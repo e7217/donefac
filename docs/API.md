@@ -224,6 +224,14 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 다단 구역을 편집하거나 교체하는 `PATCH`에는 `contentSchemaVersion: 12`를 보낸다. 공동 편집 프로토콜 12, 문서 JSON 형식 12, 자체 백업 형식 79에 다단 설정과 각 단의 내용을 보존한다. Markdown은 왼쪽 단의 첫 블록부터 저장 순서대로 내보내며, 배치가 바뀐 경우 ZIP의 `manifest.json`에 `layout_linearized`를 기록한다.
 
+### 문서 속성과 보고서
+
+본문 형식 13의 `documentProperties`는 하위 노드 없이 `attrs: {group, hidden, entries}`를 받는다. `entries`는 입력 순서로 `{name, value}`를 최대 24개 받는다. 이름과 그룹은 앞뒤 공백을 제외하고 NFC로 정규화하며 최대 80자다. 같은 블록의 이름은 정규화 뒤 유일해야 한다. 빈 값과 여러 줄을 허용하고 값은 최대 800자다. `hidden`을 켜면 일반 읽기 화면과 문서 검색 텍스트에서 해당 블록을 숨긴다. 편집, 속성 보고서와 백업에는 보존한다.
+
+`documentPropertyReport`는 `attrs: {projectId, group, labels, match, columns, sort, descending, limit, title}`을 받는다. `projectId`는 대상 프로젝트 ID 또는 팀 공통을 뜻하는 `null`이다. 라벨은 `all` 또는 `any`로 일치시키며, 라벨이 비어 있으면 결과도 비어 있다. 비어 있지 않은 `group`은 같은 이름의 그룹만 선택한다. 현재 저장된 문서에서 일치하는 속성 블록마다 한 행을 표시한다. `columns`는 최대 24개 이름을 순서대로 지정하고 비어 있으면 결과에서 열을 찾는다. `sort`는 `title` 또는 `updated`, `limit`은 1~200, `title`은 최대 160자다.
+
+두 블록을 한 문서에 합쳐 최대 30개를 둔다. 편집 `PATCH`에는 `contentSchemaVersion: 13`을 사용한다. 공동 편집 프로토콜과 문서 JSON 형식은 13이며, 자체 백업은 형식 96부터 활성·휴지통 문서와 이력·템플릿에서 두 블록을 보존한다. Markdown은 값을 일반 표로 내보내고 보고서의 저장 조건을 표시한다. 범위 제한 API 키는 문서와 보고서 대상 양쪽의 프로젝트를 허용해야 한다. 대상이 팀 공통인 보고서는 전체 범위 키로 읽거나 쓴다.
+
 ## 티켓의 필드 변경 기록
 
 `GET /api/v1/issues/:id/change-history`와 브라우저용 `/api/issues/:id/change-history`는 최대 20건을 티켓 저장 버전의 내림차순으로 반환한다. 다음 페이지에는 응답의 `nextBeforeVersion`을 `?beforeVersion=...`으로 보낸다. 마지막 페이지의 값은 `null`이다. 각 `entries` 항목에는 `issueId`, `issueVersion`, `actorId`, `actorName`, `origin`, `occurredAt`, 당시 양쪽 프로젝트 ID와 `changes`가 있다. `origin`은 `user` 또는 `automation`이다.

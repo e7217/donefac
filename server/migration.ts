@@ -8,6 +8,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
+import { hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
   remapMappingConfiguration, resolveMappingPackages, restoreMappedUsers } from './migration-mapping.js';
 import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
@@ -25,7 +26,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 6;
+const conversionVersion = 7;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -522,7 +523,8 @@ export class MigrationService {
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceSpaceId, sourceSpaceKey, project, knownPages]));
     const needsLabelListScope = labelListInventory ?? packages.some(({ dataset }) => dataset.records.some(record =>
       (record.kind === 'page' || record.kind === 'revision') && record.textFormat === 'confluence-storage' &&
-      (record.text.includes('contentbylabel') || record.text.includes('content-by-label') || /\bac:name\s*=\s*["']children["']/.test(record.text))));
+      (record.text.includes('contentbylabel') || record.text.includes('content-by-label') || /\bac:name\s*=\s*["']children["']/.test(record.text) ||
+        hasConfluencePropertyReportMacro(record.text))));
     const labelListScope = needsLabelListScope ? this.confluenceLabelListIsolated(destination) ? 'isolated' : 'mixed' : undefined;
     if (labelListScope) digest.update(JSON.stringify(['label-list-scope', labelListScope]));
     // Additive history checks the exact reused files at apply, so unrelated local attachment updates can proceed.

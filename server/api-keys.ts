@@ -8,6 +8,7 @@ import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARA
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelLists } from '../shared/document-label-list.js';
+import { documentPropertyReports } from '../shared/document-properties.js';
 import { documentNodes } from '../shared/document-references.js';
 
 export class ApiKeyError extends Error {
@@ -126,6 +127,7 @@ export class ApiKeyService {
     return (
       documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId)) &&
       documentLabelLists(content).every(({ projectId }) => projectId !== null && projects.includes(projectId)) &&
+      documentPropertyReports(content).every(({ projectId }) => projectId !== null && projects.includes(projectId)) &&
       documentChildLists(content).every(({ scope, projectId, documentId }) => {
         if (scope === 'space') return projectId !== null && projects.includes(projectId);
         return scope !== 'document' || !documentId || allowsDocument(documentId);
@@ -133,7 +135,7 @@ export class ApiKeyService {
     );
   }
   private requireDocumentBody(key: ApiKeyRecord, content: RichContent) {
-    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키의 범위를 벗어난 업무 현황, 문서 목록 또는 발췌가 있습니다.');
+    if (!this.canReadDocumentBody(key, content)) fail(403, '문서에 이 API 키의 범위를 벗어난 업무 현황, 문서 목록, 속성 보고서 또는 발췌가 있습니다.');
   }
   authorizeDocumentBody(request: Request, content: RichContent) {
     const context = this.contexts.get(request);
@@ -193,6 +195,7 @@ export class ApiKeyService {
       }
       for (const { projectId } of documentIssueBlocks(content)) this.allowedProject(key, projectId);
       for (const { projectId } of documentLabelLists(content)) this.allowedProject(key, projectId);
+      for (const { projectId } of documentPropertyReports(content)) this.allowedProject(key, projectId);
       for (const { scope, projectId } of documentChildLists(content)) {
         if (scope === 'space') this.allowedProject(key, projectId);
       }

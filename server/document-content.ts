@@ -1,6 +1,8 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
 import { documentChildLists, MAX_DOCUMENT_CHILD_LISTS, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
+import { documentPropertyReports, MAX_DOCUMENT_PROPERTY_BLOCKS,
+  normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../shared/document-properties.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
   isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
@@ -49,6 +51,8 @@ function canonicalizeNodeAttributes(node: RichContent) {
   }
   if (node.type === 'documentLabelList') node.attrs = { ...normalizeDocumentLabelListOptions(node.attrs)! };
   if (node.type === 'documentChildList') node.attrs = { ...normalizeDocumentChildListOptions(node.attrs)! };
+  if (node.type === 'documentProperties') node.attrs = { ...normalizeDocumentPropertiesOptions(node.attrs)! };
+  if (node.type === 'documentPropertyReport') node.attrs = { ...normalizeDocumentPropertyReportOptions(node.attrs)! };
   node.content?.forEach(canonicalizeNodeAttributes);
 }
 
@@ -56,7 +60,7 @@ function canonicalizeNodeAttributes(node: RichContent) {
 export function normalizeDocumentContent(value:unknown):{content:RichContent;plainText:string}{
   let serialized:string|undefined;try{serialized=JSON.stringify(value);}catch{invalid('문서 내용이 JSON 형식이 아닙니다.');}
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
-  let count=0, issueBlockCount=0, labelListCount=0, childListCount=0;
+  let count=0, issueBlockCount=0, labelListCount=0, childListCount=0, propertyBlockCount=0;
   const sectionIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
@@ -122,6 +126,15 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
       if (++childListCount > MAX_DOCUMENT_CHILD_LISTS) invalid(`문서에 하위 문서 목록은 최대 ${MAX_DOCUMENT_CHILD_LISTS}개까지 넣을 수 있습니다.`);
       if (!normalizeDocumentChildListOptions(attributes)) invalid('하위 문서 목록의 범위·깊이·표시 조건을 확인해 주세요.');
     }
+    if (node.type === 'documentProperties' || node.type === 'documentPropertyReport') {
+      if (++propertyBlockCount > MAX_DOCUMENT_PROPERTY_BLOCKS) invalid(`한 문서에 속성과 속성 보고서를 합쳐 최대 ${MAX_DOCUMENT_PROPERTY_BLOCKS}개까지 넣을 수 있습니다.`);
+      if (node.type === 'documentProperties' && !normalizeDocumentPropertiesOptions(attributes)) {
+        invalid('문서 속성의 그룹, 항목 이름과 값을 확인해 주세요.');
+      }
+      if (node.type === 'documentPropertyReport' && !normalizeDocumentPropertyReportOptions(attributes)) {
+        invalid('문서 속성 보고서의 범위·라벨·열·표시 조건을 확인해 주세요.');
+      }
+    }
     if(node.content!==undefined){if(!Array.isArray(node.content))invalid('문서 블록 목록이 올바르지 않습니다.');for(const child of node.content)check(child,depth+1);}
   };
   check(value,0);
@@ -143,6 +156,7 @@ export function validateDocumentListProjects(contents: Iterable<RichContent>, ha
   };
   for (const content of contents) {
     for (const { projectId } of documentLabelLists(content)) checkProject(projectId, '라벨별 문서 목록');
+    for (const { projectId } of documentPropertyReports(content)) checkProject(projectId, '문서 속성 보고서');
     for (const { scope, projectId } of documentChildLists(content)) {
       if (scope === 'space') checkProject(projectId, '하위 문서 목록');
     }

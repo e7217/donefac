@@ -59,7 +59,7 @@ function cqlTokens(query: string): Token[] | null {
   return tokens;
 }
 
-function cqlScope(query: string): (Scope & { order?: Order }) | null {
+export function parseConfluencePageLabelScope(query: string): (Scope & { order?: Order }) | null {
   const tokens = cqlTokens(query);
   if (!tokens?.length) return null;
   let index = 0, space: string | null | undefined, pages = false;
@@ -137,7 +137,7 @@ export function parseConfluenceLabelList(params: Record<string, string>): Conflu
   const modern = Object.hasOwn(params, 'cql');
   const whitelist = modern ? modernParameters : legacyParameters;
   if (Object.keys(params).some(key => !whitelist.has(key))) return null;
-  const scope: (Scope & { order?: Order }) | null = modern ? cqlScope(params.cql.trim()) : legacyScope(params);
+  const scope: (Scope & { order?: Order }) | null = modern ? parseConfluencePageLabelScope(params.cql.trim()) : legacyScope(params);
   if (!scope) return null;
   const { order, spaceKey, match, labels } = scope;
   const explicitSort = params.sort?.trim().toLowerCase();

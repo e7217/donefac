@@ -8,10 +8,14 @@ import type { LegacyRecord, RichContent } from '../shared/types.js';
 import { MAX_DOCUMENT_CHILD_LIST_DEPTH, MAX_DOCUMENT_CHILD_LIST_FIRST, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
+import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT } from '../shared/document-properties.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
 import { parseConfluenceLabelList } from './migration-confluence-label-list.js';
 import { parseConfluenceColumnLayout } from './migration-confluence-layout.js';
+import {
+  confluencePropertyReportMacros, parseConfluenceDocumentProperties, parseConfluenceDocumentPropertyReport,
+} from './migration-confluence-properties.js';
 import { confluenceSectionAliases, scanConfluenceSections, type ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // Format references (conversion is local and never requests these URLs):
@@ -34,6 +38,7 @@ export interface MigrationContentContext {
   legacyDocumentChildList?: boolean;
   legacyDocumentExcerpt?: boolean;
   legacyDocumentLayout?: boolean;
+  legacyDocumentProperties?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   sectionLinks?: {
@@ -102,7 +107,7 @@ function confluencePageParameter(parameter: XmlNode | undefined): MigrationPageI
 }
 
 // https://confluence.atlassian.com/spaces/CONF50/pages/329980084/Confluence+Storage+Format+for+Macros
-function excerptMacroParts(node: XmlNode) {
+function storageMacroParts(node: XmlNode) {
   if (Object.keys(node.attrs).some(key => !['ac:name', 'ac:schema-version', 'ac:macro-id', 'ac:local-id', 'xmlns:ac', 'xmlns:ri'].includes(key))) return null;
   const parameters = new Map<string, XmlNode>();
   let body: XmlNode | undefined;
@@ -124,6 +129,15 @@ function excerptMacroParts(node: XmlNode) {
     parameters.set(parameter, part);
   }
   return { parameters, body };
+}
+
+function plainStorageParameters(parameters: Map<string, XmlNode>): Record<string, string> | null {
+  const result: Record<string, string> = Object.create(null);
+  for (const [key, parameter] of parameters) {
+    if (parameter.children.some(child => typeof child !== 'string')) return null;
+    result[key] = parameter.children.join('');
+  }
+  return result;
 }
 
 function excerptParameterText(parameter: XmlNode | undefined): string | null {
@@ -174,6 +188,7 @@ class Converter {
   private sourceTitle = '';
   private sourceHeadingMaximum = 3;
   private richDocument = false;
+  private projectedProperties = 0;
   private firstSourceExcerpt?: XmlNode;
   private convertedFirstExcerpt = false;
   constructor(readonly source: string, readonly context: MigrationContentContext) {}
@@ -614,6 +629,7 @@ class Converter {
     for (const child of node.children) if (typeof child !== 'string' && child.name === 'ac:parameter') params[child.attrs['ac:name'] || ''] = this.xmlText(child);
     const body = node.children.find(value => typeof value !== 'string' && ['ac:rich-text-body', 'ac:plain-text-body'].includes(value.name)) as XmlNode | undefined;
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
+    const disclosure = () => [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
     if (name === 'toc' && this.richDocument) return this.tableOfContents(node, params);
     if ((name === 'contentbylabel' || name === 'content-by-label') && this.richDocument) return this.documentLabelList(node, params);
     if (name === 'children' && this.richDocument) return this.documentChildList(node, params);
@@ -631,7 +647,24 @@ class Converter {
       return name === 'excerpt' ? this.documentExcerpt(node, depth) : this.documentExcerptInclude(node);
     }
     if (name === 'code' || name === 'noformat') return [codeBlock(body ? this.xmlText(body) : '', name === 'code' ? (params.language || '').slice(0, 100) : '')];
-    if (name === 'expand' || name === 'details') return [{ type: 'details', content: [{ type: 'detailsSummary', content: text(params.title || '자세히 보기') }, { type: 'detailsContent', content: blocks() }] }];
+    if (name === 'expand') return disclosure();
+    if (name === 'details' || confluencePropertyReportMacros.has(name)) {
+      const brandedDisclosure = name === 'details' && Object.keys(params).length === 1 && Object.hasOwn(params, 'title');
+      if (brandedDisclosure || name === 'details' && !this.richDocument) return disclosure();
+      if (this.richDocument) {
+        if (this.context.legacyDocumentProperties) {
+          this.warn('LEGACY_DOCUMENT_PROPERTIES_REPRESENTATION', '이전 이관에서 사용한 문서 속성 표현을 확인했습니다.');
+          return name === 'details' ? disclosure() : [codeBlock(serializeXml(node))];
+        }
+        if (this.projectedProperties >= MAX_DOCUMENT_PROPERTY_BLOCKS) {
+          this.warn('DOCUMENT_PROPERTY_BLOCK_LIMIT', `문서에서 변환한 속성과 보고서가 ${MAX_DOCUMENT_PROPERTY_BLOCKS}개에 도달해 이후 매크로를 원문 코드 블록으로 보존했습니다.`);
+          return [codeBlock(serializeXml(node))];
+        }
+        const projected = name === 'details' ? this.documentProperties(node) : this.documentPropertyReport(node);
+        if (projected[0].type !== 'codeBlock') this.projectedProperties++;
+        return projected;
+      }
+    }
     if (this.context.legacyAnnotations) {
       if (isCalloutVariant(name)) {
         this.warn('PANEL_FLATTENED', '안내·경고 패널은 종류와 제목을 남긴 인용 블록으로 변환했습니다.');
@@ -681,13 +714,46 @@ class Converter {
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
   }
+  private documentProperties(node: XmlNode): RichContent[] {
+    const parts = storageMacroParts(node);
+    const parameters = parts && plainStorageParameters(parts.parameters);
+    const parsed = parameters ? parseConfluenceDocumentProperties(parameters, parts?.body) : { reason: 'parameters' as const };
+    if ('options' in parsed) {
+      if (parsed.containsStatus) this.warn('DOCUMENT_PROPERTIES_STATUS_PRESENTATION_CHANGED', '속성 값의 상태 배지는 이름을 유지하며 원래 색과 모양은 보관한 원문에서 확인할 수 있습니다.');
+      return [{ type: 'documentProperties', attrs: { ...parsed.options } }];
+    }
+    const notices = {
+      parameters: ['DOCUMENT_PROPERTIES_PARAMETERS_UNSUPPORTED', '현재 문서 속성으로 표현할 수 없는 원본 설정을 원문 코드 블록으로 보존했습니다.'],
+      table: ['DOCUMENT_PROPERTIES_TABLE_UNSUPPORTED', '현재 문서 속성으로 변환할 수 없는 표 구조나 배치 설정을 원문 코드 블록으로 보존했습니다.'],
+      values: ['DOCUMENT_PROPERTIES_VALUES_UNSUPPORTED', '서식·링크가 있는 값이나 지원 범위를 벗어난 이름·값을 원문 코드 블록으로 보존했습니다.'],
+    } as const;
+    const [code, message] = notices[parsed.reason];
+    this.warn(code, message);
+    return [codeBlock(serializeXml(node))];
+  }
+  private documentPropertyReport(node: XmlNode): RichContent[] {
+    const parts = storageMacroParts(node);
+    const parameters = parts && !parts.body && plainStorageParameters(parts.parameters);
+    const parsed = parameters && parseConfluenceDocumentPropertyReport(parameters);
+    if (!parsed) {
+      this.warn('DOCUMENT_PROPERTY_REPORT_PARAMETERS_UNSUPPORTED', '현재 문서 속성 보고서로 재현할 수 없는 검색 조건이나 표시 설정을 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    const projectId = this.context.resolveChildListSpaceProject?.(parsed.spaceKey) ?? this.context.resolveLabelListProject?.(parsed.spaceKey);
+    if (!projectId) {
+      this.warn('DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED', '원본 공간의 문서만 조회하는 이관 프로젝트를 확인할 수 없어 보고서를 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    this.warn('DOCUMENT_PROPERTY_REPORT_PAGINATION_CHANGED', `이관 보고서는 원본의 페이지 나누기를 적용하지 않고 최대 ${MAX_DOCUMENT_PROPERTY_REPORT_LIMIT}행을 표시합니다.`);
+    return [{ type: 'documentPropertyReport', attrs: { ...parsed.options, projectId } }];
+  }
   private documentExcerpt(node: XmlNode, depth: number): RichContent[] {
     const firstDefinition = node === this.firstSourceExcerpt;
     if (!firstDefinition && !this.convertedFirstExcerpt) {
       this.warn('EXCERPT_FIRST_DEFINITION_UNAVAILABLE', '원본의 첫 발췌문을 재현할 수 있어야 포함 대상이 유지됩니다. 뒤의 발췌문도 원문 코드 블록으로 보존했습니다.');
       return [codeBlock(serializeXml(node))];
     }
-    const parts = excerptMacroParts(node);
+    const parts = storageMacroParts(node);
     const hidden = excerptParameterText(parts?.parameters.get('hidden'));
     const output = excerptParameterText(parts?.parameters.get('atlassian-macro-output-type'));
     if (!parts?.body || [...parts.parameters.keys()].some(key => !['hidden', 'atlassian-macro-output-type'].includes(key)) ||
@@ -699,7 +765,7 @@ class Converter {
     return [{ type: 'documentExcerpt', attrs: { hidden: hidden === 'true' }, content: flow(this.xmlParts(parts.body.children, depth + 1, true)) }];
   }
   private documentExcerptInclude(node: XmlNode): RichContent[] {
-    const parts = excerptMacroParts(node);
+    const parts = storageMacroParts(node);
     const targetKeys = ['', 'page', 'pageTitle', 'default-parameter'];
     const targets = parts ? [...parts.parameters].filter(([key]) => targetKeys.includes(key)) : [];
     const noPanel = excerptParameterText(parts?.parameters.get('nopanel'));

@@ -10,6 +10,7 @@ import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, Worksp
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude, MAX_DOCUMENT_TABLE_SPAN, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
+import { collectDocumentPropertyReport, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { DocumentSelectionHighlight } from '../../shared/document-selection-highlight';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
@@ -20,6 +21,7 @@ import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIs
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
 import { DocumentLabelListCard } from './DocumentLabelList';
 import { DocumentChildListCard } from './DocumentChildList';
+import { DocumentPropertiesCard, DocumentPropertyReportCard } from './DocumentProperties';
 import { DocumentOutline, jumpToReadonlyHeading, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
@@ -272,7 +274,10 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     return pinnedRevision(textAttr(node, 'documentId'), textAttr(node, 'revisionId'), textAttr(node, 'label'), Math.min(state.remaining, context.includeBudget), key);
   }
   if (state.mode && (isLiveDocumentInclude(node.type) ||
-      ['issueReference', 'documentReference', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList', 'documentChildList'].includes(node.type))) {
+      ['issueReference', 'documentReference', 'documentRevisionInclude', 'issueList', 'issueSummary', 'documentLabelList', 'documentChildList', 'documentPropertyReport'].includes(node.type))) {
+    if (node.type === 'documentPropertyReport') {
+      return <p className="doc-pinned-reference" key={key}>{documentPlainText(node)} · 이 저장본에는 보고서 조건이 보관됩니다.</p>;
+    }
     return <p className="doc-pinned-reference" key={key}>{documentPlainText(node)}</p>;
   }
   if (node.type === 'issueReference') {
@@ -304,6 +309,17 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     state.remaining -= limit;
     return <DocumentLabelListCard key={key} attrs={node.attrs} data={context.data} documentId={state.documentId}
       openDocument={context.openDocument} renderLimit={limit} />;
+  }
+  if (node.type === 'documentProperties') return <DocumentPropertiesCard key={key} attrs={node.attrs} />;
+  if (node.type === 'documentPropertyReport') {
+    const options = normalizeDocumentPropertyReportOptions(node.attrs);
+    if (!options) return <Notice key={key}>저장된 속성 보고서 설정을 확인할 수 없습니다.</Notice>;
+    const projection = collectDocumentPropertyReport(context.data.documents, options);
+    const limit = Math.min(state.remaining, projection.rows.length);
+    if (limit < projection.rows.length) state.exhausted = true;
+    state.remaining -= limit;
+    return <DocumentPropertyReportCard key={key} attrs={node.attrs} data={context.data} documentId={state.documentId}
+      openDocument={context.openDocument} projection={projection} renderLimit={limit} />;
   }
   if (node.type === 'issueList' || node.type === 'issueSummary') {
     const limit = Math.min(state.remaining, DOCUMENT_ISSUE_LIST_LIMIT);
@@ -520,6 +536,31 @@ function DocumentChildListNodeView({ node, selected, editor, getPos, updateAttri
       onDelete={editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined} />
   </NodeViewWrapper>;
 }
+function DocumentPropertyNodeView({ node, selected, editor, getPos, updateAttributes, deleteNode }: NodeViewProps) {
+  const { data, documentId, openDocument, onListDraftChange } = contextOf(useContext(BlockContext));
+  const id = useId();
+  const type = node.type.name;
+  const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
+
+  function apply<Options extends object>(options: Options, baseline: Options | null, normalize: (attrs: unknown) => Options | null) {
+    const position = getPos();
+    const current = typeof position === 'number' ? editor.state.doc.nodeAt(position) : null;
+    if (!editor.isEditable || current?.type.name !== type || JSON.stringify(normalize(current.attrs)) !== JSON.stringify(baseline)) return false;
+    updateAttributes({ ...options });
+    return true;
+  }
+
+  const actions = {
+    onDelete: editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined,
+    onSettingsDraftChange: trackSettingsDraft,
+  };
+  return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node={type}>
+    {type === 'documentProperties' ? <DocumentPropertiesCard attrs={node.attrs} {...actions}
+      onChange={editor.isEditable ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertiesOptions) : undefined} />
+      : <DocumentPropertyReportCard attrs={node.attrs} {...actions} data={data} documentId={documentId} openDocument={openDocument}
+        onChange={editor.isEditable ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertyReportOptions) : undefined} />}
+  </NodeViewWrapper>;
+}
 function detailsBody(editor: Editor): boolean {
   const { $from, empty } = editor.state.selection;
   if (!empty || $from.parent.type.name !== 'detailsSummary') return false;
@@ -541,6 +582,8 @@ export function decorateDocumentExtensions(extensions: AnyExtension[]): AnyExten
     return ReactNodeViewRenderer(DocumentChildListNodeView);
   } }) : extension.name === 'documentLabelList' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentLabelListNodeView);
+  } }) : (extension.name === 'documentProperties' || extension.name === 'documentPropertyReport') ? extension.extend({ addNodeView() {
+    return ReactNodeViewRenderer(DocumentPropertyNodeView);
   } }) : extension.name === 'documentExcerpt' ? extension.extend({ addNodeView() {
     return ReactNodeViewRenderer(DocumentExcerptNodeView);
   } }) : (extension.name === 'issueList' || extension.name === 'issueSummary') ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(IssueBlockNodeView); } }) : (isLiveDocumentInclude(extension.name) || ['issueReference', 'documentReference', 'documentRevisionInclude'].includes(extension.name)) ? extension.extend({ addNodeView() { return ReactNodeViewRenderer(ReferenceNodeView); } }) : extension.name === 'details' ? extension.extend({

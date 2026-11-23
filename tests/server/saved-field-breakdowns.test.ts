@@ -207,7 +207,7 @@ test('native v95 restores custom comparison presets and their retained missing f
   assert.equal(historical.comparison?.columns.find(column => column.label === choice.options[0].name)?.count, 1);
 
   const backup = await f.call<Backup>('/export');
-  assert.equal(backup.schemaVersion, 95);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.savedFieldBreakdowns.find(preset => preset.id === original.id), original);
   assert.deepEqual(backup.savedFieldBreakdowns.find(preset => preset.id === orphan.id), orphan);
   const path = `${f.path}/${original.id}`;

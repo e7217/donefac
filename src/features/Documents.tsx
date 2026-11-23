@@ -10,12 +10,13 @@ import {
   Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
-  RotateCcw, Table2, TableOfContents, Tag, Trash2, Unlink, X,
+  RotateCcw, Table2, TableOfContents, TableProperties, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
+import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
@@ -124,9 +125,9 @@ const draftFromPage = (page: DocPage): Draft => {
   };
 };
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
+const LIST_DRAFT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정 또는 문서 속성 편집을 버리고 이동할까요? 다른 편집과 댓글 초안은 임시로 보관합니다.';
 const COMMENT_EDIT_DISCARD_MESSAGE = '작성 중인 댓글 수정 내용을 버리고 이동할까요? 다른 편집과 새 댓글 초안은 임시로 보관합니다.';
-const LIST_AND_COMMENT_EDIT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정과 댓글 수정 내용을 버리고 이동할까요? 다른 편집과 새 댓글 초안은 임시로 보관합니다.';
+const LIST_AND_COMMENT_EDIT_DISCARD_MESSAGE = '적용하지 않은 문서 목록 설정, 문서 속성 편집, 댓글 수정 내용을 버리고 이동할까요? 다른 편집과 새 댓글 초안은 임시로 보관합니다.';
 
 function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
   if (current.id !== updated.id) return current;
@@ -1332,6 +1333,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     ]).run();
   }
 
+  function insertPropertyBlock(type: 'documentProperties' | 'documentPropertyReport') {
+    if (!editor?.isEditable || !selectedPage) return;
+    let count = 0;
+    editor.state.doc.descendants(node => {
+      if (node.type.name === 'documentProperties' || node.type.name === 'documentPropertyReport') count++;
+    });
+    if (count >= MAX_DOCUMENT_PROPERTY_BLOCKS) {
+      notify(`속성과 속성 보고서는 한 문서에 합계 ${MAX_DOCUMENT_PROPERTY_BLOCKS}개까지 넣을 수 있습니다.`, 'error');
+      return;
+    }
+    const block = type === 'documentProperties' ? { type } : { type, attrs: { projectId: selectedPage.projectId } };
+    if (!editor.chain().focus().insertContent([block, { type: 'paragraph' }]).run()) notify('이 위치에는 블록을 넣을 수 없습니다.', 'error');
+  }
+
   function insertColumns(count: 2 | 3, slash?: { from: number; to: number; text: string }) {
     if (editor?.isEditable && !insertDocumentColumnLayout(editor, count, slash)) notify('이 위치에는 다단 구역을 넣을 수 없습니다.', 'error');
   }
@@ -1352,6 +1367,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
     { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: () => insertDocumentList('documentLabelList') },
     { label: '하위 문서 목록', search: 'children child pages descendants tree 하위 문서 목록', action: () => insertDocumentList('documentChildList') },
+    { label: '문서 속성', search: 'document properties metadata 문서 속성', action: () => insertPropertyBlock('documentProperties') },
+    { label: '문서 속성 보고서', search: 'document property report rollup 문서 속성 보고서', action: () => insertPropertyBlock('documentPropertyReport') },
     { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
     { label: '발췌 구역', search: 'excerpt source 발췌 구역', action: insertExcerpt },
     { label: '발췌 포함', search: 'excerpt include 발췌 포함', action: () => openReference('documentExcerptInclude') },
@@ -1617,6 +1634,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
                 {button('라벨별 문서 목록 삽입', <Files size={15} />, () => insertDocumentList('documentLabelList'))}
                 {button('하위 문서 목록 삽입', <ListTree size={15} />, () => insertDocumentList('documentChildList'))}
+                {button('문서 속성 삽입', <TableProperties size={15} />, () => insertPropertyBlock('documentProperties'))}
+                {button('문서 속성 보고서 삽입', <Table2 size={15} />, () => insertPropertyBlock('documentPropertyReport'))}
                 {button('문서 포함 삽입', <FilePlus2 size={15} />, () => openReference('documentInclude'))}
                 {button('발췌 구역 삽입', <Scissors size={15} />, insertExcerpt)}
                 {button('발췌 포함 삽입', <FileInput size={15} />, () => openReference('documentExcerptInclude'))}

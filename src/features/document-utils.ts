@@ -1,5 +1,5 @@
 import type { DocRevision, RichContent } from '../../shared/types';
-import { renderStandaloneDocumentTableMarkdown } from '../../shared/document-export-markdown';
+import { renderDocumentPropertiesMarkdown, renderStandaloneDocumentTableMarkdown } from '../../shared/document-export-markdown';
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
@@ -11,7 +11,7 @@ export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'c
 }
 
 export function hasDocumentFormattedBlocks(node: RichContent): boolean {
-  return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude', 'documentColumnLayout'].includes(node.type) ||
+  return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude', 'documentColumnLayout', 'documentProperties', 'documentPropertyReport'].includes(node.type) ||
     (node.content?.some(hasDocumentFormattedBlocks) ?? false);
 }
 
@@ -93,6 +93,9 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
     case 'documentLabelList':
     case 'documentChildList':
       return `> ${documentPlainText(node).replace(/([\\`*_[\]<>])/g, '\\$1')}\n\n`;
+    case 'documentProperties': return `${renderDocumentPropertiesMarkdown(node.attrs)}\n\n`;
+    case 'documentPropertyReport':
+      return `> ${documentPlainText(node).replace(/([\\`*_[\]<>])/g, '\\$1')} · 조회 결과 생략\n\n`;
     case 'documentToc': {
       const { minLevel, maxLevel, layout } = documentTocOptions(node.attrs);
       const links = [...(headings?.values() ?? [])].filter(entry => entry.level >= minLevel && entry.level <= maxLevel)

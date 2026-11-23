@@ -9,7 +9,7 @@ import { createApp } from '../../server/app.js';
 import type { CollaborationExport } from '../../server/collaboration.js';
 import { DocumentContentError, normalizeDocumentContent } from '../../server/document-content.js';
 import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
-import { contentReferences, DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../../shared/document-nodes.js';
+import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { DocPage, DocRevision, DocumentTemplateSummary, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
@@ -67,7 +67,7 @@ test('document column layout keeps ordered content and references and rejects ma
   const original = body(paragraph('위쪽 본문'), validLayout, paragraph('아래쪽 본문'));
   const normalized = normalizeDocumentContent(original);
   assert.deepEqual(JSON.parse(JSON.stringify(normalized.content)), original);
-  assert.equal(documentContentSchemaVersion(normalized.content), DOCUMENT_CONTENT_SCHEMA_VERSION);
+  assert.equal(documentContentSchemaVersion(normalized.content), 12);
   assert.equal(normalized.plainText, '위쪽 본문\n첫 번째 열\n[문서: 원본 연결 (target)]\n안쪽 열\n마지막 블록\n아래쪽 본문');
   assert.deepEqual(contentReferences(normalized.content), [{ type: 'document', id: 'target', kind: 'reference', label: '원본 연결' }]);
   assert.deepEqual(JSON.parse(JSON.stringify(normalizeDocumentContent(body({ ...validLayout, attrs: { weights: [300, 700] } })).content)),
@@ -103,9 +103,9 @@ test('document columns survive REST updates, templates, trash and collaboration 
     expectedVersion: original.version, contentSchemaVersion: 11, content: body(paragraph('구형 편집기의 본문')),
   });
   assert.equal(priorClient.status, 409, JSON.stringify(priorClient.data));
-  assert.equal(priorClient.data.details.contentSchemaVersion, DOCUMENT_CONTENT_SCHEMA_VERSION);
+  assert.equal(priorClient.data.details.contentSchemaVersion, 12);
   const changed = await f.call<DocPage>(path, 'PATCH', {
-    expectedVersion: original.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content: last,
+    expectedVersion: original.version, contentSchemaVersion: 12, content: last,
   });
   assert.equal(changed.status, 200, JSON.stringify(changed.data));
   assert.deepEqual(changed.data.content, last);

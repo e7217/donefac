@@ -852,6 +852,36 @@ async function runStandardPilot() {
     assert.deepEqual(revisions.map(revision => revision.content), [decisionDraft.document.content]);
   };
   await verifyDecisionDraft(pilot.url);
+  const propertyBlock = { type: 'documentProperties', attrs: { group: 'decision', hidden: true,
+    entries: [{ name: '상태', value: '검토 완료' }, { name: '검토일', value: '2027-04-06' }] } };
+  const propertyReportBlock = { type: 'documentPropertyReport', attrs: { projectId, group: 'decision', labels: ['pilot-decision'],
+    match: 'all', columns: ['상태', '검토일'], sort: 'title', descending: false, limit: 30, title: '파일럿 결정 목록' } };
+  const propertySource = await (await call(pilot.url, '/documents', { method: 'POST', status: 201, body: {
+    projectId, title: '파일럿 결정 속성', labels: ['pilot-decision'], content: { type: 'doc', content: [propertyBlock] },
+  } })).json();
+  const propertyReport = await (await call(pilot.url, '/documents', { method: 'POST', status: 201, body: {
+    projectId, title: '파일럿 결정 속성 보고서', content: { type: 'doc', content: [propertyReportBlock] },
+  } })).json();
+  const propertySessionPath = `/documents/${propertySource.id}/collaboration`;
+  const propertySession = await (await call(pilot.url, `${propertySessionPath}/enable`, {
+    method: 'POST', body: { expectedVersion: propertySource.version },
+  })).json();
+  const verifyDocumentProperties = async url => {
+    const [workspace, session, revisions] = await Promise.all([
+      call(url, '/workspace').then(response => response.json()),
+      call(url, propertySessionPath).then(response => response.json()),
+      call(url, `/documents/${propertyReport.id}/revisions`).then(response => response.json()),
+    ]);
+    assert.deepEqual(workspace.documents.find(item => item.id === propertySource.id)?.content.content, [propertyBlock]);
+    assert.deepEqual(workspace.documents.find(item => item.id === propertyReport.id)?.content.content, [propertyReportBlock]);
+    assert.deepEqual(revisions.map(item => item.content.content), [[propertyReportBlock]]);
+    assert.equal(session.enabled, true);
+    assert.equal(session.epoch, propertySession.epoch);
+    assert.equal(session.schemaVersion, 13);
+    assert.equal(session.document.plainText, '');
+    assert.deepEqual(session.document.content.content, [propertyBlock]);
+  };
+  await verifyDocumentProperties(pilot.url);
   const collaboration = await (await call(pilot.url,`${documentPath}/collaboration/enable`,{
     method:'POST',body:{expectedVersion:document.version},
   })).json();
@@ -1053,6 +1083,7 @@ async function runStandardPilot() {
   await verifyFieldBreakdown(copy.url);
   await verifyLinkedPaste(copy.url);
   await verifyDecisionDraft(copy.url);
+  await verifyDocumentProperties(copy.url);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

@@ -1,6 +1,7 @@
 import { parse, parseInline } from 'marked';
 import { documentChildListDescription, normalizeDocumentChildListOptions } from './document-child-list.js';
 import { documentLabelListDescription, normalizeDocumentLabelListOptions } from './document-label-list.js';
+import { documentPropertyReportDescription, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from './document-properties.js';
 import {
   CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, STATUS_BADGE_TONE_LABELS, documentPlainText, documentTocOptions,
   isCalloutVariant, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeTone, MAX_DOCUMENT_TABLE_SPAN,
@@ -34,6 +35,7 @@ const diagnosticMessages = {
   layout_linearized: '단 안의 블록을 왼쪽 단부터 순서대로 내보냈습니다.',
   live_include: '최신 문서에 따라 바뀌는 포함 본문을 별도로 펼치지 않았습니다.',
   pinned_revision_unavailable: '요청한 문서 저장본이 이번 내보내기 범위에 없습니다.',
+  properties_as_table: '문서 속성의 그룹과 값을 일반 표로 내보냈습니다.',
   unsupported_node: '이 블록의 텍스트만 보존했습니다.',
 } as const;
 
@@ -53,6 +55,17 @@ const singleLine = (value: string) => cleanText(value).replace(/[\r\n\t\u2028\u2
 
 export function escapeMarkdownText(value: string): string {
   return singleLine(value).replace(/[!"#$%&'()*+,\-./:;<=>?@[\]\\^_`{|}~]/gu, '\\$&');
+}
+
+export function renderDocumentPropertiesMarkdown(attrs: unknown): string {
+  const options = normalizeDocumentPropertiesOptions(attrs);
+  if (!options) return '**문서 속성**';
+  const heading = ['**문서 속성**', options.group && escapeMarkdownText(options.group), options.hidden && '원문에서 숨김']
+    .filter(Boolean).join(' · ');
+  if (!options.entries.length) return heading;
+  const rows = options.entries.map(({ name, value }) =>
+    `| ${escapeMarkdownText(name)} | ${value.split('\n').map(escapeMarkdownText).join('<br>')} |`);
+  return `${heading}\n\n${['| 속성 | 값 |', '| --- | --- |', ...rows].join('\n')}`;
 }
 
 const htmlText = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -331,6 +344,10 @@ class DocumentMarkdownRenderer {
       const options = normalizeDocumentChildListOptions(attrs);
       return `**하위 문서 목록** · ${escapeMarkdownText(options ? documentChildListDescription(options) : '조건 확인 불가')} · 조회 결과 생략`;
     }
+    if (node.type === 'documentPropertyReport') {
+      const options = normalizeDocumentPropertyReportOptions(attrs);
+      return `**문서 속성 보고서** · ${escapeMarkdownText(options ? documentPropertyReportDescription(options) : '조건 확인 불가')} · 조회 결과 생략`;
+    }
     const summary = node.type === 'issueSummary';
     const groupBy = summary && isIssueSummaryGroupBy(attrs?.groupBy) ? ISSUE_SUMMARY_GROUP_LABELS[attrs.groupBy] : '';
     const conditions = [literal(attrs?.label), literal(attrs?.projectId) && `프로젝트 ${attrs?.projectId}`,
@@ -443,7 +460,11 @@ class DocumentMarkdownRenderer {
       case 'issueReference': case 'documentReference': case 'documentInclude': case 'documentExcerptInclude': case 'documentRevisionInclude':
         return this.reference(node);
       case 'documentToc': return this.toc(node);
-      case 'issueList': case 'issueSummary': case 'documentLabelList': case 'documentChildList': return this.dynamicBlock(node);
+      case 'documentProperties':
+        this.warn('properties_as_table', node);
+        return renderDocumentPropertiesMarkdown(attrs);
+      case 'issueList': case 'issueSummary': case 'documentLabelList': case 'documentChildList': case 'documentPropertyReport':
+        return this.dynamicBlock(node);
       default:
         this.warn('unsupported_node', node);
         return escapeMarkdownText(documentPlainText(node));

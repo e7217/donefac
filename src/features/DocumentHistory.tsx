@@ -22,7 +22,7 @@ export interface DocumentHistoryProps {
   saving?: boolean;
 }
 const when = (value: string) => new Date(value).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', callout: '안내 상자', statusBadge: '상태 배지', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', documentExcerpt: '발췌 구역', documentExcerptInclude: '문서 발췌 포함', documentToc: '본문 목차', documentLabelList: '라벨별 문서 목록', documentChildList: '하위 문서 목록', documentColumnLayout: '다단 구역', documentColumn: '단', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
+const NODE_LABELS: Record<string, string> = { doc: '문서', paragraph: '문단', text: '텍스트 서식', heading: '제목 블록', blockquote: '인용문', callout: '안내 상자', statusBadge: '상태 배지', codeBlock: '코드', bulletList: '글머리 목록', orderedList: '번호 목록', listItem: '목록 항목', taskList: '할 일 목록', taskItem: '할 일', hardBreak: '줄바꿈', horizontalRule: '구분선', image: '이미지', table: '표', tableRow: '표 행', tableCell: '표 셀', tableHeader: '표 머리 셀', issueReference: '업무 참조', issueList: '업무 목록', issueSummary: '업무 현황', documentReference: '문서 참조', documentInclude: '문서 포함', documentRevisionInclude: '문서 버전 포함', documentExcerpt: '발췌 구역', documentExcerptInclude: '문서 발췌 포함', documentToc: '본문 목차', documentLabelList: '라벨별 문서 목록', documentChildList: '하위 문서 목록', documentProperties: '문서 속성', documentPropertyReport: '문서 속성 보고서', documentColumnLayout: '다단 구역', documentColumn: '단', details: '접기 블록', detailsSummary: '접기 제목', detailsContent: '접기 본문' };
 const PAGE_SIZE = 60;
 
 export function DocumentHistory({ revisions, loading, error, current, users, onRestore, restoreDisabled, onSaveCopy, saving = false }: DocumentHistoryProps) {
@@ -255,6 +255,22 @@ function metadataSummary(unit: DocumentDiffUnit): { lines: SummaryLine[]; additi
     attribute('sort', '정렬 기준', true, value => value === 'title' ? '제목' : value === 'created' ? '작성일' : '수정일');
     attribute('descending', '정렬 방향', true, value => value ? '내림차순' : '오름차순');
     attribute('style', '표시 방식', true, value => value === 'list' ? '글머리 목록' : `제목 ${String(value).slice(1)}`);
+  }
+  if (unit.nodeType === 'documentProperties') {
+    attribute('group', '속성 그룹');
+    attribute('hidden', '원본에 표시', true, value => value === true ? '숨김' : '표시');
+    attribute('entries', '속성', true, value => Array.isArray(value) ? value.map(entry => `${entry?.name} ${entry?.value}`).join(' · ') : value);
+  }
+  if (unit.nodeType === 'documentPropertyReport') {
+    attribute('title', '보고서 제목');
+    attribute('projectId', '문서 공간', true, value => value ?? '팀 공통');
+    attribute('group', '속성 그룹', true, value => value || '모든 그룹');
+    attribute('labels', '라벨', true, value => Array.isArray(value) ? value.join(', ') : value);
+    attribute('match', '라벨 일치 방식', true, value => value === 'all' ? '모든 라벨' : '라벨 하나 이상');
+    attribute('columns', '표시 열', true, value => Array.isArray(value) ? value.join(', ') || '자동' : value);
+    attribute('sort', '정렬 기준', true, value => value === 'title' ? '문서 제목' : '수정일');
+    attribute('descending', '정렬 방향', true, value => value ? '내림차순' : '오름차순');
+    attribute('limit', '최대 행 수', true);
   }
   if (unit.nodeType === 'image') { attribute('src', '이미지 주소', true); attribute('alt', '대체 텍스트', true); attribute('title', '이미지 설명'); attribute('width', '너비'); attribute('height', '높이'); }
   if (['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'documentExcerptInclude'].includes(unit.nodeType)) { attribute(unit.nodeType === 'issueReference' ? 'issueId' : 'documentId', '참조 대상 ID', true); attribute('label', '저장된 이름', true); }

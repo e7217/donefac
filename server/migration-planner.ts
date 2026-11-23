@@ -8,6 +8,7 @@ import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normaliz
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
+import { hasConfluencePropertyMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
 import type { MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
@@ -131,14 +132,18 @@ const lossyConfluenceExcerptConversions = new Set([
   'EXCERPT_PARAMETERS_UNSUPPORTED', 'EXCERPT_FIRST_DEFINITION_UNAVAILABLE',
   'EXCERPT_INCLUDE_PARAMETERS_UNSUPPORTED', 'UNRESOLVED_EXCERPT_INCLUDE',
 ]);
+const lossyConfluencePropertyConversions = new Set([
+  'DOCUMENT_PROPERTIES_PARAMETERS_UNSUPPORTED', 'DOCUMENT_PROPERTIES_TABLE_UNSUPPORTED', 'DOCUMENT_PROPERTIES_VALUES_UNSUPPORTED',
+  'DOCUMENT_PROPERTY_REPORT_PARAMETERS_UNSUPPORTED', 'DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED', 'DOCUMENT_PROPERTY_BLOCK_LIMIT',
+]);
 const lossyConfluenceConversions = new Set([
   'RAW_CONTENT_FALLBACK', 'UNSUPPORTED_CONTENT', 'UNSUPPORTED_MACRO', 'REMOTE_IMAGE_NOT_EMBEDDED', 'UNSAFE_URL',
   'LINK_TARGET_SHOWN_AS_TEXT', 'ANCHOR_FLATTENED', 'SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
   'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'LEGACY_TOC_REPRESENTATION',
   'LEGACY_LABEL_LIST_REPRESENTATION', 'CHILD_LIST_PARAMETERS_UNSUPPORTED', 'CHILD_LIST_SCOPE_UNRESOLVED',
   'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
-  'LAYOUT_STRUCTURE_UNSUPPORTED', 'LEGACY_LAYOUT_REPRESENTATION',
-  ...lossyConfluenceCalloutConversions, ...lossyConfluenceExcerptConversions,
+  'LAYOUT_STRUCTURE_UNSUPPORTED', 'LEGACY_LAYOUT_REPRESENTATION', 'LEGACY_DOCUMENT_PROPERTIES_REPRESENTATION',
+  ...lossyConfluenceCalloutConversions, ...lossyConfluenceExcerptConversions, ...lossyConfluencePropertyConversions,
 ]);
 
 function usableConfluenceBody(converted: ReturnType<typeof convertLegacyContent>): boolean {
@@ -187,19 +192,23 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
       // An older document can still exactly match a former renderer's conversion.
       const earlierContent = { legacyDocumentChildList: true, legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
       const legacyLayout = hasConfluenceColumnLayout(record) ? { legacyDocumentLayout: true } : {};
+      const legacyProperties = hasConfluencePropertyMacro(record.text) ? { legacyDocumentProperties: true } : {};
       const legacyOptions = [
+        ...(legacyProperties.legacyDocumentProperties ? [legacyProperties] : []),
         ...(legacyLayout.legacyDocumentLayout ? [legacyLayout] : []),
         ...(hasConfluenceExcerptMacro(record) ? [{ ...legacyLayout, legacyDocumentExcerpt: true }] : []),
         ...[{ legacyDocumentChildList: true }, earlierContent, { ...earlierContent, legacyAnnotations: true }]
           .map(options => ({ ...options, ...legacyLayout, legacyDocumentExcerpt: true })),
       ];
       for (const options of legacyOptions) {
-        const legacy = convertLegacyContent(record, { resolveReference, ...options });
+        const legacy = convertLegacyContent(record, { resolveReference, ...options, ...legacyProperties });
         const exactOldContent = confluencePageFieldDigest('content', legacy.content) === currentHash;
         const safeOldContent = usableConfluenceBody({ ...legacy, diagnostics: legacy.diagnostics.filter(item =>
           !['ANCHOR_FLATTENED', 'ANCHOR_DECLARATION_FLATTENED', 'LEGACY_TOC_REPRESENTATION',
             'LEGACY_LABEL_LIST_REPRESENTATION', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
-            'LEGACY_LAYOUT_REPRESENTATION'].includes(item.code)) });
+            'LEGACY_LAYOUT_REPRESENTATION', 'LEGACY_DOCUMENT_PROPERTIES_REPRESENTATION'].includes(item.code) &&
+          // The old transformer rendered default table column declarations as inert XML inside the disclosure.
+          !(legacyProperties.legacyDocumentProperties && item.code === 'UNSUPPORTED_CONTENT')) });
         if (exactOldContent && safeOldContent) { values.content = legacy.content; break; }
       }
     }
@@ -947,7 +956,8 @@ class Planner{
       const timezone = this.configuration.timezone;
       const newer = newerConfluencePage(row, previous.record, timezone, previousTimezone);
       const originalChecklistFallback = hasOriginalConfluenceChecklistFallback(previous.record, document.content);
-      const sameRevision = !newer && (row.metadata.labelSetComplete === true || originalChecklistFallback) && !sourceBodyErrors.has(entry.key) &&
+      const propertiesProjection = hasConfluenceBody(row) && hasConfluencePropertyMacro(row.text);
+      const sameRevision = !newer && (row.metadata.labelSetComplete === true || originalChecklistFallback || propertiesProjection) && !sourceBodyErrors.has(entry.key) &&
         sameConfluencePageRevision(row, previous.record, timezone, previousTimezone);
       if (!newer && !sameRevision) {
         skippedDocumentUpdates++;
@@ -958,7 +968,7 @@ class Planner{
       if (newer && (!title || title.length > 300)) {
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
-      const needsBodyReview = hasConfluenceBody(row) && (originalChecklistFallback || newer &&
+      const needsBodyReview = hasConfluenceBody(row) && (originalChecklistFallback || propertiesProjection || newer &&
         (!hasConfluenceBody(previous.record) || row.text !== previous.record.text || hasConfluenceExcerptMacro(row) || hasConfluenceColumnLayout(row)));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
@@ -969,6 +979,7 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
         for (const diagnostic of converted?.diagnostics ?? []) {
           if (lossyConfluenceCalloutConversions.has(diagnostic.code) || lossyConfluenceExcerptConversions.has(diagnostic.code) ||
+            lossyConfluencePropertyConversions.has(diagnostic.code) ||
             ['SECTION_LINK_UNRESOLVED', 'TOC_PARAMETERS_UNSUPPORTED',
             'LABEL_LIST_PARAMETERS_UNSUPPORTED', 'LABEL_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_PARAMETERS_UNSUPPORTED',
             'CHILD_LIST_SCOPE_UNRESOLVED', 'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LAYOUT_STRUCTURE_UNSUPPORTED'].includes(diagnostic.code)) {
@@ -1029,6 +1040,8 @@ class Planner{
         if (decision === 'apply') {
           if (field === 'content' && sameRevision && originalChecklistFallback) this.notice('CONFLUENCE_REFRESH_CHECKLIST_RESTORED',
             '원문 블록으로 보관된 본문을 편집 가능한 체크리스트가 있는 본문으로 바꿉니다.', 'warning', entry, true);
+          if (field === 'content' && sameRevision && propertiesProjection) this.notice('CONFLUENCE_REFRESH_DOCUMENT_PROPERTIES_RESTORED',
+            '같은 원본 버전의 속성 표나 보고서를 편집 가능한 문서 블록으로 바꿉니다.', 'warning', entry, true);
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
           checkpoint = true;

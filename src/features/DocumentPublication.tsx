@@ -51,6 +51,9 @@ function snapshotContent(node: RichContent): RichContent {
   if (node.type === 'documentLabelList' || node.type === 'documentChildList') {
     return { type: 'paragraph', content: [{ type: 'text', text: `${documentPlainText(node)} · 이 저장본에는 목록 조건이 보관됩니다.` }] };
   }
+  if (node.type === 'documentPropertyReport') {
+    return { type: 'paragraph', content: [{ type: 'text', text: `${documentPlainText(node)} · 이 저장본에는 보고서 조건이 보관됩니다.` }] };
+  }
   if (node.type === 'issueSummary') {
     const label = typeof node.attrs?.label === 'string' ? node.attrs.label : '';
     const projectId = typeof node.attrs?.projectId === 'string' ? node.attrs.projectId : '';
