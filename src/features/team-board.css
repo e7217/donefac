@@ -42,8 +42,7 @@
 }
 
 .team-board-filters label,
-.team-board-share-fallback,
-.team-board-status-body label {
+.team-board-share-fallback {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -52,8 +51,7 @@
 }
 
 .team-board-filters .field,
-.team-board-share-fallback .field,
-.team-board-status-body .field {
+.team-board-share-fallback .field {
   width: 100%;
   min-width: 0;
   box-sizing: border-box;
@@ -207,70 +205,9 @@
   font-size: 11px;
 }
 
-.team-board-page :focus-visible,
-.team-board-status-dialog :focus-visible {
+.team-board-page :focus-visible {
   outline: 2px solid #288069;
   outline-offset: 2px;
-}
-
-.team-board-status-dialog {
-  width: min(450px, calc(100% - 24px));
-  max-height: 88dvh;
-  padding: 0;
-  border: 1px solid #dce7df;
-  border-radius: 12px;
-  background: #fff;
-  color: #314d40;
-  box-shadow: 0 16px 46px #243b302f;
-}
-
-.team-board-status-dialog::backdrop {
-  background: #19372b66;
-}
-
-.team-board-status-dialog header,
-.team-board-status-dialog footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 10px clamp(12px, 4vw, 18px);
-}
-
-.team-board-status-dialog header {
-  justify-content: space-between;
-  border-bottom: 1px solid #e7eee9;
-}
-
-.team-board-status-dialog footer {
-  justify-content: flex-end;
-  border-top: 1px solid #e7eee9;
-}
-
-.team-board-status-dialog h2 {
-  margin: 0;
-  font-size: 17px;
-}
-
-.team-board-status-body {
-  display: grid;
-  gap: 10px;
-  padding: 12px clamp(12px, 4vw, 18px);
-  font-size: 13px;
-}
-
-.team-board-status-body p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.team-board-status-body p > .issue-status-dot {
-  display: inline-block;
-  margin-inline: 4px;
-}
-
-.team-board-status-details {
-  justify-self: start;
 }
 
 @media (max-width: 760px) {

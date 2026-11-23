@@ -540,6 +540,7 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
   assert.ok(archive.confluencePageFieldHashes.content);
   const olderArchive = { ...archive };
   delete olderArchive.confluencePageFieldHashes;
+  delete olderArchive.confluencePageBodySourceHash;
   const refresh = (rows: LegacyRecord[], document = canonical, previous = archive) => {
     const delta = pkg('delta-wiki', 'confluence', [{ ...space }, ...rows]);
     delta.dataset.source.instanceKey = original.dataset.source.instanceKey;
@@ -903,7 +904,8 @@ test('reviewed Confluence refresh repairs only untouched full-page checklist fal
   ] } };
   const legacyReceipt = { ...sourceRecord };
   delete legacyReceipt.confluencePageFieldHashes;
-  const fallbackReceipt = { ...sourceRecord, confluencePageFieldHashes: { ...sourceRecord.confluencePageFieldHashes,
+  delete legacyReceipt.confluencePageBodySourceHash;
+  const fallbackReceipt = { ...legacyReceipt, confluencePageFieldHashes: { ...sourceRecord.confluencePageFieldHashes,
     content: createHash('sha256').update(JSON.stringify(['content', JSON.stringify(fallback.content)])).digest('hex') } };
   const refresh = (local = fallback, previous = legacyReceipt, source = original) => {
     const next = pkg('checklist-refresh', 'confluence', [space, source]);

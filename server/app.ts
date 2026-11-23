@@ -2662,6 +2662,7 @@ export function createApp(options: {
     if(data.schemaVersion<37&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo!==undefined))fail('기존 프로젝트에 Jira 업무를 추가한 영수증에는 schemaVersion 37 백업이 필요합니다.');
     if(data.schemaVersion<38&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo!==undefined))fail('기존 프로젝트에 Confluence 문서를 추가한 영수증에는 schemaVersion 38 백업이 필요합니다.');
     if(data.schemaVersion<39&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshExisting!==undefined))fail('기존 Jira 업무의 변경분을 반영한 영수증에는 schemaVersion 39 백업이 필요합니다.');
+    if(data.schemaVersion<98&&Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraIssueSourceFieldHashes')))fail('Jira 업무의 승인된 원본 필드 기준에는 schemaVersion 98 백업이 필요합니다.');
     if(data.schemaVersion<40&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshExisting!==undefined))fail('기존 Confluence 문서의 변경분을 반영한 영수증에는 schemaVersion 40 백업이 필요합니다.');
     if(data.schemaVersion<41&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshAttachments!==undefined))fail('기존 Confluence 문서의 첨부를 추가한 영수증에는 schemaVersion 41 백업이 필요합니다.');
     if(data.schemaVersion<42&&Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendPagesTo?.refreshHistory!==undefined))fail('기존 Confluence 문서의 댓글과 이력을 추가한 영수증에는 schemaVersion 42 백업이 필요합니다.');
@@ -2802,6 +2803,9 @@ export function createApp(options: {
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
     if (data.schemaVersion < 61 && importedSources.records.some(row => row.confluencePageFieldHashes?.labels !== undefined)) {
       fail('Confluence 문서 라벨의 비교 기준을 포함한 백업은 schemaVersion 61이 필요합니다.');
+    }
+    if (data.schemaVersion < 98 && importedSources.records.some(row => row.confluencePageBodySourceHash !== undefined)) {
+      fail('Confluence 문서 원문의 비교 기준을 포함한 백업은 schemaVersion 98이 필요합니다.');
     }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
     const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);

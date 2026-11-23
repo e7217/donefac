@@ -59,10 +59,6 @@
   color: #934434;
 }
 
-.issue-board-card-row:has(.issue-order-controls) .issue-board-card {
-  margin-bottom: 0;
-}
-
 .issue-board-card-row .issue-order-controls {
   justify-content: flex-end;
   margin-bottom: 8px;

@@ -4,7 +4,8 @@ import type { AtlassianLink } from '../shared/atlassian-links.js';
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
 export interface MigrationJiraRefreshCandidate {
   issue: Issue;
-  previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration };
+  previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration;
+    priorityOption?: Pick<LegacyRecord, 'sourceId' | 'title'> };
   previousCustom?: MigrationJiraRefreshCandidate['previous'];
 }
 export interface MigrationJiraIssueUpdate {

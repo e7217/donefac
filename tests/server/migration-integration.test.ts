@@ -309,15 +309,16 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   assert.equal(local.status, 200, JSON.stringify(local.data));
 
   const delta = await upload(f, 'jira-delta', [row('100', 'HIST-1', '2020-01-03T00:00:00Z', 'Jira에서 변경한 제목', {
-    status: completed, priority: { name: 'High' }, labels: [], duedate: '2020-01-29',
+    status: completed, priority: { id: '4', name: 'High' }, labels: [], duedate: '2020-01-29',
   })]);
-  async function reviewConfig(pkg: LegacyPackageSummary) {
-    const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
+  async function reviewConfig(pkg: LegacyPackageSummary, workspace = f) {
+    const options = (await workspace.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
     const target = options.appendTarget;
     assert.ok(target);
     return { ...options.defaultConfiguration, appendTo: {
       projectId, refreshExisting: true as const,
-      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+      statuses: Object.fromEntries(options.statuses.filter(option => option.sourceValue !== '__unspecified__')
+        .map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
       issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
       fields: {},
     } };
@@ -386,23 +387,83 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   const checkpoint = backup.sourceRecords.find(record => record.sourceImportId === result.data.import.id && record.targetId === ticket.id);
   assert.ok(checkpoint?.jiraIssueFieldHashes?.priority);
   assert.ok(checkpoint.jiraIssueFieldHashes.title);
+  assert.ok(checkpoint.jiraIssueSourceFieldHashes?.title);
+  assert.ok(checkpoint.jiraIssueSourceFieldHashes.status);
   assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 38 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 97 } })).status, 400);
+  const malformedCheckpoint = { ...checkpoint, jiraIssueSourceFieldHashes: { title: ['a'.repeat(64), 'b'.repeat(64)] } };
+  const malformed = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup,
+    sourceRecords: backup.sourceRecords.map(record => record.id === checkpoint.id ? malformedCheckpoint : record),
+  } });
+  assert.equal(malformed.status, 400);
+  assert.match(malformed.data.error, /Jira 원본 필드 기준의 형식/);
   const restored = await f.call('/import', 'POST', { data: backup });
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   assert.equal((await f.preview(config)).canApply, false);
 
-  const newer = await upload(f, 'jira-follow-up', [
-    row('100', 'HIST-1', '2020-01-04T00:00:00Z', 'Jira에서 변경한 제목', { status: completed, priority: { name: 'Low' } }),
+  const newerRows = [
+    row('100', 'HIST-1', '2020-01-04T00:00:00Z', 'Jira에서 변경한 제목', { priority: { name: 'Low' } }),
     row('300', 'HIST-3', '2020-01-04T00:00:00Z', '함께 이관하는 새 Jira 업무', { status: open }),
+  ];
+  const legacy = structuredClone(backup);
+  legacy.schemaVersion = 97;
+  for (const record of legacy.sourceRecords) delete record.jiraIssueSourceFieldHashes;
+  delete legacy.sourceImports.find(receipt => receipt.id === result.data.import.id)!.integrity;
+  // Older administrator XML represented the priority as an option ID and stored its name in a separate record.
+  const archivedFields = legacy.sourceRecords.find(record => record.id === checkpoint.id)!.record.metadata.fields;
+  assert.ok(archivedFields && typeof archivedFields === 'object' && !Array.isArray(archivedFields));
+  archivedFields.priority = '4';
+  const legacyWorkspace = await fixture();
+  t.after(() => legacyWorkspace.close());
+  const restoredLegacy = await legacyWorkspace.call('/import', 'POST', { data: legacy });
+  assert.equal(restoredLegacy.status, 200, JSON.stringify(restoredLegacy.data));
+  const legacyDelta = await upload(legacyWorkspace, 'jira-legacy-follow-up', [
+    row('100', 'HIST-1', '2020-01-04T00:00:00Z', 'Jira에서 변경한 제목', { priority: { id: '4', name: 'Low' } }), newerRows[1],
   ]);
+  const legacyReview = await legacyWorkspace.preview(await reviewConfig(legacyDelta, legacyWorkspace));
+  assert.deepEqual(legacyReview.issueRefresh?.find(item => item.issueId === ticket.id)?.fields.map(item => [item.field, item.decision]), [
+    ['title', 'conflict'],
+  ]);
+
+  const newer = await upload(f, 'jira-follow-up', newerRows);
   const followUp = await f.preview(await reviewConfig(newer));
   assert.equal(followUp.canApply, true, JSON.stringify(followUp.notices));
   assert.equal(followUp.counts.issues, 1);
   assert.equal(followUp.counts.updatedFields, 1);
-  assert.equal((await f.apply(followUp)).status, 201);
-  assert.equal((await currentTicket('SYNC-1')).priority, 'low');
-  assert.equal((await currentTicket('SYNC-1')).title, '팀이 수정한 제목');
+  assert.equal(followUp.counts.conflictingFields, 1);
+  assert.deepEqual(followUp.issueRefresh?.find(item => item.issueId === ticket.id)?.fields.map(item => [item.field, item.decision]), [
+    ['title', 'conflict'], ['priority', 'apply'],
+  ]);
+  const followUpReceipt = await f.apply(followUp);
+  assert.equal(followUpReceipt.status, 201, JSON.stringify(followUpReceipt.data));
+  const afterFollowUp = await currentTicket('SYNC-1');
+  assert.equal(afterFollowUp.priority, 'low');
+  assert.equal(afterFollowUp.title, '팀이 수정한 제목');
   assert.equal((await currentTicket('SYNC-3')).title, '함께 이관하는 새 Jira 업무');
+  const followUpBackup = (await f.call<Backup>('/export')).data;
+  const followUpCheckpoint = followUpBackup.sourceRecords.find(record => record.sourceImportId === followUpReceipt.data.import.id && record.targetId === ticket.id);
+  assert.deepEqual(followUpCheckpoint?.jiraIssueSourceFieldHashes?.title, checkpoint.jiraIssueSourceFieldHashes.title);
+  assert.deepEqual(followUpCheckpoint?.jiraIssueSourceFieldHashes?.status, checkpoint.jiraIssueSourceFieldHashes.status);
+  assert.equal((await f.apply(followUp)).data.duplicate, true);
+  const reverted = await f.call<Issue>(`/issues/${ticket.id}`, 'PATCH', { expectedVersion: afterFollowUp.version, title: '원래 Jira 제목' });
+  assert.equal(reverted.status, 200, JSON.stringify(reverted.data));
+  const repeated = await f.apply(followUp);
+  assert.equal(repeated.data.duplicate, true);
+  assert.equal(repeated.data.import.id, followUpReceipt.data.import.id);
+  assert.equal((await currentTicket('SYNC-1')).title, '원래 Jira 제목');
+
+  const newest = await upload(f, 'jira-title-conflict-resolved', [
+    row('100', 'HIST-1', '2020-01-05T00:00:00Z', 'Jira에서 변경한 제목', { status: completed, priority: { name: 'Low' } }),
+  ]);
+  const newestConfig = await reviewConfig(newest);
+  // A sparse intervening export omitted the status. Mapping the same raw Jira status differently still preserves its accepted value.
+  newestConfig.appendTo.statuses = Object.fromEntries(Object.keys(newestConfig.appendTo.statuses).map(id => [id, ticket.status]));
+  const resolved = await f.preview(newestConfig);
+  assert.equal(resolved.canApply, true, JSON.stringify(resolved.notices));
+  assert.deepEqual(resolved.issueRefresh?.find(item => item.issueId === ticket.id)?.fields.map(item => [item.field, item.decision]), [['title', 'apply']]);
+  assert.equal((await f.apply(resolved)).status, 201);
+  assert.equal((await currentTicket('SYNC-1')).title, 'Jira에서 변경한 제목');
+  assert.equal((await currentTicket('SYNC-1')).status, doneId);
   assert.equal((await f.preview(config)).canApply, false);
   const next = await f.call<Issue>('/issues', 'POST', { projectId, title: '이관으로 번호가 소비되지 않는 팀 업무' });
   assert.equal(next.status, 201, JSON.stringify(next.data));
@@ -1500,7 +1561,10 @@ test('reviewed Confluence deltas preserve local edits, guard collaborative sessi
   const previous = (await initial.call<Backup>('/export')).data;
   previous.schemaVersion = 39;
   for (const receipt of previous.sourceImports) delete receipt.integrity;
-  for (const record of previous.sourceRecords) delete record.confluencePageFieldHashes;
+  for (const record of previous.sourceRecords) {
+    delete record.confluencePageFieldHashes;
+    delete record.confluencePageBodySourceHash;
+  }
   assert.equal((await f.call('/import', 'POST', { data: previous })).status, 200);
   const snapshot = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
   const [document, supporting] = (await snapshot()).documents.filter(doc => doc.projectId === projectId);
@@ -1683,7 +1747,10 @@ test('Confluence refresh replaces an exact legacy table of contents and preserve
   const backup = (await initial.call<Backup>('/export')).data;
   backup.schemaVersion = 39;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
-  for (const record of backup.sourceRecords) delete record.confluencePageFieldHashes;
+  for (const record of backup.sourceRecords) {
+    delete record.confluencePageFieldHashes;
+    delete record.confluencePageBodySourceHash;
+  }
   const oldContent = (heading: string) => normalizeDocumentContent({ type: 'doc', content: [
     { type: 'codeBlock', content: [{ type: 'text', text: macro }] },
     { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: heading }] },
@@ -1735,6 +1802,110 @@ function labelListExport(target: MigrationFixture, instance: string, name: strin
   return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
 }
 
+test('Confluence retained title and body changes survive partial receipts and portable restore without remapping accepted raw content', async t => {
+  const [source, restored, older] = await Promise.all([fixture(), fixture(), fixture()]);
+  t.after(() => Promise.all([source.close(), restored.close(), older.close()]));
+  const instance = 'synthetic-confluence-partial-refresh';
+  const linkedBody = '<p><ac:link><ri:page ri:content-id="400"/></ac:link></p>';
+  const initialPages = [
+    { id: '100', title: '처음 제목 A', body: '<p>처음 본문 A</p>' },
+    { id: '200', title: '처음 제목 B', body: '<p>처음 본문 B</p>' },
+    { id: '300', title: '연결 문서', body: linkedBody },
+    { id: '400', title: '이전 연결 대상', body: '<p>지원 문서</p>' },
+  ];
+  const original = await labelListExport(source, instance, 'partial-v1', initialPages);
+  const first = await source.apply(await source.preview(await source.configuration(original, 'CFRT')));
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const [projectId] = first.data.import.projectIds;
+  const workspace = async (target: MigrationFixture) => (await target.call<WorkspaceSnapshot>('/workspace')).data;
+  const before = (await workspace(source)).documents;
+  const [a, b, linked, other] = initialPages.map(row => before.find(document => document.title === row.title)!);
+  const document = async (target: MigrationFixture, id: string) => (await workspace(target)).documents.find(doc => doc.id === id)!;
+  const edit = async (target: MigrationFixture, doc: DocPage, values: Partial<Pick<DocPage, 'title' | 'content'>>) => {
+    const result = await target.call<DocPage>(`/documents/${doc.id}`, 'PATCH', { expectedVersion: doc.version, ...values });
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return result.data;
+  };
+  const localBody = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+  const configuration = async (target: MigrationFixture, name: string, pages: LabelListSourcePage[]) => {
+    const pkg = await labelListExport(target, instance, name, pages);
+    const config = await target.configuration(pkg);
+    return { ...config, appendPagesTo: { projectId, refreshExisting: true as const } };
+  };
+  const comparisons = (plan: MigrationPreview, doc: DocPage) => Object.fromEntries(
+    (plan.documentRefresh?.find(row => row.documentId === doc.id)?.fields ?? []).map(({ field, decision }) => [field, decision]));
+  await edit(source, a, { title: '팀 제목 A' });
+  await edit(source, b, { content: localBody('팀 본문 B') });
+  await edit(source, linked, { content: localBody('팀 메모') });
+  const secondPages = [
+    { id: '100', version: 2, title: '원본 새 제목 A', body: '<p>원본 새 본문 A</p>' },
+    { id: '200', version: 2, title: '원본 새 제목 B', body: '<p>원본 새 본문 B</p>' },
+    { id: '300', version: 2, title: '연결 문서 새 제목', body: '<p>원본의 아직 반영하지 않은 본문</p>' },
+    { id: '400', version: 2, title: '이름을 바꾼 연결 대상' },
+  ];
+  const second = await source.preview(await configuration(source, 'partial-v2', secondPages));
+  assert.equal(second.canApply, true, JSON.stringify(second.notices));
+  assert.deepEqual(comparisons(second, a), { title: 'conflict', content: 'apply' });
+  assert.deepEqual(comparisons(second, b), { title: 'apply', content: 'conflict' });
+  assert.deepEqual(comparisons(second, linked), { title: 'apply', content: 'conflict' });
+  const appliedSecond = await source.apply(second);
+  assert.equal(appliedSecond.status, 201, JSON.stringify(appliedSecond.data));
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await source.call<Backup>('/export')).data;
+  const initialSource = (doc: DocPage) => backup.sourceRecords.find(row => row.sourceImportId === first.data.import.id && row.targetId === doc.id)!;
+  const latestSource = (doc: DocPage) => backup.sourceRecords.find(row => row.sourceImportId === appliedSecond.data.import.id && row.targetId === doc.id)!;
+  assert.equal(latestSource(a).confluencePageFieldHashes?.title, initialSource(a).confluencePageFieldHashes?.title);
+  assert.match(initialSource(b).confluencePageBodySourceHash ?? '', /^[a-f0-9]{64}$/);
+  assert.notEqual(latestSource(a).confluencePageBodySourceHash, initialSource(a).confluencePageBodySourceHash);
+  assert.equal(latestSource(b).record.text, secondPages[1].body);
+  assert.equal(latestSource(b).confluencePageBodySourceHash, initialSource(b).confluencePageBodySourceHash);
+  assert.equal(latestSource(linked).confluencePageBodySourceHash, initialSource(linked).confluencePageBodySourceHash);
+  assert.equal((await restored.call('/import', 'POST', { data: { ...backup, schemaVersion: 97 } })).status, 400);
+  const restore = await restored.call('/import', 'POST', { data: backup });
+  assert.equal(restore.status, 200, JSON.stringify(restore.data));
+  const oldBackup = structuredClone(backup);
+  oldBackup.schemaVersion = 97;
+  for (const receipt of oldBackup.sourceImports) delete receipt.integrity;
+  for (const row of oldBackup.sourceRecords) delete row.confluencePageBodySourceHash;
+  const oldRestore = await older.call('/import', 'POST', { data: oldBackup });
+  assert.equal(oldRestore.status, 200, JSON.stringify(oldRestore.data));
+
+  const thirdPages = secondPages.slice(0, 2).map(row => ({ ...row, version: 3 }));
+  const linkedThird = { ...secondPages[2], version: 3, title: '연결 문서의 세 번째 제목', body: linkedBody };
+  for (const target of [restored, older]) {
+    const modern = target === restored;
+    const pages = modern ? [...thirdPages, linkedThird] : thirdPages;
+    const config = await configuration(target, 'partial-v3', pages);
+    const pending = await target.preview(config);
+    assert.deepEqual(comparisons(pending, a), { title: 'conflict' });
+    assert.deepEqual(comparisons(pending, b), { content: 'conflict' });
+    if (modern) assert.deepEqual(comparisons(pending, linked), { title: 'apply' });
+    const fixedA = await edit(target, await document(target, a.id), { title: a.title });
+    const fixedB = await edit(target, await document(target, b.id), { content: b.content });
+    if (modern) await edit(target, await document(target, linked.id), { content: linked.content });
+    const reviewed = await target.preview(config);
+    assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+    assert.equal(reviewed.counts.conflictingDocumentFields, 0);
+    assert.deepEqual(comparisons(reviewed, a), { title: 'apply' });
+    assert.deepEqual(comparisons(reviewed, b), { content: 'apply' });
+    if (modern) assert.deepEqual(comparisons(reviewed, linked), { title: 'apply' });
+    const applied = await target.apply(reviewed);
+    assert.equal(applied.status, 201, JSON.stringify(applied.data));
+    assert.equal((await target.apply(reviewed)).data.duplicate, true);
+    const savedA = await document(target, a.id), savedB = await document(target, b.id);
+    assert.deepEqual([savedA.title, savedA.plainText, savedA.version], [thirdPages[0].title, '원본 새 본문 A', fixedA.version + 1]);
+    assert.deepEqual([savedB.title, savedB.plainText, savedB.version], [thirdPages[1].title, '원본 새 본문 B', fixedB.version + 1]);
+    if (modern) {
+      const saved = await document(target, linked.id);
+      assert.equal(saved.title, linkedThird.title);
+      assert.deepEqual(saved.content, linked.content);
+      assert.deepEqual(contentReferences(saved.content).map(({ id, label }) => [id, label]), [[other.id, other.title]]);
+      assert.equal((await document(target, other.id)).title, secondPages[3].title);
+    }
+  }
+});
+
 test('Confluence layouts migrate through HTTP and upgrade exact former projections on a newer source revision', async t => {
   const initial = await fixture(), restored = await fixture();
   t.after(() => Promise.all([initial.close(), restored.close()]));
@@ -1782,6 +1953,7 @@ test('Confluence layouts migrate through HTTP and upgrade exact former projectio
   backup.schemaVersion = 78;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
+    delete record.confluencePageBodySourceHash;
     if (record.targetId === documents[0].id && record.confluencePageFieldHashes) {
       record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(previous.get(documents[0].id)!.content)])));
     } else if (record.targetId && previous.has(record.targetId)) delete record.confluencePageFieldHashes;
@@ -1864,6 +2036,7 @@ test('Confluence excerpt migration upgrades verified older projections while pre
   backup.schemaVersion = 68;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
+    delete record.confluencePageBodySourceHash;
     if (record.targetId === stored.id && record.confluencePageFieldHashes) {
       record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(priorInclude.content)])));
     } else delete record.confluencePageFieldHashes;
@@ -1923,7 +2096,10 @@ test('Confluence label-list XML migrates into a proven project and refreshes exa
   // Reproduce a prior export in which the unsupported macro remained as an exact code block.
   backup.schemaVersion = 58;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
-  for (const record of backup.sourceRecords) delete record.confluencePageFieldHashes;
+  for (const record of backup.sourceRecords) {
+    delete record.confluencePageFieldHashes;
+    delete record.confluencePageBodySourceHash;
+  }
   const oldBody = normalizeDocumentContent({ type: 'doc', content: [{ type: 'codeBlock', content: [{ type: 'text', text: confluenceLegacyList }] }] });
   const original = docs.find(doc => doc.title === '원본 목록')!, edited = docs.find(doc => doc.title === '별도 편집한 목록')!;
   assert.ok(original && edited);
@@ -3246,6 +3422,7 @@ test('retained source verification distinguishes archival loss from deleted live
   for (const original of oldBackup.sourceRecords) {
     delete original.excluded;
     delete original.confluencePageFieldHashes;
+    delete original.confluencePageBodySourceHash;
   }
   const loadedOld = await legacy.call('/import', 'POST', { data: oldBackup });
   assert.equal(loadedOld.status, 200, JSON.stringify(loadedOld.data));

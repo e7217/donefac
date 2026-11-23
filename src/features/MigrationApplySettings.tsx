@@ -199,8 +199,11 @@ function ActorMigration(props: MigrationApplyProps) {
   }
   const mode = destinationMode(configuration), reviewMode = destinationMode(preview?.configuration);
   const reviewProduct = refreshProduct(preview?.configuration);
+  const noRefreshChanges = reviewProduct && preview?.notices.some(notice => notice.code === refreshNoChanges[reviewProduct]);
+  const preservedEdits = (preview?.counts.conflictingFields ?? 0) + (preview?.counts.conflictingCustomFields ?? 0) +
+    (preview?.counts.conflictingDocumentFields ?? 0);
   const reviewHeading = preview?.canApply ? '검토 후 적용할 수 있습니다'
-    : reviewProduct && preview?.notices.some(notice => notice.code === refreshNoChanges[reviewProduct]) ? `적용할 ${reviewProduct} 변경이 없습니다`
+    : noRefreshChanges ? preservedEdits > 0 ? '보존할 팀 편집이 있습니다' : `적용할 ${reviewProduct} 변경이 없습니다`
     : '적용을 막는 항목을 해결하세요';
   const appendTo = configuration?.appendTo, appendPagesTo = configuration?.appendPagesTo;
   const appendTarget = options?.appendTarget, appendPagesTarget = options?.appendPagesTarget;

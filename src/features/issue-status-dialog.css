@@ -1,0 +1,78 @@
+.issue-status-dialog :focus-visible {
+  outline: 2px solid #288069;
+  outline-offset: 2px;
+}
+
+.issue-status-dialog {
+  width: min(450px, calc(100% - 24px));
+  max-height: 88dvh;
+  padding: 0;
+  border: 1px solid #dce7df;
+  border-radius: 12px;
+  background: #fff;
+  color: #314d40;
+  box-shadow: 0 16px 46px #243b302f;
+}
+
+.issue-status-dialog::backdrop {
+  background: #19372b66;
+}
+
+.issue-status-dialog header,
+.issue-status-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px clamp(12px, 4vw, 18px);
+}
+
+.issue-status-dialog header {
+  justify-content: space-between;
+  border-bottom: 1px solid #e7eee9;
+}
+
+.issue-status-dialog footer {
+  justify-content: flex-end;
+  border-top: 1px solid #e7eee9;
+}
+
+.issue-status-dialog h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.issue-status-dialog-body {
+  display: grid;
+  gap: 10px;
+  padding: 12px clamp(12px, 4vw, 18px);
+  font-size: 13px;
+}
+
+.issue-status-dialog-body p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.issue-status-dialog-body p > .issue-status-dot {
+  display: inline-block;
+  margin-inline: 4px;
+}
+
+.issue-status-dialog-details {
+  justify-self: start;
+}
+
+.issue-status-dialog-body label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: #435a50;
+  font-size: 12px;
+}
+
+.issue-status-dialog-body .field {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}

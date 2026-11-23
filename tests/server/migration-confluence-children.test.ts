@@ -173,7 +173,10 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
   const backup = await initial.call<Backup>('/export');
   backup.schemaVersion = 66;
   for (const value of backup.sourceImports) delete value.integrity;
-  for (const value of backup.sourceRecords) delete value.confluencePageFieldHashes;
+  for (const value of backup.sourceRecords) {
+    delete value.confluencePageFieldHashes;
+    delete value.confluencePageBodySourceHash;
+  }
   const oldBody = normalizeDocumentContent({ type: 'doc', content: [{ type: 'codeBlock', content: [{ type: 'text', text: legacy }] }] });
   const original = backup.documents.find(doc => doc.title === '기존 색인')!;
   const edited = backup.documents.find(doc => doc.title === '별도 편집한 색인')!;

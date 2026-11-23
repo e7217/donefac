@@ -172,6 +172,29 @@
   margin: 0 0 14px;
 }
 
+.issue-board-card-row > .issue-board-card {
+  margin-bottom: 0;
+}
+
+.issue-board-card-status.btn {
+  display: flex;
+  min-height: 34px;
+  margin: 0 0 4px auto;
+  padding-inline: 8px;
+  font-size: 11px;
+}
+
+.issue-board-card-status:focus-visible {
+  outline: 2px solid #288069;
+  outline-offset: 2px;
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  .issue-board-card-status.btn {
+    min-height: 44px;
+  }
+}
+
 .issue-date-actions {
   display: flex;
   flex-wrap: wrap;

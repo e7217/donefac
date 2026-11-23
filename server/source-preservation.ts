@@ -196,6 +196,20 @@ function parseFieldHashes<Field extends string>(raw: unknown, fields: ReadonlySe
   return hashes;
 }
 
+function parseJiraIssueSourceFieldHashes(raw: unknown, canonical: SourceRecordArchive['jiraIssueFieldHashes']): NonNullable<SourceRecordArchive['jiraIssueSourceFieldHashes']> {
+  const hashes: NonNullable<SourceRecordArchive['jiraIssueSourceFieldHashes']> = {};
+  if (!canonical) fail(400, 'Jira 원본 필드 기준에 적용 값의 기준이 없습니다.');
+  for (const [field, value] of Object.entries(object(raw, 'Jira 원본 필드 기준'))) {
+    const name = field as typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
+    const max = name === 'status' || name === 'type' ? 2 : 1;
+    if (!jiraIssueFields.has(name) || !Object.hasOwn(canonical, name) || !Array.isArray(value) || value.length < 1 || value.length > max) {
+      fail(400, 'Jira 원본 필드 기준의 형식을 확인해 주세요.');
+    }
+    hashes[name] = value.length === 2 ? [sha(value[0]), sha(value[1])] : [sha(value[0])];
+  }
+  return hashes;
+}
+
 function parseJiraCustomFieldHashes(raw: unknown): JiraMigrationCustomFieldHashes {
   const entries = Object.entries(object(raw, 'Jira 사용자 정의 필드 기준'));
   if (!entries.length || entries.length > 100) fail(400, 'Jira 사용자 정의 필드 기준의 개수를 확인해 주세요.');
@@ -697,6 +711,8 @@ export class SourcePreservationService {
       const expected = ({ project: 'project', issue: 'issue', page: 'document', comment: 'comment', revision: 'revision', attachment: 'attachment' } as Record<string, string>)[record.kind]; if (targetType !== null && targetType !== expected) fail(400, '원본 객체 종류와 적용 대상 종류가 다릅니다.');
       if (value.excluded !== undefined && (value.excluded !== true || targetType !== null)) fail(400, '제외된 원본은 적용 대상에 연결할 수 없습니다.');
       const jiraIssueFieldHashes = Object.hasOwn(value, 'jiraIssueFieldHashes') ? parseFieldHashes(value.jiraIssueFieldHashes, jiraIssueFields, 'Jira 업무 필드 기준') : undefined;
+      const jiraIssueSourceFieldHashes = Object.hasOwn(value, 'jiraIssueSourceFieldHashes')
+        ? parseJiraIssueSourceFieldHashes(value.jiraIssueSourceFieldHashes, jiraIssueFieldHashes) : undefined;
       const jiraCustomFieldHashes = Object.hasOwn(value, 'jiraCustomFieldHashes') ? parseJiraCustomFieldHashes(value.jiraCustomFieldHashes) : undefined;
       if ((jiraIssueFieldHashes || jiraCustomFieldHashes) && (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' ||
           ownerType !== 'issue' || ownerId !== targetId || !targetProjectId)) fail(400, 'Jira 업무 필드 기준의 원본과 연결 대상을 확인해 주세요.');
@@ -704,6 +720,8 @@ export class SourcePreservationService {
         ? parseFieldHashes(value.confluencePageFieldHashes, confluencePageFields, 'Confluence 문서 필드 기준') : undefined;
       if (confluencePageFieldHashes && (source.product !== 'confluence' || record.kind !== 'page' || targetType !== 'document' ||
           ownerType !== 'document' || ownerId !== targetId || !targetProjectId)) fail(400, 'Confluence 문서 필드 기준의 원본과 연결 대상을 확인해 주세요.');
+      const confluencePageBodySourceHash = Object.hasOwn(value, 'confluencePageBodySourceHash') ? sha(value.confluencePageBodySourceHash) : undefined;
+      if (confluencePageBodySourceHash && !confluencePageFieldHashes?.content) fail(400, 'Confluence 원문 해시의 문서 본문 기준을 확인해 주세요.');
       const jiraHistory = Object.hasOwn(value, 'jiraHistoryAppend') ? jiraHistorySourceKey(record) : null;
       if (Object.hasOwn(value, 'jiraHistoryAppend') && (value.jiraHistoryAppend !== true || source.product !== 'jira' ||
           !owner.configuration.appendTo?.refreshHistory || owner.configuration.appendTo.projectId !== targetProjectId ||
@@ -724,11 +742,13 @@ export class SourcePreservationService {
       }
       return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
+        ...(jiraIssueSourceFieldHashes ? { jiraIssueSourceFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
         ...(jiraHistory ? { jiraHistoryAppend: true } : {}),
         ...(jiraAttachmentAppend ? { jiraAttachmentAppend: true } : {}),
         ...(jiraRelationId ? { jiraRelationId } : {}),
-        ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}) } as SourceRecordArchive;
+        ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}),
+        ...(confluencePageBodySourceHash ? { confluencePageBodySourceHash } : {}) } as SourceRecordArchive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
     validateArchiveManifests(imports, records);

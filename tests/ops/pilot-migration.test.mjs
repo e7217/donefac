@@ -553,6 +553,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     Object.assign(savedPage, { plainText, content });
     Object.assign(savedRevision, { plainText, content });
     delete originalPage.confluencePageFieldHashes;
+    delete originalPage.confluencePageBodySourceHash;
     const legacyReceipt = legacyBackup.sourceImports.find(receipt => receipt.id === originalPage.sourceImportId);
     delete legacyReceipt.integrity;
     await json(base, '/import', { method: 'POST', body: { data: legacyBackup } });

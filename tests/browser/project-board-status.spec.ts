@@ -1,0 +1,211 @@
+import { randomUUID } from 'node:crypto';
+import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
+import type { Issue, ProjectIssueOrder, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
+
+test.use({ hasTouch: true, viewport: { width: 360, height: 820 } });
+
+const button = (within: Page | Locator, name: string) => within.getByRole('button', { name, exact: true });
+const chooser = (page: Page) => page.getByRole('dialog', { name: '업무 상태 변경', exact: true });
+const destination = (page: Page) => chooser(page).getByRole('combobox', { name: '변경할 상태', exact: true });
+const group = (page: Page) => page.getByRole('combobox', { name: '보드 그룹', exact: true });
+const search = (page: Page) => page.getByRole('textbox', { name: '업무 검색', exact: true });
+const card = (page: Page, issue: Issue) => page.locator(`.issue-board-card[data-issue-id="${issue.id}"]`);
+const statusAction = (page: Page, issue: Issue) => button(page, `${issue.key} 상태 변경`);
+const issuePath = (issue: Issue) => `/api/issues/${issue.id}`;
+
+async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
+  expect(response.status(), await response.text()).toBe(status);
+  return await response.json() as T;
+}
+
+function changes(page: Page) {
+  const paths: string[] = [];
+  page.on('request', request => {
+    const path = new URL(request.url()).pathname;
+    if (request.method() === 'PATCH' && (path.startsWith('/api/issues/') || path.endsWith('/issue-order'))) paths.push(path);
+  });
+  return paths;
+}
+
+function nextPatch(page: Page, issue: Issue) {
+  return page.waitForResponse(response => new URL(response.url()).pathname === issuePath(issue) && response.request().method() === 'PATCH');
+}
+
+async function fixture(request: APIRequestContext) {
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [project], users: [actor] } = await workspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const tag = randomUUID().slice(0, 8);
+  const prefix = `이관 보드 ${tag}`;
+  const path = `/api/projects/${project.id}/workflow`;
+  const readWorkflow = async () => json<ProjectWorkflow>(await request.get(path));
+  const baseline = await readWorkflow();
+  const ready = { id: `imported_${tag}`, label: `원본 검토 대기 ${tag}`, category: 'in_progress', color: '#586b9d' };
+  const review = { id: `review_${tag}`, label: `팀 검토 ${tag}`, category: 'review', color: '#458576' };
+  const guarded = { id: `check_${tag}`, label: `추가 검토 ${tag}`, category: 'review', color: '#446f98' };
+  const finished = { id: `closed_${tag}`, label: `검토 마감 ${tag}`, category: 'done', color: '#4d8760' };
+  const created: Issue[] = [];
+  let view: SavedView | undefined;
+
+  async function make(title: string, status: string) {
+    const issue = await json<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId: project.id, title, status, assigneeId: actor.id, type: '작업' },
+    }), 201);
+    created.push(issue);
+    return issue;
+  }
+
+  return {
+    project, actor, prefix, ready, review, guarded, finished,
+    async setup(grouped = false) {
+      const workflow = await json<ProjectWorkflow>(await request.patch(path, { headers, data: {
+        ...baseline, expectedVersion: baseline.version, statuses: [...baseline.statuses, ready, review, guarded, finished],
+        transitions: [...baseline.transitions,
+          { from: ready.id, to: review.id, issueTypes: ['작업'], requiredFields: [] },
+          { from: ready.id, to: guarded.id, issueTypes: ['작업'], requiredFields: ['description'] },
+          { from: ready.id, to: 'done', issueTypes: ['버그'], requiredFields: [] },
+          { from: review.id, to: finished.id, issueTypes: ['작업'], requiredFields: [] },
+        ],
+      } }));
+      await make(`필터에서 가린 이전 카드 ${tag}`, review.id);
+      const issue = await make(`${prefix} 원본에서 옮긴 상태`, ready.id);
+      await make(`${prefix} 팀에서 작성한 기존 카드`, review.id);
+      view = await json<SavedView>(await request.post('/api/views', { headers, data: {
+        projectId: project.id, name: prefix, layout: 'board', ...(grouped ? { boardGrouping: 'assignee' } : {}),
+        filters: { query: prefix, status: 'all', assigneeId: 'all', type: 'all' },
+      } }), 201);
+      return { issue, workflow, location: `/#/${project.id}/issues?${new URLSearchParams({ savedView: view.id })}` };
+    },
+    async removeGuarded(workflow: ProjectWorkflow) {
+      return json<ProjectWorkflow>(await request.patch(path, { headers, data: {
+        ...workflow, expectedVersion: workflow.version,
+        transitions: workflow.transitions.filter(edge => edge.to !== guarded.id),
+      } }));
+    },
+    async read(issue: Issue) { return (await workspace()).issues.find(value => value.id === issue.id); },
+    async rank() { return json<ProjectIssueOrder>(await request.get(`/api/projects/${project.id}/issue-order`)); },
+    async close() {
+      if (view) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`, { headers });
+      for (const issue of created.reverse()) {
+        const removed = await request.delete(issuePath(issue), { headers });
+        if (!removed.ok()) continue;
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`, { headers });
+      }
+      const current = await readWorkflow();
+      if (current.version !== baseline.version) {
+        await json<ProjectWorkflow>(await request.patch(path, { headers, data: { ...baseline, expectedVersion: current.version } }));
+      }
+    },
+  };
+}
+
+test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만 변경한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const f = await fixture(request);
+  try {
+    const { issue, workflow, location } = await f.setup();
+    const rank = await f.rank();
+    const writes = changes(page);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    const before = page.getByRole('region', { name: '업무 보드', exact: true });
+    const action = statusAction(page, issue);
+    await expect(before.locator(`[data-status-id="${f.ready.id}"]`).locator(card(page, issue))).toBeVisible();
+    const bounds = await action.boundingBox();
+    expect(bounds?.height).toBeGreaterThanOrEqual(44);
+    await action.focus();
+    await page.keyboard.press('Enter');
+    await expect(destination(page)).toBeFocused();
+    await expect(destination(page).getByRole('option', { name: f.review.label, exact: true })).toBeAttached();
+    await expect(destination(page).getByRole('option', { name: f.guarded.label, exact: true })).toBeAttached();
+    await expect(destination(page).getByRole('option')).toHaveCount(3);
+    await destination(page).selectOption(f.guarded.id);
+    const blocked = nextPatch(page, issue);
+    await button(chooser(page), '상태 변경 적용').tap();
+    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['description'] } });
+    await expect(chooser(page).getByRole('alert')).toContainText('설명');
+    await expect(button(chooser(page), '업무 상세에서 확인')).toBeVisible();
+    expect(await f.read(issue)).toEqual(issue);
+    await page.keyboard.press('Escape');
+    await expect(action).toBeFocused();
+
+    await action.tap();
+    await destination(page).selectOption(f.review.id);
+    const applying = nextPatch(page, issue);
+    await button(chooser(page), '상태 변경 적용').tap();
+    const applied = await applying;
+    const reviewed = await json<Issue>(applied);
+    expect(applied.request().postDataJSON()).toEqual({ expectedVersion: issue.version, expectedWorkflowVersion: workflow.version, status: f.review.id });
+    expect(reviewed).toMatchObject({ status: f.review.id, assigneeId: f.actor.id, version: issue.version + 1 });
+    await expect(chooser(page)).toHaveCount(0);
+    await expect(before.locator(`[data-status-id="${f.review.id}"]`).locator(card(page, issue))).toBeVisible();
+    await expect(action).toBeFocused();
+
+    await group(page).selectOption('assignee');
+    const lane = page.getByRole('region', { name: '담당자별 보드', exact: true }).locator(`[data-board-assignee-id="${f.actor.id}"]`);
+    await expect(lane.locator(`[data-status-id="${f.review.id}"]`).locator(card(page, issue))).toBeVisible();
+    await action.tap();
+    await expect(destination(page)).toHaveValue(f.finished.id);
+    const finishing = nextPatch(page, issue);
+    await button(chooser(page), '상태 변경 적용').tap();
+    expect(await json<Issue>(await finishing)).toMatchObject({ status: f.finished.id, assigneeId: f.actor.id, version: issue.version + 2 });
+    await expect(chooser(page)).toHaveCount(0);
+    await expect(lane.locator(`[data-status-id="${f.finished.id}"]`).locator(card(page, issue))).toBeVisible();
+    await expect(action).toBeDisabled();
+    await expect(card(page, issue)).toBeFocused();
+    await expect(search(page)).toHaveValue(f.prefix);
+    await expect(group(page)).toHaveValue('assignee');
+    expect(new URL(page.url()).hash).toBe(location.slice(1));
+    expect(writes).toEqual(Array<string>(3).fill(issuePath(issue)));
+    expect((await f.rank()).issueIds).toEqual(rank.issueIds);
+  } finally { await f.close(); }
+});
+
+test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실에서 복구한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const f = await fixture(request);
+  try {
+    const { issue, workflow, location } = await f.setup(true);
+    const rank = await f.rank();
+    const writes = changes(page);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    const action = statusAction(page, issue);
+    await action.tap();
+    await destination(page).selectOption(f.guarded.id);
+    const newWorkflow = await f.removeGuarded(workflow);
+    await expect(destination(page)).toHaveValue(f.guarded.id);
+    const stale = nextPatch(page, issue);
+    await button(chooser(page), '상태 변경 적용').tap();
+    const rejected = await stale;
+    expect(rejected.request().postDataJSON()).toEqual({ expectedVersion: issue.version, expectedWorkflowVersion: workflow.version, status: f.guarded.id });
+    expect(await json<{ details: unknown }>(rejected, 409)).toMatchObject({ details: { reason: 'workflow_changed', currentWorkflowVersion: newWorkflow.version } });
+    await expect(chooser(page).getByRole('alert')).toContainText('워크플로');
+    expect(await f.read(issue)).toEqual(issue);
+    await button(chooser(page), '최신 업무 불러오기').tap();
+    await expect(chooser(page)).toHaveCount(0);
+    await expect(action).toBeFocused();
+    await action.tap();
+    await expect(destination(page)).toHaveValue(f.review.id);
+
+    let committed: Issue | undefined;
+    await page.route(`**${issuePath(issue)}`, async route => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      const response = await route.fetch();
+      expect(route.request().postDataJSON()).toEqual({ expectedVersion: issue.version, expectedWorkflowVersion: newWorkflow.version, status: f.review.id });
+      committed = await json<Issue>(response);
+      await route.abort('failed');
+    });
+    await button(chooser(page), '상태 변경 적용').tap();
+    await expect(chooser(page)).toHaveCount(0);
+    const lane = page.getByRole('region', { name: '담당자별 보드', exact: true }).locator(`[data-board-assignee-id="${f.actor.id}"]`);
+    await expect(lane.locator(`[data-status-id="${f.review.id}"]`).locator(card(page, issue))).toBeVisible();
+    await expect(action).toBeFocused();
+    expect(committed).toMatchObject({ status: f.review.id, version: issue.version + 1 });
+    expect(await f.read(issue)).toEqual(committed);
+    expect(writes).toEqual([issuePath(issue), issuePath(issue)]);
+    expect((await f.rank()).issueIds).toEqual(rank.issueIds);
+    expect(new URL(page.url()).hash).toBe(location.slice(1));
+  } finally { await f.close(); }
+});

@@ -125,6 +125,7 @@ test('same-version property reprojection uses the exact prior body and leaves lo
     const original = baseline.sourceRecords.find(item => item.targetId === document.id)!;
     const previous = { ...original };
     delete previous.confluencePageFieldHashes;
+    delete previous.confluencePageBodySourceHash;
     const { content, plainText } = convertLegacyContent(previous.record, { ...withoutReferences, legacyDocumentProperties: true });
     const afterEdit = previous.record.sourceId === '2'
       ? { ...content, content: [...content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀 편집' }] }] } : content;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, RefreshCw, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowRightLeft, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState, type User, type WorkflowStatus } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
@@ -15,6 +15,7 @@ import { IssuePasteDialog } from './IssuePasteDialog';
 import { NewIssueModal } from './NewIssueModal';
 import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
+import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { IssuePriorityLabelFilters } from './IssuePriorityLabelFilters';
 import { IssueReporterFilterSelect } from './IssueReporterSelect';
@@ -38,6 +39,8 @@ type BoardCell = { status: IssueStatus; targetAssigneeId?: string | null };
 type BoardDrop = IssuePlacement & BoardCell;
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
+type BoardCardAction = 'details' | 'status';
+type BoardStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
 type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
@@ -104,6 +107,12 @@ function keepsVisiblePosition(issue: Issue, column: Issue[], placement: IssuePla
   const destinationIndex = anchorIndex - Number(currentIndex < anchorIndex) + Number(placement.position === 'after');
   return destinationIndex === currentIndex;
 }
+
+function boardCardControl(board: HTMLDivElement | null, issueId: string, action: BoardCardAction) {
+  const value = CSS.escape(issueId);
+  const selector = action === 'status' ? `.issue-board-card-status[data-board-status-for="${value}"]` : `.issue-board-card[data-issue-id="${value}"]`;
+  return board?.querySelector<HTMLButtonElement>(selector) ?? null;
+}
 export function IssueTypeIcon({ type, size = 15, data, projectId }: { type: string; size?: number; data?: FeatureProps['data']; projectId?: string }) {
   const meta = data && projectId ? issueTypeMeta(data, projectId, type) : null;
   return type === '버그' ? <Bug size={size} color={meta?.color || '#db705e'} aria-label={meta?.name} /> : type === '큰틀' ? <Layers3 size={size} color={meta?.color || '#9173cd'} aria-label={meta?.name} /> : type === '개선' ? <ArrowUpRight size={size} color={meta?.color || '#ca9e4a'} aria-label={meta?.name} /> : <CircleDot size={size} color={meta?.color || '#578ca9'} aria-label={meta?.name} />;
@@ -158,13 +167,16 @@ export function Issues(props: FeatureProps & {
   const [orderEditProject, setOrderEditProject] = useState<string | null>(null);
   const [orderNotice, setOrderNotice] = useState<OrderNotice | null>(null);
   const [dropTarget, setDropTarget] = useState<BoardDrop | null>(null);
+  const [statusEdit, setStatusEdit] = useState<BoardStatusEdit | null>(null);
   const [capacitySelection, setCapacitySelection] = useState<{ projectId: string; statusId: string } | null>(null);
   const pendingMutation = useRef(false);
+  const statusChooserOpen = useRef(false);
+  const statusFocus = useRef<Pick<BoardStatusEdit, 'issue' | 'opener'> | null>(null);
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
   const boardCanvas = useRef<HTMLDivElement>(null);
   const filterEditors = useRef<HTMLFieldSetElement>(null);
-  const focusedCard = useRef<{ control: HTMLButtonElement; issueId: string } | null>(null);
+  const focusedCard = useRef<{ control: HTMLButtonElement; issueId: string; action: BoardCardAction } | null>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const capacityHeading = useRef<HTMLHeadingElement>(null);
   const capacityOpener = useRef<HTMLButtonElement | null>(null);
@@ -182,18 +194,34 @@ export function Issues(props: FeatureProps & {
   const projectSelected = Boolean(project);
   const groupedBoard = projectSelected && view === 'board' && boardGrouping === 'assignee';
   const currentPasteScope = JSON.stringify([projectId, props.actorId]);
-  const refreshPaused = props.issueOverlayOpen || creating || pasteScope === currentPasteScope || bulk.active || Boolean(busy);
-  const hasLocalInteraction = useCallback(() => Boolean(pendingMutation.current || drag.current || filterEditors.current?.querySelector('form')), []);
+  const refreshPaused = props.issueOverlayOpen || creating || pasteScope === currentPasteScope || bulk.active || Boolean(busy || statusEdit);
+  const hasLocalInteraction = useCallback(() => Boolean(pendingMutation.current || statusChooserOpen.current || drag.current || filterEditors.current?.querySelector('form')), []);
   const { requestMode, feedback, manualRefresh, reconsider } = useWorkspaceRefresh(props.refreshIssues, refreshPaused, hasLocalInteraction);
   useLayoutEffect(() => {
     const focused = focusedCard.current;
     if (!focused || focused.control.isConnected || refreshPaused || document.activeElement !== document.body) return;
     focusedCard.current = null;
-    const card = boardCanvas.current?.querySelector<HTMLButtonElement>(`button[data-issue-id="${CSS.escape(focused.issueId)}"]`);
+    const action = boardCardControl(boardCanvas.current, focused.issueId, focused.action);
+    const card = action && !action.disabled ? action : boardCardControl(boardCanvas.current, focused.issueId, 'details');
     const target = card ?? boardCanvas.current ?? reviewHeading.current;
     target?.focus({ preventScroll: true });
     card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [data, refreshPaused]);
+  useLayoutEffect(() => {
+    if (statusEdit || !statusFocus.current) return;
+    const { issue, opener } = statusFocus.current;
+    statusFocus.current = null;
+    if (props.issueOverlayOpen || view !== 'board' || !isAll(projectId) && issue.projectId !== projectId) return;
+    requestAnimationFrame(() => {
+      const board = boardCanvas.current;
+      const action = boardCardControl(board, issue.id, 'status');
+      const details = boardCardControl(board, issue.id, 'details');
+      const target = [opener, action, details, board].find(control =>
+        control?.isConnected && !control.closest('[inert]') && !control.matches(':disabled'));
+      target?.focus({ preventScroll: true });
+      if (target && target !== opener && target !== board) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    });
+  }, [statusEdit, props.issueOverlayOpen, projectId, view]);
   if (pasteScope !== null && pasteScope !== currentPasteScope) setPasteScope(null);
   const capacities = useMemo(() => {
     const byStatus = new Map<string, BoardStatusCapacity>();
@@ -287,6 +315,20 @@ export function Issues(props: FeatureProps & {
     setBusy(issue.id);
     try { await patch(`/issues/${issue.id}`, { expectedVersion: issue.version, status: next }); await refresh(); notify(`${issue.key} · ${statusMeta(data, issue.projectId, next).label}(으)로 변경했습니다.`); }
     catch (error) { notify(errorMessage(error), 'error'); } finally { pendingMutation.current = false; setBusy(null); }
+  }
+
+  function openBoardStatus(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
+    if (!choices.length || pendingMutation.current || statusChooserOpen.current || drag.current) return;
+    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    statusChooserOpen.current = true;
+    setStatusEdit({ issue, current, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
+  }
+
+  function closeBoardStatus() {
+    if (!statusEdit) return;
+    statusFocus.current = statusEdit;
+    statusChooserOpen.current = false;
+    setStatusEdit(null);
   }
 
   async function moveIssue(issue: Issue, placement: IssuePlacement, options: Pick<IssueOrderMove, 'status' | 'targetAssigneeId' | 'assigneeId'> & {
@@ -442,6 +484,7 @@ export function Issues(props: FeatureProps & {
       </div> : boardHeading(state, column.length, capacity)}
       {column.map((issue, index) => {
         const user = data.users.find(user => user.id === issue.assigneeId);
+        const destinations = allowedNextStatuses(data, issue).filter(status => status.id !== issue.status);
         return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
           <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
             draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
@@ -449,6 +492,11 @@ export function Issues(props: FeatureProps & {
             <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(label => <span className="issue-label" key={label}>{label}</span>)}</span>
             <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
             <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
+          </button>
+          <button className="btn btn-ghost issue-board-card-status" type="button" aria-label={`${issue.key} 상태 변경`}
+            aria-haspopup="dialog" data-board-status-for={issue.id} disabled={!destinations.length || Boolean(busy)}
+            onClick={event => openBoardStatus(issue, state, destinations, event.currentTarget)}>
+            <ArrowRightLeft size={15} aria-hidden="true" />상태 변경
           </button>
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
           {controls(issue, column, index, targetAssigneeId)}
@@ -480,9 +528,10 @@ export function Issues(props: FeatureProps & {
 
   return <div className="issues-feature" onFocusCapture={event => {
     const control = event.target;
-    const issueId = control.dataset.issueId;
-    focusedCard.current = issueId && control instanceof HTMLButtonElement && control.matches('.issue-board-card')
-      ? { control, issueId } : null;
+    const actionId = control.dataset.boardStatusFor;
+    const issueId = actionId ?? (control.matches('.issue-board-card') ? control.dataset.issueId : undefined);
+    focusedCard.current = issueId && control instanceof HTMLButtonElement
+      ? { control, issueId, action: actionId ? 'status' : 'details' } : null;
   }} onBlurCapture={event => {
     const control = event.target;
     if (control instanceof HTMLButtonElement && control === focusedCard.current?.control && (event.relatedTarget || control.isConnected)) {
@@ -611,5 +660,7 @@ export function Issues(props: FeatureProps & {
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
+    {statusEdit && <IssueStatusDialog edit={statusEdit} latest={data} refresh={refresh} notify={notify} onClose={closeBoardStatus}
+      onOpenDetails={() => openVisibleIssue(statusEdit.issue.id, boardCardControl(boardCanvas.current, statusEdit.issue.id, 'details') ?? statusEdit.opener)} />}
   </div>;
 }

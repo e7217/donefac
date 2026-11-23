@@ -51,6 +51,7 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
     status, 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z',
   ];
   const staged = await upload(request, filename, csv([header, row(1, readyTitle, 'Ready'), row(2, doneTitle, 'Done')]), `jira-workflow-${id}`);
+  const createdIssueIds: string[] = [];
   try {
     await page.setViewportSize({ width: 360, height: 820 });
     const { settings } = await open(page, request);
@@ -122,32 +123,55 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
     const imported = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
     const originalReady = imported.issues.find(issue => issue.projectId === projectId && issue.title === readyTitle)!;
     const originalDone = imported.issues.find(issue => issue.projectId === projectId && issue.title === doneTitle)!;
+    createdIssueIds.push(originalReady.id, originalDone.id);
     expect(originalReady?.status).toBe(readyState);
     expect(originalDone?.status).toBe(doneState);
-    const created = await request.post('/api/issues', { data: { projectId, title: `새 업무 ${id}` } });
+    const nativeTitle = `새 업무 ${id}`;
+    const created = await request.post('/api/issues', { data: { projectId, title: nativeTitle } });
     expect(created.status(), await created.text()).toBe(201);
-    expect(await created.json()).toMatchObject({ status: approvalState });
+    const nativeIssue = await created.json() as Issue;
+    createdIssueIds.push(nativeIssue.id);
+    expect(nativeIssue).toMatchObject({ status: approvalState });
     const forbidden = await request.patch(`/api/issues/${originalReady.id}`, {
       data: { expectedVersion: originalReady.version, status: doneState },
     });
     expect(forbidden.status(), await forbidden.text()).toBe(422);
 
-    await page.goto(`/#/${projectId}/issues?issue=${originalReady.id}`);
+    await page.goto(`/#/${projectId}/issues`);
+    await page.getByRole('button', { name: '보드', exact: true }).click();
+    const board = page.getByRole('region', { name: '업무 보드', exact: true });
+    const approvalColumn = board.locator(`[data-status-id="${approvalState}"]`);
+    await expect(approvalColumn).toContainText(nativeTitle);
+    await board.getByRole('button', { name: `${originalReady.key} 상태 변경`, exact: true }).press('Enter');
+    const statusDialog = page.getByRole('dialog', { name: '업무 상태 변경', exact: true });
+    const destination = statusDialog.getByRole('combobox', { name: '변경할 상태', exact: true });
+    await expect(destination).toBeFocused();
+    await expect(destination.locator(`option[value="${doneState}"]`)).toHaveCount(0);
+    await destination.selectOption(approvalState);
+    const boardPatch = page.waitForResponse(response => response.url().endsWith(`/api/issues/${originalReady.id}`) && response.request().method() === 'PATCH');
+    await statusDialog.getByRole('button', { name: '상태 변경 적용', exact: true }).click();
+    expect(await (await boardPatch).json()).toMatchObject({ status: approvalState });
+    await expect(statusDialog).toHaveCount(0);
+    await expect(approvalColumn.getByRole('button', { name: `${originalReady.key} 상태 변경`, exact: true })).toBeFocused();
+    await approvalColumn.locator(`.issue-board-card[data-issue-id="${originalReady.id}"]`).click();
     const detail = page.getByRole('dialog', { name: originalReady.title, exact: true });
     const state = detail.getByLabel('상태', { exact: true });
     const save = detail.getByRole('button', { name: '변경사항 저장', exact: true });
-    await expect(state.locator(`option[value="${doneState}"]`)).toHaveCount(0);
-    for (const [current, next] of [[readyState, approvalState], [approvalState, doneState]]) {
-      await expect(state).toHaveValue(current);
-      await state.selectOption(next);
-      const saving = page.waitForResponse(response => response.url().endsWith(`/api/issues/${originalReady.id}`) && response.request().method() === 'PATCH');
-      await save.click();
-      const changed = await saving;
-      expect(changed.ok(), await changed.text()).toBe(true);
-      expect(await changed.json()).toMatchObject({ status: next });
-      await expect(save).toBeDisabled();
-    }
+    await expect(state).toHaveValue(approvalState);
+    await state.selectOption(doneState);
+    const saving = page.waitForResponse(response => response.url().endsWith(`/api/issues/${originalReady.id}`) && response.request().method() === 'PATCH');
+    await save.click();
+    const changed = await saving;
+    expect(changed.ok(), await changed.text()).toBe(true);
+    expect(await changed.json()).toMatchObject({ status: doneState });
+    await expect(save).toBeDisabled();
   } finally {
+    for (const issueId of createdIssueIds) {
+      const removed = await request.delete(`/api/issues/${issueId}`);
+      if (!removed.ok()) continue;
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`);
+    }
     await request.delete(`/api/legacy-import/packages/${staged.id}?expectedVersion=${staged.version}`);
   }
 });
@@ -245,8 +269,8 @@ test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트�
   }
 });
 
-test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유지하며 새 설명을 반영한다', async ({ page, request }) => {
-  test.setTimeout(90_000);
+test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 팀 편집을 검토한다', async ({ page, request }) => {
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), sourceKey = `REF${id}`, targetKey = `TGT${id}`, instance = `refresh-source-${id}`;
   const originalTitle = `이전 Jira 제목 ${id}`, localTitle = `Teamspace에서 작성한 제목 ${id}`, nextTitle = `새 Jira 제목 ${id}`;
@@ -260,12 +284,14 @@ test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유�
     },
   }] }));
   const staged: LegacyPackageSummary[] = [];
+  let issueId: string | undefined;
   try {
     const original = await upload(request, `refresh-original-${id}.json`, jiraExport(originalTitle, originalDescription, '2020-01-02T00:00:00Z'), instance);
     staged.push(original);
     const initial = await importIntoProject(request, original, targetKey, `이전 이관 프로젝트 ${id}`);
     const [projectId] = initial.import.projectIds;
     const imported = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.find(issue => issue.projectId === projectId)!;
+    issueId = imported.id;
     expect(imported).toMatchObject({ title: originalTitle, description: originalDescription });
     const savedResponse = await request.patch(`/api/issues/${imported.id}`, { data: { expectedVersion: imported.version, title: localTitle } });
     expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
@@ -331,7 +357,62 @@ test('360px에서 Jira 변경을 검토하고 팀에서 편집한 제목을 유�
     expect(repeated.canApply).toBe(false);
     await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
     await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+
+    const newer = await upload(request, `refresh-newer-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-04T00:00:00Z'), instance);
+    staged.push(newer);
+    async function reviewNewerExport() {
+      await open(page, request);
+      await selectPackage(settings, newer.filename);
+      await mode.selectOption('append');
+      await refresh.check();
+      return preview(page, settings);
+    }
+
+    await page.reload();
+    const pendingTitle = await reviewNewerExport();
+    expect(pendingTitle.counts).toMatchObject({ conflictingFields: 1, updatedFields: 0 });
+    expect(pendingTitle.canApply).toBe(false);
+    await expect(review.getByRole('heading', { name: '보존할 팀 편집이 있습니다', exact: true })).toBeVisible();
+    await expect(title).toContainText('현재 값 유지');
+    await expect(title).toContainText(localTitle);
+    await expect(title).toContainText(nextTitle);
+    await expect(description).toHaveCount(0);
+
+    const discarding = page.waitForEvent('dialog').then(async dialog => {
+      const message = dialog.message();
+      await dialog.accept();
+      expect(message).toContain('이관 매핑과 검토 중인 미리보기');
+    });
+    await Promise.all([discarding, page.goto(`/#/${projectId}/issues?issue=${imported.id}`)]);
+    const detail = page.getByRole('dialog', { name: localTitle, exact: true });
+    await detail.getByRole('textbox', { name: '제목', exact: true }).fill(originalTitle);
+    const saving = page.waitForResponse(response => response.url().endsWith(`/api/issues/${imported.id}`) && response.request().method() === 'PATCH');
+    await detail.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    expect(await (await saving).json()).toMatchObject({ title: originalTitle, version: saved.version + 2 });
+    await expect(page.getByRole('dialog', { name: originalTitle, exact: true })).toBeVisible();
+
+    const resolved = await reviewNewerExport();
+    expect(resolved.canApply, JSON.stringify(resolved.notices)).toBe(true);
+    expect(resolved.counts).toMatchObject({ conflictingFields: 0, updatedFields: 1 });
+    await expect(title).toContainText('Jira 값 반영');
+    await expect(title).toContainText(originalTitle);
+    await expect(title).toContainText(nextTitle);
+    await expect(description).toHaveCount(0);
+    await acknowledge(review, resolved);
+    const finishing = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${resolved.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    expect((await finishing).status()).toBe(201);
+    const final = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.filter(issue => issue.projectId === projectId);
+    expect(final).toMatchObject([{ id: imported.id, key: imported.key, version: saved.version + 3, title: nextTitle, description: nextDescription }]);
   } finally {
+    if (issueId) {
+      const removed = await request.delete(`/api/issues/${issueId}`);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
 });
@@ -1001,7 +1082,7 @@ test('360px에서 이관한 Confluence 담당 체크리스트를 편집하고 �
 });
 
 test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 본문을 함께 보존한다', async ({ page, request }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), instance = `refresh-confluence-${id}`, spaceKey = `CF${id}`;
   const originalTitle = `처음 이관한 문서 제목 ${id}`, localTitle = `팀에서 편집한 문서 제목 ${id}`, nextTitle = `새 Confluence 문서 제목 ${id}`;
@@ -1098,6 +1179,22 @@ test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 
     expect((await preview(page, settings)).canApply).toBe(false);
     await expect(review.getByRole('heading', { name: '적용할 Confluence 변경이 없습니다', exact: true })).toBeVisible();
     await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
+
+    const newer = await upload(request, `page-refresh-newer-${id}.zip`, exportSpace(nextTitle, `<p>${nextBody}</p>`, `<p><strong>${sameText}</strong></p>`, 3), instance);
+    staged.push(newer);
+    await page.reload();
+    await selectPackage(settings, newer.filename);
+    await mode.selectOption('append-pages');
+    await refresh.check();
+    const pendingTitle = await preview(page, settings);
+    expect(pendingTitle.canApply).toBe(false);
+    expect(pendingTitle.counts).toMatchObject({ updatedDocumentFields: 0, conflictingDocumentFields: 1 });
+    await expect(review.getByRole('heading', { name: '보존할 팀 편집이 있습니다', exact: true })).toBeVisible();
+    await expect(title).toContainText('현재 값 유지');
+    await expect(title).toContainText(localTitle);
+    await expect(title).toContainText(nextTitle);
+    await expect(body).toHaveCount(0);
+    await expect(formatted).toHaveCount(0);
   } finally {
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }

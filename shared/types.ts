@@ -317,6 +317,7 @@ export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueFie
   customFields?: Record<string, CustomFieldValue>;
 };
 export type JiraMigrationIssueFieldHashes = Partial<Record<JiraMigrationIssueField, string>>;
+export type JiraMigrationIssueSourceFieldHashes = Partial<Record<JiraMigrationIssueField, [string] | [string, string]>>;
 export type JiraMigrationCustomFieldHashes = Record<string, { sourceFieldId: string; hash: string }>;
 export interface JiraMigrationIssueReview {
   issueId: string; key: string; sourceKey: string;
@@ -435,11 +436,13 @@ export interface SourceRecordArchive {
   ownerType:'issue'|'document'|null;ownerId:string|null;
   excluded?:true;
   jiraIssueFieldHashes?: JiraMigrationIssueFieldHashes;
+  jiraIssueSourceFieldHashes?: JiraMigrationIssueSourceFieldHashes;
   jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
   jiraHistoryAppend?: true;
   jiraAttachmentAppend?: true;
   jiraRelationId?: string;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
+  confluencePageBodySourceHash?: string;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }
 export type IssueRelationType = 'related' | 'blocks' | 'duplicates';

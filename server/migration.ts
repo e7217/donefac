@@ -365,6 +365,9 @@ export class MigrationService {
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, archive.id DESC LIMIT 1`);
     const initialArchive = this.store.db.prepare(`${linkedArchives}
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')), archive.id LIMIT 1`);
+    const archivedOption = this.store.db.prepare(`SELECT json FROM source_records
+      WHERE import_id=? AND product='jira' AND source_instance=? AND kind='option' AND source_id=?
+        AND json_extract(json,'$.packageSha256')=? ORDER BY id LIMIT 2`);
     const receipts = new Map<string, SourceImport | undefined>();
     const candidates: MigrationJiraRefreshCandidate[] = [];
     let bytes = 0;
@@ -373,7 +376,7 @@ export class MigrationService {
       if (bytes > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Jira 원본이 64MiB를 넘습니다. 패키지를 나누어 주세요.');
       digest.update(json).update('\n');
     };
-    const readBaseline = (row: JiraArchiveRow, issueId: string): MigrationJiraRefreshCandidate['previous'] | undefined => {
+    const readBaseline = (row: JiraArchiveRow, issueId: string, standard = false): MigrationJiraRefreshCandidate['previous'] | undefined => {
       include(row.json);
       const archive = JSON.parse(row.json) as SourceRecordArchive;
       if (!receipts.has(row.importId)) {
@@ -384,7 +387,21 @@ export class MigrationService {
       const receipt = receipts.get(row.importId);
       const pkg = receipt?.packages.find(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' && pkg.source.instanceKey === instanceKey);
       if (!receipt || !pkg || archive.targetId !== issueId || archive.targetProjectId !== projectId) return undefined;
-      return { archive, stagingId: pkg.stagingId, configuration: receipt.configuration };
+      const baseline: MigrationJiraRefreshCandidate['previous'] = { archive, stagingId: pkg.stagingId, configuration: receipt.configuration };
+      // Legacy administrator snapshots can represent the accepted priority by option ID alone.
+      if (standard && receipt.configuration.appendTo?.refreshExisting && archive.jiraIssueFieldHashes?.priority && !archive.jiraIssueSourceFieldHashes) {
+        const references = [...new Set(archive.record.references.filter(ref => ref.kind === 'option' && ref.relation === 'priority')
+          .map(ref => ref.sourceId))];
+        if (references.length === 1) {
+          const rows = archivedOption.all(row.importId, instanceKey, references[0], archive.packageSha256) as { json: string }[];
+          for (const option of rows) include(option.json);
+          if (rows.length === 1) {
+            const option = (JSON.parse(rows[0].json) as SourceRecordArchive).record;
+            if (option.kind === 'option' && option.sourceId === references[0]) baseline.priorityOption = { sourceId: option.sourceId, title: option.title };
+          }
+        }
+      }
+      return baseline;
     };
 
     digest.update('\njira-refresh\n');
@@ -401,7 +418,7 @@ export class MigrationService {
       if (refreshCustomFields) digest.update(JSON.stringify([previous?.id ?? null, previousCustom?.id ?? null])).update('\n');
       if (!current || !previous) continue;
       include(current.json);
-      const standardBaseline = readBaseline(previous, issueId);
+      const standardBaseline = readBaseline(previous, issueId, configuration.appendTo?.refreshExisting === true);
       if (!standardBaseline) continue;
       const customBaseline = previousCustom?.id === previous.id ? standardBaseline : previousCustom && readBaseline(previousCustom, issueId);
       candidates.push({ issue: JSON.parse(current.json) as Issue, previous: standardBaseline,
