@@ -1,5 +1,6 @@
 import { XMLParser } from 'fast-xml-parser';
 import { isCalendarDate } from '../shared/calendar.js';
+import { parseConfluenceJiraList } from '../shared/confluence-jira-list.js';
 import {
   isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
   type CalloutVariant, type StatusBadgeTone,
@@ -713,7 +714,19 @@ class Converter {
       const identity = qualified ? { spaceKey: qualified[1], title: qualified[2] } : { title: parameter };
       return this.reference({ kind: 'page', ...identity }, true);
     }
-    if ((name === 'jira' || name === 'jiraissues') && params.key) return this.reference({ kind: 'issue', sourceId: params.key });
+    if (['jira', 'jiraissues'].includes(name.toLowerCase())) {
+      const original = serializeXml(node);
+      if (this.richDocument && parseConfluenceJiraList(original)) {
+        this.warn('JIRA_LIST_REVIEW', '보관한 Jira 목록 원문을 문서에서 선택한 뒤 대상 프로젝트와 검색 조건을 검토해 업무 목록으로 바꿀 수 있습니다.');
+        return [codeBlock(original)];
+      }
+      const parameters = Object.keys(params).map(key => key.toLowerCase());
+      const single = !parameters.some(key => ['jqlquery', 'url', 'filter'].includes(key))
+        && (!parameters.includes('count') || params.count?.trim().toLowerCase() === 'false');
+      if (params.key && single) {
+        return this.reference({ kind: 'issue', sourceId: params.key });
+      }
+    }
     if (name === 'anchor' && this.context.legacySectionBaseline) this.warn('ANCHOR_DECLARATION_FLATTENED', '이전 앵커 매크로의 원문 표현을 확인했습니다.');
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];

@@ -380,6 +380,22 @@ test('unsupported macros, script/HTML, unresolved references and unsafe URLs sta
   assert.ok(!nodes(result.content, 'text').some(node => node.marks?.some(mark => mark.type === 'link' && String(mark.attrs?.href).startsWith('javascript:'))));
 });
 
+test('Confluence lists preserve Jira query markup for explicit document review and unsupported selectors stay archived', () => {
+  const macro = (name: string, more = '') => `<ac:structured-macro ac:name="${name}" ac:schema-version="1">` +
+    '<ac:parameter ac:name="server">기존 Jira</ac:parameter><ac:parameter ac:name="jqlQuery">project = OLD AND status = &quot;Open&quot;</ac:parameter>' +
+    more + '</ac:structured-macro>';
+  const supported = macro('Jira', '<ac:parameter ac:name="maximumIssues">10</ac:parameter>');
+  const countOnly = macro('jira', '<ac:parameter ac:name="count">true</ac:parameter>');
+  const mixed = macro('jira', '<ac:parameter ac:name="key">OLD-7</ac:parameter>');
+  const result = convertLegacyContent(source('confluence-storage', `<p>목록 앞</p>${supported}${countOnly}${mixed}<p>목록 뒤</p>`), {
+    resolveReference: () => { throw new Error('A Jira list must be archived for review'); },
+  });
+  canonical(result);
+  assert.deepEqual(result.content.content?.map(node => node.type), ['paragraph', 'codeBlock', 'codeBlock', 'codeBlock', 'paragraph']);
+  assert.deepEqual(nodes(result.content, 'codeBlock').map(node => node.content?.[0].text), [supported, countOnly, mixed]);
+  assert.deepEqual(result.diagnostics.map(diagnostic => diagnostic.code), ['JIRA_LIST_REVIEW', 'UNSUPPORTED_MACRO']);
+});
+
 test('malformed storage, XXE/DOCTYPE, unknown HTML entities and invalid ADF fall back to the complete inert original', () => {
   const inputs: [LegacyRecord['textFormat'], string][] = [['confluence-storage', '<p>unclosed'], ['confluence-storage', '<!DOCTYPE p [<!ENTITY x SYSTEM "http://127.0.0.1:9/never">]><p>&x;</p>'], ['confluence-storage', '<p>&unrecognized;</p>'], ['adf', '{bad json'], ['adf', JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: 'MALFORMED_BUT_PRESERVED' }] })]];
   for (const [format, raw] of inputs) { const result = convertLegacyContent(source(format, raw), resolver()); canonical(result); assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, raw); assert.ok(result.diagnostics.some(value => value.code === 'RAW_CONTENT_FALLBACK')); }

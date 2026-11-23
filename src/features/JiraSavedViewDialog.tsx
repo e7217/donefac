@@ -4,10 +4,12 @@ import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type FeatureProps, type JiraSavedViewPreview, type Project, type SavedView, type SavedViewState } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import './saved-views.css';
 
 type Props = Pick<FeatureProps, 'actorId' | 'notify'> & {
   project: Pick<Project, 'id' | 'key' | 'name'>;
   currentLayout: SavedViewState['layout'];
+  initialQuery?: string;
   onClose: () => void;
   onSaved: (view: SavedView) => void;
 };
@@ -23,7 +25,7 @@ function filterSignature(filters: SavedViewState['filters']) {
   });
 }
 
-export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, onClose, onSaved }: Props) {
+export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, initialQuery = '', onClose, onSaved }: Props) {
   const titleId = useId();
   const queryId = `${titleId}-query`;
   const queryErrorId = `${queryId}-error`;
@@ -34,7 +36,7 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, o
   const verifyButton = useRef<HTMLButtonElement>(null);
   const request = useRef<AbortController | null>(null);
   const saved = useRef(false);
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initialQuery);
   const [name, setName] = useState('');
   const [layout, setLayout] = useState(currentLayout);
   const [review, setReview] = useState<JiraSavedViewPreview | null>(null);
@@ -42,7 +44,7 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, o
   const [pending, setPending] = useState<Operation | null>(null);
   const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState('');
-  const dirty = Boolean(query || name || layout !== currentLayout);
+  const dirty = Boolean(query !== initialQuery || name || layout !== currentLayout);
   const locked = Boolean(pending || uncertain);
   const queryTooLong = query.length > JIRA_SAVED_VIEW_QUERY_LIMIT;
   const canPreview = Boolean(query.trim()) && !queryTooLong && !locked;

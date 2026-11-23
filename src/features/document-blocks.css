@@ -25,6 +25,10 @@
 .doc-issue-list-fields { display: grid; gap: 11px; padding: 0 20px; }
 .doc-issue-list-fields label { display: grid; gap: 5px; min-width: 0; color: #536b5d; font-size: 12px; }
 .doc-issue-list-fields [role='alert'] { color: #a04643; }
+.doc-jira-restore-source { display: grid; gap: 5px; min-width: 0; color: #536b5d; font-size: 12px; }
+.doc-jira-restore-source pre { max-height: 8rem; overflow: auto; margin: 0; padding: 8px 10px; border: 1px solid #dce8e2; border-radius: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.doc-jira-restore-source p, .doc-jira-restore-retry p { margin: 0; overflow-wrap: anywhere; }
+.doc-jira-restore-retry { display: grid; justify-items: start; gap: 6px; }
 .doc-issue-list-chooser footer { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; padding: 16px 20px; }
 @media (max-width: 560px) {
   .doc-issue-list-row { grid-template-columns: minmax(0, 1fr) minmax(0, auto); }

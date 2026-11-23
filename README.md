@@ -157,6 +157,12 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 예를 들어 `project = OLD AND status = "Open" AND labels NOT IN ("hold") ORDER BY Rank ASC`를 검토할 수 있습니다. 이관 기록으로 `OLD`의 소속을 확인하고 라벨이 있는 업무에서 `hold`를 제외합니다. `ORDER BY`가 있으면 **프로젝트 정렬 사용**을 선택해 현재 Teamspace 업무 순서를 적용합니다. 지원되는 조건과 요청 형식은 API 사용법에 정리했습니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
 
+### Confluence 문서의 Jira 목록 복원
+
+문서 편집에서 보관된 Jira 목록 코드 블록에 커서를 두고 **보관된 Jira 목록 복원**을 누릅니다. 이관한 Jira 프로젝트를 선택하고 **Jira 조건 검토**에서 채워진 검색식과 일치 업무를 확인합니다. **공유 보기 저장**을 누른 뒤 **원본을 업무 목록으로 바꾸기**를 선택하고 문서를 저장합니다. 목록에서 티켓을 열 수 있고, 참조를 새로고침하면 현재 업무와 상태가 표시됩니다.
+
+복원은 JQL 검색식이 직접 들어 있는 목록 매크로에서 지원합니다. URL로 저장한 검색이나 건수 전용 매크로는 원문을 유지합니다. 팀 업무 목록은 현재 보이는 최대 20건과 전체 건수를 표시합니다. 원본의 열 구성과 표시 건수는 검토 화면에서 확인할 수 있습니다. [Atlassian Jira 목록 매크로 저장 형식](https://support.atlassian.com/confluence/kb/how-to-bulk-update-jira-issue-macro-to-point-to-a-different-jira-instance/)
+
 ## 업무 목록 CSV
 
 **업무 → 목록 → 현재 목록 CSV**는 현재 프로젝트·검색·필터를 적용한 티켓을 화면과 같은 순서로 내려받습니다. 일부만 필요하면 **일괄 편집**에서 행을 선택하고 **선택 업무 CSV**를 누릅니다. 파일에는 업무 키·제목·유형·상태·우선순위·담당자·라벨과 프로젝트·계획 이름이 들어갑니다. 시작일·종료일·목표 마감일은 각각 확인할 수 있습니다.

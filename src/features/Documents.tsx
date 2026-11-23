@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent a
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
-import type { Transaction } from '@tiptap/pm/state';
+import { NodeSelection, type Transaction } from '@tiptap/pm/state';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
   Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
@@ -13,6 +13,7 @@ import {
   RotateCcw, Table2, TableOfContents, TableProperties, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
+import { parseConfluenceJiraList } from '../../shared/confluence-jira-list';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
@@ -96,6 +97,19 @@ type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type CommentFilter = 'all' | 'open' | 'resolved';
 const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
 const COMMENT_FILTERS: CommentFilter[] = ['all', 'open', 'resolved'];
+
+function selectedCodeBlock(editor: Editor | null) {
+  if (!editor || editor.isDestroyed || !editor.isEditable) return null;
+  const selection = editor.state.selection;
+  if (selection instanceof NodeSelection) {
+    return selection.node.type.name === 'codeBlock' ? { pos: selection.from, node: selection.node } : null;
+  }
+  const { $from, $to } = selection;
+  return $from.depth && $from.sameParent($to) && $from.parent.type.name === 'codeBlock'
+    ? { pos: $from.before(), node: $from.parent }
+    : null;
+}
+
 function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrder[] | undefined) {
   if (!orders?.length) return pages;
   const byId = new Map(pages.map((page, index) => [page.id, { page, index }]));
@@ -526,7 +540,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const canFind = Boolean(editor && !editor.isDestroyed && draft?.id && draft.id === selectedPage?.id && (!liveMode || liveState?.ready));
   const findOpen = canFind && findScope === documentScope;
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
+  const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
+  const jiraCode = bodyReadOnly ? undefined : selectedCodeBlock(editor)?.node.textContent;
+  const jiraMacro = useMemo(() => jiraCode ? parseConfluenceJiraList(jiraCode) : undefined, [jiraCode]);
   const annotationDialog = !bodyReadOnly && !publicationOpen && annotationSelection?.editor === editor && annotationSelection.documentId === selectedPage?.id ? annotationSelection : null;
+  useEffect(() => {
+    if (issueBlockSelection?.kind === 'restoreJira' && !issueBlockDialog) closeIssueBlock();
+  }, [issueBlockSelection, issueBlockDialog, closeIssueBlock]);
   useEffect(() => {
     if (!liveMode || !liveEditor) return;
     const update = ({ editor: instance, transaction }: { editor: Editor; transaction: Transaction }) => {
@@ -549,6 +569,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setIssueBlockSelection(target ? { ...context, kind: 'edit', target } : { ...context, kind: 'insert', bookmark: instance.state.selection.getBookmark() });
     setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); closeAnnotation();
   }, [editor, closeAnnotation]);
+
+  function restoreJiraIssueList(opener: HTMLElement) {
+    const current = draftRef.current;
+    const target = selectedCodeBlock(editor);
+    if (bodyReadOnly || !editor || !current || current.id !== selectedPage?.id || !target) return;
+    const macro = parseConfluenceJiraList(target.node.textContent);
+    if (!macro) return;
+    setIssueBlockSelection({ editor, documentId: current.id, nodeType: 'issueList', opener, kind: 'restoreJira', target: { ...target, macro } });
+    setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); closeAnnotation();
+  }
   const openAnnotation = useCallback<OpenDocumentAnnotation>((instance, kind, opener, target) => {
     const current = draftRef.current;
     if (!current || instance !== editor || instance.isDestroyed || !instance.isEditable) return;
@@ -792,7 +822,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport) return;
+      if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport || issueBlockDialog) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen && !copyOpen && !orderOpen) void saveDraft();
@@ -801,7 +831,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport]);
+  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, issueBlockDialog]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1564,7 +1594,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </div>;
     });
 
-  const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
   const canRequestPublication = Boolean(draft && !draft.dirty && !saving && !bodyReadOnly &&
     (!liveMode || (liveState?.phase === 'connected' && !liveState.pending)));
   const selectionDocument = liveMode ? liveState?.document : latestPage;
@@ -1777,6 +1806,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <button type="button" className="docs-format-btn" aria-label="참조 새로고침" title="참조 새로고침" disabled={referencesRefreshing} onMouseDown={event => event.preventDefault()} onClick={() => void refreshReferences()}>{referencesRefreshing ? <Loader2 className="docs-spin" size={15} /> : <RefreshCw size={15} />}</button>
                 {button('업무 참조 삽입', <Link2 size={15} />, () => openReference('issueReference'))}
                 {button('업무 목록 삽입', <ListFilter size={15} />, () => { if (editor) openIssueBlock(editor, 'issueList'); })}
+                {jiraMacro && <button type="button" className="btn docs-selection-action" onMouseDown={event => event.preventDefault()}
+                  onClick={event => restoreJiraIssueList(event.currentTarget)}><ListFilter size={15} aria-hidden="true" />보관된 Jira 목록 복원</button>}
                 {button('업무 현황 삽입', <ChartBar size={15} />, () => { if (editor) openIssueBlock(editor, 'issueSummary'); })}
                 {button('문서 참조 삽입', <FileText size={15} />, () => openReference('documentReference'))}
                 {button('라벨별 문서 목록 삽입', <Files size={15} />, () => insertDocumentList('documentLabelList'))}
@@ -1982,7 +2013,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {orderOpen && selectedPage && <DocumentSiblingOrderDialog key={selectedPage.id} documentId={selectedPage.id} documents={data.documents}
       projects={data.projects} refreshWorkspace={refresh} onClose={closeOrder} />}
     {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
-    {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null} onClose={closeIssueBlock} />}
+    {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null}
+      actorId={actorId} notify={notify} refreshWorkspace={refresh} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}
     {templateManager && <DocumentTemplatesManager projectId={templateManager.projectId}
       scopeLabel={data.projects.find(project => project.id === templateManager.projectId)?.name ?? '팀 공통'}
