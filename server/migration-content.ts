@@ -1,6 +1,6 @@
 import { XMLParser } from 'fast-xml-parser';
 import { isCalendarDate } from '../shared/calendar.js';
-import { commentWebUrl } from '../shared/comment-web-links.js';
+import { commentWebLinkRanges, commentWebUrl } from '../shared/comment-web-links.js';
 import { parseConfluenceJiraList } from '../shared/confluence-jira-list.js';
 import {
   documentPlainText, isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
@@ -63,11 +63,16 @@ const adfPanelVariants = new Map<string, CalloutVariant>([
   ['info', 'info'], ['note', 'note'], ['warning', 'warning'], ['success', 'tip'], ['error', 'warning'],
 ]);
 type Mark = NonNullable<RichContent['marks']>[number];
+type CommentLinkCapture = (label: string, href: string) => void;
 const text = (value: string, marks?: Mark[]): RichContent[] => value ? [{ type: 'text', text: value, ...(marks?.length ? { marks } : {}) }] : [];
 const paragraph = (content: RichContent[] = []): RichContent => ({ type: 'paragraph', content });
 
+function commentLinkLabel(nodes: RichContent[]): string {
+  return nodes.map(documentPlainText).join('');
+}
+
 function commentLinkText(nodes: RichContent[], url: string): RichContent[] {
-  const label = nodes.map(documentPlainText).join('');
+  const label = commentLinkLabel(nodes);
   if (!label.trim() || commentWebUrl(label) === url) {
     const leading = label.slice(0, label.length - label.trimStart().length);
     const trailing = label.trim() ? label.slice(label.trimEnd().length) : '';
@@ -77,24 +82,40 @@ function commentLinkText(nodes: RichContent[], url: string): RichContent[] {
 }
 
 /** A visually single ADF link can be split across differently styled text nodes. */
-function materializeCommentWebLinks(node: RichContent): RichContent {
-  if (!node.content) return node;
+function materializeCommentWebLinks(node: RichContent, capture?: CommentLinkCapture): RichContent {
+  if (!node.content || (capture && node.type === 'codeBlock')) return node;
   const content: RichContent[] = [];
   let run: RichContent[] = [];
   let target: string | undefined;
+  let plain = '';
   const flush = () => {
-    if (target) content.push(...commentLinkText(run, target));
+    if (target) {
+      if (capture) {
+        capture(commentLinkLabel(run), target);
+        content.push(...run);
+      } else content.push(...commentLinkText(run, target));
+    }
     run = [];
+  };
+  const flushPlain = () => {
+    if (!plain || !capture) return;
+    for (const { href } of commentWebLinkRanges(plain)) capture(href, href);
+    plain = '';
   };
   for (const child of node.content) {
     const href = child.type === 'text' ? child.marks?.find(mark => mark.type === 'link')?.attrs?.href : undefined;
     const url = typeof href === 'string' ? commentWebUrl(href) : undefined;
     if (url !== target) flush();
     target = url;
+    if (capture) {
+      if (child.type === 'text' && !child.marks?.some(mark => mark.type === 'link' || mark.type === 'code')) plain += child.text ?? '';
+      else flushPlain();
+    }
     if (url) run.push(child);
-    else content.push(materializeCommentWebLinks(child));
+    else content.push(materializeCommentWebLinks(child, capture));
   }
   flush();
+  flushPlain();
   return { ...node, content };
 }
 
@@ -227,7 +248,7 @@ class Converter {
   private projectedProperties = 0;
   private firstSourceExcerpt?: XmlNode;
   private convertedFirstExcerpt = false;
-  constructor(readonly source: string, readonly context: MigrationContentContext) {}
+  constructor(readonly source: string, readonly context: MigrationContentContext, private readonly captureCommentLinks = false) {}
   sectionTargets(content: RichContent): ReadonlyMap<string, string> | undefined {
     if (!this.sections?.targets.size) return undefined;
     const present = this.presentSections(content);
@@ -286,11 +307,15 @@ class Converter {
     return [{ type: input.kind === 'issue' ? 'issueReference' : include ? 'documentInclude' : 'documentReference', attrs: { [input.kind === 'issue' ? 'issueId' : 'documentId']: found.id, label: label.slice(0, 300) } }];
   }
   link(label: RichContent[], url: string): RichContent[] {
+    if (this.captureCommentLinks && !commentWebUrl(url)) return [{ type: 'hardBreak' }];
     const safe = this.safeUrl(url);
     if (!safe) { this.warn('UNSAFE_URL', '안전하지 않은 URL은 실행 가능한 링크로 만들지 않고 텍스트로 보존했습니다.'); return [...label, ...text(` (${url})`)]; }
     const special = label.some(node => node.type !== 'text' || node.marks?.some(mark => mark.type === 'code'));
     const commentUrl = this.context.preserveCommentWebLinks && commentWebUrl(safe);
-    if (commentUrl && (special || !label.length)) return commentLinkText(label, commentUrl);
+    if (commentUrl && (special || !label.length)) {
+      if (this.captureCommentLinks) return text(commentLinkLabel(label) || commentUrl, [{ type: 'link', attrs: { href: commentUrl } }]);
+      return commentLinkText(label, commentUrl);
+    }
     if (special) this.warn('LINK_TARGET_SHOWN_AS_TEXT', '코드·이미지 등 링크를 직접 적용할 수 없는 내용 뒤에 원본 링크 주소를 텍스트로 남겼습니다.');
     const marked = label.map(node => node.type === 'text' && !node.marks?.some(mark => mark.type === 'code') ? { ...node, marks: [...(node.marks || []).filter(mark => mark.type !== 'link'), { type: 'link', attrs: { href: safe } }] } : node);
     return special ? [...marked, ...text(` (${url})`)] : marked;
@@ -1091,12 +1116,16 @@ class Converter {
 /** Pure, local conversion. Error diagnostics are blocking; callers must not
  * apply a limit/error placeholder as migrated source content. */
 export function convertLegacyContent(record: LegacyRecord, context: MigrationContentContext): MigrationContentResult {
-  const converter = new Converter(record.text, context);
+  return convertContent(record, context);
+}
+
+function convertContent(record: LegacyRecord, context: MigrationContentContext, captureCommentLink?: CommentLinkCapture): MigrationContentResult {
+  const converter = new Converter(record.text, context, Boolean(captureCommentLink));
   let content: RichContent;
   try {
     if (typeof record.text !== 'string' || Buffer.byteLength(record.text) > MAX_SOURCE_BYTES) throw new ConversionLimit('원본 본문이 변환 크기 한도를 초과했습니다.');
     content = { type: 'doc', content: converter.convert(record) };
-    if (context.preserveCommentWebLinks) content = materializeCommentWebLinks(content);
+    if (context.preserveCommentWebLinks) content = materializeCommentWebLinks(content, captureCommentLink);
     converter.verifyLocalSectionLinks(content);
     let count = 0; const stack = [{ node: content, depth: 0 }];
     while (stack.length) { const { node, depth } = stack.pop()!; converter.tick(depth); if (++count > MAX_NODES) throw new ConversionLimit('변환 문서 노드 수를 초과했습니다.'); for (const child of node.content || []) stack.push({ node: child, depth: depth + 1 }); }
@@ -1113,4 +1142,42 @@ export function convertLegacyContent(record: LegacyRecord, context: MigrationCon
     content = { type: 'doc', content: [paragraph(text('본문 변환을 적용하지 않았습니다. 원본 보관 자료와 변환 오류를 확인해 주세요.'))] };
     return { ...normalizeDocumentContent(content), diagnostics: converter.diagnostics };
   }
+}
+
+export const MAX_JIRA_ORIGINAL_COMMENT_LINKS = 20;
+const MAX_JIRA_ORIGINAL_COMMENT_BYTES = 256 * 1024;
+const MAX_JIRA_ORIGINAL_COMMENT_URL = 2048;
+const MAX_JIRA_ORIGINAL_COMMENT_LABEL = 300;
+
+/** Read navigable source links without treating raw markup or converter fallbacks as links. */
+export function extractJiraOriginalCommentLinks(record: LegacyRecord): { links: { label: string; href: string }[]; limited: boolean } {
+  if (record.kind !== 'comment' || record.textFormat === 'none') return { links: [], limited: false };
+  if (typeof record.text !== 'string' || Buffer.byteLength(record.text) > MAX_JIRA_ORIGINAL_COMMENT_BYTES) return { links: [], limited: true };
+  const links: { label: string; href: string }[] = [];
+  let limited = false;
+  const seen = new Set<string>();
+  const capture = (label: string, href: string) => {
+    if (seen.has(href)) return;
+    if (href.length > MAX_JIRA_ORIGINAL_COMMENT_URL || links.length >= MAX_JIRA_ORIGINAL_COMMENT_LINKS) { limited = true; return; }
+    seen.add(href);
+    const compact = label.replace(/\s+/gu, ' ').trim();
+    const readable = compact && compact.isWellFormed() && !/[\p{Cc}\p{Cf}]/u.test(compact) ? compact : href;
+    const display = [...readable];
+    links.push({ label: display.length > MAX_JIRA_ORIGINAL_COMMENT_LABEL
+      ? `${display.slice(0, MAX_JIRA_ORIGINAL_COMMENT_LABEL - 1).join('')}…` : readable, href });
+  };
+
+  const rendered = record.textFormat === 'plain' && record.metadata.bodyFormat === 'search-rendered-html';
+  if (record.textFormat === 'plain' && !rendered) {
+    for (const { href } of commentWebLinkRanges(record.text)) capture(href, href);
+    return { links, limited };
+  }
+  if (!rendered && record.textFormat !== 'jira-wiki' && record.textFormat !== 'adf') return { links: [], limited: true };
+  const input = rendered ? { ...record, textFormat: 'confluence-storage' as const } : record;
+  const result = convertContent(input, { resolveReference: () => null, legacyAnnotations: true, preserveCommentWebLinks: true }, capture);
+  const unsupported = result.diagnostics.some(item => item.code === 'UNSUPPORTED_CONTENT');
+  if (result.diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK') || (rendered && unsupported)) {
+    return { links: [], limited: true };
+  }
+  return { links, limited: limited || unsupported };
 }

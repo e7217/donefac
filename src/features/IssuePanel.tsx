@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -16,6 +16,7 @@ import { CustomFields, IssueTypeSelect } from './CustomFields';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { SourceOrigins } from './SourceOrigins';
 import { JiraDeadlineRecovery } from './JiraDeadlineRecovery';
+import { JiraOriginalCommentLinks } from './JiraOriginalCommentLinks';
 import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
@@ -150,10 +151,11 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
-  const [comments, setComments] = useState<Comment[]>([]);
+  const [comments, setComments] = useState<IssueCommentView[]>([]);
   const commentEditing = useCommentEditing({
     actorId: props.actorId, resourceId: issueId, refresh, notify,
-    onSaved: saved => setComments(previous => previous.map(item => item.id === saved.id ? saved : item)),
+    onSaved: saved => setComments(previous => previous.map(item => item.id === saved.id
+      ? { ...saved, ...(item.jiraOriginalLinksAvailable ? { jiraOriginalLinksAvailable: item.jiraOriginalLinksAvailable } : {}) } : item)),
   });
   const { discard: discardCommentEdit, hasDraft: hasCommentEditDraft, isPending: isCommentEditPending } = commentEditing;
   const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
@@ -425,7 +427,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       activeRequest?.abort();
       const request = new AbortController();
       activeRequest = request;
-      void api<Comment[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`, {
+      void api<IssueCommentView[]>(`/comments?resourceType=issue&resourceId=${encodeURIComponent(issueId)}`, {
         signal: request.signal, headers: { 'X-Actor-Id': props.actorId },
       }).then(value => { if (!request.signal.aborted) { setComments(value); setCommentError(''); } })
         .catch(err => { if (!request.signal.aborted) setCommentError(errorMessage(err)); })
@@ -1120,6 +1122,7 @@ function IssuePanelContent(props: IssuePanelProps) {
                   onArchived={removed => setComments(previous => previous.filter(value => value.id !== removed.id))} />
               </header>
               <CommentEditBody comment={comment} editing={commentEditing} users={data.users} />
+              {comment.jiraOriginalLinksAvailable && <JiraOriginalCommentLinks key={props.actorId} commentId={comment.id} actorId={props.actorId} />}
             </div>
           </article>;
         })}

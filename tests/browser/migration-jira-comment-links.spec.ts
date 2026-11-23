@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse } from '@playwright/test';
 import type {
-  Comment, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, SourceRecordArchive, WorkspaceSnapshot,
+  Comment, IssueCommentView, JiraOriginalCommentLinksResult, LegacyPackageSummary, MigrationApplyResult,
+  MigrationOptions, MigrationPreview, SourceRecordArchive, WorkspaceSnapshot,
 } from '../../shared/types';
 
-async function json<T>(response: APIResponse, status = 200): Promise<T> {
+async function json<T>(response: Pick<APIResponse, 'text' | 'status'>, status = 200): Promise<T> {
   const body = await response.text();
   expect(response.status(), body).toBe(status);
   return JSON.parse(body) as T;
@@ -124,7 +125,9 @@ test('360px에서 Jira 댓글의 링크를 이관하고 댓글 수정과 백업 
     await expect(link(imported, adfUrl)).toHaveAttribute('href', adfUrl);
 
     const backup = await json<WorkspaceSnapshot & { comments: Comment[]; sourceRecords: SourceRecordArchive[] }>(await request.get('/api/export'));
-    expect(backup.comments.find(comment => comment.id === imported.id)).toMatchObject({ body: draft, editVersion: 1 });
+    const backedUpComment = backup.comments.find(comment => comment.id === imported.id);
+    expect(backedUpComment).toMatchObject({ body: draft, editVersion: 1 });
+    expect(backedUpComment).not.toHaveProperty('jiraOriginalLinksAvailable');
     const original = backup.sourceRecords.find(row => row.sourceImportId === receipt.id && row.targetType === 'comment' && row.targetId === imported.id);
     expect(original?.record).toMatchObject({ sourceId: '701', textFormat: 'adf' });
     expect(JSON.parse(original!.record.text)).toEqual(sourceComments[0].body);
@@ -145,6 +148,76 @@ test('360px에서 Jira 댓글의 링크를 이관하고 댓글 수정과 백업 
     await expect(opened.getByRole('heading', { name: '합성 설계 자료' })).toBeVisible();
     expect(await opened.evaluate(() => window.opener === null)).toBe(true);
     await opened.close();
+
+    const legacyBodies = new Map([[imported.id, adfLabel], [wiki.id, wikiLabel]]);
+    const legacyBackup = {
+      ...backup, comments: backup.comments.map(comment => {
+        const body = legacyBodies.get(comment.id);
+        return body === undefined ? comment : { ...comment, body };
+      }),
+    };
+    await json(await request.post('/api/import', { headers, data: { confirm: 'REPLACE', data: legacyBackup } }));
+    const requestedOriginals: string[] = [];
+    page.on('request', result => {
+      const path = new URL(result.url()).pathname;
+      if (path.endsWith('/jira-original-links')) requestedOriginals.push(path);
+    });
+    await page.reload();
+    const originalTrigger = (comment: Comment) => article(comment).getByRole('button', { name: 'Jira 원본 링크 확인', exact: true });
+    const originalLink = (comment: Comment, label: string) => article(comment).getByRole('link', { name: label, exact: true });
+    const originalPath = (comment: Comment) => `/api/comments/${comment.id}/jira-original-links`;
+    const openOriginal = (comment: Comment) => Promise.all([
+      page.waitForResponse(result => new URL(result.url()).pathname === originalPath(comment) && result.request().method() === 'GET'),
+      originalTrigger(comment).click(),
+    ]);
+    const liveBody = (comment: Comment) => article(comment).locator('p').first();
+    await expect(liveBody(imported)).toHaveText(adfLabel);
+    await expect(liveBody(wiki)).toHaveText(wikiLabel);
+    await expect(originalTrigger(imported)).toBeVisible();
+    await expect(originalTrigger(wiki)).toBeVisible();
+    await expect(originalTrigger(native)).toHaveCount(0);
+    await expect(originalLink(imported, adfLabel)).toHaveCount(0);
+    expect(requestedOriginals).toEqual([]);
+
+    const [revealed] = await openOriginal(imported);
+    expect(await json<JiraOriginalCommentLinksResult>(revealed)).toEqual({
+      links: [{ label: adfLabel, href: adfUrl }], limited: false,
+    });
+    await expect(originalLink(imported, adfLabel)).toHaveAttribute('href', adfUrl);
+    await expect(liveBody(imported)).toHaveText(adfLabel);
+    await expect(originalLink(wiki, wikiLabel)).toHaveCount(0);
+    expect(requestedOriginals).toEqual([originalPath(imported)]);
+
+    const [originalPopup] = await Promise.all([page.context().waitForEvent('page'), originalLink(imported, adfLabel).click()]);
+    await expect(originalPopup).toHaveURL(adfUrl);
+    await expect(originalPopup.getByRole('heading', { name: '합성 설계 자료' })).toBeVisible();
+    expect(await originalPopup.evaluate(() => window.opener === null)).toBe(true);
+    await originalPopup.close();
+
+    const latestDraft = `${adfLabel}에 대해 팀에서 보완 사항을 기록했습니다.`;
+    await article(imported).getByRole('button', { name: '댓글 수정', exact: true }).click();
+    await expect(body).toHaveValue(adfLabel);
+    await body.fill(latestDraft);
+    await edit.getByRole('button', { name: '수정 저장', exact: true }).click();
+    await expect(edit).toHaveCount(0);
+    await expect(liveBody(imported)).toHaveText(latestDraft);
+    if (!(await originalLink(imported, adfLabel).isVisible())) await originalTrigger(imported).click();
+    await expect(originalLink(imported, adfLabel)).toHaveAttribute('href', adfUrl);
+    const live = await json<IssueCommentView[]>(await request.get('/api/comments', { headers, params: { resourceType: 'issue', resourceId: issue.id } }));
+    expect(live.find(comment => comment.id === imported.id)).toMatchObject({ body: latestDraft, jiraOriginalLinksAvailable: true });
+    expect(live.find(comment => comment.id === native.id)).not.toHaveProperty('jiraOriginalLinksAvailable');
+    const record = await json<SourceRecordArchive>(await request.get(`/api/source-imports/${receipt.id}/records/${original!.id}`));
+    expect(record.record).toEqual(original!.record);
+
+    const [wikiOriginal] = await openOriginal(wiki);
+    expect(await json<JiraOriginalCommentLinksResult>(wikiOriginal)).toEqual({
+      links: [{ label: wikiLabel, href: wikiUrl }], limited: false,
+    });
+    await expect(originalLink(wiki, wikiLabel)).toHaveAttribute('href', wikiUrl);
+    await expect(liveBody(wiki)).toHaveText(wikiLabel);
+    expect(await json<JiraOriginalCommentLinksResult>(await request.get(originalPath(unsafe), { headers }))).toEqual({
+      links: [], limited: false,
+    });
   } finally {
     if (issueId) {
       const removed = await request.delete(`/api/issues/${issueId}`, { headers });

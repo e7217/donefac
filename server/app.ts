@@ -37,6 +37,7 @@ import { DocumentCommentReplyError, DocumentCommentReplyService } from './docume
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { CommentEditError, CommentEditingService, validateCommentEdit } from './comment-editing.js';
+import { JiraOriginalCommentLinks } from './jira-original-comment-links.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
@@ -215,6 +216,7 @@ export function createApp(options: {
   if (options.seed !== false) seed(store);
   const issueSchemas=new IssueSchemaService(store);
   const sourcePreservation=new SourcePreservationService(store);
+  const jiraOriginalCommentLinks = new JiraOriginalCommentLinks(store, sourcePreservation);
   const issueRelations=new IssueRelationsService(store,sourcePreservation);
   const workflows=new WorkflowService(store,issueSchemas,issueRelations),savedViews=new SavedViewService(store,issueSchemas);
   const savedFieldBreakdowns = new SavedFieldBreakdownService(store, issueSchemas);
@@ -2235,7 +2237,18 @@ export function createApp(options: {
     const {resourceType,resourceId}=req.query;
     if((resourceType!=='issue'&&resourceType!=='document')||typeof resourceId!=='string')return fail('댓글 대상을 확인해 주세요.');
     get(resourceType==='issue'?'issues':'documents',resourceId);
-    res.set('Cache-Control','no-store').json(store.commentsForResource(resourceType,resourceId));
+    const comments = store.commentsForResource(resourceType, resourceId);
+    res.set('Cache-Control','no-store').json(resourceType === 'issue' ? jiraOriginalCommentLinks.list(resourceId, comments) : comments);
+  });
+  app.get('/api/comments/:id/jira-original-links', (req,res) => {
+    res.set('Cache-Control','no-store');
+    const comment = store.get<Comment>('comments', req.params.id);
+    if (!comment || comment.resourceType !== 'issue' || !store.get<Issue>('issues', comment.resourceId)) {
+      return fail('댓글에 연결된 Jira 원본을 찾을 수 없습니다.', 404);
+    }
+    const originals = jiraOriginalCommentLinks.read(comment);
+    if (!originals) return fail('댓글에 연결된 Jira 원본을 찾을 수 없습니다.', 404);
+    res.json(originals);
   });
   app.post('/api/comments',(req,res)=>{
     const {resourceType,resourceId}=req.body;

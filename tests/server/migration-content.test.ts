@@ -4,7 +4,7 @@ import type { LegacyRecord, RichContent } from '../../shared/types.js';
 import { contentReferences, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { normalizeDocumentContent } from '../../server/document-content.js';
-import { convertLegacyContent, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
+import { convertLegacyContent, extractJiraOriginalCommentLinks, MAX_JIRA_ORIGINAL_COMMENT_LINKS, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
 const source = (textFormat: LegacyRecord['textFormat'], text: string): LegacyRecord => ({ id: 'page:old-page', kind: 'page', sourceId: 'old-page', title: '합성 원본', containerId: 'old-space', parentId: null, authorId: null, createdAt: null, updatedAt: null, text, textFormat, metadata: {}, references: [] });
 function resolver(calls: MigrationReferenceInput[] = []): MigrationContentContext {
@@ -19,6 +19,77 @@ function resolver(calls: MigrationReferenceInput[] = []): MigrationContentContex
 }
 function nodes(content: RichContent, type: string): RichContent[] { const found: RichContent[] = [], stack = [content]; while (stack.length) { const node = stack.pop()!; if (node.type === type) found.push(node); for (let i = (node.content?.length || 0) - 1; i >= 0; i--) stack.push(node.content![i]); } return found; }
 function canonical(result: MigrationContentResult) { assert.deepEqual(normalizeDocumentContent(result.content), { content: result.content, plainText: result.plainText }); assert.equal(result.diagnostics.some(value => value.severity === 'error'), false); }
+
+const jiraComment = (textFormat: LegacyRecord['textFormat'], text: string, metadata: LegacyRecord['metadata'] = {}): LegacyRecord => ({
+  ...source(textFormat, text), id: 'comment:old', sourceId: 'old', kind: 'comment', metadata,
+});
+
+test('archived Jira wiki links retain the first original label and exact destinations in source order', () => {
+  const report = 'https://ci.example.test/run?build=1.';
+  const jira = 'https://jira.example.test/browse/OLD-7';
+  const bare = 'https://gitlab.example.test/team/repo/-/merge_requests/2';
+  const record = jiraComment('jira-wiki', [
+    `원본 링크 ${bare}.`,
+    `[CI 보고서|${report}] [기존 업무|${jira}] [나중에 같은 주소|${report}]`,
+    '[권한 주소|https://demo:fake@private.example.test/path] [https://not-the-destination.example.test|javascript:alert(1)]',
+    '{noformat}', '[예시|https://example.test/code]', '{noformat}',
+  ].join('\n'));
+  const original = structuredClone(record);
+  assert.deepEqual(extractJiraOriginalCommentLinks(record), {
+    links: [{ label: bare, href: bare }, { label: 'CI 보고서', href: report }, { label: '기존 업무', href: jira }], limited: false,
+  });
+  assert.deepEqual(record, original);
+});
+
+test('archived Jira ADF merges adjacent marks and never falls back to scanning raw JSON', () => {
+  const preview = 'https://ci.example.test/report';
+  const card = 'https://wiki.example.test/wiki/x/y';
+  const bare = 'https://ci.example.test/artifacts/42';
+  const marked = (label: string, href: string, extraMarks: { type: string }[] = []) => ({
+    type: 'text', text: label, marks: [{ type: 'link', attrs: { href } }, ...extraMarks],
+  });
+  const record = jiraComment('adf', JSON.stringify({ type: 'doc', version: 1, content: [
+    { type: 'paragraph', content: [marked('배포', preview, [{ type: 'strong' }]), marked(' 결과', preview),
+      marked(' 주소', 'https://unsafe\u202e.example.test/link')] },
+    { type: 'paragraph', content: [{ type: 'inlineCard', attrs: { url: card } }] },
+    { type: 'paragraph', content: [{ type: 'text', text: '주소 https://ci.example.test/' },
+      { type: 'text', text: 'artifacts/42.', marks: [{ type: 'strong' }] }] },
+    { type: 'paragraph', content: [marked('역방향\u202e레이블', 'https://example.test/neutral')] },
+  ] }));
+  assert.deepEqual(extractJiraOriginalCommentLinks(record), {
+    links: [{ label: '배포 결과', href: preview }, { label: card, href: card }, { label: bare, href: bare },
+      { label: 'https://example.test/neutral', href: 'https://example.test/neutral' }], limited: false,
+  });
+  assert.deepEqual(extractJiraOriginalCommentLinks({ ...record, text: record.text.slice(0, -1) }), { links: [], limited: true });
+});
+
+test('archived Jira search XML only reads links from supported rendered HTML', () => {
+  const html = '<p><a href="https://wiki.example.test/pages/viewpage.action?pageId=200&amp;ref=release"><code>절차</code></a></p>';
+  const metadata = { bodyFormat: 'search-rendered-html' };
+  assert.deepEqual(extractJiraOriginalCommentLinks(jiraComment('plain', html, metadata)), {
+    links: [{ label: '절차', href: 'https://wiki.example.test/pages/viewpage.action?pageId=200&ref=release' }], limited: false,
+  });
+  for (const invalid of [`<script>${html}</script>`, html.slice(0, -4), `<!DOCTYPE unsafe>${html}`]) {
+    assert.deepEqual(extractJiraOriginalCommentLinks(jiraComment('plain', invalid, metadata)), { links: [], limited: true });
+  }
+});
+
+test('literal Jira comment links respect URL and count limits without reading oversized source text', () => {
+  const literal = 'https://example.test/releases.';
+  const short = 'http://example.test/view';
+  const sourceText = `<${literal}> 확인, ${short}. 다시 <${literal}> 와 https://id:secret@example.test/private`;
+  assert.deepEqual(extractJiraOriginalCommentLinks(jiraComment('plain', sourceText)), {
+    links: [{ label: literal, href: literal }, { label: short, href: short }], limited: false,
+  });
+  const addresses = Array.from({ length: MAX_JIRA_ORIGINAL_COMMENT_LINKS + 2 }, (_, index) => `https://example.test/item/${index}`);
+  const limited = extractJiraOriginalCommentLinks(jiraComment('plain', addresses.join('\n')));
+  assert.deepEqual(limited, { links: addresses.slice(0, MAX_JIRA_ORIGINAL_COMMENT_LINKS).map(href => ({ label: href, href })), limited: true });
+  const longUrl = `https://example.test/${'x'.repeat(2048)}`;
+  assert.deepEqual(extractJiraOriginalCommentLinks(jiraComment('plain', `<${longUrl}> ${short}`)), {
+    links: [{ label: short, href: short }], limited: true,
+  });
+  assert.deepEqual(extractJiraOriginalCommentLinks(jiraComment('plain', `${short} ${'가'.repeat(100_000)}`)), { links: [], limited: true });
+});
 
 test('plain text preserves line order, blank lines and literal HTML without executing or converting it', () => {
   const text = '첫 줄\r\n\r\n  <script>alert("literal")</script>  \n마지막😀';

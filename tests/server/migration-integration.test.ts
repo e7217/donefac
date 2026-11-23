@@ -18,7 +18,7 @@ import { contentReferences, documentContentSchemaVersion } from '../../shared/do
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -706,7 +706,7 @@ test('Jira history append preserves local and deleted records and restores exact
   const { id, version } = await ticket();
   const worklogsPath = `/issues/${id}/worklogs`;
   const readWorklogs = () => f.call<IssueWorklogPage>(worklogsPath).then(result => result.data);
-  const readComments = () => f.call<Comment[]>(`/comments?resourceType=issue&resourceId=${id}`).then(result => result.data);
+  const readComments = () => f.call<IssueCommentView[]>(`/comments?resourceType=issue&resourceId=${id}`).then(result => result.data);
   const removedComment = (await readComments()).find(row => row.body === '삭제할 원본 댓글')!;
   const removed = await f.call<{trashItemId: string}>(`/comments/${removedComment.id}`, 'DELETE', undefined, removedComment.authorId);
   assert.equal(removed.status, 200);
@@ -774,7 +774,56 @@ test('Jira history append preserves local and deleted records and restores exact
   const comments = await readComments();
   const addedComment = comments.find(row => row.body === `추가할 원본 댓글 <${addedLink}>`)!;
   assert.equal(addedComment.authorId, 'user-jun');
+  assert.equal(addedComment.jiraOriginalLinksAvailable, true);
+  assert.ok(comments.filter(row => row.id !== addedComment.id).every(row => !Object.hasOwn(row, 'jiraOriginalLinksAvailable')));
   assert.deepEqual(comments.filter(row => row.id !== addedComment.id), expectedComments);
+
+  const originalLinks = async (commentId: string, status: number) => {
+    const response = await fetch(`${f.base}/comments/${commentId}/jira-original-links`);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    const body = await response.json();
+    assert.equal(response.status, status, JSON.stringify(body));
+    if (status === 404) {
+      assert.ok(body && typeof body === 'object');
+      assert.deepEqual(Object.keys(body), ['error']);
+    }
+    return body;
+  };
+  const expectedLinks = { links: [{ label: '추가할 원본 댓글', href: addedLink }], limited: false };
+  assert.deepEqual(await originalLinks(addedComment.id, 200), expectedLinks);
+  for (const missingId of [randomUUID(), removedComment.id, localComment.data.id]) await originalLinks(missingId, 404);
+
+  const { json: originalArchiveJson } = f.db.prepare(`SELECT json FROM source_records WHERE target_type='comment' AND target_id=?`)
+    .get(addedComment.id) as { json: string };
+  const sourceArchive = JSON.parse(originalArchiveJson) as SourceRecordArchive;
+  const expectHiddenLinks = async () => {
+    await originalLinks(addedComment.id, 404);
+    assert.equal((await readComments()).find(row => row.id === addedComment.id)?.jiraOriginalLinksAvailable, undefined);
+  };
+  const duplicate = randomUUID();
+  f.db.prepare(`INSERT INTO source_records(id,import_id,owner_type,owner_id,target_type,target_id,kind,source_instance,product,source_id,json)
+    SELECT ?,import_id,owner_type,owner_id,target_type,target_id,kind,source_instance,product,source_id,json_set(json,'$.id',?)
+    FROM source_records WHERE id=?`).run(duplicate, duplicate, sourceArchive.id);
+  try { await expectHiddenLinks(); }
+  finally { f.db.prepare('DELETE FROM source_records WHERE id=?').run(duplicate); }
+  const foreign = (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.id !== id)!;
+  const updateArchived = f.db.prepare('UPDATE source_records SET json=? WHERE id=?');
+  for (const invalid of [
+    { ...sourceArchive, ownerId: foreign.id },
+    { ...sourceArchive, record: { ...sourceArchive.record, containerId: '999', references: [{ kind: 'issue', sourceId: '999', relation: 'commentOn' }] } },
+    { ...sourceArchive, record: { ...sourceArchive.record, metadata: { ...sourceArchive.record.metadata, roleLevel: 'private' } } },
+  ]) {
+    updateArchived.run(JSON.stringify(invalid), sourceArchive.id);
+    try { await expectHiddenLinks(); }
+    finally { updateArchived.run(originalArchiveJson, sourceArchive.id); }
+  }
+  const archivedComment = await f.call<{ trashItemId: string }>(`/comments/${addedComment.id}`, 'DELETE', undefined, addedComment.authorId);
+  assert.equal(archivedComment.status, 200);
+  await originalLinks(addedComment.id, 404);
+  assert.equal((await readComments()).some(row => row.id === addedComment.id), false);
+  assert.equal((await f.call(`/trash/items/${archivedComment.data.trashItemId}/restore`, 'POST', undefined, addedComment.authorId)).status, 200);
+  assert.deepEqual(await originalLinks(addedComment.id, 200), expectedLinks);
+
   const times = await readWorklogs();
   const addedTime = times.entries.find(row => row.note === '추가할 원본 작업 시간')!;
   assert.equal(addedTime.authorId, 'user-jun');
@@ -784,14 +833,18 @@ test('Jira history append preserves local and deleted records and restores exact
   assert.deepEqual(times.entries.filter(row => row.id !== addedTime.id), expectedTimes.entries);
   assert.equal((await f.preview(config)).canApply, false);
 
-  type Backup = WorkspaceSnapshot & {schemaVersion: number; sourceRecords: SourceRecordArchive[]};
+  type Backup = WorkspaceSnapshot & {schemaVersion: number; comments: Comment[]; sourceRecords: SourceRecordArchive[]};
   const backup = (await f.call<Backup>('/export')).data;
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.sourceRecords.filter(row => row.jiraHistoryAppend).map(row => row.record.sourceId).sort(), ['310', 'worklog:410']);
   assert.equal(backup.sourceRecords.find(row => row.jiraHistoryAppend && row.targetId === addedComment.id)?.record.text, addedSourceBody);
+  const storedComment = backup.comments.find(row => row.id === addedComment.id)!;
+  assert.equal(storedComment.body, addedComment.body);
+  assert.equal(Object.hasOwn(storedComment, 'jiraOriginalLinksAvailable'), false);
   assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 43 } })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
   assert.deepEqual(await readComments(), comments);
+  assert.deepEqual(await originalLinks(addedComment.id, 200), expectedLinks);
   assert.deepEqual((await readWorklogs()).entries.map(row => row.id), times.entries.map(row => row.id));
   assert.equal((await f.preview(config)).canApply, false);
 
@@ -806,8 +859,13 @@ test('Jira history append preserves local and deleted records and restores exact
   assert.equal(sparsePlan.counts.newJiraComments, 1);
   assert.equal(sparsePlan.counts.newJiraWorklogs, 1);
   assert.equal((await f.apply(sparsePlan)).status, 201);
-  assert.ok((await readComments()).some(row => row.body === `티켓 객체가 빠진 추가 댓글 <${sparseLink}>`));
+  const sparseComment = (await readComments()).find(row => row.body === `티켓 객체가 빠진 추가 댓글 <${sparseLink}>`)!;
+  assert.equal(sparseComment.jiraOriginalLinksAvailable, true);
+  assert.deepEqual(await originalLinks(sparseComment.id, 200), {
+    links: [{ label: '티켓 객체가 빠진 추가 댓글', href: sparseLink }], limited: false,
+  });
   assert.equal((await readWorklogs()).entries.find(row => row.note === '티켓 객체가 빠진 작업 시간')?.durationSeconds, 97);
+
 });
 
 test('Jira attachment append adds exact new source bytes while preserving team versions and deletion history', async t => {

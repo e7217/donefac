@@ -1193,6 +1193,11 @@ export interface Comment {
   mentions?: CommentMention[];
   resolution?: DocumentCommentResolution;
 }
+export interface IssueCommentView extends Comment { jiraOriginalLinksAvailable?: true }
+export interface JiraOriginalCommentLinksResult {
+  links: { label: string; href: string }[];
+  limited: boolean;
+}
 export interface CommentEditSnapshot { comment: Comment; editToken: string }
 export interface CommentEditResult extends CommentEditSnapshot { duplicate: boolean }
 export interface DocumentSelectionCommentResult { comment: Comment; duplicate: boolean }

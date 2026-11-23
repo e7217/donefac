@@ -447,7 +447,9 @@ Jira·Confluence의 한 필드를 적용하고 다른 필드의 팀 편집을 �
 
 같은 Jira 원본에 연결된 기존 업무에 새 댓글과 작업 시간을 추가한다. 포함할 수 있는 기록은 원본 객체의 ID와 소유 업무, 작성자, 작업 시간·댓글 시각이 확인되는 경우다. 이미 옮긴 원본 ID는 팀의 편집이나 삭제 후에도 다시 추가하지 않는다. 새 기록과 원본의 연결, 이관 영수증을 함께 저장하고 보고서에는 기존 작업 시간과 동일하게 반영한다.
 
-신규·추가 Jira 댓글의 Wiki, ADF, 지원하는 검색 XML의 HTML에서 표시 이름과 HTTP(S) 주소를 `이름 <주소>` 형태의 일반 텍스트로 옮긴다. 표시 이름이 주소와 같으면 주소를 한 번 기록한다. URL 안의 쿼리·프래그먼트·문장부호를 유지한다. 펼친 본문이 기존 한도를 넘으면 적용 검토에 링크가 원본에 남는다고 표시하고 이전 방식으로 변환한 본문을 쓴다. 이전에 이관한 댓글의 저장 본문에 빠진 링크는 보존 원본에서 확인할 수 있다. [Jira Wiki 렌더러](https://confluence.atlassian.com/adminjiraserver106/configuring-renderers-1573488767.html) · [Atlassian 문서 형식](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
+신규·추가 Jira 댓글의 Wiki, ADF, 지원하는 검색 XML의 HTML에서 표시 이름과 HTTP(S) 주소를 `이름 <주소>` 형태의 일반 텍스트로 옮긴다. 표시 이름이 주소와 같으면 주소를 한 번 기록한다. URL 안의 쿼리·프래그먼트·문장부호를 유지한다. 펼친 본문이 기존 한도를 넘으면 적용 검토에 링크가 원본에 남는다고 표시하고 이전 방식으로 변환한 본문을 쓴다. [Jira Wiki 렌더러](https://confluence.atlassian.com/adminjiraserver106/configuring-renderers-1573488767.html) · [Atlassian 문서 형식](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
+
+이전 Jira 이관에서 본문에 빠진 주소는 댓글의 **Jira 원본 링크 확인**에서 연다. 서버는 활성 댓글과 티켓을 확인하고 유일한 보존 원본, 원래 업무 식별자와 적용 영수증을 대조한다. 다시 편집한 댓글에서도 당시 원본에 있었던 링크를 확인할 수 있다. 링크는 열기 요청 때 읽으며, 표시 이름과 주소만 반환한다. 목록에서 조회 가능 여부를 계산하며 자체 백업에는 원래 댓글과 보존 자료를 저장한다.
 
 REST 업무 응답과 같은 ZIP에 있는 별도 댓글·작업 시간 페이지는 원래 서버와 업무를 확인해 이관한다. 업무 응답에 들어 있는 기록과 같은 ID가 겹치면 내용과 접근 제한이 일치하는지 검사한다. 응답이 보고한 범위를 모두 확인할 때까지 누락 진단을 유지한다. 별도 페이지에서 찾은 제한 기록도 기존 적용 검토를 거친다.
 

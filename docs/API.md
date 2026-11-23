@@ -905,6 +905,10 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 신규·추가 Jira 댓글의 이름 붙은 웹 링크는 `Comment.body`에 `이름 <주소>` 형식으로 저장한다. 티켓의 읽기 화면은 자격 정보가 없는 HTTP(S) 주소를 링크로 표시한다. 링크를 펼친 본문이 20,000자를 넘거나 검색 XML의 HTML 구조를 변환할 수 없을 때는 이전 방식으로 표시할 수 있는 본문을 적용하고 `JIRA_COMMENT_LINKS_ARCHIVED` 검토 항목에 원본 링크 위치를 안내한다. 원본 기록에는 이관 전 본문을 보존한다.
 
+브라우저의 `GET /api/comments?resourceType=issue&resourceId=…`는 유일한 보존 원본과 원래 Jira 업무를 확인한 댓글에 `jiraOriginalLinksAvailable: true`를 반환할 수 있다. 이 값은 브라우저의 조회 버튼 표시용이다. 자세한 링크는 `GET /api/comments/:id/jira-original-links`가 해당 댓글을 다시 확인한 뒤 `{links:[{label,href}],limited}`로 반환한다. 접근 제한이나 중복으로 근거를 확인할 수 없거나 현재 티켓·댓글이 휴지통에 있으면 `404`를 반환한다.
+
+원본 링크는 한 번에 20개, 원본 256KiB, 주소 2,048자까지 확인한다. 한도나 지원 범위 때문에 일부 또는 전체를 읽지 못하면 `limited: true`를 표시한다. 원본은 요청 때만 해석하며 주소에 접속하지 않고 링크의 이름과 주소를 반환한다. 읽기 응답은 `Cache-Control: no-store`를 사용한다. 이 조회는 일반 댓글 본문, 원본 기록, 백업 형식을 그대로 사용한다.
+
 ### 기존 Jira 업무에 첨부파일 추가
 
 `appendTo.refreshAttachments: true`를 지정하면 같은 원본 인스턴스와 프로젝트에서 소유 업무를 확인할 수 있는 새 원본 첨부파일을 추가한다. 원본 ID가 같으면 이미 저장한 파일과 삭제 기록을 보존하고, 이름이 같아도 원본 ID가 다르면 별도의 파일로 추가한다. 업무 객체가 빠진 관리자 ZIP에서는 이전 이관 기록으로 연결을 확인한다.
