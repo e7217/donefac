@@ -1027,6 +1027,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `POST /api/schedule/bulk-links/apply`에 `{previewId}`를 보내 검토한 연결을 함께 추가한다. 검토 뒤 관련 업무·연결·프로젝트 규칙이 바뀌면 `409`가 반환된다. 같은 작업자는 같은 ID로 이미 저장한 결과를 확인할 수 있다. 결과의 `undoId`를 `POST /api/schedule/undo`에 보내 이 요청에서 추가한 연결을 함께 해제한다.
 
+## 차단 관계의 선후행 일괄 연결
+
+브라우저의 `GET /api/schedule/blocker-links?projectId=…&offset=0`은 같은 프로젝트 안의 방향이 확인된 차단 관계를 25개씩 조회한다. 결과는 `{items,offset,total}`이다. 각 항목은 관계 `id`, `version`, 차단하는 `sourceIssueId`, 차단되는 `targetIssueId`를 담는다. 검증한 이관 관계는 `origin: 'jira'`를 포함한다. 같은 방향에 Teamspace 관계와 Jira 관계가 있으면 Teamspace 관계가 우선한다.
+
+`POST /api/schedule/blocker-links/preview`에 `{projectId,relations:[{id,version}]}`을 보내 1~100개를 검토한다. `dependencyChanges`에는 FS·0근무일로 새로 추가할 연결이, `retainedDependencies`에는 기존 유형·간격을 유지할 연결이 담긴다. 날짜 미정과 일정 충돌은 `warnings`로 돌려준다. 방향이 반대인 기존 일정 연결이나 순환을 포함해 적용을 막는 조건이 있으면 `errors`에 표시한다. 적용할 새 연결이 있는 유효한 미리보기에 `previewId`를 발급한다.
+
+`POST /api/schedule/blocker-links/apply`에 `{previewId}`를 보낸다. 원래 관계나 확인한 원본 방향, 업무·관련 연결·일정 규칙이 바뀌면 `409`를 반환한다. 같은 작업자가 같은 ID로 저장 결과를 확인할 수 있다. 결과의 `{undoId}`를 `POST /api/schedule/undo`에 보내 추가한 일정 연결만 해제한다.
+
 ## 사이클 완료와 업무 이월
 
 `POST /api/planning-items/:id/complete/preview`는 `{expectedVersion,destinationId}`를 받는다. 원래 사이클은 진행 중이어야 한다. 같은 프로젝트의 다른 계획·진행 중 사이클로 보내려면 ID를, 백로그에 두려면 명시적으로 `null`을 보낸다. `/api/v1`의 두 완료 경로에는 해당 프로젝트의 쓰기 키가 필요하다.

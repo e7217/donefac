@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
+import { isRelationId } from '../shared/issue-relations.js';
+import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkInput, type ScheduleBlockerLinkPage, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
-  type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type WorkCalendar } from '../shared/types.js';
+  type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
@@ -30,6 +31,7 @@ interface PasteHooks {
   workflow(projectId: string): ProjectWorkflow;
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
+  projectBlockers(projectId: string): TeamScheduleBlocker[];
   commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
 }
 
@@ -51,11 +53,14 @@ interface PasteProposal extends ScheduleScope {
   linkChanges?: ScheduleDependencyMutation[];
   followUpWarnings?: string[];
   missingDateWarnings?: string[];
-  kind?: 'bulk-dates' | 'bulk-links' | 'row-edit' | 'manual-edit';
+  blockerRelations?: TeamScheduleBlocker[];
+  kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit';
   result?: SchedulePasteApplyResult;
 }
 
-type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings'>;
+type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
+
+type DependencyAddition = { line: number; predecessor: Issue; successor: Issue };
 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
@@ -132,6 +137,18 @@ function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput {
     throw new SchedulePasteError(400, '기준 업무와 선택 업무는 각각 한 번만 지정해 주세요.');
   }
   return { projectId: raw.projectId, anchor, issues, direction: raw.direction, type: raw.type, lagDays: raw.lagDays };
+}
+
+function parseBlockerLinkInput(raw: unknown): ScheduleBlockerLinkInput {
+  const invalid = () => new SchedulePasteError(400, `프로젝트와 차단 관계를 1~${MAX_SCHEDULE_BLOCKER_LINKS}개 선택해 주세요.`);
+  if (!isRecord(raw) || Object.keys(raw).length !== 2 || !isRelationId(raw.projectId) ||
+      !Array.isArray(raw.relations) || !raw.relations.length || raw.relations.length > MAX_SCHEDULE_BLOCKER_LINKS) throw invalid();
+  const relations = raw.relations.map((entry: unknown) => {
+    if (!isRecord(entry) || Object.keys(entry).length !== 2 || !isRelationId(entry.id) || !isVersion(entry.version)) throw invalid();
+    return { id: entry.id, version: entry.version };
+  });
+  if (new Set(relations.map(({ id }) => id)).size !== relations.length) throw invalid();
+  return { projectId: raw.projectId, relations };
 }
 
 function findPreviewIssue(issues: ReadonlyMap<string, Issue>, errors: SchedulePastePreview['errors'],
@@ -274,6 +291,43 @@ function affectedLinks(dependencies: Dependency[], issueIds: Iterable<string>, l
   return dependencies.filter(link => linkIds.has(link.id) || targets.has(link.predecessorId) || targets.has(link.successorId));
 }
 
+function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[], settings: Pick<Dependency, 'type' | 'lagDays'>,
+  calculateWarnings: PasteHooks['warnings']) {
+  const dependencyChanges: SchedulePasteDependencyChange[] = [];
+  const retainedDependencies: SchedulePasteDependencyChange[] = [];
+  const linkChanges: ScheduleDependencyMutation[] = [];
+  const missingDateWarnings: string[] = [];
+  const errors: SchedulePastePreview['errors'] = [];
+  const linksByPair = new Map(state.dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
+  const endpoints = DEPENDENCY_ENDPOINTS[settings.type];
+  for (const { line, predecessor, successor } of pairs) {
+    const summary = { line, predecessorKey: predecessor.key, predecessorTitle: predecessor.title,
+      successorKey: successor.key, successorTitle: successor.title };
+    const existing = linksByPair.get(dependencyPair(predecessor.id, successor.id));
+    if (existing) {
+      const saved = { type: existing.type, lagDays: existing.lagDays };
+      retainedDependencies.push({ ...summary, before: saved, after: saved });
+      continue;
+    }
+    linkChanges.push({ before: null, after: { id: randomUUID(), predecessorId: predecessor.id, successorId: successor.id, ...settings } });
+    dependencyChanges.push({ ...summary, before: null, after: settings });
+    const missingDates: string[] = [];
+    if (!predecessor[endpoints.predecessor]) missingDates.push(`${predecessor.key} ${SCHEDULE_DATE_LABELS[endpoints.predecessor]}`);
+    if (!successor[endpoints.successor]) missingDates.push(`${successor.key} ${SCHEDULE_DATE_LABELS[endpoints.successor]}`);
+    if (missingDates.length) missingDateWarnings.push(`${predecessor.key} → ${successor.key} · 날짜 미정 (${missingDates.join(', ')})`);
+  }
+
+  const warnings = [...missingDateWarnings];
+  if (linkChanges.length) {
+    const projected = projectScheduleDependencies(state.dependencies, linkChanges);
+    if (hasScheduleDependencyCycle(projected)) {
+      errors.push({ line: null, message: '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.' });
+    }
+    warnings.push(...calculateWarnings(state.issues, affectedLinks(projected, [], linkChanges)));
+  }
+  return { dependencyChanges, retainedDependencies, unchanged: retainedDependencies.length, warnings, errors, linkChanges, missingDateWarnings };
+}
+
 export class SchedulePasteService {
   constructor(private store: Store) {
     store.db.exec(`
@@ -318,6 +372,7 @@ export class SchedulePasteService {
       .map(issue => {
         if (scope.kind === 'manual-edit') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate,
           ...(scope.hierarchyId ? [issue.parentId ?? null, issue.status] : [])];
+        if (scope.kind === 'blocker-links') return [issue.id, issue.version, issue.startDate, issue.endDate];
         return scope.projectId === null ? [issue.id, issue.version, issue.projectId] : [issue.id, issue.version];
       });
     const linkVersions = links.map(dependencyGuardFields);
@@ -709,50 +764,84 @@ export class SchedulePasteService {
       this.prune();
       const state = this.projectState(projectId);
       const issuesById = new Map(state.issues.map(issue => [issue.id, issue]));
-      const dependencyChanges: SchedulePasteDependencyChange[] = [];
-      const retainedDependencies: SchedulePasteDependencyChange[] = [];
       const preview: SchedulePastePreview = {
-        projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges, retainedDependencies, warnings: [], errors: [], unchanged: 0,
+        projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges: [], retainedDependencies: [], warnings: [], errors: [], unchanged: 0,
       };
       const anchor = findPreviewIssue(issuesById, preview.errors, selectedAnchor);
       if (!anchor) return preview;
 
-      const linkChanges: ScheduleDependencyMutation[] = [];
-      const missingDateWarnings: string[] = [];
-      const linksByPair = new Map(state.dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
-      const endpoints = DEPENDENCY_ENDPOINTS[type];
+      const pairs: DependencyAddition[] = [];
       for (const [index, entry] of selected.entries()) {
         const line = index + 1;
         const issue = findPreviewIssue(issuesById, preview.errors, entry, line);
         if (!issue) continue;
         const [predecessor, successor] = direction === 'predecessor' ? [anchor, issue] : [issue, anchor];
-        const summary = { line, predecessorKey: predecessor.key, predecessorTitle: predecessor.title,
-          successorKey: successor.key, successorTitle: successor.title };
-        const existing = linksByPair.get(dependencyPair(predecessor.id, successor.id));
-        if (existing) {
-          const settings = { type: existing.type, lagDays: existing.lagDays };
-          retainedDependencies.push({ ...summary, before: settings, after: settings });
-          preview.unchanged++;
+        pairs.push({ line, predecessor, successor });
+      }
+      const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type, lagDays }, hooks.warnings);
+      return this.savePreview({ ...preview, ...review, errors: [...preview.errors, ...errors] }, state, {
+        actorId, issueIds: [anchor.id, ...selected.map(issue => issue.id)], changes: [], linkChanges, kind: 'bulk-links',
+        ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
+      }, hooks);
+    });
+  }
+
+  private listBlockerLinks(query: Request['query'], hooks: PasteHooks): ScheduleBlockerLinkPage {
+    const { projectId, offset: rawOffset = '0' } = query;
+    if (!isRelationId(projectId) || Object.keys(query).some(key => key !== 'projectId' && key !== 'offset') ||
+        typeof rawOffset !== 'string' || !/^(?:0|[1-9]\d*)$/u.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset))) {
+      throw new SchedulePasteError(400, '프로젝트와 차단 관계 목록 위치를 확인해 주세요.');
+    }
+    const offset = Number(rawOffset);
+    return this.store.transaction(() => {
+      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      const rows = this.store.db.prepare("SELECT id, json_extract(json, '$.key') AS issueKey FROM issues WHERE project_id=?")
+        .all(projectId) as { id: string; issueKey: string }[];
+      const keys = new Map(rows.map(({ id, issueKey }) => [id, issueKey]));
+      const compare = new Intl.Collator('ko', { numeric: true }).compare;
+      const byIssueKey = (left: string, right: string) => compare(keys.get(left) ?? left, keys.get(right) ?? right);
+      const blockers = hooks.projectBlockers(projectId).sort((left, right) =>
+        byIssueKey(left.sourceIssueId, right.sourceIssueId) || byIssueKey(left.targetIssueId, right.targetIssueId) || left.id.localeCompare(right.id));
+      return { items: blockers.slice(offset, offset + SCHEDULE_BLOCKER_LINK_PAGE_SIZE), offset, total: blockers.length };
+    });
+  }
+
+  private previewBlockerLinks(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
+    const { projectId, relations } = parseBlockerLinkInput(raw);
+    return this.store.transaction(() => {
+      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      this.prune();
+      const state = this.projectState(projectId);
+      const issuesById = new Map(state.issues.map(issue => [issue.id, issue]));
+      const blockersById = new Map(hooks.projectBlockers(projectId).map(relation => [relation.id, relation]));
+      const existingPairs = new Set(state.dependencies.map(link => dependencyPair(link.predecessorId, link.successorId)));
+      const selectionErrors: SchedulePastePreview['errors'] = [];
+      const reviewedRelations: TeamScheduleBlocker[] = [];
+      const issueIds = new Set<string>();
+      const pairs: DependencyAddition[] = [];
+      for (const [index, requested] of relations.entries()) {
+        const line = index + 1;
+        const relation = blockersById.get(requested.id);
+        const predecessor = relation && issuesById.get(relation.sourceIssueId);
+        const successor = relation && issuesById.get(relation.targetIssueId);
+        if (!relation || relation.version !== requested.version || !predecessor || !successor) {
+          selectionErrors.push({ line, message: '선택한 차단 관계가 변경되었거나 현재 프로젝트에서 확인할 수 없습니다. 목록을 다시 불러와 주세요.' });
           continue;
         }
-        const dependency = { id: randomUUID(), predecessorId: predecessor.id, successorId: successor.id, type, lagDays };
-        linkChanges.push({ before: null, after: dependency });
-        dependencyChanges.push({ ...summary, before: null, after: { type, lagDays } });
-        const missingDates: string[] = [];
-        if (!predecessor[endpoints.predecessor]) missingDates.push(`${predecessor.key} ${SCHEDULE_DATE_LABELS[endpoints.predecessor]}`);
-        if (!successor[endpoints.successor]) missingDates.push(`${successor.key} ${SCHEDULE_DATE_LABELS[endpoints.successor]}`);
-        if (missingDates.length) missingDateWarnings.push(`${predecessor.key} → ${successor.key} · 날짜 미정 (${missingDates.join(', ')})`);
-      }
-
-      if (linkChanges.length) {
-        const projected = projectScheduleDependencies(state.dependencies, linkChanges);
-        if (hasScheduleDependencyCycle(projected)) {
-          preview.errors.push({ line: null, message: '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.' });
+        if (!existingPairs.has(dependencyPair(predecessor.id, successor.id)) && existingPairs.has(dependencyPair(successor.id, predecessor.id))) {
+          selectionErrors.push({ line, message: `${predecessor.key} → ${successor.key}: 반대 방향의 간트 연결이 있어 순환 관계가 생깁니다.` });
+          continue;
         }
-        preview.warnings = [...missingDateWarnings, ...hooks.warnings(state.issues, affectedLinks(projected, [], linkChanges))];
+        reviewedRelations.push(relation);
+        issueIds.add(predecessor.id);
+        issueIds.add(successor.id);
+        pairs.push({ line, predecessor, successor });
       }
-      return this.savePreview(preview, state, {
-        actorId, issueIds: [anchor.id, ...selected.map(issue => issue.id)], changes: [], linkChanges, kind: 'bulk-links',
+      const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type: 'FS', lagDays: 0 }, hooks.warnings);
+      return this.savePreview({
+        projectId, previewId: null, expiresAt: null, changes: [], ...review, errors: [...selectionErrors, ...errors],
+      }, state, {
+        actorId, issueIds: [...issueIds], changes: [], linkChanges, kind: 'blocker-links', blockerRelations: reviewedRelations,
         ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
       }, hooks);
     });
@@ -769,6 +858,15 @@ export class SchedulePasteService {
       if (proposal.actorId !== actorId) throw new SchedulePasteError(409, '미리보기를 만든 작업자가 적용해 주세요.');
       if (proposal.removeAfter <= after(0)) throw new SchedulePasteError(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
+      if (kind === 'blocker-links') {
+        const reviewed = proposal.blockerRelations ?? [];
+        const current = new Map((proposal.projectId === null ? [] : hooks.projectBlockers(proposal.projectId)).map(relation => [relation.id, relation]));
+        if (!reviewed.length || reviewed.some(relation => {
+          const live = current.get(relation.id);
+          return !live || live.version !== relation.version || live.origin !== relation.origin ||
+            live.sourceIssueId !== relation.sourceIssueId || live.targetIssueId !== relation.targetIssueId;
+        })) throw new SchedulePasteError(409, '차단 관계 또는 원본 방향이 변경되었습니다. 다시 미리 확인해 주세요.');
+      }
       const state = this.scopeState(proposal);
       if (proposal.hierarchyId) {
         const trace = traceGanttHierarchy(proposal.hierarchyId, state.issues, () => 'backlog');
@@ -829,6 +927,19 @@ export class SchedulePasteService {
         throw new SchedulePasteError(400, '적용할 일정 미리보기 ID를 확인해 주세요.');
       }
       res.set('Cache-Control', 'no-store').json(this.apply(req, req.body.previewId, hooks, 'bulk-links'));
+    });
+    app.get('/api/schedule/blocker-links', (req, res) => {
+      hooks.actor(req);
+      res.set('Cache-Control', 'no-store').json(this.listBlockerLinks(req.query, hooks));
+    });
+    app.post('/api/schedule/blocker-links/preview', (req, res) => {
+      res.set('Cache-Control', 'no-store').json(this.previewBlockerLinks(req.body, hooks.actor(req), hooks));
+    });
+    app.post('/api/schedule/blocker-links/apply', (req, res) => {
+      if (!isRecord(req.body) || Object.keys(req.body).length !== 1) {
+        throw new SchedulePasteError(400, '적용할 일정 미리보기 ID를 확인해 주세요.');
+      }
+      res.set('Cache-Control', 'no-store').json(this.apply(req, req.body.previewId, hooks, 'blocker-links'));
     });
     app.post('/api/schedule/row-edit/preview', (req, res) => {
       res.set('Cache-Control', 'no-store').json(this.previewRowEdit(req.body, hooks.actor(req), hooks));

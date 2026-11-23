@@ -134,6 +134,11 @@ export class IssueRelationsService {
     return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 
+  projectScheduleBlockers(projectId: string): TeamScheduleBlocker[] {
+    const scope = { allowedProjects: [projectId] };
+    return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
+  }
+
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
     return this.store.transaction(() => this.createInTransaction(issueId, input, audit, notifyChange));
   }

@@ -92,7 +92,9 @@ test('360px 선택 업무에 날짜가 없으면 첫 빈 칸에 포커스하고 
     await expect.poll(stored).toMatchObject({ startDate: savedStart, endDate });
     const undo = page.getByRole('button', { name: '되돌리기', exact: true });
     await expect(undo).toBeEnabled();
-    await expect(start(partial)).not.toBeFocused();
+    const bar = chart.getByRole('button', { name: `${partial.key} 일정 이동`, exact: true });
+    await expect(bar).toBeVisible();
+    await expect(bar).not.toBeFocused();
     await undo.click();
     await expect.poll(stored).toMatchObject({ startDate: null, endDate });
     await expect(start(partial)).toHaveValue('');

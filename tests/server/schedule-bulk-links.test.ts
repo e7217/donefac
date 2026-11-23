@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  Dependency, Issue, Project, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
+  Dependency, Issue, IssueRelation, Project, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview,
+  TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const previewPath = '/schedule/bulk-links/preview';
@@ -221,4 +222,158 @@ test('bulk linking rechecks a retained rule and rejects a late or already existi
   assert.deepEqual(await f.workspace(), beforeCycle);
   assert.deepEqual(findLink(beforeCycle, anchor, kept), edited);
   assert.equal(findLink(beforeCycle, anchor, candidate), undefined);
+});
+
+const blockerPath = '/schedule/blocker-links';
+type BlockerPage = { items: TeamScheduleBlocker[]; offset: number; total: number };
+
+function blockerRoutes(f: Awaited<ReturnType<typeof fixture>>) {
+  const relationsPath = (issue: Issue) => `/issues/${issue.id}/relations`;
+  return {
+    add: (source: Issue, target: Issue, type: IssueRelation['type'] = 'blocks') =>
+      f.call<IssueRelation>(relationsPath(source), 201, 'POST', { otherIssueId: target.id, type, direction: 'outgoing' }),
+    list: (offset = 0) => f.call<BlockerPage>(`${blockerPath}?projectId=${f.project.id}&offset=${offset}`),
+    relations: (issue: Issue) => f.call<IssueRelation[]>(relationsPath(issue)),
+    review: (relations: readonly Pick<IssueRelation, 'id' | 'version'>[]) =>
+      f.call<SchedulePastePreview>(`${blockerPath}/preview`, 200, 'POST', {
+        projectId: f.project.id, relations: relations.map(({ id, version }) => ({ id, version })),
+      }),
+    apply: (previewId: string, status = 200, actorId?: string) =>
+      f.call<SchedulePasteApplyResult>(`${blockerPath}/apply`, status, 'POST', { previewId }, actorId),
+  };
+}
+
+test('project blocker batch keeps original relations and existing rules while warning about dates and supporting retry and undo', async t => {
+  const f = await fixture(t);
+  const blockers = blockerRoutes(f);
+  const source = await f.issue('차단하는 업무');
+  const conflict = await f.issue('차단 후행 일정이 너무 이른 업무');
+  const retained = await f.issue('선후행 연결을 이미 검토한 업무');
+  const missing = await f.issue('후행 시작일 미정', f.project.id, { startDate: null });
+  const [first, kept, last] = [
+    await blockers.add(source, conflict), await blockers.add(source, retained), await blockers.add(source, missing),
+  ];
+  const saved = await f.link(source, retained, 'SS', -2);
+  const before = await f.workspace();
+  const originalRelations = await blockers.relations(source);
+  assert.deepEqual(await blockers.list(), { offset: 0, total: 3, items: [
+    { id: first.id, sourceIssueId: source.id, targetIssueId: conflict.id, version: first.version },
+    { id: kept.id, sourceIssueId: source.id, targetIssueId: retained.id, version: kept.version },
+    { id: last.id, sourceIssueId: source.id, targetIssueId: missing.id, version: last.version },
+  ] });
+
+  const sameRule = { type: 'SS', lagDays: -2 };
+  const newRule = { type: 'FS', lagDays: 0 };
+  const preview = await blockers.review([first, kept, last]);
+  assert.ok(preview.previewId);
+  assert.deepEqual(preview.errors, []);
+  assert.deepEqual(preview.changes, []);
+  assert.equal(preview.unchanged, 1);
+  assert.deepEqual(preview.dependencyChanges?.map(change =>
+    [change.line, change.predecessorKey, change.successorKey, change.before, change.after]), [
+    [1, source.key, conflict.key, null, newRule],
+    [3, source.key, missing.key, null, newRule],
+  ]);
+  assert.deepEqual(preview.retainedDependencies?.map(change =>
+    [change.line, change.predecessorKey, change.successorKey, change.before, change.after]), [
+    [2, source.key, retained.key, sameRule, sameRule],
+  ]);
+  assert.ok(preview.warnings.some(warning => warning.includes(`${source.key} → ${conflict.key}`) && warning.includes('2026-11-23')));
+  assert.ok(preview.warnings.some(warning => warning.includes(`${source.key} → ${missing.key}`) && warning.includes('날짜 미정')));
+  assert.deepEqual(await f.workspace(), before);
+  await blockers.apply(preview.previewId, 409, 'user-seo');
+  await f.call(applyPath, 404, 'POST', { previewId: preview.previewId });
+
+  const applied = await blockers.apply(preview.previewId);
+  assert.equal(applied.dependencyChanges, 2);
+  assert.deepEqual(applied.updated, []);
+  assert.deepEqual(await blockers.apply(preview.previewId), applied);
+  const current = await f.workspace();
+  assert.deepEqual(current.issues, before.issues);
+  assert.deepEqual(findLink(current, source, retained), saved);
+  for (const target of [conflict, missing]) {
+    const added = findLink(current, source, target);
+    assert.ok(added);
+    assert.deepEqual({ type: added.type, lagDays: added.lagDays }, newRule);
+  }
+  assert.deepEqual(await blockers.relations(source), originalRelations);
+
+  const undone = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: applied.undoId });
+  assert.equal(undone.dependencyChanges, 2);
+  assert.deepEqual(undone.updated, []);
+  const restored = await f.workspace();
+  assert.deepEqual(restored.dependencies, before.dependencies);
+  assert.deepEqual(restored.issues, before.issues);
+  assert.deepEqual(await blockers.relations(source), originalRelations);
+});
+
+test('project blocker list pages exact local blocking pairs and rejects out-of-scope or malformed selections', async t => {
+  const f = await fixture(t);
+  const blockers = blockerRoutes(f);
+  const source = await f.issue('차단 관계 검색 업무');
+  const candidates: IssueRelation[] = [];
+  for (let index = 0; index < 27; index++) {
+    const issue = await f.issue(`범위 내 후행 ${index + 1}`);
+    candidates.push(await blockers.add(source, issue));
+  }
+  const outsider = await f.issue('다른 프로젝트 후행', 'project-neo');
+  const unrelated = await f.issue('같은 프로젝트 관련 업무');
+  const [cross, related] = [await blockers.add(source, outsider), await blockers.add(source, unrelated, 'related')];
+  for (const offset of [0, 25, 50]) {
+    const page = await blockers.list(offset);
+    assert.equal(page.total, 27);
+    assert.equal(page.offset, offset);
+    assert.deepEqual(page.items.map(row => row.id), candidates.slice(offset, offset + 25).map(row => row.id));
+  }
+  await f.call(`${blockerPath}?projectId=${f.project.id}&offset=-1`, 400);
+  await f.call(`${blockerPath}?projectId=unavailable&offset=0`, 404);
+  for (const relations of [
+    [], [candidates[0], candidates[0]].map(({ id, version }) => ({ id, version })),
+    [{ id: candidates[0].id, version: 0 }],
+  ]) await f.call(`${blockerPath}/preview`, 400, 'POST', { projectId: f.project.id, relations });
+  const before = await f.workspace();
+  for (const invalid of [cross, related, { ...candidates[0], version: candidates[0].version + 1 }]) {
+    const rejected = await blockers.review([candidates[1], invalid]);
+    assert.equal(rejected.previewId, null);
+    assert.ok(rejected.errors.some(error => error.line === 2));
+    assert.doesNotMatch(JSON.stringify(rejected), /다른 프로젝트 후행/u);
+  }
+  assert.deepEqual(await f.workspace(), before);
+});
+
+test('project blocker batch rejects cycle and refuses application after relation, issue or graph changes', async t => {
+  const f = await fixture(t);
+  const blockers = blockerRoutes(f);
+  const [a, b, c, d, e] = await Promise.all(['A', 'B', 'C', 'D', 'E'].map(title => f.issue(title)));
+  const ab = await blockers.add(a, b);
+  const bc = await blockers.add(b, c);
+  const ca = await blockers.add(c, a);
+  const de = await blockers.add(d, e);
+  const baseline = await f.workspace();
+  const impossible = await blockers.review([ab, bc, ca, de]);
+  assert.equal(impossible.previewId, null);
+  assert.ok(impossible.errors.some(error => /순환/u.test(error.message)));
+  assert.deepEqual(await f.workspace(), baseline);
+
+  async function rejectAfter(relations: IssueRelation[], update: () => Promise<unknown>) {
+    const preview = await blockers.review(relations);
+    assert.ok(preview.previewId);
+    await update();
+    const latest = await f.workspace();
+    await blockers.apply(preview.previewId, 409);
+    assert.deepEqual(await f.workspace(), latest);
+    assert.equal(findLink(latest, d, e), undefined);
+  }
+  await rejectAfter([ab, de], () => f.call(`/issues/${a.id}/relations/${ab.id}`, 200, 'PATCH', {
+    expectedVersion: ab.version, type: 'related', direction: 'outgoing',
+  }, 'user-seo'));
+  await rejectAfter([bc, de], () => f.call(`/issues/${b.id}/relations/${bc.id}?expectedVersion=${bc.version}`, 200, 'DELETE',
+    undefined, 'user-seo'));
+  await rejectAfter([ca, de], () => f.call(`/issues/${c.id}`, 200, 'PATCH', {
+    expectedVersion: c.version, endDate: '2026-11-23',
+  }, 'user-seo'));
+  await rejectAfter([ca, de], () => f.link(a, c, 'SS', -1));
+  const final = await f.workspace();
+  assert.equal(findLink(final, c, a), undefined);
+  assert.equal(findLink(final, d, e), undefined);
 });

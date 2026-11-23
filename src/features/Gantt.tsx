@@ -187,6 +187,7 @@ const CREATE_ISSUE_DRAFT = 'create';
 const CASCADE_DRAFT = 'successor-schedule';
 const BULK_DATES_DRAFT = 'schedule-bulk-dates';
 const BULK_LINKS_DRAFT = 'schedule-bulk-links';
+const BLOCKER_LINKS_DRAFT = 'schedule-blocker-links';
 const TEAM_BLOCKER_DRAFT = 'team-blocker';
 const TEAM_FOLLOW_UP_DRAFT = 'team-follow-up';
 const REFRESH_FEEDBACK = {
@@ -212,6 +213,7 @@ function focusGanttDate(chart: Element | null, issueId: string, edge: 'start' | 
   const input = chart?.querySelector<HTMLInputElement>(`input[data-schedule-owner="${CSS.escape(issueId)}"][data-schedule-edge="${edge}"]`);
   if (!input || input.disabled) return false;
   input.focus({ preventScroll: true });
+  if (document.activeElement !== input) return false;
   input.scrollIntoView({ block, inline: 'nearest' });
   return true;
 }
@@ -275,6 +277,7 @@ function ProjectGantt(props: GanttProps) {
   const [pasteProject, setPasteProject] = useState<Project | null>(null);
   const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
   const [bulkLinkSelection, setBulkLinkSelection] = useState<BulkLinkSelection | null>(null);
+  const [blockerLinksProject, setBlockerLinksProject] = useState<Project | null>(null);
   const [rowScheduleEdit, setRowScheduleEdit] = useState<RowScheduleEdit | null>(null);
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
   const [reservationsOpen, setReservationsOpen] = useState(false);
@@ -322,6 +325,7 @@ function ProjectGantt(props: GanttProps) {
     if (autoOpen) setAutoOpen(false);
     if (bulkDateSelection) setBulkDateSelection(null);
     if (bulkLinkSelection) setBulkLinkSelection(null);
+    if (blockerLinksProject) setBlockerLinksProject(null);
     if (rowScheduleEdit) setRowScheduleEdit(null);
   }
   if (scheduleFocus && scheduleFocus.teamScope !== teamFocusScope) {
@@ -350,6 +354,7 @@ function ProjectGantt(props: GanttProps) {
   const restoringScheduleFocus = useRef<ScheduleFocus | null>(null);
   const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
   const bulkLinksTrigger = useRef<HTMLButtonElement>(null);
+  const blockerLinksTrigger = useRef<HTMLButtonElement>(null);
   const pasteTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const previewDialog = useRef<HTMLElement>(null);
@@ -371,7 +376,7 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
-    shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
+    shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || blockerLinksProject || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -515,7 +520,7 @@ function ProjectGantt(props: GanttProps) {
       if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
-        const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult;
+        const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingScheduleResult = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
         const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
@@ -537,6 +542,7 @@ function ProjectGantt(props: GanttProps) {
             setTeamFollowUpHandoff(null);
             setPasteProject(null);
             setBulkLinkSelection(null);
+            setBlockerLinksProject(null);
             if (discardPlanShift) setPlanShift(null);
             if (discardBulkDates) setBulkDateSelection(null);
             setRowScheduleEdit(null);
@@ -881,9 +887,14 @@ function ProjectGantt(props: GanttProps) {
     scroll.scrollTo(left, anchor.top);
   }, [data, viewportContext, rangeStart, dayWidth, refreshCount]);
   useLayoutEffect(() => {
+    if (!focusRequest) {
+      handledFocusRequest.current = null;
+      return;
+    }
     if (handledFocusRequest.current === focusRequest) return;
+    // Date inputs mount after the saved inline drafts have been recovered.
+    if (!issueOverlayOpen && !dateRecoveryReady && (focusDateEndpoint || !focusedIssue?.startDate || !focusedIssue.endDate)) return;
     const frame = requestAnimationFrame(() => {
-      handledFocusRequest.current = focusRequest;
       const scroll = scrollRef.current;
       const row = scroll?.querySelector<HTMLDivElement>('[data-focused-issue="true"]');
       if (!focusedIssue || !scroll || !row) return;
@@ -892,16 +903,17 @@ function ProjectGantt(props: GanttProps) {
       if (!issueOverlayOpen) scroll.scrollIntoView({ block: 'start', inline: 'nearest' });
       scroll.scrollTop = row.offsetTop - HEADER_HEIGHT;
       if (focusDateEndpoint && !issueOverlayOpen) {
-        focusGanttDate(scroll, id, focusDateEndpoint === 'startDate' ? 'start' : 'end', 'nearest');
+        if (!focusGanttDate(scroll, id, focusDateEndpoint === 'startDate' ? 'start' : 'end', 'nearest')) return;
       } else if (startDate && endDate) {
         scrollTimelineDate(scroll, (dayNumber(startDate) - range.start) * dayWidth);
         if (!issueOverlayOpen) row.querySelector<HTMLButtonElement>('.gantt-bar')?.focus({ preventScroll: true });
       } else if (!issueOverlayOpen) {
-        focusGanttDate(scroll, id, startDate ? 'end' : 'start', 'nearest');
+        if (!focusGanttDate(scroll, id, startDate ? 'end' : 'start', 'nearest')) return;
       }
+      handledFocusRequest.current = focusRequest;
     });
     return () => cancelAnimationFrame(frame);
-  }, [dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
+  }, [dateRecoveryReady, dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
   const sheetIssues = sheetProject ? (selectedIssues.length ? selectedIssues : issues)
     .filter(issue => issue.projectId === sheetProject.id) : [];
@@ -1248,6 +1260,17 @@ function ProjectGantt(props: GanttProps) {
       (trigger && !trigger.disabled ? trigger : scrollRef.current)?.focus({ preventScroll: true });
     });
   }
+  function openBlockerLinks() {
+    if (!sheetProject || scheduleEditorOpen || busyRef.current || issueOverlayOpen || (!canKeepInlineDateDrafts() && !canLeave())) return;
+    queueMicrotask(() => setBlockerLinksProject(sheetProject));
+  }
+  function closeBlockerLinks() {
+    setBlockerLinksProject(null);
+    pendingScheduleFocus.current = () => {
+      const trigger = blockerLinksTrigger.current;
+      (trigger?.isConnected && !trigger.disabled ? trigger : scrollRef.current)?.focus({ preventScroll: true });
+    };
+  }
   function restoreShiftFocus(opener: HTMLButtonElement | null) {
     pendingScheduleFocus.current = () => {
       const target = opener?.isConnected && !opener.disabled ? opener : scrollRef.current;
@@ -1508,9 +1531,12 @@ function ProjectGantt(props: GanttProps) {
       setLinkEditor({ ...options, opener });
     });
   }
-  function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement, focusDate?: RowScheduleEdit['focusDate']) {
-    const canKeepDates = focusDate !== 'dueDate' && !busyRef.current && !scheduleEditorOpen && !issueOverlayOpen &&
+  function canKeepInlineDateDrafts() {
+    return !busyRef.current && !scheduleEditorOpen && !issueOverlayOpen &&
       [...draftsRef.current].every(([id, value]) => id.startsWith('dates:') && !value.pending && !value.awaitingResult);
+  }
+  function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement, focusDate?: RowScheduleEdit['focusDate']) {
+    const canKeepDates = canKeepInlineDateDrafts();
     if (!canKeepDates && !canLeave()) return;
     const inlineDraft = canKeepDates ? inlineDateDrafts.current.get(issue.id) : undefined;
     const initialDates: ScheduleBulkDateChanges = {};
@@ -1745,7 +1771,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || teamFollowUpHandoff || bulkLinkSelection || rowScheduleEdit)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || teamFollowUpHandoff || bulkLinkSelection || blockerLinksProject || rowScheduleEdit)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -1913,6 +1939,11 @@ function ProjectGantt(props: GanttProps) {
       {linkAnchor && <button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget,
         { anchor: { issueId: linkAnchor.id, otherRole: 'successor' } })}>
         <Link2 size={15} aria-hidden="true" />선택 업무에서 연결
+      </button>}
+      {sheetProject && <button ref={blockerLinksTrigger} className="btn" type="button"
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={openBlockerLinks}
+        disabled={busy || scheduleEditorOpen || issueOverlayOpen}>
+        <Network size={15} aria-hidden="true" />차단 관계로 일정 연결
       </button>}
       {selectedIssues.length > 1 && <>
         <button ref={bulkLinksTrigger} className="btn" type="button" onClick={openBulkLinks}
@@ -2366,6 +2397,18 @@ function ProjectGantt(props: GanttProps) {
         setScheduleWarnings(result.warnings);
         await refresh();
         closeBulkLinks();
+        notify(`선후행 연결 ${result.dependencyChanges ?? 0}건을 추가했습니다.`);
+      }}
+    />}
+    {blockerLinksProject && <SchedulePasteDialog
+      projectId={blockerLinksProject.id} projectLabel={`${blockerLinksProject.key} · ${blockerLinksProject.name}`}
+      blockerLinks={{ issues: projectIssues.filter(issue => issue.projectId === blockerLinksProject.id), dependencies: data.dependencies, refresh }}
+      notify={notify} onDraftChange={trackDraft} onClose={closeBlockerLinks}
+      onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        await refresh();
+        closeBlockerLinks();
         notify(`선후행 연결 ${result.dependencyChanges ?? 0}건을 추가했습니다.`);
       }}
     />}

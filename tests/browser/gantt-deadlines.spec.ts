@@ -84,7 +84,7 @@ async function openGantt(page: Page, f: Awaited<ReturnType<typeof fixture>>, sco
   };
 }
 
-test('360px 간트에서 목표 마감과 계획을 구분하고 초안을 보호하며 마감일만 수정하고 되돌린다', async ({ page, request }) => {
+test('360px 간트에서 목표 마감과 계획을 구분하고 같은 행의 날짜 초안과 함께 검토한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const f = await fixture(request);
   const writes = trackedScheduleWrites(page);
@@ -123,22 +123,15 @@ test('360px 간트에서 목표 마감과 계획을 구분하고 초안을 보�
 
     const edit = g.panelRow(late).getByRole('button', { name: `${late.key} 목표 마감일 수정`, exact: true });
     const inlineEnd = g.row(late).getByLabel(`${late.key} 종료일`, { exact: true });
+    const otherEnd = g.row(equal).getByLabel(`${equal.key} 종료일`, { exact: true });
     await inlineEnd.fill(f.date(8));
-    const dismissal = page.waitForEvent('dialog', { timeout: 5_000 }).then(async confirmation => {
-      const message = confirmation.message();
-      await confirmation.dismiss();
-      expect(message).toContain('저장하지 않은 간트 입력');
-    });
-    await Promise.all([dismissal, edit.click()]);
+    await otherEnd.fill(f.date(7));
+    await edit.click();
     const modal = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
-    await expect(modal).toHaveCount(0);
-    await expect(inlineEnd).toHaveValue(f.date(8));
+    await expect(modal.getByLabel('종료일', { exact: true })).toHaveValue(f.date(8));
     expect(await f.stored(late)).toMatchObject({ version: late.version, endDate: late.endDate, dueDate: late.dueDate });
     expect(writes).toEqual([]);
-    await inlineEnd.press('Escape');
-    await expect(inlineEnd).toHaveValue(f.date(6));
 
-    await edit.click();
     const due = modal.getByLabel('목표 마감일', { exact: true });
     await expect(due).toBeFocused();
     await expect(due).toBeInViewport({ ratio: 0.95 });
@@ -150,24 +143,27 @@ test('360px 간트에서 목표 마감과 계획을 구분하고 초안을 보�
     const previewResponse = await waitingPreview;
     expect(previewResponse.ok(), await previewResponse.text()).toBeTruthy();
     const input = previewResponse.request().postDataJSON() as ScheduleRowEditInput;
-    expect(input).toMatchObject({ issue: { id: late.id, expectedVersion: late.version }, changes: { dueDate: revised } });
-    expect(input.changes).toEqual({ dueDate: revised });
+    expect(input).toMatchObject({ issue: { id: late.id, expectedVersion: late.version } });
+    expect(input.changes).toEqual({ endDate: f.date(8), dueDate: revised });
     await expect(modal.getByRole('region', { name: '일정과 연결 미리보기', exact: true })).toContainText(revised);
     const waitingApply = waitPost(page, applyPath);
     await modal.getByRole('button', { name: '일정과 연결 적용', exact: true }).click();
     expect(await json<SchedulePasteApplyResult>(await waitingApply)).toMatchObject({
-      updated: [{ id: late.id, startDate: late.startDate, endDate: late.endDate, dueDate: revised }],
+      updated: [{ id: late.id, startDate: late.startDate, endDate: f.date(8), dueDate: revised }],
     });
     await expect(modal).toHaveCount(0);
     await expect(g.marker(late, revised)).toHaveAttribute('data-gantt-deadline', 'within');
     await expect(g.panelRow(late)).toHaveCount(0);
     await expect(g.search).toHaveValue(f.prefix);
+    await expect(otherEnd).toHaveValue(f.date(7));
+    expect(await f.stored(equal)).toMatchObject({ version: equal.version, endDate: equal.endDate });
 
     const waitingUndo = waitPost(page, undoPath);
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     expect((await waitingUndo).ok()).toBeTruthy();
     await expect(g.marker(late)).toHaveAttribute('data-gantt-deadline', 'late');
     await expect(g.panelRow(late)).toBeVisible();
+    await expect(otherEnd).toHaveValue(f.date(7));
     expect(await f.stored(late)).toMatchObject({ startDate: late.startDate, endDate: late.endDate, dueDate: late.dueDate });
 
     const directEdit = g.row(dueOnly).getByRole('button', { name: `${dueOnly.key} 목표 마감일 수정`, exact: true });

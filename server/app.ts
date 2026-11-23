@@ -1111,6 +1111,7 @@ export function createApp(options: {
     workflow:projectId=>workflows.get(projectId),
     validateChange:validateScheduleChange,
     warnings:scheduleWarnings,
+    projectBlockers:projectId=>issueRelations.projectScheduleBlockers(projectId),
     commitChanges:(request,changes,dependencies,linkChanges)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true),
   });
   planScheduleShift.registerRoutes(app,{

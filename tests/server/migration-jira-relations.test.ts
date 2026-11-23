@@ -11,7 +11,8 @@ import { createApp } from '../../server/app.js';
 import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
   IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem,
-  ProjectWorkflow, ScheduleAnchorChange, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive, TeamScheduleBlocker,
+  ProjectWorkflow, ScheduleAnchorChange, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
+  SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -432,6 +433,88 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.ok(final.dependencies.some(dependency => dependency.id === local.id));
   assert.deepEqual((await f.backup()).issueRelations, archivedRelations);
   assert.deepEqual((await f.call<SourceReconciliationAudit>(auditPath)).targetContent.issueRelations, sourceAudit.targetContent.issueRelations);
+});
+
+test('project blocker batch can combine Jira proven direction with native blockers and rejects missing proof at apply', async t => {
+  const f = await fixture(t);
+  await f.importInitial([
+    sourceIssue('100'), sourceIssue('200', [link('810', '100', 'inward')]), sourceIssue('300'),
+  ]);
+  const workspace = await f.workspace();
+  const source = original(workspace, '100');
+  const successor = original(workspace, '200');
+  const other = original(workspace, '300');
+  const archivedOnly = await f.call<Issue>('/issues', 'POST', { projectId: source.projectId, title: '원본 근거 없이 보관한 차단' }, 201);
+  const backup = await f.backup();
+  const jira = backup.issueRelations.find(row => [source.id, successor.id].includes(row.sourceIssueId) &&
+    [source.id, successor.id].includes(row.targetIssueId));
+  assert.ok(jira, 'Expected the imported Jira relation between both local issues');
+  const proof = backup.sourceRecords.find(row => row.jiraRelationId === jira.id);
+  assert.ok(proof);
+  const unresolved: IssueRelation = { id: randomUUID(), sourceIssueId: archivedOnly.id,
+    targetIssueId: successor.id, type: 'Blocks', version: 1, createdAt: CREATED };
+  // The proof is authoritative even when a compatible backup retains inward source order.
+  [jira.sourceIssueId, jira.targetIssueId] = [successor.id, source.id];
+  backup.issueRelations.push(unresolved);
+  await f.call('/import', 'POST', { data: backup });
+
+  const path = '/schedule/blocker-links';
+  const list = () => f.call<{ items: TeamScheduleBlocker[]; offset: number; total: number }>(`${path}?projectId=${source.projectId}&offset=0`);
+  const add = (issue: Issue) => f.call<IssueRelation>(`/issues/${issue.id}/relations`, 'POST', {
+    otherIssueId: successor.id, type: 'blocks', direction: 'outgoing',
+  }, 201);
+  const preview = (relations: readonly IssueRelation[]) => f.call<SchedulePastePreview>(`${path}/preview`, 'POST', {
+    projectId: source.projectId, relations: relations.map(({ id, version }) => ({ id, version })),
+  });
+  const native = await add(other);
+  const duplicate = await add(source);
+  const samePair = (await list()).items.filter(row => row.sourceIssueId === source.id && row.targetIssueId === successor.id);
+  assert.deepEqual(samePair, [{ id: duplicate.id, sourceIssueId: source.id, targetIssueId: successor.id, version: duplicate.version }]);
+  const overshadowed = await preview([jira]);
+  assert.equal(overshadowed.previewId, null);
+  assert.ok(overshadowed.errors.length);
+  await f.call(`/issues/${source.id}/relations/${duplicate.id}?expectedVersion=${duplicate.version}`, 'DELETE');
+  const displayed = await list();
+  assert.equal(displayed.total, 2);
+  assert.equal(displayed.offset, 0);
+  assert.deepEqual(displayed.items.find(row => row.id === jira.id), {
+    id: jira.id, sourceIssueId: source.id, targetIssueId: successor.id, version: jira.version, origin: 'jira',
+  });
+  assert.deepEqual(displayed.items.find(row => row.id === native.id), {
+    id: native.id, sourceIssueId: other.id, targetIssueId: successor.id, version: native.version,
+  });
+  assert.ok(!(await preview([unresolved])).previewId);
+
+  const originalRelations = (await f.backup()).issueRelations;
+  const before = await f.workspace();
+  const reviewed = await preview([jira, native]);
+  assert.ok(reviewed.previewId);
+  assert.deepEqual(reviewed.errors, []);
+  assert.deepEqual(reviewed.dependencyChanges?.map(row => [row.predecessorKey, row.successorKey, row.after]), [
+    [source.key, successor.key, { type: 'FS', lagDays: 0 }],
+    [other.key, successor.key, { type: 'FS', lagDays: 0 }],
+  ]);
+  const result = await f.call<SchedulePasteApplyResult>(`${path}/apply`, 'POST', { previewId: reviewed.previewId });
+  assert.equal(result.dependencyChanges, 2);
+  assert.deepEqual(result.updated, []);
+  const committed = await f.workspace();
+  assert.deepEqual(committed.dependencies.filter(row => row.successorId === successor.id).map(row => row.predecessorId).sort(),
+    [source.id, other.id].sort());
+  assert.deepEqual((await f.backup()).issueRelations, originalRelations);
+  await f.call('/schedule/undo', 'POST', { undoId: result.undoId });
+  assert.deepEqual((await f.workspace()).dependencies, before.dependencies);
+
+  const stale = await preview([jira, native]);
+  assert.ok(stale.previewId);
+  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
+  } finally { database.close(); }
+  assert.deepEqual((await list()).items.map(row => row.id), [native.id]);
+  const afterProofLoss = await f.workspace();
+  await f.call(`${path}/apply`, 'POST', { previewId: stale.previewId }, 409);
+  assert.deepEqual(await f.workspace(), afterProofLoss);
+  assert.deepEqual((await f.backup()).issueRelations, originalRelations);
 });
 
 test('proven Jira blockers keep canonical direction in reports, release readiness and protected transitions', async t => {
