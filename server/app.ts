@@ -431,13 +431,32 @@ export function createApp(options: {
     while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=options?.moveParents?.get(parentId)??get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
     workflows.validateIssue(i,previous,options);return i;
   };
-  const validateDocument = (d: DocPage, previous?: DocPage, options: {allowMissing?: boolean;skipReferences?:boolean} = {}) => {
+  type DocumentParent = Pick<DocPage, 'id' | 'projectId' | 'parentId'>;
+  type ProjectedDocumentHierarchy = { documents: ReadonlyMap<string, DocumentParent>; validated: Set<string> };
+  const storedDocumentParent = store.db.prepare('SELECT id, project_id AS projectId, parent_id AS parentId FROM documents WHERE id=?');
+  const validateDocumentHierarchy = (document: DocumentParent, projected?: ProjectedDocumentHierarchy) => {
+    if (projected?.validated.has(document.id)) return;
+    const visited = new Set([document.id]);
+    const status = projected ? 409 : 400;
+    for (let parentId = document.parentId; parentId;) {
+      if (visited.has(parentId)) fail('문서 트리에 순환 관계가 있습니다.', status);
+      visited.add(parentId);
+      const parent = projected ? projected.documents.get(parentId) ??
+        (storedDocumentParent.get(parentId) as DocumentParent | undefined) ?? fail('이관할 상위 문서를 찾을 수 없습니다.', 409)
+        : get<DocPage>('documents', parentId);
+      if (parent.projectId !== document.projectId) fail('상위 문서는 같은 프로젝트에 있어야 합니다.', status);
+      if (projected?.validated.has(parentId)) break;
+      parentId = parent.parentId;
+    }
+    if (projected) for (const id of visited) projected.validated.add(id);
+  };
+  const validateDocument = (d: DocPage, previous?: DocPage, options: {allowMissing?: boolean;skipReferences?:boolean;
+    hierarchy?: ProjectedDocumentHierarchy} = {}) => {
     d.title=text(d.title,'문서 제목',300);if(d.projectId!==null)get('projects',d.projectId);get('users',d.authorId);
     normalizeDocumentMetadataLabels(d);
     const normalized=documentContent.normalize(d.content);d.content=normalized.content;d.plainText=normalized.plainText;if(!options.skipReferences)documentContent.validate(d.id,d.content,previous?.content,options);if(!['draft','published'].includes(d.status))fail('문서 상태를 확인해 주세요.');
     if(typeof d.icon!=='string'||d.icon.length>20)fail('아이콘을 확인해 주세요.');
-    let parentId=d.parentId;const visited=new Set([d.id]);
-    while(parentId){if(visited.has(parentId))fail('문서 트리에 순환 관계가 있습니다.');visited.add(parentId);const p=get<DocPage>('documents',parentId);if(p.projectId!==d.projectId)fail('상위 문서는 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
+    validateDocumentHierarchy(d, options.hierarchy);
     return d;
   };
   const revision = (d: DocPage, authorId: string, summary: string) => store.put('revisions',{id:uid(),documentId:d.id,version:d.version,title:d.title,content:d.content,plainText:d.plainText,authorId,createdAt:now(),summary});
@@ -725,9 +744,20 @@ export function createApp(options: {
       }
       const version = before.version + 1;
       if (!Number.isSafeInteger(version)) return fail('문서의 버전 범위를 초과했습니다.', 409);
-      const after = validateDocument({ ...before, ...update.changes, version, updatedAt: now() }, before, { skipReferences: true });
+      const after = { ...before, ...update.changes, version, updatedAt: now() };
+      if (Object.hasOwn(update.changes, 'parentId') && after.parentId !== null &&
+          (typeof after.parentId !== 'string' || !after.parentId)) {
+        return fail('이관할 상위 문서의 ID를 확인해 주세요.', 409);
+      }
       return { before, after, bodyChanged };
     });
+    const hasParentChange = prepared.some(({ before, after }) => before.parentId !== after.parentId);
+    const hierarchy: ProjectedDocumentHierarchy | undefined = hasParentChange ? {
+      documents: new Map([...value.documents, ...prepared.map(({ after }) => after)].map(document => [document.id, document])),
+      validated: new Set(),
+    } : undefined;
+    for (const { before, after } of prepared) validateDocument(after, before, { skipReferences: true, hierarchy });
+    if (hierarchy) for (const document of value.documents) validateDocumentHierarchy(document, hierarchy);
     documentContent.validateBatch([
       ...value.documents.map(({ id, content }) => ({ id, content })),
       ...prepared.map(({ before, after }) => ({ id: after.id, content: after.content, previousContent: before.content })),
@@ -878,7 +908,10 @@ export function createApp(options: {
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
       for (const document of value.documents) store.put('documents', document);
-      for (const { after } of refreshedDocuments) store.put('documents', after);
+      for (const { before, after } of refreshedDocuments) {
+        store.put('documents', after);
+        if (before.parentId !== after.parentId) documentOrders.trackMigratedParentChange(before, after);
+      }
       const firstDocument = value.documents[0];
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       validateDocumentListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
@@ -2806,6 +2839,9 @@ export function createApp(options: {
     }
     if (data.schemaVersion < 98 && importedSources.records.some(row => row.confluencePageBodySourceHash !== undefined)) {
       fail('Confluence 문서 원문의 비교 기준을 포함한 백업은 schemaVersion 98이 필요합니다.');
+    }
+    if (data.schemaVersion < 99 && importedSources.records.some(row => row.confluencePageFieldHashes?.parentId !== undefined)) {
+      fail('Confluence 상위 문서의 비교 기준을 포함한 백업은 schemaVersion 99가 필요합니다.');
     }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
     const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);

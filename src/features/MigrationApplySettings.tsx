@@ -51,7 +51,7 @@ const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
 function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>) {
   return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
 }
-const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문', labels: '라벨' };
+const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문', labels: '라벨', parentId: '상위 문서' };
 const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
 const appendLabels = {
   append: {
@@ -413,7 +413,7 @@ function ActorMigration(props: MigrationApplyProps) {
             같은 Jira 인스턴스에서 이관한 업무의 원본 관계를 검토합니다. 별도로 이관한 프로젝트 간 관계도 포함됩니다.
           </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
-            최신 원본의 제목·본문·라벨을 현재 문서와 비교합니다. 팀에서 바꾼 값은 유지하고, 원본 전체 목록을 확인한 경우에만 라벨을 삭제할 수 있습니다.
+            최신 원본의 제목·본문·라벨·상위 문서를 현재 문서와 비교합니다. 팀에서 바꾼 값은 유지하고, 원본 전체 목록을 확인한 경우에만 라벨을 삭제할 수 있습니다.
           </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} option="refreshAttachments" onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서에 첨부와 버전 추가">
             새 첨부와 원본 파일의 새 버전을 검토합니다. 팀이 올린 버전은 현재 파일로 유지합니다.
@@ -729,6 +729,7 @@ function ConfluenceRefreshReview({ rows, renderOriginal }: { rows: ConfluenceMig
       <RefreshFields label={`${row.title} 필드 변경`} product="Confluence" fields={row.fields.map(change => ({
         ...change, id: change.field, label: confluenceRefreshFieldLabels[change.field],
         ...(change.field === 'labels' && { incomingLabel: change.decision === 'apply' ? '반영할 라벨' : 'Confluence 라벨' }),
+        ...(change.field === 'parentId' && { currentLabel: '현재 위치', incomingLabel: '이관 제안 위치' }),
       }))} />
       {renderOriginal(row.recordId)}
     </article>} />
@@ -737,7 +738,7 @@ function ConfluenceRefreshReview({ rows, renderOriginal }: { rows: ConfluenceMig
 
 function RefreshFields({ label, product, fields }: {
   label: string; product: RefreshProduct;
-  fields: { id: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true; incomingLabel?: string }[];
+  fields: { id: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict'; formatOnly?: true; currentLabel?: string; incomingLabel?: string }[];
 }) {
   return <ul aria-label={label}>
     {fields.map(change => <li key={change.id} aria-label={change.label}>
@@ -746,7 +747,7 @@ function RefreshFields({ label, product, fields }: {
         <span className={change.decision === 'apply' ? 'is-apply' : 'is-conflict'}>{change.decision === 'apply' ? `${product} 값 반영` : '현재 값 유지'}</span>
       </div>
       {change.formatOnly && <small className="migration-refresh-format">본문 서식 또는 구조가 변경되었습니다.</small>}
-      <dl><div><dt>현재 값</dt><dd>{change.current || '비어 있음'}</dd></div><div><dt>{change.incomingLabel ?? `${product} 원본 값`}</dt><dd>{change.incoming || '비어 있음'}</dd></div></dl>
+      <dl><div><dt>{change.currentLabel ?? '현재 값'}</dt><dd>{change.current || '비어 있음'}</dd></div><div><dt>{change.incomingLabel ?? `${product} 원본 값`}</dt><dd>{change.incoming || '비어 있음'}</dd></div></dl>
     </li>)}
   </ul>;
 }

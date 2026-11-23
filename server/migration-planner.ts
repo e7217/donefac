@@ -7,6 +7,7 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
+import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
 import { hasConfluencePropertyMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
@@ -124,6 +125,14 @@ function confluenceSourceVersion(row: LegacyRecord): number | null {
 function newerConfluencePage(next: LegacyRecord, previous: LegacyRecord, timezone: string, previousTimezone: string): boolean {
   const nextVersion = confluenceSourceVersion(next), previousVersion = confluenceSourceVersion(previous);
   if (nextVersion !== null && previousVersion !== null) return nextVersion > previousVersion;
+  const nextTime = sourceTimestamp(next.updatedAt, timezone), previousTime = sourceTimestamp(previous.updatedAt, previousTimezone);
+  return nextTime !== null && previousTime !== null && nextTime > previousTime;
+}
+
+function laterConfluenceHierarchy(next: LegacyRecord, previous: LegacyRecord, timezone: string, previousTimezone: string): boolean {
+  const version = confluenceSourceVersion(next);
+  if (version === null || version !== confluenceSourceVersion(previous) || next.title.trim() !== previous.title.trim() ||
+      hasConfluenceBody(next) && hasConfluenceBody(previous) && next.text !== previous.text) return false;
   const nextTime = sourceTimestamp(next.updatedAt, timezone), previousTime = sourceTimestamp(previous.updatedAt, previousTimezone);
   return nextTime !== null && previousTime !== null && nextTime > previousTime;
 }
@@ -451,6 +460,7 @@ class Planner{
   private jiraRelationIds = new Map<string, string>();
   private jiraRelationProjectIds = new Set<string>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
+  private hierarchyDocuments = new Map<string, Pick<DocPage, 'id' | 'parentId' | 'title'>>();
   private confluenceBodySourceHashes = new Map<string, string>();
   private confluenceBodyReviews = new Map<string, ReturnType<typeof reviewNewerConfluenceBody>>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
@@ -1007,6 +1017,29 @@ class Planner{
     const page = this.boundPages.get(sourceId);
     return append && page?.projectId === append.project.id && page.sourceSpaceId === append.sourceSpaceId ? page : undefined;
   }
+  private confluenceParentLabel(id: string | null, fallback = '상위 문서 확인 불가',
+    changes?: ReadonlyMap<string, ConfluenceMigrationDocumentValues>): string {
+    if (id === null) return '최상위';
+    const path: string[] = [];
+    let pathLength = 0;
+    const seen = new Set<string>();
+    for (let current: string | null = id; current !== null && !seen.has(current);) {
+      seen.add(current);
+      const document: Pick<DocPage, 'parentId' | 'title'> | undefined = this.documentById.get(current) ?? this.hierarchyDocuments.get(current);
+      if (!document) break;
+      const update: ConfluenceMigrationDocumentValues | undefined = changes?.get(current);
+      const title = update?.title ?? document.title;
+      const nextLength = pathLength + title.length + (path.length ? 3 : 0);
+      if (path.length && nextLength > 300) {
+        path.push('…');
+        break;
+      }
+      path.push(title);
+      pathLength = nextLength;
+      current = update?.parentId === undefined ? document.parentId : update.parentId;
+    }
+    return path.length ? path.reverse().join(' / ') : fallback;
+  }
   private createConfluenceRefreshes(): void {
     const append = this.input.appendPages;
     if (!append || this.configuration.appendPagesTo?.refreshExisting !== true) return;
@@ -1019,6 +1052,7 @@ class Planner{
     }
     const review: ConfluenceMigrationDocumentReview[] = [];
     const updates: NonNullable<PreparedMigration['documentUpdates']> = [];
+    const parentLabels: { field: ConfluenceMigrationDocumentReview['fields'][number]; destination: string | null; fallback?: string }[] = [];
     const seen = new Set<string>();
     const excludedLabels = this.excludedConfluencePageLabels();
     let updatedDocumentFields = 0, conflictingDocumentFields = 0, skippedDocumentUpdates = 0;
@@ -1035,7 +1069,7 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_PAGE_UNAVAILABLE', '현재 문서 연결이나 접근 범위 또는 원본 자료를 확인할 수 없어 원본만 보관합니다.', 'warning', entry);
         continue;
       }
-      const { document, previous, previousTimezone } = candidate;
+      const { document, previous, previousTimezone, initialParentId } = candidate;
       if (seen.has(document.id)) {
         this.notice('CONFLUENCE_REFRESH_OVERLAPPING_PAGE', '같은 기존 문서의 기록이 겹칩니다. 패키지에서 적용할 페이지 기록 하나를 남겨 주세요.', 'error', entry);
         continue;
@@ -1047,7 +1081,9 @@ class Planner{
       const propertiesProjection = hasConfluenceBody(row) && hasConfluencePropertyMacro(row.text);
       const sameRevision = !newer && (row.metadata.labelSetComplete === true || originalChecklistFallback || propertiesProjection) && !sourceBodyErrors.has(entry.key) &&
         sameConfluencePageRevision(row, previous.record, timezone, previousTimezone);
-      if (!newer && !sameRevision) {
+      const sourceParent = confluenceParentEvidence(row);
+      const reviewParent = sourceParent !== undefined && (newer || laterConfluenceHierarchy(row, previous.record, timezone, previousTimezone));
+      if (!newer && !sameRevision && !reviewParent) {
         skippedDocumentUpdates++;
         this.notice('CONFLUENCE_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 버전 또는 수정 시각을 확인할 수 없어 원본만 보관합니다.', 'info', entry);
         continue;
@@ -1059,7 +1095,7 @@ class Planner{
       const bodyReview = this.confluenceBodyReviews.get(entry.key);
       let acceptedBody = bodyReview?.acceptedSourceHash ?? previous.confluencePageBodySourceHash;
       const incomingBody = confluencePageBodySourceHash(row);
-      const needsBodyReview = incomingBody !== undefined && (originalChecklistFallback ||
+      const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (originalChecklistFallback ||
         incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, { resolveReference: request => this.resolve(entry, request), sectionLinks: this.confluenceSectionLinks(entry, document.id),
@@ -1080,11 +1116,28 @@ class Planner{
       }
       const values: ConfluenceMigrationDocumentValues = {};
       if (newer && title && title.length <= 300) values.title = title;
+      let sourceParentLabel: string | undefined;
+      if (reviewParent) {
+        if (sourceParent === null) values.parentId = null;
+        else {
+          const resolved = this.confluencePage(entry, { sourceId: sourceParent });
+          const resolvedClass = resolved?.entry
+            ? resolved.entry.row.metadata.sourceClass : resolved && this.originalPage(resolved.sourceId)?.sourceClass;
+          if (resolved && resolvedClass === 'Page') {
+            values.parentId = resolved.reference.id;
+            sourceParentLabel = resolved.reference.label;
+          } else {
+            this.notice('CONFLUENCE_REFRESH_PARENT_UNAVAILABLE',
+              `원본 상위 페이지 ${sourceParent}의 같은 공간 내 연결을 확인할 수 없어 현재 위치를 보존합니다.`, 'warning', entry, true);
+          }
+        }
+      }
       if (safeBody) {
         values.content = safeBody.content;
         for (const diagnostic of safeBody.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
       }
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
+      if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = confluencePageFieldDigest('parentId', initialParentId);
       if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
         // For old receipts, the full original code block is the only proven baseline.
         hashes.content = confluencePageFieldDigest('content', document.content);
@@ -1093,7 +1146,7 @@ class Planner{
       const status = string(row.metadata.contentStatus).trim().toLowerCase();
       const labels = !status || status === 'current'
         ? this.confluenceDocumentLabels(entry, excludedLabels.get(entry.key), true) : { values: [], complete: false };
-      if (labels.complete) values.labels = labels.values;
+      if ((newer || sameRevision) && labels.complete) values.labels = labels.values;
       else if (newer && labels.values.length) {
         const present = new Set(currentLabels.map(documentLabelKey));
         const additions = labels.values.filter(label => !present.has(documentLabelKey(label)));
@@ -1123,11 +1176,15 @@ class Planner{
           continue;
         }
         const decision = currentHash === hashes[field] ? 'apply' : 'conflict';
-        const current = field === 'title' ? document.title : field === 'labels' ? currentLabels.join('\n') || '—' : document.plainText;
-        const incomingText = field === 'title' ? title : field === 'labels' ? values.labels!.join('\n') || '—' : safeBody!.plainText;
-        fields.push({ field, current: field === 'labels' ? current : confluenceReviewExcerpt(current),
+        const current = field === 'title' ? document.title : field === 'labels' ? currentLabels.join('\n') || '—'
+          : field === 'parentId' ? this.confluenceParentLabel(document.parentId) : document.plainText;
+        const incomingText = field === 'title' ? title : field === 'labels' ? values.labels!.join('\n') || '—'
+          : field === 'parentId' ? '' : safeBody!.plainText;
+        const reviewField: ConfluenceMigrationDocumentReview['fields'][number] = { field, current: field === 'labels' || field === 'parentId' ? current : confluenceReviewExcerpt(current),
           incoming: field === 'labels' ? incomingText : confluenceReviewExcerpt(incomingText), decision,
-          ...(field === 'content' && current === incomingText ? { formatOnly: true } : {}) });
+          ...(field === 'content' && current === incomingText ? { formatOnly: true } : {}) };
+        fields.push(reviewField);
+        if (field === 'parentId') parentLabels.push({ field: reviewField, destination: values.parentId ?? null, fallback: sourceParentLabel });
         if (field === 'labels' && sameRevision && decision === 'apply') this.notice('CONFLUENCE_REFRESH_LABEL_SAME_REVISION',
           '같은 페이지 버전의 라벨 목록을 비교했습니다. 반영 전에 내보내기 순서를 확인해 주세요.', 'warning', entry, true);
         if (decision === 'apply') {
@@ -1140,13 +1197,23 @@ class Planner{
           if (field === 'content') acceptedBody = incomingBody;
           checkpoint = true;
           updatedDocumentFields++;
-        } else conflictingDocumentFields++;
+        } else {
+          if (field === 'parentId' && hashes.parentId === undefined) this.notice('CONFLUENCE_REFRESH_PARENT_BASELINE_UNAVAILABLE',
+            '이전 이관에서 저장한 위치를 확인할 수 없어 현재 위치를 보존합니다.', 'warning', entry, true);
+          conflictingDocumentFields++;
+        }
       }
       if (fields.length) review.push({ documentId: document.id, title: document.title, sourceId: row.sourceId, recordId: entry.key, fields });
       if (Object.keys(accepted).length) updates.push({ documentId: document.id, expectedVersion: document.version, changes: accepted });
       if (checkpoint) {
         this.confluenceRefreshCheckpoints.set(entry.key, { document, hashes });
         if (acceptedBody) this.confluenceBodySourceHashes.set(entry.key, acceptedBody);
+      }
+    }
+    if (parentLabels.length) {
+      const changes = new Map(updates.map(update => [update.documentId, update.changes]));
+      for (const { field, destination, fallback } of parentLabels) {
+        field.incoming = this.confluenceParentLabel(destination, fallback, changes);
       }
     }
     if (conflictingDocumentFields) {
@@ -1171,6 +1238,7 @@ class Planner{
     this.result.appendPages = { projectId: append.project.id, token: append.token,
       ...(append.labelListScope ? { labelListInventory: true } : {}),
       ...(append.sectionInventory ? { sectionInventory: true } : {}) };
+    this.hierarchyDocuments = new Map((append.hierarchyDocuments ?? []).map(document => [document.id, document]));
     for (const page of append.knownPages) {
       this.boundPages.set(page.sourceId, page);
       if (page.sourceSpaceId !== append.sourceSpaceId) continue;

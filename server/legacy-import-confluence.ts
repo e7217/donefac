@@ -90,6 +90,10 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
     const original=ref(node,'originalVersion');if(original){row.metadata.originalVersionId=original;contentRef(row,type,original,'original-version');}
     const historicalIds=refs(node,'historicalVersions');if(historicalIds.length){row.metadata.historicalVersionIds=historicalIds;for(const historyId of historicalIds)contentRef(row,type,historyId,'historical-version');}
     const ancestors=refs(node,'ancestors');if(ancestors.length){row.metadata.ancestorIds=ancestors;for(const ancestor of ancestors)addReference(row,'page',ancestor,'ancestor');}
+    if(type==='Page'&&kind==='page'){
+      const parentEvidence=confluencePageParentEvidence(node,id);
+      if(parentEvidence!==undefined)row.metadata.confluenceParentSourceId=parentEvidence;
+    }
     if(type==='Comment'||type==='Attachment'){
       const ownerNode=property(node,'containerContent')??property(node,'content')??property(node,'page'),ownerId=idOf(ownerNode),ownerType=ownerNode?objectClass(ownerNode)||'Page':'Page';
       if(ownerId){row.containerId=ownerId;row.metadata.containerClass=ownerType;contentRef(row,ownerType,ownerId,'container-content');}
@@ -155,10 +159,55 @@ function exactLabelObjectId(node: LegacyXmlNode): string {
   return ids.length === 1 ? exactNamedId(ids[0]) : '';
 }
 
-function exactLabelReferenceId(node: LegacyXmlNode | undefined): string {
+function exactReferenceId(node: LegacyXmlNode | undefined): string {
   if (!node || node.text.trim() || node.children.length !== 1) return '';
   if (Object.keys(node.attributes).some(name => name !== 'class' && name !== 'package' && name !== 'name')) return '';
   return exactNamedId(node.children[0]);
+}
+
+const confluenceNumericId = /^[1-9]\d{0,18}$/u;
+const confluenceCollectionClasses = new Set(['java.util.List', 'java.util.Collection', 'java.util.Set']);
+
+function exactHierarchyReference(node: LegacyXmlNode | undefined, type: 'Page' | 'Space'): string | undefined {
+  if (!node) return;
+  const expectedPackage = type === 'Page' ? 'com.atlassian.confluence.pages' : 'com.atlassian.confluence.spaces';
+  const { class: sourceClass, package: sourcePackage } = node.attributes;
+  if (sourceClass !== type && sourceClass !== `${expectedPackage}.${type}` || sourcePackage !== undefined && sourcePackage !== expectedPackage) return;
+  const id = exactReferenceId(node);
+  return confluenceNumericId.test(id) ? id : undefined;
+}
+
+function confluencePageParentEvidence(node: LegacyXmlNode, id: string): string | null | undefined {
+  const status = property(node, 'contentStatus');
+  if (!confluenceNumericId.test(id) || !exactHierarchyReference(property(node, 'space'), 'Space') ||
+      status && (status.children.length || !['', 'current'].includes(status.text.trim().toLowerCase())) ||
+      collection(node, 'parent') || property(node, 'parentComment') || property(node, 'ancestors')) return;
+
+  const parent = property(node, 'parent');
+  const declaredAncestors = collection(node, 'ancestors');
+  const ancestorIds = new Set<string>();
+  if (declaredAncestors) {
+    const { class: sourceClass } = declaredAncestors.attributes;
+    if (declaredAncestors.text.trim() || Object.keys(declaredAncestors.attributes).some(attribute => attribute !== 'name' && attribute !== 'class') ||
+        sourceClass !== undefined && !confluenceCollectionClasses.has(sourceClass)) return;
+    for (const ancestor of declaredAncestors.children) {
+      const ancestorId = ancestor.name === 'element' && exactHierarchyReference(ancestor, 'Page');
+      if (!ancestorId || ancestorId === id || ancestorIds.has(ancestorId)) return;
+      ancestorIds.add(ancestorId);
+    }
+  }
+
+  const parentId = exactHierarchyReference(parent, 'Page');
+  if (parentId) {
+    return parentId !== id && (!declaredAncestors || ancestorIds.has(parentId)) ? parentId : undefined;
+  }
+  if (ancestorIds.size) return;
+  if (!parent) return declaredAncestors ? null : undefined;
+  // An omitted parent can mean a partial export. Root requires an explicit empty property or ancestor collection.
+  const [nullNode] = parent.children;
+  if (!parent.text.trim() && Object.keys(parent.attributes).length === 1 &&
+      (!nullNode || parent.children.length === 1 && nullNode.name === 'null' && !nullNode.text.trim() &&
+        !nullNode.children.length && !Object.keys(nullNode.attributes).length)) return null;
 }
 
 function labelCollectionKeys(node: LegacyXmlNode, resolve: (element: LegacyXmlNode) => string): { keys: Set<string>; complete: boolean } {
@@ -215,8 +264,8 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
       message: '레이블과 콘텐츠의 연결을 확정할 수 없습니다.', recordId: `relation:${item.type}:${item.id}`, path });
 
     if (ownerKey && owner && exactLabelObjectId(item.node) === item.id && labelNode && objectClass(labelNode) === 'Label' &&
-        exactLabelObjects.has(exactLabelReferenceId(labelNode)) &&
-        contents.every(node => `${objectClass(node)}:${exactLabelReferenceId(node)}` === ownerKey)) {
+        exactLabelObjects.has(exactReferenceId(labelNode)) &&
+        contents.every(node => `${objectClass(node)}:${exactReferenceId(node)}` === ownerKey)) {
       const links = associations.get(ownerKey) ?? new Map<string, string>();
       links.set(`${item.type}:${item.id}`, labelId);
       associations.set(ownerKey, links);
@@ -242,7 +291,7 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
         exactLabelObjectId(object.node) !== object.id) continue;
     const proven = associations.get(key) ?? new Map<string, string>();
     const directIds = direct && labelCollectionKeys(direct, element => {
-      const id = exactLabelReferenceId(element);
+      const id = exactReferenceId(element);
       return objectClass(element) === 'Label' && exactLabelObjects.has(id) ? id : '';
     });
     const provenLabels = new Set(proven.values());
@@ -252,7 +301,7 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     if (!direct && !indirect || uncertainOwners.has(key)) continue;
     const indirectIds = indirect && labelCollectionKeys(indirect, element => {
       const type = objectClass(element);
-      const key = `${type}:${exactLabelReferenceId(element)}`;
+      const key = `${type}:${exactReferenceId(element)}`;
       return labelAssociationTypes.has(type) && proven.has(key) ? key : '';
     });
     if (directIds?.complete === false || indirectIds?.complete === false || property(object.node, 'labels') || property(object.node, 'labellings')) continue;

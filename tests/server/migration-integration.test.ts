@@ -1530,6 +1530,95 @@ test('incremental Confluence imports reuse live parents and references while pre
   assert.deepEqual(receipts.find(receipt => receipt.id === applied.data.import.id)?.configuration.appendPagesTo, { projectId });
 });
 
+test('Confluence parent refresh proves the original placement after format 98 restore and checks source freshness', async t => {
+  const origin = await fixture(), target = await fixture();
+  t.after(() => Promise.all([origin.close(), target.close()]));
+  const page = (id: number, title: string, version: number, day: string, parent?: number) => `
+    <object class="Page"><id name="id">${id}</id><property name="title">${title}</property><property name="version">${version}</property>
+      <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-${day}T00:00:00Z</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      ${parent === undefined ? '' : `<property name="parent" class="Page"><id name="id">${parent}</id></property>`}
+    </object>`;
+  const upload = (workspace: MigrationFixture, name: string, pages: string[]) => workspace.upload(zip([{ path: 'entities.xml',
+    bytes: Buffer.from(`<hibernate-generic><object class="Space"><id name="id">42</id><property name="key">TREE</property>
+      <property name="name">이관 문서 트리</property></object>${pages.join('')}</hibernate-generic>`),
+  }]), `${name}.zip`, 'confluence', 'synthetic-confluence-hierarchy-baseline');
+  const staged = await upload(origin, 'initial-hierarchy', [page(10, '처음 상위', 1, '02'), page(20, '새 상위', 1, '02'),
+    page(30, '위치를 이동할 문서', 5, '02', 10), page(31, '상위를 생략한 문서', 5, '02', 10),
+    page(32, '상위를 찾지 못한 문서', 5, '02', 10), page(33, '팀에서 옮긴 문서', 5, '02', 40)]);
+  const otherPackage = await upload(origin, 'initial-hierarchy-other', [page(40, '별도 패키지의 상위', 1, '02')]);
+  const initialPreview = await origin.preview(await origin.configuration([staged, otherPackage], 'TREE'));
+  assert.ok(initialPreview.notices.some(notice => notice.code === 'PARENT_NOT_IMPORTED' && notice.recordId === `${staged.id}/page:33`));
+  const initial = await origin.apply(initialPreview);
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await origin.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, 99);
+  const initialDocuments = backup.documents.filter(document => document.projectId === projectId);
+  const originalParent = initialDocuments.find(document => document.title === '처음 상위')!;
+  const destination = initialDocuments.find(document => document.title === '새 상위')!;
+  const subject = initialDocuments.find(document => document.title === '위치를 이동할 문서')!;
+  const otherParent = initialDocuments.find(document => document.title === '별도 패키지의 상위')!;
+  const locallyMoved = initialDocuments.find(document => document.title === '팀에서 옮긴 문서')!;
+  assert.equal(subject.parentId, originalParent.id);
+  assert.equal(locallyMoved.parentId, null);
+  const old = { ...backup, schemaVersion: 98 };
+  assert.equal((await target.call('/import', 'POST', { data: old })).status, 400);
+  for (const receipt of old.sourceImports) delete receipt.integrity;
+  for (const record of old.sourceRecords) if (record.confluencePageFieldHashes) delete record.confluencePageFieldHashes.parentId;
+  const restored = await target.call('/import', 'POST', { data: old });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  const teamMove = await target.call<DocPage>(`/documents/${locallyMoved.id}`, 'PATCH', {
+    expectedVersion: locallyMoved.version, parentId: otherParent.id,
+  });
+  assert.equal(teamMove.status, 200, JSON.stringify(teamMove.data));
+
+  async function preview(packageSummary: LegacyPackageSummary) {
+    return target.preview({ ...await target.configuration(packageSummary, 'TREE'), appendPagesTo: { projectId, refreshExisting: true } });
+  }
+  const followUp = await upload(target, 'newer-hierarchy', [page(30, subject.title, 5, '03', 20),
+    page(31, '제목만 갱신한 문서', 6, '03'), page(32, '확인할 상위가 없는 문서', 6, '03', 999),
+    page(33, locallyMoved.title, 6, '03', 20)]);
+  const reviewed = await preview(followUp);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  assert.ok(reviewed.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_PARENT_UNAVAILABLE'));
+  assert.deepEqual(reviewed.documentRefresh?.find(row => row.sourceId === '30')?.fields,
+    [{ field: 'parentId', current: originalParent.title, incoming: destination.title, decision: 'apply' }]);
+  assert.deepEqual(reviewed.documentRefresh?.find(row => row.sourceId === '33')?.fields,
+    [{ field: 'parentId', current: otherParent.title, incoming: destination.title, decision: 'conflict' }]);
+  assert.ok(reviewed.notices.some(notice => notice.code === 'CONFLUENCE_REFRESH_PARENT_BASELINE_UNAVAILABLE' &&
+    notice.recordId === `${followUp.id}/page:33`));
+  for (const id of ['31', '32']) assert.deepEqual(reviewed.documentRefresh?.find(row => row.sourceId === id)?.fields.map(field => field.field), ['title']);
+  const applied = await target.apply(reviewed);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const after = (await target.call<Backup>('/export')).data;
+  assert.equal(after.documents.find(document => document.id === subject.id)?.parentId, destination.id);
+  assert.equal(after.documents.find(document => document.id === locallyMoved.id)?.parentId, otherParent.id);
+  assert.equal(after.documents.find(document => document.title === '제목만 갱신한 문서')?.parentId, originalParent.id);
+  assert.equal(after.documents.find(document => document.title === '확인할 상위가 없는 문서')?.parentId, originalParent.id);
+  assert.match(after.sourceRecords.find(row => row.sourceImportId === applied.data.import.id && row.targetId === subject.id)?.confluencePageFieldHashes?.parentId ?? '', /^[a-f0-9]{64}$/u);
+
+  const equalTime = await upload(target, 'equal-time-hierarchy', [page(30, subject.title, 5, '03', 10)]);
+  const unproven = await preview(equalTime);
+  assert.equal(unproven.canApply, false);
+  assert.deepEqual(unproven.documentRefresh, []);
+  assert.equal((await target.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === subject.id)?.parentId, destination.id);
+
+  const native = await fixture();
+  t.after(() => native.close());
+  const restoredCurrent = await native.call('/import', 'POST', { data: after });
+  assert.equal(restoredCurrent.status, 200, JSON.stringify(restoredCurrent.data));
+  const later = await upload(native, 'after-format-99-restore', [page(30, subject.title, 6, '04', 10)]);
+  const reviewAfterRestore = await native.preview({ ...await native.configuration(later, 'TREE'), appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(reviewAfterRestore.canApply, true, JSON.stringify(reviewAfterRestore.notices));
+  assert.deepEqual(reviewAfterRestore.documentRefresh?.[0].fields, [
+    { field: 'parentId', current: destination.title, incoming: originalParent.title, decision: 'apply' },
+  ]);
+  assert.equal((await native.apply(reviewAfterRestore)).status, 201);
+  assert.equal((await native.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === subject.id)?.parentId, originalParent.id);
+});
+
 test('reviewed Confluence deltas preserve local edits, guard collaborative sessions and restore the comparison baseline', async t => {
   const initial = await fixture(), f = await fixture();
   const sockets = new Set<WebSocket>();
@@ -1867,7 +1956,10 @@ test('Confluence retained title and body changes survive partial receipts and po
   const oldBackup = structuredClone(backup);
   oldBackup.schemaVersion = 97;
   for (const receipt of oldBackup.sourceImports) delete receipt.integrity;
-  for (const row of oldBackup.sourceRecords) delete row.confluencePageBodySourceHash;
+  for (const row of oldBackup.sourceRecords) {
+    delete row.confluencePageBodySourceHash;
+    if (row.confluencePageFieldHashes) delete row.confluencePageFieldHashes.parentId;
+  }
   const oldRestore = await older.call('/import', 'POST', { data: oldBackup });
   assert.equal(oldRestore.status, 200, JSON.stringify(oldRestore.data));
 
@@ -1955,6 +2047,7 @@ test('Confluence layouts migrate through HTTP and upgrade exact former projectio
   for (const record of backup.sourceRecords) {
     delete record.confluencePageBodySourceHash;
     if (record.targetId === documents[0].id && record.confluencePageFieldHashes) {
+      delete record.confluencePageFieldHashes.parentId;
       record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(previous.get(documents[0].id)!.content)])));
     } else if (record.targetId && previous.has(record.targetId)) delete record.confluencePageFieldHashes;
   }
@@ -2038,6 +2131,7 @@ test('Confluence excerpt migration upgrades verified older projections while pre
   for (const record of backup.sourceRecords) {
     delete record.confluencePageBodySourceHash;
     if (record.targetId === stored.id && record.confluencePageFieldHashes) {
+      delete record.confluencePageFieldHashes.parentId;
       record.confluencePageFieldHashes.content = hash(Buffer.from(JSON.stringify(['content', JSON.stringify(priorInclude.content)])));
     } else delete record.confluencePageFieldHashes;
   }

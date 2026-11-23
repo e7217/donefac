@@ -1200,6 +1200,105 @@ test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 
   }
 });
 
+test('360px에서 Confluence 상위 문서 변경을 검토하고 문서 트리에 반영한다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const token = suffix(), instance = `refresh-confluence-parents-${token}`, spaceKey = `CF${token}`;
+  const oldParent = `기존 상위 문서 ${token}`, newParent = `새 상위 문서 ${token}`, localParent = `팀의 상위 문서 ${token}`;
+  const movingTitle = `원본에서 옮긴 문서 ${token}`, editedTitle = `팀에서 옮긴 문서 ${token}`;
+  const topLevelTitle = `최상위로 옮긴 문서 ${token}`;
+  const body = '배치가 바뀌는 문서의 저장 본문';
+  const sourcePage = (id: number, title: string, version: number, parentId?: number | null) => `
+    <object class="Page"><id name="id">${id}</id><property name="title">${title}</property><property name="version">${version}</property>
+      <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-0${version + 1}T00:00:00Z</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      ${parentId === undefined ? '' : parentId === null ? '<property name="parent"/>' : `<property name="parent" class="Page"><id name="id">${parentId}</id></property>`}</object>
+    <object class="BodyContent"><id name="id">${id + 300}</id><property name="body"><![CDATA[<p>${body}</p>]]></property>
+      <property name="content" class="Page"><id name="id">${id}</id></property></object>`;
+  const exportSpace = (...pages: string[]) => zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">원본 문서 공간 ${token}</property></object>
+    ${pages.join('\n')}
+  </hibernate-generic>`) }]);
+  const snapshot = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const staged: LegacyPackageSummary[] = [];
+
+  try {
+    const original = await upload(request, `page-parents-original-${token}.zip`, exportSpace(
+      sourcePage(100, oldParent, 1), sourcePage(101, newParent, 1), sourcePage(102, localParent, 1),
+      sourcePage(200, movingTitle, 1, 100), sourcePage(201, editedTitle, 1, 100), sourcePage(202, topLevelTitle, 1, 100),
+    ), instance);
+    staged.push(original);
+    const initial = await importIntoProject(request, original, `WIK${token}`, `이관 위치 검토 ${token}`);
+    const [projectId] = initial.import.projectIds;
+    const workspace = await snapshot();
+    const imported = (title: string) => workspace.documents.find(document => document.projectId === projectId && document.title === title)!;
+    const oldParentId = imported(oldParent).id, newParentId = imported(newParent).id, localParentId = imported(localParent).id;
+    const moving = imported(movingTitle), edited = imported(editedTitle), topLevel = imported(topLevelTitle);
+    expect(moving.parentId).toBe(oldParentId);
+    expect(edited.parentId).toBe(oldParentId);
+    expect(topLevel.parentId).toBe(oldParentId);
+
+    const localEdit = await request.patch(`/api/documents/${edited.id}`, { data: { expectedVersion: edited.version, parentId: localParentId } });
+    expect(localEdit.status(), await localEdit.text()).toBe(200);
+    const savedLocal = await localEdit.json() as DocPage;
+    expect(savedLocal.parentId).toBe(localParentId);
+
+    const next = await upload(request, `page-parents-next-${token}.zip`, exportSpace(
+      sourcePage(200, movingTitle, 2, 101), sourcePage(201, editedTitle, 2, 101), sourcePage(202, topLevelTitle, 2, null),
+    ), instance);
+    staged.push(next);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, next.filename);
+    await settings.getByLabel('이관 방식', { exact: true }).selectOption('append-pages');
+    await settings.getByRole('checkbox', { name: '기존 Confluence 문서 변경분 반영', exact: true }).check();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts).toMatchObject({ documents: 0, updatedDocuments: 2, updatedDocumentFields: 2, conflictingDocumentFields: 1 });
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const changes = review.getByRole('region', { name: '기존 Confluence 문서 변경 검토', exact: true });
+    const location = (title: string) => changes.getByRole('article', { name: title, exact: true }).getByRole('listitem', { name: '상위 문서', exact: true });
+    const movingLocation = location(movingTitle), editedLocation = location(editedTitle), topLevelLocation = location(topLevelTitle);
+    await expect(movingLocation).toContainText('Confluence 값 반영');
+    await expect(movingLocation.locator('dl > div').filter({ hasText: '현재 위치' })).toContainText(oldParent);
+    await expect(movingLocation.locator('dl > div').filter({ hasText: '이관 제안 위치' })).toContainText(newParent);
+    await expect(editedLocation).toContainText('현재 값 유지');
+    await expect(editedLocation.locator('dl > div').filter({ hasText: '현재 위치' })).toContainText(localParent);
+    await expect(editedLocation.locator('dl > div').filter({ hasText: '이관 제안 위치' })).toContainText(newParent);
+    await expect(topLevelLocation).toContainText('Confluence 값 반영');
+    await expect(topLevelLocation.locator('dl > div').filter({ hasText: '이관 제안 위치' }).locator('dd')).toHaveText('최상위');
+    const bounds = await changes.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    await acknowledge(review, plan);
+    const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const response = await applied;
+    expect(response.status(), await response.text()).toBe(201);
+    await expect(settings.getByRole('heading', { name: '기존 프로젝트의 Confluence 이관 결과', exact: true })).toBeVisible();
+
+    const after = await snapshot();
+    expect(after.documents.find(document => document.id === moving.id)).toMatchObject({ parentId: newParentId, plainText: body, version: moving.version + 1 });
+    expect(after.documents.find(document => document.id === edited.id)).toEqual(savedLocal);
+    expect(after.documents.find(document => document.id === topLevel.id)).toMatchObject({ parentId: null, plainText: body, version: topLevel.version + 1 });
+
+    await page.goto(`/#/${projectId}/documents/${moving.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(movingTitle);
+    const tree = page.getByRole('complementary', { name: '문서 목록', exact: true });
+    const branch = (title: string) => tree.locator('.docs-tree-row').filter({ has: page.getByText(title, { exact: true }) }).locator('..');
+    await expect(branch(newParent).getByText(movingTitle, { exact: true })).toBeVisible();
+    await expect(branch(oldParent).getByText(movingTitle, { exact: true })).toHaveCount(0);
+    await expect(branch(localParent).getByText(editedTitle, { exact: true })).toBeVisible();
+    await expect(tree.getByText(topLevelTitle, { exact: true })).toBeVisible();
+    await expect(branch(oldParent).getByText(topLevelTitle, { exact: true })).toHaveCount(0);
+  } finally {
+    for (const pack of staged) await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`);
+  }
+});
+
 test('360px에서 Confluence 라벨의 추가와 삭제를 검토하고 팀에서 바꾼 라벨을 보존한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

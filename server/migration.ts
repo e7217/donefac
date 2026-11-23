@@ -8,6 +8,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { buildMigrationOptions } from './migration-planner.js';
+import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
 import { hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
   remapMappingConfiguration, resolveMappingPackages, restoreMappedUsers } from './migration-mapping.js';
@@ -26,7 +27,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 7;
+const conversionVersion = 8;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -503,6 +504,7 @@ export class MigrationService {
     const boundPages: MigrationPageAppendContext['knownPages'] = this.store.db.prepare(`WITH page_origins AS (
       SELECT binding.source_alias AS sourceId, binding.target_id AS documentId, document.project_id AS projectId,
         json_extract(archive.json,'$.record.containerId') AS sourceSpaceId,
+        json_extract(archive.json,'$.record.metadata.sourceClass') AS sourceClass,
         json_extract(archive.json,'$.record.title') AS sourceTitle
       FROM source_bindings AS binding
       LEFT JOIN documents AS document ON document.id=binding.target_id
@@ -513,9 +515,10 @@ export class MigrationService {
     ), bound_pages AS (
       SELECT sourceId, documentId, projectId,
         CASE WHEN COUNT(DISTINCT sourceSpaceId)=1 THEN MAX(sourceSpaceId) END AS sourceSpaceId,
+        CASE WHEN COUNT(DISTINCT sourceClass)=1 THEN MAX(sourceClass) END AS sourceClass,
         CASE WHEN COUNT(DISTINCT sourceTitle)=1 THEN MAX(sourceTitle) ELSE '' END AS sourceTitle
       FROM page_origins GROUP BY sourceId, documentId, projectId
-    ) SELECT bound.sourceId, bound.documentId, bound.projectId, bound.sourceSpaceId,
+    ) SELECT bound.sourceId, bound.documentId, bound.projectId, bound.sourceSpaceId, bound.sourceClass,
       COALESCE((SELECT json_extract(snapshot.json,'$.record.title')
       FROM source_records AS snapshot JOIN source_imports AS receipt ON receipt.id=snapshot.import_id
       WHERE bound.sourceSpaceId=? AND snapshot.target_type='document' AND snapshot.target_id=bound.documentId
@@ -556,12 +559,12 @@ export class MigrationService {
     const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, attachmentDigest);
     const knownHistory = configuration.appendPagesTo.refreshHistory
       ? this.confluenceKnownHistory(packages, knownPages, destination, digest) : undefined;
-    const refreshDocuments = configuration.appendPagesTo.refreshExisting
+    const refreshContext = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
       ...(labelListScope ? { labelListScope } : {}),
       ...(hasSectionLinks ? { sectionInventory: true } : {}),
-      ...(refreshDocuments ? { refreshDocuments } : {}), ...(knownHistory ? { knownHistory } : {}) };
+      ...refreshContext, ...(knownHistory ? { knownHistory } : {}) };
   }
   private confluenceKnownHistory(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
     { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>):
@@ -686,14 +689,31 @@ export class MigrationService {
     return null;
   }
   private confluenceRefreshDocuments(packages: MigrationPackage[], configuration: MigrationConfiguration, knownPages: MigrationPageAppendContext['knownPages'],
-    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationPageAppendContext['refreshDocuments']> {
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>):
+    Required<Pick<MigrationPageAppendContext, 'refreshDocuments' | 'hierarchyDocuments'>> {
     const live = new Map(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId)
       .map(page => [page.sourceId, page.documentId]));
     const excluded = new Set(configuration.excludedRecords);
     const selected = new Set<string>();
+    const parentEvidence = new Set<string>();
+    const hierarchyAnchors = new Set<string>();
+    const newPageParents = new Set<string>();
     for (const { summary, dataset } of packages) for (const row of dataset.records) {
-      if (row.kind === 'page' && live.has(row.sourceId) && !excluded.has(`${summary.id}/${row.id}`)) selected.add(row.sourceId);
+      if (row.kind !== 'page' || excluded.has(`${summary.id}/${row.id}`)) continue;
+      const existing = live.get(row.sourceId);
+      if (existing) selected.add(row.sourceId);
+      else if (row.parentId) {
+        const parent = live.get(row.parentId);
+        if (parent) newPageParents.add(parent);
+      }
+      const parentEvidenceId = confluenceParentEvidence(row);
+      if (!existing || parentEvidenceId === undefined) continue;
+      parentEvidence.add(row.sourceId);
+      hierarchyAnchors.add(existing);
+      const parent = parentEvidenceId && live.get(parentEvidenceId);
+      if (parent) hierarchyAnchors.add(parent);
     }
+    if (parentEvidence.size) for (const parent of newPageParents) hierarchyAnchors.add(parent);
     if (selected.size > MAX_REFRESH_DOCUMENTS) fail(413, '기존 Confluence 문서의 변경은 한 번에 300개까지 검토할 수 있습니다. 패키지를 나누어 주세요.');
 
     const currentDocument = this.store.db.prepare('SELECT json FROM documents WHERE id=? AND project_id=?');
@@ -703,6 +723,34 @@ export class MigrationService {
         AND snapshot.kind='page' AND snapshot.source_id=? AND json_extract(snapshot.json,'$.record.containerId')=?
         AND json_extract(snapshot.json,'$.targetProjectId')=?
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, snapshot.id DESC LIMIT 1`);
+    const originalPage = this.store.db.prepare(`SELECT snapshot.import_id AS importId, binding.import_id AS bindingImportId,
+      julianday(json_extract(receipt.json,'$.createdAt')) AS stamp,
+      json_extract(snapshot.json,'$.packageSha256') AS packageSha256,
+      json_type(snapshot.json,'$.record.parentId') AS parentType,
+      json_extract(snapshot.json,'$.record.parentId') AS parentSourceId
+      FROM source_records AS snapshot JOIN source_imports AS receipt ON receipt.id=snapshot.import_id
+      JOIN source_bindings AS binding ON binding.product=snapshot.product AND binding.source_instance=snapshot.source_instance
+        AND binding.kind=snapshot.kind AND binding.source_alias=snapshot.source_id AND binding.target_type=snapshot.target_type
+        AND binding.target_id=snapshot.target_id
+      WHERE snapshot.target_type='document' AND snapshot.target_id=? AND snapshot.product='confluence' AND snapshot.source_instance=?
+        AND snapshot.kind='page' AND snapshot.source_id=? AND json_extract(snapshot.json,'$.record.containerId')=?
+        AND json_extract(snapshot.json,'$.targetProjectId')=? AND json_extract(snapshot.json,'$.record.metadata.sourceClass')='Page'
+      ORDER BY stamp, snapshot.id LIMIT 2`);
+    const originalParent = this.store.db.prepare(`SELECT DISTINCT parent.target_id AS id FROM source_records AS parent
+      WHERE parent.import_id=? AND parent.product='confluence' AND parent.source_instance=? AND parent.kind='page' AND parent.source_id=?
+        AND json_extract(parent.json,'$.packageSha256')=? AND parent.target_type='document' AND json_extract(parent.json,'$.record.containerId')=?
+        AND json_extract(parent.json,'$.targetProjectId')=? AND json_extract(parent.json,'$.record.metadata.sourceClass')='Page' LIMIT 2`);
+    const initialParent = (documentId: string, sourceId: string): string | null | undefined => {
+      const [first, next] = originalPage.all(documentId, instanceKey, sourceId, sourceSpaceId, project.id) as
+        { importId: string; bindingImportId: string; stamp: number; packageSha256: string; parentType: string | null; parentSourceId: string | null }[];
+      if (!first || first.importId !== first.bindingImportId || first.stamp === next?.stamp) return undefined;
+      // A page created from an archived root had no native parent even if the export omitted the property.
+      if (first.parentType === 'null') return null;
+      if (first.parentType !== 'text' || !first.parentSourceId) return undefined;
+      // A new-project import only resolved parents within the child's own package.
+      const resolved = originalParent.all(first.importId, instanceKey, first.parentSourceId, first.packageSha256, sourceSpaceId, project.id) as { id: string }[];
+      return resolved.length === 1 && resolved[0].id !== documentId ? resolved[0].id : undefined;
+    };
     const candidates: NonNullable<MigrationPageAppendContext['refreshDocuments']> = [];
     let bytes = 0;
     digest.update('\nconfluence-refresh\n');
@@ -715,10 +763,28 @@ export class MigrationService {
       bytes += Buffer.byteLength(current.json) + Buffer.byteLength(previous.json);
       if (bytes > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Confluence 원본이 64MiB를 넘습니다. 패키지를 나누어 주세요.');
       digest.update(current.json).update('\n').update(previous.json).update('\n').update(JSON.stringify(previous.timezone)).update('\n');
-      candidates.push({ document: JSON.parse(current.json) as DocPage, previous: JSON.parse(previous.json) as SourceRecordArchive,
-        previousTimezone: previous.timezone });
+      const archive = JSON.parse(previous.json) as SourceRecordArchive;
+      const initialParentId = parentEvidence.has(sourceId) && archive.confluencePageFieldHashes?.parentId === undefined
+        ? initialParent(documentId, sourceId) : undefined;
+      if (initialParentId !== undefined) digest.update(JSON.stringify(['initial-parent', documentId, initialParentId])).update('\n');
+      candidates.push({ document: JSON.parse(current.json) as DocPage, previous: archive,
+        previousTimezone: previous.timezone, ...(initialParentId !== undefined ? { initialParentId } : {}) });
     }
-    return candidates;
+    const hierarchyDocuments = hierarchyAnchors.size ? this.store.db.prepare(`WITH RECURSIVE ancestors(id) AS (
+      SELECT value FROM json_each(?)
+      UNION
+      SELECT document.parent_id FROM documents AS document JOIN ancestors ON ancestors.id=document.id
+        WHERE document.project_id=? AND document.parent_id IS NOT NULL
+    ) SELECT document.id, document.parent_id AS parentId, json_extract(document.json,'$.title') AS title,
+      json_extract(document.json,'$.version') AS version FROM documents AS document JOIN ancestors ON ancestors.id=document.id
+      WHERE document.project_id=? ORDER BY document.id`).all(JSON.stringify([...hierarchyAnchors]), project.id, project.id) as
+      NonNullable<MigrationPageAppendContext['hierarchyDocuments']> : [];
+    if (hierarchyDocuments.length) {
+      const hierarchy = JSON.stringify(['document-hierarchy', hierarchyDocuments]);
+      if (bytes + Buffer.byteLength(hierarchy) > MAX_REFRESH_BYTES) fail(413, '검토에 필요한 기존 Confluence 원본과 상위 문서가 64MiB를 넘습니다. 패키지를 나누어 주세요.');
+      digest.update(hierarchy);
+    }
+    return { refreshDocuments: candidates, hierarchyDocuments };
   }
   private fileSpec(summary: LegacyPackageSummary): MigrationSourceFile {
     return { id: summary.id, filename: summary.filename, sha256: summary.sha256, path: join(this.dataDir, 'legacy-imports', `${summary.id}.bundle`) };

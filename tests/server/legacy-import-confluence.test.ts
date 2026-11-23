@@ -19,6 +19,47 @@ const refHas=(row:LegacyRecord,kind:string,sourceId:string,relation:string)=>row
 const page=(id:string,title:string,extra='')=>object('Page',id,p('title',title)+p('version','1')+p('contentStatus','current')+r('space','Space','42')+extra);
 const space=object('Space','42',p('key','TEAM')+p('name','합성 공간'));
 
+test('current-page hierarchy evidence distinguishes explicit roots from missing or contradictory XML', () => {
+  const emptyParent = '<property name="parent"/>';
+  const explicitNull = '<property name="parent"><null/></property>';
+  const vendorParent = '<property name="parent" class="Page" package="com.atlassian.confluence.pages"><id name="id">100</id></property>';
+  const ancestors = (ids: string[]) => list('ancestors', 'Page', ids);
+  const data = parseConfluence(files([
+    object('Space', '42', p('key', 'TEAM') + r('homePage', 'Page', '100')),
+    page('100', '홈은 단독 증거가 아님'),
+    page('101', '확인한 상위 문서', vendorParent + ancestors(['100'])),
+    page('102', '상위 객체의 별도 파일', r('parent', 'Page', '999')),
+    page('103', '비어 있는 상위 속성', emptyParent),
+    page('104', '명시적인 null 상위 속성', explicitNull),
+    page('105', '비어 있는 조상 목록', '<collection name="ancestors" class="java.util.List"/>'),
+    page('106', '상위 속성의 종류가 틀림', r('parent', 'BlogPost', '100')),
+    page('107', '상위와 조상 목록이 모순됨', vendorParent + ancestors(['102'])),
+    page('108', '비어 있는 조상과 명시한 상위가 모순됨', vendorParent + ancestors([])),
+    page('109', '명시한 최상위와 조상 목록이 모순됨', emptyParent + ancestors(['100'])),
+    page('110', '상위가 비어 있다고 볼 수 없는 속성', '<property name="parent" class="Page"/>'),
+    page('111', '조상 목록의 중복 ID', vendorParent + ancestors(['100', '100'])),
+    page('112', '조상 목록의 부정확한 원소', vendorParent + '<collection name="ancestors"><element class="Page"/></collection>'),
+    page('113', '조상 목록만 있는 문서', ancestors(['100'])),
+    page('114', '다른 XML 종류에서 선언된 상위', ancestors([]) + '<collection name="parent"/>'),
+    object('Page', '115', r('space', 'Space', '42') + p('contentStatus', 'draft') + emptyParent),
+    object('Page', '116', r('space', 'Space', '42') + p('contentStatus', 'historical') + vendorParent),
+    object('BlogPost', '117', r('space', 'Space', '42') + p('contentStatus', 'current') + emptyParent),
+    object('Page', '118', r('space', 'Page', '42') + p('contentStatus', 'current') + vendorParent),
+    page('119', '자기 자신을 가리키는 상위', r('parent', 'Page', '119')),
+    page('120', '불완전한 조상 표식', '<collection name="ancestors" partial="true"/>'),
+  ]), 'confluence-hierarchy-evidence');
+
+  assert.deepEqual(Object.fromEntries(data.records.flatMap(row =>
+    Object.hasOwn(row.metadata, 'confluenceParentSourceId') ? [[row.sourceId, row.metadata.confluenceParentSourceId]] : [])),
+  { '101': '100', '102': '999', '103': null, '104': null, '105': null });
+  assert.equal(find(data, 'page', '100').parentId, null);
+  assert.equal(find(data, 'page', '106').parentId, '100', 'existing initial-import parsing remains unchanged');
+  assert.deepEqual(find(data, 'page', '107').metadata.ancestorIds, ['102']);
+  assert.throws(() => parseConfluence(files([
+    space, page('100', '서로 다른 상위 선언', vendorParent + emptyParent),
+  ]), 'confluence-duplicate-parent'), /같은 이름의 속성이 중복/);
+});
+
 test('complete label evidence needs an explicit, resolved and consistent collection on the current Page', () => {
   const labelling = (id: string, pageId: string, labelId: string) =>
     object('Labelling', id, r('content', 'Page', pageId) + r('label', 'Label', labelId));

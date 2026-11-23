@@ -17,6 +17,7 @@ export interface MigrationConfluenceRefreshCandidate {
   document: DocPage;
   previous: SourceRecordArchive;
   previousTimezone: string;
+  initialParentId?: string | null;
 }
 export interface MigrationConfluenceDocumentUpdate {
   documentId: string;
@@ -71,8 +72,10 @@ export interface MigrationPageAppendContext {
   labelListScope?: 'isolated' | 'mixed';
   token: string;
   sectionInventory?: boolean;
-  knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string; sectionIds?: string[] }[];
+  knownPages: { sourceId: string; documentId: string; projectId: string | null; sourceSpaceId: string | null; sourceTitle: string;
+    sourceClass?: string | null; sectionIds?: string[] }[];
   refreshDocuments?: MigrationConfluenceRefreshCandidate[];
+  hierarchyDocuments?: Pick<DocPage, 'id' | 'parentId' | 'title' | 'version'>[];
   knownAttachments?: MigrationConfluenceKnownAttachment[];
   knownHistory?: MigrationConfluenceKnownHistory[];
 }

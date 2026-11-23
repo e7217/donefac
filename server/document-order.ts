@@ -86,8 +86,15 @@ export class DocumentOrderService {
 
   private track({ before, after, context }: StoreChange): void {
     if (context.origin === 'import') return;
-    const old = before as DocPage | undefined;
-    const next = after as DocPage | undefined;
+    this.trackMembership(before as DocPage | undefined, after as DocPage | undefined);
+  }
+
+  trackMigratedParentChange(before: DocPage, after: DocPage): void {
+    if (!this.store.db.isTransaction) throw new Error('Migrated document order requires a transaction.');
+    this.trackMembership(before, after);
+  }
+
+  private trackMembership(old: DocPage | undefined, next: DocPage | undefined): void {
     const oldKey = old && scopeKey(old), nextKey = next && scopeKey(next);
     // The parent's own ID identifies its children before and after moving a subtree to another space.
     if (oldKey === nextKey) return;

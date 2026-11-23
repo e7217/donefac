@@ -333,7 +333,7 @@ export interface MigrationPageAppendConfiguration {
   refreshAttachments?: true;
   refreshHistory?: true;
 }
-export const CONFLUENCE_MIGRATION_DOCUMENT_FIELDS = ['title', 'content', 'labels'] as const;
+export const CONFLUENCE_MIGRATION_DOCUMENT_FIELDS = ['title', 'content', 'labels', 'parentId'] as const;
 export type ConfluenceMigrationDocumentField = typeof CONFLUENCE_MIGRATION_DOCUMENT_FIELDS[number];
 export type ConfluenceMigrationDocumentValues = Partial<Pick<DocPage, ConfluenceMigrationDocumentField>>;
 export type ConfluenceMigrationPageFieldHashes = Partial<Record<ConfluenceMigrationDocumentField, string>>;
