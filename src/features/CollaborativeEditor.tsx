@@ -67,10 +67,10 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     downloadDocument(`${session.document.title || 'document'}-공동편집-복구.json`, JSON.stringify(payload, null, 2), 'application/json');
   }
 
-  function openLatest() {
+  function discardRecovery() {
     if (!client || busy) return;
-    if ((view?.pending || view?.phase === 'recovery' || view?.phase === 'error') && !window.confirm('이전에 보관한 공동 편집을 버리고 최신 문서를 열까요? 필요한 내용은 먼저 내려받거나 사본으로 보관해주세요.')) return;
-    try { client.discardOwnPending(true); restartSession(); }
+    if (!window.confirm('화면에 표시된 보관 편집을 버릴까요? 필요한 내용은 먼저 내려받거나 사본으로 보관해주세요.')) return;
+    try { client.discardDisplayedPending(); restartSession(); }
     catch { notify('임시 편집을 정리하지 못했습니다. 복구 데이터를 먼저 내려받아주세요.', 'error'); }
   }
 
@@ -80,8 +80,10 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     setBusy(true);
     try {
       const document = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify({ title: `${session.document.title} (공동 편집 복구 사본)`, projectId: session.document.projectId, parentId: null, content: editor.getJSON(), status: 'draft', labels }) });
-      client.discardOwnPending();
-      notify('이전 편집을 새 문서에 보관했습니다.', 'success');
+      try {
+        client.discardDisplayedPending();
+        notify('이전 편집을 새 문서에 보관했습니다.', 'success');
+      } catch { notify('사본을 저장했습니다. 브라우저에 남은 보관 편집을 다시 확인해 주세요.', 'error'); }
       onOpenCopy(document.id);
     } catch (cause) { notify(cause instanceof Error ? cause.message : '복구 사본을 만들지 못했습니다.', 'error'); }
     finally { setBusy(false); }
@@ -89,6 +91,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
 
   const peers = view ? [...new Map(view.peers.map(peer => [peer.actorId, peer])).values()] : [];
   const recovery = view?.phase === 'recovery' || view?.phase === 'error';
+  const otherRecoveries = view?.otherRecoveries ?? 0;
   return <div className="docs-collaborative-editor">
     <div className={`docs-collaboration-bar ${view?.phase || 'connecting'}`} role="status" aria-live="polite">
       <span className="docs-collaboration-state">{view?.phase === 'connected' ? <span className="docs-live-dot" /> : view?.phase === 'offline' ? <WifiOff size={13} /> : <Loader2 size={13} className={recovery ? '' : 'docs-spin'} />}
@@ -97,7 +100,15 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
       {view?.phase === 'connected' && <span className="docs-collaboration-presence"><Users size={13} /><span>{peers.length}명 접속</span><span className="docs-peer-avatars">{peers.map(peer => <span key={peer.actorId} style={{ background: peer.color }} title={peer.name} aria-label={`${peer.name} 접속 중`}>{peer.name.slice(0, 1)}</span>)}</span></span>}
     </div>
     {view?.storageError && <div className="docs-notice" role="alert">브라우저에 편집을 임시 보관하지 못했습니다. 서버 동기화가 끝나기 전에 이 화면을 닫지 말고 복구 데이터를 내려받아주세요.<button className="docs-collab-text-button" onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button></div>}
-    {recovery && <div className="docs-notice docs-collaboration-recovery" role="alert"><strong>{view?.error || '문서가 교체되어 이전 편집을 자동으로 합치지 않았습니다.'}</strong><p>아래 내용은 이전 편집입니다. 사본으로 보관하거나 최신 문서를 열어주세요.</p><div><button onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button><button onClick={() => void saveRecoveryCopy()} disabled={busy || !view?.ready}>사본으로 보관</button><button onClick={openLatest} disabled={busy}><RotateCcw size={12} /> 최신 문서 열기</button></div></div>}
+    {recovery && <div className="docs-notice docs-collaboration-recovery" role="alert">
+      <strong>{view?.error || '문서가 교체되어 이전 편집을 자동으로 합치지 않았습니다.'}</strong>
+      {otherRecoveries > 0 && <p>별도로 보관된 편집 {otherRecoveries}건이 있습니다.</p>}
+      <div>
+        <button onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button>
+        <button onClick={() => void saveRecoveryCopy()} disabled={busy || !view?.ready}>사본으로 보관</button>
+        <button onClick={discardRecovery} disabled={busy}><RotateCcw size={12} />{otherRecoveries > 0 ? '이 편집 버리기' : '최신 문서 열기'}</button>
+      </div>
+    </div>}
     {client && view?.ready ? <LiveBinding {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
   </div>;
 }

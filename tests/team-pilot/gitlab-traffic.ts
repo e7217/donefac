@@ -80,12 +80,14 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
       const running = await links();
       expect(running.total).toBe(1);
       expect(running.links).toMatchObject([{ issueId: issue.id, projectId: repositoryId, iid: 701,
-        state: 'running', webUrl: pipelineUrl(701), sourceBranch: branch, sourceSha: sha, updatedAt: initial.occurredAt }]);
+        state: 'running', webUrl: pipelineUrl(701), sourceBranch: branch, sourceSha: sha,
+        updatedAt: initial.occurredAt, pipelineObservedAt: initial.occurredAt }]);
 
       const sparse = pipeline(701, 'success', null, sha);
       expect(await sparse.send()).toEqual({ ok: true, duplicate: false, linked: 1, runs: [] });
       const updated = await links();
-      expect(updated).toEqual({ ...running, links: [{ ...running.links[0], state: 'success', updatedAt: sparse.occurredAt }] });
+      expect(updated).toEqual({ ...running, links: [{ ...running.links[0], state: 'success',
+        updatedAt: sparse.occurredAt, pipelineObservedAt: sparse.occurredAt }] });
       expect(await readIssue()).toEqual(issue);
       expect(await runs()).toEqual([]);
       const [sparseReceipt] = (await status()).repositories;

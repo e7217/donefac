@@ -16,17 +16,20 @@ import {
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { createEditorSchema } from '../../shared/editor-schema';
 import type { DocPage } from '../../shared/types';
+import { newRequestId } from './request-id';
 
 export type CollaborationPhase = 'connecting' | 'connected' | 'offline' | 'recovery' | 'error';
 export interface CollaborationView {
   phase: CollaborationPhase; ready: boolean; pending: boolean; peers: CollaborationPeer[];
-  epoch: string; document: DocPage; error: string; storageError: boolean;
+  epoch: string; document: DocPage; error: string; storageError: boolean; otherRecoveries: number;
 }
 export interface RemoteCollaborationCursor {
   peer: CollaborationPeer;
   selection: CollaborationCursorSelection;
 }
 interface PendingCache { epoch: string; schemaVersion: number; update: string; pending: true; updatedAt: string }
+interface PendingSnapshot { key: string; value: string }
+interface PendingEntry { snapshot: PendingSnapshot; cache: PendingCache | null; update?: Uint8Array }
 const REMOTE = Symbol('server-update');
 const CACHE = Symbol('pending-cache');
 const MAX_CACHE_STATE = 16 * 1024 * 1024;
@@ -117,9 +120,25 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
   } finally { candidate.destroy(); }
 }
 const prefix = (actorId: string, documentId: string) => `teamspace:collaboration-pending:${actorId}:${documentId}:`;
-const key = (actorId: string, documentId: string, epoch: string) => `${prefix(actorId, documentId)}${epoch}:${COLLABORATION_SCHEMA}`;
+function pendingSnapshotKeys(actorId: string, documentId: string): string[] {
+  const own = prefix(actorId, documentId);
+  const keys = new Set<string>();
+  for (let index = 0; index < localStorage.length; index++) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(own)) keys.add(key);
+  }
+  return [...keys];
+}
+
+function pendingSnapshots(actorId: string, documentId: string): PendingSnapshot[] {
+  return pendingSnapshotKeys(actorId, documentId).flatMap(key => {
+    const value = localStorage.getItem(key);
+    return value === null ? [] : [{ key, value }];
+  });
+}
+
 export function hasPendingCollaboration(actorId: string, documentId: string): boolean {
-  return Object.keys(localStorage).some(storedKey => storedKey.startsWith(prefix(actorId, documentId)));
+  return pendingSnapshotKeys(actorId, documentId).length > 0;
 }
 
 export function encodeBytes(bytes: Uint8Array): string {
@@ -130,6 +149,25 @@ export function encodeBytes(bytes: Uint8Array): string {
 export function decodeBytes(value: string): Uint8Array {
   const binary = atob(value);
   return Uint8Array.from(binary, character => character.charCodeAt(0));
+}
+
+function readPendingEntry(snapshot: PendingSnapshot): PendingEntry {
+  try {
+    const cache = JSON.parse(snapshot.value) as PendingCache;
+    if (!cache || cache.pending !== true || typeof cache.epoch !== 'string' || !cache.epoch || cache.epoch.length > 200 ||
+        !Number.isSafeInteger(cache.schemaVersion) || typeof cache.updatedAt !== 'string' ||
+        typeof cache.update !== 'string' || !cache.update || cache.update.length > MAX_CACHE_STATE) return { snapshot, cache: null };
+    if (cache.schemaVersion !== COLLABORATION_SCHEMA) return { snapshot, cache };
+    const update = decodeBytes(cache.update);
+    // A damaged entry must stay separately recoverable alongside usable same-epoch snapshots.
+    Y.decodeUpdate(update);
+    return { snapshot, cache, update };
+  } catch { return { snapshot, cache: null }; }
+}
+
+function removeObservedSnapshot(snapshot: PendingSnapshot) {
+  // Current keys are immutable. Also preserve any changed value from an older browser's shared key.
+  if (localStorage.getItem(snapshot.key) === snapshot.value) localStorage.removeItem(snapshot.key);
 }
 
 /** One actor/document/epoch session. Browser caches contain unacknowledged work,
@@ -156,7 +194,11 @@ export class CollaborationClient {
   private requestSequence = 0;
   private unreadableCache = false;
   private legacyRecovery = false;
-  private selectedCacheKey: string | null = null;
+  private restoredSnapshots: PendingSnapshot[] = [];
+  private ownSnapshot: PendingSnapshot | null = null;
+  private readonly snapshotWriter = newRequestId();
+  private snapshotSequence = 0;
+  private snapshotNeedsWrite = false;
   private inFlight = new Map<string, number>();
   private serverVector: Uint8Array = new Uint8Array();
   private state: CollaborationView;
@@ -168,8 +210,8 @@ export class CollaborationClient {
   constructor(session: CollaborationSession, actorId: string, publish: (state: CollaborationView) => void, onDocument: (document: DocPage) => void) {
     this.actorId = actorId; this.documentId = session.document.id;
     this.publish = publish; this.onDocument = onDocument;
-    this.state = { phase: 'connecting', ready: false, pending: false, peers: [], epoch: session.epoch || '', document: session.document, error: '', storageError: false };
-    this.loadPending();
+    this.state = { phase: 'connecting', ready: false, pending: false, peers: [], epoch: session.epoch || '', document: session.document, error: '', storageError: false, otherRecoveries: 0 };
+    this.loadPending(session.enabled);
     if (!session.enabled && this.state.phase !== 'recovery' && this.state.phase !== 'error') throw new Error('공동 편집 세션이 활성화되지 않았습니다.');
     this.doc.on('update', this.onUpdate);
   }
@@ -196,39 +238,43 @@ export class CollaborationClient {
     if (this.state.phase !== 'recovery') this.connect();
   }
 
-  private loadPending() {
+  private loadPending(enabled: boolean) {
     try {
-      let candidate: PendingCache | null = null;
-      let candidateKey: string | null = null;
-      for (let index = 0; index < localStorage.length; index++) {
-        const storedKey = localStorage.key(index);
-        if (!storedKey?.startsWith(prefix(this.actorId, this.documentId))) continue;
-        const stored = localStorage.getItem(storedKey);
-        if (!stored) continue;
-        const parsed = JSON.parse(stored) as PendingCache;
-        if (!parsed.pending || !parsed.update || !parsed.epoch) continue;
-        if (!candidate || parsed.updatedAt > candidate.updatedAt) { candidate = parsed; candidateKey = storedKey; }
-      }
-      if (!candidate) return;
-      this.selectedCacheKey = candidateKey;
+      const entries = pendingSnapshots(this.actorId, this.documentId).map(readPendingEntry)
+        .sort((a, b) => (b.cache?.updatedAt ?? '').localeCompare(a.cache?.updatedAt ?? ''));
+      const isCurrent = (entry: PendingEntry) => enabled && entry.update && entry.cache?.epoch === this.state.epoch;
+      const current = entries.filter(isCurrent);
+      const archived = entries.filter(entry => !isCurrent(entry));
+      const first = archived[0] ?? current[0];
+      if (!first) return;
+
+      const group = !archived.length ? current : first.update
+        ? archived.filter(entry => entry.update && entry.cache?.epoch === first.cache?.epoch) : [first];
+      this.restoredSnapshots = group.map(entry => entry.snapshot);
+      const displayed = new Set(group);
+      const otherGroups = new Set(entries.filter(entry => !displayed.has(entry))
+        .map(entry => entry.update ? `epoch:${entry.cache?.epoch}` : entry.snapshot.key));
+      this.state.otherRecoveries = otherGroups.size;
+
+      const candidate = first.cache;
+      if (!candidate) throw new Error('이전 편집 보관 정보가 올바르지 않습니다.');
       if (supportsCollaborationSchema(candidate.schemaVersion) && candidate.schemaVersion !== COLLABORATION_SCHEMA) {
-        if (typeof candidate.epoch !== 'string' || candidate.epoch.length > 200 || candidate.pending !== true) throw new Error('이전 편집 보관 정보가 올바르지 않습니다.');
-        const update = validateLegacyPending(candidate.update, candidate.schemaVersion);
-        Y.applyUpdate(this.doc, update, CACHE);
+        Y.applyUpdate(this.doc, validateLegacyPending(candidate.update, candidate.schemaVersion), CACHE);
         this.legacyRecovery = true;
         this.localSequence = 1;
         this.state = { ...this.state, epoch: candidate.epoch, phase: 'recovery', ready: true, pending: true, error: '이전 문서 형식의 편집을 읽기 전용으로 복구했습니다. 원본 문서에 자동으로 합치지 않으니 사본으로 보관해주세요.' };
         return;
       }
-      if (candidate.schemaVersion !== COLLABORATION_SCHEMA) {
+      if (!first.update) {
         this.unreadableCache = true;
         this.state = { ...this.state, phase: 'error', error: '이전에 보관한 편집의 문서 형식이 다릅니다. 원본 데이터를 내려받아 복구해주세요.' };
         return;
       }
-      Y.applyUpdate(this.doc, decodeBytes(candidate.update), CACHE);
+      const updates = group.flatMap(entry => entry.update ? [entry.update] : []);
+      Y.applyUpdate(this.doc, updates.length === 1 ? first.update : Y.mergeUpdates(updates), CACHE);
       this.localSequence = 1;
       this.state.pending = true;
-      if (candidate.epoch !== this.state.epoch) {
+      if (!enabled || candidate.epoch !== this.state.epoch) {
         this.state = { ...this.state, epoch: candidate.epoch, phase: 'recovery', ready: true, error: '문서가 복구되거나 교체되어 이전 편집을 자동으로 합치지 않았습니다.' };
       }
     } catch { this.unreadableCache = true; this.state = { ...this.state, phase: 'error', error: '브라우저에 보관한 편집을 읽지 못했습니다. 원본 데이터를 보존한 채 문서를 다시 확인해주세요.' }; }
@@ -238,9 +284,17 @@ export class CollaborationClient {
     if (this.unreadableCache || this.legacyRecovery) return;
     try {
       if (this.localSequence > this.acknowledgedSequence) {
+        if (!this.snapshotNeedsWrite) return;
         const cached: PendingCache = { epoch: this.state.epoch, schemaVersion: COLLABORATION_SCHEMA, update: encodeBytes(Y.encodeStateAsUpdate(this.doc)), pending: true, updatedAt: new Date().toISOString() };
-        localStorage.setItem(key(this.actorId, this.documentId, this.state.epoch), JSON.stringify(cached));
-      } else localStorage.removeItem(key(this.actorId, this.documentId, this.state.epoch));
+        const key = `${prefix(this.actorId, this.documentId)}${cached.epoch}:${cached.schemaVersion}:${this.snapshotWriter}:${++this.snapshotSequence}`;
+        const snapshot = { key, value: JSON.stringify(cached) };
+        const previous = this.ownSnapshot;
+        // Publish a new immutable key before retiring the previous one. Other tabs can only consume observed keys.
+        localStorage.setItem(key, snapshot.value);
+        this.ownSnapshot = snapshot;
+        this.snapshotNeedsWrite = false;
+        if (previous) removeObservedSnapshot(previous);
+      } else this.clearStoredSnapshots();
       this.state.storageError = false;
     } catch { this.state.storageError = true; }
   }
@@ -249,10 +303,14 @@ export class CollaborationClient {
     if (this.disposed || this.legacyRecovery || origin === CACHE) return;
     if (origin !== REMOTE) {
       this.localSequence++;
+      this.snapshotNeedsWrite = true;
       this.persistPending();
       this.setState({});
       this.sendPending();
-    } else if (this.localSequence > this.acknowledgedSequence) this.persistPending();
+    } else if (this.localSequence > this.acknowledgedSequence) {
+      this.snapshotNeedsWrite = true;
+      this.persistPending();
+    }
   };
 
   private sendPending() {
@@ -451,18 +509,20 @@ export class CollaborationClient {
   private onOnline = () => { if (this.retry) clearTimeout(this.retry); this.retry = null; this.connect(); };
   private onOffline = () => { if (this.state.phase === 'recovery' || this.state.phase === 'error') return; this.clearCursorChannel(true); this.socket?.close(); this.setState({ phase: 'offline', peers: [] }); };
 
-  discardOwnPending(allEpochs = false) {
-    const ownPrefix = prefix(this.actorId, this.documentId);
-    if (allEpochs) {
-      for (const storedKey of Object.keys(localStorage)) if (storedKey.startsWith(ownPrefix)) localStorage.removeItem(storedKey);
-    } else localStorage.removeItem(this.selectedCacheKey || key(this.actorId, this.documentId, this.state.epoch));
-    this.selectedCacheKey = null;
+  private clearStoredSnapshots() {
+    for (const snapshot of this.restoredSnapshots) removeObservedSnapshot(snapshot);
+    this.restoredSnapshots = [];
+    if (this.ownSnapshot) removeObservedSnapshot(this.ownSnapshot);
+    this.ownSnapshot = null;
+  }
+  discardDisplayedPending() {
+    this.clearStoredSnapshots();
     this.acknowledgedSequence = this.localSequence;
     this.unreadableCache = false;
     this.setState({});
   }
   exportPending() {
-    const caches = Object.keys(localStorage).filter(storedKey => storedKey.startsWith(prefix(this.actorId, this.documentId))).map(storedKey => ({ key: storedKey, value: localStorage.getItem(storedKey) }));
+    const caches = pendingSnapshots(this.actorId, this.documentId);
     return { format: 'teamspace-collaboration-recovery', schemaVersion: COLLABORATION_SCHEMA, documentId: this.documentId, actorId: this.actorId, epoch: this.state.epoch, update: encodeBytes(Y.encodeStateAsUpdate(this.doc)), pending: this.localSequence > this.acknowledgedSequence, caches };
   }
   destroy() {

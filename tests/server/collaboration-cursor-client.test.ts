@@ -90,6 +90,45 @@ test('cursor capability negotiation keeps editing compatible with an older serve
   assert.equal(client.view.phase, 'connected');
 });
 
+test('ACK of a restored snapshot cannot remove the original writer’s newer pending snapshot', t => {
+  const { client: writer, socket, current, welcome, storage } = fixture(t);
+  function append(target: CollaborationClient, value: string) {
+    const paragraph = new Y.XmlElement('paragraph'), text = new Y.XmlText();
+    text.insert(0, value);
+    paragraph.insert(0, [text]);
+    target.doc.getXmlFragment('default').push([paragraph]);
+  }
+  socket.receive(welcome);
+  append(writer, 'first edit');
+  assert.equal(storage.size, 1);
+  const firstKey = [...storage.keys()][0];
+
+  const reader = new CollaborationClient({ enabled: true, epoch, schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => {}, () => {});
+  try {
+    reader.start();
+    const reopened = current();
+    reopened.open();
+    reopened.receive(welcome);
+    const sent = reopened.sent.find(message => message.type === 'update');
+    assert.ok(sent && sent.type === 'update');
+    assert.match(reader.doc.getXmlFragment('default').toString(), /first edit/);
+
+    append(writer, 'later edit');
+    assert.equal(storage.size, 1);
+    const laterKey = [...storage.keys()][0];
+    assert.notEqual(laterKey, firstKey);
+    const laterSnapshot = storage.get(laterKey);
+    reopened.receive({ type: 'ack', epoch, requestId: sent.requestId, stateVector: encodeBytes(Y.encodeStateVector(reader.doc)), document: snapshot });
+    assert.equal(reader.view.pending, false);
+    assert.equal(writer.view.pending, true);
+    assert.deepEqual([...storage], [[laterKey, laterSnapshot]]);
+  } finally {
+    reader.destroy();
+    reader.doc.destroy();
+  }
+  assert.equal(storage.size, 1);
+});
+
 test('cursor delivery waits for ACK, keeps the newest position and follows connection state', async t => {
   const { browser, client, socket, current, welcome, storage, views } = fixture(t);
   let cursorNotifications = 0;

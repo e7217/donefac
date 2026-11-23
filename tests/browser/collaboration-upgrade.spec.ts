@@ -33,9 +33,58 @@ test('이전 형식의 미전송 편집을 읽기 전용으로 열고 원본을 
   const entries={[selected]:cache(f.session.epoch!,legacyUpdate(oldText)),[older]:cache(olderEpoch,legacyUpdate('이전 epoch 편집'),'2000-01-01T00:00:00.000Z'),[otherActor]:cache(f.session.epoch!,legacyUpdate('다른 팀원의 편집'))};
   let updateFrames=0;page.on('websocket',socket=>socket.on('framesent',frame=>{try{if(JSON.parse(String(frame.payload)).type==='update')updateFrames++;}catch{/* Other transport frames do not write document content. */}}));
   await open(page,f,entries);await expect(page.locator('.docs-live-prose')).toHaveText(oldText);await expect(page.locator('.docs-live-prose')).toHaveAttribute('contenteditable','false');await expect(page.getByRole('button',{name:'사본으로 보관',exact:true})).toBeEnabled();expect((await canonical(f)).plainText).toBe(f.serverText);expect(await stored(page)).toEqual(entries);
-  page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'최신 문서 열기',exact:true}).click();await expect(page.locator('.docs-live-prose')).toHaveText(oldText);expect(await stored(page)).toEqual(entries);
+  page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'이 편집 버리기',exact:true}).click();await expect(page.locator('.docs-live-prose')).toHaveText(oldText);expect(await stored(page)).toEqual(entries);
   const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'복구 데이터 내려받기',exact:true}).click();const exported=await recoveryDownload(await downloading);expect(Object.fromEntries(exported.caches.map(value=>[value.key,value.value]))).toEqual({[selected]:entries[selected],[older]:entries[older]});expect(exported.content).toBeTruthy();expect(await stored(page)).toEqual(entries);
   const copying=page.waitForResponse(response=>response.url().endsWith('/api/documents')&&response.request().method()==='POST');await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();const copied=await(await copying).json() as DocPage;expect(copied.id).not.toBe(f.document.id);expect(copied.plainText).toBe(oldText);await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(copied.title);await expect(page.locator('.docs-prose')).toContainText(oldText);expect((await canonical(f)).plainText).toBe(f.serverText);expect(updateFrames).toBe(0);expect(await stored(page)).toEqual({[older]:entries[older],[otherActor]:entries[otherActor]});
+});
+
+test('복구 화면에서 확인한 편집만 버리고 다른 시점의 보관 편집을 이어서 연다', async ({ page, upgrade: f }) => {
+  const newestEpoch = f.session.epoch!;
+  const olderEpoch = randomUUID();
+  const newest = cacheKey(f.actors[0], f.document.id, newestEpoch);
+  const older = cacheKey(f.actors[0], f.document.id, olderEpoch);
+  const malformed = cacheKey(f.actors[0], f.document.id, randomUUID());
+  const otherActor = cacheKey(f.actors[1], f.document.id, newestEpoch);
+  const newestText = '먼저 표시할 이전 문서의 편집';
+  const olderText = '나중에 검토할 더 오래된 편집';
+  const entries = {
+    [newest]: cache(newestEpoch, legacyUpdate(newestText)),
+    [older]: cache(olderEpoch, legacyUpdate(olderText), '2000-01-01T00:00:00.000Z'),
+    [malformed]: '{"pending":true,"update":',
+    [otherActor]: cache(newestEpoch, legacyUpdate('다른 작업자에게 남겨둘 편집')),
+  };
+  const original = await canonical(f);
+  await open(page, f, entries);
+  const body = page.locator('.docs-live-prose');
+  await expect(body).toHaveText(newestText);
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '이 편집 버리기', exact: true }).click();
+  await expect(body).toHaveText(olderText);
+  await expect(body).toHaveAttribute('contenteditable', 'false');
+  expect(await stored(page)).toEqual({ [older]: entries[older], [malformed]: entries[malformed], [otherActor]: entries[otherActor] });
+  expect(await canonical(f)).toEqual(original);
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '이 편집 버리기', exact: true }).click();
+  const recovery = page.locator('.docs-collaboration-recovery');
+  await expect(recovery).toContainText('브라우저에 보관한 편집을 읽지 못했습니다.');
+  await expect(body).toHaveCount(0);
+  await expect(recovery.getByRole('button', { name: '사본으로 보관', exact: true })).toBeDisabled();
+  const [download] = await Promise.all([
+    page.waitForEvent('download'),
+    recovery.getByRole('button', { name: '복구 데이터 내려받기', exact: true }).click(),
+  ]);
+  expect((await recoveryDownload(download)).caches).toEqual([{ key: malformed, value: entries[malformed] }]);
+  expect(await stored(page)).toEqual({ [malformed]: entries[malformed], [otherActor]: entries[otherActor] });
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '최신 문서 열기', exact: true }).click();
+  await expect(recovery).toHaveCount(0);
+  await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+  await expect(body).toHaveText(f.serverText);
+  expect(await stored(page)).toEqual({ [otherActor]: entries[otherActor] });
+  expect(await canonical(f)).toEqual(original);
 });
 
 test('유효하지 않은 이전 형식 보관 데이터는 적용하지 않고 원본 바이트를 내려받을 수 있게 유지한다',async({page,upgrade:f})=>{

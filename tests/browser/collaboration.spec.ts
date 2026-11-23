@@ -48,6 +48,15 @@ async function append(page: Page, value: string) {
   await page.locator('.docs-live-prose').press('Control+End');
   await page.keyboard.insertText(value);
 }
+async function holdBodyUpdates(target: Page | BrowserContext, shouldHold = () => true) {
+  await target.routeWebSocket('**/api/collaboration?*', route => {
+    const server = route.connectToServer();
+    route.onMessage(message => {
+      if (!shouldHold() || (JSON.parse(String(message)) as { type: string }).type !== 'update') server.send(message);
+    });
+    server.onMessage(message => route.send(message));
+  });
+}
 async function canonical(fixture: CollaborativeFixture) {
   const snapshot = await (await fixture.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
   return snapshot.documents.find(document => document.id === fixture.document.id)!;
@@ -174,6 +183,67 @@ test('연결이 끊긴 동안의 편집은 같은 epoch에 재연결하면 다�
     await synced(b);
     await expect(b.locator('.docs-live-prose')).toHaveText(merged);
   } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
+test('같은 작업자의 저장된 탭을 떠나도 다른 탭의 미전송 본문이 다시 열린다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const context = await browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } });
+  try {
+    await setActor(context, fixture.actorIds[0]);
+    const [editing, leaving] = await Promise.all([context.newPage(), context.newPage()]);
+    await holdBodyUpdates(editing);
+    await Promise.all([open(editing, fixture.document), open(leaving, fixture.document)]);
+    await Promise.all([synced(editing), synced(leaving)]);
+
+    const acknowledged = '서버에서 확인한 문장';
+    const pending = '아직 보내지 못한 다른 탭 문장';
+    await append(leaving, ` ${acknowledged}`);
+    await synced(leaving);
+    await expect(editing.locator('.docs-live-prose')).toContainText(acknowledged);
+    await append(editing, ` ${pending}`);
+    await expect(editing.locator('.docs-collaboration-state')).toHaveText('변경 전송 중');
+    expect((await canonical(fixture)).plainText).not.toContain(pending);
+    await leaving.getByRole('button', { name: '간트 · 일정', exact: true }).click();
+    await expect(leaving.locator('.docs-live-prose')).toHaveCount(0);
+    await expect(editing.locator('.docs-live-prose')).toContainText(pending);
+    await editing.close();
+
+    const reopened = await context.newPage();
+    await open(reopened, fixture.document);
+    await synced(reopened);
+    await expect(reopened.locator('.docs-live-prose')).toHaveText(`${fixture.initialText} ${acknowledged} ${pending}`);
+    expect((await canonical(fixture)).plainText).toBe(`${fixture.initialText} ${acknowledged} ${pending}`);
+  } finally { await context.close(); }
+});
+
+test('같은 작업자의 두 탭을 닫고 다시 열면 각각의 미전송 본문을 한 번씩 저장한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const context = await browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } });
+  try {
+    await setActor(context, fixture.actorIds[0]);
+    let holding = true;
+    await holdBodyUpdates(context, () => holding);
+    const [first, second] = await Promise.all([context.newPage(), context.newPage()]);
+    await Promise.all([open(first, fixture.document), open(second, fixture.document)]);
+    await Promise.all([synced(first), synced(second)]);
+
+    const firstText = '첫 탭의 보관 문장', secondText = '둘째 탭의 보관 문장';
+    for (const [page, text] of [[first, firstText], [second, secondText]] as const) {
+      await append(page, ` ${text}`);
+      await expect(page.locator('.docs-collaboration-state')).toHaveText('변경 전송 중');
+      await expect(page.locator('.docs-live-prose')).toContainText(text);
+    }
+    expect((await canonical(fixture)).plainText).toBe(fixture.initialText);
+    await Promise.all([first.close(), second.close()]);
+
+    holding = false;
+    const reopened = await context.newPage();
+    await open(reopened, fixture.document);
+    await synced(reopened);
+    const content = await reopened.locator('.docs-live-prose').innerText();
+    for (const text of [fixture.initialText, firstText, secondText]) expect(content.split(text)).toHaveLength(2);
+    expect((await canonical(fixture)).plainText).toBe(content);
+  } finally { await context.close(); }
 });
 
 test('문서 복구 뒤의 오래된 오프라인 편집은 자동 적용하지 않고 사본으로 복구한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
