@@ -14,6 +14,7 @@ const MANIFEST = 'manifest.json';
 const MAX_MANIFEST = 64 * 1024 * 1024;
 const MAX_ENTRIES = 1_000_000;
 const UUID = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i;
+const SHA256 = /^[a-f\d]{64}$/u;
 function fail(message, exitCode = 1) { const error = new Error(message); error.exitCode = exitCode; throw error; }
 function exists(path) { try { lstatSync(path); return true; } catch (error) { if (error.code === 'ENOENT') return false; throw error; } }
 function directory(path) { const value = lstatSync(path); if (!value.isDirectory() || value.isSymbolicLink()) fail(`일반 디렉터리가 필요합니다: ${path}`); }
@@ -91,18 +92,16 @@ function credential(root) {
   const path = join(root, KEY), fd = regularFd(path);
   try { if (fstatSync(fd).size !== 32) fail('32바이트 .credential-key 파일이 필요합니다.'); } finally { closeSync(fd); }
 }
-function recoveryJournals(root, committedGeneration = undefined) {
-  const result = [];
-  if (exists(join(root, '.attachments-import.json'))) {
-    const record = jsonFile(join(root, '.attachments-import.json'), MAX_MANIFEST);
-    if (!record || typeof record !== 'object' || !UUID.test(record.generation) || !/^\.uploads-import-[a-f\d-]{36}$/.test(record.stage) || !/^\.uploads-previous-[a-f\d-]{36}$/.test(record.backup)) fail('첨부파일 교체 복구 저널이 올바르지 않습니다.');
-    for (const name of [record.stage, record.backup]) if (exists(join(root, name))) directory(join(root, name));
-    if (committedGeneration !== undefined) {
-      const previous = join(root, record.backup);
-      directory(committedGeneration !== record.generation && exists(previous) ? previous : join(root, 'uploads'));
-    }
-    result.push('.attachments-import.json');
-  }
+function attachmentImportJournal(root) {
+  const path = join(root, '.attachments-import.json');
+  if (!exists(path)) return null;
+  const record = jsonFile(path, MAX_MANIFEST);
+  if (!record || typeof record !== 'object' || !UUID.test(record.generation) || !/^\.uploads-import-[a-f\d-]{36}$/.test(record.stage) || !/^\.uploads-previous-[a-f\d-]{36}$/.test(record.backup)) fail('첨부파일 교체 복구 저널이 올바르지 않습니다.');
+  for (const name of [record.stage, record.backup]) if (exists(join(root, name))) directory(join(root, name));
+  return record;
+}
+function recoveryJournals(root) {
+  const result = attachmentImportJournal(root) ? ['.attachments-import.json'] : [];
   for (const name of readdirSync(root)) if (/^\.append-[a-f\d-]{36}\.json$/.test(name)) {
     const record = jsonFile(join(root, name), MAX_MANIFEST);
     if (!record || typeof record !== 'object' || !UUID.test(record.id) || name !== `.append-${record.id}.json` || record.stage !== `.append-stage-${record.id}` || !Array.isArray(record.files) || record.files.length > 100000 || new Set(record.files).size !== record.files.length || record.files.some(id => typeof id !== 'string' || !UUID.test(id))) fail('첨부파일 추가 복구 저널이 올바르지 않습니다.');
@@ -110,11 +109,56 @@ function recoveryJournals(root, committedGeneration = undefined) {
   }
   return result.sort();
 }
+
+function workspaceFileInventory(db, tables, uploadDirectory) {
+  const expected = new Map();
+  function add(file, base, extension = '', id = file?.id) {
+    if (typeof id !== 'string' || !UUID.test(id) || file?.id !== id ||
+        !Number.isSafeInteger(file.size) || file.size < 1 || typeof file.sha256 !== 'string' || !SHA256.test(file.sha256)) {
+      fail('SQLite의 첨부파일 또는 이관 원본 메타데이터가 올바르지 않습니다.');
+    }
+    const path = `${base}/${id}${extension}`;
+    const known = expected.get(path);
+    if (known && (known.size !== file.size || known.sha256 !== file.sha256)) {
+      fail(`SQLite의 파일 메타데이터가 일치하지 않습니다: ${path}`);
+    }
+    expected.set(path, { size: file.size, sha256: file.sha256 });
+  }
+  for (const [table, base, extension] of [
+    ['attachments', uploadDirectory, ''], ['attachment_versions', uploadDirectory, ''],
+    ['legacy_packages', 'legacy-imports', '.bundle'],
+  ]) {
+    if (!tables.has(table)) continue;
+    for (const { id, json } of db.prepare(`SELECT id, json FROM ${table}`).iterate()) {
+      add(JSON.parse(json), base, extension, id);
+    }
+  }
+  if (tables.has('trash_entries')) {
+    for (const { attachments, versions } of db.prepare(`SELECT json_extract(json, '$.attachments') AS attachments,
+      json_extract(json, '$.attachmentVersions') AS versions FROM trash_entries`).iterate()) {
+      const files = JSON.parse(attachments), history = JSON.parse(versions ?? '[]');
+      if (!Array.isArray(files) || !Array.isArray(history)) fail('SQLite의 휴지통 첨부 목록이 올바르지 않습니다.');
+      for (const entry of files) add(entry, uploadDirectory);
+      for (const entry of history) add(entry, uploadDirectory);
+    }
+  }
+  if (tables.has('trash_items')) {
+    for (const { item, versions } of db.prepare(`SELECT json_extract(json, '$.item') AS item,
+      json_extract(json, '$.versions') AS versions FROM trash_items WHERE item_type='attachment'`).iterate()) {
+      add(JSON.parse(item), uploadDirectory);
+      const history = JSON.parse(versions);
+      if (!Array.isArray(history)) fail('SQLite의 개별 휴지통 첨부 버전 목록이 올바르지 않습니다.');
+      for (const entry of history) add(entry, uploadDirectory);
+    }
+  }
+  return expected;
+}
+
 function validateDatabase(root, checkpoint) {
   credential(root);
   const path = join(root, DB), fd = regularFd(path); closeSync(fd);
   const db = new DatabaseSync(path, { readOnly: !checkpoint, enableForeignKeyConstraints: true });
-  let committedGeneration = null;
+  let expected;
   try {
     const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(row => row.name));
     for (const name of ['users', 'projects', 'issues', 'documents', 'settings']) {
@@ -126,14 +170,31 @@ function validateDatabase(root, checkpoint) {
     if (check.length !== 1 || check[0].quick_check !== 'ok') fail('SQLite quick_check에 실패했습니다.');
     if (db.prepare('PRAGMA foreign_key_check').all().length) fail('SQLite 외래 키 검사에 실패했습니다.');
     const generation = db.prepare("SELECT value FROM settings WHERE key='attachmentImportGeneration'").get();
-    committedGeneration = generation ? JSON.parse(generation.value) : null;
+    const committedGeneration = generation ? JSON.parse(generation.value) : null;
+    const journal = attachmentImportJournal(root);
+    // Match the upload directory that AttachmentFiles.recover will retain at startup.
+    const uploads = journal && committedGeneration !== journal.generation && exists(join(root, journal.backup))
+      ? journal.backup : 'uploads';
+    if (journal) directory(join(root, uploads));
+    expected = workspaceFileInventory(db, tables, uploads);
     if (checkpoint) {
       const result = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
       if (result && result.busy !== 0) fail('복사본 WAL 체크포인트를 완료하지 못했습니다.');
     }
   } finally { db.close(); }
   if (checkpoint) sync(path);
-  recoveryJournals(root, committedGeneration);
+  return expected;
+}
+
+function verifyWorkspaceFiles(manifest, expected) {
+  const files = new Map(manifest.files.map(file => [file.path, file]));
+  for (const [path, metadata] of expected) {
+    const file = files.get(path);
+    if (!file) fail(`SQLite가 참조하는 파일이 없습니다: ${path}`);
+    if (file.size !== metadata.size || file.sha256 !== metadata.sha256) {
+      fail(`SQLite가 참조하는 파일의 무결성 검사에 실패했습니다: ${path}`);
+    }
+  }
 }
 function jsonFile(path, limit) {
   const fd = regularFd(path);
@@ -169,7 +230,7 @@ function verifyBackup(root) {
   const seen = new Set();
   for (const path of manifest.directories) { if (!validRelative(path, true) || seen.has(path)) fail('매니페스트의 디렉터리 경로가 올바르지 않습니다.'); seen.add(path); }
   for (const file of manifest.files) {
-    if (!file || !validRelative(file.path) || seen.has(file.path) || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.sha256 !== 'string' || !/^[a-f\d]{64}$/.test(file.sha256)) fail('매니페스트의 파일 경로·크기·해시가 올바르지 않습니다.');
+    if (!file || !validRelative(file.path) || seen.has(file.path) || !Number.isSafeInteger(file.size) || file.size < 0 || typeof file.sha256 !== 'string' || !SHA256.test(file.sha256)) fail('매니페스트의 파일 경로·크기·해시가 올바르지 않습니다.');
     seen.add(file.path);
   }
   const tree = walk(root), expectedDirectories = ['', ...manifest.directories.map(path => path ? `data/${path}` : 'data')].sort(), expectedFiles = [MANIFEST, ...manifest.files.map(file => `data/${file.path}`)].sort();
@@ -210,8 +271,9 @@ function perform(operation, source, target) {
       if (!tree.files.some(file => file.path === DB)) fail('Teamspace 데이터베이스가 없습니다.');
       stage = mkdtempSync(join(dirname(to), '.teamspace-backup-')); chmodSync(stage, 0o700);
       privateDirectory(join(stage, 'data')); copyTree(from, join(stage, 'data'), tree);
-      validateDatabase(join(stage, 'data'), true);
+      const expected = validateDatabase(join(stage, 'data'), true);
       const manifest = manifestOf(join(stage, 'data'));
+      verifyWorkspaceFiles(manifest, expected);
       writeFileSync(join(stage, MANIFEST), JSON.stringify(manifest), { flag: 'wx', mode: 0o600, flush: true });
       verifyBackup(stage);
       for (const directory of walk(stage).directories.reverse()) sync(join(stage, directory));
@@ -221,9 +283,11 @@ function perform(operation, source, target) {
       const originalManifest = verifyBackup(from);
       const payload = join(from, 'data'), tree = walk(payload);
       stage = mkdtempSync(join(dirname(to), '.teamspace-restore-')); chmodSync(stage, 0o700);
-      copyTree(payload, stage, tree); validateDatabase(stage, false);
+      copyTree(payload, stage, tree);
+      const expected = validateDatabase(stage, false);
       clearReadonlyCaches(stage, originalManifest);
       const manifest = verifyBackup(from);
+      verifyWorkspaceFiles(manifest, expected);
       for (const file of manifest.files) { const actual = digest(join(stage, file.path)); if (actual.size !== file.size || actual.sha256 !== file.sha256) fail('복원 사본의 무결성을 확인하지 못했습니다.'); }
       const copied = walk(stage);
       if (JSON.stringify(copied.directories) !== JSON.stringify([...manifest.directories].sort()) || JSON.stringify(copied.files.map(file => file.path)) !== JSON.stringify(manifest.files.map(file => file.path).sort())) fail('복원 사본에 매니페스트와 다른 파일 또는 디렉터리가 있습니다.');
