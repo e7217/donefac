@@ -1,4 +1,5 @@
 import type { DocRevision, RichContent } from '../../shared/types';
+import { renderStandaloneDocumentTableMarkdown } from '../../shared/document-export-markdown';
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
@@ -152,9 +153,8 @@ function renderMarkdown(node: RichContent, headings?: Map<RichContent, MarkdownH
     case 'taskItem': return `- [${node.attrs?.checked ? 'x' : ' '}] ` + inline().trim() + '\n';
     case 'image': return `![${String(node.attrs?.alt || '').replace(/\]/g, '\\]')}](${String(node.attrs?.src || '').replace(/[()]/g, encodeURIComponent)})\n\n`;
     case 'table': {
-      const rows = (node.content || []).map(row => (row.content || []).map(cell => render(cell).trim().replace(/\n/g, '<br>').replace(/\|/g, '\\|')));
-      if (!rows.length) return '';
-      return '| ' + rows[0].join(' | ') + ' |\n| ' + rows[0].map(() => '---').join(' | ') + ' |\n' + rows.slice(1).map(row => '| ' + row.join(' | ') + ' |').join('\n') + '\n\n';
+      const table = renderStandaloneDocumentTableMarkdown(node, headings);
+      return table ? `${table}\n\n` : '';
     }
     default: return inline();
   }

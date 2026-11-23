@@ -1,6 +1,6 @@
 import { documentNodes } from '../shared/document-references.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
-import { renderTicketDescriptionMarkdown } from './document-export-markdown.js';
+import { renderTicketDescriptionMarkdown } from '../shared/document-export-markdown.js';
 import { convertLegacyContent, type MigrationContentContext, type MigrationContentDiagnostic } from './migration-content.js';
 
 const renderedHtmlTag = /<\/?(?:p|br|h[1-6]|strong|b|em|i|u|del|s|strike|a|code|pre|blockquote|ul|ol|li|table|tr|th|td|img|span|div|hr)\b/i;

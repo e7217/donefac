@@ -7,7 +7,7 @@ import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
-import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
+import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude, MAX_DOCUMENT_TABLE_SPAN, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
@@ -363,8 +363,11 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'image': { const src = imageUrl(attrs.src, state.pinnedSource); return src ? <img key={key} src={src} alt={typeof attrs.alt === 'string' ? attrs.alt : ''} title={typeof attrs.title === 'string' ? attrs.title : undefined} loading="lazy" /> : <Notice key={key}>이 이미지를 안전하게 표시할 수 없습니다.</Notice>; }
     case 'table': return <div key={key} className="doc-readonly-table"><table><tbody>{children}</tbody></table></div>;
     case 'tableRow': return <tr key={key}>{children}</tr>;
-    case 'tableHeader': return <th key={key} colSpan={typeof attrs.colspan === 'number' ? Math.min(100, Math.max(1, attrs.colspan)) : undefined} rowSpan={typeof attrs.rowspan === 'number' ? Math.min(100, Math.max(1, attrs.rowspan)) : undefined}>{children}</th>;
-    case 'tableCell': return <td key={key} colSpan={typeof attrs.colspan === 'number' ? Math.min(100, Math.max(1, attrs.colspan)) : undefined} rowSpan={typeof attrs.rowspan === 'number' ? Math.min(100, Math.max(1, attrs.rowspan)) : undefined}>{children}</td>;
+    case 'tableHeader': case 'tableCell': {
+      const Cell = node.type === 'tableHeader' ? 'th' : 'td';
+      const span = (value: unknown) => typeof value === 'number' ? Math.min(MAX_DOCUMENT_TABLE_SPAN, Math.max(1, value)) : undefined;
+      return <Cell key={key} colSpan={span(attrs.colspan)} rowSpan={span(attrs.rowspan)}>{children}</Cell>;
+    }
     case 'details': return <details key={key} className="doc-readonly-details" open>{children}</details>;
     case 'detailsSummary': return <summary key={key}>{children}</summary>;
     case 'detailsContent': return <div key={key} className="doc-details-content">{children}</div>;

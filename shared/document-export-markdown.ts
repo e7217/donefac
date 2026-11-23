@@ -1,14 +1,14 @@
 import { parse, parseInline } from 'marked';
-import { documentChildListDescription, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
-import { documentLabelListDescription, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
+import { documentChildListDescription, normalizeDocumentChildListOptions } from './document-child-list.js';
+import { documentLabelListDescription, normalizeDocumentLabelListOptions } from './document-label-list.js';
 import {
   CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, STATUS_BADGE_TONE_LABELS, documentPlainText, documentTocOptions,
-  isCalloutVariant, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeTone,
-} from '../shared/document-nodes.js';
-import { documentNodes } from '../shared/document-references.js';
-import { isDocumentSectionId, outlineHeadingTitle } from '../shared/document-sections.js';
-import { inlineAttachmentIdFromUrl } from '../shared/inline-attachment.js';
-import type { DocPage, RichContent } from '../shared/types.js';
+  isCalloutVariant, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeTone, MAX_DOCUMENT_TABLE_SPAN,
+} from './document-nodes.js';
+import { documentNodes } from './document-references.js';
+import { isDocumentSectionId, outlineHeadingTitle } from './document-sections.js';
+import { inlineAttachmentIdFromUrl } from './inline-attachment.js';
+import type { DocPage, RichContent } from './types.js';
 
 type DocumentTarget = { sectionId?: string; revisionId?: string };
 type AttachmentKind = 'inline-image' | 'attachment' | 'attachment-version';
@@ -44,6 +44,8 @@ export interface DocumentMarkdownExportDiagnostic {
 }
 
 type Heading = { level: 1 | 2 | 3; anchor: string; title: string };
+type StandaloneTable = { headings?: ReadonlyMap<RichContent, { anchor: string; level: number; title: string }> };
+const emptyExportResolvers: DocumentMarkdownExportResolvers = { document: () => undefined, attachment: () => undefined };
 
 const literal = (value: unknown) => typeof value === 'string' ? value : '';
 const cleanText = (value: string) => value.toWellFormed().replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, '\ufffd');
@@ -63,8 +65,20 @@ function localHref(href: string | undefined): string | undefined {
   return href.replace(/[ !"&'()<>[\]`{}|]/gu, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
 }
 
-function ticketHref(href: string | undefined): string | undefined {
+function encodeMarkdownHref(href: string | undefined): string | undefined {
   return href?.replace(/[ !"'()<>`{}|]/gu, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function standaloneHref(href: string, image = false): string | undefined {
+  if (!href || href.trim() !== href || href.startsWith('//') || /[\\\u0000-\u001f\u007f]/u.test(href)) return;
+  const scheme = /^[a-z][a-z\d+.-]*:/iu.exec(href)?.[0].toLowerCase();
+  if (scheme === 'http:' || scheme === 'https:') {
+    try {
+      const url = new URL(href);
+      if (url.username || url.password) return;
+    } catch { return; }
+  } else if (image ? !href.startsWith('/') : scheme ? scheme !== 'mailto:' && scheme !== 'tel:' : /^[^/?#]*:/u.test(href)) return;
+  return encodeMarkdownHref(href);
 }
 
 function link(body: string, href: string, title?: string): string {
@@ -162,7 +176,7 @@ function listItem(marker: string, body: string): string {
 }
 
 function cellSpan(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) ? Math.min(100, Math.max(1, value)) : 1;
+  return typeof value === 'number' && Number.isInteger(value) ? Math.min(MAX_DOCUMENT_TABLE_SPAN, Math.max(1, value)) : 1;
 }
 
 const alignment = (value: unknown) => value === 'center' || value === 'left' || value === 'right' ? value : null;
@@ -176,8 +190,19 @@ class DocumentMarkdownRenderer {
   private readonly headings: Map<RichContent, Heading>;
   private readonly anchors: Set<string>;
 
-  constructor(content: RichContent, private readonly resolve: DocumentMarkdownExportResolvers, private readonly ticket?: TicketMarkdownLinks) {
+  constructor(content: RichContent, private readonly resolve: DocumentMarkdownExportResolvers, private readonly ticket?: TicketMarkdownLinks,
+    private readonly standalone?: StandaloneTable) {
     this.headings = outline(content);
+    if (standalone?.headings?.size) {
+      const allHeadings = new Map<RichContent, Heading>();
+      for (const [node, heading] of standalone.headings) {
+        allHeadings.set(node, { ...heading, level: isDocumentTocLevel(heading.level) ? heading.level : 3 });
+      }
+      for (const [node, heading] of this.headings) {
+        if (!allHeadings.has(node)) allHeadings.set(node, heading);
+      }
+      this.headings = allHeadings;
+    }
     this.anchors = new Set([...this.headings.values()].map(heading => heading.anchor));
   }
 
@@ -186,7 +211,8 @@ class DocumentMarkdownRenderer {
   }
 
   private destination(raw: unknown, node: RichContent): string | undefined {
-    if (this.ticket) return ticketHref(this.ticket.href(literal(raw)));
+    if (this.ticket) return encodeMarkdownHref(this.ticket.href(literal(raw)));
+    if (this.standalone) return standaloneHref(literal(raw));
     const href = sameOriginAddress(literal(raw), this.resolve.browserOrigin);
     const attachment = attachmentTarget(href);
     if (attachment) {
@@ -245,10 +271,13 @@ class DocumentMarkdownRenderer {
     const label = escapeMarkdownText(literal(attrs?.label) || id || literal(attrs?.issueId) || '참조');
     if (this.ticket) {
       const href = node.type === 'issueReference' ? this.ticket.reference('issue', literal(attrs?.issueId)) : this.ticket.reference('document', id);
-      const destination = ticketHref(href);
+      const destination = encodeMarkdownHref(href);
       return destination ? link(label, destination) : label;
     }
     if (node.type === 'issueReference') {
+      if (this.standalone && typeof attrs?.issueId === 'string') {
+        return link(label, encodeMarkdownHref(`#/all/issues?issue=${encodeURIComponent(attrs.issueId)}`)!);
+      }
       this.warn('issue_reference', node);
       return `**업무 참조** · ${label}`;
     }
@@ -258,7 +287,7 @@ class DocumentMarkdownRenderer {
       if (!href) this.warn('pinned_revision_unavailable', node);
       return `**문서 버전 포함** · ${href ? link(label, href) : label} · 저장본 ${escapeMarkdownText(revisionId || '미확인')}${href ? '' : ' · 이번 내보내기에 없음'}`;
     }
-    const href = localHref(this.resolve.document(id));
+    const href = this.standalone && id ? encodeMarkdownHref(`#/all/documents/${encodeURIComponent(id)}`) : localHref(this.resolve.document(id));
     const view = href ? link(label, href) : label;
     if (node.type === 'documentReference') {
       if (!href) this.warn('document_outside_export', node);
@@ -274,8 +303,12 @@ class DocumentMarkdownRenderer {
     const title = literal(node.attrs?.title);
     const alt = escapeMarkdownText(literal(node.attrs?.alt) || title || '첨부 이미지');
     if (this.ticket) {
-      const href = ticketHref(this.ticket.href(src));
+      const href = encodeMarkdownHref(this.ticket.href(src));
       return href ? link(alt, href) : alt;
+    }
+    if (this.standalone) {
+      const href = standaloneHref(src, true);
+      return href ? `!${link(alt, href, title)}` : alt;
     }
     const attachment = attachmentTarget(src);
     const id = inlineAttachmentIdFromUrl(src) ?? attachment?.id;
@@ -431,5 +464,9 @@ export function renderDocumentExportMarkdown(source: Pick<DocPage, 'id' | 'title
 }
 
 export function renderTicketDescriptionMarkdown(content: RichContent, links: TicketMarkdownLinks): string {
-  return new DocumentMarkdownRenderer(content, { document: () => undefined, attachment: () => undefined }, links).blocks([content]);
+  return new DocumentMarkdownRenderer(content, emptyExportResolvers, links).blocks([content]);
+}
+
+export function renderStandaloneDocumentTableMarkdown(table: RichContent, headings?: StandaloneTable['headings']): string {
+  return new DocumentMarkdownRenderer(table, emptyExportResolvers, undefined, { headings }).blocks([table]);
 }

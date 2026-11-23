@@ -1,7 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import { isCalendarDate } from '../shared/calendar.js';
 import {
-  isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH,
+  isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
   type CalloutVariant, type StatusBadgeTone,
 } from '../shared/document-nodes.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
@@ -300,7 +300,7 @@ class Converter {
     return [{ type: 'statusBadge', attrs: { label, tone: tone ?? 'neutral' } }];
   }
   plain(value: string): RichContent[] { return value.replace(/\r\n?/g, '\n').split('\n').map(line => { this.tick(); return paragraph(text(line)); }); }
-  span(value: unknown): number { const number = Number(value ?? 1); if (!Number.isSafeInteger(number) || number < 1 || number > 100) { this.warn('TABLE_SPAN_NORMALIZED', '잘못되었거나 너무 큰 표 셀 병합 수를 1로 바꿨습니다.'); return 1; } return number; }
+  span(value: unknown): number { const number = Number(value ?? 1); if (!Number.isSafeInteger(number) || number < 1 || number > MAX_DOCUMENT_TABLE_SPAN) { this.warn('TABLE_SPAN_NORMALIZED', '잘못되었거나 너무 큰 표 셀 병합 수를 1로 바꿨습니다.'); return 1; } return number; }
   headingLevel(value: unknown): number { const level = Number(value || 1); if (![1, 2, 3].includes(level)) this.warn('HEADING_LEVEL_NORMALIZED', '편집기가 지원하는 제목 1~3단계로 정규화했습니다.'); return Math.max(1, Math.min(3, Number.isFinite(level) ? level : 1)); }
   urlReference(url: string): MigrationReferenceInput | null {
     const address = url.trim();

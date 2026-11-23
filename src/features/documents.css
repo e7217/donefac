@@ -82,8 +82,16 @@
 }
 .docs-selection-action svg { flex: none; }
 .docs-selection-action-hint { flex-basis: 100%; padding: 3px 5px; color: #56647b; font-size: 11px; }
-.docs-table-tools { display:flex; flex-wrap:wrap; gap:6px; margin-top:-15px; margin-bottom:15px; }
-.docs-table-tools button { border:1px solid #e5eaf2; background:white; color:#7c89a1; padding:4px 7px; border-radius:4px; font-size:9px; cursor:pointer; }
+.docs-table-tools { display:grid; min-width:0; gap:6px; margin:-12px 0 15px; }
+.docs-table-tool-actions { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.docs-table-tools button { min-height:30px; border:1px solid #dce4f0; background:white; color:#425773; padding:4px 8px; border-radius:5px; font-size:11px; cursor:pointer; }
+.docs-table-tools button[aria-pressed='true'] { border-color:#b3c5f2; background:#edf2ff; color:#344e87; }
+.docs-table-tools button:enabled:hover { border-color:#92abe1; }
+.docs-table-tools button:focus-visible { outline:2px solid #486cb4; outline-offset:2px; }
+.docs-table-tools button:disabled { color:#66748a; background:#f3f5f8; cursor:not-allowed; }
+.docs-table-tools button.docs-table-delete:enabled { color:#a33e46; }
+.docs-table-tools p { margin:0; color:#52647e; font-size:11px; line-height:1.55; overflow-wrap:anywhere; }
+.docs-table-tools p[role='status'] { color:#304e81; font-weight:600; }
 .docs-insert-form { display:flex; align-items:center; gap:6px; margin:-10px 0 17px; }
 .docs-insert-form>input { flex:1; min-width:0; font-size:11px; }
 .docs-insert-form .btn { font-size:10px; }

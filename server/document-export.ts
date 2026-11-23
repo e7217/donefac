@@ -9,7 +9,7 @@ import { isDocumentSectionId } from '../shared/document-sections.js';
 import type { Attachment, AttachmentVersion, DocPage } from '../shared/types.js';
 import { attachmentId, MAX_PACKAGE_BYTES, type AttachmentFiles } from './attachments.js';
 import type { AttachmentVersionsService } from './attachment-versions.js';
-import { escapeMarkdownText, renderDocumentExportMarkdown, type DocumentMarkdownExportDiagnostic } from './document-export-markdown.js';
+import { escapeMarkdownText, renderDocumentExportMarkdown, type DocumentMarkdownExportDiagnostic } from '../shared/document-export-markdown.js';
 import type { DocumentPublicationService } from './document-publication.js';
 import type { Store } from './store.js';
 

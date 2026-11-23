@@ -36,6 +36,7 @@ import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
+import { DocumentTableTools } from './DocumentTableTools';
 import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
@@ -1637,7 +1638,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   onMouseDown={event => event.preventDefault()} onClick={() => exitDocumentColumnLayout(editor)}><CornerDownRight size={12} aria-hidden="true" /> 구역 다음 본문으로 이동</button>
                 <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => unwrapDocumentColumnLayout(editor)}>다단 구역 해제</button>
               </div>}
-              {editor?.isActive('table') && !bodyReadOnly && <div className="docs-table-tools"><button onClick={() => editor.chain().focus().addRowAfter().run()}>행 추가</button><button onClick={() => editor.chain().focus().addColumnAfter().run()}>열 추가</button><button onClick={() => editor.chain().focus().deleteRow().run()}>행 삭제</button><button onClick={() => editor.chain().focus().deleteColumn().run()}>열 삭제</button><button onClick={() => editor.chain().focus().deleteTable().run()}>표 삭제</button></div>}
+              {editor && !bodyReadOnly && <DocumentTableTools key={`${draft.id}:${liveMode}`} editor={editor} />}
               {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
               {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor}
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}

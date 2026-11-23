@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parse } from 'marked';
-import { renderDocumentExportMarkdown, type DocumentMarkdownExportResolvers } from '../../server/document-export-markdown.js';
+import { renderDocumentExportMarkdown, type DocumentMarkdownExportResolvers } from '../../shared/document-export-markdown.js';
 import type { RichContent } from '../../shared/types.js';
 import { contentMarkdown } from '../../src/features/document-utils.js';
 
@@ -31,6 +31,40 @@ test('Markdown exports preserve the reading order, formatting and section links 
     const html = parse(markdown, { async: false, gfm: true });
     assert.match(html, /id="column-left"[\s\S]*<h2>작업 절차<\/h2>[\s\S]*<strong>승인 필요<\/strong>[\s\S]*href="#column-left">절로 이동<\/a>[\s\S]*<pre><code class="language-sh">echo 준비\n<\/code><\/pre>[\s\S]*<p>공통 점검<\/p>/u);
   }
+});
+
+test('standalone Markdown keeps merged table headers, rich cell content and safe links', () => {
+  const row = (...content: RichContent[]): RichContent => ({ type: 'tableRow', content });
+  const header = (value: string, attrs?: RichContent['attrs']): RichContent => ({
+    type: 'tableHeader', attrs, content: [paragraph(text(value))],
+  });
+  const cell = (...content: RichContent[]): RichContent => ({ type: 'tableCell', content });
+  const content: RichContent = { type: 'doc', content: [
+    { type: 'heading', attrs: { level: 2, sectionId: 'review-table' }, content: [text('표 검토')] },
+    { type: 'table', content: [
+      row(header('병합 머리글', { colspan: 2, rowspan: 2 }), cell(paragraph(text('본문 칸')))),
+      row(cell(
+        paragraph(text('강조한 결정', { type: 'bold' })),
+        paragraph(text('둘째 문단 ', { type: 'italic' }), link('외부 참고', 'https://docs.example.test/review')),
+        { type: 'bulletList', content: [{ type: 'listItem', content: [paragraph(text('셀 안의 목록'))] }] },
+      )),
+      row(header('행 머리글'), { ...cell(
+        paragraph(link('표 제목으로', '#review-table')),
+        paragraph(text('<sample>문자 예제</sample>'), text(' · '), link('주소가 잘못된 링크', 'javascript:void(0)')),
+      ), attrs: { colspan: 2 } }),
+    ] },
+    { type: 'table', content: [row(header('검사 항목'), header('결과')), row(cell(paragraph(text('날짜'))), cell(paragraph(text('확인'))))] },
+  ] };
+
+  const markdown = contentMarkdown(content);
+  const html = parse(markdown, { async: false, gfm: true }).replaceAll('&#10;', '\n');
+  assert.match(html, /<th\b(?=[^>]*colspan="2")(?=[^>]*rowspan="2")[^>]*><p>병합 머리글<\/p><\/th><td><p>본문 칸<\/p><\/td>/u);
+  assert.match(html, /<td><p><strong>강조한 결정<\/strong><\/p>\s*<p><em>둘째 문단<\/em> <a href="https:\/\/docs\.example\.test\/review">외부 참고<\/a><\/p>/u);
+  assert.match(html, /<ul>\s*<li>셀 안의 목록<\/li>\s*<\/ul>/u);
+  assert.match(html, /<th><p>행 머리글<\/p><\/th><td colspan="2">[\s\S]*<a href="#review-table">표 제목으로<\/a>/u);
+  assert.match(html, /&lt;sample&gt;문자 예제&lt;\/sample&gt; · 주소가 잘못된 링크/u);
+  assert.doesNotMatch(html, /<\/?sample>|href=["']\s*javascript:/iu);
+  assert.match(markdown, /^\| 검사 항목 \| 결과 \|\n\|[\s|:-]+\|\n\| 날짜 \| 확인 \|$/mu);
 });
 
 test('offline Markdown renders rich Korean text, nested structures and stable navigation', () => {

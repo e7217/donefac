@@ -9,6 +9,7 @@ export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
 export const DOCUMENT_CONTENT_SCHEMA_VERSION = 12;
 export const MAX_DOCUMENT_COLUMNS = 3;
+export const MAX_DOCUMENT_TABLE_SPAN = 100;
 
 export interface DocumentColumnLayoutOptions {
   weights: number[];
