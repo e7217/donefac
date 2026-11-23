@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import { createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT } from '../../shared/issue-view.js';
-import { JiraViewQueryError, translateJiraViewQuery, type JiraViewQueryContext } from '../../shared/jira-view-query.js';
+import { JiraViewQueryError, translateJiraViewQuery, type JiraViewQueryContext, type JiraViewSourceAlias } from '../../shared/jira-view-query.js';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type Issue } from '../../shared/types.js';
 
 const project = { id: 'project-id', key: 'TEAM', name: 'Team project' };
@@ -121,6 +121,78 @@ test('JQL status unions check every original alias before reducing to current st
   for (const value of ['unmapped', 'ambiguous']) {
     assert.throws(() => translateJiraViewQuery(`status IN ("Legacy review", ${value}) AND status = review`, sourceContext), JiraViewQueryError);
   }
+});
+
+test('JQL priority lists become canonical native filters and combine with status and labels', () => {
+  const native = { ...context, sourceProjectAliases: undefined };
+  const translated = translateJiraViewQuery(
+    'project = TEAM AND priority IN (low, HIGH, 긴급) AND priority IN (높음, urgent) AND status = review AND labels = release', native,
+  );
+  assert.deepEqual(translated.filters, {
+    ...noFilters, priorities: ['urgent', 'high'], status: 'review', labels: { include: ['release'], match: 'all' },
+  });
+  assert.deepEqual(translated.criteria[1], { field: 'priority', label: '우선순위 · 긴급, 높음' });
+  const matches = createIssueViewMatcher(translated.filters, { users: [] }, schema);
+  assert.equal(matches(issue({ priority: 'urgent', labels: ['release'] })), true);
+  assert.equal(matches(issue({ priority: 'high', labels: ['release'] })), true);
+  assert.equal(matches(issue({ priority: 'medium', labels: ['release'] })), false);
+  assert.equal(matches(issue({ priority: 'high', labels: ['release'], status: 'done' })), false);
+  assert.equal(matches(issue({ priority: 'high' })), false);
+  assert.deepEqual(translateJiraViewQuery('PRIORITY = 높음', native).filters.priorities, ['high']);
+  for (const jql of [
+    'priority = Highest', 'priority = urgent AND priority = low', 'priority IN ()', 'priority IN (high,)',
+    'priority NOT IN (high, low)', 'priority != high', 'priority IS EMPTY', 'priority = high OR priority = low',
+    'priority = high OR status = review', 'priority = priorityOf(currentUser())',
+  ]) assert.throws(() => translateJiraViewQuery(jql, native), JiraViewQueryError, jql);
+});
+
+test('JQL priority intersections require complete coverage of a collapsed original priority', () => {
+  const highest = { kind: 'mapped', sourceId: '11', targetId: 'urgent', targetSourceIds: ['11', '12'] } as const;
+  const blocker = { kind: 'mapped', sourceId: '12', targetId: 'urgent', targetSourceIds: ['12', '11'] } as const;
+  const high = { kind: 'mapped', sourceId: '22', targetId: 'high' } as const;
+  const evidence = new Map<string, JiraViewSourceAlias>([
+    ['highest', highest], ['11', highest], ['blocker', blocker], ['12', blocker], ['legacy high', high], ['22', high],
+    ['merged option', { kind: 'ambiguous' }], ['bad option', { kind: 'unmapped' }], ['high', highest],
+  ]);
+  const source: JiraViewQueryContext = {
+    ...context,
+    prepareSourceAliases(fields) {
+      assert.deepEqual(fields, ['priority']);
+      return (field, value) => field === 'priority' ? evidence.get(value.toLowerCase()) : undefined;
+    },
+  };
+  const converted = translateJiraViewQuery(
+    'project = OLD AND priority IN (Highest, Blocker, "Legacy High") AND priority IN (11, 12, 22)', source,
+  );
+  assert.deepEqual(converted.filters, { ...noFilters, priorities: ['urgent', 'high'] });
+  assert.deepEqual(converted.criteria[1], { field: 'priority', label: '우선순위 · 긴급, 높음' });
+  assert.deepEqual(translateJiraViewQuery('priority IN (Highest, 22) AND priority = 22', source).filters.priorities, ['high']);
+  for (const jql of [
+    'priority = Highest', 'priority IN (Highest, 22)', 'priority IN (Highest, Blocker) AND priority = Blocker',
+    'priority = Highest AND priority = Blocker', 'priority = high', 'priority = urgent',
+    'priority IN (Highest, Blocker, unknown) AND priority IN (Highest, Blocker)',
+    'priority IN (Highest, Blocker, "merged option")', 'priority IN (Highest, Blocker, "bad option")',
+  ]) assert.throws(() => translateJiraViewQuery(jql, source), JiraViewQueryError, jql);
+  assert.throws(() => translateJiraViewQuery('priority = high', { ...context, sourceProjectAliases: [], blockedSourceProjectAliases: ['TEAM'] }), JiraViewQueryError);
+});
+
+test('JQL priority names can include label-only values while numeric aliases still select just their ID', () => {
+  const labelOnlyId = 'label:highest';
+  const targetSourceIds = ['11', '12', labelOnlyId];
+  const highest = { kind: 'mapped', sourceId: '11', targetId: 'urgent', targetSourceIds } as const;
+  const blocker = { kind: 'mapped', sourceId: '12', targetId: 'urgent', targetSourceIds } as const;
+  const evidence = new Map<string, JiraViewSourceAlias>([
+    ['highest', { ...highest, sameNameSourceIds: [labelOnlyId] }], ['11', highest], ['blocker', blocker], ['12', blocker],
+    ['invalid', { ...highest, sameNameSourceIds: ['label:unexpected'] }],
+  ]);
+  const source: JiraViewQueryContext = {
+    ...context,
+    prepareSourceAliases: () => (field, value) => field === 'priority' ? evidence.get(value.toLowerCase()) : undefined,
+  };
+  assert.deepEqual(translateJiraViewQuery('priority IN (Highest, Blocker) AND priority IN (Highest, 12)', source).filters.priorities, ['urgent']);
+  for (const jql of [
+    'priority IN (11, 12)', 'priority IN (Highest, Blocker) AND priority IN (11, Blocker)', 'priority IN (invalid, 12)',
+  ]) assert.throws(() => translateJiraViewQuery(jql, source), JiraViewQueryError, jql);
 });
 
 test('quoted literals preserve case and decode quotes and backslashes without evaluating the content', () => {

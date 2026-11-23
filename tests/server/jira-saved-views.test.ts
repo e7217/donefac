@@ -8,7 +8,7 @@ import { createApp } from '../../server/app.js';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view.js';
 import type {
   Issue, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
-  MigrationPreview, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, SavedView, SourceRecordArchive, User, WorkspaceSnapshot,
+  MigrationPreview, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, SavedView, SourceRecordArchive, User, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const ACTOR = 'user-min';
@@ -25,7 +25,7 @@ type JiraSourceIssue = {
   key: string;
   issueId?: string;
   fields?: {
-    summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue; duedate?: string | null;
+    summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue; duedate?: string | null; priority?: JiraRestValue;
     assignee?: JiraRestProfile; reporter?: JiraRestProfile; creator?: JiraRestProfile;
   };
 };
@@ -73,20 +73,23 @@ async function fixture(t: TestContext) {
   const addIssue = (title: string, labels: string[], projectId = PROJECT_ID) =>
     request<Issue>('/issues', 'POST', { projectId, title, labels }, 201);
 
-  async function reviewJiraMigration(instanceKey: string, sourceIssues: JiraSourceIssue[], targetKey: string,
+  async function reviewJiraMigration(instanceKey: string, sourceIssues: JiraSourceIssue[] | string, targetKey: string,
     configure?: (options: MigrationOptions) => Partial<MigrationConfiguration>) {
-    const issues = sourceIssues.map(({ id, key, issueId, fields }, index) => ({
-      id: issueId ?? String(100 + index), key: `${key}-${issueId ?? index + 1}`,
-      fields: {
-        project: { id, key, name: key }, summary: `${key} imported issue`,
-        created: '2020-01-01T00:00:00Z', updated: '2020-01-02T00:00:00Z',
-        issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' }, ...fields,
-      },
-    }));
-    const query = new URLSearchParams({ filename: 'synthetic.json', product: 'jira', instanceKey });
+    const csv = typeof sourceIssues === 'string';
+    const payload = csv ? sourceIssues : JSON.stringify({
+      issues: sourceIssues.map(({ id, key, issueId, fields }, index) => ({
+        id: issueId ?? String(100 + index), key: `${key}-${issueId ?? index + 1}`,
+        fields: {
+          project: { id, key, name: key }, summary: `${key} imported issue`,
+          created: '2020-01-01T00:00:00Z', updated: '2020-01-02T00:00:00Z',
+          issuetype: { id: '3', name: 'Task' }, status: { id: '1', name: 'Open' }, ...fields,
+        },
+      })),
+    });
+    const query = new URLSearchParams({ filename: csv ? 'synthetic.csv' : 'synthetic.json', product: 'jira', instanceKey });
     const uploaded = await fetch(`${base}/legacy-import/packages?${query}`, {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': ACTOR },
-      body: new TextEncoder().encode(JSON.stringify({ issues })),
+      body: new TextEncoder().encode(payload),
     });
     const pkg = await uploaded.json() as LegacyPackageSummary;
     assert.equal(uploaded.status, 201, JSON.stringify(pkg));
@@ -311,6 +314,118 @@ test('Jira multi-status saved views preserve original aliases while reviewing cu
   await f.request(`/views/${saved.id}?expectedVersion=${saved.version}`, 'DELETE');
   await f.request('/import', 'POST', { data: backup });
   assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [saved]);
+});
+
+test('Jira priority saved views match complete imported categories, preserve live native behavior, and revalidate after edits', async t => {
+  const f = await fixture(t);
+  const origin = { id: '40350', key: 'LEGPRIORITY' };
+  const [high, critical, minor, medium, deferred] = [
+    { id: '71211', name: 'Engineering High' }, { id: '71212', name: 'Critical' }, { id: '71213', name: 'Minor' },
+    { id: '71214', name: 'Normal' }, { id: '71215', name: 'Deferred backlog' },
+  ];
+  const projectId = await f.migrateJira('priority-source', [high, critical, minor, medium, deferred].map((priority, index) => ({
+    ...origin, issueId: String(1150 + index), fields: { priority, summary: priority.name },
+  })), 'TEAMPRIORITY');
+  const imported = (await f.snapshot()).issues.filter(issue => issue.projectId === projectId);
+  assert.deepEqual(Object.fromEntries(imported.map(issue => [issue.title, issue.priority])), {
+    [high.name]: 'high', [critical.name]: 'high', [minor.name]: 'low', [medium.name]: 'medium', [deferred.name]: 'medium',
+  });
+
+  const jql = `project = ${origin.key} AND priority IN (${high.id}, ${critical.name})`;
+  const review = await f.preview(jql, projectId);
+  const expected = imported.filter(issue => issue.priority === 'high').map(issue => issue.id).sort();
+  assert.deepEqual(review.filters.priorities, ['high']);
+  assert.deepEqual(review.criteria.find(criterion => criterion.field === 'priority'), { field: 'priority', label: '우선순위 · 높음' });
+  assert.deepEqual(review.issues.map(issue => issue.id).sort(), expected);
+  const named = await f.preview(`priority IN ("${high.name}", ${critical.id})`, projectId);
+  assert.deepEqual(named.filters, review.filters);
+  assert.deepEqual(named.issues, review.issues);
+  assert.deepEqual((await f.preview(`priority = ${minor.name}`, projectId)).filters.priorities, ['low']);
+  for (const condition of [
+    `priority = ${high.id}`, `priority IN (${high.id}, ${critical.id}) AND priority = ${critical.id}`,
+    `priority = ${medium.name}`, `priority = ${deferred.id}`, 'priority = 71999', 'priority = high',
+  ]) {
+    const failure = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: condition }, 400);
+    assert.match(failure.error, /우선순위/u, condition);
+  }
+
+  const save = { projectId, jql, name: 'Jira priority categories', layout: 'board', acceptProjectOrder: false };
+  const view = await f.request<SavedView>(IMPORT, 'POST', { ...save, revision: review.revision }, 201);
+  assert.deepEqual(view.filters, review.filters);
+  const native = await f.request<Issue>('/issues', 'POST', { projectId, title: 'New native high ticket', priority: 'high' }, 201);
+  const afterCreate = await f.snapshot();
+  const schema = afterCreate.issueSchemas?.find(value => value.projectId === projectId);
+  assert.ok(schema);
+  const matches = createIssueViewMatcher(view.filters, afterCreate, schema);
+  assert.deepEqual(afterCreate.issues.filter(issue => issue.projectId === projectId && matches(issue)).map(issue => issue.id).sort(),
+    [...expected, native.id].sort());
+
+  const beforeEdit = await f.preview(jql, projectId);
+  const localEdit = imported.find(issue => issue.title === minor.name);
+  assert.ok(localEdit);
+  const edited = await f.request<Issue>(`/issues/${localEdit.id}`, 'PATCH', { expectedVersion: localEdit.version, priority: 'high' });
+  assert.ok(matches(edited));
+  const blocked = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql }, 400);
+  assert.match(blocked.error, /우선순위/u);
+  const stale = await f.request<{ details: unknown }>(IMPORT, 'POST', { ...save, name: 'Stale priority preview', revision: beforeEdit.revision }, 409);
+  assert.deepEqual(stale.details, STALE);
+  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [view]);
+
+  const backup = await f.request<WorkspaceSnapshot>('/export');
+  assert.deepEqual(backup.savedViews, [view]);
+  assert.doesNotMatch(JSON.stringify(backup.savedViews), /Engineering High|Critical|LEGPRIORITY/u);
+  await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
+  await f.request('/import', 'POST', { data: backup });
+  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [view]);
+});
+
+test('Jira priority queries accept exact Teamspace values in a native project', async t => {
+  const f = await fixture(t);
+  const { id: projectId } = await f.request<Project>('/projects', 'POST', { name: 'Native priorities', key: 'LOCALPRIO' }, 201);
+  const high = await f.request<Issue>('/issues', 'POST', { projectId, title: 'High local priority', priority: 'high' }, 201);
+  await f.request<Issue>('/issues', 'POST', { projectId, title: 'Low local priority', priority: 'low' }, 201);
+  const jql = 'project = LOCALPRIO AND priority IN (HIGH, "낮음") AND priority = "높음"';
+  const review = await f.preview(jql, projectId);
+  assert.deepEqual(review.filters.priorities, ['high']);
+  assert.deepEqual(review.issues.map(issue => issue.id), [high.id]);
+  const failure = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: 'priority = Critical' }, 400);
+  assert.match(failure.error, /우선순위/u);
+});
+
+test('Jira label-only priority joins a proven same-name option without establishing its numeric ID', async t => {
+  const f = await fixture(t);
+  const instanceKey = 'mixed-priority-source';
+  const origin = { id: '40351', key: 'SOURCEPRIO' };
+  const targetKey = 'MIXEDPRIO';
+  const csv = [
+    'Issue id,Issue key,Project id,Project key,Summary,Priority,Status,Issue Type,Created,Updated',
+    `1900,${origin.key}-1900,${origin.id},${origin.key},CSV High,High,Open,Task,2020-01-01T00:00:00Z,2020-01-02T00:00:00Z`,
+  ].join('\r\n');
+  const projectId = await f.migrateJira(instanceKey, csv, targetKey);
+  const [csvIssue] = (await f.snapshot()).issues.filter(issue => issue.projectId === projectId);
+  assert.ok(csvIssue);
+  assert.equal(csvIssue.priority, 'high');
+  const nameQuery = `project = ${origin.key} AND priority = High`;
+  assert.deepEqual((await f.preview(nameQuery, projectId)).issues.map(issue => issue.id), [csvIssue.id]);
+
+  const append = (id: string, issueId: string) => f.migrateJira(instanceKey, [{
+    ...origin, issueId, fields: { summary: `REST High ${id}`, priority: { id, name: 'High' } },
+  }], targetKey, options => ({ appendTo: {
+    projectId,
+    statuses: Object.fromEntries(options.statuses.map(value => [value.id, csvIssue.status])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(value => [value.id, csvIssue.type])),
+    fields: {},
+  } }));
+  await append('11', '1901');
+  const both = await f.preview(nameQuery, projectId);
+  assert.deepEqual(both.filters.priorities, ['high']);
+  assert.deepEqual(both.issues.map(issue => issue.title).sort(), ['CSV High', 'REST High 11']);
+  const numeric = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: 'priority = 11' }, 400);
+  assert.match(numeric.error, /우선순위/u);
+
+  await append('12', '1902');
+  const ambiguous = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: nameQuery }, 400);
+  assert.match(ambiguous.error, /우선순위/u);
 });
 
 test('Jira source user, status, and type values survive team renames, append, and backup restore', async t => {

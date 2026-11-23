@@ -39,10 +39,10 @@ function wikiExport(key: string, title: string, jql: string) {
 
 function jiraExport(key: string, suffix: string, login: string) {
   return Buffer.from([
-    'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Assignee,Due Date',
-    ...[['1', `배포 예정 ${suffix}`, '2026-11-25'], ['2', `다른 마감 업무 ${suffix}`, '2026-11-27']].map(([id, title, dueDate]) =>
+    'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Assignee,Priority,Due Date',
+    ...[['1', `배포 예정 ${suffix}`, 'High', '2026-11-25'], ['2', `다른 마감 업무 ${suffix}`, 'Low', '2026-11-27']].map(([id, title, priority, dueDate]) =>
       [id, `${key}-${id}`, '20800', key, 'Original Jira project', title,
-        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 'Open', 'Task', login, dueDate].join(',')),
+        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 'Open', 'Task', login, priority, dueDate].join(',')),
   ].join('\r\n'));
 }
 
@@ -98,7 +98,7 @@ const test = base.extend<{ migratedJiraList: Fixture }>({
     const jiraKey = `JR${suffix}`, wikiKey = `WK${suffix}`;
     const login = `legacy_owner_${suffix}`;
     const title = `이관한 배포 문서 ${suffix}`;
-    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY Rank ASC`;
+    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND priority = High AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY Rank ASC`;
     const { users: [assignee, secondActor] } = await workspace(request);
     expect(assignee).toBeDefined();
     expect(secondActor).toBeDefined();
@@ -119,6 +119,7 @@ const test = base.extend<{ migratedJiraList: Fixture }>({
       if (!original || !matched || !unmatched) throw new Error('The source Jira tickets or Confluence page were not imported.');
       expect(original.content.content?.filter(node => node.type === 'codeBlock')).toHaveLength(2);
       expect(matched.assigneeId).toBe(assignee.id);
+      expect([matched.priority, unmatched.priority]).toEqual(['high', 'low']);
       await provide({ original, jiraProjectId, jql, suffix, matched, unmatched, assignee, secondActor });
     } finally {
       const snapshot = await workspace(request);
@@ -153,8 +154,9 @@ async function openReview(page: Page, editor: Locator, fixture: Fixture) {
   await review.getByRole('button', { name: '조건 미리보기', exact: true }).click();
   const preview = await read<JiraSavedViewPreview>(await pending);
   expect(preview.issues.map(issue => issue.id)).toEqual([fixture.matched.id]);
-  expect(preview.filters).toMatchObject({ status: fixture.matched.status, assigneeId: fixture.assignee.id,
+  expect(preview.filters).toMatchObject({ status: fixture.matched.status, assigneeId: fixture.assignee.id, priorities: ['high'],
     planning: { dates: { mode: 'due', from: '2026-11-25', to: '2026-11-26' } } });
+  await expect(review.getByText('우선순위 · 높음', { exact: true })).toBeVisible();
   await review.getByLabel('보기 이름', { exact: true }).fill(`이관한 업무 표 ${fixture.suffix}`);
   await review.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true }).check();
   return review;
@@ -229,10 +231,20 @@ test('360px에서 보관한 Confluence Jira 목록을 복원하고 초안과 원
   const revisions = await read<DocRevision[]>(await request.get(`/api/documents/${f.original.id}/revisions`));
   expect(revisions.find(revision => revision.version === f.original.version)?.content).toEqual(f.original.content);
 
-  await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
+  const moved = await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
     data: { expectedVersion: f.unmatched.version, dueDate: '2026-11-26' },
   }));
-  await page.getByRole('button', { name: '참조 새로고침', exact: true }).click();
+  const refreshButton = page.getByRole('button', { name: '참조 새로고침', exact: true });
+  const [refreshed] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === '/api/workspace'), refreshButton.click(),
+  ]);
+  expect(refreshed.ok()).toBe(true);
+  await expect(refreshButton).toBeEnabled();
+  await expect(list).not.toContainText(f.unmatched.title);
+  await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
+    data: { expectedVersion: moved.version, priority: 'high' },
+  }));
+  await refreshButton.click();
   await expect(list).toContainText(f.unmatched.title);
   expect((await currentDoc(request, f.original.id))?.version).toBe(savedDoc?.version);
   await page.reload();

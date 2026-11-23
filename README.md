@@ -155,11 +155,13 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 ## Jira 필터를 공유 보기로 옮기기
 
-옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Teamspace 프로젝트와 현재 상태·유형·팀원·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
+옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Teamspace 프로젝트와 현재 상태·유형·팀원·우선순위·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
 
 원본 프로젝트와 이관 매핑을 확인할 수 있으면 `assignee = old_login`, `status = "In Review"` 같은 기존 조건을 그대로 붙여넣을 수 있습니다. 현재 Teamspace에서 이름을 바꾼 뒤에도 미리보기에는 연결된 팀원·상태·업무 유형의 현재 이름이 표시됩니다. 원본이나 현재 값에 충돌이 있으면 저장 전에 해당 조건을 검토합니다.
 
 `status IN ("Open", "In Review")`처럼 여러 상태에 해당하는 조건도 옮길 수 있습니다. `(status = Open OR status = "In Review")`처럼 `OR`로 이어진 상태 조건도 같은 방식으로 미리봅니다. [Atlassian JQL 연산자 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html)
+
+`priority = High`나 `priority IN (11, "Blocker")`는 이관 기록에서 확인한 원본 이름과 ID를 사용합니다. `Highest`와 `Blocker`가 둘 다 **긴급**으로 이관됐다면 그 두 값을 함께 고르는 조건을 옮길 수 있습니다. 미리보기에서 현재 티켓의 우선순위까지 대조합니다. 저장한 보기는 이후에도 현재 Teamspace 우선순위로 조회합니다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
 `due >= "2026-11-01" AND due < "2026-12-01"`은 목표 마감일이 11월 안에 있는 업무를 고릅니다. 저장하면 목록·보드·간트와 문서 업무 목록에서 같은 조회 조건을 사용합니다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 

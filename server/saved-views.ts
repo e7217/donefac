@@ -156,19 +156,27 @@ export class SavedViewService {
     const schema = this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId);
     const workflow = hooks.workflow(projectId);
     const aliases = this.jiraProjectAliases(projectId);
-    const sourceMatches: string[][] = [];
+    const sourceMatches: [string, string, string, ...(readonly string[])[]][] = [];
+    let blockedPriorities: ReadonlySet<Issue['priority']> | undefined;
     const translated = translateJiraViewQuery(jql, {
       project, ...aliases, statuses: workflow.statuses, issueTypes: schema.issueTypes, users,
       prepareSourceAliases: fields => {
         if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
-        const resolveAlias = jiraSavedViewSourceAliases(this.store, projectId, aliases.sourceInstance, aliases.sourceProjectAliases, fields);
+        const evidence = jiraSavedViewSourceAliases(this.store, projectId, aliases.sourceInstance, aliases.sourceProjectAliases, fields);
+        blockedPriorities = evidence.blockedPriorities;
         return (field, value) => {
-          const source = resolveAlias(field, value);
-          if (source?.kind === 'mapped') sourceMatches.push([field, source.sourceId, source.targetId]);
+          const source = evidence.resolveAlias(field, value);
+          if (source?.kind === 'mapped') {
+            const { sourceId, targetId, targetSourceIds, sameNameSourceIds } = source;
+            sourceMatches.push([field, sourceId, targetId, ...(targetSourceIds ? [targetSourceIds, sameNameSourceIds ?? []] : [])]);
+          }
           return source;
         };
       },
     });
+    if (translated.filters.priorities?.some(priority => blockedPriorities?.has(priority))) {
+      throw new JiraViewQueryError('우선순위 · 이관한 업무의 원본 값과 현재 우선순위가 일치하지 않아 같은 결과를 저장할 수 없습니다.');
+    }
     const selected = state({ layout: 'list', filters: translated.filters }, schema, users, hooks.planningItems(projectId));
     this.validateAssignee(selected, users);
     const { filters } = selected;

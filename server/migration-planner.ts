@@ -50,11 +50,16 @@ type JiraScheduleEndpoint = typeof jiraScheduleEndpoints[number];
 const jiraScheduleLabels = { startDate: '시작일', endDate: '종료일' } satisfies Record<JiraScheduleEndpoint, string>;
 const projectedJiraDate = (row: LegacyRecord, field: JiraScheduleEndpoint): unknown => object(row.metadata.jiraProjectedDates)[field];
 function sourceField(row:LegacyRecord,...names:string[]):unknown{const fields=fieldMap(row);const name=Object.keys(fields).find(name=>names.some(candidate=>normalizedName(name)===normalizedName(candidate)));return name===undefined?undefined:fields[name];}
-function recognizedJiraPriority(label: string): Issue['priority'] | null {
+export function recognizedJiraPriority(label: string): Issue['priority'] | null {
   if (/urgent|highest|blocker|긴급/i.test(label)) return 'urgent';
   if (/high|critical|높음/i.test(label)) return 'high';
   if (/low|minor|trivial|낮음/i.test(label)) return 'low';
   return /^(?:medium|normal|major|보통|중간)$/i.test(label.trim()) ? 'medium' : null;
+}
+export function jiraSourcePriorityRaw(row: LegacyRecord): unknown {
+  const fields = Object.entries(fieldMap(row)).filter(([name]) => normalizedName(name) === 'priority');
+  if (fields.length > 1) return fields.map(([, value]) => value);
+  return scalar(fields[0]?.[1]);
 }
 function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
   const raw = scalar(sourceField(row, kind, kind === 'issuetype' ? 'type' : 'status') ?? row.metadata[kind]);

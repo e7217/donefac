@@ -2,6 +2,7 @@ import type { JiraViewAliasField, JiraViewSourceAliasResolver } from '../shared/
 import { normalizeMigrationEmail } from '../shared/migration-identity-suggestions.js';
 import type { JiraMigrationIssueField, LegacyRecord, MigrationConfiguration, SourceImport, SourceRecordArchive } from '../shared/types.js';
 import { jiraIdentityEmailEvidence } from './migration-identity-email.js';
+import { jiraSavedViewPriorities } from './jira-saved-view-priorities.js';
 import {
   importedIssueTypeId, importedStatusId, jiraAssignee, jiraFieldDigest, jiraReporter, jiraSourceBuiltin,
   jiraSourceFieldHashes, migrationOptionId,
@@ -118,8 +119,9 @@ function isOriginalProjectRecord(record: LegacyRecord, projectAliases: ReadonlyS
 
 /** Read the migration mappings for live issues in one proven Jira project. No source values are stored in the view. */
 export function jiraSavedViewSourceAliases(store: Store, projectId: string, instanceKey: string,
-  projectAliases: readonly string[], fields: readonly JiraViewAliasField[]): JiraViewSourceAliasResolver {
+  projectAliases: readonly string[], fields: readonly JiraViewAliasField[]) {
   const indexes = new Map<JiraViewAliasField, AliasIndex>();
+  const priorities = fields.includes('priority') ? jiraSavedViewPriorities(store, projectId) : undefined;
   const memberFields = ['assignee', 'reporter'] as const;
   // A Jira user is the same account in both roles. Only proven assignee and reporter fields contribute.
   if (memberFields.some(field => fields.includes(field))) {
@@ -172,13 +174,17 @@ export function jiraSavedViewSourceAliases(store: Store, projectId: string, inst
     };
     const source: JiraSavedViewSource = { archive, packageId: pack.stagingId, configuration: receipt.configuration, original, record,
       accepted: (field, targetId) => sourceFieldAccepted(archive, original, field, targetId) };
+    priorities?.observe(archive, original, receipt.createdAt, sourceId => record('option', sourceId));
     for (const [field, index] of indexes) {
-      const evidence = field === 'type' || field === 'status' ? fieldEvidence(source, field) : memberEvidence(source, field);
+      const evidence = field === 'type' || field === 'status' ? fieldEvidence(source, field)
+        : field === 'assignee' || field === 'reporter' ? memberEvidence(source, field) : undefined;
       if (evidence) indexEvidence(index, evidence);
     }
   }
 
-  return (field, value) => {
+  const priorityEvidence = priorities?.prepare();
+  const resolveAlias: JiraViewSourceAliasResolver = (field, value) => {
+    if (field === 'priority') return priorityEvidence?.resolve(value);
     const index = indexes.get(field);
     if (!index) return undefined;
     const alias = value.toLowerCase();
@@ -194,4 +200,5 @@ export function jiraSavedViewSourceAliases(store: Store, projectId: string, inst
     if (index.sourcesByTarget.get(targetId)?.size !== 1) return { kind: 'ambiguous' };
     return { kind: 'mapped', sourceId, targetId };
   };
+  return { resolveAlias, blockedPriorities: priorityEvidence?.blockedTargets };
 }

@@ -1,9 +1,9 @@
 import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from './calendar.js';
 import {
   ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
-  issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter,
+  issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
 } from './issue-view.js';
-import { JIRA_SAVED_VIEW_QUERY_LIMIT, type IssueTypeDefinition, type IssueViewLabelFilter, type JiraSavedViewPreview, type Project, type User, type WorkflowStatus } from './types.js';
+import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueTypeDefinition, type IssueViewLabelFilter, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
 
 export interface JiraViewQueryContext {
   project: Pick<Project, 'id' | 'key' | 'name'>;
@@ -23,11 +23,19 @@ export class JiraViewQueryError extends Error {
 }
 
 type Translation = Pick<JiraSavedViewPreview, 'filters' | 'criteria' | 'orderBy'>;
-export type JiraViewAliasField = 'status' | 'type' | 'assignee' | 'reporter';
-export type JiraViewSourceAlias = { kind: 'mapped'; sourceId: string; targetId: string } | { kind: 'ambiguous' | 'unmapped' };
+export type JiraViewAliasField = 'status' | 'type' | 'assignee' | 'reporter' | 'priority';
+export type JiraViewSourceAlias = {
+  kind: 'mapped';
+  sourceId: string;
+  targetId: string;
+  /** The complete set of source priority IDs that share this target. Omit for a one-to-one mapping. */
+  targetSourceIds?: readonly string[];
+  /** Label-only source values covered by this exact name. Numeric aliases omit these values. */
+  sameNameSourceIds?: readonly string[];
+} | { kind: 'ambiguous' | 'unmapped' };
 export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: string) => JiraViewSourceAlias | undefined;
-type ScalarField = 'project' | JiraViewAliasField;
-type Field = ScalarField | 'labels' | 'due';
+type ScalarField = 'project' | Exclude<JiraViewAliasField, 'priority'>;
+type Field = ScalarField | 'priority' | 'labels' | 'due';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
 type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
   | { operator: '=' | '!=' | 'in' | 'not in'; values: Token[] }
@@ -35,6 +43,7 @@ type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
 );
 type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
+type PriorityClause = { offset: number; values: Token[] };
 type DueClause = { field: 'due'; offset: number; from?: string; to?: string };
 type Clause = BasicClause | StatusClause | DueClause;
 
@@ -55,8 +64,9 @@ const reservedWords = new Set([
 ]);
 const dueOperators = ['=', '<', '<=', '>', '>='];
 const fieldLabels: Record<Field, string> = {
-  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', labels: '라벨', due: '목표 마감일',
+  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', priority: '우선순위', labels: '라벨', due: '목표 마감일',
 };
+const priorities = (Object.keys(PRIORITY) as Priority[]).map(id => ({ id, label: PRIORITY[id] }));
 
 function isBare(token: Token, value: string): boolean {
   return (token.kind === 'symbol' || token.kind === 'word') && token.value.toLowerCase() === value;
@@ -122,7 +132,7 @@ function tokenize(query: string): Token[] {
 function parseField(token: Token): Field {
   const value = token.value.toLowerCase();
   switch (value) {
-    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'labels': case 'due':
+    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'priority': case 'labels': case 'due':
       return value;
     case 'issuetype':
       return 'type';
@@ -214,6 +224,7 @@ class QueryParser {
     const base = { field, offset: start.offset };
     if (this.consume('=')) return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
     if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
+    if (base.field === 'priority' && this.consume('in')) return { ...base, operator: 'in', values: this.list(fieldLabels.priority, MAX_TOKENS) };
     if (base.field === 'labels') {
       if (this.consume('!=')) return { ...base, operator: '!=', values: [this.literal('제외할 라벨을 입력해 주세요.')] };
       if (this.consume('in')) return { ...base, operator: 'in', values: this.list('라벨', ISSUE_VIEW_LABEL_FILTER_LIMIT) };
@@ -357,6 +368,46 @@ function statusIntersection(clauses: readonly StatusClause[], context: JiraViewQ
   return selected ?? new Map<string, string>();
 }
 
+function priorityFilter(clauses: readonly PriorityClause[], requireSource: boolean, resolveSourceAlias?: JiraViewSourceAliasResolver): Priority[] | undefined {
+  if (!clauses.length) return undefined;
+  // Intersect original values before converting them. One Teamspace priority can represent several Jira options.
+  const coverage = new Map<Priority, Set<string | null>>();
+  let selected: Map<Priority, Set<string | null>> | undefined;
+  for (const { values } of clauses) {
+    const options = new Map<Priority, Set<string | null>>();
+    for (const value of values) {
+      const source = resolveSourceAlias?.('priority', value.value) ?? (requireSource ? { kind: 'unmapped' as const } : undefined);
+      const { id } = resolveValue('priority', value, priorities, item => [item.id, item.label], () => source);
+      const matchedSources = source?.kind === 'mapped' ? [source.sourceId, ...(source.sameNameSourceIds ?? [])] : [null];
+      const originals = new Set<string | null>(source?.kind === 'mapped' ? source.targetSourceIds ?? [source.sourceId] : [null]);
+      const previous = coverage.get(id);
+      if (matchedSources.some(sourceId => !originals.has(sourceId)) ||
+          (previous && (previous.size !== originals.size || [...previous].some(item => !originals.has(item))))) {
+        throw new JiraViewQueryError('우선순위 · 이관 원본에서 이 값을 하나의 현재 값으로 구분할 수 없습니다.', value.offset);
+      }
+      coverage.set(id, originals);
+      const included = options.get(id) ?? new Set<string | null>();
+      for (const sourceId of matchedSources) included.add(sourceId);
+      options.set(id, included);
+    }
+    if (!selected) selected = options;
+    else for (const [id, included] of selected) {
+      const other = options.get(id);
+      for (const sourceId of included) if (!other?.has(sourceId)) included.delete(sourceId);
+      if (included.size === 0) selected.delete(id);
+    }
+  }
+
+  const offset = clauses.at(-1)?.offset;
+  if (!selected?.size) throw new JiraViewQueryError('우선순위 조건에 공통으로 일치하는 값이 없습니다.', offset);
+  for (const [id, included] of selected) {
+    if (included.size !== coverage.get(id)?.size) {
+      throw new JiraViewQueryError(`우선순위 · 현재 값 ‘${PRIORITY[id]}’에 함께 이관된 원본 값을 하나의 보기에서 나눌 수 없습니다.`, offset);
+    }
+  }
+  return parseIssueViewPriorities([...selected.keys()]);
+}
+
 function dueFilter(clauses: readonly DueClause[]) {
   if (!clauses.length) return undefined;
   let from: string | undefined;
@@ -450,6 +501,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const conditions = new Map<ScalarField, { id: string; label: string }>();
   const labelClauses: BasicClause[] = [];
   const statusClauses: StatusClause[] = [];
+  const priorityClauses: PriorityClause[] = [];
   const dueClauses: DueClause[] = [];
   for (const clause of clauses) {
     if (isStatusClause(clause)) {
@@ -459,6 +511,11 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     const { field } = clause;
     if (field === 'labels') {
       labelClauses.push(clause);
+      continue;
+    }
+    if (field === 'priority') {
+      if (!('values' in clause)) throw new JiraViewQueryError('지원하지 않는 우선순위 조건입니다.', clause.offset);
+      priorityClauses.push(clause);
       continue;
     }
     if (field === 'due') {
@@ -487,6 +544,10 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   }
   const labels = labelFilter(labelClauses);
   if (labels) filters.labels = labels;
+  const requirePrioritySource = Boolean(context.sourceProjectAliases?.length || context.blockedSourceProjectAliases?.length);
+  const selectedPriorities = priorityFilter(priorityClauses, requirePrioritySource, resolveSourceAlias);
+  if (selectedPriorities) filters.priorities = selectedPriorities;
+  const [priorityLabel] = issuePriorityLabelFilterLabels({ priorities: selectedPriorities });
   const due = dueFilter(dueClauses);
   if (due) filters.planning = { dates: due.dates };
   const fields = new Set(clauses.map(clause => clause.field));
@@ -494,7 +555,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     { field: 'project', label: projectCriterion(context) },
     ...[...fields].flatMap(field => {
       if (field === 'project' || field === 'labels') return [];
-      const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : conditions.get(field)?.label;
+      const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : field === 'priority' ? priorityLabel : conditions.get(field)?.label;
       return label === undefined ? [] : [{ field, label }];
     }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),

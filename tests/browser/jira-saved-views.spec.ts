@@ -201,3 +201,118 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     if (source) await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
   }
 });
+
+test('360px에서 Jira 우선순위 일부만 합쳐지는 조건을 막고 전체 그룹을 업무와 간트의 공유 보기로 연다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const originalKey = `JP${suffix}`;
+  const targetKey = `TP${suffix}`;
+  const rows = [
+    ['711', 'Highest', '긴급으로 옮긴 가장 높은 업무'],
+    ['712', 'Blocker', '긴급으로 옮긴 차단 업무'],
+    ['722', 'Critical', '높음으로 옮긴 중요 업무'],
+    ['733', 'Medium', '보통으로 옮긴 일반 업무'],
+  ];
+  const issues: Issue[] = [];
+  let source: LegacyPackageSummary | undefined;
+  let saved: SavedView | undefined;
+
+  try {
+    const xml = `<entity-engine-xml>
+      <Project id="42" pkey="${originalKey}" name="Jira 우선순위 프로젝트"/>
+      <Status id="1" pname="Open"/><IssueType id="3" pname="Task"/>
+      ${rows.map(([id, label]) => `<Priority id="${id}" pname="${label}"/>`).join('\n')}
+      ${rows.map(([id, , title], index) => `<Issue id="${200 + index}" project="42" number="${1 + index}"
+        summary="${title} ${suffix}" status="1" issuetype="3" priority="${id}"
+        created="2020-01-01T00:00:00Z" updated="2020-01-02T00:00:00Z"/>`).join('\n')}
+    </entity-engine-xml>`;
+    const query = new URLSearchParams({ filename: 'entities.xml', product: 'jira', instanceKey: `priority-views-${suffix}` });
+    source = await json<LegacyPackageSummary>(await request.post(`/api/legacy-import/packages?${query}`, {
+      headers: { 'Content-Type': 'application/octet-stream' }, data: Buffer.from(xml),
+    }), 201);
+    const { defaultConfiguration } = await json<MigrationOptions>(await request.get(`/api/migrations/options?packageId=${source.id}`));
+    const configuration = {
+      ...defaultConfiguration,
+      projects: defaultConfiguration.projects.map(project => ({ ...project, key: targetKey, name: `우선순위 이관 ${suffix}` })),
+    };
+    const migration = await json<MigrationPreview>(await request.post('/api/migrations/preview', { data: { configuration } }), 201);
+    expect(migration.canApply, JSON.stringify(migration.notices)).toBe(true);
+    const { import: { projectIds: [projectId] } } = await json<MigrationApplyResult>(await request.post(`/api/migrations/previews/${migration.id}/apply`, {
+      data: { expectedVersion: migration.version, acknowledgements: migration.requiredAcknowledgements },
+    }), 201);
+    const workspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    issues.push(...workspace.issues.filter(issue => issue.projectId === projectId));
+    expect(issues).toHaveLength(rows.length);
+    const migrated = rows.map(([, , title]) => issues.find(value => value.title === `${title} ${suffix}`)!);
+    expect(migrated.map(issue => issue.priority)).toEqual(['urgent', 'urgent', 'high', 'medium']);
+    const nativeLow = await json<Issue>(await request.post('/api/issues', {
+      data: { projectId, title: `Teamspace에서 추가한 낮은 업무 ${suffix}`, priority: 'low' },
+    }), 201);
+    issues.push(nativeLow);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${projectId}/issues`);
+    await page.getByRole('button', { name: 'Jira 필터 옮기기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Jira 필터 옮기기', exact: true });
+    const jqlInput = dialog.getByLabel('Jira 검색식 (JQL)', { exact: true });
+    const previewButton = dialog.getByRole('button', { name: '조건 미리보기', exact: true });
+    const save = dialog.getByRole('button', { name: '공유 보기 저장', exact: true });
+    const postTo = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+    const previewPath = '/api/views/jira/preview';
+    const viewName = `Jira 우선순위 보기 ${suffix}`;
+    await dialog.getByLabel('보기 이름', { exact: true }).fill(viewName);
+
+    const incomplete = `project = ${originalKey} AND priority = 711`;
+    await jqlInput.fill(incomplete);
+    const rejected = postTo(previewPath);
+    await previewButton.click();
+    expect((await rejected).status()).toBe(400);
+    await expect(dialog.getByRole('alert')).toContainText(/우선순위.*함께 이관된 원본 값/);
+    await expect(jqlInput).toHaveValue(incomplete);
+    await expect(save).toBeDisabled();
+    const rejectedWorkspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    expect(rejectedWorkspace.savedViews?.filter(view => view.projectId === projectId) ?? []).toEqual([]);
+
+    const complete = `project = ${originalKey} AND priority IN ("Highest", 712, "Critical")`;
+    await jqlInput.fill(complete);
+    const reviewing = postTo(previewPath);
+    await previewButton.click();
+    const reviewed = await json<JiraSavedViewPreview>(await reviewing);
+    const matched = migrated.slice(0, 3);
+    const excluded = [...migrated.slice(3), nativeLow];
+    expect(reviewed.total).toBe(matched.length);
+    expect(new Set(reviewed.filters.priorities)).toEqual(new Set(['urgent', 'high']));
+    expect(new Set(reviewed.issues.map(issue => issue.id))).toEqual(new Set(matched.map(issue => issue.id)));
+    const review = dialog.getByRole('region', { name: 'Jira 필터 미리보기', exact: true });
+    const criteria = review.getByRole('list', { name: '적용할 검색 조건', exact: true });
+    await expect(criteria).toContainText(/우선순위.*긴급.*높음/);
+    for (const issue of excluded) await expect(review).not.toContainText(issue.title);
+
+    const saving = postTo('/api/views/jira/import');
+    await save.click();
+    saved = await json<SavedView>(await saving, 201);
+    expect(saved.filters).toEqual(reviewed.filters);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByLabel('저장된 업무 보기', { exact: true })).toHaveValue(saved.id);
+    const listRows = page.locator('.issue-table tbody tr[data-issue-id]');
+    await expect(listRows).toHaveCount(matched.length);
+    for (const issue of matched) await expect(listRows.filter({ hasText: issue.title })).toBeVisible();
+
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const row = (issue: Issue) => chart.locator(`[data-issue-id="${issue.id}"]`);
+    for (const issue of matched) await expect(row(issue)).toBeVisible();
+    for (const issue of excluded) await expect(row(issue)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '간트에 적용된 우선순위·라벨 조건', exact: true })).toContainText(/우선순위.*긴급.*높음/);
+    await page.reload();
+    for (const issue of matched) await expect(row(issue)).toBeVisible();
+    for (const issue of excluded) await expect(row(issue)).toHaveCount(0);
+  } finally {
+    if (saved) await request.delete(`/api/views/${saved.id}?expectedVersion=${saved.version}`);
+    for (const value of issues) {
+      const response = await request.delete(`/api/issues/${value.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    if (source) await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
+  }
+});
