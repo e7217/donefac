@@ -1032,6 +1032,29 @@ async function runStandardPilot() {
     assert.deepEqual(issues.find(item => item.id === prerequisite.id), prerequisite);
   };
   await verifyPrerequisite(pilot.url);
+  const progressProject = await (await call(pilot.url, '/projects', { method: 'POST', status: 201,
+    body: { key: 'CYPR', name: '파일럿 사이클 진행 추이' } })).json();
+  const progressDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+  const progressCycle = await (await call(pilot.url, '/planning-items', { method: 'POST', status: 201,
+    body: { projectId: progressProject.id, kind: 'cycle', name: '파일럿 관측 사이클', status: 'active', startDate: progressDate } })).json();
+  const progressIssue = await (await call(pilot.url, '/issues', { method: 'POST', status: 201, body: {
+    projectId: progressProject.id, title: '파일럿 사이클 진행 검증 업무', cycleId: progressCycle.id,
+  } })).json();
+  const progressIssuePath = `/issues/${progressIssue.id}`;
+  const estimated = await (await call(pilot.url, progressIssuePath, { method: 'PATCH',
+    body: { expectedVersion: progressIssue.version, estimate: 8 } })).json();
+  const removedFromCycle = await (await call(pilot.url, progressIssuePath, { method: 'PATCH',
+    body: { expectedVersion: estimated.version, cycleId: null } })).json();
+  await call(pilot.url, progressIssuePath, { method: 'PATCH', body: { expectedVersion: removedFromCycle.version, cycleId: progressCycle.id } });
+  const progressPath = `/projects/${progressProject.id}/cycles/${progressCycle.id}/progress?${new URLSearchParams({ throughDate: progressDate, date: progressDate })}`;
+  const readProgress = async url => (await call(url, progressPath)).json();
+  const cycleProgress = await readProgress(pilot.url);
+  assert.ok(cycleProgress.revision);
+  assert.deepEqual(cycleProgress.days.at(-1).state, { scopeIssues: 1, remainingIssues: 1, completedIssues: 0, cancelledIssues: 0,
+    scopeEstimate: 8, remainingEstimate: 8, missingScopeEstimate: 0, missingRemainingEstimate: 0 });
+  assert.deepEqual(cycleProgress.days.at(-1).changes, { added: 2, removed: 1, completed: 0, cancelled: 0,
+    reopened: 0, estimateChanged: 1, reclassified: 0 });
+  assert.deepEqual(cycleProgress.evidence.items.map(item => item.issueId), Array(4).fill(progressIssue.id));
   const locked = cli('backup',source,backup);
   assert.equal(locked.status,75,locked.stderr);
   assert.equal(existsSync(backup),false);
@@ -1113,6 +1136,10 @@ async function runStandardPilot() {
   await verifyDecisionDraft(copy.url);
   await verifyDocumentProperties(copy.url);
   await verifyPrerequisite(copy.url);
+  const restoredCycleProgress = await readProgress(copy.url);
+  assert.equal(restoredCycleProgress.revision, cycleProgress.revision);
+  assert.deepEqual(restoredCycleProgress.days, cycleProgress.days);
+  assert.deepEqual(restoredCycleProgress.evidence, cycleProgress.evidence);
   await call(copy.url, `/issues/${routedIssue.id}`, {method: 'PATCH', status: 422,
     body: {expectedVersion: restoredRouting.version, customFields: {pilot_gate: true, pilot_proof: null}}});
   const restoredCollaboration = await (await call(copy.url,`${documentPath}/collaboration`)).json();

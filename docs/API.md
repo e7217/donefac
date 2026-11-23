@@ -987,6 +987,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `GET /api/projects/:projectId/cycle-completion-records/:recordId`는 해당 기록의 `issues`를 포함한다. 기록에는 당시 사이클 이름·버전·기간, `destination`의 ID·이름·버전 또는 백로그를 뜻하는 `null`, 완료한 작업자와 시각, 분류별 건수를 저장한다. 각 업무에는 당시 업무 키·제목·상태·담당자와 `done`, `cancelled`, `carry` 중 하나의 결과를 저장한다. 해당 프로젝트에서 보관한 기록은 원래 사이클이나 업무가 사라진 뒤에도 조회할 수 있다. `/api/v1`의 같은 경로는 해당 프로젝트의 읽기 또는 쓰기 키를 사용한다. 자체 백업 형식 80의 `cycleCompletionRecords`가 이 기록을 보존한다.
 
+### 사이클 진행 추이
+
+`GET /api/projects/:projectId/cycles/:cycleId/progress`와 `GET /api/v1/projects/:projectId/cycles/:cycleId/progress`는 해당 프로젝트의 사이클을 서울 날짜별로 조회한다. 자동화 경로에서는 해당 프로젝트의 읽기 또는 쓰기 키를 사용한다. `throughDate`를 생략하면 마지막 날짜에서 최대 92일을 반환한다. 그보다 이전 기간은 원하는 마지막 날짜를 `YYYY-MM-DD`로 보낸다. 시작일을 지정하지 않은 사이클은 생성일을 첫 날짜로 사용한다. 완료 기록에서 현재 완료 상태를 저장한 시각을 확인할 수 있으면 당시 완료 시각까지 조회한다. 자체 백업 복원에서 버전만 갱신된 경우에도 이 시각을 보존한다. 이 조건을 만족하는 기록이 없으면 조회 시각까지의 관측을 반환한다.
+
+`days`에는 `date`, `coverage`, `state`, `changes`가 있다. `coverage`는 `complete`, `partial`, `unobserved`다. `state`는 조회일 종료 시각 또는 당일 조회·완료 시각에 관측한 범위·남은 업무, 완료·취소 업무와 입력한 스토리 포인트를 나타낸다. 해당 시각을 관측하지 못했으면 `null`이다. 포인트 미입력 건수는 범위와 남은 업무에 따로 기록한다. `changes`는 관측한 추가·제외·완료·취소·재개·추정치 변경·워크플로 분류 변경 횟수이며 미관측 날짜에는 `null`이다. 한 업무의 반복 변경은 각각 센다.
+
+선택한 날짜가 현재 기간에 포함되면 `date=YYYY-MM-DD`로 `evidence`를 함께 받을 수 있다. 관측 시각과 순서대로 최대 50건씩 응답하며 각 이벤트의 당시 업무 키·제목과 변경 분류, 추정치 전후 값을 담는다. 다음 페이지에는 `offset`과 이전 응답의 `revision`을 `expectedRevision`으로 보낸다. 조회 기간이나 관측 데이터가 바뀌면 `409`와 `details.reason: "stale_cycle_progress"`를 반환한다. 자체 백업 형식 97의 `reportingLedger`가 사이클 소속·추정치와 관측 시작 시점을 보존한다.
+
 ## 계획과 연결 업무 일정 이동
 
 브라우저의 `POST /api/planning-items/:id/schedule-preview`에 `{expectedPlanVersion, days, workingDays, includeLinked}`를 보낸다. `days`는 절댓값이 1~3,650인 정수다. `workingDays`가 참이면 프로젝트 달력을 적용한다. `includeLinked`가 참이면 현재 연결된 전체 업무를 대상으로 기존 일정 중 이동할 날짜를 계산한다. 프로젝트 업무 10,000개나 연결 업무 1,000개를 초과하면 `413`을 반환한다. 응답은 계획 날짜의 `plan.from`과 `plan.to`, 업무 `changes`, 제외 업무 `skipped`, 선후행 `warnings`, 적용 차단 사유 `blocking`을 담는다. 적용 가능한 변경이 있으면 30분 동안 사용할 `previewId`를 발급한다.

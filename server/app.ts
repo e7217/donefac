@@ -1,5 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { AttachmentFiles, MAX_FILE_BYTES, MAX_PACKAGE_BYTES, MAX_EXPORT_BYTES, attachmentId, safeFilename, sniffMime, hash } from './attachments.js';
 import { AttachmentVersionsService, AttachmentVersionError } from './attachment-versions.js';
@@ -15,6 +15,7 @@ import { CollaborationService, CollaborationError, type CollaborationUpgradeGuar
 import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
 import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-completion-records.js';
+import { aggregateCycleProgress, CycleProgressError } from './cycle-progress.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
@@ -96,8 +97,8 @@ import { TeamWorkloadCapacityService } from './team-workload-capacity.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup.js';
 import { documentLabelKey, documentSearchText, MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../shared/document-nodes.js';
-import { createCalendarMath } from '../shared/calendar.js';
-import { reservationLocalDateTime } from '../shared/time-reservations.js';
+import { createCalendarMath, isCalendarDate } from '../shared/calendar.js';
+import { reservationDayRange, reservationLocalDateTime } from '../shared/time-reservations.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
@@ -1250,6 +1251,40 @@ export function createApp(options: {
     const record = cycleCompletionRecords.get(id, req.params.recordId);
     if (!record) return fail('사이클 완료 기록을 찾을 수 없습니다.', 404);
     res.set('Cache-Control', 'no-store').json(record);
+  });
+  app.get('/api/projects/:projectId/cycles/:cycleId/progress', (req, res) => {
+    const { projectId, cycleId } = req.params;
+    const { throughDate, date, offset, expectedRevision } = req.query;
+    if (Object.keys(req.query).some(key => !['throughDate', 'date', 'offset', 'expectedRevision'].includes(key)) ||
+        (throughDate !== undefined && !isCalendarDate(throughDate)) || (date !== undefined && !isCalendarDate(date)) ||
+        (offset !== undefined && (typeof offset !== 'string' || !/^(?:0|[1-9]\d{0,6})$/u.test(offset))) ||
+        (expectedRevision !== undefined && (typeof expectedRevision !== 'string' || !/^[a-f0-9]{64}$/u.test(expectedRevision))) ||
+        (date === undefined && (offset !== undefined || expectedRevision !== undefined)) ||
+        (Number(offset) > 0 && expectedRevision === undefined)) {
+      return fail('사이클 진행 추이의 날짜와 조회 위치를 확인해 주세요.');
+    }
+    const cycle = store.get<PlanningItem>('planning_items', cycleId);
+    if (!cycle || cycle.kind !== 'cycle' || cycle.projectId !== projectId) return fail('프로젝트의 사이클을 찾을 수 없습니다.', 404);
+    const latest = cycle.status === 'completed' ? cycleCompletionRecords.list(projectId, { cycleId, limit: 1 }).items[0] : undefined;
+    // Native restore may renew a plan's version while preserving its last edit time.
+    const completedAt = latest && latest.completedAt === cycle.updatedAt && latest.cycle.version <= cycle.version
+      ? latest.completedAt : null;
+    const generatedAt = now();
+    const requestedRange = throughDate ? reservationDayRange(throughDate) : null;
+    const horizon = completedAt && completedAt < generatedAt ? completedAt : generatedAt;
+    const through = requestedRange && requestedRange.endAt <= horizon
+      ? new Date(Date.parse(requestedRange.endAt) - 1).toISOString() : horizon;
+    const ledger = reportLedger.readCycle(projectId, cycleId, through);
+    const progress = aggregateCycleProgress(cycle, ledger, generatedAt, { completedAt, throughDate, evidenceDate: date,
+      offset: offset === undefined ? undefined : Number(offset) });
+    const newest = ledger.events.at(-1);
+    const revision = createHash('sha256').update(JSON.stringify([projectId, cycleId, cycle.version, progress.completedAt,
+      progress.windowStart, progress.windowEnd, ledger.coverage, newest?.id, newest?.sequence])).digest('hex');
+    if (expectedRevision !== undefined && expectedRevision !== revision) {
+      return fail('사이클 진행 추이가 바뀌었습니다. 최신 결과를 다시 불러와 주세요.', 409, { reason: 'stale_cycle_progress', revision });
+    }
+    if (date !== undefined && !progress.evidence) return fail('현재 조회 기간에 속하는 날짜를 선택해 주세요.');
+    res.set('Cache-Control', 'no-store').json({ ...progress, revision });
   });
   issueBulkEdit.registerRoutes(app,{
     actor,
@@ -3025,7 +3060,7 @@ export function createApp(options: {
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabDeploymentError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof CycleCompletionRecordsError)return res.status(error.status).json({error:error.message});
+    if(error instanceof CycleCompletionRecordsError||error instanceof CycleProgressError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueViewPriorityLabelFilterError)return res.status(error.status).json({error:error.message});

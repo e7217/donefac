@@ -8,6 +8,7 @@ import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
+import { CycleProgress } from './CycleProgress';
 import { errorMessage } from './schedule-utils';
 import './cycle-board.css';
 
@@ -306,6 +307,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         onClick={() => void submit(hold.attempt, true)}>이동 결과 다시 확인</button> : hold && <button className="btn btn-primary" type="button" disabled={pending}
         onClick={() => void retryRefresh()}>{hold.stage === 'conflict' ? '최신 업무 불러오기' : '화면에 다시 반영'}</button>}
     </div>}
+    {cycle && <CycleProgress cycle={cycle} actorId={actorId} data={data} projectId={projectId} openIssue={openIssue} />}
     <div className="cycle-board-lanes">
       {[{ items: backlog, targetCycle: undefined }, ...(cycle ? [{ items: members, targetCycle: cycle }] : [])]
         .map(({ items, targetCycle }) => {

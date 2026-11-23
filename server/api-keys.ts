@@ -338,6 +338,14 @@ export class ApiKeyService {
       this.used(key);
       return next();
     }
+    const cycleProgress = /^\/api\/projects\/([^/]+)\/cycles\/([^/]+)\/progress$/.exec(path);
+    if (request.method === 'GET' && cycleProgress) {
+      this.query(request, ['throughDate', 'date', 'offset', 'expectedRevision']);
+      this.allowedProject(key, this.decode(cycleProgress[1]));
+      this.decode(cycleProgress[2]);
+      this.used(key);
+      return next();
+    }
     if (request.method === 'POST' && path === '/api/issues/query') {
       this.query(request, []);
       if (typeof request.body.projectId !== 'string' || !request.body.projectId) fail(400, '필터를 적용할 프로젝트가 필요합니다.');

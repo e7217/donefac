@@ -131,7 +131,8 @@ test('workflow category and label changes retain their contemporaneous meaning w
     assert.equal(events.length, 4); assert.deepEqual(events.map(event => event.after?.category), ['todo', 'done', 'cancelled', 'cancelled']);
     assert.equal(events[3].before?.statusLabel, '취소 분류'); assert.equal(events[3].after?.statusLabel, '취소 이름 변경');
     assert.equal(f.ledger.current('p')[0].statusLabel, '취소 이름 변경');
-    assert.deepEqual(f.ledger.validateRestore(f.ledger.exportData(tomorrow), tomorrow, restoredAt, f.projects).events, events);
+    const exported = f.ledger.exportData(tomorrow);
+    assert.deepEqual(f.ledger.validateRestore(exported, tomorrow, restoredAt, f.projects), exported);
   } finally { f.close(); }
 });
 
@@ -237,5 +238,73 @@ test('migration creates only explicit import baselines at observation time and r
     assert.equal(f.store.get('issues', 'rolled-back'), undefined); assert.deepEqual(f.ledger.read('p').events, events);
     f.store.put('issues', issue('source', { status: 'review' }));
     assert.equal(f.ledger.read('p').events.at(-1)?.before?.category, 'done');
+  } finally { f.close(); }
+});
+
+test('upgrading an active legacy ledger adds cycle membership and estimates at the first observation without changing weekly history', () => {
+  const f = fixture();
+  try {
+    const weekly = f.ledger.read('p');
+    f.ledger.close();
+    // Persist the projection written by the older collector while retaining its live coverage.
+    f.store.db.prepare('UPDATE reporting_coverage SET json=? WHERE id=?')
+      .run(JSON.stringify(weekly.coverage[0]), weekly.coverage[0].id);
+    f.store.db.prepare('UPDATE reporting_events SET json=? WHERE id=?')
+      .run(JSON.stringify(weekly.events[0]), weekly.events[0].id);
+    const existing = issue('existing', { cycleId: 'cycle-a', estimate: 2.5 });
+    f.store.put('issues', existing);
+    f.setClock(tomorrow);
+    f.ledger.start();
+    assert.deepEqual(f.ledger.read('p'), weekly);
+    const beforeMove = f.ledger.readCycle('p', 'cycle-a');
+    assert.deepEqual(beforeMove.coverage, [{ ...weekly.coverage[0], cycleStartedAt: tomorrow }]);
+    assert.equal(beforeMove.events.length, 1);
+    const [observed] = beforeMove.events;
+    assert.equal(observed.kind, 'cycle_baseline');
+    assert.equal(observed.sequence, 2);
+    assert.equal(observed.occurredAt, tomorrow);
+    assert.deepEqual(observed.before, weekly.events[0].after);
+    assert.deepEqual(observed.after, { ...weekly.events[0].after, cycleId: 'cycle-a', estimate: 2.5 });
+    assert.deepEqual(f.ledger.readCycle('p', 'cycle-a', initial).events, []);
+
+    f.ledger.close();
+    f.ledger.start();
+    assert.deepEqual(f.ledger.readCycle('p', 'cycle-a'), beforeMove);
+    f.store.put('issues', { ...existing, cycleId: 'cycle-b', estimate: 0, version: 2 });
+    assert.deepEqual(f.ledger.read('p'), weekly);
+    const outgoing = f.ledger.readCycle('p', 'cycle-a').events.at(-1);
+    const incoming = f.ledger.readCycle('p', 'cycle-b').events.at(-1);
+    assert.equal(outgoing?.before?.cycleId, 'cycle-a');
+    assert.equal(incoming?.after?.cycleId, 'cycle-b');
+    assert.equal(incoming?.after?.estimate, 0);
+    assert.deepEqual(incoming, outgoing);
+    assert.deepEqual(f.ledger.readCycle('q', 'cycle-b').events, []);
+
+    const exported = f.ledger.exportData(tomorrow);
+    const validated = f.ledger.validateRestore(exported, tomorrow, restoredAt, f.projects);
+    assert.deepEqual(validated, exported);
+    const corruptions: ((data: ReportingLedgerData) => void)[] = [
+      data => { delete data.coverage[0].cycleStartedAt; },
+      data => { data.coverage[0].cycleStartedAt = restoredAt; },
+      data => { data.events[1].origin = 'user'; },
+      data => { data.events[1].after!.estimate = -1; },
+      data => { delete data.events[1].after!.cycleId; },
+      data => { data.events[1].after!.title = '원래 관측 이후를 바꿀 수 없음'; },
+      data => { data.events[2].before!.estimate = 1; },
+      data => { data.events.splice(1); },
+    ];
+    for (const corrupt of corruptions) {
+      const modified = copy(exported);
+      corrupt(modified);
+      assert.throws(() => f.ledger.validateRestore(modified, tomorrow, restoredAt, f.projects), invalid);
+    }
+    f.store.transaction(() => f.ledger.replaceRestored(validated, restoredAt));
+    const restored = f.ledger.readCycle('p', 'cycle-b');
+    assert.deepEqual(restored.coverage.map(epoch => [epoch.startedAt, epoch.cycleStartedAt, epoch.endedAt]), [
+      [initial, tomorrow, tomorrow], [restoredAt, restoredAt, null],
+    ]);
+    assert.deepEqual(restored.events.map(event => [event.kind, event.after?.cycleId, event.after?.estimate]), [
+      ['changed', 'cycle-b', 0], ['baseline', 'cycle-b', 0],
+    ]);
   } finally { f.close(); }
 });

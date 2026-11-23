@@ -7,6 +7,7 @@ import { statusMeta } from '../../shared/workflow-helpers';
 import { api, dateLabel, patch, post, remove } from '../lib/api';
 import { CycleCompletionHistory } from './CycleCompletionHistory';
 import { CycleCompletionPanel } from './CycleCompletionPanel';
+import { CycleProgress } from './CycleProgress';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
 import { errorMessage } from './schedule-utils';
 import './planning.css';
@@ -163,6 +164,8 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
     </div>}
     {completionCycle && <CycleCompletionPanel cycle={completionCycle} plans={data.planningItems ?? []} actorId={actorId}
       refresh={refresh} notify={notify} onClose={closeCompletion} onSaved={acceptCycle} restoreFocus={restoreCompletionFocus} />}
+    {kind === 'cycle' && item && <CycleProgress cycle={{ ...item, version: Math.max(item.version, version) }}
+      projectId={projectId} actorId={actorId} data={data} openIssue={openIssue} />}
     {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={actorId} issues={data.issues} openIssue={openIssue}
       cycle={item && { id: item.id, version: Math.max(item.version, version) }} />}
     <form onSubmit={save} aria-label="계획 정보 편집"><fieldset disabled={busy || selectedAssignments.length > 0}><label className="issue-form-label">이름<input className="field planning-name-input" aria-label="계획 이름" value={draft.name} onChange={event => update('name', event.target.value)} placeholder={`${PLAN_LABELS[kind]} 이름`} required maxLength={120} /></label><label className="issue-form-label">설명<textarea className="field" aria-label="계획 설명" value={draft.description} onChange={event => update('description', event.target.value)} rows={3} placeholder="목표와 범위를 간단히 적어주세요." /></label><div className="planning-form-grid"><label className="issue-form-label">상태<select className="field" aria-label="계획 상태" value={draft.status} onChange={event => {

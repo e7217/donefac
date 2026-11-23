@@ -4,6 +4,7 @@ export interface ReportingCoverage {
   startedAt: string;
   endedAt: string | null;
   reason: 'initial' | 'restore';
+  cycleStartedAt?: string;
 }
 export interface ReportIssueState {
   issueId: string;
@@ -18,6 +19,8 @@ export interface ReportIssueState {
   startDate: string | null;
   endDate: string | null;
   dueDate: string | null;
+  cycleId?: string | null;
+  estimate?: number | null;
 }
 export interface IssueReportEvent {
   id: string;
@@ -26,7 +29,7 @@ export interface IssueReportEvent {
   projectId: string;
   issueId: string;
   occurredAt: string;
-  kind: 'baseline' | 'created' | 'changed' | 'reclassified' | 'deleted' | 'restored' | 'moved_out' | 'moved_in';
+  kind: 'baseline' | 'cycle_baseline' | 'created' | 'changed' | 'reclassified' | 'deleted' | 'restored' | 'moved_out' | 'moved_in';
   actorId: string | null;
   origin: MutationOrigin;
   workflowVersion: number;
@@ -34,6 +37,58 @@ export interface IssueReportEvent {
   after: ReportIssueState | null;
 }
 export interface ReportingLedgerData { coverage: ReportingCoverage[]; events: IssueReportEvent[] }
+
+export const CYCLE_PROGRESS_MAX_DAYS = 92;
+export const CYCLE_PROGRESS_EVIDENCE_LIMIT = 50;
+export type CycleProgressChangeKind = 'added' | 'removed' | 'completed' | 'cancelled' | 'reopened' | 'estimateChanged' | 'reclassified';
+export type CycleProgressChangeCounts = Record<CycleProgressChangeKind, number>;
+export interface CycleProgressState {
+  scopeIssues: number;
+  remainingIssues: number;
+  completedIssues: number;
+  cancelledIssues: number;
+  scopeEstimate: number;
+  remainingEstimate: number;
+  missingScopeEstimate: number;
+  missingRemainingEstimate: number;
+}
+export interface CycleProgressDay {
+  date: string;
+  coverage: 'complete' | 'partial' | 'unobserved';
+  state: CycleProgressState | null;
+  changes: CycleProgressChangeCounts | null;
+}
+export interface CycleProgressEvidenceItem {
+  id: string;
+  occurredAt: string;
+  issueId: string;
+  key: string;
+  title: string;
+  kinds: CycleProgressChangeKind[];
+  beforeEstimate: number | null;
+  afterEstimate: number | null;
+}
+export interface CycleProgressEvidence {
+  date: string;
+  offset: number;
+  limit: number;
+  total: number;
+  items: CycleProgressEvidenceItem[];
+}
+export interface CycleProgressReport {
+  cycle: Pick<PlanningItem, 'id' | 'projectId' | 'name' | 'startDate' | 'endDate' | 'status'>;
+  generatedAt: string;
+  timeZone: 'Asia/Seoul';
+  firstDate: string;
+  lastDate: string | null;
+  windowStart: string | null;
+  windowEnd: string | null;
+  completedAt: string | null;
+  revision: string;
+  days: CycleProgressDay[];
+  evidence: CycleProgressEvidence | null;
+}
+
 export interface ReportQuery {
   projectId: string;
   startDate: string;
