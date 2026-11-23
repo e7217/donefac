@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type IssueTemplate, type Priority, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentDecisionSource, type DocumentFollowUpCommentSource, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type IssueTemplate, type Priority, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
 import { fieldApplies, hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
@@ -23,7 +23,10 @@ import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-schedule-successor.css';
 
-export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & { sourceSelection?: DocumentSourceSelection };
+export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & (
+  { sourceSelection?: DocumentSourceSelection; comment?: never } |
+  { sourceSelection?: never; comment: { id: string; body: string; source: DocumentDecisionSource } }
+);
 type ParentIssue = Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version'>;
 export type ScheduleIssueLink = {
   direction: 'predecessor' | 'successor';
@@ -141,7 +144,8 @@ function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagD
 export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [description, setDescription] = useState(cloneIssue?.description ?? '');
+  const sourceComment = sourceDocument?.comment;
+  const [description, setDescription] = useState(cloneIssue?.description ?? sourceComment?.body ?? '');
   const [priority, setPriority] = useState<Priority>(cloneIssue?.priority ?? 'medium');
   const [appliedTemplate, setAppliedTemplate] = useState<IssueTemplate | null>(null);
   const [templateError, setTemplateError] = useState('');
@@ -534,11 +538,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         onCloneCreated?.(issue);
         onClose();
       } else if (linkedPath) {
+        const commentReference: DocumentFollowUpCommentSource | undefined = sourceComment && {
+          commentId: sourceComment.id, revisionId: sourceComment.source.revisionId,
+        };
         const request = attempt.current ?? {
           actorId,
           body: JSON.stringify({
             requestId: newRequestId(),
-            ...(reviewedParent ? { expectedParentVersion: reviewedParent.version } : { expectedDocumentVersion: sourceVersion, sourceSelection }),
+            ...(reviewedParent ? { expectedParentVersion: reviewedParent.version } : {
+              expectedDocumentVersion: sourceVersion,
+              ...(commentReference ? { sourceComment: commentReference } : { sourceSelection }),
+            }),
             issue: issuePayload(new FormData(form)),
           }),
         };
@@ -546,9 +556,13 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         const result = await api<DocumentFollowUpResult | IssueChildCreationResult>(linkedPath, {
           method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body,
         });
+        const documentLink = result && typeof result === 'object' && 'link' in result ? result.link : undefined;
+        const pinned = documentLink?.documentSource;
         if (!result?.issue?.id ||
           (reviewedParent && (result.issue.parentId !== reviewedParent.id || result.issue.projectId !== reviewedParent.projectId)) ||
-          (sourceDocument && (!('link' in result) || result.link?.issueId !== result.issue.id || result.link?.documentId !== sourceDocument.id))) {
+          (sourceDocument && (documentLink?.issueId !== result.issue.id || documentLink.documentId !== sourceDocument.id)) ||
+          (sourceComment && (pinned?.revisionId !== sourceComment.source.revisionId || pinned?.from !== sourceComment.source.from ||
+            pinned?.to !== sourceComment.source.to || pinned?.text !== sourceComment.source.text))) {
           throw new Error('업무 생성 응답을 읽을 수 없습니다.');
         }
         confirmed = true;
@@ -678,6 +692,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         {sourceSelection && <section className="issue-follow-up-passage" aria-label="선택한 본문">
           <strong>선택한 본문</strong>
           <blockquote>{sourceSelection.text}</blockquote>
+        </section>}
+        {sourceComment && <section className="issue-follow-up-passage" aria-label="댓글 원문">
+          <strong>댓글 원문</strong>
+          <blockquote>{sourceComment.source.text}</blockquote>
         </section>}
         <fieldset disabled={fieldsLocked} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
           <div className="issue-create-fields">

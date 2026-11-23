@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type WebSocketRoute } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
-import type { Comment, DocPage, DocumentSelectionCommentResult, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, DocPage, DocumentFollowUpResult, DocumentSelectionCommentResult, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 const actionLabel = '선택한 본문에 댓글 남기기';
 const content = (...children: RichContent[]): RichContent => ({ type: 'doc', content: children });
@@ -135,6 +135,110 @@ test('360px 문장 댓글은 응답 유실을 복구하고 일반 댓글 초안�
     expect(await listed.json() as Comment[]).toEqual([saved.comment]);
   } finally {
     await reader.close();
+    await cleanDocument(request, source.id);
+  }
+});
+
+test('360px 문장 댓글에서 후속 업무를 만들면 당시 원문이 연결되고 문서와 댓글 초안이 유지된다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project] } = await workspace(request);
+  const title = `검토 댓글 후속 ${randomUUID().slice(0, 8)}`;
+  const issueTitle = `${title} 업무`;
+  const quote = '검증 조건을 첨부해 주세요.';
+  const oldOnly = '이 문단은 댓글을 남긴 저장본에만 있습니다.';
+  const feedback = '**시험 기준**을 다시 확인해 주세요.\n추가 재현이 필요합니다.';
+  const savedBody = '동료가 고친 최신 저장 본문';
+  const source = await createDocument(request, project.id, title, content(paragraph(quote), paragraph(oldOnly)));
+  const path = `/api/documents/${source.id}`;
+  const route = `/#/${project.id}/documents/${source.id}`;
+  let issueId: string | undefined;
+
+  try {
+    const posted = await request.post(`${path}/selection-comments`, { data: {
+      requestId: randomUUID(), expectedDocumentVersion: source.version,
+      sourceSelection: { from: 1, to: 1 + quote.length, text: quote }, body: feedback,
+    } });
+    expect(posted.status(), await posted.text()).toBe(201);
+    const { comment } = await posted.json() as DocumentSelectionCommentResult;
+    const pin = comment.documentSource!;
+    expect(pin).toMatchObject({ text: quote, revisionId: expect.any(String) });
+    const changed = await request.patch(path, { data: { expectedVersion: source.version, content: content(paragraph(savedBody)) } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    const latest = await changed.json() as DocPage;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(route);
+    const editor = page.locator('.docs-prose');
+    const documentTitle = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    const unsavedTitle = `${title} 편집 중`;
+    const unsavedBody = '저장하지 않은 본문 편집';
+    await expect(editor).toHaveText(savedBody, { timeout: 25_000 });
+    await documentTitle.fill(unsavedTitle);
+    await editor.fill(unsavedBody);
+    await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const commentDraft = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    const draftText = '보내기 전의 다른 문서 댓글';
+    await commentDraft.fill(draftText);
+    const thread = page.locator(`#document-comment-${comment.id}`);
+    await thread.getByRole('button', { name: '답글 쓰기', exact: true }).click();
+    const replyDraft = thread.getByRole('textbox', { name: '답글 내용', exact: true });
+    const replyText = '이 스레드의 보내지 않은 답글';
+    await replyDraft.fill(replyText);
+    const action = thread.getByRole('button', { name: '댓글에서 후속 업무 만들기', exact: true });
+    await action.click();
+
+    const dialog = page.getByRole('dialog', { name: '후속 업무 만들기', exact: true });
+    const evidence = dialog.getByRole('region', { name: '댓글 원문', exact: true });
+    await expect(evidence.locator('blockquote')).toHaveText(quote);
+    await expect(evidence).not.toContainText(savedBody);
+    await expect(dialog.getByRole('combobox', { name: '설명 서식', exact: true })).toHaveValue('plain');
+    const description = dialog.getByRole('textbox', { name: '설명', exact: true });
+    await expect(description).toHaveValue(feedback);
+    const updatedDescription = `${feedback}\n업무 담당자에게 추가로 전달합니다.`;
+    await description.fill(updatedDescription);
+    await dialog.getByRole('textbox', { name: '업무 제목', exact: true }).fill(issueTitle);
+    const creating = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/follow-up-issues` && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '업무 만들고 연결', exact: true }).click();
+    const response = await creating;
+    expect(response.status(), await response.text()).toBe(201);
+    const result = await response.json() as DocumentFollowUpResult;
+    issueId = result.issue.id;
+    const submitted = response.request().postDataJSON();
+    expect(submitted).toMatchObject({ expectedDocumentVersion: latest.version, sourceComment: { commentId: comment.id, revisionId: pin.revisionId },
+      issue: { title: issueTitle, projectId: project.id, description: updatedDescription },
+    });
+    expect(submitted).not.toHaveProperty('sourceSelection');
+    expect(result.issue).toMatchObject({ title: issueTitle, description: updatedDescription });
+    expect(result.issue.descriptionFormat).toBeUndefined();
+    expect(result.link).toMatchObject({ documentId: source.id, issueId, kind: '후속 업무', documentSource: pin });
+
+    await expect(dialog).toHaveCount(0);
+    await expect(action).toBeFocused();
+    await expect(commentDraft).toHaveValue(draftText);
+    await expect(replyDraft).toHaveValue(replyText);
+    await expect(documentTitle).toHaveValue(unsavedTitle);
+    await expect(editor).toHaveText(unsavedBody);
+    expect(new URL(page.url()).hash).toBe(route.slice(1));
+    const state = await workspace(request);
+    expect(state.resourceLinks.filter(link => link.documentId === source.id)).toEqual([result.link]);
+    expect(state.documents.find(document => document.id === source.id)).toEqual(latest);
+    const listed = await request.get(`/api/comments?resourceType=document&resourceId=${source.id}`);
+    expect(listed.ok(), await listed.text()).toBeTruthy();
+    expect(await listed.json() as Comment[]).toEqual([comment]);
+
+    await page.getByRole('button', { name: '연결', exact: true }).click();
+    const linked = page.getByRole('region', { name: `${result.issue.key} 결정 근거`, exact: true });
+    const checkingPin = page.waitForResponse(value => new URL(value.url()).pathname === `${path}/include-revisions/${pin.revisionId}`);
+    await linked.getByRole('button', { name: '원문 저장본 열기', exact: true }).click();
+    expect((await checkingPin).ok()).toBeTruthy();
+    await expect(linked).toContainText(oldOnly);
+    await expect(linked).not.toContainText(savedBody);
+  } finally {
+    if (issueId) {
+      const removed = await request.delete(`/api/issues/${issueId}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
     await cleanDocument(request, source.id);
   }
 });

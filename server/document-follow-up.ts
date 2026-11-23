@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DOCUMENT_SELECTION_TEXT_LIMIT } from '../shared/document-selection.js';
 import type {
-  DocPage, DocRevision, DocumentDecisionSource, DocumentFollowUpResult, DocumentIssueLinkResult, DocumentSourceSelection, Issue, ResourceLink,
+  Comment, DocPage, DocRevision, DocumentDecisionSource, DocumentFollowUpCommentSource, DocumentFollowUpResult, DocumentIssueLinkResult,
+  DocumentSourceSelection, Issue, ResourceLink,
 } from '../shared/types.js';
 import { readDocumentSelection } from './document-content.js';
 import type { Store } from './store.js';
@@ -10,7 +11,8 @@ type IssueInput = Record<string, unknown>;
 type RequestInput = { documentId: string; actorId: string; body: unknown };
 type ResultAuthorization = { authorizeResult(issue: Issue, link: ResourceLink): void };
 type CreationHooks = ResultAuthorization & {
-  create(documentId: string, expectedVersion: number, issueInput: IssueInput, selection?: DocumentSourceSelection): Pick<DocumentFollowUpResult, 'issue' | 'link'>;
+  create(documentId: string, expectedVersion: number, issueInput: IssueInput, selection?: DocumentSourceSelection,
+    sourceComment?: DocumentFollowUpCommentSource): Pick<DocumentFollowUpResult, 'issue' | 'link'>;
 };
 type DecisionLinkHooks = ResultAuthorization & {
   checkVersion(document: DocPage, expectedVersion: number): void;
@@ -43,8 +45,12 @@ export function parseDocumentSourceSelection(input: unknown): DocumentSourceSele
   return { from, to, text };
 }
 
+function isSourceId(value: unknown): value is string {
+  return typeof value === 'string' && Boolean(value.trim()) && value.length <= 200 && value.isWellFormed() && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
 function parse(body: unknown) {
-  if (!record(body) || Object.keys(body).some(key => !['requestId', 'expectedDocumentVersion', 'issue', 'actorId', 'sourceSelection'].includes(key))) {
+  if (!record(body) || Object.keys(body).some(key => !['requestId', 'expectedDocumentVersion', 'issue', 'actorId', 'sourceSelection', 'sourceComment'].includes(key))) {
     throw new DocumentFollowUpError(400, '후속 업무 요청을 확인해 주세요.');
   }
   const { requestId, expectedDocumentVersion, issue } = body;
@@ -62,7 +68,15 @@ function parse(body: unknown) {
       throw new DocumentFollowUpError(400, '후속 업무에 남길 문서의 선택 범위를 확인해 주세요.');
     }
   }
-  return { requestId: requestId.toLowerCase(), expectedDocumentVersion, issue, selection };
+  let sourceComment: DocumentFollowUpCommentSource | undefined;
+  if (Object.hasOwn(body, 'sourceComment')) {
+    const source = body.sourceComment;
+    if (selection || !record(source) || Object.keys(source).length !== 2 || !isSourceId(source.commentId) || !isSourceId(source.revisionId)) {
+      throw new DocumentFollowUpError(400, '후속 업무에 남길 문장 댓글을 확인해 주세요.');
+    }
+    sourceComment = { commentId: source.commentId, revisionId: source.revisionId };
+  }
+  return { requestId: requestId.toLowerCase(), expectedDocumentVersion, issue, selection, sourceComment };
 }
 
 function parseDecisionLink(body: unknown) {
@@ -86,11 +100,11 @@ function sameSelection(a: DocumentSourceSelection, b: DocumentSourceSelection): 
   return a.from === b.from && a.to === b.to && a.text === b.text;
 }
 
-function requestFingerprint(version: number, issue: IssueInput, selection?: DocumentSourceSelection): string {
+function requestFingerprint(version: number, issue: IssueInput, source?: DocumentSourceSelection | { sourceComment: DocumentFollowUpCommentSource }): string {
   let payload: string;
   try {
     // Keep earlier unquoted requests' fingerprints valid across upgrades.
-    payload = JSON.stringify(selection ? [version, issue, selection] : [version, issue], (_key, value: unknown) => record(value)
+    payload = JSON.stringify(source ? [version, issue, source] : [version, issue], (_key, value: unknown) => record(value)
       ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
       : value);
   } catch {
@@ -128,12 +142,27 @@ export function validateDocumentDecisionSource(value: unknown, documentId: strin
   const invalidSource = () => new DocumentFollowUpError(400, errorMessage);
   if (!record(value) || Object.keys(value).length !== 4 || !validSelection(value)) throw invalidSource();
   const { revisionId, from, to, text } = value;
-  if (typeof revisionId !== 'string' || !revisionId.trim() || revisionId.length > 200
-      || !revisionId.isWellFormed() || /[\u0000-\u001f\u007f]/u.test(revisionId)) throw invalidSource();
+  if (!isSourceId(revisionId)) throw invalidSource();
   const revision = revisions.get(revisionId);
   if (!revision && !knownDocument) return;
   if (!revision || revision.documentId !== documentId || revision.confluenceSourceVersion !== undefined ||
       readDocumentSelection(revision.content, from, to) !== text) throw invalidSource();
+}
+
+export function resolveDocumentFollowUpComment(store: Store, documentId: string, input: DocumentFollowUpCommentSource,
+  authorizeSource: (content: DocPage['content']) => void): DocumentDecisionSource {
+  const comment = store.get<Comment>('comments', input.commentId);
+  if (!comment || comment.resourceType !== 'document' || comment.resourceId !== documentId || comment.parentCommentId) {
+    throw new DocumentFollowUpError(404, '이 문서에서 연결할 문장 댓글을 찾을 수 없습니다.');
+  }
+  const source = comment.documentSource;
+  if (!source) throw new DocumentFollowUpError(400, '원문이 저장된 문장 댓글을 선택해 주세요.');
+  if (source.revisionId !== input.revisionId) throw new DocumentFollowUpError(409, '댓글의 원문 저장본이 변경되었습니다. 댓글에서 다시 열어 주세요.');
+  const revision = store.get<DocRevision>('revisions', source.revisionId);
+  if (!revision) throw new DocumentFollowUpError(409, '댓글의 원문 저장본을 찾을 수 없습니다.');
+  validateDocumentDecisionSource(source, documentId, new Map([[revision.id, revision]]), true, '댓글의 원문과 선택 범위를 확인할 수 없습니다.');
+  authorizeSource(revision.content);
+  return source;
 }
 
 export class DocumentFollowUpService {
@@ -159,8 +188,8 @@ export class DocumentFollowUpService {
   }
 
   create({ documentId, actorId, body }: RequestInput, hooks: CreationHooks): DocumentFollowUpResult {
-    const { requestId, expectedDocumentVersion, issue: issueInput, selection } = parse(body);
-    const fingerprint = requestFingerprint(expectedDocumentVersion, issueInput, selection);
+    const { requestId, expectedDocumentVersion, issue: issueInput, selection, sourceComment } = parse(body);
+    const fingerprint = requestFingerprint(expectedDocumentVersion, issueInput, sourceComment ? { sourceComment } : selection);
     return this.store.transaction(() => {
       const receipt = this.store.db.prepare(`SELECT document_id AS documentId, actor_id AS actorId, fingerprint,
         issue_id AS issueId, link_id AS linkId FROM document_follow_up_requests WHERE id=?`).get(requestId) as Receipt | undefined;
@@ -178,7 +207,7 @@ export class DocumentFollowUpService {
         return { issue, link, duplicate: true };
       }
 
-      const { issue, link } = hooks.create(documentId, expectedDocumentVersion, issueInput, selection);
+      const { issue, link } = hooks.create(documentId, expectedDocumentVersion, issueInput, selection, sourceComment);
       hooks.authorizeResult(issue, link);
       this.store.db.prepare(`INSERT INTO document_follow_up_requests(id, document_id, actor_id, fingerprint, issue_id, link_id)
         VALUES (?, ?, ?, ?, ?, ?)`).run(requestId, documentId, actorId, fingerprint, issue.id, link.id);

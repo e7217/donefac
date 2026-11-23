@@ -1120,6 +1120,7 @@ export type DependencyType = 'FS' | 'SS' | 'FF' | 'SF';
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: DependencyType; lagDays: number; version?: number }
 export interface DocumentSourceSelection { from: number; to: number; text: string }
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
+export interface DocumentFollowUpCommentSource { commentId: string; revisionId: string }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }
 export interface LinkedDocumentCreationResult { document: DocPage; link: ResourceLink }
 

@@ -31,7 +31,7 @@ import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
 import { DocumentOrderError, DocumentOrderService } from './document-order.js';
 import { DocumentTreeCopyError, DocumentTreeCopyService } from './document-tree-copy.js';
-import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, validateDocumentDecisionSource } from './document-follow-up.js';
+import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, resolveDocumentFollowUpComment, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
@@ -1768,12 +1768,14 @@ export function createApp(options: {
     const actorId=actor(req);
     const result=documentFollowUp.create({documentId:String(req.params.id),actorId,body:req.body},{
       authorizeResult: (issue, link) => apiKeys.authorizeDocumentDecisionResult(req, issue, link),
-      create(documentId,expectedVersion,input,sourceSelection){
+      create(documentId,expectedVersion,input,sourceSelection,sourceComment){
         const document=get<DocPage>('documents',documentId);
         checkVersion(document,expectedVersion);
         if(document.projectId!==null&&document.projectId!==input.projectId)fail('프로젝트 문서의 후속 업무는 같은 프로젝트에 만들어 주세요.');
         if (sourceSelection) apiKeys.authorizeDocumentBody(req, document.content);
-        const documentSource=sourceSelection && resolveDocumentDecisionSource(store,document,actorId,sourceSelection);
+        const documentSource=sourceComment ? resolveDocumentFollowUpComment(store, documentId, sourceComment,
+          content => apiKeys.authorizeDocumentBody(req, content))
+          : sourceSelection && resolveDocumentDecisionSource(store,document,actorId,sourceSelection);
         const issue=createIssueInTransaction(req,input);
         const link:ResourceLink={id:uid(),issueId:issue.id,documentId,kind:'후속 업무',...(documentSource?{documentSource}:{})};
         store.put('resource_links',link);

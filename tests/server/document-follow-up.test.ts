@@ -11,7 +11,8 @@ import { createApp } from '../../server/app.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, DocPage, DocRevision, DocumentSourceSelection, Issue, Project, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Comment, DocPage, DocRevision, DocumentCommentReplyResult, DocumentSelectionCommentResult,
+  DocumentSourceSelection, Issue, Project, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const commonTarget = 'project-team';
@@ -23,6 +24,7 @@ type FollowUpInput = {
   expectedDocumentVersion: number;
   issue: { projectId: string; title: string; assigneeId?: string };
   sourceSelection?: { from: number; to: number; text: string };
+  sourceComment?: { commentId: string; revisionId: string };
 };
 type Backup = WorkspaceSnapshot & {
   schemaVersion: number;
@@ -87,6 +89,16 @@ function issueSummaryBody(project: string): RichContent {
   return { ...content, content: [...content.content, { type: 'issueSummary', attrs: {
     projectId: project, savedViewId: null, label: '다른 프로젝트의 업무 현황', groupBy: 'status',
   } }] };
+}
+
+async function sentenceComment(call: Awaited<ReturnType<typeof fixture>>['call'], document: DocPage) {
+  const text = content.content[0].content[0].text;
+  const { comment } = await call<DocumentSelectionCommentResult>(`/documents/${document.id}/selection-comments`, 'POST', {
+    requestId: randomUUID(), expectedDocumentVersion: document.version,
+    sourceSelection: { from: 1, to: text.length + 1, text }, body: '원래 설계에서 확인할 사항입니다.',
+  }, 201);
+  assert.ok(comment.documentSource);
+  return { comment, source: comment.documentSource };
 }
 
 test('project documents enforce their project and common documents link to the explicit target without changing the document', async t => {
@@ -284,6 +296,139 @@ test('follow-up links roll back with the issue number and retry safely across do
   const afterUnlink = await call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(afterUnlink.issues.filter(issue => issue.title === forUnlink.issue.title), [unlinked.issue]);
   assert.ok(!afterUnlink.resourceLinks.some(link => link.issueId === unlinked.issue.id));
+});
+
+test('sentence comment follow-ups pin the original revision and authorize its content across edits and replay', async t => {
+  const { call, directory, key, restart } = await fixture(t);
+  const narrow = await key([projectId], 'write', 'user-min');
+  const wide = await key([projectId, commonTarget], 'write', 'user-min');
+  const document = await call<DocPage>('/documents', 'POST', {
+    projectId, title: '검토 당시의 설계', content: issueSummaryBody(commonTarget),
+  }, 201);
+  const { comment, source } = await sentenceComment(call, document);
+  const revisionPath = `/documents/${document.id}/include-revisions/${source.revisionId}`;
+  const original = await call<DocRevision>(revisionPath);
+  assert.equal(original.version, document.version);
+
+  const latest = await call<DocPage>(`/documents/${document.id}`, 'PATCH', {
+    expectedVersion: document.version, title: '편집한 현재 설계', contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION,
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '현재 문서에는 원래 문장이 없습니다.' }] }] },
+  });
+  const path = `/v1${pathFor(document.id)}`;
+  const input = {
+    ...followUp(latest, projectId, '문장 댓글에서 연결한 후속 업무'),
+    sourceComment: { commentId: comment.id, revisionId: source.revisionId },
+  };
+  const before = await call<WorkspaceSnapshot>('/workspace');
+  await call(path, 'POST', { ...input, expectedDocumentVersion: document.version }, 409, wide);
+  await call(path, 'POST', input, 403, narrow);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+  const revisionsPath = `/documents/${document.id}/revisions`;
+  const revisions = await call<DocRevision[]>(revisionsPath);
+
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    const sequence = () => observer.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId);
+    const number = sequence();
+    observer.exec(`CREATE TRIGGER fail_sentence_follow_up BEFORE INSERT ON document_follow_up_requests
+      BEGIN SELECT RAISE(ABORT, 'synthetic sentence follow-up receipt failure'); END`);
+    await call(path, 'POST', input, 500, wide);
+    assert.deepEqual(sequence(), number);
+    assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+    assert.deepEqual(await call<DocRevision[]>(revisionsPath), revisions);
+  } finally {
+    observer.exec('DROP TRIGGER IF EXISTS fail_sentence_follow_up');
+    observer.close();
+  }
+
+  const created = await call<Created>(path, 'POST', input, 201, wide);
+  assert.equal(created.duplicate, false);
+  assert.equal(created.issue.reporterId, 'user-min');
+  assert.deepEqual(created.link, {
+    id: created.link.id, issueId: created.issue.id, documentId: document.id, kind: '후속 업무', documentSource: source,
+  });
+  assert.deepEqual(await call<DocRevision[]>(revisionsPath), revisions);
+  const wideRevisions = await call<DocRevision[]>(`/v1${revisionsPath}`, 'GET', undefined, 200, wide);
+  assert.deepEqual(wideRevisions.find(value => value.id === original.id), original);
+  const narrowRevisions = await call<DocRevision[]>(`/v1${revisionsPath}`, 'GET', undefined, 200, narrow);
+  assert.equal(narrowRevisions.some(value => value.id === original.id), false);
+  const saved = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(saved.documents.find(value => value.id === document.id), latest);
+  assert.deepEqual(saved.resourceLinks.filter(link => link.documentId === document.id), [created.link]);
+  await restart();
+  // A key with the same owner can recover an acknowledged request only if it can still read its pinned original.
+  await call(path, 'POST', input, 403, narrow);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, wide), { ...created, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), saved);
+
+  await call(`/comments/${comment.id}`, 'DELETE');
+  const archived = await call<WorkspaceSnapshot>('/workspace');
+  await call(path, 'POST', { ...input, requestId: randomUUID() }, 404, wide);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, wide), { ...created, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), archived);
+
+  const backup = await call<WorkspaceSnapshot>('/export');
+  await call('/import', 'POST', { data: backup });
+  const restored = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(restored.resourceLinks.find(link => link.id === created.link.id), created.link);
+  assert.deepEqual(await call<DocRevision>(revisionPath), original);
+});
+
+test('sentence comment follow-ups reject forged, unrelated and damaged original selections', async t => {
+  const { call, directory } = await fixture(t);
+  const document = await call<DocPage>('/documents', 'POST', { projectId, title: '검토 댓글의 실제 문서', content }, 201);
+  const other = await call<DocPage>('/documents', 'POST', { projectId, title: '같은 원문이 있는 다른 문서', content }, 201);
+  const { comment, source } = await sentenceComment(call, document);
+  const foreign = await sentenceComment(call, other);
+  const { comment: reply } = await call<DocumentCommentReplyResult>(`/documents/${document.id}/selection-comments/${comment.id}/replies`, 'POST', {
+    requestId: randomUUID(), expectedResolutionVersion: 0, body: '검토에 대한 답글',
+  }, 201);
+  const ordinary = await call<Comment>('/comments', 'POST', {
+    resourceType: 'document', resourceId: document.id, body: '문서 전체를 검토한 일반 댓글',
+  }, 201);
+  const latest = await call<DocPage>(`/documents/${document.id}`, 'PATCH', { expectedVersion: document.version, title: '현재 문서 제목' });
+  const revisions = await call<DocRevision[]>(`/documents/${document.id}/revisions`);
+  const latestRevision = revisions.find(revision => revision.version === latest.version);
+  assert.ok(latestRevision && latestRevision.id !== source.revisionId);
+  const path = pathFor(document.id);
+  const sourceComment = { commentId: comment.id, revisionId: source.revisionId };
+  const input = { ...followUp(latest, projectId, '검증이 필요한 댓글 업무'), sourceComment };
+  const before = await call<WorkspaceSnapshot>('/workspace');
+
+  await call(path, 'POST', { ...input, sourceSelection: { from: source.from, to: source.to, text: source.text } }, 400);
+  await call(path, 'POST', { ...input, sourceComment: { ...sourceComment, text: '클라이언트가 보낸 원문' } }, 400);
+  await call(path, 'POST', { ...input, sourceComment: { ...sourceComment, revisionId: latestRevision.id } }, 409);
+  const forged = [
+    { commentId: randomUUID(), revisionId: source.revisionId },
+    { commentId: reply.id, revisionId: source.revisionId },
+    { commentId: foreign.comment.id, revisionId: foreign.source.revisionId },
+  ];
+  for (const candidate of forged) await call(path, 'POST', { ...input, sourceComment: candidate }, 404);
+  await call(path, 'POST', { ...input, sourceComment: { ...sourceComment, commentId: ordinary.id } }, 400);
+
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    const update = observer.prepare('UPDATE revisions SET json=? WHERE id=?');
+    const original = revisions.find(revision => revision.id === source.revisionId);
+    assert.ok(original);
+    const moveRevision = observer.prepare('UPDATE revisions SET id=? WHERE id=?');
+    const missingId = randomUUID();
+    assert.equal(moveRevision.run(missingId, original.id).changes, 1);
+    await call(path, 'POST', input, 409);
+    assert.equal(moveRevision.run(original.id, missingId).changes, 1);
+    const plainText = '원래 발췌와 다른 문장';
+    const damagedContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: plainText }] }] };
+    update.run(JSON.stringify({ ...original, content: damagedContent, plainText }), original.id);
+    await call(path, 'POST', input, 400);
+    update.run(JSON.stringify(original), original.id);
+  } finally { observer.close(); }
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+  const created = await call<Created>(path, 'POST', input, 201);
+  assert.deepEqual(created.link.documentSource, source);
+  await call(path, 'POST', { ...input, sourceComment: { ...sourceComment, revisionId: latestRevision.id } }, 409);
+  const saved = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(saved.issues.filter(issue => issue.title === input.issue.title), [created.issue]);
+  assert.deepEqual(saved.resourceLinks.filter(link => link.documentId === document.id), [created.link]);
 });
 
 test('the selected decision is bound to its exact stored source through edits, replay and native restore', async t => {

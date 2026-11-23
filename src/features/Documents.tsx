@@ -1610,6 +1610,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     documentActionOpener.current = opener;
     setDocumentAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
   }
+  function openCommentFollowUp(comment: Comment, opener: HTMLButtonElement) {
+    const source = comment.documentSource;
+    if (!source || comment.resourceType !== 'document' || comment.parentCommentId !== undefined || latestPage?.id !== comment.resourceId) return;
+    const { id, title, projectId, version } = latestPage;
+    documentActionOpener.current = opener;
+    setDocumentAction({ kind: 'create', source: { id, title, projectId, version, comment: { id: comment.id, body: comment.body, source: { ...source } } } });
+  }
   function openDecisionLink(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
     documentActionOpener.current = opener;
     setDocumentAction({ kind: 'link', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
@@ -1927,6 +1934,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                       {resolutionActor?.name || '팀원'} · <time dateTime={resolution.changedAt}>{when(resolution.changedAt)}</time>
                     </span>}
                     <div className="docs-comment-review-actions">
+                      <button type="button" className="btn btn-ghost"
+                        disabled={commentControlsDisabled || restoring || isCommentEditPending() || !actorId || !data.projects.length ||
+                          draft.id !== comment.resourceId || latestPage?.id !== comment.resourceId}
+                        onClick={event => openCommentFollowUp(comment, event.currentTarget)}>
+                        <Plus size={14} aria-hidden="true" />댓글에서 후속 업무 만들기
+                      </button>
                       <button type="button" className="btn btn-ghost" aria-disabled={Boolean(resolvingCommentId) || !actorId}
                         onClick={event => void changeCommentResolution(comment, event.currentTarget)}>
                         {pending ? <Loader2 size={14} className="docs-spin" aria-hidden="true" />
