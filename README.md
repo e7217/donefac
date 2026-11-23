@@ -289,6 +289,8 @@ Jira 이관 원본에서 연결 대상과 방향을 확인한 차단 업무에�
 
 수신 주소에 웹훅이 없다면 GitLab에서 해당 저장소의 Maintainer 또는 Owner 권한으로 발급한 `api` 토큰과 Teamspace에 저장한 웹훅 인증 값을 입력한 뒤 **GitLab에 웹훅 등록**을 누릅니다. Push·Merge Request·Pipeline·Deployment 이벤트와 SSL 검증을 켭니다. 배포 이벤트가 꺼져 있는 기존 웹훅은 GitLab 설정에서 **Deployment events**를 켭니다. 응답이 끊기면 **다시 점검**으로 목록을 확인합니다. 실제 인증 수신은 아래 **GitLab 웹훅 수신 확인**에서 볼 수 있습니다. [Teamspace API](docs/API.md#gitlab-프로젝트-웹훅-점검과-등록) · [GitLab 프로젝트 웹훅 API](https://docs.gitlab.com/api/project_webhooks/)
 
+**최근 전송 확인**에서 각 GitLab 전송의 HTTP 응답과 **같은 메시지 인증 수신**을 함께 확인합니다. 일치한 경우 Teamspace 수신 시각과 인증 방식을 표시합니다. 같은 메시지를 재전송하면 각 시도의 HTTP 상태와 함께 동일한 수신 기록이 표시될 수 있습니다. [파일럿 수신 확인 절차](docs/PILOT.md#gitlab-웹훅-수신-확인)
+
 ## GitLab 배포 확인
 
 **개발 · GitLab → GitLab 배포 기록**에서 저장소를 선택해 배포 환경과 상태를 확인합니다. 티켓의 **연결된 GitLab 배포**에는 같은 저장소에서 티켓에 연결된 커밋이나 파이프라인의 SHA, 또는 MR의 확인된 병합·스쿼시 SHA와 일치하는 배포가 표시됩니다. 새 이벤트를 받은 뒤 **배포 새로고침**을 눌러 확인하고, **GitLab 작업 열기**에서 원래 배포 작업으로 이동합니다. 작업 주소가 없는 배포는 커밋 링크를 제공합니다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)

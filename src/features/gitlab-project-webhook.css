@@ -86,6 +86,10 @@
 .gitlab-project-webhook-attempts small { color: #506f61; font-size: 12px; }
 .gitlab-project-webhook-http { padding: 0 4px; border-radius: 3px; background: #fff0e2; color: #75472f; font-size: 12px; }
 .gitlab-project-webhook-http[data-ok="true"] { background: #e8f3eb; color: #285e49; }
+.gitlab-project-webhook-message-receipt { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.gitlab-project-webhook-message-receipt strong { font-size: 12px; color: #506f61; }
+.gitlab-project-webhook-message-receipt strong[data-receipt-status="matched"] { color: #285e49; }
+.gitlab-project-webhook-message-receipt strong[data-receipt-status="unconfirmed"] { color: #75472f; }
 .gitlab-project-webhook-local-receipt { margin-top: 8px; }
 
 @media (max-width: 600px) {

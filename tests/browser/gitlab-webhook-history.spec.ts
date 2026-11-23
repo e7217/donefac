@@ -75,6 +75,10 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
   const privateHeader = 'synthetic-private-request-header';
   const privatePayload = 'synthetic-private-webhook-payload';
   const privateResponse = 'synthetic-private-webhook-response';
+  const acceptedMessage = randomUUID();
+  const proxyOnlyMessage = randomUUID();
+  const eventUuid = randomUUID();
+  const unrelatedMessage = randomUUID();
   const startedLateRead = Promise.withResolvers<void>();
   const finishLateRead = Promise.withResolvers<void>();
   const attemptedAt = new Date(Date.now() - 60_000).toISOString();
@@ -108,11 +112,14 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
       await finishLateRead.promise;
     }
     const payload = [
-      { id: 602, url: receiverUrl, trigger: 'merge_request_hooks', response_status: '401', created_at: attemptedAt,
-        execution_duration: 0.125, request_headers: { 'X-Gitlab-Token': privateHeader }, request_data: { internal: privatePayload },
+      { id: 602, url: receiverUrl, trigger: 'push_hooks', response_status: '401', created_at: attemptedAt,
+        execution_duration: 0.125, request_headers: { 'X-Gitlab-Token': privateHeader, 'Idempotency-Key': acceptedMessage }, request_data: { internal: privatePayload },
         response_headers: { 'X-Private': privateHeader }, response_body: privateResponse },
-      { id: 601, url: receiverUrl, trigger: 'push_hooks', response_status: '200', execution_duration: 0.05 },
-      { id: 600, url: receiverUrl, trigger: 'pipeline_hooks', response_status: '0', internal_error_message: privateResponse },
+      { id: 601, url: receiverUrl, trigger: 'push_hooks', response_status: '200', execution_duration: 0.05,
+        request_headers: { 'webhook-id': proxyOnlyMessage } },
+      { id: 600, url: receiverUrl, trigger: 'pipeline_hooks', response_status: '0', internal_error_message: privateResponse,
+        request_headers: { 'X-Gitlab-Event-UUID': eventUuid } },
+      { id: 598, url: receiverUrl, trigger: 'push_hooks', response_status: '200', request_headers: { 'webhook-id': acceptedMessage } },
       { id: 599, url: `${receiverUrl}?route=legacy`, trigger: 'push_hooks', response_status: '503' },
     ];
     response.writeHead(200, { 'Content-Type': 'application/json', 'X-Next-Page': '2' }).end(JSON.stringify(payload));
@@ -126,11 +133,14 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     const saved = await readJson<GitlabSettings>(await request.patch(settingsPath, { data: {
       expectedVersion: initial.version, baseUrl: source, projectIds: [repositoryId, 99], token: readToken, webhookSecret,
     } }));
-    await readJson(await request.post(receiverPath, {
-      headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': randomUUID() },
+    const sendPush = (id: string) => request.post(receiverPath, {
+      headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': id },
       data: { object_kind: 'push', project_id: repositoryId, project: { id: repositoryId, web_url: `${source}/team/history` },
         ref: 'refs/heads/synthetic-history', before: '0'.repeat(40), after: 'a'.repeat(40), commits: [], total_commits_count: 0 },
-    }));
+    }).then(response => readJson(response));
+    await sendPush(acceptedMessage);
+    const accepted = (await readJson<GitlabWebhookStatus>(await request.get(statusPath))).repositories[0].lastDelivery;
+    await sendPush(unrelatedMessage);
     const receiptsBefore = await readJson<GitlabWebhookStatus>(await request.get(statusPath));
     const latest = receiptsBefore.repositories.find(item => item.repositoryId === repositoryId)?.lastDelivery;
     expect(latest).toMatchObject({ event: 'push', authentication: 'secret-token', linked: 0 });
@@ -179,14 +189,24 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     expect(browserCalls).toEqual([{ expectedVersion: saved.version, repositoryId, hookId: exactHookId, managementToken: managerToken }]);
     expect(calls.map(call => call.target.pathname)).toEqual([hookPath, hookPath, eventsPath]);
     expect(Object.fromEntries(calls[2].target.searchParams)).toEqual({ page: '1', per_page: '20' });
-    await expect(history.getByText('HTTP 401', { exact: true })).toBeVisible();
-    await expect(history.getByText('HTTP 200', { exact: true })).toBeVisible();
-    await expect(history.getByText('HTTP 응답 없음', { exact: true })).toBeVisible();
+    const attempt = (id: number) => history.getByRole('listitem', { name: `GitLab 전송 #${id}`, exact: true });
+    await expect(attempt(602)).toContainText('HTTP 401');
+    await expect(attempt(602)).toContainText('같은 메시지 인증 수신 확인');
+    await expect(attempt(601)).toContainText('HTTP 200');
+    await expect(attempt(601)).toContainText('같은 메시지 인증 수신 미확인');
+    await expect(attempt(600)).toContainText('HTTP 응답 없음');
+    await expect(attempt(600)).toContainText('같은 메시지 대조 불가');
+    await expect(attempt(598)).toContainText('같은 메시지 인증 수신 확인');
+    expect(result.attempts.map(({ id, messageReceipt }) => [id, messageReceipt])).toEqual([
+      [602, { status: 'matched', delivery: accepted }], [601, { status: 'unconfirmed' }],
+      [600, { status: 'unavailable' }], [598, { status: 'matched', delivery: accepted }],
+    ]);
     await expect(history.getByText('확인할 수 있는 전송만 표시합니다.', { exact: true })).toBeVisible();
     await expect(history.getByRole('heading', { name: 'Teamspace 인증 수신', exact: true })).toBeVisible();
     await expect(history).toContainText('이 저장소의 마지막 인증 수신 · Push · Secret Token');
     await expect(history).not.toContainText('HTTP 503');
-    for (const privateValue of [managerToken, webhookSecret, privateHeader, privatePayload, privateResponse, '?route=legacy']) {
+    for (const privateValue of [managerToken, webhookSecret, privateHeader, privatePayload, privateResponse, '?route=legacy',
+      acceptedMessage, proxyOnlyMessage, eventUuid, unrelatedMessage, 'messageDigests', 'request_headers']) {
       expect(JSON.stringify(result)).not.toContain(privateValue);
       await expect(history).not.toContainText(privateValue);
     }

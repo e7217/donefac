@@ -664,7 +664,11 @@ GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing To
 
 등록 직전 목록과 연결 버전을 확인한다. 같은 경로의 훅이 있으면 확인 결과만 반환한다. 새 훅의 Push·Merge Request·Pipeline·Deployment와 SSL 검증을 켜고 `created`로 반환한다. 기존 훅의 `deploymentEvents`가 `false`이거나 확인할 수 없으면 `review`가 표시된다. 쓰기 응답을 확인할 수 없으면 `unknown`으로 반환하고 이후에는 목록을 조회해 확인한다. 재시작 후에도 미확인 시도를 기억한다. 목록에 계속 나타나지 않으면 GitLab에서 해당 저장소 설정을 확인한다. 제출 이후 Teamspace 설정이 바뀌면 `configurationChanged`를 반환한다.
 
-최근 전송 조회는 `{expectedVersion,repositoryId,hookId,managementToken?}`을 받는다. 현재 HTTPS 수신 주소에 정확히 일치하는 저장소의 훅을 다시 확인한 뒤 GitLab 17.3 이상에서 제공하는 전송 이력의 첫 페이지를 최대 20건 읽는다. 응답의 `attempts`는 전송 ID, 이벤트 유형, HTTP 상태 `status`, 전송 시각 `sentAt`과 소요 밀리초 `durationMs`를 담는다. HTTP 응답이 없으면 상태는 `null`이며, GitLab이 시각·소요 시간을 제공하지 않으면 해당 값도 `null`이다. 원래 등록 주소가 다른 전송이나 해석할 수 없는 행이 있거나 다음 페이지가 있으면 `partial`을 표시한다. `localReceipt`는 해당 저장소의 최근 인증 수신 요약이다. 전송과 수신은 각 시스템이 보고한 기록을 함께 보여준다. 원문·헤더·응답 본문은 내보내거나 저장하지 않는다. [GitLab 프로젝트 웹훅 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events)
+최근 전송 조회는 `{expectedVersion,repositoryId,hookId,managementToken?}`을 받는다. 현재 HTTPS 수신 주소에 정확히 일치하는 저장소의 훅을 다시 확인한 뒤 GitLab 17.3 이상에서 제공하는 전송 이력의 첫 페이지를 최대 20건 읽는다. 응답의 `attempts`는 전송 ID, 이벤트 유형, HTTP 상태 `status`, 전송 시각 `sentAt`과 소요 밀리초 `durationMs`를 담는다. HTTP 응답이 없으면 상태는 `null`이며, GitLab이 시각·소요 시간을 제공하지 않으면 해당 값도 `null`이다. 원래 등록 주소가 다른 전송이나 해석할 수 없는 행이 있거나 다음 페이지가 있으면 `partial`을 표시한다. `localReceipt`는 해당 저장소 전체의 최근 인증 수신 요약이다. [GitLab 프로젝트 웹훅 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events)
+
+각 전송의 `messageReceipt.status`는 인증된 같은 메시지를 확인한 `matched`, 유효한 ID에 대응하는 인증 수신을 찾지 못한 `unconfirmed`, 비교 가능한 메시지 ID나 이벤트 유형을 확인할 수 없는 `unavailable` 중 하나다. `matched`의 `delivery`에는 확인한 최초 인증 수신의 시각·인증 방식·처리 요약이 들어 있다. 재전송은 같은 메시지의 요약을 함께 표시할 수 있다. `status`는 항상 해당 GitLab 전송 시도의 HTTP 결과다.
+
+GitLab 인스턴스·저장소·이벤트·수신 주소 범위에서 `webhook-id` 또는 `Idempotency-Key`의 해시를 대조한다. 두 헤더가 다르거나 모호하면 대조를 보류한다. 원래 메시지 ID·헤더·요청 및 응답 본문은 이 API 응답에 포함하지 않는다. 인증 수신은 7일 동안 작업공간에 최대 10,000건을 보관한다. 웹훅 인증 값이나 GitLab 주소가 바뀌면 수신 기록을 초기화한다. 저장소 제거 또는 Jira 매핑 변경은 해당 저장소의 기록을 초기화한다. 물리 백업은 수신 기록을 보존하고 자체 JSON 복원은 초기화한다. [GitLab 전송 헤더](https://docs.gitlab.com/user/project/integrations/webhooks/#delivery-headers)
 
 ### GitLab 환경별 배포
 

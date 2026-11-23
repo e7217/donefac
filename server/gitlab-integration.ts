@@ -7,9 +7,12 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
+import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, readGitlabManualObject, readGitlabMergeRequestReview, readGitlabPipelineJobs, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
+import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
+import { GitlabWebhookReceipts } from './gitlab-webhook-receipts.js';
 import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-branch-creation.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
@@ -469,6 +472,7 @@ export class GitlabIntegrationService{
   private readonly manualLinkRows:StatementSync;
   private readonly linkedActivityRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
+  private readonly webhookReceipts: GitlabWebhookReceipts;
   private readonly issueBranches: GitlabIssueBranchCreation;
   private readonly deploymentSyncs = new Set<string>();
   private readonly syncAttempts: GitlabManualSyncStatus;
@@ -476,6 +480,7 @@ export class GitlabIntegrationService{
   constructor(private readonly store:Store,private readonly hooks:Hooks,webhookPublicOrigin?:string){
     this.deployments=new GitlabDeployments(store);
     this.syncAttempts = new GitlabManualSyncStatus(store);
+    this.webhookReceipts = new GitlabWebhookReceipts(store);
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_object_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
@@ -883,13 +888,17 @@ export class GitlabIntegrationService{
   private invalidateWebhookDeliveries(previous: RawSettings, next: RawSettings, credentialsChanged: boolean): void {
     if (previous.baseUrl !== next.baseUrl || credentialsChanged) {
       this.store.db.exec('DELETE FROM gitlab_webhook_deliveries');
+      this.webhookReceipts.clear();
       return;
     }
     const allowed = new Set(next.projectIds);
     const previousRoutes = new Map((previous.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
     const nextRoutes = new Map((next.jiraRoutes ?? []).map(route => [route.repositoryId, jiraSourceId(route)]));
     for (const id of previous.projectIds) {
-      if (!allowed.has(id) || previousRoutes.get(id) !== nextRoutes.get(id)) this.store.remove('gitlab_webhook_deliveries', String(id));
+      if (!allowed.has(id) || previousRoutes.get(id) !== nextRoutes.get(id)) {
+        this.store.remove('gitlab_webhook_deliveries', String(id));
+        this.webhookReceipts.clear(id);
+      }
     }
   }
   private invalidateSyncAttempts(previous: RawSettings, next: RawSettings, readCredentialChanged: boolean): void {
@@ -907,6 +916,7 @@ export class GitlabIntegrationService{
   }
   resetForImport(branchLinks: Iterable<GitlabLink> = []): void {
     this.store.db.exec('DELETE FROM webhook_inbox;DELETE FROM gitlab_object_cursors;DELETE FROM gitlab_branch_cursors;DELETE FROM gitlab_push_cursors;DELETE FROM gitlab_webhook_deliveries;');
+    this.webhookReceipts.clear();
     this.syncAttempts.clear();
     const observations = new Map<string, PushObservation>();
     for (const link of branchLinks) {
@@ -1268,6 +1278,11 @@ export class GitlabIntegrationService{
       const priorAccepted = acceptedWebhookEvents(this.store.get<StoredWebhookDelivery>('gitlab_webhook_deliveries', id));
       const lastAcceptedByEvent = !duplicate && isTrackedWebhookEvent(event) ? { ...priorAccepted, [event]: delivery } : priorAccepted;
       this.store.put('gitlab_webhook_deliveries', { id, delivery, ...(lastAcceptedByEvent ? { lastAcceptedByEvent } : {}) } satisfies StoredWebhookDelivery);
+      const receiverUrl = this.projectWebhooks.receiverUrl;
+      if (event !== 'other' && raw.baseUrl && receiverUrl && req.originalUrl === new URL(receiverUrl).pathname) {
+        const digest = gitlabWebhookMessageDigest(req.headers, authentication === 'signing-token');
+        if (digest) this.webhookReceipts.remember({ instance: raw.baseUrl, repositoryId: projectId, event, receiverUrl }, digest, delivery);
+      }
       return result;
     });
   }
@@ -1699,14 +1714,26 @@ export class GitlabIntegrationService{
       try {
         if (operation === 'history') {
           if (Object.keys(req.query).length) fail('웹훅 전송 이력 조회 조건을 확인해 주세요.');
-          const history = await this.projectWebhooks.history(req.body, controller.signal);
+          const { settingsVersion, repositoryId, hookId, attempts, partial, messageDigests, receiverUrl } =
+            await this.projectWebhooks.history(req.body, controller.signal);
           if (controller.signal.aborted) return;
-          const status = this.webhookStatus();
-          const repository = status.repositories.find(item => item.repositoryId === history.repositoryId);
-          if (status.settingsVersion !== history.settingsVersion || !repository) {
+          const current = this.raw();
+          if (current.version !== settingsVersion || !current.projectIds.includes(repositoryId)) {
             fail('GitLab 연결 설정이 변경되었습니다. 최신 설정에서 다시 점검해 주세요.', 409);
           }
-          return res.json({ ...history, localReceipt: repository.lastDelivery });
+          const localReceipt = this.store.get<StoredWebhookDelivery>('gitlab_webhook_deliveries', String(repositoryId))?.delivery ?? null;
+          const response: GitlabProjectWebhookHistory = { settingsVersion, repositoryId, hookId, partial, localReceipt,
+            attempts: attempts.map(attempt => {
+              const digest = messageDigests.get(attempt.id);
+              let messageReceipt: GitlabProjectWebhookMessageReceipt = { status: 'unavailable' };
+              if (digest && attempt.event !== 'other') {
+                const delivery = this.webhookReceipts.match({ instance: current.baseUrl, repositoryId, event: attempt.event, receiverUrl }, digest);
+                messageReceipt = delivery ? { status: 'matched', delivery } : { status: 'unconfirmed' };
+              }
+              return { ...attempt, messageReceipt };
+            }),
+          };
+          return res.json(response);
         }
         const result = await this.projectWebhooks[operation](req.body, actorId, controller.signal);
         if (result.state === 'created') {

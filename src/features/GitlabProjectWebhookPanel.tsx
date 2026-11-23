@@ -21,6 +21,11 @@ const resultMessages: Record<GitlabProjectWebhookReview['state'], string> = {
   unknown: 'GitLab에서 웹훅 설정을 확인하지 못했습니다.',
   created: 'GitLab에 웹훅을 등록했습니다.',
 };
+const messageReceiptLabels = {
+  matched: '같은 메시지 인증 수신 확인',
+  unconfirmed: '같은 메시지 인증 수신 미확인',
+  unavailable: '같은 메시지 대조 불가',
+};
 
 function operationError(error: unknown, action: Action) {
   if (error instanceof ApiError) {
@@ -74,18 +79,34 @@ function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
     <h4>GitLab 최근 전송</h4>
     {value.partial && <p className="gitlab-project-webhook-note">확인할 수 있는 전송만 표시합니다.</p>}
     {hint && <p>{hint}</p>}
-    {value.attempts.length ? <ol className="gitlab-project-webhook-attempts" aria-label="GitLab 최근 전송 내역" role="list">
-      {value.attempts.map(attempt => <li key={attempt.id}>
-        <div><strong>{gitlabWebhookEventLabels[attempt.event]}</strong>
-          <span className="gitlab-project-webhook-http" data-ok={attempt.status !== null && attempt.status >= 200 && attempt.status < 300}>
-            {attempt.status === null ? 'HTTP 응답 없음' : `HTTP ${attempt.status}`}
-          </span>
-        </div>
-        <small>{attempt.sentAt ? <time dateTime={attempt.sentAt}>{new Date(attempt.sentAt).toLocaleString('ko-KR')}</time> : '전송 시각 미제공'}
-          {attempt.durationMs !== null && <> · {attempt.durationMs.toLocaleString('ko-KR')}ms</>}
-        </small>
-      </li>)}
-    </ol> : <p>확인된 GitLab 전송 기록이 없습니다.</p>}
+    {value.attempts.length ? <>
+      <p className="gitlab-project-webhook-note">HTTP 상태는 개별 전송 시도의 응답입니다. 같은 메시지의 재전송에는 동일한 Teamspace 인증 수신 기록이 표시될 수 있습니다.</p>
+      <ol className="gitlab-project-webhook-attempts" aria-label="GitLab 최근 전송 내역" role="list">
+        {value.attempts.map(attempt => {
+          const messageReceipt = attempt.messageReceipt ?? { status: 'unavailable' as const };
+          return <li key={attempt.id} aria-label={`GitLab 전송 #${attempt.id}`}>
+            <div><strong>{gitlabWebhookEventLabels[attempt.event]}</strong>
+              <span className="gitlab-project-webhook-http" data-ok={attempt.status !== null && attempt.status >= 200 && attempt.status < 300}>
+                {attempt.status === null ? 'HTTP 응답 없음' : `HTTP ${attempt.status}`}
+              </span>
+            </div>
+            <small>{attempt.sentAt ? <><span className="sr-only">GitLab 전송 시각 </span>
+              <time dateTime={attempt.sentAt}>{new Date(attempt.sentAt).toLocaleString('ko-KR')}</time></> : '전송 시각 미제공'}
+              {attempt.durationMs !== null && <> · {attempt.durationMs.toLocaleString('ko-KR')}ms</>}
+            </small>
+            <p className="gitlab-project-webhook-message-receipt">
+              <strong data-receipt-status={messageReceipt.status}>{messageReceiptLabels[messageReceipt.status]}</strong>
+              {messageReceipt.status === 'matched' && <small>
+                {gitlabWebhookAuthenticationLabels[messageReceipt.delivery.authentication]} · <span className="sr-only">Teamspace 인증 수신 시각 </span>
+                <time dateTime={messageReceipt.delivery.receivedAt}>
+                  {new Date(messageReceipt.delivery.receivedAt).toLocaleString('ko-KR')}
+                </time>
+              </small>}
+            </p>
+          </li>;
+        })}
+      </ol>
+    </> : <p>확인된 GitLab 전송 기록이 없습니다.</p>}
     <div className="gitlab-project-webhook-local-receipt">
       <h4>Teamspace 인증 수신</h4>
       {receipt ? <p>이 저장소의 마지막 인증 수신 · {gitlabWebhookEventLabels[receipt.event]} · {gitlabWebhookAuthenticationLabels[receipt.authentication]}

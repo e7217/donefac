@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -464,6 +465,58 @@ async function verifySignedGitlabWebhooks(session, anonymous, origin) {
   assert.equal((await readStatus()).repositories[0].lastDelivery, null);
 }
 
+async function verifyGitlabMessageCorrelation(session, anonymous, origin) {
+  const integration = '/api/integrations/gitlab';
+  const webhook = `${integration}/webhook`;
+  const history = `${integration}/project-webhook-history`;
+  const receiver = origin + webhook;
+  const webhookId = randomUUID();
+  const proxyOnly = randomUUID();
+  const readToken = randomBytes(20).toString('hex');
+  protectedValues.push(readToken, webhookId, proxyOnly);
+  const source = createServer((request, response) => {
+    const path = new URL(request.url ?? '/', 'http://localhost').pathname;
+    if (request.method !== 'GET' || request.headers['private-token'] !== readToken) {
+      response.writeHead(403).end();
+      return;
+    }
+    if (path === '/api/v4/projects/42/hooks') {
+      response.setHeader('Content-Type', 'application/json').end(JSON.stringify([{
+        id: 17, project_id: 42, url: receiver, push_events: true, merge_requests_events: true,
+        pipeline_events: true, deployment_events: true, enable_ssl_verification: true, alert_status: 'executable',
+      }]));
+    } else if (path === '/api/v4/projects/42/hooks/17/events') {
+      response.setHeader('Content-Type', 'application/json').end(JSON.stringify([
+        { id: 10, url: receiver, trigger: 'push_hooks', response_status: 200, request_headers: { 'webhook-id': proxyOnly } },
+        { id: 11, url: receiver, trigger: 'push_hooks', response_status: 502, request_headers: { 'webhook-id': webhookId } },
+      ]));
+    } else response.writeHead(404).end();
+  });
+  source.listen(0, '127.0.0.1');
+  await once(source, 'listening');
+  try {
+    const settings = await (await call(session, 'GET', integration, 200)).json();
+    const saved = await (await call(session, 'PATCH', integration, 200, { headers: { Origin: origin }, data: {
+      expectedVersion: settings.version, baseUrl: `http://127.0.0.1:${source.address().port}`, projectIds: [42], token: readToken,
+    } })).json();
+    const input = { headers: { Origin: origin }, data: { expectedVersion: saved.version, repositoryId: 42, hookId: 17 } };
+    await call(anonymous, 'POST', history, 401, input);
+    await call(anonymous, 'POST', webhook, 200, { headers: { 'X-Gitlab-Token': gitlabSecret, 'Idempotency-Key': webhookId },
+      data: { object_kind: 'push', project_id: 42 } });
+    const response = await call(session, 'POST', history, 200, input);
+    const raw = await response.text();
+    checkCredentials(raw, 'GitLab message correlation');
+    const { attempts, localReceipt } = JSON.parse(raw);
+    assert.deepEqual(attempts.map(({ status, messageReceipt }) => [status, messageReceipt.status]), [[200, 'unconfirmed'], [502, 'matched']]);
+    assert.deepEqual(attempts[1].messageReceipt.delivery, localReceipt);
+  } finally {
+    await new Promise((resolve, reject) => {
+      source.close(error => error ? reject(error) : resolve());
+      source.closeAllConnections();
+    });
+  }
+}
+
 async function verifyBrowser(origin) {
   browser = await chromium.launch({ ...browserConfig.use.launchOptions, timeout: 15_000 });
   const session = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: true, viewport: { width: 1440, height: 1000 } });
@@ -569,6 +622,7 @@ async function verifyBrowser(origin) {
       await expectSoon(boardPage).toHaveURL(boardUrl);
     } finally { await boardPage.close(); }
     await verifySignedGitlabWebhooks(session.request, anonymous, origin);
+    await verifyGitlabMessageCorrelation(session.request, anonymous, origin);
     for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab',
       '/api/integrations/gitlab/webhook-status', '/api/integrations/gitlab/sync-status']) {
       const response = await call(session.request, 'GET', path, 200);

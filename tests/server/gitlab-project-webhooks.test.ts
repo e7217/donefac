@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -368,7 +368,8 @@ test('delivery history only reads the exact saved hook and exposes a sanitized s
   const first = await app.call<History>(historyPath, input);
   assert.equal(first.cacheControl, 'no-store');
   assert.equal(first.data.localReceipt, null);
-  assert.deepEqual(first.data.attempts, [{ id: 17, event: 'push', status: 401, sentAt, durationMs: 125 }]);
+  assert.deepEqual(first.data.attempts, [{ id: 17, event: 'push', status: 401, sentAt, durationMs: 125,
+    messageReceipt: { status: 'unavailable' } }]);
   assert.deepEqual([first.data.settingsVersion, first.data.repositoryId, first.data.hookId], [settings.version, repositoryId, 12]);
   assert.ok(!JSON.stringify(first.data).includes(confidential));
   assert.ok(!JSON.stringify(first.data).includes('previous.example.test'));
@@ -384,6 +385,75 @@ test('delivery history only reads the exact saved hook and exposes a sanitized s
   assert.ok(source.calls.every(call => call.method === 'GET' && call.body === undefined));
   assert.deepEqual((await app.call<GitlabSettings>(settingsPath)).data, settings);
   assert.deepEqual((await app.call<WorkspaceSnapshot>('/workspace')).data, before);
+});
+
+test('history correlates an authenticated message across retries and keeps HTTP success, repository receipt and message evidence distinct', async t => {
+  const message = randomUUID(), unrelated = randomUUID(), eventUuid = randomUUID();
+  const conflicting = randomUUID(), proxyOnly = randomUUID();
+  const deliveryPath = `${settingsPath}/webhook`;
+  const source = await gitlab(t, (call, response) => {
+    assert.equal(call.method, 'GET');
+    if (call.url.pathname === hookPath) return reply(response, [hook(12)]);
+    assert.equal(call.url.pathname, historyHookPath);
+    return reply(response, [
+      { id: 51, response_status: 200, request_headers: { 'Idempotency-Key': message } },
+      { id: 52, response_status: 401, request_headers: { 'webhook-id': message, 'idempotency-key': message } },
+      { id: 53, response_status: 200, request_headers: { 'webhook-id': proxyOnly } },
+      { id: 54, response_status: 200, request_headers: { 'X-GitLab-Event-UUID': eventUuid } },
+      { id: 55, response_status: 200, request_headers: { 'webhook-id': message, 'idempotency-key': conflicting } },
+    ].map(row => ({ ...row, url: receiverUrl, trigger: 'push_hooks' })));
+  });
+  const app = await fixture(t);
+  let settings = await app.configure(source.url, { projectIds: [repositoryId, 99], signingToken });
+  const history = () => app.call<History>(historyPath, { ...reviewInput(settings), hookId: 12 }).then(({ data }) => data);
+  const results = ({ attempts }: History) => attempts.map(row => row.messageReceipt.status);
+  const push = { project_id: repositoryId, object_kind: 'push' };
+  const secret = { 'X-Gitlab-Token': legacySecret };
+  const accepted = ['matched', 'matched', 'unconfirmed', 'unavailable', 'unavailable'];
+  const unconfirmed = ['unconfirmed', 'unconfirmed', 'unconfirmed', 'unavailable', 'unavailable'];
+  await app.call(deliveryPath, push, 200, 'POST', { ...secret, 'webhook-id': unrelated, 'X-Gitlab-Event-UUID': eventUuid });
+  await app.call(deliveryPath, { ...push, project_id: 99 }, 200, 'POST', { ...secret, 'webhook-id': message });
+  await app.call(deliveryPath, { ...push, object_kind: 'pipeline' }, 200, 'POST', { ...secret, 'webhook-id': message });
+  await app.call(deliveryPath, push, 401, 'POST', { 'X-Gitlab-Token': 'rejected-fixture-token', 'webhook-id': message });
+  const first = await history();
+  assert.ok(first.localReceipt);
+  assert.equal(first.attempts[0].status, 200);
+  assert.deepEqual(results(first), unconfirmed);
+
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = createHmac('sha256', Buffer.alloc(32, 7))
+    .update(`${message}.${timestamp}.${JSON.stringify(push)}`).digest('base64');
+  const signed = { 'webhook-id': message, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` };
+  await app.call(deliveryPath, push, 200, 'POST', signed);
+  const receipt = (await app.call<GitlabWebhookStatus>(`${settingsPath}/webhook-status`)).data.repositories[0].lastDelivery;
+  assert.ok(receipt && !receipt.duplicate && receipt.authentication === 'signing-token');
+
+  await app.call(deliveryPath, push, 200, 'POST', signed);
+  await app.restart();
+  const matched = await history();
+  assert.deepEqual(results(matched), accepted);
+  assert.deepEqual(matched.attempts.slice(0, 2).map(row => row.messageReceipt), [
+    { status: 'matched', delivery: receipt }, { status: 'matched', delivery: receipt },
+  ]);
+  assert.equal(matched.localReceipt?.duplicate, true);
+  assert.equal(matched.attempts[1].status, 401);
+  for (const privateValue of [message, unrelated, eventUuid, conflicting, proxyOnly, signature, 'messageDigests', 'request_headers']) {
+    assert.ok(!JSON.stringify(matched).includes(privateValue));
+  }
+
+  settings = await app.configure(source.url, { projectIds: [repositoryId, 99], signingToken, token: 'rotated-fixture-read-token' });
+  assert.deepEqual(results(await history()), accepted, 'read token changes preserve an authenticated receipt');
+  settings = await app.configure(source.url, { projectIds: [repositoryId, 99], signingToken, webhookSecret: 'rotated-fixture-receiver-token' });
+  assert.deepEqual(results(await history()), unconfirmed);
+  await app.call(deliveryPath, push, 200, 'POST', { ...signed, 'Idempotency-Key': proxyOnly });
+  assert.deepEqual(results(await history()), unconfirmed, 'a signed ID does not authenticate a different legacy alias');
+  await app.call(deliveryPath, push, 200, 'POST', signed);
+  assert.deepEqual(results(await history()), accepted);
+
+  const backup = (await app.call('/export')).data;
+  await app.call('/import', { confirm: 'REPLACE', data: backup });
+  settings = (await app.call<GitlabSettings>(settingsPath)).data;
+  assert.deepEqual(results(await history()), unconfirmed);
 });
 
 test('delivery history reports access and invalid response errors safely and can retry', async t => {

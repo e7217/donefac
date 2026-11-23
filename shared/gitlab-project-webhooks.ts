@@ -26,12 +26,19 @@ export interface GitlabProjectWebhookReview {
   configurationChanged?: true;
 }
 
-export interface GitlabProjectWebhookAttempt {
+export interface GitlabProjectWebhookAttemptDetails {
   id: number;
   event: GitlabWebhookDelivery['event'];
   status: number | null;
   sentAt: string | null;
   durationMs: number | null;
+}
+
+export type GitlabProjectWebhookMessageReceipt = { status: 'matched'; delivery: GitlabWebhookDelivery }
+  | { status: 'unconfirmed' | 'unavailable' };
+
+export interface GitlabProjectWebhookAttempt extends GitlabProjectWebhookAttemptDetails {
+  messageReceipt: GitlabProjectWebhookMessageReceipt;
 }
 
 export interface GitlabProjectWebhookHistory {

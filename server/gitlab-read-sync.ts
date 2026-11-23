@@ -1,9 +1,10 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
-import type { GitlabProjectWebhook, GitlabProjectWebhookAttempt, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
+import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
 import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch,
   GitlabReviewParticipant, GitlabReviewState } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
+import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
@@ -39,7 +40,7 @@ const MAX_WEBHOOK_PAGES = 10;
 const WEBHOOK_HISTORY_LIMIT = 20;
 const WEBHOOK_RECEIVER_PATH = '/api/integrations/gitlab/webhook';
 const WEBHOOK_ATTEMPT_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,9})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
-const WEBHOOK_HISTORY_EVENTS = new Map<string, GitlabProjectWebhookAttempt['event']>([
+const WEBHOOK_HISTORY_EVENTS = new Map<string, GitlabProjectWebhookAttemptDetails['event']>([
   ['push_hooks', 'push'], ['tag_push_hooks', 'tag_push'], ['merge_request_hooks', 'merge_request'],
   ['pipeline_hooks', 'pipeline'], ['deployment_hooks', 'deployment'],
 ]);
@@ -296,7 +297,7 @@ function webhookAttemptTime(value: unknown): string | null {
 }
 
 export async function readGitlabProjectWebhookHistory(connection: Connection, repositoryId: number, hookId: number,
-  receiverUrl: string, signal?: AbortSignal): Promise<{ attempts: GitlabProjectWebhookAttempt[]; partial: boolean }> {
+  receiverUrl: string, signal?: AbortSignal): Promise<{ attempts: GitlabProjectWebhookAttemptDetails[]; partial: boolean; messageDigests: Map<number, string> }> {
   const receiver = webhookReceiver(receiverUrl);
   if (!Number.isSafeInteger(hookId) || hookId < 1) throw new GitlabReadError('webhooks', 'network');
   const { headers, projectUrl } = projectReadRequest(connection, repositoryId, 'webhooks');
@@ -306,7 +307,8 @@ export async function readGitlabProjectWebhookHistory(connection: Connection, re
   const rows = await readJson(projectUrl, headers, 'webhooks', signal, value => { pagination = value; });
   if (!Array.isArray(rows) || rows.length > WEBHOOK_HISTORY_LIMIT) invalidWebhookResponse();
   let partial = webhookNextPage(pagination, projectUrl, 1, WEBHOOK_HISTORY_LIMIT, rows.length);
-  const attempts = new Map<number, GitlabProjectWebhookAttempt>();
+  const attempts = new Map<number, GitlabProjectWebhookAttemptDetails>();
+  const messageDigests = new Map<number, string>();
   const seen = new Set<number>();
   for (const row of rows) {
     if (!isReadObject(row) || typeof row.id !== 'number' || !Number.isSafeInteger(row.id) || row.id < 1) {
@@ -316,6 +318,7 @@ export async function readGitlabProjectWebhookHistory(connection: Connection, re
     const { id } = row;
     if (seen.has(id)) {
       attempts.delete(id);
+      messageDigests.delete(id);
       partial = true;
       continue;
     }
@@ -330,8 +333,10 @@ export async function readGitlabProjectWebhookHistory(connection: Connection, re
     const duration = typeof seconds === 'number' && seconds >= 0 ? Math.round(seconds * 1000) : NaN;
     attempts.set(id, { id, event, status, sentAt: webhookAttemptTime(row.created_at),
       durationMs: Number.isSafeInteger(duration) ? duration : null });
+    const messageDigest = event === 'other' ? null : gitlabWebhookMessageDigest(row.request_headers);
+    if (messageDigest) messageDigests.set(id, messageDigest);
   }
-  return { attempts: [...attempts.values()], partial };
+  return { attempts: [...attempts.values()], partial, messageDigests };
 }
 
 export async function createGitlabProjectWebhook(connection: Connection, projectId: number, receiverUrl: string,

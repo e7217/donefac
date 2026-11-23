@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode, GitlabProjectWebhookHistory, GitlabProjectWebhookReview } from '../shared/gitlab-project-webhooks.js';
+import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode, GitlabProjectWebhookReview } from '../shared/gitlab-project-webhooks.js';
 import { createGitlabProjectWebhook, GitlabReadError, listGitlabProjectWebhooks, readGitlabProjectWebhookHistory, supportsGitlabProjectWebhookSigning } from './gitlab-read-sync.js';
 import type { Store } from './store.js';
 
@@ -12,6 +12,8 @@ type Connection = {
   matchesCredential(value: string): boolean;
 };
 type Review = { settingsVersion: number; repositoryId: number; baseUrl: string; actorId: string; expiresAt: number };
+type WebhookHistory = { settingsVersion: number; repositoryId: number; hookId: number; receiverUrl: string;
+  attempts: GitlabProjectWebhookAttemptDetails[]; partial: boolean; messageDigests: ReadonlyMap<number, string> };
 const REVIEW_TTL_MS = 10 * 60_000;
 const MAX_REVIEWS = 256;
 const DEFINITE_REJECTIONS = new Set([400, 401, 403, 404, 405, 410, 422, 429]);
@@ -145,7 +147,7 @@ export class GitlabProjectWebhookSetup {
     return result;
   }
 
-  async history(value: unknown, signal?: AbortSignal): Promise<Omit<GitlabProjectWebhookHistory, 'localReceipt'>> {
+  async history(value: unknown, signal?: AbortSignal): Promise<WebhookHistory> {
     const input = requestFields(value, ['expectedVersion', 'repositoryId', 'hookId', 'managementToken', 'actorId']);
     const target = this.target(input);
     const { connection, repositoryId, receiverUrl } = target;
@@ -168,7 +170,8 @@ export class GitlabProjectWebhookSetup {
 
     const result = await readGitlabProjectWebhookHistory({ baseUrl: connection.baseUrl, token }, repositoryId, hookId, receiverUrl, signal)
       .catch(error => { throw historyReadError(error); }).finally(checkCurrent);
-    return { settingsVersion: connection.version, repositoryId, hookId, attempts: result.attempts, partial: result.partial };
+    return { settingsVersion: connection.version, repositoryId, hookId, receiverUrl,
+      attempts: result.attempts, partial: result.partial, messageDigests: result.messageDigests };
   }
 
   async register(value: unknown, actorId: string, signal?: AbortSignal): Promise<GitlabProjectWebhookReview> {

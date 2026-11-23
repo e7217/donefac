@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type RequestListener } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabProjectWebhookHistory, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
+import { gitlabWebhookMessageDigest } from '../../server/gitlab-webhook-message.js';
 
 async function upstream(t: TestContext, listener: RequestListener) {
   const server = createServer(listener);
@@ -18,7 +20,24 @@ async function upstream(t: TestContext, listener: RequestListener) {
   return `http://127.0.0.1:${address.port}`;
 }
 
-test('GitLab webhook history reads one reviewed receiver page and projects delivery diagnostics without private fields', async t => {
+test('GitLab webhook message identity preserves exact IDs and requires unambiguous retry-stable headers', () => {
+  const expected = createHash('sha256').update('gitlab-webhook-message\0Message-Exact_17').digest('hex');
+  assert.equal(gitlabWebhookMessageDigest({ 'Idempotency-Key': ' \tMessage-Exact_17\t ' }), expected);
+  assert.equal(gitlabWebhookMessageDigest({ 'Webhook-Id': 'Message-Exact_17' }, true), expected);
+  assert.equal(gitlabWebhookMessageDigest({ 'webhook-id': 'Message-Exact_17', 'Idempotency-Key': 'Message-Exact_17' }), expected);
+  assert.notEqual(gitlabWebhookMessageDigest({ 'webhook-id': 'message-exact_17' }), expected);
+  assert.equal(gitlabWebhookMessageDigest({ 'Idempotency-Key': 'Message-Exact_17' }, true), null);
+  for (const headers of [null, [], { 'X-Gitlab-Event-UUID': 'Message-Exact_17' },
+    { 'webhook-id': 'Message-Exact_17', 'Idempotency-Key': 'different' },
+    { 'webhook-id': 'Message-Exact_17', 'Webhook-Id': 'Message-Exact_17' },
+    { 'webhook-id': 'Message-Exact_17', 'Idempotency-Key': ['Message-Exact_17'] },
+    { 'webhook-id': 'Message-Exact_17, different' }, { 'webhook-id': 'leading internal space' },
+    { 'webhook-id': 'Message-Exact_17\n' }, { 'webhook-id': 'x'.repeat(501) }]) {
+    assert.equal(gitlabWebhookMessageDigest(headers), null);
+  }
+});
+
+test('GitLab webhook history projects delivery diagnostics with private message correlation kept separately', async t => {
   const receiver = 'https://teamspace.example.test/api/integrations/gitlab/webhook';
   const paths: string[] = [];
   const origin = await upstream(t, (request, response) => {
@@ -28,18 +47,24 @@ test('GitLab webhook history reads one reviewed receiver page and projects deliv
     response.setHeader('X-Next-Page', '2');
     response.end(JSON.stringify([
       { id: 32, url: receiver, trigger: 'deployment_hooks', response_status: '200', execution_duration: 1.09064,
-        created_at: '2026-01-22T11:20:30-07:00', request_headers: { authorization: 'private-header' },
+        created_at: '2026-01-22T11:20:30-07:00', request_headers: { authorization: 'private-header',
+          'Idempotency-Key': 'private-delivery-ID', 'Webhook-Id': 'private-delivery-ID' },
         request_data: { private: 'private-payload' }, response_body: 'response-private-data', response_headers: { Date: 'Thu, 22 Jan 2026 18:20:31 GMT' } },
-      { id: 45, url: receiver, trigger: 'merge_request_hooks', response_status: 401, execution_duration: 0.08 },
-      { id: 23, url: `${receiver}?token=historical-private-target`, trigger: 'pipeline_hooks', response_status: '200' },
+      { id: 45, url: receiver, trigger: 'merge_request_hooks', response_status: 401, execution_duration: 0.08,
+        request_headers: { 'webhook-id': 'private-retried-delivery-ID' } },
+      { id: 23, url: `${receiver}?token=historical-private-target`, trigger: 'pipeline_hooks', response_status: '200',
+        request_headers: { 'webhook-id': 'private-out-of-scope-ID' } },
       { id: 24, url: 'https://older.example.test/api/integrations/gitlab/webhook', trigger: 'push_hooks', response_status: '200' },
       { id: 26, url: receiver, trigger: 'pipeline_hooks', response_status: 'internal error', execution_duration: -0.001,
-        created_at: '2026-02-29T00:00:00Z', internal_error_message: 'private-connection-detail' },
-      { id: 20, url: receiver, trigger: 'tag_push_hooks', response_status: '0', response_headers: { Date: 'Thu, 22 Jan 2026 18:20:31 GMT' } },
+        created_at: '2026-02-29T00:00:00Z', internal_error_message: 'private-connection-detail',
+        request_headers: { 'idempotency-key': 'private-delivery-ID', 'webhook-id': 'private-retried-delivery-ID' } },
+      { id: 20, url: receiver, trigger: 'tag_push_hooks', response_status: '0', response_headers: { Date: 'Thu, 22 Jan 2026 18:20:31 GMT' },
+        request_headers: { 'X-Gitlab-Event-UUID': 'private-event-ID' } },
       { id: 18, url: receiver, trigger: 'push_hooks', response_status: 0, created_at: '2026-01-22T18:20:30', execution_duration: 0 },
-      { id: 17, url: receiver, trigger: 'private-trigger-detail', response_status: '502', execution_duration: '1.25' },
+      { id: 17, url: receiver, trigger: 'private-trigger-detail', response_status: '502', execution_duration: '1.25',
+        request_headers: { 'webhook-id': 'private-unknown-delivery-ID' } },
       { id: 15, url: receiver, trigger: 'push_hooks', response_status: 'malformed status private-data' },
-      { id: 12, url: receiver, trigger: 'push_hooks', response_status: '200' },
+      { id: 12, url: receiver, trigger: 'push_hooks', response_status: '200', request_headers: { 'webhook-id': 'private-duplicate-attempt-ID' } },
       { id: 12, url: receiver, trigger: 'merge_request_hooks', response_status: '400' },
       null,
     ]));
@@ -53,7 +78,10 @@ test('GitLab webhook history reads one reviewed receiver page and projects deliv
     { id: 20, event: 'tag_push', status: null, sentAt: null, durationMs: null },
     { id: 18, event: 'push', status: null, sentAt: null, durationMs: 0 },
     { id: 17, event: 'other', status: 502, sentAt: null, durationMs: null },
-  ] });
+  ], messageDigests: new Map([
+    [32, gitlabWebhookMessageDigest({ 'Idempotency-Key': 'private-delivery-ID' })],
+    [45, gitlabWebhookMessageDigest({ 'Idempotency-Key': 'private-retried-delivery-ID' })],
+  ]) });
   assert.doesNotMatch(JSON.stringify(result), /private|https:/u);
 });
 
@@ -74,9 +102,9 @@ test('GitLab webhook history distinguishes an empty page, filtered attempts, inc
     response.end(JSON.stringify(fixture.rows));
   });
   const read = () => readGitlabProjectWebhookHistory({ baseUrl: origin }, 2, 3, receiver);
-  assert.deepEqual(await read(), { attempts: [], partial: false });
-  assert.deepEqual(await read(), { attempts: [{ id: 1, event: 'push', status: 200, sentAt: null, durationMs: null }], partial: true });
-  assert.deepEqual(await read(), { attempts: [], partial: true });
+  assert.deepEqual(await read(), { attempts: [], partial: false, messageDigests: new Map() });
+  assert.deepEqual(await read(), { attempts: [{ id: 1, event: 'push', status: 200, sentAt: null, durationMs: null }], partial: true, messageDigests: new Map() });
+  assert.deepEqual(await read(), { attempts: [], partial: true, messageDigests: new Map() });
   const limited = await read();
   assert.equal(limited.attempts.length, 20);
   assert.equal(limited.partial, true);
