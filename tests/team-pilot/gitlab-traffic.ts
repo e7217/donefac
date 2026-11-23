@@ -13,36 +13,50 @@ async function json<T>(response: APIResponse, message: string, status = 200): Pr
   return await response.json() as T;
 }
 
-export async function prepareGitlabTraffic(context: BrowserContext, { origin, projectId, actorId }: {
+export async function prepareGitlabTraffic(context: BrowserContext, { origin, projectId, actorId, issueId, jiraIssueKey, jiraInstanceKey }: {
   origin: string;
   projectId: string;
   actorId: string;
+  issueId: string;
+  jiraIssueKey: string;
+  jiraInstanceKey: string;
 }) {
   const requests = context.request;
   const headers = { Origin: origin, 'X-Actor-Id': actorId };
-  const issue = await json<Issue>(await requests.post('/api/issues', { headers, data: {
-    projectId, title: '공동 편집 중 서명된 파이프라인으로 검토할 업무',
-  } }), 'Create the issue for concurrent GitLab activity', 201);
+  const readWorkspace = async () => json<WorkspaceSnapshot>(await requests.get('/api/workspace'), 'Read the migrated issue and workflow for GitLab');
+  const findIssue = (snapshot: WorkspaceSnapshot): Issue => {
+    const issue = snapshot.issues.find(item => item.id === issueId);
+    if (!issue) throw new Error('The migrated issue for the GitLab pilot is missing.');
+    return issue;
+  };
+  const readIssue = async () => findIssue(await readWorkspace());
+  const workspace = await readWorkspace();
+  const issue = findIssue(workspace);
+  const workflow = workspace.workflows?.find(item => item.projectId === projectId);
+  const review = workflow?.statuses.find(item => item.category === 'review');
+  if (!review) throw new Error('The migrated project needs a review status for the GitLab pilot.');
+  expect(issue.projectId).toBe(projectId);
+  expect(workflow?.statuses.find(item => item.id === issue.status)?.category).toBe('in_progress');
+  expect(issue.key).not.toBe(jiraIssueKey);
   const settings = await json<GitlabSettings>(await requests.get(integration), 'Read current GitLab settings');
   const signingKey = randomBytes(32);
+  const jiraRoutes = [{ repositoryId, projectId, jiraInstanceKey }];
   const configured = await requests.patch(integration, { headers, data: {
     expectedVersion: settings.version, baseUrl, projectIds: [repositoryId], signingToken: `whsec_${signingKey.toString('base64')}`,
+    jiraRoutes,
   } }).catch(() => { throw new Error('Could not configure signing for the isolated GitLab pilot.'); });
   const signed = await json<GitlabSettings>(configured, 'Configure GitLab signing');
   expect(signed.signingTokenConfigured).toBe(true);
+  expect(signed.jiraRoutes).toEqual(jiraRoutes);
   const rule = await json<AutomationRule>(await requests.post('/api/automation-rules', { headers, data: {
     projectId, name: '합성 파이프라인 성공 시 검토', trigger: 'pipeline.succeeded', enabled: true,
-    gitlabProjectIds: [repositoryId], branchPattern: branch, issueTypes: [], fromStatuses: [issue.status], toStatusId: 'review', actorId,
+    gitlabProjectIds: [repositoryId], branchPattern: branch, issueTypes: [], fromStatuses: [issue.status], toStatusId: review.id, actorId,
   } }), 'Enable the repository-scoped GitLab automation rule', 201);
   expect(rule.enabled).toBe(true);
 
   const links = async () => json<{ total: number; links: GitlabLink[] }>(
     await requests.get(`/api/issues/${issue.id}/gitlab-links?kind=pipeline`), 'Read the issue pipeline links');
   const runs = async () => json<AutomationRun[]>(await requests.get(`/api/automation-runs?projectId=${projectId}`), 'Read project automation runs');
-  const readIssue = async () => {
-    const snapshot = await json<WorkspaceSnapshot>(await requests.get('/api/workspace'), 'Read the GitLab-linked issue');
-    return snapshot.issues.find(item => item.id === issue.id);
-  };
   const status = async () => json<GitlabWebhookStatus>(await requests.get(`${integration}/webhook-status`), 'Read authenticated webhook status');
 
   return async function verifyGitlabTraffic() {
@@ -75,12 +89,12 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
 
     try {
       const sha = 'a'.repeat(40);
-      const initial = pipeline(701, 'running', issue.key, sha);
+      const initial = pipeline(701, 'running', jiraIssueKey, sha);
       expect(await initial.send()).toEqual({ ok: true, duplicate: false, linked: 1, runs: [] });
       const running = await links();
       expect(running.total).toBe(1);
       expect(running.links).toMatchObject([{ issueId: issue.id, projectId: repositoryId, iid: 701,
-        state: 'running', webUrl: pipelineUrl(701), sourceBranch: branch, sourceSha: sha,
+        state: 'running', webUrl: pipelineUrl(701), sourceBranch: branch, sourceSha: sha, originalJiraKey: jiraIssueKey,
         updatedAt: initial.occurredAt, pipelineObservedAt: initial.occurredAt }]);
 
       const sparse = pipeline(701, 'success', null, sha);
@@ -93,7 +107,7 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
       const [sparseReceipt] = (await status()).repositories;
       expect(sparseReceipt.lastAcceptedByEvent?.pipeline).toMatchObject({ authentication: 'signing-token', duplicate: false, linked: 1, automationRuns: 0 });
 
-      const keyed = pipeline(702, 'success', issue.key, 'b'.repeat(40));
+      const keyed = pipeline(702, 'success', jiraIssueKey, 'b'.repeat(40));
       const applied = await keyed.send();
       expect(applied).toMatchObject({ ok: true, duplicate: false, linked: 1 });
       expect(applied.runs).toMatchObject([{ actorId, ruleId: rule.id, issueId: issue.id, fromStatus: issue.status,
@@ -102,11 +116,13 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
       expect(await keyed.send()).toEqual({ ok: true, duplicate: true, linked: 0, runs: [] });
       expect(await runs()).toEqual(applied.runs);
       const issueAfter = await readIssue();
-      if (!issueAfter) throw new Error('The linked issue disappeared during the GitLab pilot.');
       expect(issueAfter).toMatchObject({ id: issue.id, status: rule.toStatusId, version: issue.version + 1 });
       const finalLinks = await links();
       expect(finalLinks.total).toBe(2);
-      expect(finalLinks.links).toEqual([expect.objectContaining({ issueId: issue.id, iid: 702, state: 'success', webUrl: pipelineUrl(702) }), updated.links[0]]);
+      expect(finalLinks.links).toEqual([
+        expect.objectContaining({ issueId: issue.id, iid: 702, state: 'success', webUrl: pipelineUrl(702), originalJiraKey: jiraIssueKey }),
+        updated.links[0],
+      ]);
       const webhookStatus = await status();
       expect(webhookStatus.repositories).toMatchObject([{ repositoryId,
         lastDelivery: { event: 'pipeline', authentication: 'signing-token', duplicate: true, linked: 0, automationRuns: 0 },
@@ -119,11 +135,12 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
         const detail = page.getByRole('dialog', { name: issue.title, exact: true });
         const pipelines = detail.getByRole('region', { name: '파이프라인', exact: true });
         await expect(pipelines.locator('[data-gitlab-kind="pipeline"][data-gitlab-state="success"]')).toHaveCount(2, { timeout: 25_000 });
+        await expect(pipelines.getByText(jiraIssueKey, { exact: true })).toHaveCount(2);
         for (const id of [701, 702]) await expect(pipelines.locator(`a[href="${pipelineUrl(id)}"]`)).toBeVisible();
       } finally {
         await page.close();
       }
-      return { issue: issueAfter, links: finalLinks, rule, runs: applied.runs, webhookStatus };
+      return { issue: issueAfter, links: finalLinks, rule, runs: applied.runs, webhookStatus, settings: { jiraRoutes } };
     } finally {
       await sender.dispose();
     }

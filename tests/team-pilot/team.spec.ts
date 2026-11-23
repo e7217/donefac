@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { expect, request as apiRequest, test, type APIRequestContext, type BrowserContext, type Dialog, type Page } from '@playwright/test';
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
+import { documentPlainText } from '../../shared/document-plain-text';
 import type { DocPage, DocRevision } from '../../shared/types';
 import { prepareGitlabTraffic } from './gitlab-traffic';
 import { verifyWorkspaceTraffic } from './workspace-traffic';
@@ -12,9 +13,15 @@ interface Fixture {
   actorIds: string[];
   projectId: string;
   issueId: string;
+  migratedIssueKey: string;
+  originalJiraKey: string;
+  gitlabIssueId: string;
+  gitlabOriginalJiraKey: string;
+  gitlabJiraInstanceKey: string;
   documentId: string;
   title: string;
   initialText: string;
+  editingParagraph: string;
   initialEpoch: string;
   seconds: number;
   evidencePath: string;
@@ -41,6 +48,9 @@ const state = (page: Page) => page.locator('.docs-collaboration-state');
 const editor = (page: Page) => page.locator('.docs-live-prose');
 const presence = (page: Page) => page.locator('.docs-collaboration-presence');
 const marker = (round: number, peer: Peer) => `[team-edit-${round}-${peer.ordinal}]`;
+const issueReference = (page: Page, issueId: string) => editor(page)
+  .locator(`[data-teamspace-node="issueReference"][data-reference-id="${issueId}"]`)
+  .getByRole('button', { name: /^참조 업무 열기 / });
 
 function loadFixture(): Fixture {
   const raw = process.env.TEAMSPACE_PILOT_TEAM_FIXTURE;
@@ -48,7 +58,9 @@ function loadFixture(): Fixture {
   const fixture = JSON.parse(raw) as Fixture;
   if (!Array.isArray(fixture.actorIds) || fixture.actorIds.length !== TEAM_SIZE || new Set(fixture.actorIds).size !== TEAM_SIZE ||
     fixture.actorIds.some(id => typeof id !== 'string' || !id) || !Number.isSafeInteger(fixture.seconds) || fixture.seconds < 1 ||
-    !fixture.projectId || !fixture.issueId || !fixture.documentId || !fixture.initialEpoch || !fixture.title || !fixture.initialText || !fixture.evidencePath) {
+    !fixture.projectId || !fixture.issueId || !fixture.migratedIssueKey || !fixture.originalJiraKey ||
+    !fixture.gitlabIssueId || !fixture.gitlabOriginalJiraKey || !fixture.gitlabJiraInstanceKey ||
+    !fixture.documentId || !fixture.initialEpoch || !fixture.title || !fixture.initialText || !fixture.editingParagraph || !fixture.evidencePath) {
     throw new Error('The isolated team pilot fixture is invalid.');
   }
   return fixture;
@@ -141,21 +153,31 @@ async function append(peer: Peer, value: string) {
     const tiptap = (element as HTMLElement & { editor?: Editor }).editor;
     if (!tiptap?.isEditable) throw new Error('The collaborative editor is unavailable for local input.');
     const { doc, tr } = tiptap.state;
-    if (doc.childCount !== 1 || doc.lastChild?.type.name !== 'paragraph') throw new Error('The pilot document needs one paragraph.');
+    if (doc.lastChild?.type.name !== 'paragraph') throw new Error('The pilot document must end with the editing paragraph.');
     tiptap.view.dispatch(tr.insertText(` ${text}`, doc.content.size - 1));
   }, value, { timeout: SYNC_TIMEOUT });
 }
 
-async function matchesRendered(peers: Peer[], current: DocPage, epoch: string) {
+async function matchesRendered(peers: Peer[], current: DocPage, epoch: string, fixture: Fixture) {
+  const paragraph = current.content.content?.at(-1);
+  if (paragraph?.type !== 'paragraph') throw new Error('The stored document lost its editing paragraph.');
+  expect(current.content.content).toContainEqual(expect.objectContaining({
+    type: 'issueReference', attrs: expect.objectContaining({ issueId: fixture.issueId }),
+  }));
+  const paragraphText = documentPlainText(paragraph);
+  expect(paragraphText.startsWith(fixture.editingParagraph)).toBe(true);
   await Promise.all(peers.map(async peer => {
     await synchronized(peer, epoch, peers.length);
-    await expect.poll(() => editor(peer.page).innerText({ timeout: SYNC_TIMEOUT }), {
-      message: `player ${peer.ordinal} body matches durable content`, timeout: SYNC_TIMEOUT,
-    }).toBe(current.plainText);
+    const renderedParagraph = editor(peer.page).locator(':scope > p:last-child');
+    await expect.poll(() => renderedParagraph.innerText({ timeout: SYNC_TIMEOUT }), {
+      message: `player ${peer.ordinal} editing paragraph matches durable content`, timeout: SYNC_TIMEOUT,
+    }).toBe(paragraphText);
+    await expect(issueReference(peer.page, fixture.issueId), `player ${peer.ordinal} renders the migrated issue reference`)
+      .toBeVisible({ timeout: SYNC_TIMEOUT });
   }));
 }
 
-async function wave(request: APIRequestContext, prior: DocPage, epoch: string, peers: Peer[], edits: { peer: Peer; value: string }[]) {
+async function wave(request: APIRequestContext, prior: DocPage, epoch: string, peers: Peer[], edits: { peer: Peer; value: string }[], fixture: Fixture) {
   const ackBefore = edits.map(({peer}) => peer.acknowledgments.size);
   await Promise.all(edits.map(({peer, value}) => append(peer, value)));
   await Promise.all(edits.map(({peer}, index) => expect.poll(() => peer.acknowledgments.size, {
@@ -164,7 +186,7 @@ async function wave(request: APIRequestContext, prior: DocPage, epoch: string, p
   const after = await session(request, prior.id);
   expect(after.epoch).toBe(epoch);
   expect(after.document.version).toBe(prior.version + edits.length);
-  await matchesRendered(peers, after.document, epoch);
+  await matchesRendered(peers, after.document, epoch, fixture);
   return after.document;
 }
 
@@ -172,6 +194,38 @@ function expectEdits(document: DocPage, original: string, edits: string[]) {
   expect(document.plainText.startsWith(original)).toBe(true);
   expect(document.plainText.split(original)).toHaveLength(2);
   expect((document.plainText.match(/\[team-edit-\d+-\d+\]/g) ?? []).sort()).toEqual([...edits].sort());
+}
+
+async function verifyMigratedReference(page: Page, fixture: Fixture) {
+  const currentRoute = () => {
+    const [path, query] = new URL(page.url()).hash.split('?');
+    return { path, issueId: new URLSearchParams(query).get('issue') };
+  };
+  const documentPath = `#/${fixture.projectId}/documents/${fixture.documentId}`;
+  const reference = issueReference(page, fixture.issueId);
+  await expect(reference.getByText(fixture.migratedIssueKey, { exact: true })).toBeVisible();
+  await reference.click();
+  const ticket = page.getByRole('dialog').filter({ has: page.getByRole('button', { name: '업무 상세 닫기', exact: true }) });
+  await expect(ticket.getByRole('list', { name: '이전 티켓 번호', exact: true })).toHaveText(`Jira 원래 키 ${fixture.originalJiraKey}`);
+  await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: fixture.issueId });
+  await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+  await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: null });
+
+  await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+  const quickSearch = page.getByRole('dialog', { name: '통합 검색', exact: true });
+  await quickSearch.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(fixture.originalJiraKey);
+  const result = quickSearch.locator('button.search-result-issue').filter({
+    has: page.getByText(fixture.migratedIssueKey, { exact: true }),
+  });
+  await expect(result).toContainText(`Jira 원래 키 ${fixture.originalJiraKey}`);
+  await result.click();
+  await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: fixture.issueId });
+  await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+  await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: null });
+  return {
+    projectId: fixture.projectId, issueId: fixture.issueId, documentId: fixture.documentId,
+    currentIssueKey: fixture.migratedIssueKey, originalJiraKey: fixture.originalJiraKey,
+  };
 }
 
 async function openLatest(peer: Peer) {
@@ -241,9 +295,11 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       }
     }
     expect(sessionTokens.size, 'Distinct HTTPS browser sessions').toBe(TEAM_SIZE);
-    await matchesRendered(peers, initial.document, originalEpoch);
+    await matchesRendered(peers, initial.document, originalEpoch, fixture);
+    const migrationReference = await verifyMigratedReference(peers[0].page, fixture);
     const verifyGitlabTraffic = await prepareGitlabTraffic(peers[1].context, {
       origin: baseURL, projectId: fixture.projectId, actorId: peers[1].actorId,
+      issueId: fixture.gitlabIssueId, jiraIssueKey: fixture.gitlabOriginalJiraKey, jiraInstanceKey: fixture.gitlabJiraInstanceKey,
     });
     const startedAt = performance.now();
     const keepConnected = () => {
@@ -270,11 +326,11 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       const edits = peers.map(peer => ({ peer, value: marker(round, peer) }));
       if (round === 1) {
         [current, workspaceTraffic, gitlabTraffic] = await Promise.all([
-          wave(request, current, originalEpoch, peers, edits),
+          wave(request, current, originalEpoch, peers, edits, fixture),
           verifyWorkspaceTraffic(peers[0].context.request, { projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL }),
           verifyGitlabTraffic(),
         ]);
-      } else current = await wave(request, current, originalEpoch, peers, edits);
+      } else current = await wave(request, current, originalEpoch, peers, edits, fixture);
       storedEdits.push(...edits.map(edit => edit.value));
       expectEdits(current, fixture.initialText, storedEdits);
       keepConnected();
@@ -297,7 +353,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await expect(state(delayed.page)).toContainText('연결 끊김');
     await append(delayed, reconnectMarker);
     await expect(state(delayed.page)).toHaveText('연결 끊김 · 편집 보관 중');
-    current = await wave(request, current, originalEpoch, onlinePeers, onlineEdits);
+    current = await wave(request, current, originalEpoch, onlinePeers, onlineEdits, fixture);
     storedEdits.push(...onlineEdits.map(edit => edit.value));
     expectEdits(current, fixture.initialText, storedEdits);
     expect(delayed.acknowledgments.size).toBe(reconnectAcks);
@@ -309,7 +365,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     current = rejoined.document;
     storedEdits.push(reconnectMarker);
     expectEdits(current, fixture.initialText, storedEdits);
-    await matchesRendered(peers, current, originalEpoch);
+    await matchesRendered(peers, current, originalEpoch, fixture);
     console.log('Team pilot merged one cached offline edit exactly once after reconnecting in the same epoch.');
 
     const headers = { 'X-Actor-Id': peers[0].actorId };
@@ -321,7 +377,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     expect(checkpoint.plainText).toBe(current.plainText);
     const replacedMarker = '[team-restore-replaced]';
     const staleMarker = '[team-stale-offline]';
-    current = await wave(request, current, originalEpoch, peers, [{ peer: peers[0], value: replacedMarker }]);
+    current = await wave(request, current, originalEpoch, peers, [{ peer: peers[0], value: replacedMarker }], fixture);
     expect(current.plainText).toContain(replacedMarker);
     await delayed.context.setOffline(true);
     await expect(state(delayed.page)).toContainText('연결 끊김');
@@ -354,10 +410,10 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       await Promise.all(onlinePeers.slice(first, first + OPEN_BATCH_SIZE).map(openLatest));
     }
     await delayed.page.goto(location, { waitUntil: 'domcontentloaded' });
-    await matchesRendered(peers, restored.document, finalEpoch);
+    await matchesRendered(peers, restored.document, finalEpoch, fixture);
 
     const finalEdits = peers.map(peer => ({ peer, value: marker(rounds + 2, peer) }));
-    const final = await wave(request, restored.document, finalEpoch, peers, finalEdits);
+    const final = await wave(request, restored.document, finalEpoch, peers, finalEdits, fixture);
     storedEdits.push(...finalEdits.map(edit => edit.value));
     expectEdits(final, fixture.initialText, storedEdits);
     expect(final.plainText).not.toContain(staleMarker);
@@ -366,7 +422,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await writeFile(fixture.evidencePath, JSON.stringify({
       documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
       plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
-      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, workspaceTraffic, gitlabTraffic,
+      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, migrationReference, workspaceTraffic, gitlabTraffic,
       authentication: { transport: 'https', browserSessions: sessionTokens.size },
     }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');

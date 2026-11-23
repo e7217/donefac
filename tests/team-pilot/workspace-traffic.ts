@@ -27,9 +27,12 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
 
   const calendar = before.calendars?.find(item => item.projectId === projectId) ?? defaultWorkCalendar(projectId);
   const initialDate = workingDateOnOrAfter(providedDate ?? issue.startDate ?? new Date().toISOString().slice(0, 10), calendar);
+  const workflow = before.workflows?.find(item => item.projectId === projectId);
+  const progress = workflow?.statuses.find(item => item.category === 'in_progress' && item.id !== issue.status);
+  if (!progress) throw new Error('The migrated project needs a different in-progress status for the ticket pilot.');
   const plannedEffortMinutes = 95;
   const changes = {
-    status: issue.status === 'in_progress' ? 'review' : 'in_progress',
+    status: progress.id,
     assigneeId: actorId,
     startDate: initialDate,
     endDate: initialDate,

@@ -143,15 +143,16 @@ async function openTeamPilot(proxy, access, dataDir, retiredCookies) {
   assert.ok(!retiredCookies.has(session), 'A new session must have a fresh cookie.');
   retiredCookies.add(session);
 
-  const api = async (path, { method = 'GET', body, headers = {}, status = 200 } = {}) => {
+  const request = async (path, { method = 'GET', body, headers = {}, status = 200 } = {}) => {
     const reply = await requestTeamPilot(proxy, `/api${path}`, {
       method, headers: { 'Content-Type': 'application/json', ...headers, Origin: proxy.origin, Cookie: session },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      body: body === undefined || Buffer.isBuffer(body) ? body : JSON.stringify(body),
     });
     assert.equal(reply.status, status, `${method} ${path} returned ${reply.status} through the HTTPS proxy.`);
-    return JSON.parse(reply.bytes.toString('utf8'));
+    return new Response(reply.bytes.length ? reply.bytes : null, { status: reply.status, headers: reply.headers });
   };
-  return { ...pilot, api };
+  const api = async (path, options) => (await request(path, options)).json();
+  return { ...pilot, request, api };
 }
 
 function cli(action, from, to) {
@@ -168,7 +169,7 @@ function fileHash(path) { return createHash('sha256').update(readFileSync(path))
 const jiraAuthorKey = 'pilot-jira-author';
 const jiraRestrictedWorklog = 'history:worklog:32';
 
-async function applyPilotSourceMigration(url, actorId, authorId) {
+async function applyPilotSourceMigration(request, actorId, authorId) {
   const jiraAttachment = Buffer.from('Jira 관리자 백업에 따로 보관한 첨부 바이트\x00\n');
   const jira = zip([
     {path: 'entities.xml', bytes: Buffer.from(`<?xml version="1.0" encoding="UTF-8"?><entity-engine-xml>
@@ -208,7 +209,7 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
   const headers = { 'X-Actor-Id': actorId };
   async function stage(filename, product, body) {
     const query = new URLSearchParams({filename, product, instanceKey: `pilot-${product}`});
-    return (await call(url, `/legacy-import/packages?${query}`, {
+    return (await request(`/legacy-import/packages?${query}`, {
       method: 'POST', status: 201, headers: {...headers, 'Content-Type': 'application/octet-stream'}, body,
     })).json();
   }
@@ -218,7 +219,7 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
   assert.equal(wikiPackage.source.format, 'confluence-xml');
   const query = new URLSearchParams();
   for (const info of [jiraPackage, wikiPackage]) query.append('packageId', info.id);
-  const options = await (await call(url, `/migrations/options?${query}`, {headers})).json();
+  const options = await (await request(`/migrations/options?${query}`, {headers})).json();
   const migration = options.defaultConfiguration;
   migration.projects = migration.projects.map(project => ({...project, key: 'PILOTIMP', name: '파일럿 합성 이관'}));
   const originalAuthor = options.identities.find(identity => identity.packageId === jiraPackage.id && identity.sourceValue === jiraAuthorKey);
@@ -230,12 +231,12 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
     [wikiPackage.id]: 'https://wiki.example.test/confluence',
   };
   async function previewMigration() {
-    return (await call(url, '/migrations/preview', {
+    return (await request('/migrations/preview', {
       method: 'POST', status: 201, headers, body: {configuration: migration},
     })).json();
   }
   async function applyMigration(preview, status) {
-    return (await call(url, `/migrations/previews/${preview.id}/apply`, {
+    return (await request(`/migrations/previews/${preview.id}/apply`, {
       method: 'POST', status, headers,
       body: {expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements},
     })).json();
@@ -265,12 +266,12 @@ async function applyPilotSourceMigration(url, actorId, authorId) {
   };
 }
 
-async function verifyPilotSourceMigration(url, migration) {
+async function verifyPilotSourceMigration(request, migration) {
   const {receipt, authorId, expectedFiles} = migration;
   assert.equal(receipt.projectIds.length, 1);
   const [projectId] = receipt.projectIds;
   const base = `/source-imports/${receipt.id}/reconciliation`;
-  const workspace = await (await call(url, '/workspace')).json();
+  const workspace = await (await request('/workspace')).json();
   const issue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 원본 업무');
   const otherIssue = workspace.issues.find(item => item.projectId === projectId && item.title === '파일럿 두 번째 업무');
   const documents = workspace.documents.filter(item => item.projectId === projectId);
@@ -279,8 +280,7 @@ async function verifyPilotSourceMigration(url, migration) {
   const remoteDocument = documents.find(item => item.plainText.includes('공유 첨부를 가진 다른 원본 공간'));
   const workflow = workspace.workflows.find(item => item.projectId === projectId);
   const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
-  assert.ok(issue && otherIssue && nextStatus && nextStatus !== issue.status);
-  assert.equal(otherIssue.status, nextStatus);
+  assert.ok(issue && otherIssue && nextStatus);
   assert.equal(issue.assigneeId, authorId);
   assert.match(issue.description, /보관할 원본 내용/);
   assert.ok(document && sameSpaceDocument && remoteDocument);
@@ -298,11 +298,11 @@ async function verifyPilotSourceMigration(url, migration) {
     ['document', remoteDocument.id, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=102'],
   ]) {
     const query = new URLSearchParams({targetType, targetId});
-    const links = await (await call(url, `/atlassian-links?${query}`)).json();
+    const links = await (await request(`/atlassian-links?${query}`)).json();
     assert.deepEqual(links.map(link => link.url), [originalUrl]);
     originalLinks.push(links[0]);
   }
-  const reconciliation = await (await call(url, base)).json();
+  const reconciliation = await (await request(base)).json();
   const sourceRows = reconciliation.rows;
   for (const [product, kind, sourceId, key, target] of [
     ['jira', 'issue', '100', 'OLD-1', issue],
@@ -316,7 +316,7 @@ async function verifyPilotSourceMigration(url, migration) {
     assert.equal(sourceRow.target?.id, target.id);
     assert.equal(sourceRow.status, 'linked');
   }
-  const worklogs = await (await call(url, `/issues/${issue.id}/worklogs`)).json();
+  const worklogs = await (await request(`/issues/${issue.id}/worklogs`)).json();
   assert.equal(worklogs.totalEntries, 1);
   assert.equal(worklogs.totalMinutes, 91 / 60);
   const [worklog] = worklogs.entries;
@@ -329,12 +329,12 @@ async function verifyPilotSourceMigration(url, migration) {
   assert.equal(worklogRow.status, 'linked');
   assert.equal(worklogRow?.target?.id, worklog.id);
   assert.equal(worklogRow?.target?.type, 'worklog');
-  const origin = await (await call(url, `/source-imports/${receipt.id}/records/${worklog.sourceRecordId}`)).json();
+  const origin = await (await request(`/source-imports/${receipt.id}/records/${worklog.sourceRecordId}`)).json();
   assert.equal(origin.record.authorId, jiraAuthorKey);
   const restricted = sourceRows.find(row => row.kind === 'history' && row.sourceId === 'worklog:32');
   assert.equal(restricted?.status, 'excluded');
   assert.equal(restricted.target, null);
-  const audit = await (await call(url, `${base}/audit?expectedVersion=${receipt.version}`)).json();
+  const audit = await (await request(`${base}/audit?expectedVersion=${receipt.version}`)).json();
   assert.equal(audit.receiptVersion, receipt.version);
   assert.equal(receipt.integrity.version, 1);
   assert.equal(audit.integrity.status, 'verified');
@@ -358,16 +358,16 @@ async function verifyPilotSourceMigration(url, migration) {
     assert.equal(checked.packageSha256, packageSha256);
     assert.equal(checked.size, bytes.length);
     assert.equal(checked.sha256, createHash('sha256').update(bytes).digest('hex'));
-    const download = await call(url, `/attachment-versions/${checked.fileId}/download`);
+    const download = await request(`/attachment-versions/${checked.fileId}/download`);
     assert.deepEqual(Buffer.from(await download.arrayBuffer()), bytes);
   }
   const sharedFile = audit.attachments.find(file => file.product === 'confluence' && file.sourceId === '702');
   const attachmentLabel = document.content.content.flatMap(node => node.content ?? []).find(node => node.text === '다른 공간의 원본 첨부');
   assert.deepEqual(attachmentLabel?.marks?.map(mark => mark.attrs.href), [`/api/attachments/${sharedFile.fileId}/content`]);
-  const sharedDownload = await call(url, `/attachments/${sharedFile.fileId}/content`);
+  const sharedDownload = await request(`/attachments/${sharedFile.fileId}/content`);
   assert.deepEqual(Buffer.from(await sharedDownload.arrayBuffer()), expectedFiles.find(file => file.sourceId === '702').bytes);
   return {
-    issue, document, nextStatus, originalLinks, sourceRows, worklog,
+    issue, otherIssue, document, nextStatus, originalLinks, sourceRows, worklog,
     integrity: audit.integrity, recordCounts: audit.recordCounts, attachments: audit.attachments,
   };
 }
@@ -579,13 +579,14 @@ async function teamSnapshot(api, fixture, evidence) {
     [issue.id, successor.id, 'FS', scheduled.lagDays]);
 
   const gitlab = evidence.gitlabTraffic;
-  assert.ok(gitlab?.issue && gitlab.issue.id !== issue.id && gitlab.issue.projectId === fixture.projectId);
+  assert.ok(gitlab?.issue && gitlab.issue.id === fixture.gitlabIssueId && gitlab.issue.projectId === fixture.projectId);
   const gitlabIssue = workspace.issues.find(value => value.id === gitlab.issue.id);
   const gitlabRule = workspace.automationRules.find(rule => rule.id === gitlab.rule.id);
   const gitlabRuns = workspace.automationRuns.filter(run => run.issueId === gitlab.issue.id);
   const storedLinks = workspace.gitlabLinks.filter(link => link.issueId === gitlab.issue.id);
-  const [gitlabLinks, webhookStatus] = await Promise.all([
+  const [gitlabLinks, webhookStatus, gitlabSettings] = await Promise.all([
     api(`/issues/${gitlab.issue.id}/gitlab-links?kind=pipeline`), api('/integrations/gitlab/webhook-status'),
+    api('/integrations/gitlab'),
   ]);
   assert.deepEqual(gitlabIssue, gitlab.issue);
   assert.deepEqual(gitlabRule, gitlab.rule);
@@ -593,7 +594,8 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.deepEqual(gitlabLinks, gitlab.links);
   assert.deepEqual(storedLinks.toSorted((a, b) => a.id.localeCompare(b.id)), gitlabLinks.links.toSorted((a, b) => a.id.localeCompare(b.id)));
   assert.deepEqual(webhookStatus, gitlab.webhookStatus);
-  assert.equal((await api('/integrations/gitlab')).signingTokenConfigured, true);
+  assert.equal(gitlabSettings.signingTokenConfigured, true);
+  assert.deepEqual(gitlabSettings.jiraRoutes, gitlab.settings.jiraRoutes);
 
   return {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
@@ -601,6 +603,17 @@ async function teamSnapshot(api, fixture, evidence) {
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
       otherCalendar, successor, dependency, issueList, view, gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
   };
+}
+
+async function verifyTeamMigration(pilot, migration, dataDir, fixture) {
+  const audit = await verifyPilotSourceMigration(pilot.request, migration);
+  assert.equal(audit.issue.id, fixture.issueId);
+  assert.equal(audit.document.id, fixture.documentId);
+  assert.equal(audit.otherIssue.id, fixture.gitlabIssueId);
+  for (const {summary} of migration.packages) {
+    assert.equal(fileHash(join(dataDir, 'legacy-imports', `${summary.id}.bundle`)), summary.sha256);
+  }
+  return createHash('sha256').update(JSON.stringify(audit)).digest('hex');
 }
 
 async function runTeamPilot(seconds) {
@@ -625,24 +638,31 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   }
   assert.equal(new Set(actorIds).size, 20);
   const headers = { 'X-Actor-Id': actorIds[0] };
-  const project = await pilot.api('/projects', {
-    method: 'POST', status: 201, headers, body: { key: 'TEAM', name: '합성 팀 파일럿' },
-  });
+  const migration = await applyPilotSourceMigration(pilot.request, actorIds[0], actorIds[0]);
+  const imported = await verifyPilotSourceMigration(pilot.request, migration);
+  assert.notEqual(imported.issue.status, imported.nextStatus);
+  assert.equal(imported.otherIssue.status, imported.nextStatus);
+  const workflowPath = `/projects/${imported.issue.projectId}/workflow`;
+  const workflow = await pilot.api(workflowPath);
+  const review = { id: 'pilot_review', label: '검토', category: 'review', color: '#668899' };
+  await pilot.api(workflowPath, { method: 'PATCH', headers, body: {
+    ...workflow, expectedVersion: workflow.version, statuses: [...workflow.statuses, review],
+    transitions: [...workflow.transitions, { from: imported.nextStatus, to: review.id, issueTypes: [], requiredFields: [] }],
+  } });
   const planned = new Date();
   do { planned.setUTCDate(planned.getUTCDate() + 1); } while ([0, 6].includes(planned.getUTCDay()));
   const workingDate = planned.toISOString().slice(0, 10);
-  const issue = await pilot.api('/issues', {
-    method: 'POST', status: 201, headers, body: {
-      projectId: project.id, title: '동시 편집 중 검증할 업무', assigneeId: actorIds[0],
-      startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
+  const issue = await pilot.api(`/issues/${imported.issue.id}`, {
+    method: 'PATCH', headers, body: {
+      expectedVersion: imported.issue.version, startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
     },
   });
-  const title = '20명 공동 편집 리허설';
-  const initialText = '이 문장은 팀 파일럿의 합성 원문입니다.';
-  const document = await pilot.api('/documents', {
-    method: 'POST', status: 201, headers, body: {
-      projectId: project.id, title,
-      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: initialText }] }] },
+  const editingParagraph = '파일럿 공동 편집 기록';
+  const document = await pilot.api(`/documents/${imported.document.id}`, {
+    method: 'PATCH', headers, body: {
+      expectedVersion: imported.document.version,
+      content: { type: 'doc', content: [...imported.document.content.content,
+        { type: 'paragraph', content: [{ type: 'text', text: editingParagraph }] }] },
     },
   });
   const session = await pilot.api(`/documents/${document.id}/collaboration/enable`, {
@@ -651,10 +671,13 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.ok(session.enabled && session.epoch);
   const evidencePath = join(scratch, 'team-evidence.json');
   const fixture = {
-    actorIds, projectId: project.id, documentId: document.id, issueId: issue.id, title, initialText,
+    actorIds, projectId: issue.projectId, documentId: document.id, issueId: issue.id,
+    title: document.title, initialText: session.document.plainText, editingParagraph,
+    migratedIssueKey: issue.key, originalJiraKey: 'OLD-1', gitlabIssueId: imported.otherIssue.id,
+    gitlabOriginalJiraKey: 'OLD-2', gitlabJiraInstanceKey: 'pilot-jira',
     initialEpoch: session.epoch, seconds, evidencePath,
   };
-  console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing.`);
+  console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing on migrated content.`);
   await browser(proxy.origin, fixture, access.file);
 
   const browserEvidence = readFileSync(evidencePath, 'utf8');
@@ -662,10 +685,12 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   const evidence = JSON.parse(browserEvidence);
   assert.deepEqual(evidence.authentication, { transport: 'https', browserSessions: actorIds.length });
   assert.equal(evidence.documentId, document.id);
+  assert.deepEqual(evidence.migrationReference, {projectId: fixture.projectId, issueId: issue.id, documentId: document.id,
+    currentIssueKey: issue.key, originalJiraKey: fixture.originalJiraKey});
   assert.equal(evidence.originalEpoch, session.epoch);
   assert.ok(typeof evidence.finalEpoch === 'string' && evidence.finalEpoch !== session.epoch);
   assert.ok(Number.isSafeInteger(evidence.documentVersion) && evidence.documentVersion > session.document.version);
-  assert.ok(typeof evidence.plainText === 'string' && evidence.plainText.includes(initialText));
+  assert.ok(typeof evidence.plainText === 'string' && evidence.plainText.includes(fixture.initialText));
   assert.ok(typeof evidence.staleMarker === 'string' && evidence.staleMarker.length > 0);
   assert.ok(typeof evidence.recoveryText === 'string' && evidence.recoveryText.includes(evidence.staleMarker));
   assert.ok(typeof evidence.recoveryDocumentId === 'string' && evidence.recoveryDocumentId !== document.id);
@@ -675,11 +700,13 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.ok(Number.isFinite(evidence.elapsedMs) && evidence.elapsedMs >= seconds * 1_000);
   assert.ok(evidence.workspaceTraffic, 'The browser must verify issue and issue-list changes during editing.');
   const baseline = await teamSnapshot(pilot.api, fixture, evidence);
+  const migrationBaseline = await verifyTeamMigration(pilot, migration, source, fixture);
   await stop(pilot);
   proxy.setBackendPort(null);
 
   const reopened = await openTeamPilot(proxy, access, source, retiredCookies);
   assert.deepEqual(await teamSnapshot(reopened.api, fixture, evidence), baseline, 'The source changed across a restart.');
+  assert.equal(await verifyTeamMigration(reopened, migration, source, fixture), migrationBaseline, 'Migration evidence changed across a restart.');
   await stop(reopened);
   proxy.setBackendPort(null);
 
@@ -695,10 +722,11 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(recovery.status, 0, recovery.stderr);
   const copy = await openTeamPilot(proxy, access, restored, retiredCookies);
   assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
+  assert.equal(await verifyTeamMigration(copy, migration, restored, fixture), migrationBaseline, 'The separate restoration changed migration evidence.');
   await stop(copy);
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project schedules and receipts, ` +
-    'dependency and issue list, GitLab pipeline links and webhook receipts, and the single automation transition.');
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched Jira and Confluence records and attachment bytes, ` +
+    'documents, cross-project schedules and receipts, GitLab pipeline links by original Jira key, and the single automation transition.');
 }
 
 async function runStandardPilot() {
@@ -981,8 +1009,10 @@ async function runStandardPilot() {
   })).json();
   const fileArchive = await (await call(pilot.url,`/attachments/${archivedRoot.id}?expectedVersionId=${archivedHead.currentVersionId}`,{method:'DELETE'})).json();
   await call(pilot.url,`/attachments/${archivedHead.currentVersionId}/content`,{status:404});
-  const migration = await applyPilotSourceMigration(pilot.url, assigneeId, workspace.users[1].id);
-  const sourceAudit = await verifyPilotSourceMigration(pilot.url, migration);
+  const migration = await applyPilotSourceMigration(call.bind(null, pilot.url), assigneeId, workspace.users[1].id);
+  const sourceAudit = await verifyPilotSourceMigration(call.bind(null, pilot.url), migration);
+  assert.notEqual(sourceAudit.issue.status, sourceAudit.nextStatus);
+  assert.equal(sourceAudit.otherIssue.status, sourceAudit.nextStatus);
   const jiraRelationMigration = await applyPilotCrossProjectJiraRelation(pilot.url, assigneeId, sourceAudit.issue);
   const jiraRelationAudit = await verifyPilotCrossProjectJiraRelation(pilot.url, jiraRelationMigration);
   const key = await (await call(pilot.url,'/api-keys',{
@@ -1273,7 +1303,7 @@ async function runStandardPilot() {
     assert.equal(restoredPackage.summary.sha256, summary.sha256);
     assert.deepEqual(readFileSync(join(restored, 'legacy-imports', `${summary.id}.bundle`)), bytes);
   }
-  const restoredAudit = await verifyPilotSourceMigration(copy.url, migration);
+  const restoredAudit = await verifyPilotSourceMigration(call.bind(null, copy.url), migration);
   assert.deepEqual(restoredAudit, sourceAudit, 'Migrated items, source rows, worklogs, links and file audit must agree across physical restore.');
   assert.deepEqual(await verifyPilotCrossProjectJiraRelation(copy.url, jiraRelationMigration), jiraRelationAudit);
   const restoredGitlab = await (await call(copy.url,'/integrations/gitlab')).json();
