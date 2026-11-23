@@ -1294,6 +1294,27 @@ export interface GitlabPipelineJobs {
   hasMore: boolean;
   jobs: GitlabPipelineJob[];
 }
+export type GitlabReviewState = 'unreviewed' | 'review_started' | 'reviewed' | 'requested_changes' | 'approved' | 'unapproved' | 'unknown';
+export interface GitlabReviewParticipant {
+  id: number;
+  name: string;
+  username: string;
+}
+export interface GitlabMergeRequestReview {
+  linkId: string;
+  repositoryId: number;
+  mergeRequestIid: number;
+  checkedAt: string;
+  reviewerSource: 'reviewers' | 'merge_request' | 'unavailable';
+  reviewers: (GitlabReviewParticipant & { state: GitlabReviewState })[];
+  reviewersHasMore: boolean;
+  approvals: {
+    approvers: GitlabReviewParticipant[];
+    required: number | null;
+    remaining: number | null;
+    hasMore: boolean;
+  } | null;
+}
 export interface GitlabIssueBranchTarget {
   repositoryId: number;
   repositoryPath: string;

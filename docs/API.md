@@ -707,6 +707,14 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 같은 MR 수정 시각에 병합 조건만 바뀐 경우에도 확인한 리비전의 상태를 갱신한다. 저장소와 MR ID가 일치하면 티켓 키가 생략된 이벤트도 기존 연결에 반영할 수 있다. 인증 이벤트보다 먼저 시작한 조회가 뒤늦게 끝나면 해당 결과를 보류한다. 내보내기 또는 복원 시각보다 늦은 병합 관측이 들어 있는 백업은 복원을 거절한다.
 
+### 연결된 MR 검토 확인
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-review`는 현재 업무와 연결된 GitLab 저장소, 전역 MR ID 및 저장소 안의 IID를 대조한다. 사용자가 요청하면 저장한 읽기 자격 증명으로 검토자와 승인을 확인한다. 응답은 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`, `reviewerSource`, `reviewers`, `reviewersHasMore`, `approvals`를 반환한다. 검토자별 `id`, `username`, `name`과 검토 상태를 최대 50명까지 제공한다. [GitLab 검토자 API](https://docs.gitlab.com/api/merge_requests/#retrieve-merge-request-reviewers)
+
+`reviewerSource`는 검토자 API로 확인한 `reviewers`, MR에 포함된 배정만 확인한 `merge_request`, 두 출처 모두 확인할 수 없는 `unavailable`이다. 배정만 확인한 경우 각 검토 상태는 `unknown`이다. 승인 응답은 승인자를 최대 50명까지 담은 `approvers`와 `hasMore`를 포함한다. `required`와 `remaining`은 GitLab이 유효한 두 값을 제공할 때만 숫자다. 승인 API를 사용할 수 없으면 `approvals`는 `null`이다. [GitLab 승인 상태 API](https://docs.gitlab.com/api/merge_request_approvals/#retrieve-approval-state-for-a-merge-request)
+
+조회 전후 MR의 확인 가능한 커밋·수정 시각·상태·검토자 배정, Teamspace의 연결 설정·업무 위치·저장된 링크를 비교한다. 이 중 하나가 바뀌면 `409`로 조회를 다시 요청하게 한다. 응답은 `Cache-Control: no-store`를 적용하고 조회 결과는 열린 검토 화면에서만 사용한다.
+
 ## 상태별 담당자 자동 배정
 
 프로젝트의 **설정 → 상태별 담당자 자동 배정**에서 사용한다. 관리 경로는 브라우저용 `/api`에 있다. 기존 업무의 `/api/v1` 수정 요청으로 상태가 실제로 바뀌면 같은 배정 규칙을 적용한다.

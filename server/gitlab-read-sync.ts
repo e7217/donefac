@@ -1,11 +1,12 @@
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabIssueBranchTarget, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
+import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch,
+  GitlabReviewParticipant, GitlabReviewState } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
-  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs';
+  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'merge-request-review';
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -27,6 +28,7 @@ const MAX_MERGE_REQUEST_PAGES = 10;
 const PIPELINE_PAGE_SIZE = 50;
 const PIPELINE_JOB_PAGE_SIZE = 50;
 const MAX_PIPELINE_JOB_PAGES = 4;
+const MR_REVIEW_PARTICIPANT_LIMIT = 50;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
 const COMMIT_PAGE_SIZE = 100;
@@ -46,6 +48,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   deployments: '배포',
   'deployment-merge-requests': '배포에 포함된 MR',
   'pipeline-jobs': '파이프라인 작업',
+  'merge-request-review': 'MR 검토',
 };
 
 export class GitlabReadError extends Error {
@@ -56,7 +59,7 @@ export class GitlabReadError extends Error {
       'network': '연결 실패',
       'invalid-response': '응답 형식 오류',
       'response-too-large': '응답 크기 한도 초과',
-      'changed': '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
+      'changed': stage === 'merge-request-review' ? 'MR이 변경되었습니다. 다시 확인해 주세요.' : '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
   }
@@ -607,6 +610,94 @@ export function gitlabLinkedWorkflowReader(connection: Connection, signal?: Abor
   };
 }
 
+const reviewStates = new Set<unknown>(['unreviewed', 'review_started', 'reviewed', 'requested_changes', 'approved', 'unapproved']);
+const unavailableReviewStatuses = new Set([401, 403, 404, 405, 501]);
+const reviewStage = 'merge-request-review';
+const positiveId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+const nonNegativeCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+function invalidMergeRequestReview(): never {
+  throw new GitlabReadError(reviewStage, 'invalid-response');
+}
+
+function reviewParticipants<T extends GitlabReviewParticipant>(rows: unknown, parse: (entry: GitlabReadObject) => T) {
+  if (!Array.isArray(rows)) invalidMergeRequestReview();
+  const ids = new Set<number>();
+  return rows.slice(0, MR_REVIEW_PARTICIPANT_LIMIT).map(row => {
+    if (!isReadObject(row)) invalidMergeRequestReview();
+    const participant = parse(row);
+    if (ids.has(participant.id)) invalidMergeRequestReview();
+    ids.add(participant.id);
+    return participant;
+  });
+}
+
+function reviewParticipant(row: unknown, token: Connection['token']): GitlabReviewParticipant {
+  if (!isReadObject(row) || !positiveId(row.id) || typeof row.username !== 'string' ||
+      !/^[a-z\d_.-]{1,255}$/iu.test(row.username) || includesGitlabCredential(token, [row.username])) invalidMergeRequestReview();
+  const name = typeof row.name === 'string' ? gitlabDisplayLabel(row.name, 255, token, row.username) : row.username;
+  return { id: row.id, name, username: row.username };
+}
+
+function reviewRevision(object: GitlabReadObject): string {
+  const { sha, diff_refs: refs, updated_at: updatedAt, state, reviewers } = object;
+  const diffHead = isReadObject(refs) ? refs.head_sha : null;
+  const head = gitlabObjectSha(sha), diff = gitlabObjectSha(diffHead);
+  const time = typeof updatedAt === 'string' ? Date.parse(updatedAt) : NaN;
+  if ((sha != null && !head) || (diffHead != null && !diff) || (updatedAt != null && !Number.isFinite(time))) invalidMergeRequestReview();
+  const assigned = Array.isArray(reviewers) ? reviewers.flatMap(row => isReadObject(row) && positiveId(row.id) ? [row.id] : []).sort((a, b) => a - b) : null;
+  return JSON.stringify([head, diff, Number.isFinite(time) ? time : null, state, assigned]);
+}
+
+export async function readGitlabMergeRequestReview(connection: Connection, repositoryId: number, iid: number, objectId: number,
+  signal?: AbortSignal): Promise<Omit<GitlabMergeRequestReview, 'linkId' | 'repositoryId' | 'mergeRequestIid' | 'checkedAt'>> {
+  if (!positiveId(iid) || !positiveId(objectId)) invalidMergeRequestReview();
+  const read = gitlabLinkedWorkflowReader(connection, signal);
+  const { object } = await read(repositoryId, 'merge_request', iid, objectId);
+  const observed = reviewRevision(object);
+  const { projectUrl, headers } = projectReadRequest(connection, repositoryId, reviewStage);
+  const token = connection.token;
+  async function readReviewPart(part: 'reviewers' | 'approvals', onHeaders?: (headers: Headers) => void) {
+    const url = new URL(projectUrl);
+    url.pathname += `/merge_requests/${iid}/${part}`;
+    if (part === 'reviewers') url.search = new URLSearchParams({ per_page: String(MR_REVIEW_PARTICIPANT_LIMIT), page: '1' }).toString();
+    try {
+      return { available: true as const, payload: await readJson(url, headers, reviewStage, signal, onHeaders) };
+    } catch (error) {
+      if (error instanceof GitlabReadError && error.code === 'http' && unavailableReviewStatuses.has(error.httpStatus ?? 0)) {
+        return { available: false as const };
+      }
+      throw error;
+    }
+  }
+  let pagination = new Headers();
+  const [roster, votes] = await Promise.all([readReviewPart('reviewers', value => { pagination = value; }), readReviewPart('approvals')]);
+  const { object: latest } = await read(repositoryId, 'merge_request', iid, objectId);
+  if (reviewRevision(latest) !== observed) throw new GitlabReadError(reviewStage, 'changed');
+
+  const reviewerSource = roster.available ? 'reviewers' : Array.isArray(latest.reviewers) ? 'merge_request' : 'unavailable';
+  const rows = roster.available ? roster.payload : reviewerSource === 'merge_request' ? latest.reviewers : [];
+  const reviewers = reviewParticipants(rows, row => {
+    const state = (roster.available && reviewStates.has(row.state) ? row.state : 'unknown') as GitlabReviewState;
+    return { ...reviewParticipant(roster.available ? row.user : row, token), state };
+  });
+  const next = pagination.get('x-next-page'), links = pagination.get('link');
+  const hasNext = next?.trim() === '2' || /(?:^|,)\s*<[^>]+>\s*;\s*rel\s*=\s*(?:"next"|next)(?=\s*(?:[;,]|$))/iu.test(links ?? '');
+  const reviewersHasMore = hasNext || (Array.isArray(rows) && (rows.length > MR_REVIEW_PARTICIPANT_LIMIT ||
+    (roster.available && next === null && links === null && rows.length === MR_REVIEW_PARTICIPANT_LIMIT)));
+
+  if (!votes.available) return { reviewerSource, reviewers, reviewersHasMore, approvals: null };
+  const payload = votes.payload;
+  if (!isReadObject(payload) || (payload.project_id !== undefined && payload.project_id !== repositoryId) ||
+      (payload.id !== undefined && payload.id !== objectId) || (payload.iid !== undefined && payload.iid !== iid)) invalidMergeRequestReview();
+  const approvers = reviewParticipants(payload.approved_by, row => reviewParticipant(row.user, token));
+  const { approvals_required: required, approvals_left: remaining } = payload;
+  const approvals = nonNegativeCount(required) && nonNegativeCount(remaining) && remaining <= required
+    ? { required, remaining } : { required: null, remaining: null };
+  return { reviewerSource, reviewers, reviewersHasMore, approvals: { ...approvals, approvers,
+    hasMore: Array.isArray(payload.approved_by) && payload.approved_by.length > MR_REVIEW_PARTICIPANT_LIMIT } };
+}
+
 function invalidPipelineJobs(): never {
   throw new GitlabReadError('pipeline-jobs', 'invalid-response');
 }
@@ -634,7 +725,7 @@ function pipelineJobsNextPage(headers: Headers, url: URL, page: number, rowCount
   return reportedNext;
 }
 
-function pipelineJobLabel(value: string, limit: number, token: string | null | undefined, fallback: string): string {
+function gitlabDisplayLabel(value: string, limit: number, token: string | null | undefined, fallback: string): string {
   const label = value.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, limit).toWellFormed();
   return label && !includesGitlabCredential(token, [value, label]) ? label : fallback;
 }
@@ -656,7 +747,7 @@ function pipelineJob(row: GitlabReadObject, repository: { id: number; path: stri
   if (includesGitlabCredential(token, [webUrl])) invalidPipelineJobs();
   const failureReason = status === 'failed' && typeof reason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(reason) &&
     !includesGitlabCredential(token, [reason]) ? reason : null;
-  return { id, name: pipelineJobLabel(name, 255, token, '이름 미확인'), stage: pipelineJobLabel(stage, 128, token, '단계 미확인'),
+  return { id, name: gitlabDisplayLabel(name, 255, token, '이름 미확인'), stage: gitlabDisplayLabel(stage, 128, token, '단계 미확인'),
     status, failureReason, allowFailure, webUrl };
 }
 

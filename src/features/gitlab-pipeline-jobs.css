@@ -1,18 +1,18 @@
-.gitlab-pipeline-jobs {
+.gitlab-activity-inspection {
   grid-column: 1 / -1;
   min-width: 0;
 }
 
-.gitlab-pipeline-jobs .btn {
+.gitlab-activity-inspection .btn {
   font-size: 12px;
 }
 
-.gitlab-pipeline-jobs .btn[aria-disabled='true'] {
+.gitlab-activity-inspection .btn[aria-disabled='true'] {
   opacity: 0.55;
   cursor: wait;
 }
 
-.gitlab-pipeline-jobs-panel {
+.gitlab-activity-inspection-panel {
   display: grid;
   justify-items: start;
   gap: 8px;
@@ -27,17 +27,22 @@
   overflow-wrap: anywhere;
 }
 
-.gitlab-pipeline-jobs-panel p {
+.gitlab-activity-inspection-panel p,
+.gitlab-activity-inspection-panel h4 {
   margin: 0;
 }
 
-.gitlab-pipeline-jobs-panel p a,
+.gitlab-activity-inspection-panel h4 {
+  font-size: inherit;
+}
+
+.gitlab-activity-inspection-panel p a,
 .gitlab-pipeline-job-link {
   color: #245846;
   text-decoration: underline;
 }
 
-.gitlab-pipeline-jobs-meta {
+.gitlab-activity-inspection-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
@@ -45,11 +50,11 @@
   min-width: 0;
 }
 
-.gitlab-pipeline-jobs-meta time {
+.gitlab-activity-inspection-meta time {
   color: #547364;
 }
 
-.gitlab-pipeline-jobs-warning {
+.gitlab-activity-inspection-warning {
   color: #8d402e;
 }
 
@@ -101,8 +106,22 @@
   color: #8d402e;
 }
 
+.gitlab-review-people {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.gitlab-review-people li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+}
+
 @media (max-width: 520px) {
-  .gitlab-pipeline-jobs .btn,
+  .gitlab-activity-inspection .btn,
   .gitlab-pipeline-job-link {
     min-height: 44px;
   }
