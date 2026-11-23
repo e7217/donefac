@@ -1269,7 +1269,15 @@ export interface GitlabMergeReadiness {
   observedAt: string;
   source: 'read' | 'webhook';
 }
-export interface GitlabLink { id: string; issueId: string; projectId: number; iid: number; kind: 'merge_request' | 'commit' | 'pipeline' | 'branch'; title: string; webUrl: string; state: string; updatedAt: string; sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync'; originalJiraKey?: string; manualLinkId?: string; mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[]; pipelineObservedAt?: string | null }
+export interface GitlabLink {
+  id: string; issueId: string; projectId: number; iid: number;
+  kind: 'merge_request' | 'commit' | 'pipeline' | 'branch';
+  title: string; webUrl: string; state: string; updatedAt: string;
+  sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync';
+  originalJiraKey?: string; manualLinkId?: string;
+  mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[];
+  pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
+}
 export interface GitlabIssueRefreshResult {
   links: GitlabLink[];
   failures: { linkId: string; message: string }[];

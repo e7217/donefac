@@ -84,7 +84,8 @@ test('repository sync and keyless webhooks refresh an existing automatic pipelin
   assert.equal(original.state, 'running');
   assert.equal(original.manualLinkId, undefined);
 
-  const failed = { id: 200, ref: 'main', sha, status: 'failed', updated_at: time(1000), web_url: `${repositoryUrl}/-/pipelines/200` };
+  const failed = { id: 200, project_id: 42, ref: 'main', sha, status: 'failed', updated_at: time(1000),
+    source: 'schedule', tag: true, web_url: `${repositoryUrl}/-/pipelines/200` };
   pipelineRows = [failed];
   const preview = await f.service.previewSync({ expectedVersion: settings.version });
   assert.equal(preview.counts.unmatched, 0);
@@ -95,8 +96,15 @@ test('repository sync and keyless webhooks refresh an existing automatic pipelin
   assert.deepEqual(links(f), [original]);
   const refreshed = await f.service.sync();
   assert.equal(refreshed.linked, 1);
-  assert.deepEqual(links(f), [{ ...original, state: 'failed', updatedAt: time(1000), pipelineObservedAt: time(1000) }]);
+  const classified = { ...original, state: 'failed', updatedAt: time(1000), pipelineObservedAt: time(1000), pipelineSource: 'schedule' };
+  assert.deepEqual(links(f), [classified]);
   assert.equal(f.events.length, 0);
+
+  pipelineRows = [{ ...failed, source: 'web', status: 'success', updated_at: time(2000) }];
+  const incompatible = await f.service.previewSync({ expectedVersion: settings.version });
+  assert.equal(incompatible.counts.skipped, 1);
+  assert.equal((await f.service.sync()).linked, 0);
+  assert.deepEqual(links(f), [classified]);
 
   // An object in another repository, or a contradictory repository/ref/SHA, does not refresh the link.
   for (const different of [{ id: 201 }, { project_id: 99 }, { ref: 'other' }, { sha: 'b'.repeat(40) }]) {
@@ -110,19 +118,29 @@ test('repository sync and keyless webhooks refresh an existing automatic pipelin
   assert.equal(f.service.webhook(request(wrongProject)).linked, 0);
   assert.equal(links(f)[0].state, 'failed');
 
-  const completed = observation({ status: 'success', finished_at: time(3000) });
+  const completed = observation({ status: 'success', finished_at: time(3000), tag: true });
   const headers = { 'x-gitlab-event-uuid': 'pipeline-terminal-sparse' };
   const result = f.service.webhook(request(completed, headers));
   assert.equal(result.linked, 1);
   assert.deepEqual(result.runs, []);
-  assert.deepEqual(links(f), [{ ...original, state: 'success', updatedAt: time(3000), pipelineObservedAt: time(3000) }]);
+  const succeeded = { ...original, state: 'success', updatedAt: time(3000), pipelineObservedAt: time(3000), pipelineSource: 'schedule', pipelineTag: true };
+  assert.deepEqual(links(f), [succeeded]);
   assert.equal(f.events.length, 1);
   assert.equal(f.events[0].trigger, 'pipeline.succeeded');
   assert.deepEqual(f.events[0].issueIds, []);
   assert.equal(f.service.webhook(request(completed, headers)).duplicate, true);
   assert.equal(f.events.length, 1);
-  assert.equal(f.service.webhook(request(observation({ status: 'running', updated_at: time(2000) }))).linked, 0);
-  assert.equal(links(f)[0].state, 'success');
+  assert.equal(f.service.webhook(request(observation({ status: 'running', updated_at: time(2000), source: 'web', tag: false }))).linked, 0);
+  assert.deepEqual(links(f), [succeeded]);
+
+  // Older event shapes may still create a status-only link using IID. That shape cannot borrow exact-object evidence.
+  const fallback = observation({ id: undefined, iid: 200, status: 'running', updated_at: time(4000), source: 'schedule', tag: true });
+  assert.equal(f.service.webhook(request({ ...fallback, commit: { id: sha, message: 'NEO-2 legacy pipeline' } })).linked, 1);
+  const legacyAlias = links(f).find(link => link.issueId === 'issue-2')!;
+  assert.equal(legacyAlias.pipelineObservedAt, null);
+  assert.equal(Object.hasOwn(legacyAlias, 'pipelineSource'), false);
+  assert.equal(Object.hasOwn(legacyAlias, 'pipelineTag'), false);
+  assert.deepEqual(links(f).find(link => link.issueId === original.issueId), succeeded);
 });
 
 test('a keyed pipeline webhook cannot regress a newer verified read and the matching authenticated result still qualifies', async t => {
@@ -145,7 +163,8 @@ test('a keyed pipeline webhook cannot regress a newer verified read and the matc
       res.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/repo', web_url: repositoryUrl }));
     } else if (path === `${projectPath}/pipelines/${pipelineId}`) {
       res.end(JSON.stringify({ id: pipelineId, iid: 19, project_id: repositoryId,
-        status: 'success', sha: upstreamSha, ref: branch, updated_at: upstreamUpdatedAt, finished_at: 'invalid-date', web_url: pipelineUrl() }));
+        status: 'success', sha: upstreamSha, ref: branch, updated_at: upstreamUpdatedAt, finished_at: 'invalid-date',
+        source: 'merge_request_event', tag: false, web_url: pipelineUrl() }));
     } else res.writeHead(404).end('{}');
   });
   t.after(mock.close);
@@ -163,7 +182,8 @@ test('a keyed pipeline webhook cannot regress a newer verified read and the matc
   assert.equal(running.updatedAt, at(1000));
 
   const result = await f.service.refreshIssueLinks(running.issueId, {});
-  const success = { ...running, state: 'success', updatedAt: at(3000), pipelineObservedAt: at(3000) };
+  const success = { ...running, state: 'success', updatedAt: at(3000), pipelineObservedAt: at(3000),
+    pipelineSource: 'merge_request_event', pipelineTag: false };
   assert.deepEqual(result, { links: [success], failures: [], skipped: 0 });
   assert.deepEqual(links(f), [success]);
   assert.equal(f.events.length, 0);
@@ -171,12 +191,12 @@ test('a keyed pipeline webhook cannot regress a newer verified read and the matc
   const future = new Date(Date.now() + 60_000).toISOString();
   assert.equal(isRestorableGitlabLink({ ...success, updatedAt: future, pipelineObservedAt: future }), false);
 
-  assert.equal(f.service.webhook(delivery('failed', 2000)).linked, 0);
+  assert.equal(f.service.webhook(delivery('failed', 2000, { source: 'schedule', tag: true })).linked, 0);
   assert.deepEqual(links(f), [success]);
   assert.equal(f.events.at(-1)?.trigger, 'pipeline.failed');
   assert.equal(f.events.at(-1)?.disposition, 'stale');
 
-  assert.equal(f.service.webhook(delivery('failed', 3000)).linked, 0);
+  assert.equal(f.service.webhook(delivery('failed', 3000, { source: 'api', tag: true })).linked, 0);
   assert.deepEqual(links(f), [success]);
   assert.equal(f.events.at(-1)?.trigger, 'pipeline.failed');
   assert.equal(f.events.at(-1)?.disposition, 'ambiguous');
@@ -193,7 +213,13 @@ test('a keyed pipeline webhook cannot regress a newer verified read and the matc
   assert.equal(f.events.length, observed);
 
   const cursor = f.store.all('gitlab_object_cursors');
-  assert.equal(f.service.webhook(delivery('failed', 4000, { sha: 'b'.repeat(40) })).linked, 0);
+  for (const classification of [{ source: 'push' }, { tag: true }]) {
+    assert.equal(f.service.webhook(delivery('failed', 4000, classification)).linked, 0);
+    assert.deepEqual(links(f), [success]);
+    assert.deepEqual(f.store.all('gitlab_object_cursors'), cursor);
+    assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  }
+  assert.equal(f.service.webhook(delivery('failed', 4000, { sha: 'b'.repeat(40), source: 'push', tag: true })).linked, 0);
   assert.deepEqual(links(f), [success]);
   assert.deepEqual(f.store.all('gitlab_object_cursors'), cursor);
   assert.equal(f.events.at(-1)?.trigger, 'pipeline.failed');

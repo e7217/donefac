@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   Issue, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
   MigrationPreview, SourceRecordArchive, WorkspaceSnapshot,
@@ -150,7 +151,7 @@ test('Jira applies reviewed parents against the combined tree and rolls back if 
   assert.deepEqual(find(detached, newIssue.title), newIssue);
 
   const backup = await f.request<{ schemaVersion: number; sourceRecords: SourceRecordArchive[] }>('/export');
-  assert.equal(backup.schemaVersion, 100);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.sourceRecords.some(row => row.targetId === a.id && row.jiraIssueFieldHashes?.parentId));
   const older = await f.request<{ error: string }>('/import', 400, 'POST', { data: { ...backup, schemaVersion: 99 } });
   assert.match(older.error, /schemaVersion 100/);

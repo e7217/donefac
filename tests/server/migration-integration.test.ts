@@ -237,7 +237,7 @@ test('Jira parent refresh restores format 99 safely across packages and uses the
   assert.equal((await target.apply(followUp)).status, 201);
   const changed = (await target.call<Backup>('/export')).data;
   assert.deepEqual([30, 31, 32, 33].map(id => issue(changed, id).parentId), [newParent.id, originalParent.id, originalParent.id, separateParent.id]);
-  assert.equal(changed.schemaVersion, 100);
+  assert.equal(changed.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.equal((await target.call('/import', 'POST', { data: changed })).status, 200);
   const next = await preview('later-hierarchy-issues', '04', [[30, null]]);
   assert.equal(next.issueRefresh?.[0].fields.find(field => field.field === 'parentId')?.decision, 'apply');

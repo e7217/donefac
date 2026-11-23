@@ -687,6 +687,8 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 응답의 `links`는 확인한 연결, `failures`는 확인할 수 없었던 항목의 `{linkId,message}`, `skipped`는 이번 범위보다 오래된 항목 수다. 실패한 항목은 직전에 저장한 상태를 유지한다. 조회 중 더 최신 웹훅이 반영되면 그 상태를 반환한다. 연결 설정이나 티켓의 프로젝트·키가 바뀌면 `409`로 응답한다. 이 조회에서 티켓 상태 규칙을 실행하지 않는다.
 
+파이프라인 링크는 원본에서 확인한 `pipelineSource`와 태그 실행 여부인 `pipelineTag`를 선택적으로 포함한다. 저장소 목록은 실행 유형을, 단건 조회와 인증된 웹훅은 실행 유형과 태그 여부를 제공한다. 업데이트에서 값이 생략되면 앞서 확인한 값을 유지한다. 같은 파이프라인의 명시된 값이 저장값과 다르면 해당 관측을 보류한다. 자동 상태 전이는 인증 이벤트와 저장소·브랜치 순서를 기준으로 평가한다. 자체 백업 형식 101은 활성 업무와 휴지통의 값을 보존한다. [GitLab 파이프라인 API](https://docs.gitlab.com/api/pipelines/) · [GitLab Pipeline Hook](https://docs.gitlab.com/user/project/integrations/webhook_events/#pipeline-events)
+
 ### 파이프라인 CI 작업 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-jobs`는 해당 업무에 연결한 파이프라인에서 실패(`failed`)와 수동 실행 대기(`manual`) 작업을 읽는다. 저장한 GitLab 주소와 읽기 자격 증명을 사용한다. 저장소와 파이프라인의 실제 ID, 확인 가능한 커밋 SHA를 대조한다. 작업은 50건씩 최대 4페이지를 조회하며 재실행으로 대체된 작업은 제외한다. 새 연결이나 업무 상태를 저장하는 과정과 독립된 브라우저 조회다. [GitLab Jobs API](https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
@@ -1154,7 +1156,7 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | `running_pipeline` | 최신 연결 파이프라인 중 하나 이상이 실행 또는 대기 중인 업무 |
 | `no_activity` | 저장된 GitLab 연결이 없는 업무 |
 
-파이프라인은 같은 업무·GitLab 인스턴스·저장소·브랜치의 연결 중 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 브랜치나 원본 ID를 확인할 수 없는 기존 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 57은 MR 병합 상태와 `merge_blocked` 조건을 보존한다. 기존 GitLab 조건은 형식 53에서 지원한다.
+같은 업무·GitLab 인스턴스·저장소·참조 이름의 파이프라인은 실행 유형별로 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 태그로 확인된 실행은 별도로 집계한다. 실행 유형을 확인하지 못한 기존 연결은 같은 참조의 미확인 그룹으로 집계하고, 참조 이름이나 원본 ID를 확인할 수 없는 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 57은 MR 병합 상태와 `merge_blocked` 조건을 보존한다. 기존 GitLab 조건은 형식 53에서 지원한다.
 
 ## 공유 보기의 요청자 조건
 

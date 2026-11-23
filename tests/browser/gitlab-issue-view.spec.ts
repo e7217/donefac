@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIResponse } from '@playwright/test';
+import { expect, test, type APIResponse, type Locator } from '@playwright/test';
 import type { DocPage, GitlabSettings, Issue, Project, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function readJson<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
@@ -173,5 +173,98 @@ test('360px 업무 목록과 보드의 GitLab 조건을 저장하고 간트에�
         expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
       } }));
     }
+  }
+});
+
+test('같은 커밋에서 푸시 성공과 MR 실패를 구분하고 이후 MR 성공으로 실패 조건을 해제한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const unique = randomUUID();
+  const baseUrl = 'https://gitlab.example.test';
+  const projectUrl = `${baseUrl}/team/pipeline-sources`;
+  const settingsPath = '/api/integrations/gitlab';
+  const repositoryId = 42;
+  const secret = `synthetic-pipeline-sources-${unique}`;
+  const sha = 'a'.repeat(40);
+  const settings = async () => readJson<GitlabSettings>(await request.get(settingsPath));
+  const workspace = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [project] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const issue = await readJson<Issue>(await request.post('/api/issues', { data: {
+    projectId: project.id, title: `GitLab 실행 유형 확인 ${unique.slice(0, 8)}`,
+  } }), 201);
+  const ref = `feature/${issue.key}`;
+  const at = Date.now() - 60_000;
+  const pipeline = (id: number, source: 'merge_request_event' | 'push', status: 'failed' | 'success', sequence: number) =>
+    request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: projectUrl }, object_attributes: {
+        id, source, status, sha, ref, tag: false, finished_at: new Date(at + sequence * 1_000).toISOString(),
+      } },
+    }).then(response => readJson<{ duplicate: boolean; linked: number }>(response));
+
+  async function expectSources(region: Locator) {
+    const pipelines = region.getByRole('region', { name: '파이프라인', exact: true });
+    const failedMerge = pipelines.getByRole('listitem').filter({ hasText: '#901' });
+    await expect(failedMerge.getByText('MR', { exact: true })).toBeVisible();
+    await expect(failedMerge.getByText('실패', { exact: true })).toBeVisible();
+    const pushed = pipelines.getByRole('listitem').filter({ hasText: '#902' });
+    await expect(pushed.getByText('푸시', { exact: true })).toBeVisible();
+    await expect(pushed.getByText('성공', { exact: true })).toBeVisible();
+    expect(await pipelines.evaluate(region => region.scrollWidth <= region.clientWidth + 1)).toBe(true);
+  }
+
+  try {
+    await readJson(await request.patch(settingsPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], webhookSecret: secret,
+    } }));
+    await expect(pipeline(901, 'merge_request_event', 'failed', 1)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+    await expect(pipeline(902, 'push', 'success', 2)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/issues`);
+    const filter = page.getByRole('combobox', { name: 'GitLab 조건', exact: true });
+    const list = page.locator(`.issue-table tr[data-issue-id="${issue.id}"]`);
+    const card = page.locator(`.issue-board-card[data-issue-id="${issue.id}"]`);
+    await expect(list).toContainText('실패한 파이프라인 1개');
+    await filter.selectOption('failed_pipeline');
+    await expect(list).toBeVisible();
+    await page.getByRole('button', { name: '보드', exact: true }).click();
+    await expect(card).toContainText('실패한 파이프라인 1개');
+    await card.click();
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    await expectSources(ticket.getByRole('region', { name: 'GitLab', exact: true }));
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+
+    const development = await page.context().newPage();
+    try {
+      await development.setViewportSize({ width: 360, height: 820 });
+      await development.goto(`/#/${project.id}/development`);
+      await expectSources(development.getByRole('region', { name: '연결된 개발 활동', exact: true }));
+    } finally { await development.close(); }
+
+    await expect(pipeline(903, 'merge_request_event', 'success', 3)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+    await page.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true }).click();
+    await expect(card).toHaveCount(0);
+    await page.getByRole('button', { name: '목록', exact: true }).click();
+    await expect(filter).toHaveValue('failed_pipeline');
+    await expect(list).toHaveCount(0);
+    await filter.selectOption('');
+    await expect(list).toBeVisible();
+    await expect(list).not.toContainText('실패한 파이프라인');
+    expect((await workspace()).gitlabLinks.filter(link => link.issueId === issue.id && link.kind === 'pipeline')
+      .map(link => [link.iid, link.state, link.pipelineSource, link.pipelineTag]).sort()).toEqual([
+      [901, 'failed', 'merge_request_event', false], [902, 'success', 'push', false], [903, 'success', 'merge_request_event', false],
+    ]);
+  } finally {
+    const deleted = await request.delete(`/api/issues/${issue.id}`);
+    if (deleted.ok()) {
+      const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`);
+    }
+    const current = await settings();
+    if (current.baseUrl === baseUrl) await readJson(await request.patch(settingsPath, { data: {
+      expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+    } }));
   }
 });

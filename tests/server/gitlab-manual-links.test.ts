@@ -47,7 +47,8 @@ async function fixture(t: TestContext) {
   let mr = { id: mrId, iid: mrIid, project_id: repositoryId, target_project_id: repositoryId,
     title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant(),
     detailed_merge_status: undefined as string | undefined };
-  let pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha, status: 'running', updated_at: instant() };
+  let pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha, status: 'running', updated_at: instant(),
+    source: undefined as unknown, tag: undefined as unknown };
   const mock = createServer(async (req, res) => {
     const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
     calls.push({ method: req.method, path, credential: req.headers['private-token'] });
@@ -127,6 +128,41 @@ async function fixture(t: TestContext) {
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     setMr(patch: Partial<typeof mr>) { mr = { ...mr, ...patch }; }, holdRead(gate: () => Promise<void>) { objectGate = gate; } };
 }
+
+test('exact manual pipeline links share verified classification across aliases and reject contradictory detail', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const refresh = () => f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
+  f.setPipeline({ source: 'https://example.test/not-a-source', tag: 'false' });
+  const attached = await f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201);
+  assert.equal(Object.hasOwn(attached, 'pipelineSource'), false);
+  assert.equal(Object.hasOwn(attached, 'pipelineTag'), false);
+
+  f.setPipeline({ source: 'push', tag: false });
+  const classified = { ...attached, pipelineSource: 'push', pipelineTag: false };
+  assert.deepEqual(await refresh(), { links: [classified], failures: [], skipped: 0 });
+  const other = await f.call<Issue>('/issues', { method: 'POST', body: { projectId, title: 'A second ticket for the same pipeline' } }, 201);
+  f.setPipeline({ source: 'schedule', tag: true, status: 'failed', updated_at: f.instant(1) });
+  await f.call(pathFor(other.id), f.attach(f.pipelineUrl), 409);
+  const rejected = await refresh();
+  assert.deepEqual(rejected.links, []);
+  assert.deepEqual(rejected.failures.map(failure => failure.linkId), [attached.id]);
+  assert.deepEqual(await f.links(), [classified]);
+  assert.deepEqual(await f.links(other.id), []);
+
+  f.setPipeline({ source: undefined, tag: undefined, status: 'running', updated_at: f.instant(2) });
+  const alias = await f.call<GitlabLink>(pathFor(other.id), f.attach(f.pipelineUrl), 201);
+  assert.equal(alias.pipelineSource, 'push');
+  assert.equal(alias.pipelineTag, false);
+  assert.equal((await f.webhook('pipeline', { id: pipelineId, ref: sourceBranch, sha, status: 'success',
+    updated_at: f.instant(3), url: f.pipelineUrl })).linked, 2);
+  for (const id of [f.issue.id, other.id]) {
+    const [current] = await f.links(id);
+    assert.equal(current.state, 'success');
+    assert.equal(current.pipelineSource, 'push');
+    assert.equal(current.pipelineTag, false);
+  }
+});
 
 test('ticket GitLab refresh updates its existing links only, reports partial failure, and skips status automation', async t => {
   const f = await fixture(t);

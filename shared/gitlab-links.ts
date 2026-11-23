@@ -1,5 +1,7 @@
 import { isJiraIssueKey } from './atlassian-links.js';
 import { isGitlabMergeReadiness } from './gitlab-merge-readiness.js';
+import { gitlabPipelineSource } from './gitlab-pipeline-source.js';
+import type { GitlabLink } from './types.js';
 
 export function gitlabObjectSha(value: unknown): string | null {
   return typeof value === 'string' && /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value) ? value.toLowerCase() : null;
@@ -13,6 +15,16 @@ export function isGitlabBranchName(value: unknown): value is string {
 
 export function isGitlabManualLinkId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u.test(value);
+}
+
+const pipelineObjectPrefix = /^gitlab:([a-f0-9]{12}):([1-9]\d*):pipeline:([1-9]\d*):/u;
+
+export function gitlabPipelineLinkIdentity({ id, projectId, issueId }: Pick<GitlabLink, 'id' | 'issueId' | 'projectId'>) {
+  if (typeof id !== 'string' || typeof issueId !== 'string' || !issueId || !Number.isSafeInteger(projectId)) return null;
+  const match = pipelineObjectPrefix.exec(id);
+  if (!match || match[2] !== String(projectId) || id.slice(match[0].length) !== issueId) return null;
+  const objectId = Number(match[3]);
+  return Number.isSafeInteger(objectId) ? { instance: match[1], objectId } : null;
 }
 
 function isCanonicalLinkUrl(webUrl: unknown, suffix: string): boolean {
@@ -58,6 +70,14 @@ function isRestorableManualGitlabLink(link: Record<string, unknown>): boolean {
 export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
+  const { kind, id, issueId, projectId } = link;
+  const hasSource = Object.hasOwn(link, 'pipelineSource');
+  const hasTag = Object.hasOwn(link, 'pipelineTag');
+  if ((hasSource || hasTag) &&
+      (kind !== 'pipeline' || typeof id !== 'string' || typeof issueId !== 'string' || typeof projectId !== 'number' ||
+       !gitlabPipelineLinkIdentity({ id, issueId, projectId }) ||
+       (hasSource && !gitlabPipelineSource(link.pipelineSource)) ||
+       (hasTag && typeof link.pipelineTag !== 'boolean'))) return false;
   if (Object.hasOwn(link, 'pipelineObservedAt')) {
     const { pipelineObservedAt, updatedAt, kind, state } = link;
     if (kind !== 'pipeline') return false;

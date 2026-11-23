@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isRestorableGitlabLink } from '../../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../../shared/gitlab-merge-readiness.js';
+import { gitlabPipelineSource, gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source.js';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view.js';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import { createIssueViewMatcher, IssueViewGitlabFilterError, parseIssueViewGitlabFilter } from '../../shared/issue-view.js';
@@ -111,6 +112,52 @@ test('GitLab summaries retain independent legacy pipelines and distinguish queue
   ];
   const summary = summarizeIssueGitlabLinks(links).get('first');
   assert.deepEqual(summary, { activityCount: 12, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 5 });
+});
+
+test('a successful push pipeline does not hide a failed MR pipeline until that source succeeds', () => {
+  const mrFailure = { ...pipeline(100, 'failed'), pipelineSource: 'merge_request_event' };
+  const pushSuccess = { ...pipeline(101, 'success'), pipelineSource: 'push' };
+  const mrRetry = { ...pipeline(102, 'success'), pipelineSource: 'merge_request_event' };
+  const matchesFailed = (gitlabLinks: GitlabLink[]) => createIssueViewMatcher({ ...filters, gitlab: 'failed_pipeline' },
+    { users: [], gitlabLinks }, schema)(issue('first'));
+  assert.equal(matchesFailed([pushSuccess, mrFailure]), true);
+  assert.equal(matchesFailed([mrRetry, pushSuccess, mrFailure]), false);
+});
+
+test('tag and branch runs with the same source and ref have independent newest states', () => {
+  const tagFailure = { ...pipeline(100, 'failed'), pipelineSource: 'push', pipelineTag: true };
+  const branchFailure = { ...pipeline(101, 'failed'), pipelineSource: 'push', pipelineTag: false };
+  const branchPending = { ...pipeline(102, 'pending'), pipelineSource: 'push' };
+  const tagRetry = { ...pipeline(103, 'success'), pipelineSource: 'push', pipelineTag: true };
+  assert.deepEqual(summarizeIssueGitlabLinks([branchPending, branchFailure, tagFailure]).get('first'), {
+    activityCount: 3, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1,
+  });
+  assert.equal(summarizeIssueGitlabLinks([tagRetry, branchPending, branchFailure, tagFailure]).get('first')?.failedPipelines, 0);
+});
+
+test('invalid and legacy sources stay out of the verified pipeline source groups', () => {
+  const knownFailure = { ...pipeline(100, 'failed'), pipelineSource: 'push' };
+  const legacyFailure = pipeline(101, 'failed');
+  const invalidSource = { ...pipeline(102, 'success'), pipelineSource: 'push\n' };
+  const unknownFutureSource = { ...pipeline(103, 'pending'), pipelineSource: 'new_gitlab_source' };
+  assert.equal(summarizeIssueGitlabLinks([knownFailure, legacyFailure]).get('first')?.failedPipelines, 2);
+  assert.deepEqual(summarizeIssueGitlabLinks([knownFailure, legacyFailure, invalidSource, unknownFutureSource]).get('first'), {
+    activityCount: 4, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1,
+  });
+});
+
+test('pipeline source labels distinguish verified triggers, tags, and unavailable evidence', () => {
+  for (const value of ['merge_request_event', 'push', 'a'.repeat(64), 'future_source_7']) {
+    assert.equal(gitlabPipelineSource(value), value);
+  }
+  for (const value of [undefined, null, 3, [], '', ' push', 'PUSH', 'push\n', '9push', 'git-lab', 'a'.repeat(65)]) {
+    assert.equal(gitlabPipelineSource(value), undefined);
+    assert.equal(gitlabPipelineSourceLabel(value), '실행 유형 미확인');
+  }
+  assert.equal(gitlabPipelineSourceLabel('merge_request_event', false), 'MR');
+  assert.equal(gitlabPipelineSourceLabel('schedule'), '예약');
+  assert.equal(gitlabPipelineSourceLabel('push', true), '태그 · 푸시');
+  assert.equal(gitlabPipelineSourceLabel('constructor'), '기타 실행 유형');
 });
 
 test('merge-blocked views count actionable readiness only for open merge requests', () => {

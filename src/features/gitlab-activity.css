@@ -204,6 +204,13 @@ a.gitlab-activity-target:hover {
   margin-top: 4px;
 }
 
+.gitlab-activity-status {
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+  min-width: 0;
+}
+
 .gitlab-activity-state {
   max-width: 7rem;
   margin-top: 4px;
@@ -212,6 +219,14 @@ a.gitlab-activity-target:hover {
   background: #edf4ef;
   color: #3c5f4e;
   font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-activity-source {
+  max-width: 7rem;
+  color: #4d685b;
+  font-size: 11px;
+  text-align: end;
   overflow-wrap: anywhere;
 }
 
@@ -241,7 +256,8 @@ a.gitlab-activity-target:hover {
     min-height: 44px;
   }
 
-  .gitlab-activity-state {
+  .gitlab-activity-state,
+  .gitlab-activity-source {
     max-width: 5rem;
   }
 }

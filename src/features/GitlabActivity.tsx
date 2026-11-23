@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
+import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type { FeatureProps, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './gitlab-activity.css';
@@ -403,6 +404,7 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
   const hasNumber = Number.isSafeInteger(link.iid) && link.iid > 0;
   const number = hasNumber && link.kind === 'merge_request' ? `!${link.iid}` : hasNumber && link.kind === 'pipeline' ? `#${link.iid}` : null;
   const state = typeof link.state === 'string' && link.state ? link.state : 'unknown';
+  const pipelineSource = link.kind === 'pipeline' ? gitlabPipelineSourceLabel(link.pipelineSource, link.pipelineTag) : null;
   const issueKey = issueContext?.keys.get(link.issueId);
   const titleContent = <>
     {number && <span className="gitlab-activity-number">{number}</span>}
@@ -424,7 +426,10 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
       {link.manualLinkId && <span className="gitlab-activity-detail gitlab-activity-manual-label">수동 연결</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
-    <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
+    <div className="gitlab-activity-status">
+      <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
+      {pipelineSource && <span className="gitlab-activity-source">{pipelineSource}</span>}
+    </div>
     {jobsTarget && <PipelineJobs key={`${link.id}:${link.manualLinkId ?? ''}:${jobsTarget.url.href}`} target={jobsTarget}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha])} />}
     {reviewTarget && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${reviewTarget.url.href}`} target={reviewTarget}

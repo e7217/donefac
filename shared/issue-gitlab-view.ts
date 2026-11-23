@@ -1,5 +1,6 @@
-import { isGitlabBranchName } from './gitlab-links.js';
+import { gitlabPipelineLinkIdentity, isGitlabBranchName } from './gitlab-links.js';
 import { isGitlabMergeReadinessBlocked } from './gitlab-merge-readiness.js';
+import { gitlabPipelineSource } from './gitlab-pipeline-source.js';
 import type { GitlabLink } from './types.js';
 
 export interface IssueGitlabSummary {
@@ -11,16 +12,16 @@ export interface IssueGitlabSummary {
 }
 
 const activePipelineStates = new Set(['created', 'waiting_for_resource', 'preparing', 'pending', 'running']);
-const pipelineLinkIdPrefix = /^gitlab:([a-f0-9]{12}):([1-9]\d*):pipeline:([1-9]\d*):/u;
 
-function pipelineBranch(link: GitlabLink) {
+function pipelineGroup(link: GitlabLink) {
   if (!isGitlabBranchName(link.sourceBranch)) return null;
-  const match = pipelineLinkIdPrefix.exec(link.id);
-  if (!match || match[2] !== String(link.projectId) || link.id.slice(match[0].length) !== link.issueId) return null;
+  const identity = gitlabPipelineLinkIdentity(link);
+  if (!identity) return null;
+  const source = gitlabPipelineSource(link.pipelineSource) ?? null;
   // GitLab's object ID determines pipeline creation order. The stored IID and update timestamp can differ.
-  const id = Number(match[3]);
-  if (!Number.isSafeInteger(id)) return null;
-  return { id, key: JSON.stringify([match[1], link.projectId, link.sourceBranch, link.issueId]) };
+  return { id: identity.objectId, key: JSON.stringify([
+    identity.instance, link.projectId, link.sourceBranch, link.issueId, source, link.pipelineTag === true,
+  ]) };
 }
 
 function countPipeline(summary: IssueGitlabSummary, state: string) {
@@ -44,14 +45,14 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
     }
     if (link.kind !== 'pipeline') continue;
 
-    const branch = pipelineBranch(link);
-    if (!branch) {
+    const group = pipelineGroup(link);
+    if (!group) {
       countPipeline(summary, link.state);
       continue;
     }
-    const latest = latestPipelines.get(branch.key);
-    if (!latest || latest.id < branch.id) {
-      latestPipelines.set(branch.key, { id: branch.id, state: link.state, summary });
+    const latest = latestPipelines.get(group.key);
+    if (!latest || latest.id < group.id) {
+      latestPipelines.set(group.key, { id: group.id, state: link.state, summary });
     }
   }
   for (const { state, summary } of latestPipelines.values()) countPipeline(summary, state);

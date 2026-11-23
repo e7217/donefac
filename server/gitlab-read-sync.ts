@@ -571,6 +571,12 @@ function isWorkflowPage(page: ManualPage): page is WorkflowPage {
   return typeof page.id === 'number';
 }
 
+export function isExactGitlabPipelineListRow(object: GitlabReadObject, projectId: number, baseUrl: string): boolean {
+  if (object.project_id !== projectId) return false;
+  const page = manualPage(object.web_url, new URL(baseUrl), false);
+  return page?.kind === 'pipeline' && page.id === object.id;
+}
+
 async function readExactWorkflowObject(
   { base, headers, projectUrl }: ReturnType<typeof projectReadRequest>, projectId: number,
   { repositoryPath, kind, id }: WorkflowPage, signal?: AbortSignal,

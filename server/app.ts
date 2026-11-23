@@ -2803,6 +2803,9 @@ export function createApp(options: {
       fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
     }
     if (!data.gitlabLinks.every(isRestorableGitlabLink)) fail('GitLab 연결 데이터를 확인해 주세요.');
+    if (data.schemaVersion < 101 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
+      links => links.some((link: GitlabLink) => Object.hasOwn(link, 'pipelineSource') || Object.hasOwn(link, 'pipelineTag')),
+    )) fail('GitLab 파이프라인 실행 유형을 포함한 백업은 schemaVersion 101이 필요합니다.');
     if (data.schemaVersion <28 && (data.gitlabLinks.some((link:GitlabLink) => link.branchObservationSource==='sync') ||
         importedTrash.some(entry => entry.gitlabLinks.some(link => link.branchObservationSource==='sync')))) {
       fail('GitLab 수동 조회로 확인한 브랜치 연결에는 schemaVersion 28 백업이 필요합니다.');
