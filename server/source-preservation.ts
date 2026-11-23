@@ -500,8 +500,8 @@ export class SourcePreservationService {
 
   hasImport(id: string): boolean { return Boolean(this.store.db.prepare('SELECT 1 FROM source_imports WHERE id=?').get(id)); }
 
-  jiraIssueBlockers({ issueIds, allowedProjects = null, crossProjectOnly = false }: {
-    issueIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean;
+  jiraIssueBlockers({ issueIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false }: {
+    issueIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean; sameProjectOnly?: boolean;
   } = {}): TeamScheduleBlocker[] {
     if (issueIds?.length === 0 || allowedProjects?.length === 0) return [];
     const incidentSql = issueIds ? `WITH selected AS MATERIALIZED (SELECT value FROM json_each(?)),
@@ -530,8 +530,10 @@ export class SourcePreservationService {
       WHERE archive.product='jira' AND archive.kind='relation' AND json_valid(archive.json) AND json_type(archive.json,'$.jiraRelationId')='text'
         AND json_type(relation.json,'$.origin') IS NULL AND source.id<>target.id
         AND (?=0 OR source.project_id<>target.project_id)
+        AND (?=0 OR source.project_id=target.project_id)
         AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
-      ORDER BY relation.id, archive.id`).all(...(issueIds ? [JSON.stringify(issueIds)] : []), Number(crossProjectOnly), scope, scope, scope) as (Omit<TeamScheduleBlocker, 'origin'> & {
+      ORDER BY relation.id, archive.id`).all(...(issueIds ? [JSON.stringify(issueIds)] : []),
+        Number(crossProjectOnly), Number(sameProjectOnly), scope, scope, scope) as (Omit<TeamScheduleBlocker, 'origin'> & {
         type: string; sourceProjectId: string; targetProjectId: string; instanceKey: string; importId: string;
         archiveJson: string; receiptProjects: string | null;
       })[];

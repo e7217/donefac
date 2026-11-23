@@ -3,7 +3,7 @@ import type { Express, Request } from 'express';
 import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
-import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkInput, type ScheduleBlockerLinkPage, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
+import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -31,7 +31,7 @@ interface PasteHooks {
   workflow(projectId: string): ProjectWorkflow;
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
-  projectBlockers(projectId: string): TeamScheduleBlocker[];
+  projectBlockers(projectIds: readonly string[] | null): TeamScheduleBlocker[];
   commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
 }
 
@@ -56,14 +56,15 @@ interface PasteProposal extends ScheduleScope {
   linkChanges?: ScheduleDependencyMutation[];
   followUpWarnings?: string[];
   missingDateWarnings?: string[];
-  blockerRelations?: TeamScheduleBlocker[];
+  blockerRelations?: ScheduleBlockerLinkCandidate[];
   kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit';
   result?: SchedulePasteApplyResult;
 }
 
 type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'keyBindings' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
 
-type DependencyAddition = { line: number; predecessor: Issue; successor: Issue };
+type DependencyAddition = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
+type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
@@ -142,16 +143,20 @@ function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput {
   return { projectId: raw.projectId, anchor, issues, direction: raw.direction, type: raw.type, lagDays: raw.lagDays };
 }
 
-function parseBlockerLinkInput(raw: unknown): ScheduleBlockerLinkInput {
+function parseBlockerLinkInput(raw: unknown): { projectId: string | null; relations: ScopedBlockerReference[] } {
   const invalid = () => new SchedulePasteError(400, `프로젝트와 차단 관계를 1~${MAX_SCHEDULE_BLOCKER_LINKS}개 선택해 주세요.`);
-  if (!isRecord(raw) || Object.keys(raw).length !== 2 || !isRelationId(raw.projectId) ||
+  if (!isRecord(raw) || Object.keys(raw).length !== 2 || (raw.projectId !== null && !isRelationId(raw.projectId)) ||
       !Array.isArray(raw.relations) || !raw.relations.length || raw.relations.length > MAX_SCHEDULE_BLOCKER_LINKS) throw invalid();
-  const relations = raw.relations.map((entry: unknown) => {
-    if (!isRecord(entry) || Object.keys(entry).length !== 2 || !isRelationId(entry.id) || !isVersion(entry.version)) throw invalid();
-    return { id: entry.id, version: entry.version };
+  const { projectId } = raw;
+  const relations = Array.from(raw.relations, (entry: unknown) => {
+    if (!isRecord(entry) || Object.keys(entry).length !== (projectId === null ? 3 : 2) ||
+        !isRelationId(entry.id) || !isVersion(entry.version)) throw invalid();
+    const relationProjectId = projectId ?? entry.projectId;
+    if (!isRelationId(relationProjectId)) throw invalid();
+    return { id: entry.id, version: entry.version, projectId: relationProjectId };
   });
   if (new Set(relations.map(({ id }) => id)).size !== relations.length) throw invalid();
-  return { projectId: raw.projectId, relations };
+  return { projectId, relations };
 }
 
 function findPreviewIssue(issues: ReadonlyMap<string, Issue>, errors: SchedulePastePreview['errors'],
@@ -305,9 +310,9 @@ function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[],
   const errors: SchedulePastePreview['errors'] = [];
   const linksByPair = new Map(state.dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
   const endpoints = DEPENDENCY_ENDPOINTS[settings.type];
-  for (const { line, predecessor, successor } of pairs) {
+  for (const { line, predecessor, successor, projectId } of pairs) {
     const summary = { line, predecessorKey: predecessor.key, predecessorTitle: predecessor.title,
-      successorKey: successor.key, successorTitle: successor.title };
+      successorKey: successor.key, successorTitle: successor.title, ...(projectId ? { projectId } : {}) };
     const existing = linksByPair.get(dependencyPair(predecessor.id, successor.id));
     if (existing) {
       const saved = { type: existing.type, lagDays: existing.lagDays };
@@ -391,7 +396,8 @@ export class SchedulePasteService {
       .map(issue => {
         if (scope.kind === 'manual-edit') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate,
           ...(scope.hierarchyId ? [issue.parentId ?? null, issue.status] : [])];
-        if (scope.kind === 'blocker-links') return [issue.id, issue.version, issue.startDate, issue.endDate];
+        if (scope.kind === 'blocker-links') return [issue.id, issue.version, issue.startDate, issue.endDate,
+          ...(scope.projectId === null ? [issue.projectId] : [])];
         return scope.projectId === null ? [issue.id, issue.version, issue.projectId] : [issue.id, issue.version];
       });
     const linkVersions = links.map(dependencyGuardFields);
@@ -858,36 +864,50 @@ export class SchedulePasteService {
   }
 
   private listBlockerLinks(query: Request['query'], hooks: PasteHooks): ScheduleBlockerLinkPage {
-    const { projectId, offset: rawOffset = '0' } = query;
-    if (!isRelationId(projectId) || Object.keys(query).some(key => key !== 'projectId' && key !== 'offset') ||
+    const { projectId, scope, offset: rawOffset = '0' } = query;
+    const scopedProject = isRelationId(projectId) && scope === undefined ? projectId : null;
+    const team = scope === 'team' && projectId === undefined;
+    if ((!scopedProject && !team) || Object.keys(query).some(key => key !== 'projectId' && key !== 'scope' && key !== 'offset') ||
         typeof rawOffset !== 'string' || !/^(?:0|[1-9]\d*)$/u.test(rawOffset) || !Number.isSafeInteger(Number(rawOffset))) {
       throw new SchedulePasteError(400, '프로젝트와 차단 관계 목록 위치를 확인해 주세요.');
     }
     const offset = Number(rawOffset);
     return this.store.transaction(() => {
-      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
-      const rows = this.store.db.prepare("SELECT id, json_extract(json, '$.key') AS issueKey FROM issues WHERE project_id=?")
-        .all(projectId) as { id: string; issueKey: string }[];
-      const keys = new Map(rows.map(({ id, issueKey }) => [id, issueKey]));
+      if (scopedProject && !this.store.get('projects', scopedProject)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      const blockers = hooks.projectBlockers(scopedProject ? [scopedProject] : null);
+      if (!blockers.length) return { items: [], offset, total: 0 };
+      const issueIds = [...new Set(blockers.flatMap(({ sourceIssueId, targetIssueId }) => [sourceIssueId, targetIssueId]))];
+      const rows = this.store.db.prepare(`SELECT id, project_id AS projectId, json_extract(json, '$.key') AS issueKey
+        FROM issues WHERE id IN (SELECT value FROM json_each(?))`)
+        .all(JSON.stringify(issueIds)) as { id: string; projectId: string; issueKey: string }[];
+      const issues = new Map(rows.map(issue => [issue.id, issue]));
       const compare = new Intl.Collator('ko', { numeric: true }).compare;
-      const byIssueKey = (left: string, right: string) => compare(keys.get(left) ?? left, keys.get(right) ?? right);
-      const blockers = hooks.projectBlockers(projectId).sort((left, right) =>
+      const byIssueKey = (left: string, right: string) => compare(issues.get(left)?.issueKey ?? left, issues.get(right)?.issueKey ?? right);
+      blockers.sort((left, right) =>
         byIssueKey(left.sourceIssueId, right.sourceIssueId) || byIssueKey(left.targetIssueId, right.targetIssueId) || left.id.localeCompare(right.id));
-      return { items: blockers.slice(offset, offset + SCHEDULE_BLOCKER_LINK_PAGE_SIZE), offset, total: blockers.length };
+      const page = blockers.slice(offset, offset + SCHEDULE_BLOCKER_LINK_PAGE_SIZE);
+      return {
+        items: team ? page.map(blocker => ({ ...blocker, projectId: issues.get(blocker.sourceIssueId)!.projectId })) : page,
+        offset, total: blockers.length,
+      };
     });
   }
 
   private previewBlockerLinks(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
     const { projectId, relations } = parseBlockerLinkInput(raw);
     return this.store.transaction(() => {
-      if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
+      if (projectId !== null && !this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
-      const state = this.projectState(projectId);
+      const projectIds = projectId === null
+        ? [...new Set(relations.map(relation => relation.projectId))].filter(id => this.store.get('projects', id)).sort()
+        : [projectId];
+      const scope = projectId === null ? { projectId, projectIds } : { projectId };
+      const state = this.scopeState(scope);
       const issuesById = new Map(state.issues.map(issue => [issue.id, issue]));
-      const blockersById = new Map(hooks.projectBlockers(projectId).map(relation => [relation.id, relation]));
+      const blockersById = new Map(hooks.projectBlockers(projectIds).map(relation => [relation.id, relation]));
       const existingPairs = new Set(state.dependencies.map(link => dependencyPair(link.predecessorId, link.successorId)));
       const selectionErrors: SchedulePastePreview['errors'] = [];
-      const reviewedRelations: TeamScheduleBlocker[] = [];
+      const reviewedRelations: ScheduleBlockerLinkCandidate[] = [];
       const issueIds = new Set<string>();
       const pairs: DependencyAddition[] = [];
       for (const [index, requested] of relations.entries()) {
@@ -895,22 +915,23 @@ export class SchedulePasteService {
         const relation = blockersById.get(requested.id);
         const predecessor = relation && issuesById.get(relation.sourceIssueId);
         const successor = relation && issuesById.get(relation.targetIssueId);
-        if (!relation || relation.version !== requested.version || !predecessor || !successor) {
-          selectionErrors.push({ line, message: '선택한 차단 관계가 변경되었거나 현재 프로젝트에서 확인할 수 없습니다. 목록을 다시 불러와 주세요.' });
+        if (!relation || relation.version !== requested.version || predecessor?.projectId !== requested.projectId || successor?.projectId !== requested.projectId) {
+          selectionErrors.push({ line, message: '선택한 차단 관계가 변경되었거나 지정한 프로젝트에서 확인할 수 없습니다. 목록을 다시 불러와 주세요.' });
           continue;
         }
         if (!existingPairs.has(dependencyPair(predecessor.id, successor.id)) && existingPairs.has(dependencyPair(successor.id, predecessor.id))) {
           selectionErrors.push({ line, message: `${predecessor.key} → ${successor.key}: 반대 방향의 간트 연결이 있어 순환 관계가 생깁니다.` });
           continue;
         }
-        reviewedRelations.push(relation);
+        const rowProject = projectId === null ? { projectId: requested.projectId } : {};
+        reviewedRelations.push({ ...relation, ...rowProject });
         issueIds.add(predecessor.id);
         issueIds.add(successor.id);
-        pairs.push({ line, predecessor, successor });
+        pairs.push({ line, predecessor, successor, ...rowProject });
       }
       const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type: 'FS', lagDays: 0 }, hooks.warnings);
       return this.savePreview({
-        projectId, previewId: null, expiresAt: null, changes: [], ...review, errors: [...selectionErrors, ...errors],
+        ...scope, previewId: null, expiresAt: null, changes: [], ...review, errors: [...selectionErrors, ...errors],
       }, state, {
         actorId, issueIds: [...issueIds], changes: [], linkChanges, kind: 'blocker-links', blockerRelations: reviewedRelations,
         ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
@@ -936,16 +957,20 @@ export class SchedulePasteService {
           return current?.id !== binding.id || current.projectId !== binding.projectId;
         })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
       }
+      const state = this.scopeState(proposal);
       if (kind === 'blocker-links') {
         const reviewed = proposal.blockerRelations ?? [];
-        const current = new Map((proposal.projectId === null ? [] : hooks.projectBlockers(proposal.projectId)).map(relation => [relation.id, relation]));
+        const projectIds = proposal.projectId === null ? proposal.projectIds ?? [] : [proposal.projectId];
+        const current = new Map(hooks.projectBlockers(projectIds).map(relation => [relation.id, relation]));
+        const issueProjects = new Map(state.issues.map(issue => [issue.id, issue.projectId]));
         if (!reviewed.length || reviewed.some(relation => {
           const live = current.get(relation.id);
+          const projectId = proposal.projectId ?? relation.projectId;
           return !live || live.version !== relation.version || live.origin !== relation.origin ||
-            live.sourceIssueId !== relation.sourceIssueId || live.targetIssueId !== relation.targetIssueId;
+            live.sourceIssueId !== relation.sourceIssueId || live.targetIssueId !== relation.targetIssueId ||
+            !projectId || issueProjects.get(live.sourceIssueId) !== projectId || issueProjects.get(live.targetIssueId) !== projectId;
         })) throw new SchedulePasteError(409, '차단 관계 또는 원본 방향이 변경되었습니다. 다시 미리 확인해 주세요.');
       }
-      const state = this.scopeState(proposal);
       if (proposal.hierarchyId) {
         const trace = traceGanttHierarchy(proposal.hierarchyId, state.issues, () => 'backlog');
         const reviewedIds = new Set(proposal.issueIds);

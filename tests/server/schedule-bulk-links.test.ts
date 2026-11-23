@@ -7,9 +7,10 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
-  Dependency, Issue, IssueRelation, Project, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview,
-  TeamScheduleBlocker, WorkspaceSnapshot,
+  Dependency, Issue, IssueRelation, Project, ScheduleBlockerLinkPage,
+  ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const previewPath = '/schedule/bulk-links/preview';
@@ -242,6 +243,146 @@ function blockerRoutes(f: Awaited<ReturnType<typeof fixture>>) {
       f.call<SchedulePasteApplyResult>(`${blockerPath}/apply`, status, 'POST', { previewId }, actorId),
   };
 }
+
+const teamBlockerReference = ({ id, version }: IssueRelation, projectId: string) => ({ id, version, projectId });
+
+test('team blocker batch uses each calendar and atomically applies and undoes new links across projects', async t => {
+  const f = await fixture(t);
+  const blockers = blockerRoutes(f);
+  const secondProject = await f.call<Project>('/projects', 201, 'POST', { key: 'BLKTWO', name: '두 번째 차단 검토' });
+  const source = await f.issue('첫 프로젝트 선행');
+  const target = await f.issue('첫 프로젝트 후행');
+  const retained = await f.issue('첫 프로젝트 기존 연결');
+  const otherSource = await f.issue('둘째 프로젝트 선행', secondProject.id);
+  const otherTarget = await f.issue('둘째 프로젝트 후행', secondProject.id);
+  const first = await blockers.add(source, target);
+  const existing = await blockers.add(source, retained);
+  const last = await blockers.add(otherSource, otherTarget);
+  const existingLink = await f.link(source, retained, 'SS', -2);
+  const calendarPath = `/projects/${secondProject.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { ...calendar, expectedVersion: calendar.version,
+    exceptions: [...calendar.exceptions, { date: '2026-11-23', isWorking: false, label: '합성 휴무' }],
+  });
+
+  const before = await f.workspace();
+  const beforeRelations = await Promise.all([blockers.relations(source), blockers.relations(otherSource)]);
+  const preview = await f.call<SchedulePastePreview>(`${blockerPath}/preview`, 200, 'POST', {
+    projectId: null, relations: [teamBlockerReference(first, f.project.id), teamBlockerReference(existing, f.project.id),
+      teamBlockerReference(last, secondProject.id)],
+  });
+  assert.ok(preview.previewId, JSON.stringify(preview.errors));
+  assert.deepEqual(preview.errors, []);
+  assert.deepEqual(preview.changes, []);
+  assert.deepEqual(preview.projectIds, [f.project.id, secondProject.id].sort());
+  assert.deepEqual(preview.dependencyChanges?.map(change => [change.line, change.projectId, change.before, change.after]), [
+    [1, f.project.id, null, { type: 'FS', lagDays: 0 }], [3, secondProject.id, null, { type: 'FS', lagDays: 0 }],
+  ]);
+  assert.deepEqual(preview.retainedDependencies?.map(change => [change.line, change.projectId, change.before, change.after]), [
+    [2, f.project.id, { type: 'SS', lagDays: -2 }, { type: 'SS', lagDays: -2 }],
+  ]);
+  assert.equal(preview.unchanged, 1);
+  assert.ok(preview.warnings.some(warning => warning.includes(`${source.key} → ${target.key}`) && warning.includes('2026-11-23')));
+  assert.ok(preview.warnings.some(warning => warning.includes(`${otherSource.key} → ${otherTarget.key}`) && warning.includes('2026-11-24')));
+  await blockers.apply(preview.previewId, 409, 'user-seo');
+
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER fail_second_project_blocker BEFORE INSERT ON dependencies
+      WHEN NEW.successor_id='${otherTarget.id}' BEGIN SELECT RAISE(ABORT,'synthetic second project blocker failure'); END`);
+    await blockers.apply(preview.previewId, 500);
+    assert.deepEqual(await f.workspace(), before);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+    database.exec('DROP TRIGGER fail_second_project_blocker');
+
+    const applied = await blockers.apply(preview.previewId);
+    assert.deepEqual(applied.updated, []);
+    assert.equal(applied.dependencyChanges, 2);
+    assert.deepEqual(applied.warnings, preview.warnings);
+    assert.deepEqual(await blockers.apply(preview.previewId), applied);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 1);
+    const current = await f.workspace();
+    assert.deepEqual(current.issues, before.issues);
+    assert.deepEqual(await Promise.all([blockers.relations(source), blockers.relations(otherSource)]), beforeRelations);
+    assert.deepEqual(findLink(current, source, retained), existingLink);
+    assert.equal(findLink(current, source, target)?.type, 'FS');
+    assert.equal(findLink(current, otherSource, otherTarget)?.type, 'FS');
+
+    const undone = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: applied.undoId });
+    assert.equal(undone.dependencyChanges, 2);
+    const restored = await f.workspace();
+    assert.deepEqual(restored.dependencies, before.dependencies);
+    assert.deepEqual(restored.issues, before.issues);
+    assert.deepEqual(await Promise.all([blockers.relations(source), blockers.relations(otherSource)]), beforeRelations);
+  } finally { database.close(); }
+});
+
+test('team blocker listing pages only local pairs and a preview refuses forged project ownership or drift', async t => {
+  const f = await fixture(t);
+  const blockers = blockerRoutes(f);
+  const second = await f.call<Project>('/projects', 201, 'POST', { key: 'ZIPPAIR', name: '다른 차단 관계 프로젝트' });
+  const source = await f.issue('팀 차단 관계 선행');
+  const firstProjectPairs: IssueRelation[] = [];
+  for (let index = 0; index < 25; index++) {
+    firstProjectPairs.push(await blockers.add(source, await f.issue(`팀 차단 관계 후행 ${index + 1}`)));
+  }
+  const otherSource = await f.issue('둘째 팀 차단 관계 선행', second.id);
+  const otherTarget = await f.issue('둘째 팀 차단 관계 후행', second.id);
+  const secondProjectPair = await blockers.add(otherSource, otherTarget);
+  const cross = await blockers.add(source, otherTarget);
+  const nonBlocker = await blockers.add(otherTarget, otherSource, 'related');
+  for (const offset of [0, 25, 50]) {
+    const page = await f.call<ScheduleBlockerLinkPage>(`${blockerPath}?scope=team&offset=${offset}`);
+    assert.equal(page.total, 26);
+    assert.equal(page.offset, offset);
+    assert.deepEqual(page.items.map(row => [row.id, row.projectId]), [
+      ...firstProjectPairs.map(row => [row.id, f.project.id]), [secondProjectPair.id, second.id],
+    ].slice(offset, offset + 25));
+  }
+  for (const query of ['scope=unknown', 'scope=team&scope=team', 'scope=team&offset=-1', 'scope=team&limit=3',
+    `scope=team&projectId=${f.project.id}`, 'offset=0']) await f.call(`${blockerPath}?${query}`, 400);
+  const accepted = teamBlockerReference(firstProjectPairs[0], f.project.id);
+  const secondRef = teamBlockerReference(secondProjectPair, second.id);
+  const preview = (relations: unknown[]) => f.call<SchedulePastePreview>(`${blockerPath}/preview`, 200, 'POST', {
+    projectId: null, relations,
+  });
+  const before = await f.workspace();
+  for (const malformed of [[], [accepted, { ...accepted, projectId: second.id }], [accepted, { ...secondRef, projectId: null }],
+    [accepted, { id: secondRef.id, version: secondRef.version }], [accepted, { ...secondRef, version: 0 }]]) {
+    await f.call(`${blockerPath}/preview`, 400, 'POST', { projectId: null, relations: malformed });
+  }
+  await f.call(`${blockerPath}/preview`, 400, 'POST', { projectId: f.project.id, relations: [accepted] });
+  for (const invalid of [teamBlockerReference(cross, second.id), teamBlockerReference(nonBlocker, second.id),
+    { ...secondRef, projectId: f.project.id }, { ...secondRef, projectId: 'unknown-project' }, { ...secondRef, version: secondRef.version + 1 }]) {
+    const relations = invalid.id === secondRef.id ? [accepted, invalid] : [accepted, secondRef, invalid];
+    const rejected = await preview(relations);
+    assert.equal(rejected.previewId, null);
+    assert.deepEqual(rejected.errors.map(error => error.line), [relations.length]);
+  }
+  assert.deepEqual(await f.workspace(), before);
+
+  const earlierReview = await preview([accepted, secondRef]);
+  assert.ok(earlierReview.previewId, JSON.stringify(earlierReview.errors));
+  const calendarPath = `/projects/${second.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { ...calendar, expectedVersion: calendar.version, name: '수정한 팀 달력' });
+  const afterCalendar = await f.workspace();
+  await blockers.apply(earlierReview.previewId, 409);
+  assert.deepEqual(await f.workspace(), afterCalendar);
+
+  const reviewed = await preview([accepted, secondRef]);
+  assert.ok(reviewed.previewId, JSON.stringify(reviewed.errors));
+  const path = `/issues/${otherSource.id}/project-move`;
+  const move = { expectedVersion: otherSource.version, projectId: f.project.id, includeConnected: false, mappings: [] };
+  const transfer = await f.call<IssueProjectMovePreview>(`${path}/preview`, 200, 'POST', move);
+  assert.ok(transfer.token, JSON.stringify(transfer.blockers));
+  const moved = await f.call<IssueProjectMoveResult>(`${path}/apply`, 200, 'POST', { ...move, token: transfer.token });
+  assert.equal(moved.issues[0].projectId, f.project.id);
+  const afterMove = await f.workspace();
+  await blockers.apply(reviewed.previewId, 409);
+  assert.deepEqual(await f.workspace(), afterMove);
+  assert.equal((await preview([accepted, secondRef])).previewId, null);
+});
 
 test('project blocker batch keeps original relations and existing rules while warning about dates and supporting retry and undo', async t => {
   const f = await fixture(t);

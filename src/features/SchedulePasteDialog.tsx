@@ -15,7 +15,7 @@ import './schedule-paste.css';
 
 type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
 type BulkLinks = { issues: readonly Issue[]; candidates: readonly Issue[]; refresh: () => Promise<void> };
-type BlockerLinks = { issues: readonly Issue[]; dependencies: readonly Dependency[]; refresh: () => Promise<void> };
+type BlockerLinks = { issues: readonly Issue[]; dependencies: readonly Dependency[]; projects?: readonly Project[]; refresh: () => Promise<void> };
 type TeamPaste = { projects: readonly Project[] };
 type ProjectName = Pick<Project, 'id' | 'name'>;
 type ProjectLabels = ReadonlyMap<string, ProjectName>;
@@ -27,7 +27,7 @@ export type SchedulePasteDialogProps = {
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
 } & (
   | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: BulkLinks; blockerLinks?: never; teamPaste?: never }
-  | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: never; blockerLinks: BlockerLinks; teamPaste?: never }
+  | { projectId: string | null; projectLabel?: string; bulkDates?: never; bulkLinks?: never; blockerLinks: BlockerLinks; teamPaste?: never }
   | { projectId: string | null; projectLabel?: never; bulkDates: BulkDates; bulkLinks?: never; blockerLinks?: never; teamPaste?: never }
   | { projectId: null; projectLabel?: never; bulkDates?: never; bulkLinks?: never; blockerLinks?: never; teamPaste: TeamPaste }
 );
@@ -116,6 +116,7 @@ function ProjectScheduleEditDialog({
   const applyRecoveryButton = useRef<HTMLButtonElement>(null);
   const firstDateAction = useRef<HTMLSelectElement>(null);
   const anchorSearch = useRef<HTMLInputElement>(null);
+  const blockerProjectFilter = useRef<HTMLSelectElement>(null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
   const dirtyRef = useRef(false);
@@ -127,17 +128,25 @@ function ProjectScheduleEditDialog({
   const blockerDialog = Boolean(blockerLinks);
   const directLinks = Boolean(bulkLinks || blockerLinks);
   const isTeamPaste = Boolean(teamPaste);
+  const isTeamBlocker = projectId === null && blockerDialog;
+  const focusTeamRecovery = isTeamPaste || isTeamBlocker;
   const preserveUnknownResult = Boolean(managed || teamPaste);
   const reportUnknownResult = directLinks || isTeamPaste;
   const draftId = blockerLinks ? BLOCKER_LINK_DRAFT_ID : bulkLinks ? BULK_LINK_DRAFT_ID : bulkDates ? BULK_DRAFT_ID : SCHEDULE_PASTE_DRAFT_ID;
   const team = projectId === null;
-  const scopeLabel = isTeamPaste ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
+  const scopeLabel = focusTeamRecovery ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
   const title = blockerLinks ? '차단 관계 선후행 검토' : bulkLinks ? '선후행 연결 일괄 추가' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
   const linksEdited = hasLinkInput(link, anchorQuery);
   const selectedBlockers = [...blockerSelection.values()];
-  const blockerRelations = selectedBlockers.map(({ id, version }) => ({ id, version }));
-  const input = blockerLinks ? JSON.stringify(blockerRelations)
+  const blockerInput: ScheduleBlockerLinkInput | null = blockerLinks
+    ? projectId === null ? {
+      projectId: null,
+      relations: selectedBlockers.flatMap(relation => relation.projectId
+        ? [{ id: relation.id, version: relation.version, projectId: relation.projectId }] : []),
+    } : { projectId, relations: selectedBlockers.map(({ id, version }) => ({ id, version })) }
+    : null;
+  const input = blockerInput ? JSON.stringify(blockerInput)
     : bulkLinks ? JSON.stringify([link.choice?.id, link.direction, link.type, link.lagDays])
       : bulkDates ? JSON.stringify(dates) : text;
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
@@ -163,18 +172,20 @@ function ProjectScheduleEditDialog({
     const source = blockerIssuesById.get(relation.sourceIssueId);
     const target = blockerIssuesById.get(relation.targetIssueId);
     const dependency = dependencyFor(relation);
-    return [source?.version, target?.version, dependency?.id, dependency?.version, dependency?.type, dependency?.lagDays];
+    return [source?.version, source?.projectId, target?.version, target?.projectId, dependency?.id, dependency?.version, dependency?.type, dependency?.lagDays];
   })) : bulk ? JSON.stringify([bulkIssues.map(issue => [issue.id, issue.version, issue.projectId]), anchor?.version]) : '';
   const projectNames = team ? new Map(bulkDates?.projects.map(project => [project.id, project.name])) : null;
   const selectedProjects = projectNames && bulkDates ? new Map(bulkDates.issues.map(issue => [issue.id, {
     id: issue.projectId, name: projectNames.get(issue.projectId) ?? '프로젝트 정보 없음',
   }])) : undefined;
-  const teamProjects = teamPaste && new Map(teamPaste.projects.map(project => [project.id, {
+  const teamProjectList = teamPaste?.projects ?? (isTeamBlocker ? blockerLinks?.projects : undefined);
+  const teamProjects = teamProjectList && new Map(teamProjectList.map(project => [project.id, {
     id: project.id, name: `${project.key} · ${project.name}`,
   }]));
   const projectCount = selectedProjects ? new Set([...selectedProjects.values()].map(project => project.id)).size : undefined;
-  const canPreview = blockerLinks
-    ? blockerRelations.length > 0 && blockerRelations.length <= MAX_SCHEDULE_BLOCKER_LINKS
+  const canPreview = blockerInput
+    ? selectedBlockers.length > 0 && selectedBlockers.length <= MAX_SCHEDULE_BLOCKER_LINKS &&
+      blockerInput.relations.length === selectedBlockers.length
     : bulkLinks
     ? Boolean(bulkLinkInput)
     : bulkDates
@@ -210,7 +221,7 @@ function ProjectScheduleEditDialog({
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    (anchorSearch.current ?? firstDateAction.current ?? textarea.current ?? dialog.current)?.focus({ preventScroll: true });
+    (blockerProjectFilter.current ?? anchorSearch.current ?? firstDateAction.current ?? textarea.current ?? dialog.current)?.focus({ preventScroll: true });
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -224,14 +235,14 @@ function ProjectScheduleEditDialog({
   }, []);
 
   useEffect(() => {
-    if (!isTeamPaste || pending) return;
+    if (!focusTeamRecovery || pending) return;
     if (retryApply || applied) {
       applyRecoveryButton.current?.focus({ preventScroll: true });
     } else if (error) {
       const active = document.activeElement;
       if (!dialog.current?.contains(active) || active?.matches(':disabled')) pastePreviewButton.current?.focus();
     }
-  }, [applied, error, isTeamPaste, pending, retryApply]);
+  }, [applied, error, focusTeamRecovery, pending, retryApply]);
 
   const close = useCallback(() => {
     if (busyRef.current) {
@@ -250,9 +261,9 @@ function ProjectScheduleEditDialog({
     if (dirtyRef.current && !window.confirm(confirmation)) return;
     dirtyRef.current = false;
     onDraftChange(draftId, false, false);
-    if (isTeamPaste && retryApply) onClose(true);
+    if (focusTeamRecovery && retryApply) onClose(true);
     else onClose();
-  }, [blockerLinks, bulkDates, directLinks, draftId, isTeamPaste, notify, onClose, onDraftChange, retryApply]);
+  }, [blockerLinks, bulkDates, directLinks, draftId, focusTeamRecovery, isTeamPaste, notify, onClose, onDraftChange, retryApply]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -364,7 +375,7 @@ function ProjectScheduleEditDialog({
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects };
     let payload: { projectId: string | null; text: string } | ScheduleBulkDateInput | ScheduleBulkLinkInput | ScheduleBlockerLinkInput;
-    if (blockerLinks) payload = { projectId, relations: blockerRelations };
+    if (blockerInput) payload = blockerInput;
     else if (bulkLinkInput) payload = bulkLinkInput;
     else if (bulkDates) {
       const changes: ScheduleBulkDateChanges = {};
@@ -530,6 +541,7 @@ function ProjectScheduleEditDialog({
                   : isTeamPaste
                     ? '여러 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'
                     : '현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'}
+              {isTeamBlocker && ' 같은 프로젝트 안의 차단 관계를 선택하세요. 서로 다른 프로젝트의 업무는 간트의 프로젝트 간 차단에서 검토합니다.'}
             </p>
           </div>
           <button
@@ -564,7 +576,8 @@ function ProjectScheduleEditDialog({
               </p>
             )}
             {blockerLinks ? (
-              <GanttBlockerLinkPicker projectId={projectId} issues={blockerIssuesById} dependencyFor={dependencyFor}
+              <GanttBlockerLinkPicker projectId={projectId} projects={blockerLinks.projects} projectFilterRef={blockerProjectFilter}
+                issues={blockerIssuesById} dependencyFor={dependencyFor}
                 selection={blockerSelection} refreshKey={blockerRefreshKey} onChange={updateBlockers} />
             ) : bulkLinks ? (
               <GanttBulkLinkFields anchors={anchors} anchor={anchor} searchRef={anchorSearch} query={anchorQuery}
@@ -647,7 +660,7 @@ function ProjectScheduleEditDialog({
             )}
             {managed ? (
               <div className="schedule-bulk-date-actions">
-                <button className="btn btn-primary" type="submit" disabled={!canPreview}>
+                <button ref={pastePreviewButton} className="btn btn-primary" type="submit" disabled={!canPreview}>
                   {pending === 'preview' ? '검토 중…' : directLinks ? '연결 미리보기' : '날짜 변경 미리보기'}
                 </button>
                 <button className="btn" type="button" onClick={() => void reloadTargets()}>
@@ -776,7 +789,7 @@ function ProjectScheduleEditDialog({
               {dependencyChanges.length > 0 && (
                 <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? 'added' : 'paste'} teamProjects={teamProjects} />
               )}
-              {directLinks && retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained" />}
+              {directLinks && retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained" teamProjects={teamProjects} />}
             </section>
           )}
         </div>

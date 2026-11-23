@@ -46,8 +46,8 @@ export function listIssueRelations(store: Store, issueId: string, allowedProject
   return rows.map(row => JSON.parse(row.json) as IssueRelation);
 }
 
-function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, crossProjectOnly = false, limit }: {
-  targetIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean; limit?: number;
+function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false, limit }: {
+  targetIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean; sameProjectOnly?: boolean; limit?: number;
 }): TeamScheduleBlocker[] {
   if (targetIds?.length === 0 || allowedProjects?.length === 0 || limit === 0) return [];
   const scope = allowedProjects ? JSON.stringify(allowedProjects) : null;
@@ -61,9 +61,11 @@ function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, cr
     WHERE json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'
       AND source.id<>target.id ${targetSql}
       AND (?=0 OR source.project_id<>target.project_id)
+      AND (?=0 OR source.project_id=target.project_id)
       AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
     ORDER BY relation.source_issue_id, relation.target_issue_id LIMIT ?`)
-    .all(...(targetIds ? [JSON.stringify(targetIds)] : []), Number(crossProjectOnly), scope, scope, scope, limit ?? -1) as TeamScheduleBlocker[];
+    .all(...(targetIds ? [JSON.stringify(targetIds)] : []), Number(crossProjectOnly), Number(sameProjectOnly),
+      scope, scope, scope, limit ?? -1) as TeamScheduleBlocker[];
 }
 
 export function directTeamspaceBlockers(store: Store, targetIds: readonly string[], allowedProjects: readonly string[] | null = null,
@@ -134,8 +136,8 @@ export class IssueRelationsService {
     return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 
-  projectScheduleBlockers(projectId: string): TeamScheduleBlocker[] {
-    const scope = { allowedProjects: [projectId] };
+  localScheduleBlockers(allowedProjects: readonly string[] | null): TeamScheduleBlocker[] {
+    const scope = { allowedProjects, sameProjectOnly: true };
     return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 

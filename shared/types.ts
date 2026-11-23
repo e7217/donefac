@@ -1826,15 +1826,16 @@ export interface ScheduleBulkLinkInput {
 }
 export const SCHEDULE_BLOCKER_LINK_PAGE_SIZE = 25;
 export const MAX_SCHEDULE_BLOCKER_LINKS = 100;
+export type ScheduleBlockerLinkCandidate = TeamScheduleBlocker & { projectId?: string };
 export interface ScheduleBlockerLinkPage {
-  items: TeamScheduleBlocker[];
+  items: ScheduleBlockerLinkCandidate[];
   offset: number;
   total: number;
 }
-export interface ScheduleBlockerLinkInput {
-  projectId: string;
-  relations: Pick<TeamScheduleBlocker, 'id' | 'version'>[];
-}
+type ScheduleBlockerLinkReference = Pick<TeamScheduleBlocker, 'id' | 'version'>;
+export type ScheduleBlockerLinkInput =
+  | { projectId: string; relations: ScheduleBlockerLinkReference[] }
+  | { projectId: null; relations: (ScheduleBlockerLinkReference & { projectId: string })[] };
 export const MAX_SCHEDULE_ROW_DEPENDENCY_EDITS = 100;
 export type ScheduleRowDependencyEdit =
   | { action: 'add'; relatedIssue: ScheduleRowIssue; direction: 'predecessor' | 'successor'; type: DependencyType; lagDays: number }

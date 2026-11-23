@@ -11,7 +11,7 @@ import { createApp } from '../../server/app.js';
 import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
   IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem,
-  ProjectWorkflow, ScheduleAnchorChange, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
+  ProjectWorkflow, ScheduleAnchorChange, ScheduleBlockerLinkPage, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
   SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -460,6 +460,7 @@ test('project blocker batch can combine Jira proven direction with native blocke
 
   const path = '/schedule/blocker-links';
   const list = () => f.call<{ items: TeamScheduleBlocker[]; offset: number; total: number }>(`${path}?projectId=${source.projectId}&offset=0`);
+  const listTeam = () => f.call<ScheduleBlockerLinkPage>(`${path}?scope=team`);
   const add = (issue: Issue) => f.call<IssueRelation>(`/issues/${issue.id}/relations`, 'POST', {
     otherIssueId: successor.id, type: 'blocks', direction: 'outgoing',
   }, 201);
@@ -470,6 +471,8 @@ test('project blocker batch can combine Jira proven direction with native blocke
   const duplicate = await add(source);
   const samePair = (await list()).items.filter(row => row.sourceIssueId === source.id && row.targetIssueId === successor.id);
   assert.deepEqual(samePair, [{ id: duplicate.id, sourceIssueId: source.id, targetIssueId: successor.id, version: duplicate.version }]);
+  assert.deepEqual((await listTeam()).items.filter(row => row.sourceIssueId === source.id && row.targetIssueId === successor.id),
+    samePair.map(row => ({ ...row, projectId: source.projectId })));
   const overshadowed = await preview([jira]);
   assert.equal(overshadowed.previewId, null);
   assert.ok(overshadowed.errors.length);
@@ -483,6 +486,7 @@ test('project blocker batch can combine Jira proven direction with native blocke
   assert.deepEqual(displayed.items.find(row => row.id === native.id), {
     id: native.id, sourceIssueId: other.id, targetIssueId: successor.id, version: native.version,
   });
+  assert.deepEqual((await listTeam()).items, displayed.items.map(row => ({ ...row, projectId: source.projectId })));
   assert.ok(!(await preview([unresolved])).previewId);
 
   const originalRelations = (await f.backup()).issueRelations;
@@ -506,6 +510,11 @@ test('project blocker batch can combine Jira proven direction with native blocke
 
   const stale = await preview([jira, native]);
   assert.ok(stale.previewId);
+  const teamStale = await f.call<SchedulePastePreview>(`${path}/preview`, 'POST', {
+    projectId: null, relations: [jira, native].map(({ id, version }) => ({ id, version, projectId: source.projectId })),
+  });
+  assert.ok(teamStale.previewId, JSON.stringify(teamStale.errors));
+  assert.deepEqual(teamStale.dependencyChanges, stale.dependencyChanges?.map(row => ({ ...row, projectId: source.projectId })));
   const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
   try {
     assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
@@ -513,6 +522,7 @@ test('project blocker batch can combine Jira proven direction with native blocke
   assert.deepEqual((await list()).items.map(row => row.id), [native.id]);
   const afterProofLoss = await f.workspace();
   await f.call(`${path}/apply`, 'POST', { previewId: stale.previewId }, 409);
+  await f.call(`${path}/apply`, 'POST', { previewId: teamStale.previewId }, 409);
   assert.deepEqual(await f.workspace(), afterProofLoss);
   assert.deepEqual((await f.backup()).issueRelations, originalRelations);
 });
@@ -562,6 +572,11 @@ test('proven Jira blockers keep canonical direction in reports, release readines
     relation.sourceIssueId === issue.id || relation.targetIssueId === issue.id);
   assert.deepEqual(incoming.filter(relation => relation.verifiedBlockerDirection).map(relation => relation.id).sort(),
     [relationWith(local)!.id, inverted.id].sort());
+  const aggregate = await f.call<ScheduleBlockerLinkPage>('/schedule/blocker-links?scope=team');
+  assert.deepEqual(aggregate.items, [{
+    id: relationWith(local)!.id, sourceIssueId: local.id, targetIssueId: target.id,
+    version: relationWith(local)!.version, projectId: target.projectId, origin: 'jira',
+  }]);
   for (const candidate of [ambiguous, unprovenSource]) {
     const raw = relationWith(candidate);
     assert.ok(raw);

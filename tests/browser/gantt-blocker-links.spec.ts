@@ -124,7 +124,7 @@ test('360px 간트에서 보기 밖 차단 관계를 검토하고 응답 유실 
     await page.goto(`/#/${project.id}/gantt?scope=team`);
     const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
     await expect(projectFilter).toBeVisible();
-    await expect(opener).toHaveCount(0);
+    await expect(opener).toBeVisible();
     await projectFilter.selectOption(project.id);
     await opener.click();
     await expect(choice(third, fourth)).toBeVisible();

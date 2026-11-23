@@ -361,6 +361,12 @@
   margin-bottom: 0.75rem;
 }
 
+.schedule-blocker-project-filter select {
+  display: block;
+  max-width: 100%;
+  margin-top: 0.25rem;
+}
+
 .schedule-blocker-toolbar,
 .schedule-blocker-selected li {
   display: flex;
