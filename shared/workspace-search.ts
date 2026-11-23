@@ -94,9 +94,25 @@ export function issueSearchAliasLabel(alias: IssueSearchAlias): string {
   return `${alias.source === 'jira' ? 'Jira 원래 키' : '이동 전 키'} ${alias.key}`;
 }
 
-function issueKeyMatchRank(issue: Issue, query: string, aliases: readonly IssueSearchAlias[]): 0 | 1 | null {
+function issueKeyMatchRank(issue: Pick<Issue, 'key'>, query: string, aliases: readonly IssueSearchAlias[]): 0 | 1 | null {
   if (normalizeWorkspaceSearchKey(issue.key) === query) return 0;
   return aliases.some(alias => normalizeWorkspaceSearchKey(alias.key) === query) ? 1 : null;
+}
+
+export function searchIssueCandidates<T extends Pick<Issue, 'id' | 'key' | 'title'>>(
+  data: IssueAliasData, candidates: readonly T[], input: string, text: (issue: T) => string = issue => issue.title,
+): { issue: T; matchedAliases: IssueSearchAlias[]; rank: 0 | 1 | 2 }[] {
+  const query = normalizeWorkspaceSearchKey(input);
+  if (!query) return candidates.map(issue => ({ issue, matchedAliases: [], rank: 2 }));
+  const terms = query.split(' ');
+  return candidates.flatMap(issue => {
+    const label = normalizeWorkspaceSearchKey(`${issue.key} ${text(issue)}`);
+    const aliases = issueSearchAliases(data, issue.id).map(alias => ({ alias, key: normalizeWorkspaceSearchKey(alias.key) }));
+    if (!terms.every(term => label.includes(term) || aliases.some(({ key }) => key.includes(term)))) return [];
+    const matchedAliases = aliases.filter(({ key }) => terms.some(term => key.includes(term))).map(({ alias }) => alias);
+    const rank: 0 | 1 | 2 = issueKeyMatchRank(issue, query, matchedAliases) ?? 2;
+    return [{ issue, matchedAliases, rank }];
+  }).sort((left, right) => left.rank - right.rank);
 }
 
 export function searchQuickIssues(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): IssueSearchMatch[] {

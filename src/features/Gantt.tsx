@@ -23,6 +23,7 @@ import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLa
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
 import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
+import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { issueStatusFilterLabel } from './IssueStatusFilter';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
@@ -256,6 +257,7 @@ function ProjectGantt(props: GanttProps) {
   const [planShift, setPlanShift] = useState<PlanningItem | null>(null);
   const [projectQuery, setProjectQuery] = useState('');
   const query = allProjects ? teamQuery : projectQuery;
+  const aliasQuery = normalizeWorkspaceSearchKey(query);
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [scheduleFocus, setScheduleFocus] = useState<ScheduleFocus | null>(null);
@@ -780,13 +782,15 @@ function ProjectGantt(props: GanttProps) {
     scheduleFilters = allProjects ? teamScheduleFilters : undefined) {
     const teamSearch = allProjects && text.trim() ? createTeamIssueSearchMatcher(text) : null;
     const projectSearch = allProjects ? '' : text.toLowerCase();
+    const projectAliasSearch = allProjects ? '' : normalizeWorkspaceSearchKey(text);
     return candidates.filter(issue => (!scope || issue[planningFields(scope.kind).idField] === scope.id) &&
       (!hideTerminal || !isTerminalStatus(data, issue.projectId, issue.status)) &&
       (scheduleFilters?.assigneeId === undefined || (issue.assigneeId ?? null) === scheduleFilters.assigneeId) &&
       (!scheduleFilters?.unscheduledOnly || !issue.startDate || !issue.endDate) &&
       (!scheduleFilters?.gitlab || matchesGitlabFilter(scheduleFilters.gitlab, teamGitlabSummaries?.get(issue.id))) &&
       (!teamSearch || teamSearch(data, issue, projectsById.get(issue.projectId), statusMeta(data, issue.projectId, issue.status).label)) &&
-      (!projectSearch || issueSearchText(data, issue).toLowerCase().includes(projectSearch)));
+      (!projectSearch || issueSearchText(data, issue).toLowerCase().includes(projectSearch) ||
+        matchingIssueSearchAliases(data, issue.id, projectAliasSearch).length > 0));
   }
   function sharedViewRows(rows: Issue[]) {
     if (sharedViewUnavailable) return [];
@@ -2248,6 +2252,7 @@ function ProjectGantt(props: GanttProps) {
         const deadline = issueDeadlines.get(issue.id);
         const deadlineX = deadline && !outside(deadline.dueDate) ? (dayNumber(deadline.dueDate) - range.start + .5) * dayWidth : null;
         const deadlineLabel = deadline && `${issue.key} 목표 마감일 ${deadline.dueDate}`;
+        const matchedAliasLabel = matchingIssueSearchAliases(data, issue.id, aliasQuery).map(issueSearchAliasLabel).join(' · ');
         return <div data-issue-id={issue.id} data-focused-issue={isFocused || undefined} data-dependency-focus-row={traceRole} data-hierarchy-focus-row={hierarchyRole}
           className={`gantt-row ${selected.has(issue.id) ? 'is-selected' : ''}${linkPicker ? ' gantt-link-pick-row' : ''}${isSource ? ' gantt-link-source-row' : ''}`} key={issue.id}>
           <div className="gantt-left">
@@ -2267,6 +2272,7 @@ function ProjectGantt(props: GanttProps) {
                 <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
                 <span><small>{rowProject && <><span className="gantt-row-project" title={rowProject.name}>{rowProject.key}</span> · </>}{issue.key} · <IssueTypeName data={data} issue={issue} />
                   {hierarchyTrace && <GanttHierarchyFocusLabel trace={hierarchyTrace} issueId={issue.id} />}</small><strong title={issue.title}>{issue.title}</strong>
+                  {matchedAliasLabel && <small className="gantt-issue-search-alias" title={matchedAliasLabel}>{matchedAliasLabel}</small>}
                   {visibleIds && !visibleIds.has(issue.id) && <small>현재 보기 조건 밖 · 날짜 입력 유지</small>}
                   {dependencyTrace && <GanttDependencyFocusLabel trace={dependencyTrace} issueId={issue.id} />}
                   {endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>
@@ -2469,7 +2475,7 @@ function ProjectGantt(props: GanttProps) {
       }}
     />}
     {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch}
-      issues={editingDependency || linkEditor.prefill || linkEditor.anchor ? projectIssues : scopedIssues}
+      issues={editingDependency || linkEditor.prefill || linkEditor.anchor ? projectIssues : scopedIssues} issueAliases={data.issueAliases}
       dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
       staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={() => { if (canLeave()) closeLinkEditor(); }} onSubmit={saveDependency} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
@@ -2491,7 +2497,8 @@ function ProjectGantt(props: GanttProps) {
       }} />}
   </div>
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
-      issue={rowScheduleEdit.issue} issues={rowEditIssues} dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
+      issue={rowScheduleEdit.issue} issues={rowEditIssues} issueAliases={data.issueAliases}
+      dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
       initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
       onApplied={async (result, reviewedAnchorVersion) => {
@@ -2515,6 +2522,7 @@ function ProjectGantt(props: GanttProps) {
       bulkLinks={{
         issues: bulkLinkSelection.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original),
         candidates: projectIssues.filter(issue => issue.projectId === bulkLinkSelection.project.id),
+        issueAliases: data.issueAliases,
         refresh,
       }}
       notify={notify} onDraftChange={trackDraft} onClose={closeBulkLinks}

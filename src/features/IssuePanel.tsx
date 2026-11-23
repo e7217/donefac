@@ -1175,10 +1175,11 @@ function IssuePanelContent(props: IssuePanelProps) {
       onClose={closeScheduleIssueCreation} onScheduleIssueCreated={focusCreatedScheduleIssue} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       initialDateDraft={rowScheduleEdit.initialDateDraft}
-      issues={data.issues} dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
+      issues={data.issues} issueAliases={data.issueAliases}
+      dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} undoScope={scheduleUndoScope ?? undefined} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
-    {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
+    {dependencyEditor && <GanttDependencyModal issues={data.issues} issueAliases={data.issueAliases} dependency={editingDependency}
       anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}
       relationReview={relationScheduleReview && { sourceIssueId: relationScheduleReview.relation.sourceIssueId,
         targetIssueId: relationScheduleReview.relation.targetIssueId, mode: relationScheduleReview.mode }}

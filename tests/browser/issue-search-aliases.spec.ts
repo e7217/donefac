@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse } from '@playwright/test';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 import type {
-  Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, WorkspaceSnapshot,
+  Dependency, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, SchedulePastePreview, WorkspaceSnapshot,
 } from '../../shared/types';
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
@@ -11,7 +11,7 @@ async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   return JSON.parse(body) as T;
 }
 
-test('360px 이전 번호로 Jira 이관 업무의 충돌을 구분하고 이동한 업무를 연다', async ({ page, request }) => {
+test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현재 업무를 열거나 연결한다', async ({ page, request }) => {
   test.setTimeout(95_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const suffix = randomUUID().slice(0, 7).toUpperCase();
@@ -64,6 +64,10 @@ test('360px 이전 번호로 Jira 이관 업무의 충돌을 구분하고 이동
     const preview = await json<IssueProjectMovePreview>(await request.post(`${movePath}/preview`, { data: move }));
     expect(preview.token, JSON.stringify(preview.blockers)).toBeTruthy();
     const { issues: [moved] } = await json<IssueProjectMoveResult>(await request.post(`${movePath}/apply`, { data: { ...move, token: preview.token } }));
+    const ganttFixtureTitle = `간트 연결 검증 ${suffix}`;
+    const anchor = await addIssue(first.project.id, `${ganttFixtureTitle} 시작 업무`);
+    const bulkTarget = await addIssue(first.project.id, `${ganttFixtureTitle} 일괄 연결 업무`);
+    const movedTarget = await addIssue(destination.id, `${ganttFixtureTitle} 이동 업무 연결`);
 
     await page.goto(`/#/${project.id}/issues`);
     const searchButton = page.getByRole('button', { name: '통합 검색', exact: true });
@@ -117,6 +121,111 @@ test('360px 이전 번호로 Jira 이관 업무의 충돌을 구분하고 이동
     await expect(movedDrawer).toContainText(moved.key);
     await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('issue')).toBe(moved.id);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    await movedDrawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+
+    const jiraAliasLabel = `Jira 원래 키 ${current.key}`;
+    const ganttSearch = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const chartRows = chart.locator('.gantt-row[data-issue-id]');
+    const chartRow = (issue: Issue) => chart.locator(`.gantt-row[data-issue-id="${issue.id}"]`);
+    const chartSelect = (issue: Issue) => chartRow(issue).getByRole('checkbox', { name: `${issue.key} 선택`, exact: true });
+
+    await page.goto(`/#/${project.id}/teamboard`);
+    await page.getByRole('searchbox', { name: '보드 업무 검색', exact: true }).fill(wideKey);
+    const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
+    await expect(board.locator('[data-issue-id]')).toHaveCount(3);
+    for (const issue of [current, first.issue, second.issue]) await expect(board.locator(`[data-issue-id="${issue.id}"]`)).toBeVisible();
+    await page.getByRole('button', { name: '현재 조건으로 간트 열기', exact: true }).click();
+    await expect(ganttSearch).toHaveValue(wideKey);
+    await expect(chartRows).toHaveCount(3);
+    await expect(chartRow(current)).toContainText(current.title);
+    for (const candidate of [first, second]) {
+      await expect(chartRow(candidate.issue)).toContainText(candidate.issue.key);
+      await expect(chartRow(candidate.issue)).toContainText(candidate.issue.title);
+      await expect(chartRow(candidate.issue)).toContainText(jiraAliasLabel);
+    }
+    await chartRow(first.issue).locator('.gantt-issue-name').click();
+    const chartDrawer = page.getByRole('dialog', { name: first.issue.title, exact: true });
+    await expect(chartDrawer).toBeVisible();
+    await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('issue')).toBe(first.issue.id);
+    await chartDrawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await ganttSearch.fill(beforeMove.key.toLowerCase());
+    await expect(chartRows).toHaveCount(1);
+    const moveAliasLabel = `이동 전 키 ${beforeMove.key}`;
+    await expect(chartRow(moved)).toContainText(moveAliasLabel);
+    await expect(chartRow(moved)).toContainText(moved.key);
+
+    await ganttSearch.fill(movedTarget.title);
+    await chartRow(movedTarget).getByRole('button', { name: `${movedTarget.key} 일정과 연결 편집`, exact: true }).click();
+    const rowEdit = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const rowLink = rowEdit.getByRole('group', { name: '연결 변경 1', exact: true });
+    await rowLink.getByLabel('선후행 연결 작업', { exact: true }).selectOption('add');
+    await rowLink.getByRole('textbox', { name: '연결할 업무 검색', exact: true }).fill(beforeMove.key.toLowerCase());
+    const movedChoice = rowLink.getByRole('list', { name: '연결할 업무 검색 결과', exact: true }).getByRole('button');
+    await expect(movedChoice).toHaveCount(1);
+    await expect(movedChoice).toContainText(moveAliasLabel);
+    await expect(movedChoice).toContainText(`${moved.key} · ${moved.title}`);
+    await movedChoice.click();
+    const rowPreviewing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/row-edit/preview' && response.request().method() === 'POST');
+    await rowEdit.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const rowPreview = await rowPreviewing;
+    expect(rowPreview.status(), await rowPreview.text()).toBe(200);
+    expect(rowPreview.request().postDataJSON()).toMatchObject({
+      projectId: destination.id, issue: { id: movedTarget.id },
+      dependency: { action: 'add', relatedIssue: { id: moved.id, expectedVersion: moved.version } },
+    });
+    page.once('dialog', confirmation => confirmation.accept());
+    await rowEdit.getByRole('button', { name: '일정과 연결 편집 닫기', exact: true }).click();
+    await expect(rowEdit).toHaveCount(0);
+
+    await page.goto(`/#/${first.project.id}/gantt`);
+    await ganttSearch.fill(wideKey);
+    await expect(chartRows).toHaveCount(1);
+    await expect(chartRow(first.issue)).toContainText(jiraAliasLabel);
+    await ganttSearch.fill(ganttFixtureTitle);
+    await chartSelect(anchor).check();
+    await expect(chartRow(first.issue)).toHaveCount(0);
+    await page.getByRole('button', { name: '선택 업무에서 연결', exact: true }).click();
+    const link = page.getByRole('dialog', { name: '선행·후행 업무 연결', exact: true });
+    await link.getByRole('searchbox', { name: '연결할 업무 검색', exact: true }).fill(wideKey);
+    const candidate = link.getByRole('combobox', { name: '연결할 업무', exact: true });
+    const options = candidate.getByRole('option');
+    await expect(options).toHaveCount(2);
+    await expect(options.nth(1)).toHaveJSProperty('value', first.issue.id);
+    await expect(options.nth(1)).toContainText(first.issue.key);
+    await expect(options.nth(1)).toContainText(first.issue.title);
+    await expect(options.nth(1)).toContainText(jiraAliasLabel);
+    await expect(candidate).toHaveValue('');
+    await candidate.selectOption(first.issue.id);
+    const creating = page.waitForResponse(response => new URL(response.url()).pathname === '/api/dependencies' && response.request().method() === 'POST');
+    await link.getByRole('button', { name: '업무 연결', exact: true }).click();
+    const created = await creating;
+    expect(created.request().postDataJSON()).toMatchObject({ predecessorId: anchor.id, successorId: first.issue.id });
+    expect(created.status(), await created.text()).toBe(201);
+    expect(await created.json() as Dependency).toMatchObject({ predecessorId: anchor.id, successorId: first.issue.id });
+    await expect(link).toHaveCount(0);
+
+    await chartSelect(anchor).check();
+    await chartSelect(bulkTarget).check();
+    await page.getByRole('button', { name: '선후행 일괄 연결', exact: true }).click();
+    const bulk = page.getByRole('dialog', { name: '선후행 연결 일괄 추가', exact: true });
+    await bulk.getByLabel('기준 업무 검색', { exact: true }).fill(wideKey);
+    const choices = bulk.getByRole('list', { name: '기준 업무 검색 결과', exact: true }).getByRole('listitem');
+    await expect(choices).toHaveCount(1);
+    await expect(choices.first()).toContainText(first.issue.key);
+    await expect(choices.first()).toContainText(first.issue.title);
+    await expect(choices.first()).toContainText(jiraAliasLabel);
+    await choices.first().getByRole('button').click();
+    await bulk.getByLabel('기준 업무 방향', { exact: true }).selectOption('successor');
+    const previewing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/bulk-links/preview' && response.request().method() === 'POST');
+    await bulk.getByRole('button', { name: '연결 미리보기', exact: true }).click();
+    const bulkPreviewResponse = await previewing;
+    expect(bulkPreviewResponse.request().postDataJSON()).toMatchObject({ anchor: { id: first.issue.id }, direction: 'successor' });
+    expect(bulkPreviewResponse.status(), await bulkPreviewResponse.text()).toBe(200);
+    expect(await bulkPreviewResponse.json() as SchedulePastePreview).toMatchObject({
+      errors: [], retainedDependencies: [expect.objectContaining({ predecessorKey: anchor.key, successorKey: first.issue.key })],
+      dependencyChanges: [expect.objectContaining({ predecessorKey: bulkTarget.key, successorKey: first.issue.key })],
+    });
   } finally {
     for (const id of issueIds) {
       const removed = await request.delete(`/api/issues/${id}`);

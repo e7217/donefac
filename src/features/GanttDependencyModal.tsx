@@ -3,8 +3,9 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowRightLeft, Link2, X } from 'lucide-react';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
-import type { Dependency, DependencyType, Issue } from '../../shared/types';
+import type { Dependency, DependencyType, Issue, WorkspaceSnapshot } from '../../shared/types';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { errorMessage } from './schedule-utils';
 import './issue-schedule-relations.css';
 
@@ -15,6 +16,7 @@ export type DependencyRelationReview = { sourceIssueId: string; targetIssueId: s
 
 type Props = {
   issues: Issue[];
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependency?: Dependency;
   prefill?: DependencyPrefill;
   anchor?: { issueId: string; otherRole: RelatedIssueDirection };
@@ -30,7 +32,7 @@ function relationIssueText(issue: Issue | undefined) {
   return issue ? `${issue.key} · ${issue.title}` : '업무를 찾을 수 없습니다.';
 }
 
-export function GanttDependencyModal({ issues, dependency, prefill, anchor, relationReview, staleMessage, onClose, onSubmit, busy, onDraftChange }: Props) {
+export function GanttDependencyModal({ issues, issueAliases, dependency, prefill, anchor, relationReview, staleMessage, onClose, onSubmit, busy, onDraftChange }: Props) {
   const id = useId();
   const fixedRelation = relationReview?.mode === 'fixed-direction' ? relationReview : undefined;
   const initialPredecessor = relationReview ? (fixedRelation?.sourceIssueId ?? '') :
@@ -66,13 +68,9 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
   const otherIsSuccessor = Boolean(anchor && predecessorId === anchor.issueId);
   const otherIssueId = otherIsSuccessor ? successorId : predecessorId;
   const otherIssue = otherIsSuccessor ? successor : predecessor;
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
   const searchForIssue = Boolean(anchor && !editing && !relationReview);
-  const candidates = searchForIssue && anchoredIssue ? issues.filter(issue => {
-    if (issue.id === anchoredIssue.id || issue.projectId !== anchoredIssue.projectId) return false;
-    const haystack = `${issue.key} ${issue.title}`.toLocaleLowerCase();
-    return terms.every(term => haystack.includes(term));
-  }) : [];
+  const candidates = searchForIssue && anchoredIssue ? searchIssueCandidates({ issueAliases },
+    issues.filter(issue => issue.id !== anchoredIssue.id && issue.projectId === anchoredIssue.projectId), query) : [];
   useEffect(() => {
     const focus = chooseRelationDirection ? relationDirectionSelect : searchForIssue ? searchInput : reviewingSelection ? typeSelect : predecessorSelect;
     focus.current?.focus({ preventScroll: true });
@@ -172,7 +170,7 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
             </label>
             {editing ? <div className="issue-dependent-context"><span>상대 업무</span><strong>{otherIssue?.key} · {otherIssue?.title}</strong></div> : <>
               <label className="issue-form-label issue-dependent-search">연결할 업무 검색
-                <input ref={searchInput} className="field" type="search" aria-label="연결할 업무 검색" placeholder="업무 번호 또는 제목" value={query} disabled={busy}
+                <input ref={searchInput} className="field" type="search" aria-label="연결할 업무 검색" placeholder="업무 키, 이전 키 또는 제목" value={query} disabled={busy}
                   onChange={event => setQuery(event.target.value)} onKeyDown={event => {
                     if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault();
                   }} />
@@ -182,8 +180,10 @@ export function GanttDependencyModal({ issues, dependency, prefill, anchor, rela
                   (otherIsSuccessor ? setSuccessorId : setPredecessorId)(event.target.value);
                 }}>
                   <option value="">{candidates.length ? '업무 선택' : '조건에 맞는 업무 없음'}</option>
-                  {otherIssue && !candidates.some(issue => issue.id === otherIssue.id) && <option value={otherIssue.id}>{otherIssue.key} · {otherIssue.title}</option>}
-                  {candidates.map(issue => <option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}
+                  {otherIssue && !candidates.some(({ issue }) => issue.id === otherIssue.id) && <option value={otherIssue.id}>{relationIssueText(otherIssue)}</option>}
+                  {candidates.map(({ issue, matchedAliases }) => <option key={issue.id} value={issue.id}>
+                    {relationIssueText(issue)}{matchedAliases.length > 0 && ` · ${matchedAliases.map(issueSearchAliasLabel).join(' · ')}`}
+                  </option>)}
                 </select>
               </label>
             </>}

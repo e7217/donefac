@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type PointerEventHandler } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays, Link2, Plus, RefreshCw, X } from 'lucide-react';
 import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
-import type { FeatureProps, Issue, IssueRelation, TeamScheduleBlocker } from '../../shared/types';
+import type { FeatureProps, Issue, IssueRelation, TeamScheduleBlocker, WorkspaceSnapshot } from '../../shared/types';
 import { isTerminalStatus } from '../../shared/workflow-helpers';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { api } from '../lib/api';
 import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
@@ -254,11 +255,11 @@ export function GanttTeamBlockers({
       <fieldset disabled={disabled}>
         <IssuePicker label="차단하는 업무" searchLabel="원인 업무 검색" searchRef={sourceSearch}
           selectedId={draft.sourceId} query={draft.sourceQuery} excludedProjectId={target?.projectId}
-          issues={activeIssues} projectNames={projectNames} onSelect={sourceId => changeDraft({ sourceId })}
+          issues={activeIssues} issueAliases={data.issueAliases} projectNames={projectNames} onSelect={sourceId => changeDraft({ sourceId })}
           onQuery={sourceQuery => changeDraft({ sourceQuery })} />
         <IssuePicker label="차단되는 업무" searchLabel="차단 대상 업무 검색"
           selectedId={draft.targetId} query={draft.targetQuery} excludedProjectId={source?.projectId}
-          issues={activeIssues} projectNames={projectNames} onSelect={targetId => changeDraft({ targetId })}
+          issues={activeIssues} issueAliases={data.issueAliases} projectNames={projectNames} onSelect={targetId => changeDraft({ targetId })}
           onQuery={targetQuery => changeDraft({ targetQuery })} />
       </fieldset>
       {invalidPair && <p role="status">서로 다른 프로젝트의 업무를 선택해 주세요.</p>}
@@ -313,7 +314,7 @@ export function GanttTeamBlockers({
   </section>;
 }
 
-function IssuePicker({ label, searchLabel, searchRef, selectedId, query, excludedProjectId, issues, projectNames, onSelect, onQuery }: {
+function IssuePicker({ label, searchLabel, searchRef, selectedId, query, excludedProjectId, issues, issueAliases, projectNames, onSelect, onQuery }: {
   label: string;
   searchLabel: string;
   searchRef?: React.Ref<HTMLInputElement>;
@@ -321,23 +322,29 @@ function IssuePicker({ label, searchLabel, searchRef, selectedId, query, exclude
   query: string;
   excludedProjectId?: string;
   issues: readonly Issue[];
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   projectNames: ReadonlyMap<string, string>;
   onSelect: (value: string) => void;
   onQuery: (value: string) => void;
 }) {
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/u);
   const selected = issues.find(issue => issue.id === selectedId);
-  const matches = issues.filter(issue => issue.id !== selectedId && issue.projectId !== excludedProjectId &&
-    terms.every(term => `${issue.key} ${issue.title} ${projectNames.get(issue.projectId) ?? ''}`.toLocaleLowerCase().includes(term)));
-  const shown = selected ? [selected, ...matches.slice(0, ISSUE_MATCH_LIMIT - 1)] : matches.slice(0, ISSUE_MATCH_LIMIT);
+  const matches = searchIssueCandidates({ issueAliases },
+    issues.filter(issue => issue.id === selectedId || issue.projectId !== excludedProjectId), query,
+    issue => `${issue.key} ${issue.title} ${projectNames.get(issue.projectId) ?? ''}`);
+  const available = matches.filter(({ issue }) => issue.id !== selectedId);
+  const selectedMatch = selected && (matches.find(({ issue }) => issue.id === selectedId) ?? { issue: selected, matchedAliases: [] });
+  const shown = selectedMatch ? [selectedMatch, ...available.slice(0, ISSUE_MATCH_LIMIT - 1)] : available.slice(0, ISSUE_MATCH_LIMIT);
   return <div className="gantt-team-blockers-picker">
     <label>{searchLabel}<input ref={searchRef} className="field" type="search" value={query} onChange={event => onQuery(event.target.value)} /></label>
     <label>{label}<select className="field" value={selectedId} onChange={event => onSelect(event.target.value)} required>
       <option value="">업무 선택</option>
       {selectedId && !selected && <option value={selectedId} disabled>현재 선택할 수 없는 업무</option>}
-      {shown.map(issue => <option key={issue.id} value={issue.id}>{issue.key} · {issue.title} · {projectNames.get(issue.projectId)}</option>)}
+      {shown.map(({ issue, matchedAliases }) => <option key={issue.id} value={issue.id}>
+        {issue.key} · {issue.title} · {projectNames.get(issue.projectId)}
+        {matchedAliases.length > 0 && ` · ${matchedAliases.map(issueSearchAliasLabel).join(' · ')}`}
+      </option>)}
     </select></label>
-    {matches.length > ISSUE_MATCH_LIMIT - Number(Boolean(selected)) && <small>업무 키, 제목 또는 프로젝트 이름으로 검색하세요.</small>}
+    {available.length > ISSUE_MATCH_LIMIT - Number(Boolean(selected)) && <small>업무 키, 이전 키, 제목 또는 프로젝트 이름으로 검색하세요.</small>}
   </div>;
 }
 

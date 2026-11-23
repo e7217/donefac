@@ -3,7 +3,8 @@
 import { useId, useState, type ReactNode, type RefObject } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import { DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../../shared/schedule-dependencies';
-import type { Issue, ScheduleBulkLinkInput } from '../../shared/types';
+import type { Issue, ScheduleBulkLinkInput, WorkspaceSnapshot } from '../../shared/types';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 
 type AnchorChoice = Pick<Issue, 'id' | 'key' | 'title'>;
 export type BulkLinkRule = Pick<ScheduleBulkLinkInput, 'type'> & { lagDays: string };
@@ -12,6 +13,7 @@ export type BulkLinkDraft = BulkLinkRule & Pick<ScheduleBulkLinkInput, 'directio
 type Props = {
   anchors: readonly Issue[];
   anchor?: Issue;
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   searchRef: RefObject<HTMLInputElement | null>;
   query: string;
   value: BulkLinkDraft;
@@ -21,18 +23,10 @@ type Props = {
 
 const PAGE_SIZE = 12;
 
-export function GanttBulkLinkFields({ anchors, anchor, searchRef, query, value, onSearch, onChange }: Props) {
+export function GanttBulkLinkFields({ anchors, anchor, issueAliases, searchRef, query, value, onSearch, onChange }: Props) {
   const id = useId();
   const [visible, setVisible] = useState(PAGE_SIZE);
-  const search = query.trim().toLocaleLowerCase();
-  const terms = search.split(/\s+/).filter(Boolean);
-  const results = anchors.filter(issue => {
-    if (issue.id === anchor?.id) return false;
-    const label = `${issue.key} ${issue.title}`.toLocaleLowerCase();
-    return terms.every(term => label.includes(term));
-  });
-  const exact = results.findIndex(issue => issue.key.toLocaleLowerCase() === search);
-  if (exact > 0) results.unshift(...results.splice(exact, 1));
+  const results = searchIssueCandidates({ issueAliases }, anchors.filter(issue => issue.id !== anchor?.id), query);
 
   function choose(choice: AnchorChoice | null) {
     onSearch('');
@@ -47,7 +41,7 @@ export function GanttBulkLinkFields({ anchors, anchor, searchRef, query, value, 
       <div className="schedule-bulk-link-anchor">
         <label htmlFor={`${id}-search`}>기준 업무 검색</label>
         <input ref={searchRef} id={`${id}-search`} className="field" value={query} autoComplete="off"
-          placeholder="업무 키 또는 제목" onChange={event => {
+          placeholder="업무 키, 이전 키 또는 제목" onChange={event => {
             setVisible(PAGE_SIZE);
             onSearch(event.currentTarget.value);
           }} />
@@ -58,13 +52,15 @@ export function GanttBulkLinkFields({ anchors, anchor, searchRef, query, value, 
           </div>
         )}
         {chosen && !anchor && <p role="alert">기준 업무가 삭제되었거나 다른 프로젝트로 이동했습니다. 기준 업무를 다시 선택해 주세요.</p>}
-        {(!anchor || search) && (
+        {(!anchor || query.trim()) && (
           <>
             {results.length ? (
               <ul className="schedule-bulk-link-results" aria-label="기준 업무 검색 결과">
-                {results.slice(0, visible).map(issue => (
+                {results.slice(0, visible).map(({ issue, matchedAliases }) => (
                   <li key={issue.id}>
-                    <button type="button" onClick={() => choose(issue)}><strong>{issue.key}</strong> {issue.title}</button>
+                    <button type="button" onClick={() => choose(issue)}><strong>{issue.key}</strong> {issue.title}
+                      {matchedAliases.length > 0 && <small className="gantt-candidate-alias">{matchedAliases.map(issueSearchAliasLabel).join(' · ')}</small>}
+                    </button>
                   </li>
                 ))}
               </ul>

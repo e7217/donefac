@@ -8,9 +8,10 @@ import { createApp } from '../../server/app.js';
 import { Store } from '../../server/store.js';
 import { documentPlainText } from '../../shared/document-nodes.js';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
+import { createTeamIssueSearchMatcher } from '../../shared/issue-view.js';
 import type { DocPage, GitlabLink, Issue, Project, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
-import { DEFAULT_WORKSPACE_SEARCH_FILTERS, normalizeWorkspaceSearchInput, normalizeWorkspaceSearchQuery, searchQuickDocuments, searchQuickIssues, searchWorkspace, workspaceSearchLabels,
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, normalizeWorkspaceSearchInput, normalizeWorkspaceSearchQuery, searchIssueCandidates, searchQuickDocuments, searchQuickIssues, searchWorkspace, workspaceSearchLabels,
   workspaceAtlassianSearchAddress, WORKSPACE_SEARCH_QUERY_LIMIT, type WorkspaceSearchFilters, type WorkspaceSearchResult } from '../../shared/workspace-search.js';
 
 const now = '2026-11-21T00:00:00.000Z';
@@ -51,6 +52,49 @@ function gitlabLink(issueId: string, kind: GitlabLink['kind'], webUrl: string, f
   return { id: `${issueId}:${kind}:${webUrl}`, issueId, projectId: 5, iid: 91, kind, webUrl,
     title: '합성 개발 활동', state: 'active', updatedAt: now, ...fields };
 }
+
+test('scoped issue pickers rank current exact keys above colliding Jira and moved keys without selecting one alias', () => {
+  const exact = issue('current', '현재 키의 티켓', { key: 'LAB-91' });
+  const migrated = issue('migrated', '검토할 원본 업무', { key: 'LAB-10', description: '오프라인 설치 계획' });
+  const moved = issue('moved', '이동한 검토 업무', { key: 'LAB-11' });
+  const text = issue('text', 'LAB-91 검토 참고');
+  const other = issue('foreign', '프로젝트 범위 밖', { key: 'OPS-31', projectId: secondProject.id });
+  const scoped = [text, moved, migrated, exact];
+  const data = snapshot([other, ...scoped]);
+  const jira = { key: exact.key, source: 'jira' } as const;
+  const former = { key: exact.key, source: 'move' } as const;
+  data.issueAliases = {
+    [migrated.id]: [jira, { key: 'OLD-52', source: 'jira' }], [moved.id]: [former], [other.id]: [jira],
+  };
+  const before = structuredClone(data);
+  const exactQuery = '  ｌａｂ－９１  ';
+  const matches = searchIssueCandidates(data, scoped, exactQuery);
+  assert.deepEqual(matches.map(value => value.issue.id), [exact.id, moved.id, migrated.id, text.id]);
+  assert.deepEqual(matches.map(value => value.matchedAliases ?? []), [[], [former], [jira], []]);
+  assert.deepEqual(searchIssueCandidates(data, scoped, 'lab-9 검토').map(value => value.issue.id), [text.id, moved.id, migrated.id]);
+  const byDescription = searchIssueCandidates(data, scoped, 'ＬＡＢ－９１ 설치', value => value.description);
+  assert.deepEqual(byDescription.map(value => [value.issue.id, value.matchedAliases]), [[migrated.id, [jira]]]);
+  assert.deepEqual(searchIssueCandidates(data, scoped, ' ').map(value => value.issue.id), scoped.map(value => value.id));
+  assert.deepEqual(searchIssueCandidates(data, [text, exact], 'OLD-52'), []);
+  assert.deepEqual(data, before);
+});
+
+test('team issue text search combines normalized Jira or moved aliases with project, status and body terms', () => {
+  const migrated = issue('jira', '원본 업무', { key: 'OPS-10', projectId: secondProject.id, description: 'rollback 안내' });
+  const moved = issue('moved', '이전 업무', { key: 'OPS-11', projectId: secondProject.id, description: 'rollback 안내' });
+  const unrelated = issue('other', '관련 없는 업무', { key: 'OPS-12', projectId: secondProject.id, description: 'rollback 안내' });
+  const data = snapshot([migrated, moved, unrelated]);
+  data.issueAliases = {
+    [migrated.id]: [{ key: 'OLD-91', source: 'jira' }], [moved.id]: [{ key: 'OLD-91', source: 'move' }],
+  };
+  const query = createTeamIssueSearchMatcher('ｏｌｄ－９１ 운영실 검토 rollBACK');
+  assert.equal(query(data, migrated, secondProject, '검토 중'), true);
+  assert.equal(query(data, moved, secondProject, '검토 중'), true);
+  assert.equal(query(data, unrelated, secondProject, '검토 중'), false);
+  assert.equal(query(data, migrated, secondProject, '대기'), false);
+  assert.equal(query(data, migrated, firstProject, '검토 중'), false);
+  assert.equal(createTeamIssueSearchMatcher('ops-10 rollback')(data, migrated, secondProject, '검토 중'), true);
+});
 
 test('workspace original-address searches only linked local targets and preserves filters and safe sharing', () => {
   const url = 'https://wiki.search.invalid/wiki/pages/viewpage.action?pageId=90071992547409931234';

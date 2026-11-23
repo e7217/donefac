@@ -4,6 +4,7 @@ import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
 import { summarizeIssueGitlabLinks, type IssueGitlabSummary } from './issue-gitlab-view.js';
 import { PLANNING_FIELDS } from './planning-helpers.js';
+import { issueSearchAliases, normalizeWorkspaceSearchKey } from './workspace-search.js';
 
 export class IssueViewPlanningFilterError extends Error {
   readonly status = 400;
@@ -236,11 +237,12 @@ export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: Issu
 }
 
 export function createTeamIssueSearchMatcher(query?: string) {
-  const terms = (query ?? '').trim().toLocaleLowerCase().split(/\s+/u).filter(Boolean);
+  const terms = normalizeWorkspaceSearchKey(query ?? '').split(' ').filter(Boolean);
   return (data: WorkspaceSnapshot, issue: Issue, project: Pick<Project, 'key' | 'name'> | undefined, statusLabel: string) => {
     if (!terms.length) return true;
-    const text = `${project?.key ?? ''} ${project?.name ?? ''} ${statusLabel} ${issueSearchText(data, issue)}`.toLocaleLowerCase();
-    return terms.every(term => text.includes(term));
+    const text = normalizeWorkspaceSearchKey(`${project?.key ?? ''} ${project?.name ?? ''} ${statusLabel} ${issueSearchText(data, issue)}`);
+    const aliases = issueSearchAliases(data, issue.id).map(alias => normalizeWorkspaceSearchKey(alias.key));
+    return terms.every(term => text.includes(term) || aliases.some(key => key.includes(term)));
   };
 }
 

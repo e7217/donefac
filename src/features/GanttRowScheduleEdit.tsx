@@ -12,8 +12,9 @@ import {
   MAX_SCHEDULE_ROW_DEPENDENCY_EDITS,
   type Dependency, type DependencyType, type FeatureProps, type Issue, type ScheduleBulkDateChanges,
   type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput,
-  type ScheduleUndoScope, type WorkCalendar,
+  type ScheduleUndoScope, type WorkCalendar, type WorkspaceSnapshot,
 } from '../../shared/types';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { ApiError, api } from '../lib/api';
 import { scheduleUndoHeaders } from './schedule-undo';
 import { errorMessage, todayDate } from './schedule-utils';
@@ -24,6 +25,7 @@ import './gantt-row-schedule-edit.css';
 type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issue: Issue;
   issues: readonly Issue[];
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
@@ -142,7 +144,8 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, issueAliases, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
@@ -516,7 +519,7 @@ export function GanttRowScheduleEdit({
           </details>}
           <div className="gantt-row-edit-drafts" data-multiple={drafts.length > 1 || undefined}>
             {drafts.map((draft, index) => <GanttRowDependencyFields key={draft.id} draft={draft} name={`연결 변경 ${index + 1}`}
-              anchorId={anchor.id} projectIssues={projectIssues} links={links} resolved={resolvedDrafts[index]}
+              anchorId={anchor.id} projectIssues={projectIssues} issueAliases={issueAliases} links={links} resolved={resolvedDrafts[index]}
               duplicateDraft={duplicateDraft(resolvedDrafts[index])} onChange={changes => changeDraft(draft.id, changes)}
               onRemove={drafts.length > 1 ? () => removeDraft(index) : undefined} />)}
           </div>
@@ -635,11 +638,12 @@ function MissingDateSuggestion({ startDate, endDate, calendarMath, links, disabl
   </section>;
 }
 
-function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links, resolved, duplicateDraft, onChange, onRemove }: {
+function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, issueAliases, links, resolved, duplicateDraft, onChange, onRemove }: {
   draft: LinkDraft;
   name: string;
   anchorId: string;
   projectIssues: ReadonlyMap<string, Issue>;
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   links: readonly ExistingLink[];
   resolved: DraftResolution;
   duplicateDraft: boolean;
@@ -654,13 +658,13 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links,
   const { related, selected, duplicateExisting } = resolved;
   const candidates = useMemo(() => {
     if (action !== 'add' || related) return [];
-    const normalizedQuery = query.trim().toLocaleLowerCase();
-    const terms = normalizedQuery.split(/\s+/u).filter(Boolean);
-    return [...projectIssues.values()]
-      .filter(item => item.id !== anchorId && terms.every(term => issueText(item).toLocaleLowerCase().includes(term)))
-      .sort((left, right) => Number(right.key.toLocaleLowerCase() === normalizedQuery) -
-        Number(left.key.toLocaleLowerCase() === normalizedQuery) || left.key.localeCompare(right.key, 'ko', { numeric: true }));
-  }, [action, anchorId, query, projectIssues, related]);
+    const available = [...projectIssues.values()].filter(item => item.id !== anchorId)
+      .sort((left, right) => left.key.localeCompare(right.key, 'ko', { numeric: true }));
+    return searchIssueCandidates({ issueAliases }, available, query, issueText);
+  }, [action, anchorId, issueAliases, query, projectIssues, related]);
+  const exactMatches = candidates.filter(candidate => candidate.rank < 2);
+  const ambiguousAlias = (exactMatches.length > 1 && exactMatches.some(candidate => candidate.rank === 1)) ||
+    (!exactMatches.length && candidates.length > 1 && candidates.some(candidate => candidate.matchedAliases.length > 0));
 
   function chooseLink(id: string) {
     const link = links.find(entry => entry.dependency.id === id);
@@ -684,7 +688,8 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links,
       (buttons[index - 1] ?? searchInput.current)?.focus();
     } else if (event.key === 'Enter' && event.target === searchInput.current) {
       event.preventDefault();
-      if (candidates[0]) chooseRelated(candidates[0]);
+      if (ambiguousAlias) buttons[0]?.focus();
+      else if (candidates[0]) chooseRelated(candidates[0].issue);
     }
   }
 
@@ -713,14 +718,17 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, links,
       <div className="gantt-row-edit-control">
         <label htmlFor={`${uid}-search`}>연결할 업무 검색</label>
         <input id={`${uid}-search`} className="field" type="text" ref={searchInput} aria-controls={`${uid}-results`}
-          value={query} placeholder="업무 키 또는 제목" onChange={event => onChange({ query: event.currentTarget.value })} />
+          value={query} placeholder="업무 키, 이전 키 또는 제목" onChange={event => onChange({ query: event.currentTarget.value })} />
       </div>
       {relatedId && <p className="gantt-row-edit-hint" role="status">선택한 업무가 목록에서 사라졌습니다. 연결할 업무를 다시 선택하세요.</p>}
       <ul className="gantt-row-edit-results" id={`${uid}-results`} ref={resultsList} aria-label="연결할 업무 검색 결과">
-        {candidates.slice(0, 12).map(candidate => <li key={candidate.id}>
-          <button type="button" className="btn btn-ghost" onClick={() => chooseRelated(candidate)}>{issueText(candidate)}</button>
+        {candidates.slice(0, 12).map(({ issue, matchedAliases }) => <li key={issue.id}>
+          <button type="button" className="btn btn-ghost" onClick={() => chooseRelated(issue)}><span>{issueText(issue)}
+            {matchedAliases.length > 0 && <small className="gantt-candidate-alias">{matchedAliases.map(issueSearchAliasLabel).join(' · ')}</small>}
+          </span></button>
         </li>)}
       </ul>
+      {ambiguousAlias && <p className="gantt-row-edit-hint" role="status">검색에 일치하는 업무가 여러 개입니다. 현재 키와 제목을 확인해 선택하세요.</p>}
       {!candidates.length && <p className="gantt-row-edit-hint">같은 프로젝트에 일치하는 업무가 없습니다.</p>}
       {candidates.length > 12 && <p className="gantt-row-edit-hint">검색 조건으로 업무를 더 좁힐 수 있습니다.</p>}
     </div>)}

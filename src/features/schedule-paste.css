@@ -634,6 +634,13 @@
   outline-offset: -2px;
 }
 
+.gantt-candidate-alias {
+  display: block;
+  color: #4d685b;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .schedule-bulk-link-lag .field {
   margin-top: 0;
 }

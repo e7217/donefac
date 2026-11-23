@@ -7,7 +7,7 @@ import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../..
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
   ScheduleBulkChainInput, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
-  SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker,
+  SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
@@ -16,7 +16,7 @@ import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
 
 type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
-type BulkLinks = { issues: readonly Issue[]; candidates: readonly Issue[]; refresh: () => Promise<void> };
+type BulkLinks = { issues: readonly Issue[]; candidates: readonly Issue[]; issueAliases?: WorkspaceSnapshot['issueAliases']; refresh: () => Promise<void> };
 type BlockerLinks = { issues: readonly Issue[]; dependencies: readonly Dependency[]; projects?: readonly Project[]; refresh: () => Promise<void> };
 type TeamPaste = { projects: readonly Project[] };
 type ProjectName = Pick<Project, 'id' | 'name'>;
@@ -640,7 +640,7 @@ function ProjectScheduleEditDialog({
                   </select>
                 </label>
                 {chainMode ? <GanttBulkChainFields issues={chainIssues} value={chainRule} onChange={updateChainRule} onMove={moveChainIssue} />
-                  : <GanttBulkLinkFields anchors={anchors} anchor={anchor} searchRef={anchorSearch} query={anchorQuery}
+                  : <GanttBulkLinkFields anchors={anchors} anchor={anchor} issueAliases={bulkLinks.issueAliases} searchRef={anchorSearch} query={anchorQuery}
                     value={link} onSearch={setAnchorQuery} onChange={updateLink} />}
               </>
             ) : bulkDates ? (
