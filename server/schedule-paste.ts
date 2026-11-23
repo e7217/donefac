@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -60,7 +60,6 @@ type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'hierarchyId' 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
-const MAX_MANUAL_ISSUES = 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -150,7 +149,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const invalid = () => new SchedulePasteError(400, '일정을 변경할 업무와 날짜 또는 이동 일수를 확인해 주세요.');
   if (!isRecord(raw)) throw invalid();
   if (Object.hasOwn(raw, 'changes')) {
-    if (Object.keys(raw).length !== 1 || !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_MANUAL_ISSUES) throw invalid();
+    if (Object.keys(raw).length !== 1 || !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
       const { id, expectedVersion, startDate, endDate } = value;
@@ -165,7 +164,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   if (Object.keys(raw).length !== 3 || typeof days !== 'number' || !Number.isSafeInteger(days) ||
       Math.abs(days) > MAX_WORKING_DURATION_DAYS || typeof workingDays !== 'boolean') throw invalid();
   if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays };
-  if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_MANUAL_ISSUES ||
+  if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_SCHEDULE_MANUAL_ISSUES ||
       !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length) throw invalid();
   return { issueIds, days, workingDays };
 }
@@ -364,8 +363,8 @@ export class SchedulePasteService {
         }
         const trace = traceGanttHierarchy(anchor.id, state.issues, issue => categories?.get(issue.status) ?? 'backlog');
         if (!trace) throw new SchedulePasteError(404, '상위 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
-        if (trace.issues.length > MAX_MANUAL_ISSUES) {
-          throw new SchedulePasteError(400, `한 번에 검토할 수 있는 상위·하위 업무는 ${MAX_MANUAL_ISSUES}개입니다. 하위 업무를 기준으로 범위를 나누어 주세요.`);
+        if (trace.issues.length > MAX_SCHEDULE_MANUAL_ISSUES) {
+          throw new SchedulePasteError(400, `한 번에 검토할 수 있는 상위·하위 업무는 ${MAX_SCHEDULE_MANUAL_ISSUES}개입니다. 하위 업무를 기준으로 범위를 나누어 주세요.`);
         }
         selected = trace.issues.map(issue => shiftTarget(issue.id));
       }

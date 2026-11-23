@@ -101,24 +101,20 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     if (onScopeChange({ ...scope, offset })) focusResults.current = true;
   }
 
-  async function showIssue(issue: DecisionFollowUpItem['issue'], opener: HTMLButtonElement) {
+  async function showIssue(issueId: string, opener: HTMLButtonElement) {
     if (issueRequest.current) return;
-    const cached = data.issues.find(value => value.id === issue.id);
     issueOpener.current = opener;
     opener.focus({ preventScroll: true });
-    if (cached && cached.projectId === issue.projectId && cached.title === issue.title && cached.status === issue.status && cached.assigneeId === issue.assigneeId &&
-        (cached.dueDate || cached.endDate || null) === issue.deadline) {
-      openIssue(issue.id);
-      return;
-    }
+    const origin = window.location.hash;
     const token = Symbol();
+    const isCurrent = () => issueRequest.current === token && window.location.hash === origin;
     issueRequest.current = token;
     setOpening({ scope, token });
     try {
       await refresh();
-      if (issueRequest.current === token) openIssue(issue.id);
+      if (isCurrent()) openIssue(issueId);
     } catch (cause) {
-      if (issueRequest.current === token) notify(cause instanceof Error ? cause.message : '업무를 불러오지 못했습니다.', 'error');
+      if (isCurrent()) notify(cause instanceof Error ? cause.message : '업무를 불러오지 못했습니다.', 'error');
     } finally {
       setOpening(previous => previous?.token === token ? null : previous);
       if (issueRequest.current === token) issueRequest.current = null;
@@ -245,7 +241,7 @@ function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
   data: Props['data'];
   showIssueProject: boolean;
   loading: boolean;
-  open: (issue: DecisionFollowUpItem['issue'], opener: HTMLButtonElement) => Promise<void>;
+  open: (issueId: string, opener: HTMLButtonElement) => Promise<void>;
 }) {
   const { linkId, issue, document, source } = item;
   const path = `${workspacePath(issue.projectId)}/${encodeURIComponent(linkId)}/source`;
@@ -264,7 +260,7 @@ function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
 
   return <article className="card decision-follow-up" aria-label={`${issue.key} 결정 후속 업무`}>
     <h4><button className="decision-follow-up-issue" type="button" aria-label={`${issue.key} 업무 열기`} aria-disabled={loading}
-      onClick={event => { if (!loading) void open(issue, event.currentTarget); }}>
+      onClick={event => { if (!loading) void open(issue.id, event.currentTarget); }}>
       <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><ChevronRight size={15} aria-hidden="true" />
     </button></h4>
     <dl className="decision-follow-up-details" data-show-issue-project={showIssueProject || undefined}>

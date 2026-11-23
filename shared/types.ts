@@ -1680,6 +1680,7 @@ export interface SchedulePreview {
   skipped?: ScheduleHierarchySkip[];
 }
 export interface ScheduleAnchorChange { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }
+export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
 export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
   { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
   { changes: ScheduleAnchorChange[] };

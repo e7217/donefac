@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -61,12 +61,17 @@ import './gantt-deadline-markers.css';
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type InlineDateDraft = { source: Issue; startDate: string | null; endDate: string | null; accept: (saved: Issue) => void };
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
-type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin };
+type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin; inlineDates?: InlineDateDraft[] };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
 type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
 type ShiftMode = 'selection' | 'hierarchy';
 function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
   return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
+}
+function inlineDateChange(draft: InlineDateDraft, issue = draft.source): ScheduleAnchorChange {
+  return { id: issue.id, expectedVersion: issue.version,
+    startDate: draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
+    endDate: draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
 }
 function isUncertainScheduleResponse(cause: unknown): boolean {
   return !(cause instanceof ApiError) || cause.status >= 500 || [408, 425, 429, 499].includes(cause.status);
@@ -321,6 +326,7 @@ function ProjectGantt(props: GanttProps) {
   const restoreViewport = useRef<GanttViewportAnchor>(null);
   const [refreshCount, setRefreshCount] = useState(0);
   const [hasDraft, setHasDraft] = useState(false);
+  const [inlineDateIds, setInlineDateIds] = useState<ReadonlySet<string>>(() => new Set());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
     shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
@@ -410,8 +416,11 @@ function ProjectGantt(props: GanttProps) {
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
   const trackInlineDates = useCallback((id: string, draft: InlineDateDraft | null) => {
-    if (draft) inlineDateDrafts.current.set(id, draft);
-    else inlineDateDrafts.current.delete(id);
+    const drafts = inlineDateDrafts.current;
+    const wasDirty = drafts.has(id);
+    if (draft) drafts.set(id, draft);
+    else drafts.delete(id);
+    if (wasDirty !== Boolean(draft)) setInlineDateIds(new Set(drafts.keys()));
   }, []);
   const markBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
   useEffect(() => {
@@ -436,6 +445,7 @@ function ProjectGantt(props: GanttProps) {
             setDatePreviewFocusTarget(null);
             draftsRef.current.clear();
             inlineDateDrafts.current.clear();
+            setInlineDateIds(new Set());
             setHasDraft(false);
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
@@ -463,6 +473,7 @@ function ProjectGantt(props: GanttProps) {
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
       inlineDateDrafts.current.clear();
+      setInlineDateIds(new Set());
       setDraftEpoch(value => value + 1);
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
@@ -615,7 +626,13 @@ function ProjectGantt(props: GanttProps) {
     return { rows: pinnedIssue ? [pinnedIssue, ...rows] : rows, pinnedIssue };
   }
   const { rows: ordinaryIssues, pinnedIssue } = chartRows(query, hideDone, planningScope);
-  const issues = scheduleFocus ? focusedTrace?.issues ?? [] : ordinaryIssues;
+  const visibleIssues = scheduleFocus ? focusedTrace?.issues ?? [] : ordinaryIssues;
+  // A peer edit can make a dirty row fail its active filters while refreshing a stale preview.
+  const visibleIds = inlineDateIds.size ? new Set(visibleIssues.map(issue => issue.id)) : null;
+  const retainedDateRows = visibleIds && !scheduleFocus
+    ? scopedIssues.filter(issue => inlineDateIds.has(issue.id) && !visibleIds.has(issue.id)) : [];
+  const issues = retainedDateRows.length ? [...visibleIssues, ...retainedDateRows] : visibleIssues;
+  const inlineDateCount = inlineDateIds.size ? issues.filter(issue => inlineDateIds.has(issue.id)).length : 0;
   const ordinaryIssueIds = focusedTrace ? new Set(ordinaryIssues.map(issue => issue.id)) : null;
   const outsideFilterCount = ordinaryIssueIds ? issues.filter(issue => !ordinaryIssueIds.has(issue.id) && issue.id !== hierarchyTrace?.anchor.id).length : 0;
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
@@ -663,7 +680,7 @@ function ProjectGantt(props: GanttProps) {
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
   const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
-  const previewCascade = !hierarchyPreview && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
+  const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
     if (!analysisOpen || !hasProject || !calendar) return null;
     try {
@@ -1136,6 +1153,48 @@ function ProjectGantt(props: GanttProps) {
       markBusy(false);
     }
   }
+  async function openInlineDateReview(opener: HTMLButtonElement) {
+    if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
+        [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
+    const inlineDates = issues.flatMap(issue => {
+      const draft = inlineDateDrafts.current.get(issue.id);
+      return draft ? [draft] : [];
+    });
+    if (inlineDates.length < 2 || inlineDates.length > MAX_SCHEDULE_MANUAL_ISSUES) return;
+    const input = { changes: inlineDates.map(draft => inlineDateChange(draft)) };
+    markBusy(true);
+    try {
+      const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      setDatePreviewFocusTarget(opener);
+      setManualReview({ input, preview, inlineDates });
+      setManualProblem(null);
+    } catch (cause) {
+      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
+        setDatePreviewFocusTarget(opener);
+        setManualReview({ input, preview: { changes: [], warnings: [] }, inlineDates });
+        setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+        await refresh().catch(() => undefined);
+      } else {
+        notify(errorMessage(cause), 'error');
+        focusAfterDatePicking(opener);
+      }
+    } finally { markBusy(false); }
+  }
+  function settleInlineDates(review: ManualReview, updated: readonly Issue[]) {
+    if (!review.inlineDates || !('changes' in review.input)) return;
+    const submitted = new Map(review.input.changes.map(change => [change.id, change]));
+    const saved = new Map(updated.map(issue => [issue.id, issue]));
+    const latest = new Map(data.issues.map(issue => [issue.id, issue]));
+    for (const draft of review.inlineDates) {
+      const id = draft.source.id;
+      if (inlineDateDrafts.current.get(id) !== draft) continue;
+      const change = submitted.get(id);
+      const unchanged = latest.get(id);
+      const issue = saved.get(id) ?? (change && unchanged?.version === change.expectedVersion &&
+        unchanged.startDate === change.startDate && unchanged.endDate === change.endDate ? unchanged : undefined);
+      if (issue) draft.accept(issue);
+    }
+  }
   async function commitManualReview(review: ManualReview, checking = false) {
     const { previewId } = review.preview;
     if (!previewId) return;
@@ -1157,6 +1216,7 @@ function ProjectGantt(props: GanttProps) {
     }
     const inlineIssue = result.updated.find(issue => issue.id === review.inline?.issueId);
     if (inlineIssue) review.inline?.accept?.(inlineIssue);
+    settleInlineDates(review, result.updated);
     setUndoId(result.undoId);
     setManualReview(null);
     setManualProblem(null);
@@ -1180,7 +1240,19 @@ function ProjectGantt(props: GanttProps) {
   async function reviewManualAgain() {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
-    if ('changes' in input) {
+    if (manualReview.inlineDates) {
+      const latest = new Map(data.issues.map(issue => [issue.id, issue]));
+      const changes: ScheduleAnchorChange[] = [];
+      for (const draft of manualReview.inlineDates) {
+        const issue = latest.get(draft.source.id);
+        if (!issue || issue.projectId !== draft.source.projectId) {
+          setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
+          return;
+        }
+        changes.push(inlineDateChange(draft, issue));
+      }
+      input = { changes };
+    } else if ('changes' in input) {
       const issues = new Map(data.issues.map(issue => [issue.id, issue]));
       input = { changes: input.changes.map(change => ({ ...change, expectedVersion: issues.get(change.id)?.version ?? change.expectedVersion })) };
     } else if ('hierarchy' in input) {
@@ -1191,7 +1263,13 @@ function ProjectGantt(props: GanttProps) {
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
-      setManualReview({ ...manualReview, input, preview });
+      const review = { ...manualReview, input, preview };
+      if (review.inlineDates && !preview.previewId && !preview.blocking?.length) {
+        settleInlineDates(review, []);
+        setManualReview(null);
+        restoreDatePreviewFocus();
+        notify('입력한 날짜가 현재 일정에 모두 반영되어 있습니다.');
+      } else setManualReview(review);
       setManualProblem(null);
     } catch (cause) {
       setManualProblem({ kind: 'stale', message: errorMessage(cause) });
@@ -1651,6 +1729,14 @@ function ProjectGantt(props: GanttProps) {
         <CalendarRange size={15} aria-hidden="true" />일정 일괄 편집
       </button>}
       {canEditBulkDates && bulkDatesOverLimit && <span role="status" className="muted">날짜를 한 번에 편집할 업무를 {MAX_SCHEDULE_BULK_DATE_ISSUES}개 이하로 선택하세요.</span>}
+      {inlineDateCount >= 2 && <button className="btn" type="button" data-gantt-focus-control=""
+        onPointerDown={keepInlineDateFocus} onClick={event => void openInlineDateReview(event.currentTarget)}
+        disabled={busy || scheduleEditorOpen || issueOverlayOpen || inlineDateCount > MAX_SCHEDULE_MANUAL_ISSUES}>
+        <CalendarRange size={15} aria-hidden="true" />입력한 날짜 {inlineDateCount}건 검토
+      </button>}
+      {inlineDateCount > MAX_SCHEDULE_MANUAL_ISSUES && <span role="status" className="muted">
+        한 번에 최대 {MAX_SCHEDULE_MANUAL_ISSUES.toLocaleString('ko-KR')}개 업무의 날짜를 검토할 수 있습니다.
+      </span>}
       <button ref={findingsTrigger} className="btn gantt-findings-trigger" type="button" aria-label="일정 충돌" aria-expanded={findingsOpen}
         aria-controls={findingsOpen ? FINDINGS_PANEL_ID : undefined}
         aria-describedby="gantt-dependency-summary"
@@ -1792,7 +1878,7 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 입력은 행의 저장 버튼이나 Enter로 저장하세요. Esc로 날짜 변경을 취소합니다.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 여러 행을 입력한 뒤 함께 검토할 수 있습니다. Esc로 날짜 변경을 취소합니다.</span></div>
     <div className="gantt-window-controls">
       <span>표시 범위</span>
       <button type="button" className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button>
@@ -1905,6 +1991,7 @@ function ProjectGantt(props: GanttProps) {
                 <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
                 <span><small>{rowProject && <><span className="gantt-row-project" title={rowProject.name}>{rowProject.key}</span> · </>}{issue.key} · <IssueTypeName data={data} issue={issue} />
                   {hierarchyTrace && <GanttHierarchyFocusLabel trace={hierarchyTrace} issueId={issue.id} />}</small><strong title={issue.title}>{issue.title}</strong>
+                  {visibleIds && !visibleIds.has(issue.id) && <small>현재 보기 조건 밖 · 날짜 입력 유지</small>}
                   {dependencyTrace && <GanttDependencyFocusLabel trace={dependencyTrace} issueId={issue.id} />}
                   {endDelta !== null && <small className="gantt-baseline-delta" title="현재 계획 종료일 − 기준선 종료일 (달력일)">종료 {endDelta > 0 ? '+' : ''}{endDelta}일 · 달력일</small>}</span>
                 {user && <span className="issue-avatar" style={{ background: user.color }} title={user.name}>{user.name.slice(0, 1)}</span>}
@@ -1997,7 +2084,16 @@ function ProjectGantt(props: GanttProps) {
       </section>
     </div>
     {preview && !cascade && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
-      if (!hierarchyPreview || busy || event.defaultPrevented || event.nativeEvent.isComposing || event.key !== 'Escape') return;
+      if (event.defaultPrevented || event.nativeEvent.isComposing) return;
+      if (manualReview?.inlineDates && event.key === 'Tab') {
+        const controls = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+        const first = controls[0], last = controls[controls.length - 1];
+        if (!first || event.target === event.currentTarget || event.target === (event.shiftKey ? first : last)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first)?.focus();
+        }
+      }
+      if ((!hierarchyPreview && !manualReview?.inlineDates) || busy || event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
       closePreview();
