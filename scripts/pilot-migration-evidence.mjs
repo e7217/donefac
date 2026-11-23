@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { confirmedConfluenceRestrictions } from './pilot-migration-confluence-findings.mjs';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const sha = /^[a-f0-9]{64}$/;
@@ -163,16 +164,18 @@ function validateConfluenceReviews(reviews, packages) {
   }
 }
 
-async function readReviewedPageDispositions(call, receipt, reviewedSources, recordCount) {
+async function readReviewedPageDispositions(call, receipt, reviewedSources, restrictedSources, recordCount) {
   const invalid = 'Confluence 페이지별 검토의 영수증 원본 목록을 확인할 수 없습니다.';
   const configuredExclusions = receipt.configuration?.excludedRecords ?? [];
   requireEvidence(Array.isArray(configuredExclusions), invalid);
   const excluded = new Set(configuredExclusions);
+  const restrictedTargets = new Set();
   let total;
   for (let offset = 0; total === undefined || offset < total; offset += sourceRecordPageSize) {
     requireEvidence(offset <= sourceRecordMaxOffset, invalid);
     const page = await call(`/source-imports/${receipt.id}/records?kind=page&offset=${offset}&limit=${sourceRecordPageSize}`);
-    requireEvidence(page && count(page.total) && page.total <= recordCount && (total === undefined || page.total === total) &&
+    requireEvidence(page && count(page.total) && (recordCount === undefined || page.total <= recordCount) &&
+      (total === undefined || page.total === total) &&
       page.offset === offset && page.limit === sourceRecordPageSize && Array.isArray(page.records) &&
       page.records.length === Math.min(sourceRecordPageSize, page.total - offset), invalid);
     total = page.total;
@@ -180,41 +183,66 @@ async function readReviewedPageDispositions(call, receipt, reviewedSources, reco
       requireEvidence(row?.sourceImportId === receipt.id && row.record?.kind === 'page' &&
         typeof row.record.sourceId === 'string' && row.record.id === `page:${row.record.sourceId}` &&
         hex(row.packageSha256) && product(row.source?.product) && typeof row.source.instanceKey === 'string', invalid);
-      const source = reviewedSources.get(sourceKey(row.packageSha256, row.source.product, row.source.instanceKey));
-      if (!source?.pages.has(row.record.sourceId)) continue;
-      requireEvidence(row.source.format === 'confluence-xml' && source.pages.get(row.record.sourceId) === 'absent', invalid);
+      const key = sourceKey(row.packageSha256, row.source.product, row.source.instanceKey);
       const documentBound = row.targetType === 'document' && typeof row.targetId === 'string' && row.targetId.length > 0;
-      const disposition = row.excluded === true || excluded.has(`${source.packageId}/${row.record.id}`) ? 'excluded'
-        : documentBound ? 'documentBound' : 'archiveOnly';
-      source.pages.set(row.record.sourceId, disposition);
+      if (documentBound && row.source.format === 'confluence-xml' && restrictedSources.get(key)?.has(row.record.sourceId)) {
+        restrictedTargets.add(row.targetId);
+      }
+      const source = reviewedSources.get(key);
+      if (!source?.pages.has(row.record.sourceId)) continue;
+      requireEvidence(row.source.format === 'confluence-xml' && source.pages.get(row.record.sourceId) === null, invalid);
+      source.pages.set(row.record.sourceId, {
+        excluded: row.excluded === true || excluded.has(`${source.packageId}/${row.record.id}`),
+        documentBound,
+      });
     }
   }
+  return restrictedTargets.size;
+}
+
+function confluenceDispositions() {
+  return { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 };
 }
 
 /** @param {ConfluenceReview[]} reviews */
-async function auditConfluenceReviews(call, receipt, reviews, recordCount) {
+async function auditConfluenceReviews(call, receipt, reviews, restrictedPages, recordCount) {
   const packages = new Map(receipt.packages.map(pkg => [pkg.stagingId, pkg]));
+  const restrictedSources = new Map();
+  for (const { sha256, source } of packages.values()) {
+    if (source.product !== 'confluence' || source.format !== 'confluence-xml') continue;
+    const pages = restrictedPages.get(source.instanceKey);
+    if (pages) restrictedSources.set(sourceKey(sha256, source.product, source.instanceKey), pages);
+  }
   const reviewedSources = new Map();
   for (const { proof, findings } of reviews) {
     if (!findings.findings.length) continue;
     const { sha256, source } = packages.get(proof.packageId);
     const key = sourceKey(sha256, source.product, source.instanceKey);
     if (!reviewedSources.has(key)) reviewedSources.set(key, { packageId: proof.packageId, pages: new Map() });
-    for (const { pageId } of findings.findings) reviewedSources.get(key).pages.set(pageId, 'absent');
+    for (const { pageId } of findings.findings) reviewedSources.get(key).pages.set(pageId, null);
   }
-  if (reviewedSources.size) await readReviewedPageDispositions(call, receipt, reviewedSources, recordCount);
-  return reviews.map(({ proof, findings }) => {
+  const liveRestrictedConfluenceDocumentCount = reviewedSources.size || restrictedSources.size
+    ? await readReviewedPageDispositions(call, receipt, reviewedSources, restrictedSources, recordCount) : 0;
+  const confluenceReviews = reviews.map(({ proof, findings }) => {
     const { packageId, sha256 } = proof;
     const pkg = packages.get(packageId);
-    const observed = { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 };
+    const counts = confluenceDispositions();
+    const liveRestrictedCounts = confluenceDispositions();
     const source = reviewedSources.get(sourceKey(pkg.sha256, pkg.source.product, pkg.source.instanceKey));
     const rows = findings.findings.map(({ pageId, codes }) => {
-      const disposition = source.pages.get(pageId);
-      observed[disposition]++;
-      return [pageId, [...codes].sort(), disposition];
+      const row = source.pages.get(pageId);
+      const disposition = !row ? 'absent' : row.excluded ? 'excluded' : row.documentBound ? 'documentBound' : 'archiveOnly';
+      counts[disposition]++;
+      const sortedCodes = [...codes].sort();
+      if (!codes.includes('LIVE_RESTRICTED')) return [pageId, sortedCodes, disposition];
+      // An actual document binding is evidence of application even when the receipt also marks an exclusion.
+      const restrictedDisposition = row?.documentBound ? 'documentBound' : disposition;
+      liveRestrictedCounts[restrictedDisposition]++;
+      return [pageId, sortedCodes, disposition, restrictedDisposition];
     }).sort(([first], [second]) => first.localeCompare(second));
-    return { packageId, sha256, counts: observed, dispositionsSha256: fingerprint([sha256, rows]) };
+    return { packageId, sha256, counts, liveRestrictedCounts, dispositionsSha256: fingerprint([sha256, rows]) };
   }).sort((a, b) => a.packageId.localeCompare(b.packageId) || a.sha256.localeCompare(b.sha256));
+  return { confluenceReviews, liveRestrictedConfluenceDocumentCount };
 }
 
 function workspaceEvidence(workspace) {
@@ -250,10 +278,12 @@ function failedAudit({ integrity, recordCounts, attachmentCounts, notices }) {
 export async function collectMigrationEvidence(call, packages, confluenceReviews = []) {
   const expected = inputPackages(packages);
   validateConfluenceReviews(confluenceReviews, expected);
+  const restrictedPages = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
-    receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0 };
+    receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
+    receiptsWithLiveRestrictedConfluenceDocuments: 0 };
   const seenReceipts = new Set();
   const receipts = [];
   for (const receipt of imports) {
@@ -277,19 +307,21 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
       entry.receiptIds.push(receipt.id);
       matches.add(pkg.stagingId);
     }
-    if (!matches.size) {
+    let evidence;
+    if (matches.size) {
+      checks.unmatchedPackages += packageIds.size - matches.size;
+      evidence = await auditReceipt(call, receipt, [...matches].sort(), receiptKeys);
+      requireEvidence(evidence.integrity.packages.length === packageIds.size &&
+        new Set(evidence.integrity.packages.map(pkg => pkg.packageId)).size === packageIds.size &&
+        evidence.integrity.packages.every(pkg => packageIds.has(pkg.packageId)), '원본 검증 결과의 패키지와 이관 영수증이 일치하지 않습니다.');
+    } else {
       checks.unexpectedReceipts++;
-      continue;
     }
-    checks.unmatchedPackages += packageIds.size - matches.size;
-    const evidence = await auditReceipt(call, receipt, [...matches].sort(), receiptKeys);
-    requireEvidence(evidence.integrity.packages.length === packageIds.size &&
-      new Set(evidence.integrity.packages.map(pkg => pkg.packageId)).size === packageIds.size &&
-      evidence.integrity.packages.every(pkg => packageIds.has(pkg.packageId)), '원본 검증 결과의 패키지와 이관 영수증이 일치하지 않습니다.');
     const matchedReviews = confluenceReviews.filter(({ proof }) => matches.has(proof.packageId));
-    const reviewEvidence = matchedReviews.length
-      ? await auditConfluenceReviews(call, receipt, matchedReviews, evidence.integrity.records.observed) : null;
-    receipts.push({ ...evidence, ...(reviewEvidence ? { confluenceReviews: reviewEvidence } : {}) });
+    const reviewed = await auditConfluenceReviews(call, receipt, matchedReviews, restrictedPages, evidence?.integrity.records.observed);
+    if (reviewed.liveRestrictedConfluenceDocumentCount) checks.receiptsWithLiveRestrictedConfluenceDocuments++;
+    if (evidence) receipts.push({ ...evidence, liveRestrictedConfluenceDocumentCount: reviewed.liveRestrictedConfluenceDocumentCount,
+      ...(reviewed.confluenceReviews.length ? { confluenceReviews: reviewed.confluenceReviews } : {}) });
   }
   const staged = [...expected.values()].sort((a, b) => a.packageId.localeCompare(b.packageId));
   for (const pkg of staged) pkg.receiptIds.sort();
@@ -299,7 +331,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   checks.receiptsWithJiraHistoryReview = receipts.filter(({ jiraStatusHistory }) => jiraStatusHistory &&
     (jiraStatusHistory.unavailable > 0 || jiraStatusHistory.restricted > 0 || jiraStatusHistory.unresolvedTime > 0 || jiraStatusHistory.unresolvedAuthor > 0)).length;
   receipts.sort((a, b) => a.id.localeCompare(b.id));
-  const failed = checks.sourceIdentityMismatches > 0 || receipts.some(failedAudit);
+  const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 || receipts.some(failedAudit);
   const review = confluenceReviews.some(({ proof }) => proof.status === 'needs-review') ||
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>
     receipt.recordCounts.trashed > 0 || receipt.recordCounts.excluded > 0 || receipt.attachmentCounts.unbound > 0);

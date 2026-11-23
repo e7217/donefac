@@ -12,7 +12,7 @@ export interface MigrationSourceFile {
   sha256: string;
 }
 export type MigrationWork =
-  | { action: 'preview'; sources: MigrationSourceFile[]; input: MigrationPlanningInput }
+  | { action: 'preview'; sources: MigrationSourceFile[]; input: MigrationPlanningInput; restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>> }
   | { action: 'files'; sources: MigrationSourceFile[]; copies: PreparedMigration['fileCopies'] };
 
 export async function runMigrationWork(work: MigrationWork): Promise<PreparedMigration | AppendedFile[]> {
@@ -41,7 +41,7 @@ export async function runMigrationWork(work: MigrationWork): Promise<PreparedMig
   }
   if (work.action === 'preview') {
     const { buildMigrationPlan } = await import('./migration-planner.js');
-    return buildMigrationPlan({ ...work.input, fileInfo: info });
+    return buildMigrationPlan({ ...work.input, fileInfo: info }, work.restrictedConfluencePages);
   }
   if (files.length !== work.copies.length) throw new LegacyImportError(409, '첨부 파일의 원본 패키지가 없습니다.');
   return files;

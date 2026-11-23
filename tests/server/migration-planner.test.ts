@@ -1000,6 +1000,94 @@ test('restricted content blocks apply and explicit primary exclusion cascades de
   const source=confluence();source.dataset.records.find(row=>row.id==='page:10')!.metadata.restricted=true;source.dataset.diagnostics.push({id:'restricted',severity:'error',code:'CONFLUENCE_RESTRICTED_CONTENT',message:'restricted',recordId:'page:10',path:null});const request=input([source]),blocked=buildMigrationPlan(request);assert.equal(blocked.preview.canApply,false);assert.ok(notices(blocked).has('RESTRICTED_CONTENT'));request.configuration.excludedRecords=['wiki/page:10'];const allowed=buildMigrationPlan(request);assert.equal(allowed.preview.canApply,true,JSON.stringify(allowed.preview.notices));assert.equal(allowed.documents.length,0);assert.equal(allowed.comments.length,0);assert.equal(allowed.revisions.length,0);assert.equal(allowed.preview.counts.excludedRecords,3);for(const archive of allowed.sourceRecords.filter(row=>['page','comment','revision'].includes(row.record.kind))){assert.equal(archive.targetId,null);assert.equal(archive.ownerId,null);}assert.equal(allowed.sourceRecords.length,source.dataset.records.length);for(const[field,value]of [['security',{id:'private',name:'비공개'}],['Security Level','Internal']] as const){const source=jira();(source.dataset.records.find(row=>row.id==='issue:1')!.metadata.fields as Record<string,unknown>)[field]=value;assert.equal(buildMigrationPlan(input([source])).preview.canApply,false);}for(const internal of ['false','true']){const source=jira();source.dataset.records.find(row=>row.id==='comment:jc')!.metadata.visibility=[{key:'sd.public.comment',value:{internal}}];assert.equal(buildMigrationPlan(input([source])).preview.canApply,internal==='false');}
 });
 
+test('confirmed Confluence restrictions follow ownership across ZIPs from the same instance', () => {
+  const original = confluence();
+  const space = record('project', 's', { title: '같은 원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const nested = page('20', { parentId: '10', authorId: null });
+  const comment = record('comment', 'cross', {
+    text: '하위 문서 댓글', textFormat: 'plain', createdAt: created, containerId: '20',
+    references: [{ kind: 'page', sourceId: '20', relation: 'container-content' }],
+  });
+  const related = pkg('related', 'confluence', [nested, comment]);
+  related.dataset.source.instanceKey = original.dataset.source.instanceKey;
+  const separate = pkg('separate', 'confluence', [space, page('10', { authorId: null }), nested, comment]);
+  const request = input([original, related, separate]);
+  const restricted = new Map([[original.dataset.source.instanceKey, new Set(['10'])]]);
+
+  const blocked = buildMigrationPlan(request, restricted);
+  assert.equal(blocked.preview.canApply, false);
+  const failures = blocked.preview.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT');
+  assert.ok(failures.some(notice => notice.recordId === 'wiki/page:10' && notice.severity === 'error'));
+  assert.ok(failures.some(notice => notice.recordId === 'related/page:20'));
+  assert.ok(failures.every(notice => !notice.recordId?.startsWith('separate/')));
+  assert.deepEqual(blocked.documents, []);
+
+  request.configuration.excludedRecords = ['wiki/page:10'];
+  const allowed = buildMigrationPlan(request, restricted);
+  assert.equal(allowed.preview.canApply, true, JSON.stringify(allowed.preview.notices));
+  assert.equal(allowed.preview.counts.explicitExcludedRecords, 1);
+  assert.equal(allowed.preview.counts.excludedDescendants, 4);
+  assert.deepEqual(allowed.documents.map(document => document.title), ['문서 10', '문서 20']);
+  assert.deepEqual(allowed.comments.map(row => row.body), ['하위 문서 댓글']);
+  for (const archive of allowed.sourceRecords.filter(row => row.source.instanceKey === original.dataset.source.instanceKey &&
+      ['page', 'comment', 'revision'].includes(row.record.kind))) {
+    assert.equal(archive.excluded, true);
+    assert.equal(archive.targetId, null);
+    assert.equal(archive.ownerId, null);
+  }
+});
+
+test('sparse Confluence append blocks proven restricted page owners absent from the selected ZIP', () => {
+  const space = record('project', 's', { title: '원본 공간' });
+  const prior = pkg('prior', 'confluence', [space, page('10', { authorId: null, metadata: { version: '3' } })]);
+  const previous = buildMigrationPlan(input([prior]));
+  const project = previous.projects[0], owner = previous.documents[0];
+  const comment = record('comment', 'sparse', {
+    text: '기존 문서의 새 댓글', textFormat: 'plain', createdAt: created, containerId: '10',
+    references: [{ kind: 'page', sourceId: '10', relation: 'container-content' }], metadata: { sourceClass: 'Comment' },
+  });
+  const revision = record('revision', 'sparse', {
+    title: '기존 문서의 과거 본문', text: '<p>이전 본문</p>', textFormat: 'confluence-storage', updatedAt: created,
+    references: [{ kind: 'page', sourceId: '10', relation: 'current-version' }],
+    metadata: { sourceClass: 'Page', currentVersionId: '10', version: '2' },
+  });
+  const attachment = record('attachment', 'sparse', {
+    title: 'manual.png', createdAt: created, containerId: '10',
+    references: [{ kind: 'page', sourceId: '10', relation: 'container-content' }],
+    metadata: { version: '1', packagePath: 'attachments/manual', sha256: 'a'.repeat(64), size: 3 },
+  });
+  const source = pkg('sparse', 'confluence', [space, page('20', { authorId: null }), comment, revision, attachment]);
+  source.dataset.source.instanceKey = prior.dataset.source.instanceKey;
+  const request = input([source]);
+  request.configuration.appendPagesTo = { projectId: project.id, refreshHistory: true, refreshAttachments: true };
+  request.appendPages = { project, sourceSpaceId: 's', token: 'append',
+    knownPages: [{ sourceId: '10', documentId: owner.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: owner.title }] };
+  const unrestricted = buildMigrationPlan(request);
+  assert.equal(unrestricted.preview.canApply, true, JSON.stringify(unrestricted.preview.notices));
+  assert.equal(unrestricted.comments.length, 1);
+  assert.equal(unrestricted.revisions.filter(row => row.documentId === owner.id).length, 1);
+  assert.equal(unrestricted.attachments.length, 1);
+
+  const restricted = new Map([[prior.dataset.source.instanceKey, new Set(['10'])]]);
+  const blocked = buildMigrationPlan(request, restricted);
+  assert.equal(blocked.preview.canApply, false);
+  const excludedRecords = blocked.preview.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT').map(notice => notice.recordId!);
+  assert.deepEqual(new Set(excludedRecords), new Set(['sparse/comment:sparse', 'sparse/revision:sparse', 'sparse/attachment:sparse']));
+  request.configuration.excludedRecords = excludedRecords;
+  const allowed = buildMigrationPlan(request, restricted);
+  assert.equal(allowed.preview.canApply, true, JSON.stringify(allowed.preview.notices));
+  assert.deepEqual(allowed.documents.map(document => document.title), ['문서 20']);
+  assert.deepEqual(allowed.comments, []);
+  assert.deepEqual(allowed.revisions.filter(row => row.documentId === owner.id), []);
+  assert.deepEqual(allowed.attachments, []);
+  assert.deepEqual(allowed.fileCopies, []);
+  for (const archive of allowed.sourceRecords.filter(row => row.record.sourceId === 'sparse')) {
+    assert.equal(archive.excluded, true);
+    assert.equal(archive.targetId, null);
+    assert.equal(archive.ownerId, null);
+  }
+});
+
 test('IANA date conversion handles local offsets and rejects DST ambiguity/nonexistent dates unless fallback is acknowledged',()=>{
   const source=jira(),row=source.dataset.records.find(row=>row.id==='issue:1')!;row.createdAt='2020-01-01 09:15:00.125';let request=input([source]);request.configuration.timezone='Asia/Seoul';let plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true);assert.equal(plan.issues.find(issue=>issue.title==='업무 1')!.createdAt,'2020-01-01T00:15:00.125Z');
   for(const date of ['2024-11-03 01:30:00','2024-03-10 02:30:00','2024-02-31T12:00:00Z','10/11/2020 08:50']){row.createdAt=date;request=input([source]);request.configuration.timezone='America/New_York';plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,false,date);assert.ok(notices(plan).has('DATE_UNRESOLVED'));request.configuration.datePolicy='import-time';plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true,JSON.stringify(plan.preview.notices));assert.equal(plan.issues.find(issue=>issue.title==='업무 1')!.createdAt,now);assert.ok(plan.preview.requiredAcknowledgements.includes('DATE_IMPORT_TIME'));assert.equal(plan.sourceRecords.find(archive=>archive.record.id==='issue:1')!.record.createdAt,date);}

@@ -31,7 +31,7 @@ const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
 const MAX_REUSED_FILE_BYTES = 256 * MiB;
-type PreviewRow = { json: string; generation: string; conversionVersion: number | null };
+type PreviewRow = { json: string; generation: string; conversionVersion: number | null; confluenceRestrictionHash: string | null };
 type JiraArchiveRow = { id: string; json: string; importId: string };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & {
   instanceKey: string; sourceProjectId: string; originalSourceProjectId: string;
@@ -58,13 +58,20 @@ type Hooks = {
 export class MigrationService {
   private readonly append: AttachmentAppend;
   private readonly files: AttachmentFiles;
+  private readonly confluenceRestrictionHash: string | null;
   private closed = false;
   private current: { abort: () => void } | null = null;
   private busy = false;
 
-  constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService, private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean) {
+  constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService,
+    private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean,
+    private readonly restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>) {
     this.append = new AttachmentAppend(dataDir);
     this.files = new AttachmentFiles(dataDir);
+    const restrictions = [...(restrictedConfluencePages ?? [])]
+      .sort(([first], [second]) => first.localeCompare(second))
+      .map(([instance, pages]) => [instance, [...pages].sort()]);
+    this.confluenceRestrictionHash = restrictions.length ? createHash('sha256').update(JSON.stringify(restrictions)).digest('hex') : null;
     this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id) || hasCommittedAppend(id));
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
@@ -867,11 +874,18 @@ export class MigrationService {
       const packages = this.loadPackages(configuration.packageIds);
       const append = this.appendContext(configuration, packages);
       const appendPages = this.pageAppendContext(configuration, packages);
+      const restrictedConfluencePages = new Map<string, ReadonlySet<string>>();
+      for (const { summary: { source } } of packages) {
+        if (source.product !== 'confluence') continue;
+        const pages = this.restrictedConfluencePages?.get(source.instanceKey);
+        if (pages?.size) restrictedConfluencePages.set(source.instanceKey, pages);
+      }
       const prepared = await this.work<PreparedMigration>({
         action: 'preview', sources: packages.map(item => this.fileSpec(item.summary)),
         input: { id: randomUUID(), configuration, actorId, packages, now: new Date().toISOString(),
           users: this.store.all<User>('users'), existingProjectKeys: this.store.all<Project>('projects').map(project => project.key),
           ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}) },
+        ...(restrictedConfluencePages.size ? { restrictedConfluencePages } : {}),
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
@@ -930,7 +944,7 @@ export class MigrationService {
     } finally { this.busy = false; }
   }
   private storePreview(prepared: Pick<PreparedMigration, 'preview'>, generation: string) {
-    const json = JSON.stringify({ ...prepared, conversionVersion });
+    const json = JSON.stringify({ ...prepared, conversionVersion, confluenceRestrictionHash: this.confluenceRestrictionHash });
     const size = Buffer.byteLength(json);
     if (size > 192 * MiB) fail(413, '변환 결과가 192MiB를 넘습니다. 패키지를 나누어 주세요.');
     this.store.transaction(() => {
@@ -947,12 +961,14 @@ export class MigrationService {
   private getPreview(id: string, actorId: string, reviewOnly = false): { prepared: PreparedMigration; generation: string } {
     const json = reviewOnly ? "json_object('preview',json_extract(json,'$.preview'))" : 'json';
     const row = this.store.db.prepare(`SELECT ${json} AS json, generation,
-      json_extract(json,'$.conversionVersion') AS conversionVersion FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
+      json_extract(json,'$.conversionVersion') AS conversionVersion,
+      json_extract(json,'$.confluenceRestrictionHash') AS confluenceRestrictionHash FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
     if (!row) return fail(408, '미리보기 보관 기간이 지났거나 새로 검토해야 합니다.');
     const prepared = JSON.parse(row.json) as PreparedMigration;
     if (prepared.preview.actorId !== actorId) fail(403, '미리보기를 만든 작업자를 선택해 주세요.');
     if (row.generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
     if (row.conversionVersion !== conversionVersion) fail(409, '원본 변환 규칙이 변경되었습니다. 새 미리보기를 만들어 주세요.');
+    if (row.confluenceRestrictionHash !== this.confluenceRestrictionHash) fail(409, 'Confluence 페이지별 검토 범위가 달라졌습니다. 새 미리보기를 만들어 주세요.');
     if (Date.parse(prepared.preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
     return { prepared, generation: row.generation };
   }

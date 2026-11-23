@@ -230,13 +230,14 @@ test('migration rehearsal surfaces pending stages, conflicted package identities
 
 const reviewedPageIds = ['100000000000000001', '100000000000000002', '100000000000000003', '100000000000000004', '100000000000000005'];
 const reviewDispositionCounts = { excluded: 2, documentBound: 1, archiveOnly: 1, absent: 1 };
+const emptyDispositions = { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 };
 
-function confluenceReview(sha256: string, pageIds: string[]) {
+function confluenceReview(sha256: string, pageIds: string[], codes = ['LIVE_RESTRICTED']) {
   const status = pageIds.length ? 'needs-review' as const : 'matched' as const;
   return {
     proof: { packageId: wiki.packageId, sha256, status },
     findings: { status, archive: { sha256: wiki.sha256, bytes: wiki.size },
-      findings: pageIds.map(pageId => ({ pageId, codes: ['LIVE_RESTRICTED'] })) },
+      findings: pageIds.map(pageId => ({ pageId, codes })) },
   };
 }
 
@@ -292,10 +293,13 @@ test('Confluence findings use exact receipt package identities, one page scan, a
   const reviews = [confluenceReview('9'.repeat(64), reviewedPageIds), confluenceReview('8'.repeat(64), [bound, absent])];
   const before = await confluenceEvidence(rows, reviews, offsets);
   assert.deepEqual(offsets, [0, 100]);
-  assert.equal(before.status, 'review');
+  assert.equal(before.status, 'failed');
+  assert.equal(before.checks.receiptsWithLiveRestrictedConfluenceDocuments, 1);
+  assert.equal(before.receipts[0].liveRestrictedConfluenceDocumentCount, 1);
   const observed = before.receipts[0].confluenceReviews;
-  assert.deepEqual(observed?.map(({ counts }) => counts),
-    [{ excluded: 0, documentBound: 1, archiveOnly: 0, absent: 1 }, reviewDispositionCounts]);
+  const dispositions = [{ ...emptyDispositions, documentBound: 1, absent: 1 }, reviewDispositionCounts];
+  assert.deepEqual(observed?.map(({ counts }) => counts), dispositions);
+  assert.deepEqual(observed?.map(({ liveRestrictedCounts }) => liveRestrictedCounts), dispositions);
   assert.ok(observed?.every(({ dispositionsSha256 }) => /^[a-f0-9]{64}$/u.test(dispositionsSha256)));
   assert.doesNotMatch(JSON.stringify(before), /10000000000000000[1-5]|never-emit|team-document|wrong-.*-document/);
   const after = await confluenceEvidence([...rows].reverse(), [...reviews].reverse(), [], undefined, 2);
@@ -307,13 +311,75 @@ test('Confluence findings use exact receipt package identities, one page scan, a
   assert.deepEqual(compareMigrationEvidence(before, changed).changedReceiptIds, [receiptId]);
 });
 
+test('Confluence unconfirmed restrictions remain under review and a document binding overrides a conflicting exclusion for confirmed restrictions', async () => {
+  const [bound, inheritedExclusion, explicitExclusion, archiveOnly, absent] = reviewedPageIds;
+  const confirmed = confluenceReview('9'.repeat(64), [inheritedExclusion, explicitExclusion, archiveOnly, absent]);
+  const unconfirmed = confluenceReview('8'.repeat(64), [bound], ['LIVE_RESTRICTION_UNKNOWN', 'RESTRICTION_MISMATCH']);
+  const rows = [
+    reviewedPage(bound, { targetType: 'document', targetId: 'unconfirmed-team-document' }),
+    reviewedPage(inheritedExclusion, { excluded: true }),
+    reviewedPage(explicitExclusion),
+    reviewedPage(archiveOnly),
+  ];
+  const before = await confluenceEvidence(rows, [confirmed, unconfirmed]);
+  assert.equal(before.status, 'review');
+  assert.equal(before.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
+  const reviewed = before.receipts[0].confluenceReviews;
+  assert.deepEqual(reviewed?.[0].counts, { ...emptyDispositions, documentBound: 1 });
+  assert.deepEqual(reviewed?.[0].liveRestrictedCounts, emptyDispositions);
+  assert.deepEqual(reviewed?.[1].liveRestrictedCounts, { ...reviewDispositionCounts, documentBound: 0 });
+
+  rows[2] = reviewedPage(explicitExclusion, { excluded: true, targetType: 'document', targetId: 'restricted-live-document' });
+  const after = await confluenceEvidence(rows, [confirmed, unconfirmed]);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.checks.receiptsWithLiveRestrictedConfluenceDocuments, 1);
+  assert.equal(after.receipts[0].liveRestrictedConfluenceDocumentCount, 1);
+  assert.deepEqual(after.receipts[0].confluenceReviews?.[1].counts, reviewed?.[1].counts);
+  assert.deepEqual(after.receipts[0].confluenceReviews?.[1].liveRestrictedCounts, { excluded: 1, documentBound: 1, archiveOnly: 1, absent: 1 });
+  assert.deepEqual(compareMigrationEvidence(before, after).changedReceiptIds, [receiptId]);
+  assert.doesNotMatch(JSON.stringify(after), /10000000000000000[1-5]|never-emit|restricted-live-document/);
+});
+
+test('Confluence live restrictions follow the same source instance into a different package and receipt', async () => {
+  const [pageId] = reviewedPageIds;
+  const input = sample({ wikiOnly: true });
+  const alternateSha256 = 'e'.repeat(64);
+  const review = confluenceReview('9'.repeat(64), [pageId], ['LIVE_RESTRICTED', 'MISSING_FROM_ARCHIVE']);
+  let pageScans = 0;
+  function run(instanceKey: string) {
+    const source = { ...input.receipt.packages[0].source, instanceKey };
+    const receipt = { ...input.receipt, packages: [{
+      ...input.receipt.packages[0], stagingId: '00000000-0000-0000-0000-000000000015', sha256: alternateSha256, source,
+    }] };
+    const row = reviewedPage(pageId, { packageSha256: alternateSha256, source, targetType: 'document', targetId: 'another-team-document' });
+    return collectMigrationEvidence(async path => {
+      if (path === '/source-imports') return [receipt];
+      if (path === '/workspace') return input.workspace;
+      assert.equal(path, `/source-imports/${receiptId}/records?kind=page&offset=0&limit=100`);
+      pageScans++;
+      return { records: [row], total: 1, offset: 0, limit: 100 };
+    }, [wiki], [review]);
+  }
+  const otherZip = await run(wiki.instanceKey);
+  assert.equal(otherZip.status, 'failed');
+  assert.equal(otherZip.checks.receiptsWithLiveRestrictedConfluenceDocuments, 1);
+  assert.equal(otherZip.checks.unexpectedReceipts, 1);
+  assert.equal(otherZip.checks.pendingPackages, 1);
+  assert.doesNotMatch(JSON.stringify(otherZip), /100000000000000001|never-emit|another-team-document/);
+  const otherInstance = await run('never-emit-another-wiki-instance');
+  assert.equal(otherInstance.status, 'review');
+  assert.equal(otherInstance.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
+  assert.equal(pageScans, 1);
+});
+
 test('Confluence matched findings with no rows preserve status and malformed page evidence is rejected', async () => {
   const matched = confluenceReview('9'.repeat(64), []);
   const offsets: number[] = [];
   const result = await confluenceEvidence([], [matched], offsets);
   assert.deepEqual(offsets, []);
   assert.equal(result.status, 'verified');
-  assert.deepEqual(result.receipts[0].confluenceReviews?.[0].counts, { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 });
+  assert.deepEqual(result.receipts[0].confluenceReviews?.[0].counts, emptyDispositions);
+  assert.deepEqual(result.receipts[0].confluenceReviews?.[0].liveRestrictedCounts, emptyDispositions);
   const review = confluenceReview('8'.repeat(64), [reviewedPageIds[0]]);
   await assert.rejects(confluenceEvidence([reviewedPage(reviewedPageIds[0])], [review], [], page => ({ ...page, total: 9000 })),
     /Confluence 페이지별 검토의 영수증 원본 목록/);

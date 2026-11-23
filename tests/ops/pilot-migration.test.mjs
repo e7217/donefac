@@ -267,6 +267,15 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal((missingSnapshot.stderr + changedSnapshot.stderr).includes(missingPage), false);
   await writeFile(reviewSnapshot, reportBytes[0]);
 
+  const differentInstance = structuredClone(staged);
+  differentInstance.packages[1].instanceKey = 'incorrect-confluence-instance';
+  await writeFile(stagePath, JSON.stringify(differentInstance));
+  const mismatchedInstance = await launch(['review', root], env).exited;
+  assert.equal(mismatchedInstance.code, 1, mismatchedInstance.stderr);
+  assert.match(mismatchedInstance.stderr, /분석 기록과 원본 인스턴스가 일치하지 않습니다/);
+  assert.doesNotMatch(mismatchedInstance.stdout, /이관 검토 주소/);
+  await writeFile(stagePath, initial);
+
   const mappingSourceRoot = join(scratch, 'mapping-source');
   const mappingStage = await launch(['stage', manifest, mappingSourceRoot], env).exited;
   assert.equal(mappingStage.code, 0, mappingStage.stderr);
@@ -416,15 +425,18 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.deepEqual(report.confluenceReviews, staged.confluenceReviews);
   assert.equal(report.source.evidence.checks.pendingPackages, 0);
   assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
+  assert.equal(report.source.evidence.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
   assert.equal(report.source.evidence.receipts.length, 1);
   const [receipt] = report.source.evidence.receipts;
+  assert.equal(receipt.liveRestrictedConfluenceDocumentCount, 0);
   assert.equal(receipt.confluenceReviews.length, 2);
   for (const [index, reportSha] of reviewDigests.entries()) {
     const review = receipt.confluenceReviews.find(value => value.sha256 === reportSha);
     assert.match(review.dispositionsSha256, /^[a-f0-9]{64}$/);
     assert.deepEqual(review, { packageId: wikiId, sha256: reportSha, dispositionsSha256: review.dispositionsSha256,
       counts: index === 0 ? { excluded: 2, documentBound: 1, archiveOnly: 0, absent: 1 } :
-        { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 } });
+        { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 },
+      liveRestrictedCounts: { excluded: index === 0 ? 2 : 0, documentBound: 0, archiveOnly: 0, absent: 0 } });
   }
   assert.deepEqual(report.restore.evidence.receipts[0].confluenceReviews, receipt.confluenceReviews);
   assert.deepEqual(report.source.evidence.packages.map(pkg => pkg.receiptIds), [[receipt.id], [receipt.id]]);

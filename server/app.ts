@@ -193,6 +193,7 @@ export function createApp(options: {
   atlassianEnv?: NodeJS.ProcessEnv;
   browserOrigin?: string;
   gitlabWebhookPublicOrigin?: string;
+  restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
 } = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
@@ -288,7 +289,8 @@ export function createApp(options: {
   const trashItems=new TrashItemsService(store,files);
   const documentTreeMove=new DocumentTreeMoveService(store,trash);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>
-    Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id));
+    Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id),
+    options.restrictedConfluencePages);
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const documentTreeCopy = new DocumentTreeCopyService(store, new DocumentCopyAssets(store, files, attachmentVersions), documentOrders);

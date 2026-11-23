@@ -7,7 +7,7 @@ import { Worker } from 'node:worker_threads';
 import { safeFilename } from '../server/attachments.ts';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
-import { CONFLUENCE_FINDINGS_MAX_BYTES, confluenceFindingsProof, parseConfluenceFindings,
+import { CONFLUENCE_FINDINGS_MAX_BYTES, confirmedConfluenceRestrictions, confluenceFindingsProof, parseConfluenceFindings,
   validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
@@ -452,11 +452,22 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
 async function review(directory) {
   const { workspace, packages, confluenceReviews } = await loadRun(directory);
   const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
-  const pilot = await startRehearsalPilot(workspace, { signal });
+  const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
+  const restricted = confirmedConfluenceRestrictions(confluenceReviews, reviewedPackages);
+  const restrictions = [...restricted].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
+  const pilot = await startRehearsalPilot(workspace, { signal, restrictions });
   try {
     if (confluenceReviews.length) {
-      const bundles = await verifyBundles(workspace, packages.filter(item => reviewedIds.has(item.packageId)));
+      const bundles = await verifyBundles(workspace, reviewedPackages);
       if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Confluence 대조에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
+      const staged = new Map((await apiCall(pilot)('/legacy-import/packages')).map(item => [item.id, item]));
+      for (const pkg of reviewedPackages) {
+        const current = staged.get(pkg.packageId);
+        if (current?.sha256 !== pkg.sha256 || current.size !== pkg.size || current.source?.product !== pkg.product ||
+            current.source?.format !== pkg.format || current.source?.instanceKey !== pkg.instanceKey) {
+          throw new Error('Confluence 대조에 연결한 ZIP의 분석 기록과 원본 인스턴스가 일치하지 않습니다.');
+        }
+      }
     }
     console.log(`이관 검토 주소 ${pilot.url}`);
     if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 ${findingsDirectory}/에 보관했습니다.`);

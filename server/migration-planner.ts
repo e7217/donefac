@@ -404,7 +404,7 @@ class Planner{
   private retainedPageOwners = new Map<string, string | null>();
   private restrictedSourcePages = new Set<string>();
   private labelListProjectScopes?: Map<string, LabelListProjectScope | null>;
-  constructor(readonly input:MigrationPlanningInput){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
+  constructor(readonly input:MigrationPlanningInput, private readonly confirmedConfluenceRestrictions?: ReadonlyMap<string, ReadonlySet<string>>){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
   sourceEntry(entry:Entry,kind:string,id:string){return this.entryByKey.get(`${entry.pkg.summary.id}/${kind}:${id}`);}
@@ -1122,6 +1122,7 @@ class Planner{
     this.result.preview.counts.retainedPages = retainedPages;
     this.result.preview.counts.retainedRecords = this.retainedEntries.size;
     if (this.retainedEntries.size) this.notice('APPEND_PRIOR_PAGES_RETAINED', `기존 페이지 ${retainedPages}개를 포함한 원본 기록 ${this.retainedEntries.size}건을 보관합니다.`, 'info');
+    for (const sourceId of this.confirmedConfluenceRestrictions?.get(instance) ?? []) this.restrictedSourcePages.add(sourceId);
     this.indexConfluenceRestrictions();
   }
   private indexConfluenceRestrictions(): void {
@@ -1341,6 +1342,77 @@ class Planner{
     for(let cursor=0;cursor<pending.length&&!owner;cursor++){const current=pending[cursor];if(seen.has(current.key))continue;seen.add(current.key);if(current.row.kind==='issue'||current.row.kind==='page'){owner=current;break;}const currentId=string(current.row.metadata.currentVersionId);if(currentId){const candidate=this.sourceEntry(current,current.row.kind==='revision'?'page':current.row.kind,currentId)||this.sourceEntry(current,'revision',currentId);if(candidate)pending.push(candidate);}for(const reference of current.row.references)if(['container-content','current-version','body-owner','attachedTo','commentOn','historyOf','worklogOf','source'].includes(reference.relation)){const candidate=this.sourceEntry(current,reference.kind,reference.sourceId);if(candidate)pending.push(candidate);}if(current.row.containerId)for(const kind of ['issue','page','revision','comment','attachment']){const candidate=this.sourceEntry(current,kind,current.row.containerId);if(candidate)pending.push(candidate);}}
     this.ownerCache.set(entry.key,owner);return owner;
   }
+  private indexConfirmedConfluenceRestrictions(exclusionChildren: Map<string, string[]>): Set<string> {
+    const confirmed = this.confirmedConfluenceRestrictions;
+    const restrictedRecords = new Set<string>();
+    if (!confirmed?.size) return restrictedRecords;
+
+    const sourceKey = (instance: string, kind: string, id: string) => JSON.stringify([instance, kind, id]);
+    const eligibleKinds = new Set(['page', 'attachment', 'comment', 'revision']);
+    const records = new Map<string, Entry[]>();
+    const children = new Map<string, { key: string; entry: Entry }[]>();
+    for (const entry of this.entries) {
+      const { product, instanceKey } = entry.pkg.dataset.source;
+      const { kind, sourceId, parentId, references, metadata } = entry.row;
+      if (product !== 'confluence' || !confirmed.get(instanceKey)?.size || !eligibleKinds.has(kind)) continue;
+      const key = sourceKey(instanceKey, kind, sourceId);
+      const copies = records.get(key) ?? [];
+      copies.push(entry);
+      records.set(key, copies);
+
+      const parents = new Set<string>();
+      for (const reference of references) {
+        if (!eligibleKinds.has(reference.kind)) continue;
+        const isPageAncestor = kind === 'page' && reference.kind === 'page' && ['ancestor', 'parent'].includes(reference.relation);
+        const isContentOwner = kind !== 'page' && (pageOwnerRelations.has(reference.relation) ||
+          kind === 'revision' && reference.relation === 'original-version' ||
+          kind === 'comment' && reference.kind === 'comment' && reference.relation === 'parent');
+        if (isPageAncestor || isContentOwner) parents.add(sourceKey(instanceKey, reference.kind, reference.sourceId));
+      }
+      if ((kind === 'page' || kind === 'comment') && parentId) parents.add(sourceKey(instanceKey, kind, parentId));
+      if (kind === 'attachment' && typeof metadata.currentVersionId === 'string') {
+        parents.add(sourceKey(instanceKey, kind, metadata.currentVersionId));
+      }
+      if (kind !== 'page') {
+        const owner = this.ownerEntry(entry);
+        if (owner?.row.kind === 'page') parents.add(sourceKey(instanceKey, 'page', owner.row.sourceId));
+        if (metadata.orphan === true && typeof metadata.ownerId === 'string' &&
+            (metadata.ownerClass === 'Page' || metadata.ownerClass === 'BlogPost')) {
+          parents.add(sourceKey(instanceKey, 'page', metadata.ownerId));
+        }
+      }
+      parents.delete(key);
+      for (const parent of parents) {
+        const descendants = children.get(parent) ?? [];
+        descendants.push({ key, entry });
+        children.set(parent, descendants);
+      }
+    }
+
+    // An excluded page also covers associated records in other ZIPs from its source instance.
+    // A page absent from all selected ZIPs still blocks each affected record until its exclusion.
+    const queue: string[] = [];
+    for (const [instance, pages] of confirmed) for (const page of pages) queue.push(sourceKey(instance, 'page', page));
+    const seen = new Set(queue);
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const key = queue[cursor];
+      const descendants = children.get(key) ?? [];
+      for (const record of records.get(key) ?? []) {
+        restrictedRecords.add(record.key);
+        if (!descendants.length) continue;
+        const linked = exclusionChildren.get(record.key) ?? [];
+        for (const child of descendants) linked.push(child.entry.key);
+        exclusionChildren.set(record.key, linked);
+      }
+      for (const child of descendants) {
+        if (seen.has(child.key)) continue;
+        seen.add(child.key);
+        queue.push(child.key);
+      }
+    }
+    return restrictedRecords;
+  }
+
   initialize():void{
     const config=this.configuration,sourceCount=this.entries.length;
     if(this.input.packages.length>MAX_PACKAGES||sourceCount>MAX_RECORDS||this.input.packages.reduce((sum,pkg)=>sum+pkg.summary.expandedBytes,0)>MAX_EXPANDED_BYTES)this.notice('PLAN_LIMIT','한 이관은20개 패키지·100000개 원본 객체·총256MiB 확장 크기 이하여야 합니다.','error');
@@ -1352,6 +1424,7 @@ class Planner{
     for(const key of config.excludedRecords||[]){if(!this.entryByKey.has(key))this.notice('EXCLUSION_INVALID','제외 대상 원본 객체를 찾을 수 없습니다.','error');else this.excluded.add(key);}
     const explicitCount=this.excluded.size,children=new Map<string,string[]>();
     for(const entry of this.entries){this.archiveIds.set(entry.key,randomUUID());const row=entry.row,parents:string[]=[];if(row.parentId)parents.push(`${entry.pkg.summary.id}/${row.kind==='issue'?'issue':row.kind==='page'?'page':row.kind}:${row.parentId}`);if(row.kind==='issue'||row.kind==='page')parents.push(`${entry.pkg.summary.id}/project:${entry.container}`);else{const owner=this.ownerEntry(entry);if(owner&&owner!==entry)parents.push(owner.key);const current=string(row.metadata.currentVersionId);if(current)parents.push(`${entry.pkg.summary.id}/${row.kind==='revision'?'page':row.kind}:${current}`);}for(const parent of parents){const values=children.get(parent)||[];values.push(entry.key);children.set(parent,values);}}
+    const confirmedRestrictions = this.indexConfirmedConfluenceRestrictions(children);
     const queue=[...this.excluded];for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[])if(!this.excluded.has(child)){this.excluded.add(child);queue.push(child);}
     this.result.preview.counts.explicitExcludedRecords=explicitCount;this.result.preview.counts.excludedDescendants=this.excluded.size-explicitCount;
     if(this.excluded.size)this.notice('RECORDS_EXCLUDED',`원본 ${this.excluded.size}개를 적용 대상에서 제외합니다(명시적 ${explicitCount}개, 하위 ${this.excluded.size-explicitCount}개). 원문 보관은 유지합니다.`,'warning',undefined,true);
@@ -1384,7 +1457,13 @@ class Planner{
     if(this.result.projects.length)this.notice('PROJECT_ACCESS_NOT_REPRODUCED','원본 Jira/Confluence 프로젝트·공간 권한 체계는 새 팀 프로젝트에 재현하지 않습니다. 제한된 개별 콘텐츠는 제외 전까지 차단하며 원래 권한 자료는 보관합니다.','warning',undefined,true);
     if(this.result.appendPages)this.notice('CONFLUENCE_APPEND_ACCESS_NOT_REPRODUCED','추가하는 페이지는 대상 프로젝트의 접근 범위를 따릅니다. 원본에 접근 제한이 있는 콘텐츠는 제외 전까지 적용을 차단합니다.','warning',undefined,true);
     const sourceAliases=new Map<string,string>();for(const entry of this.entries)if(!this.skip(entry)&&['issue','page','project'].includes(entry.row.kind)){const target=this.bindings.get(entry.key)?.id;for(const alias of [entry.row.sourceId,...(entry.row.kind==='issue'&&entry.row.metadata.key?[string(entry.row.metadata.key)]:[])]){const key=JSON.stringify([entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,entry.row.kind,alias]),previous=sourceAliases.get(key);if(previous&&previous!==entry.key&&!(target&&target===this.bindings.get(previous)?.id))this.notice('SOURCE_BINDING_AMBIGUOUS','같은 원본 인스턴스·ID가 여러 적용 대상으로 존재합니다. 겹치는 내보내기를 제외해 주세요.','error',entry);else sourceAliases.set(key,entry.key);}}
-    for(const entry of this.entries)if(!this.skip(entry)&&(this.restricted(entry)||entry.row.kind==='page'&&this.restrictedSourcePages.has(entry.row.sourceId)))this.notice('RESTRICTED_CONTENT','권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.','error',entry);
+    for (const entry of this.entries) {
+      if (this.excluded.has(entry.key)) continue;
+      if (confirmedRestrictions.has(entry.key) || !this.retainedEntries.has(entry.key) &&
+          (this.restricted(entry) || entry.row.kind === 'page' && this.restrictedSourcePages.has(entry.row.sourceId))) {
+        this.notice('RESTRICTED_CONTENT', '권한 또는 공개 범위가 제한된 원본은 현재 서비스에 그대로 공개할 수 없습니다. 해당 객체를 제외해 주세요.', 'error', entry);
+      }
+    }
     for(const pkg of this.input.packages){for(const diagnostic of pkg.dataset.diagnostics){
       const recordKey = diagnostic.recordId ? `${pkg.summary.id}/${diagnostic.recordId}` : null;
       if (recordKey && (this.excluded.has(recordKey) || this.retainedEntries.has(recordKey))) continue;
@@ -3125,4 +3204,9 @@ class Planner{
 }
 
 /** Pure planning: IDs are allocated once and persisted by the caller with its immutable preview. */
-export function buildMigrationPlan(input:MigrationPlanningInput):PreparedMigration{return new Planner(input).run();}
+export function buildMigrationPlan(
+  input: MigrationPlanningInput,
+  restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>,
+): PreparedMigration {
+  return new Planner(input, restrictedConfluencePages).run();
+}

@@ -73,6 +73,20 @@ export function parseConfluenceFindings(raw) {
   return raw;
 }
 
+export function confirmedConfluenceRestrictions(reviews, packages) {
+  const instances = new Map(packages.map(pkg => [pkg.packageId, pkg.instanceKey]));
+  const restrictedPages = new Map();
+  for (const { proof, findings } of reviews) {
+    const instance = instances.get(proof.packageId);
+    for (const { pageId, codes } of findings.findings) {
+      if (!codes.includes('LIVE_RESTRICTED')) continue;
+      if (!restrictedPages.has(instance)) restrictedPages.set(instance, new Set());
+      restrictedPages.get(instance).add(pageId);
+    }
+  }
+  return restrictedPages;
+}
+
 export function confluenceFindingsProof(findings, sha256, packageId) {
   const { checkedAt, version, selection, status, archive, spacePermissions, unidentifiedPages } = findings;
   const counts = new Map();
