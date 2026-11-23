@@ -214,7 +214,8 @@
   padding-inline-start: 1.2rem;
 }
 
-.gantt-row-schedule-edit > .gantt-row-edit-missing {
+.gantt-row-schedule-edit > .gantt-row-edit-missing,
+.gantt-row-schedule-edit > .gantt-row-edit-warning {
   margin-inline: 1.5rem;
 }
 
@@ -276,7 +277,8 @@
     gap: 0;
   }
 
-  .gantt-row-schedule-edit > .gantt-row-edit-missing {
+  .gantt-row-schedule-edit > .gantt-row-edit-missing,
+  .gantt-row-schedule-edit > .gantt-row-edit-warning {
     margin-inline: 1rem;
   }
 }

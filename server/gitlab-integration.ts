@@ -128,6 +128,7 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
   return {
     id,numericId:numericObjectId(object.id),hasTitle:Boolean(explicitTitle),title:title.slice(0,500),matchedKeys:[...new Set([...readKeys(title,object.description,object.source_branch,object.ref),...explicitKeys])],
     webUrl:validWebUrl(object.web_url||object.url),iid:kind==='commit'?0:Number(object.iid||object.id)||0,reportedIid:Number(numericObjectId(object.iid))||0,
+    reportedProjectId:object.project_id===undefined?undefined:numericObjectId(object.project_id),
     state,incomingTime,mergeCommitShas,
     sourceBranch:bound(object.source_branch||object.ref,512),sourceSha:bound(object.sha||record(object.last_commit).id,128),
     mergeObservation:kind==='merge_request'&&object.state==='opened'&&observation
@@ -220,6 +221,12 @@ function sameMergeHead(link:GitlabLink,draft:LinkDraft):boolean{
   return (!link.iid||!draft.reportedIid||link.iid===draft.reportedIid)&&
     (!link.sourceSha||!draft.sourceSha||link.sourceSha===draft.sourceSha)&&
     (!link.sourceBranch||!draft.sourceBranch||link.sourceBranch===draft.sourceBranch);
+}
+function samePipelineRevision(link: GitlabLink, draft: LinkDraft): boolean {
+  const storedSha = gitlabObjectSha(link.sourceSha) ?? link.sourceSha;
+  const incomingSha = gitlabObjectSha(draft.sourceSha) ?? draft.sourceSha;
+  return (!storedSha || !incomingSha || storedSha === incomingSha) &&
+    (!link.sourceBranch || !draft.sourceBranch || link.sourceBranch === draft.sourceBranch);
 }
 function matchingApprovalTime(cursor:ObjectCursor|undefined,draft:LinkDraft):string|undefined{
   const revision=cursor?.approvalRevision;
@@ -375,7 +382,7 @@ export class GitlabIntegrationService{
   // A verified branch read can race its first webhook before a link exists.
   private readonly pendingBranchReads=new Map<string,{count:number;webUrl:string}>();
   private readonly manualLinkRows:StatementSync;
-  private readonly linkedMergeRequestRows:StatementSync;
+  private readonly linkedWorkflowRows:StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
   private readonly issueBranches: GitlabIssueBranchCreation;
   private readonly deploymentSyncs = new Set<string>();
@@ -391,7 +398,7 @@ export class GitlabIntegrationService{
       CREATE INDEX IF NOT EXISTS gitlab_links_manual ON gitlab_links(id) WHERE json_extract(json,'$.manualLinkId') IS NOT NULL;`);
     this.manualLinkRows=store.db.prepare(`SELECT json FROM gitlab_links WHERE id>=? AND id<?
       AND json_extract(json,'$.manualLinkId') IS NOT NULL`);
-    this.linkedMergeRequestRows=store.db.prepare('SELECT json FROM gitlab_links WHERE id>=? AND id<?');
+    this.linkedWorkflowRows=store.db.prepare('SELECT json FROM gitlab_links WHERE id>=? AND id<?');
     this.projectWebhooks = new GitlabProjectWebhookSetup(store, () => {
       const saved = this.raw();
       const authMode = saved.signingToken ? 'signature' : saved.webhookSecret ? 'secret' : null;
@@ -773,14 +780,16 @@ export class GitlabIntegrationService{
     if(kind!=='branch'&&kind!=='commit'&&(!draft.numericId||draft.id!==draft.numericId))return[];
     return this.manualLinksForKey(instance,projectId,kind,draft.id).filter(link=>matchesManualLink(link,draft));
   }
-  private existingAutomaticMergeRequests(instance:string,projectId:number,draft:LinkDraft,matcher:TicketMatcher){
+  private existingAutomaticWorkflowLinks(instance:string,projectId:number,kind:WorkflowGitlabKind,draft:LinkDraft,matcher:TicketMatcher){
     if(!draft.numericId||draft.id!==draft.numericId)return [];
-    const key=gitlabLinkObjectKey(instance,projectId,'merge_request',draft.numericId);
-    const rows=this.linkedMergeRequestRows.all(`${key}:`,`${key};`) as {json:string}[];
+    if(kind==='pipeline'&&draft.reportedProjectId!==undefined&&draft.reportedProjectId!==String(projectId))return [];
+    const key=gitlabLinkObjectKey(instance,projectId,kind,draft.numericId);
+    const rows=this.linkedWorkflowRows.all(`${key}:`,`${key};`) as {json:string}[];
     return rows.flatMap(row=>{
       const link=JSON.parse(row.json) as GitlabLink;
-      if(link.id!==`${key}:${link.issueId}`||link.kind!=='merge_request'||link.projectId!==projectId||
-         draft.reportedIid&&link.iid!==draft.reportedIid)return [];
+      if(link.id!==`${key}:${link.issueId}`||link.kind!==kind||link.projectId!==projectId)return [];
+      if(kind==='merge_request'&&draft.reportedIid&&link.iid!==draft.reportedIid)return [];
+      if(kind==='pipeline'&&!samePipelineRevision(link,draft))return [];
       const match=matcher.inherit(link);
       return match?[{link,match}]:[];
     });
@@ -1008,8 +1017,10 @@ export class GitlabIntegrationService{
         this.store.put('gitlab_links',updated);
         linked++;
       }
-      if(mergeRepositoryMatches&&objectDisposition==='fresh'){
-        for(const {link:prior} of this.existingAutomaticMergeRequests(instance,projectId,draft,matcher)){
+      if((mergeRepositoryMatches||kind==='pipeline')&&objectDisposition==='fresh'){
+        // Already linked objects can change after GitLab omits the references that linked them.
+        // An existing link alone does not expand the targets of a workflow event.
+        for(const {link:prior} of this.existingAutomaticWorkflowLinks(instance,projectId,kind,draft,matcher)){
           if(draft.webUrl&&byMatchId.has(prior.issueId))continue;
           const updated=refreshExistingLink(prior,draft,null);
           if(updated===prior)continue;
@@ -1067,7 +1078,7 @@ export class GitlabIntegrationService{
         }
       }
       const attached=this.manualLinksForObject(instance,projectId,kind,draft).map(link=>planned.get(link.id)??link).filter(link=>link.manualLinkId);
-      const known=kind==='merge_request'?this.existingAutomaticMergeRequests(instance,projectId,draft,matcher):[];
+      const known=kind==='merge_request'||kind==='pipeline'?this.existingAutomaticWorkflowLinks(instance,projectId,kind,draft,matcher):[];
       if(!draft.webUrl&&!attached.length&&!known.length){counts.skipped++;continue;}
       const attachedIssueIds=new Set(attached.map(link=>link.issueId));
       const targets=matcher.match(draft.matchedKeys).filter(match=>Boolean(draft.webUrl)||attachedIssueIds.has(match.issue.id));

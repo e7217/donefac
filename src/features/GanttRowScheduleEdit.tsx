@@ -26,6 +26,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
+  initialDateDraftVersion?: number;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
@@ -137,7 +138,7 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, focusDate, initialDates, actorId, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraftVersion, actorId, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
@@ -173,7 +174,9 @@ export function GanttRowScheduleEdit({
     return other ? [{ dependency, other, role }] : [];
   }), [dependencies, issue.id, projectIssues]);
   const editLocked = Boolean(pending || retryId || applied);
-  const dirty = !applied && Boolean(Object.keys(editedDates).length || drafts.some(draft => draft.action !== 'none') || review || retryId);
+  const datesChanged = initialDateDraftVersion === undefined ? Object.keys(editedDates).length > 0
+    : dates.some(({ field }) => editedDates[field] !== initialDates?.[field]);
+  const dirty = !applied && Boolean(datesChanged || drafts.some(draft => draft.action !== 'none') || review || retryId);
 
   const changes: ScheduleBulkDateChanges = {};
   const nextDates = { startDate: anchor.startDate, endDate: anchor.endDate, dueDate: anchor.dueDate, ...editedDates };
@@ -258,7 +261,8 @@ export function GanttRowScheduleEdit({
     if (request.current) { notify('일정 요청 결과를 확인한 뒤 닫아 주세요.', 'error'); return; }
     if (dirtyRef.current && !window.confirm(retryId
       ? '일정과 연결이 이미 변경됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
-      : '입력한 날짜와 연결, 검토 결과를 버리고 닫을까요?')) return;
+      : initialDateDraftVersion !== undefined ? '이 편집 창에서 바꾼 내용과 검토 결과를 버리고 닫을까요?'
+        : '입력한 날짜와 연결, 검토 결과를 버리고 닫을까요?')) return;
     onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, false);
     onClose();
   }
@@ -441,6 +445,8 @@ export function GanttRowScheduleEdit({
           onClick={close}><X size={20} aria-hidden="true" /></button>
       </header>
       {!currentIssue && <p className="schedule-paste-error gantt-row-edit-missing" role="alert">현재 프로젝트에서 업무를 찾을 수 없습니다.</p>}
+      {currentIssue && initialDateDraftVersion !== undefined && currentIssue.version !== initialDateDraftVersion &&
+        <p className="schedule-paste-warnings gantt-row-edit-warning" role="status">업무가 변경됐습니다. 미리보기에서 저장된 날짜와 입력한 날짜를 비교해 주세요.</p>}
       <form className="schedule-paste-input" onSubmit={preview}>
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>날짜</legend>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -59,6 +59,7 @@ import './gantt.css';
 import './gantt-deadline-markers.css';
 
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
+type InlineDateDraft = { source: Issue; startDate: string | null; endDate: string | null; accept: (saved: Issue) => void };
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
 type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
@@ -107,7 +108,13 @@ type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: strin
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
 type TeamFollowUpReview = TeamFollowUpSelection & { opener: HTMLButtonElement };
-type RowScheduleEdit = { issue: Issue; opener: HTMLButtonElement; focusDate?: 'dueDate' };
+type RowScheduleEdit = {
+  issue: Issue;
+  opener: HTMLButtonElement;
+  focusDate?: 'dueDate';
+  inlineDraft?: InlineDateDraft;
+  initialDates?: ScheduleBulkDateChanges;
+};
 type ScheduleFocus = {
   kind: 'dependencies' | 'hierarchy';
   issueId: string;
@@ -308,6 +315,7 @@ function ProjectGantt(props: GanttProps) {
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
+  const inlineDateDrafts = useRef(new Map<string, InlineDateDraft>());
   const draggingRef = useRef(false);
   const viewport = useRef<GanttViewport>(null);
   const restoreViewport = useRef<GanttViewportAnchor>(null);
@@ -401,6 +409,10 @@ function ProjectGantt(props: GanttProps) {
   }, [reconsider]);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
+  const trackInlineDates = useCallback((id: string, draft: InlineDateDraft | null) => {
+    if (draft) inlineDateDrafts.current.set(id, draft);
+    else inlineDateDrafts.current.delete(id);
+  }, []);
   const markBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
   useEffect(() => {
     const guard = (event: Event) => {
@@ -423,6 +435,7 @@ function ProjectGantt(props: GanttProps) {
             previewRef.current = null;
             setDatePreviewFocusTarget(null);
             draftsRef.current.clear();
+            inlineDateDrafts.current.clear();
             setHasDraft(false);
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
@@ -449,6 +462,8 @@ function ProjectGantt(props: GanttProps) {
       setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
+      inlineDateDrafts.current.clear();
+      setDraftEpoch(value => value + 1);
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
     window.addEventListener('teamspace:workspace-imported', importReset);
@@ -1272,21 +1287,31 @@ function ProjectGantt(props: GanttProps) {
     });
   }
   function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement, focusDate?: RowScheduleEdit['focusDate']) {
-    if (!canLeave()) return;
-    queueMicrotask(() => setRowScheduleEdit({ issue, opener, focusDate }));
+    const canKeepDates = focusDate !== 'dueDate' && !busyRef.current && !scheduleEditorOpen && !issueOverlayOpen &&
+      [...draftsRef.current].every(([id, value]) => id.startsWith('dates:') && !value.pending && !value.awaitingResult);
+    if (!canKeepDates && !canLeave()) return;
+    const inlineDraft = canKeepDates ? inlineDateDrafts.current.get(issue.id) : undefined;
+    const initialDates: ScheduleBulkDateChanges = {};
+    if (inlineDraft) {
+      for (const field of ['startDate', 'endDate'] as const) {
+        if (inlineDraft[field] !== inlineDraft.source[field]) initialDates[field] = inlineDraft[field];
+      }
+    }
+    queueMicrotask(() => setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, initialDates }));
   }
   function closeRowScheduleEdit(updated?: readonly Issue[]) {
     const { opener, focusDate, issue } = rowScheduleEdit ?? {};
     setRowScheduleEdit(null);
     if (updated && focusAfterCompletingMissingRows(updated)) return;
-    requestAnimationFrame(() => {
+    pendingScheduleFocus.current = () => {
       const rowEdit = issue && scrollRef.current?.querySelector<HTMLButtonElement>(
         `[data-issue-id="${CSS.escape(issue.id)}"] .gantt-row-schedule-trigger`,
       );
-      const target = opener?.isConnected && !opener.disabled ? opener
-        : focusDate === 'dueDate' ? deadlinesOpen ? deadlinesTrigger.current : rowEdit : null;
-      (target ?? scrollRef.current)?.focus({ preventScroll: true });
-    });
+      const fallback = focusDate === 'dueDate' && deadlinesOpen ? deadlinesTrigger.current : rowEdit;
+      const target = [opener, fallback, scrollRef.current].find(element => element?.isConnected &&
+        !element.closest('[inert]') && !element.matches(':disabled'));
+      target?.focus({ preventScroll: true });
+    };
   }
   function cancelLinkPicking() {
     setLinkPicker(null);
@@ -1498,7 +1523,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || bulkLinkSelection)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || bulkLinkSelection || rowScheduleEdit)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -1767,7 +1792,7 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 변경 후 미리보기</span><span>날짜 입력 후 Enter로 저장 · Esc로 최신 날짜 · 핸들은 ← → 키도 지원해요.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 입력은 행의 저장 버튼이나 Enter로 저장하세요. Esc로 날짜 변경을 취소합니다.</span></div>
     <div className="gantt-window-controls">
       <span>표시 범위</span>
       <button type="button" className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button>
@@ -1894,7 +1919,8 @@ function ProjectGantt(props: GanttProps) {
                 childSchedule={{ label: `${issue.key} 하위 업무 일정 보기`, disabled: Boolean(scheduleFocus),
                   onOpen: opener => openScheduleFocus('hierarchy', issue, opener), onPointerDown: keepInlineDateFocus }} />
             </div>
-            <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
+            <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} onInlineDraftChange={trackInlineDates}
+              disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
               onReview={outgoingIssueIds.has(issue.id) ? (change, origin) => reviewSuccessors(change, origin) : undefined} />
           </div>
@@ -2029,19 +2055,6 @@ function ProjectGantt(props: GanttProps) {
         notify(`${changes.join(' · ')}을 변경했습니다.`);
       }}
     />}
-    {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
-      issue={rowScheduleEdit.issue} issues={rowEditIssues} dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
-      actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
-      onApplied={async result => {
-        setUndoId(result.undoId);
-        setScheduleWarnings(result.warnings);
-        await refresh();
-        closeRowScheduleEdit(result.updated);
-        const datesChanged = result.updated.length > 0;
-        const linksChanged = Boolean(result.dependencyChanges);
-        notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
-          : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
-      }} />}
     {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch}
       issues={editingDependency || linkEditor.prefill || linkEditor.anchor ? projectIssues : scopedIssues}
       dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
@@ -2064,6 +2077,25 @@ function ProjectGantt(props: GanttProps) {
         notify(result.updated.length ? `계획과 ${result.updated.length}개 업무의 일정을 이동했습니다.` : '계획 일정을 이동했습니다.');
       }} />}
   </div>
+    {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
+      issue={rowScheduleEdit.issue} issues={rowEditIssues} dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
+      initialDates={rowScheduleEdit.initialDates} initialDateDraftVersion={rowScheduleEdit.inlineDraft?.source.version}
+      actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
+      onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        if (rowScheduleEdit.inlineDraft) {
+          const saved = result.updated.find(issue => issue.id === rowScheduleEdit.issue.id)
+            ?? rowEditIssues.find(issue => issue.id === rowScheduleEdit.issue.id);
+          if (saved) rowScheduleEdit.inlineDraft.accept(saved);
+        }
+        await refresh();
+        closeRowScheduleEdit(result.updated);
+        const datesChanged = result.updated.length > 0;
+        const linksChanged = Boolean(result.dependencyChanges);
+        notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
+          : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
+      }} />}
     {bulkLinkSelection && <SchedulePasteDialog
       projectId={bulkLinkSelection.project.id} projectLabel={`${bulkLinkSelection.project.key} · ${bulkLinkSelection.project.name}`}
       bulkLinks={{
@@ -2355,44 +2387,93 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   </form>;
 }
 
-function DateCells({ issue, onSave, onReview, disabled, onDraftChange }: {
+function DateCells({ issue, onSave, onReview, disabled, onDraftChange, onInlineDraftChange }: {
   issue: Issue;
   onSave: (source: Issue, start: string | null, end: string | null, origin: InlineScheduleOrigin) => Promise<void>;
   onReview?: (anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
   disabled: boolean;
   onDraftChange: TrackDraft;
+  onInlineDraftChange: (id: string, draft: InlineDateDraft | null) => void;
 }) {
   const [source, setSource] = useState(issue);
   const [start, setStart] = useState(issue.startDate || '');
   const [end, setEnd] = useState(issue.endDate || '');
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
+  const startField = useRef<HTMLInputElement>(null);
+  const endField = useRef<HTMLInputElement>(null);
+  const draftId = `dates:${issue.id}`;
   const dirty = start !== (source.startDate || '') || end !== (source.endDate || '');
   const conflict = issue.version > source.version && dirty;
   if (issue.version > source.version && !dirty && !pending) { setSource(issue); setStart(issue.startDate || ''); setEnd(issue.endDate || ''); }
-  useEffect(() => { onDraftChange(`dates:${issue.id}`, dirty, pending); return () => onDraftChange(`dates:${issue.id}`, false); }, [onDraftChange, issue.id, dirty, pending]);
-  function accept(saved: Issue) { setSource(saved); setStart(saved.startDate || ''); setEnd(saved.endDate || ''); }
-  function reset() { if (!pendingRef.current) accept(issue); }
-  async function commit(nextFocus: EventTarget | null) {
-    if (disabled || pendingRef.current || !dirty || (nextFocus instanceof HTMLElement &&
-      (nextFocus.dataset.scheduleOwner === issue.id || nextFocus.dataset.ganttExport || nextFocus.hasAttribute('data-gantt-focus-control')))) return;
-    pendingRef.current = true; setPending(true); onDraftChange(`dates:${issue.id}`, dirty, true);
+  const accept = useCallback((saved: Issue) => {
+    setSource(saved);
+    setStart(saved.startDate || '');
+    setEnd(saved.endDate || '');
+  }, []);
+  useLayoutEffect(() => {
+    onDraftChange(draftId, dirty, pending);
+    onInlineDraftChange(issue.id, dirty ? { source, startDate: start || null, endDate: end || null, accept } : null);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, dirty, pending, source, start, end, accept]);
+  useLayoutEffect(() => () => {
+    onDraftChange(draftId, false);
+    onInlineDraftChange(issue.id, null);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id]);
+
+  const editedField = start !== (source.startDate || '') ? startField : endField;
+  function reset(restoreField = false) {
+    if (pendingRef.current) return;
+    if (restoreField) editedField.current?.focus({ preventScroll: true });
+    accept(issue);
+  }
+  async function commit(opener: HTMLInputElement | HTMLButtonElement) {
+    if (disabled || pendingRef.current || !dirty) return;
+    const focusTarget = opener instanceof HTMLInputElement ? opener : editedField.current;
+    pendingRef.current = true;
+    setPending(true);
+    onDraftChange(draftId, true, true);
     try {
       await onSave(source, start || null, end || null, {
-        issueId: issue.id, accept, returnToMissingRow: nextFocus === null, focus: document.activeElement,
+        issueId: issue.id, accept, returnToMissingRow: true, focus: opener,
+      });
+    } finally {
+      pendingRef.current = false;
+      setPending(false);
+      requestAnimationFrame(() => {
+        const active = document.activeElement;
+        if ((active === document.body || active === opener) && focusTarget?.isConnected && !focusTarget.disabled) {
+          focusTarget.focus({ preventScroll: true });
+        }
       });
     }
-    finally { pendingRef.current = false; setPending(false); }
   }
   const title = conflict ? '다른 변경이 있습니다. 입력은 보존됩니다. Esc로 최신 날짜 불러오기' : 'Enter로 저장 · Esc로 최신 날짜 불러오기';
   function dateInput(edge: 'start' | 'end') {
-    return <input className={`gantt-inline-date ${conflict ? 'has-conflict' : ''}`} title={title} aria-describedby="gantt-editing-help" type="date" data-schedule-owner={issue.id} data-schedule-edge={edge} aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'}`} aria-invalid={conflict || undefined} value={edge === 'start' ? start : end} onChange={event => edge === 'start' ? setStart(event.target.value) : setEnd(event.target.value)} disabled={disabled || pending} onBlur={event => void commit(event.relatedTarget)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); reset(); } else if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); } }} />;
+    return <input ref={edge === 'start' ? startField : endField}
+      className={`gantt-inline-date ${conflict ? 'has-conflict' : ''}`} type="date" title={title}
+      data-schedule-owner={issue.id} data-schedule-edge={edge}
+      aria-describedby="gantt-editing-help" aria-invalid={conflict || undefined}
+      aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'}`}
+      value={edge === 'start' ? start : end} disabled={disabled || pending}
+      onChange={event => edge === 'start' ? setStart(event.target.value) : setEnd(event.target.value)}
+      onKeyDown={event => {
+        if (event.nativeEvent.isComposing) return;
+        if (event.key === 'Escape') { event.preventDefault(); reset(); }
+        else if (event.key === 'Enter') { event.preventDefault(); void commit(event.currentTarget); }
+      }} />;
   }
-  return <>{dateInput('start')}<div className="gantt-inline-end-cell">{dateInput('end')}
-    {onReview && dirty && !conflict && (!start || !end || start <= end) && <button type="button" className="gantt-inline-cascade"
-      data-schedule-owner={issue.id} aria-label={`${issue.key} 후행 일정 검토`} disabled={disabled || pending}
-      onPointerDown={event => { if (event.button === 0) event.preventDefault(); }}
-      onClick={event => onReview({ id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
-        { kind: 'inline', opener: event.currentTarget, accept })}>후행 일정 검토</button>}
-  </div></>;
+  return <div className="gantt-inline-date-controls">
+    {dateInput('start')}
+    {dateInput('end')}
+    {dirty && <div className="gantt-inline-draft-actions">
+      <button type="button" className="gantt-inline-save" aria-label={`${issue.key} 날짜 저장`} disabled={disabled || pending}
+        onClick={event => void commit(event.currentTarget)}>저장</button>
+      <button type="button" aria-label={`${issue.key} 날짜 변경 취소`} disabled={disabled || pending}
+        onClick={() => reset(true)}>취소</button>
+      {onReview && !conflict && (!start || !end || start <= end) && <button type="button"
+        aria-label={`${issue.key} 후행 일정 검토`} disabled={disabled || pending}
+        onClick={event => onReview({ id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
+          { kind: 'inline', opener: event.currentTarget, accept })}>후행 일정 검토</button>}
+    </div>}
+  </div>;
 }
