@@ -317,8 +317,9 @@ test('360px에서 Confluence 원본 주소를 검색하고 현재 문서와 공�
     const wrongContext = await f.document(f.first.id, `별도 설치의 기록 ${f.token}`);
     const wrongOrigin = await f.document(f.first.id, `별도 원본의 기록 ${f.token}`);
     const origin = `https://wiki-${f.token}.search.invalid`;
-    const pageId = '90071992547409931234';
+    const pageId = '9007199254740993';
     const classic = `${origin}/wiki/pages/viewpage.action?pageId=${pageId}`;
+    const tiny = `${origin}/wiki/x/AQAAAAAAI`;
     const modern = `${origin}/wiki/spaces/TEAM/pages/${pageId}`;
     const titleAlias = `${origin}/wiki/display/TEAM/Original+Name`;
     const otherContext = `${origin}/another-wiki/pages/viewpage.action?pageId=${pageId}`;
@@ -366,7 +367,7 @@ test('360px에서 Confluence 원본 주소를 검색하고 현재 문서와 공�
     try {
       await term.fill(otherContext);
       await expect.poll(() => slowStarted).toBe(true);
-      await term.fill(`${classic}&token=synthetic-wiki-secret#private-section`);
+      await term.fill(`${tiny}?token=synthetic-wiki-secret#private-section`);
       await expect(quick.getByText(first.title, { exact: true })).toBeVisible();
       await expect(quick.getByText(second.title, { exact: true })).toBeVisible();
     } finally {

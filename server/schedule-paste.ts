@@ -52,6 +52,7 @@ interface PasteProposal extends ScheduleScope {
   issueIds: string[];
   keyBindings?: ScheduleKeyBinding[];
   hierarchyId?: string;
+  hierarchyIssueIds?: string[];
   guard: string;
   changes: ScheduleDateMutation[];
   linkChanges?: ScheduleDependencyMutation[];
@@ -62,7 +63,8 @@ interface PasteProposal extends ScheduleScope {
   result?: SchedulePasteApplyResult;
 }
 
-type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'keyBindings' | 'hierarchyId' | 'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
+type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'keyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
+  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
 
 type DependencyAddition = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
 type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
@@ -174,9 +176,11 @@ function findPreviewIssue(issues: ReadonlyMap<string, Issue>, errors: SchedulePa
 function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const invalid = () => new SchedulePasteError(400, '일정을 변경할 업무와 날짜 또는 이동 일수를 확인해 주세요.');
   if (!isRecord(raw)) throw invalid();
+  const hasFollowUp = Object.hasOwn(raw, 'rescheduleSuccessors');
+  if (hasFollowUp && typeof raw.rescheduleSuccessors !== 'boolean') throw invalid();
+  const followUp = raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {};
   if (Object.hasOwn(raw, 'changes')) {
     if (Object.keys(raw).some(key => key !== 'changes' && key !== 'rescheduleSuccessors') ||
-        (Object.hasOwn(raw, 'rescheduleSuccessors') && typeof raw.rescheduleSuccessors !== 'boolean') ||
         !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
@@ -186,15 +190,15 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
       return { id, expectedVersion, startDate, endDate };
     });
     if (new Set(changes.map(change => change.id)).size !== changes.length) throw invalid();
-    return { changes, ...(raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {}) };
+    return { changes, ...followUp };
   }
   const { issueIds, days, workingDays } = raw;
-  if (Object.keys(raw).length !== 3 || typeof days !== 'number' || !Number.isSafeInteger(days) ||
+  if (Object.keys(raw).length !== (hasFollowUp ? 4 : 3) || typeof days !== 'number' || !Number.isSafeInteger(days) ||
       Math.abs(days) > MAX_WORKING_DURATION_DAYS || typeof workingDays !== 'boolean') throw invalid();
-  if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays };
+  if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays, ...followUp };
   if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_SCHEDULE_MANUAL_ISSUES ||
       !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length) throw invalid();
-  return { issueIds, days, workingDays };
+  return { issueIds, days, workingDays, ...followUp };
 }
 
 function parseRowDependencyEdit(raw: unknown): ScheduleRowDependencyEdit {
@@ -428,7 +432,6 @@ export class SchedulePasteService {
   private previewManual(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePreview {
     const input = parseManualPreviewInput(raw);
     const shift = 'changes' in input ? null : input;
-    const followUp = 'changes' in input && input.rescheduleSuccessors ? input.changes : null;
     const hierarchy = 'hierarchy' in input ? input.hierarchy : null;
     const shiftTarget = (id: string) => ({ id, expectedVersion: undefined, startDate: null, endDate: null });
     return this.store.transaction(() => {
@@ -499,9 +502,12 @@ export class SchedulePasteService {
         }
         addDateChange(issue, dates);
       }
-      const issueIds = new Set(selected.map(({ id }) => id));
+      const selectedIds = selected.map(({ id }) => id);
+      const issueIds = new Set(selectedIds);
       const followUpWarnings: string[] = [];
-      if (followUp && !blocking.length) {
+      if (input.rescheduleSuccessors && !blocking.length && ('changes' in input || changes.size)) {
+        const followUp = 'changes' in input ? input.changes : [...changes.values()];
+        const followUpIssueIds: string[] = [];
         const anchorsByProject = Map.groupBy(followUp, ({ id }) => byId.get(id)!.projectId);
         const issuesByProject = Map.groupBy(state.issues, ({ projectId }) => projectId);
         const dependenciesByProject = Map.groupBy(state.dependencies, ({ predecessorId }) => byId.get(predecessorId)!.projectId);
@@ -516,9 +522,12 @@ export class SchedulePasteService {
           followUpWarnings.push(...plan.warnings);
           const anchorIds = new Set(anchors.map(({ id }) => id));
           for (const { id, toStart, toEnd } of plan.changes) {
-            if (!anchorIds.has(id)) addDateChange(byId.get(id)!, { startDate: toStart, endDate: toEnd });
+            if (anchorIds.has(id)) continue;
+            addDateChange(byId.get(id)!, { startDate: toStart, endDate: toEnd });
+            if (changes.has(id)) followUpIssueIds.push(id);
           }
         }
+        if (followUpIssueIds.length) preview.followUpIssueIds = followUpIssueIds;
         if (changes.size > MAX_SCHEDULE_MANUAL_ISSUES) {
           blocking.push(`한 번에 변경할 수 있는 업무는 ${MAX_SCHEDULE_MANUAL_ISSUES}개입니다. 범위를 나누어 미리 확인해 주세요.`);
         }
@@ -539,7 +548,7 @@ export class SchedulePasteService {
       if (!changes.size) return preview;
       return { ...preview, ...this.saveProposal(scope, state, {
         actorId, issueIds: [...issueIds], changes: [...changes.values()], kind: 'manual-edit',
-        ...(hierarchy ? { hierarchyId: hierarchy.id } : {}),
+        ...(hierarchy ? { hierarchyId: hierarchy.id, hierarchyIssueIds: selectedIds } : {}),
         ...(followUpWarnings.length ? { followUpWarnings } : {}),
       }, hooks) };
     });
@@ -974,7 +983,7 @@ export class SchedulePasteService {
       }
       if (proposal.hierarchyId) {
         const trace = traceGanttHierarchy(proposal.hierarchyId, state.issues, () => 'backlog');
-        const reviewedIds = new Set(proposal.issueIds);
+        const reviewedIds = new Set(proposal.hierarchyIssueIds ?? proposal.issueIds);
         if (!trace || trace.issues.length !== reviewedIds.size || trace.issues.some(issue => !reviewedIds.has(issue.id))) {
           throw new SchedulePasteError(409, '상위·하위 업무 구성이 변경되었습니다. 다시 미리 확인해 주세요.');
         }

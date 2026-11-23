@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Page, type Response } from '@playwright/test';
-import type { AutomaticSchedulePreview, Issue, ScheduleChange, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, ScheduleChange, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 type Dates = readonly [string, string];
 type ApplyResult = { undoId: string; updated: Issue[] };
@@ -113,6 +113,116 @@ function trackScheduleRequests(page: Page) {
   });
   return requests;
 }
+
+test('360px에서 선택한 두 일정과 숨겨진 공유 후행을 옮기고 한 번에 되돌린다', async ({ page, request }) => {
+  test.setTimeout(60_000);
+  const { projects: [project] } = await workspace(request);
+  const date = nextWorkweek();
+  const prefix = `선택 일정 이동 ${randomUUID()}`;
+  const created: Issue[] = [];
+  async function createIssue(title: string, start: number, end: number) {
+    const response = await request.post('/api/issues', { data: {
+      projectId: project.id, title, startDate: date(start), endDate: date(end),
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const first = await createIssue(`${prefix} 첫 선행 업무`, 0, 1);
+    const second = await createIssue(`${prefix} 둘째 선행 업무`, 1, 2);
+    const shared = await createIssue(`${first.key}와 ${second.key}의 공유 후행`, 3, 4);
+    const next = await createIssue(`${shared.key}의 직접 후행`, 7, 7);
+    const slack = await createIssue(`${shared.key}의 여유가 있는 후행`, 11, 11);
+    const unrelated = await createIssue(`${first.key}와 연결되지 않은 업무`, 2, 3);
+    for (const [from, to] of [[first, shared], [second, shared], [shared, next], [shared, slack]]) {
+      const response = await request.post('/api/dependencies', { data: {
+        predecessorId: from.id, successorId: to.id, type: 'FS', lagDays: 0,
+      } });
+      expect(response.status(), await response.text()).toBe(201);
+    }
+    const shifted: Dates[] = [[date(3), date(4)], [date(4), date(7)], [date(8), date(9)], [date(10), date(10)]];
+    const original: Dates[] = [[date(0), date(1)], [date(1), date(2)], [date(3), date(4)], [date(7), date(7)]];
+    const stored = storedDates(request, created);
+    const initial = await stored();
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(prefix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill(date(0));
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    for (const hidden of [shared, next, slack, unrelated]) {
+      await expect(chart.locator(`[data-issue-id="${hidden.id}"]`)).toHaveCount(0);
+    }
+    for (const issue of [first, second]) await chart.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true }).check();
+    const shift = page.getByRole('button', { name: '2개 일정 이동', exact: true });
+    const includeSuccessors = page.getByRole('checkbox', { name: '후행 업무도 함께 조정', exact: true });
+    const review = page.getByRole('button', { name: '변경 미리보기', exact: true });
+    const dialog = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const reviewRow = (issue: Issue) => dialog.getByRole('row').filter({ hasText: issue.title });
+    const posts = trackScheduleRequests(page);
+
+    await shift.click();
+    await expect(includeSuccessors).not.toBeChecked();
+    await page.getByRole('spinbutton', { name: '이동 일수', exact: true }).fill('3');
+    await page.getByRole('checkbox', { name: '근무일 기준', exact: true }).check();
+    const previewDateOnly = responseAt(page, 'manual-preview');
+    await review.click();
+    const dateOnlyResponse = await previewDateOnly;
+    const baseInput = { issueIds: expect.arrayContaining([first.id, second.id]), days: 3, workingDays: true };
+    expect(dateOnlyResponse.request().postDataJSON()).toEqual(baseInput);
+    expect(dateOnlyResponse.request().postDataJSON().issueIds).toHaveLength(2);
+    const dateOnly = await payload<SchedulePreview>(dateOnlyResponse);
+    expect(changesOf(dateOnly.changes)).toEqual(expect.arrayContaining(expectedChanges(created, shifted.slice(0, 2))));
+    expect(dateOnly.changes).toHaveLength(2);
+    await expect(reviewRow(shared)).toHaveCount(0);
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(await stored()).toEqual(initial);
+
+    await shift.click();
+    await includeSuccessors.check();
+    const previewBoth = responseAt(page, 'manual-preview');
+    await review.click();
+    const combinedResponse = await previewBoth;
+    expect(combinedResponse.request().postDataJSON()).toEqual({ ...baseInput, rescheduleSuccessors: true });
+    expect(combinedResponse.request().postDataJSON().issueIds).toHaveLength(2);
+    const combined = await payload<SchedulePreview>(combinedResponse);
+    expect(combined.previewId).toBeTruthy();
+    expect(combined.previewId).not.toBe(dateOnly.previewId);
+    expect(combined.blocking ?? []).toEqual([]);
+    expect(changesOf(combined.changes)).toEqual(expect.arrayContaining(expectedChanges(created, shifted)));
+    expect(combined.changes).toHaveLength(shifted.length);
+    for (const [issue, dates] of [[shared, shifted[2]], [next, shifted[3]]] as const) {
+      await expect(reviewRow(issue)).toHaveCount(1);
+      await expect(reviewRow(issue).getByText('후행 조정', { exact: true })).toBeVisible();
+      await expect(reviewRow(issue).locator('.gantt-new-dates')).toHaveText(dates.join(''));
+    }
+    for (const untouched of [slack, unrelated]) await expect(reviewRow(untouched)).toHaveCount(0);
+    expect(await stored()).toEqual(initial);
+
+    const applyResponse = responseAt(page, 'manual-apply');
+    await dialog.getByRole('button', { name: '변경 적용', exact: true }).click();
+    const application = await applyResponse;
+    expect(application.request().postDataJSON()).toEqual({ previewId: combined.previewId });
+    const applied = await payload<ApplyResult>(application);
+    expect(applied.updated.map(issue => issue.id).sort()).toEqual([first.id, second.id, shared.id, next.id].sort());
+    expect(await stored()).toEqual(expectedDates(created, shifted, 1));
+    await expect(dialog).toHaveCount(0);
+    await expect(chart.getByLabel(`${second.key} 종료일`, { exact: true })).toHaveValue(date(7));
+
+    const undoResponse = responseAt(page, 'undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoResponse;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    await payload(undone);
+    expect(await stored()).toEqual(expectedDates(created, original, 2));
+    await expect(chart.getByLabel(`${second.key} 종료일`, { exact: true })).toHaveValue(date(2));
+    expect(posts).toEqual(['/api/schedule/manual-preview', '/api/schedule/manual-preview', '/api/schedule/manual-apply', '/api/schedule/undo']);
+  } finally { await removeIssues(request, created); }
+});
 
 test('360px에서 날짜 초안을 보존하며 숨겨진 두 단계의 후행 일정을 함께 적용하고 한 번에 되돌린다', async ({ page, request }) => {
   test.setTimeout(60_000);

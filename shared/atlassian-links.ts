@@ -90,6 +90,16 @@ function aSegment(raw: string): string | undefined {
   return value;
 }
 
+function confluenceTinyPageId(identifier: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]{1,11}$/u.test(identifier)) return undefined;
+  // Server and Data Center encode a little-endian Java long, swapping / and + and dropping trailing A characters.
+  const encoded = identifier.replaceAll('-', '/').replaceAll('_', '+');
+  const bytes = atob(`${encoded.padEnd(11, 'A')}=`);
+  if (btoa(bytes).replace(/A*=$/u, '') !== encoded) return undefined;
+  const id = new DataView(Uint8Array.from(bytes, byte => byte.charCodeAt(0)).buffer).getBigInt64(0, true);
+  return id > BigInt(0) ? String(id) : undefined;
+}
+
 function invalidLink(product: AtlassianProduct): never {
   throw new AtlassianReadError(400, product === 'jira' ? 'Jira 업무 주소를 확인해 주세요.' : 'Confluence 페이지 주소를 확인해 주세요.');
 }
@@ -136,6 +146,15 @@ export function parseAtlassianLink(product: unknown, value: unknown): ParsedAtla
     }
     const displayTitle = encodeURIComponent(title).replaceAll('%20', '+');
     return { ...address(context, `/display/${encodeURIComponent(spaceKey)}/${displayTitle}`), product, spaceKey, title };
+  }
+
+  if (segments.at(-2) === 'x') {
+    const pageId = confluenceTinyPageId(leaf);
+    const context = contextPath(segments.slice(0, -2));
+    if (!pageId || context === undefined || (pageIds.length !== 0 && (pageIds.length !== 1 || pageIds[0] !== pageId))) {
+      return invalidLink(product);
+    }
+    return { ...address(context, '/pages/viewpage.action', new URLSearchParams({ pageId })), product, pageId };
   }
 
   const withSlug = segments.at(-5) === 'spaces' && segments.at(-3) === 'pages';

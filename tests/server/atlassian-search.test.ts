@@ -45,6 +45,25 @@ test('numeric Confluence locators match across page URL forms without rounding l
   )), false);
 });
 
+test('Confluence Server tiny links decode to exact page IDs and retain the verified installation identity', () => {
+  const base = 'https://kb.example.test/wiki';
+  for (const [token, pageId] of [
+    ['ZIAB', '98404'], // The matching Tiny Link and pageId in Atlassian's Confluence URL format examples.
+    ['y', '200'],
+    ['_w', '251'],
+    ['-w', '255'],
+    ['AQAAAAAAI', '9007199254740993'],
+    ['---------38', '9223372036854775807'],
+  ]) {
+    const expected = `${base}/pages/viewpage.action?pageId=${pageId}`;
+    const parsed = address(`${base}/x/${token}?pageId=${pageId}&tracking=hidden#section`);
+    assert.deepEqual(parsed, { product: 'confluence', origin: 'https://kb.example.test', contextPath: '/wiki', url: expected, pageId });
+    assert.ok(sameAtlassianSearchAddress(parsed, address(expected)));
+    assert.equal(sameAtlassianSearchAddress(parsed, address(`${base}/elsewhere/x/${token}`)), false);
+    assert.equal(sameAtlassianSearchAddress(parsed, address(expected.replace('kb.example', 'other.example'))), false);
+  }
+});
+
 test('Confluence display locators use the exact decoded source space and title', () => {
   const base = 'https://kb.example.test/confluence';
   const canonical = address(`${base}/display/PLAN/Team+%2B+%EC%9A%B4%EC%98%81%2FNotes?token=discard#heading`);
@@ -86,6 +105,17 @@ test('malformed source addresses never become canonical lookup input', () => {
     `${base}/wiki/spaces/PLAN/pages/42?pageId=43`,
     `${base}/wiki/spaces/PLAN/pages/42?pageId=42&pageId=42`,
     `${base}/wiki/display/PLAN/Title?pageId=42`,
+    `${base}/wiki/x/A`,
+    `${base}/wiki/x/AAAAAAAAAAA`,
+    `${base}/wiki/x/AAAAAAAAAAAB`,
+    `${base}/wiki/x/AAAAAAAAAI`,
+    `${base}/wiki/x/ZIABA`,
+    `${base}/wiki/x/---------39`,
+    `${base}/wiki/x/%5AIAB`,
+    `${base}/wiki/x/ZIAB=`,
+    `${base}/wiki/x/ZIAB?pageId=98405`,
+    `${base}/wiki/x/ZIAB?pageId=98404&pageId=98404`,
+    `${base}/other/../wiki/x/ZIAB`,
     `${base}/wiki/browse/PLAN-42?token=${'x'.repeat(MAX_ATLASSIAN_LINK_URL_LENGTH)}`,
   ]) assert.equal(parseAtlassianSearchInput(invalid), null, invalid);
 });

@@ -977,7 +977,7 @@ test('360px에서 기존 Confluence 공간의 새 문서를 추가하고 편집�
   }
 });
 
-test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamspace 문서를 연다', async ({ page, request }) => {
+test('360px에서 이관한 Confluence 제목·페이지 ID·짧은 주소로 같은 Teamspace 문서를 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const id = suffix(), spaceKey = `CFL${id}`, spaceName = `링크 이관 공간 ${id}`;
@@ -985,12 +985,15 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
   const sourceTitle = `본문 링크가 있는 문서 ${id}`, targetTitle = `팀 절차 안내 ${id}`;
   const targetBody = '이관 후 Teamspace에서 열리는 절차 본문';
   const titleLabel = '제목 경로로 절차 열기', idLabel = '페이지 ID로 절차 열기', missingLabel = '이관 대상이 없는 페이지';
+  const tinyLabel = '짧은 주소로 절차 열기';
   const titlePath = `${base}/display/${spaceKey}/${encodeURIComponent(targetTitle).replaceAll('%20', '+')}`;
   const idPath = '/wiki/pages/viewpage.action?pageId=31002';
+  const tinyPath = '/wiki/x/Gnk';
   const missingPath = '/wiki/pages/viewpage.action?pageId=31999';
   const sourceBody = [
     `<p><a href="${titlePath}">${titleLabel}</a></p>`,
     `<p><a href="${idPath}">${idLabel}</a></p>`,
+    `<p><a href="${tinyPath}">${tinyLabel}</a></p>`,
     `<p><a href="${missingPath}">${missingLabel}</a></p>`,
   ].join('\n');
   const pageRow = (sourceId: number, title: string, body: string) => `
@@ -1028,7 +1031,7 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
     expect(plan.counts.documents).toBe(2);
     expect(plan.notices).toEqual(expect.arrayContaining([expect.objectContaining({ code: 'UNRESOLVED_REFERENCE' })]));
     const sample = plan.samples.find(item => item.title === sourceTitle);
-    for (const label of [titleLabel, idLabel, missingLabel]) expect(sample?.plainText).toContain(label);
+    for (const label of [titleLabel, idLabel, tinyLabel, missingLabel]) expect(sample?.plainText).toContain(label);
 
     const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
     await expect(review.locator('.migration-notice').filter({ hasText: 'UNRESOLVED_REFERENCE' })).toBeVisible();
@@ -1050,7 +1053,7 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
     const target = importedDocuments.find(document => document.title === targetTitle)!;
     expect(source).toBeTruthy();
     expect(target).toBeTruthy();
-    expect(contentReferences(source.content)).toEqual([titleLabel, idLabel].map(label => ({
+    expect(contentReferences(source.content)).toEqual([titleLabel, idLabel, tinyLabel].map(label => ({
       type: 'document', kind: 'reference', id: target.id, label,
     })));
 
@@ -1067,7 +1070,7 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
     await page.getByRole('dialog', { name: readerIssue.title, exact: true })
       .getByRole('button', { name: `${sourceTitle} 미리보기`, exact: true }).click();
     const reader = page.getByRole('dialog', { name: '연결 문서 미리보기', exact: true });
-    for (const index of [0, 1]) {
+    for (const index of [0, 1, 2]) {
       if (index) await page.goto(readerPath);
       await expect(reader).toBeVisible();
       const body = reader.getByRole('region', { name: '미리보기 본문', exact: true });
@@ -1075,7 +1078,7 @@ test('360px에서 이관한 Confluence 본문 링크 두 종류로 같은 Teamsp
       await expect(body).toContainText(missingLabel);
       await expect(body.getByRole('link', { name: new RegExp(missingLabel) })).toHaveCount(0);
       const references = body.getByRole('button', { name: `참조 문서 열기 ${targetTitle}`, exact: true });
-      await expect(references).toHaveCount(2);
+      await expect(references).toHaveCount(3);
       await references.nth(index).click();
       await expect(page).toHaveURL(new RegExp(`/#/${projectId}/documents/${target.id}$`));
       await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(targetTitle);

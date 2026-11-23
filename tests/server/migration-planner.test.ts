@@ -722,6 +722,7 @@ test('Confluence page hrefs preserve verified mount, title encoding and page or 
   const display = `display/TEAM/${encodeURIComponent(title).replaceAll('%20', '+')}`;
   const numeric = 'pages/viewpage.action?pageId=200';
   const modern = 'spaces/TEAM/pages/200/Release+notes';
+  const tiny = 'x/y';
   const supported = [
     [`${origin}${mount}/${display}`, '절대 제목 링크'],
     [`${mount}/${display}`, '루트 기준 제목 링크'],
@@ -734,6 +735,9 @@ test('Confluence page hrefs preserve verified mount, title encoding and page or 
     [`${origin}${mount}/${modern}`, '절대 페이지 경로'],
     [`${mount}/${modern}`, '루트 기준 페이지 경로'],
     [`./${modern}`, '서비스 기준 페이지 경로'],
+    [`${origin}${mount}/${tiny}`, '절대 짧은 주소'],
+    [`${mount}/${tiny}`, '루트 기준 짧은 주소'],
+    [`./${tiny}`, '서비스 기준 짧은 주소'],
   ];
   const avoided = [
     [`/${display}`, '서비스 밖 경로'],
@@ -746,13 +750,20 @@ test('Confluence page hrefs preserve verified mount, title encoding and page or 
     [`https://reviewer:synthetic-secret@wiki.example.test${mount}/${display}`, '자격 정보 포함 주소'],
     [`//wiki.example.test${mount}/${display}`, '프로토콜 생략 주소'],
   ];
+  const externalLinks = [
+    ['https://outside.example.test/pages/123', '일반 외부 링크'],
+    [`https://outside.example.test/${tiny}`, '다른 원본의 짧은 주소'],
+    [`${origin}/other/${tiny}`, '다른 설치의 짧은 주소'],
+    [`${origin}${mount}/x/yA`, '덧붙인 식별자의 주소'],
+  ];
   const source = pkg('wiki-hrefs', 'confluence', [
     record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } }),
     page('100', { title: '링크를 포함한 원본', authorId: null, text: [
       ...supported.map(([href, label]) => confluenceBodyHref(href, label)),
       confluenceBodyHref(`${mount}/${display}#ReleaseNotes`, '같은 문서의 절'),
+      confluenceBodyHref(`${mount}/${tiny}#ReleaseNotes`, '짧은 주소로 연결한 절'),
       ...avoided.map(([href, label]) => confluenceBodyHref(href, label)),
-      confluenceBodyHref('https://outside.example.test/pages/123', '일반 외부 링크'),
+      ...externalLinks.map(([href, label]) => confluenceBodyHref(href, label)),
     ].join('') }),
     page('200', { title, authorId: null, text: '<h2>Release Notes</h2>' }),
     page('201', { title: '배포   기록', authorId: null }),
@@ -766,10 +777,14 @@ test('Confluence page hrefs preserve verified mount, title encoding and page or 
   assert.deepEqual(contentReferences(original.content).map(({ id, label }) => [id, label]),
     supported.map(([, label]) => [target.id, label]));
   const sectionId = target.content.content?.[0].attrs?.sectionId as string;
-  const linkedSection = original.content.content?.find(node => node.content?.[0].text === '같은 문서의 절');
-  assert.equal(linkedSection?.content?.[0].marks?.[0].attrs?.href, documentSectionHash(target.id, sectionId));
-  const external = original.content.content?.find(node => node.content?.[0].text === '일반 외부 링크');
-  assert.equal(external?.content?.[0].marks?.[0].attrs?.href, 'https://outside.example.test/pages/123');
+  for (const label of ['같은 문서의 절', '짧은 주소로 연결한 절']) {
+    const linkedSection = original.content.content?.find(node => node.content?.[0].text === label);
+    assert.equal(linkedSection?.content?.[0].marks?.[0].attrs?.href, documentSectionHash(target.id, sectionId));
+  }
+  for (const [href, label] of externalLinks) {
+    const external = original.content.content?.find(node => node.content?.[0].text === label);
+    assert.equal(external?.content?.[0].marks?.[0].attrs?.href, href);
+  }
   for (const [, label] of avoided) {
     const paragraph = original.content.content?.find(node => node.content?.some(child => child.text?.includes(label)));
     assert.ok(paragraph, label);
@@ -790,11 +805,13 @@ test('absolute Confluence body hrefs cross configured sources only through an un
     page('100', { authorId: null, text: [
       confluenceBodyHref(`${peer}/display/QA/Peer+target`, '확인한 상대 서버의 문서 제목'),
       confluenceBodyHref(`${peer}/pages/viewpage.action?pageId=200`, '확인한 상대 서버의 문서 ID'),
+      confluenceBodyHref(`${peer}/x/y`, '확인한 상대 서버의 짧은 주소'),
       confluenceBodyHref('display/QA/Peer+target', '현재 서버에 없는 상대 경로'),
       confluenceBodyHref('/wiki/pages/viewpage.action?pageId=200', '현재 서버에 없는 상대 ID'),
       confluenceBodyHref(`${peer}/display/QA/Shared+title`, '원본 제목이 중복된 문서'),
       confluenceBodyHref(`${peer}/display/QA/Excluded`, '제외한 원본 문서'),
       confluenceBodyHref(`${peer}/display/QA/Restricted`, '제한된 원본 문서'),
+      confluenceBodyHref(`${peer}/x/z`, '제한된 원본 문서의 짧은 주소'),
     ].join('') }),
   ]);
   const peerSource = pkg('wiki-peer', 'confluence', [
@@ -822,8 +839,9 @@ test('absolute Confluence body hrefs cross configured sources only through an un
   const target = verified.documents.find(document => document.title === 'Peer target')!;
   assert.deepEqual(contentReferences(sourceContent(verified).content).map(({ id, label }) => [id, label]), [
     [target.id, '확인한 상대 서버의 문서 제목'], [target.id, '확인한 상대 서버의 문서 ID'],
+    [target.id, '확인한 상대 서버의 짧은 주소'],
   ]);
-  for (const label of ['현재 서버에 없는 상대 경로', '현재 서버에 없는 상대 ID', '원본 제목이 중복된 문서', '제외한 원본 문서', '제한된 원본 문서']) {
+  for (const label of ['현재 서버에 없는 상대 경로', '현재 서버에 없는 상대 ID', '원본 제목이 중복된 문서', '제외한 원본 문서', '제한된 원본 문서', '제한된 원본 문서의 짧은 주소']) {
     assert.ok(sourceContent(verified).plainText.includes(label));
   }
   assert.ok(notices(verified).has('UNRESOLVED_REFERENCE'));

@@ -273,6 +273,7 @@ function ProjectGantt(props: GanttProps) {
   const { undoId, remember: rememberUndo, undo: undoScheduleChange } = useScheduleUndo(undoScope, props.actorId, data.restoreGeneration);
   const [days, setDays] = useState(5);
   const [workingDays, setWorkingDays] = useState(true);
+  const [shiftSuccessors, setShiftSuccessors] = useState(false);
   const [shiftMode, setShiftMode] = useState<ShiftMode | null>(null);
   const [linkEditor, setLinkEditor] = useState<DependencyEditor | null>(null);
   const [linkPicker, setLinkPicker] = useState<{ source: LinkPick | null } | null>(null);
@@ -855,11 +856,13 @@ function ProjectGantt(props: GanttProps) {
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
   const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
-  const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
+  const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && !manualReview?.input.rescheduleSuccessors &&
+    singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
   const batchDateInput = manualReview?.inlineDates && 'changes' in manualReview.input ? manualReview.input : null;
   const batchFollowUp = batchDateInput?.rescheduleSuccessors === true;
   const canReviewBatchFollowUp = batchDateInput && (batchFollowUp || batchDateInput.changes.some(change => outgoingIssueIds.has(change.id)));
   const batchAnchorIds = batchFollowUp ? new Set(batchDateInput.changes.map(change => change.id)) : null;
+  const adjustedShiftSuccessors = preview?.followUpIssueIds ? new Set(preview.followUpIssueIds) : null;
   const previewTeamFollowUp = manualReview && 'changes' in manualReview.input && manualReview.input.changes.length === 1 &&
     singleChange && teamBlockerChoices.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
@@ -1323,16 +1326,20 @@ function ProjectGantt(props: GanttProps) {
   function toggleShiftForm(mode: ShiftMode) {
     if (busyRef.current) return;
     if (shiftMode === mode) { closeShiftForm(); return; }
-    if (canLeave()) queueMicrotask(() => setShiftMode(mode));
+    if (canLeave()) queueMicrotask(() => {
+      setShiftSuccessors(false);
+      setShiftMode(mode);
+    });
   }
   function submitShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const shift = { days, workingDays, ...(shiftSuccessors ? { rescheduleSuccessors: true } : {}) };
     if (shiftMode === 'hierarchy') {
       if (!hierarchyTrace) return;
       const { id, version } = hierarchyTrace.anchor;
-      void requestShiftPreview({ hierarchy: { id, expectedVersion: version }, days, workingDays }, hierarchyShiftTrigger.current);
+      void requestShiftPreview({ ...shift, hierarchy: { id, expectedVersion: version } }, hierarchyShiftTrigger.current);
     } else {
-      void requestShiftPreview({ issueIds: selectedIssues.map(issue => issue.id), days, workingDays }, selectionShiftTrigger.current);
+      void requestShiftPreview({ ...shift, issueIds: selectedIssues.map(issue => issue.id) }, selectionShiftTrigger.current);
     }
   }
   async function requestShiftPreview(input: ScheduleShiftInput, opener: HTMLButtonElement | null) {
@@ -2093,9 +2100,13 @@ function ProjectGantt(props: GanttProps) {
         value={days} disabled={busy} onChange={e => setDays(Number(e.target.value))} required />
       <span>일 이동</span>
       <label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} disabled={busy} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label>
+      <label className="gantt-checkbox-label"><input type="checkbox" checked={shiftSuccessors} disabled={busy}
+        aria-describedby={shiftSuccessors ? 'gantt-shift-follow-up-help' : undefined}
+        onChange={event => setShiftSuccessors(event.target.checked)} />후행 업무도 함께 조정</label>
       <small>{shiftMode === 'hierarchy'
         ? '시작일과 종료일을 같은 일수만큼 옮깁니다. 음수는 앞당기며, 근무일 기준은 프로젝트 달력의 근무 요일과 예외를 적용합니다.'
         : '음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용'}</small>
+      {shiftSuccessors && <small id="gantt-shift-follow-up-help">같은 프로젝트에서 선후행 조건을 맞추는 데 필요한 일정만 늦춥니다.</small>}
       <button className="btn btn-primary" type="submit" disabled={busy || (shiftMode === 'hierarchy' ? !hierarchyTrace : !selectedIssues.length)}>변경 미리보기</button>
       <button className="issue-icon-button" type="button" onClick={closeShiftForm} disabled={busy} aria-label="일정 이동 닫기"><X size={16} aria-hidden="true" /></button>
     </form>}
@@ -2385,7 +2396,8 @@ function ProjectGantt(props: GanttProps) {
           <tbody>{preview.changes.map(change => <tr key={change.id}>
             <td>
               <span className="issue-key">{change.key}</span><strong>{change.title}</strong>
-              {batchAnchorIds && !batchAnchorIds.has(change.id) && <small className="gantt-follow-up-row-label">후행 조정</small>}
+              {(adjustedShiftSuccessors?.has(change.id) || batchAnchorIds && !batchAnchorIds.has(change.id)) &&
+                <small className="gantt-follow-up-row-label">후행 조정</small>}
             </td>
             <td>{change.fromStart || '미정'}<br />{change.fromEnd || '미정'}</td>
             <td><ArrowRight size={16} /></td>

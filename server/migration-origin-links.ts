@@ -58,7 +58,7 @@ export function confluenceMigrationPageAddress(value: string, base?: MigrationOr
     if (!base || text.startsWith('//')) return null;
     const relative = text.replace(/^\.\//u, '');
     if (text.startsWith('/')) address = `${base.origin}${text}`;
-    else if (/^(?:pages|display|spaces)\//u.test(relative)) address = `${base.origin}${base.contextPath}/${relative}`;
+    else if (/^(?:pages|display|spaces|x)\//u.test(relative)) address = `${base.origin}${base.contextPath}/${relative}`;
     else if (/^viewpage\.action(?=[?#]|$)/u.test(relative)) address = `${base.origin}${base.contextPath}/pages/${relative}`;
     else if (text.startsWith('?')) address = `${base.origin}${base.contextPath}/pages/viewpage.action${text}`;
     else return null;

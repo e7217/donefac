@@ -33,6 +33,7 @@ test('external links normalize duplicate requests, distinguish target types, and
   const saved = links.create(jira);
   assert.deepEqual(links.create({ ...jira, url: 'https://JIRA.example.test/jira/browse/test-37?focusedCommentId=89#comment' }), saved);
   const page = links.create(confluence);
+  assert.deepEqual(links.create({ ...confluence, url: 'https://wiki.example.test/wiki/x/9QE?tracking=ignored#heading' }), page);
   assert.deepEqual(links.list('issue', issue.id), [saved]);
   assert.deepEqual(links.list('document', issue.id), [page]);
   assert.deepEqual(new AtlassianLinksService(store).get(saved.id), saved);

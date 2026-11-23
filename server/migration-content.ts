@@ -322,6 +322,11 @@ class Converter {
     const address = url.trim();
     if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(address)) return { kind: 'issue', url };
     if (/[?&]pageId=|(?:^|\/)(?:display|spaces)\//.test(address)) return { kind: 'page', url };
+    if (/(?:^|\/)x\/[A-Za-z0-9_-]{1,11}\/*$/u.test(address.split(/[?#]/u, 1)[0])) {
+      const page = { kind: 'page', url } as const;
+      // Other sites can use /x/ too. Convert only a short link with an established migration target.
+      return this.resolve(page) ? page : null;
+    }
     return null;
   }
   adf(value: unknown, depth = 0): RichContent[] {
