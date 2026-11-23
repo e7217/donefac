@@ -240,6 +240,10 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   if (previous && hasSameReportContext(previous, next) && previous.issueId !== next.issueId) {
     return dispatchWorkspaceNavigation(null, true);
   }
+  if (previous?.view === 'teamboard' && next.view === 'teamboard' && !previous.issueId && !next.issueId &&
+      !previous.documentPreviewId && !next.documentPreviewId && previous.projectId === next.projectId) {
+    return dispatchWorkspaceNavigation(null, false, true);
+  }
   return dispatchWorkspaceNavigation();
 }
 function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRoute {

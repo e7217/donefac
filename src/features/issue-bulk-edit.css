@@ -75,6 +75,15 @@
 
 .issue-bulk-fields .field { width: 100%; min-width: 0; }
 
+.issue-bulk-project-statuses {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+  gap: 10px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .issue-bulk-date-fields { display: grid; gap: 8px; min-width: 0; }
 
 .issue-bulk-label-removal {
@@ -230,6 +239,8 @@
   height: 40px;
   cursor: pointer;
 }
+
+.issue-bulk-select-with-label { width: auto; gap: 6px; }
 
 .issue-bulk-selection input {
   width: 16px;

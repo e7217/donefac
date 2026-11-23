@@ -839,7 +839,14 @@ export interface IssueBulkEditPreviewInput {
   changes: IssueBulkEditChanges;
   fieldBreakdown?: IssueFieldBreakdownSelection;
 }
+export interface TeamIssueBulkEditPreviewInput {
+  issues: { id: string; expectedVersion: number; projectId: string }[];
+  changes: Omit<IssueBulkEditChanges, 'status' | 'customFields'>;
+  statuses?: Record<string, string>;
+  workflowVersions?: Record<string, number>;
+}
 export interface IssueBulkEditRow extends Pick<Issue, 'id' | 'key' | 'title'> {
+  projectId?: string;
   outcome: 'changed' | 'unchanged' | 'blocked';
   before: IssueBulkEditValues;
   after: IssueBulkEditValues | null;

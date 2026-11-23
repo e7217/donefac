@@ -329,6 +329,10 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `POST /api/projects/:projectId/issues/bulk-apply`에 `{previewId}`를 보낸다. 같은 작업자와 프로젝트에서 업무·워크플로·업무 양식·배정 규칙을 다시 확인한 뒤 실제 변경이 있는 업무를 함께 저장한다. 충돌이 있으면 `409` 응답으로 전체 저장을 거절한다. 적용 응답을 받지 못하면 같은 ID를 보내 7일간 `{previewId,updated,unchanged}`를 다시 받을 수 있다. 자체 백업을 가져오면 미리보기와 재시도 기록을 초기화한다.
 
+전체 프로젝트 보드의 `POST /api/team/issues/bulk-preview`는 `{issues:[{id,projectId,expectedVersion}],changes:{priority?,assigneeId?,dueDate?,addLabels?,removeLabels?},statuses?,workflowVersions?}`를 받는다. 현재 보드에서 선택한 업무 최대 100개를 보낸다. `statuses`에는 상태를 바꿀 프로젝트별 실제 상태 ID를 넣고, `workflowVersions`에는 같은 프로젝트 키와 조회 당시 버전을 넣는다. 공통 변경만 검토할 때는 두 항목을 생략한다. 선택한 업무·프로젝트와 워크플로 버전을 대조한 뒤 `rows[].projectId`와 각 업무의 전후 값·차단 이유를 반환한다.
+
+팀 보드에서 받은 미리보기 ID는 `POST /api/team/issues/bulk-apply`에 `{previewId}`로 보낸다. 각 프로젝트의 설정과 업무 버전을 다시 확인하고, 실제 업무·이력·알림과 적용 결과를 한 트랜잭션으로 저장한다. 입력한 상태 전이가 하나라도 막히면 전체 적용을 보류한다. 적용 응답이 끊기면 같은 미리보기 ID로 결과를 다시 확인할 수 있다.
+
 ## 전체 프로젝트 보드의 상태 변경
 
 브라우저의 `PATCH /api/issues/:id`에 `{expectedVersion, expectedWorkflowVersion, status}`를 보내 상태를 바꾼다. `status`는 해당 업무 프로젝트의 실제 상태 ID다. 선택 속성인 `expectedWorkflowVersion`을 보낼 때는 `status`를 함께 지정하고, 조회한 워크플로의 양의 정수 버전을 사용한다. 업무 버전과 별도로 워크플로 버전이 달라지면 `409`와 `details.reason`의 `workflow_changed`, `currentWorkflowVersion`을 반환한다. 일반 상태 전이의 필수 입력·차단 검사를 적용하며 프로젝트 내 상대 순서를 보존한다.

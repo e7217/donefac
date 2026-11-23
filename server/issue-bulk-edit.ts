@@ -6,7 +6,7 @@ import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, WORKFLOW_STATUS_MIGRATION_LIMIT,
   type CustomFieldValue, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
   type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditValues,
-  type IssueFieldBreakdownSelection, type ProjectWorkflow, type WorkflowStatusMigrationPreviewInput,
+  type IssueFieldBreakdownSelection, type ProjectWorkflow, type TeamIssueBulkEditPreviewInput, type WorkflowStatusMigrationPreviewInput,
 } from '../shared/types.js';
 import { MAX_PACKAGE_BYTES } from './attachments.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
@@ -18,6 +18,7 @@ export class IssueBulkEditError extends Error {
 }
 
 type IssueSelection = IssueBulkEditPreviewInput['issues'][number];
+type TeamIssueSelection = TeamIssueBulkEditPreviewInput['issues'][number];
 type IssueUpdate = Partial<IssueBulkEditValues>;
 type FieldBreakdownMatches = (projectId: string, selection: IssueFieldBreakdownSelection, issueIds: readonly string[]) => boolean;
 interface BulkEditHooks<T extends { issue: Issue }> {
@@ -27,26 +28,33 @@ interface BulkEditHooks<T extends { issue: Issue }> {
   prepare(before: Issue, update: IssueUpdate, preparedAt: string): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
-interface StatusMigrationHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
+interface WorkflowBulkEditHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
   workflow(projectId: string): ProjectWorkflow;
 }
 interface BulkEditScope extends IssueBulkEditPreviewInput {
+  team?: never;
   projectId: string;
   actorId: string;
   migrationFromStatusId?: string;
 }
-interface BulkEditProposal extends BulkEditScope {
+interface TeamBulkEditScope extends TeamIssueBulkEditPreviewInput {
+  team: true;
+  actorId: string;
+}
+type EditScope = BulkEditScope | TeamBulkEditScope;
+type BulkEditProposal = ((BulkEditScope & { configurationToken: string }) |
+  (TeamBulkEditScope & { configurationTokens: [string, string][] })) & {
   id: string;
   removeAfter: string;
-  configurationToken: string;
   rows: IssueBulkEditRow[];
   result?: IssueBulkEditResult;
-}
+};
 interface BulkEditCandidate<T> { before: Issue; row: IssueBulkEditRow; prepared?: T }
 
 const TABLE = 'issue_bulk_edit_previews';
 const STALE_MESSAGE = '업무 또는 프로젝트 설정이 변경되었습니다. 다시 미리 확인해 주세요.';
 const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels', 'customFields']);
+const TEAM_CHANGE_FIELDS = new Set(['priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels']);
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 
 function fail(status: number, message: string, details?: unknown): never {
@@ -94,27 +102,30 @@ function parseCustomFields(value: unknown): Record<string, CustomFieldValue> {
   return Object.fromEntries(parsed);
 }
 
-function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
-  const input = object(raw);
-  if (Object.keys(input).some(field => field !== 'issues' && field !== 'changes' && field !== 'fieldBreakdown')) fail(400, '업무 일괄 편집 요청 항목을 확인해 주세요.');
-  if (!Array.isArray(input.issues) || input.issues.length < 1 || input.issues.length > ISSUE_BULK_EDIT_LIMIT) {
+function parseSelectedIssues<T extends IssueSelection>(value: unknown,
+  withScope: (record: Record<string, unknown>, issue: IssueSelection) => T): T[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > ISSUE_BULK_EDIT_LIMIT) {
     fail(400, `업무를 1~${ISSUE_BULK_EDIT_LIMIT}개 선택해 주세요.`);
   }
   const ids = new Set<string>();
-  const issues = input.issues.map((value): IssueSelection => {
+  return value.map((value: unknown) => {
     const selection = object(value);
     const { id, expectedVersion } = selection;
-    if (Object.keys(selection).length !== 2 || !isId(id) || typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
+    if (!isId(id) || typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
       fail(400, '업무 ID와 확인한 버전을 입력해 주세요.');
     }
     if (ids.has(id)) fail(400, '업무를 중복으로 선택할 수 없습니다.');
     ids.add(id);
-    return { id, expectedVersion };
+    return withScope(selection, { id, expectedVersion });
   });
+}
 
-  const change = object(input.changes);
+function parseChanges(raw: unknown, allowedFields = CHANGE_FIELDS, allowEmpty = false): IssueBulkEditChanges {
+  const change = object(raw);
   const fields = Object.keys(change);
-  if (!fields.length || fields.some(field => !CHANGE_FIELDS.has(field))) fail(400, '지원하는 변경 항목을 한 가지 이상 선택해 주세요.');
+  if ((!allowEmpty && !fields.length) || fields.some(field => !allowedFields.has(field))) {
+    fail(400, '지원하는 변경 항목을 한 가지 이상 선택해 주세요.');
+  }
   const changes: IssueBulkEditChanges = {};
   if (Object.hasOwn(change, 'status')) {
     if (!isId(change.status)) fail(400, '변경할 업무 상태를 확인해 주세요.');
@@ -136,8 +147,44 @@ function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
   if (Object.hasOwn(change, 'removeLabels')) changes.removeLabels = parseLabels(change.removeLabels, 'remove');
   if (Object.hasOwn(change, 'customFields')) changes.customFields = parseCustomFields(change.customFields);
   if (changes.addLabels?.some(label => changes.removeLabels?.includes(label))) fail(400, '같은 라벨을 함께 추가하고 제거할 수 없습니다.');
+  return changes;
+}
+
+function parsePreview(raw: unknown): IssueBulkEditPreviewInput {
+  const input = object(raw);
+  if (Object.keys(input).some(field => field !== 'issues' && field !== 'changes' && field !== 'fieldBreakdown')) fail(400, '업무 일괄 편집 요청 항목을 확인해 주세요.');
+  const issues = parseSelectedIssues(input.issues, (selection, issue) => {
+    if (Object.keys(selection).length !== 2) fail(400, '업무 ID와 확인한 버전을 입력해 주세요.');
+    return issue;
+  });
+  const changes = parseChanges(input.changes);
   const fieldBreakdown = Object.hasOwn(input, 'fieldBreakdown') ? parseFieldBreakdownSelection(input.fieldBreakdown) : undefined;
   return { issues, changes, ...(fieldBreakdown ? { fieldBreakdown } : {}) };
+}
+
+function parseTeamPreview(raw: unknown): TeamIssueBulkEditPreviewInput {
+  const input = object(raw);
+  if (Object.keys(input).some(field => !['issues', 'changes', 'statuses', 'workflowVersions'].includes(field))) fail(400, '업무 일괄 편집 요청 항목을 확인해 주세요.');
+  const issues = parseSelectedIssues(input.issues, (selection, issue) => {
+    if (Object.keys(selection).length !== 3 || !isId(selection.projectId)) fail(400, '선택한 업무마다 프로젝트 ID를 입력해 주세요.');
+    return { ...issue, projectId: selection.projectId };
+  });
+  const projects = new Set(issues.map(issue => issue.projectId));
+  const entries = Object.hasOwn(input, 'statuses') ? Object.entries(object(input.statuses)) : [];
+  const statuses = Object.fromEntries(entries.map(([projectId, status]) => {
+    if (!projects.has(projectId) || !isId(status)) fail(400, '선택한 업무의 프로젝트별 상태를 확인해 주세요.');
+    return [projectId, status];
+  }));
+  const versions = Object.hasOwn(input, 'workflowVersions') ? Object.entries(object(input.workflowVersions)) : [];
+  if (versions.length !== entries.length) fail(400, '상태를 선택한 프로젝트마다 확인한 워크플로 버전을 보내 주세요.');
+  const workflowVersions = Object.fromEntries(versions.map(([projectId, version]) => {
+    if (!Object.hasOwn(statuses, projectId) || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+      fail(400, '상태를 선택한 프로젝트마다 확인한 워크플로 버전을 보내 주세요.');
+    }
+    return [projectId, version];
+  }));
+  return { issues, changes: parseChanges(input.changes, TEAM_CHANGE_FIELDS, entries.length > 0),
+    ...(entries.length ? { statuses, workflowVersions } : {}) };
 }
 
 function verifyFieldBreakdown(projectId: string, { issues, fieldBreakdown }: IssueBulkEditPreviewInput, matches?: FieldBreakdownMatches) {
@@ -241,8 +288,20 @@ function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulk
 }
 
 function matchesReview(current: IssueBulkEditRow, reviewed: IssueBulkEditRow): boolean {
-  return current.id === reviewed.id && current.outcome === reviewed.outcome
+  return current.id === reviewed.id && current.projectId === reviewed.projectId && current.outcome === reviewed.outcome
     && sameValues(current.before, reviewed.before) && sameValues(current.after, reviewed.after);
+}
+
+function changesFor(scope: EditScope, projectId: string): IssueBulkEditChanges {
+  if (!scope.team || !scope.statuses || !Object.hasOwn(scope.statuses, projectId)) return scope.changes;
+  return { ...scope.changes, status: scope.statuses[projectId] };
+}
+
+function reviewCandidate<T extends { issue: Issue }>(scope: EditScope, issue: Issue,
+  prepare: BulkEditHooks<T>['prepare'], preparedAt: string): BulkEditCandidate<T> {
+  const result = candidate(issue, changesFor(scope, issue.projectId), prepare, preparedAt);
+  if (scope.team) result.row.projectId = issue.projectId;
+  return result;
 }
 
 export class IssueBulkEditService {
@@ -256,9 +315,9 @@ export class IssueBulkEditService {
     this.store.db.prepare("DELETE FROM issue_bulk_edit_previews WHERE json_extract(json,'$.removeAfter') <= ?").run(after(0));
   }
 
-  private loadIssues(projectId: string, selections: IssueSelection[], missingStatus: 404 | 409): Issue[] {
+  private loadIssues(selections: TeamIssueSelection[], missingStatus: 404 | 409): Issue[] {
     const getIssue = this.store.db.prepare('SELECT json FROM issues WHERE id = ? AND project_id = ?');
-    const issues = selections.map(({ id }) => {
+    const issues = selections.map(({ id, projectId }) => {
       const row = getIssue.get(id, projectId) as { json: string } | undefined;
       if (!row) fail(missingStatus, missingStatus === 404 ? '선택한 업무를 이 프로젝트에서 찾을 수 없습니다.' : STALE_MESSAGE, { issueId: id });
       return JSON.parse(row.json) as Issue;
@@ -276,14 +335,20 @@ export class IssueBulkEditService {
     return rows.map(row => JSON.parse(row.json) as Issue);
   }
 
-  private review<T extends { issue: Issue }>(scope: BulkEditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
+  private teamConfigurationTokens<T extends { issue: Issue }>(scope: TeamBulkEditScope, hooks: BulkEditHooks<T>): [string, string][] {
+    const projectIds = new Set(scope.issues.map(({ projectId }) => projectId));
+    return [...projectIds].map(projectId => [projectId, hooks.configurationToken(projectId, changesFor(scope, projectId))]);
+  }
+
+  private review<T extends { issue: Issue }>(scope: EditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
     const rows: IssueBulkEditRow[] = [];
     const counts = { changed: 0, unchanged: 0, blocked: 0 };
     const preparedAt = new Date().toISOString();
-    let remainingBytes = scope.changes.customFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
+    const hasCustomFields = !scope.team && Boolean(scope.changes.customFields);
+    let remainingBytes = hasCustomFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
     for (const issue of issues) {
-      const { row } = candidate(issue, scope.changes, hooks.prepare, preparedAt);
-      if (scope.changes.customFields) {
+      const { row } = reviewCandidate(scope, issue, hooks.prepare, preparedAt);
+      if (hasCustomFields) {
         remainingBytes -= Buffer.byteLength(JSON.stringify(row)) + 1;
         if (remainingBytes < 0) fail(413, '미리보기 데이터가 너무 큽니다. 업무 또는 변경할 필드 수를 줄여 주세요.');
       }
@@ -294,9 +359,10 @@ export class IssueBulkEditService {
 
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-    const proposal: BulkEditProposal = {
-      ...scope, id, removeAfter: expiresAt, rows, configurationToken: hooks.configurationToken(scope.projectId, scope.changes),
-    };
+    const summary = { id, removeAfter: expiresAt, rows };
+    const proposal: BulkEditProposal = scope.team
+      ? { ...scope, ...summary, configurationTokens: this.teamConfigurationTokens(scope, hooks) }
+      : { ...scope, ...summary, configurationToken: hooks.configurationToken(scope.projectId, scope.changes) };
     this.store.put(TABLE, proposal);
     return { previewId: id, expiresAt, rows, ...counts };
   }
@@ -308,12 +374,26 @@ export class IssueBulkEditService {
       this.prune();
       if (!this.store.get('projects', projectId)) fail(404, '프로젝트를 찾을 수 없습니다.');
       verifyFieldBreakdown(projectId, input, hooks.fieldBreakdownMatches);
-      const issues = this.loadIssues(projectId, input.issues, 404);
+      const issues = this.loadIssues(input.issues.map(issue => ({ ...issue, projectId })), 404);
       return this.review({ ...input, projectId, actorId }, issues, hooks);
     });
   }
 
-  private previewStatusMigration<T extends { issue: Issue }>(projectId: string, request: Request, hooks: StatusMigrationHooks<T>): IssueBulkEditPreview {
+  private previewTeam<T extends { issue: Issue }>(request: Request, hooks: WorkflowBulkEditHooks<T>): IssueBulkEditPreview {
+    const input = parseTeamPreview(request.body);
+    const actorId = hooks.actor(request);
+    return this.store.transaction(() => {
+      this.prune();
+      const issues = this.loadIssues(input.issues, 404);
+      for (const [projectId, expectedVersion] of Object.entries(input.workflowVersions ?? {})) {
+        const { version } = hooks.workflow(projectId);
+        if (version !== expectedVersion) fail(409, STALE_MESSAGE, { projectId, currentWorkflowVersion: version });
+      }
+      return this.review({ ...input, team: true, actorId }, issues, hooks);
+    });
+  }
+
+  private previewStatusMigration<T extends { issue: Issue }>(projectId: string, request: Request, hooks: WorkflowBulkEditHooks<T>): IssueBulkEditPreview {
     const { fromStatusId, toStatusId, expectedWorkflowVersion } = parseStatusMigration(request.body);
     const actorId = hooks.actor(request);
     return this.store.transaction(() => {
@@ -340,7 +420,7 @@ export class IssueBulkEditService {
     const actorId = hooks.actor(request);
     return this.store.transaction(() => {
       const proposal = this.store.get<BulkEditProposal>(TABLE, previewId);
-      if (!proposal || proposal.projectId !== projectId || proposal.actorId !== actorId || Boolean(proposal.migrationFromStatusId) !== statusMigration) {
+      if (!proposal || proposal.team || proposal.projectId !== projectId || proposal.actorId !== actorId || Boolean(proposal.migrationFromStatusId) !== statusMigration) {
         fail(404, '적용할 미리보기를 찾을 수 없습니다.');
       }
       if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
@@ -351,26 +431,46 @@ export class IssueBulkEditService {
       // The migration preview represents the whole active source status, so an issue newly entering or leaving it also invalidates the review.
       const issues = proposal.migrationFromStatusId
         ? this.statusCohort(projectId, proposal.migrationFromStatusId)
-        : this.loadIssues(projectId, proposal.issues, 409);
+        : this.loadIssues(proposal.issues.map(issue => ({ ...issue, projectId })), 409);
       if (proposal.migrationFromStatusId && (issues.length !== proposal.issues.length || issues.some(({ id, version }, index) =>
         id !== proposal.issues[index].id || version !== proposal.issues[index].expectedVersion))) fail(409, STALE_MESSAGE);
-      const preparedAt = new Date().toISOString();
-      const prepared = issues.map(issue => candidate(issue, proposal.changes, hooks.prepare, preparedAt));
-      if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
-
-      const result: IssueBulkEditResult = { previewId, updated: [], unchanged: 0 };
-      for (const { before, prepared: change } of prepared) {
-        if (!change) {
-          result.unchanged++;
-          continue;
-        }
-        hooks.commit(request, before, change);
-        const { id, key, version } = change.issue;
-        result.updated.push({ id, key, version });
-      }
-      this.store.put(TABLE, { ...proposal, result, removeAfter: after(AUTO_RESULT_RETENTION_MS) });
-      return result;
+      return this.commitReview(proposal, issues, request, hooks);
     });
+  }
+
+  private applyTeam<T extends { issue: Issue }>(request: Request, hooks: BulkEditHooks<T>): IssueBulkEditResult {
+    const previewId = parseApply(request.body);
+    const actorId = hooks.actor(request);
+    return this.store.transaction(() => {
+      const proposal = this.store.get<BulkEditProposal>(TABLE, previewId);
+      if (!proposal?.team || proposal.actorId !== actorId) fail(404, '적용할 미리보기를 찾을 수 없습니다.');
+      if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
+      if (proposal.result) return proposal.result;
+      const issues = this.loadIssues(proposal.issues, 409);
+      const tokens = this.teamConfigurationTokens(proposal, hooks);
+      if (JSON.stringify(tokens) !== JSON.stringify(proposal.configurationTokens)) fail(409, STALE_MESSAGE);
+      return this.commitReview(proposal, issues, request, hooks);
+    });
+  }
+
+  private commitReview<T extends { issue: Issue }>(proposal: BulkEditProposal, issues: Issue[], request: Request,
+    hooks: BulkEditHooks<T>): IssueBulkEditResult {
+    const preparedAt = new Date().toISOString();
+    const prepared = issues.map(issue => reviewCandidate(proposal, issue, hooks.prepare, preparedAt));
+    if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
+
+    const result: IssueBulkEditResult = { previewId: proposal.id, updated: [], unchanged: 0 };
+    for (const { before, prepared: change } of prepared) {
+      if (!change) {
+        result.unchanged++;
+        continue;
+      }
+      hooks.commit(request, before, change);
+      const { id, key, version } = change.issue;
+      result.updated.push({ id, key, version });
+    }
+    this.store.put(TABLE, { ...proposal, result, removeAfter: after(AUTO_RESULT_RETENTION_MS) });
+    return result;
   }
 
   resetForImport(): void {
@@ -378,7 +478,13 @@ export class IssueBulkEditService {
     this.store.db.exec('DELETE FROM issue_bulk_edit_previews');
   }
 
-  registerRoutes<T extends { issue: Issue }>(app: Express, hooks: BulkEditHooks<T>): void {
+  registerRoutes<T extends { issue: Issue }>(app: Express, hooks: WorkflowBulkEditHooks<T>): void {
+    app.post('/api/team/issues/bulk-preview', (request, response) => {
+      response.set('Cache-Control', 'no-store').json(this.previewTeam(request, hooks));
+    });
+    app.post('/api/team/issues/bulk-apply', (request, response) => {
+      response.set('Cache-Control', 'no-store').json(this.applyTeam(request, hooks));
+    });
     app.post('/api/projects/:projectId/issues/bulk-preview', (request, response) => {
       response.set('Cache-Control', 'no-store').json(this.preview(request.params.projectId, request, hooks));
     });
@@ -387,7 +493,7 @@ export class IssueBulkEditService {
     });
   }
 
-  registerStatusMigrationRoutes<T extends { issue: Issue }>(app: Express, hooks: StatusMigrationHooks<T>): void {
+  registerStatusMigrationRoutes<T extends { issue: Issue }>(app: Express, hooks: WorkflowBulkEditHooks<T>): void {
     app.post('/api/projects/:projectId/workflow/status-migration-preview', (request, response) => {
       response.set('Cache-Control', 'no-store').json(this.previewStatusMigration(request.params.projectId, request, hooks));
     });

@@ -1373,6 +1373,7 @@ export function createApp(options: {
   });
   issueBulkEdit.registerRoutes(app,{
     actor,
+    workflow:projectId=>workflows.get(projectId),
     configurationToken(projectId, changes) {
       const editToken = issueEditConfiguration(projectId);
       const destination = workflows.get(projectId).statuses.find(status => status.id === changes.status);

@@ -10,7 +10,7 @@ import { createApp } from '../../server/app.js';
 import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type CustomFieldDefinition, type CustomFieldValue, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
   type IssueBulkEditPreview, type IssueBulkEditResult, type IssueFieldBreakdown, type IssueFieldBreakdownPage, type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type TeamNotificationPage,
-  type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
+  type TeamIssueBulkEditPreviewInput, type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -23,6 +23,7 @@ const runsPath = `/projects/${projectId}/assignment-runs`;
 const workflowPath = `/projects/${projectId}/workflow`;
 const schemaPath = `/projects/${projectId}/issue-schema`;
 const bulkPath = (project = projectId) => `/projects/${project}/issues/bulk`;
+const teamBulkPath = '/team/issues/bulk';
 const issueFields = ({ status, priority, assigneeId }: Issue) => ({ status, priority, assigneeId });
 const issueVersions = (issues: Issue[]) => issues.map(({ id, version }) => ({ id, expectedVersion: version }));
 
@@ -112,6 +113,95 @@ async function fixture(t: TestContext) {
 function customField(id: string, name: string, kind: CustomFieldDefinition['kind'], options: Partial<CustomFieldDefinition> = {}): CustomFieldDefinition {
   return { id, name, kind, archived: false, description: '', required: false, issueTypes: [], options: [], ...options };
 }
+
+test('team bulk uses each project workflow and writes an actor-bound receipt for a single atomic edit', async t => {
+  const f = await fixture(t);
+  const first = await f.createIssue('개발 프로젝트 검토');
+  const second = await f.createIssue('다른 프로젝트 배포', { projectId: otherProjectId, labels: ['기존'] });
+  const rule = await f.createRule();
+  const firstWorkflow = await f.requireForReview(['assigneeId']);
+  const otherWorkflowPath = `/projects/${otherProjectId}/workflow`;
+  const workflow = await f.expectStatus<ProjectWorkflow>(200, otherWorkflowPath);
+  const protectedWorkflow = await f.expectStatus<ProjectWorkflow>(200, otherWorkflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    statuses: workflow.statuses.map(status => status.id === 'review' ? { ...status, label: '다른 프로젝트의 검토' } : status),
+    transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'review' ? { ...edge, requiredFields: ['description'] } : edge),
+  });
+  const targets = [first, second].map(({ id, version, projectId }) => ({ id, expectedVersion: version, projectId }));
+  const preview = (input: TeamIssueBulkEditPreviewInput) => f.expectStatus<IssueBulkEditPreview>(200, `${teamBulkPath}-preview`, 'POST', input);
+  const apply = (previewId: string, actor = editor) => f.call<IssueBulkEditResult>(`${teamBulkPath}-apply`, 'POST', { previewId }, actor);
+  const before = await f.snapshot();
+
+  const commonOnly = await preview({ issues: targets, changes: { priority: 'high', assigneeId: null } });
+  assert.ok(commonOnly.previewId);
+  assert.deepEqual(commonOnly.rows.map(row => [row.after?.status, row.after?.assigneeId]), [['todo', null], ['todo', null]]);
+  const workflowVersions = { [projectId]: firstWorkflow.version, [otherProjectId]: protectedWorkflow.version };
+  const blocked = await preview({ issues: targets, changes: {}, statuses: { [projectId]: 'review', [otherProjectId]: 'review' }, workflowVersions });
+  assert.equal(blocked.previewId, null);
+  assert.deepEqual(blocked.rows.map(row => [row.projectId, row.outcome, row.after?.status]), [
+    [projectId, 'changed', 'review'], [otherProjectId, 'blocked', undefined],
+  ]);
+  assert.match(blocked.rows[1].reason ?? '', /설명|description/);
+  assert.deepEqual(await f.snapshot(), before);
+
+  const input: TeamIssueBulkEditPreviewInput = {
+    issues: targets, changes: { priority: 'high', addLabels: ['팀 편집'] }, statuses: { [projectId]: 'review', [otherProjectId]: 'done' }, workflowVersions,
+  };
+  const fromUnselected = { ...input, statuses: { ...input.statuses, 'unselected-project': 'review' } };
+  for (const invalid of [fromUnselected, { ...input, statuses: {}, workflowVersions: {}, changes: {} }, { ...input, changes: { status: 'review' } },
+    { ...input, workflowVersions: undefined }, { ...input, workflowVersions: { [projectId]: firstWorkflow.version, other: 1 } },
+    { ...input, workflowVersions: { ...workflowVersions, [otherProjectId]: 1.5 } },
+    { ...input, changes: { customFields: { risk: false } } }, { ...input, issues: [targets[0], { ...targets[0], projectId: otherProjectId }] }]) {
+    await f.expectStatus(400, `${teamBulkPath}-preview`, 'POST', invalid);
+  }
+  await f.expectStatus(404, `${teamBulkPath}-preview`, 'POST', { ...input, statuses: { [projectId]: 'review' },
+    workflowVersions: { [projectId]: firstWorkflow.version }, issues: [targets[0], { ...targets[1], projectId }] });
+
+  const stale = await preview(input);
+  assert.ok(stale.previewId);
+  const updatedWorkflow = await f.expectStatus<ProjectWorkflow>(200, otherWorkflowPath, 'PATCH', {
+    ...protectedWorkflow, expectedVersion: protectedWorkflow.version,
+    statuses: protectedWorkflow.statuses.map(status => status.id === 'done' ? { ...status, label: '다른 프로젝트의 완료' } : status),
+  });
+  const beforeStaleApply = await f.snapshot();
+  assert.equal((await apply(stale.previewId)).status, 409);
+  const stalePreview = await f.expectStatus<{ details: { projectId: string; currentWorkflowVersion: number } }>(409, `${teamBulkPath}-preview`, 'POST', input);
+  assert.deepEqual(stalePreview.details, { projectId: otherProjectId, currentWorkflowVersion: updatedWorkflow.version });
+  assert.deepEqual(await f.snapshot(), beforeStaleApply);
+
+  const reviewed = await preview({ ...input, workflowVersions: { ...workflowVersions, [otherProjectId]: updatedWorkflow.version } });
+  assert.ok(reviewed.previewId);
+  assert.deepEqual(reviewed.rows.map(row => [row.projectId, row.after?.status, row.after?.assigneeId, row.after?.priority, row.after?.labels]), [
+    [projectId, 'review', reviewer, 'high', ['팀 편집']], [otherProjectId, 'done', null, 'high', ['기존', '팀 편집']],
+  ]);
+  const legacy = await f.preview([first], { status: 'review' });
+  assert.ok(legacy.previewId);
+  assert.equal((await apply(legacy.previewId)).status, 404);
+  assert.equal((await f.apply(reviewed.previewId)).status, 404);
+  assert.equal((await apply(reviewed.previewId, reviewer)).status, 404);
+
+  const targetId = second.id.replaceAll("'", "''");
+  f.database.exec(`CREATE TRIGGER reject_second_project_change BEFORE UPDATE ON issues
+    WHEN OLD.id = '${targetId}' BEGIN SELECT RAISE(ABORT, 'synthetic second project failure'); END;`);
+  assert.equal((await apply(reviewed.previewId)).status, 500);
+  assert.deepEqual(await f.snapshot(), beforeStaleApply);
+  assert.equal((await f.runs()).total, 0);
+  f.database.exec('DROP TRIGGER reject_second_project_change');
+
+  const [applied, duplicate] = await Promise.all([apply(reviewed.previewId), apply(reviewed.previewId)]);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.deepEqual(duplicate, applied);
+  assert.deepEqual(applied.data.updated, [first, second].map(({ id, key, version }) => ({ id, key, version: version + 1 })));
+  assert.deepEqual((await f.runs()).items.map(({ issueId, ruleId }) => [issueId, ruleId]), [[first.id, rule.id]]);
+  const after = await f.snapshot();
+  const afterIssues = new Map(after.issues.map(issue => [issue.id, issue]));
+  assert.deepEqual([first, second].map(issue => issueFields(afterIssues.get(issue.id)!)), [
+    { status: 'review', priority: 'high', assigneeId: reviewer }, { status: 'done', priority: 'high', assigneeId: null },
+  ]);
+  await f.restart();
+  assert.deepEqual(await apply(reviewed.previewId), applied);
+  assert.deepEqual(await f.snapshot(), after);
+});
 
 test('bulk review shows blocked and unchanged rows, assigns automatically, and replays the exact receipt after restart', async t => {
   const f = await fixture(t);
