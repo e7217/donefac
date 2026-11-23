@@ -552,6 +552,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 `POST /api/views/jira/preview`에 `{projectId,jql}`을 보낸다. JQL에 프로젝트 조건이 없으면 선택한 Teamspace 프로젝트에서 검토한다. 원래 Jira 프로젝트 키와 ID는 이관 기록으로 소속이 확인될 때 사용할 수 있다. 현재 프로젝트의 키와 이름도 사용할 수 있다. 같은 이름의 상태·유형·팀원이 서로 다른 대상과 일치하거나 원본 프로젝트가 여러 개 합쳐진 경우에는 대응할 범위를 확인하도록 오류를 표시한다.
 
+선택한 Teamspace 프로젝트가 Jira 원본 프로젝트 하나와 연결되면 현재 프로젝트의 이관 업무와 적용 영수증에서 원래 상태·업무 유형의 이름과 ID, 담당자·요청자 계정의 사용자 이름·사용자 키·계정 ID·확인된 이메일을 찾는다. Jira에서 담당자나 요청자로 확인한 같은 계정은 두 조건 모두에 사용할 수 있다. 여러 원본 값이 하나의 Teamspace 값에 합쳐졌거나, 하나의 검색값이 서로 다른 현재 값에 해당하면 변환을 보류한다. 미리보기에는 현재 이름을 표시하고, 저장한 보기에는 Teamspace ID를 사용한다. [Atlassian Jira Data Center JQL 필드](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html)
+
 최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 현재 조건으로 표현할 수 없는 조합, `OR`, 상대 날짜, `currentUser()` 같은 동적 함수, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
 미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. 원본에 `ORDER BY`가 있으면 `acceptProjectOrder:true`를 보내 Teamspace의 프로젝트 순서를 사용한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 기존 공유 보기와 같은 형식으로 저장하고 원래 JQL은 보기 데이터에 포함하지 않는다.

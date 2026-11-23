@@ -3,7 +3,7 @@ import { expect, test, type APIResponse } from '@playwright/test';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT } from '../../shared/types';
 import type {
   Issue, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
-  SavedView, WorkspaceSnapshot,
+  ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot,
 } from '../../shared/types';
 
 async function json<T>(response: Pick<APIResponse, 'text' | 'status'>, status = 200): Promise<T> {
@@ -12,38 +12,51 @@ async function json<T>(response: Pick<APIResponse, 'text' | 'status'>, status = 
   return JSON.parse(body) as T;
 }
 
-test('360px에서 Jira 원래 프로젝트의 검색식을 미리보고 공유 보기와 간트에서 연다', async ({ page, request }) => {
+test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 보기와 간트에서 연다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const suffix = randomUUID().slice(0, 7).toUpperCase();
   const originalKey = `JR${suffix}`;
   const targetKey = `TM${suffix}`;
   const viewName = `옮긴 Jira 필터 ${suffix}`;
+  const originalAssignee = `old_assignee_${suffix}`;
+  const originalReporter = `old_reporter_${suffix}`;
+  const currentStatus = '팀 개발 대기';
+  const currentType = '팀 개발 업무';
   const issues: Issue[] = [];
   let source: LegacyPackageSummary | undefined;
   let saved: SavedView | undefined;
 
   try {
+    const initialWorkspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    const [assignee, reporter] = initialWorkspace.users;
+    expect(assignee).toBeDefined();
+    expect(reporter).toBeDefined();
     const rows = [
-      ['1', '운영 업무', 'Open', 'api'],
-      ['2', '보류 업무', 'Open', 'hold'],
-      ['3', '라벨 없는 업무', 'Open', ''],
-      ['4', '완료 업무', 'Closed', 'api'],
+      ['1', '운영 업무', 'Open', 'api', originalAssignee, originalReporter],
+      ['2', '보류 업무', 'Open', 'hold', originalAssignee, originalReporter],
+      ['3', '라벨 없는 업무', 'Open', '', originalAssignee, originalReporter],
+      ['4', '완료 업무', 'Closed', 'api', originalAssignee, originalReporter],
+      ['5', '요청자가 다른 업무', 'Open', 'api', originalAssignee, ''],
     ];
     const csv = [
-      'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Labels',
-      ...rows.map(([id, title, status, label]) => [
+      'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Labels,Assignee,Reporter',
+      ...rows.map(([id, title, status, label, assigneeName, reporterName]) => [
         id, `${originalKey}-${id}`, '20800', originalKey, 'Jira 프로젝트', `${title} ${suffix}`,
-        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', status, 'Task', label,
+        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', status, 'Task', label, assigneeName, reporterName,
       ].join(',')),
     ].join('\r\n');
     const query = new URLSearchParams({ filename: `saved-filter-${suffix}.csv`, product: 'jira', instanceKey: `filters-${suffix}` });
     source = await json<LegacyPackageSummary>(await request.post(`/api/legacy-import/packages?${query}`, {
       headers: { 'Content-Type': 'application/octet-stream' }, data: Buffer.from(csv),
     }), 201);
-    const { defaultConfiguration } = await json<MigrationOptions>(await request.get(`/api/migrations/options?packageId=${source.id}`));
+    const { defaultConfiguration, identities } = await json<MigrationOptions>(await request.get(`/api/migrations/options?packageId=${source.id}`));
+    const sourceAssignee = identities.find(identity => identity.sourceValue === originalAssignee);
+    const sourceReporter = identities.find(identity => identity.sourceValue === originalReporter);
+    if (!sourceAssignee || !sourceReporter) throw new Error('Missing source users from the CSV migration.');
     const configuration = {
       ...defaultConfiguration,
       projects: defaultConfiguration.projects.map(project => ({ ...project, key: targetKey, name: `팀 프로젝트 ${suffix}` })),
+      users: { ...defaultConfiguration.users, [sourceAssignee.id]: assignee.id, [sourceReporter.id]: reporter.id },
     };
     const migration = await json<MigrationPreview>(await request.post('/api/migrations/preview', { data: { configuration } }), 201);
     expect(migration.canApply, JSON.stringify(migration.notices)).toBe(true);
@@ -52,14 +65,29 @@ test('360px에서 Jira 원래 프로젝트의 검색식을 미리보고 공유 �
     }), 201);
     const workspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
     issues.push(...workspace.issues.filter(issue => issue.projectId === projectId));
-    expect(issues).toHaveLength(4);
+    expect(issues).toHaveLength(5);
     const issue = (title: string) => issues.find(value => value.title === `${title} ${suffix}`)!;
     const included = issue('운영 업무');
     const held = issue('보류 업무');
     const unlabeled = issue('라벨 없는 업무');
     const closed = issue('완료 업무');
+    const otherReporter = issue('요청자가 다른 업무');
     expect(included.labels).toEqual(['api']);
     expect(held.labels).toEqual(['hold']);
+    expect(included.assigneeId).toBe(assignee.id);
+    expect(included.reporterId).toBe(reporter.id);
+    const workflowPath = `/api/projects/${projectId}/workflow`;
+    const schemaPath = `/api/projects/${projectId}/issue-schema`;
+    const workflow = await json<ProjectWorkflow>(await request.get(workflowPath));
+    const schema = await json<ProjectIssueSchema>(await request.get(schemaPath));
+    await json<ProjectWorkflow>(await request.patch(workflowPath, { data: {
+      ...workflow, expectedVersion: workflow.version,
+      statuses: workflow.statuses.map(value => value.id === included.status ? { ...value, label: currentStatus } : value),
+    } }));
+    await json<ProjectIssueSchema>(await request.patch(schemaPath, { data: {
+      ...schema, expectedVersion: schema.version,
+      issueTypes: schema.issueTypes.map(value => value.id === included.type ? { ...value, name: currentType } : value),
+    } }));
 
     await page.setViewportSize({ width: 360, height: 820 });
     await page.goto(`/#/${projectId}/issues`);
@@ -83,7 +111,7 @@ test('360px에서 Jira 원래 프로젝트의 검색식을 미리보고 공유 �
     await expect(dialog.getByRole('alert')).toBeVisible();
     await expect(save).toBeDisabled();
 
-    const jql = `project = ${originalKey} AND status = "Open" AND labels NOT IN ("hold") ORDER BY Rank DESC`;
+    const jql = `project = ${originalKey} AND status = Open AND issuetype = Task AND assignee = ${originalAssignee} AND reporter = ${originalReporter} AND labels NOT IN ("hold") ORDER BY Rank DESC`;
     await jqlInput.fill(jql);
     async function preview() {
       const pending = postTo(previewPath);
@@ -93,14 +121,20 @@ test('360px에서 Jira 원래 프로젝트의 검색식을 미리보고 공유 �
       return json<JiraSavedViewPreview>(response);
     }
     const first = await preview();
-    expect(first).toMatchObject({ total: 1,
-      filters: { status: included.status, labels: { exclude: ['hold'], presence: 'set' } },
+    expect(first).toMatchObject({
+      total: 1,
+      filters: { status: included.status, type: included.type, assigneeId: assignee.id,
+        reporter: { kind: 'member', memberId: reporter.id }, labels: { exclude: ['hold'], presence: 'set' } },
       orderBy: [{ field: 'Rank', direction: 'desc' }],
     });
     expect(first.issues.map(value => value.id)).toEqual([included.id]);
     const review = dialog.getByRole('region', { name: 'Jira 필터 미리보기', exact: true });
     await expect(review).toContainText(included.title);
+    for (const name of [currentStatus, currentType, assignee.name, reporter.name]) {
+      await expect(review).toContainText(name);
+    }
     await expect(review).not.toContainText(unlabeled.title);
+    await expect(review).not.toContainText(otherReporter.title);
     const name = dialog.getByLabel('보기 이름', { exact: true });
     const order = dialog.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true });
     await name.fill(viewName);
@@ -147,7 +181,7 @@ test('360px에서 Jira 원래 프로젝트의 검색식을 미리보고 공유 �
     await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     for (const value of [included, held]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toBeVisible();
-    for (const value of [unlabeled, closed]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toHaveCount(0);
+    for (const value of [unlabeled, closed, otherReporter]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toHaveCount(0);
     await page.reload();
     await expect(chart.locator(`[data-issue-id="${included.id}"]`)).toBeVisible();
     await expect(chart.locator(`[data-issue-id="${unlabeled.id}"]`)).toHaveCount(0);

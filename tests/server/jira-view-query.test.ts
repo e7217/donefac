@@ -48,6 +48,35 @@ test('JQL resolves exact case-insensitive project, workflow, type and member ali
   assert.throws(() => translateJiraViewQuery('project = OTHER', context), JiraViewQueryError);
 });
 
+test('JQL original aliases resolve to current options without overriding conflicting native values', () => {
+  const sourceContext: JiraViewQueryContext = {
+    ...context,
+    prepareSourceAliases: fields => {
+      assert.deepEqual(fields, ['assignee', 'status']);
+      return (field, value) => {
+        if (field === 'status') return { kind: 'mapped', sourceId: '14', targetId: 'review' };
+        switch (value) {
+          case 'old-login': return { kind: 'mapped', sourceId: 'original-member', targetId: 'member-a' };
+          case 'member-b': return { kind: 'mapped', sourceId: 'original-member', targetId: 'member-a' };
+          case 'dev@example.test': return { kind: 'unmapped' };
+          case 'member-a': return { kind: 'mapped', sourceId: 'deleted-account', targetId: 'removed-member' };
+        }
+      };
+    },
+  };
+  const translated = translateJiraViewQuery('assignee = old-login AND status = 14', sourceContext);
+  assert.equal(translated.filters.assigneeId, 'member-a');
+  assert.equal(translated.filters.status, 'review');
+  assert.deepEqual(translated.criteria.slice(1), [
+    { field: 'assignee', label: '담당자 · 김 개발' }, { field: 'status', label: '상태 · In Review' },
+  ]);
+  for (const value of ['member-b', 'dev@example.test', 'member-a']) {
+    assert.throws(() => translateJiraViewQuery(`assignee = "${value}" AND status = 14`, sourceContext), JiraViewQueryError);
+  }
+  assert.doesNotThrow(() => translateJiraViewQuery('assignee IS EMPTY AND labels = release', sourceContext));
+  assert.throws(() => translateJiraViewQuery('assignee = old-login OR status = 14', sourceContext), JiraViewQueryError);
+});
+
 test('quoted literals preserve case and decode quotes and backslashes without evaluating the content', () => {
   const { filters } = translateJiraViewQuery(String.raw`"labels" = "qa\"review" and labels = 'dev\'s' AND labels = "a\\b" AND labels = "AND"`, context);
   assert.deepEqual(filters.labels, { include: ['AND', 'a\\b', "dev's", 'qa"review'], match: 'all' });

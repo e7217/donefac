@@ -14,6 +14,7 @@ import {
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
 import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
+import { jiraSavedViewSourceAliases } from './jira-saved-view-sources.js';
 import { Store } from './store.js';
 
 export class SavedViewError extends Error {
@@ -142,7 +143,7 @@ export class SavedViewService {
         targetRows.some(row => row.sourceId === null) || conflictingAlias) {
       return { blockedSourceProjectAliases: allAliases };
     }
-    return { sourceProjectAliases: allAliases };
+    return { sourceProjectAliases: allAliases, sourceInstance: targetRows[0].sourceInstance };
   }
   private previewJiraView(project: Project, jql: unknown, actorId: string, hooks: SavedViewRouteHooks): JiraSavedViewPreview {
     const projectId = project.id;
@@ -150,7 +151,19 @@ export class SavedViewService {
     const schema = this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId);
     const workflow = hooks.workflow(projectId);
     const aliases = this.jiraProjectAliases(projectId);
-    const translated = translateJiraViewQuery(jql, { project, ...aliases, statuses: workflow.statuses, issueTypes: schema.issueTypes, users });
+    const sourceMatches: string[][] = [];
+    const translated = translateJiraViewQuery(jql, {
+      project, ...aliases, statuses: workflow.statuses, issueTypes: schema.issueTypes, users,
+      prepareSourceAliases: fields => {
+        if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
+        const resolveAlias = jiraSavedViewSourceAliases(this.store, projectId, aliases.sourceInstance, aliases.sourceProjectAliases, fields);
+        return (field, value) => {
+          const source = resolveAlias(field, value);
+          if (source?.kind === 'mapped') sourceMatches.push([field, source.sourceId, source.targetId]);
+          return source;
+        };
+      },
+    });
     const selected = state({ layout: 'list', filters: translated.filters }, schema, users, hooks.planningItems(projectId));
     this.validateAssignee(selected, users);
     const { filters } = selected;
@@ -160,7 +173,7 @@ export class SavedViewService {
     const matchingIssues = orderProjectIssues(rows.map(row => JSON.parse(row.json) as Issue).filter(matches), hooks.issueOrder(projectId));
     const cohort = matchingIssues.map(({ id, key, title, version }) => [id, key, title, version]);
     const revision = createHash('sha256').update(JSON.stringify([
-      projectId, actorId, jql, aliases, filters, criteria, orderBy, cohort, this.store.setting('attachmentImportGeneration'),
+      projectId, actorId, jql, aliases, sourceMatches, filters, criteria, orderBy, cohort, this.store.setting('attachmentImportGeneration'),
     ])).digest('hex');
     return {
       filters, criteria, orderBy, total: matchingIssues.length, revision,

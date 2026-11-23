@@ -23,7 +23,7 @@ export function observeJiraIdentityEmail(identity: LegacyRecord, values: Iterabl
   identity.metadata[jiraIdentityEmailEvidenceKey] = previous === undefined || previous === observation ? observation : null;
 }
 
-export function jiraIdentityEmailEvidence(identity: LegacyRecord | undefined): MigrationIdentityOption['emailEvidence'] {
+export function jiraIdentityEmailEvidence(identity: Pick<LegacyRecord, 'metadata'> | undefined): MigrationIdentityOption['emailEvidence'] {
   if (!identity) return;
   const { metadata } = identity;
   const recorded = metadata[jiraIdentityEmailEvidenceKey];

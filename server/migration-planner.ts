@@ -36,7 +36,8 @@ const categories:StatusCategory[]=['backlog','todo','in_progress','review','done
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 const optionId=(packageId:string,kind:string,value:string)=>`option_${hash(packageId,kind,value).slice(0,40)}`;
-const importedStatusId = (source: LegacySource, value: string) => `s_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
+export const importedStatusId = (source: LegacySource, value: string) => `s_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
+export const importedIssueTypeId = (source: LegacySource, value: string) => `t_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
 export { optionId as migrationOptionId };
 const qualified=(packageId:string,row:LegacyRecord)=>`${packageId}/${row.id}`;
 const string=(value:unknown)=>typeof value==='string'?value:typeof value==='number'||typeof value==='boolean'?String(value):'';
@@ -55,6 +56,7 @@ function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
   return { value: string(item.id) || string(item.value) || string(item.name) || string(item.text) || string(raw) || '__unspecified__',
     label: string(item.name || item.text || item.value) };
 }
+export { sourceBuiltin as jiraSourceBuiltin };
 function builtin(pkg:MigrationPackage,row:LegacyRecord,kind:'status'|'issuetype',index?:Map<string,LegacyRecord>):{value:string;label:string}{
   const { value, label } = sourceBuiltin(row, kind);
   const option=index?index.get(`option:builtin:${kind}:${value}`):pkg.dataset.records.find(option=>option.kind==='option'&&option.sourceId===`builtin:${kind}:${value}`);return{value,label:label||option?.title||(value==='__unspecified__'?(kind==='status'?'상태 미지정':'유형 미지정'):value)};
@@ -306,7 +308,7 @@ function sourceCalendarDate(raw: string, timezone: string): string | null {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function jiraFieldDigest(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
+export function jiraFieldDigest(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
   // Text-only descriptions keep the same digest as checkpoints written by older versions.
   if (field === 'description' && format === 'markdown') return hash(field, JSON.stringify(['markdown', value]));
   if (value === undefined) return hash(field, 'undefined');
@@ -326,12 +328,12 @@ const jiraCalendarFields = {
   startDate: ['startDate', 'Start date', 'Start'], endDate: ['endDate', 'End date', 'End'], dueDate: ['dueDate', 'due', 'duedate'],
 } as const;
 
-function jiraAssignee(row: LegacyRecord): string {
+export function jiraAssignee(row: LegacyRecord): string {
   return row.references.find(reference => reference.kind === 'identity' && reference.relation === 'assignee')?.sourceId ||
     string(scalar(sourceField(row, 'assignee')));
 }
 
-function jiraReporter(row: LegacyRecord): string | null | undefined {
+export function jiraReporter(row: LegacyRecord): string | null | undefined {
   // Older CSV and REST analysis could store a creator as the issue's author. The explicit marker distinguishes the source field.
   const observed = row.metadata.jiraReporter;
   if (observed !== null && typeof observed !== 'string') return undefined;
@@ -367,7 +369,7 @@ function jiraLabelValues(raw: unknown): string[] | null {
   return [...new Set(labels.filter(label => label.length > 0))];
 }
 
-function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: LegacyRecord): [string] | [string, string] {
+export function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: LegacyRecord): [string] | [string, string] {
   const digest = (value: unknown) => hash(`jira-source:${field}`, JSON.stringify(value) ?? 'undefined');
   if (field === 'status' || field === 'type') {
     const { value, label } = sourceBuiltin(row, field === 'status' ? 'status' : 'issuetype');
@@ -611,7 +613,7 @@ class Planner{
     } else {
       if (Object.hasOwn(configuration.statuses, stateOption)) values.status = importedStatusId(source, sourceState);
       if (Object.hasOwn(configuration.issueTypes, typeOption)) {
-        values.type = configuration.issueTypes[typeOption] || `t_${hash(source.product, source.instanceKey, sourceType).slice(0, 24)}`;
+        values.type = configuration.issueTypes[typeOption] || importedIssueTypeId(source, sourceType);
       }
     }
     values.priority = this.priority(sourceField(record, 'priority'));
@@ -1826,7 +1828,7 @@ class Planner{
         const sourceType = builtin(entry.pkg, row, 'issuetype', this.indexes.get(entry.pkg.summary.id));
         const typeOption = optionId(entry.pkg.summary.id, 'issuetype', sourceType.value);
         const mappedType = mapping ? mapping.issueTypes[typeOption] : this.configuration.issueTypes[typeOption];
-        const typeId = mapping ? mappedType : mappedType || `t_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,sourceType.value).slice(0,24)}`;
+        const typeId = mapping ? mappedType : mappedType || importedIssueTypeId(entry.pkg.dataset.source, sourceType.value);
         const schema = this.schemas.get(project.id)!;
         const existingType = schema.issueTypes.find(type => type.id === typeId);
         if (mapping && (!typeId || !existingType || existingType.archived)) {

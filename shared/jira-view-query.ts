@@ -8,6 +8,7 @@ export interface JiraViewQueryContext {
   statuses: readonly Pick<WorkflowStatus, 'id' | 'label'>[];
   issueTypes: readonly Pick<IssueTypeDefinition, 'id' | 'name' | 'archived'>[];
   users: readonly Pick<User, 'id' | 'name' | 'email'>[];
+  prepareSourceAliases?: (fields: readonly JiraViewAliasField[]) => JiraViewSourceAliasResolver | undefined;
 }
 
 export class JiraViewQueryError extends Error {
@@ -18,7 +19,10 @@ export class JiraViewQueryError extends Error {
 }
 
 type Translation = Pick<JiraSavedViewPreview, 'filters' | 'criteria' | 'orderBy'>;
-type ScalarField = 'project' | 'status' | 'type' | 'assignee' | 'reporter';
+export type JiraViewAliasField = 'status' | 'type' | 'assignee' | 'reporter';
+export type JiraViewSourceAlias = { kind: 'mapped'; sourceId: string; targetId: string } | { kind: 'ambiguous' | 'unmapped' };
+export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: string) => JiraViewSourceAlias | undefined;
+type ScalarField = 'project' | JiraViewAliasField;
 type Field = ScalarField | 'labels';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
 type Clause = { field: Field; offset: number } & (
@@ -212,8 +216,17 @@ function sameIdentifier(candidate: string, value: string): boolean {
   return candidate.toLowerCase() === value.toLowerCase();
 }
 
-function resolveValue<T extends { id: string }>(field: ScalarField, value: Token, candidates: readonly T[], keys: (item: T) => string[]): T {
-  const matches = candidates.filter(item => keys(item).some(key => sameIdentifier(key, value.value)));
+function resolveValue<T extends { id: string }>(field: JiraViewAliasField, value: Token, candidates: readonly T[],
+  keys: (item: T) => string[], resolveSourceAlias?: JiraViewSourceAliasResolver): T {
+  const source = resolveSourceAlias?.(field, value.value);
+  if (source?.kind === 'ambiguous') {
+    throw new JiraViewQueryError(`${fieldLabels[field]} · 이관 원본에서 이 값을 하나의 현재 값으로 구분할 수 없습니다.`, value.offset);
+  }
+  if (source && (source.kind === 'unmapped' || source.kind === 'mapped' && !candidates.some(item => item.id === source.targetId))) {
+    throw new JiraViewQueryError(`${fieldLabels[field]} · 이관 원본에 대응하는 현재 값을 찾을 수 없습니다.`, value.offset);
+  }
+  const matches = candidates.filter(item => (source?.kind === 'mapped' && item.id === source.targetId) ||
+    keys(item).some(key => sameIdentifier(key, value.value)));
   if (matches.length !== 1) {
     const message = matches.length ? '해당하는 값이 여러 개 있습니다. 고유한 값을 입력해 주세요.' : '선택한 프로젝트에서 해당 값을 찾을 수 없습니다.';
     throw new JiraViewQueryError(`${fieldLabels[field]} · ${message}`, value.offset);
@@ -238,21 +251,22 @@ function projectCriterion(context: JiraViewQueryContext, value?: Token) {
   return `프로젝트 · ${project.key} ${project.name}`;
 }
 
-function scalarCondition(field: ScalarField, clause: Clause, context: JiraViewQueryContext): { id: string; label: string } {
+function scalarCondition(field: ScalarField, clause: Clause, context: JiraViewQueryContext,
+  resolveSourceAlias?: JiraViewSourceAliasResolver): { id: string; label: string } {
   if (!('values' in clause)) return { id: '', label: `${fieldLabels[field]} 없음` };
   const [value] = clause.values;
   if (field === 'project') return { id: context.project.id, label: projectCriterion(context, value) };
   if (field === 'status') {
-    const status = resolveValue(field, value, context.statuses, item => [item.id, item.label]);
+    const status = resolveValue(field, value, context.statuses, item => [item.id, item.label], resolveSourceAlias);
     if (!isSelectableId(status.id)) throw new JiraViewQueryError('이 상태는 저장된 보기에서 개별 값으로 선택할 수 없습니다.', value.offset);
     return { id: status.id, label: `상태 · ${status.label}` };
   }
   if (field === 'type') {
-    const type = resolveValue(field, value, context.issueTypes, item => [item.id, item.name]);
+    const type = resolveValue(field, value, context.issueTypes, item => [item.id, item.name], resolveSourceAlias);
     if (type.archived || !isSelectableId(type.id)) throw new JiraViewQueryError('이슈 유형은 현재 프로젝트에서 개별 값으로 선택할 수 있어야 합니다.', value.offset);
     return { id: type.id, label: `이슈 유형 · ${type.name}` };
   }
-  const user = resolveValue(field, value, context.users, item => [item.id, item.name, item.email]);
+  const user = resolveValue(field, value, context.users, item => [item.id, item.name, item.email], resolveSourceAlias);
   if (!user.id || (field === 'assignee' && (user.id === 'none' || !isSelectableId(user.id)))) {
     throw new JiraViewQueryError('이 팀원은 저장된 보기에서 개별 값으로 선택할 수 없습니다.', value.offset);
   }
@@ -328,6 +342,11 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   if (!query.trim()) throw new JiraViewQueryError('JQL을 입력해 주세요.');
   if (!query.isWellFormed()) throw new JiraViewQueryError('JQL에 잘못된 유니코드 문자가 있습니다.');
   const { clauses, orderBy } = new QueryParser(tokenize(query)).parse();
+  const aliasFields = new Set<JiraViewAliasField>();
+  if (context.prepareSourceAliases) for (const clause of clauses) {
+    if (clause.field !== 'project' && clause.field !== 'labels' && 'values' in clause) aliasFields.add(clause.field);
+  }
+  const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
   const conditions = new Map<ScalarField, { id: string; label: string }>();
   const labelClauses: Clause[] = [];
@@ -337,7 +356,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
       labelClauses.push(clause);
       continue;
     }
-    const condition = scalarCondition(field, clause, context);
+    const condition = scalarCondition(field, clause, context, resolveSourceAlias);
     const previous = conditions.get(field);
     if (previous && previous.id !== condition.id) throw new JiraViewQueryError(`${fieldLabels[field]}에 서로 충돌하는 조건이 있습니다.`, clause.offset);
     conditions.set(field, condition);
