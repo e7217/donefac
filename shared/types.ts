@@ -310,7 +310,7 @@ export interface MigrationAppendConfiguration {
   refreshAttachments?: true;
   refreshRelations?: true;
 }
-export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'reporterId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate'] as const;
+export const JIRA_MIGRATION_ISSUE_FIELDS = ['title', 'description', 'type', 'status', 'priority', 'assigneeId', 'reporterId', 'labels', 'startDate', 'endDate', 'dueDate', 'estimate', 'parentId'] as const;
 export type JiraMigrationIssueField = typeof JIRA_MIGRATION_ISSUE_FIELDS[number];
 export type JiraMigrationIssueValues = Partial<Pick<Issue, JiraMigrationIssueField>> & {
   descriptionFormat?: IssueDescriptionFormat;

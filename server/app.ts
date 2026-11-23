@@ -412,7 +412,30 @@ export function createApp(options: {
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
   const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
-  const validateIssue = (i: Issue,previous?:Issue,options?:{checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean;moveParents?:ReadonlyMap<string,Issue>}) => {
+  type IssueParent = Pick<Issue, 'id' | 'projectId' | 'parentId'>;
+  type ProjectedIssueHierarchy = { issues: ReadonlyMap<string, IssueParent>; validated: Set<string> };
+  const storedIssueParent = store.db.prepare('SELECT id, project_id AS projectId, parent_id AS parentId FROM issues WHERE id=?');
+  const readProjectedIssueParent = (id: string, hierarchy: ProjectedIssueHierarchy) => typeof id === 'string'
+    ? hierarchy.issues.get(id) ?? (storedIssueParent.get(id) as IssueParent | undefined) : undefined;
+  type IssueHierarchyOptions = { moveParents?: ReadonlyMap<string, Issue>; hierarchy?: ProjectedIssueHierarchy };
+  const validateIssueHierarchy = (issue: IssueParent, options?: IssueHierarchyOptions) => {
+    const { hierarchy } = options ?? {};
+    if (hierarchy?.validated.has(issue.id)) return;
+    const visited = new Set([issue.id]);
+    const status = hierarchy ? 409 : 400;
+    for (let parentId = issue.parentId; parentId;) {
+      if (visited.has(parentId)) fail('상위 티켓에 순환 관계가 있습니다.', status);
+      visited.add(parentId);
+      const parent = hierarchy
+        ? readProjectedIssueParent(parentId, hierarchy) ?? fail('이관할 상위 티켓을 찾을 수 없습니다.', 409)
+        : options?.moveParents?.get(parentId) ?? get<Issue>('issues', parentId);
+      if (parent.projectId !== issue.projectId) fail('상위 티켓은 같은 프로젝트에 있어야 합니다.', status);
+      if (hierarchy?.validated.has(parentId)) break;
+      parentId = parent.parentId;
+    }
+    if (hierarchy) for (const id of visited) hierarchy.validated.add(id);
+  };
+  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & {checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -427,8 +450,7 @@ export function createApp(options: {
     if(i.estimate!==null&&(!Number.isFinite(i.estimate)||i.estimate<0||i.estimate>100000))fail('예상 작업량은 0 이상의 숫자여야 합니다.');
     validatePlannedEffortMinutes(i.plannedEffortMinutes);
     planning.validateIssueReferences(i,previous,{allowArchived:options?.allowArchivedPlanning});
-    let parentId=i.parentId;const visited=new Set([i.id]);
-    while(parentId){if(visited.has(parentId))fail('상위 티켓에 순환 관계가 있습니다.');visited.add(parentId);const p=options?.moveParents?.get(parentId)??get<Issue>('issues',parentId);if(p.projectId!==i.projectId)fail('상위 티켓은 같은 프로젝트에 있어야 합니다.');parentId=p.parentId;}
+    validateIssueHierarchy(i, options);
     workflows.validateIssue(i,previous,options);return i;
   };
   type DocumentParent = Pick<DocPage, 'id' | 'projectId' | 'parentId'>;
@@ -685,26 +707,16 @@ export function createApp(options: {
     const customIds = Object.keys(customFields ?? {});
     if (!fields.length && !customIds.length) fail('Jira에서 반영할 업무 필드를 확인해 주세요.', 409);
     const mergedFields = customIds.length ? { ...before.customFields, ...customFields } : before.customFields;
-    let after: Issue;
-    try { after = validateIssue({ ...before, ...changes, ...(hasDescriptionFormat ? { descriptionFormat } : {}),
-      customFields: mergedFields, version: before.version + 1, updatedAt: now() }, before); }
-    catch (error) {
-      if (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
-          error instanceof PlanningError || error instanceof WorkloadError) return fail(`${before.key} · ${error.message}`, error.status);
-      throw error;
+    const after = { ...before, ...changes, ...(hasDescriptionFormat ? { descriptionFormat } : {}),
+      customFields: mergedFields, version: before.version + 1, updatedAt: now() };
+    if (fields.includes('parentId') && after.parentId !== null && (typeof after.parentId !== 'string' || !after.parentId)) {
+      fail(`${before.key} · 이관할 상위 티켓의 ID를 확인해 주세요.`, 409);
     }
-    if (customIds.length) {
-      const schema = issueSchemas.get(projectId);
-      const visible = visibleIssueFieldIds(schema, after);
-      if (customIds.some(id => !visible.has(id))) return fail(`${before.key} · 표시 조건에 맞는 사용자 정의 필드를 확인해 주세요.`, 422);
-      for (const field of schema.fields) if (customIds.includes(field.id)) fields.push(field.name);
-    }
-    after.completedAt = done(after) ? (before.completedAt || after.updatedAt) : null;
-    return { before, after, fields };
+    return { before, after, fields, customIds };
   };
   const prepareJiraRefreshes = (value: PreparedMigration) => {
     const updates = value.issueUpdates ?? [];
-    if (!updates.length) return [];
+    if (!updates.length) return { refreshedIssues: [], hierarchy: undefined };
     const projectId = value.append?.projectId;
     const append = value.preview.configuration.appendTo;
     const allowStandard = append?.refreshExisting === true, allowCustom = append?.refreshCustomFields === true;
@@ -712,7 +724,34 @@ export function createApp(options: {
         new Set(updates.map(update => update.issueId)).size !== updates.length) {
       return fail('Jira에서 변경분을 반영할 프로젝트와 업무를 확인해 주세요.', 409);
     }
-    return updates.map(update => prepareJiraRefresh(update, projectId, allowStandard, allowCustom));
+    const refreshedIssues = updates.map(update => prepareJiraRefresh(update, projectId, allowStandard, allowCustom));
+    // Project final parents together so moving both ends of an existing link can be checked before either write.
+    const hierarchy: ProjectedIssueHierarchy | undefined = refreshedIssues.some(({ before, after }) => before.parentId !== after.parentId)
+      ? { issues: new Map([...value.issues, ...refreshedIssues.map(({ after }) => after)].map(issue => [issue.id, issue])), validated: new Set() }
+      : undefined;
+    const schema = issueSchemas.get(projectId);
+    if (hierarchy) for (const issue of value.issues) {
+      try { validateIssueHierarchy(issue, { hierarchy }); }
+      catch (error) {
+        if (error instanceof ApiError) fail(`${issue.key} · ${error.message}`, error.status);
+        throw error;
+      }
+    }
+    for (const { before, after, fields, customIds } of refreshedIssues) {
+      try { validateIssue(after, before, { hierarchy }); }
+      catch (error) {
+        if (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
+            error instanceof PlanningError || error instanceof WorkloadError) return fail(`${before.key} · ${error.message}`, error.status);
+        throw error;
+      }
+      if (customIds.length) {
+        const visible = visibleIssueFieldIds(schema, after);
+        if (customIds.some(id => !visible.has(id))) return fail(`${before.key} · 표시 조건에 맞는 사용자 정의 필드를 확인해 주세요.`, 422);
+        for (const field of schema.fields) if (customIds.includes(field.id)) fields.push(field.name);
+      }
+      after.completedAt = done(after) ? (before.completedAt || after.updatedAt) : null;
+    }
+    return { refreshedIssues, hierarchy };
   };
   const confluenceRefreshFields = new Set<string>(CONFLUENCE_MIGRATION_DOCUMENT_FIELDS);
   const prepareConfluenceRefreshes = (value: PreparedMigration) => {
@@ -791,7 +830,7 @@ export function createApp(options: {
       }
     },
     persistCanonical(value, req) {
-      const refreshedIssues = prepareJiraRefreshes(value);
+      const { refreshedIssues, hierarchy: issueHierarchy } = prepareJiraRefreshes(value);
       const refreshedDocuments = prepareConfluenceRefreshes(value);
       const importedWorklogs = value.worklogs ?? [];
       const issueHistoryOwners = new Set(value.jiraHistoryOwners ?? []);
@@ -916,7 +955,7 @@ export function createApp(options: {
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       validateDocumentListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {
-        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalPlans,
+        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalPlans, hierarchy: issueHierarchy,
       }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       for (const { before, after, fields } of refreshedIssues) {
@@ -2842,6 +2881,10 @@ export function createApp(options: {
     }
     if (data.schemaVersion < 99 && importedSources.records.some(row => row.confluencePageFieldHashes?.parentId !== undefined)) {
       fail('Confluence 상위 문서의 비교 기준을 포함한 백업은 schemaVersion 99가 필요합니다.');
+    }
+    if (data.schemaVersion < 100 && importedSources.records.some(row =>
+      row.jiraIssueFieldHashes?.parentId !== undefined || row.jiraIssueSourceFieldHashes?.parentId !== undefined)) {
+      fail('Jira 상위 티켓의 비교 기준을 포함한 백업은 schemaVersion 100이 필요합니다.');
     }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
     const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);

@@ -98,6 +98,19 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     expect(initial.offset).toBe(20);
     expect(new Set(initial.items.map(item => item.linkId))).toEqual(new Set(sources.map(link => link.id)));
 
+    const pageTwoHash = new URL(page.url()).hash;
+    const liveSource = report.getByRole('link', { name: `현재 문서 열기 ${secondSource.title}`, exact: true });
+    const sharedSourceHash = `#/${destination.id}/documents/${secondSource.id}`;
+    await expect(liveSource).toHaveAttribute('href', sharedSourceHash);
+    await liveSource.click();
+    await expect(page).toHaveURL(url => url.hash === sharedSourceHash);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(secondSource.title);
+    const returnedPage = waitForReport(20);
+    await page.goBack();
+    expect((await json<DecisionFollowUpPage>(await returnedPage)).revision).toBe(initial.revision);
+    await expect(page).toHaveURL(url => url.hash === pageTwoHash);
+    await expect(report.getByRole('link', { name: `현재 문서 열기 ${secondSource.title}`, exact: true })).toBeVisible();
+
     await report.getByRole('button', { name: '회의 초안 만들기', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: '회의 초안 만들기', exact: true });
     const titleInput = dialog.getByRole('textbox', { name: '회의 초안 제목', exact: true });

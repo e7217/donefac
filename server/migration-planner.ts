@@ -1,6 +1,7 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueSourceFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
+import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -370,6 +371,10 @@ function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: LegacyRecord
       }
       case 'assigneeId': return jiraAssignee(row);
       case 'reporterId': return jiraReporter(row);
+      case 'parentId': {
+        const parent = jiraParentEvidence(row);
+        return parent === null ? null : parent?.[0];
+      }
       case 'labels': {
         const raw = jiraLabels(row);
         return jiraLabelValues(raw)?.sort() ?? raw;
@@ -485,6 +490,7 @@ class Planner{
     return issue && issue.projectId && issue.projectId === this.input.append?.project.id
       ? { type: 'issue', id: issue.issueId, projectId: issue.projectId } : undefined;
   }
+  private jiraHierarchyIssues = new Map<string, Pick<Issue, 'id' | 'parentId' | 'key' | 'title'>>();
   private initializeAppend(): void {
     const append = this.input.append;
     const mapping = this.configuration.appendTo;
@@ -494,6 +500,7 @@ class Planner{
       return;
     }
     this.result.append = { projectId: append.project.id, token: append.token, startIssueNumber: append.nextIssueNumber };
+    for (const issue of append.hierarchyIssues ?? []) this.jiraHierarchyIssues.set(issue.id, issue);
     for (const { alias, ...issue } of append.knownIssues) this.boundIssues.set(alias, issue);
     for (const container of this.options.containers) {
       if (container.issueCount) this.projectsByContainer.set(container.id, append.project);
@@ -620,6 +627,8 @@ class Planner{
       ? jiraFieldDigests(this.jiraRefreshValues(entry, issueId, previous)) : applied;
     const result: JiraMigrationIssueSourceFieldHashes = {};
     for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
+      // An initial raw parent may have been outside the import, leaving a canonical root.
+      if (field === 'parentId') continue;
       if (applied[field] !== undefined && applied[field] === projected[field]) {
         result[field] = jiraSourceFieldHashes(field, previous.archive.record);
       }
@@ -725,9 +734,14 @@ class Planner{
     return values;
   }
   private jiraReviewValue(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
+    if (field === 'parentId' && value === null) return '최상위 업무';
     if (value === null || value === undefined || value === '' || Array.isArray(value) && value.length === 0) return '비어 있음';
     const append = this.input.append!;
     let label = Array.isArray(value) ? value.join(', ') : String(value);
+    if (field === 'parentId') {
+      const parent = this.issueById.get(label) ?? this.jiraHierarchyIssues.get(label);
+      label = parent ? `${parent.key} · ${parent.title}` : '상위 업무 확인 불가';
+    }
     if (field === 'status') label = append.workflow.statuses.find(status => status.id === value)?.label ?? label;
     if (field === 'type') label = append.schema.issueTypes.find(type => type.id === value)?.name ?? label;
     if (field === 'assigneeId' || field === 'reporterId') label = this.input.users.find(user => user.id === value)?.name ?? label;
@@ -887,12 +901,35 @@ class Planner{
       users: configuration.users, originalMapping: configuration.appendTo ? 'existing' : 'generated' });
     return previousValue !== undefined && jiraCustomValueDigest(field, previousValue) === checkpoint.hash;
   }
+  private jiraRefreshParent(entry: Entry, aliases: string[], known: ReadonlyMap<string, string>, sourceErrors: ReadonlySet<string>): string | undefined {
+    const targets = new Set<string>();
+    for (const alias of aliases) {
+      const stored = known.get(alias);
+      const bound = this.boundIssues.get(alias);
+      if (stored) targets.add(stored);
+      const matches = this.referenceIndex.get(JSON.stringify(['issue', 'id', alias])) ?? [];
+      for (const match of matches) {
+        if (match.pkg.dataset.source.product !== 'jira' || match.pkg.dataset.source.instanceKey !== entry.pkg.dataset.source.instanceKey ||
+            match.container !== entry.container || this.excluded.has(match.key) || this.restricted(match) || sourceErrors.has(match.key)) return;
+        const binding = this.bindings.get(match.key);
+        if (binding?.type === 'issue' && binding.projectId === this.input.append?.project.id) targets.add(binding.id);
+      }
+      if (bound && bound.issueId !== stored && bound.projectId === this.input.append?.project.id) {
+        // A retained row may supply the ID of an issue previously imported using only its key.
+        const alternate = matches.some(match => [match.row.sourceId, string(match.row.metadata.key)].some(value => known.get(value) === bound.issueId));
+        if (!alternate) return;
+        targets.add(bound.issueId);
+      } else if (bound && bound.issueId !== stored) return;
+    }
+    if (targets.size === 1) return [...targets][0];
+  }
   private createJiraRefreshes(): void {
     const mapping = this.configuration.appendTo;
     if ((!mapping?.refreshExisting && !mapping?.refreshCustomFields) || !this.input.append) return;
     const append = this.input.append;
     const definitions = new Map(append.schema.fields.map(field => [field.id, field]));
     const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
+    const hierarchyAliases = new Map(append.hierarchyIssueAliases?.map(({ alias, issueId }) => [alias, issueId]));
     const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
       .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
     const sourceDateWarnings = new Map<string, string[]>();
@@ -918,7 +955,7 @@ class Planner{
         this.notice('JIRA_REFRESH_ISSUE_UNAVAILABLE', '현재 업무 연결이나 접근 범위 또는 원본 자료를 확인할 수 없어 변경분은 적용하지 않습니다.', 'warning', entry);
         continue;
       }
-      const { issue, previous, previousCustom } = candidate;
+      const { issue, previous, previousCustom, initialParentId } = candidate;
       if (seen.has(issue.id)) {
         this.notice('JIRA_REFRESH_OVERLAPPING_ISSUE', '같은 기존 업무의 기록이 겹칩니다. 패키지에서 적용할 기록 하나를 남겨 주세요.', 'error', entry);
         continue;
@@ -947,6 +984,16 @@ class Planner{
       const values = reviewStandard ? this.jiraRefreshValues(entry, issue.id) : {};
       const hashes = reviewStandard ? { ...this.originalJiraIssueDigests(previous) } : {};
       const sourceHashes = reviewStandard ? this.originalJiraSourceFieldHashes(entry, issue.id, previous, hashes) : {};
+      if (reviewStandard) {
+        const evidence = jiraParentEvidence(entry.row);
+        if (evidence === null) values.parentId = null;
+        else if (evidence) {
+          const parent = this.jiraRefreshParent(entry, evidence, hierarchyAliases, sourceErrors);
+          if (parent) values.parentId = parent;
+          else this.notice('JIRA_REFRESH_PARENT_UNAVAILABLE', `원본 상위 업무 ${evidence.join(' / ')}의 같은 프로젝트 내 연결을 확인할 수 없어 현재 상위 업무를 보존합니다.`, 'warning', entry, true);
+        }
+        if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = jiraFieldDigest('parentId', initialParentId);
+      }
       const accepted: JiraMigrationIssueValues = {};
       const fields: JiraMigrationIssueReview['fields'] = [];
       let canCheckpoint = false;
@@ -984,7 +1031,11 @@ class Planner{
           sourceHashes[field] = incomingSourceHashes;
           canCheckpoint = true;
           updatedFields++;
-        } else conflictingFields++;
+        } else {
+          if (field === 'parentId' && hashes.parentId === undefined) this.notice('JIRA_REFRESH_PARENT_BASELINE_UNAVAILABLE',
+            '이전 이관의 상위 업무를 확인할 수 없어 현재 상위 업무를 보존합니다.', 'warning', entry, true);
+          conflictingFields++;
+        }
       }
       if (accepted.startDate !== undefined || accepted.endDate !== undefined) {
         const start = accepted.startDate === undefined ? issue.startDate : accepted.startDate;
@@ -3141,7 +3192,12 @@ class Planner{
   }
   validateGraph():void{
     const cyclic=(rows:{id:string;parentId:string|null}[], appended:boolean)=>{const incoming=new Map(rows.map(row=>[row.id,0])),children=new Map<string,string[]>();for(const row of rows)if(row.parentId&&(!appended||incoming.has(row.parentId))){incoming.set(row.id,(incoming.get(row.id)||0)+1);const values=children.get(row.parentId)||[];values.push(row.id);children.set(row.parentId,values);}const queue=[...incoming].filter(([,count])=>!count).map(([id])=>id);for(let cursor=0;cursor<queue.length;cursor++)for(const child of children.get(queue[cursor])||[]){const count=incoming.get(child)!-1;incoming.set(child,count);if(!count)queue.push(child);}return queue.length!==rows.length;};
-    if(cyclic(this.result.issues, Boolean(this.input.append)))this.notice('ISSUE_PARENT_CYCLE','이관할 업무 계층에 순환 관계가 있습니다.','error');if(cyclic(this.result.documents, Boolean(this.input.appendPages)))this.notice('DOCUMENT_PARENT_CYCLE','이관할 문서 계층에 순환 관계가 있습니다.','error');
+    const issueMoves = this.result.issueUpdates?.filter(update => update.changes.parentId !== undefined) ?? [];
+    const hierarchy = new Map((issueMoves.length ? [...this.jiraHierarchyIssues.values()] : [])
+      .map(({ id, parentId }) => [id, { id, parentId }]));
+    for (const issue of this.result.issues) hierarchy.set(issue.id, issue);
+    for (const { issueId, changes } of issueMoves) hierarchy.set(issueId, { id: issueId, parentId: changes.parentId ?? null });
+    if(cyclic([...hierarchy.values()], Boolean(this.input.append)))this.notice('ISSUE_PARENT_CYCLE','이관할 업무 계층에 순환 관계가 있습니다.','error');if(cyclic(this.result.documents, Boolean(this.input.appendPages)))this.notice('DOCUMENT_PARENT_CYCLE','이관할 문서 계층에 순환 관계가 있습니다.','error');
     const issueIds = new Set(this.result.issues.map(issue => issue.id));
     const bodies = new Map(this.result.documents.map(document => [document.id, document.content]));
     for (const update of this.result.documentUpdates ?? []) if (update.changes.content) bodies.set(update.documentId, update.changes.content);

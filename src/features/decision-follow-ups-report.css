@@ -60,6 +60,7 @@
 
 .decision-follow-up-issue:hover { color: #11675e; }
 .decision-follow-up-issue:focus-visible,
+.decision-follow-up-document-link:focus-visible,
 .decision-follow-ups-results h3:focus-visible { outline: 2px solid #177c72; outline-offset: 3px; }
 .decision-follow-up-details {
   display: grid;
@@ -94,6 +95,7 @@
 
 .decision-follow-up-document svg { flex: 0 0 auto; margin-top: 0.2rem; }
 .decision-follow-up-document small { display: block; }
+.decision-follow-up-document-link { color: #11675e; text-decoration: underline; text-underline-offset: 0.15em; }
 .decision-follow-up .doc-pinned-include { margin: 0; }
 .decision-follow-up .doc-pinned-include > blockquote {
   border-left: 3px solid #177c72;

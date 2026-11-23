@@ -417,6 +417,97 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
   }
 });
 
+test('360px에서 Jira 상위 업무 변경을 검토하고 팀이 옮긴 업무의 위치를 보존한다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const token = suffix(), sourceKey = `JP${token}`, instance = `jira-parent-refresh-${token}`;
+  const titles = ['기존 상위 업무', '새 상위 업무', '팀에서 선택한 상위 업무', '원본에서 옮긴 업무', '팀에서 옮긴 업무', '최상위로 옮긴 업무']
+    .map(title => `${title} ${token}`);
+  const row = (number: number, updatedDay: string, parent?: number | null) => ({
+    id: String(100 + number), key: `${sourceKey}-${number}`, fields: {
+      project: { id: '20', key: sourceKey, name: `원본 프로젝트 ${token}` }, summary: titles[number - 1],
+      status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+      created: '2020-01-01T00:00:00Z', updated: `2020-01-${updatedDay}T00:00:00Z`,
+      ...(parent === undefined ? {} : { parent: parent === null ? null : { id: String(100 + parent), key: `${sourceKey}-${parent}` } }),
+    },
+  });
+  const stage = (name: string, issues: ReturnType<typeof row>[]) =>
+    upload(request, `jira-parents-${name}-${token}.json`, Buffer.from(JSON.stringify({ issues })), instance);
+  const staged: LegacyPackageSummary[] = [];
+  let cleanupIssues: Issue[] = [];
+
+  try {
+    const original = await stage('original', [row(1, '02'), row(2, '02'), row(3, '02'), row(4, '02', 1), row(5, '02', 1), row(6, '02', 1)]);
+    staged.push(original);
+    const initial = await importIntoProject(request, original, `PAR${token}`, `Jira 업무 위치 검토 ${token}`);
+    const [projectId] = initial.import.projectIds;
+    const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const [firstParent, sourceParent, teamParent, reparented, conflicting, detached] = titles.map(title =>
+      workspace.issues.find(issue => issue.projectId === projectId && issue.title === title)!);
+    cleanupIssues = [reparented, conflicting, detached, firstParent, sourceParent, teamParent];
+    const openIssue = async (issue: Issue) => {
+      await page.goto(`/#/${projectId}/issues?issue=${issue.id}`);
+      const detail = page.getByRole('dialog', { name: issue.title, exact: true });
+      await expect(detail).toBeVisible();
+      return detail;
+    };
+    const parentSelect = (detail: Locator) => detail.getByRole('combobox', { name: '상위 업무', exact: true });
+    const teamEdited = await openIssue(conflicting);
+    await expect(parentSelect(teamEdited)).toHaveValue(firstParent.id);
+    await parentSelect(teamEdited).selectOption(teamParent.id);
+    const saving = page.waitForResponse(response => response.url().endsWith(`/api/issues/${conflicting.id}`) && response.request().method() === 'PATCH');
+    await teamEdited.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    const saved = await saving;
+    expect(saved.status(), await saved.text()).toBe(200);
+
+    const incoming = await stage('next', [row(4, '03', 2), row(5, '03', 2), row(6, '03', null)]);
+    staged.push(incoming);
+    const { settings } = await open(page, request);
+    await selectPackage(settings, incoming.filename);
+    await settings.getByLabel('이관 방식', { exact: true }).selectOption('append');
+    await settings.getByRole('checkbox', { name: '기존 Jira 업무 변경분 반영', exact: true }).check();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts).toMatchObject({ issues: 0, updatedIssues: 2, updatedFields: 2, conflictingFields: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const changes = review.getByRole('region', { name: '기존 Jira 업무 변경 검토', exact: true });
+    const location = (issue: Issue) => changes.getByRole('list', { name: `${issue.key} 필드 변경`, exact: true })
+      .getByRole('listitem', { name: '상위 업무', exact: true });
+    const label = (issue: Issue) => `${issue.key} · ${issue.title}`;
+    await expect(location(reparented).locator('dd')).toHaveText([label(firstParent), label(sourceParent)]);
+    await expect(location(reparented)).toContainText('Jira 값 반영');
+    await expect(location(conflicting).locator('dd')).toHaveText([label(teamParent), label(sourceParent)]);
+    await expect(location(conflicting)).toContainText('현재 값 유지');
+    await expect(location(detached).locator('dd')).toHaveText([label(firstParent), '최상위 업무']);
+    await expect(location(detached)).toContainText('Jira 값 반영');
+
+    await acknowledge(review, plan);
+    const applying = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applying;
+    expect(applied.status(), await applied.text()).toBe(201);
+    await expect(settings.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
+    await expect(settings.getByRole('button', { name: '이관 원본·영수증 새로고침', exact: true })).toBeEnabled();
+
+    const moved = await openIssue(reparented);
+    await expect(parentSelect(moved)).toHaveValue(sourceParent.id);
+    await moved.getByRole('button', { name: `상위 업무 · ${sourceParent.key} ${sourceParent.title}`, exact: true }).click();
+    await expect(page.getByRole('dialog', { name: sourceParent.title, exact: true })).toBeVisible();
+    await expect(parentSelect(await openIssue(conflicting))).toHaveValue(teamParent.id);
+    await expect(parentSelect(await openIssue(detached))).toHaveValue('');
+  } finally {
+    for (const issue of cleanupIssues) {
+      const removed = await request.delete(`/api/issues/${issue.id}`);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+    for (const pack of staged) await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`);
+  }
+});
+
 test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 편집한 값을 유지한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

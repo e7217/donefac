@@ -17,6 +17,7 @@ import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
 import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
@@ -27,7 +28,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 8;
+const conversionVersion = 9;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -226,15 +227,15 @@ export class MigrationService {
     const planningToken = createHash('sha256').update(JSON.stringify(planningItems)).digest('hex');
     const cyclePlanningToken = createHash('sha256').update(JSON.stringify(cyclePlanningItems)).digest('hex');
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
-    const refreshIssues = mapping.refreshExisting || mapping.refreshCustomFields
-      ? this.jiraRefreshIssues(packages, configuration, knownIssues, project.id, instanceKey, digest)
+    const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields
+      ? this.jiraRefreshIssues(packages, configuration, knownIssues, destination, digest)
       : undefined;
     const history = mapping.refreshHistory ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const attachments = mapping.refreshAttachments ? this.jiraAttachmentContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const relationRefresh = mapping.refreshRelations ? this.jiraRelationContext(packages, configuration, knownIssues, destination, digest) : undefined;
     return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues,
       planningItems, planningToken, cyclePlanningItems, cyclePlanningToken,
-      ...(refreshIssues ? { refreshIssues } : {}), ...(relationRefresh ? { relationRefresh } : {}), ...history, ...attachments };
+      ...refreshContext, ...(relationRefresh ? { relationRefresh } : {}), ...history, ...attachments };
   }
   private jiraChildIssueCandidates(packages: MigrationPackage[], configuration: MigrationConfiguration, live: ReadonlyMap<string, string>,
     select: (row: LegacyRecord) => string[] | null) {
@@ -341,17 +342,63 @@ export class MigrationService {
       issues.map(({ id, projectId, projectName, key, version }) => [id, projectId, projectName, key, version]), active, previouslyApplied, legacy]));
     return { issues, provenAliases, active, previouslyApplied, legacy };
   }
-  private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'], projectId: string, instanceKey: string, digest: ReturnType<typeof createHash>): MigrationJiraRefreshCandidate[] {
+  private jiraHierarchySourceProjects(packages: MigrationPackage[],
+    { project: { id: projectId }, instanceKey, sourceProjectId, originalSourceProjectId }: AppendDestination): Set<string> {
+    const sourceIds = new Set([sourceProjectId, originalSourceProjectId]);
+    if (sourceIds.size > 1) return sourceIds;
+    // A search export can bind the project key before a later REST import binds its numeric ID.
+    // Prove the pair by the shared archived Jira key. A Teamspace project can include several Jira projects.
+    const archived = this.store.db.prepare(`SELECT DISTINCT archive.source_id AS sourceId, archive.target_id AS projectId,
+      json_extract(archive.json,'$.record.metadata.key') AS key, json_extract(archive.json,'$.record.metadata.pkey') AS pkey
+      FROM source_records AS archive JOIN source_bindings AS binding
+        ON binding.product=archive.product AND binding.source_instance=archive.source_instance AND binding.kind=archive.kind
+        AND binding.source_alias=archive.source_id AND binding.target_type='project' AND binding.target_id=archive.target_id
+      WHERE archive.product='jira' AND archive.source_instance=? AND archive.kind='project' AND archive.target_type='project'`)
+      .all(instanceKey) as { sourceId: string; projectId: string; key: unknown; pkey: unknown }[];
+    const officialKeys = (key: unknown, pkey: unknown) => [key, pkey].filter((value): value is string =>
+      typeof value === 'string' && jiraProjectKey.test(value));
+    const staged = new Set(packages.flatMap(({ dataset }) => dataset.records.filter(row => row.kind === 'project' && row.sourceId === sourceProjectId)
+      .flatMap(row => officialKeys(row.metadata.key, row.metadata.pkey))));
+    const current = archived.filter(row => row.sourceId === sourceProjectId && row.projectId === projectId);
+    const keys = staged.size ? staged : new Set(current.flatMap(row => officialKeys(row.key, row.pkey)));
+    if (keys.size !== 1) return sourceIds;
+    const [key] = keys;
+    const matches = archived.filter(row => officialKeys(row.key, row.pkey).includes(key));
+    if (matches.some(row => row.projectId !== projectId || officialKeys(row.key, row.pkey).some(value => value !== key))) return sourceIds;
+    const identities = [...new Set(matches.map(row => row.sourceId))];
+    if (identities.length !== 2 || !identities.includes(key) || !identities.includes(sourceProjectId)) return sourceIds;
+    const numeric = identities.find(id => jiraNumericId.test(id));
+    if (numeric) { sourceIds.add(numeric); sourceIds.add(key); }
+    return sourceIds;
+  }
+  private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
+    destination: AppendDestination, digest: ReturnType<typeof createHash>):
+    Required<Pick<MigrationAppendContext, 'refreshIssues' | 'hierarchyIssues' | 'hierarchyIssueAliases'>> {
+    const { project: { id: projectId }, instanceKey } = destination;
     const refreshCustomFields = configuration.appendTo?.refreshCustomFields === true;
     const live = new Map(knownIssues.filter(issue => issue.projectId === projectId).map(issue => [issue.alias, issue.issueId]));
     const excluded = new Set(configuration.excludedRecords);
     const selected = new Set<string>();
+    const hierarchyAnchors = new Set<string>();
+    const parentAliases = new Set<string>();
+    const newIssueParentAliases = new Set<string>();
+    const stagedAliases = new Map<string, string>();
     for (const { summary, dataset } of packages) for (const row of dataset.records) {
       if (row.kind !== 'issue' || excluded.has(`${summary.id}/${row.id}`)) continue;
       const byId = live.get(row.sourceId);
       const byKey = typeof row.metadata.key === 'string' ? live.get(row.metadata.key) : undefined;
       if (byId) selected.add(byId);
       if (byKey) selected.add(byKey);
+      if (!configuration.appendTo?.refreshExisting) continue;
+      if (byId || byKey) {
+        if (byId && typeof row.metadata.key === 'string') stagedAliases.set(row.metadata.key, byId);
+        if (byKey) stagedAliases.set(row.sourceId, byKey);
+        const evidence = jiraParentEvidence(row);
+        if (evidence === undefined) continue;
+        if (byId) hierarchyAnchors.add(byId);
+        if (byKey) hierarchyAnchors.add(byKey);
+        for (const alias of evidence ?? []) parentAliases.add(alias);
+      } else if (row.parentId) newIssueParentAliases.add(row.parentId);
     }
     if (selected.size > MAX_REFRESH_ISSUES) fail(413, '기존 Jira 업무의 변경은 한 번에 1000개까지 검토할 수 있습니다. 패키지를 나누어 주세요.');
 
@@ -366,6 +413,27 @@ export class MigrationService {
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')) DESC, archive.id DESC LIMIT 1`);
     const initialArchive = this.store.db.prepare(`${linkedArchives}
       ORDER BY julianday(json_extract(receipt.json,'$.createdAt')), archive.id LIMIT 1`);
+    const ownedArchive = this.store.db.prepare(`SELECT import_id AS importId, json_extract(json,'$.packageSha256') AS packageSha256,
+      json_extract(json,'$.record.containerId') AS containerId, json_type(json,'$.record.parentId') AS parentType,
+      json_extract(json,'$.record.parentId') AS parentSourceId FROM source_records WHERE id=?`);
+    const originalParent = this.store.db.prepare(`SELECT DISTINCT target_id AS id FROM source_records
+      WHERE import_id=? AND product='jira' AND source_instance=? AND kind='issue' AND source_id=? AND target_type='issue'
+        AND json_extract(json,'$.packageSha256')=? AND json_extract(json,'$.targetProjectId')=? AND json_extract(json,'$.record.containerId')=? LIMIT 2`);
+    const sourceProjects = hierarchyAnchors.size ? this.jiraHierarchySourceProjects(packages, destination) : new Set<string>();
+    const sameOrigin = (origin: { projectId: string; sourceProjectId: string }) => origin.projectId === projectId && sourceProjects.has(origin.sourceProjectId);
+    const originalArchives = Map.groupBy(this.sources.jiraIssueOrigins(instanceKey, [...hierarchyAnchors], 'issue').filter(sameOrigin), origin => origin.issueId);
+    const initialParent = (id: string): string | null | undefined => {
+      const archives = new Set(originalArchives.get(id)?.map(origin => origin.archiveId));
+      if (archives.size !== 1) return;
+      const row = ownedArchive.get([...archives][0]) as {
+        importId: string; packageSha256: string; containerId: string; parentType: string | null; parentSourceId: string | null;
+      } | undefined;
+      if (row?.parentType === 'null') return null;
+      if (row?.parentType !== 'text' || !row.parentSourceId) return;
+      // The original importer used an exact in-package source ID for initial hierarchy.
+      const parents = originalParent.all(row.importId, instanceKey, row.parentSourceId, row.packageSha256, projectId, row.containerId) as { id: string }[];
+      if (parents.length === 1 && parents[0].id !== id) return parents[0].id;
+    };
     const archivedOption = this.store.db.prepare(`SELECT json FROM source_records
       WHERE import_id=? AND product='jira' AND source_instance=? AND kind='option' AND source_id=?
         AND json_extract(json,'$.packageSha256')=? ORDER BY id LIMIT 2`);
@@ -422,10 +490,35 @@ export class MigrationService {
       const standardBaseline = readBaseline(previous, issueId, configuration.appendTo?.refreshExisting === true);
       if (!standardBaseline) continue;
       const customBaseline = previousCustom?.id === previous.id ? standardBaseline : previousCustom && readBaseline(previousCustom, issueId);
-      candidates.push({ issue: JSON.parse(current.json) as Issue, previous: standardBaseline,
+      const initialParentId = hierarchyAnchors.has(issueId) && standardBaseline.archive.jiraIssueFieldHashes?.parentId === undefined
+        ? initialParent(issueId) : undefined;
+      if (initialParentId !== undefined) include(JSON.stringify(['jira-initial-parent', issueId, initialParentId]));
+      candidates.push({ issue: JSON.parse(current.json) as Issue, previous: standardBaseline, ...(initialParentId !== undefined ? { initialParentId } : {}),
         ...(customBaseline ? { previousCustom: customBaseline } : {}) });
     }
-    return candidates;
+    const hierarchyIssueAliases: NonNullable<MigrationAppendContext['hierarchyIssueAliases']> = [];
+    for (const [alias, origins] of Map.groupBy(this.sources.jiraIssueOrigins(instanceKey, [...parentAliases], 'alias'), origin => origin.alias)) {
+      const origin = origins.length === 1 ? origins[0] : undefined;
+      if (origin && sameOrigin(origin) && live.get(alias) === origin.issueId) {
+        hierarchyIssueAliases.push({ alias, issueId: origin.issueId });
+        hierarchyAnchors.add(origin.issueId);
+      }
+    }
+    if (hierarchyAnchors.size) for (const alias of newIssueParentAliases) {
+      const parent = live.get(alias) ?? stagedAliases.get(alias);
+      if (parent) hierarchyAnchors.add(parent);
+    }
+    const hierarchyIssues = hierarchyAnchors.size ? this.store.db.prepare(`WITH RECURSIVE ancestors(id) AS (
+      SELECT value FROM json_each(?)
+      UNION
+      SELECT issue.parent_id FROM issues AS issue JOIN ancestors ON ancestors.id=issue.id
+        WHERE issue.project_id=? AND issue.parent_id IS NOT NULL
+    ) SELECT issue.id, issue.project_id AS projectId, issue.parent_id AS parentId, json_extract(issue.json,'$.key') AS key,
+      json_extract(issue.json,'$.title') AS title, json_extract(issue.json,'$.version') AS version
+      FROM issues AS issue JOIN ancestors ON ancestors.id=issue.id WHERE issue.project_id=? ORDER BY issue.id`)
+      .all(JSON.stringify([...hierarchyAnchors]), projectId, projectId) as NonNullable<MigrationAppendContext['hierarchyIssues']> : [];
+    if (hierarchyIssues.length) include(JSON.stringify(['jira-hierarchy', hierarchyIssueAliases, hierarchyIssues]));
+    return { refreshIssues: candidates, hierarchyIssues, hierarchyIssueAliases };
   }
   private pageAppendDestination(packages: MigrationPackage[], options: MigrationOptions, allowSparseHistory = false): PageAppendDestination | undefined {
     const instanceKey = this.sourceInstance(packages, 'confluence');

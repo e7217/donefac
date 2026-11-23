@@ -19,6 +19,8 @@ type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'o
 type Options = Omit<DecisionFollowUpScope, 'offset'>;
 type Result = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage | null; loading: boolean; error?: string };
 type DraftSelection = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage };
+type Target = 'issue' | 'document';
+const targetLabels: Record<Target, string> = { issue: '업무', document: '현재 문서' };
 const numberLabel = (count: number) => count.toLocaleString('ko-KR');
 const workspacePath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/decision-follow-ups`;
 const STATUS_LABEL = { open: '미완료', closed: '종료', all: '전체 상태' };
@@ -31,11 +33,11 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
   const [options, setOptions] = useState<Options>(scope);
   const [result, setResult] = useState<Result | null>(null);
   const [draft, setDraft] = useState<DraftSelection | null>(null);
-  const [opening, setOpening] = useState<{ scope: DecisionFollowUpScope; token: symbol } | null>(null);
+  const [opening, setOpening] = useState<{ scope: DecisionFollowUpScope; token: symbol; target: Target } | null>(null);
   const [lastIssues, setLastIssues] = useState(data.issues);
   const request = useRef<AbortController | null>(null);
-  const issueRequest = useRef<symbol | null>(null);
-  const issueOpener = useRef<HTMLButtonElement | null>(null);
+  const targetRequest = useRef<symbol | null>(null);
+  const issueOpener = useRef<HTMLElement | null>(null);
   const resultsHeading = useRef<HTMLHeadingElement>(null);
   const focusResults = useRef(false);
   if (!sameOptions(applied, scope)) {
@@ -76,12 +78,12 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     return () => { clearTimeout(timer); request.current?.abort(); };
   }, [lastIssues, load]);
 
-  useEffect(() => () => { issueRequest.current = null; }, [actorId, projectId, scope]);
+  useEffect(() => () => { targetRequest.current = null; }, [actorId, projectId, scope]);
 
   const current = result && sameDecisionFollowUpScope(result.scope, scope) ? result : null;
   const page = current?.page;
   const loading = current?.loading ?? true;
-  const openingIssue = opening !== null && sameDecisionFollowUpScope(opening.scope, scope);
+  const openingTarget = opening !== null && sameDecisionFollowUpScope(opening.scope, scope) ? opening.target : null;
   const projectSelection = options.projectId === undefined ? 'current' : options.projectId === null ? 'team' : `project:${options.projectId}`;
   useLayoutEffect(() => {
     if (!page || loading || issueOverlayOpen) return;
@@ -101,23 +103,23 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     if (onScopeChange({ ...scope, offset })) focusResults.current = true;
   }
 
-  async function showIssue(issueId: string, opener: HTMLButtonElement) {
-    if (issueRequest.current) return;
-    issueOpener.current = opener;
+  async function openTarget(target: Target, id: string, opener: HTMLElement) {
+    if (targetRequest.current) return;
+    if (target === 'issue') issueOpener.current = opener;
     opener.focus({ preventScroll: true });
     const origin = window.location.hash;
     const token = Symbol();
-    const isCurrent = () => issueRequest.current === token && window.location.hash === origin;
-    issueRequest.current = token;
-    setOpening({ scope, token });
+    const isCurrent = () => targetRequest.current === token && window.location.hash === origin;
+    targetRequest.current = token;
+    setOpening({ scope, token, target });
     try {
       await refresh();
-      if (isCurrent()) openIssue(issueId);
+      if (isCurrent()) (target === 'issue' ? openIssue : openDocument)(id);
     } catch (cause) {
-      if (isCurrent()) notify(cause instanceof Error ? cause.message : '업무를 불러오지 못했습니다.', 'error');
+      if (isCurrent()) notify(cause instanceof Error ? cause.message : `${targetLabels[target]}를 불러오지 못했습니다.`, 'error');
     } finally {
       setOpening(previous => previous?.token === token ? null : previous);
-      if (issueRequest.current === token) issueRequest.current = null;
+      if (targetRequest.current === token) targetRequest.current = null;
     }
   }
 
@@ -167,7 +169,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
 
     {current?.error && <p role="alert" className="reports-error">{current.error}</p>}
     {loading && <p role="status">결정 후속 업무를 불러오는 중입니다.</p>}
-    {openingIssue && <p role="status">업무를 불러오는 중입니다.</p>}
+    {openingTarget && <p role="status">{targetLabels[openingTarget]}를 불러오는 중입니다.</p>}
     {page && <section className="decision-follow-ups-results" aria-label="결정 후속 업무 결과" aria-busy={loading}>
       <header>
         <h3 ref={resultsHeading} tabIndex={-1}>결정 근거 {numberLabel(page.total)}건</h3>
@@ -177,7 +179,7 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
       </header>
       {page.items.length ? <ul className="decision-follow-ups-list" aria-label="결정 후속 업무 목록">
         {page.items.map(item => <li key={item.linkId}><DecisionFollowUpCard key={`${item.source.revisionId}:${item.source.from}:${item.source.to}`}
-          item={item} data={data} showIssueProject={scope.projectId !== undefined} loading={openingIssue} open={showIssue} /></li>)}
+          item={item} data={data} reportProjectId={projectId} showIssueProject={scope.projectId !== undefined} openingTarget={openingTarget} open={openTarget} /></li>)}
       </ul> : <p className="card decision-follow-ups-empty">{page.total && page.offset ? '이 페이지에 표시할 결정 근거가 없습니다.' : '조건에 맞는 결정 후속 업무가 없습니다.'}</p>}
       {(page.total > page.limit || page.offset > 0) && <nav className="reports-pagination" aria-label="결정 후속 업무 페이지">
         <span>{page.items.length ? `${numberLabel(page.offset + 1)}–${numberLabel(page.offset + page.items.length)} / ` : ''}{numberLabel(page.total)}건</span>
@@ -236,12 +238,13 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
     </>} />;
 }
 
-function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
+function DecisionFollowUpCard({ item, data, reportProjectId, showIssueProject, openingTarget, open }: {
   item: DecisionFollowUpItem;
   data: Props['data'];
+  reportProjectId: string;
   showIssueProject: boolean;
-  loading: boolean;
-  open: (issueId: string, opener: HTMLButtonElement) => Promise<void>;
+  openingTarget: Target | null;
+  open: (target: Target, id: string, opener: HTMLElement) => Promise<void>;
 }) {
   const { linkId, issue, document, source } = item;
   const path = `${workspacePath(issue.projectId)}/${encodeURIComponent(linkId)}/source`;
@@ -257,10 +260,12 @@ function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
   const issueProject = showIssueProject ? data.projects.find(project => project.id === issue.projectId) : undefined;
   const documentProject = data.projects.find(project => project.id === document.projectId);
   const documentSpace = document.projectId === null ? '팀 공통 문서' : documentProject?.name ?? '프로젝트 정보 없음';
+  const documentTitle = document.title || '제목 없는 문서';
+  const documentHref = `#/${encodeURIComponent(document.projectId ?? reportProjectId)}/documents/${encodeURIComponent(documentId)}`;
 
   return <article className="card decision-follow-up" aria-label={`${issue.key} 결정 후속 업무`}>
-    <h4><button className="decision-follow-up-issue" type="button" aria-label={`${issue.key} 업무 열기`} aria-disabled={loading}
-      onClick={event => { if (!loading) void open(issue.id, event.currentTarget); }}>
+    <h4><button className="decision-follow-up-issue" type="button" aria-label={`${issue.key} 업무 열기`} aria-disabled={openingTarget !== null}
+      onClick={event => { if (!openingTarget) void open('issue', issue.id, event.currentTarget); }}>
       <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><ChevronRight size={15} aria-hidden="true" />
     </button></h4>
     <dl className="decision-follow-up-details" data-show-issue-project={showIssueProject || undefined}>
@@ -271,7 +276,12 @@ function DecisionFollowUpCard({ item, data, showIssueProject, loading, open }: {
         <dd>{issue.deadline ? <time dateTime={issue.deadline}>{issue.deadline}</time> : '미정'}</dd></div>
     </dl>
     <p className="decision-follow-up-document"><BookOpen size={16} aria-hidden="true" />
-      <span>{document.title || '제목 없는 문서'}<small data-decision-document-space={document.projectId ?? ''}>
+      <span><a href={documentHref} className="decision-follow-up-document-link" aria-label={`현재 문서 열기 ${documentTitle}`}
+        onClick={event => {
+          if (event.button !== 0 || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+          event.preventDefault();
+          if (!openingTarget) void open('document', documentId, event.currentTarget);
+        }}>{documentTitle}</a><small data-decision-document-space={document.projectId ?? ''}>
         {showIssueProject && '문서 공간 · '}{documentSpace}</small></span>
     </p>
     <Suspense fallback={<p role="status">결정 근거 보기를 준비하고 있습니다.</p>}>

@@ -9,6 +9,71 @@ const parse=(name:string,value:string,extra:Map<string,Buffer>=new Map())=>parse
 const find=(data:LegacyDataset,id:string)=>{const item=data.records.find(item=>item.id===id);assert.ok(item,`Missing ${id}`);return item;};
 const codes=(data:LegacyDataset)=>new Set(data.diagnostics.map(item=>item.code));
 
+test('Jira REST parent evidence verifies identities and distinguishes explicit clear from omission', () => {
+  const parent = (data: LegacyDataset, id: number) => find(data, `issue:${id}`).metadata.jiraParentSourceId;
+  const row = (id: number, key: string, value?: unknown) => ({ id, key, fields: {
+    project: { id: '20', key: 'OLD' }, summary: key, ...(value === undefined ? {} : { parent: value }),
+  } });
+  const data = parse('rest.json', JSON.stringify({ issues: [
+    row(100, 'OLD-1'), row(200, 'OLD-2'), row(201, 'OLD-3'), row(202, 'OLD-3'),
+    row(300, 'OLD-30', { id: '100', key: 'OLD-1' }), row(301, 'OLD-31', null), row(302, 'OLD-32'),
+    row(303, 'OLD-33', { id: '100', key: 'OLD-2' }), row(304, 'OLD-34', { key: 'OLD-1' }),
+    row(305, 'OLD-35', { key: 'OLD-99' }), row(306, 'OLD-36', { id: '300', key: 'not an issue key' }),
+    row(307, 'OLD-37', { id: '307' }), row(308, 'OLD-38', '100'), row(309, 'OLD-39', { key: 'OLD-3' }),
+    row(310, 'OLD-40', { id: 100 }), row(311, 'OLD-41', { id: Number.MAX_SAFE_INTEGER + 1, key: 'OLD-1' }),
+    row(312, 'OLD-42', { id: '900', key: 'OLD-90' }),
+  ] }));
+  assert.deepEqual([300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312].map(id => parent(data, id)),
+    ['100', null, undefined, undefined, '100', 'OLD-99', undefined, undefined, undefined, undefined, '100', undefined, '900']);
+  for (const id of [300, 304]) assert.equal(find(data, `issue:${id}`).metadata.jiraParentSourceKey, 'OLD-1');
+  assert.equal(find(data, 'issue:312').metadata.jiraParentSourceKey, 'OLD-90');
+  assert.equal(find(data, 'issue:303').parentId, '100');
+  assert.equal(find(data, 'issue:308').parentId, '100');
+  const importers = parse('importers.json', JSON.stringify({ projects: [{ key: 'OLD', issues: [
+    { externalId: '100', key: 'OLD-1', summary: 'Importer parent field', parent: null },
+  ] }] }));
+  assert.equal(parent(importers, 100), undefined);
+});
+
+test('Jira XML subtask links provide positive parent evidence only when singular and consistent', () => {
+  const issue = (id: number, attributes = '') => `<Issue id="${id}" project="20" number="${id}" ${attributes}/>`;
+  const link = (id: number, source: number, destination: number, type = 800) =>
+    `<IssueLink id="${id}" linktype="${type}" source="${source}" destination="${destination}"/>`;
+  const data = parse('entities.xml', `<entity-engine-xml>
+    <Project id="20" pkey="OLD"/>${issue(100)}${issue(200)}${issue(300)}${issue(301)}${issue(302, 'parent="100"')}
+    ${issue(303, 'parent="200"')}${issue(304, 'parent="100"')}${issue(305)}${issue(306)}${issue(307)}
+    <IssueLinkType id="800" style="jira_subtask"/><IssueLinkType id="810" style="jira_subtask"/>
+    <IssueLinkType id="810" style="jira_subtask"/><IssueLinkType id="820" style="jira_subtask"/>
+    ${link(801, 100, 300)}${link(802, 100, 302)}${link(803, 100, 303)}
+    ${link(804, 100, 305)}${link(805, 200, 305)}${link(806, 100, 306, 810)}
+    <IssueLink id="807" linktype="820" source="200" destination="307"><source>100</source></IssueLink>
+  </entity-engine-xml>`);
+  assert.deepEqual([300, 301, 302, 303, 304, 305, 306, 307].map(id => find(data, `issue:${id}`).metadata.jiraParentSourceId),
+    ['100', undefined, '100', undefined, undefined, undefined, undefined, undefined]);
+  assert.equal(find(data, 'issue:303').parentId, '100');
+  assert.equal(find(data, 'issue:305').parentId, '200');
+});
+
+test('Jira search exports provide only unambiguous positive parent evidence', () => {
+  const item = (id: number, extra = '') => `<item><key id="${id}">OLD-${id}</key><project id="20" key="OLD"/>${extra}</item>`;
+  const rss = parse('search.xml', `<rss><channel>${item(10)}${item(20)}
+    ${item(30, '<parent id="10">OLD-10</parent>')}${item(31, '<parent/>')}
+    ${item(32, '<parent id="10">OLD-20</parent>')}${item(33, '<parent id="10">OLD-10</parent><parent id="20"/>')}
+  </channel></rss>`);
+  const csv = parse('search.csv', [
+    'Issue key,Issue id,Summary,Parent id,Parent', 'OLD-10,10,First parent,,', 'OLD-20,20,Second parent,,',
+    'OLD-30,30,Matched parent,10,OLD-10', 'OLD-31,31,Blank parent,,', 'OLD-32,32,Conflicting parent,10,OLD-20',
+    'OLD-33,33,Incomplete row,10',
+  ].join('\n'));
+  for (const data of [rss, csv]) {
+    assert.deepEqual([30, 31, 32, 33].map(id => find(data, `issue:${id}`).metadata.jiraParentSourceId),
+      ['10', undefined, undefined, undefined]);
+    assert.equal(find(data, 'issue:30').metadata.jiraParentSourceKey, 'OLD-10');
+  }
+  const duplicateCsv = parse('duplicate.csv', 'Issue key,Issue id,Parent id,Parent id\nOLD-30,30,10,20');
+  assert.equal(find(duplicateCsv, 'issue:30').metadata.jiraParentSourceId, undefined);
+});
+
 test('administrator XML preserves allowlisted users, issues, typed fields, comments, change groups, attachments and relationships without credentials',()=>{
   const bytes=Buffer.from('synthetic attachment bytes'),xml=`<?xml version="1.0"?><entity-engine-xml version="9.12">
     <ApplicationUser id="10" userKey="user-key-alice" lowerUserName="alice"/>

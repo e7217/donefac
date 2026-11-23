@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
-import type { DecisionFollowUpPage, DocPage, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { DecisionFollowUpPage, DocPage, DocumentTreeMovePreview, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const reportPath = '/api/decision-follow-ups';
 const workspacePath = '/api/workspace';
@@ -41,7 +41,7 @@ async function fixture(request: APIRequestContext) {
       requestId: randomUUID(), expectedDocumentVersion: document.version, issueId: issue.id,
       sourceSelection: { from: 1, to: excerpt.length + 1, text: excerpt },
     } }), 201);
-    return { actor, peer, issue, project, prefix, close,
+    return { actor, peer, issue, home, project, document, excerpt, prefix, close,
       route: (q = prefix) => `#/${home.id}/reports/decision-follow-ups?${new URLSearchParams({ q, scope: 'team', decisionProject: project.id })}`,
     };
   } catch (error) {
@@ -137,6 +137,72 @@ test('결정 보고서 조건을 바꾸는 동안 늦게 도착한 업무 조회
     await expect(report.getByText('조건에 맞는 결정 후속 업무가 없습니다.', { exact: true })).toBeVisible();
   } finally {
     release.resolve();
+    await setup.close();
+  }
+});
+
+test('결정 후속 업무에서 다른 프로젝트로 이동한 현재 문서를 열고 고정 근거와 보고서 조건을 보존한다', async ({ page, context, request }) => {
+  test.setTimeout(75_000);
+  const setup = await fixture(request);
+  try {
+    const { report } = await openReport(page, setup);
+    const oldPath = `#/${setup.home.id}/documents/${setup.document.id}`;
+    const source = report.getByRole('link', { name: `현재 문서 열기 ${setup.document.title}`, exact: true });
+    await expect(source).toHaveAttribute('href', oldPath);
+    const newTab = context.waitForEvent('page');
+    await source.click({ modifiers: ['ControlOrMeta'] });
+    const reader = await newTab;
+    try {
+      await expect(reader).toHaveURL(url => url.hash === oldPath);
+      await expect(reader.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(setup.document.title, { timeout: 20_000 });
+      await expect(page).toHaveURL(url => url.hash === setup.route());
+    } finally {
+      await reader.close();
+    }
+
+    const headers = { 'X-Actor-Id': setup.peer.id };
+    const path = `/api/documents/${setup.document.id}`;
+    const revisedText = '이동 후 현재 회의록 본문';
+    const revised = await json<DocPage>(await request.patch(path, { headers, data: {
+      expectedVersion: setup.document.version, title: `${setup.prefix} 수정한 현재 문서`,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: revisedText }] }] },
+    } }));
+    const target = { projectId: setup.project.id, parentId: null };
+    const { token } = await json<DocumentTreeMovePreview>(await request.post(`${path}/move-preview`, { headers, data: target }));
+    await json<DocumentTreeMovePreview>(await request.post(`${path}/move`, { headers, data: { ...target, token } }));
+
+    // The report still links to the previous location until the action refreshes the workspace.
+    await expect(source).toHaveAttribute('href', oldPath);
+    await source.press('Enter');
+    const currentPath = `#/${setup.project.id}/documents/${setup.document.id}`;
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(page).toHaveURL(url => url.hash === currentPath);
+    await expect(title).toHaveValue(revised.title);
+    await expect(page.locator('.docs-prose')).toContainText(revisedText);
+    await expect(page.locator('.docs-prose')).not.toContainText(setup.excerpt);
+
+    const draft = `${revised.title} 작성 중`;
+    await title.fill(draft);
+    const confirmation = page.waitForEvent('dialog').then(async dialog => {
+      const message = dialog.message();
+      await dialog.dismiss();
+      return message;
+    });
+    await page.evaluate(() => history.back());
+    expect(await confirmation).toContain('저장하지 않은 편집');
+    await expect(page).toHaveURL(url => url.hash === currentPath);
+    await expect(title).toHaveValue(draft);
+
+    const returned = nextReport(page, setup.project.id, setup.prefix);
+    page.once('dialog', dialog => dialog.accept());
+    await page.evaluate(() => history.back());
+    expect((await json<DecisionFollowUpPage>(await returned)).items[0]?.document).toMatchObject({ id: setup.document.id, projectId: setup.project.id, title: revised.title });
+    await expect(page).toHaveURL(url => url.hash === setup.route());
+    await expect(report.getByRole('link', { name: `현재 문서 열기 ${revised.title}`, exact: true })).toHaveAttribute('href', currentPath);
+    await report.getByRole('button', { name: `${setup.issue.key} 결정 근거 열기`, exact: true }).click();
+    await expect(report.locator('[data-document-excerpt-start]')).toHaveText(setup.excerpt);
+    await expect(report.getByText(revisedText, { exact: true })).toHaveCount(0);
+  } finally {
     await setup.close();
   }
 });

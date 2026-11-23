@@ -178,6 +178,73 @@ test('Jira HTTP migration projects only an explicit mapped reporter and updates 
   assert.deepEqual(Array.from({ length: 7 }, (_, index) => issue(afterRestore, index + 1).reporterId), expected);
 });
 
+test('Jira parent refresh restores format 99 safely across packages and uses the accepted parent after format 100 restore', async t => {
+  const first = await fixture(), target = await fixture();
+  t.after(() => Promise.all([first.close(), target.close()]));
+  const instance = 'synthetic-jira-hierarchy-restore';
+  type Row = [id: number, parent: number | null | undefined];
+  const upload = (workspace: MigrationFixture, name: string, day: string, rows: Row[]) => workspace.upload(Buffer.from(JSON.stringify({
+    issues: rows.map(([id, parent]) => ({ id: String(id), key: `OLD-${id}`, fields: {
+      project: { id: '42', key: 'OLD', name: '원본 티켓 계층' }, summary: `계층 업무 ${id}`,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      created: '2020-01-01T00:00:00Z', updated: `2020-01-${day}T00:00:00Z`,
+      ...(parent === undefined ? {} : { parent: parent === null ? null : { id: String(parent), key: `OLD-${parent}` } }),
+    } })),
+  })), `${name}.json`, 'jira', instance);
+  const original = await upload(first, 'initial-hierarchy-issues', '02', [[10, null], [20, null], [30, 10], [31, 10], [32, 10], [33, 90]]);
+  const separate = await upload(first, 'initial-hierarchy-other-issue', '02', [[90, null]]);
+  const configured = await first.configuration([original, separate], 'JRTREE');
+  const initialPlan = await first.preview(configured);
+  assert.ok(initialPlan.notices.some(notice => notice.code === 'PARENT_NOT_IMPORTED' && notice.recordId === `${original.id}/issue:33`));
+  const initial = await first.apply(initialPlan);
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const backup = (await first.call<Backup>('/export')).data;
+  const issue = (data: WorkspaceSnapshot, id: number) => data.issues.find(item => item.projectId === projectId && item.title === `계층 업무 ${id}`)!;
+  const originalParent = issue(backup, 10), newParent = issue(backup, 20), separateParent = issue(backup, 90);
+  const child = issue(backup, 30), locallyMoved = issue(backup, 33);
+  assert.equal(child.parentId, originalParent.id);
+  assert.equal(locallyMoved.parentId, null);
+  backup.schemaVersion = 99;
+  for (const receipt of backup.sourceImports) delete receipt.integrity;
+  for (const record of backup.sourceRecords) {
+    if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
+    delete record.record.metadata.jiraParentSourceId;
+    delete record.record.metadata.jiraParentSourceKey;
+  }
+  const restored = await target.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal((await target.call(`/issues/${locallyMoved.id}`, 'PATCH', { expectedVersion: locallyMoved.version, parentId: separateParent.id })).status, 200);
+
+  async function preview(name: string, day: string, rows: Row[]) {
+    const staged = await upload(target, name, day, rows);
+    const { data: options } = await target.call<MigrationOptions>(`/migrations/options?packageId=${staged.id}`);
+    const scope = options.appendTarget;
+    assert.ok(scope);
+    return target.preview({ ...options.defaultConfiguration, appendTo: { projectId, refreshExisting: true,
+      statuses: Object.fromEntries(options.statuses.map(value => [value.id, scope.statuses.find(status => status.label === value.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(value => [value.id, scope.issueTypes.find(type => type.name === value.label)!.id])),
+      fields: {},
+    } });
+  }
+  const followUp = await preview('edited-hierarchy-issues', '03', [[30, 20], [31, undefined], [32, 99], [33, 20]]);
+  assert.equal(followUp.canApply, true, JSON.stringify(followUp.notices));
+  assert.deepEqual(Object.fromEntries(followUp.issueRefresh?.map(row => [row.sourceKey, row.fields.find(field => field.field === 'parentId')?.decision]) ?? []),
+    { 'OLD-30': 'apply', 'OLD-33': 'conflict' });
+  assert.ok(followUp.notices.some(notice => notice.code === 'JIRA_REFRESH_PARENT_UNAVAILABLE'));
+  assert.ok(followUp.notices.some(notice => notice.code === 'JIRA_REFRESH_PARENT_BASELINE_UNAVAILABLE'));
+  assert.equal((await target.apply(followUp)).status, 201);
+  const changed = (await target.call<Backup>('/export')).data;
+  assert.deepEqual([30, 31, 32, 33].map(id => issue(changed, id).parentId), [newParent.id, originalParent.id, originalParent.id, separateParent.id]);
+  assert.equal(changed.schemaVersion, 100);
+  assert.equal((await target.call('/import', 'POST', { data: changed })).status, 200);
+  const next = await preview('later-hierarchy-issues', '04', [[30, null]]);
+  assert.equal(next.issueRefresh?.[0].fields.find(field => field.field === 'parentId')?.decision, 'apply');
+  assert.equal((await target.apply(next)).status, 201);
+  assert.equal(issue((await target.call<WorkspaceSnapshot>('/workspace')).data, 30).parentId, null);
+});
+
 test('incremental Jira imports append only new issues to the bound project and reuse active source parents', async t => {
   const f = await fixture();
   t.after(() => f.close());
@@ -407,7 +474,10 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   ];
   const legacy = structuredClone(backup);
   legacy.schemaVersion = 97;
-  for (const record of legacy.sourceRecords) delete record.jiraIssueSourceFieldHashes;
+  for (const record of legacy.sourceRecords) {
+    delete record.jiraIssueSourceFieldHashes;
+    if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
+  }
   delete legacy.sourceImports.find(receipt => receipt.id === result.data.import.id)!.integrity;
   // Older administrator XML represented the priority as an option ID and stored its name in a separate record.
   const archivedFields = legacy.sourceRecords.find(record => record.id === checkpoint.id)!.record.metadata.fields;
@@ -495,7 +565,10 @@ test('Jira custom field refresh survives a legacy restore and advances independe
   const seeded = old.sourceRecords.find(row => row.record.kind === 'issue' && row.targetType === 'issue');
   assert.equal(Object.keys(seeded?.jiraCustomFieldHashes ?? {}).length, 5);
   old.schemaVersion = 42;
-  for (const row of old.sourceRecords) delete row.jiraCustomFieldHashes;
+  for (const row of old.sourceRecords) {
+    delete row.jiraCustomFieldHashes;
+    if (row.jiraIssueFieldHashes) delete row.jiraIssueFieldHashes.parentId;
+  }
   for (const receipt of old.sourceImports) delete receipt.integrity;
   assert.equal((await target.call('/import', 'POST', { data: old })).status, 200);
 
@@ -1111,7 +1184,7 @@ test('explicit repository routes match imported Jira keys only for their selecte
   assert.deepEqual(newest.data.runs, []);
   assert.deepEqual(await readIssue(targetB.id), targetB);
 
-  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; automationRuns?: AutomationRun[] }>('/export');
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; automationRuns?: AutomationRun[]; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[] }>('/export');
   assert.equal(backup.status, 200);
   assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
@@ -1119,6 +1192,8 @@ test('explicit repository routes match imported Jira keys only for their selecte
   const legacy = { ...structuredClone(backup.data), issueChangeHistory: undefined };
   legacy.schemaVersion = 34;
   delete legacy.automationRuns;
+  for (const record of legacy.sourceRecords) if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
+  for (const receipt of legacy.sourceImports) delete receipt.integrity;
   assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
   assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data.jiraRoutes, otherRoute);
@@ -1129,9 +1204,12 @@ test('explicit repository routes match imported Jira keys only for their selecte
   const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
   assert.deepEqual(restored, backup.data.gitlabLinks);
   for (const link of legacy.gitlabLinks) delete link.originalJiraKey;
-  assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
-  assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks, legacy.gitlabLinks);
-  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
+  const legacyWorkspace = await fixture();
+  t.after(() => legacyWorkspace.close());
+  const restoredLegacy = await legacyWorkspace.call('/import', 'POST', { data: legacy });
+  assert.equal(restoredLegacy.status, 200, JSON.stringify(restoredLegacy.data));
+  assert.deepEqual((await legacyWorkspace.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks, legacy.gitlabLinks);
+  assert.deepEqual((await legacyWorkspace.call<AutomationRun[]>('/automation-runs')).data, []);
 
   assert.equal((await f.call('/import', 'POST', { data: baseline.data })).status, 200);
   const reset = (await f.call<GitlabSettings>(gitlabPath)).data;
@@ -1554,7 +1632,7 @@ test('Confluence parent refresh proves the original placement after format 98 re
   const [projectId] = initial.data.import.projectIds;
   type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
   const backup = (await origin.call<Backup>('/export')).data;
-  assert.equal(backup.schemaVersion, 99);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const initialDocuments = backup.documents.filter(document => document.projectId === projectId);
   const originalParent = initialDocuments.find(document => document.title === '처음 상위')!;
   const destination = initialDocuments.find(document => document.title === '새 상위')!;
@@ -3517,6 +3595,7 @@ test('retained source verification distinguishes archival loss from deleted live
     delete original.excluded;
     delete original.confluencePageFieldHashes;
     delete original.confluencePageBodySourceHash;
+    if (original.jiraIssueFieldHashes) delete original.jiraIssueFieldHashes.parentId;
   }
   const loadedOld = await legacy.call('/import', 'POST', { data: oldBackup });
   assert.equal(loadedOld.status, 200, JSON.stringify(loadedOld.data));

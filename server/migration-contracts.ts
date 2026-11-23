@@ -7,6 +7,7 @@ export interface MigrationJiraRefreshCandidate {
   previous: { archive: SourceRecordArchive; stagingId: string; configuration: MigrationConfiguration;
     priorityOption?: Pick<LegacyRecord, 'sourceId' | 'title'> };
   previousCustom?: MigrationJiraRefreshCandidate['previous'];
+  initialParentId?: string | null;
 }
 export interface MigrationJiraIssueUpdate {
   issueId: string;
@@ -53,6 +54,8 @@ export interface MigrationAppendContext {
   cyclePlanningToken?: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
   refreshIssues?: MigrationJiraRefreshCandidate[];
+  hierarchyIssues?: Pick<Issue, 'id' | 'projectId' | 'parentId' | 'key' | 'title' | 'version'>[];
+  hierarchyIssueAliases?: { alias: string; issueId: string }[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
   knownHistory?: { kind: 'comment' | 'worklog'; sourceId: string; issueId: string }[];
   attachmentIssues?: Pick<Issue, 'id' | 'projectId'>[];
