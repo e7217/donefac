@@ -372,6 +372,71 @@ async function verifyPilotSourceMigration(url, migration) {
   };
 }
 
+async function applyPilotCrossProjectJiraRelation(url, actorId, sourceIssue) {
+  const headers = { 'X-Actor-Id': actorId };
+  const sourceRow = (id, key, project, summary, issuelinks = []) => ({ id, key, fields: {
+    project, summary, created: '2020-01-01T00:00:00Z', updated: '2020-01-03T00:00:00Z',
+    status: { id: '1', name: 'Open' }, issuetype: { id: '5', name: 'Task' }, issuelinks,
+  } });
+  async function stageAndReadOptions(filename, issue) {
+    const query = new URLSearchParams({ filename, product: 'jira', instanceKey: 'pilot-jira' });
+    const { id } = await (await call(url, `/legacy-import/packages?${query}`, { method: 'POST', status: 201,
+      headers: { ...headers, 'Content-Type': 'application/octet-stream' }, body: Buffer.from(JSON.stringify({ issues: [issue] })),
+    })).json();
+    return (await call(url, `/migrations/options?${new URLSearchParams({ packageId: id })}`, { headers })).json();
+  }
+  const previewFor = async configuration => (await call(url, '/migrations/preview', { method: 'POST', status: 201,
+    headers, body: { configuration }, })).json();
+  const apply = async preview => (await (await call(url, `/migrations/previews/${preview.id}/apply`, {
+    method: 'POST', status: 201, headers,
+    body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements },
+  })).json()).import;
+
+  const peerTitle = '파일럿 다른 Jira 프로젝트 업무';
+  const peer = await stageAndReadOptions('pilot-jira-peer.json', sourceRow('201', 'PEER-1',
+    { id: '21', key: 'PEER', name: '파일럿 다른 원본 프로젝트' }, peerTitle));
+  const peerConfig = peer.defaultConfiguration;
+  peerConfig.projects = peerConfig.projects.map(project => ({ ...project, key: 'PILOTPEER', name: '파일럿 다른 Jira 프로젝트' }));
+  const peerReceipt = await apply(await previewFor(peerConfig));
+  const workspace = await (await call(url, '/workspace', { headers })).json();
+  const targetIssue = workspace.issues.find(issue => issue.projectId === peerReceipt.projectIds[0] && issue.title === peerTitle);
+  assert.ok(targetIssue);
+  assert.notEqual(sourceIssue.projectId, targetIssue.projectId);
+
+  const delta = await stageAndReadOptions('pilot-jira-cross-relation.json', sourceRow('100', 'OLD-1',
+    { id: '20', key: 'OLD', name: '파일럿 원본 프로젝트' }, '파일럿 원본 업무', [{ id: '610', outwardIssue: { id: '201' },
+      type: { id: '10000', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' } }]));
+  const { appendTarget } = delta;
+  assert.equal(appendTarget?.projectId, sourceIssue.projectId);
+  const preview = await previewFor({ ...delta.defaultConfiguration, appendTo: { projectId: sourceIssue.projectId,
+    statuses: {}, issueTypes: {}, fields: {}, refreshRelations: true } });
+  assert.ok(preview.canApply, JSON.stringify(preview.notices));
+  assert.equal(preview.counts.issues, 0);
+  assert.equal(preview.counts.newJiraRelations, 1);
+  const [row] = preview.jiraRelationRefresh;
+  assert.deepEqual([row.sourceKey, row.targetKey, row.sourceProjectName, row.targetProjectName],
+    [sourceIssue.key, targetIssue.key, '파일럿 합성 이관', '파일럿 다른 Jira 프로젝트']);
+  const receipt = await apply(preview);
+  assert.deepEqual(new Set(receipt.projectIds), new Set([sourceIssue.projectId, targetIssue.projectId]));
+  return { receipt, sourceIssueId: sourceIssue.id, targetIssueId: targetIssue.id };
+}
+
+async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId, targetIssueId }) {
+  const [source, target, audit] = await Promise.all([
+    call(url, `/issues/${sourceIssueId}/relations`),
+    call(url, `/issues/${targetIssueId}/relations`),
+    call(url, `/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`),
+  ].map(response => response.then(item => item.json())));
+  assert.equal(source.length, 1);
+  assert.deepEqual(source, target);
+  const [relation] = source;
+  assert.deepEqual([relation.sourceIssueId, relation.targetIssueId, relation.type], [sourceIssueId, targetIssueId, 'Blocks']);
+  assert.equal(audit.integrity.status, 'verified');
+  assert.equal(audit.targetContent.issueRelations.count, 1);
+  assert.match(audit.targetContent.issueRelations.sha256, /^[a-f0-9]{64}$/);
+  return { relation, evidence: audit.targetContent.issueRelations };
+}
+
 async function browser(url, teamFixture, accessFile) {
   interruption.signal.throwIfAborted();
   const playwright = fileURLToPath(new URL('../node_modules/@playwright/test/cli.js', import.meta.url));
@@ -740,6 +805,8 @@ async function runStandardPilot() {
   await call(pilot.url,`/attachments/${archivedHead.currentVersionId}/content`,{status:404});
   const migration = await applyPilotSourceMigration(pilot.url, assigneeId, workspace.users[1].id);
   const sourceAudit = await verifyPilotSourceMigration(pilot.url, migration);
+  const jiraRelationMigration = await applyPilotCrossProjectJiraRelation(pilot.url, assigneeId, sourceAudit.issue);
+  const jiraRelationAudit = await verifyPilotCrossProjectJiraRelation(pilot.url, jiraRelationMigration);
   const key = await (await call(pilot.url,'/api-keys',{
     method:'POST',status:201,body:{name:'파일럿 복원 키',access:'read',projectIds:[projectId],expiresAt:null},
   })).json();
@@ -919,6 +986,7 @@ async function runStandardPilot() {
   }
   const restoredAudit = await verifyPilotSourceMigration(copy.url, migration);
   assert.deepEqual(restoredAudit, sourceAudit, 'Migrated items, source rows, worklogs, links and file audit must agree across physical restore.');
+  assert.deepEqual(await verifyPilotCrossProjectJiraRelation(copy.url, jiraRelationMigration), jiraRelationAudit);
   const restoredGitlab = await (await call(copy.url,'/integrations/gitlab')).json();
   assert.deepEqual(restoredGitlab.jiraRoutes,jiraRoutes);
   assert.deepEqual(await (await call(copy.url,gitlabLinksPath)).json(),gitlabActivity);

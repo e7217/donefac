@@ -204,3 +204,119 @@ test('360px에서 기존 Jira 업무의 새 관계를 이관해 일정 연결을
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
 });
+
+test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 검토하고 상대 업무를 연다', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
+  const source = { id: '5100', key: `JA${suffix}`, name: `Jira 설계 ${suffix}` };
+  const target = { id: '5200', key: `JB${suffix}`, name: `Jira 검증 ${suffix}` };
+  const projects = [
+    { jira: source, issueId: '5101', name: `이관한 설계 ${suffix}`, key: `TA${suffix}`, title: `설계 결정 ${suffix}` },
+    { jira: target, issueId: '5201', name: `이관한 검증 ${suffix}`, key: `TB${suffix}`, title: `검증 계획 ${suffix}` },
+  ];
+  const packages: LegacyPackageSummary[] = [];
+  const tickets: Issue[] = [];
+
+  async function upload(fixture: typeof projects[number], withRelation = false) {
+    const filename = `jira-cross-project-${fixture.key}${withRelation ? '-relation' : ''}.json`;
+    const query = new URLSearchParams({ filename, product: 'jira', instanceKey: `cross-relation-${suffix}` });
+    const response = await request.post(`/api/legacy-import/packages?${query}`, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+      data: Buffer.from(JSON.stringify({ issues: [{
+        id: fixture.issueId, key: `${fixture.jira.key}-1`, fields: {
+          project: fixture.jira, summary: fixture.title, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+          created: '2020-01-01T00:00:00Z', updated: withRelation ? '2020-01-03T00:00:00Z' : '2020-01-02T00:00:00Z',
+          issuelinks: withRelation ? [{ id: '5301', type: { id: '5300', name: 'Blocks', inward: 'is blocked by', outward: 'blocks' },
+            outwardIssue: { id: '5201', key: `${target.key}-1` } }] : [],
+        },
+      }] })),
+    });
+    expect(response.status(), await response.text()).toBe(201);
+    const pkg = await response.json() as LegacyPackageSummary;
+    packages.push(pkg);
+    return pkg;
+  }
+
+  try {
+    for (const fixture of projects) {
+      const original = await upload(fixture);
+      const { defaultConfiguration } = await read<MigrationOptions>(request, `/api/migrations/options?packageId=${original.id}`);
+      const configuration = { ...defaultConfiguration, projects: defaultConfiguration.projects.map(project => ({ ...project, name: fixture.name, key: fixture.key })) };
+      const draft = await request.post('/api/migrations/preview', { data: { configuration } });
+      expect(draft.status(), await draft.text()).toBe(201);
+      const reviewed = await draft.json() as MigrationPreview;
+      expect(reviewed.canApply, JSON.stringify(reviewed.notices)).toBe(true);
+      const applied = await request.post(`/api/migrations/previews/${reviewed.id}/apply`, { data: {
+        expectedVersion: reviewed.version, acknowledgements: reviewed.requiredAcknowledgements,
+      } });
+      expect(applied.status(), await applied.text()).toBe(201);
+      const { import: { projectIds: [projectId] } } = await applied.json() as MigrationApplyResult;
+      const created = (await read<WorkspaceSnapshot>(request, '/api/workspace')).issues.filter(issue => issue.projectId === projectId);
+      tickets.push(...created);
+      expect(created).toHaveLength(1);
+    }
+    const [blocker, blocked] = tickets;
+    expect(blocker.projectId).not.toBe(blocked.projectId);
+    const later = await upload(projects[0], true);
+    await page.goto(`/#/${blocker.projectId}/settings`);
+    const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
+    await expect(settings).toBeVisible({ timeout: 30_000 });
+    await settings.getByLabel(`이관 패키지 ${later.filename}`, { exact: true }).check();
+    await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();
+    await settings.getByRole('combobox', { name: '이관 방식', exact: true }).selectOption('append');
+    const option = settings.getByRole('checkbox', { name: '기존 Jira 업무 사이의 새 관계 추가', exact: true });
+    await expect(option).toHaveAccessibleDescription(/별도로 이관한 프로젝트 간 관계도 포함됩니다/);
+    await option.check();
+    const reviewed = await preview(page, settings);
+    expect(reviewed.canApply, JSON.stringify(reviewed.notices)).toBe(true);
+    expect(reviewed.configuration.appendTo).toMatchObject({ projectId: blocker.projectId, refreshRelations: true });
+    expect(reviewed.counts).toMatchObject({ issues: 0, newJiraRelations: 1 });
+    expect(reviewed.jiraRelationRefresh).toMatchObject([{ sourceKey: blocker.key, targetKey: blocked.key,
+      sourceProjectName: projects[0].name, targetProjectName: projects[1].name }]);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const plannedRelations = review.getByRole('region', { name: '추가할 Jira 관계', exact: true });
+    await expect(plannedRelations.getByRole('heading', { name: `${blocker.key} → ${blocked.key}`, exact: true })).toBeVisible();
+    await expect(plannedRelations.getByText(`프로젝트 간 관계 · ${projects[0].name} → ${projects[1].name}`, { exact: true })).toBeVisible();
+    const original = plannedRelations.getByRole('button', { name: 'Jira 관계 원본 보기', exact: true });
+    await original.click();
+    const originalDialog = page.getByRole('dialog', { name: 'Jira 관계 원본 기록', exact: true });
+    await expect(originalDialog.getByRole('region', { name: '원본 객체 상세', exact: true })).toContainText('5301 · 관계');
+    await originalDialog.getByRole('button', { name: 'Jira 관계 원본 닫기', exact: true }).click();
+    for (const code of reviewed.requiredAcknowledgements) await review.getByLabel(`이관 확인 ${code}`, { exact: true }).check();
+    const applying = page.waitForResponse(response => new URL(response.url()).pathname === `/api/migrations/previews/${reviewed.id}/apply` && response.request().method() === 'POST');
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const applied = await applying;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const result = await applied.json() as MigrationApplyResult;
+    expect(result.import.projectIds.toSorted()).toEqual([blocker.projectId, blocked.projectId].toSorted());
+    const receipt = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(receipt.getByRole('heading', { name: '기존 프로젝트의 Jira 이관 결과', exact: true })).toBeVisible();
+    for (const project of projects) {
+      await expect(receipt.getByRole('link', { name: `${project.name} 프로젝트 열기`, exact: true })).toBeVisible();
+    }
+
+    await page.goto(`/#/${blocker.projectId}/issues?issue=${blocker.id}`);
+    const panel = page.getByRole('dialog', { name: blocker.title, exact: true });
+    const relations = panel.getByRole('region', { name: '업무 관계', exact: true });
+    const linked = relations.getByRole('button').filter({ hasText: blocked.key });
+    await expect(linked).toContainText(projects[1].name);
+    await linked.click();
+    const other = page.getByRole('dialog', { name: blocked.title, exact: true });
+    await expect(other.getByRole('region', { name: '업무 관계', exact: true })).toContainText(blocker.key);
+    const after = await read<WorkspaceSnapshot>(request, '/api/workspace');
+    const unchanged = after.issues.filter(issue => tickets.some(ticket => ticket.projectId === issue.projectId));
+    expect(unchanged).toHaveLength(tickets.length);
+    for (const ticket of tickets) expect(unchanged.find(issue => issue.id === ticket.id)).toEqual(ticket);
+  } finally {
+    for (const issue of tickets) {
+      const removed = await request.delete(`/api/issues/${issue.id}`);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+    for (const pkg of packages) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});

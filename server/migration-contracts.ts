@@ -56,7 +56,8 @@ export interface MigrationAppendContext {
   attachmentIssues?: Pick<Issue, 'id' | 'projectId'>[];
   knownAttachments?: { sourceId: string; issueId: string }[];
   relationRefresh?: {
-    issues: Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'version'>[];
+    issues: (Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'version'> & { projectName: string })[];
+    provenAliases: { alias: string; issueId: string }[];
     active: IssueRelation[];
     previouslyApplied: { record: LegacyRecord; relationId: string }[];
     legacy: LegacyRecord[];

@@ -169,14 +169,28 @@ export class MigrationService {
     const linkAliases = [...new Set(links.flat())];
     const linkOrigins = this.sources.jiraIssueOrigins(instanceKey, linkAliases, 'alias');
     const originsByAlias = Map.groupBy(linkOrigins, origin => origin.alias);
+    const crossProjectEndpoints = new Set<string>();
     for (const [sourceAlias, targetAlias] of links) {
       const sourceOrigins = originsByAlias.get(sourceAlias) ?? [];
       const targetOrigins = originsByAlias.get(targetAlias) ?? [];
-      if (sourceOrigins.length !== 1 || targetOrigins.length !== 1 || sourceOrigins[0].issueId === targetOrigins[0].issueId ||
-          sourceOrigins[0].sourceProjectId !== targetOrigins[0].sourceProjectId) continue;
-      projects.add(sourceOrigins[0].sourceProjectId);
+      if (sourceOrigins.length !== 1 || targetOrigins.length !== 1) continue;
+      const [source] = sourceOrigins;
+      const [target] = targetOrigins;
+      if (source.issueId === target.issueId) continue;
+      if (source.sourceProjectId === target.sourceProjectId) projects.add(source.sourceProjectId);
+      else if (source.projectId !== target.projectId) {
+        crossProjectEndpoints.add(source.sourceProjectId);
+        crossProjectEndpoints.add(target.sourceProjectId);
+      }
     }
-    return projects.size === 1 ? [...projects][0] : undefined;
+    if (projects.size === 1) return [...projects][0];
+    if (projects.size > 1 || !crossProjectEndpoints.size) return;
+    // A sparse cross-project export has no owning issue row. Only an explicit
+    // single project declaration can identify the destination without guessing.
+    const declared = new Set(packages.flatMap(({ dataset }) => dataset.records.filter(row => row.kind === 'project').map(row => row.sourceId)));
+    if (declared.size !== 1) return;
+    const [sourceProjectId] = declared;
+    if (crossProjectEndpoints.has(sourceProjectId)) return sourceProjectId;
   }
   private appendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false): MigrationAppendContext | undefined {
     const mapping = configuration.appendTo;
@@ -213,10 +227,9 @@ export class MigrationService {
       planningItems, planningToken, cyclePlanningItems, cyclePlanningToken,
       ...(refreshIssues ? { refreshIssues } : {}), ...(relationRefresh ? { relationRefresh } : {}), ...history, ...attachments };
   }
-  private jiraChildIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
-    { project, instanceKey, sourceProjectId, originalSourceProjectId }: AppendDestination, select: (row: LegacyRecord) => string[] | null) {
+  private jiraChildIssueCandidates(packages: MigrationPackage[], configuration: MigrationConfiguration, live: ReadonlyMap<string, string>,
+    select: (row: LegacyRecord) => string[] | null) {
     const excluded = new Set(configuration.excludedRecords);
-    const live = new Map(knownIssues.filter(issue => issue.projectId === project.id).map(issue => [issue.alias, issue.issueId]));
     const candidates = new Set<string>();
     const addCandidate = (alias: string) => { const issueId = live.get(alias); if (issueId) candidates.add(issueId); };
     for (const { summary, dataset } of packages) {
@@ -231,14 +244,20 @@ export class MigrationService {
         if (issueAliases.some(alias => aliases.has(alias))) issueAliases.forEach(addCandidate);
       }
     }
+    return [...candidates];
+  }
+  private jiraChildIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
+    { project, instanceKey, sourceProjectId, originalSourceProjectId }: AppendDestination, select: (row: LegacyRecord) => string[] | null) {
+    const live = new Map(knownIssues.filter(issue => issue.projectId === project.id).map(issue => [issue.alias, issue.issueId]));
+    const candidates = this.jiraChildIssueCandidates(packages, configuration, live, select);
     const sourceProjects = new Set([sourceProjectId, originalSourceProjectId]);
-    const origins = this.sources.jiraIssueOrigins(instanceKey, [...candidates], 'issue').filter(origin =>
+    const origins = this.sources.jiraIssueOrigins(instanceKey, candidates, 'issue').filter(origin =>
       origin.projectId === project.id && sourceProjects.has(origin.sourceProjectId));
     const owners = JSON.stringify([...new Set(origins.map(origin => origin.issueId))]);
     const issues = this.store.db.prepare(`SELECT id, project_id AS projectId, json_extract(json,'$.key') AS key,
       json_extract(json,'$.title') AS title, json_extract(json,'$.version') AS version
       FROM issues WHERE project_id=? AND id IN (SELECT value FROM json_each(?)) ORDER BY id`)
-      .all(project.id, owners) as NonNullable<MigrationAppendContext['relationRefresh']>['issues'];
+      .all(project.id, owners) as Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'version'>[];
     return { origins, issues };
   }
   private jiraHistoryContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
@@ -272,23 +291,46 @@ export class MigrationService {
   private jiraRelationContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
     destination: AppendDestination, digest: ReturnType<typeof createHash>): NonNullable<MigrationAppendContext['relationRefresh']> {
     const sourceIds = new Set<string>();
-    const { origins, issues } = this.jiraChildIssues(packages, configuration, knownIssues, destination, row => {
+    const live = new Map(knownIssues.filter(issue => issue.projectId !== null).map(issue => [issue.alias, issue.issueId]));
+    const currentProjects = new Map(knownIssues.map(issue => [issue.issueId, issue.projectId]));
+    const candidates = this.jiraChildIssueCandidates(packages, configuration, live, row => {
       const source = jiraIssueRelationSource(row);
       if (!source) return null;
       if (source.stableSourceId) sourceIds.add(source.stableSourceId);
       return [source.sourceAlias, source.targetAlias];
     });
-    const empty = { issues, active: [], previouslyApplied: [], legacy: [] };
-    if (!issues.length) return empty;
+    const sourceProjects = new Set([destination.sourceProjectId, destination.originalSourceProjectId]);
+    const origins = this.sources.jiraIssueOrigins(destination.instanceKey, candidates, 'issue');
+    const originCounts = Map.groupBy(origins, origin => origin.alias);
+    const projectsByIssue = new Map<string, Set<string>>();
+    for (const origin of origins) {
+      const originals = projectsByIssue.get(origin.issueId) ?? new Set<string>();
+      originals.add(origin.sourceProjectId);
+      projectsByIssue.set(origin.issueId, originals);
+    }
+    // Each endpoint needs its own durable issue archive and original project
+    // mapping, which must still agree with the issue's current live project.
+    const proven = origins.filter(origin => originCounts.get(origin.alias)?.length === 1 &&
+      projectsByIssue.get(origin.issueId)?.size === 1 && currentProjects.get(origin.issueId) === origin.projectId &&
+      sourceProjects.has(origin.sourceProjectId) === (origin.projectId === destination.project.id));
+    const provenAliases = proven.map(({ alias, issueId }) => ({ alias, issueId }));
+    const issues = this.store.db.prepare(`SELECT issue.id, issue.project_id AS projectId, json_extract(issue.json,'$.key') AS key,
+      json_extract(issue.json,'$.title') AS title, json_extract(issue.json,'$.version') AS version,
+      json_extract(project.json,'$.name') AS projectName
+      FROM issues AS issue JOIN projects AS project ON project.id=issue.project_id
+      WHERE issue.id IN (SELECT value FROM json_each(?)) ORDER BY issue.id`)
+      .all(JSON.stringify([...new Set(proven.map(origin => origin.issueId))])) as NonNullable<MigrationAppendContext['relationRefresh']>['issues'];
+    if (!issues.length) return { issues, provenAliases, active: [], previouslyApplied: [], legacy: [] };
     const issueIds = JSON.stringify(issues.map(issue => issue.id));
     const rows = this.store.db.prepare(`WITH selected(id) AS (SELECT value FROM json_each(?))
       SELECT relation.json FROM issue_relations AS relation
       WHERE relation.source_issue_id IN (SELECT id FROM selected) AND relation.target_issue_id IN (SELECT id FROM selected)
       ORDER BY relation.id`).all(issueIds) as { json: string }[];
     const active = rows.map(row => JSON.parse(row.json) as IssueRelation);
-    const { previouslyApplied, legacy } = this.sources.jiraKnownRelations(destination.instanceKey, [...sourceIds], origins.map(origin => origin.alias));
-    digest.update('\njira-relations\n').update(JSON.stringify([origins, issues.map(({ id, key, version }) => [id, key, version]), active, previouslyApplied, legacy]));
-    return { issues, active, previouslyApplied, legacy };
+    const { previouslyApplied, legacy } = this.sources.jiraKnownRelations(destination.instanceKey, [...sourceIds], proven.map(origin => origin.alias));
+    digest.update('\njira-relations\n').update(JSON.stringify([proven,
+      issues.map(({ id, projectId, projectName, key, version }) => [id, projectId, projectName, key, version]), active, previouslyApplied, legacy]));
+    return { issues, provenAliases, active, previouslyApplied, legacy };
   }
   private jiraRefreshIssues(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'], projectId: string, instanceKey: string, digest: ReturnType<typeof createHash>): MigrationJiraRefreshCandidate[] {
     const refreshCustomFields = configuration.appendTo?.refreshCustomFields === true;

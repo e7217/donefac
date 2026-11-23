@@ -207,7 +207,7 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const packages = list(value.packages, '원본 패키지', 20).map(raw => { const item = object(raw, '원본 패키지'); let filename: string; try { filename = safeFilename(item.filename); } catch { return fail(400, '원본 패키지 파일명을 확인해 주세요.'); } return { stagingId: string(item.stagingId, '분석 패키지 ID', 200), filename, sha256: sha(item.sha256), source: legacySource(item.source) }; });
   if (!packages.length || new Set(packages.map(value => value.stagingId)).size !== packages.length || new Set(packages.map(value => stable([value.source.product, value.source.instanceKey, value.sha256]))).size !== packages.length) fail(400, '원본 패키지 출처가 중복되거나 비었습니다.');
   const config = configuration(value.configuration, users); if (config.packageIds.length !== packages.length || packages.some(value => !config.packageIds.includes(value.stagingId))) fail(400, '이관 설정과 원본 패키지 목록이 다릅니다.');
-  if (config.appendTo && (projectIds.length !== 1 || projectIds[0] !== config.appendTo.projectId ||
+  if (config.appendTo && (projectIds[0] !== config.appendTo.projectId || (projectIds.length !== 1 && !config.appendTo.refreshRelations) ||
       packages.some(pkg => pkg.source.product !== 'jira' || pkg.source.instanceKey !== packages[0].source.instanceKey))) {
     fail(400, '추가 이관 영수증의 대상 프로젝트와 Jira 원본 인스턴스를 확인해 주세요.');
   }
@@ -500,6 +500,9 @@ export class SourcePreservationService {
       const targetId = nullable(value.targetId, '대상 ID', 200), ownerId = nullable(value.ownerId, '소유자 ID', 200), targetProjectId = nullable(value.targetProjectId, '대상 프로젝트', 200);
       if ((targetType === null) !== (targetId === null) || (ownerType === null) !== (ownerId === null)) fail(400, '원본 대상·소유자 종류와 ID는 함께 있어야 합니다.');
       if (targetProjectId && !owner.projectIds.includes(targetProjectId)) fail(400, '원본 대상 프로젝트가 이관 영수증에 없습니다.');
+      if (targetProjectId && owner.configuration.appendTo && targetProjectId !== owner.configuration.appendTo.projectId) {
+        fail(400, '원본 객체의 대상이 선택한 Jira 추가 이관 프로젝트와 다릅니다.');
+      }
       const expected = ({ project: 'project', issue: 'issue', page: 'document', comment: 'comment', revision: 'revision', attachment: 'attachment' } as Record<string, string>)[record.kind]; if (targetType !== null && targetType !== expected) fail(400, '원본 객체 종류와 적용 대상 종류가 다릅니다.');
       if (value.excluded !== undefined && (value.excluded !== true || targetType !== null)) fail(400, '제외된 원본은 적용 대상에 연결할 수 없습니다.');
       const jiraIssueFieldHashes = Object.hasOwn(value, 'jiraIssueFieldHashes') ? parseFieldHashes(value.jiraIssueFieldHashes, jiraIssueFields, 'Jira 업무 필드 기준') : undefined;
@@ -605,8 +608,24 @@ export class SourcePreservationService {
   private validateJiraRelations(records: SourceRecordArchive[], receipts: Map<string, SourceImport>, relations: Map<string, IssueRelation>,
     issues: Map<string, Issue>, bindings: Binding[], applying: boolean): void {
     const marked = records.filter(record => record.jiraRelationId);
-    if (!marked.length) return;
+    const appendProjectScopes = new Map<string, { anchor: string; evidenced: Set<string> }>();
+    for (const receipt of receipts.values()) {
+      const anchor = receipt.configuration.appendTo?.projectId;
+      if (anchor && receipt.projectIds.length > 1) appendProjectScopes.set(receipt.id, { anchor, evidenced: new Set([anchor]) });
+    }
+    if (!marked.length && !appendProjectScopes.size) return;
     const key = (instance: string, alias: string) => JSON.stringify([instance, alias]);
+    const archivedIssueProjects = new Map<string, Set<string>>();
+    if (!applying && appendProjectScopes.size) {
+      for (const { source, record, targetType, targetId, targetProjectId, excluded } of records) {
+        if (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' || !targetId || !targetProjectId ||
+            excluded || isRestrictedJiraHistoryOwner(record)) continue;
+        const identity = key(source.instanceKey, targetId);
+        const projects = archivedIssueProjects.get(identity) ?? new Set<string>();
+        projects.add(targetProjectId);
+        archivedIssueProjects.set(identity, projects);
+      }
+    }
     const needed = new Set<string>();
     for (const archive of marked) {
       const source = jiraIssueRelationSource(archive.record)!;
@@ -646,12 +665,23 @@ export class SourcePreservationService {
       if (seen.has(relationId)) fail(400, 'Jira 원본과 적용한 업무 관계가 중복됩니다.');
       seen.add(relationId);
       const relation = relations.get(relationId);
-      // Archived evidence must survive an issue's removal even when its relation has been cascaded away.
-      if (!relation) continue;
       const source = jiraIssueRelationSource(archive.record)!;
       const receipt = receipts.get(archive.sourceImportId)!;
       const first = resolved(archive.source.instanceKey, source.sourceAlias);
       const second = resolved(archive.source.instanceKey, source.targetAlias);
+      const scope = appendProjectScopes.get(receipt.id);
+      if (!relation) {
+        // An archived receipt survives ticket removal through the original issue bindings.
+        if (scope && first && second) {
+          const sourceProjects = archivedIssueProjects.get(key(archive.source.instanceKey, first));
+          const targetProjects = archivedIssueProjects.get(key(archive.source.instanceKey, second));
+          if (sourceProjects?.size === 1 && targetProjects?.size === 1 &&
+              (sourceProjects.has(scope.anchor) || targetProjects.has(scope.anchor))) {
+            for (const projectId of [...sourceProjects, ...targetProjects]) scope.evidenced.add(projectId);
+          }
+        }
+        continue;
+      }
       const canonical = first && second && jiraRelationEndpoints(source, first, second);
       const original = source.sourceAlias === source.storedSourceAlias ? [first, second] : [second, first];
       // Initial/default import keeps the original row order. Follow-up relations between existing issues use canonical direction.
@@ -662,6 +692,17 @@ export class SourcePreservationService {
       if (relation.origin || relation.type !== source.typeName || !matchesEndpoints ||
           !sourceProject || !targetProject || !receipt.projectIds.includes(sourceProject) || !receipt.projectIds.includes(targetProject)) {
         fail(400, 'Jira 업무 관계의 원본·업무 대상·프로젝트가 일치하지 않습니다.');
+      }
+      if (scope) {
+        if (sourceProject !== scope.anchor && targetProject !== scope.anchor) fail(400, 'Jira 업무 관계에 선택한 이관 프로젝트가 없습니다.');
+        scope.evidenced.add(sourceProject);
+        scope.evidenced.add(targetProject);
+      }
+    }
+    for (const [receiptId, { evidenced }] of appendProjectScopes) {
+      const projectIds = receipts.get(receiptId)!.projectIds;
+      if (evidenced.size !== projectIds.length || projectIds.some(id => !evidenced.has(id))) {
+        fail(400, 'Jira 추가 이관 영수증의 프로젝트가 확인된 업무 관계와 일치하지 않습니다.');
       }
     }
   }

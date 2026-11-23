@@ -63,8 +63,8 @@ async function fixture(t: TestContext) {
     assert.equal(response.status, status, `${method} ${path}: ${JSON.stringify(response.data)}`);
     return response.data;
   }
-  async function uploadBytes(filename: string, bytes: Buffer) {
-    const query = new URLSearchParams({ filename, product: 'jira', instanceKey: INSTANCE });
+  async function uploadBytes(filename: string, bytes: Buffer, instanceKey = INSTANCE) {
+    const query = new URLSearchParams({ filename, product: 'jira', instanceKey });
     const response = await fetch(`${base}/legacy-import/packages?${query}`, {
       method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': ACTOR },
       body: new Uint8Array(bytes),
@@ -73,8 +73,8 @@ async function fixture(t: TestContext) {
     assert.equal(response.status, 201, JSON.stringify(summary));
     return summary;
   }
-  const upload = (name: string, issues: ReturnType<typeof sourceIssue>[]) =>
-    uploadBytes(`${name}.json`, Buffer.from(JSON.stringify({ issues })));
+  const upload = (name: string, issues: ReturnType<typeof sourceIssue>[], instanceKey = INSTANCE) =>
+    uploadBytes(`${name}.json`, Buffer.from(JSON.stringify({ issues })), instanceKey);
   const options = (pkg: LegacyPackageSummary) => call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`);
   const preview = (configuration: MigrationConfiguration) => call<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
   const apply = (plan: MigrationPreview, actor = ACTOR) => request<MigrationApplyResult>(`/migrations/previews/${plan.id}/apply`, 'POST', {
@@ -83,11 +83,11 @@ async function fixture(t: TestContext) {
   const workspace = () => call<WorkspaceSnapshot>('/workspace');
   const backup = () => call<Backup>('/export');
   const relations = (issue: Issue) => call<IssueRelation[]>(`/issues/${issue.id}/relations`);
-  async function importInitial(issues: ReturnType<typeof sourceIssue>[], sharedProjectKey?: string) {
-    const pkg = await upload('initial', issues);
+  async function importInitial(issues: ReturnType<typeof sourceIssue>[], sharedProjectKey?: string, instanceKey = INSTANCE) {
+    const pkg = await upload('initial', issues, instanceKey);
     const { defaultConfiguration } = await options(pkg);
     if (sharedProjectKey) defaultConfiguration.projects = defaultConfiguration.projects.map(project =>
-      ({ ...project, key: sharedProjectKey, name: '합쳐서 이관한 Jira 프로젝트' }));
+      ({ ...project, key: sharedProjectKey, name: `${sharedProjectKey} 이관 프로젝트` }));
     const plan = await preview(defaultConfiguration);
     assert.ok(plan.canApply, JSON.stringify(plan.notices));
     const applied = await apply(plan);
@@ -108,7 +108,7 @@ async function fixture(t: TestContext) {
       },
     };
   }
-  return { dataDir, call, upload, uploadBytes, preview, apply, workspace, backup, relations, importInitial, appendConfiguration };
+  return { dataDir, call, upload, uploadBytes, options, preview, apply, workspace, backup, relations, importInitial, appendConfiguration };
 }
 
 function original(workspace: WorkspaceSnapshot, sourceId: string, project = 'OLD') {
@@ -180,6 +180,171 @@ test('Jira follow-up explicitly imports one mirrored blocking link between exist
     expectedVersion: relation.version, predecessorId: blocker.id, successorId: blocked.id, type: 'FS', lagDays: 0,
   }, 201);
   assert.deepEqual([dependency.predecessorId, dependency.successorId], [blocker.id, blocked.id]);
+});
+
+test('Jira relation-only follow-up links separately migrated projects using exact Jira origin identities', async t => {
+  const f = await fixture(t);
+  await f.importInitial([sourceIssue('100')], 'ALPHA');
+  await f.importInitial([sourceIssue('200', [], 'OTHER')], 'BRAVO');
+  const foreignCollisionTitle = '다른 Jira에서 같은 숫자 ID를 쓰는 업무';
+  await f.importInitial([sourceIssue('200', [], 'OTHER', foreignCollisionTitle), sourceIssue('900', [], 'OTHER')], 'FOREIGN', `${INSTANCE}-foreign`);
+
+  const initial = await f.workspace();
+  const a = original(initial, '100');
+  const b = original(initial, '200', 'OTHER');
+  const foreign = original(initial, '900', 'OTHER');
+  const foreignCollision = initial.issues.find(issue => issue.title === foreignCollisionTitle)!;
+  const aProject = initial.projects.find(project => project.id === a.projectId)!;
+  const bProject = initial.projects.find(project => project.id === b.projectId)!;
+  assert.notEqual(a.projectId, b.projectId);
+  assert.notEqual(b.projectId, foreign.projectId);
+
+  const delta = await f.upload('A-follow-up-with-no-new-tickets', [sourceIssue('100', [
+    link('701', '200'), link('702', '900'), link('703', '200', 'outward', RELATES),
+  ])]);
+  const append = await f.appendConfiguration(delta);
+  assert.equal(append.appendTo!.projectId, a.projectId);
+  append.appendTo!.refreshRelations = true;
+  append.excludedRecords.push(`${delta.id}/relation:703`);
+
+  const stale = await f.preview(append);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  const edited = await f.call<Issue>(`/issues/${b.id}`, 'PATCH', { expectedVersion: b.version, title: 'B에서 편집한 제목' });
+  assert.equal((await f.apply(stale)).status, 409);
+  assert.deepEqual(await f.relations(a), []);
+
+  const beforeApply = await f.workspace();
+  const review = await f.preview(append);
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  assert.equal(review.counts.issues, 0);
+  assert.equal(review.counts.issueRelations, 1);
+  assert.equal(review.counts.newJiraRelations, 1);
+  assert.equal(review.counts.skippedJiraRelations, 1);
+  assert.deepEqual(review.jiraRelationRefresh, [{
+    recordId: `${delta.id}/relation:701`, sourceKey: a.key, targetKey: b.key, type: 'Blocks',
+    sourceProjectName: aProject.name, targetProjectName: bProject.name,
+  }]);
+  assert.ok(review.notices.some(notice => notice.code === 'JIRA_RELATION_SCOPE_UNRESOLVED' && notice.recordId === `${delta.id}/relation:702`));
+  assert.deepEqual(await f.relations(b), []);
+
+  const applied = await f.apply(review);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  assert.deepEqual(new Set(receipt.projectIds), new Set([a.projectId, b.projectId]));
+  const [imported] = await f.relations(a);
+  assert.ok(imported);
+  assert.deepEqual([imported.sourceIssueId, imported.targetIssueId, imported.type, imported.origin], [a.id, b.id, 'Blocks', undefined]);
+  assert.deepEqual(await f.relations(b), [imported]);
+  assert.deepEqual(await f.relations(foreign), []);
+  assert.deepEqual(await f.relations(foreignCollision), []);
+  const workspace = await f.workspace();
+  assert.deepEqual(workspace.issues, beforeApply.issues);
+  assert.deepEqual(workspace.issues.find(issue => issue.id === b.id), edited);
+  assert.deepEqual(workspace.dependencies, beforeApply.dependencies);
+  const backup = await f.backup();
+  const records = backup.sourceRecords.filter(row => row.sourceImportId === receipt.id && row.record.kind === 'relation');
+  assert.deepEqual(records.map(row => [row.record.sourceId, row.jiraRelationId ?? null, row.excluded ?? false]).sort(), [
+    ['701', imported.id, false], ['702', null, false], ['703', null, true],
+  ]);
+  const auditPath = `/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`;
+  const proof = await f.call<SourceReconciliationAudit>(auditPath);
+  assert.equal(proof.targetContent.issueRelations.count, 1);
+  assert.match(proof.targetContent.issueRelations.sha256, /^[a-f0-9]{64}$/);
+
+  const replay = await f.apply(review);
+  assert.equal(replay.status, 200, JSON.stringify(replay.data));
+  assert.equal(replay.data.duplicate, true);
+  assert.equal(replay.data.import.id, receipt.id);
+  const incomplete = structuredClone(backup);
+  incomplete.sourceImports.find(row => row.id === receipt.id)!.projectIds = [a.projectId];
+  await f.call('/import', 'POST', { data: incomplete }, 400);
+  const expanded = structuredClone(backup);
+  expanded.sourceImports.find(row => row.id === receipt.id)!.projectIds.push(foreign.projectId);
+  await f.call('/import', 'POST', { data: expanded }, 400);
+  assert.deepEqual(await f.relations(b), [imported]);
+  await f.call('/import', 'POST', { data: backup });
+  assert.deepEqual(await f.relations(a), [imported]);
+  assert.deepEqual(await f.relations(b), [imported]);
+  const restored = (await f.call<SourceImport[]>('/source-imports')).find(row => row.id === receipt.id)!;
+  assert.ok(restored.version > receipt.version);
+  const restoredAudit = await f.call<SourceReconciliationAudit>(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${restored.version}`);
+  assert.deepEqual(restoredAudit.targetContent.issueRelations, proof.targetContent.issueRelations);
+
+  const repeated = await f.upload('B-follow-up-mirrored-side', [sourceIssue('200', [link('701', '100', 'inward'), link('704', '100', 'inward')], 'OTHER')]);
+  const repeat = await f.appendConfiguration(repeated);
+  assert.equal(repeat.appendTo!.projectId, b.projectId);
+  repeat.appendTo!.refreshRelations = true;
+  const noChanges = await f.preview(repeat);
+  assert.equal(noChanges.canApply, false);
+  assert.equal(noChanges.counts.newJiraRelations, 0);
+  assert.equal(noChanges.counts.skippedJiraRelations, 2);
+  assert.deepEqual(await f.relations(a), [imported]);
+
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    assert.equal(db.prepare('DELETE FROM issue_relations WHERE id=?').run(imported.id).changes, 1);
+  } finally { db.close(); }
+  const afterRemoval = await f.backup();
+  await f.call('/import', 'POST', { data: afterRemoval });
+  assert.deepEqual((await f.backup()).sourceImports.find(row => row.id === receipt.id)?.projectIds, receipt.projectIds);
+  assert.deepEqual(await f.relations(a), []);
+  const archivedRepeat = await f.upload('B-follow-up-after-link-removal', [
+    sourceIssue('200', [link('701', '100', 'inward')], 'OTHER', 'B의 같은 관계를 포함한 후속 원본'),
+  ]);
+  const archivedAppend = await f.appendConfiguration(archivedRepeat);
+  archivedAppend.appendTo!.refreshRelations = true;
+  const retained = await f.preview(archivedAppend);
+  assert.equal(retained.canApply, false);
+  assert.equal(retained.counts.newJiraRelations, 0);
+  assert.equal(retained.counts.skippedJiraRelations, 1);
+});
+
+test('relation-only Jira administrator XML needs a proven project to anchor a cross-project review', async t => {
+  const f = await fixture(t);
+  await f.importInitial([sourceIssue('100')]);
+  await f.importInitial([sourceIssue('200', [], 'OTHER')]);
+  const workspace = await f.workspace();
+  const a = original(workspace, '100');
+  const b = original(workspace, '200', 'OTHER');
+  const native = await f.call<IssueRelation>(`/issues/${b.id}/relations`, 'POST', {
+    otherIssueId: a.id, type: 'related', direction: 'outgoing',
+  }, 201);
+  const sparse = (name: string, project = '') => f.uploadBytes(`${name}.zip`, zip([{ path: 'entities.xml', bytes: Buffer.from(`
+    <entity-engine-xml version="9.12">
+      ${project}
+      <IssueLinkType id="10000" linkname="Blocks" inward="is blocked by" outward="blocks"/>
+      <IssueLinkType id="10001" linkname="Relates" inward="relates to" outward="relates to"/>
+      <IssueLink id="711" linktype="10001" source="100" destination="200"/>
+      <IssueLink id="712" linktype="10000" source="200" destination="100"/>
+    </entity-engine-xml>`),
+  }]));
+
+  const noProject = await sparse('without-anchor');
+  assert.equal((await f.options(noProject)).appendTarget, undefined);
+  const both = await sparse('ambiguous-anchor', '<Project id="10100" pkey="OLD" name="Old"/><Project id="20200" pkey="OTHER" name="Other"/>');
+  assert.equal((await f.options(both)).appendTarget, undefined);
+  const unrelated = await sparse('unrelated-anchor', '<Project id="30300" pkey="WRONG" name="Wrong"/>');
+  assert.equal((await f.options(unrelated)).appendTarget, undefined);
+
+  const anchored = await sparse('project-A-anchor', '<Project id="10100" pkey="OLD" name="Old"/>');
+  const append = await f.appendConfiguration(anchored);
+  assert.equal(append.appendTo!.projectId, a.projectId);
+  append.appendTo!.refreshRelations = true;
+  const review = await f.preview(append);
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  assert.equal(review.counts.issues, 0);
+  assert.equal(review.counts.newJiraRelations, 1);
+  assert.equal(review.counts.skippedJiraRelations, 1);
+  assert.deepEqual(review.jiraRelationRefresh?.map(({ recordId, sourceKey, targetKey, type }) => [recordId, sourceKey, targetKey, type]),
+    [[`${anchored.id}/relation:712`, b.key, a.key, 'Blocks']]);
+  const applied = await f.apply(review);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const relations = await f.relations(a);
+  assert.equal(relations.length, 2);
+  assert.ok(relations.some(relation => relation.id === native.id));
+  const added = relations.find(relation => relation.id !== native.id)!;
+  assert.deepEqual([added.sourceIssueId, added.targetIssueId, added.type], [b.id, a.id, 'Blocks']);
+  assert.deepEqual(await f.relations(b), relations);
 });
 
 test('Jira follow-up skips existing equivalences and foreign endpoints, and a restored receipt prevents old link revival', async t => {

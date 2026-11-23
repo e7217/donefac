@@ -826,10 +826,17 @@ export function createApp(options: {
             [...jiraAttachmentOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
           fail('첨부파일을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
         }
-        if (jiraRelationRefresh.length && (value.preview.configuration.appendTo?.refreshRelations !== true ||
-            jiraRelationRefresh.some(relation => [relation.sourceIssueId, relation.targetIssueId].some(id =>
-              store.get<Issue>('issues', id)?.projectId !== projectId)))) {
-          fail('관계를 추가할 같은 프로젝트의 기존 Jira 업무를 확인해 주세요.', 409);
+        if (jiraRelationRefresh.length) {
+          const relationProjects = new Set(value.sourceImport.projectIds);
+          const outsideReview = jiraRelationRefresh.some(relation => {
+            const source = store.get<Issue>('issues', relation.sourceIssueId);
+            const target = store.get<Issue>('issues', relation.targetIssueId);
+            return !source || !target || !relationProjects.has(source.projectId) || !relationProjects.has(target.projectId) ||
+              (source.projectId !== projectId && target.projectId !== projectId);
+          });
+          if (value.preview.configuration.appendTo?.refreshRelations !== true || outsideReview) {
+            fail('선택한 프로젝트에 연결된 양쪽 Jira 업무의 이관 기록을 확인해 주세요.', 409);
+          }
         }
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);

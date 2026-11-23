@@ -316,7 +316,8 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
-  jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string }[];
+  jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string;
+    sourceProjectName?: string; targetProjectName?: string }[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
   jiraReleaseChoices?: MigrationJiraPlanningChoice[];
   jiraSprintChoices?: MigrationJiraPlanningChoice[];

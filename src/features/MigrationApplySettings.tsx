@@ -395,7 +395,7 @@ function ActorMigration(props: MigrationApplyProps) {
             원본 ID와 파일 내용을 확인해 첨부파일을 추가합니다. 패키지에 파일이 누락된 경우 원본 정보가 보존됩니다.
           </RefreshOption>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshRelations" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무 사이의 새 관계 추가">
-            같은 프로젝트로 이관한 두 업무의 원본 관계를 확인해 추가합니다.
+            같은 Jira 인스턴스에서 이관한 업무의 원본 관계를 검토합니다. 별도로 이관한 프로젝트 간 관계도 포함됩니다.
           </RefreshOption>}
           {appendPagesTo && pageDestination && <RefreshOption value={appendPagesTo} onChange={next => change({ ...configuration, appendPagesTo: next })} label="기존 Confluence 문서 변경분 반영">
             최신 원본의 제목·본문·라벨을 현재 문서와 비교합니다. 팀에서 바꾼 값은 유지하고, 원본 전체 목록을 확인한 경우에만 라벨을 삭제할 수 있습니다.
@@ -694,6 +694,7 @@ function JiraRelationReview({ rows, total, renderOriginal }: { rows: NonNullable
       {rows.map(row => <li className="migration-refresh-entry" key={row.recordId}>
         <h5>{row.sourceKey} → {row.targetKey}</h5>
         <small>{row.type}</small>
+        {row.sourceProjectName && row.targetProjectName && <small>프로젝트 간 관계 · {row.sourceProjectName} → {row.targetProjectName}</small>}
         {renderOriginal(row.recordId)}
       </li>)}
     </ul>

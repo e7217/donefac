@@ -318,7 +318,7 @@ function sameJiraSourceField(field: JiraMigrationIssueField, current: LegacyReco
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
 type Binding={type:'project'|'issue'|'document'|'comment'|'revision'|'attachment';id:string;projectId:string|null};
 type JiraHistoryIssue=Pick<Issue,'id'|'projectId'|'key'|'title'>;
-type JiraChildScope = { durable: Map<string, string>; blocked: Set<string>; sourceErrors: Set<string> };
+type JiraChildScope = { durable: Map<string, string>; resolveId: (alias: string) => string | undefined; blocked: Set<string>; sourceErrors: Set<string> };
 type JiraCustomFieldOption = MigrationOptions['fields'][number];
 type JiraCustomFieldReview = NonNullable<JiraMigrationIssueReview['customFields']>[number];
 interface JiraCustomFieldConversion {
@@ -381,6 +381,7 @@ class Planner{
   private jiraAttachmentOwners = new Map<string, AttachmentOwner>();
   private knownJiraAttachments = new Set<string>();
   private jiraRelationIds = new Map<string, string>();
+  private jiraRelationProjectIds = new Set<string>();
   private confluenceRefreshCheckpoints = new Map<string, { document: DocPage; hashes: ConfluenceMigrationPageFieldHashes }>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
   private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
@@ -2681,7 +2682,11 @@ class Planner{
     const context = append.relationRefresh;
     if (!context) return;
     const issues = new Map(context.issues.map(issue => [issue.id, issue]));
-    const scope = this.jiraChildScope(append);
+    const scope = this.jiraChildScope(append, context.provenAliases);
+    const issueForAlias = (alias: string) => {
+      const id = scope.resolveId(alias);
+      return id && issues.has(id) ? id : undefined;
+    };
     const pair = (source: string, target: string) => JSON.stringify([source, target]);
     const stored = new Set(context.active.filter(relation => relation.origin === undefined)
       .map(relation => JSON.stringify([relation.sourceIssueId, relation.targetIssueId, relation.type])));
@@ -2700,15 +2705,15 @@ class Planner{
       const link = jiraIssueRelationSource(record);
       if (!link) continue;
       if (link.stableSourceId) knownIds.add(link.stableSourceId);
-      const source = this.originalIssue(link.sourceAlias)?.id;
-      const target = this.originalIssue(link.targetAlias)?.id;
+      const source = issueForAlias(link.sourceAlias);
+      const target = issueForAlias(link.targetAlias);
       if (source && target) remember(link, source, target, liveImported.has(relationId));
     }
     for (const record of context.legacy) {
       const link = jiraIssueRelationSource(record);
       if (!link) continue;
-      const source = this.originalIssue(link.storedSourceAlias)?.id;
-      const target = this.originalIssue(link.storedTargetAlias)?.id;
+      const source = issueForAlias(link.storedSourceAlias);
+      const target = issueForAlias(link.storedTargetAlias);
       if (!source || !target || !stored.has(JSON.stringify([source, target, link.typeName]))) continue;
       if (link.stableSourceId) knownIds.add(link.stableSourceId);
       remember(link, link.sourceAlias === link.storedSourceAlias ? source : target,
@@ -2748,9 +2753,10 @@ class Planner{
       if (resolved.some(issue => issue && this.issueById.has(issue.id))) continue;
       const source = this.resolveJiraChildOwner(entry, [link.sourceAlias], issues, scope);
       const target = this.resolveJiraChildOwner(entry, [link.targetAlias], issues, scope);
-      if (!source || !target || source.id === target.id) {
+      if (!source || !target || source.id === target.id ||
+          (source.projectId !== append.project.id && target.projectId !== append.project.id)) {
         skipped++;
-        this.notice('JIRA_RELATION_SCOPE_UNRESOLVED', '같은 원본 프로젝트에 연결된 두 업무를 확인할 수 없어 원본 관계를 보관합니다.', 'warning', entry, true);
+        this.notice('JIRA_RELATION_SCOPE_UNRESOLVED', '선택한 원본 프로젝트와 연결된 양쪽 업무의 이관 기록을 확인할 수 없어 원본 관계를 보관합니다.', 'warning', entry, true);
         continue;
       }
       const [sourceId, targetId] = jiraRelationEndpoints(link, source.id, target.id);
@@ -2775,11 +2781,15 @@ class Planner{
         continue;
       }
       this.addIssueRelation(entry, sourceId, targetId, link.typeName, true);
+      const source = issues.get(sourceId)!;
+      const target = issues.get(targetId)!;
+      this.jiraRelationProjectIds.add(source.projectId);
+      this.jiraRelationProjectIds.add(target.projectId);
       added++;
       if (stable) knownIds.add(stable);
       remember(link, sourceId, targetId, true);
-      if (preview.length < 20) preview.push({ recordId: entry.key, sourceKey: issues.get(sourceId)!.key,
-        targetKey: issues.get(targetId)!.key, type: link.typeName });
+      if (preview.length < 20) preview.push({ recordId: entry.key, sourceKey: source.key, targetKey: target.key, type: link.typeName,
+        ...(source.projectId === target.projectId ? {} : { sourceProjectName: source.projectName, targetProjectName: target.projectName }) });
     }
     if (preview.length) this.result.preview.jiraRelationRefresh = preview;
     if (skipped) this.notice('JIRA_RELATIONS_RETAINED', '이미 처리한 관계와 현재 연결은 유지합니다. 확인이 필요한 링크는 원본 기록에서 검토할 수 있습니다.', 'info');
@@ -2860,10 +2870,10 @@ class Planner{
     });
   }
   private resolveJiraChildOwner<T extends Pick<Issue, 'id' | 'projectId'>>(entry: Entry, aliases: string[] | null,
-    issues: ReadonlyMap<string, T>, { durable, blocked, sourceErrors }: JiraChildScope): T | undefined {
+    issues: ReadonlyMap<string, T>, { durable, resolveId, blocked, sourceErrors }: JiraChildScope): T | undefined {
     if (sourceErrors.has(entry.key) || this.restricted(entry)) return undefined;
     if (!aliases) return undefined;
-    const [ownerId, ...others] = aliases.map(alias => this.originalIssue(alias)?.id);
+    const [ownerId, ...others] = aliases.map(resolveId);
     if (!ownerId || blocked.has(ownerId) || others.some(id => id !== ownerId)) return undefined;
     for (const alias of aliases) {
       const packageRows = (this.referenceIndex.get(JSON.stringify(['issue', 'id', alias])) ?? [])
@@ -2879,8 +2889,11 @@ class Planner{
     }
     return issues.get(ownerId);
   }
-  private jiraChildScope(append: NonNullable<MigrationPlanningInput['append']>): JiraChildScope {
-    const durable = new Map(append.knownIssues.filter(issue => issue.projectId === append.project.id).map(issue => [issue.alias, issue.issueId]));
+  private jiraChildScope(append: NonNullable<MigrationPlanningInput['append']>,
+    provenRelations?: readonly { alias: string; issueId: string }[]): JiraChildScope {
+    const known = provenRelations ?? append.knownIssues.filter(issue => issue.projectId === append.project.id);
+    const durable = new Map(known.map(issue => [issue.alias, issue.issueId]));
+    const resolveId = provenRelations ? (alias: string) => this.boundIssues.get(alias)?.issueId : (alias: string) => this.originalIssue(alias)?.id;
     const blocked = new Set<string>();
     const sourceErrors = new Set(this.input.packages.flatMap(({ summary, dataset }) => dataset.diagnostics
       .filter(diagnostic => diagnostic.severity === 'error' && diagnostic.recordId)
@@ -2890,11 +2903,11 @@ class Planner{
       if (entry.pkg.dataset.source.product !== 'jira' || row.kind !== 'issue' ||
           !(this.excluded.has(entry.key) || sourceErrors.has(entry.key) || isRestrictedJiraHistoryOwner(row) || this.restricted(entry))) continue;
       for (const alias of [row.sourceId, string(row.metadata.key)]) {
-        const issueId = this.originalIssue(alias)?.id;
+        const issueId = resolveId(alias);
         if (issueId) blocked.add(issueId);
       }
     }
-    return { durable, blocked, sourceErrors };
+    return { durable, resolveId, blocked, sourceErrors };
   }
   private createJiraHistory(): void {
     const append = this.input.append;
@@ -3090,7 +3103,11 @@ class Planner{
       }
       else this.notice('APPEND_NO_NEW_PAGES', '이 프로젝트에 추가할 새 Confluence 페이지가 없습니다.', 'error');
     }
-    this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=projects.map(project=>project.id);this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
+    const receiptProjects = [...new Set([...projects.map(project => project.id), ...this.jiraRelationProjectIds])];
+    if (receiptProjects.length > MAX_PROJECTS) {
+      this.notice('MIGRATION_PROJECT_LIMIT', `한 번에 이관 영수증에 기록할 프로젝트는 ${MAX_PROJECTS}개입니다. 패키지를 나누어 주세요.`, 'error');
+    }
+    this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=receiptProjects;this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
   }
 }
 

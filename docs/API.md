@@ -770,11 +770,11 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 ### 기존 Jira 업무 사이의 관계 추가
 
-`appendTo.refreshRelations: true`를 지정하면 선택한 Jira 인스턴스와 원본 프로젝트에서 이관한 기존 티켓 두 건에 새 원본 업무 관계를 추가한다. REST·검색 XML의 방향 표기와 관리자 XML의 양쪽 ID를 해석한다. 관계만 있는 관리자 XML에서도 양쪽 업무의 원래 프로젝트가 하나로 확인되면 검토할 수 있다. [Jira Data Center 관계 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-issuelink/) · [Jira 관계 방향 모델](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/)
+`appendTo.refreshRelations: true`를 지정하면 같은 Jira 인스턴스에서 이관한 기존 티켓 두 건에 새 원본 업무 관계를 추가한다. 두 원본 프로젝트를 서로 다른 Teamspace 프로젝트에 이관한 경우에도 한쪽이 선택한 대상 프로젝트에 속하고 양쪽 원본 매핑이 확인되면 적용할 수 있다. REST·검색 XML의 방향 표기와 관리자 XML의 양쪽 ID를 해석한다. 관계만 있는 관리자 XML은 추가 이관 대상의 원본 프로젝트를 유일하게 확인할 수 있을 때 검토한다. [Jira Data Center 관계 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-issuelink/) · [Jira 관계 방향 모델](https://developer.atlassian.com/cloud/jira/platform/issue-linking-model/)
 
-`counts.newJiraRelations`와 `counts.skippedJiraRelations`는 기존 업무 사이에 추가할 관계와 보관할 원본 관계 건수다. `jiraRelationRefresh`에는 추가할 관계를 최대 20건 표시한다. 각 행은 원본 `recordId`, Teamspace의 `sourceKey`·`targetKey`, 원본 `type`을 담는다. 현재 연결과 동일함을 확인한 관계, 이미 적용한 원본, 양쪽 출처가 불분명하거나 서로 모순된 관계는 건너뛴다. 원본은 이관 기록에서 조회한다.
+`counts.newJiraRelations`와 `counts.skippedJiraRelations`는 기존 업무 사이에 추가할 관계와 보관할 원본 관계 건수다. `jiraRelationRefresh`에는 추가할 관계를 최대 20건 표시한다. 각 행은 원본 `recordId`, Teamspace의 `sourceKey`·`targetKey`, 원본 `type`을 담는다. 서로 다른 Teamspace 프로젝트를 잇는 행에는 `sourceProjectName`과 `targetProjectName`도 포함된다. 현재 연결과 동일함을 확인한 관계, 이미 적용한 원본, 양쪽 출처가 불분명하거나 서로 모순된 관계는 건너뛴다. 원본은 이관 기록에서 조회한다.
 
-적용은 관련 업무·연결·원본의 변경 여부를 확인한다. 두 티켓의 변경 이력, 관계, 영수증과 원본 연결 ID(`jiraRelationId`)를 함께 저장한다. 형식 66 백업은 적용한 원본 관계 ID를 보존한다. 전체 이관 검증의 `targetContent.issueRelations`는 관계만 적용한 영수증의 연결도 집계하고 해시를 계산한다. 차단 관계의 간트 선후행은 티켓에서 방향을 검토한 뒤 별도로 저장한다.
+적용은 관련 업무·연결·원본의 변경 여부를 확인한다. 두 티켓의 변경 이력, 관계, 영수증과 원본 연결 ID(`jiraRelationId`)를 함께 저장한다. 프로젝트 간 관계의 양쪽 대상은 영수증의 `projectIds`에 포함된다. 형식 66 백업은 적용한 원본 관계 ID를 보존한다. 전체 이관 검증의 `targetContent.issueRelations`는 관계만 적용한 영수증의 연결도 집계하고 해시를 계산한다. 차단 관계의 간트 선후행은 티켓에서 방향을 검토한 뒤 별도로 저장한다.
 
 ### 기존 프로젝트에 새 Confluence 문서 추가
 
