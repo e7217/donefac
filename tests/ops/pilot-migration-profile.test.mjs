@@ -118,13 +118,17 @@ test('offline profile reads Jira XML, Jira REST and Confluence ZIP and writes on
   assert.deepEqual((await readdir(f.directory)).sort(), [...before, 'profile.json'].sort());
   const report = JSON.parse(raw);
   assert.equal(report.format, 'teamspace-migration-source-profile');
-  assert.equal(report.version, 1);
+  assert.equal(report.version, 2);
   assert.equal(report.status, 'review');
   assert.deepEqual(report.limits, { packageCount: 20, packageBytes, totalBytes });
   assert.equal(report.totals.bytes, jira.length + jsonArchive.length + confluence.length);
   assert.deepEqual(report.packages.map(item => [item.ordinal, item.product, item.analysis.format, item.sha256]), [
     [1, 'jira', 'jira-backup-xml', hash(jira)], [2, 'jira', 'jira-json', hash(jsonArchive)], [3, 'confluence', 'confluence-xml', hash(confluence)],
   ]);
+  for (const item of report.packages) {
+    assert.match(item.inputSha256, /^[a-f\d]{64}$/u);
+    assert.notEqual(item.inputSha256, item.sha256);
+  }
   const [backup, rest, wiki] = report.packages.map(item => item.analysis);
   assert.equal(backup.counts.issue, 1);
   assert.equal(backup.counts.attachment, 1);
@@ -172,6 +176,7 @@ test('offline profile continues after missing, malformed, oversized and duplicat
   assert.deepEqual(report.totals, { packages: 6, analyzed: 2, review: 0, blocked: 4,
     bytes: good.length * 3 + Buffer.byteLength(`<entity-engine-xml><Issue id="${privateAuthor}">`) });
   assert.equal(report.packages[4].sha256, hash(good));
+  assert.equal(report.packages[4].inputSha256, undefined);
   assert.equal(report.packages[0].sha256, undefined);
   assert.equal(report.packages[2].sha256, undefined);
   assert.equal(report.packages[5].analysis.counts.issue, 1);
@@ -179,7 +184,10 @@ test('offline profile continues after missing, malformed, oversized and duplicat
   await f.manifest([source(names[3])]);
   const clean = await f.run('clean-profile.json');
   assert.equal(clean.code, 0, clean.stdout + clean.stderr);
-  assert.equal(JSON.parse(await readFile(join(f.directory, 'clean-profile.json'), 'utf8')).status, 'analyzed');
+  const cleanReport = JSON.parse(await readFile(join(f.directory, 'clean-profile.json'), 'utf8'));
+  assert.equal(cleanReport.status, 'analyzed');
+  assert.equal(cleanReport.packages[0].sha256, report.packages[5].sha256);
+  assert.notEqual(cleanReport.packages[0].inputSha256, report.packages[5].inputSha256);
 });
 
 test('offline profile bounds the manifest count and skips a file that exceeds the remaining aggregate buffer budget', { timeout: 45_000 }, async t => {

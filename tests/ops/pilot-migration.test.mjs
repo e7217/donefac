@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -145,12 +146,12 @@ async function readReport(root, answer) {
   return { attempt: join(path, '..'), report: JSON.parse(raw) };
 }
 
-test('migration rehearsal stages local exports, applies a reviewed plan, and compares a separate cold restore', { timeout: 120_000 }, async t => {
+test('migration rehearsal stages profiled exports, applies a reviewed plan, and compares a separate cold restore', { timeout: 120_000 }, async t => {
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-e2e-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'other-workspace'), TEAMSPACE_PILOT_ACCESS_FILE: join(scratch, 'absent-key'),
     TEAMSPACE_PILOT_ORIGIN: 'https://rehearsal.example.invalid', TEAMSPACE_JIRA_BASE_URL: 'https://source.example.invalid' };
-  const manifest = join(scratch, 'manifest.json'), root = join(scratch, 'run');
+  const manifest = join(scratch, 'manifest.json'), root = join(scratch, 'run'), profilePath = join(scratch, 'profile.json');
   const packages = fixturePackages();
   for (const item of packages) await writeFile(join(scratch, item.filename), item.bytes);
   const input = { packages: packages.map(item => ({ file: item.filename, product: item.product, instanceKey: `${originalFrom}-${item.product}` })) };
@@ -165,16 +166,34 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(interrupted.code, 1);
   assert.equal(existsSync(root), false);
   await writeFile(manifest, JSON.stringify(input));
-  const stage = await launch(['stage', manifest, root], env).exited;
+  const profiled = await launch(['profile', manifest, profilePath], env).exited;
+  assert.equal(profiled.code, 2, profiled.stdout + profiled.stderr);
+  const profileBytes = await readFile(profilePath);
+  const profile = JSON.parse(profileBytes);
+  assert.equal(profile.version, 2);
+  assert.equal(profile.status, 'review');
+  const expectedProfileProof = { version: 2, status: 'review', checkedAt: profile.checkedAt,
+    sha256: createHash('sha256').update(profileBytes).digest('hex') };
+
+  const movedFile = 'relocated-jira.zip';
+  await rename(join(scratch, input.packages[0].file), join(scratch, movedFile));
+  input.packages[0] = { ...input.packages[0], file: movedFile, instanceKey: ` ${input.packages[0].instanceKey} ` };
+  await writeFile(manifest, JSON.stringify(input));
+  const stageArguments = ['stage', manifest, root, '--profile', profilePath];
+  const stage = await launch(stageArguments, env).exited;
   assert.equal(stage.code, 0, stage.stderr);
   assert.equal((await stat(root)).mode & 0o777, 0o700);
   assert.equal(existsSync(env.TEAMSPACE_DATA_DIR), false);
   const stagePath = join(root, 'stage.json');
   const initial = await readFile(stagePath, 'utf8');
   const staged = JSON.parse(initial);
+  assert.deepEqual(staged.profile, expectedProfileProof);
   assert.deepEqual(staged.packages.map(pkg => pkg.product), ['jira', 'confluence']);
+  assert.deepEqual(staged.packages.map(pkg => [pkg.sha256, pkg.size, pkg.format]),
+    profile.packages.map(pkg => [pkg.sha256, pkg.size, pkg.analysis.format]));
+  assert.equal(staged.packages[0].instanceKey, `${originalFrom}-jira`);
   assert.equal((await stat(stagePath)).mode & 0o777, 0o600);
-  assert.equal((await launch(['stage', manifest, root], env).exited).code, 1);
+  assert.equal((await launch(stageArguments, env).exited).code, 1);
   assert.equal(await readFile(stagePath, 'utf8'), initial);
 
   const mappingSourceRoot = join(scratch, 'mapping-source');
@@ -212,6 +231,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(pending.code, 2, pending.stderr);
   const pendingEvidence = (await readReport(root, pending)).report;
   assert.equal(pendingEvidence.status, 'review');
+  assert.deepEqual(pendingEvidence.profile, expectedProfileProof);
   assert.equal(pendingEvidence.source.evidence.checks.pendingPackages, 2);
   assert.equal(pendingEvidence.restore, null);
 
@@ -315,6 +335,7 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(requiresReview.code, 2, requiresReview.stderr);
   const { attempt, report } = await readReport(root, requiresReview);
   assert.equal(report.status, 'review');
+  assert.deepEqual(report.profile, expectedProfileProof);
   assert.equal(report.source.evidence.checks.pendingPackages, 0);
   assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
   assert.equal(report.source.evidence.receipts.length, 1);
@@ -415,6 +436,123 @@ test('migration rehearsal stages local exports, applies a reviewed plan, and com
   assert.equal(failed.code, 1, failed.stderr);
   const failedEvidence = (await readReport(root, failed)).report;
   assert.equal(failedEvidence.status, 'failed');
+  assert.deepEqual(failedEvidence.profile, expectedProfileProof);
   assert.equal(failedEvidence.source.bundles[0].status, 'mismatch');
   assert.equal(failedEvidence.restore, null);
+});
+
+test('profile-bound stage discards rejected inputs and accepts an exact clean profile', { timeout: 90_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-bound-stage-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'unused-workspace') };
+  const manifest = join(scratch, 'manifest.json');
+  const root = join(scratch, 'run');
+  const profilePath = join(scratch, 'profile.json');
+  const fixtures = fixturePackages();
+  const sources = fixtures.map(item => ({ file: item.filename, product: item.product, instanceKey: `${originalFrom}-${item.product}` }));
+  const writeManifest = values => writeFile(manifest, JSON.stringify({ packages: values }));
+  for (const item of fixtures) await writeFile(join(scratch, item.filename), item.bytes);
+  await writeManifest(sources);
+  const profiled = await launch(['profile', manifest, profilePath], env).exited;
+  assert.equal(profiled.code, 2, profiled.stdout + profiled.stderr);
+
+  async function rejectsStage(report = profilePath, ordinal) {
+    const before = (await readdir(scratch)).sort();
+    const staged = await launch(['stage', manifest, root, '--profile', report], env).exited;
+    assert.equal(staged.code, 1, staged.stdout + staged.stderr);
+    if (ordinal !== undefined) assert.match(staged.stderr, new RegExp(`패키지\\s*${ordinal}(?:\\D|$)`, 'u'));
+    assert.equal(existsSync(root), false);
+    assert.deepEqual((await readdir(scratch)).sort(), before);
+    for (const privateValue of [scratch, ...fixtures.map(item => item.filename), originalFrom, 'different-private-instance', privateTitle, privateBody]) {
+      assert.equal((staged.stdout + staged.stderr).includes(privateValue), false);
+    }
+    return staged.stderr;
+  }
+
+  const secondFile = join(scratch, sources[1].file);
+  const changed = Buffer.from(fixtures[1].bytes);
+  changed[0] ^= 1;
+  await writeFile(secondFile, changed);
+  await rejectsStage(profilePath, 2);
+  await writeFile(secondFile, changed.subarray(1));
+  await rejectsStage(profilePath, 2);
+  await writeFile(secondFile, fixtures[1].bytes);
+
+  await writeManifest(sources.toReversed());
+  await rejectsStage(profilePath, 1);
+  await writeManifest([sources[0], { ...sources[1], product: 'jira' }]);
+  await rejectsStage(profilePath, 2);
+  await writeManifest([sources[0], { ...sources[1], instanceKey: 'different-private-instance' }]);
+  await rejectsStage(profilePath, 2);
+  await writeManifest([sources[0]]);
+  await rejectsStage();
+
+  await writeManifest(sources);
+  const malformedPath = join(scratch, 'malformed-profile.json');
+  await writeFile(malformedPath, `{ invalid json ${privateTitle} }`);
+  await rejectsStage(malformedPath);
+
+  const firstVersionPath = join(scratch, 'prior-profile.json');
+  const report = JSON.parse(await readFile(profilePath, 'utf8'));
+  const { format, checkedAt, status, limits, totals, packages } = report;
+  await writeFile(firstVersionPath, JSON.stringify({ format, version: 1, checkedAt, status, limits, totals,
+    packages: packages.map(({ ordinal, product, size, sha256, status, analysis }) => ({ ordinal, product, size, sha256, status, analysis })) }));
+  assert.match(await rejectsStage(firstVersionPath), /profile을 다시 실행/u);
+
+  const differentAnalysis = join(scratch, 'different-analysis-profile.json');
+  report.packages[1].analysis.fileCount += 1;
+  await writeFile(differentAnalysis, JSON.stringify(report));
+  await rejectsStage(differentAnalysis, 2);
+
+  const blockedPath = join(scratch, 'blocked-profile.json');
+  const emptyJira = 'empty-jira.xml';
+  await writeFile(join(scratch, emptyJira), '<entity-engine-xml/>');
+  await writeManifest([{ file: emptyJira, product: 'jira', instanceKey: originalFrom }]);
+  const blocked = await launch(['profile', manifest, blockedPath], env).exited;
+  assert.equal(blocked.code, 1, blocked.stdout + blocked.stderr);
+  assert.equal(JSON.parse(await readFile(blockedPath, 'utf8')).status, 'blocked');
+  assert.match(await rejectsStage(blockedPath), /blocked/u);
+
+  const cleanPath = join(scratch, 'clean-profile.json');
+  await writeFile(join(scratch, emptyJira), `<entity-engine-xml>
+    <Project id="10" pkey="SRC" name="Jira fixture"/><Status id="1" pname="Open"/><IssueType id="2" pname="Task"/>
+    <Issue id="100" project="10" number="1" summary="${privateTitle}" status="1" issuetype="2" created="${date}" updated="${date}"/>
+  </entity-engine-xml>`);
+  const clean = await launch(['profile', manifest, cleanPath], env).exited;
+  assert.equal(clean.code, 0, clean.stdout + clean.stderr);
+  const renamedJira = join('moved', 'renamed.xml');
+  await mkdir(join(scratch, 'moved'));
+  await rename(join(scratch, emptyJira), join(scratch, renamedJira));
+  await writeManifest([{ file: renamedJira, product: 'jira', instanceKey: originalFrom }]);
+  assert.match(await rejectsStage(cleanPath, 1), /파일 유형과 이름/u);
+
+  const relocatedJira = join('moved', emptyJira);
+  await rename(join(scratch, renamedJira), join(scratch, relocatedJira));
+  await writeManifest([{ file: relocatedJira, product: 'jira', instanceKey: originalFrom }]);
+  const staged = await launch(['stage', manifest, root, '--profile', cleanPath], env).exited;
+  assert.equal(staged.code, 0, staged.stdout + staged.stderr);
+  const accepted = JSON.parse(await readFile(join(root, 'stage.json'), 'utf8'));
+  assert.equal(accepted.profile.status, 'analyzed');
+});
+
+test('stage applies the aggregate input limit before starting the workspace', { timeout: 30_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-stage-cap-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const manifest = join(scratch, 'manifest.json');
+  const root = join(scratch, 'run');
+  const bigFile = 'private-large-input.zip';
+  const tinyFile = 'private-final-input.xml';
+  await writeFile(join(scratch, bigFile), 'A sparse file used to measure the aggregate before archive analysis.');
+  await truncate(join(scratch, bigFile), 64 * 1024 * 1024);
+  await writeFile(join(scratch, tinyFile), '<entity-engine-xml/>');
+  await writeFile(manifest, JSON.stringify({ packages: [
+    ...Array.from({ length: 8 }, (_, index) => ({ file: bigFile, product: 'jira', instanceKey: `private-instance-${index}` })),
+    { file: tinyFile, product: 'jira', instanceKey: 'private-instance-final' },
+  ] }));
+  const before = (await readdir(scratch)).sort();
+  const stage = await launch(['stage', manifest, root], process.env).exited;
+  assert.equal(stage.code, 1, stage.stdout + stage.stderr);
+  assert.match(stage.stderr, /패키지\s*9(?:\D|$)/u);
+  assert.match(stage.stderr, /합계/u);
+  assert.deepEqual((await readdir(scratch)).sort(), before);
 });

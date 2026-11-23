@@ -405,6 +405,8 @@ Confluence 본문의 제목 참조는 원본 인스턴스와 명시한 공간 �
 
 합성 자료로 분석·매핑·적용·복원을 검증한다. 오프라인 리허설에서는 패키지 등록, 브라우저에서 검토한 매핑과 적용, 별도 물리 복원 및 대조를 한 절차로 실행한다. 실제 패키지에서는 Jira 관리자 백업과 별도 첨부 구성, Confluence 6.9.1의 공간 내보내기 범위, 조직별 매크로와 권한, 누락된 자료를 확인한다. [오프라인 이관 리허설](PILOT.md#오프라인-원본-이관-리허설)
 
+사전 분석 보고서를 지정한 리허설 준비는 파일 바이트와 매니페스트의 순서·제품·인스턴스, 저장한 분석 결과를 대조한다. 실행 전과 실제 읽을 때 패키지 한도를 검사한다. 준비가 끝나면 사용한 보고서의 SHA-256을 준비·복원 검증 기록에 남긴다.
+
 근거: [Jira 검색 내보내기](https://confluence.atlassian.com/jirasoftware/working-with-search-results-1528533257.html), [관리자 XML 백업과 첨부 범위](https://confluence.atlassian.com/adminjiraserver/backing-up-data-938847673.html), [Jira Importers JSON](https://confluence.atlassian.com/adminjiraserver100/importing-data-from-json-1442845835.html), [Confluence XML 객체/이력 구조](https://confluence.atlassian.com/confkb/use-space-site-xml-export-entities-xml-to-find-confluence-objects-1283686755.html), [Confluence 저장 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html).
 
 
