@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { MAX_SCHEDULE_BULK_DATE_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleManualPreviewInput, type SchedulePreview, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -69,7 +69,7 @@ function isUncertainScheduleResponse(cause: unknown): boolean {
 }
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
-type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingCreationResult?: boolean) => void;
+type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
 type GanttProps = FeatureProps & {
   refreshGantt: WorkspaceRefresh;
   allProjects?: boolean;
@@ -91,6 +91,7 @@ type GanttProps = FeatureProps & {
   onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
+type BulkLinkSelection = { project: Project; issues: Issue[] };
 type DependencyEditor = {
   dependency?: Dependency;
   prefill?: DependencyPrefill;
@@ -132,6 +133,7 @@ const RANGE_PICK_DRAFT = 'date-range-pick';
 const CREATE_ISSUE_DRAFT = 'create';
 const CASCADE_DRAFT = 'successor-schedule';
 const BULK_DATES_DRAFT = 'schedule-bulk-dates';
+const BULK_LINKS_DRAFT = 'schedule-bulk-links';
 const TEAM_BLOCKER_DRAFT = 'team-blocker';
 const TEAM_FOLLOW_UP_DRAFT = 'team-follow-up';
 const REFRESH_FEEDBACK = {
@@ -219,6 +221,7 @@ function ProjectGantt(props: GanttProps) {
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteProject, setPasteProject] = useState<Project | null>(null);
   const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
+  const [bulkLinkSelection, setBulkLinkSelection] = useState<BulkLinkSelection | null>(null);
   const [rowScheduleEdit, setRowScheduleEdit] = useState<RowScheduleEdit | null>(null);
   const [workloadView, setWorkloadView] = useState<'project' | 'team' | null>(null);
   const [reservationsOpen, setReservationsOpen] = useState(false);
@@ -263,6 +266,7 @@ function ProjectGantt(props: GanttProps) {
     if (shiftOpen) setShiftOpen(false);
     if (autoOpen) setAutoOpen(false);
     if (bulkDateSelection) setBulkDateSelection(null);
+    if (bulkLinkSelection) setBulkLinkSelection(null);
     if (rowScheduleEdit) setRowScheduleEdit(null);
   }
   if (scheduleFocus && scheduleFocus.teamScope !== teamFocusScope) {
@@ -287,13 +291,14 @@ function ProjectGantt(props: GanttProps) {
   const hierarchyFocusTrigger = useRef<HTMLButtonElement>(null);
   const restoringScheduleFocus = useRef<ScheduleFocus | null>(null);
   const bulkDatesTrigger = useRef<HTMLButtonElement>(null);
+  const bulkLinksTrigger = useRef<HTMLButtonElement>(null);
   const pasteTrigger = useRef<HTMLButtonElement>(null);
   const linkEditorFocusTarget = useRef<HTMLButtonElement | null>(null);
   const previewDialog = useRef<HTMLElement>(null);
   const manualReviewAction = useRef<HTMLButtonElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
-  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingCreationResult: boolean }>());
+  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
   const draggingRef = useRef(false);
   const viewport = useRef<GanttViewport>(null);
   const restoreViewport = useRef<GanttViewportAnchor>(null);
@@ -301,7 +306,7 @@ function ProjectGantt(props: GanttProps) {
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || drag || datePicker || linkPicker || preview || cascade ||
-    shiftOpen || autoOpen || pasteProject || bulkDateSelection || rowScheduleEdit || createOpen || schedulePredecessor || linkEditor || planAssignment || planShift);
+    shiftOpen || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || schedulePredecessor || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -372,9 +377,9 @@ function ProjectGantt(props: GanttProps) {
     if (opener.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
     else scrollRef.current?.focus({ preventScroll: true });
   }, [busy, linkEditor]);
-  const trackDraft = useCallback<TrackDraft>((id, dirty, pending = false, awaitingCreationResult = false) => {
+  const trackDraft = useCallback<TrackDraft>((id, dirty, pending = false, awaitingResult = false) => {
     const hadDraft = draftsRef.current.size > 0;
-    if (dirty || pending || awaitingCreationResult) draftsRef.current.set(id, { dirty, pending, awaitingCreationResult });
+    if (dirty || pending || awaitingResult) draftsRef.current.set(id, { dirty, pending, awaitingResult });
     else draftsRef.current.delete(id);
     const next = draftsRef.current.size > 0;
     if (next !== hadDraft) {
@@ -390,9 +395,11 @@ function ProjectGantt(props: GanttProps) {
       if (event.defaultPrevented) return;
       if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
       else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
-        const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingCreationResult;
+        const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
+        const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult;
         const awaitingScheduleResult = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
-        const confirmation = awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
+        const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
+          : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
@@ -408,16 +415,18 @@ function ProjectGantt(props: GanttProps) {
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftOpen(false); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setPasteProject(null);
+            setBulkLinkSelection(null);
             if (discardPlanShift) setPlanShift(null);
             if (discardBulkDates) setBulkDateSelection(null);
             setRowScheduleEdit(null);
             setDraftEpoch(value => value + 1);
-            if (awaitingCreationResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
+            if (awaitingCreationResult || awaitingLinkResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
           });
         }
       } else afterAcceptedNavigation(event, () => {
         setRowScheduleEdit(null);
         setPasteProject(null);
+        setBulkLinkSelection(null);
       });
     };
     const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
@@ -425,6 +434,7 @@ function ProjectGantt(props: GanttProps) {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
       setPasteProject(null);
+      setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setSelected(new Set());
     };
@@ -696,6 +706,12 @@ function ProjectGantt(props: GanttProps) {
     .filter(issue => issue.projectId === sheetProject.id) : [];
   const firstSelectedProject = selectedIssues[0]?.projectId;
   const selectedProjectId = firstSelectedProject && selectedIssues.every(issue => issue.projectId === firstSelectedProject) ? firstSelectedProject : undefined;
+  const bulkLinkProject = selectedProjectId ? projectsById.get(selectedProjectId) : undefined;
+  const visibleSelection = new Set(selectedIssues.map(issue => issue.id));
+  const bulkLinkProblem = selectedIssues.length < 2 ? ''
+    : !bulkLinkProject ? '같은 프로젝트의 업무를 선택해 주세요.'
+    : selectedIssues.length > MAX_SCHEDULE_BULK_LINK_ISSUES ? `한 번에 ${MAX_SCHEDULE_BULK_LINK_ISSUES}개까지 연결할 수 있습니다.`
+    : !projectIssues.some(issue => issue.projectId === bulkLinkProject.id && !visibleSelection.has(issue.id)) ? '선택 목록 밖에 연결할 업무가 없습니다.' : '';
   const canEditBulkDates = hasProject || (allProjects && data.projects.length > 0);
   const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
   const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
@@ -1013,6 +1029,21 @@ function ProjectGantt(props: GanttProps) {
       const trigger = bulkDatesTrigger.current;
       if (trigger && !trigger.disabled) trigger.focus({ preventScroll: true });
       else scrollRef.current?.focus({ preventScroll: true });
+    });
+  }
+  function openBulkLinks() {
+    if (busyRef.current || activeDatePicker || selectedIssues.length < 2 || !bulkLinkProject || bulkLinkProblem || !canLeave()) return;
+    queueMicrotask(() => {
+      setLinkPicker(null);
+      setDatePicker(null);
+      setBulkLinkSelection({ project: bulkLinkProject, issues: selectedIssues });
+    });
+  }
+  function closeBulkLinks() {
+    setBulkLinkSelection(null);
+    requestAnimationFrame(() => {
+      const trigger = bulkLinksTrigger.current;
+      (trigger && !trigger.disabled ? trigger : scrollRef.current)?.focus({ preventScroll: true });
     });
   }
   async function requestPreview(ids: string[], offset: number, skipWeekends: boolean, opener?: HTMLButtonElement) {
@@ -1396,7 +1427,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor || teamFollowUp)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(schedulePredecessor || teamFollowUp || bulkLinkSelection)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -1550,6 +1581,15 @@ function ProjectGantt(props: GanttProps) {
         { anchor: { issueId: linkAnchor.id, otherRole: 'successor' } })}>
         <Link2 size={15} aria-hidden="true" />선택 업무에서 연결
       </button>}
+      {selectedIssues.length > 1 && <>
+        <button ref={bulkLinksTrigger} className="btn" type="button" onClick={openBulkLinks}
+          data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
+          aria-describedby={bulkLinkProblem ? 'gantt-bulk-links-problem' : undefined}
+          disabled={busy || Boolean(activeDatePicker || bulkLinkProblem)}>
+          <Link2 size={15} aria-hidden="true" />선후행 일괄 연결
+        </button>
+        {bulkLinkProblem && <span id="gantt-bulk-links-problem" className="muted">{bulkLinkProblem}</span>}
+      </>}
       {selectedAnchor && !scheduleFocus && <button ref={dependencyFocusTrigger} className="btn" type="button" disabled={busy}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={event => openScheduleFocus('dependencies', selectedAnchor, event.currentTarget)}>
         <Network size={15} aria-hidden="true" />선후행 흐름 보기
@@ -1905,6 +1945,22 @@ function ProjectGantt(props: GanttProps) {
         notify(result.updated.length ? `계획과 ${result.updated.length}개 업무의 일정을 이동했습니다.` : '계획 일정을 이동했습니다.');
       }} />}
   </div>
+    {bulkLinkSelection && <SchedulePasteDialog
+      projectId={bulkLinkSelection.project.id} projectLabel={`${bulkLinkSelection.project.key} · ${bulkLinkSelection.project.name}`}
+      bulkLinks={{
+        issues: bulkLinkSelection.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original),
+        candidates: projectIssues.filter(issue => issue.projectId === bulkLinkSelection.project.id),
+        refresh,
+      }}
+      notify={notify} onDraftChange={trackDraft} onClose={closeBulkLinks}
+      onApplied={async result => {
+        setUndoId(result.undoId);
+        setScheduleWarnings(result.warnings);
+        await refresh();
+        closeBulkLinks();
+        notify(`선후행 연결 ${result.dependencyChanges ?? 0}건을 추가했습니다.`);
+      }}
+    />}
     {schedulePredecessor && <NewIssueModal {...props} predecessorIssue={schedulePredecessor} onClose={closeSuccessorCreation} />}
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
       onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}

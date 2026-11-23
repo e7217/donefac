@@ -1582,6 +1582,7 @@ export interface SchedulePastePreview {
   expiresAt: string | null;
   changes: ScheduleChange[];
   dependencyChanges?: SchedulePasteDependencyChange[];
+  retainedDependencies?: SchedulePasteDependencyChange[];
   warnings: string[];
   errors: SchedulePasteDiagnostic[];
   unchanged: number;
@@ -1595,6 +1596,15 @@ export interface ScheduleBulkDateInput {
   changes: ScheduleBulkDateChanges;
 }
 type ScheduleRowIssue = { id: string; expectedVersion: number };
+export const MAX_SCHEDULE_BULK_LINK_ISSUES = 100;
+export interface ScheduleBulkLinkInput {
+  projectId: string;
+  anchor: ScheduleRowIssue;
+  issues: ScheduleRowIssue[];
+  direction: 'predecessor' | 'successor';
+  type: DependencyType;
+  lagDays: number;
+}
 export const MAX_SCHEDULE_ROW_DEPENDENCY_EDITS = 100;
 export type ScheduleRowDependencyEdit =
   | { action: 'add'; relatedIssue: ScheduleRowIssue; direction: 'predecessor' | 'successor'; type: DependencyType; lagDays: number }

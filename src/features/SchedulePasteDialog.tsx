@@ -1,25 +1,31 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import { ArrowDown, CalendarRange, Check, ClipboardList, Loader2, RefreshCw, X } from 'lucide-react';
-import { DEPENDENCY_LABELS } from '../../shared/schedule-dependencies';
+import { ArrowDown, CalendarRange, Check, ClipboardList, Link2, Loader2, RefreshCw, X } from 'lucide-react';
+import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-dependencies';
+import { MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
-  FeatureProps, Issue, Project, ScheduleBulkDateChanges, ScheduleBulkDateInput, ScheduleChange, SchedulePasteApplyResult,
+  FeatureProps, Issue, Project, ScheduleBulkDateChanges, ScheduleBulkDateInput, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult,
   SchedulePasteDependencyChange, SchedulePastePreview,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
+import { GanttBulkLinkFields, type BulkLinkDraft } from './GanttBulkLinksDialog';
 import './schedule-paste.css';
 
 type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
+type BulkLinks = { issues: readonly Issue[]; candidates: readonly Issue[]; refresh: () => Promise<void> };
 type ProjectName = Pick<Project, 'id' | 'name'>;
 type IssueProjects = ReadonlyMap<string, ProjectName>;
 
 export type SchedulePasteDialogProps = {
   notify: FeatureProps['notify'];
   onClose: () => void;
-  onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
+  onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult) => Promise<void>;
-} & ({ projectId: string; projectLabel?: string; bulkDates?: never } | { projectId: string | null; projectLabel?: never; bulkDates: BulkDates });
+} & (
+  | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: BulkLinks }
+  | { projectId: string | null; projectLabel?: never; bulkDates: BulkDates; bulkLinks?: never }
+);
 
 type Review = { input: string; targets: string; projects?: IssueProjects; result: SchedulePastePreview };
 type DateField = 'startDate' | 'endDate' | 'dueDate';
@@ -28,6 +34,7 @@ type DateEntry = { action: DateAction; value: string };
 type DateDraft = Record<DateField, DateEntry>;
 const DRAFT_ID = 'schedule-paste';
 const BULK_DRAFT_ID = 'schedule-bulk-dates';
+const BULK_LINK_DRAFT_ID = 'schedule-bulk-links';
 const PAGE_SIZE = 50;
 const bulkFields: { field: DateField; label: string }[] = [
   { field: 'startDate', label: '시작일' },
@@ -35,6 +42,9 @@ const bulkFields: { field: DateField; label: string }[] = [
   { field: 'dueDate', label: '목표 마감일' },
 ];
 const keepDate: DateEntry = { action: 'keep', value: '' };
+const defaultLink: BulkLinkDraft = { choice: null, direction: 'predecessor', type: 'FS', lagDays: '0' };
+const hasLinkInput = (link: BulkLinkDraft, query: string) =>
+  Boolean(link.choice || query || link.direction !== defaultLink.direction || link.type !== defaultLink.type || link.lagDays !== defaultLink.lagDays);
 const pendingLabels = {
   preview: '입력한 일정표를 검토하는 중입니다.',
   apply: '검토한 일정을 적용하는 중입니다.',
@@ -56,7 +66,7 @@ function isDefiniteApplyRejection(cause: unknown, bulk: boolean, recovering: boo
 }
 
 export function SchedulePasteDialog(props: SchedulePasteDialogProps) {
-  return <ProjectScheduleEditDialog key={`${props.projectId}:${Boolean(props.bulkDates)}`} {...props} />;
+  return <ProjectScheduleEditDialog key={`${props.projectId}:${props.bulkLinks ? 'links' : props.bulkDates ? 'dates' : 'paste'}`} {...props} />;
 }
 
 export function bulkDateResultMessage(updated: readonly Issue[], team: boolean) {
@@ -73,9 +83,12 @@ function ProjectScheduleEditDialog({
   onDraftChange,
   onApplied,
   bulkDates,
+  bulkLinks,
 }: SchedulePasteDialogProps) {
   const [text, setText] = useState('');
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
+  const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
+  const [anchorQuery, setAnchorQuery] = useState('');
   const [review, setReview] = useState<Review | null>(null);
   const [latest, setLatest] = useState<Review | null>(null);
   const [approved, setApproved] = useState(false);
@@ -88,34 +101,53 @@ function ProjectScheduleEditDialog({
   const dialog = useRef<HTMLElement>(null);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const firstDateAction = useRef<HTMLSelectElement>(null);
+  const anchorSearch = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
   const dirtyRef = useRef(false);
   const request = useRef<AbortController | null>(null);
 
-  const draftId = bulkDates ? BULK_DRAFT_ID : DRAFT_ID;
+  const bulk = bulkDates ?? bulkLinks;
+  const bulkIssues = bulk?.issues ?? [];
+  const draftId = bulkLinks ? BULK_LINK_DRAFT_ID : bulkDates ? BULK_DRAFT_ID : DRAFT_ID;
   const team = projectId === null;
-  const title = bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
+  const title = bulkLinks ? '선후행 연결 일괄 추가' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
-  const input = bulkDates ? JSON.stringify(dates) : text;
-  const issues = bulkDates?.issues.map(issue => ({ id: issue.id, expectedVersion: issue.version })) ?? [];
-  const targets = bulkDates ? JSON.stringify(bulkDates.issues.map(issue => [issue.id, issue.version, issue.projectId])) : '';
+  const linksEdited = hasLinkInput(link, anchorQuery);
+  const input = bulkLinks ? JSON.stringify([link.choice?.id, link.direction, link.type, link.lagDays]) : bulkDates ? JSON.stringify(dates) : text;
+  const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
+  const selectedIds = new Set(issues.map(issue => issue.id));
+  const sameProjectCandidates = bulkLinks?.candidates.filter(issue => issue.projectId === projectId) ?? [];
+  const sameProjectIds = new Set(sameProjectCandidates.map(issue => issue.id));
+  const unavailableTargets = bulkLinks && bulkIssues.filter(issue => issue.projectId !== projectId || !sameProjectIds.has(issue.id));
+  const anchors = sameProjectCandidates.filter(issue => !selectedIds.has(issue.id));
+  const anchor = anchors.find(issue => issue.id === link.choice?.id);
+  const lagDays = link.lagDays.trim() ? Number(link.lagDays) : NaN;
+  const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && projectId !== null && !unavailableTargets?.length &&
+    issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES && isDependencyLag(lagDays)
+    ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction, type: link.type, lagDays }
+    : null;
+  const targets = bulk ? JSON.stringify([bulkIssues.map(issue => [issue.id, issue.version, issue.projectId]), anchor?.version]) : '';
   const projectNames = team ? new Map(bulkDates?.projects.map(project => [project.id, project.name])) : null;
   const selectedProjects = projectNames && bulkDates ? new Map(bulkDates.issues.map(issue => [issue.id, {
     id: issue.projectId, name: projectNames.get(issue.projectId) ?? '프로젝트 정보 없음',
   }])) : undefined;
   const projectCount = selectedProjects ? new Set([...selectedProjects.values()].map(project => project.id)).size : undefined;
-  const canPreview = bulkDates
-    ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
-    : Boolean(text.trim());
-  const editLocked = Boolean(pending || applied || (bulkDates && retryApply));
-  const dirty = !applied && Boolean((bulkDates ? datesEdited : text) || review || latest || error);
+  const canPreview = bulkLinks
+    ? Boolean(bulkLinkInput)
+    : bulkDates
+      ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
+      : Boolean(text.trim());
+  const editLocked = Boolean(pending || applied || (bulk && retryApply));
+  const dirty = !applied && Boolean((bulkLinks ? linksEdited : bulkDates ? datesEdited : text) || review || latest || error);
+  const awaitingResult = Boolean(bulkLinks && retryApply);
   const expiresAt = review?.result.expiresAt;
   const expiry = expiresAt ? Date.parse(expiresAt) : NaN;
   const expired = Boolean(review?.result.previewId && Number.isFinite(expiry) && expiry <= clock);
   const validReview = Boolean(
     review &&
       approved &&
+      canPreview &&
       review.input === input &&
       review.targets === targets &&
       review.result.previewId &&
@@ -128,15 +160,15 @@ function ProjectScheduleEditDialog({
 
   useEffect(() => {
     dirtyRef.current = dirty;
-    onDraftChange(draftId, dirty, Boolean(pending));
-  }, [draftId, dirty, pending, onDraftChange]);
+    onDraftChange(draftId, dirty, Boolean(pending), awaitingResult);
+  }, [draftId, dirty, pending, awaitingResult, onDraftChange]);
 
   useEffect(() => () => onDraftChange(draftId, false, false), [draftId, onDraftChange]);
 
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    (firstDateAction.current ?? textarea.current)?.focus({ preventScroll: true });
+    (anchorSearch.current ?? firstDateAction.current ?? textarea.current)?.focus({ preventScroll: true });
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -155,14 +187,17 @@ function ProjectScheduleEditDialog({
       return;
     }
     let confirmation = '붙여넣은 일정과 검토 결과를 버리고 닫을까요?';
-    if (bulkDates) confirmation = retryApply
+    if (bulkLinks) confirmation = retryApply
+      ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
+      : '입력한 선후행 연결과 검토 결과를 버리고 닫을까요?';
+    else if (bulkDates) confirmation = retryApply
       ? '일정이 이미 변경됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
       : '입력한 날짜와 검토 결과를 버리고 닫을까요?';
     if (dirtyRef.current && !window.confirm(confirmation)) return;
     dirtyRef.current = false;
     onDraftChange(draftId, false, false);
     onClose();
-  }, [bulkDates, draftId, notify, onClose, onDraftChange, retryApply]);
+  }, [bulkDates, bulkLinks, draftId, notify, onClose, onDraftChange, retryApply]);
 
   useEffect(() => {
     const handleKey = (event: KeyboardEvent) => {
@@ -223,6 +258,11 @@ function ProjectScheduleEditDialog({
     resetReview(bulkFields.some(item => next[item.field].action !== 'keep'));
   }
 
+  function updateLink(next: BulkLinkDraft) {
+    setLink(next);
+    resetReview(hasLinkInput(next, anchorQuery));
+  }
+
   function begin(kind: NonNullable<typeof pending>) {
     if (busyRef.current) return null;
     busyRef.current = true;
@@ -252,8 +292,9 @@ function ProjectScheduleEditDialog({
     setRetryApply(null);
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects };
-    let payload: { projectId: string; text: string } | ScheduleBulkDateInput;
-    if (bulkDates) {
+    let payload: { projectId: string; text: string } | ScheduleBulkDateInput | ScheduleBulkLinkInput;
+    if (bulkLinkInput) payload = bulkLinkInput;
+    else if (bulkDates) {
       const changes: ScheduleBulkDateChanges = {};
       for (const { field } of bulkFields) {
         const { action, value } = dates[field];
@@ -262,7 +303,7 @@ function ProjectScheduleEditDialog({
       payload = { projectId, issues, changes };
     } else payload = { projectId, text };
     try {
-      const result = await api<SchedulePastePreview>(bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview', {
+      const result = await api<SchedulePastePreview>(bulkLinks ? '/schedule/bulk-links/preview' : bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview', {
         method: 'POST',
         body: JSON.stringify(payload),
         signal: controller.signal,
@@ -286,18 +327,18 @@ function ProjectScheduleEditDialog({
   }
 
   async function reloadTargets() {
-    if (!bulkDates || editLocked) return;
+    if (!bulk || editLocked) return;
     const controller = begin('reload');
     if (!controller) return;
     setApproved(false);
     setNotice('');
     try {
-      await bulkDates.refresh();
+      await bulk.refresh();
       if (!mounted.current || controller.signal.aborted) return;
       setLatest(null);
-      setNotice('선택한 업무와 날짜 입력을 유지했습니다. 최신 업무 상태로 미리보기를 다시 만들어 주세요.');
+      setNotice(`선택한 업무와 ${bulkLinks ? '연결' : '날짜'} 입력을 유지했습니다. 최신 업무 상태로 미리보기를 다시 만들어 주세요.`);
     } catch (cause) {
-      if (mounted.current && !controller.signal.aborted) setError(`${errorMessage(cause)} 선택한 업무와 날짜 입력은 유지했습니다.`);
+      if (mounted.current && !controller.signal.aborted) setError(`${errorMessage(cause)} 선택한 업무와 ${bulkLinks ? '연결' : '날짜'} 입력은 유지했습니다.`);
     } finally {
       finish(controller);
     }
@@ -308,7 +349,7 @@ function ProjectScheduleEditDialog({
       await onApplied(result);
     } catch (cause) {
       if (mounted.current) {
-        setError(`일정은 적용되었습니다. ${errorMessage(cause)} 아래에서 화면 반영을 다시 시도하세요.`);
+        setError(`${bulkLinks ? '선후행 연결은' : '일정은'} 적용되었습니다. ${errorMessage(cause)} 아래에서 화면 반영을 다시 시도하세요.`);
       }
     }
   }
@@ -324,7 +365,7 @@ function ProjectScheduleEditDialog({
     if (!controller) return;
     setApproved(false);
     try {
-      const result = await api<SchedulePasteApplyResult>(bulkDates ? '/schedule/bulk-dates/apply' : '/schedule/paste-apply', {
+      const result = await api<SchedulePasteApplyResult>(bulkLinks ? '/schedule/bulk-links/apply' : bulkDates ? '/schedule/bulk-dates/apply' : '/schedule/paste-apply', {
         method: 'POST',
         body: JSON.stringify({ previewId }),
         signal: controller.signal,
@@ -345,7 +386,7 @@ function ProjectScheduleEditDialog({
       await reflectResult(result);
     } catch (cause) {
       if (mounted.current && !controller.signal.aborted) {
-        if (isDefiniteApplyRejection(cause, Boolean(bulkDates), recovering)) {
+        if (isDefiniteApplyRejection(cause, Boolean(bulk), recovering)) {
           setRetryApply(null);
           setError(
             `${errorMessage(cause)} 입력과 검토 결과를 유지했습니다. 최신 조건으로 새 미리보기를 만들어 주세요.`,
@@ -375,6 +416,7 @@ function ProjectScheduleEditDialog({
 
   const result = review?.result;
   const dependencyChanges = result?.dependencyChanges ?? [];
+  const retainedDependencies = result?.retainedDependencies ?? [];
   const rejected = latest?.result.errors.length ? latest.result : null;
   return (
     <div className="schedule-paste-overlay">
@@ -390,14 +432,16 @@ function ProjectScheduleEditDialog({
         <header>
           <div>
             <h2 id="schedule-paste-title">
-              {bulkDates ? <CalendarRange size={21} /> : <ClipboardList size={21} />}
+              {bulkLinks ? <Link2 size={21} /> : bulkDates ? <CalendarRange size={21} /> : <ClipboardList size={21} />}
               {title}
             </h2>
             {projectLabel && <p id="schedule-paste-project">대상 프로젝트 {projectLabel}</p>}
             <p id="schedule-paste-description">
-              {bulkDates
-                ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
-                : '현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'}
+              {bulkLinks
+                ? '같은 프로젝트에서 기준 업무를 고르고 선택한 업무들과 맺을 관계를 확인하세요. 기존 연결은 유지합니다.'
+                : bulkDates
+                  ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
+                  : '현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'}
             </p>
           </div>
           <button
@@ -413,19 +457,28 @@ function ProjectScheduleEditDialog({
 
         <form className="schedule-paste-input" onSubmit={preview}>
           <fieldset disabled={editLocked}>
-            {bulkDates ? (
-              <>
-                <details className="schedule-bulk-targets">
-                  <summary>선택한 업무 {bulkDates.issues.length}개{projectCount !== undefined && ` · 프로젝트 ${projectCount}개`}</summary>
-                  <ul>
-                    {bulkDates.issues.map(issue => (
-                      <li key={issue.id}>
-                        <span>{issue.key}</span> {issue.title}
-                        <BulkDateProject project={selectedProjects?.get(issue.id)} />
-                      </li>
-                    ))}
-                  </ul>
-                </details>
+            {bulk && (
+              <details className="schedule-bulk-targets">
+                <summary>선택한 업무 {bulkIssues.length}개{projectCount !== undefined && ` · 프로젝트 ${projectCount}개`}</summary>
+                <ul>
+                  {bulkIssues.map(issue => (
+                    <li key={issue.id}>
+                      <span>{issue.key}</span> {issue.title}
+                      <BulkDateProject project={selectedProjects?.get(issue.id)} />
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {Boolean(unavailableTargets?.length) && (
+              <p className="schedule-paste-error" role="alert">
+                선택한 업무가 삭제되었거나 다른 프로젝트로 이동했습니다. 간트에서 연결할 업무를 다시 선택해 주세요.
+              </p>
+            )}
+            {bulkLinks ? (
+              <GanttBulkLinkFields anchors={anchors} anchor={anchor} searchRef={anchorSearch} query={anchorQuery}
+                value={link} onSearch={setAnchorQuery} onChange={updateLink} />
+            ) : bulkDates ? (
                 <div className="schedule-bulk-date-fields">
                   {bulkFields.map(({ field, label }, index) => {
                     const entry = dates[field];
@@ -453,7 +506,6 @@ function ProjectScheduleEditDialog({
                     );
                   })}
                 </div>
-              </>
             ) : (
               <>
                 <label htmlFor="schedule-paste-text">일정표 (TSV 또는 CSV)</label>
@@ -500,10 +552,10 @@ function ProjectScheduleEditDialog({
                 </details>
               </>
             )}
-            {bulkDates ? (
+            {bulk ? (
               <div className="schedule-bulk-date-actions">
                 <button className="btn btn-primary" type="submit" disabled={!canPreview}>
-                  {pending === 'preview' ? '검토 중…' : '날짜 변경 미리보기'}
+                  {pending === 'preview' ? '검토 중…' : bulkLinks ? '연결 미리보기' : '날짜 변경 미리보기'}
                 </button>
                 <button className="btn" type="button" onClick={() => void reloadTargets()}>
                   <RefreshCw size={16} aria-hidden="true" /> 새로고침
@@ -522,7 +574,8 @@ function ProjectScheduleEditDialog({
           {pending && (
             <p className="schedule-paste-pending" role="status">
               <Loader2 className="spin" size={17} />
-              {pending === 'preview' && bulkDates ? '선택한 업무의 날짜를 검토하는 중입니다.' : pendingLabels[pending]}
+              {pending === 'preview' && bulkLinks ? '선택한 업무의 선후행 연결을 검토하는 중입니다.'
+                : pending === 'preview' && bulkDates ? '선택한 업무의 날짜를 검토하는 중입니다.' : pendingLabels[pending]}
             </p>
           )}
           {notice && <p className="schedule-paste-success" role="status">{notice}</p>}
@@ -533,34 +586,34 @@ function ProjectScheduleEditDialog({
           )}
           {retryApply && retryApply.input === input && (
             <p className="schedule-paste-stale">
-              {bulkDates
+              {bulk
                 ? '같은 미리보기 ID로 적용 여부와 되돌리기 정보를 확인합니다.'
                 : '같은 미리보기 ID로 다시 요청해 적용 여부와 되돌리기 정보를 확인합니다. 입력을 수정하거나 새 미리보기를 만들면 이 재시도는 초기화됩니다.'}
             </p>
           )}
           {applied && (
             <p className="schedule-paste-success" role="status">
-              {bulkDates
-                ? bulkDateResultMessage(applied.updated, team)
-                : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
+              {bulkLinks ? `선후행 연결 ${applied.dependencyChanges ?? 0}건을 추가했습니다. `
+                : bulkDates ? bulkDateResultMessage(applied.updated, team)
+                  : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
               적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
           )}
           {rejected && (
-            <section className="schedule-paste-rejected" aria-label={bulkDates ? '선택 업무 날짜 오류' : '일정 붙여넣기 오류'}>
+            <section className="schedule-paste-rejected" aria-label={bulkLinks ? '선후행 연결 오류' : bulkDates ? '선택 업무 날짜 오류' : '일정 붙여넣기 오류'}>
               <h3>적용할 수 없는 입력 {rejected.errors.length}건</h3>
               <p>
                 오류를 수정하고 미리보기를 다시 만드세요. 이전 변경안이 있으면 아래에 참고용으로 남겨
                 둡니다.
               </p>
               <PagedList
-                label={bulkDates ? '업무 날짜 오류' : '붙여넣기 오류'}
+                label={bulkLinks ? '선후행 연결 오류' : bulkDates ? '업무 날짜 오류' : '붙여넣기 오류'}
                 items={rejected.errors}
                 render={(item, index) => (
                   <li key={index}>
                     <strong>
-                      {bulkDates
-                        ? item.key || bulkDates.issues.find(issue => issue.id === item.issueId)?.key || '선택 업무'
+                      {bulk
+                        ? item.key || bulkIssues.find(issue => issue.id === item.issueId)?.key || '선택 업무'
                         : `${item.line === null ? '전체' : `${item.line}행`}${item.key ? ` · ${item.key}` : ''}`}
                     </strong>
                     {item.issueId && <BulkDateProject project={latest?.projects?.get(item.issueId)} />}
@@ -574,13 +627,13 @@ function ProjectScheduleEditDialog({
             <WarningList warnings={rejected.warnings} label="입력 검토 경고" />
           )}
           {result && (
-            <section aria-label={bulkDates ? '선택 업무 날짜 변경 검토' : '붙여넣기 변경 검토'}>
+            <section aria-label={bulkLinks ? '선후행 연결 변경 검토' : bulkDates ? '선택 업무 날짜 변경 검토' : '붙여넣기 변경 검토'}>
               <div className="schedule-paste-review-heading">
                 <div>
                   <h3>
-                    {bulkDates
-                      ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
-                      : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
+                    {bulkLinks ? `추가 ${dependencyChanges.length}건 · 유지 ${result.unchanged}건`
+                      : bulkDates ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
+                        : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
                   {result.projectIds && <p>대상 프로젝트 {result.projectIds.length}개</p>}
                   {result.expiresAt && (
@@ -615,14 +668,15 @@ function ProjectScheduleEditDialog({
               )}
               {!hasChanges(result) && (
                 <p className="schedule-paste-noop">
-                  {bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
+                  {bulkLinks ? '추가할 선후행 연결이 없습니다.' : bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
                 </p>
               )}
               {result.warnings.length > 0 && (
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
               {result.changes.length > 0 && <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} projects={review?.projects} />}
-              {dependencyChanges.length > 0 && <DependencyChangeTable changes={dependencyChanges} />}
+              {dependencyChanges.length > 0 && <DependencyChangeTable changes={dependencyChanges} mode={bulkLinks ? 'added' : 'paste'} />}
+              {bulkLinks && retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained" />}
             </section>
           )}
         </div>
@@ -633,7 +687,8 @@ function ProjectScheduleEditDialog({
               ? '적용 후 간트에서 되돌리기를 사용할 수 있습니다.'
               : retryApply
                 ? '적용 여부가 확인되지 않았습니다. 같은 요청의 결과를 확인하세요.'
-                : bulkDates ? '검토한 날짜만 한 번에 적용됩니다.' : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
+                : bulkLinks ? '검토한 새 연결을 한 번에 추가합니다.'
+                  : bulkDates ? '검토한 날짜만 한 번에 적용됩니다.' : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
           </span>
           <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>
             닫기
@@ -664,7 +719,7 @@ function ProjectScheduleEditDialog({
               onClick={() => void apply()}
             >
               <Check size={16} />
-              검토한 일정 적용
+              {bulkLinks ? '검토한 연결 적용' : '검토한 일정 적용'}
             </button>
           )}
         </footer>
@@ -757,41 +812,43 @@ function DateChangeCell({ before, after }: { before: string | null; after: strin
   );
 }
 
-function DependencyChangeTable({ changes }: { changes: SchedulePasteDependencyChange[] }) {
+function DependencyChangeTable({ changes, mode }: { changes: SchedulePasteDependencyChange[]; mode: 'paste' | 'added' | 'retained' }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
+  const label = mode === 'retained' ? '유지할 선후행 연결 목록' : mode === 'added' ? '새 선후행 연결 목록' : '붙여넣기 업무 연결 변경 목록';
   return (
     <div className="schedule-paste-change-table schedule-paste-dependency-table">
-      <table aria-label="붙여넣기 업무 연결 변경 목록">
+      {mode !== 'paste' && <h4>{label}</h4>}
+      <table aria-label={label}>
         <thead>
           <tr>
             <th scope="col">선행 → 후행 업무</th>
-            <th scope="col">현재 연결</th>
-            <th scope="col">변경할 연결</th>
+            <th scope="col">{mode === 'retained' ? '유지할 연결' : '현재 연결'}</th>
+            {mode !== 'retained' && <th scope="col">{mode === 'added' ? '추가할 연결' : '변경할 연결'}</th>}
           </tr>
         </thead>
         <tbody>
           {changes.slice(start, start + PAGE_SIZE).map((change) => (
             <tr key={change.line}>
               <th scope="row">
-                <small>입력 {change.line}행</small>
+                {mode === 'paste' && <small>입력 {change.line}행</small>}
                 <small>{change.predecessorKey}</small>
                 <strong>{change.predecessorTitle}</strong>
                 <ArrowDown className="schedule-paste-dependency-arrow" aria-hidden="true" size={14} />
                 <small>{change.successorKey}</small>
                 <strong>{change.successorTitle}</strong>
               </th>
-              <td><DependencyRule rule={change.before} /></td>
-              <td>
+              <td><DependencyRule rule={change.before} action={mode === 'retained' ? '유지' : undefined} /></td>
+              {mode !== 'retained' && <td>
                 <DependencyRule rule={change.after}
                   action={!change.after ? '삭제' : !change.before ? '추가' : '변경'} />
-              </td>
+              </td>}
             </tr>
           ))}
         </tbody>
       </table>
       {changes.length > PAGE_SIZE && (
-        <Pagination label="업무 연결 변경" offset={start} total={changes.length} onChange={setOffset} />
+        <Pagination label={mode === 'paste' ? '업무 연결 변경' : label} offset={start} total={changes.length} onChange={setOffset} />
       )}
     </div>
   );
@@ -799,10 +856,10 @@ function DependencyChangeTable({ changes }: { changes: SchedulePasteDependencyCh
 
 function DependencyRule({ rule, action }: {
   rule: SchedulePasteDependencyChange['before'];
-  action?: '추가' | '변경' | '삭제';
+  action?: '추가' | '변경' | '삭제' | '유지';
 }) {
   return (
-    <span className={`schedule-paste-dependency-rule${action ? rule ? ' is-changed' : ' is-removed' : ''}`}>
+    <span className={`schedule-paste-dependency-rule${action && action !== '유지' ? rule ? ' is-changed' : ' is-removed' : ''}`}>
       {rule ? (
         <>
           <strong>{rule.type} · {DEPENDENCY_LABELS[rule.type]}</strong>
