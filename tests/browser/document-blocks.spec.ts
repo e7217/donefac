@@ -73,7 +73,14 @@ test('참조와 포함을 삽입해 실제 서식을 표시하고 이름·상태
   await page.getByRole('button', { name: '참조 새로고침', exact: true }).click(); await expect(page.locator('.docs-prose')).toContainText(localText); await expect(included).toContainText('원본에 새로 추가한 본문'); await expect(included).toContainText(`${f.prefix} 최신 포함 원본`);
   const card = page.locator('.docs-prose .doc-reference-node > .doc-reference-card.issue'); await expect(card).toContainText(renamed); await expect(card).toContainText('진행 중');
   await page.locator('.docs-save-button').click(); await expect(page.locator('.docs-save-state')).toHaveText('저장됨'); const saved = await currentDoc(f); expect(contentReferences(saved.content).map(ref => [ref.type, ref.kind, ref.id])).toEqual([['issue', 'reference', f.issue.id], ['document', 'reference', f.target.id], ['document', 'include', f.target.id]]); expect(saved.plainText).toContain(f.issue.id); expect(saved.plainText).not.toContain('서식 있는 포함 본문');
-  await page.getByRole('button', { name: '연결', exact: true }).click(); await expect(page.locator('.docs-linked-issue')).toHaveCount(1); await expect(page.locator('.docs-reference-list').filter({ hasText: '본문에서 참조하는 문서' })).toContainText(`${f.prefix} 최신 포함 원본`); await expect(page.locator('.docs-reference-list').filter({ hasText: '이 문서를 참조하는 문서' })).toContainText(f.backlink.title); await expect(page.locator('.docs-reference-list').filter({ hasText: '본문의 업무 참조' })).toContainText(renamed);
+  await page.getByRole('button', { name: '연결', exact: true }).click();
+  const linkedIssue = page.locator('.docs-linked-issue');
+  await expect(linkedIssue).toHaveCount(1);
+  await expect(linkedIssue).toContainText(renamed);
+  await expect(linkedIssue).toContainText('본문 참조 1곳');
+  await expect(page.locator('.docs-reference-list').filter({ hasText: '본문에서 참조하는 문서' })).toContainText(`${f.prefix} 최신 포함 원본`);
+  await expect(page.locator('.docs-reference-list').filter({ hasText: '이 문서를 참조하는 문서' })).toContainText(f.backlink.title);
+  await expect(page.getByRole('heading', { name: '본문의 업무 참조', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '문서 내보내기', exact: true }).click(); const downloadEvent = page.waitForEvent('download'); await page.getByRole('button', { name: '문서 JSON 내보내기', exact: true }).click(); const download = await downloadEvent, path = await download.path(); expect(path).not.toBeNull(); const exported = JSON.parse(readFileSync(path!, 'utf8')) as { schemaVersion: number; document: DocPage }; expect(exported.schemaVersion).toBe(2); expect(contentReferences(exported.document.content)).toHaveLength(3);
   await page.reload(); await expect(page.locator('.doc-included-content')).toContainText('서식 있는 포함 본문'); await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
 });

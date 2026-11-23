@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { Store } from '../../server/store.js';
+import { documentPlainText } from '../../shared/document-nodes.js';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
-import type { DocPage, GitlabLink, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
+import type { DocPage, GitlabLink, Issue, Project, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
-import { DEFAULT_WORKSPACE_SEARCH_FILTERS, normalizeWorkspaceSearchInput, normalizeWorkspaceSearchQuery, searchQuickIssues, searchWorkspace, workspaceSearchLabels,
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, normalizeWorkspaceSearchInput, normalizeWorkspaceSearchQuery, searchQuickDocuments, searchQuickIssues, searchWorkspace, workspaceSearchLabels,
   workspaceAtlassianSearchAddress, WORKSPACE_SEARCH_QUERY_LIMIT, type WorkspaceSearchFilters, type WorkspaceSearchResult } from '../../shared/workspace-search.js';
 
 const now = '2026-11-21T00:00:00.000Z';
@@ -295,4 +296,90 @@ test('workspace search returns bounded Unicode-safe leading or matching excerpts
   const capped = normalizeWorkspaceSearchQuery(`${'x'.repeat(WORKSPACE_SEARCH_QUERY_LIMIT - 1)}😀 뒤`);
   assert.equal(capped, 'x'.repeat(WORKSPACE_SEARCH_QUERY_LIMIT - 1));
   assert.ok(capped.isWellFormed());
+});
+
+const paragraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+const heading = (text: string, sectionId?: string, level = 1): RichContent => ({ type: 'heading',
+  attrs: { level, ...(sectionId ? { sectionId } : {}) }, content: [{ type: 'text', text }] });
+
+function indexedDoc(id: string, blocks: RichContent[], values: Partial<DocPage> = {}) {
+  const content = { type: 'doc', content: blocks };
+  return doc(id, `${id} 문서`, { ...values, content, plainText: documentPlainText(content) });
+}
+
+function documentResults(data: WorkspaceSnapshot, query: string) {
+  return searchWorkspace(data, filters({ query, kind: 'document' })).items.filter(item => item.kind === 'document');
+}
+
+test('document search jumps to a unique saved heading and uses the source paragraph for the excerpt', () => {
+  const document = indexedDoc('folded', [
+    paragraph('처음 나오는 안내'),
+    heading('상위 절', 'parent-section'),
+    { type: 'details', content: [
+      { type: 'detailsSummary', content: [{ type: 'text', text: '접은 내용' }] },
+      { type: 'detailsContent', content: [
+        heading('중첩된 절', 'nested-section', 2),
+        { type: 'paragraph', content: [
+          { type: 'text', text: '승인된 ' }, { type: 'text', text: 'ＢＵＩＬＤ', marks: [{ type: 'bold' }] }, { type: 'text', text: ' 번호' },
+        ] },
+        paragraph('같은 절에서 승인된 ＢＵＩＬＤ 상태 확인'),
+      ] },
+    ] },
+    paragraph('접힌 내용 이후의 설명'),
+    heading('다른 절', 'other-section'),
+  ]);
+  const data = snapshot([], [document]);
+  const original = structuredClone(data);
+  const [passage] = documentResults(data, '승인된  build');
+  assert.equal(passage.sectionId, 'nested-section');
+  assert.equal(passage.excerpt, '승인된 BUILD 번호');
+  assert.equal(documentResults(data, '중첩된 절')[0].sectionId, 'nested-section');
+  assert.equal(documentResults(data, '처음 나오는 안내')[0].sectionId, undefined);
+  assert.equal(documentResults(data, '접힌 내용 이후')[0].sectionId, 'parent-section');
+  assert.equal(searchQuickDocuments(data, '승인된 ＢＵＩＬＤ')[0].sectionId, 'nested-section');
+  assert.deepEqual(data, original);
+});
+
+test('document search keeps page results for ambiguous, unreachable, and cross-block-only text', () => {
+  const cases: [string, RichContent[], string][] = [
+    ['multiple', [heading('첫 절', 'a'), paragraph('찾는 문장'), heading('다음 절', 'b'), paragraph('찾는 문장')], '찾는 문장'],
+    ['preface', [paragraph('찾는 문장'), heading('다음 절', 'a'), paragraph('찾는 문장')], '찾는 문장'],
+    ['duplicate', [heading('첫 절', 'a'), paragraph('찾는 문장'), heading('다음 절', 'a')], '찾는 문장'],
+    ['unlinked', [heading('첫 절', 'a'), heading('링크를 저장하지 않은 절', undefined, 2), paragraph('찾는 문장')], '찾는 문장'],
+    ['invalid', [heading('유효하지 않은 절', 'bad id'), paragraph('찾는 문장'), heading('다음 절', 'a')], '찾는 문장'],
+    ['cross-block', [heading('첫 절', 'a'), paragraph('서로 다른'), paragraph('본문 블록')], '다른 본문'],
+    ['hidden', [heading('첫 절', 'a'), { type: 'documentExcerpt', attrs: { hidden: true }, content: [
+      heading('숨긴 절', 'b'), paragraph('찾는 문장'),
+    ] }], '찾는 문장'],
+  ];
+  for (const [id, blocks, query] of cases) {
+    const data = snapshot([], [indexedDoc(id, blocks)]);
+    const results = documentResults(data, query);
+    assert.equal(results.length, 1, id);
+    assert.equal(results[0].sectionId, undefined, id);
+  }
+});
+
+test('document title, label, project name and original address matches retain their navigation behavior', () => {
+  const blocks = [heading('보관 절', 'stable-id'), paragraph('문서 분류 연구실')];
+  const documents = [indexedDoc('title', blocks, { title: '문서 분류' }), indexedDoc('label', blocks, { labels: ['문서 분류'] }),
+    indexedDoc('body', blocks)];
+  const data = snapshot([], documents);
+  assert.deepEqual(documentResults(data, '문서 분류').map(item => [item.document.id, item.sectionId]), [
+    ['title', undefined], ['label', undefined], ['body', 'stable-id'],
+  ]);
+  assert.deepEqual(searchQuickDocuments(data, '문서 분류').map(item => [item.document.id, item.sectionId]), [
+    ['title', undefined], ['label', undefined], ['body', 'stable-id'],
+  ]);
+  assert.ok(documentResults(data, '연구실').every(item => item.sectionId === undefined));
+  assert.ok(documentResults(data, '연구실').length === documents.length);
+  const quickData = snapshot([], Array.from({ length: 10 }, (_, index) => indexedDoc(`quick-${index}`, blocks)));
+  assert.deepEqual(searchQuickDocuments(quickData, '문서 분류').map(item => item.document.id), quickData.documents.slice(0, 8).map(item => item.id));
+
+  const original = { issueIds: new Set<string>(), documentIds: new Set(['body']) };
+  const input = 'https://wiki.search.invalid/wiki/pages/viewpage.action?pageId=1234';
+  assert.deepEqual(searchQuickDocuments(data, input, original), [{ document: documents[2] }]);
+  const [address] = searchWorkspace(data, filters({ query: input }), original).items;
+  assert.equal(address.kind, 'document');
+  assert.equal(address.sectionId, undefined);
 });

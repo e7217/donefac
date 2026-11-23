@@ -31,7 +31,7 @@ export function DocumentLinkedWork({ data, document, openIssue, refresh, notify,
   const [refreshError, setRefreshError] = useState(false);
   const { rows, counts } = useMemo(() => buildDocumentLinkedWork(data, document.id), [data, document.id]);
   const visible = rows.filter(({ closed, link }) =>
-    (statusFilter === 'all' || closed === (statusFilter === 'closed')) && (!evidenceOnly || link.documentSource));
+    (statusFilter === 'all' || closed === (statusFilter === 'closed')) && (!evidenceOnly || link?.documentSource));
 
   useEffect(() => {
     mounted.current = true;
@@ -84,12 +84,19 @@ export function DocumentLinkedWork({ data, document, openIssue, refresh, notify,
         <span>결정 근거 {counts.evidence}개</span>
       </div>
     </div>}
-    {visible.length ? <ul className="document-linked-work-list">{visible.map(({ issue, link, projectName, assigneeName, status, deadline }) => <li key={link.id}>
+    {visible.length ? <ul className="document-linked-work-list">{visible.map(({ issue, link, referenceCount, projectName, assigneeName, status, deadline }) => <li key={issue.id}>
       <button type="button" className="docs-linked-issue" onClick={event => {
         issueOpener.current = event.currentTarget;
         openIssue(issue.id);
       }}>
-        <span className="docs-linked-issue-key"><span>{issue.key}{link.kind === '후속 업무' && <span className="document-linked-work-kind">후속 업무</span>}</span><ChevronRight size={12} aria-hidden="true" /></span>
+        <span className="docs-linked-issue-key">
+          <span>
+            {issue.key}
+            {link?.kind === '후속 업무' && <span className="document-linked-work-kind">후속 업무</span>}
+            {referenceCount > 0 && <span className="document-linked-work-kind document-linked-work-reference">본문 참조 {referenceCount}곳</span>}
+          </span>
+          <ChevronRight size={12} aria-hidden="true" />
+        </span>
         <strong>{issue.title}</strong>
         <span className="docs-linked-issue-meta">
           {projectName && issue.projectId !== document.projectId && <span>{projectName}</span>}
@@ -98,7 +105,7 @@ export function DocumentLinkedWork({ data, document, openIssue, refresh, notify,
           <span>{deadline ? <>{deadline.source === 'dueDate' ? '목표 마감일' : '계획 종료일'} <time dateTime={deadline.value}>{deadline.value}</time></> : '기한 없음'}</span>
         </span>
       </button>
-      {link.documentSource && <section className="document-linked-work-evidence" aria-label={`${issue.key} 결정 근거`}>
+      {link?.documentSource && <section className="document-linked-work-evidence" aria-label={`${issue.key} 결정 근거`}>
         <h4>결정 근거</h4>
         <blockquote>{link.documentSource.text}</blockquote>
         <DocumentDecisionRevision key={link.documentSource.revisionId} data={data} documentId={document.id}

@@ -1,8 +1,11 @@
-import { normalizeDocumentLabel, normalizeDocumentLabelKey } from './document-labels.js';
+import { documentLabelKey, documentSearchText, normalizeDocumentLabel, normalizeDocumentLabelKey } from './document-labels.js';
+import { documentPlainText } from './document-plain-text.js';
+import { documentNodes } from './document-references.js';
+import { isDocumentSectionId, outlineHeadingTitle } from './document-sections.js';
 import { GITLAB_SEARCH_INPUT_LIMIT, matchingGitlabSearchLinks, normalizeGitlabSearchInput } from './gitlab-search.js';
 import { parseAtlassianSearchInput } from './atlassian-search.js';
 import { issueSearchText } from './issue-schema.js';
-import type { DocPage, Issue, IssueSearchAlias, WorkspaceSnapshot } from './types.js';
+import type { DocPage, Issue, IssueSearchAlias, RichContent, WorkspaceSnapshot } from './types.js';
 import { projectStatuses } from './workflow-helpers.js';
 
 export interface WorkspaceSearchFilters {
@@ -19,17 +22,21 @@ export const WORKSPACE_SEARCH_INPUT_LIMIT = GITLAB_SEARCH_INPUT_LIMIT;
 export type OriginalAddressMatches = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
 const pageSize = 20;
 const quickIssueLimit = 12;
+const quickDocumentLimit = 8;
 const excerptLimit = 160;
 const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'base' });
 const httpUrlStart = /^https?:\/\//iu;
 
 type IssueSearchMatch = { issue: Issue; matchedAliases?: IssueSearchAlias[]; matchedGitlab?: string };
+type DocumentSearchMatch = { document: DocPage; sectionId?: string };
 type IssueAliasData = Pick<WorkspaceSnapshot, 'issueAliases'>;
-export type WorkspaceSearchResult = ({ kind: 'issue'; excerpt: string | null } & IssueSearchMatch) |
-  { kind: 'document'; document: DocPage; parentTitles: string[]; excerpt: string | null };
+export type WorkspaceSearchDocument = { kind: 'document'; parentTitles: string[]; excerpt: string | null } & DocumentSearchMatch;
+export type WorkspaceSearchResult = ({ kind: 'issue'; excerpt: string | null } & IssueSearchMatch) | WorkspaceSearchDocument;
 
 type Match = { title: string; rank: number } & ({ kind: 'issue'; value: Issue; matchedAliases: IssueSearchAlias[]; matchedGitlab?: string }
-  | { kind: 'document'; value: DocPage });
+  | { kind: 'document'; value: DocPage; bodyOnly?: boolean });
+
+const documentSearchTextBlocks = new Set(['paragraph', 'codeBlock', 'detailsSummary']);
 
 function readableText(value: string): string {
   return value.toWellFormed().normalize('NFKC').replace(/[\p{Cc}\s]+/gu, ' ').trim();
@@ -124,6 +131,21 @@ export function searchQuickIssues(data: WorkspaceSnapshot, input: string, origin
   return [...exactCurrent, ...exactPrevious, ...exactGitlab, ...partial].slice(0, quickIssueLimit);
 }
 
+export function searchQuickDocuments(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): DocumentSearchMatch[] {
+  if (workspaceAtlassianSearchAddress(input)) {
+    return data.documents.filter(document => original?.documentIds.has(document.id)).slice(0, quickDocumentLimit)
+      .map(document => ({ document }));
+  }
+  const query = documentLabelKey(input.trim());
+  if (!query) return [];
+  const matches = (text: string) => documentLabelKey(text).includes(query);
+  return data.documents.filter(document => documentSearchText(document).includes(query)).slice(0, quickDocumentLimit)
+    .map(document => {
+      const match = matches(document.title) || (document.labels ?? []).some(matches) ? undefined : documentSearchSection(document, matches);
+      return { document, ...(match ? { sectionId: match.sectionId } : {}) };
+    });
+}
+
 function scopeMatches(projectId: string | null, scope: string): boolean {
   return !scope || (projectId === null ? scope === 'common' : scope === `project:${projectId}`);
 }
@@ -178,6 +200,49 @@ function excerptOf(value: string, query: string): string | null {
   const hasTail = end < text.length;
   const piece = textSlice(text, start, end - Number(hasTail)).trim();
   return `${start > 0 ? '…' : ''}${piece}${hasTail ? '…' : ''}`;
+}
+
+function documentSearchSection(document: DocPage, matches: (value: string) => boolean) {
+  if (!matches(document.plainText)) return undefined;
+
+  const seenIds = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const node of documentNodes(document.content)) {
+    const id = node.type === 'heading' ? node.attrs?.sectionId : undefined;
+    if (!isDocumentSectionId(id)) continue;
+    if (seenIds.has(id)) duplicates.add(id);
+    seenIds.add(id);
+  }
+  if (seenIds.size === duplicates.size) return undefined;
+
+  let match: { sectionId: string; text: string } | undefined;
+  const withinOneSection = (text: string, sectionId?: string) => {
+    if (!matches(text)) return true;
+    if (!sectionId || (match && match.sectionId !== sectionId)) return false;
+    match ??= { sectionId, text };
+    return true;
+  };
+  const visit = (nodes: readonly RichContent[], inheritedSection?: string, reachable = true): boolean => {
+    let sectionId = inheritedSection;
+    for (const node of nodes) {
+      if (node.type === 'heading') {
+        const text = documentPlainText(node);
+        const id = node.attrs?.sectionId;
+        sectionId = reachable && isDocumentSectionId(id) && !duplicates.has(id) && outlineHeadingTitle(text) ? id : undefined;
+        if (!withinOneSection(text, sectionId)) return false;
+      } else if (documentSearchTextBlocks.has(node.type) || !node.content?.length) {
+        if (!withinOneSection(documentPlainText(node), sectionId)) return false;
+      } else {
+        if (node.type === 'callout' && typeof node.attrs?.title === 'string' && !withinOneSection(node.attrs.title, sectionId)) return false;
+        // A heading inside a folded block or column applies within that container.
+        // A hidden excerpt still contributes to the page's text index but cannot be a navigation target.
+        const childReachable = reachable && !(node.type === 'documentExcerpt' && node.attrs?.hidden === true);
+        if (!visit(node.content, childReachable ? sectionId : undefined, childReachable)) return false;
+      }
+    }
+    return true;
+  };
+  return visit(document.content.content ?? []) ? match : undefined;
 }
 
 function ancestorTitles(document: DocPage, byId: ReadonlyMap<string, DocPage>): string[] {
@@ -235,7 +300,8 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       }
       const space = document.projectId === null ? '팀 공통' : spaces.get(document.projectId) ?? '';
       const rank = rankMatch(query, title, labels, () => `${document.plainText} ${space}`);
-      if (rank !== null) matches.push({ kind: 'document', value: document, title, rank });
+      if (rank !== null) matches.push({ kind: 'document', value: document, title, rank,
+        bodyOnly: rank === 6 && !searchKey(space).includes(query) });
     }
   }
 
@@ -247,10 +313,13 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
   const page = Math.min(pageCount, Math.max(1, Number.isSafeInteger(filters.page) ? filters.page : 1));
   const visible = matches.slice((page - 1) * pageSize, page * pageSize);
   const documentsById = new Map(visible.some(item => item.kind === 'document') ? data.documents.map(doc => [doc.id, doc]) : []);
-  const items = visible.map((item): WorkspaceSearchResult => item.kind === 'issue'
-    ? { kind: 'issue', issue: item.value, excerpt: excerptOf(item.value.description, query),
+  const items = visible.map((item): WorkspaceSearchResult => {
+    if (item.kind === 'issue') return { kind: 'issue', issue: item.value, excerpt: excerptOf(item.value.description, query),
       ...(item.matchedAliases.length ? { matchedAliases: item.matchedAliases } : {}),
-      ...(item.matchedGitlab ? { matchedGitlab: item.matchedGitlab } : {}) }
-    : { kind: 'document', document: item.value, parentTitles: ancestorTitles(item.value, documentsById), excerpt: excerptOf(item.value.plainText, query) });
+      ...(item.matchedGitlab ? { matchedGitlab: item.matchedGitlab } : {}) };
+    const section = item.bodyOnly ? documentSearchSection(item.value, value => searchKey(value).includes(query)) : undefined;
+    return { kind: 'document', document: item.value, parentTitles: ancestorTitles(item.value, documentsById),
+      excerpt: excerptOf(section?.text ?? item.value.plainText, query), ...(section ? { sectionId: section.sectionId } : {}) };
+  });
   return { items, total, page, pageCount };
 }

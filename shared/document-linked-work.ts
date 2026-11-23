@@ -1,9 +1,11 @@
+import { documentNodes } from './document-references.js';
 import { issueDeadline } from './my-work.js';
 import type { Issue, ResourceLink, WorkflowStatus, WorkspaceSnapshot } from './types.js';
 import { statusMeta } from './workflow-helpers.js';
 
 export type DocumentLinkedWorkItem = {
-  link: ResourceLink;
+  link?: ResourceLink;
+  referenceCount: number;
   issue: Issue;
   projectName: string | null;
   assigneeName: string | null;
@@ -12,7 +14,7 @@ export type DocumentLinkedWorkItem = {
   closed: boolean;
 };
 
-type DocumentLinkedWorkData = Pick<WorkspaceSnapshot, 'issues' | 'projects' | 'users' | 'workflows' | 'resourceLinks'>;
+type DocumentLinkedWorkData = Pick<WorkspaceSnapshot, 'documents' | 'issues' | 'projects' | 'users' | 'workflows' | 'resourceLinks'>;
 const issueKeys = new Intl.Collator('ko', { numeric: true });
 
 function compareRows(left: DocumentLinkedWorkItem, right: DocumentLinkedWorkItem): number {
@@ -35,18 +37,32 @@ export function buildDocumentLinkedWork(data: DocumentLinkedWorkData, documentId
   const assigneeNames = new Map(data.users.map(user => [user.id, user.name]));
   const rows: DocumentLinkedWorkItem[] = [];
   const counts = { open: 0, closed: 0, evidence: 0 };
+  const links = new Map<string, ResourceLink>();
+  const references = new Map<string, number>();
+  const document = data.documents.find(page => page.id === documentId);
 
   for (const link of data.resourceLinks) {
-    if (link.documentId !== documentId) continue;
-    const issue = issues.get(link.issueId);
+    if (link.documentId === documentId) links.set(link.issueId, link);
+  }
+  if (document) {
+    for (const node of documentNodes(document.content)) {
+      const issueId = node.attrs?.issueId;
+      if (node.type !== 'issueReference' || typeof issueId !== 'string' || !issueId) continue;
+      references.set(issueId, (references.get(issueId) ?? 0) + 1);
+    }
+  }
+
+  for (const issueId of new Set([...links.keys(), ...references.keys()])) {
+    const issue = issues.get(issueId);
     if (!issue) continue;
 
+    const link = links.get(issueId);
     const status = statusMeta(data, issue.projectId, issue.status);
     const closed = status.category === 'done' || status.category === 'cancelled';
     counts[closed ? 'closed' : 'open']++;
-    if (link.documentSource) counts.evidence++;
+    if (link?.documentSource) counts.evidence++;
     rows.push({
-      link, issue, status, closed, deadline: issueDeadline(issue),
+      link, referenceCount: references.get(issueId) ?? 0, issue, status, closed, deadline: issueDeadline(issue),
       projectName: projectNames.get(issue.projectId) ?? null,
       assigneeName: issue.assigneeId ? assigneeNames.get(issue.assigneeId) ?? null : null,
     });

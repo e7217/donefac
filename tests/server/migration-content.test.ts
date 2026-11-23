@@ -41,6 +41,30 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
 const storageTask = (id: number, checked: boolean, body: string) => `<ac:task><ac:task-id>${id}</ac:task-id>` +
   `<ac:task-status>${checked ? 'complete' : 'incomplete'}</ac:task-status><ac:task-body>${body}</ac:task-body></ac:task>`;
 
+test('Confluence inline comment markers preserve body text, inline marks and links in their original blocks', () => {
+  const marked = '<ac:inline-comment-marker ac:ref="source-comment-selection-17">' +
+    '<strong>검토한 <em>결정</em></strong><ac:inline-comment-marker ac:ref="overlap-7"> 항목</ac:inline-comment-marker>' +
+    '</ac:inline-comment-marker>';
+  const xml = `<h2>릴리스 검토</h2><p>이번에 ${marked} 뒤쪽을 확인합니다.</p>` +
+    '<table><tr><td><ac:inline-comment-marker ac:ref="cell-1">' +
+    '<a href="https://example.test/guide">검토 지침</a></ac:inline-comment-marker> <em>참조</em></td></tr></table>';
+  for (const kind of ['page', 'revision'] as const) {
+    const record = { ...source('confluence-storage', xml), kind };
+    const result = convertLegacyContent(record, { ...resolver(), sectionLinks: { documentId: 'local-doc' } });
+    canonical(result);
+    assert.deepEqual(result.content.content?.map(node => node.type), ['heading', 'paragraph', 'table']);
+    assert.ok(result.sectionTargets?.get('릴리스 검토'));
+    assert.match(result.plainText, /이번에 검토한 결정 항목 뒤쪽을 확인합니다\./u);
+    assert.match(result.plainText, /검토 지침 참조/u);
+    assert.doesNotMatch(result.plainText, /ac:inline-comment-marker|source-comment-selection-17/u);
+    const leaves = nodes(result.content, 'text');
+    assert.deepEqual(leaves.find(node => node.text === '결정')?.marks?.map(mark => mark.type).sort(), ['bold', 'italic']);
+    assert.equal(leaves.find(node => node.text === '검토 지침')?.marks?.find(mark => mark.type === 'link')?.attrs?.href, 'https://example.test/guide');
+    assert.equal(result.diagnostics.filter(item => item.code === 'INLINE_COMMENT_ANCHOR_ARCHIVED').length, 1);
+    assert.equal(record.text, xml);
+  }
+});
+
 test('Confluence checklist assignees and valid dates stay readable inside editable task items', () => {
   const xml = '<h2>배포 절차</h2><p>체크리스트 바로 앞 설명</p><ac:task-list>' +
     storageTask(1, false, '<ac:link><ri:user ri:userkey="release-reviewer-key"/></ac:link> ' +

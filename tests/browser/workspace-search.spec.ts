@@ -158,6 +158,84 @@ test('360px 검색에서 업무·공통 문서를 함께 찾고 검색 페이지
   }
 });
 
+test('360px 통합 검색과 빠른 검색에서 다른 프로젝트 문서의 일치한 절을 연다', async ({ page, request }) => {
+  const f = await fixture(request);
+  const term = `본문검색-${f.token}`;
+  const title = `장비 검토 문서 ${f.token}`;
+  const headingTitle = '점검 절차';
+  const sectionId = `search-target-${f.token}`;
+  const nodeText = (text: string): RichContent => ({ type: 'text', text });
+  const titleNode = (id: string): RichContent => ({
+    type: 'heading', attrs: { level: 2, sectionId: id }, content: [nodeText(headingTitle)],
+  });
+  try {
+    const document = await f.document(f.second.id, title, { content: {
+      type: 'doc', content: [
+        titleNode(`search-other-${f.token}`),
+        { type: 'paragraph', content: [nodeText('처음 만나는 점검 절차입니다.')] },
+        { type: 'details', content: [
+          { type: 'detailsSummary', content: [nodeText('장비별 상세 점검')] },
+          { type: 'detailsContent', content: [
+            titleNode(sectionId),
+            { type: 'paragraph', content: [nodeText(`이 절의 ${term} 실측 결과를 ${title}에서 검토합니다.`)] },
+          ] },
+        ] },
+      ],
+    } });
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    const path = `#/${f.first.id}/search`;
+    const query = { q: term, type: 'document', space: `project:${f.second.id}` };
+    const targetPath = `#/${f.second.id}/documents/${document.id}`;
+    const targetRoute = { path: targetPath, query: { section: sectionId } };
+    const result = search(page);
+    const editor = page.locator('.docs-prose');
+    const heading = editor.locator(`[data-document-section-id="${sectionId}"]`);
+    const fold = heading.locator('xpath=ancestor::details[1]');
+    const openFromQuickSearch = async () => {
+      await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+      const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+      await quick.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(term);
+      await quick.getByRole('button', { name: title, exact: true }).click();
+      await expect(quick).toBeHidden();
+    };
+    async function expectMatchedSection() {
+      await expect.poll(() => route(page)).toEqual(targetRoute);
+      await expect(fold).toHaveJSProperty('open', true);
+      await expect(heading).toBeFocused();
+      await expect(heading).toBeInViewport();
+    }
+
+    await page.goto(`/${path}?${new URLSearchParams(query)}`);
+    await expect(result.document(document)).toContainText(term);
+    await result.document(document).click();
+    await expectMatchedSection();
+    await page.reload();
+    await expectMatchedSection();
+    await page.goBack();
+    await expect.poll(() => route(page)).toEqual({ path, query });
+    await expect(result.document(document)).toBeVisible();
+
+    await openFromQuickSearch();
+    await expectMatchedSection();
+    await page.goBack();
+    await expect.poll(() => route(page)).toEqual({ path, query });
+    await result.term.fill(title);
+    await result.submit.click();
+    await expect.poll(() => route(page)).toEqual({ path, query: { ...query, q: title } });
+    await result.document(document).click();
+    await expect.poll(() => route(page)).toEqual({ path: targetPath, query: {} });
+
+    await fold.locator(':scope > summary').click();
+    await expect(fold).toHaveJSProperty('open', false);
+    await expect(heading).toBeHidden();
+    await openFromQuickSearch();
+    await expectMatchedSection();
+  } finally {
+    await f.close();
+  }
+});
+
 test('GitLab MR 주소로 빠른 검색에서 통합 검색까지 연결 업무를 찾고 안전한 검색 주소를 공유한다', async ({ page, request }) => {
   const f = await fixture(request);
   try {

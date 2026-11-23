@@ -17,6 +17,7 @@ import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/doc
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
@@ -1968,6 +1969,70 @@ function labelListExport(target: MigrationFixture, instance: string, name: strin
   const bytes = Buffer.from(`<hibernate-generic>${root}${records}</hibernate-generic>`);
   return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
 }
+
+test('Confluence inline comment text survives actual import, version refresh, and restore with its raw anchor retained', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-confluence-inline-review';
+  const marker = (word: string, id: string) => `<ac:inline-comment-marker ac:ref="${id}"><strong>${word}</strong></ac:inline-comment-marker>`;
+  const pages = (version: number, outcome: string) => [100, 101].map(id => ({
+    id: String(id), title: `원본 리뷰 ${id}`, version,
+    body: `<h2>검토 결과</h2><p>배포 승인 ${marker(outcome, `selection-${id}`)} 뒤 확인</p>`,
+  }));
+  const v1 = pages(1, '이관할 핵심 문장');
+  const initial = await labelListExport(f, instance, 'inline-comments-v1', v1);
+  const plan = await f.preview(await f.configuration(initial, 'MARKER'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.ok(plan.notices.some(item => item.code === 'INLINE_COMMENT_ANCHOR_ARCHIVED'));
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  const readDocs = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.filter(document => document.projectId === projectId);
+  const original = await readDocs();
+  assert.equal(original.length, 2);
+  for (const document of original) {
+    assert.match(document.plainText, /배포 승인 이관할 핵심 문장 뒤 확인/u);
+    assert.doesNotMatch(document.plainText, /inline-comment-marker|selection-10/u);
+    assert.equal(document.content.content?.[1].content?.[1].marks?.[0]?.type, 'bold');
+  }
+  const edited = original.find(document => document.title === v1[1].title)!;
+  const editedBody = normalizeDocumentContent({ type: 'doc', content: [...(edited.content.content ?? []), {
+    type: 'paragraph', content: [{ type: 'text', text: '팀에서 추가한 검토' }],
+  }] });
+  const saved = await f.call<DocPage>(`/documents/${edited.id}`, 'PATCH', {
+    expectedVersion: edited.version, contentSchemaVersion: documentContentSchemaVersion(edited.content), content: editedBody.content,
+  });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+
+  const v2 = pages(2, '갱신한 승인 결과');
+  const next = await labelListExport(f, instance, 'inline-comments-v2', v2);
+  const refresh = await f.preview({ ...await f.configuration(next), appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(refresh.canApply, true, JSON.stringify(refresh.notices));
+  const decisions = new Map(refresh.documentRefresh?.map(row => [row.sourceId, row.fields.find(field => field.field === 'content')?.decision]));
+  assert.deepEqual([...decisions].sort(), [['100', 'apply'], ['101', 'conflict']]);
+  const reapplied = await f.apply(refresh);
+  assert.equal(reapplied.status, 201, JSON.stringify(reapplied.data));
+  const refreshed = await readDocs();
+  const updated = refreshed.find(document => document.title === v2[0].title)!;
+  assert.match(updated.plainText, /배포 승인 갱신한 승인 결과 뒤 확인/u);
+  assert.deepEqual(refreshed.find(document => document.id === edited.id)?.content, saved.data.content);
+
+  const { data: backup } = await f.call<WorkspaceSnapshot & { sourceRecords: SourceRecordArchive[] }>('/export');
+  for (const input of [...v1, ...v2]) {
+    assert.ok(backup.sourceRecords.some(row => row.record.sourceId === input.id && row.record.text === input.body));
+  }
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  const restoredDocuments = await readDocs();
+  for (const document of refreshed) assert.deepEqual(restoredDocuments.find(row => row.id === document.id)?.content, document.content);
+
+  const current = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const results = searchWorkspace(current, { ...DEFAULT_WORKSPACE_SEARCH_FILTERS, scope: `project:${projectId}`, query: '갱신한 승인 결과' });
+  const sectionId = updated.content.content?.[0].attrs?.sectionId;
+  assert.ok(sectionId);
+  assert.deepEqual(results.items, [{ kind: 'document', document: current.documents.find(document => document.id === updated.id),
+    parentTitles: [], excerpt: '배포 승인 갱신한 승인 결과 뒤 확인', sectionId }]);
+});
 
 test('Confluence retained title and body changes survive partial receipts and portable restore without remapping accepted raw content', async t => {
   const [source, restored, older] = await Promise.all([fixture(), fixture(), fixture()]);

@@ -1,12 +1,14 @@
 import { Node, mergeAttributes } from '@tiptap/core';
-import { DOCUMENT_CHILD_LIST_DEFAULTS, documentChildListDescription, normalizeDocumentChildListOptions } from './document-child-list.js';
-import { DOCUMENT_LABEL_LIST_DEFAULTS, documentLabelListDescription, normalizeDocumentLabelListOptions } from './document-label-list.js';
+import { DOCUMENT_CHILD_LIST_DEFAULTS, normalizeDocumentChildListOptions } from './document-child-list.js';
+import { DOCUMENT_LABEL_LIST_DEFAULTS, normalizeDocumentLabelListOptions } from './document-label-list.js';
 import {
-  DOCUMENT_PROPERTIES_DEFAULTS, DOCUMENT_PROPERTY_REPORT_DEFAULTS, documentPropertyReportDescription,
-  normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions,
+  DOCUMENT_PROPERTIES_DEFAULTS, DOCUMENT_PROPERTY_REPORT_DEFAULTS, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions,
 } from './document-properties.js';
-import { documentNodes } from './document-references.js';
+import { documentNodes, isDocumentReferenceNode } from './document-references.js';
+import type { IssueSummaryGroupBy } from './document-plain-text.js';
 import type { ContentReference, RichContent } from './types.js';
+
+export { documentPlainText, ISSUE_SUMMARY_GROUP_BY, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, type IssueSummaryGroupBy } from './document-plain-text.js';
 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
@@ -43,11 +45,6 @@ export interface DocumentTocOptions {
   layout: DocumentTocLayout;
 }
 export const DOCUMENT_TOC_DEFAULTS = { minLevel: 1, maxLevel: 3, layout: 'list' } as const satisfies DocumentTocOptions;
-export const ISSUE_SUMMARY_GROUP_BY = ['status', 'assignee', 'priority'] as const;
-export type IssueSummaryGroupBy = typeof ISSUE_SUMMARY_GROUP_BY[number];
-export const ISSUE_SUMMARY_GROUP_LABELS: Record<IssueSummaryGroupBy, string> = {
-  status: '상태', assignee: '담당자', priority: '우선순위',
-};
 export const MAX_CALLOUT_TITLE_LENGTH = 300;
 export const MAX_STATUS_BADGE_LABEL_LENGTH = 120;
 export const CALLOUT_VARIANTS = ['info', 'note', 'warning', 'tip', 'panel'] as const;
@@ -61,7 +58,6 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
   neutral: '기본', blue: '파랑', green: '초록', amber: '주황', red: '빨강', purple: '보라',
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
-const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'documentExcerptInclude']);
 
 type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
@@ -121,10 +117,6 @@ export interface DocumentIssueList {
 }
 
 export interface DocumentIssueSummary extends DocumentIssueList { groupBy: IssueSummaryGroupBy }
-
-export function isIssueSummaryGroupBy(value: unknown): value is IssueSummaryGroupBy {
-  return ISSUE_SUMMARY_GROUP_BY.some(group => group === value);
-}
 
 export function isCalloutVariant(value: unknown): value is CalloutVariant {
   return CALLOUT_VARIANTS.some(variant => variant === value);
@@ -516,7 +508,7 @@ export function contentReferences(content: RichContent): ContentReference[] {
       }
       continue;
     }
-    if (!referenceNodes.has(node.type)) continue;
+    if (!isDocumentReferenceNode(node.type)) continue;
     const type = node.type === 'issueReference' ? 'issue' : 'document';
     const id = node.attrs?.[type === 'issue' ? 'issueId' : 'documentId'];
     if (typeof id !== 'string' || !id) continue;
@@ -526,48 +518,4 @@ export function contentReferences(content: RichContent): ContentReference[] {
       label: typeof node.attrs?.label === 'string' ? node.attrs.label : '', ...(revisionId ? { revisionId } : {}) });
   }
   return references;
-}
-
-export function documentPlainText(node: RichContent): string {
-  if (node.type === 'text') return node.text || '';
-  if (node.type === 'hardBreak') return '\n';
-  if (node.type === 'statusBadge') return typeof node.attrs?.label === 'string' ? node.attrs.label : '';
-  if (node.type === 'documentLabelList') {
-    const options = normalizeDocumentLabelListOptions(node.attrs);
-    return options ? `[라벨별 문서 · ${documentLabelListDescription(options)}]` : '[라벨별 문서]';
-  }
-  if (node.type === 'documentChildList') {
-    const options = normalizeDocumentChildListOptions(node.attrs);
-    return options ? `[하위 문서 목록 · ${documentChildListDescription(options)}]` : '[하위 문서 목록]';
-  }
-  if (node.type === 'documentProperties') {
-    const options = normalizeDocumentPropertiesOptions(node.attrs);
-    if (!options || options.hidden) return '';
-    return [options.group, ...options.entries.map(({ name, value }) => `${name}\t${value}`)].filter(Boolean).join('\n');
-  }
-  if (node.type === 'documentPropertyReport') {
-    const options = normalizeDocumentPropertyReportOptions(node.attrs);
-    return options ? `[문서 속성 보고서 · ${documentPropertyReportDescription(options)}]` : '[문서 속성 보고서]';
-  }
-  if (referenceNodes.has(node.type)) {
-    const id = String(node.attrs?.[node.type === 'issueReference' ? 'issueId' : 'documentId'] || '');
-    const label = String(node.attrs?.label || id);
-    if (node.type === 'documentRevisionInclude') return `[문서 버전 포함: ${label} (${id} @ ${String(node.attrs?.revisionId || '')})]`;
-    if (node.type === 'documentExcerptInclude') return `[문서 발췌 포함: ${label} (${id})]`;
-    return `[${node.type === 'issueReference' ? '업무' : node.type === 'documentInclude' ? '문서 포함' : '문서'}: ${label} (${id})]`;
-  }
-  if (node.type === 'issueList' || node.type === 'issueSummary') {
-    const project = String(node.attrs?.projectId || '');
-    const view = node.attrs?.savedViewId ? ` / ${String(node.attrs.savedViewId)}` : '';
-    const group = isIssueSummaryGroupBy(node.attrs?.groupBy) ? node.attrs.groupBy : 'status';
-    const kind = node.type === 'issueSummary' ? `업무 현황 · ${ISSUE_SUMMARY_GROUP_LABELS[group]}별` : '업무 목록';
-    return `[${kind}: ${String(node.attrs?.label || project)} (${project}${view})]`;
-  }
-  if (node.type === 'image') return String(node.attrs?.alt || '');
-  const separator = node.type === 'tableRow' ? '\t' : ['paragraph', 'heading', 'codeBlock', 'detailsSummary'].includes(node.type) ? '' : '\n';
-  const text = (node.content || []).map(documentPlainText).join(separator);
-  if (node.type === 'callout' && typeof node.attrs?.title === 'string' && node.attrs.title) {
-    return text ? `${node.attrs.title}\n${text}` : node.attrs.title;
-  }
-  return text;
 }

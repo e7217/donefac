@@ -10,8 +10,8 @@ import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflo
 import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
-import { documentLabelKey, documentSearchText, normalizeDocumentLabelKey } from '../shared/document-labels';
-import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
+import { normalizeDocumentLabelKey } from '../shared/document-labels';
+import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput, searchQuickDocuments, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
@@ -788,16 +788,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
   const openReleaseReadiness = (id: string) =>
     requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, blockerScope: { releaseId: id } });
-  const openDocument = (id: string) => {
+  const openDocument = (id: string, requestedSectionId?: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
     if (!document) return;
+    const targetSectionId = isDocumentSectionId(requestedSectionId) ? requestedSectionId : null;
     const current = acceptedRouteRef.current;
-    if (current?.view === 'documents' && current.documentId === id && current.issueId) {
+    if (!targetSectionId && current?.view === 'documents' && current.documentId === id && current.issueId) {
       closeIssuePanel(current.issueId);
       return;
     }
     const targetProject = document.projectId || projectId;
-    if (requestRoute({projectId:targetProject, view:'documents',documentId:id,issueId:null,
+    if (requestRoute({projectId:targetProject, view:'documents',documentId:id,issueId:null, sectionId:targetSectionId,
       documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null})) setSearchOpen(false);
   };
   const openNotification = async (notification: TeamNotification) => {
@@ -1094,7 +1095,8 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
 
-function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: FeatureProps & {
+function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: Pick<FeatureProps, 'data' | 'refresh' | 'openIssue'> & {
+  openDocument: (id: string, sectionId?: string) => void;
   onClose: () => void;
   onShowAll: (query: string) => void;
 }) {
@@ -1103,9 +1105,7 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
   const lookup = useAtlassianSearch(query, data, refresh, 150);
   const issues = searchQuickIssues(data, query, lookup.matches);
   const projectNames = new Map(data.projects.map(project => [project.id, project.name]));
-  const documentQuery = documentLabelKey(trimmed);
-  const docs = lookup.label ? data.documents.filter(doc => lookup.matches?.documentIds.has(doc.id)).slice(0, 8) :
-    documentQuery ? data.documents.filter(doc => documentSearchText(doc).includes(documentQuery)).slice(0, 8) : [];
+  const docs = searchQuickDocuments(data, query, lookup.matches);
   return <div className="modal-backdrop" onMouseDown={event => event.target === event.currentTarget && onClose()}>
     <div className="search-dialog" role="dialog" aria-modal="true" aria-label="통합 검색">
       <form className="search-input-wrap" onSubmit={event => {
@@ -1134,7 +1134,8 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
             <ChevronRight size={15} aria-hidden="true"/>
           </button>)}
           {docs.length > 0 && <div className="search-label">문서</div>}
-          {docs.map(doc => <button type="button" className="search-result" key={doc.id} onClick={() => openDocument(doc.id)}>
+          {docs.map(({ document: doc, sectionId }) => <button type="button" className="search-result" key={doc.id}
+            onClick={() => openDocument(doc.id, sectionId)}>
             <BookOpen size={17} aria-hidden="true"/>
             <span className="search-result-issue-content">
               <span>{doc.title}</span>

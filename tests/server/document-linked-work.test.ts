@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { buildDocumentLinkedWork } from '../../shared/document-linked-work.js';
-import type { Issue, ResourceLink, WorkflowStatus } from '../../shared/types.js';
+import type { DocPage, Issue, ResourceLink, RichContent, WorkflowStatus } from '../../shared/types.js';
 import { defaultWorkflow } from '../../shared/workflow-helpers.js';
 
 const documentId = 'meeting';
@@ -29,6 +29,13 @@ function link(issueId: string, fields: Partial<ResourceLink> = {}): ResourceLink
   return { id: `link-${issueId}`, documentId, issueId, kind: '연관 업무', ...fields };
 }
 
+function page(id: string, content: RichContent[]): DocPage {
+  return {
+    id, projectId: null, parentId: null, title: id, content: { type: 'doc', content }, plainText: '', icon: '📄',
+    authorId: assignee.id, status: 'draft', version: 1, createdAt, updatedAt: createdAt,
+  };
+}
+
 test('keeps only active work linked to the document and reads evidence independently of link kind', () => {
   const open = issue('TEAM-1', { dueDate: '2026-11-29', endDate: '2026-11-18' });
   const done = issue('TEAM-2', { status: 'released', assigneeId: null });
@@ -38,7 +45,7 @@ test('keeps only active work linked to the document and reads evidence independe
   const existing = link(done.id, { documentSource: pinnedSource });
   const cancelledLink = link(cancelled.id, { kind: '후속 업무', documentSource: pinnedSource });
   const data = {
-    issues: [done, other, cancelled, open], projects: [project], users: [assignee], workflows,
+    documents: [page(documentId, [])], issues: [done, other, cancelled, open], projects: [project], users: [assignee], workflows,
     resourceLinks: [existing, link(other.id, { documentId: 'another-document', documentSource: pinnedSource }),
       link('deleted-issue', { documentSource: pinnedSource }), followUp, cancelledLink],
   };
@@ -64,7 +71,8 @@ test('orders open work before closed work and breaks deadline ties by natural ke
     issue('TEAM-8', { dueDate: '2026-12-01' }),
     issue('TEAM-9', { dueDate: '2026-11-01', status: 'released' }),
   ];
-  const data = { issues, projects: [project], users: [assignee], workflows, resourceLinks: issues.map(item => link(item.id)) };
+  const data = { documents: [page(documentId, [])], issues, projects: [project], users: [assignee], workflows,
+    resourceLinks: issues.map(item => link(item.id)) };
   const original = structuredClone(data);
   const expected = ['issue-TEAM-8', 'issue-a', 'issue-z', 'issue-TEAM-10', 'issue-TEAM-1', 'issue-TEAM-9'];
   const forward = buildDocumentLinkedWork(data, documentId);
@@ -74,4 +82,30 @@ test('orders open work before closed work and breaks deadline ties by natural ke
   assert.equal(forward.rows[4].projectName, null);
   assert.equal(forward.rows[4].assigneeName, null);
   assert.deepEqual(data, original);
+});
+
+test('merges only direct saved body references with real links and counts each active issue once', () => {
+  const linked = issue('TEAM-1', { dueDate: '2026-11-28' });
+  const referenced = issue('TEAM-2', { endDate: '2026-11-27' });
+  const closed = issue('TEAM-3', { status: 'released' });
+  const included = issue('TEAM-4');
+  const reference = (issueId: string): RichContent => ({ type: 'issueReference', attrs: { issueId, label: '이전 제목' } });
+  const nestedReference = { type: 'blockquote', content: [reference(linked.id)] };
+  const realLink = link(linked.id, { documentSource: pinnedSource });
+  const data = {
+    documents: [page(documentId, [
+      reference(linked.id), nestedReference, reference(referenced.id), reference(closed.id), reference('missing'),
+      { type: 'documentInclude', attrs: { documentId: 'other' } },
+      { type: 'documentRevisionInclude', attrs: { documentId: 'other', revisionId: 'older-revision' } },
+      { type: 'issueList', attrs: { projectId: project.id, savedViewId: 'selected' } },
+    ]), page('other', [reference(included.id)])],
+    issues: [linked, referenced, closed, included], projects: [project], users: [assignee], workflows,
+    resourceLinks: [realLink, link(included.id, { documentId: 'other' })],
+  };
+  const result = buildDocumentLinkedWork(data, documentId);
+  assert.deepEqual(result.counts, { open: 2, closed: 1, evidence: 1 });
+  assert.deepEqual(result.rows.map(({ issue, referenceCount, link }) => [issue.id, referenceCount, link]),
+    [[referenced.id, 1, undefined], [linked.id, 2, realLink], [closed.id, 1, undefined]]);
+  assert.equal(result.rows[0].assigneeName, assignee.name);
+  assert.deepEqual(result.rows[0].deadline, { value: referenced.endDate, source: 'endDate' });
 });

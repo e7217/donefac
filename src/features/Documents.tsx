@@ -1505,7 +1505,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   const references = draft ? contentReferences(draft.content) : [];
   const outgoingDocuments = [...new Map(references.filter(reference => reference.type === 'document').map(reference => [JSON.stringify([reference.id, reference.kind, reference.revisionId]), reference])).values()];
-  const inlineIssues = [...new Map(references.filter(reference => reference.type === 'issue').map(reference => [reference.id, reference])).values()];
+  const savedContent = selectedPage?.content;
+  const savedIssueReferences = useMemo(() => savedContent
+    ? contentReferences(savedContent).filter(reference => reference.type === 'issue') : [], [savedContent]);
+  const issuesById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
+  const savedIssueReferenceIds = new Set(savedIssueReferences.map(reference => reference.id));
+  const draftIssueReferences = draft?.id === selectedPage?.id
+    ? references.filter(reference => reference.type === 'issue' && !savedIssueReferenceIds.has(reference.id)) : [];
+  const unresolvedIssueReferences = savedIssueReferences.filter(reference => !issuesById.has(reference.id));
+  const supplementalIssueReferences = [...new Map([...draftIssueReferences, ...unresolvedIssueReferences]
+    .map(reference => [reference.id, reference])).values()];
   const backlinks = data.documents.filter(page => page.id !== draft?.id && contentReferences(page.content).some(reference => reference.type === 'document' && reference.id === draft?.id));
   const candidateIssues = useMemo(() => {
     const linkedIssueIds = new Set(data.resourceLinks.filter(link => link.documentId === documentId).map(link => link.issueId));
@@ -1928,7 +1937,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </DocumentLinkedWork>
               <ResourceLinkPicker key={`${actorId}:${selectedPage.id}`} kind="issue" items={candidateIssues} projects={data.projects}
                 busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} />
-              <div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={JSON.stringify([reference.id, reference.kind, reference.revisionId])} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.revisionId ? '고정 버전 포함' : reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && (reference.revisionId ? ' · 원본 열기 불가' : ' · 찾을 수 없음')}</small><strong>{(reference.revisionId ? reference.label : page?.title) || reference.label || reference.id}</strong></button>; })}</div><div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div><div className="docs-reference-list"><h3>본문의 업무 참조</h3>{!inlineIssues.length && <p>본문에 삽입한 업무 참조가 없습니다.</p>}{inlineIssues.map(reference => { const issue = data.issues.find(value => value.id === reference.id); return <button key={reference.id} disabled={!issue} onClick={() => issue && openIssue(issue.id)}><small>{issue?.key || '찾을 수 없는 업무'}</small><strong>{issue?.title || reference.label || reference.id}</strong></button>; })}</div><div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div></>}
+              <div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={JSON.stringify([reference.id, reference.kind, reference.revisionId])} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.revisionId ? '고정 버전 포함' : reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && (reference.revisionId ? ' · 원본 열기 불가' : ' · 찾을 수 없음')}</small><strong>{(reference.revisionId ? reference.label : page?.title) || reference.label || reference.id}</strong></button>; })}</div>
+              <div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div>
+              {supplementalIssueReferences.length > 0 && <div className="docs-reference-list">
+                <h3>본문의 업무 참조</h3>
+                {supplementalIssueReferences.map(reference => {
+                  const issue = issuesById.get(reference.id);
+                  const pending = !savedIssueReferenceIds.has(reference.id);
+                  return <button key={reference.id} disabled={!issue} onClick={() => issue && openIssue(issue.id)}>
+                    <small>{pending && '저장 전 · '}{issue?.key || '찾을 수 없는 업무'}</small>
+                    <strong>{issue?.title || reference.label || reference.id}</strong>
+                  </button>;
+                })}
+              </div>}
+              <div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div>
+            </>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>파일을 첨부하고 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
           </div>

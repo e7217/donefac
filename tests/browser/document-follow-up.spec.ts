@@ -524,7 +524,7 @@ test('공동 편집에서 문장이 바뀌면 기존 업무에 연결하기 전�
   }
 });
 
-test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문을 함께 확인한다', async ({ page, request }) => {
+test('360px 문서에서 직접 연결과 본문의 업무 상태와 결정 당시 원문을 함께 확인한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const snapshot = await workspace(request);
   const [documentProject, issueProject] = snapshot.projects;
@@ -549,7 +549,11 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
   try {
     const decisionIssue = await createIssue('결정 근거 연결 업무', { assigneeId: initialAssignee.id, status: 'in_progress', dueDate: '2027-05-08', endDate: '2027-05-13' });
     const ordinaryIssue = await createIssue('계획 날짜만 있는 일반 연결', { endDate: '2027-05-24' });
-    const bodyOnlyIssue = await createIssue('본문에서만 참조한 업무', { projectId: documentProject.id });
+    const bodyOnlyIssue = await createIssue('본문에서만 참조한 업무', {
+      projectId: documentProject.id, assigneeId: nextAssignee.id, status: 'in_progress', dueDate: '2027-05-30',
+    });
+    const draftOnlyIssue = await createIssue('저장 전 본문 참조', { projectId: documentProject.id });
+    const removedIssue = await createIssue('열 수 없는 이전 업무', { projectId: documentProject.id });
     document = await createDecision(request, null, originalTitle, { type: 'doc', content: [
       { type: 'paragraph', content: [{ type: 'text', text: originalText }] },
       { type: 'issueReference', attrs: { issueId: bodyOnlyIssue.id, label: bodyOnlyIssue.title } },
@@ -578,9 +582,17 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
       content: { type: 'doc', content: [
         { type: 'paragraph', content: [{ type: 'text', text: latestText }] },
         { type: 'issueReference', attrs: { issueId: bodyOnlyIssue.id, label: bodyOnlyIssue.title } },
+        { type: 'issueReference', attrs: { issueId: decisionIssue.id, label: decisionIssue.title } },
+        { type: 'issueReference', attrs: { issueId: decisionIssue.id, label: decisionIssue.title } },
+        { type: 'issueReference', attrs: { issueId: removedIssue.id, label: removedIssue.title } },
       ] },
     } });
     expect(edited.ok(), await edited.text()).toBe(true);
+    const removed = await request.delete(`/api/issues/${removedIssue.id}?expectedVersion=${removedIssue.version}`);
+    expect(removed.ok(), await removed.text()).toBe(true);
+    const { trashEntryId } = await removed.json() as { trashEntryId: string };
+    const purged = await request.delete(`/api/trash/${trashEntryId}`);
+    expect(purged.ok(), await purged.text()).toBe(true);
 
     const revisionPrefix = `/api/documents/${documentId}/include-revisions/`;
     const revisionPath = `${revisionPrefix}${decisionLink.documentSource!.revisionId}`;
@@ -594,6 +606,12 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
     const draftTitle = `${originalTitle} 편집 중`;
     const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
     await title.fill(draftTitle);
+    await page.locator('.docs-prose > p').filter({ hasText: latestText }).click();
+    await page.getByRole('button', { name: '업무 참조 삽입', exact: true }).click();
+    const referenceChooser = page.getByRole('dialog', { name: '업무 참조 삽입', exact: true });
+    await referenceChooser.getByRole('textbox', { name: '참조할 항목 검색', exact: true }).fill(draftOnlyIssue.key);
+    await referenceChooser.getByRole('button', { name: new RegExp(draftOnlyIssue.title) }).click();
+    await expect(referenceChooser).toHaveCount(0);
     await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
     await page.getByRole('button', { name: '연결', exact: true }).click();
     const panel = page.getByRole('region', { name: '연결된 업무', exact: true });
@@ -601,15 +619,24 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
     const card = (issue: Issue) => cards.filter({ hasText: issue.title });
     const filters = panel.getByLabel('연결된 업무 상태', { exact: true });
     const onlyEvidence = panel.getByRole('checkbox', { name: '결정 근거가 있는 업무만', exact: true });
-    await expect(cards).toHaveCount(3);
+    await expect(cards).toHaveCount(4);
     await expect(cards.nth(0)).toContainText(decisionIssue.title);
     await expect(cards.nth(1)).toContainText(ordinaryIssue.title);
-    await expect(cards.nth(2)).toContainText(closedIssue.title);
-    await expect(card(bodyOnlyIssue)).toHaveCount(0);
+    await expect(cards.nth(2)).toContainText(bodyOnlyIssue.title);
+    await expect(cards.nth(3)).toContainText(closedIssue.title);
+    await expect(card(bodyOnlyIssue)).toContainText('본문 참조 1곳');
+    await expect(card(bodyOnlyIssue)).toContainText('진행 중');
+    await expect(card(bodyOnlyIssue)).toContainText(nextAssignee.name);
+    await expect(card(bodyOnlyIssue).locator('time')).toHaveAttribute('datetime', bodyOnlyIssue.dueDate!);
+    await expect(card(decisionIssue)).toHaveCount(1);
+    await expect(card(decisionIssue)).toContainText('본문 참조 2곳');
+    await expect(card(draftOnlyIssue)).toHaveCount(0);
     const inlineReferences = page.getByRole('heading', { name: '본문의 업무 참조', exact: true }).locator('..');
-    await expect(inlineReferences.getByRole('button', { name: new RegExp(bodyOnlyIssue.title) })).toBeVisible();
-    await expect(filters.getByRole('option', { name: '전체 3개', exact: true })).toHaveCount(1);
-    await expect(filters.getByRole('option', { name: '미완료 2개', exact: true })).toHaveCount(1);
+    await expect(inlineReferences.getByRole('button')).toHaveCount(2);
+    await expect(inlineReferences.getByRole('button', { name: new RegExp(draftOnlyIssue.title) })).toContainText('저장 전');
+    await expect(inlineReferences.getByRole('button', { name: new RegExp(removedIssue.title) })).toBeDisabled();
+    await expect(filters.getByRole('option', { name: '전체 4개', exact: true })).toHaveCount(1);
+    await expect(filters.getByRole('option', { name: '미완료 3개', exact: true })).toHaveCount(1);
     await expect(filters.getByRole('option', { name: '종료 1개', exact: true })).toHaveCount(1);
     await expect(card(decisionIssue)).toContainText(issueProject.name);
     await expect(card(decisionIssue)).toContainText(initialAssignee.name);
@@ -621,8 +648,15 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
     await expect(card(closedIssue)).toContainText('후속 업무');
     await expect(card(closedIssue)).toContainText('기한 없음');
 
+    await card(bodyOnlyIssue).click();
+    const referenceTicket = page.getByRole('dialog', { name: bodyOnlyIssue.title, exact: true });
+    await expect(referenceTicket).toBeVisible();
+    await referenceTicket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(card(bodyOnlyIssue)).toBeFocused();
+    await expect(title).toHaveValue(draftTitle);
+
     await filters.selectOption('open');
-    await expect(cards).toHaveCount(2);
+    await expect(cards).toHaveCount(3);
     await expect(card(closedIssue)).toHaveCount(0);
     await filters.selectOption('closed');
     await expect(cards).toHaveCount(1);
@@ -670,9 +704,14 @@ test('360px 문서에서 연결 업무의 최신 상태와 결정 당시 원문�
     await onlyEvidence.uncheck();
     await expect(cards).toHaveCount(2);
     await expect(card(closedIssue)).toBeVisible();
+    await expect(inlineReferences.getByRole('button', { name: new RegExp(draftOnlyIssue.title) })).toContainText('저장 전');
     await expect(title).toHaveValue(draftTitle);
     await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
-    expect((await workspace(request)).documents.find(item => item.id === documentId)?.title).toBe(originalTitle);
+    const persisted = await workspace(request);
+    expect(persisted.documents.find(item => item.id === documentId)?.title).toBe(originalTitle);
+    expect(persisted.resourceLinks.filter(item => item.documentId === documentId).map(item => item.issueId).sort()).toEqual(
+      [decisionIssue.id, ordinaryIssue.id, closedIssue.id].sort(),
+    );
   } finally {
     const resources = [
       ...(document ? [`documents/${document.id}`] : []),

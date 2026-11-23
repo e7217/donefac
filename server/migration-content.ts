@@ -412,7 +412,7 @@ class Converter {
   xmlParts(children: (XmlNode | string)[], depth: number, blockLayout = false): RichContent[] {
     const isBlock = (value: XmlNode | string | undefined) => {
       if (!value || typeof value === 'string') return false;
-      if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt', 'span', 'br', 'time', 'ri:user'].includes(value.name)) return false;
+      if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt', 'span', 'br', 'time', 'ri:user', 'ac:inline-comment-marker'].includes(value.name)) return false;
       if (['ac:structured-macro', 'ac:macro'].includes(value.name) && value.attrs['ac:name'] === 'status') return false;
       if (value.name === 'ac:link' && value.children.some(child => typeof child !== 'string' && ['ri:attachment', 'ri:user'].includes(child.name))) return false;
       return true;
@@ -432,6 +432,10 @@ class Converter {
       case 'migration-root': case 'div': case 'ac:rich-text-body': return this.xmlParts(node.children, depth, true);
       case 'ac:layout': return this.richDocument ? this.columnLayout(node, depth) : this.fallback(`XML ${type}`, serializeXml(node));
       case 'p': return flow(children());
+      case 'ac:inline-comment-marker': {
+        this.warn('INLINE_COMMENT_ANCHOR_ARCHIVED', 'Confluence 문장 댓글의 위치 정보는 보존 원문에서 확인할 수 있습니다. 댓글이 붙은 본문 텍스트와 서식을 옮겼습니다.');
+        return children();
+      }
       case 'span': {
         let nodes = children(); const style = node.attrs.style || '';
         if (/text-decoration\s*:\s*line-through/i.test(style)) nodes = this.marked(nodes, { type: 'strike' });

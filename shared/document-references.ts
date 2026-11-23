@@ -1,5 +1,11 @@
 import type { DocPage, RichContent } from './types.js';
 
+const referenceNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'documentRevisionInclude', 'documentExcerptInclude']);
+
+export function isDocumentReferenceNode(type: string): boolean {
+  return referenceNodes.has(type);
+}
+
 export function* documentNodes(content: RichContent): Generator<RichContent> {
   const pending = [content];
   while (pending.length) {
