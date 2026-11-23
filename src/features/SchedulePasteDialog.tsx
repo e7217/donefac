@@ -9,6 +9,7 @@ import type {
   ScheduleBulkChainInput, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
   SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
+import { issueSearchAliasLabel } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
 import { GanttBulkChainFields, GanttBulkLinkFields, type BulkLinkDraft, type BulkLinkRule } from './GanttBulkLinksDialog';
@@ -559,6 +560,7 @@ function ProjectScheduleEditDialog({
   const result = review?.result;
   const dependencyChanges = result?.dependencyChanges ?? [];
   const retainedDependencies = result?.retainedDependencies ?? [];
+  const keyMappings = result?.keyMappings ?? [];
   const rejected = latest?.result.errors.length ? latest.result : null;
   return (
     <div className="schedule-paste-overlay">
@@ -689,6 +691,7 @@ function ProjectScheduleEditDialog({
                 <p id="schedule-paste-help">
                   시작일, 종료일, 목표 마감일은 YYYY-MM-DD로 입력하세요. 날짜 칸에 <code>-</code>를 입력하면 삭제되고,
                   빈 칸은 기존 날짜를 유지합니다.
+                  업무 키와 선행 업무는 현재 키, Jira 원래 키 또는 이동 전 키로 입력하세요.
                   선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
                   {isTeamPaste && ' 선후행 업무는 같은 프로젝트에 속해야 합니다.'}
                 </p>
@@ -841,6 +844,8 @@ function ProjectScheduleEditDialog({
                   {directLinks ? '추가할 선후행 연결이 없습니다.' : bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
                 </p>
               )}
+              {keyMappings.length > 0 && <ScheduleKeyMappings mappings={keyMappings}
+                teamProjects={teamProjects} projectLabel={projectLabel} />}
               {result.warnings.length > 0 && (
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
@@ -850,7 +855,8 @@ function ProjectScheduleEditDialog({
               {dependencyChanges.length > 0 && (
                 <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? 'added' : 'paste'} teamProjects={teamProjects} />
               )}
-              {directLinks && retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained" teamProjects={teamProjects} />}
+              {retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained"
+                teamProjects={teamProjects} showInputLine={!directLinks} />}
             </section>
           )}
         </div>
@@ -918,6 +924,35 @@ function DateResult({ before, after }: { before: string | null; after: string | 
 
 function ScheduleProject({ project }: { project?: ProjectName }) {
   return project ? <small className="schedule-bulk-project" data-schedule-project={project.id}>{project.name}</small> : null;
+}
+
+function ScheduleKeyMappings({ mappings, teamProjects, projectLabel }: {
+  mappings: NonNullable<SchedulePastePreview['keyMappings']>;
+  teamProjects?: ProjectLabels;
+  projectLabel?: string;
+}) {
+  const label = '이전 업무 키 확인';
+  return <section className="schedule-paste-key-mappings" aria-label={label}>
+    <h4>{label} {mappings.length}건</h4>
+    {mappings.some(mapping => mapping.currentKeyConflict) && <p className="schedule-paste-key-guidance">
+      입력한 키와 같은 이전 업무 키가 있습니다. 다른 업무가 대상이면 해당 업무의 현재 키로 바꾸거나 프로젝트 범위를 좁힌 뒤 미리보기를 다시 만드세요.
+    </p>}
+    <PagedList label={label} items={mappings} render={mapping => {
+      const { inputKey, key, title, projectId, source, currentKeyConflict } = mapping;
+      const inputLabel = source === 'current' ? `입력한 키 ${inputKey}` : issueSearchAliasLabel({ key: inputKey, source });
+      const project = teamProjects?.get(projectId) ?? (projectLabel ? { id: projectId, name: projectLabel } : undefined);
+      return <li key={inputKey}>
+        <div className="schedule-paste-key-input">
+          <span>{inputLabel}</span>
+          {currentKeyConflict && <small className="schedule-paste-key-conflict">현재 키 우선</small>}
+        </div>
+        <div>
+          <span aria-hidden="true">→ </span><span className="sr-only">현재 업무 </span><strong>{key}</strong> {title}
+          <ScheduleProject project={project} />
+        </div>
+      </li>;
+    }} />
+  </section>;
 }
 
 function ChangeTable({ changes, bulk, projects, teamProjects }: {
@@ -990,8 +1025,8 @@ function DateChangeCell({ before, after }: { before: string | null; after: strin
   );
 }
 
-function DependencyChangeTable({ changes, mode, teamProjects }: {
-  changes: SchedulePasteDependencyChange[]; mode: 'paste' | 'added' | 'retained'; teamProjects?: ProjectLabels;
+function DependencyChangeTable({ changes, mode, teamProjects, showInputLine = mode === 'paste' }: {
+  changes: SchedulePasteDependencyChange[]; mode: 'paste' | 'added' | 'retained'; teamProjects?: ProjectLabels; showInputLine?: boolean;
 }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
@@ -1011,7 +1046,7 @@ function DependencyChangeTable({ changes, mode, teamProjects }: {
           {changes.slice(start, start + PAGE_SIZE).map((change) => (
             <tr key={change.line}>
               <th scope="row">
-                {mode === 'paste' && <small>입력 {change.line}행</small>}
+                {showInputLine && <small>입력 {change.line}행</small>}
                 {change.projectId && <ScheduleProject project={teamProjects?.get(change.projectId)} />}
                 <small>{change.predecessorKey}</small>
                 <strong>{change.predecessorTitle}</strong>

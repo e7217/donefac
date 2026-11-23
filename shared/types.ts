@@ -1852,6 +1852,15 @@ export interface SchedulePasteDependencyChange {
   before: Pick<Dependency, 'type' | 'lagDays'> | null;
   after: Pick<Dependency, 'type' | 'lagDays'> | null;
 }
+export interface SchedulePasteKeyMapping {
+  inputKey: string;
+  issueId: string;
+  key: string;
+  title: string;
+  projectId: string;
+  source: IssueSearchAlias['source'] | 'current';
+  currentKeyConflict?: true;
+}
 export interface SchedulePastePreview {
   projectId: string | null;
   projectIds?: string[];
@@ -1860,6 +1869,7 @@ export interface SchedulePastePreview {
   changes: ScheduleChange[];
   dependencyChanges?: SchedulePasteDependencyChange[];
   retainedDependencies?: SchedulePasteDependencyChange[];
+  keyMappings?: SchedulePasteKeyMapping[];
   warnings: string[];
   errors: SchedulePasteDiagnostic[];
   unchanged: number;

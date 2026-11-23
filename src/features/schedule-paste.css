@@ -142,6 +142,7 @@
 .schedule-paste-warnings,
 .schedule-paste-stale,
 .schedule-paste-success,
+.schedule-paste-key-mappings,
 .schedule-paste-noop {
   border: 1px solid #d2e3da;
   border-radius: 7px;
@@ -171,6 +172,44 @@
 
 .schedule-paste-rejected li strong {
   display: block;
+}
+
+.schedule-paste-key-mappings {
+  background: #f5f9f6;
+}
+
+.schedule-paste-key-mappings ul {
+  margin: 0.4rem 0 0;
+  padding-inline-start: 1.2rem;
+}
+
+.schedule-paste-key-mappings li {
+  font-size: 0.875rem;
+  overflow-wrap: anywhere;
+}
+
+.schedule-paste-key-mappings li + li {
+  margin-top: 0.45rem;
+}
+
+.schedule-paste-key-input {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.25rem 0.45rem;
+  color: #476357;
+}
+
+.schedule-paste-key-mappings .schedule-paste-key-guidance {
+  color: #73501c;
+  font-size: 0.875rem;
+}
+
+.schedule-paste-key-conflict {
+  padding: 0.14rem 0.4rem;
+  border-radius: 4px;
+  background: #fff0ce;
+  color: #73501c;
 }
 
 .schedule-paste-warnings,

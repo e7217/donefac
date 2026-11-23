@@ -4,11 +4,12 @@ import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, cr
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
-  type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
+  type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
+import { readIssueSearchAliases } from './issue-search-aliases.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
 import type { Store } from './store.js';
 
@@ -44,6 +45,7 @@ interface ScheduleState {
 }
 
 type ScheduleKeyBinding = Pick<Issue, 'id' | 'projectId' | 'key'>;
+type ResolvedScheduleKeyBinding = ScheduleKeyBinding & Pick<SchedulePasteKeyMapping, 'inputKey' | 'source' | 'currentKeyConflict'>;
 
 interface PasteProposal extends ScheduleScope {
   id: string;
@@ -51,6 +53,7 @@ interface PasteProposal extends ScheduleScope {
   removeAfter: string;
   issueIds: string[];
   keyBindings?: ScheduleKeyBinding[];
+  resolvedKeyBindings?: ResolvedScheduleKeyBinding[];
   hierarchyId?: string;
   hierarchyIssueIds?: string[];
   guard: string;
@@ -63,7 +66,7 @@ interface PasteProposal extends ScheduleScope {
   result?: SchedulePasteApplyResult;
 }
 
-type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'keyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
+type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'resolvedKeyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
   'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
 
 type DependencyAddition = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
@@ -72,6 +75,7 @@ type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { pr
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
+const dateKeys = ['startDate', 'endDate', 'dueDate'] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -400,6 +404,43 @@ export class SchedulePasteService {
     return matches;
   }
 
+  private resolvePasteKeys(projectId: string | null, keys: ReadonlySet<string>): Map<string, ResolvedScheduleKeyBinding | null> {
+    const resolved = new Map<string, ResolvedScheduleKeyBinding | null>();
+    if (!keys.size) return resolved;
+    const sql = "SELECT id, project_id AS projectId, json_extract(json, '$.key') AS key FROM issues";
+    const rows = (projectId === null ? this.store.db.prepare(sql).all()
+      : this.store.db.prepare(`${sql} WHERE project_id=?`).all(projectId)) as ScheduleKeyBinding[];
+    const owners = rows.filter(owner => typeof owner.key === 'string');
+    const aliases = readIssueSearchAliases(this.store, owners);
+    const current = new Map<string, ScheduleKeyBinding | null>();
+    const historical = new Map<string, Map<string, ResolvedScheduleKeyBinding>>();
+    for (const owner of owners) {
+      const inputKey = owner.key.toUpperCase();
+      if (keys.has(inputKey)) current.set(inputKey, current.has(inputKey) ? null : owner);
+      for (const alias of Object.hasOwn(aliases, owner.id) ? aliases[owner.id] : []) {
+        const aliasKey = alias.key.trim().toUpperCase();
+        if (!keys.has(aliasKey)) continue;
+        let matches = historical.get(aliasKey);
+        if (!matches) {
+          matches = new Map();
+          historical.set(aliasKey, matches);
+        }
+        // Two sources on the same issue still describe one candidate. Prefer the Jira label for both sources.
+        if (!matches.has(owner.id) || alias.source === 'jira') matches.set(owner.id, { ...owner, inputKey: aliasKey, source: alias.source });
+      }
+    }
+    for (const inputKey of keys) {
+      const owner = current.get(inputKey);
+      const matches = historical.get(inputKey);
+      if (owner) {
+        resolved.set(inputKey, { ...owner, inputKey, source: 'current',
+          ...(matches && [...matches.keys()].some(id => id !== owner.id) ? { currentKeyConflict: true } : {}) });
+      } else if (owner === null || (matches && matches.size > 1)) resolved.set(inputKey, null);
+      else if (matches) resolved.set(inputKey, [...matches.values()][0]);
+    }
+    return resolved;
+  }
+
   private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind' | 'hierarchyId'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: PasteHooks) {
     const links = incidentLinks(dependencies, targetIds);
     const related = new Set([...targetIds, ...links.flatMap(link => [link.predecessorId, link.successorId])]);
@@ -569,34 +610,36 @@ export class SchedulePasteService {
     return this.store.transaction(() => {
       if (projectId !== null && !this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
-      const keys = projectId === null
-        ? this.workspaceKeys(new Set(parsed.rows.flatMap(({ key, dependency }) => dependency ? [key, dependency.predecessorKey] : [key])))
-        : null;
-      const projectIds = keys && [...new Set([...keys.values()].flatMap(binding => binding ? [binding.projectId] : []))].sort();
+      const keys = this.resolvePasteKeys(projectId, new Set(parsed.rows.flatMap(({ key, dependency }) => dependency ? [key, dependency.predecessorKey] : [key])));
+      const projectIds = projectId === null ? [...new Set([...keys.values()].flatMap(binding => binding ? [binding.projectId] : []))].sort() : undefined;
       const scope = { projectId, ...(projectIds ? { projectIds } : {}) };
       const state = this.scopeState(scope);
       const {issues, dependencies} = state;
+      const byId = new Map(issues.map(issue => [issue.id, issue]));
       const byKey = new Map<string, Issue | null>();
-      if (keys) {
-        const byId = new Map(issues.map(issue => [issue.id, issue]));
-        for (const [key, binding] of keys) byKey.set(key, binding ? byId.get(binding.id) ?? null : null);
-      } else {
-        for (const issue of issues) {
-          const key = issue.key.toUpperCase();
-          byKey.set(key, byKey.has(key) ? null : issue);
-        }
+      const keyMappings: SchedulePasteKeyMapping[] = [];
+      for (const [key, binding] of keys) {
+        const issue = binding ? byId.get(binding.id) : undefined;
+        byKey.set(key, issue ?? null);
+        if (!issue || !binding || (binding.source === 'current' && !binding.currentKeyConflict)) continue;
+        keyMappings.push({ inputKey: key, issueId: issue.id, key: issue.key, title: issue.title, projectId: issue.projectId,
+          source: binding.source, ...(binding.currentKeyConflict ? { currentKeyConflict: true } : {}) });
       }
       const scopeLabel = projectId === null ? '전체 프로젝트에' : '이 프로젝트에';
       const dependencyChanges: SchedulePasteDependencyChange[] = [];
+      const retainedDependencies: SchedulePasteDependencyChange[] = [];
       const preview: SchedulePastePreview = {
         ...scope, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
+        ...(keyMappings.length ? { keyMappings } : {}),
       };
       const changes = new Map<string, ScheduleDateMutation>();
       const linkChanges: ScheduleDependencyMutation[] = [];
       const byPair = new Map(dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
       const targetIds = new Set<string>();
       const resolvedRows: { row: SchedulePasteRow; issue: Issue; datesChanged: boolean }[] = [];
-      const requestedDates = new Map<string, { issue: Issue; line: number; dates: ScheduleBulkDateChanges }>();
+      const requestedDates = new Map<string, { issue: Issue; line: number | null; dates: ScheduleBulkDateChanges;
+        firstLines: Partial<Record<typeof dateKeys[number], number>> }>();
+      const invalidDates = new Set<string>();
       for (const row of parsed.rows) {
         const issue = byKey.get(row.key);
         if (!issue) {
@@ -609,19 +652,27 @@ export class SchedulePasteService {
           (endDate !== undefined && endDate !== issue.endDate) ||
           (dueDate !== undefined && dueDate !== (issue.dueDate ?? null));
         resolvedRows.push({ row, issue, datesChanged });
-        if (!datesChanged) continue;
-        const previous = requestedDates.get(issue.id);
-        const dates = previous?.dates ?? {};
-        if (startDate !== undefined) dates.startDate = startDate;
-        if (endDate !== undefined) dates.endDate = endDate;
-        if (dueDate !== undefined) dates.dueDate = dueDate;
-        requestedDates.set(issue.id, {
-          issue, line: previous?.line ?? row.line, dates,
-        });
+        if (startDate === undefined && endDate === undefined && dueDate === undefined) continue;
+        const request = requestedDates.get(issue.id) ?? { issue, line: null, dates: {}, firstLines: {} };
+        if (datesChanged && request.line === null) request.line = row.line;
+        for (const field of dateKeys) {
+          const value = row[field];
+          if (value === undefined) continue;
+          const firstLine = request.firstLines[field];
+          if (firstLine === undefined) {
+            request.dates[field] = value;
+            request.firstLines[field] = row.line;
+          } else if (request.dates[field] !== value) {
+            invalidDates.add(issue.id);
+            preview.errors.push({ line: row.line, key: row.key,
+              message: `${issue.key}의 ${dateFields[field]} 값이 ${firstLine}번째 줄의 값과 충돌합니다.` });
+          }
+        }
+        requestedDates.set(issue.id, request);
       }
 
-      const invalidDates = new Set<string>();
       for (const { issue, line, dates } of requestedDates.values()) {
+        if (invalidDates.has(issue.id)) continue;
         const edit = proposeDateEdit(issue, dates);
         if (!edit) continue;
         const { change, summary } = edit;
@@ -641,43 +692,59 @@ export class SchedulePasteService {
         preview.changes.push(omitUnchangedDueDate(projectId === null ? { ...summary, projectId: issue.projectId } : summary));
       }
 
+      const seenRows = new Map<string, number>();
       for (const { row, issue, datesChanged } of resolvedRows) {
         if (invalidDates.has(issue.id)) continue;
         targetIds.add(issue.id);
         const input = row.dependency;
+        let predecessor: Issue | undefined;
         if (input) {
-          const predecessor = byKey.get(input.predecessorKey);
-          if (!predecessor || predecessor.id === issue.id) {
-            const message = predecessor === null ? `선행 업무 키 ${input.predecessorKey}가 ${scopeLabel} 중복되어 있습니다.`
-              : predecessor ? '자기 자신에게 의존할 수 없습니다.' : `${scopeLabel} 선행 업무 키 ${input.predecessorKey}가 없습니다.`;
+          const matched = byKey.get(input.predecessorKey);
+          if (!matched || matched.id === issue.id) {
+            const message = matched === null ? `선행 업무 키 ${input.predecessorKey}가 ${scopeLabel} 중복되어 있습니다.`
+              : matched ? '자기 자신에게 의존할 수 없습니다.' : `${scopeLabel} 선행 업무 키 ${input.predecessorKey}가 없습니다.`;
             preview.errors.push({line:row.line,key:row.key,message});
             continue;
           }
-          if (predecessor.projectId !== issue.projectId) {
-            preview.errors.push({ line: row.line, key: row.key, message: `선행 업무 ${predecessor.key}는 같은 프로젝트에 있어야 합니다.` });
+          if (matched.projectId !== issue.projectId) {
+            preview.errors.push({ line: row.line, key: row.key, message: `선행 업무 ${matched.key}는 같은 프로젝트에 있어야 합니다.` });
             continue;
           }
+          predecessor = matched;
+        }
+        const pair = dependencyPair(predecessor?.id ?? '', issue.id);
+        const firstLine = seenRows.get(pair);
+        if (firstLine !== undefined) {
+          const subject = predecessor ? `${predecessor.key} → ${issue.key} 선행 업무 연결` : `${issue.key}의 날짜 전용 행`;
+          preview.errors.push({ line: row.line, key: row.key, message: `${subject}이 ${firstLine}번째 줄과 중복되었습니다.` });
+          continue;
+        }
+        seenRows.set(pair, row.line);
+        if (input && predecessor) {
           targetIds.add(predecessor.id);
-          const before = byPair.get(dependencyPair(predecessor.id, issue.id));
+          const before = byPair.get(pair);
           const after = input.type === '-' ? null : {
             id:before?.id ?? randomUUID(),predecessorId:predecessor.id,successorId:issue.id,
             type:input.type ?? before?.type ?? 'FS',lagDays:input.lagDays ?? before?.lagDays ?? 0,
           } as const satisfies Dependency;
           const changed = after ? !before || before.type !== after.type || before.lagDays !== after.lagDays : Boolean(before);
+          const summary: SchedulePasteDependencyChange = {
+            line: row.line, predecessorKey: predecessor.key, predecessorTitle: predecessor.title, successorKey: issue.key, successorTitle: issue.title,
+            before: before ? { type: before.type, lagDays: before.lagDays } : null,
+            after: after ? { type: after.type, lagDays: after.lagDays } : null,
+            ...(projectId === null ? { projectId: issue.projectId } : {}),
+          };
           if (changed) {
             if (before) linkChanges.push({before,after});
             else if (after) linkChanges.push({before:null,after});
-            dependencyChanges.push({
-              line:row.line,predecessorKey:predecessor.key,predecessorTitle:predecessor.title,successorKey:issue.key,successorTitle:issue.title,
-              before:before ? {type:before.type,lagDays:before.lagDays} : null,
-              after:after ? {type:after.type,lagDays:after.lagDays} : null,
-              ...(projectId === null ? { projectId: issue.projectId } : {}),
-            });
+            dependencyChanges.push(summary);
             continue;
           }
+          if (before && after) retainedDependencies.push(summary);
         }
         if (!datesChanged) preview.unchanged++;
       }
+      if (retainedDependencies.length) preview.retainedDependencies = retainedDependencies;
       const projectedLinks = linkChanges.length ? projectScheduleDependencies(dependencies, linkChanges) : dependencies;
       if (linkChanges.some(change => !change.before) && hasScheduleDependencyCycle(projectedLinks)) {
         preview.errors.push({line:null,message:'적용할 선행 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.'});
@@ -693,9 +760,9 @@ export class SchedulePasteService {
         });
         preview.warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
       }
-      const keyBindings = keys && [...keys.values()].filter((binding): binding is ScheduleKeyBinding => Boolean(binding && targetIds.has(binding.id)));
+      const resolvedKeyBindings = [...keys.values()].filter((binding): binding is ResolvedScheduleKeyBinding => Boolean(binding && targetIds.has(binding.id)));
       return this.savePreview(preview, state, {
-        actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges, ...(keyBindings ? { keyBindings } : {}),
+        actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges, resolvedKeyBindings,
       }, hooks);
     });
   }
@@ -983,6 +1050,14 @@ export class SchedulePasteService {
         if (proposal.keyBindings.some(binding => {
           const current = keys.get(binding.key);
           return current?.id !== binding.id || current.projectId !== binding.projectId;
+        })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
+      }
+      if (proposal.resolvedKeyBindings) {
+        const resolved = this.resolvePasteKeys(proposal.projectId, new Set(proposal.resolvedKeyBindings.map(({ inputKey }) => inputKey)));
+        if (proposal.resolvedKeyBindings.some(binding => {
+          const current = resolved.get(binding.inputKey);
+          return current?.id !== binding.id || current.projectId !== binding.projectId || current.key !== binding.key ||
+            current.source !== binding.source || current.currentKeyConflict !== binding.currentKeyConflict;
         })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
       }
       const state = this.scopeState(proposal);

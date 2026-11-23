@@ -50,6 +50,18 @@ async function fixture(t: TestContext) {
         db.prepare("UPDATE issues SET json = json_set(json, '$.key', ?) WHERE id=?").run(key, issue.id);
       } finally { db.close(); }
     },
+    usePreviousTeamBindings(previewId: string) {
+      const db = new DatabaseSync(join(dir, 'teamspace.sqlite'));
+      try {
+        const stored = db.prepare('SELECT json FROM schedule_paste_previews WHERE id=?').get(previewId) as { json: string };
+        const { resolvedKeyBindings, ...proposal } = JSON.parse(stored.json) as Record<string, unknown> & {
+          resolvedKeyBindings: { id: string; projectId: string; inputKey: string; source: string }[];
+        };
+        assert.ok(resolvedKeyBindings.length && resolvedKeyBindings.every(binding => binding.source === 'current'));
+        const keyBindings = resolvedKeyBindings.map(({ id, projectId, inputKey }) => ({ id, projectId, key: inputKey }));
+        db.prepare('UPDATE schedule_paste_previews SET json=? WHERE id=?').run(JSON.stringify({ ...proposal, keyBindings }), previewId);
+      } finally { db.close(); }
+    },
     async issue(title: string, { projectId = project.id, dueDate = null }: { projectId?: string; dueDate?: string | null } = {}) {
       const result = await call<Issue>('/issues', 'POST', {
         projectId, title, startDate: '2026-11-19', endDate: '2026-11-20', dueDate,
@@ -558,7 +570,7 @@ test('team TSV requires exact unique current keys and refuses cross-project link
   assert.equal(projectReview.dependencyChanges?.[0].projectId, undefined);
 });
 
-test('a team paste is stale after an issue moves and its old key cannot start a new proposal', async t => {
+test('a team paste is stale after an issue moves and fresh reviews resolve former keys in the current scope', async t => {
   const f = await fixture(t);
   const second = await f.createProject('TEAMPASTE');
   const third = await f.createProject('THIRDP');
@@ -587,12 +599,25 @@ test('a team paste is stale after an issue moves and its old key cannot start a 
 
   assert.equal((await f.apply(review)).status, 409);
   const oldKey = await f.preview(rows, scope);
-  assert.equal(oldKey.previewId, null);
-  assert.deepEqual(oldKey.errors.map(({ line, key }) => [line, key]), [[3, other.key]]);
-  assert.deepEqual(await f.workspace(), afterMove);
+  assert.ok(oldKey.previewId, JSON.stringify(oldKey.errors));
+  assert.deepEqual(oldKey.projectIds, [f.project.id, third.id].sort());
+  assert.deepEqual(oldKey.changes.map(change => [change.id, change.key]), [[first.id, first.key], [current.id, current.key]]);
+  assert.deepEqual(oldKey.keyMappings, [{
+    inputKey: other.key, issueId: current.id, key: current.key, title: current.title, projectId: current.projectId, source: 'move',
+  }]);
+  const formerScope = await f.preview([rows[1]], { projectId: second.id });
+  assert.equal(formerScope.previewId, null);
+  assert.deepEqual(formerScope.errors.map(({ line, key }) => [line, key]), [[2, other.key]]);
   const newKey = await f.preview([rows[0], [current.key, ...rows[1].slice(1)]], scope);
-  assert.ok(newKey.previewId);
+  assert.ok(newKey.previewId, JSON.stringify(newKey.errors));
   assert.deepEqual(newKey.projectIds, [f.project.id, third.id].sort());
+  assert.deepEqual(await f.workspace(), afterMove);
+  f.usePreviousTeamBindings(newKey.previewId);
+  const applied = await f.apply(newKey);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.deepEqual(applied.data.updated.map(issue => [issue.id, issue.projectId, issue.startDate, issue.endDate]), [
+    [first.id, first.projectId, ...rows[0].slice(1, 3)], [current.id, current.projectId, ...rows[1].slice(1, 3)],
+  ]);
 });
 
 test('undo preserves dates after intervening link edits, a replacement deletion, or a new cycle', async t => {

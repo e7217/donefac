@@ -1,23 +1,21 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIResponse } from '@playwright/test';
+import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 import type {
-  Dependency, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, SchedulePastePreview, WorkspaceSnapshot,
+  Dependency, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project,
+  SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
 } from '../../shared/types';
 
-async function json<T>(response: APIResponse, expected = 200): Promise<T> {
+async function json<T>(response: Pick<APIResponse, 'status' | 'text'>, expected = 200): Promise<T> {
   const body = await response.text();
   expect(response.status(), body).toBe(expected);
   return JSON.parse(body) as T;
 }
 
-test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현재 업무를 열거나 연결한다', async ({ page, request }) => {
-  test.setTimeout(95_000);
-  await page.setViewportSize({ width: 360, height: 820 });
+function aliasFixture(request: APIRequestContext) {
   const suffix = randomUUID().slice(0, 7).toUpperCase();
   const currentKey = `KS${suffix}`;
   const snapshot = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
-  const { projects: [destination] } = await snapshot();
   const packages: LegacyPackageSummary[] = [];
   const issueIds = new Set<string>();
   async function addIssue(projectId: string, title: string) {
@@ -52,6 +50,22 @@ test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현�
     issueIds.add(issue.id);
     return { issue, project };
   }
+
+  async function close() {
+    for (const id of issueIds) {
+      const removed = await request.delete(`/api/issues/${id}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    for (const pkg of packages) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+  return { suffix, currentKey, snapshot, addIssue, migrate, close };
+}
+
+test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현재 업무를 열거나 연결한다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { suffix, currentKey, snapshot, addIssue, migrate, close } = aliasFixture(request);
+  const { projects: [destination] } = await snapshot();
 
   try {
     const project = await json<Project>(await request.post('/api/projects', { data: { key: currentKey, name: `현행 업무 ${suffix}` } }), 201);
@@ -227,10 +241,118 @@ test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현�
       dependencyChanges: [expect.objectContaining({ predecessorKey: bulkTarget.key, successorKey: first.issue.key })],
     });
   } finally {
-    for (const id of issueIds) {
-      const removed = await request.delete(`/api/issues/${id}`);
-      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    await close();
+  }
+});
+
+test('360px 간트 붙여넣기에서 Jira 이전 키로 날짜와 연결을 검토하고 같은 키의 대상이 바뀌면 적용을 막는다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { suffix, currentKey, snapshot, addIssue, migrate, close } = aliasFixture(request);
+  let nativeTrashId: string | undefined;
+  try {
+    const project = await json<Project>(await request.post('/api/projects', { data: { key: currentKey, name: `간트 현행 키 ${suffix}` } }), 201);
+    const current = await addIssue(project.id, `현재 키의 업무 ${suffix}`);
+    const first = await migrate(current.key, 'A', `붙여넣기 Jira 이전 업무 A ${suffix}`);
+    const second = await migrate(current.key, 'B', `붙여넣기 Jira 이전 업무 B ${suffix}`);
+    const successor = await addIssue(first.project.id, `붙여넣기 연결 대상 ${suffix}`);
+    const opener = page.getByRole('button', { name: '일정 붙여넣기', exact: true });
+    const dialog = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
+    const apply = dialog.getByRole('button', { name: '검토한 일정 적용', exact: true });
+    const mappings = dialog.getByRole('region', { name: '이전 업무 키 확인', exact: true });
+    const nextPost = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+    async function review(projectId: string | null, text: string) {
+      await input.fill(text);
+      const pending = nextPost('/api/schedule/paste-preview');
+      await dialog.getByRole('button', { name: '붙여넣기 미리보기', exact: true }).click();
+      const response = await pending;
+      expect(response.request().postDataJSON()).toEqual({ projectId, text });
+      return json<SchedulePastePreview>(response);
     }
-    for (const pkg of packages) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+
+    const header = '업무 키\t시작일\t종료일\t선행 업무';
+    const start = '2031-11-03', end = '2031-11-04';
+    const dateRow = `${current.key.toLowerCase()}\t${start}\t${end}\t`;
+    const dateAndLink = `${header}\n${dateRow}\n${successor.key}\t\t\t${current.key}`;
+    const dateOnly = `${header}\n${dateRow}`;
+    await page.goto(`/#/${first.project.id}/gantt`);
+    await opener.click();
+    const scoped = await review(first.project.id, dateAndLink);
+    expect(scoped).toMatchObject({ errors: [], previewId: expect.any(String),
+      changes: [expect.objectContaining({ id: first.issue.id, key: first.issue.key, toStart: start, toEnd: end })],
+      dependencyChanges: [expect.objectContaining({ predecessorKey: first.issue.key, successorKey: successor.key })],
+      keyMappings: [{ inputKey: current.key, issueId: first.issue.id, key: first.issue.key, title: first.issue.title,
+        projectId: first.project.id, source: 'jira' }],
+    });
+    await expect(mappings).toContainText(`Jira 원래 키 ${current.key}`);
+    await expect(mappings).toContainText(first.issue.key);
+    await expect(mappings).toContainText(first.issue.title);
+    await expect(mappings).toContainText(`${first.project.key} · ${first.project.name}`);
+    await expect(dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록', exact: true })).toContainText(first.issue.key);
+    const links = dialog.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록', exact: true });
+    await expect(links).toContainText(first.issue.key);
+    await expect(links).toContainText(successor.key);
+
+    const applying = nextPost('/api/schedule/paste-apply');
+    await apply.click();
+    const result = await json<SchedulePasteApplyResult>(await applying);
+    expect(result).toMatchObject({ dependencyChanges: 1, updated: [expect.objectContaining({ id: first.issue.id, startDate: start, endDate: end })] });
+    await expect(dialog).toHaveCount(0);
+    const state = await snapshot();
+    expect(state.issues.filter(issue => issue.id === current.id || issue.id === second.issue.id)).toEqual(expect.arrayContaining([current, second.issue]));
+    expect(state.dependencies.filter(link => link.successorId === successor.id)).toEqual([
+      expect.objectContaining({ predecessorId: first.issue.id, successorId: successor.id, type: 'FS', lagDays: 0 }),
+    ]);
+    const undoing = nextPost('/api/schedule/undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: result.undoId });
+    expect(await json<SchedulePasteApplyResult>(undone)).toMatchObject({ dependencyChanges: 1,
+      updated: [expect.objectContaining({ id: first.issue.id, startDate: first.issue.startDate, endDate: first.issue.endDate })],
+    });
+    expect((await snapshot()).dependencies.filter(link => link.successorId === successor.id)).toEqual([]);
+
+    await page.goto(`/#/${project.id}/gantt?scope=team`);
+    await opener.click();
+    const exact = await review(null, dateOnly);
+    expect(exact).toMatchObject({ errors: [], previewId: expect.any(String),
+      changes: [expect.objectContaining({ id: current.id, key: current.key })],
+      keyMappings: [{ inputKey: current.key, issueId: current.id, key: current.key, title: current.title,
+        projectId: project.id, source: 'current', currentKeyConflict: true }],
+    });
+    await expect(mappings).toContainText(`입력한 키 ${current.key}`);
+    await expect(mappings).toContainText('현재 키 우선');
+    await expect(mappings).toContainText(current.title);
+    await expect(mappings).toContainText('입력한 키와 같은 이전 업무 키가 있습니다.');
+    await expect(apply).toBeEnabled();
+
+    ({ trashEntryId: nativeTrashId } = await json<{ trashEntryId: string }>(await request.delete(`/api/issues/${current.id}`)));
+    const staleApply = nextPost('/api/schedule/paste-apply');
+    await apply.click();
+    const rejected = await staleApply;
+    expect(rejected.request().postDataJSON()).toEqual({ previewId: exact.previewId });
+    expect(rejected.status()).toBe(409);
+    await expect(apply).toBeDisabled();
+    await expect(input).toHaveValue(dateOnly);
+    const ambiguous = await review(null, dateOnly);
+    expect(ambiguous).toMatchObject({ previewId: null, changes: [],
+      errors: [expect.objectContaining({ key: current.key, line: 2, message: expect.stringMatching(/중복|두 개|여러/) })],
+    });
+    await expect(dialog.getByRole('region', { name: '일정 붙여넣기 오류', exact: true })).toContainText(current.key);
+    await expect(apply).toBeDisabled();
+    const afterwards = await snapshot();
+    expect(afterwards.issues.find(issue => issue.id === first.issue.id)).toMatchObject({ startDate: first.issue.startDate, endDate: first.issue.endDate });
+    expect(afterwards.issues.find(issue => issue.id === second.issue.id)).toEqual(second.issue);
+    expect(afterwards.dependencies.filter(link => link.successorId === successor.id)).toEqual([]);
+    const restored = await request.post(`/api/trash/${nativeTrashId}/restore`);
+    expect(restored.status(), await restored.text()).toBe(200);
+    nativeTrashId = undefined;
+  } finally {
+    if (nativeTrashId) {
+      const restored = await request.post(`/api/trash/${nativeTrashId}/restore`);
+      if (!restored.ok()) await request.delete(`/api/trash/${nativeTrashId}`);
+    }
+    await close();
   }
 });

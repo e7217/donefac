@@ -8,7 +8,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type { ApiKeyCreated, Issue, IssueKeyMatch, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
-  Project, WorkspaceSnapshot } from '../../shared/types.js';
+  Project, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function open(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-aliases-'));
@@ -70,9 +70,10 @@ async function open(t: TestContext) {
     assert.ok(row);
     return row;
   }
-  async function move(before: Issue, target: Project) {
+  async function move(before: Issue, target: Project, placement?: Pick<Issue, 'type' | 'status'>) {
     const path = `/issues/${before.id}/project-move`;
-    const input: IssueProjectMoveInput = { expectedVersion: before.version, projectId: target.id, includeConnected: false, mappings: [] };
+    const mappings = placement ? [{ issueId: before.id, type: placement.type, status: placement.status }] : [];
+    const input: IssueProjectMoveInput = { expectedVersion: before.version, projectId: target.id, includeConnected: false, mappings };
     const preview = await call<IssueProjectMovePreview>(`${path}/preview`, { method: 'POST', body: input });
     assert.ok(preview.token, JSON.stringify(preview.blockers));
     const { issues } = await call<IssueProjectMoveResult>(`${path}/apply`, { method: 'POST', body: { ...input, token: preview.token } });
@@ -187,4 +188,108 @@ test('past native issue keys follow later project moves and are derived again af
     }
     assert.deepEqual((await f.findKey(final.key)).map(value => [value.issue.id, value.matchedAliases]), [[final.id, []]]);
   }
+});
+
+test('schedule paste resolves proved historical keys in both columns and guards changes to their owners', async t => {
+  const f = await open(t);
+  const original = await f.project('PASTEOLD', '이동 전 일정 프로젝트');
+  const originalPredecessor = await f.issue(original, '이동할 선행 업무');
+  const current = await f.issue(original, 'Jira 원본 번호와 겹치는 현재 업무');
+  const migrated = await f.migrate('alias-schedule', current.key, 'PASTEIN', '이관한 후행 업무');
+  const target = (await f.snapshot()).projects.find(project => project.id === migrated.projectId);
+  assert.ok(target);
+  const predecessor = await f.move(originalPredecessor, target, migrated);
+  const another = await f.issue(target, '별도의 선행 업무');
+
+  const preview = (projectId: string | null, rows: string[][]) => f.call<SchedulePastePreview>('/schedule/paste-preview', {
+    method: 'POST', body: { projectId, text: [
+      ['key', 'startDate', 'endDate', 'predecessor', 'dependency type', 'lag days'], ...rows,
+    ].map(row => row.join('\t')).join('\n') },
+  });
+  const apply = (proposal: SchedulePastePreview, status = 200) => {
+    assert.ok(proposal.previewId, JSON.stringify(proposal.errors));
+    return f.call<SchedulePasteApplyResult>('/schedule/paste-apply', { method: 'POST', body: { previewId: proposal.previewId }, status });
+  };
+  const mapping = (inputKey: string, { id, key, title, projectId }: Issue, source: 'jira' | 'move' | 'current') =>
+    ({ inputKey, issueId: id, key, title, projectId, source });
+  const dates = ['2026-11-23', '2026-11-24'];
+  const rows = [
+    [current.key.toLowerCase(), dates[0], '', originalPredecessor.key.toLowerCase(), 'SS', '2'],
+    [migrated.key, '', dates[1], another.key, 'FS', ''],
+  ];
+  const before = await f.snapshot();
+  const projectReview = await preview(target.id, rows);
+  assert.deepEqual(projectReview.errors, []);
+  assert.deepEqual(new Set(projectReview.keyMappings), new Set([
+    mapping(current.key, migrated, 'jira'), mapping(originalPredecessor.key, predecessor, 'move'),
+  ]));
+  assert.deepEqual(projectReview.changes.map(change => [change.id, change.key, change.toStart, change.toEnd]),
+    [[migrated.id, migrated.key, ...dates]]);
+  assert.deepEqual(projectReview.dependencyChanges?.map(change => [change.predecessorKey, change.successorKey, change.after]), [
+    [predecessor.key, migrated.key, { type: 'SS', lagDays: 2 }], [another.key, migrated.key, { type: 'FS', lagDays: 0 }],
+  ]);
+
+  const duplicate = await preview(target.id, [rows[0], [migrated.key, '', '', predecessor.key, 'FS', '']]);
+  assert.equal(duplicate.previewId, null);
+  assert.deepEqual(duplicate.errors.map(error => error.line), [3]);
+  assert.match(duplicate.errors[0].message, /중복/u);
+  const conflictingDates = await preview(target.id, [rows[0], [migrated.key, migrated.startDate ?? '-', '', another.key, 'FS', '']]);
+  assert.equal(conflictingDates.previewId, null);
+  assert.deepEqual(conflictingDates.errors.map(error => error.line), [3]);
+  assert.match(conflictingDates.errors[0].message, /충돌/u);
+  const selfLink = await preview(target.id, [[current.key, '', '', migrated.key, 'FS', '']]);
+  assert.equal(selfLink.previewId, null);
+  assert.match(selfLink.errors[0].message, /자기 자신/u);
+  assert.deepEqual(await f.snapshot(), before);
+
+  const result = await apply(projectReview);
+  assert.deepEqual(result.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), [[migrated.id, ...dates]]);
+  assert.equal(result.dependencyChanges, 2);
+  const afterApply = await f.snapshot();
+  assert.deepEqual(afterApply.issues.find(issue => issue.id === current.id), current);
+  assert.deepEqual(afterApply.dependencies.filter(link => link.successorId === migrated.id).map(link => [
+    link.predecessorId, link.type, link.lagDays,
+  ]).sort(), [[predecessor.id, 'SS', 2], [another.id, 'FS', 0]].sort());
+  await f.call('/schedule/undo', { method: 'POST', body: { undoId: result.undoId } });
+  const afterUndo = await f.snapshot();
+  const restored = afterUndo.issues.find(issue => issue.id === migrated.id);
+  assert.deepEqual([restored?.startDate, restored?.endDate], [migrated.startDate, migrated.endDate]);
+  assert.deepEqual(afterUndo.dependencies, before.dependencies);
+
+  const currentReview = await preview(null, [[current.key, ...dates, '', '', '']]);
+  assert.ok(currentReview.previewId, JSON.stringify(currentReview.errors));
+  assert.deepEqual(currentReview.keyMappings, [{ ...mapping(current.key, current, 'current'), currentKeyConflict: true }]);
+  assert.deepEqual(currentReview.changes.map(change => change.id), [current.id]);
+  const currentResult = await apply(currentReview);
+  assert.deepEqual(currentResult.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), [[current.id, ...dates]]);
+  assert.deepEqual((await f.snapshot()).issues.find(issue => issue.id === migrated.id), restored);
+  const historicalTeamRows = [[originalPredecessor.key, ...dates, '', '', '']];
+  const staleTeam = await preview(null, historicalTeamRows);
+  assert.ok(staleTeam.previewId, JSON.stringify(staleTeam.errors));
+  const other = await f.migrate('alias-schedule-collision', originalPredecessor.key, 'PASTEAMB', '이동 전 번호와 겹치는 업무');
+  const afterCollision = await f.snapshot();
+  assert.deepEqual(afterCollision.issues.find(issue => issue.id === predecessor.id), predecessor);
+  await apply(staleTeam, 409);
+  const ambiguous = await preview(null, historicalTeamRows);
+  assert.equal(ambiguous.previewId, null);
+  assert.deepEqual(ambiguous.errors.map(error => [error.line, error.key]), [[2, originalPredecessor.key]]);
+  for (const [projectId, issue, source] of [[target.id, predecessor, 'move'], [other.projectId, other, 'jira']] as const) {
+    const local = await preview(projectId, historicalTeamRows);
+    assert.ok(local.previewId, JSON.stringify(local.errors));
+    assert.deepEqual(local.keyMappings, [mapping(originalPredecessor.key, issue, source)]);
+  }
+  assert.deepEqual(await f.snapshot(), afterCollision);
+
+  const staleLocal = await preview(target.id, rows);
+  assert.ok(staleLocal.previewId, JSON.stringify(staleLocal.errors));
+  const removed = f.database.prepare(`DELETE FROM source_bindings WHERE product='jira' AND kind='issue' AND source_alias=? AND target_id=?`)
+    .run(current.key, migrated.id);
+  assert.equal(removed.changes, 1);
+  const lostEvidence = await f.snapshot();
+  assert.deepEqual(lostEvidence.issues.find(issue => issue.id === migrated.id), restored);
+  await apply(staleLocal, 409);
+  const unproved = await preview(target.id, rows);
+  assert.equal(unproved.previewId, null);
+  assert.deepEqual(unproved.errors.map(error => [error.line, error.key]), [[2, current.key]]);
+  assert.deepEqual(await f.snapshot(), lostEvidence);
 });
