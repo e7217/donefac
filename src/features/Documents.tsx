@@ -77,6 +77,7 @@ type Props = FeatureProps & {
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
   issueDrawerOpen?: boolean;
+  onOpenIssueSchedule?: (id: string) => boolean;
   commentFocus?: { commentId: string; activation: number };
   onCopyCommentLink?: (commentId: string) => void;
 };
@@ -169,7 +170,9 @@ function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
   return { ...latestBody, resolution: latestResolution.resolution };
 }
 
-export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false, commentFocus, onCopyCommentLink }: Props) {
+export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument,
+  documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
+  commentFocus, onCopyCommentLink, onOpenIssueSchedule }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [findScope, setFindScope] = useState<string | null>(null);
   const findOpener = useRef<HTMLButtonElement>(null);
@@ -1975,7 +1978,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </form>
             </>}
             {sideTab === 'links' && <>
-              <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue}
+              <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue} onOpenIssueSchedule={onOpenIssueSchedule}
                 refresh={refresh} notify={notify} issueDrawerOpen={issueDrawerOpen}>
                 <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>
               </DocumentLinkedWork>

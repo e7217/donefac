@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
-import { BookOpen, ChevronRight, FileText, RefreshCw, Search } from 'lucide-react';
+import { BookOpen, ChevronRight, FileText, RefreshCw, Search, SquareChartGantt } from 'lucide-react';
 import type { DecisionFollowUpDraftRequest, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource, FeatureProps } from '../../shared/types';
 import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { api } from '../lib/api';
@@ -15,21 +15,24 @@ const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(modu
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'notify' | 'openIssue' | 'openDocument' | 'refresh'> & {
   scope: DecisionFollowUpScope;
   onScopeChange: (scope: DecisionFollowUpScope) => boolean;
+  onOpenIssueSchedule: (id: string) => boolean;
   issueOverlayOpen: boolean;
 };
 type Options = Omit<DecisionFollowUpScope, 'offset'>;
 type Result = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage | null; loading: boolean; error?: string };
 type DraftSelection = { scope: DecisionFollowUpScope; page: DecisionFollowUpPage };
-type Target = 'issue' | 'document';
-const targetLabels: Record<Target, string> = { issue: '업무', document: '현재 문서' };
+type Target = 'issue' | 'document' | 'schedule';
+const targetLabels: Record<Target, string> = { issue: '업무를', document: '현재 문서를', schedule: '업무 일정을' };
 const numberLabel = (count: number) => count.toLocaleString('ko-KR');
 const workspacePath = (projectId: string) => `/projects/${encodeURIComponent(projectId)}/decision-follow-ups`;
 const STATUS_LABEL = { open: '미완료', closed: '종료', all: '전체 상태' };
 function sameOptions(left: Options, right: Options): boolean {
-  return left.projectId === right.projectId && left.status === right.status && left.assigneeId === right.assigneeId && left.q === right.q;
+  return left.projectId === right.projectId && left.status === right.status && left.assigneeId === right.assigneeId &&
+    Boolean(left.unscheduledOnly) === Boolean(right.unscheduledOnly) && left.q === right.q;
 }
 
-export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onScopeChange, issueOverlayOpen, openIssue, openDocument, refresh, notify }: Props) {
+export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onScopeChange, onOpenIssueSchedule,
+  issueOverlayOpen, openIssue, openDocument, refresh, notify }: Props) {
   const [applied, setApplied] = useState(scope);
   const [options, setOptions] = useState<Options>(scope);
   const [result, setResult] = useState<Result | null>(null);
@@ -116,9 +119,11 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
     setOpening({ scope, token, target });
     try {
       await refresh();
-      if (isCurrent()) (target === 'issue' ? openIssue : openDocument)(id);
+      if (!isCurrent()) return;
+      if (target === 'schedule') onOpenIssueSchedule(id);
+      else (target === 'issue' ? openIssue : openDocument)(id);
     } catch (cause) {
-      if (isCurrent()) notify(cause instanceof Error ? cause.message : `${targetLabels[target]}를 불러오지 못했습니다.`, 'error');
+      if (isCurrent()) notify(cause instanceof Error ? cause.message : `${targetLabels[target]} 불러오지 못했습니다.`, 'error');
     } finally {
       setOpening(previous => previous?.token === token ? null : previous);
       if (targetRequest.current === token) targetRequest.current = null;
@@ -165,13 +170,18 @@ export function DecisionFollowUpsReport({ data, projectId, actorId, scope, onSco
             {data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
           </select>
         </label>
+        <label className="decision-follow-ups-unscheduled">
+          <input type="checkbox" checked={Boolean(options.unscheduledOnly)}
+            onChange={event => setOptions({ ...options, unscheduledOnly: event.currentTarget.checked || undefined })} />
+          일정 미정만
+        </label>
         <button className="btn btn-primary" type="submit"><Search size={15} aria-hidden="true" />조건 적용</button>
       </div>
     </form>
 
     {current?.error && <p role="alert" className="reports-error">{current.error}</p>}
     {loading && <p role="status">결정 후속 업무를 불러오는 중입니다.</p>}
-    {openingTarget && <p role="status">{targetLabels[openingTarget]}를 불러오는 중입니다.</p>}
+    {openingTarget && <p role="status">{targetLabels[openingTarget]} 불러오는 중입니다.</p>}
     {page && <section className="decision-follow-ups-results" aria-label="결정 후속 업무 결과" aria-busy={loading}>
       <header>
         <h3 ref={resultsHeading} tabIndex={-1}>결정 근거 {numberLabel(page.total)}건</h3>
@@ -218,6 +228,7 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
       ...(typeof scope.projectId === 'string' ? { projectId: scope.projectId } : {}),
       ...(scope.status !== 'open' ? { status: scope.status } : {}),
       ...(scope.assigneeId ? { assigneeId: scope.assigneeId } : {}),
+      ...(scope.unscheduledOnly ? { unscheduledOnly: true } : {}),
       ...(scope.q ? { q: scope.q } : {}),
       ...(review.offset ? { offset: review.offset } : {}),
     })}
@@ -227,6 +238,7 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
         <div><dt>보고서 범위</dt><dd>{projectName(review.projectId)}</dd></div>
         <div><dt>업무 상태</dt><dd>{STATUS_LABEL[scope.status]}</dd></div>
         <div><dt>담당자</dt><dd>{assignee}</dd></div>
+        {scope.unscheduledOnly && <div><dt>계획 일정</dt><dd>일정 미정만</dd></div>}
         {scope.q && <div><dt>검색</dt><dd>{scope.q}</dd></div>}
         <div><dt>결정 근거</dt><dd>{review.items.length > 0 && `${numberLabel(review.offset + 1)}–${numberLabel(review.offset + review.items.length)} / `}{numberLabel(review.total)}건</dd></div>
       </dl>
@@ -267,6 +279,7 @@ function DecisionFollowUpCard({ item, data, issueKeyQuery, reportProjectId, show
   const documentSpace = document.projectId === null ? '팀 공통 문서' : documentProject?.name ?? '프로젝트 정보 없음';
   const documentTitle = document.title || '제목 없는 문서';
   const documentHref = `#/${encodeURIComponent(document.projectId ?? reportProjectId)}/documents/${encodeURIComponent(documentId)}`;
+  const scheduleAction = !issue.startDate || !issue.endDate ? '간트에서 날짜 입력' : '간트에서 일정 보기';
 
   return <article className="card decision-follow-up" aria-label={`${issue.key} 결정 후속 업무`}>
     <h4><button className="decision-follow-up-issue" type="button" aria-label={`${issue.key} 업무 열기`} aria-disabled={openingTarget !== null}
@@ -280,7 +293,18 @@ function DecisionFollowUpCard({ item, data, issueKeyQuery, reportProjectId, show
       <div><dt>담당자</dt><dd>{assignee?.name ?? '미지정'}</dd></div>
       <div><dt>{issue.deadlineSource === 'endDate' ? '계획 종료일' : '목표 마감일'}</dt>
         <dd>{issue.deadline ? <time dateTime={issue.deadline}>{issue.deadline}</time> : '미정'}</dd></div>
+      <div className="decision-follow-up-plan"><dt>계획 일정</dt><dd>
+        {issue.startDate ? <time dateTime={issue.startDate}>{issue.startDate}</time> : '시작일 미정'}
+        {' ~ '}
+        {issue.endDate ? <time dateTime={issue.endDate}>{issue.endDate}</time> : '종료일 미정'}
+      </dd></div>
     </dl>
+    <div className="decision-follow-up-schedule-action">
+      <button className="btn" type="button" aria-disabled={openingTarget !== null}
+        onClick={event => { if (!openingTarget) void open('schedule', issue.id, event.currentTarget); }}>
+        <SquareChartGantt size={15} aria-hidden="true" />{scheduleAction}
+      </button>
+    </div>
     <p className="decision-follow-up-document"><BookOpen size={16} aria-hidden="true" />
       <span><a href={documentHref} className="decision-follow-up-document-link" aria-label={`현재 문서 열기 ${documentTitle}`}
         onClick={event => {

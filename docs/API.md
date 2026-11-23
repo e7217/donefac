@@ -447,9 +447,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 ## 프로젝트 결정 후속 업무
 
-`GET /api/projects/:id/decision-follow-ups`와 `/api/v1`의 같은 경로는 결정 근거가 연결된 현재 티켓을 프로젝트 기준으로 읽는다. `status`는 `open`(기본값), `closed`, `all` 중 하나다. `assigneeId`에는 팀원 ID 또는 `unassigned`를 쓴다. `q`는 최대 160 UTF-16 코드 단위의 검색어로 현재 업무 키·제목, Jira 원래 키, 프로젝트 이동 전 업무 키와 현재·고정 문서 제목을 대소문자 없이 비교한다. 이전 키로 검색해도 행의 업무에는 현재 키를 반환한다. `offset`은 기본 0이며 정수 0~1,000,000을 받는다.
+`GET /api/projects/:id/decision-follow-ups`와 `/api/v1`의 같은 경로는 결정 근거가 연결된 현재 티켓을 프로젝트 기준으로 읽는다. `status`는 `open`(기본값), `closed`, `all` 중 하나다. `assigneeId`에는 팀원 ID 또는 `unassigned`를 쓴다. `q`는 최대 160 UTF-16 코드 단위의 검색어로 현재 업무 키·제목, Jira 원래 키, 프로젝트 이동 전 업무 키와 현재·고정 문서 제목을 대소문자 없이 비교한다. 이전 키로 검색해도 행의 업무에는 현재 키를 반환한다. `unscheduledOnly=1`은 계획 시작일이나 종료일 중 하나 이상이 비어 있는 업무만 포함한다. `0`과 생략은 모든 일정 상태를 포함한다. `offset`은 기본 0이며 정수 0~1,000,000을 받는다.
 
-`{projectId,generatedAt,revision,total,offset,limit,items}`에 조건을 통과한 연결을 20건씩 반환한다. `generatedAt`은 조회 시각이며 `revision`은 적용한 조건과 현재 페이지의 조회 버전이다. 목표 마감일 또는 계획 종료일이 이른 업무를 먼저 보여준다. 날짜가 없는 업무는 뒤에 두고 같은 날짜에서는 원문 저장 시각 내림차순, 연결 ID 오름차순으로 정렬한다. 각 행에는 `linkId`, 현재 `issue`와 `document`, 고정 `source`의 버전 ID·버전·당시 제목·시각·선택 위치를 제공한다. 휴지통에서 업무나 문서를 복원하면 현재 활성 연결을 다시 조회할 수 있다.
+`{projectId,generatedAt,revision,total,offset,limit,items}`에 조건을 통과한 연결을 20건씩 반환한다. `generatedAt`은 조회 시각이며 `revision`은 적용한 조건과 현재 페이지의 조회 버전이다. 목표 마감일 또는 계획 종료일이 이른 업무를 먼저 보여준다. 날짜가 없는 업무는 뒤에 두고 같은 날짜에서는 원문 저장 시각 내림차순, 연결 ID 오름차순으로 정렬한다. 각 행에는 `linkId`, 현재 `issue`와 `document`, 고정 `source`의 버전 ID·버전·당시 제목·시각·선택 위치를 제공한다. 업무의 `startDate`와 `endDate`는 각각 유효한 계획 날짜 또는 `null`이다. 기한 정보는 `deadline`과 `deadlineSource`에서 읽는다. 휴지통에서 업무나 문서를 복원하면 현재 활성 연결을 다시 조회할 수 있다.
 
 `GET /api/projects/:id/decision-follow-ups/:linkId/source`와 `/api/v1`의 같은 경로는 현재 연결과 고정 저장본의 발췌를 다시 대조해 `{linkId,documentId,source}`를 반환한다. `source`의 `{revisionId,from,to,text}`를 기존 고정 원문 뷰어에 전달할 수 있다. 범위 제한 키는 업무와 원본 문서 양쪽 프로젝트를 포함해야 한다. 공통 문서는 전체 프로젝트 키로 읽는다. 목록과 합계에는 허용된 행만 포함되며, 발췌 조회에는 원문 저장본의 본문 접근 범위도 적용한다.
 
@@ -461,9 +461,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 ### 결정 후속 업무 회의 초안
 
-브라우저의 `POST /api/projects/:id/decision-follow-ups/meeting-draft` 또는 `POST /api/decision-follow-ups/meeting-draft`에 `requestId`, 직전 GET의 `revision`, 제목 `title`, `destinationProjectId`와 현재 조회 조건을 보낸다. `requestId`는 UUID v4, 제목은 공백을 정리한 뒤 1~200자다. `destinationProjectId`는 저장할 프로젝트 ID 또는 팀 공통 문서를 뜻하는 `null`이다. `status`, `assigneeId`, `q`는 GET과 같은 조건을 사용하고 `offset`은 정수로 보낸다. 팀 경로에서만 `projectId`로 보고서의 프로젝트를 지정한다.
+브라우저의 `POST /api/projects/:id/decision-follow-ups/meeting-draft` 또는 `POST /api/decision-follow-ups/meeting-draft`에 `requestId`, 직전 GET의 `revision`, 제목 `title`, `destinationProjectId`와 현재 조회 조건을 보낸다. `requestId`는 UUID v4, 제목은 공백을 정리한 뒤 1~200자다. `destinationProjectId`는 저장할 프로젝트 ID 또는 팀 공통 문서를 뜻하는 `null`이다. `status`, `assigneeId`, `q`는 GET과 같은 조건을 사용한다. `unscheduledOnly`는 선택 불리언이고 `offset`은 정수다. 팀 경로에서만 `projectId`로 보고서의 프로젝트를 지정한다.
 
-초안에는 해당 페이지의 결정 근거 최대 20건과 현재 티켓 상태·담당자·기한을 기록한다. 원문 저장본과 대조한 발췌를 문서에 복사하고 확인할 수 없는 발췌는 안내를 표시한다. 원래 티켓과 문서 참조, 같은 조건과 페이지로 돌아가는 보고서 링크를 보관한다. 신규 응답은 `201`과 `{document,duplicate:false}`다. 같은 작업자·입력의 재시도는 `200`과 저장한 문서를 반환한다. 요청한 보고서 유형, 조회 조건이나 페이지가 바뀌면 `409`의 `details.reason`은 `stale_report`다. 빈 페이지 또는 사라진 저장 위치에는 `422`를 반환하며, 저장 위치 오류의 `details.reason`은 `destination_unavailable`이다. 생성은 팀 브라우저 세션에서 사용한다.
+초안에는 해당 페이지의 결정 근거 최대 20건과 현재 티켓 상태·담당자·기한·계획 시작일과 종료일을 기록한다. 원문 저장본과 대조한 발췌를 문서에 복사하고 확인할 수 없는 발췌는 안내를 표시한다. 원래 티켓과 문서 참조, 일정 미정 조건을 포함한 같은 조건과 페이지로 돌아가는 보고서 링크를 보관한다. 신규 응답은 `201`과 `{document,duplicate:false}`다. 같은 작업자·입력의 재시도는 `200`과 저장한 문서를 반환한다. 요청한 보고서 유형, 조회 조건이나 페이지가 바뀌면 `409`의 `details.reason`은 `stale_report`다. 빈 페이지 또는 사라진 저장 위치에는 `422`를 반환하며, 저장 위치 오류의 `details.reason`은 `destination_unavailable`이다. 생성은 팀 브라우저 세션에서 사용한다.
 
 ## 문장 댓글
 

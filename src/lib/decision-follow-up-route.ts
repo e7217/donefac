@@ -2,6 +2,7 @@ export type DecisionFollowUpScope = {
   projectId?: string | null;
   status: 'open' | 'closed' | 'all';
   assigneeId: string;
+  unscheduledOnly?: boolean;
   q: string;
   offset: number;
 };
@@ -13,6 +14,7 @@ export function decisionFollowUpQuery(scope: DecisionFollowUpScope): URLSearchPa
   const parameters = new URLSearchParams();
   if (scope.status !== 'open') parameters.set('status', scope.status);
   if (scope.assigneeId) parameters.set('assigneeId', scope.assigneeId);
+  if (scope.unscheduledOnly) parameters.set('unscheduledOnly', '1');
   if (scope.q) parameters.set('q', scope.q);
   if (scope.offset) parameters.set('offset', String(scope.offset));
   return parameters;
@@ -40,6 +42,7 @@ export function readDecisionFollowUpScope(parameters: URLSearchParams, isKnownAs
     ...(team ? { projectId: requestedProject && isKnownProject(requestedProject) ? requestedProject : null } : {}),
     status: requestedStatus === 'closed' || requestedStatus === 'all' ? requestedStatus : status,
     assigneeId: requestedAssignee && (requestedAssignee === 'unassigned' || isKnownAssignee(requestedAssignee)) ? requestedAssignee : assigneeId,
+    ...(parameters.get('unscheduledOnly') === '1' ? { unscheduledOnly: true } : {}),
     q: query.length <= MAX_DECISION_FOLLOW_UP_SEARCH_LENGTH && query.isWellFormed() && !/[\u0000-\u001f\u007f]/u.test(query) ? query : q,
     offset: /^\d{1,7}$/u.test(position) && Number(position) <= 1_000_000 ? Number(position) : offset,
   };
@@ -47,5 +50,5 @@ export function readDecisionFollowUpScope(parameters: URLSearchParams, isKnownAs
 
 export function sameDecisionFollowUpScope(left?: DecisionFollowUpScope | null, right?: DecisionFollowUpScope | null): boolean {
   return left?.projectId === right?.projectId && left?.status === right?.status && left?.assigneeId === right?.assigneeId &&
-    left?.q === right?.q && left?.offset === right?.offset;
+    Boolean(left?.unscheduledOnly) === Boolean(right?.unscheduledOnly) && left?.q === right?.q && left?.offset === right?.offset;
 }

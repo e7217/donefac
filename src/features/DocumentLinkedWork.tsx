@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronRight, Link2, RefreshCw } from 'lucide-react';
+import { ChevronRight, Link2, RefreshCw, SquareChartGantt } from 'lucide-react';
+import { isCalendarDate } from '../../shared/calendar';
 import { buildDocumentLinkedWork } from '../../shared/document-linked-work';
 import type { DocPage, FeatureProps, WorkspaceSnapshot } from '../../shared/types';
 import { DocumentDecisionRevision } from './DocumentBlocks';
@@ -13,13 +14,14 @@ interface Props {
   data: WorkspaceSnapshot;
   document: Pick<DocPage, 'id' | 'title' | 'projectId'>;
   openIssue: (id: string) => void;
+  onOpenIssueSchedule?: (id: string) => boolean;
   refresh: () => Promise<void>;
   notify: FeatureProps['notify'];
   issueDrawerOpen?: boolean;
   children?: ReactNode;
 }
 
-export function DocumentLinkedWork({ data, document, openIssue, refresh, notify, issueDrawerOpen = false, children }: Props) {
+export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueSchedule, refresh, notify, issueDrawerOpen = false, children }: Props) {
   const titleId = useId();
   const statusControl = useRef<HTMLSelectElement>(null);
   const refreshControl = useRef<HTMLButtonElement>(null);
@@ -105,6 +107,11 @@ export function DocumentLinkedWork({ data, document, openIssue, refresh, notify,
           <span>{deadline ? <>{deadline.source === 'dueDate' ? '목표 마감일' : '계획 종료일'} <time dateTime={deadline.value}>{deadline.value}</time></> : '기한 없음'}</span>
         </span>
       </button>
+      {onOpenIssueSchedule && <button className="btn btn-ghost document-linked-work-schedule" type="button"
+        onClick={() => onOpenIssueSchedule(issue.id)}>
+        <SquareChartGantt size={14} aria-hidden="true" />
+        {isCalendarDate(issue.startDate) && isCalendarDate(issue.endDate) ? '간트에서 일정 보기' : '간트에서 날짜 입력'}
+      </button>}
       {link?.documentSource && <section className="document-linked-work-evidence" aria-label={`${issue.key} 결정 근거`}>
         <h4>결정 근거</h4>
         <blockquote>{link.documentSource.text}</blockquote>

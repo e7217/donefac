@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
+import { isCalendarDate } from '../shared/calendar.js';
 import { issueDeadline } from '../shared/my-work.js';
 import type { DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpItem, DecisionFollowUpPage, DecisionFollowUpSource,
   DocPage, DocRevision, Project, ProjectWorkflow, ResourceLink, RichContent, User } from '../shared/types.js';
@@ -14,7 +15,7 @@ import type { Store } from './store.js';
 const PAGE_SIZE = 20;
 const MAX_OFFSET = 1_000_000;
 const invalidControl = /[\u0000-\u001f\u007f]/u;
-export const DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['status', 'assigneeId', 'q', 'offset'] as const;
+export const DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['status', 'assigneeId', 'q', 'unscheduledOnly', 'offset'] as const;
 export const TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['projectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS] as const;
 const draftFields = ['requestId', 'title', 'revision', 'destinationProjectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS];
 
@@ -43,6 +44,7 @@ type Row = {
   issueStatus: string;
   assigneeId: string | null;
   dueDate: string | null;
+  startDate: string | null;
   endDate: string | null;
   documentId: string;
   documentProjectId: string | null;
@@ -88,6 +90,7 @@ type Filters = {
   assigneeId: string | null;
   query: string;
   searchTerm: string;
+  unscheduledOnly?: true;
   offset: number;
 };
 
@@ -95,12 +98,15 @@ function parseQuery(query: Record<string, unknown>, allowed: readonly string[] =
   if (Object.keys(query).some(key => !allowed.includes(key))) {
     throw new DecisionFollowUpError(400, '결정 후속 업무의 조회 조건을 확인해 주세요.');
   }
-  const { status = 'open', assigneeId, q, offset = '0' } = query;
+  const { status = 'open', assigneeId, q, unscheduledOnly, offset = '0' } = query;
   if (status !== 'open' && status !== 'closed' && status !== 'all') {
     throw new DecisionFollowUpError(400, '결정 후속 업무의 상태 조건을 확인해 주세요.');
   }
   if (q !== undefined && (typeof q !== 'string' || q.length > 160 || !q.isWellFormed() || invalidControl.test(q))) {
     throw new DecisionFollowUpError(400, '검색어는 160자까지 입력할 수 있습니다.');
+  }
+  if (unscheduledOnly !== undefined && unscheduledOnly !== '0' && unscheduledOnly !== '1') {
+    throw new DecisionFollowUpError(400, '일정 미정 조건을 확인해 주세요.');
   }
   if (typeof offset !== 'string' || !/^[0-9]{1,7}$/u.test(offset) || Number(offset) > MAX_OFFSET) {
     throw new DecisionFollowUpError(400, '조회 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
@@ -109,6 +115,7 @@ function parseQuery(query: Record<string, unknown>, allowed: readonly string[] =
   return {
     status, assigneeId: assigneeId === undefined ? null : identifier(assigneeId, '담당자 ID를 확인해 주세요.'),
     query: searchable(searchTerm), searchTerm, offset: Number(offset),
+    ...(unscheduledOnly === '1' ? { unscheduledOnly: true } : {}),
   };
 }
 
@@ -181,7 +188,7 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
     const rows = store.db.prepare(`SELECT l.id AS linkId, i.id AS issueId, i.project_id AS issueProjectId,
       json_extract(i.json,'$.key') AS issueKey, json_extract(i.json,'$.title') AS issueTitle,
       json_extract(i.json,'$.status') AS issueStatus, i.assignee_id AS assigneeId,
-      json_extract(i.json,'$.dueDate') AS dueDate, json_extract(i.json,'$.endDate') AS endDate,
+      json_extract(i.json,'$.dueDate') AS dueDate, json_extract(i.json,'$.startDate') AS startDate, json_extract(i.json,'$.endDate') AS endDate,
       d.id AS documentId, d.project_id AS documentProjectId, json_extract(d.json,'$.title') AS documentTitle,
       r.id AS revisionId, json_extract(r.json,'$.version') AS version, json_extract(r.json,'$.title') AS sourceTitle,
       json_extract(r.json,'$.createdAt') AS createdAt, json_extract(l.json,'$.documentSource.from') AS sourceFrom,
@@ -197,6 +204,9 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
       if (!Number.isSafeInteger(row.version) || row.version < 1 || !Number.isFinite(Date.parse(row.createdAt)) ||
           !Number.isSafeInteger(row.sourceFrom) || !Number.isSafeInteger(row.sourceTo) ||
           row.sourceFrom < 0 || row.sourceTo <= row.sourceFrom) continue;
+      const startDate = isCalendarDate(row.startDate) ? row.startDate : null;
+      const endDate = isCalendarDate(row.endDate) ? row.endDate : null;
+      if (filters.unscheduledOnly && startDate && endDate) continue;
       const issueProjectId = row.issueProjectId;
       let issueWorkflow = workflows.get(issueProjectId);
       if (!issueWorkflow) {
@@ -216,7 +226,7 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
         issue: {
           id: row.issueId, projectId: issueProjectId, key: row.issueKey, title: row.issueTitle, status: row.issueStatus,
           statusLabel: status.label, statusColor: status.color, statusCategory: status.category,
-          assigneeId: row.assigneeId, deadline: deadline?.value ?? null, deadlineSource: deadline?.source ?? null,
+          assigneeId: row.assigneeId, startDate, endDate, deadline: deadline?.value ?? null, deadlineSource: deadline?.source ?? null,
         },
         document: { id: row.documentId, projectId: row.documentProjectId, title: row.documentTitle },
         source: { revisionId: row.revisionId, version: row.version, title: row.sourceTitle, createdAt: row.createdAt,
@@ -227,7 +237,7 @@ function listDecisions({ store, workflow }: Dependencies, projectId: string | nu
     const visible = items.slice(filters.offset, filters.offset + PAGE_SIZE);
     const labels = pageLabels(store, projectId, filters.assigneeId, visible);
     const revision = createHash('sha256').update(JSON.stringify([
-      teamReport, projectId, filters.status, filters.assigneeId, filters.searchTerm, filters.offset, items.length, visible,
+      teamReport, projectId, filters.status, filters.assigneeId, filters.searchTerm, filters.unscheduledOnly === true, filters.offset, items.length, visible,
       [...labels.projectNames], [...labels.assigneeNames], store.setting('attachmentImportGeneration'),
     ])).digest('hex');
     const page: DecisionFollowUpPage = { projectId, total: items.length, offset: filters.offset, limit: PAGE_SIZE,
@@ -271,7 +281,7 @@ function draftInput(request: Request, teamReport: boolean) {
       Object.keys(body).some(key => !draftFields.includes(key) && !(teamReport && key === 'projectId'))) {
     throw new DecisionFollowUpError(400, '결정 후속 업무 회의 초안의 입력을 확인해 주세요.');
   }
-  const { title: inputTitle, requestId, revision, destinationProjectId, projectId, status, assigneeId, q, offset } = body as Record<string, unknown>;
+  const { title: inputTitle, requestId, revision, destinationProjectId, projectId, status, assigneeId, q, unscheduledOnly, offset } = body as Record<string, unknown>;
   const title = typeof inputTitle === 'string' ? inputTitle.trim() : '';
   if (!title || title.length > 200 || !title.isWellFormed() || invalidControl.test(title)) {
     throw new DecisionFollowUpError(400, '회의 초안 제목을 1~200자로 입력해 주세요.');
@@ -282,9 +292,12 @@ function draftInput(request: Request, teamReport: boolean) {
   if (offset !== undefined && (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_OFFSET)) {
     throw new DecisionFollowUpError(400, '조회 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
   }
+  if (unscheduledOnly !== undefined && typeof unscheduledOnly !== 'boolean') {
+    throw new DecisionFollowUpError(400, '일정 미정 조건을 확인해 주세요.');
+  }
   return { title, requestId, revision, destination: destinationProjectId === null ? null : projectIdentifier(destinationProjectId),
     reportProject: teamReport ? (projectId === undefined ? null : projectIdentifier(projectId)) : projectIdentifier(request.params.id),
-    filters: parseQuery({ status, assigneeId, q, offset: String(offset ?? 0) }),
+    filters: parseQuery({ status, assigneeId, q, offset: String(offset ?? 0), ...(unscheduledOnly ? { unscheduledOnly: '1' } : {}) }),
   };
 }
 
@@ -293,6 +306,7 @@ function reportHref(routeProject: string, reportProject: string | null, filters:
   if (filters.status !== 'open') parameters.set('status', filters.status);
   if (filters.assigneeId) parameters.set('assigneeId', filters.assigneeId);
   if (filters.searchTerm) parameters.set('q', filters.searchTerm);
+  if (filters.unscheduledOnly) parameters.set('unscheduledOnly', '1');
   if (filters.offset) parameters.set('offset', String(filters.offset));
   if (teamReport) {
     parameters.set('scope', 'team');

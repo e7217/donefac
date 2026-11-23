@@ -32,6 +32,7 @@ type Props = FeatureProps & {
   onChangeBlockerScope: (scope: DeliveryBlockerDraftScope | null) => boolean;
   onOpenReleasePlan: (id: string) => boolean;
   onOpenReleaseGantt: (id: string) => boolean;
+  onOpenIssueSchedule: (id: string) => boolean;
   decisionFollowUpScope: DecisionFollowUpScope | null;
   onChangeDecisionFollowUpScope: (scope: DecisionFollowUpScope | null) => boolean;
   fieldBreakdownScope: FieldBreakdownScope | null;

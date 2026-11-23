@@ -439,6 +439,85 @@ function draftReportUrl(document: DocPage) {
   return new URL(String(href).slice(1), 'http://teamspace.test');
 }
 
+test('decision follow-up timing filters use missing plan dates independently of deadlines and respect project scopes before paging', async t => {
+  const f = await fixture(t);
+  const query = '합성 결정 일정 필터';
+  const excerpt = '시작과 종료 날짜를 검토하기로 했다.';
+  const source = await f.document('같은 프로젝트의 결정 근거', project, paragraph(excerpt));
+  const foreignSource = await f.document('다른 프로젝트의 결정 근거', outsideProject, paragraph(excerpt));
+  const [complete, dueOnly, startOnly, endOnly, closed, foreign] = await Promise.all([
+    f.issue(`${query} 날짜 입력 완료`, project, { startDate: '2030-01-01', endDate: '2030-01-10', dueDate: '2030-01-03' }),
+    f.issue(`${query} 목표 마감일만`, project, { dueDate: '2030-01-04' }),
+    f.issue(`${query} 시작일만`, project, { assigneeId: owner, startDate: '2030-01-05', dueDate: '2030-01-06' }),
+    f.issue(`${query} 종료일만`, project, { endDate: '2030-01-07', dueDate: '2030-01-08' }),
+    f.issue(`${query} 닫힌 업무`, project, { status: 'done', dueDate: '2030-01-09' }),
+    f.issue(`${query} 다른 프로젝트`, outsideProject, { dueDate: '2030-01-02' }),
+  ]);
+  await Promise.all([complete, dueOnly, startOnly, closed].map(issue => f.cite(issue, source, excerpt)));
+  await f.cite(endOnly, foreignSource, excerpt);
+  await f.cite(foreign, foreignSource, excerpt);
+
+  const teamPath = '/decision-follow-ups';
+  const projectPath = `/projects/${project}${teamPath}`;
+  const read = (path: string, filters: Record<string, string> = {}, token?: string) => f.call<DecisionFollowUpPage>(
+    `${token ? '/v1' : ''}${path}?${new URLSearchParams({ q: query, ...filters })}`, 200, 'GET', undefined, token);
+  const ids = (page: DecisionFollowUpPage) => page.items.map(item => item.issue.id);
+  const missing = { unscheduledOnly: '1' };
+  const all = await read(projectPath);
+  assert.deepEqual(ids(all), [complete.id, dueOnly.id, startOnly.id, endOnly.id]);
+  assert.deepEqual(all.items.map(({ issue }) => [issue.startDate, issue.endDate, issue.deadline, issue.deadlineSource]), [
+    ['2030-01-01', '2030-01-10', '2030-01-03', 'dueDate'], [null, null, '2030-01-04', 'dueDate'],
+    ['2030-01-05', null, '2030-01-06', 'dueDate'], [null, '2030-01-07', '2030-01-08', 'dueDate'],
+  ]);
+  assert.equal((await read(projectPath, { unscheduledOnly: '0' })).revision, all.revision);
+  assert.deepEqual(ids(await read(projectPath, { ...missing, status: 'closed' })), [closed.id]);
+  assert.deepEqual(ids(await read(projectPath, { ...missing, status: 'all' })), [dueOnly.id, startOnly.id, endOnly.id, closed.id]);
+  assert.deepEqual(ids(await read(projectPath, { ...missing, assigneeId: owner })), [startOnly.id]);
+  assert.deepEqual(ids(await read(teamPath, { ...missing, projectId: project })), [dueOnly.id, startOnly.id, endOnly.id]);
+  const sliced = await read(teamPath, { ...missing, offset: '1' });
+  assert.equal(sliced.total, 4);
+  assert.equal(sliced.offset, 1);
+  assert.deepEqual(ids(sliced), [dueOnly.id, startOnly.id, endOnly.id]);
+  const scoped = await f.key('read');
+  assert.deepEqual(ids(await read(teamPath, missing, scoped)), [dueOnly.id, startOnly.id]);
+  assert.deepEqual(ids(await read(projectPath, missing, scoped)), [dueOnly.id, startOnly.id]);
+  for (const value of ['true', '2', '1&unscheduledOnly=0']) {
+    await f.call(`${teamPath}?unscheduledOnly=${value}`, 400);
+    await f.call(`/v1${projectPath}?unscheduledOnly=${value}`, 400, 'GET', undefined, scoped);
+  }
+
+  const onlyDue = { q: dueOnly.title };
+  const sameItems = await read(projectPath, onlyDue);
+  const onlyUnscheduled = await read(projectPath, { ...onlyDue, ...missing });
+  assert.deepEqual(sameItems.items, onlyUnscheduled.items);
+  assert.notEqual(sameItems.revision, onlyUnscheduled.revision);
+  const prior = await read(projectPath, missing);
+  const draftPath = `${projectPath}/meeting-draft`;
+  const input = { q: query, unscheduledOnly: true, requestId: randomUUID(), revision: prior.revision,
+    title: '계획 날짜를 검토하는 회의 초안', destinationProjectId: project };
+  await f.call(draftPath, 400, 'POST', { ...input, unscheduledOnly: '1' });
+  await f.call(`/issues/${startOnly.id}`, 200, 'PATCH', { expectedVersion: startOnly.version, startDate: '2030-01-11' });
+  const current = await read(projectPath, missing);
+  assert.deepEqual(ids(current), ids(prior));
+  assert.deepEqual(current.items.map(({ issue }) => issue.deadline), prior.items.map(({ issue }) => issue.deadline));
+  assert.notEqual(current.revision, prior.revision);
+  const stale = await f.call<DraftConflict>(draftPath, 409, 'POST', input);
+  assert.equal(stale.details?.reason, 'stale_report');
+  assert.ok(!(await f.call<WorkspaceSnapshot>('/workspace')).documents.some(document => document.title === input.title));
+
+  const body = { ...input, revision: current.revision };
+  const draft = await f.call<DecisionFollowUpDraftResult>(draftPath, 201, 'POST', body);
+  assert.equal(draft.duplicate, false);
+  assert.deepEqual([...documentNodes(draft.document.content)].filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId),
+    [dueOnly.id, startOnly.id, endOnly.id]);
+  assert.match(draft.document.plainText, /일정 미정/u);
+  assert.match(draft.document.plainText, /계획 시작일 미정 · 계획 종료일 미정/u);
+  assert.match(draft.document.plainText, /계획 시작일 2030-01-11 · 계획 종료일 미정/u);
+  assert.match(draft.document.plainText, /계획 시작일 미정 · 계획 종료일 2030-01-07/u);
+  assert.deepEqual(Object.fromEntries(draftReportUrl(draft.document).searchParams), { q: query, ...missing });
+  assert.deepEqual(await f.call<DecisionFollowUpDraftResult>(draftPath, 200, 'POST', body), { ...draft, duplicate: true });
+});
+
 test('project decision meeting draft preserves reviewed original excerpts and atomically records one ordinary backlink', async t => {
   const f = await fixture(t);
   const query = '프로젝트 초안 교차 확인 CHECK';
@@ -526,6 +605,7 @@ test('project decision meeting draft preserves reviewed original excerpts and at
 
   await f.call(`/issues/${issue.id}`, 200, 'PATCH', { expectedVersion: changed.version, dueDate: '2030-01-13' });
   assert.deepEqual(await f.call<MeetingDraftResult>(draftPath, 200, 'POST', body), { document, duplicate: true });
+  assert.deepEqual(await f.call<MeetingDraftResult>(draftPath, 200, 'POST', { ...body, unscheduledOnly: false }), { document, duplicate: true });
   assert.equal((await f.call<DraftConflict>(draftPath, 409, 'POST', { ...body, destinationProjectId: project })).details?.reason, 'request_conflict');
   await f.call(draftPath, 400, 'POST', { ...body, requestId: randomUUID(), projectId: outsideProject });
   const writeKey = await f.key('write', null);

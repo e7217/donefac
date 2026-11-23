@@ -5,6 +5,7 @@ import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOp
 import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
+import { isCalendarDate } from '../shared/calendar';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { countActiveMyWork } from '../shared/my-work';
@@ -809,6 +810,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setIssueFocusActivation(value => value + 1);
     return true;
   };
+  const openFollowUpSchedule = (id: string) => {
+    const issue = dataRef.current?.issues.find(value => value.id === id);
+    if (!issue) {
+      notify('일정을 열 업무를 찾을 수 없습니다.', 'error');
+      return false;
+    }
+    const endpoint = !isCalendarDate(issue.startDate) ? 'startDate' : !isCalendarDate(issue.endDate) ? 'endDate' : undefined;
+    return openIssueSchedule(id, endpoint);
+  };
   const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) =>
     requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
   const openReleaseReadiness = (id: string) =>
@@ -1023,14 +1033,14 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>
           <Reports {...props} snapshotId={reportId} initialBlockerScope={blockerScope} decisionFollowUpScope={decisionFollowUpScope}
             onChangeBlockerScope={changeBlockerScope} onOpenReleasePlan={id => openPlanIn('planning', id)} onOpenReleaseGantt={id => openPlanIn('gantt', id)}
-            onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} fieldBreakdownScope={fieldBreakdownScope}
+            onChangeDecisionFollowUpScope={changeDecisionFollowUpScope} onOpenIssueSchedule={openFollowUpSchedule} fieldBreakdownScope={fieldBreakdownScope}
             onChangeFieldBreakdownScope={changeFieldBreakdownScope} onPublishFieldBreakdownScope={publishFieldBreakdownScope}
             onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}
             issueOverlayOpen={reportIssueOpen}/>
         </Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
-          onCopyCommentLink={copyDocumentCommentLink}
+          onCopyCommentLink={copyDocumentCommentLink} onOpenIssueSchedule={openFollowUpSchedule}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {
             const current = acceptedRouteRef.current;
             if (current?.view === 'documents') requestRoute({...current, documentLabel:label});

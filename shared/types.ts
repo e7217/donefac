@@ -1126,7 +1126,7 @@ export interface LinkedDocumentCreationResult { document: DocPage; link: Resourc
 
 export interface DecisionFollowUpItem {
   linkId: string;
-  issue: Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'status' | 'assigneeId'> & {
+  issue: Pick<Issue, 'id' | 'projectId' | 'key' | 'title' | 'status' | 'assigneeId' | 'startDate' | 'endDate'> & {
     statusLabel: string;
     statusColor: string;
     statusCategory: StatusCategory;
@@ -1156,6 +1156,7 @@ export interface DecisionFollowUpDraftRequest {
   status?: 'open' | 'closed' | 'all';
   assigneeId?: string;
   q?: string;
+  unscheduledOnly?: boolean;
   offset?: number;
 }
 

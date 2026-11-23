@@ -14,13 +14,23 @@
 
 .decision-follow-ups-controls {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr)) auto auto;
   align-items: end;
   gap: 0.75rem;
 }
 
 .decision-follow-ups-controls label { min-width: 0; }
 .decision-follow-ups-controls .field { box-sizing: border-box; min-width: 0; }
+.decision-follow-ups-controls .decision-follow-ups-unscheduled {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-height: 36px;
+  color: #526c65;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.decision-follow-ups-unscheduled input { margin: 0; }
 .decision-follow-ups-results > header {
   display: flex;
   flex-wrap: wrap;
@@ -73,6 +83,7 @@
 }
 
 .decision-follow-up-details[data-show-issue-project] { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.decision-follow-up-plan { grid-column: 1 / -1; }
 
 .decision-follow-up-details dt,
 .decision-follow-up-document small { color: #526c65; }
@@ -97,6 +108,8 @@
 .decision-follow-up-document svg { flex: 0 0 auto; margin-top: 0.2rem; }
 .decision-follow-up-document small { display: block; }
 .decision-follow-up-document-link { color: #11675e; text-decoration: underline; text-underline-offset: 0.15em; }
+.decision-follow-up-schedule-action { margin-bottom: 0.65rem; }
+.decision-follow-up-schedule-action .btn[aria-disabled='true'] { opacity: 0.6; cursor: wait; }
 .decision-follow-up .doc-pinned-include { margin: 0; }
 .decision-follow-up .doc-pinned-include > blockquote {
   border-left: 3px solid #177c72;
@@ -112,7 +125,9 @@
   .decision-follow-ups-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .decision-follow-ups-controls label:first-child,
   .decision-follow-ups-project { grid-column: 1 / -1; }
-  .decision-follow-ups-controls .btn { grid-column: 1 / -1; justify-self: end; }
+  .decision-follow-ups-controls .btn { justify-self: end; }
+  .decision-follow-up-schedule-action .btn,
+  .decision-follow-ups-controls .decision-follow-ups-unscheduled { min-height: 44px; }
 }
 
 @media (max-width: 420px) {

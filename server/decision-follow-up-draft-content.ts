@@ -2,7 +2,7 @@ import type { DecisionFollowUpDraftRequest, DecisionFollowUpPage, RichContent } 
 
 type DraftDetails = {
   page: DecisionFollowUpPage;
-  filters: { status: NonNullable<DecisionFollowUpDraftRequest['status']>; assigneeId: string | null; searchTerm: string };
+  filters: { status: NonNullable<DecisionFollowUpDraftRequest['status']>; assigneeId: string | null; searchTerm: string; unscheduledOnly?: boolean };
   projectNames: ReadonlyMap<string, string>;
   assigneeNames: ReadonlyMap<string, string>;
   excerpts: ReadonlyMap<string, string>;
@@ -30,6 +30,7 @@ export function buildDecisionFollowUpDraftContent({ page, filters, projectNames,
     paragraph(`보고서 기준 시각 ${captured}`),
     paragraph(`프로젝트 ${scope} · 상태 ${statusLabels[filters.status]} · 담당자 ${assigneeFilter}`),
     ...(filters.searchTerm ? [paragraph(`검색어 ${filters.searchTerm}`)] : []),
+    ...(filters.unscheduledOnly ? [paragraph('일정 미정만')] : []),
     { type: 'paragraph', content: [{ ...text('결정 후속 업무 보고서 열기'), marks: [{ type: 'link', attrs: { href, target: '_self' } }] }, text(' (현재 상태)')] },
     heading('결정 후속 업무'),
     paragraph(`결정 근거 ${numberLabel(page.total)}건 중 ${numberLabel(page.offset + 1)}–${numberLabel(page.offset + page.items.length)}번째 ${numberLabel(page.items.length)}건을 기록했습니다.`),
@@ -43,6 +44,7 @@ export function buildDecisionFollowUpDraftContent({ page, filters, projectNames,
     content.push(
       heading(issueLabel, 3),
       paragraph(`업무 프로젝트 ${projectLabel(issue.projectId)} · 상태 ${issue.statusLabel} · 담당자 ${assigneeLabel(issue.assigneeId)} · ${deadlineLabel} ${issue.deadline ?? '미정'}`),
+      paragraph(`계획 시작일 ${issue.startDate ?? '미정'} · 계획 종료일 ${issue.endDate ?? '미정'}`),
       paragraph(`원문 문서 ${documentLabel(document.title)} · ${space}`),
       paragraph(`고정 저장본 ${documentLabel(source.title)} · 버전 ${source.version} · ${source.createdAt}`),
       excerpt ? { type: 'blockquote', content: [paragraph(excerpt)] } : paragraph('저장된 결정 근거를 확인할 수 없습니다.'),
