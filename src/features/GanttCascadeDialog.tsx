@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertCircle, ArrowRight, Check, RefreshCw } from 'lucide-react';
-import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange, TeamScheduleBlocker } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
+import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
 
 export type CascadeAnchorChange = ScheduleAnchorChange;
@@ -13,9 +14,8 @@ type SourceDates = Pick<Issue, 'startDate' | 'endDate'>;
 type SourceSchedule = SourceDates & Pick<Issue, 'version'>;
 
 export type TeamFollowUpSelection = {
-  relation: TeamScheduleBlocker;
+  choices: readonly TeamFollowUpChoice[];
   source: Pick<Issue, 'id' | 'key'> & SourceSchedule;
-  target: Pick<Issue, 'id' | 'key'>;
   initialChange?: ScheduleAnchorChange;
 };
 
@@ -23,6 +23,7 @@ type Props = {
   onClose: () => void;
   onApplied: (result: ScheduleApplyResult, unchangedSource?: SourceSchedule) => Promise<void> | void;
   onBusyChange: (value: boolean) => void;
+  onOutcomeUnknownChange?: (unknown: boolean) => void;
 } & (
   | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never }
   | { teamFollowUp: TeamFollowUpSelection; projects: readonly Project[]; projectId?: never; anchorChange?: never }
@@ -57,7 +58,9 @@ function currentSourceSchedule(cause: unknown): SourceSchedule | null {
   return { version: currentVersion, startDate, endDate };
 }
 
-export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, projects, onClose, onApplied, onBusyChange }: Props) {
+export function GanttCascadeDialog({
+  projectId, anchorChange, teamFollowUp, projects, onClose, onApplied, onBusyChange, onOutcomeUnknownChange,
+}: Props) {
   const headingId = useId();
   const sourceDateErrorId = useId();
   const dialog = useRef<HTMLElement>(null);
@@ -105,7 +108,8 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
     if (!controller) return;
     setFreshPreviewNeeded(true);
     try {
-      const input = teamFollowUp ? { relationId: teamFollowUp.relation.id, expectedVersion: teamFollowUp.relation.version,
+      const relations = teamFollowUp?.choices.map(({ relation }) => ({ relationId: relation.id, expectedVersion: relation.version }));
+      const input = relations ? { ...(relations.length === 1 ? relations[0] : { relations }),
         ...(change ? { anchorChange: change } : {}) } : { projectId, anchorChange };
       const result = await api<AutomaticSchedulePreview>(`${route}-preview`, {
         method: 'POST', signal: controller.signal, body: JSON.stringify(input),
@@ -171,6 +175,11 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
     catch { setError('일정이 저장되었습니다. 간트 화면을 다시 불러와 주세요.'); }
   }
 
+  function updateOutcomeUnknown(unknown: boolean) {
+    setOutcomeUnknown(unknown);
+    onOutcomeUnknownChange?.(unknown);
+  }
+
   async function apply(recovering: boolean) {
     if (!preview || applied || preview.blocking.length || !preview.changes.length) return;
     if (!recovering && (needsPreview || outcomeUnknown || Date.parse(preview.expiresAt) <= Date.now())) {
@@ -187,16 +196,16 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
       if (controller.signal.aborted) return;
       if (!isApplyResult(result)) {
         if (!recovering || result?.applied !== false) throw new Error('적용 결과를 확인하지 못했습니다.');
-        setOutcomeUnknown(false);
+        updateOutcomeUnknown(false);
         setStatus('아직 저장된 결과가 없습니다. 같은 제안을 다시 적용할 수 있습니다.');
         return;
       }
-      setOutcomeUnknown(false);
+      updateOutcomeUnknown(false);
       await reflect(result);
     } catch (cause) {
       if (controller.signal.aborted) return;
       const ambiguous = recovering || !(cause instanceof ApiError) || cause.status >= 500 || cause.status === 408;
-      setOutcomeUnknown(ambiguous);
+      updateOutcomeUnknown(ambiguous);
       if (!ambiguous) {
         if (teamFollowUp) setStaleSource(currentSourceSchedule(cause));
         setFreshPreviewNeeded(true);
@@ -242,13 +251,26 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
   const canApply = preview && preview.changes.length > 0 && !preview.blocking.length && !needsPreview;
   const anchorId = teamFollowUp?.source.id ?? anchorChange?.id;
   const anchorListed = preview?.changes.some(change => change.id === anchorId);
+  const singleChoice = teamFollowUp?.choices.length === 1 ? teamFollowUp.choices[0] : undefined;
+  const selectedTargets = new Set(teamFollowUp?.choices.map(({ target }) => target.id));
   const projectNames = new Map(projects?.map(project => [project.id, project.name]));
   return <div className="issue-modal-overlay"><section className={`gantt-preview-modal${teamFollowUp ? ' gantt-team-follow-up-modal' : ''}`} role="dialog" aria-modal="true"
       aria-labelledby={headingId} tabIndex={-1} ref={dialog} onKeyDown={handleKey}>
     <header><div><h2 id={headingId}>{teamFollowUp ? '프로젝트 간 후행 일정 검토' : '후행 일정 미리보기'}</h2>
       {teamFollowUp ? <>
-        <p><strong>{teamFollowUp.source.key} → {teamFollowUp.target.key}</strong></p>
-        {teamFollowUp.relation.origin === 'jira' && <p>Jira 이관 관계</p>}
+        {singleChoice ? <>
+          <p><strong>{teamFollowUp.source.key} → {singleChoice.target.key}</strong></p>
+          <p>{projectNames.get(singleChoice.target.projectId) ?? '프로젝트 정보 없음'}</p>
+          {singleChoice.relation.origin === 'jira' && <p>Jira 이관 관계</p>}
+        </> : <>
+          <p>선행 업무 <strong>{teamFollowUp.source.key}</strong></p>
+          <ul className="gantt-team-follow-up-selected" role="list" aria-label="선택한 후행 업무">
+            {teamFollowUp.choices.map(({ relation, target }) => <li key={relation.id}>
+              <strong>{target.key}</strong> · {target.title}
+              <small>{projectNames.get(target.projectId) ?? '프로젝트 정보 없음'}{relation.origin === 'jira' && ' · Jira 이관 관계'}</small>
+            </li>)}
+          </ul>
+        </>}
         {preview?.teamFollowUp && <p>기준 업무 종료일 <strong>{preview.teamFollowUp.sourceEndDate ?? '미정'}</strong></p>}
         <p>선행 업무의 일정으로 후행 업무가 각 프로젝트 달력에서 얼마나 밀리는지 확인합니다.</p>
       </> : <>
@@ -283,7 +305,7 @@ export function GanttCascadeDialog({ projectId, anchorChange, teamFollowUp, proj
       <tbody>{preview.changes.map(change => <tr key={change.id}>
         <td><span className="issue-key">{change.key}</span><strong>{change.title}</strong>
           {teamFollowUp && change.projectId && <small data-schedule-project={change.projectId}>{projectNames.get(change.projectId) ?? '프로젝트 정보 없음'}</small>}
-          <small>{change.id === anchorId ? (teamFollowUp ? '선행 업무' : '입력한 업무') : change.id === teamFollowUp?.target.id ? '차단되는 업무' : '후행 업무'}</small></td>
+          <small>{change.id === anchorId ? (teamFollowUp ? '선행 업무' : '입력한 업무') : selectedTargets.has(change.id) ? '차단되는 업무' : '후행 업무'}</small></td>
         <td>{change.fromStart ?? '미정'}<br />{change.fromEnd ?? '미정'}</td><td><ArrowRight aria-hidden="true" size={16} /></td>
         <td className="gantt-new-dates">{change.toStart ?? '미정'}<br />{change.toEnd ?? '미정'}</td>
       </tr>)}</tbody></table>

@@ -6,7 +6,6 @@ type ScheduleDates = Pick<Issue, 'startDate' | 'endDate'>;
 type CalendarMath = ReturnType<typeof createCalendarMath>;
 interface TeamFollowUpScope {
   sourceId: string;
-  targetId: string;
   anchorChange?: ScheduleDates;
   issues: Issue[];
   selectedIds: string[];
@@ -28,12 +27,14 @@ function edgesByIssue(dependencies: Dependency[], direction: 'predecessorId' | '
   return groups;
 }
 
-export function teamFollowUpScope(sourceId: string, targetId: string, issues: Issue[], dependencies: Dependency[],
+export function teamFollowUpScope(sourceId: string, targetIds: readonly string[], issues: Issue[], dependencies: Dependency[],
   anchorChange?: ScheduleDates): TeamFollowUpScope {
   const byId = new Map(issues.map(issue => [issue.id, issue]));
-  if (!byId.has(sourceId) || !byId.has(targetId)) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
+  if (!byId.has(sourceId) || !targetIds.length || targetIds.some(id => !byId.has(id))) {
+    throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
+  }
   const outgoing = edgesByIssue(dependencies, 'predecessorId');
-  const selected = new Set([anchorChange ? sourceId : targetId]);
+  const selected = new Set(anchorChange ? [sourceId] : targetIds);
   for (const id of selected) {
     for (const dependency of outgoing.get(id) ?? []) {
       if (!byId.has(dependency.successorId)) throw new TeamFollowUpScheduleError(409, '선후행 연결에 현재 없는 업무가 있습니다.');
@@ -43,11 +44,11 @@ export function teamFollowUpScope(sourceId: string, targetId: string, issues: Is
         : '후행 업무는 한 번에 1,000개까지 계산할 수 있습니다.');
     }
   }
-  if (anchorChange && !selected.has(targetId)) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
+  if (anchorChange && targetIds.some(id => !selected.has(id))) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
   const incoming = dependencies.filter(dependency => selected.has(dependency.successorId));
   const references = new Set([...selected, sourceId, ...incoming.map(dependency => dependency.predecessorId)]);
   return {
-    sourceId, targetId, issues: issues.filter(issue => references.has(issue.id)), selectedIds: [...selected], dependencies: incoming,
+    sourceId, issues: issues.filter(issue => references.has(issue.id)), selectedIds: [...selected], dependencies: incoming,
     ...(anchorChange ? { anchorChange } : {}),
   };
 }

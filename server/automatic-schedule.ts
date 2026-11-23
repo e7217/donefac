@@ -1,7 +1,9 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
-import type { AutomaticSchedulePreview, Dependency, Issue, ProjectWorkflow, ProjectWorkloadCapacity, ScheduleAnchorChange, ScheduleChange,
-  TeamFollowUpScheduleInput, TeamScheduleBlocker, TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkCalendar, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
+import { MAX_TEAM_FOLLOW_UP_RELATIONS, type AutomaticSchedulePreview, type Dependency, type Issue, type ProjectWorkflow,
+  type ProjectWorkloadCapacity, type ScheduleAnchorChange, type ScheduleChange, type TeamFollowUpRelationReference, type TeamFollowUpScheduleInput,
+  type TeamScheduleBlocker, type TeamWorkloadCapacity, type TeamWorkloadLevelPreview, type WorkCalendar, type WorkloadLevelPlan,
+  type WorkloadLevelPreview } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -65,17 +67,35 @@ const readset=(issues:Issue[]):[string,number][]=>issues.map(issue=>[issue.id,is
 const followUpReadset = (issues: Issue[]): [string, number, string][] => issues
   .map(({ id, version, projectId }): [string, number, string] => [id, version, projectId]).sort((a, b) => a[0].localeCompare(b[0]));
 
-function parseTeamFollowUpInput(value: unknown): TeamFollowUpScheduleInput {
+function parseTeamFollowUpRelation(value: unknown): TeamFollowUpRelationReference {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      Object.keys(value).some(key => key !== 'relationId' && key !== 'expectedVersion' && key !== 'anchorChange')) {
+      Object.keys(value).some(key => key !== 'relationId' && key !== 'expectedVersion')) {
     fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
   }
-  const { relationId, expectedVersion, anchorChange } = value as Record<string, unknown>;
+  const { relationId, expectedVersion } = value as Record<string, unknown>;
   if (!isRelationId(relationId) ||
       typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
     fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
   }
-  if (anchorChange === undefined) return { relationId, expectedVersion };
+  return { relationId, expectedVersion };
+}
+
+function parseTeamFollowUpInput(value: unknown): TeamFollowUpScheduleInput {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
+  const batch = Object.hasOwn(value, 'relations');
+  const allowed = batch ? ['relations', 'anchorChange'] : ['relationId', 'expectedVersion', 'anchorChange'];
+  if (Object.keys(value).some(key => !allowed.includes(key))) fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
+  const { relations, relationId, expectedVersion, anchorChange } = value as Record<string, unknown>;
+  let selection: TeamFollowUpScheduleInput;
+  if (batch) {
+    const invalid = () => fail(`차단 관계를 중복 없이 1~${MAX_TEAM_FOLLOW_UP_RELATIONS}개 선택해 주세요.`);
+    if (!Array.isArray(relations) || !relations.length || relations.length > MAX_TEAM_FOLLOW_UP_RELATIONS) return invalid();
+    const references = Array.from(relations, parseTeamFollowUpRelation);
+    if (new Set(references.map(reference => reference.relationId)).size !== references.length) return invalid();
+    selection = { relations: references };
+  } else selection = parseTeamFollowUpRelation({ relationId, expectedVersion });
+
+  if (anchorChange === undefined) return selection;
   if (!anchorChange || typeof anchorChange !== 'object' || Array.isArray(anchorChange) ||
       Object.keys(anchorChange).some(key => key !== 'id' && key !== 'expectedVersion' && key !== 'startDate' && key !== 'endDate')) {
     fail('원인 업무와 변경할 날짜를 확인해 주세요.');
@@ -84,7 +104,7 @@ function parseTeamFollowUpInput(value: unknown): TeamFollowUpScheduleInput {
   if (!isRelationId(id) || typeof issueVersion !== 'number' || !Number.isSafeInteger(issueVersion) || issueVersion < 1) {
     fail('원인 업무와 조회 당시 업무 버전을 확인해 주세요.');
   }
-  return { relationId, expectedVersion, anchorChange: { id, expectedVersion: issueVersion,
+  return { ...selection, anchorChange: { id, expectedVersion: issueVersion,
     startDate: date(startDate, '시작일'), endDate: date(endDate, '종료일') } };
 }
 
@@ -475,14 +495,26 @@ export class AutomaticScheduleService{
     };
     const terminal = (issue: Issue) => isTerminalStatus({ workflows: [workflow(issue.projectId)] }, issue.projectId, issue.status);
     const blockers = hooks.teamBlockers();
-    const chosen = blockers.find(relation => relation.id === input.relationId);
-    const source = chosen && byId.get(chosen.sourceIssueId);
-    const target = chosen && byId.get(chosen.targetIssueId);
-    if (!chosen || !source || !target || source.projectId === target.projectId) {
-      fail('프로젝트 간 차단 관계를 찾을 수 없습니다. 차단 목록을 다시 확인해 주세요.', applying ? 409 : 404);
-    }
-    if (chosen.version !== input.expectedVersion || terminal(source) || terminal(target)) {
-      fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
+    const batch = 'relations' in input;
+    const references = batch ? input.relations : [input];
+    const chosenIds = new Set(references.map(reference => reference.relationId));
+    const blockersById = new Map(blockers.map(relation => [relation.id, relation]));
+    const choices = references.map(reference => {
+      const relation = blockersById.get(reference.relationId);
+      const source = relation && byId.get(relation.sourceIssueId);
+      const target = relation && byId.get(relation.targetIssueId);
+      if (!relation || !source || !target || source.projectId === target.projectId) {
+        fail('프로젝트 간 차단 관계를 찾을 수 없습니다. 차단 목록을 다시 확인해 주세요.', applying ? 409 : 404);
+      }
+      if (relation.version !== reference.expectedVersion || terminal(source) || terminal(target)) {
+        fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
+      }
+      return { relation, source, target };
+    });
+    const [first] = choices;
+    const { source } = first;
+    if (choices.some(choice => choice.source.id !== source.id)) {
+      fail('같은 원인 업무의 차단 관계만 함께 검토할 수 있습니다.', applying ? 409 : 400);
     }
     const { anchorChange } = input;
     if (anchorChange && anchorChange.id !== source.id) {
@@ -495,17 +527,20 @@ export class AutomaticScheduleService{
     }
     for (const { id, sourceIssueId, targetIssueId, version, origin } of blockers) {
       // Imported relations only participate when explicitly chosen for this review.
-      if (origin === 'jira' && id !== chosen.id) continue;
+      if (origin === 'jira' && !chosenIds.has(id)) continue;
       const predecessor = byId.get(sourceIssueId), successor = byId.get(targetIssueId);
       if (!predecessor || !successor || predecessor.projectId === successor.projectId || terminal(predecessor) || terminal(successor)) continue;
       dependencies.push({ id: `team-blocker:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId, type: 'FS', lagDays: 0, version });
       if (dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) limit();
     }
     try {
-      const scope = teamFollowUpScope(source.id, target.id, issues, dependencies, anchorChange);
-      const teamFollowUp: TeamFollowUpRelation = { ...input, sourceIssueId: source.id, targetIssueId: target.id,
+      const scope = teamFollowUpScope(source.id, choices.map(({ target }) => target.id), issues, dependencies, anchorChange);
+      const teamFollowUp: TeamFollowUpRelation = { relationId: first.relation.id, expectedVersion: first.relation.version,
+        ...(anchorChange ? { anchorChange } : {}), sourceIssueId: source.id, targetIssueId: first.target.id,
         sourceEndDate: anchorChange ? anchorChange.endDate : source.endDate,
-        sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate } };
+        sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate },
+        ...(batch ? { relations: choices.map(({ relation, target }) => ({ relationId: relation.id, expectedVersion: relation.version, targetIssueId: target.id })) } : {}),
+      };
       return { scope, teamFollowUp, workflow, terminal };
     } catch (error) {
       if (!(error instanceof TeamFollowUpScheduleError)) throw error;
@@ -608,6 +643,7 @@ export class AutomaticScheduleService{
     if ('teamFollowUp' in proposal) {
       const { scope, teamFollowUp } = this.followUpContext(proposal.teamFollowUp, hooks, true);
       if (teamFollowUp.sourceIssueId !== proposal.teamFollowUp.sourceIssueId || teamFollowUp.targetIssueId !== proposal.teamFollowUp.targetIssueId ||
+          JSON.stringify(teamFollowUp.relations) !== JSON.stringify(proposal.teamFollowUp.relations) ||
           JSON.stringify(followUpReadset(scope.issues)) !== JSON.stringify(proposal.issueVersions)) {
         fail('업무 또는 고정 선행 일정이 변경되었습니다. 다시 미리 확인해 주세요.', 409);
       }

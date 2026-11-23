@@ -435,6 +435,67 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.deepEqual((await f.call<SourceReconciliationAudit>(auditPath)).targetContent.issueRelations, sourceAudit.targetContent.issueRelations);
 });
 
+test('a handoff batch activates only the selected verified Jira blockers and rechecks every source proof', async t => {
+  const f = await fixture(t);
+  const targets = ['200', '300', '400'];
+  await f.importInitial([sourceIssue('100')], 'ALPHA');
+  await f.importInitial(targets.map(id => sourceIssue(id, [], 'OTHER')), 'BRAVO');
+  const delta = await f.upload('multi-handoff-jira-proof', targets.map(id => sourceIssue(id, [link(`8${id}`, '100', 'inward')], 'OTHER')));
+  const config = await f.appendConfiguration(delta);
+  config.appendTo!.refreshRelations = true;
+  const migration = await f.apply(await f.preview(config));
+  assert.equal(migration.status, 201, JSON.stringify(migration.data));
+
+  const workspace = await f.workspace();
+  const schedule = (issue: Issue, date: string) => f.call<Issue>(`/issues/${issue.id}`, 'PATCH', {
+    expectedVersion: issue.version, startDate: date, endDate: date,
+  });
+  let source = await schedule(original(workspace, '100'), '2026-11-20');
+  const [first, second, unselected] = await Promise.all(targets.map(id => schedule(original(workspace, id, 'OTHER'), '2026-11-16')));
+  const blockers = (await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers')).filter(relation => relation.sourceIssueId === source.id);
+  assert.deepEqual(new Set(blockers.map(relation => relation.targetIssueId)), new Set([first.id, second.id, unselected.id]));
+  assert.ok(blockers.every(relation => relation.origin === 'jira'));
+  const selected = [second, first].map(target => blockers.find(relation => relation.targetIssueId === target.id)!);
+  const relations = selected.map(({ id, version }) => ({ relationId: id, expectedVersion: version }));
+  const previewPath = '/schedule/team-follow-up-preview', applyPath = '/schedule/team-follow-up-apply';
+  const review = (anchorChange?: ScheduleAnchorChange) => f.call<AutomaticSchedulePreview>(previewPath, 'POST', { relations, anchorChange });
+  const firstReview = await review();
+  assert.deepEqual(firstReview.blocking, []);
+  assert.deepEqual(firstReview.teamFollowUp?.relations, relations.map((relation, index) => ({ ...relation, targetIssueId: selected[index].targetIssueId })));
+  assert.deepEqual(firstReview.changes.map(change => [change.id, change.toStart, change.toEnd]),
+    [[second.id, '2026-11-23', '2026-11-23'], [first.id, '2026-11-23', '2026-11-23']]);
+
+  const dateChange = () => ({ id: source.id, expectedVersion: source.version, startDate: source.startDate, endDate: '2026-11-24' });
+  const anchored = await review(dateChange());
+  assert.deepEqual(anchored.blocking, []);
+  assert.equal(anchored.changes[0]?.id, source.id);
+  assert.deepEqual(anchored.changes.map(change => [change.id, change.toStart, change.toEnd]).sort(),
+    [[source.id, '2026-11-20', '2026-11-24'], [second.id, '2026-11-25', '2026-11-25'], [first.id, '2026-11-25', '2026-11-25']].sort());
+  const applied = await f.call<SchedulePasteApplyResult>(applyPath, 'POST', { previewId: anchored.previewId });
+  assert.deepEqual(await f.call(applyPath, 'POST', { previewId: anchored.previewId }), applied);
+  assert.deepEqual((await f.workspace()).issues.find(issue => issue.id === unselected.id), unselected);
+  await f.call('/schedule/undo', 'POST', { undoId: applied.undoId });
+  const restored = await f.workspace();
+  source = restored.issues.find(issue => issue.id === source.id)!;
+  for (const originalIssue of [first, second]) {
+    const item = restored.issues.find(issue => issue.id === originalIssue.id)!;
+    assert.deepEqual([item.startDate, item.endDate, item.version], [originalIssue.startDate, originalIssue.endDate, originalIssue.version + 2]);
+  }
+
+  const stale = await review(dateChange());
+  assert.deepEqual(stale.blocking, []);
+  const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === selected[1].id);
+  assert.ok(proof);
+  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
+  } finally { database.close(); }
+  const beforeRejection = await f.workspace();
+  await f.call(applyPath, 'POST', { previewId: stale.previewId }, 409);
+  assert.deepEqual(await f.call(`/schedule/team-follow-up-result/${stale.previewId}`), { applied: false });
+  assert.deepEqual(await f.workspace(), beforeRejection);
+});
+
 test('project blocker batch can combine Jira proven direction with native blockers and rejects missing proof at apply', async t => {
   const f = await fixture(t);
   await f.importInitial([

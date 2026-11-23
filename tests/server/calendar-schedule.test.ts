@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { createApp } from '../../server/app.js';
 import { calculateFixedFollowUpSchedule } from '../../server/automatic-schedule.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { MAX_TEAM_FOLLOW_UP_RELATIONS } from '../../shared/types.js';
 import { Store } from '../../server/store.js';
 import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWorkCalendar, isWorkingDate, shiftWorkingDate,
   countWorkingDays, createCalendarMath, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
@@ -170,6 +171,84 @@ test('cross-project handoff refuses to retime incomplete or terminal work and re
   assert.ok(cycle.blocking.some(item => item.includes('순환')));
   assert.equal((await f.request(teamApply, 'POST', { previewId: cycle.previewId })).status, 422);
   assert.deepEqual(await scheduleState(f), beforeCycle);
+});
+
+test('selected handoff roots use their receiving calendars, merge shared successors once, and commit and undo as one batch', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const secondId = 'project-team', thirdId = 'project-neo';
+  await handoffCalendar(f, secondId, [{ date: '2026-11-21', isWorking: true, label: '둘째 프로젝트 토요일 근무' }]);
+  await handoffCalendar(f, thirdId, [{ date: '2026-11-23', isWorking: false, label: '셋째 프로젝트 월요일 휴무' }]);
+  const source = await makeIssue(f, '여러 인계의 공통 원인', '2026-11-20', '2026-11-20');
+  const second = await makeIssue(f, '선택한 둘째 프로젝트 인계', '2026-11-16', '2026-11-16', { projectId: secondId });
+  const third = await makeIssue(f, '선택한 셋째 프로젝트 인계', '2026-11-16', '2026-11-16', { projectId: thirdId });
+  const merged = await makeIssue(f, '두 인계가 합쳐지는 업무', '2026-11-16', '2026-11-16', { projectId: thirdId });
+  const untouched = await makeIssue(f, '선택하지 않은 인계', '2026-11-16', '2026-11-16', { projectId: secondId });
+  const secondRelation = await blocks(f, source, second);
+  const thirdRelation = await blocks(f, source, third);
+  const otherSource = await blocks(f, second, merged);
+  await blocks(f, source, untouched);
+  await dep(f, third, merged);
+  const reference = (relation: IssueRelation) => ({ relationId: relation.id, expectedVersion: relation.version });
+  const selected = { relations: [reference(thirdRelation), reference(secondRelation)] };
+  const preview = async () => {
+    const response = await f.request(teamReview, 'POST', selected);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return response.data as AutomaticSchedulePreview;
+  };
+  for (const input of [
+    { relations: [] }, { relations: 'invalid' }, { relations: [null] },
+    { relations: [reference(secondRelation), reference(secondRelation)] },
+    { relations: [reference(secondRelation), reference(otherSource)] },
+    { relations: [{ ...reference(secondRelation), targetIssueId: merged.id }] },
+    { ...reference(secondRelation), ...selected },
+    { relations: Array.from({ length: MAX_TEAM_FOLLOW_UP_RELATIONS + 1 }, () => ({ relationId: randomUUID(), expectedVersion: 1 })) },
+  ]) {
+    const invalid = await f.request(teamReview, 'POST', input);
+    assert.equal(invalid.status, 400, JSON.stringify(invalid.data));
+  }
+  const wrongVersion = await f.request(teamReview, 'POST', { relations: [selected.relations[0],
+    { ...selected.relations[1], expectedVersion: secondRelation.version! + 1 }] });
+  assert.equal(wrongVersion.status, 409, JSON.stringify(wrongVersion.data));
+
+  const initial = await scheduleState(f);
+  const single = await handoff(f, thirdRelation);
+  assert.ok(!single.changes.some(change => change.id === second.id));
+  const reviewed = await preview();
+  const expected = new Map([[second.id, '2026-11-21'], [third.id, '2026-11-24'], [merged.id, '2026-11-25']]);
+  assert.deepEqual(reviewed.blocking, []);
+  assert.deepEqual(reviewed.teamFollowUp, { ...reference(thirdRelation), sourceIssueId: source.id, targetIssueId: third.id,
+    sourceEndDate: source.endDate, sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate },
+    relations: [{ ...reference(thirdRelation), targetIssueId: third.id }, { ...reference(secondRelation), targetIssueId: second.id }],
+  });
+  assert.equal(reviewed.changes.length, expected.size);
+  assert.deepEqual(new Map(reviewed.changes.map(change => [change.id, change.toStart])), expected);
+  assert.ok(reviewed.changes.every(change => change.toEnd === change.toStart));
+  assert.deepEqual(await scheduleState(f), initial);
+
+  await handoffCalendar(f, thirdId, [
+    { date: '2026-11-23', isWorking: false, label: '셋째 프로젝트 월요일 휴무' },
+    { date: '2026-12-01', isWorking: false, label: '변경된 달력 확인' },
+  ]);
+  const beforeApply = await scheduleState(f);
+  assert.equal((await f.request(teamApply, 'POST', { previewId: reviewed.previewId })).status, 409);
+  assert.deepEqual(await scheduleState(f), beforeApply);
+
+  const fresh = await preview();
+  const body = { previewId: fresh.previewId };
+  const applied = await f.request(teamApply, 'POST', body);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  const updated = applied.data.updated as Issue[];
+  assert.equal(updated.length, expected.size);
+  assert.deepEqual(new Map(updated.map(issue => [issue.id, issue.startDate])), expected);
+  assert.deepEqual(await f.request(teamResult(fresh.previewId)), applied);
+  assert.deepEqual(await f.request(teamApply, 'POST', body), applied);
+  for (const unchanged of [source, untouched]) assert.deepEqual(await getIssue(f, unchanged.id), unchanged);
+  assert.equal((await f.request('/schedule/undo', 'POST', { undoId: applied.data.undoId })).status, 200);
+  for (const previous of [second, third, merged]) {
+    const restored = await getIssue(f, previous.id);
+    assert.deepEqual([restored.startDate, restored.endDate, restored.version], [previous.startDate, previous.endDate, previous.version + 2]);
+  }
 });
 
 test('a proposed source change traverses all native branches and commits and restores every project together', async t => {

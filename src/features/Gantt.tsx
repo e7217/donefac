@@ -131,8 +131,8 @@ type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement } | { ki
 type TeamFollowUpReview = TeamFollowUpSelection & { origin: TeamFollowUpOrigin };
 type TeamFollowUpHandoff = {
   source: TeamFollowUpSelection['source'] & Pick<Issue, 'title'>;
-  initialChange: ScheduleAnchorChange;
-  origin: Exclude<TeamFollowUpOrigin, { kind: 'blockers' }>;
+  initialChange?: ScheduleAnchorChange;
+  origin: TeamFollowUpOrigin;
   choices: readonly TeamFollowUpChoice[];
 };
 function findTeamBlockerChoices(data: FeatureProps['data'], projects: ReadonlyMap<string, Project>) {
@@ -476,6 +476,7 @@ function ProjectGantt(props: GanttProps) {
   }, [reconsider]);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
+  const trackTeamFollowUpOutcome = useCallback((unknown: boolean) => trackDraft(TEAM_FOLLOW_UP_DRAFT, true, false, unknown), [trackDraft]);
   useEffect(() => {
     if (dateRecoveryReady) return;
     let active = true;
@@ -536,7 +537,8 @@ function ProjectGantt(props: GanttProps) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
-        const awaitingScheduleResult = awaitingPasteResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
+        const awaitingFollowUpResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult;
+        const awaitingScheduleResult = awaitingPasteResult || awaitingFollowUpResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
         const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
@@ -562,7 +564,9 @@ function ProjectGantt(props: GanttProps) {
             if (discardBulkDates) setBulkDateSelection(null);
             setRowScheduleEdit(null);
             setDraftEpoch(value => value + 1);
-            if (awaitingCreationResult || awaitingLinkResult || awaitingPasteResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
+            if (awaitingCreationResult || awaitingLinkResult || awaitingPasteResult || awaitingFollowUpResult) {
+              void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
+            }
           });
         }
       } else afterAcceptedNavigation(event, () => {
@@ -603,31 +607,30 @@ function ProjectGantt(props: GanttProps) {
     setTeamBlockersOpen(false);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
   }
-  function openTeamFollowUp(relation: TeamFollowUpSelection['relation'], source: Issue, target: Issue, opener: HTMLButtonElement) {
+  function reviewTeamBlockerSchedules(source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen || draftsRef.current.size) {
       notify('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', 'error');
       return;
     }
-    trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
-    const { id, key, version, startDate, endDate } = source;
-    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key },
-      origin: { kind: 'blockers', opener } });
+    if (choices.length) startTeamFollowUp({ source, choices, origin: { kind: 'blockers', opener } });
   }
-  function reviewTeamSuccessors(source: TeamFollowUpHandoff['source'], initialChange: ScheduleAnchorChange, origin: TeamFollowUpHandoff['origin']) {
+  function reviewTeamSuccessors(source: TeamFollowUpHandoff['source'], initialChange: ScheduleAnchorChange,
+    origin: Exclude<TeamFollowUpOrigin, { kind: 'blockers' }>) {
     if (busyRef.current || teamFollowUp || teamFollowUpHandoff || issueOverlayOpen || cascade ||
         [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
     const choices = teamBlockerChoices.get(source.id);
     if (!choices?.length) return;
-    const handoff = { source, initialChange, origin, choices };
+    startTeamFollowUp({ source, initialChange, origin, choices });
+  }
+  function startTeamFollowUp(handoff: TeamFollowUpHandoff) {
     trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
-    if (choices.length === 1) openTeamFollowUpChoice(handoff, choices[0]);
+    if (handoff.choices.length === 1) openTeamFollowUpChoices(handoff, handoff.choices);
     else setTeamFollowUpHandoff(handoff);
   }
-  function openTeamFollowUpChoice({ source, initialChange, origin }: TeamFollowUpHandoff, { relation, target }: TeamFollowUpChoice) {
+  function openTeamFollowUpChoices({ source, initialChange, origin }: TeamFollowUpHandoff, choices: readonly TeamFollowUpChoice[]) {
     const { id, key, version, startDate, endDate } = source;
     setTeamFollowUpHandoff(null);
-    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key },
-      initialChange, origin });
+    setTeamFollowUp({ choices, source: { id, key, version, startDate, endDate }, initialChange, origin });
   }
   function restoreTeamFollowUpOrigin(origin: TeamFollowUpOrigin, sourceId: string, updated?: readonly Issue[]) {
     const completed = Boolean(updated && focusAfterCompletingMissingRows(updated));
@@ -640,7 +643,10 @@ function ProjectGantt(props: GanttProps) {
     pendingScheduleFocus.current = () => {
       if (origin.kind === 'inline') restoreInlineCascadeFocus(origin, sourceId);
       else {
-        const target = [origin.opener, teamBlockersTrigger.current, scrollRef.current].find(element =>
+        const currentAction = origin.opener.dataset.teamFollowUpSource === sourceId
+          ? document.getElementById(TEAM_BLOCKERS_PANEL_ID)?.querySelector<HTMLButtonElement>(`[data-team-follow-up-source="${CSS.escape(sourceId)}"]`)
+          : null;
+        const target = [origin.opener, currentAction, teamBlockersTrigger.current, scrollRef.current].find(element =>
           element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
         target?.focus({ preventScroll: true });
       }
@@ -649,10 +655,12 @@ function ProjectGantt(props: GanttProps) {
   function closeTeamFollowUp() {
     const selection = teamFollowUp ?? teamFollowUpHandoff;
     if (!selection) return;
+    const awaitingResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult;
     trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
     setTeamFollowUp(null);
     setTeamFollowUpHandoff(null);
     restoreTeamFollowUpOrigin(selection.origin, selection.source.id);
+    if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
   }
   async function applyTeamFollowUp(result: ApplyResult, unchangedSource?: Pick<Issue, 'version' | 'startDate' | 'endDate'>) {
     if (!teamFollowUp) return;
@@ -2062,7 +2070,8 @@ function ProjectGantt(props: GanttProps) {
     {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
       busy={busy || Boolean(issueOverlayOpen)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
-      onReviewSchedule={openTeamFollowUp}
+      onReviewSchedule={(relation, source, target, opener) => reviewTeamBlockerSchedules(source, [{ relation, target }], opener)}
+      onReviewTogether={reviewTeamBlockerSchedules}
       onPointerDown={keepInlineDateFocus} refresh={refresh} notify={notify} onClose={closeTeamBlockers}
       onDraftChange={trackTeamBlockerDraft} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
@@ -2504,9 +2513,9 @@ function ProjectGantt(props: GanttProps) {
     />}
     {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link} onClose={closeScheduleIssueCreation} />}
     {teamFollowUpHandoff && <GanttTeamFollowUpChooser source={teamFollowUpHandoff.source} choices={teamFollowUpHandoff.choices}
-      projects={data.projects} onChoose={choice => openTeamFollowUpChoice(teamFollowUpHandoff, choice)} onClose={closeTeamFollowUp} />}
+      projects={data.projects} onChoose={choices => openTeamFollowUpChoices(teamFollowUpHandoff, choices)} onClose={closeTeamFollowUp} />}
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects}
-      onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} />}
+      onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} onOutcomeUnknownChange={trackTeamFollowUpOutcome} />}
   </>;
 }
 

@@ -6,6 +6,7 @@ import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependenc
 import type { FeatureProps, Issue, IssueRelation, TeamScheduleBlocker } from '../../shared/types';
 import { isTerminalStatus } from '../../shared/workflow-helpers';
 import { api } from '../lib/api';
+import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
 import './gantt-team-blockers.css';
 
@@ -21,6 +22,7 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   onDraftChange: (dirty: boolean, pending: boolean) => void;
   onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
   onReviewSchedule: (relation: TeamScheduleBlocker, source: Issue, target: Issue, opener: HTMLButtonElement) => void;
+  onReviewTogether: (source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement) => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
 };
 
@@ -34,7 +36,7 @@ interface Draft {
 
 export function GanttTeamBlockers({
   id, data, visibleIssueIds, selectedIssueIds, busy, openIssue, refresh, notify,
-  onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onPointerDown,
+  onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onReviewTogether, onPointerDown,
 }: Props) {
   const heading = useId();
   const formHeading = useId();
@@ -58,17 +60,29 @@ export function GanttTeamBlockers({
   const activeIssues = useMemo(() => issues.filter(issue => projectNames.has(issue.projectId) &&
     !isTerminalStatus({ workflows, issueSchemas }, issue.projectId, issue.status)), [issues, projectNames, workflows, issueSchemas]);
   const activeById = useMemo(() => new Map(activeIssues.map(issue => [issue.id, issue])), [activeIssues]);
-  const rows = useMemo(() => relations.flatMap(relation => {
+  const activeRows = useMemo(() => relations.flatMap(relation => {
     const source = activeById.get(relation.sourceIssueId);
     const target = activeById.get(relation.targetIssueId);
-    return source && target && source.projectId !== target.projectId &&
-      (visibleIssueIds.has(source.id) || visibleIssueIds.has(target.id)) ? [{ relation, source, target }] : [];
-  }).sort((a, b) => (a.target.startDate ?? a.target.endDate ?? '9999-12-31').localeCompare(b.target.startDate ?? b.target.endDate ?? '9999-12-31') ||
+    return source && target && source.projectId !== target.projectId ? [{ relation, source, target }] : [];
+  }), [relations, activeById]);
+  const reviewChoices = useMemo(() => {
+    const bySource = new Map<string, TeamFollowUpChoice[]>();
+    for (const { source, relation, target } of activeRows) {
+      const choices = bySource.get(source.id);
+      if (choices) choices.push({ relation, target });
+      else bySource.set(source.id, [{ relation, target }]);
+    }
+    for (const choices of bySource.values()) choices.sort((a, b) => a.target.key.localeCompare(b.target.key, 'ko', { numeric: true }));
+    return bySource;
+  }, [activeRows]);
+  const rows = useMemo(() => activeRows.filter(({ source, target }) => visibleIssueIds.has(source.id) || visibleIssueIds.has(target.id))
+    .sort((a, b) => (a.target.startDate ?? a.target.endDate ?? '9999-12-31').localeCompare(b.target.startDate ?? b.target.endDate ?? '9999-12-31') ||
     a.target.key.localeCompare(b.target.key, 'ko', { numeric: true }) || a.source.key.localeCompare(b.source.key, 'ko', { numeric: true }) ||
-    a.relation.id.localeCompare(b.relation.id)), [relations, activeById, visibleIssueIds]);
+    a.relation.id.localeCompare(b.relation.id)), [activeRows, visibleIssueIds]);
   const lastPage = Math.max(0, Math.ceil(rows.length / ROWS_PER_PAGE) - 1);
   const currentPage = Math.min(page, lastPage);
   const offset = currentPage * ROWS_PER_PAGE;
+  const pageRows = rows.slice(offset, offset + ROWS_PER_PAGE);
 
   const source = draft && activeById.get(draft.sourceId);
   const target = draft && activeById.get(draft.targetId);
@@ -262,23 +276,31 @@ export function GanttTeamBlockers({
     {loadError && <p className="gantt-team-blockers-status" role="alert">차단 관계를 불러오지 못했습니다. {loadError}</p>}
     {rows.length > 0 ? <>
       <ul className="gantt-team-blockers-list" role="list" aria-label="프로젝트 간 차단 관계 목록">
-        {rows.slice(offset, offset + ROWS_PER_PAGE).map(({ relation, source, target }) => <li key={relation.id} data-team-blocker-id={relation.id}>
-          <BlockerEndpoint issue={source} project={projectNames.get(source.projectId)} label="차단하는 업무"
-            disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
-          <ArrowRight className="gantt-team-blockers-arrow" size={16} aria-hidden="true" />
-          <BlockerEndpoint issue={target} project={projectNames.get(target.projectId)} label="차단되는 업무"
-            disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
-          <div className="gantt-team-blockers-actions gantt-team-blockers-review">
-            <button type="button" className="btn" aria-haspopup="dialog"
-              aria-label={`${source.key} → ${target.key} 프로젝트 간 일정 검토`} disabled={disabled || refreshing}
-              aria-describedby={relation.origin === 'jira' ? `${heading}-${relation.id}-origin` : undefined}
-              data-gantt-focus-control="" onPointerDown={onPointerDown}
-              onClick={event => onReviewSchedule(relation, source, target, event.currentTarget)}>
-              <CalendarDays size={15} aria-hidden="true" />프로젝트 간 일정 검토
-            </button>
-            {relation.origin === 'jira' && <small id={`${heading}-${relation.id}-origin`}>Jira 이관 관계</small>}
-          </div>
-        </li>)}
+        {pageRows.map(({ relation, source, target }, index) => {
+          const choices = reviewChoices.get(source.id);
+          const showTogether = choices && choices.length > 1 && pageRows.findIndex(row => row.source.id === source.id) === index;
+          return <li key={relation.id} data-team-blocker-id={relation.id}>
+            <BlockerEndpoint issue={source} project={projectNames.get(source.projectId)} label="차단하는 업무"
+              disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
+            <ArrowRight className="gantt-team-blockers-arrow" size={16} aria-hidden="true" />
+            <BlockerEndpoint issue={target} project={projectNames.get(target.projectId)} label="차단되는 업무"
+              disabled={disabled} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate} onPointerDown={onPointerDown} />
+            <div className="gantt-team-blockers-actions gantt-team-blockers-review">
+              <button type="button" className="btn" aria-haspopup="dialog"
+                aria-label={`${source.key} → ${target.key} 프로젝트 간 일정 검토`} disabled={disabled || refreshing}
+                aria-describedby={relation.origin === 'jira' ? `${heading}-${relation.id}-origin` : undefined}
+                data-gantt-focus-control="" onPointerDown={onPointerDown}
+                onClick={event => onReviewSchedule(relation, source, target, event.currentTarget)}>
+                <CalendarDays size={15} aria-hidden="true" />프로젝트 간 일정 검토
+              </button>
+              {showTogether && <button type="button" className="btn" aria-haspopup="dialog"
+                aria-label={`${source.key} 후행 일정 함께 검토`} disabled={disabled || refreshing}
+                data-gantt-focus-control="" data-team-follow-up-source={source.id} onPointerDown={onPointerDown}
+                onClick={event => onReviewTogether(source, choices, event.currentTarget)}>후행 일정 함께 검토</button>}
+              {relation.origin === 'jira' && <small id={`${heading}-${relation.id}-origin`}>Jira 이관 관계</small>}
+            </div>
+          </li>;
+        })}
       </ul>
       {lastPage > 0 && <nav className="gantt-team-blockers-actions gantt-team-blockers-pages" aria-label="차단 관계 페이지">
         <span aria-live="polite">{offset + 1}–{Math.min(offset + ROWS_PER_PAGE, rows.length)} / {rows.length}</span>

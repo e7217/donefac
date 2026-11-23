@@ -1728,12 +1728,18 @@ export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
 export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
   { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
   { changes: ScheduleAnchorChange[]; rescheduleSuccessors?: boolean };
-export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number; anchorChange?: ScheduleAnchorChange }
+export const MAX_TEAM_FOLLOW_UP_RELATIONS = 100;
+export interface TeamFollowUpRelationReference { relationId: string; expectedVersion: number }
+export type TeamFollowUpScheduleInput = (TeamFollowUpRelationReference | { relations: TeamFollowUpRelationReference[] }) & {
+  anchorChange?: ScheduleAnchorChange;
+};
 export interface AutomaticSchedulePreview extends SchedulePreview {
   previewId: string;
   blocking: string[];
   expiresAt: string;
-  teamFollowUp?: TeamFollowUpScheduleInput & {
+  teamFollowUp?: TeamFollowUpRelationReference & {
+    anchorChange?: ScheduleAnchorChange;
+    relations?: (TeamFollowUpRelationReference & { targetIssueId: string })[];
     sourceIssueId: string;
     targetIssueId: string;
     sourceEndDate: string | null;

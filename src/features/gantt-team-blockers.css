@@ -152,6 +152,19 @@
   display: block;
 }
 
+.gantt-team-follow-up-selected {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+  padding-inline-start: 20px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-follow-up-selected small {
+  display: block;
+  color: #53685e;
+}
+
 .gantt-team-follow-up-dates {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -233,12 +246,39 @@
   overflow-wrap: anywhere;
 }
 
+.gantt-team-follow-up-select-all {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
 .gantt-team-follow-up-chooser ul {
   display: grid;
   gap: 6px;
   margin: 12px 0;
   padding: 0;
   list-style: none;
+}
+
+.gantt-team-follow-up-chooser li {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  align-items: stretch;
+  gap: 4px;
+}
+
+.gantt-team-follow-up-checkbox {
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.gantt-team-follow-up-checkbox input {
+  width: 16px;
+  height: 16px;
 }
 
 .gantt-team-follow-up-chooser li .btn {
@@ -261,7 +301,9 @@
 
 .gantt-team-follow-up-chooser footer {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 6px;
 }
 
 @media (max-width: 550px) {
