@@ -954,11 +954,9 @@ function ProjectGantt(props: GanttProps) {
   const firstSelectedProject = selectedIssues[0]?.projectId;
   const selectedProjectId = firstSelectedProject && selectedIssues.every(issue => issue.projectId === firstSelectedProject) ? firstSelectedProject : undefined;
   const bulkLinkProject = selectedProjectId ? projectsById.get(selectedProjectId) : undefined;
-  const visibleSelection = new Set(selectedIssues.map(issue => issue.id));
   const bulkLinkProblem = selectedIssues.length < 2 ? ''
     : !bulkLinkProject ? '같은 프로젝트의 업무를 선택해 주세요.'
-    : selectedIssues.length > MAX_SCHEDULE_BULK_LINK_ISSUES ? `한 번에 ${MAX_SCHEDULE_BULK_LINK_ISSUES}개까지 연결할 수 있습니다.`
-    : !projectIssues.some(issue => issue.projectId === bulkLinkProject.id && !visibleSelection.has(issue.id)) ? '선택 목록 밖에 연결할 업무가 없습니다.' : '';
+    : selectedIssues.length > MAX_SCHEDULE_BULK_LINK_ISSUES ? `한 번에 ${MAX_SCHEDULE_BULK_LINK_ISSUES}개까지 연결할 수 있습니다.` : '';
   const canEditBulkDates = hasProject || (allProjects && data.projects.length > 0);
   const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
   const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);

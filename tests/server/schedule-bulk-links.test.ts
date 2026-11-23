@@ -10,7 +10,7 @@ import { createApp } from '../../server/app.js';
 import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
   Dependency, Issue, IssueRelation, Project, ScheduleBlockerLinkPage,
-  ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
+  ScheduleBulkChainInput, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const previewPath = '/schedule/bulk-links/preview';
@@ -59,6 +59,124 @@ async function fixture(t: TestContext) {
 function input(anchor: Issue, issues: Issue[], direction: ScheduleBulkLinkInput['direction'] = 'predecessor'): ScheduleBulkLinkInput {
   return { projectId: anchor.projectId, anchor: reference(anchor), issues: issues.map(reference), direction, type: 'FS', lagDays: 2 };
 }
+
+function chain(projectId: string, issues: Issue[]): ScheduleBulkChainInput {
+  return { mode: 'chain', projectId, issues: issues.map(reference), type: 'FF', lagDays: 1 };
+}
+
+test('ordered bulk chain previews only adjacent pairs and undoes its new links without changing dates or retained rules', async t => {
+  const f = await fixture(t);
+  const second = await f.issue('두 번째 연결 업무');
+  const fourth = await f.issue('마지막 연결 업무', f.project.id, { endDate: null });
+  const first = await f.issue('첫 번째 연결 업무');
+  const third = await f.issue('세 번째 연결 업무');
+  const retained = await f.link(second, third, 'SS', -2);
+  const before = await f.workspace();
+  const body = chain(f.project.id, [first, second, third, fourth]);
+  const proposal = await f.review(body);
+  assert.ok(proposal.previewId, JSON.stringify(proposal.errors));
+  assert.deepEqual(proposal.changes, []);
+  assert.deepEqual(proposal.errors, []);
+  assert.equal(proposal.unchanged, 1);
+  assert.deepEqual(proposal.dependencyChanges?.map(change => [change.predecessorKey, change.successorKey, change.before, change.after]), [
+    [first.key, second.key, null, { type: 'FF', lagDays: 1 }],
+    [third.key, fourth.key, null, { type: 'FF', lagDays: 1 }],
+  ]);
+  assert.deepEqual(proposal.retainedDependencies?.map(change => [change.predecessorKey, change.successorKey, change.before, change.after]), [
+    [second.key, third.key, { type: 'SS', lagDays: -2 }, { type: 'SS', lagDays: -2 }],
+  ]);
+  assert.ok(proposal.warnings.some(warning => warning.includes(`${third.key} → ${fourth.key}`) && warning.includes('날짜 미정')));
+  assert.deepEqual(await f.workspace(), before);
+
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER fail_last_chain_edge BEFORE INSERT ON dependencies
+      WHEN NEW.successor_id='${fourth.id}' BEGIN SELECT RAISE(ABORT,'synthetic final chain edge failure'); END`);
+    try { await f.apply(proposal.previewId, 500); }
+    finally { database.exec('DROP TRIGGER fail_last_chain_edge'); }
+    assert.deepEqual(await f.workspace(), before);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+
+    const applied = await f.apply(proposal.previewId);
+    assert.equal(applied.dependencyChanges, 2);
+    assert.deepEqual(applied.updated, []);
+    assert.deepEqual(await f.apply(proposal.previewId), applied);
+    const changed = await f.workspace();
+    assert.deepEqual(changed.issues, before.issues);
+    assert.deepEqual(findLink(changed, second, third), retained);
+    assert.equal(findLink(changed, first, third), undefined);
+    assert.equal(findLink(changed, first, fourth), undefined);
+    assert.equal(findLink(changed, first, second)?.type, 'FF');
+    assert.equal(findLink(changed, third, fourth)?.lagDays, 1);
+    assert.equal((await f.review(body)).previewId, null);
+
+    const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: applied.undoId });
+    assert.equal(undo.dependencyChanges, 2);
+    assert.deepEqual(undo.updated, []);
+    const restored = await f.workspace();
+    assert.deepEqual(restored.issues, before.issues);
+    assert.deepEqual(restored.dependencies, before.dependencies);
+  } finally { database.close(); }
+});
+
+test('ordered bulk chain rejects invalid scope, stale members and a cycle that needs more than one new edge', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('첫 번째');
+  const second = await f.issue('두 번째');
+  const third = await f.issue('세 번째');
+  const outsideFrom = await f.issue('기존 연결의 시작');
+  const outsideTo = await f.issue('기존 연결의 끝');
+  const foreign = await f.issue('다른 프로젝트의 이름은 노출하지 않음', 'project-neo');
+  await f.link(third, outsideFrom);
+  await f.link(outsideTo, first);
+  const body = chain(f.project.id, [first, second, third]);
+  for (const invalid of [
+    { ...body, mode: 'CHAIN' }, { ...body, issues: [reference(first)] },
+    { ...body, issues: [reference(first), reference(second), reference(first)] },
+    { ...body, anchor: reference(first), direction: 'predecessor' },
+    { ...body, lagDays: 0.5 }, { ...body, type: 'invalid' },
+  ]) await f.call(previewPath, 400, 'POST', invalid);
+  await f.call(previewPath, 404, 'POST', { ...body, projectId: 'missing' });
+
+  const foreignReview = await f.review(chain(f.project.id, [first, foreign, third]));
+  assert.equal(foreignReview.previewId, null);
+  assert.deepEqual(foreignReview.errors.map(error => error.issueId), [foreign.id]);
+  assert.ok(!JSON.stringify(foreignReview).includes(foreign.title));
+  const staleReview = await f.review({ ...body, issues: [reference(first), { id: second.id, expectedVersion: second.version + 1 }, reference(third)] });
+  assert.equal(staleReview.previewId, null);
+  assert.deepEqual(staleReview.errors.map(error => error.issueId), [second.id]);
+
+  const reviewed = await f.review(body);
+  assert.ok(reviewed.previewId);
+  const concurrent = await f.call<Issue>(`/issues/${second.id}`, 200, 'PATCH', {
+    expectedVersion: second.version, title: '두 번째를 다른 작업자가 변경',
+  }, 'user-seo');
+  const updated = await f.workspace();
+  await f.apply(reviewed.previewId, 409);
+  assert.deepEqual(await f.workspace(), updated);
+
+  const current = chain(f.project.id, [first, concurrent, third]);
+  const beforeCyclePreview = await f.review(current);
+  assert.ok(beforeCyclePreview.previewId);
+  await f.link(outsideFrom, outsideTo);
+  const topology = await f.workspace();
+  const rejected = await f.call<{ error: string }>(applyPath, 409, 'POST', { previewId: beforeCyclePreview.previewId });
+  assert.match(rejected.error, /순환/u);
+  assert.ok((await f.review(chain(f.project.id, [first, concurrent]))).previewId);
+  assert.ok((await f.review(chain(f.project.id, [concurrent, third]))).previewId);
+  const cyclic = await f.review(current);
+  assert.equal(cyclic.previewId, null);
+  assert.ok(cyclic.errors.some(error => /순환/u.test(error.message)));
+  assert.deepEqual(await f.workspace(), topology);
+
+  // The original request shape still makes each selected issue follow one anchor.
+  const legacy = await f.review(input(first, [concurrent, third], 'successor'));
+  assert.ok(legacy.previewId);
+  assert.deepEqual(legacy.dependencyChanges?.map(change => [change.predecessorKey, change.successorKey]), [
+    [concurrent.key, first.key], [third.key, first.key],
+  ]);
+  assert.equal((await f.apply(legacy.previewId)).dependencyChanges, 2);
+});
 
 test('bulk link keeps the existing rule and applies only new links once, with atomic rollback and one undo', async t => {
   const f = await fixture(t);

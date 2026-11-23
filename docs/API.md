@@ -1094,6 +1094,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/schedule/bulk-links/preview`에 `{projectId,anchor,issues,direction,type,lagDays}`를 보낸다. `anchor`와 `issues`의 각 업무는 `{id,expectedVersion}` 형식이다. 한 프로젝트에 속한 2~100개의 서로 다른 업무와 별도의 공통 업무를 지정한다. `direction`은 공통 업무의 역할이며 `predecessor` 또는 `successor`다. `type`은 `FS`, `SS`, `FF`, `SF`이고 `lagDays`에는 −3,650~3,650 사이의 정수 근무일을 보낸다.
 
+목록의 순서대로 연결할 때는 `{mode:'chain',projectId,issues,type,lagDays}`를 보낸다. `issues`에 두 업무를 연속으로 넣으면 앞 업무를 선행, 뒤 업무를 후행으로 검토한다. 예를 들어 A·B·C를 지정하면 A→B와 B→C를 검토한다. 업무마다 버전과 같은 프로젝트 소속을 확인한다.
+
 응답의 `dependencyChanges`에는 새 연결이 담긴다. 같은 방향의 연결이 이미 있으면 `unchanged` 건수와 `retainedDependencies`에 기록하며 각 행의 `before`와 `after`에 기존 유형과 간격이 들어간다. 일정 누락과 충돌은 `warnings`에 표시한다. 업무 위치·버전이 일치하지 않거나 전체 연결에 순환이 생기면 `errors`와 빈 `previewId`를 반환한다. 추가할 연결이 전부 존재하는 경우도 적용 ID가 없다.
 
 `POST /api/schedule/bulk-links/apply`에 `{previewId}`를 보내 검토한 연결을 함께 추가한다. 검토 뒤 관련 업무·연결·프로젝트 규칙이 바뀌면 `409`가 반환된다. 같은 작업자는 같은 ID로 이미 저장한 결과를 확인할 수 있다. 결과의 `undoId`를 `POST /api/schedule/undo`에 보내 이 요청에서 추가한 연결을 함께 해제한다.

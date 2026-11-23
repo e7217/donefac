@@ -1897,6 +1897,13 @@ export interface ScheduleBulkLinkInput {
   type: DependencyType;
   lagDays: number;
 }
+export interface ScheduleBulkChainInput {
+  mode: 'chain';
+  projectId: string;
+  issues: ScheduleRowIssue[];
+  type: DependencyType;
+  lagDays: number;
+}
 export const SCHEDULE_BLOCKER_LINK_PAGE_SIZE = 25;
 export const MAX_SCHEDULE_BLOCKER_LINKS = 100;
 export type ScheduleBlockerLinkCandidate = TeamScheduleBlocker & { projectId?: string };

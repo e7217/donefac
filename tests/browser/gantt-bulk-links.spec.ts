@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
 import type {
-  Dependency, Issue, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
+  Dependency, Issue, Project, ScheduleBulkLinkInput, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
 } from '../../shared/types';
 
 const previewPath = '/api/schedule/bulk-links/preview';
@@ -164,7 +164,7 @@ test('360px 간트에서 필터 밖 기준 업무를 연결하고 응답 유실 
   }
 });
 
-test('전체 프로젝트 간트에서 다른 프로젝트를 함께 고르면 안내하고 같은 프로젝트를 선택하면 연결을 연다', async ({ page, request }) => {
+test('전체 프로젝트 간트에서 다른 프로젝트를 함께 고르면 안내하고 같은 프로젝트 업무를 순서대로 연결한다', async ({ page, request }) => {
   const [project, otherProject] = (await workspace(request)).projects;
   const f = fixture(request);
   try {
@@ -200,6 +200,161 @@ test('전체 프로젝트 간트에서 다른 프로젝트를 함께 고르면 �
     await dialog.getByRole('button', { name: '닫기', exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await dialog.getByRole('combobox', { name: '연결 방식', exact: true }).selectOption('chain');
+    const previewing = nextPost(page, previewPath);
+    await dialog.getByRole('button', { name: '연결 미리보기', exact: true }).click();
+    const preview = await readJson<SchedulePastePreview>(await previewing);
+    expect(preview.dependencyChanges).toEqual([expect.objectContaining({ predecessorKey: first.key, successorKey: second.key })]);
+    const applying = nextPost(page, applyPath);
+    await dialog.getByRole('button', { name: '검토한 연결 적용', exact: true }).click();
+    const applied = await readJson<SchedulePasteApplyResult>(await applying);
+    expect(applied).toMatchObject({ updated: [], dependencyChanges: 1 });
+    await expect(dialog).toHaveCount(0);
+    const links = async () => (await workspace(request)).dependencies.filter(link =>
+      [first.id, second.id, anchor.id, other.id].includes(link.predecessorId));
+    expect(await links()).toEqual([expect.objectContaining({ predecessorId: first.id, successorId: second.id, type: 'FS', lagDays: 0 })]);
+    const undoing = nextPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undoResponse = await undoing;
+    expect(undoResponse.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    expect(await readJson<SchedulePasteApplyResult>(undoResponse)).toMatchObject({ updated: [], dependencyChanges: 1 });
+    expect(await links()).toEqual([]);
+  } finally {
+    await f.close();
+  }
+});
+
+test('360px 간트에서 선택한 업무 순서를 지켜 선후행 연결을 추가하고 새 연결만 되돌린다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  const f = fixture(request);
+  const project = await readJson<Project>(await request.post('/api/projects', { data: {
+    key: `LC${randomUUID().slice(0, 8).toUpperCase()}`, name: f.prefix,
+  } }), 201);
+  const [actor, peer] = (await workspace(request)).users;
+  try {
+    const first = await f.create(project.id, '첫 업무');
+    const second = await f.create(project.id, '둘째 업무');
+    const third = await f.create(project.id, '셋째 업무');
+    const fourth = await f.create(project.id, '넷째 업무');
+    const chartOrder = [first, second, third, fourth];
+    const chain = [first, fourth, second, third];
+    const createLink = (predecessor: Issue, successor: Issue, type: Dependency['type'], lagDays: number) =>
+      request.post('/api/dependencies', { data: { predecessorId: predecessor.id, successorId: successor.id, type, lagDays } })
+        .then(response => readJson<Dependency>(response, 201));
+    const retained = await createLink(fourth, second, 'SS', -2);
+    const outsideChain = await createLink(first, third, 'FF', 1);
+    const currentLinks = async () => (await workspace(request)).dependencies
+      .filter(link => chartOrder.some(issue => issue.id === link.predecessorId));
+    const expectOriginalLinks = async () => {
+      const links = await currentLinks();
+      expect(links).toHaveLength(2);
+      expect(links).toEqual(expect.arrayContaining([retained, outsideChain]));
+    };
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/gantt`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const chartRows = chart.locator('.gantt-row[data-issue-id]');
+    await expect(chartRows).toHaveCount(4, { timeout: 35_000 });
+    expect(await chartRows.evaluateAll(rows => rows.map(row => row.getAttribute('data-issue-id')))).toEqual(chartOrder.map(issue => issue.id));
+    for (const issue of [...chartOrder].reverse()) await chart.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '선후행 일괄 연결', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: dialogName, exact: true });
+    await expect(dialog).toBeVisible();
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    const mode = dialog.getByRole('combobox', { name: '연결 방식', exact: true });
+    await expect(mode).toHaveValue('chain');
+    await expect(mode.getByRole('option', { name: '공통 기준 업무 연결', exact: true })).toHaveJSProperty('disabled', true);
+    await expect(dialog.getByLabel('기준 업무 검색', { exact: true })).toHaveCount(0);
+    await expect(dialog.getByLabel('연결 유형', { exact: true })).toHaveValue('FS');
+    await expect(dialog.getByLabel('근무일 간격', { exact: true })).toHaveValue('0');
+
+    const order = dialog.getByRole('list', { name: '선후행 연결 순서', exact: true });
+    const orderRows = order.getByRole('listitem');
+    async function expectOrder(issues: Issue[]) {
+      await expect(orderRows).toHaveCount(issues.length);
+      for (const [index, issue] of issues.entries()) await expect(orderRows.nth(index)).toContainText(issue.key);
+    }
+    const move = (issue: Issue, direction: '위로' | '아래로') =>
+      order.getByRole('button', { name: `${issue.key} ${direction} 이동`, exact: true });
+    await expectOrder(chartOrder);
+    await expect(move(first, '위로')).toBeDisabled();
+    await expect(move(fourth, '아래로')).toBeDisabled();
+    await move(fourth, '위로').click();
+    await expectOrder([first, second, fourth, third]);
+    await move(second, '아래로').click();
+    await expectOrder(chain);
+
+    const preview = dialog.getByRole('button', { name: '연결 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '검토한 연결 적용', exact: true });
+    async function previewChain(issues: Issue[]) {
+      const pending = nextPost(page, previewPath);
+      await preview.click();
+      const response = await pending;
+      expect(response.request().postDataJSON()).toEqual({ mode: 'chain', projectId: project.id, issues: issues.map(reference), type: 'FS', lagDays: 0 });
+      const value = await readJson<SchedulePastePreview>(response);
+      expect(value.previewId).toBeTruthy();
+      expect(value.errors).toEqual([]);
+      expect(value.changes).toEqual([]);
+      expect(value.unchanged).toBe(1);
+      expect(value.retainedDependencies).toEqual([expect.objectContaining({
+        predecessorKey: fourth.key, successorKey: second.key, before: { type: 'SS', lagDays: -2 }, after: { type: 'SS', lagDays: -2 },
+      })]);
+      expect(value.dependencyChanges).toHaveLength(2);
+      expect(value.dependencyChanges).toEqual(expect.arrayContaining([[first, fourth], [second, third]].map(([before, after]) =>
+        expect.objectContaining({ predecessorKey: before.key, successorKey: after.key, before: null, after: { type: 'FS', lagDays: 0 } }))));
+      await expect(dialog.getByRole('table', { name: '유지할 선후행 연결 목록', exact: true })).toContainText(fourth.key);
+      await expect(dialog.getByRole('table', { name: '새 선후행 연결 목록', exact: true })).toContainText(third.key);
+      return value.previewId;
+    }
+
+    const stalePreview = await previewChain(chain);
+    await expectOriginalLinks();
+    const revised = await readJson<Issue>(await request.patch(`/api/issues/${fourth.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: fourth.version, title: `${fourth.title} 동료 수정` },
+    }));
+    const rejected = nextPost(page, applyPath);
+    await apply.click();
+    const rejection = await rejected;
+    expect(rejection.status()).toBe(409);
+    expect(rejection.request().postDataJSON()).toEqual({ previewId: stalePreview });
+    await expect(dialog.getByText('다시 검토 필요', { exact: true })).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await expectOriginalLinks();
+
+    await dialog.getByRole('button', { name: '새로고침', exact: true }).click();
+    await expect(order).toContainText(revised.title);
+    await expectOrder(chain);
+    await expect(mode).toHaveValue('chain');
+    const currentPreview = await previewChain([first, revised, second, third]);
+    expect(currentPreview).not.toBe(stalePreview);
+    const beforeApply = await f.stored();
+    const applying = nextPost(page, applyPath);
+    await apply.click();
+    const applied = await readJson<SchedulePasteApplyResult>(await applying);
+    expect(applied).toMatchObject({ updated: [], dependencyChanges: 2 });
+    await expect(dialog).toHaveCount(0);
+    const added = await currentLinks();
+    expect(added).toHaveLength(4);
+    expect(added).toEqual(expect.arrayContaining([retained, outsideChain,
+      expect.objectContaining({ predecessorId: first.id, successorId: fourth.id, type: 'FS', lagDays: 0 }),
+      expect.objectContaining({ predecessorId: second.id, successorId: third.id, type: 'FS', lagDays: 0 }),
+    ]));
+    expect(await f.stored()).toEqual(beforeApply);
+
+    const undoing = nextPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undoResponse = await undoing;
+    expect(undoResponse.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    expect(await readJson<SchedulePasteApplyResult>(undoResponse)).toMatchObject({ updated: [], dependencyChanges: 2 });
+    await expectOriginalLinks();
+    expect(await f.stored()).toEqual(beforeApply);
   } finally {
     await f.close();
   }

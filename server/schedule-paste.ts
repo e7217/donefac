@@ -3,7 +3,7 @@ import type { Express, Request } from 'express';
 import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
-import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
+import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
@@ -126,9 +126,8 @@ function parseBulkDateInput(raw: unknown): ScheduleBulkDateInput {
   return { projectId: raw.projectId, issues, changes: parseDateChanges(raw.changes) };
 }
 
-function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput {
-  if (!isRecord(raw) || Object.keys(raw).length !== 6 || !isId(raw.projectId) ||
-      (raw.direction !== 'predecessor' && raw.direction !== 'successor')) {
+function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput | ScheduleBulkChainInput {
+  if (!isRecord(raw) || !isId(raw.projectId)) {
     throw new SchedulePasteError(400, '프로젝트와 일괄 연결 방향을 확인해 주세요.');
   }
   if (!isDependencyType(raw.type) || !isDependencyLag(raw.lagDays)) {
@@ -137,13 +136,21 @@ function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput {
   if (!Array.isArray(raw.issues) || raw.issues.length < 2 || raw.issues.length > MAX_SCHEDULE_BULK_LINK_ISSUES) {
     throw new SchedulePasteError(400, `한 프로젝트에서 업무를 2~${MAX_SCHEDULE_BULK_LINK_ISSUES}개 선택해 주세요.`);
   }
-  const anchor = parseScheduleIssue(raw.anchor);
   const issues = raw.issues.map(parseScheduleIssue);
   const ids = new Set(issues.map(issue => issue.id));
+  const selection = { projectId: raw.projectId, issues, type: raw.type, lagDays: raw.lagDays };
+  if (raw.mode === 'chain' && Object.keys(raw).length === 5) {
+    if (ids.size !== issues.length) throw new SchedulePasteError(400, '순서에 같은 업무를 두 번 지정할 수 없습니다.');
+    return { ...selection, mode: 'chain' };
+  }
+  if (Object.hasOwn(raw, 'mode') || Object.keys(raw).length !== 6 || (raw.direction !== 'predecessor' && raw.direction !== 'successor')) {
+    throw new SchedulePasteError(400, '프로젝트와 일괄 연결 방향을 확인해 주세요.');
+  }
+  const anchor = parseScheduleIssue(raw.anchor);
   if (ids.size !== issues.length || ids.has(anchor.id)) {
     throw new SchedulePasteError(400, '기준 업무와 선택 업무는 각각 한 번만 지정해 주세요.');
   }
-  return { projectId: raw.projectId, anchor, issues, direction: raw.direction, type: raw.type, lagDays: raw.lagDays };
+  return { ...selection, anchor, direction: raw.direction };
 }
 
 function parseBlockerLinkInput(raw: unknown): { projectId: string | null; relations: ScopedBlockerReference[] } {
@@ -845,7 +852,8 @@ export class SchedulePasteService {
   }
 
   private previewBulkLinks(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    const { projectId, anchor: selectedAnchor, issues: selected, direction, type, lagDays } = parseBulkLinkInput(raw);
+    const input = parseBulkLinkInput(raw);
+    const { projectId, issues: selected, type, lagDays } = input;
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
@@ -854,20 +862,30 @@ export class SchedulePasteService {
       const preview: SchedulePastePreview = {
         projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges: [], retainedDependencies: [], warnings: [], errors: [], unchanged: 0,
       };
-      const anchor = findPreviewIssue(issuesById, preview.errors, selectedAnchor);
-      if (!anchor) return preview;
-
       const pairs: DependencyAddition[] = [];
-      for (const [index, entry] of selected.entries()) {
-        const line = index + 1;
-        const issue = findPreviewIssue(issuesById, preview.errors, entry, line);
-        if (!issue) continue;
-        const [predecessor, successor] = direction === 'predecessor' ? [anchor, issue] : [issue, anchor];
-        pairs.push({ line, predecessor, successor });
+      const issueIds = selected.map(issue => issue.id);
+      if ('mode' in input) {
+        const ordered = selected.map((entry, index) => findPreviewIssue(issuesById, preview.errors, entry, index + 1));
+        for (let index = 1; index < ordered.length; index++) {
+          const predecessor = ordered[index - 1];
+          const successor = ordered[index];
+          if (predecessor && successor) pairs.push({ line: index, predecessor, successor });
+        }
+      } else {
+        const anchor = findPreviewIssue(issuesById, preview.errors, input.anchor);
+        if (!anchor) return preview;
+        issueIds.unshift(anchor.id);
+        for (const [index, entry] of selected.entries()) {
+          const line = index + 1;
+          const issue = findPreviewIssue(issuesById, preview.errors, entry, line);
+          if (!issue) continue;
+          const [predecessor, successor] = input.direction === 'predecessor' ? [anchor, issue] : [issue, anchor];
+          pairs.push({ line, predecessor, successor });
+        }
       }
       const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type, lagDays }, hooks.warnings);
       return this.savePreview({ ...preview, ...review, errors: [...preview.errors, ...errors] }, state, {
-        actorId, issueIds: [anchor.id, ...selected.map(issue => issue.id)], changes: [], linkChanges, kind: 'bulk-links',
+        actorId, issueIds, changes: [], linkChanges, kind: 'bulk-links',
         ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
       }, hooks);
     });

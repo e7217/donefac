@@ -6,11 +6,12 @@ import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-depend
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
-  ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker,
+  ScheduleBulkChainInput, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
+  SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
-import { GanttBulkLinkFields, type BulkLinkDraft } from './GanttBulkLinksDialog';
+import { GanttBulkChainFields, GanttBulkLinkFields, type BulkLinkDraft, type BulkLinkRule } from './GanttBulkLinksDialog';
 import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
 
@@ -40,6 +41,7 @@ type DateField = 'startDate' | 'endDate' | 'dueDate';
 type DateAction = 'keep' | 'set' | 'clear';
 type DateEntry = { action: DateAction; value: string };
 type DateDraft = Record<DateField, DateEntry>;
+type LinkMode = 'anchor' | 'chain';
 export const SCHEDULE_PASTE_DRAFT_ID = 'schedule-paste';
 const BULK_DRAFT_ID = 'schedule-bulk-dates';
 const BULK_LINK_DRAFT_ID = 'schedule-bulk-links';
@@ -51,7 +53,8 @@ const bulkFields: { field: DateField; label: string }[] = [
   { field: 'dueDate', label: '목표 마감일' },
 ];
 const keepDate: DateEntry = { action: 'keep', value: '' };
-const defaultLink: BulkLinkDraft = { choice: null, direction: 'predecessor', type: 'FS', lagDays: '0' };
+const defaultLinkRule: BulkLinkRule = { type: 'FS', lagDays: '0' };
+const defaultLink: BulkLinkDraft = { ...defaultLinkRule, choice: null, direction: 'predecessor' };
 const hasLinkInput = (link: BulkLinkDraft, query: string) =>
   Boolean(link.choice || query || link.direction !== defaultLink.direction || link.type !== defaultLink.type || link.lagDays !== defaultLink.lagDays);
 const pendingLabels = {
@@ -103,6 +106,12 @@ function ProjectScheduleEditDialog({
   const [text, setText] = useState('');
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
   const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
+  const [linkMode, setLinkMode] = useState<LinkMode>(() => {
+    const selected = new Set(bulkLinks?.issues.map(issue => issue.id));
+    return bulkLinks?.candidates.some(issue => issue.projectId === projectId && !selected.has(issue.id)) ? 'anchor' : 'chain';
+  });
+  const [chainOrder, setChainOrder] = useState(() => bulkLinks?.issues.map(issue => issue.id) ?? []);
+  const [chainRule, setChainRule] = useState<BulkLinkRule>(defaultLinkRule);
   const [anchorQuery, setAnchorQuery] = useState('');
   const [blockerSelection, setBlockerSelection] = useState<BlockerLinkSelection>(() => new Map());
   const [blockerRefreshKey, setBlockerRefreshKey] = useState(0);
@@ -121,6 +130,7 @@ function ProjectScheduleEditDialog({
   const applyRecoveryButton = useRef<HTMLButtonElement>(null);
   const firstDateAction = useRef<HTMLSelectElement>(null);
   const anchorSearch = useRef<HTMLInputElement>(null);
+  const linkModeSelect = useRef<HTMLSelectElement>(null);
   const blockerProjectFilter = useRef<HTMLSelectElement>(null);
   const mounted = useRef(true);
   const busyRef = useRef(false);
@@ -142,7 +152,10 @@ function ProjectScheduleEditDialog({
   const scopeLabel = focusTeamRecovery ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
   const title = blockerLinks ? '차단 관계 선후행 검토' : bulkLinks ? '선후행 연결 일괄 추가' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
-  const linksEdited = hasLinkInput(link, anchorQuery);
+  const chainMode = linkMode === 'chain';
+  const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
+    chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
+  const linksEdited = hasLinkInput(link, anchorQuery) || chainEdited;
   const selectedBlockers = [...blockerSelection.values()];
   const blockerInput: ScheduleBlockerLinkInput | null = blockerLinks
     ? projectId === null ? {
@@ -152,7 +165,9 @@ function ProjectScheduleEditDialog({
     } : { projectId, relations: selectedBlockers.map(({ id, version }) => ({ id, version })) }
     : null;
   const input = blockerInput ? JSON.stringify(blockerInput)
-    : bulkLinks ? JSON.stringify([link.choice?.id, link.direction, link.type, link.lagDays])
+    : bulkLinks ? JSON.stringify(chainMode
+      ? [linkMode, chainOrder, chainRule.type, chainRule.lagDays]
+      : [linkMode, link.choice?.id, link.direction, link.type, link.lagDays])
       : bulkDates ? JSON.stringify(dates) : text;
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
   const selectedIds = new Set(issues.map(issue => issue.id));
@@ -160,11 +175,18 @@ function ProjectScheduleEditDialog({
   const sameProjectIds = new Set(sameProjectCandidates.map(issue => issue.id));
   const unavailableTargets = bulkLinks && bulkIssues.filter(issue => issue.projectId !== projectId || !sameProjectIds.has(issue.id));
   const anchors = sameProjectCandidates.filter(issue => !selectedIds.has(issue.id));
-  const anchor = anchors.find(issue => issue.id === link.choice?.id);
-  const lagDays = link.lagDays.trim() ? Number(link.lagDays) : NaN;
-  const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && projectId !== null && !unavailableTargets?.length &&
-    issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES && isDependencyLag(lagDays)
-    ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction, type: link.type, lagDays }
+  const anchor = chainMode ? undefined : anchors.find(issue => issue.id === link.choice?.id);
+  const bulkIssuesById = new Map(bulkIssues.map(issue => [issue.id, issue]));
+  const chainIssues = chainOrder.map(id => bulkIssuesById.get(id)).filter((issue): issue is Issue => Boolean(issue));
+  const { lagDays: lag, type: linkType } = chainMode ? chainRule : link;
+  const lagDays = lag.trim() ? Number(lag) : NaN;
+  const linkRulesValid = projectId !== null && !unavailableTargets?.length &&
+    issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES && isDependencyLag(lagDays);
+  const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid
+    ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction, type: linkType, lagDays }
+    : null;
+  const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && chainIssues.length === issues.length
+    ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })), type: linkType, lagDays }
     : null;
   const blockerIssues = blockerLinks?.issues;
   const blockerDependencies = blockerLinks?.dependencies;
@@ -192,7 +214,7 @@ function ProjectScheduleEditDialog({
     ? selectedBlockers.length > 0 && selectedBlockers.length <= MAX_SCHEDULE_BLOCKER_LINKS &&
       blockerInput.relations.length === selectedBlockers.length
     : bulkLinks
-    ? Boolean(bulkLinkInput)
+    ? Boolean(bulkLinkInput || bulkChainInput)
     : bulkDates
       ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
       : Boolean(text.trim());
@@ -226,7 +248,7 @@ function ProjectScheduleEditDialog({
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    (blockerProjectFilter.current ?? anchorSearch.current ?? firstDateAction.current ?? textarea.current ?? dialog.current)?.focus({ preventScroll: true });
+    (blockerProjectFilter.current ?? anchorSearch.current ?? linkModeSelect.current ?? firstDateAction.current ?? textarea.current ?? dialog.current)?.focus({ preventScroll: true });
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -331,7 +353,24 @@ function ProjectScheduleEditDialog({
 
   function updateLink(next: BulkLinkDraft) {
     setLink(next);
-    resetReview(hasLinkInput(next, anchorQuery));
+    resetReview(hasLinkInput(next, anchorQuery) || chainEdited);
+  }
+
+  function updateLinkMode(next: LinkMode) {
+    setLinkMode(next);
+    resetReview(linksEdited);
+  }
+
+  function moveChainIssue(from: number, to: number) {
+    const next = [...chainOrder];
+    [next[from], next[to]] = [next[to], next[from]];
+    setChainOrder(next);
+    resetReview(true);
+  }
+
+  function updateChainRule(next: BulkLinkRule) {
+    setChainRule(next);
+    resetReview(true);
   }
 
   function updateBlockers(selection: BlockerLinkSelection) {
@@ -379,9 +418,11 @@ function ProjectScheduleEditDialog({
     setRetryApply(null);
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects };
-    let payload: { projectId: string | null; text: string } | ScheduleBulkDateInput | ScheduleBulkLinkInput | ScheduleBlockerLinkInput;
+    let payload: { projectId: string | null; text: string } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
+      ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
     else if (bulkLinkInput) payload = bulkLinkInput;
+    else if (bulkChainInput) payload = bulkChainInput;
     else if (bulkDates) {
       const changes: ScheduleBulkDateChanges = {};
       for (const { field } of bulkFields) {
@@ -541,7 +582,9 @@ function ProjectScheduleEditDialog({
               {blockerLinks
                 ? '차단하는 업무를 선행으로, 차단된 업무를 후행으로 연결합니다. 새 연결은 종료→시작(FS) · 0근무일이며 기존 연결은 유지합니다.'
                 : bulkLinks
-                ? '같은 프로젝트에서 기준 업무를 고르고 선택한 업무들과 맺을 관계를 확인하세요. 기존 연결은 유지합니다.'
+                ? chainMode
+                  ? '목록의 위에서 아래로 바로 다음 업무를 연결합니다. 기존 연결의 유형과 간격은 유지합니다.'
+                  : '같은 프로젝트에서 기준 업무를 고르고 선택한 업무들과 맺을 관계를 확인하세요. 기존 연결은 유지합니다.'
                 : bulkDates
                   ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
                   : isTeamPaste
@@ -563,7 +606,7 @@ function ProjectScheduleEditDialog({
 
         <form className="schedule-paste-input" onSubmit={preview}>
           <fieldset disabled={editLocked}>
-            {bulk && (
+            {bulk && !(bulkLinks && chainMode) && (
               <details className="schedule-bulk-targets">
                 <summary>선택한 업무 {bulkIssues.length}개{projectCount !== undefined && ` · 프로젝트 ${projectCount}개`}</summary>
                 <ul>
@@ -586,8 +629,20 @@ function ProjectScheduleEditDialog({
                 issues={blockerIssuesById} dependencyFor={dependencyFor}
                 selection={blockerSelection} refreshKey={blockerRefreshKey} onChange={updateBlockers} />
             ) : bulkLinks ? (
-              <GanttBulkLinkFields anchors={anchors} anchor={anchor} searchRef={anchorSearch} query={anchorQuery}
-                value={link} onSearch={setAnchorQuery} onChange={updateLink} />
+              <>
+                <label className="schedule-bulk-link-mode">연결 방식
+                  <select ref={linkModeSelect} className="field" value={linkMode} onChange={event => {
+                    const mode = event.currentTarget.value;
+                    if (mode === 'anchor' || mode === 'chain') updateLinkMode(mode);
+                  }}>
+                    <option value="anchor" disabled={!anchors.length}>공통 기준 업무 연결</option>
+                    <option value="chain">순서대로 연결</option>
+                  </select>
+                </label>
+                {chainMode ? <GanttBulkChainFields issues={chainIssues} value={chainRule} onChange={updateChainRule} onMove={moveChainIssue} />
+                  : <GanttBulkLinkFields anchors={anchors} anchor={anchor} searchRef={anchorSearch} query={anchorQuery}
+                    value={link} onSearch={setAnchorQuery} onChange={updateLink} />}
+              </>
             ) : bulkDates ? (
                 <div className="schedule-bulk-date-fields">
                   {bulkFields.map(({ field, label }, index) => {
