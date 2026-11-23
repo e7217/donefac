@@ -584,7 +584,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `GET /api/integrations/gitlab/sync-status` | 저장한 연결 설정 버전과 저장소별 최근 활동·배포 수동 동기화 결과 |
 | `POST /api/integrations/gitlab/webhook` | 허용 저장소의 인증된 이벤트 수신 |
-| `GET /api/integrations/gitlab/webhook-status` | 저장한 연결 설정 버전과 허용 저장소별 최근 인증 수신 요약 |
+| `GET /api/integrations/gitlab/webhook-status` | 저장한 연결 설정 버전과 허용 저장소별 최근 인증 수신 및 이벤트별 반영 요약 |
 | `POST /api/integrations/gitlab/project-webhook-review` | 저장한 저장소의 프로젝트 웹훅을 조회하고 수신 주소와 이벤트 설정 점검 |
 | `POST /api/integrations/gitlab/project-webhook-register` | 점검에서 누락된 저장소 한 곳에 프로젝트 웹훅 등록 |
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
@@ -615,7 +615,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
 
-`webhook-status`는 `settingsVersion`과 `repositories`를 반환한다. 각 저장소에 `repositoryId`와 `lastDelivery`가 들어간다. `lastDelivery`는 인증된 수신이 없으면 `null`이다. 수신이 있으면 `event`, `authentication`, 서버의 `receivedAt`, `duplicate`, 업무 연결 반영 수 `linked`, 자동화 기록 수 `automationRuns`를 포함한다. 자동화 기록 수에는 차단이나 무시 결과도 포함될 수 있다. 원문, 헤더, 비밀값은 수신 요약에 저장하지 않는다. 주소나 웹훅 인증값을 바꾸면 요약을 초기화하고, 저장소 제거와 Jira 매핑 변경은 해당 저장소에만 적용한다. 읽기 토큰 변경은 수신 요약을 유지한다. 별도 물리 복원은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
+`webhook-status`는 `settingsVersion`과 `repositories`를 반환한다. 각 저장소에 `repositoryId`와 `lastDelivery`가 들어간다. `lastDelivery`는 인증된 수신이 없으면 `null`이다. 수신이 있으면 `event`, `authentication`, 서버의 `receivedAt`, `duplicate`, 업무 연결 반영 수 `linked`, 자동화 기록 수 `automationRuns`를 포함한다. 자동화 기록 수에는 차단이나 무시 결과도 포함될 수 있다. 중복을 제외한 수신이 기록된 경우 `lastAcceptedByEvent`에 `push`, `merge_request`, `pipeline`, `deployment` 가운데 해당하는 유형별 최근 요약을 반환한다. 같은 유형의 재전송은 `lastDelivery`에 기록되고 유형별 요약은 유지된다. 이전 물리 사본에서는 확인 가능한 마지막 수신 한 건으로 시작한다.
+
+원문, 헤더, 비밀값은 수신 요약에 저장하지 않는다. 주소나 웹훅 인증값을 바꾸면 요약을 초기화하고, 저장소 제거와 Jira 매핑 변경은 해당 저장소에만 적용한다. 읽기 토큰 변경은 수신 요약을 유지한다. 별도 물리 복원은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
 
 ### GitLab 프로젝트 웹훅 점검과 등록
 

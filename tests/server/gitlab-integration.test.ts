@@ -10,7 +10,7 @@ import type { Request } from 'express';
 import { Store } from '../../server/store.js';
 import { seed } from '../../server/seed.js';
 import { GitlabIntegrationService,GitlabIntegrationError } from '../../server/gitlab-integration.js';
-import type { AutomationEvent,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure } from '../../shared/types.js';
+import type { AutomationEvent,GitlabJiraSource,GitlabLink,GitlabSettings,GitlabSyncFailure,GitlabWebhookDelivery } from '../../shared/types.js';
 
 function fixture(jiraSources: GitlabJiraSource[] = []){const dir=mkdtempSync(join(tmpdir(),'teamspace-gitlab-')),store=new Store(dir);seed(store);const events:AutomationEvent[]=[],connections:{before:GitlabSettings;after:GitlabSettings}[]=[];let rejectEvent=false;const service=new GitlabIntegrationService(store,{processEvent:event=>{if(rejectEvent)throw new Error('audit rollback');events.push(event);return[];},onConnectionChanged:(before,after)=>{connections.push({before,after});return 0;},jiraSources:()=>jiraSources});return{dir,store,service,events,connections,rejectEvent:(value:boolean)=>{rejectEvent=value;},configure:(values:Record<string,unknown>={})=>service.configure({expectedVersion:service.settings().version,baseUrl:'https://git.example.test',projectIds:[42],webhookSecret:'legacy-secret',...values}),close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};}
 function request(body:unknown,headers:Record<string,string>={},raw=Buffer.from(JSON.stringify(body))):Request{const values=Object.fromEntries(Object.entries({'x-gitlab-token':'legacy-secret','x-gitlab-event-uuid':randomUUID(),...headers}).map(([key,value])=>[key.toLowerCase(),value]));return{body,headers:values,gitlabRawBody:raw,header:(name:string)=>values[name.toLowerCase()]} as unknown as Request;}
@@ -197,6 +197,7 @@ test('GitLab webhook receipts persist only accepted delivery summaries for each 
   assert.ok(Date.parse(delivered.receivedAt) >= sentAt && Date.parse(delivered.receivedAt) <= Date.now());
   assert.deepEqual(delivered, { event: 'push', authentication: 'secret-token', receivedAt: delivered.receivedAt,
     duplicate: false, linked: 0, automationRuns: 0 });
+  assert.deepEqual(first.repositories[0].lastAcceptedByEvent, { push: delivered });
   assert.equal(first.repositories[1].lastDelivery, null);
 
   const body = { ...mr({ title: 'NEO-1 synthetic-private-merge-title' }), project: { id: 77, web_url: `${pushBase}/team/other` } };
@@ -215,11 +216,13 @@ test('GitLab webhook receipts persist only accepted delivery summaries for each 
   assert.ok(signedDelivery);
   assert.deepEqual(signedDelivery, { event: 'merge_request', authentication: 'signing-token', receivedAt: signedDelivery.receivedAt,
     duplicate: false, linked: 1, automationRuns: 0 });
+  assert.deepEqual(signedStatus.repositories[1].lastAcceptedByEvent, { merge_request: signedDelivery });
   assert.deepEqual(signedStatus.repositories[0].lastDelivery, delivered);
   assert.equal(f.service.webhook(request(body, signed, raw)).duplicate, true);
   const replay = f.service.webhookStatus().repositories[1].lastDelivery;
   assert.ok(replay);
   assert.deepEqual(replay, { ...signedDelivery, receivedAt: replay.receivedAt, duplicate: true, linked: 0 });
+  assert.deepEqual(f.service.webhookStatus().repositories[1].lastAcceptedByEvent, { merge_request: signedDelivery });
   assert.equal(f.events.length, 1);
 
   const unsupported = 'synthetic-private-custom-event';
@@ -227,6 +230,7 @@ test('GitLab webhook receipts persist only accepted delivery summaries for each 
   const expected = f.service.webhookStatus();
   assert.equal(expected.repositories[0].lastDelivery?.event, 'other');
   assert.equal(expected.repositories[0].lastDelivery?.linked, 0);
+  assert.deepEqual(expected.repositories[0].lastAcceptedByEvent, { push: delivered });
   const reopened = new Store(f.dir);
   try {
     const restoredService = new GitlabIntegrationService(reopened, { processEvent: () => [], onConnectionChanged: () => 0 });
@@ -237,6 +241,86 @@ test('GitLab webhook receipts persist only accepted delivery summaries for each 
       assert.ok(!JSON.stringify(expected).includes(redacted));
     }
   } finally { reopened.db.close(); }
+});
+
+test('tracked GitLab events retain each accepted result when deliveries interleave or repeat', t => {
+  const f = fixture();
+  t.after(f.close);
+  f.configure();
+  const repository = () => f.service.webhookStatus().repositories[0];
+  const mergeRequest = request(mr());
+  assert.equal(f.service.webhook(mergeRequest).linked, 1);
+  const mergeReceipt = repository().lastDelivery;
+  assert.ok(mergeReceipt);
+
+  const failed = request(pipeline({ status: 'failed' }));
+  f.rejectEvent(true);
+  assert.throws(() => f.service.webhook(failed), /audit rollback/);
+  assert.deepEqual(repository(), {
+    repositoryId: 42, lastDelivery: mergeReceipt, lastAcceptedByEvent: { merge_request: mergeReceipt },
+  });
+  f.rejectEvent(false);
+  assert.equal(f.service.webhook(failed).duplicate, false);
+  const failedReceipt = repository().lastDelivery;
+  assert.ok(failedReceipt);
+
+  const projectUrl = 'https://git.example.test/team/repo';
+  assert.equal(f.service.webhook(request({
+    object_kind: 'deployment', project: { id: 42, web_url: projectUrl },
+    deployment_id: 12, environment: 'production', status: 'success', status_changed_at: '2024-02-10T08:00:00.000Z',
+    commit_url: `${projectUrl}/-/commit/${'a'.repeat(40)}`,
+  })).deploymentUpdated, true);
+  const deployReceipt = repository().lastDelivery;
+  assert.ok(deployReceipt?.deploymentUpdated);
+
+  const push = { object_kind: 'push', project_id: 42 };
+  assert.equal(f.service.webhook(request(push)).linked, 0);
+  const pushReceipt = repository().lastDelivery;
+  assert.ok(pushReceipt);
+  const initialAccepted = { merge_request: mergeReceipt, pipeline: failedReceipt, deployment: deployReceipt, push: pushReceipt };
+  assert.deepEqual(repository().lastAcceptedByEvent, initialAccepted);
+
+  const succeeded = request(pipeline({ id: 201, status: 'success' }));
+  assert.equal(f.service.webhook(succeeded).duplicate, false);
+  const successReceipt = repository().lastDelivery;
+  assert.ok(successReceipt);
+  assert.equal(f.service.webhook(failed).duplicate, true);
+  assert.equal(repository().lastDelivery?.duplicate, true);
+  assert.deepEqual(repository().lastAcceptedByEvent, { ...initialAccepted, pipeline: successReceipt });
+
+  f.service.webhook(request({ object_kind: 'tag_push', project_id: 42 }));
+  assert.equal(repository().lastDelivery?.event, 'tag_push');
+  assert.deepEqual(repository().lastAcceptedByEvent, { ...initialAccepted, pipeline: successReceipt });
+});
+
+test('legacy GitLab receipt rows seed only the known accepted event through a new untracked or duplicate delivery', t => {
+  const f = fixture();
+  t.after(f.close);
+  f.configure({ projectIds: [42, 77, 88] });
+  const table = 'gitlab_webhook_deliveries';
+  const repo = (repositoryId: number) => f.service.webhookStatus().repositories.find(row => row.repositoryId === repositoryId)!;
+
+  const original = request(mr());
+  assert.equal(f.service.webhook(original).linked, 1);
+  const legacyMerge = repo(42).lastDelivery;
+  assert.ok(legacyMerge);
+  f.store.put(table, { id: '42', delivery: legacyMerge });
+  const legacyPush: GitlabWebhookDelivery = { ...legacyMerge, event: 'push', linked: 0 };
+  f.store.put(table, { id: '77', delivery: legacyPush });
+  f.store.put(table, { id: '88', delivery: { ...legacyPush, duplicate: true } });
+  assert.deepEqual(repo(42).lastAcceptedByEvent, { merge_request: legacyMerge });
+  assert.deepEqual(repo(77).lastAcceptedByEvent, { push: legacyPush });
+  assert.equal(repo(88).lastAcceptedByEvent, undefined);
+  assert.deepEqual(f.store.get(table, '42'), { id: '42', delivery: legacyMerge });
+
+  assert.equal(f.service.webhook(original).duplicate, true);
+  f.service.webhook(request({ object_kind: 'tag_push', project_id: 77 }));
+  f.service.webhook(request({ object_kind: 'tag_push', project_id: 88 }));
+  assert.equal(repo(42).lastDelivery?.duplicate, true);
+  assert.equal(repo(77).lastDelivery?.event, 'tag_push');
+  assert.deepEqual(repo(42).lastAcceptedByEvent, { merge_request: legacyMerge });
+  assert.deepEqual(repo(77).lastAcceptedByEvent, { push: legacyPush });
+  assert.equal(repo(88).lastAcceptedByEvent, undefined);
 });
 
 test('matching GitLab settings retain receipts while changed webhook scope prunes them atomically', t => {

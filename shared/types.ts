@@ -1324,8 +1324,10 @@ export interface GitlabRepositorySearch {
   hasNextPage: boolean;
   repositories: GitlabRepositoryCandidate[];
 }
+export const GITLAB_WEBHOOK_TRACKED_EVENTS = ['push', 'merge_request', 'pipeline', 'deployment'] as const;
+export type GitlabWebhookTrackedEvent = (typeof GITLAB_WEBHOOK_TRACKED_EVENTS)[number];
 export interface GitlabWebhookDelivery {
-  event: 'push' | 'tag_push' | 'merge_request' | 'pipeline' | 'deployment' | 'other';
+  event: GitlabWebhookTrackedEvent | 'tag_push' | 'other';
   authentication: 'secret-token' | 'signing-token';
   receivedAt: string;
   duplicate: boolean;
@@ -1335,7 +1337,11 @@ export interface GitlabWebhookDelivery {
 }
 export interface GitlabWebhookStatus {
   settingsVersion: number;
-  repositories: { repositoryId: number; lastDelivery: GitlabWebhookDelivery | null }[];
+  repositories: {
+    repositoryId: number;
+    lastDelivery: GitlabWebhookDelivery | null;
+    lastAcceptedByEvent?: Partial<Record<GitlabWebhookTrackedEvent, GitlabWebhookDelivery>>;
+  }[];
 }
 export interface GitlabSyncPreviewCounts {
   mergeRequests: number; pipelines: number; matched: number; unmatched: number; skipped: number;

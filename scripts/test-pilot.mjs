@@ -999,10 +999,21 @@ async function runStandardPilot() {
   const webhookStatusPath = '/integrations/gitlab/webhook-status';
   const receipt = await (await call(pilot.url, '/integrations/gitlab/webhook', gitlabWebhook)).json();
   assert.deepEqual(receipt, { ok: true, linked: 0, duplicate: false, runs: [] });
+  const pipelineReceipt = await (await call(pilot.url, '/integrations/gitlab/webhook', {
+    method: 'POST', headers: { 'X-Gitlab-Token': syntheticWebhookSecret, 'Idempotency-Key': randomUUID() },
+    body: { object_kind: 'pipeline', project: { id: repository.id, web_url: repository.webUrl },
+      object_attributes: { id: 915, ref: 'preview-without-ticket', sha: 'a'.repeat(40), status: 'running',
+        updated_at: new Date().toISOString() } },
+  })).json();
+  assert.deepEqual(pipelineReceipt, { ok: true, linked: 0, duplicate: false, runs: [] });
   const inboundStatus = await call(pilot.url, webhookStatusPath);
   assert.equal(inboundStatus.headers.get('cache-control'), 'no-store');
   const gitlabWebhookStatus = await inboundStatus.json();
-  assert.equal(gitlabWebhookStatus.repositories[0].lastDelivery.authentication, 'secret-token');
+  const [inboundRepository] = gitlabWebhookStatus.repositories;
+  assert.equal(inboundRepository.lastDelivery.authentication, 'secret-token');
+  assert.equal(inboundRepository.lastDelivery.event, 'pipeline');
+  assert.equal(inboundRepository.lastAcceptedByEvent.push.event, 'push');
+  assert.deepEqual(inboundRepository.lastAcceptedByEvent.pipeline, inboundRepository.lastDelivery);
   const firstSync = await (await call(pilot.url,'/integrations/gitlab/sync',{method:'POST',body:{}})).json();
   assert.equal(firstSync.linked,1);
   const { settingsVersion, ...deploymentResult } = await (await call(pilot.url, '/integrations/gitlab/deployments/sync', {
@@ -1258,12 +1269,19 @@ async function runStandardPilot() {
   assert.deepEqual(await (await call(copy.url, syncStatusPath)).json(), syncStatus);
   assert.equal(authenticatedReads, readsBeforeRestoredStatus);
   assert.equal((await (await call(copy.url, '/integrations/gitlab/webhook', gitlabWebhook)).json()).duplicate, true);
+  const [afterReplay] = (await (await call(copy.url, webhookStatusPath)).json()).repositories;
+  assert.equal(afterReplay.lastDelivery.duplicate, true);
+  assert.deepEqual(afterReplay.lastAcceptedByEvent, inboundRepository.lastAcceptedByEvent);
   const nextHead = 'e'.repeat(40);
   const afterRestore = await (await call(copy.url, '/integrations/gitlab/webhook', {
     method:'POST',headers:{'X-Gitlab-Token':syntheticWebhookSecret,'Idempotency-Key':randomUUID()},
     body:{object_kind:'push',project_id:42,ref:`refs/heads/${manualBranchName}`,before:manualCommitSha,after:nextHead,commits:[]},
   })).json();
   assert.deepEqual(afterRestore,{ok:true,linked:1,duplicate:false,runs:[]});
+  const [afterRestoredPush] = (await (await call(copy.url, webhookStatusPath)).json()).repositories;
+  assert.deepEqual(afterRestoredPush.lastAcceptedByEvent.push, afterRestoredPush.lastDelivery);
+  assert.equal(afterRestoredPush.lastAcceptedByEvent.push.linked, 1);
+  assert.deepEqual(afterRestoredPush.lastAcceptedByEvent.pipeline, inboundRepository.lastAcceptedByEvent.pipeline);
   const [updatedBranch] = (await (await call(copy.url,restoredBranchPath)).json()).links;
   assert.deepEqual([updatedBranch.id,updatedBranch.manualLinkId,updatedBranch.sourceSha],[manualBranch.id,manualBranch.manualLinkId,nextHead]);
   const updatedMigratedIssue = await (await call(copy.url, `/issues/${restoredAudit.issue.id}`, {

@@ -2,6 +2,7 @@ import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
 import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabPipelineJobs,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
@@ -21,7 +22,8 @@ function fail(message:string,status=400,details?:unknown):never{throw new Gitlab
 type Obj=Record<string,unknown>;
 type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token?:string|null;webhookSecret?:string|null;signingToken?:string|null;version:number;lastSyncAt:string|null;lastError:string|null};
 type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[]; deploymentUpdated?: true };
-type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery };
+type AcceptedWebhookEvents = Partial<Record<GitlabWebhookTrackedEvent, GitlabWebhookDelivery>>;
+type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery; lastAcceptedByEvent?: AcceptedWebhookEvents };
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string;approvalRevision?:{updatedAt:string;head:string}};
 type BranchCursor={id:string;pipelineId:number};
 type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string};
@@ -53,6 +55,17 @@ const GITLAB_PUSH_COMMIT_LIMIT=20;
 const ISSUE_REFRESH_LINK_LIMIT=20;
 const ISSUE_REFRESH_CONCURRENCY=4;
 const now=()=>new Date().toISOString();
+function isTrackedWebhookEvent(event: string): event is GitlabWebhookTrackedEvent {
+  return GITLAB_WEBHOOK_TRACKED_EVENTS.some(tracked => tracked === event);
+}
+function acceptedWebhookEvents(stored: StoredWebhookDelivery | undefined): AcceptedWebhookEvents | undefined {
+  if (!stored) return undefined;
+  const { delivery, lastAcceptedByEvent } = stored;
+  if (lastAcceptedByEvent) return lastAcceptedByEvent;
+  // An older physical backup contains only the most recent delivery for this repository.
+  if (!delivery.duplicate && isTrackedWebhookEvent(delivery.event)) return { [delivery.event]: delivery };
+  return undefined;
+}
 const record=(value:unknown):Obj=>value&&typeof value==='object'&&!Array.isArray(value)?value as Obj:{};
 const string=(value:unknown):string=>typeof value==='string'?value:'';
 const bound=(value:unknown,max:number):string=>typeof value==='string'&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value)?value:'';
@@ -402,10 +415,14 @@ export class GitlabIntegrationService{
   }
   webhookStatus(): GitlabWebhookStatus {
     const settings = this.raw();
-    const deliveries = new Map(this.store.all<StoredWebhookDelivery>('gitlab_webhook_deliveries').map(({ id, delivery }) => [id, delivery]));
+    const deliveries = new Map(this.store.all<StoredWebhookDelivery>('gitlab_webhook_deliveries').map(stored => [stored.id, stored]));
     return {
       settingsVersion: settings.version,
-      repositories: settings.projectIds.map(repositoryId => ({ repositoryId, lastDelivery: deliveries.get(String(repositoryId)) ?? null })),
+      repositories: settings.projectIds.map(repositoryId => {
+        const stored = deliveries.get(String(repositoryId));
+        const lastAcceptedByEvent = acceptedWebhookEvents(stored);
+        return { repositoryId, lastDelivery: stored?.delivery ?? null, ...(lastAcceptedByEvent ? { lastAcceptedByEvent } : {}) };
+      }),
     };
   }
   private jiraSources():GitlabJiraSource[]{return this.hooks.jiraSources?.()??[];}
@@ -1007,11 +1024,14 @@ export class GitlabIntegrationService{
     };
     return this.store.transaction(() => {
       const result = processWebhook();
-      const event = kind === 'push' || kind === 'tag_push' || kind === 'merge_request' || kind === 'pipeline' || kind === 'deployment' ? kind : 'other';
+      const event = isTrackedWebhookEvent(kind) || kind === 'tag_push' ? kind : 'other';
       const { duplicate, linked, runs, deploymentUpdated } = result;
       const delivery: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns: runs.length,
         ...(deploymentUpdated ? { deploymentUpdated } : {}) };
-      this.store.put('gitlab_webhook_deliveries', { id: String(projectId), delivery } satisfies StoredWebhookDelivery);
+      const id = String(projectId);
+      const priorAccepted = acceptedWebhookEvents(this.store.get<StoredWebhookDelivery>('gitlab_webhook_deliveries', id));
+      const lastAcceptedByEvent = !duplicate && isTrackedWebhookEvent(event) ? { ...priorAccepted, [event]: delivery } : priorAccepted;
+      this.store.put('gitlab_webhook_deliveries', { id, delivery, ...(lastAcceptedByEvent ? { lastAcceptedByEvent } : {}) } satisfies StoredWebhookDelivery);
       return result;
     });
   }

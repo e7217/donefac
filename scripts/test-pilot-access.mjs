@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -346,6 +346,124 @@ async function verifyIntegrations(session, anonymous, origin) {
   await call(session, 'GET', `/api${findings}`, 404);
 }
 
+async function verifySignedGitlabWebhooks(session, anonymous, origin) {
+  const integration = '/api/integrations/gitlab';
+  const webhook = `${integration}/webhook`;
+  const readStatus = async () => (await call(session, 'GET', `${integration}/webhook-status`, 200)).json();
+  const settings = await (await call(session, 'GET', integration, 200)).json();
+  const key = randomBytes(32);
+  const signingToken = `whsec_${key.toString('base64')}`;
+  protectedValues.push(signingToken);
+  const signedSettings = await (await call(session, 'PATCH', integration, 200, {
+    headers: { Origin: origin }, data: { expectedVersion: settings.version, signingToken },
+  })).json();
+  assert.equal(signedSettings.signingTokenConfigured, true);
+  assert.equal(signedSettings.webhookSecretConfigured, true);
+  const before = await readStatus();
+  assert.equal(before.settingsVersion, signedSettings.version);
+  assert.equal(before.repositories[0].lastDelivery, null);
+  assert.deepEqual(before.repositories[0].lastAcceptedByEvent ?? {}, {});
+
+  const repositoryUrl = `${settings.baseUrl}/team/pilot`;
+  const project = { id: 42, web_url: repositoryUrl, path_with_namespace: 'team/pilot' };
+  const branch = 'feature/NEO-1-https-signed';
+  const sha = 'a'.repeat(40);
+  const happenedAt = new Date(Date.now() - 30_000).toISOString();
+  const commitUrl = `${repositoryUrl}/-/commit/${sha}`;
+  const mrUrl = `${repositoryUrl}/-/merge_requests/31`;
+  const pipelineUrl = `${repositoryUrl}/-/pipelines/701`;
+  const events = [
+    { event: 'push', name: 'Push Hook', linked: 2, payload: {
+      object_kind: 'push', project_id: project.id, project, ref: `refs/heads/${branch}`,
+      before: '0'.repeat(40), after: sha, checkout_sha: sha, total_commits_count: 1,
+      commits: [{ id: sha, title: 'NEO-1 HTTPS 서명 커밋', timestamp: happenedAt, url: commitUrl }],
+    } },
+    { event: 'merge_request', name: 'Merge Request Hook', linked: 1, payload: {
+      object_kind: 'merge_request', project, object_attributes: {
+        id: 731, iid: 31, source_branch: branch, target_project_id: project.id, title: 'NEO-1 HTTPS 서명 MR',
+        sha, state: 'opened', action: 'open', updated_at: happenedAt, url: mrUrl,
+      },
+    } },
+    { event: 'pipeline', name: 'Pipeline Hook', linked: 1, payload: {
+      object_kind: 'pipeline', project, object_attributes: {
+        id: 701, ref: branch, sha, status: 'success', finished_at: happenedAt, url: pipelineUrl,
+      },
+    } },
+    { event: 'deployment', name: 'Deployment Hook', linked: 0, deploymentUpdated: true, payload: {
+      object_kind: 'deployment', project, deployment_id: 901, status: 'success', status_changed_at: happenedAt,
+      environment: 'staging', environment_tier: 'staging', commit_url: commitUrl, short_sha: sha.slice(0, 8),
+    } },
+  ].map(event => {
+    // The original whitespace and UTF-8 text must reach the Express verifier intact.
+    const data = Buffer.from(`${JSON.stringify(event.payload, null, 2)}\n`, 'utf8');
+    const id = randomUUID();
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = createHmac('sha256', key).update(`${id}.${timestamp}.`).update(data).digest('base64');
+    protectedValues.push(signature);
+    const headers = { 'Content-Type': 'application/json', 'X-Gitlab-Event': event.name, 'webhook-id': id,
+      'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` };
+    return { ...event, data, headers };
+  });
+  const [push] = events;
+  await call(anonymous, 'POST', webhook, 401, {
+    headers: { ...push.headers, 'X-Gitlab-Token': gitlabSecret }, data: Buffer.from(JSON.stringify(push.payload)),
+  });
+  await call(anonymous, 'POST', webhook, 401, {
+    headers: { ...push.headers, 'X-Gitlab-Token': gitlabSecret, 'webhook-signature': `v1,${Buffer.alloc(32).toString('base64')}` },
+    data: push.data,
+  });
+  assert.deepEqual(await readStatus(), before);
+
+  for (const event of events) {
+    const response = await call(anonymous, 'POST', webhook, 200, { headers: event.headers, data: event.data });
+    assert.deepEqual(await response.json(), { ok: true, duplicate: false, linked: event.linked, runs: [],
+      ...(event.deploymentUpdated ? { deploymentUpdated: true } : {}) });
+  }
+  const [after] = (await readStatus()).repositories;
+  assert.equal(after.repositoryId, project.id);
+  assert.deepEqual(Object.keys(after.lastAcceptedByEvent).sort(), events.map(({ event }) => event).sort());
+  for (const { event, linked, deploymentUpdated } of events) {
+    const accepted = after.lastAcceptedByEvent[event];
+    assert.ok(Number.isFinite(Date.parse(accepted.receivedAt)));
+    assert.deepEqual(accepted, { event, authentication: 'signing-token', receivedAt: accepted.receivedAt,
+      duplicate: false, linked, automationRuns: 0, ...(deploymentUpdated ? { deploymentUpdated: true } : {}) });
+  }
+  assert.deepEqual(after.lastDelivery, after.lastAcceptedByEvent.deployment);
+
+  const [, , pipeline] = events;
+  const replay = await call(anonymous, 'POST', webhook, 200, { headers: pipeline.headers, data: pipeline.data });
+  assert.deepEqual(await replay.json(), { ok: true, duplicate: true, linked: 0, runs: [] });
+  const [afterReplay] = (await readStatus()).repositories;
+  assert.deepEqual(afterReplay.lastAcceptedByEvent, after.lastAcceptedByEvent);
+  assert.deepEqual(afterReplay.lastDelivery, { event: 'pipeline', authentication: 'signing-token',
+    receivedAt: afterReplay.lastDelivery.receivedAt, duplicate: true, linked: 0, automationRuns: 0 });
+
+  const workspace = await (await call(session, 'GET', '/api/workspace', 200)).json();
+  const links = workspace.gitlabLinks.filter(link => link.projectId === project.id && link.sourceBranch === branch);
+  assert.deepEqual(links.map(link => [link.kind, link.issueId, link.sourceSha]).sort(), [
+    ['branch', 'issue-1', sha], ['commit', 'issue-1', sha], ['merge_request', 'issue-1', sha], ['pipeline', 'issue-1', sha],
+  ]);
+  assert.equal(links.find(link => link.kind === 'commit').webUrl, commitUrl);
+  assert.equal(links.find(link => link.kind === 'merge_request').webUrl, mrUrl);
+  assert.equal(links.find(link => link.kind === 'pipeline').webUrl, pipelineUrl);
+  const repositoryDeployments = await (await call(session, 'GET', `${integration}/deployments?repositoryId=${project.id}`, 200)).json();
+  const issueDeployments = await (await call(session, 'GET', '/api/issues/issue-1/gitlab-deployments', 200)).json();
+  assert.equal(repositoryDeployments.total, 1);
+  assert.equal(issueDeployments.total, 1);
+  assert.deepEqual(issueDeployments.items, repositoryDeployments.items);
+  assert.deepEqual(repositoryDeployments.items.map(item => [item.deploymentId, item.status, item.sha, item.environment]), [
+    [901, 'success', sha, 'staging'],
+  ]);
+  checkCredentials(JSON.stringify(afterReplay), 'Signed GitLab webhook status');
+
+  const restoredSettings = await (await call(session, 'PATCH', integration, 200, {
+    headers: { Origin: origin }, data: { expectedVersion: signedSettings.version, signingToken: '' },
+  })).json();
+  assert.equal(restoredSettings.signingTokenConfigured, false);
+  assert.equal(restoredSettings.webhookSecretConfigured, true);
+  assert.equal((await readStatus()).repositories[0].lastDelivery, null);
+}
+
 async function verifyBrowser(origin) {
   browser = await chromium.launch({ ...browserConfig.use.launchOptions, timeout: 15_000 });
   const session = await browser.newContext({ baseURL: origin, ignoreHTTPSErrors: true, viewport: { width: 1440, height: 1000 } });
@@ -450,6 +568,7 @@ async function verifyBrowser(origin) {
       await expectSoon(board.getByRole('button', { name: 'NEO-1 업무 열기', exact: true })).toHaveCount(0);
       await expectSoon(boardPage).toHaveURL(boardUrl);
     } finally { await boardPage.close(); }
+    await verifySignedGitlabWebhooks(session.request, anonymous, origin);
     for (const path of ['/api/workspace', '/api/export', '/api/api-keys', '/api/integrations/gitlab',
       '/api/integrations/gitlab/webhook-status', '/api/integrations/gitlab/sync-status']) {
       const response = await call(session.request, 'GET', path, 200);
@@ -499,7 +618,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, scoped field breakdowns and decision follow-ups, weekly reports and release readiness, integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, scoped field breakdowns and decision follow-ups, weekly reports and release readiness, signed GitLab delivery, logout and backup verified.');
   } finally {
     try {
       await browser?.close();

@@ -18,8 +18,13 @@
 .gitlab-history-limits{color:#71542a}
 .gitlab-preview,.gitlab-sync-result,.gitlab-webhook-status{grid-column:1/-1;padding:20px;color:#375649;font-size:14px;line-height:1.6}
 .gitlab-webhook-status-heading{flex-wrap:wrap;gap:8px;margin-bottom:8px}
-.gitlab-webhook-status>.gitlab-webhook-repositories{margin-top:12px}
+.gitlab-webhook-status>.gitlab-webhook-repositories{margin-top:12px;align-items:start}
 .gitlab-webhook-waiting{color:#52665c;background:#eff4f0}
+.gitlab-webhook-event-evidence{margin-top:8px;border-top:1px solid #dae8e1}
+.gitlab-webhook-event-evidence>summary{cursor:pointer;min-height:36px;padding-block:7px;color:#274c3c;font-weight:600}
+.gitlab-webhook-events{margin:0;padding:0;list-style:none}
+.gitlab-webhook-events>li{display:grid;grid-template-columns:minmax(5.7rem,.7fr) minmax(0,1fr);gap:5px 10px;padding:7px 0;border-top:1px solid #dae8e1}
+.gitlab-webhook-events>li>span{color:#52665c}
 @media(min-width:901px){.development-page>.integration-grid>.integration-guide{grid-column:2;grid-row:1}}
 .gitlab-preview .card-heading h2{display:flex;gap:8px;align-items:center}
 .gitlab-preview p,.gitlab-sync-result p,.gitlab-webhook-status p{margin:6px 0;overflow-wrap:anywhere}
