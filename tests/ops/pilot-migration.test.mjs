@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { startRehearsalPilot } from '../../scripts/pilot-migration-runtime.mjs';
@@ -182,6 +183,59 @@ async function readReport(root, answer) {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   return { attempt: join(path, '..'), report: JSON.parse(raw) };
 }
+
+test('migration rehearsal startup keeps due records unchanged', { timeout: 60_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-due-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const workspace = join(scratch, 'workspace');
+  const initial = await startRehearsalPilot(workspace);
+  const ruleId = randomUUID();
+  let actor, projectId, issueId;
+  try {
+    const user = await json(initial.url, '/users', { method: 'POST', status: 201,
+      body: { name: 'Rehearsal worker fixture', email: 'worker-fixture@example.invalid' } });
+    actor = user.id;
+    const project = await json(initial.url, '/projects', { method: 'POST', actor, status: 201,
+      body: { key: 'DUE', name: 'Rehearsal worker fixture' } });
+    projectId = project.id;
+    await json(initial.url, '/notifications/deadline-reminders', { method: 'PUT', actor,
+      body: { daysBefore: 0, onDueDate: false, overdue: true, expectedVersion: null } });
+    const issue = await json(initial.url, '/issues', { method: 'POST', actor, status: 201,
+      body: { projectId, title: 'Existing overdue issue', assigneeId: actor, dueDate: '2020-03-01' } });
+    issueId = issue.id;
+    const template = await json(initial.url, `/projects/${projectId}/issue-templates`, { method: 'POST', actor, status: 201,
+      body: { name: 'Recurring template', defaults: { title: 'Scheduled issue', description: '', descriptionFormat: 'markdown',
+        type: '작업', priority: 'medium', labels: [], customFields: {} } } });
+    await json(initial.url, `/projects/${projectId}/recurring-issues`, { method: 'POST', actor, status: 201,
+      body: { name: 'Weekly issue', templateId: template.id, weekday: 1, time: '09:00', enabled: true,
+        assigneeId: actor, requestId: ruleId } });
+  } finally { await initial.close(); }
+
+  // Leave an elapsed weekly slot in the closed workspace without waiting for its schedule.
+  const nextRunAt = '2020-03-02T00:00:00.000Z';
+  const createdAt = '2020-03-01T00:00:00.000Z';
+  const database = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+  try {
+    const result = database.prepare(`UPDATE recurring_issue_rules SET next_run_at=?,
+      json=json_set(json,'$.nextRunAt',?,'$.createdAt',?,'$.updatedAt',?) WHERE id=?`)
+      .run(nextRunAt, nextRunAt, createdAt, createdAt, ruleId);
+    assert.equal(result.changes, 1);
+  } finally { database.close(); }
+
+  const review = await startRehearsalPilot(workspace);
+  try {
+    const [rules, { issues }, { items }] = await Promise.all([
+      json(review.url, `/projects/${projectId}/recurring-issues`),
+      json(review.url, '/workspace'),
+      json(review.url, '/notifications', { actor }),
+    ]);
+    assert.deepEqual({
+      rule: rules.map(rule => ({ id: rule.id, nextRunAt: rule.nextRunAt, runs: rule.recentRuns.length })),
+      issues: issues.map(issue => issue.id),
+      reminders: items.filter(item => item.kind === 'issue-deadline-overdue').map(item => item.targetId),
+    }, { rule: [{ id: ruleId, nextRunAt, runs: 0 }], issues: [issueId], reminders: [] });
+  } finally { await review.close(); }
+});
 
 test('migration rehearsal binds Confluence reviews to profiled exports and checks receipts after cold restore', { timeout: 150_000 }, async t => {
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-e2e-'));

@@ -1,12 +1,13 @@
 'use client';
 
-import { useId, useMemo, useRef, useState, type DragEvent } from 'react';
-import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, Search, X } from 'lucide-react';
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from 'react';
+import { ArrowDown, ArrowDownToLine, ArrowDownUp, ArrowUp, ArrowUpRight, Bug, CalendarRange, Circle, CircleDot, ClipboardPaste, Columns3, Filter, Layers3, List, ListChecks, Plus, RefreshCw, Search, X } from 'lucide-react';
 import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type FeatureProps, type Issue, type IssueOrderMove, type IssueStatus, type IssueViewGitlabFilter, type SavedView, type SavedViewState, type User, type WorkflowStatus } from '../../shared/types';
 import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
+import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
 import { CustomFieldSummary, IssueTypeName } from './CustomFields';
@@ -41,6 +42,11 @@ type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefr
 type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
 const assigneeCollator = new Intl.Collator('ko', { numeric: true });
+const refreshMessages = {
+  updated: '업무를 새로고침했습니다.',
+  skipped: '업무 새로고침을 건너뛰었습니다.',
+  failed: '업무를 새로고침하지 못했습니다. 다시 시도해 주세요.',
+} as const;
 
 function groupBoardIssues(issues: Issue[], users: readonly User[], showEmpty: boolean) {
   const byAssignee = new Map<string | null, Issue[]>();
@@ -106,6 +112,8 @@ export function StatusDot({ color }: { color: string }) { return <span className
 function PriorityIcon({ value }: { value: keyof typeof PRIORITY }) { return value === 'urgent' || value === 'high' ? <ArrowUp size={14} className={value === 'urgent' ? 'issue-priority-urgent' : 'issue-priority-high'} /> : value === 'low' ? <ArrowDown size={14} className="muted" /> : <span className="issue-priority-medium">=</span>; }
 
 export function Issues(props: FeatureProps & {
+  refreshIssues: WorkspaceRefresh;
+  issueOverlayOpen: boolean;
   savedViewId?: string | null;
   onChangeSavedView?: (id: string | null) => boolean;
   onOpenGantt?: (viewId: string) => void;
@@ -155,6 +163,8 @@ export function Issues(props: FeatureProps & {
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
   const boardCanvas = useRef<HTMLDivElement>(null);
+  const filterEditors = useRef<HTMLFieldSetElement>(null);
+  const focusedCard = useRef<{ control: HTMLButtonElement; issueId: string } | null>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const capacityHeading = useRef<HTMLHeadingElement>(null);
   const capacityOpener = useRef<HTMLButtonElement | null>(null);
@@ -172,6 +182,18 @@ export function Issues(props: FeatureProps & {
   const projectSelected = Boolean(project);
   const groupedBoard = projectSelected && view === 'board' && boardGrouping === 'assignee';
   const currentPasteScope = JSON.stringify([projectId, props.actorId]);
+  const refreshPaused = props.issueOverlayOpen || creating || pasteScope === currentPasteScope || bulk.active || Boolean(busy);
+  const hasLocalInteraction = useCallback(() => Boolean(pendingMutation.current || drag.current || filterEditors.current?.querySelector('form')), []);
+  const { requestMode, feedback, manualRefresh, reconsider } = useWorkspaceRefresh(props.refreshIssues, refreshPaused, hasLocalInteraction);
+  useLayoutEffect(() => {
+    const focused = focusedCard.current;
+    if (!focused || focused.control.isConnected || refreshPaused || document.activeElement !== document.body) return;
+    focusedCard.current = null;
+    const card = boardCanvas.current?.querySelector<HTMLButtonElement>(`button[data-issue-id="${CSS.escape(focused.issueId)}"]`);
+    const target = card ?? boardCanvas.current ?? reviewHeading.current;
+    target?.focus({ preventScroll: true });
+    card?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [data, refreshPaused]);
   if (pasteScope !== null && pasteScope !== currentPasteScope) setPasteScope(null);
   const capacities = useMemo(() => {
     const byStatus = new Map<string, BoardStatusCapacity>();
@@ -340,11 +362,14 @@ export function Issues(props: FeatureProps & {
     event.dataTransfer.setData(issueDragType, issue.id);
     event.dataTransfer.effectAllowed = 'move';
     drag.current = { issue, projectId, orderVersion: order?.version };
+    reconsider();
   }
 
   function endBoardDrag() {
+    const wasDragging = Boolean(drag.current);
     drag.current = null;
     setDropTarget(null);
+    if (wasDragging) reconsider();
   }
 
   function boardDragOver(event: DragEvent<HTMLElement>, cell: BoardCell, column: Issue[]) {
@@ -453,9 +478,21 @@ export function Issues(props: FeatureProps & {
     downloadText(`teamspace-issues-${projectKey}${selectionOnly ? '-selected' : ''}.csv`, formatIssueCsv(data, rows), 'text/csv;charset=utf-8');
   }
 
-  return <div className="issues-feature">
+  return <div className="issues-feature" onFocusCapture={event => {
+    const control = event.target;
+    const issueId = control.dataset.issueId;
+    focusedCard.current = issueId && control instanceof HTMLButtonElement && control.matches('.issue-board-card')
+      ? { control, issueId } : null;
+  }} onBlurCapture={event => {
+    const control = event.target;
+    if (control instanceof HTMLButtonElement && control === focusedCard.current?.control && (event.relatedTarget || control.isConnected)) {
+      focusedCard.current = null;
+    }
+  }}>
     <div className="feature-heading"><div><div className="feature-eyebrow">WORK MANAGEMENT</div><h1 ref={reviewHeading} tabIndex={-1}>업무</h1><p>해야 할 일을 명확하게, 진행 상황을 한눈에.</p></div>
       <div className="issue-heading-actions">
+        <button className="btn" type="button" aria-disabled={refreshPaused || requestMode !== null} aria-busy={requestMode === 'manual'}
+          onClick={manualRefresh}><RefreshCw size={15} aria-hidden="true" className={requestMode === 'manual' ? 'spin' : undefined} />업무 새로고침</button>
         {projectSelected && props.onOpenCycleBoard && <button className="btn" type="button" onClick={props.onOpenCycleBoard}>
           <CalendarRange size={15} aria-hidden="true" />백로그 · 사이클
         </button>}
@@ -465,6 +502,8 @@ export function Issues(props: FeatureProps & {
         <button className="btn btn-primary" onClick={() => { beginCreate(statuses.some(value => value.id === status) ? status : workflow.initialStatusId); }}><Plus size={16} /> 업무 만들기</button>
       </div>
     </div>
+    {feedback && <p className={`issue-refresh-feedback${feedback === 'failed' ? ' issue-form-error' : ''}`}
+      role={feedback === 'failed' ? 'alert' : 'status'}>{refreshMessages[feedback]}</p>}
     <div className="issue-toolbar">
       <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} disabled={bulk.busy} onClick={() => { if (!bulk.active || bulk.close()) setView('board'); }}><Columns3 size={16} /> 보드</button></div>
       {projectSelected && view === 'board' && <label className="issue-board-group-picker">보드 그룹
@@ -490,7 +529,7 @@ export function Issues(props: FeatureProps & {
         disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
       {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
-    {projectSelected && <fieldset className="issue-bulk-filter-controls" disabled={bulk.locked}>
+    {projectSelected && <fieldset ref={filterEditors} className="issue-bulk-filter-controls" disabled={bulk.locked}>
       <IssuePriorityLabelFilters key={`priority-label:${projectId}:${filterEditorEpoch}`} issues={projectIssues}
         value={{ priorities, labels }} onApply={updateProjectFilters} />
       {(schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters

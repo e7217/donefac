@@ -88,9 +88,11 @@ type WorkspaceCommentFocus = {
   commentId: string;
   activation: number;
 };
+const ganttRevisionScope = { query: 'ganttSince', header: 'X-Teamspace-Gantt-Revision' } as const;
 const refreshScopes = {
+  issues: ganttRevisionScope,
   teamboard: { query: 'teamBoardSince', header: 'X-Teamspace-Board-Revision' },
-  gantt: { query: 'ganttSince', header: 'X-Teamspace-Gantt-Revision' },
+  gantt: ganttRevisionScope,
 } as const;
 type RefreshScope = keyof typeof refreshScopes;
 type WorkspaceRevisions = Record<RefreshScope, string | null>;
@@ -381,7 +383,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const acceptedRouteRef = useRef<WorkspaceRoute | null>(null);
   const workspaceReadSequence = useRef(0);
   const lastAppliedWorkspaceRead = useRef(0);
-  const workspaceRevisions = useRef<WorkspaceRevisions>({ teamboard: null, gantt: null });
+  const workspaceRevisions = useRef<WorkspaceRevisions>({ issues: null, teamboard: null, gantt: null });
   const refreshContextEpoch = useRef(0);
   const publicationOpenRequest = useRef(0);
   const notificationOpenRequest = useRef(0);
@@ -398,9 +400,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const request = ++workspaceReadSequence.current;
     const params = since ? `?${new URLSearchParams({ [refreshScopes[since.scope].query]: since.revision })}` : '';
     const response = await apiResponse(`/workspace${params}`, { signal, cache: 'no-store' });
+    const ganttRevision = response.headers.get(ganttRevisionScope.header);
     const revisions = {
+      issues: ganttRevision,
       teamboard: response.headers.get(refreshScopes.teamboard.header),
-      gantt: response.headers.get(refreshScopes.gantt.header),
+      gantt: ganttRevision,
     };
     const snapshot = response.status === 204 ? null : await response.json() as WorkspaceSnapshot;
     return { request, snapshot, revisions };
@@ -437,6 +441,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!result.snapshot) return 'unchanged';
     return applyWorkspace(result) ? 'updated' : 'skipped';
   }, [applyWorkspace, readWorkspace]);
+  const refreshIssues = useCallback<WorkspaceRefresh>((...args) => refreshView('issues', ...args), [refreshView]);
   const refreshBoard = useCallback<WorkspaceRefresh>((...args) => refreshView('teamboard', ...args), [refreshView]);
   const refreshGantt = useCallback<WorkspaceRefresh>((...args) => refreshView('gantt', ...args), [refreshView]);
   useEffect(() => { refresh().catch(e => setFailure(e.message)); }, [refresh]);
@@ -466,12 +471,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       const id = route.issueId;
       return review && id && review.context === issueReviewContext(route) && review.issueIds.includes(id) ? review : null;
     });
-    if (previous && (previous.view === 'teamboard' || previous.view === 'gantt')) {
+    if (previous && (previous.view === 'issues' || previous.view === 'teamboard' || previous.view === 'gantt')) {
       const changedPane = route.view !== previous.view || route.projectId !== previous.projectId || route.issueId !== previous.issueId;
+      const changedIssueView = previous.view === 'issues' && route.savedViewId !== previous.savedViewId;
       const changedChart = previous.view === 'gantt' && (route.ganttScope !== previous.ganttScope || route.ganttProject !== previous.ganttProject ||
         !sameTeamGanttScheduleFilters(route.ganttScheduleFilters, previous.ganttScheduleFilters) || route.planningId !== previous.planningId ||
         route.savedViewId !== previous.savedViewId || route.ganttFocusIssueId !== previous.ganttFocusIssueId || route.ganttFocusDate !== previous.ganttFocusDate);
-      if (changedPane || changedChart) refreshContextEpoch.current++;
+      if (changedPane || changedChart || changedIssueView) refreshContextEpoch.current++;
     }
     const { documentId, documentCommentId } = route;
     const linkedComment: WorkspaceCommentFocus | null = documentId && documentCommentId &&
@@ -962,7 +968,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
           <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openIssue} openDocument={openDocument}/>
         </Suspense>}
-        {view === 'issues' && <Issues {...props} savedViewId={savedViewId}
+        {view === 'issues' && <Issues {...props} savedViewId={savedViewId} refreshIssues={refreshIssues} issueOverlayOpen={Boolean(issueId)}
           onOpenIssueForReview={openIssueForReview}
           onOpenBoardCapacityIssue={openIssue}
           onOpenCycleBoard={() => openPlanIn('backlog')}

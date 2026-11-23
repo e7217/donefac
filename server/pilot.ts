@@ -66,6 +66,7 @@ const api = createApp({
   restrictedConfluencePages,
   seed: process.env.TEAMSPACE_PILOT_DEMO === '1',
   outboundWorker: process.env.TEAMSPACE_PILOT_OUTBOUND !== '0',
+  deadlineReminderWorker: process.env.TEAMSPACE_PILOT_DEADLINE_REMINDERS !== '0',
   recurringIssueWorker: process.env.TEAMSPACE_PILOT_RECURRING_ISSUES !== '0',
 });
 const web = express();

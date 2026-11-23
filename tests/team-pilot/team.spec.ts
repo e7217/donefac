@@ -5,6 +5,7 @@ import { expect, request as apiRequest, test, type APIRequestContext, type Brows
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
 import type { DocPage, DocRevision } from '../../shared/types';
+import { prepareGitlabTraffic } from './gitlab-traffic';
 import { verifyWorkspaceTraffic } from './workspace-traffic';
 
 interface Fixture {
@@ -241,6 +242,9 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     }
     expect(sessionTokens.size, 'Distinct HTTPS browser sessions').toBe(TEAM_SIZE);
     await matchesRendered(peers, initial.document, originalEpoch);
+    const verifyGitlabTraffic = await prepareGitlabTraffic(peers[1].context, {
+      origin: baseURL, projectId: fixture.projectId, actorId: peers[1].actorId,
+    });
     const startedAt = performance.now();
     const keepConnected = () => {
       for (const peer of peers) {
@@ -255,6 +259,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     const storedEdits: string[] = [];
     let current = initial.document;
     let workspaceTraffic: Awaited<ReturnType<typeof verifyWorkspaceTraffic>> | undefined;
+    let gitlabTraffic: Awaited<ReturnType<typeof verifyGitlabTraffic>> | undefined;
 
     for (let round = 1; round <= rounds; round++) {
       const nextRoundAt = startedAt + fixture.seconds * 1000 * (round - 1) / (rounds - 1);
@@ -264,9 +269,10 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       }
       const edits = peers.map(peer => ({ peer, value: marker(round, peer) }));
       if (round === 1) {
-        [current, workspaceTraffic] = await Promise.all([
+        [current, workspaceTraffic, gitlabTraffic] = await Promise.all([
           wave(request, current, originalEpoch, peers, edits),
           verifyWorkspaceTraffic(peers[0].context.request, { projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL }),
+          verifyGitlabTraffic(),
         ]);
       } else current = await wave(request, current, originalEpoch, peers, edits);
       storedEdits.push(...edits.map(edit => edit.value));
@@ -277,9 +283,10 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     const elapsedMs = Math.floor(performance.now() - startedAt);
     expect(elapsedMs).toBeGreaterThanOrEqual(fixture.seconds * 1000);
     if (!workspaceTraffic) throw new Error('The team pilot did not run project traffic.');
+    if (!gitlabTraffic) throw new Error('The team pilot did not verify signed GitLab activity.');
     await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
     keepConnected();
-    console.log('The protected Gantt rendered both moved dates and the resolved dependency.');
+    console.log('The protected Gantt rendered the resolved dependency, and signed GitLab pipeline events refreshed links and applied one workflow transition.');
 
     const delayed = peers.at(-1)!;
     const onlinePeers = peers.slice(0, -1);
@@ -359,7 +366,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await writeFile(fixture.evidencePath, JSON.stringify({
       documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
       plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
-      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, workspaceTraffic,
+      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, workspaceTraffic, gitlabTraffic,
       authentication: { transport: 'https', browserSessions: sessionTokens.size },
     }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');

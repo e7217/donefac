@@ -578,11 +578,28 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.deepEqual([dependency.predecessorId, dependency.successorId, dependency.type, dependency.lagDays],
     [issue.id, successor.id, 'FS', scheduled.lagDays]);
 
+  const gitlab = evidence.gitlabTraffic;
+  assert.ok(gitlab?.issue && gitlab.issue.id !== issue.id && gitlab.issue.projectId === fixture.projectId);
+  const gitlabIssue = workspace.issues.find(value => value.id === gitlab.issue.id);
+  const gitlabRule = workspace.automationRules.find(rule => rule.id === gitlab.rule.id);
+  const gitlabRuns = workspace.automationRuns.filter(run => run.issueId === gitlab.issue.id);
+  const storedLinks = workspace.gitlabLinks.filter(link => link.issueId === gitlab.issue.id);
+  const [gitlabLinks, webhookStatus] = await Promise.all([
+    api(`/issues/${gitlab.issue.id}/gitlab-links?kind=pipeline`), api('/integrations/gitlab/webhook-status'),
+  ]);
+  assert.deepEqual(gitlabIssue, gitlab.issue);
+  assert.deepEqual(gitlabRule, gitlab.rule);
+  assert.deepEqual(gitlabRuns, gitlab.runs);
+  assert.deepEqual(gitlabLinks, gitlab.links);
+  assert.deepEqual(storedLinks.toSorted((a, b) => a.id.localeCompare(b.id)), gitlabLinks.links.toSorted((a, b) => a.id.localeCompare(b.id)));
+  assert.deepEqual(webhookStatus, gitlab.webhookStatus);
+  assert.equal((await api('/integrations/gitlab')).signingTokenConfigured, true);
+
   return {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
-      otherCalendar, successor, dependency, issueList, view })).digest('hex'),
+      otherCalendar, successor, dependency, issueList, view, gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
   };
 }
 
@@ -680,7 +697,8 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
   await stop(copy);
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project due dates and schedule handoff receipts, schedules, dependency and issue list.`);
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched documents, cross-project schedules and receipts, ` +
+    'dependency and issue list, GitLab pipeline links and webhook receipts, and the single automation transition.');
 }
 
 async function runStandardPilot() {
