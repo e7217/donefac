@@ -329,6 +329,8 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 브라우저의 `PATCH /api/issues/:id`에 `{expectedVersion, expectedWorkflowVersion, status}`를 보내 상태를 바꾼다. `status`는 해당 업무 프로젝트의 실제 상태 ID다. 선택 속성인 `expectedWorkflowVersion`을 보낼 때는 `status`를 함께 지정하고, 조회한 워크플로의 양의 정수 버전을 사용한다. 업무 버전과 별도로 워크플로 버전이 달라지면 `409`와 `details.reason`의 `workflow_changed`, `currentWorkflowVersion`을 반환한다. 일반 상태 전이의 필수 입력·차단 검사를 적용하며 프로젝트 내 상대 순서를 보존한다.
 
+이 버전 검사와 함께 `assigneeId`를 지정하면 팀원 ID 또는 `null`을 상태와 함께 저장한다. 현재 값과 같아도 직접 지정한 값은 자동 배정보다 우선한다. `assigneeId`를 생략하면 현재 프로젝트의 배정 규칙을 적용한다. 전이의 필수 담당자 조건은 저장할 최종 값으로 검사한다. 검증을 통과한 경우에만 변경을 함께 커밋한다. 이 경로를 프로젝트 업무 목록과 두 보드의 상태 변경 창에서 사용한다.
+
 브라우저의 `GET /api/workspace`는 `X-Teamspace-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
 
 팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.

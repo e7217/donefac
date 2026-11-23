@@ -199,6 +199,58 @@ test('rule priority preserves current assignees and manual changes and ignores n
   assert.deepEqual((await f.expectStatus<IssueAssignmentRule[]>(200, rulesPath)).map(rule => rule.id), [lower.id]);
 });
 
+test('guarded status edits distinguish explicit unchanged or empty assignees from automatic assignment', async t => {
+  const f = await fixture(t);
+  const same = await f.createIssue('상태와 함께 현재 담당자를 명시', { assigneeId: 'user-jun' });
+  const empty = await f.createIssue('상태와 함께 미지정을 명시');
+  const automatic = await f.createIssue('담당자 자동 배정 유지', { assigneeId: 'user-jun' });
+  const rule = await f.createRule({ mode: 'replace' });
+  const required = await f.setWorkflowRequirements(['assigneeId']);
+
+  function move<T>(issue: Issue, workflowVersion: number, selection: { assigneeId?: string | null } = {}) {
+    return f.call<T>(`/issues/${issue.id}`, 'PATCH', {
+      expectedVersion: issue.version, expectedWorkflowVersion: workflowVersion, status: 'review', ...selection,
+    }, headersFor(editor));
+  }
+
+  const before = await f.snapshot();
+  const stale = await move<{ details: unknown }>(same, required.version - 1, { assigneeId: 'user-yun' });
+  assert.equal(stale.status, 409);
+  assert.deepEqual(stale.data.details, { reason: 'workflow_changed', currentWorkflowVersion: required.version });
+  const missing = await move<{ details: unknown }>(empty, required.version, { assigneeId: null });
+  assert.equal(missing.status, 422);
+  assert.deepEqual(missing.data.details, { requiredFields: ['assigneeId'] });
+  assert.deepEqual(await f.snapshot(), before);
+  assert.equal((await f.runs()).total, 0);
+  assert.deepEqual((await f.inbox(target)).items, []);
+
+  const selected = await move<Issue>(same, required.version, { assigneeId: same.assigneeId });
+  assert.equal(selected.status, 200);
+  assert.equal(selected.data.assigneeId, same.assigneeId);
+  assert.equal(selected.data.status, 'review');
+  assert.equal(selected.data.version, same.version + 1);
+  const assigned = await move<Issue>(automatic, required.version);
+  assert.equal(assigned.status, 200);
+  assert.equal(assigned.data.assigneeId, target);
+
+  const optional = await f.setWorkflowRequirements([]);
+  const unassigned = await move<Issue>(empty, optional.version, { assigneeId: null });
+  assert.equal(unassigned.status, 200);
+  assert.equal(unassigned.data.assigneeId, null);
+  assert.equal(unassigned.data.status, 'review');
+  assert.equal(unassigned.data.version, empty.version + 1);
+
+  const runs = await f.runs();
+  assert.equal(runs.total, 3);
+  const byIssue = new Map(runs.items.map(run => [run.issueId, run]));
+  for (const issue of [selected.data, unassigned.data, assigned.data]) {
+    const run = byIssue.get(issue.id);
+    assert.equal(run?.ruleId, rule.id);
+    assert.equal(run.assigneeId, issue.assigneeId);
+    assert.equal(run.outcome, issue.id === automatic.id ? 'assigned' : 'skipped');
+  }
+});
+
 test('board and scoped API status changes share assignment while native import restores disabled definitions', async t => {
   const f = await fixture(t);
   const board = await f.createIssue('보드에서 옮길 업무', { assigneeId: 'user-jun' });

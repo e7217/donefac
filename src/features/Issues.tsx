@@ -39,8 +39,8 @@ type BoardCell = { status: IssueStatus; targetAssigneeId?: string | null };
 type BoardDrop = IssuePlacement & BoardCell;
 type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
 type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
-type BoardCardAction = 'details' | 'status';
-type BoardStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
+type IssueRowAction = 'details' | 'status';
+type ProjectStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
 type ProjectFilters = Pick<SavedViewState['filters'], 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
@@ -108,10 +108,14 @@ function keepsVisiblePosition(issue: Issue, column: Issue[], placement: IssuePla
   return destinationIndex === currentIndex;
 }
 
-function boardCardControl(board: HTMLDivElement | null, issueId: string, action: BoardCardAction) {
+function boardCardControl(board: HTMLDivElement | null, issueId: string, action: IssueRowAction) {
   const value = CSS.escape(issueId);
   const selector = action === 'status' ? `.issue-board-card-status[data-board-status-for="${value}"]` : `.issue-board-card[data-issue-id="${value}"]`;
   return board?.querySelector<HTMLButtonElement>(selector) ?? null;
+}
+function issueListControl(list: HTMLDivElement | null, issueId: string, action: IssueRowAction) {
+  const selector = action === 'status' ? '.issue-list-status-action' : '.issue-title-button';
+  return list?.querySelector<HTMLButtonElement>(`tr[data-issue-id="${CSS.escape(issueId)}"] ${selector}`) ?? null;
 }
 export function IssueTypeIcon({ type, size = 15, data, projectId }: { type: string; size?: number; data?: FeatureProps['data']; projectId?: string }) {
   const meta = data && projectId ? issueTypeMeta(data, projectId, type) : null;
@@ -167,16 +171,17 @@ export function Issues(props: FeatureProps & {
   const [orderEditProject, setOrderEditProject] = useState<string | null>(null);
   const [orderNotice, setOrderNotice] = useState<OrderNotice | null>(null);
   const [dropTarget, setDropTarget] = useState<BoardDrop | null>(null);
-  const [statusEdit, setStatusEdit] = useState<BoardStatusEdit | null>(null);
+  const [statusEdit, setStatusEdit] = useState<ProjectStatusEdit | null>(null);
   const [capacitySelection, setCapacitySelection] = useState<{ projectId: string; statusId: string } | null>(null);
   const pendingMutation = useRef(false);
   const statusChooserOpen = useRef(false);
-  const statusFocus = useRef<Pick<BoardStatusEdit, 'issue' | 'opener'> | null>(null);
+  const statusFocus = useRef<Pick<ProjectStatusEdit, 'issue' | 'opener'> | null>(null);
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
   const boardCanvas = useRef<HTMLDivElement>(null);
+  const listCanvas = useRef<HTMLDivElement>(null);
   const filterEditors = useRef<HTMLFieldSetElement>(null);
-  const focusedCard = useRef<{ control: HTMLButtonElement; issueId: string; action: BoardCardAction } | null>(null);
+  const focusedCard = useRef<{ control: HTMLButtonElement; issueId: string; action: IssueRowAction } | null>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const capacityHeading = useRef<HTMLHeadingElement>(null);
   const capacityOpener = useRef<HTMLButtonElement | null>(null);
@@ -211,15 +216,16 @@ export function Issues(props: FeatureProps & {
     if (statusEdit || !statusFocus.current) return;
     const { issue, opener } = statusFocus.current;
     statusFocus.current = null;
-    if (props.issueOverlayOpen || view !== 'board' || !isAll(projectId) && issue.projectId !== projectId) return;
+    if (props.issueOverlayOpen || !isAll(projectId) && issue.projectId !== projectId) return;
     requestAnimationFrame(() => {
-      const board = boardCanvas.current;
-      const action = boardCardControl(board, issue.id, 'status');
-      const details = boardCardControl(board, issue.id, 'details');
-      const target = [opener, action, details, board].find(control =>
+      const canvas = view === 'board' ? boardCanvas.current : listCanvas.current;
+      const control = view === 'board' ? boardCardControl : issueListControl;
+      const action = control(canvas, issue.id, 'status');
+      const details = control(canvas, issue.id, 'details');
+      const target = [opener, action, details, canvas, reviewHeading.current].find(control =>
         control?.isConnected && !control.closest('[inert]') && !control.matches(':disabled'));
       target?.focus({ preventScroll: true });
-      if (target && target !== opener && target !== board) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      if (target && (target === action || target === details) && target !== opener) target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     });
   }, [statusEdit, props.issueOverlayOpen, projectId, view]);
   if (pasteScope !== null && pasteScope !== currentPasteScope) setPasteScope(null);
@@ -313,18 +319,22 @@ export function Issues(props: FeatureProps & {
     if (!allowedNextStatuses(data, issue).some(value => value.id === next)) { notify('이 업무 유형에 허용되지 않은 상태 전이입니다.', 'error'); return; }
     pendingMutation.current = true;
     setBusy(issue.id);
-    try { await patch(`/issues/${issue.id}`, { expectedVersion: issue.version, status: next }); await refresh(); notify(`${issue.key} · ${statusMeta(data, issue.projectId, next).label}(으)로 변경했습니다.`); }
+    try {
+      await patch(`/issues/${issue.id}`, { expectedVersion: issue.version, expectedWorkflowVersion: projectWorkflow(data, issue.projectId).version, status: next });
+      await refresh();
+      notify(`${issue.key} · ${statusMeta(data, issue.projectId, next).label}(으)로 변경했습니다.`);
+    }
     catch (error) { notify(errorMessage(error), 'error'); } finally { pendingMutation.current = false; setBusy(null); }
   }
 
-  function openBoardStatus(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
+  function openStatusEdit(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
     if (!choices.length || pendingMutation.current || statusChooserOpen.current || drag.current) return;
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     statusChooserOpen.current = true;
     setStatusEdit({ issue, current, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
   }
 
-  function closeBoardStatus() {
+  function closeStatusEdit() {
     if (!statusEdit) return;
     statusFocus.current = statusEdit;
     statusChooserOpen.current = false;
@@ -495,7 +505,7 @@ export function Issues(props: FeatureProps & {
           </button>
           <button className="btn btn-ghost issue-board-card-status" type="button" aria-label={`${issue.key} 상태 변경`}
             aria-haspopup="dialog" data-board-status-for={issue.id} disabled={!destinations.length || Boolean(busy)}
-            onClick={event => openBoardStatus(issue, state, destinations, event.currentTarget)}>
+            onClick={event => openStatusEdit(issue, state, destinations, event.currentTarget)}>
             <ArrowRightLeft size={15} aria-hidden="true" />상태 변경
           </button>
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
@@ -607,8 +617,11 @@ export function Issues(props: FeatureProps & {
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
     </div>}
     {bulk.active && <IssueBulkEdit editor={bulk} statuses={statuses} users={data.users} onClose={closeBulkEdit} />}
-    {!unavailableView && (view === 'list' ? <div className="issue-table-scroll"><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
+    {!unavailableView && (view === 'list' ? <div className="issue-table-scroll" ref={listCanvas} role="region" aria-label="업무 목록" tabIndex={-1}><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
       const user = data.users.find(u => u.id === issue.assigneeId);
+      const current = statusMeta(data, issue.projectId, issue.status);
+      const destinations = allowedNextStatuses(data, issue).filter(value => value.id !== issue.status);
+      const statusLabelId = `issue-list-status-${encodeURIComponent(issue.id)}`;
       const selected = bulk.active && bulk.selectedIds.has(issue.id);
       return <tr key={issue.id} data-issue-id={issue.id} className={selected ? 'issue-bulk-selected' : undefined}>
         {bulk.active && <td className="issue-bulk-selection"><label className="issue-bulk-select-control"><input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected}
@@ -617,7 +630,11 @@ export function Issues(props: FeatureProps & {
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
           <CustomFieldSummary data={data} issue={issue} limit={2} />
           <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />{controls(issue, issues, index)}</td>
-        <td><span className="issue-status-select"><StatusDot color={statusMeta(data, issue.projectId, issue.status).color} /><select aria-label={`${issue.key} 상태`} value={issue.status} disabled={Boolean(busy) || bulk.active} onChange={e => changeStatus(issue, e.target.value as IssueStatus)}>{allowedNextStatuses(data, issue).map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></span></td>
+        <td>{destinations.length ? <button className="btn btn-ghost issue-list-status-action" type="button"
+          aria-label={`${issue.key} 상태 변경`} aria-describedby={statusLabelId} aria-haspopup="dialog" disabled={Boolean(busy) || bulk.active}
+          onClick={event => openStatusEdit(issue, current, destinations, event.currentTarget)}>
+          <StatusDot color={current.color} /><span id={statusLabelId}>{current.label}</span><ArrowRightLeft size={13} aria-hidden="true" />
+        </button> : <span className="issue-status-select"><StatusDot color={current.color} />{current.label}</span>}</td>
         <td><span className="issue-priority"><PriorityIcon value={issue.priority} />{PRIORITY[issue.priority]}</span></td>
         <td>{user ? <span className="issue-assignee"><span className="issue-avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span>{user.name}</span> : <span className="muted">미지정</span>}</td>
         <td className="issue-date-cell">{dateLabel(issue.endDate || issue.dueDate)}</td>
@@ -660,7 +677,11 @@ export function Issues(props: FeatureProps & {
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
-    {statusEdit && <IssueStatusDialog edit={statusEdit} latest={data} refresh={refresh} notify={notify} onClose={closeBoardStatus}
-      onOpenDetails={() => openVisibleIssue(statusEdit.issue.id, boardCardControl(boardCanvas.current, statusEdit.issue.id, 'details') ?? statusEdit.opener)} />}
+    {statusEdit && <IssueStatusDialog edit={statusEdit} latest={data} refresh={refresh} notify={notify} onClose={closeStatusEdit}
+      onOpenDetails={() => {
+        const opener = view === 'board' ? boardCardControl(boardCanvas.current, statusEdit.issue.id, 'details')
+          : issueListControl(listCanvas.current, statusEdit.issue.id, 'details');
+        openVisibleIssue(statusEdit.issue.id, opener ?? statusEdit.opener);
+      }} />}
   </div>;
 }

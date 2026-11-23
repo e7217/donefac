@@ -220,6 +220,26 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     expect(updatedRanks[0]).toEqual(ranks[0]);
     expect(updatedRanks[1].issueIds).toEqual(ranks[1].issueIds);
     expect(updatedRanks[1].version).not.toBe(ranks[1].version);
+
+    const onlyPeer = { ...filtered, member: someoneElse.assigneeId };
+    await memberFilter.selectOption(`member:${someoneElse.assigneeId}`);
+    await expect.poll(() => route(page)).toEqual(onlyPeer);
+    await button(card(page, someoneElse), `${someoneElse.key} 상태 변경`).click();
+    await destination(page).selectOption('in_progress');
+    await chooser(page).getByRole('combobox', { name: '담당자', exact: true }).selectOption(`user:${f.actor.id}`);
+    const assigning = waitPatch(page, issuePath(someoneElse));
+    await button(chooser(page), '상태 변경 적용').click();
+    const assignedResponse = await assigning;
+    expect(assignedResponse.request().postDataJSON()).toEqual({ expectedVersion: someoneElse.version,
+      expectedWorkflowVersion: workflow.version, status: 'in_progress', assigneeId: f.actor.id });
+    const assigned = await json<Issue>(assignedResponse);
+    expect(assigned).toMatchObject({ status: 'in_progress', assigneeId: f.actor.id, version: someoneElse.version + 1 });
+    await expect(chooser(page)).toHaveCount(0);
+    await expect(card(page, someoneElse)).toHaveCount(0);
+    await expect(board(page)).toBeFocused();
+    await expect.poll(() => route(page)).toEqual(onlyPeer);
+    expect(await f.read(someoneElse)).toEqual(assigned);
+    expect(patches).toEqual([issuePath(east), issuePath(east), issuePath(east), issuePath(someoneElse)]);
   } finally {
     await f.close();
   }

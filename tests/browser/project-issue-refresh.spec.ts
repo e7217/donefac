@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { Issue, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import { STATUS, type Issue, type SavedView, type WorkspaceSnapshot } from '../../shared/types';
 
 const workspaceUrl = (url: URL) => url.pathname === '/api/workspace';
 const conditionalUrl = (url: URL) => workspaceUrl(url) && url.searchParams.has('ganttSince');
 const conditionalResponse = (response: Response, status: number) => conditionalUrl(new URL(response.url())) && response.status() === status;
 const refresh = (page: Page) => page.getByRole('button', { name: '업무 새로고침', exact: true });
 const card = (board: Locator, issue: Issue, status: string) => board.locator(`[data-status-id="${status}"] .issue-board-card[data-issue-id="${issue.id}"]`);
+const listRow = (page: Page, issue: Issue) => page.getByRole('region', { name: '업무 목록', exact: true }).locator(`tr[data-issue-id="${issue.id}"]`);
+const statusCell = (row: Locator) => row.getByRole('cell').nth(1);
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -54,12 +56,12 @@ async function openProject(page: Page, data: Awaited<ReturnType<typeof fixture>>
   await page.setViewportSize({ width: 360, height: 820 });
   await page.clock.install();
   await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), data.actor.id);
-  const unchanged = page.waitForResponse(response => conditionalResponse(response, 204), { timeout: 10_000 });
   await page.goto(`/${data.route}`);
   const search = page.getByLabel('업무 검색', { exact: true });
   const picker = page.getByLabel('저장된 업무 보기', { exact: true });
   await expect(search).toHaveValue(data.prefix);
   await expect(picker).toHaveValue(data.view.id);
+  const unchanged = page.waitForResponse(response => conditionalResponse(response, 204), { timeout: 10_000 });
   await page.clock.runFor(15_100);
   const outcome = await unchanged;
   expect(outcome.headers()['content-length'] ?? '0').toBe('0');
@@ -92,13 +94,13 @@ test('360px 공유 프로젝트 보드에서 동료가 바꾼 상태를 자동 �
     await expect(picker).toHaveValue(data.view.id);
 
     await page.getByRole('button', { name: '목록', exact: true }).click();
-    const state = page.getByLabel(`${issue.key} 상태`, { exact: true });
-    await expect(state).toHaveValue('review');
+    const state = statusCell(listRow(page, issue));
+    await expect(state).toHaveText(STATUS.review.label);
     await data.update(remote, { status: 'done' });
-    await expect(state).toHaveValue('review');
+    await expect(state).toHaveText(STATUS.review.label);
     const button = refresh(page);
     await button.click();
-    await expect(state).toHaveValue('done');
+    await expect(state).toHaveText(STATUS.done.label);
     await expect(page.getByText('업무를 새로고침했습니다.', { exact: true })).toBeVisible();
     await expect(button).toBeFocused();
     await expect(page).toHaveURL(url => url.hash === data.route);
@@ -117,7 +119,7 @@ test('프로젝트 목록의 지연된 갱신을 상세 초안에 적용하지 �
   try {
     const issue = await data.issue('편집 전 제목');
     const { search, picker } = await openProject(page, data);
-    const row = page.locator(`.issue-table tr[data-issue-id="${issue.id}"]`);
+    const row = listRow(page, issue);
     const opener = row.locator('.issue-title-button');
     const remoteTitle = `${data.prefix} 동료가 바꾼 제목`;
     await data.update(issue, { title: remoteTitle, status: 'review' });
@@ -160,7 +162,7 @@ test('프로젝트 목록의 지연된 갱신을 상세 초안에 적용하지 �
     await latest;
     await expect(details).toHaveCount(0);
     await expect(opener).toContainText(remoteTitle);
-    await expect(row.getByLabel(`${issue.key} 상태`, { exact: true })).toHaveValue('review');
+    await expect(statusCell(row)).toHaveText(STATUS.review.label);
     await expect(page).toHaveURL(url => url.hash === data.route);
     await expect(search).toHaveValue(data.prefix);
     await expect(picker).toHaveValue(data.view.id);

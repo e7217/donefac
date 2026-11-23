@@ -1292,7 +1292,6 @@ export function createApp(options: {
     recordAutomaticDueDate(actorId,issue,automaticDueDate);
     return issue;
   };
-  const updateIssue = (req: Request, old: Issue, values: Record<string, unknown>) => commitIssueUpdate(req,old,prepareIssueUpdate(old,values));
   const issueEditConfiguration = (projectId: string) => JSON.stringify([
     workflows.get(projectId).version, issueSchemas.get(projectId).version, issueAssignments.revisions(projectId),
   ]);
@@ -1744,7 +1743,8 @@ export function createApp(options: {
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);
-      if (Object.hasOwn(req.body, 'expectedWorkflowVersion')) {
+      const guardedTransition = Object.hasOwn(req.body, 'expectedWorkflowVersion');
+      if (guardedTransition) {
         const { expectedWorkflowVersion } = req.body;
         if (!Object.hasOwn(req.body, 'status') || !Number.isSafeInteger(expectedWorkflowVersion) || expectedWorkflowVersion < 1) {
           fail('변경할 상태와 확인한 워크플로 버전을 보내 주세요.');
@@ -1755,7 +1755,9 @@ export function createApp(options: {
             { reason: 'workflow_changed', currentWorkflowVersion: version });
         }
       }
-      return updateIssue(req,old,req.body);
+      return commitIssueUpdate(req, old, prepareIssueUpdate(old, req.body, {
+        assigneeExplicit: guardedTransition && Object.hasOwn(req.body, 'assigneeId'),
+      }));
     });res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{
