@@ -2,11 +2,12 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertCircle, ArrowRight, Check, RefreshCw } from 'lucide-react';
-import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange, ScheduleUndoScope } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
+import { scheduleUndoHeaders } from './schedule-undo';
 
 export type CascadeAnchorChange = ScheduleAnchorChange;
 
@@ -20,6 +21,8 @@ export type TeamFollowUpSelection = {
 };
 
 type Props = {
+  actorId: string;
+  undoScope: ScheduleUndoScope;
   onClose: () => void;
   onApplied: (result: ScheduleApplyResult, unchangedSource?: SourceSchedule) => Promise<void> | void;
   onBusyChange: (value: boolean) => void;
@@ -59,7 +62,7 @@ function currentSourceSchedule(cause: unknown): SourceSchedule | null {
 }
 
 export function GanttCascadeDialog({
-  projectId, anchorChange, teamFollowUp, projects, onClose, onApplied, onBusyChange, onOutcomeUnknownChange,
+  projectId, anchorChange, teamFollowUp, projects, actorId, undoScope, onClose, onApplied, onBusyChange, onOutcomeUnknownChange,
 }: Props) {
   const headingId = useId();
   const sourceDateErrorId = useId();
@@ -192,7 +195,9 @@ export function GanttCascadeDialog({
     try {
       const result = recovering
         ? await api<ScheduleApplyResult | { applied: false }>(`${route}-result/${encodeURIComponent(preview.previewId)}`, { signal: controller.signal, cache: 'no-store' })
-        : await api<ScheduleApplyResult>(`${route}-apply`, { method: 'POST', signal: controller.signal, body: JSON.stringify({ previewId: preview.previewId }) });
+        : await api<ScheduleApplyResult>(`${route}-apply`, {
+          method: 'POST', signal: controller.signal, headers: scheduleUndoHeaders(undoScope, actorId), body: JSON.stringify({ previewId: preview.previewId }),
+        });
       if (controller.signal.aborted) return;
       if (!isApplyResult(result)) {
         if (!recovering || result?.applied !== false) throw new Error('적용 결과를 확인하지 못했습니다.');

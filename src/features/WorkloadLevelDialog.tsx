@@ -2,11 +2,12 @@
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { CalendarClock, Check, RefreshCw, X } from 'lucide-react';
-import type { Issue, Project, TeamWorkloadLevelPreview, User, WorkloadLevelPreview } from '../../shared/types';
+import type { Issue, Project, ScheduleUndoScope, TeamWorkloadLevelPreview, User, WorkloadLevelPreview } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import { errorMessage } from './schedule-utils';
+import { scheduleUndoHeaders } from './schedule-undo';
 import './workload-level.css';
 
 const WORKLOAD_LEVEL_DRAFT = 'workload-level';
@@ -21,6 +22,7 @@ type TeamScope = {
 
 type Props = {
   actorId: string;
+  undoScope: ScheduleUndoScope;
   startDate: string;
   endDate: string;
   initialUserId?: string;
@@ -41,7 +43,7 @@ function isApplyResult(value: Receipt | null): value is ScheduleApplyResult {
   return Boolean(value && typeof value === 'object' && 'undoId' in value && typeof value.undoId === 'string' && value.undoId && Array.isArray(value.updated));
 }
 
-export function WorkloadLevelDialog({ projectId, projectName, team, actorId, startDate, endDate, initialUserId = '', availableUserIds,
+export function WorkloadLevelDialog({ projectId, projectName, team, actorId, undoScope, startDate, endDate, initialUserId = '', availableUserIds,
   selectedIssueIds, users, issues, onDraftChange, onClose, onApplied }: Props) {
   const titleId = useId();
   const descriptionId = `${titleId}-description`;
@@ -180,7 +182,7 @@ export function WorkloadLevelDialog({ projectId, projectName, team, actorId, sta
       let result: ScheduleApplyResult;
       try {
         const response = await api<ScheduleApplyResult>(`${route}-apply`, {
-          method: 'POST', headers, signal, body: JSON.stringify({ previewId: preview.previewId }),
+          method: 'POST', headers: scheduleUndoHeaders(undoScope, actorId), signal, body: JSON.stringify({ previewId: preview.previewId }),
         });
         if (!isApplyResult(response)) throw new Error('적용 응답을 확인하지 못했습니다.');
         result = response;

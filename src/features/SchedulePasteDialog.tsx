@@ -6,11 +6,12 @@ import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-depend
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
-  ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview, TeamScheduleBlocker,
+  ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange, SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
 import { GanttBulkLinkFields, type BulkLinkDraft } from './GanttBulkLinksDialog';
+import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
 
 type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
@@ -21,6 +22,8 @@ type ProjectName = Pick<Project, 'id' | 'name'>;
 type ProjectLabels = ReadonlyMap<string, ProjectName>;
 
 export type SchedulePasteDialogProps = {
+  actorId: string;
+  undoScope: ScheduleUndoScope;
   notify: FeatureProps['notify'];
   onClose: (awaitingResult?: boolean) => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
@@ -84,6 +87,8 @@ export function bulkDateResultMessage(updated: readonly Issue[], team: boolean) 
 }
 
 function ProjectScheduleEditDialog({
+  actorId,
+  undoScope,
   projectId,
   projectLabel,
   notify,
@@ -461,6 +466,7 @@ function ProjectScheduleEditDialog({
         : bulkLinks ? '/schedule/bulk-links/apply' : bulkDates ? '/schedule/bulk-dates/apply' : '/schedule/paste-apply';
       const result = await api<SchedulePasteApplyResult>(endpoint, {
         method: 'POST',
+        headers: scheduleUndoHeaders(undoScope, actorId),
         body: JSON.stringify({ previewId }),
         signal: controller.signal,
       });

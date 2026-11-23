@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, CalendarClock, ChevronDown, Layers3, RefreshCw, SlidersHorizontal, X } from 'lucide-react';
 import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar';
 import { defaultTeamWorkloadCapacity } from '../../shared/team-workload-capacity';
-import type { FeatureProps, TeamWorkloadCapacity, TeamWorkloadResult } from '../../shared/types';
+import type { FeatureProps, ScheduleUndoScope, TeamWorkloadCapacity, TeamWorkloadResult } from '../../shared/types';
 import { api } from '../lib/api';
 import { formatWorklogMinutes } from '../lib/worklogs';
 import { focusWorkloadButton, WORKLOAD_INCOMPLETE_REASONS, WorkloadIssueLink, WorkloadTable, type WorkloadSelection } from './ProjectWorkload';
@@ -22,6 +22,7 @@ const LAST_DAY = calendarDay(MAX_CALENDAR_DATE);
 const CAPACITY_ROUTE = '/workload-capacity';
 
 type TeamWorkloadProps = Pick<FeatureProps, 'data' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
+  undoScope: ScheduleUndoScope;
   initialStartDate: string;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onBeforeLevel?: () => boolean;
@@ -57,7 +58,7 @@ function groupByProject<T extends { projectId: string }>(items: readonly T[]) {
   return [...groups];
 }
 
-export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify, openIssue, onDraftChange,
+export function TeamWorkload({ data, actorId, undoScope, initialStartDate, refresh, notify, openIssue, onDraftChange,
   onBeforeLevel, scheduleBusy, onScheduleApplied }: TeamWorkloadProps) {
   const [startOverride, setStartOverride] = useState<string | null>(null);
   const [projectFilter, setProjectFilter] = useState<Set<string> | null>(null);
@@ -193,7 +194,7 @@ export function TeamWorkload({ data, actorId, initialStartDate, refresh, notify,
         </button>
       </div>
     </header>
-    {levelSelection && onScheduleApplied && <WorkloadLevelDialog actorId={actorId}
+    {levelSelection && onScheduleApplied && <WorkloadLevelDialog actorId={actorId} undoScope={undoScope}
       startDate={levelSelection.startDate} endDate={levelSelection.endDate} initialUserId={levelSelection.initialUserId}
       team={{ projectIds: levelSelection.projectIds, projects: projectsById }}
       availableUserIds={data.users.map(user => user.id)} users={usersById} issues={issuesById}

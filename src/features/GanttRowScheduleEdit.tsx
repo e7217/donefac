@@ -11,9 +11,11 @@ import { suggestMissingScheduleDates, type MissingScheduleLink } from '../../sha
 import {
   MAX_SCHEDULE_ROW_DEPENDENCY_EDITS,
   type Dependency, type DependencyType, type FeatureProps, type Issue, type ScheduleBulkDateChanges,
-  type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type WorkCalendar,
+  type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput,
+  type ScheduleUndoScope, type WorkCalendar,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
+import { scheduleUndoHeaders } from './schedule-undo';
 import { errorMessage, todayDate } from './schedule-utils';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import './schedule-paste.css';
@@ -27,6 +29,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+  undoScope?: ScheduleUndoScope;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
   onApplied: (result: SchedulePasteApplyResult, reviewedAnchorVersion: number) => Promise<void>;
@@ -139,7 +142,7 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
@@ -413,7 +416,8 @@ export function GanttRowScheduleEdit({
     if (!controller) return;
     try {
       const recorded = await api<SchedulePasteApplyResult>('/schedule/row-edit/apply', {
-        method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify({ previewId }), signal: controller.signal,
+        method: 'POST', headers: scheduleUndoHeaders(undoScope, actorId),
+        body: JSON.stringify({ previewId }), signal: controller.signal,
       });
       if (controller.signal.aborted) return;
       if (!recorded || typeof recorded.undoId !== 'string' || !recorded.undoId ||

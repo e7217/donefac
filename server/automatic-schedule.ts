@@ -18,10 +18,11 @@ import { calculateTeamFollowUpSchedule, teamFollowUpScope, TeamFollowUpScheduleE
 export class AutomaticScheduleError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomaticScheduleError(status,message,details);}
 export type AutomaticScheduleMutation = ScheduleAnchorChange;
+export type ScheduleUndoOrigin = { projectId?: string; issueId?: string; selectableProject?: boolean };
 interface AutomaticScheduleInput{projectId:string;issueIds?:string[];anchorDate?:string|null;defaultDuration?:number|null;seedChanges?:AutomaticScheduleMutation[];anchorChange?:AutomaticScheduleMutation}
 type ScheduleDates = Pick<AutomaticScheduleMutation, 'startDate' | 'endDate'>;
 export interface AutomaticScheduleResult{undoId:string;updated:Issue[];warnings?:string[]}
-type Hooks={actor:(request:Request)=>string;commitChanges:(request:Request,changes:AutomaticScheduleMutation[])=>AutomaticScheduleResult};
+type Hooks={actor:(request:Request)=>string;commitChanges:(request:Request,changes:AutomaticScheduleMutation[],origin?:ScheduleUndoOrigin)=>AutomaticScheduleResult};
 type WorkloadHooks = {
   capacity(projectId: string): ProjectWorkloadCapacity;
   teamCapacity(): TeamWorkloadCapacity;
@@ -685,7 +686,12 @@ export class AutomaticScheduleService{
       }
       this.checkProposal(proposal, workload);
       if (!proposal.preview.changes.length) fail('적용할 일정 변경이 없습니다.');
-      const committed = hooks.commitChanges(request, proposal.preview.changes.map(toMutation));
+      const sourceIssueId = 'teamFollowUp' in proposal ? proposal.teamFollowUp.sourceIssueId : undefined;
+      const projectId = sourceIssueId ? this.store.get<Issue>('issues', sourceIssueId)?.projectId
+        : 'projectId' in proposal ? proposal.projectId : undefined;
+      const committed = hooks.commitChanges(request, proposal.preview.changes.map(toMutation), {
+        projectId, selectableProject: scope === 'automatic' || scope === 'team-workload',
+      });
       const result = scope === 'team-follow-up' ? { ...committed,
         warnings: [...new Set([...proposal.preview.warnings, ...(committed.warnings ?? [])])] } : committed;
       this.store.put('automatic_schedule_previews', { ...proposal, used: true, appliedAt: new Date().toISOString(), result });

@@ -997,6 +997,14 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 성공 시 `{undoId,updated,warnings}`를 반환한다. 날짜와 되돌리기 정보, 적용 결과는 한 트랜잭션으로 저장한다. 미사용 미리보기는 30분간 유효하며, 같은 미리보기의 적용 결과는 7일 안에 다시 조회할 수 있다. `POST /api/schedule/undo`에 `{undoId}`를 보내 해당 날짜 변경을 되돌린다.
 
+## 마지막 일정 변경 되돌리기
+
+브라우저의 일정 적용 요청은 `X-Teamspace-Schedule-Undo-Scope`에 적용을 시작한 화면을 보낸다. 값은 `team`, `project:<프로젝트 ID>` 또는 기준 티켓의 `issue:<업무 ID>`다. ID는 URI 구성 요소로 인코딩한다. 티켓 범위는 해당 티켓에서 검토한 일정과 연결 편집에 사용한다.
+
+`GET /api/schedule/undo/latest?scope=team`으로 전체 프로젝트 간트의 마지막 변경을 읽는다. 프로젝트와 티켓은 각각 `scope=project&id=<ID>` 또는 `scope=issue&id=<ID>`를 사용한다. 작업자와 화면이 일치하는 최근 7일의 마지막 변경을 `{undo:{undoId,appliedAt,issueCount,dependencyChanges,planCount}}`로 반환한다. 대상이 바뀌었거나 이미 되돌렸으면 `{undo:null}`을 반환한다. 한 단계 되돌리기여서 이전 변경으로 자동 이동하지 않는다.
+
+`POST /api/schedule/undo`에 `{undoId}`를 보낸다. 이 기록을 만든 작업자와 현재 업무·계획·연결의 버전을 검사하고 한 트랜잭션에서 복원한다. 요청에 화면 헤더가 있으면 저장한 범위와 그 범위의 최신 변경을 대조한다. 다른 탭에서 새 변경을 저장했다면 이전 ID는 `409`를 반환한다. 응답은 `{updated,warnings,plan?,dependencyChanges?}`다. 응답을 잃었으면 같은 ID로 `POST /api/schedule/undo?retry=true`를 보낸다. 7일 안에 완료한 경우 저장된 결과와 `duplicate:true`를 반환한다. 일반 요청에서 이미 실행한 ID는 `409`를 반환한다. 물리 복원은 관련 기록을 보존하며 자체 JSON 복원은 초기화한다.
+
 ## 기준 업무와 후행 일정 함께 적용
 
 브라우저의 `POST /api/schedule/auto-preview`에 `{projectId, anchorChange: {id, expectedVersion, startDate, endDate}}`를 보낸다. 양쪽 날짜는 `YYYY-MM-DD` 또는 `null`이다. 기준 날짜를 그대로 사용해 프로젝트 안의 직접·간접 후행 업무를 계산한다. 이 모드에는 일반 자동 일정의 `issueIds`, `anchorDate`, `defaultDuration`, `seedChanges`를 함께 보내지 않는다. 반환값의 `changes`는 검토할 날짜이고 `blocking`은 함께 적용하기 전에 해결할 항목이다.

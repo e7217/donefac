@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -37,6 +37,7 @@ import { FavoriteAction } from './FavoritesState';
 import { AtlassianLinks } from './AtlassianLinks';
 import type { IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
@@ -114,7 +115,7 @@ function isOpenBlockerError(cause: unknown) {
 }
 
 export function IssuePanel(props: IssuePanelProps) {
-  const panel = <IssuePanelContent key={`${props.issueId}:${props.actorId}`} {...props} />;
+  const panel = <IssuePanelContent key={JSON.stringify([props.issueId, props.actorId, props.data.restoreGeneration])} {...props} />;
   return props.documentOverlay ? <div className="issue-panel-document-layer">{panel}</div> : panel;
 }
 
@@ -216,18 +217,22 @@ function IssuePanelContent(props: IssuePanelProps) {
     issue: Issue; initialDates: ScheduleBulkDateChanges; initialDateDraft?: Issue;
   } | null>(null);
   const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; keepDateDraft: boolean } | null>(null);
-  const [scheduleUndoId, setScheduleUndoId] = useState<string | null>(null);
+  const scheduleUndoScope: ScheduleUndoScope | null = issue ? { kind: 'issue', id: issue.id } : null;
+  const { undoId: scheduleUndoId, remember: rememberScheduleUndo, undo: undoSchedule } = useScheduleUndo(
+    scheduleUndoScope, props.actorId, data.restoreGeneration,
+  );
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const rowScheduleOpener = useRef<HTMLButtonElement>(null);
-  const focusAfterScheduleUndo = useRef(false);
+  const rowScheduleUndoButton = useRef<HTMLButtonElement>(null);
+  const scheduleReturnFocus = useRef<'edit' | 'undo' | null>(null);
   const rowScheduleGuard = useRef({ dirty: false, pending: false });
   const trackRowScheduleDraft = useCallback((_id: string, dirty: boolean, pending = false) => {
     rowScheduleGuard.current = { dirty, pending };
   }, []);
   const closeRowScheduleEdit = useCallback((restoreFocus = true) => {
     rowScheduleGuard.current = { dirty: false, pending: false };
+    scheduleReturnFocus.current = restoreFocus ? 'edit' : null;
     setRowScheduleEdit(null);
-    if (restoreFocus) requestAnimationFrame(() => rowScheduleOpener.current?.focus({ preventScroll: true }));
   }, []);
   const [projectMove, setProjectMove] = useState<{ draftMessage: string | null } | null>(null);
   const projectMoveTrigger = useRef<HTMLButtonElement>(null);
@@ -251,12 +256,14 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [trackLinkedDocumentDraft]);
   const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
+  // Restore focus after the nested dialog is removed and the ticket becomes interactive.
   useLayoutEffect(() => {
-    if (dependencyBusy || !focusAfterScheduleUndo.current) return;
-    focusAfterScheduleUndo.current = false;
-    const opener = rowScheduleOpener.current;
-    if (opener && !opener.disabled && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-  }, [dependencyBusy]);
+    if (dependencyBusy || nestedModalOpen || previewDocumentId || !scheduleReturnFocus.current) return;
+    const retryButton = scheduleReturnFocus.current === 'undo' ? rowScheduleUndoButton.current : null;
+    scheduleReturnFocus.current = null;
+    const target = retryButton ?? rowScheduleOpener.current;
+    if (target && !target.disabled && !target.closest('[inert]')) target.focus({ preventScroll: true });
+  }, [dependencyBusy, nestedModalOpen, previewDocumentId]);
   const statusField = useRef<HTMLSelectElement>(null);
   const dependencyBusyRef = useRef(false);
   const dependencyDraftRef = useRef(false);
@@ -543,7 +550,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setScheduleWarnings(result.warnings);
   }
   async function reflectRowScheduleEdit(result: SchedulePasteApplyResult, reviewedAnchorVersion: number) {
-    setScheduleUndoId(result.undoId);
+    rememberScheduleUndo(result.undoId);
     await reflectScheduleChange(result, false, reviewedAnchorVersion);
     closeRowScheduleEdit();
     const datesChanged = result.updated.length > 0;
@@ -556,16 +563,17 @@ function IssuePanelContent(props: IssuePanelProps) {
     dependencyBusyRef.current = true;
     setDependencyBusy(true);
     try {
-      const result = await post<Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>>('/schedule/undo', { undoId: scheduleUndoId });
-      setScheduleUndoId(null);
+      const result = await undoSchedule();
+      if (!result) return;
       try {
         await reflectScheduleChange(result, true);
         notify('일정과 연결 변경을 되돌렸습니다.');
       } catch (cause) {
         notify(`일정과 연결 변경을 되돌렸습니다. 최신 업무를 불러오지 못했습니다. ${errorMessage(cause)}`, 'error');
       }
-      focusAfterScheduleUndo.current = true;
+      scheduleReturnFocus.current = 'edit';
     } catch (cause) {
+      scheduleReturnFocus.current = 'undo';
       notify(errorMessage(cause), 'error');
     } finally {
       dependencyBusyRef.current = false;
@@ -962,7 +970,7 @@ function IssuePanelContent(props: IssuePanelProps) {
               onClick={openRowScheduleEdit}><CalendarRange size={15} aria-hidden="true" />일정과 연결 편집</button>
             <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
               onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button>
-            {scheduleUndoId && <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
+            {scheduleUndoId && <button ref={rowScheduleUndoButton} className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
               onClick={() => void undoRowScheduleEdit()}><Undo2 size={15} aria-hidden="true" />일정과 연결 되돌리기</button>}
           </div>
           {scheduleWarnings.length > 0 && <div className="issue-grid-wide issue-schedule-warnings" role="status">
@@ -1146,7 +1154,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       initialDateDraft={rowScheduleEdit.initialDateDraft}
       issues={data.issues} dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
-      actorId={props.actorId} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
+      actorId={props.actorId} undoScope={scheduleUndoScope ?? undefined} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} dependency={editingDependency}
       anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}

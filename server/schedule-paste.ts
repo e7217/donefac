@@ -7,7 +7,7 @@ import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
-import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation } from './automatic-schedule.js';
+import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
 import type { Store } from './store.js';
@@ -32,7 +32,8 @@ interface PasteHooks {
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
   projectBlockers(projectIds: readonly string[] | null): TeamScheduleBlocker[];
-  commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[]): SchedulePasteApplyResult;
+  commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[],
+    origin: ScheduleUndoOrigin): SchedulePasteApplyResult;
 }
 
 type ScheduleScope = Pick<SchedulePastePreview, 'projectId' | 'projectIds'>;
@@ -988,7 +989,11 @@ export class SchedulePasteService {
         throw new SchedulePasteError(409, '업무 연결이 변경되어 순환 관계가 생깁니다. 다시 미리 확인해 주세요.');
       }
       const links = affectedLinks(projectedLinks, proposal.changes.map(change => change.id), linkChanges);
-      const result = hooks.commitChanges(request, proposal.changes, links, linkChanges);
+      const result = hooks.commitChanges(request, proposal.changes, links, linkChanges, {
+        projectId: proposal.projectId ?? undefined,
+        // The selected row heads the guarded read set even when only successors or links change.
+        issueId: proposal.kind === 'row-edit' ? proposal.issueIds[0] : undefined,
+      });
       if (proposal.followUpWarnings || proposal.missingDateWarnings) {
         result.warnings = [...new Set([...(proposal.followUpWarnings ?? []), ...(proposal.missingDateWarnings ?? []), ...result.warnings])];
       }

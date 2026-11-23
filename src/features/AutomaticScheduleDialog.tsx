@@ -2,13 +2,19 @@
 
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AlertCircle, ArrowRight, Check, RefreshCw, Sparkles, X } from 'lucide-react';
-import type { AutomaticSchedulePreview, FeatureProps, Issue } from '../../shared/types';
-import { post } from '../lib/api';
+import type { AutomaticSchedulePreview, FeatureProps, Issue, ScheduleUndoScope } from '../../shared/types';
+import { api, post } from '../lib/api';
 import { errorMessage } from './schedule-utils';
+import { scheduleUndoHeaders } from './schedule-undo';
 import './automatic-schedule.css';
 
 export type ScheduleApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
-export function AutomaticScheduleDialog({ data, projectId, selectedIssueIds, notify, onClose, onApplied }: FeatureProps & { selectedIssueIds: string[]; onClose: () => void; onApplied: (result: ScheduleApplyResult) => Promise<void> }) {
+export function AutomaticScheduleDialog({ data, projectId, actorId, undoScope, selectedIssueIds, notify, onClose, onApplied }: FeatureProps & {
+  undoScope: ScheduleUndoScope;
+  selectedIssueIds: string[];
+  onClose: () => void;
+  onApplied: (result: ScheduleApplyResult) => Promise<void>;
+}) {
   const [initialProject] = useState(data.projects.some(value => value.id === projectId) ? projectId : data.projects[0]?.id || '');
   const [selectedProject, setSelectedProject] = useState(initialProject);
   const [anchorDate, setAnchorDate] = useState('');
@@ -41,7 +47,13 @@ export function AutomaticScheduleDialog({ data, projectId, selectedIssueIds, not
   }
   async function apply() {
     if (busyRef.current || !preview || preview.blocking.length || !preview.changes.length) return; setError(''); busyRef.current = true; setBusy(true);
-    try { const result = await post<ScheduleApplyResult>('/schedule/auto-apply', { previewId: preview.previewId }); dirtyRef.current = false; await onApplied(result); }
+    try {
+      const result = await api<ScheduleApplyResult>('/schedule/auto-apply', {
+        method: 'POST', headers: scheduleUndoHeaders(undoScope, actorId), body: JSON.stringify({ previewId: preview.previewId }),
+      });
+      dirtyRef.current = false;
+      await onApplied(result);
+    }
     catch (err) { setError(errorMessage(err)); } finally { busyRef.current = false; setBusy(false); }
   }
   return <div className="issue-modal-overlay"><section className="automatic-schedule-dialog" role="dialog" aria-modal="true" aria-labelledby="automatic-schedule-title">

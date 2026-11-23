@@ -416,7 +416,7 @@ test('일정을 따로 저장해도 동료와 함께 바꾼 설명은 상세의 
   }
 });
 
-test('티켓 상세에서 일정과 연결을 되돌리며 이후 날짜·제목·댓글 초안을 보존한다', async ({ page, request }) => {
+test('티켓을 다시 연 뒤 응답이 끊겨도 일정과 연결을 한 번만 되돌리고 초안을 보존한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const fixture = await createFixture(request);
   try {
@@ -438,6 +438,17 @@ test('티켓 상세에서 일정과 연결을 되돌리며 이후 날짜·제목
     const predecessor = dependencies.locator(`[data-related-schedule-issue="${related.id}"]`);
     await expect(predecessor).toBeVisible();
 
+    await button(details, '업무 상세 닫기').click();
+    await expect(details).toHaveCount(0);
+    await page.reload();
+    const reopen = button(page.getByRole('region', { name: '전체 프로젝트 보드', exact: true }), `${anchor.key} 업무 열기`);
+    const lookup = page.waitForResponse(value => {
+      const url = new URL(value.url());
+      return url.pathname === `${undoPath}/latest` && url.searchParams.get('scope') === 'issue' && url.searchParams.get('id') === anchor.id;
+    });
+    await reopen.click();
+    expect(await json(await lookup)).toMatchObject({ undo: { undoId: receipt.undoId, issueCount: 1, dependencyChanges: 1 } });
+
     const draftStart = '2027-03-11';
     const draftTitle = `${anchor.title} 초안`;
     const draftComment = '일정을 되돌리기 전에 작성 중인 댓글';
@@ -445,14 +456,26 @@ test('티켓 상세에서 일정과 연결을 되돌리며 이후 날짜·제목
     await field(details, '제목').fill(draftTitle);
     await field(details, '댓글 내용').fill(draftComment);
     const undoButton = button(details, '일정과 연결 되돌리기');
-    const undone = waitPost(page, undoPath);
+    const undoAttempts: { retry: string | null; body: unknown }[] = [];
+    await page.route(url => url.pathname === undoPath, async route => {
+      undoAttempts.push({ retry: new URL(route.request().url()).searchParams.get('retry'), body: route.request().postDataJSON() });
+      if (undoAttempts.length > 1) return route.continue();
+      const saved = await route.fetch();
+      expect(saved.status()).toBe(200);
+      await route.abort('failed');
+    });
+    const undone = page.waitForResponse(value => {
+      const url = new URL(value.url());
+      return url.pathname === undoPath && url.searchParams.get('retry') === 'true' && value.request().method() === 'POST';
+    });
     await undoButton.click();
     const response = await undone;
     expect(response.request().postDataJSON()).toEqual({ undoId: receipt.undoId });
     expect(await json<Omit<SchedulePasteApplyResult, 'undoId'>>(response)).toMatchObject({
       updated: [{ ...original, id: anchor.id, title: anchor.title, version: anchor.version + 2 }],
-      dependencyChanges: 1,
+      dependencyChanges: 1, duplicate: true,
     });
+    expect(undoAttempts).toEqual([{ retry: null, body: { undoId: receipt.undoId } }, { retry: 'true', body: { undoId: receipt.undoId } }]);
     await expect(undoButton).toHaveCount(0);
     await expect(scheduleButton).toBeFocused();
     await expect(predecessor).toHaveCount(0);

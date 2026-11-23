@@ -2,7 +2,7 @@
 
 import { useId, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, BarChart3, CalendarClock, SlidersHorizontal, X } from 'lucide-react';
-import type { FeatureProps, Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, SchedulePreview, User, WorkloadIncompleteReason } from '../../shared/types';
+import type { FeatureProps, Issue, ProjectWorkloadCapacity, ProjectWorkloadResult, SchedulePreview, ScheduleUndoScope, User, WorkloadIncompleteReason } from '../../shared/types';
 import { calendarDate, calendarDay, defaultWorkCalendar, isCalendarDate } from '../../shared/calendar';
 import { calculateProjectWorkload, defaultWorkloadCapacity } from '../../shared/project-workload';
 import { projectWorkflow } from '../../shared/workflow-helpers';
@@ -28,6 +28,7 @@ type LevelSelection = WorkloadRange & { initialUserId?: string };
 type TrackDraft = (id: string, dirty: boolean, pending?: boolean) => void;
 export type WorkloadSelection = { userId: string; date: string };
 type WorkloadProps = FeatureProps & WorkloadRange & {
+  undoScope: ScheduleUndoScope;
   onDraftChange?: TrackDraft;
   onBeforeLevel?: () => boolean;
   scheduleBusy?: boolean;
@@ -61,7 +62,7 @@ export function ProjectWorkload(props: WorkloadProps) {
 }
 
 function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, notify, openIssue,
-  onDraftChange, onBeforeLevel, scheduleBusy, onScheduleApplied, levelIssueIds }: WorkloadProps) {
+  undoScope, onDraftChange, onBeforeLevel, scheduleBusy, onScheduleApplied, levelIssueIds }: WorkloadProps) {
   const input = useWorkloadInput(data, projectId, startDate, endDate);
   const [localCapacity, setLocalCapacity] = useState<ProjectWorkloadCapacity | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -148,7 +149,7 @@ function WorkloadPanel({ data, projectId, actorId, startDate, endDate, refresh, 
         </button>
       </div>
     </header>
-    {levelSelection && onScheduleApplied && <WorkloadLevelDialog projectId={projectId} actorId={actorId}
+    {levelSelection && onScheduleApplied && <WorkloadLevelDialog projectId={projectId} actorId={actorId} undoScope={undoScope}
       startDate={levelSelection.startDate} endDate={levelSelection.endDate} initialUserId={levelSelection.initialUserId}
       projectName={data.projects.find(project => project.id === projectId)?.name ?? projectId}
       availableUserIds={workload?.rows.filter(row => row.overloadedDays > 0).map(row => row.userId) ?? []}

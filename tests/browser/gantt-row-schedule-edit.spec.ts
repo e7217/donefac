@@ -60,7 +60,7 @@ async function openRow(page: Page, issue: Issue, actorId: string) {
   return { search, opener, dialog };
 }
 
-test('360px 간트 업무 행에서 숨은 선행 업무와 날짜를 한 번에 저장하고 응답 유실 뒤 같은 결과를 읽으며 모두 되돌린다', async ({ page, request }) => {
+test('360px 간트에서 날짜와 숨은 선행 업무를 저장하고 화면을 다시 연 뒤 같은 변경을 되돌린다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const f = await fixture(request);
   try {
@@ -127,6 +127,15 @@ test('360px 간트 업무 행에서 숨은 선행 업무와 날짜를 한 번에
     expect(dates(changed)).toEqual({ startDate: date(23), endDate: date(26), dueDate: null });
     await expect(page.getByLabel(`${anchor.key} 시작일`, { exact: true })).toHaveValue(date(23));
 
+    await page.goto(`/#/${anchor.projectId}/issues`);
+    await expect(search).toHaveCount(0);
+    const lookupUndo = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === `${undoPath}/latest` && url.searchParams.get('scope') === 'project' && url.searchParams.get('id') === anchor.projectId;
+    });
+    await page.goto(`/#/${anchor.projectId}/gantt`);
+    expect(await json(await lookupUndo)).toMatchObject({ undo: { undoId: applied?.undoId, issueCount: 1, dependencyChanges: 1 } });
+    await search.fill(anchor.title);
     const pendingUndo = waitPost(page, undoPath);
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     expect(await json<{ dependencyChanges: number }>(await pendingUndo)).toMatchObject({ dependencyChanges: 1 });

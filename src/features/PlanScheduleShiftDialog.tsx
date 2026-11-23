@@ -8,14 +8,17 @@ import type {
   PlanningItem,
   PlanScheduleShiftPreview,
   PlanScheduleShiftResult,
+  ScheduleUndoScope,
 } from '../../shared/types';
 import { PLANNING_META } from '../../shared/planning-helpers';
 import { api, ApiError } from '../lib/api';
+import { scheduleUndoHeaders } from './schedule-undo';
 import './plan-schedule-shift.css';
 
 export interface PlanScheduleShiftDialogProps {
   plan: PlanningItem;
   actorId: string;
+  undoScope: ScheduleUndoScope;
   notify: FeatureProps['notify'];
   refresh: FeatureProps['refresh'];
   onClose: () => void;
@@ -47,6 +50,7 @@ export function PlanScheduleShiftDialog(props: PlanScheduleShiftDialogProps) {
 function ShiftDialog({
   plan,
   actorId,
+  undoScope,
   notify,
   refresh,
   onClose,
@@ -275,7 +279,7 @@ function ShiftDialog({
         {
           method: 'POST',
           signal: controller.signal,
-          headers: { 'X-Actor-Id': actorId },
+          headers: scheduleUndoHeaders(undoScope, actorId),
           body: JSON.stringify({ previewId }),
         },
       );

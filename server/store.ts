@@ -44,6 +44,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS webhook_inbox(id TEXT PRIMARY KEY,created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS schedule_undos(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS schedule_undos_by_actor_scope ON schedule_undos(json_extract(json,'$.actorId'),json_extract(json,'$.scope'));
+      CREATE TABLE IF NOT EXISTS schedule_undo_results(
+        undo_id TEXT PRIMARY KEY REFERENCES schedule_undos(id) ON DELETE CASCADE,
+        completed_at TEXT NOT NULL,
+        json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS schedule_undo_results_by_completion ON schedule_undo_results(completed_at);
       CREATE TABLE IF NOT EXISTS schedule_dependency_removals(
         predecessor_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
         successor_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,

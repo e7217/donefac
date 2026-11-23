@@ -18,7 +18,7 @@ import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-com
 import { aggregateCycleProgress, CycleProgressError } from './cycle-progress.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
-import { AutomaticScheduleService, AutomaticScheduleError } from './automatic-schedule.js';
+import { AutomaticScheduleService, AutomaticScheduleError, AUTO_RESULT_RETENTION_MS, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { SchedulePasteService, SchedulePasteError, type ScheduleDateMutation } from './schedule-paste.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
@@ -113,11 +113,15 @@ import { IssueFieldFilterError, parseIssueFieldFilter } from '../shared/issue-fi
 import { createIssueViewMatcher, IssueViewPriorityLabelFilterError, IssueViewStatusFilterError, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities, parseIssueViewStatusIds } from '../shared/issue-view.js';
 import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
 import { matchingGitlabSearchLinks, normalizeGitlabSearchInput } from '../shared/gitlab-search.js';
+import type { ScheduleUndoInfo, ScheduleUndoResult, ScheduleUndoScope } from '../shared/types.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
-type ScheduleUndoRecord = { id:string; records:ScheduleUndoIssue[]; used:boolean; plan?:ScheduleUndoPlan; linkChanges?:ScheduleDependencyMutation[] };
+type ScheduleUndoRecord = {
+  id:string; records:ScheduleUndoIssue[]; used:boolean; plan?:ScheduleUndoPlan; linkChanges?:ScheduleDependencyMutation[];
+  actorId?:string; appliedAt?:string; scope?:string; scopeProjectId?:string;
+};
 
 class ApiError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 const fail = (message: string, status = 400, details?: unknown): never => { throw new ApiError(status, message, details); };
@@ -574,9 +578,49 @@ export function createApp(options: {
     }
     return reverse;
   };
+  const undoScopeKey = (scope:ScheduleUndoScope) => scope.kind === 'team' ? 'team' : `${scope.kind}:${scope.id}`;
+  const undoScope = (kind:unknown,id:unknown):ScheduleUndoScope => {
+    if(kind==='team'&&id===undefined)return {kind};
+    if((kind==='project'||kind==='issue')&&typeof id==='string'&&id)return {kind,id};
+    return fail('일정 되돌리기 화면을 확인해 주세요.');
+  };
+  const requestedUndoScope = (req:Request):ScheduleUndoScope|undefined => {
+    const header=req.header('X-Teamspace-Schedule-Undo-Scope');
+    if(header===undefined)return;
+    if(header==='team')return {kind:'team'};
+    const colon=header.indexOf(':');
+    if(colon<0)return fail('일정 되돌리기 화면을 확인해 주세요.');
+    let id:string;
+    try{id=decodeURIComponent(header.slice(colon+1));}
+    catch{return fail('일정 되돌리기 화면을 확인해 주세요.');}
+    return undoScope(header.slice(0,colon),id);
+  };
+  const checkUndoOrigin = (scope:ScheduleUndoScope,origin:ScheduleUndoOrigin,projectIds:Set<string>) => {
+    if(scope.kind==='team')return;
+    if(scope.kind==='project'){
+      get<Project>('projects',scope.id);
+      if(origin.selectableProject||origin.projectId===scope.id||(projectIds.size===1&&projectIds.has(scope.id)))return;
+    }else if(origin.issueId===scope.id)return get<Issue>('issues',scope.id).projectId;
+    return fail('일정 변경에 해당하는 화면을 확인해 주세요.');
+  };
+  const prepareScheduleUndo = (record:ScheduleUndoRecord) => {
+    if(record.scope?.startsWith('issue:')&&record.scopeProjectId!==store.get<Issue>('issues',record.scope.slice('issue:'.length))?.projectId) {
+      fail('업무가 다른 프로젝트로 옮겨졌거나 현재 찾을 수 없습니다.',409);
+    }
+    if(record.scope?.startsWith('project:')&&!store.get<Project>('projects',record.scope.slice('project:'.length))) {
+      fail('일정을 변경한 프로젝트를 찾을 수 없습니다.',409);
+    }
+    const previousPlan=record.plan&&get<PlanningItem>('planning_items',record.plan.id);
+    if(record.plan&&previousPlan)checkVersion(previousPlan,record.plan.appliedVersion);
+    for(const entry of record.records)checkVersion(get<Issue>('issues',entry.id),entry.appliedVersion);
+    const reverseLinks=record.linkChanges?.length?prepareDependencyUndo(record.id,record.linkChanges):[];
+    return {previousPlan,reverseLinks};
+  };
   /** Caller owns the transaction, shared by manual edits and guarded proposals. */
-  const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[],plan?:ScheduleUndoPlan,dependencyChanges:ScheduleDependencyMutation[] = [],allowDueDate=false)=>{
+  const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[],plan?:ScheduleUndoPlan,
+    dependencyChanges:ScheduleDependencyMutation[] = [],allowDueDate=false,origin:ScheduleUndoOrigin={})=>{
     if(!Array.isArray(changes)||(!changes.length&&!plan&&!dependencyChanges.length)||changes.length>1000)return fail('변경할 일정이나 업무 연결을 선택해 주세요.');
+    const scope=requestedUndoScope(req);
     const seen=new Set<string>(),records:ScheduleUndoIssue[]=[],updated:Issue[]=[];
     for(const c of changes){
       if(!c||typeof c!=='object'||Array.isArray(c)||typeof c.id!=='string')fail('일정 변경 형식을 확인해 주세요.');
@@ -593,7 +637,10 @@ export function createApp(options: {
     const projectIds=new Set(updated.map(issue=>issue.projectId));
     const undoId=uid();
     const linkChanges=writeScheduleDependencyChanges(req,dependencyChanges,projectIds,undoId);
-    const record:ScheduleUndoRecord={id:undoId,records,used:false,...(plan?{plan}:{}),...(linkChanges.length?{linkChanges}:{})};
+    const scopeProjectId=scope&&checkUndoOrigin(scope,origin,projectIds);
+    const record:ScheduleUndoRecord={id:undoId,records,used:false,actorId:actor(req),appliedAt:now(),
+      ...(scope?{scope:undoScopeKey(scope)}:{}),...(scopeProjectId?{scopeProjectId}:{}),
+      ...(plan?{plan}:{}),...(linkChanges.length?{linkChanges}:{})};
     const linkDetail=linkChanges.length?` · 업무 연결 ${linkChanges.length}건`:'';
     store.put('schedule_undos',record);activity(req,'schedule',undoId,'일정 일괄 변경',`${plan?'계획 1개 · ':''}${updated.length}개 티켓${linkDetail}`);
     const warnings=projectIds.size?scheduleWarnings(store.all<Issue>('issues').filter(issue=>projectIds.has(issue.projectId)),dependencies):[];
@@ -1102,7 +1149,9 @@ export function createApp(options: {
     });
     res.set('Cache-Control', 'no-store').json(analysis);
   });
-  automaticSchedule.registerRoutes(app,{actor,commitChanges:commitScheduleChanges},{
+  automaticSchedule.registerRoutes(app,{actor,
+    commitChanges:(request,changes,origin)=>commitScheduleChanges(request,changes,undefined,undefined,[],false,origin),
+  },{
     capacity:projectId=>workload.get(projectId),teamCapacity:()=>teamCapacity.get(),
     workflow:projectId=>workflows.get(projectId),validateChange:validateScheduleChange,
     teamBlockers:()=>issueRelations.teamScheduleBlockers(),
@@ -1115,7 +1164,7 @@ export function createApp(options: {
     validateChange:validateScheduleChange,
     warnings:scheduleWarnings,
     projectBlockers:projectIds=>issueRelations.localScheduleBlockers(projectIds),
-    commitChanges:(request,changes,dependencies,linkChanges)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true),
+    commitChanges:(request,changes,dependencies,linkChanges,origin)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true,origin),
   });
   planScheduleShift.registerRoutes(app,{
     actor,calendar:projectId=>calendars.get(projectId),versions:scheduleVersions,
@@ -1128,7 +1177,7 @@ export function createApp(options: {
       const plan=planning.writeScheduleDates(item.id,item.version,dates);
       activity(req,'planning',plan.id,'계획 일정 변경',`${planScheduleLabel(item)} → ${planScheduleLabel(plan)}`);
       const planUndo:ScheduleUndoPlan={id:item.id,appliedVersion:plan.version,dates:{startDate:item.startDate,endDate:item.endDate,targetDate:item.targetDate}};
-      return {...commitScheduleChanges(req,changes,dependencies,planUndo),plan};
+      return {...commitScheduleChanges(req,changes,dependencies,planUndo,[],false,{projectId:item.projectId}),plan};
     },
   });
   scheduleArtifacts.registerRoutes(app,{actor,activity,getCalendar:projectId=>calendars.get(projectId)});
@@ -2555,14 +2604,47 @@ export function createApp(options: {
     const changes=req.body.changes;if(!Array.isArray(changes)||!changes.length||changes.length>1000)fail('변경할 일정을 선택해 주세요.');
     const result=store.transaction(()=>{checkCalendarVersions(req.body.calendarVersions,changes);return commitScheduleChanges(req,changes);});res.json(result);
   });
+  const scheduleUndoCutoff = () => new Date(Date.now() - AUTO_RESULT_RETENTION_MS).toISOString();
+  const latestScheduleUndo = (actorId:string,scope:string) => {
+    const located=store.db.prepare(`SELECT json FROM schedule_undos WHERE json_extract(json,'$.actorId')=?
+      AND json_extract(json,'$.scope')=? ORDER BY rowid DESC LIMIT 1`).get(actorId,scope) as {json:string}|undefined;
+    return located&&JSON.parse(located.json) as ScheduleUndoRecord;
+  };
+  app.get('/api/schedule/undo/latest',(req,res)=>{
+    if(Object.keys(req.query).some(key=>key!=='scope'&&key!=='id'))return fail('일정 되돌리기 조회 조건을 확인해 주세요.');
+    const scope=undoScope(req.query.scope,req.query.id),actorId=resolveActor(req);
+    const undo=store.transaction(():ScheduleUndoInfo|null=>{
+      if(!actorId)return null;
+      const record=latestScheduleUndo(actorId,undoScopeKey(scope));
+      if(!record||record.used||!record.appliedAt||record.appliedAt<=scheduleUndoCutoff())return null;
+      try{prepareScheduleUndo(record);}
+      catch(error){if(error instanceof ApiError&&(error.status===404||error.status===409))return null;throw error;}
+      return {undoId:record.id,appliedAt:record.appliedAt,issueCount:record.records.length,
+        dependencyChanges:record.linkChanges?.length??0,planCount:record.plan?1:0};
+    });
+    res.set('Cache-Control','no-store').json({undo});
+  });
   app.post('/api/schedule/undo',(req,res)=>{
+    const {retry}=req.query;
+    if(Object.keys(req.query).some(key=>key!=='retry')||(retry!==undefined&&retry!=='true'))return fail('일정 되돌리기 요청을 확인해 주세요.');
+    const scope=requestedUndoScope(req);
     const result=store.transaction(()=>{
       const record=get<ScheduleUndoRecord>('schedule_undos',req.body.undoId);
-      if(record.used)fail('이미 되돌린 작업입니다.',409);
-      const previousPlan=record.plan&&get<PlanningItem>('planning_items',record.plan.id);
-      if(record.plan&&previousPlan)checkVersion(previousPlan,record.plan.appliedVersion);
-      for(const entry of record.records)checkVersion(get<Issue>('issues',entry.id),entry.appliedVersion);
-      const reverseLinks=record.linkChanges?.length?prepareDependencyUndo(record.id,record.linkChanges):[];
+      if(record.actorId&&record.actorId!==actor(req))fail('일정을 변경한 작업자가 되돌릴 수 있습니다.',409);
+      if(scope&&record.scope&&record.scope!==undoScopeKey(scope))fail('일정을 변경한 화면에서 다시 확인해 주세요.',409);
+      if(record.used){
+        if(retry==='true'&&record.actorId){
+          const receipt=store.db.prepare('SELECT json FROM schedule_undo_results WHERE undo_id=? AND completed_at>?')
+            .get(record.id,scheduleUndoCutoff()) as {json:string}|undefined;
+          if(receipt)return {...JSON.parse(receipt.json) as ScheduleUndoResult,duplicate:true};
+        }
+        return fail('이미 되돌린 작업입니다.',409);
+      }
+      if(scope&&record.scope&&record.actorId&&(!record.appliedAt||record.appliedAt<=scheduleUndoCutoff()||
+          latestScheduleUndo(record.actorId,record.scope)?.id!==record.id)){
+        return fail('최근 일정 변경이 달라졌거나 되돌리기 기간이 지났습니다. 목록을 새로고침해 주세요.',409);
+      }
+      const {previousPlan,reverseLinks}=prepareScheduleUndo(record);
       const updated=record.records.map(entry=>{
         const old=get<Issue>('issues',entry.id);
         const {startDate,endDate,dueDate=old.dueDate}=entry;
@@ -2580,9 +2662,15 @@ export function createApp(options: {
       const linkDetail=reverseLinks.length?` · 업무 연결 ${reverseLinks.length}건`:'';
       activity(req,'schedule',record.id,'일정 변경 되돌리기',`${plan?'계획 1개 · ':''}${updated.length}개 티켓${linkDetail}`);
       const warnings=projects.size?scheduleWarnings(store.all<Issue>('issues').filter(issue=>projects.has(issue.projectId))):[];
-      return {updated,warnings,...(plan?{plan}:{}),...(reverseLinks.length?{dependencyChanges:reverseLinks.length}:{})};
+      const confirmation:ScheduleUndoResult={updated,warnings,...(plan?{plan}:{}),...(reverseLinks.length?{dependencyChanges:reverseLinks.length}:{})};
+      if(record.actorId){
+        store.db.prepare('DELETE FROM schedule_undo_results WHERE completed_at<=?').run(scheduleUndoCutoff());
+        store.db.prepare('INSERT INTO schedule_undo_results(undo_id,completed_at,json) VALUES(?,?,?)')
+          .run(record.id,now(),JSON.stringify(confirmation));
+      }
+      return confirmation;
     });
-    res.json(result);
+    res.set('Cache-Control','no-store').json(result);
   });
   app.get('/api/issue-key-matches', (req, res) => {
     res.set('Cache-Control', 'no-store').json(readIssueKeyMatches(store, req.query, apiKeys.projectScope(req)));

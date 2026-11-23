@@ -1831,6 +1831,21 @@ export interface SchedulePastePreview {
   unchanged: number;
 }
 export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; warnings: string[]; dependencyChanges?: number }
+export type ScheduleUndoScope = { kind: 'team' } | { kind: 'project' | 'issue'; id: string };
+export interface ScheduleUndoInfo {
+  undoId: string;
+  appliedAt: string;
+  issueCount: number;
+  dependencyChanges: number;
+  planCount: number;
+}
+export interface ScheduleUndoResult {
+  updated: Issue[];
+  warnings: string[];
+  plan?: PlanningItem;
+  dependencyChanges?: number;
+  duplicate?: boolean;
+}
 export const MAX_SCHEDULE_BULK_DATE_ISSUES = 100;
 export type ScheduleBulkDateChanges = Partial<Pick<Issue, 'startDate' | 'endDate' | 'dueDate'>>;
 export interface ScheduleBulkDateInput {
