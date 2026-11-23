@@ -1049,7 +1049,10 @@ export function createApp(options: {
     const dueDate = defaultStatusDueDate(before, proposed);
     return validateIssue(dueDate ? { ...proposed, dueDate } : proposed, before);
   }});
-  workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{actor,activity,planningItems:projectId=>planning.forProject(projectId)});
+  workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{
+    actor, activity, planningItems: projectId => planning.forProject(projectId),
+    issueOrder: projectId => issueOrders.get(projectId), workflow: projectId => workflows.get(projectId),
+  });
   savedFieldBreakdowns.registerRoutes(app, { actor, activity });
   issueSchemas.registerRoutes(app,{actor,activity});
   planning.registerRoutes(app,{actor,activity,validateIssue,findSavedViewReference:item=>savedViews.findPlanningItemReference(item)});apiKeys.registerManagementRoutes(app,{actor,activity});

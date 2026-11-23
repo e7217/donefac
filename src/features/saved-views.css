@@ -14,3 +14,98 @@
 .saved-view-copy-fallback input {
   width: 100%;
 }
+
+.jira-saved-view-dialog {
+  box-sizing: border-box;
+  width: min(600px, calc(100% - 24px));
+  max-height: calc(100dvh - 24px);
+  padding: 0;
+  border: 1px solid #dfebe6;
+  border-radius: 12px;
+  background: #fff;
+  color: #203c32;
+  box-shadow: 0 18px 56px #152f2540;
+  font-size: .875rem;
+}
+
+.jira-saved-view-dialog::backdrop { background: #172e2866; }
+
+.jira-saved-view-dialog form {
+  display: flex;
+  max-height: inherit;
+  flex-direction: column;
+}
+
+.jira-saved-view-dialog header,
+.jira-saved-view-dialog footer {
+  flex: none;
+  padding: 12px 16px;
+}
+
+.jira-saved-view-dialog header { border-bottom: 1px solid #e6eee8; }
+.jira-saved-view-dialog h2 { margin: 0 0 6px; font-size: 1.125rem; }
+.jira-saved-view-dialog p { margin: 0; overflow-wrap: anywhere; }
+
+.jira-saved-view-content {
+  min-height: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.jira-saved-view-content .field {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  font-size: .875rem;
+}
+
+.jira-saved-view-content textarea {
+  min-height: 92px;
+  max-height: 210px;
+  resize: vertical;
+  font-family: ui-monospace, monospace;
+}
+
+.jira-saved-view-preview-button { justify-self: end; }
+.jira-saved-view-review { display: grid; gap: 8px; overflow-wrap: anywhere; }
+.jira-saved-view-review h3 { margin: 0; font-size: .875rem; }
+.jira-saved-view-criteria { margin: 0; padding-inline-start: 22px; white-space: pre-wrap; }
+.jira-saved-view-review ol { margin: 0; padding-inline-start: 22px; }
+.jira-saved-view-review li + li { margin-block-start: 4px; }
+
+.jira-saved-view-sort {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid #e3ebe5;
+  border-radius: 6px;
+  background: #f5f8f6;
+}
+
+.jira-saved-view-sort label { display: flex; gap: 6px; align-items: center; }
+.jira-saved-view-sort label input { flex-shrink: 0; }
+
+.jira-saved-view-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(115px, .35fr);
+  align-items: end;
+  gap: 8px;
+}
+
+.jira-saved-view-dialog footer {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid #e6eee8;
+}
+
+.jira-saved-view-dialog .btn { min-height: 34px; font-size: .8125rem; }
+
+@media (max-width: 420px) {
+  .jira-saved-view-details { grid-template-columns: minmax(0, 1fr); }
+  .jira-saved-view-dialog .btn { min-height: 40px; }
+}

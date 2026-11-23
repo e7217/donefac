@@ -548,6 +548,14 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 응답은 `{order,issue,duplicate}`다. 같은 작업자·프로젝트·요청 ID·입력으로 7일 이내에 재전송하면 현재 업무와 순서에 `duplicate:true`를 반환한다. 이전 이동이나 이력을 다시 쓰지 않는다. 현재 업무를 찾을 수 없거나 요청 ID·버전·배정이 충돌하면 `409`를 반환한다. 자체 JSON 복원은 배정과 순서를 보존하며 이동 요청 기록을 초기화한다. 물리 백업은 이동 요청 기록도 보존한다.
 
+## Jira 필터를 공유 보기로 옮기기
+
+`POST /api/views/jira/preview`에 `{projectId,jql}`을 보낸다. JQL에 프로젝트 조건이 없으면 선택한 Teamspace 프로젝트에서 검토한다. 원래 Jira 프로젝트 키와 ID는 이관 기록으로 소속이 확인될 때 사용할 수 있다. 현재 프로젝트의 키와 이름도 사용할 수 있다. 같은 이름의 상태·유형·팀원이 서로 다른 대상과 일치하거나 원본 프로젝트가 여러 개 합쳐진 경우에는 대응할 범위를 확인하도록 오류를 표시한다.
+
+최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 현재 조건으로 표현할 수 없는 조합, `OR`, 상대 날짜, `currentUser()` 같은 동적 함수, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
+
+미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. 원본에 `ORDER BY`가 있으면 `acceptProjectOrder:true`를 보내 Teamspace의 프로젝트 순서를 사용한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 기존 공유 보기와 같은 형식으로 저장하고 원래 JQL은 보기 데이터에 포함하지 않는다.
+
 ## 공유 보기의 보드 그룹
 
 브라우저의 `POST /api/views`와 `PATCH /api/views/:id`에서 `layout: 'board'`와 `boardGrouping: 'assignee'`로 담당자별 보드를 저장한다. 수정 시 `boardGrouping`을 생략하면 설정을 유지하고 `null`을 보내면 지운다. `layout: 'list'`도 묶음을 지운다. 응답에서 `boardGrouping`이 없으면 기본 보드다. 자체 백업 형식 76은 이 표시 설정을 보존한다. 간트와 문서의 업무 목록·현황 및 보고서는 보기의 필터로 업무를 선택한다.

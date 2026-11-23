@@ -597,7 +597,7 @@ export function Issues(props: FeatureProps & {
       <IssuePlanningFilters key={`planning:${projectId}:${filterEditorEpoch}`} projectId={projectId} planningItems={planningItems}
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
-    <SavedViews projectId={projectId} planningItems={planningItems} users={data.users} views={projectViews} selectedId={savedViewId}
+    <SavedViews projectId={projectId} project={project} actorId={props.actorId} planningItems={planningItems} users={data.users} views={projectViews} selectedId={savedViewId}
       current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />

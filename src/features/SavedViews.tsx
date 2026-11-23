@@ -1,18 +1,21 @@
 'use client';
 
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
-import { BarChart3, Bookmark, Check, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
-import type { PlanningItem, SavedView, SavedViewState, User } from '../../shared/types';
+import { BarChart3, Bookmark, Check, ClipboardPaste, Link2, LoaderCircle, Pencil, Plus, Save, SquareChartGantt, Trash2, X } from 'lucide-react';
+import type { PlanningItem, Project, SavedView, SavedViewState, User } from '../../shared/types';
 import { issuePriorityLabelFilterLabels } from '../../shared/issue-view';
 import { api, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { issueReporterFilterLabel } from './IssueReporterSelect';
+import { JiraSavedViewDialog } from './JiraSavedViewDialog';
 import './saved-views.css';
 
 type Props = {
   projectId: string;
+  project?: Pick<Project, 'id' | 'key' | 'name'>;
+  actorId: string;
   planningItems: readonly PlanningItem[];
   users: readonly User[];
   views: SavedView[];
@@ -36,12 +39,13 @@ export function SavedViews(props: Props) {
   return <ProjectSavedViews key={props.projectId} {...props}/>;
 }
 
-function ProjectSavedViews({projectId, planningItems, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
+function ProjectSavedViews({projectId, project, actorId, planningItems, users, views, selectedId, current, onSelect, onApply, onOpenGantt, onOpenFieldBreakdown, onViewsLoaded, onViewsChanged, notify}: Props) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [workspaceRefreshFailed, setWorkspaceRefreshFailed] = useState(false);
   const [editing, setEditing] = useState<ViewEditor | null>(null);
+  const [jiraOpen, setJiraOpen] = useState(false);
   const [name, setName] = useState('');
   const [dialogError, setDialogError] = useState('');
   const [conflicted, setConflicted] = useState(false);
@@ -142,6 +146,28 @@ function ProjectSavedViews({projectId, planningItems, users, views, selectedId, 
       return false;
     }
   };
+  const registerSavedView = (view: SavedView) => {
+    onViewsLoaded([...views.filter(existing => existing.id !== view.id), view].sort((a, b) => a.name.localeCompare(b.name, 'ko')));
+    setError('');
+  };
+  const acceptJiraView = async (view: SavedView) => {
+    if (!mounted.current) return;
+    const origin = window.location.hash;
+    const navigation = navigationEpoch.current;
+    setJiraOpen(false);
+    registerSavedView(view);
+    notify('Jira 필터를 공유 보기로 저장했습니다.');
+    setBusy(true);
+    try {
+      await refreshWorkspace();
+      if (mounted.current && origin === window.location.hash && navigation === navigationEpoch.current) {
+        if (onSelect) onSelect(view.id);
+        else onApply(view);
+      }
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
+  };
   const retryWorkspace = async () => {
     if (busy) return;
     setBusy(true);
@@ -178,8 +204,8 @@ function ProjectSavedViews({projectId, planningItems, users, views, selectedId, 
         : await post<SavedView>('/views', {projectId, name, ...editing.state});
       savedEditor.current = editing;
       if (mounted.current) {
-        onViewsLoaded([...views.filter(view => view.id !== value.id), value].sort((a,b) => a.name.localeCompare(b.name,'ko')));
-        setEditing(null);setError('');notify('업무 보기를 저장했습니다.');
+        registerSavedView(value);
+        setEditing(null);notify('업무 보기를 저장했습니다.');
       }
       await refreshWorkspace();
       if (editing.mode === 'create' && mounted.current && origin === window.location.hash && navigation === navigationEpoch.current) onSelect?.(value.id);
@@ -282,10 +308,14 @@ function ProjectSavedViews({projectId, planningItems, users, views, selectedId, 
       보기 링크 주소<input ref={copyInput} className="field" readOnly value={copyFallback.href} onFocus={event => event.currentTarget.select()} />
     </label>}
     <button className="btn btn-ghost saved-view-create" disabled={loading || busy} onClick={() => openEditor('create')}><Plus size={13}/> 현재 보기 저장</button>
+    {project && <button type="button" className="btn btn-ghost" aria-haspopup="dialog" disabled={loading || busy || Boolean(editing)}
+      onClick={() => setJiraOpen(true)}><ClipboardPaste size={14} aria-hidden="true" /> Jira 필터 옮기기</button>}
     {error && <span className="saved-view-error" role="alert">{error}<button className="text-link" onClick={() => reload().catch(e => notify(e.message,'error'))}>다시 불러오기</button></span>}
     {workspaceRefreshFailed && <div className="saved-view-error" role="status"><span>작업 공간의 보기 목록을 갱신하지 못했습니다.</span>
       <button className="text-link" type="button" disabled={busy} onClick={() => void retryWorkspace()}>작업 공간 다시 불러오기</button>
     </div>}
+    {jiraOpen && project && <JiraSavedViewDialog project={project} actorId={actorId} currentLayout={current.layout} notify={notify}
+      onClose={() => setJiraOpen(false)} onSaved={view => { void acceptJiraView(view); }} />}
     {editing && editorState && <div className="modal-backdrop"><form className="modal-card saved-view-dialog" role="dialog" aria-modal="true" aria-labelledby="saved-view-title" onSubmit={save}>
       <div className="card-heading"><h2 id="saved-view-title">{editing.mode === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
       <p className="muted">적용된 검색어와 필터를 {editorState.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>

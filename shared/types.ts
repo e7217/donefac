@@ -1656,6 +1656,15 @@ export interface IssueFieldBreakdownPage {
   editTargets?: IssueBulkEditTarget[];
 }
 export interface SavedView extends SavedViewState { id: string; projectId: string; name: string; authorId: string; version: number; createdAt: string; updatedAt: string }
+export const JIRA_SAVED_VIEW_QUERY_LIMIT = 4000;
+export interface JiraSavedViewPreview {
+  filters: SavedViewState['filters'];
+  criteria: { field: string; label: string }[];
+  orderBy: { field: string; direction?: 'asc' | 'desc' }[];
+  total: number;
+  issues: Pick<Issue, 'id' | 'key' | 'title'>[];
+  revision: string;
+}
 export interface ProjectIssueOrder { projectId: string; issueIds: string[]; version: string }
 export interface IssueOrderMove {
   issueId: string;

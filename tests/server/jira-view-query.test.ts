@@ -1,0 +1,138 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { defaultIssueSchema } from '../../shared/issue-schema.js';
+import { createIssueViewMatcher } from '../../shared/issue-view.js';
+import { JiraViewQueryError, translateJiraViewQuery, type JiraViewQueryContext } from '../../shared/jira-view-query.js';
+import { JIRA_SAVED_VIEW_QUERY_LIMIT, type Issue } from '../../shared/types.js';
+
+const project = { id: 'project-id', key: 'TEAM', name: 'Team project' };
+const context: JiraViewQueryContext = {
+  project,
+  sourceProjectAliases: ['OLD', '10000'],
+  statuses: [{ id: 'review', label: 'In Review' }, { id: 'done', label: '완료' }],
+  issueTypes: [{ id: 'bug', name: '버그', archived: false }, { id: 'retired', name: 'Retired', archived: true }],
+  users: [
+    { id: 'member-a', name: '김 개발', email: 'dev@example.test' },
+    { id: 'member-b', name: '이 개발', email: 'qa@example.test' },
+  ],
+};
+const noFilters = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
+const schema = defaultIssueSchema(project.id);
+const now = '2026-11-20T00:00:00Z';
+
+function issue(extra: Partial<Issue>): Issue {
+  return {
+    id: 'issue', projectId: project.id, key: 'TEAM-1', title: '업무', description: '', type: 'bug', status: 'review',
+    priority: 'medium', assigneeId: null, collaboratorIds: [], parentId: null, labels: [], startDate: null, endDate: null,
+    dueDate: null, estimate: null, cycle: null, module: null, release: null, createdAt: now, updatedAt: now,
+    completedAt: null, version: 1, ...extra,
+  };
+}
+
+function match(jql: string) {
+  return createIssueViewMatcher(translateJiraViewQuery(jql, context).filters, { users: [] }, schema);
+}
+
+test('JQL resolves exact case-insensitive project, workflow, type and member aliases', () => {
+  const translated = translateJiraViewQuery(`project = OLD AND (status = "in review" AnD (issuetype = 버그 AND type = bug))
+    AND assignee = '김 개발' AND reporter = "QA@example.test"`, context);
+  assert.deepEqual(translated.filters, {
+    ...noFilters, status: 'review', type: 'bug', assigneeId: 'member-a', reporter: { kind: 'member', memberId: 'member-b' },
+  });
+  assert.deepEqual(translated.criteria.map(criterion => criterion.field), ['project', 'status', 'type', 'assignee', 'reporter']);
+  assert.match(translated.criteria[0].label, /TEAM/);
+  assert.deepEqual(translateJiraViewQuery('project = 10000', context).filters, noFilters);
+  assert.equal(translateJiraViewQuery('status = 완료', context).criteria[0].field, 'project');
+  assert.throws(() => translateJiraViewQuery('project = old', { ...context, blockedSourceProjectAliases: ['OLD'] }), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('project = team', { ...context, blockedSourceProjectAliases: ['TEAM'] }), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('project = OTHER', context), JiraViewQueryError);
+});
+
+test('quoted literals preserve case and decode quotes and backslashes without evaluating the content', () => {
+  const { filters } = translateJiraViewQuery(String.raw`"labels" = "qa\"review" and labels = 'dev\'s' AND labels = "a\\b" AND labels = "AND"`, context);
+  assert.deepEqual(filters.labels, { include: ['AND', 'a\\b', "dev's", 'qa"review'], match: 'all' });
+  assert.equal(match('labels = Release')(issue({ labels: ['release'] })), false);
+  assert.equal(match('labels = Release')(issue({ labels: ['Release'] })), true);
+  assert.equal(match('labels = "NULL"')(issue({ labels: ['NULL'] })), true);
+  assert.throws(() => translateJiraViewQuery(String.raw`labels = "a\nb"`, context), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('labels = "a\nb"', context), JiraViewQueryError);
+});
+
+test('label exclusions keep Jira null behavior and compose without broadening included groups', () => {
+  const query = 'labels IN (release, candidate, backlog) AND labels IN (release, candidate) AND labels NOT IN (backlog, archived, Release)';
+  const { filters } = translateJiraViewQuery(query, context);
+  assert.deepEqual(filters.labels, { include: ['candidate', 'release'], exclude: ['Release', 'archived', 'backlog'], presence: 'set' });
+  const nowMatches = match(query);
+  for (const labels of [[], ['release'], ['candidate'], ['archived'], ['candidate', 'backlog'], ['candidate', 'Release'], ['other']]) {
+    const jiraMatches = labels.some(label => label === 'release' || label === 'candidate')
+      && !labels.some(label => ['backlog', 'archived', 'Release'].includes(label));
+    assert.equal(nowMatches(issue({ labels })), jiraMatches, labels.join(', '));
+  }
+  assert.equal(match('labels != backlog')(issue({ labels: [] })), false);
+  assert.equal(match('labels NOT IN (archived, backlog)')(issue({ labels: ['other'] })), true);
+  assert.equal(match('labels IS NULL')(issue({ labels: [] })), true);
+  assert.equal(match('labels IS NOT EMPTY')(issue({ labels: [] })), false);
+  assert.equal(match('labels IS NOT NULL')(issue({ labels: ['other'] })), true);
+  assert.deepEqual(translateJiraViewQuery('labels IN (a, b) AND labels = a AND labels = c', context).filters.labels,
+    { include: ['a', 'c'], match: 'all' });
+  assert.deepEqual(translateJiraViewQuery('labels IN (a, b) AND labels != a AND labels IN (b, c)', context).filters.labels,
+    { include: ['b'], match: 'all', exclude: ['a'], presence: 'set' });
+});
+
+test('empty assignees and explicitly empty reporters remain distinct from unknown reporters', () => {
+  const absent = issue({});
+  const unset = issue({ reporterId: null });
+  const member = issue({ reporterId: 'member-a' });
+  const assigned = issue({ assigneeId: 'member-a', reporterId: null });
+  const examples = [absent, unset, member, assigned];
+  assert.deepEqual(examples.filter(match('assignee IS EMPTY AND reporter IS NULL')), [unset]);
+  assert.deepEqual(examples.filter(match('reporter = member-a')), [member]);
+  assert.deepEqual(examples.filter(match('assignee IS NULL')), [absent, unset, member]);
+});
+
+test('JQL sort descriptors are parsed separately from the saved view filters', () => {
+  const translated = translateJiraViewQuery('project = TEAM ORDER BY Rank ASC, "Epic Link" dEsC, cf[10001], updated', context);
+  assert.deepEqual(translated.filters, noFilters);
+  assert.deepEqual(translated.orderBy, [
+    { field: 'Rank', direction: 'asc' }, { field: 'Epic Link', direction: 'desc' }, { field: 'cf[10001]' }, { field: 'updated' },
+  ]);
+  assert.deepEqual(translateJiraViewQuery('ORDER BY updated', context).orderBy, [{ field: 'updated' }]);
+});
+
+test('unsupported, contradictory and ambiguous JQL cannot silently become a broader saved view', () => {
+  for (const jql of [
+    'project = TEAM OR status = review', '(labels = a OR labels = b)', 'NOT labels = a', 'status IN (review, done)',
+    'status != done', 'status WAS "In Review"', 'status CHANGED', 'priority = High', 'text = foo', 'key = TEAM-5',
+    'assignee = currentUser()', 'labels IN (membersOf("team"))', 'reporter = NULL', 'assignee IS NOT EMPTY',
+    'status = review AND status = done', 'reporter IS EMPTY AND reporter = member-a', 'assignee = unknown',
+    'status = " in review"', 'status = rev', 'type = Retired', 'labels = a AND labels != a',
+    'labels IS EMPTY AND labels IS NOT EMPTY', 'labels IS EMPTY AND labels NOT IN (b)', 'labels IN (a, b) AND labels NOT IN (a, b)',
+    'labels = a AND labels IN (b, c)', 'labels IN (a, b) AND labels IN (b, c)',
+    'labels IN ()', 'labels IN (a,)', 'labels = a,b', 'labels = a.b', 'labels = ', 'labels = ""', '(labels = a',
+    'project = TEAM AND', 'project = TEAM ORDER BY', 'project = TEAM ORDER BY Rank ASC,', 'project = TEAM ORDER BY Rank AND labels = a',
+  ]) assert.throws(() => translateJiraViewQuery(jql, context), JiraViewQueryError, jql);
+
+  const another = { id: 'other', name: '김 개발', email: 'other@example.test' };
+  assert.throws(() => translateJiraViewQuery('assignee = "김 개발"', { ...context, users: [...context.users, another] }), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('assignee = "Reserved sentinel"', {
+    ...context, users: [{ id: 'none', name: 'Reserved sentinel', email: '' }],
+  }), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('status = "Reserved sentinel"', {
+    ...context, statuses: [{ id: 'all', label: 'Reserved sentinel' }],
+  }), JiraViewQueryError);
+  assert.throws(() => translateJiraViewQuery('project = TEAM OR labels = a', context), { offset: 15 });
+});
+
+test('JQL parsing enforces text, list and nesting limits', () => {
+  const list = Array.from({ length: 20 }, (_, i) => `label${i}`).join(', ');
+  for (const input of [
+    1, {}, null, '\t\r\n', 'x'.repeat(JIRA_SAVED_VIEW_QUERY_LIMIT + 1), 'labels = "\ud800"',
+    `${'('.repeat(17)}labels = a${')'.repeat(17)}`,
+    Array.from({ length: 41 }, () => 'labels = a').join(' AND '),
+    Array.from({ length: 15 }, () => `labels IN (${list})`).join(' AND '),
+    `labels IN (${list}, extra)`,
+    Array.from({ length: 21 }, (_, i) => `labels != label${i}`).join(' AND '),
+    `labels = ${'x'.repeat(61)}`,
+    `ORDER BY ${Array.from({ length: 11 }, () => 'Rank ASC').join(', ')}`,
+  ]) assert.throws(() => translateJiraViewQuery(input, context), JiraViewQueryError);
+});
