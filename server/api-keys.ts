@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
 import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, ResourceLink, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
+import { creationRequestId } from './creation-request.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { listIssueRelations } from './issue-relations.js';
 import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS } from './decision-follow-ups.js';
@@ -283,6 +284,27 @@ export class ApiKeyService {
     if (request.method === 'POST' && fieldBreakdown) {
       this.query(request, []);
       this.allowedProject(key, this.decode(fieldBreakdown[1]));
+      this.used(key);
+      return next();
+    }
+    const projectReports = /^\/api\/projects\/([^/]+)\/(report|report-snapshots(?:\/([^/]+))?)$/.exec(path);
+    if (projectReports) {
+      this.allowedProject(key, this.decode(projectReports[1]));
+      if (request.method === 'GET') {
+        this.query(request, projectReports[2] === 'report' ? ['startDate', 'endDate', 'timeZone', 'issueType', 'assigneeId'] : []);
+        if (projectReports[3]) this.decode(projectReports[3]);
+      } else if (request.method === 'POST' && projectReports[2] === 'report-snapshots') {
+        if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
+        this.query(request, []);
+        const input = request.body ?? {};
+        if (Object.keys(input).some(name => !['requestId', 'title', 'query', 'actorId'].includes(name))) {
+          fail(400, '지원하지 않는 주간 보고서 생성 항목입니다.');
+        }
+        const { requestId } = input;
+        if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
+          throw new ApiKeyError(400, '주간 보고서 생성 요청 ID를 확인해 주세요.', { reason: 'invalid_request_id' });
+        }
+      } else return fail(403, '공개 API에서 지원하지 않는 보고서 작업입니다.');
       this.used(key);
       return next();
     }

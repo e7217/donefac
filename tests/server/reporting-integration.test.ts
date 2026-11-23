@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
@@ -11,7 +12,7 @@ import { createApp } from '../../server/app.js';
 import { createPilotAccess, type PilotAccess } from '../../server/pilot-access.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { contentReferences, documentPlainText } from '../../shared/document-nodes.js';
-import type { Issue, Project, ProjectReport, ReportingLedgerData, ReportQuery, ReportSnapshot, ReportSnapshotSummary, ReportStatusDuration, DocRevision, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DocPage, DocRevision, Issue, Project, ProjectReport, ReportingLedgerData, ReportQuery, ReportSnapshot, ReportSnapshotSummary, ReportStatusDuration, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; exportedAt: string; reportingLedger: ReportingLedgerData; reportSnapshots: ReportSnapshot[]; revisions: DocRevision[] };
 async function fixture(teamAccess = false) {
@@ -48,16 +49,20 @@ async function fixture(teamAccess = false) {
       throw error;
     }
   }
+  async function call<T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown, actorId = 'user-yun', signedIn = true, token?: string) {
+    const headers: Record<string, string> = { 'X-Actor-Id': actorId };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (teamAccess && signedIn) headers.Origin = origin;
+    if (cookie && signedIn) headers.Cookie = cookie;
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(base + path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: response.status, data: await response.json() as T };
+  }
   return {
-    dir,
-    async call<T = Record<string, unknown>>(path: string, method = 'GET', body?: unknown, actorId = 'user-yun', signedIn = true) {
-      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Actor-Id': actorId };
-      if (teamAccess) headers.Origin = origin;
-      if (cookie && signedIn) headers.Cookie = cookie;
-      const response = await fetch(base + path, { method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      return { status: response.status, data: await response.json() as T };
+    dir, call, close,
+    publicCall<T = Record<string, unknown>>(path: string, token?: string, method = 'GET', body?: unknown) {
+      return call<T>(`/v1${path}`, method, body, 'user-yun', false, token);
     },
-    close,
   };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -88,6 +93,11 @@ async function change(f: Fixture, issue: Issue, fields: Partial<Issue>) {
 async function capture(f: Fixture, reportQuery: ReportQuery, title = '합성 주간 보고 확정본') {
   const response = await f.call<ReportSnapshot>(`/projects/${reportQuery.projectId}/report-snapshots`, 'POST', { query: reportQuery, title }, 'user-seo');
   assert.equal(response.status, 201, JSON.stringify(response.data)); return response.data;
+}
+async function reportKey(f: Fixture, projectIds: string[], access: 'read' | 'write', owner = 'user-seo') {
+  const response = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: '합성 주간 보고 키', projectIds, access, expiresAt: null }, owner);
+  assert.equal(response.status, 201, JSON.stringify(response.data));
+  return response.data.token;
 }
 
 test('HTTP reports separate observation baselines from real completions, repeated completions and reopening transitions', async () => {
@@ -156,6 +166,144 @@ test('report snapshot stores canonical query and metrics with a real document an
       }
     } finally { db.close(); }
   } finally { await f.close(); }
+});
+
+test('public report reads enforce project scope and strictly validate query parameters', async () => {
+  const f = await fixture(true);
+  try {
+    const p = await project(f), q = query(p.id);
+    await createIssue(f, p.id, '선택한 프로젝트 업무');
+    await createIssue(f, 'project-team', '다른 프로젝트 업무');
+    const snapshot = await capture(f, q);
+    const outsideSnapshot = await capture(f, query('project-team'));
+    const reader = await reportKey(f, [p.id], 'read');
+    const browserPath = `/projects/${p.id}`;
+    const params = new URLSearchParams({ startDate: q.startDate, endDate: q.endDate, timeZone: q.timeZone });
+    const live = `${browserPath}/report?${params}`;
+    const list = `${browserPath}/report-snapshots`;
+    const detail = `${list}/${snapshot.id}`;
+    for (const path of [live, list, detail]) {
+      assert.equal((await f.publicCall(path)).status, 401);
+      assert.equal((await f.publicCall(path.replace(p.id, 'project-team'), reader)).status, 403);
+    }
+
+    const liveResponse = await f.publicCall<ProjectReport>(live, reader);
+    assert.equal(liveResponse.status, 200, JSON.stringify(liveResponse.data));
+    assert.deepEqual(liveResponse.data.query, q);
+    assert.deepEqual(liveResponse.data.issues.map(row => row.issue.title), ['선택한 프로젝트 업무']);
+    const listResponse = await f.publicCall<ReportSnapshotSummary[]>(list, reader);
+    const { report: savedReport, ...metadata } = snapshot;
+    assert.equal(listResponse.status, 200);
+    assert.deepEqual(listResponse.data, [{ ...metadata, query: savedReport.query }]);
+    const detailResponse = await f.publicCall<ReportSnapshot>(detail, reader);
+    assert.equal(detailResponse.status, 200);
+    assert.deepEqual(detailResponse.data, snapshot);
+    assert.equal((await f.publicCall(`${list}/${outsideSnapshot.id}`, reader)).status, 404);
+
+    for (const invalid of [`${live}&startDate=${q.startDate}`, `${live}&projectId=${p.id}`, `${live}&issueType[]=task`, `${list}?limit=1`, `${detail}?timeZone=UTC`]) {
+      assert.equal((await f.publicCall(invalid, reader)).status, 400);
+    }
+  } finally { await f.close(); }
+});
+
+test('public weekly capture uses the writer identity and replays the same frozen snapshot exactly once', async () => {
+  const f = await fixture(true);
+  try {
+    const p = await project(f), q = query(p.id);
+    const list = `/projects/${p.id}/report-snapshots`;
+    let issue = await createIssue(f, p.id, '보고 시점에 완료한 합성 업무');
+    issue = await change(f, issue, { status: 'done' });
+    const reader = await reportKey(f, [p.id], 'read');
+    const writer = await reportKey(f, [p.id], 'write');
+    const otherWriter = await reportKey(f, [p.id], 'write', 'user-yun');
+    const input = { requestId: randomUUID(), title: '키로 작성한 주간 문서', query: q, actorId: 'user-yun' };
+    assert.equal((await f.publicCall(list, undefined, 'POST', input)).status, 401);
+    assert.equal((await f.publicCall(list, reader, 'POST', input)).status, 403);
+    assert.equal((await f.publicCall(list.replace(p.id, 'project-team'), writer, 'POST', input)).status, 403);
+    const noBody = await f.publicCall<{ details: { reason: string } }>(list, writer, 'POST');
+    assert.equal(noBody.status, 400);
+    assert.equal(noBody.data.details.reason, 'invalid_request_id');
+    assert.equal((await f.publicCall(list, writer, 'POST', { title: input.title, query: q })).status, 400);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, requestId: '00000000-0000-1000-8000-000000000000' })).status, 400);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, query: { ...q, projectId: 'project-team' } })).status, 400);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, projectId: p.id })).status, 400);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, query: { ...q, actorId: 'user-yun' } })).status, 400);
+    assert.equal((await f.publicCall(`${list}?requestId=${input.requestId}`, writer, 'POST', input)).status, 400);
+
+    const created = await f.publicCall<ReportSnapshot>(list, writer, 'POST', input);
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    const snapshot = created.data;
+    assert.equal(snapshot.actorId, 'user-seo');
+    assert.equal(snapshot.report.current.state.done, 1);
+    const documentPath = `/documents/${snapshot.documentId}`;
+    const document = (await f.publicCall<DocPage>(documentPath, reader)).data;
+    assert.equal(document.authorId, 'user-seo');
+    assert.equal(document.status, 'draft');
+    assert.equal(document.projectId, p.id);
+    assert.equal(document.title, input.title);
+    assert.deepEqual(contentReferences(document.content).map(reference => reference.id), [issue.id]);
+
+    await change(f, issue, { status: 'todo', title: '확정 후 변경한 업무' });
+    assert.equal((await report(f, q)).current.state.done, 0);
+    const beforeRetries = (await f.call<Backup>('/export')).data;
+    const retry = await f.publicCall<ReportSnapshot>(list, writer, 'POST', {
+      query: { timeZone: q.timeZone, endDate: q.endDate, startDate: q.startDate, projectId: q.projectId },
+      title: ` ${input.title} `, requestId: input.requestId.toUpperCase(),
+    });
+    assert.equal(retry.status, 200, JSON.stringify(retry.data));
+    assert.deepEqual(retry.data, snapshot);
+    assert.equal((await f.publicCall(list, otherWriter, 'POST', input)).status, 409);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, title: '내용이 다른 주간 문서' })).status, 409);
+    assert.equal((await f.publicCall(list, writer, 'POST', { ...input, query: { ...q, assigneeId: 'user-seo' } })).status, 409);
+    const differentOperation = await f.call('/documents', 'POST', { requestId: input.requestId, title: input.title, projectId: p.id }, 'user-seo');
+    assert.equal(differentOperation.status, 409);
+    assert.equal(beforeRetries.revisions.filter(value => value.documentId === document.id && value.authorId === 'user-seo').length, 1);
+    assert.equal(beforeRetries.activities.filter(value => value.resourceId === document.id && value.actorId === 'user-seo').length, 1);
+    const afterRetries = (await f.call<Backup>('/export')).data;
+    for (const key of ['documents', 'resourceLinks', 'activities', 'reportSnapshots', 'revisions'] as const) {
+      assert.deepEqual(afterRetries[key], beforeRetries[key], key);
+    }
+    assert.equal(afterRetries.reportSnapshots.filter(value => value.documentId === document.id).length, 1);
+
+    const moved = await f.call<DocPage>(documentPath, 'PATCH', { projectId: 'project-team', expectedVersion: document.version, title: '이동한 초안' });
+    assert.equal(moved.status, 200, JSON.stringify(moved.data));
+    assert.equal((await f.publicCall(documentPath, reader)).status, 403);
+    assert.equal((await f.publicCall(list, writer, 'POST', input)).status, 409);
+    assert.deepEqual((await f.publicCall<ReportSnapshot>(`${list}/${snapshot.id}`, reader)).data, snapshot);
+    const summaries = await f.publicCall<ReportSnapshotSummary[]>(list, reader);
+    assert.deepEqual(summaries.data.map(value => value.title), [input.title]);
+
+    const removed = await f.call(documentPath, 'DELETE', { expectedVersion: moved.data.version });
+    assert.equal(removed.status, 200, JSON.stringify(removed.data));
+    assert.equal((await f.publicCall(list, writer, 'POST', input)).status, 409);
+    assert.deepEqual((await f.publicCall<ReportSnapshot>(`${list}/${snapshot.id}`, reader)).data, snapshot);
+  } finally { await f.close(); }
+});
+
+test('public weekly capture rolls back a failed receipt and can safely retry the same request', async () => {
+  const f = await fixture(true);
+  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    const p = await project(f), q = query(p.id);
+    await createIssue(f, p.id, '원자적으로 저장할 업무 연결');
+    const writer = await reportKey(f, [p.id], 'write');
+    const path = `/projects/${p.id}/report-snapshots`;
+    const input = { requestId: randomUUID(), title: '저장 요청을 재시도할 주간 문서', query: q };
+    const before = (await f.call<Backup>('/export')).data;
+    db.exec("CREATE TRIGGER reject_weekly_receipt BEFORE INSERT ON document_creation_requests BEGIN SELECT RAISE(ABORT, 'synthetic weekly receipt storage failure'); END");
+    const failed = await f.publicCall(path, writer, 'POST', input);
+    assert.equal(failed.status, 500, JSON.stringify(failed.data));
+    const afterFailure = (await f.call<Backup>('/export')).data;
+    for (const key of ['documents', 'resourceLinks', 'activities', 'reportSnapshots', 'revisions'] as const) {
+      assert.deepEqual(afterFailure[key], before[key], key);
+    }
+    db.exec('DROP TRIGGER reject_weekly_receipt');
+    const successful = await f.publicCall<ReportSnapshot>(path, writer, 'POST', input);
+    assert.equal(successful.status, 201, JSON.stringify(successful.data));
+    const retry = await f.publicCall<ReportSnapshot>(path, writer, 'POST', input);
+    assert.equal(retry.status, 200, JSON.stringify(retry.data));
+    assert.deepEqual(retry.data, successful.data);
+  } finally { db.close(); await f.close(); }
 });
 
 test('schema10 restores immutable snapshots and closed historical coverage with new baselines, rejecting inconsistent history atomically', async () => {

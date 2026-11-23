@@ -6,7 +6,8 @@ import type { Store } from './store.js';
 
 type Receipt = { actorId: string; projectId: string | null; fingerprint: string; documentId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
-type CreationOperation = 'delivery-blocker-draft' | 'document-template-draft' | `document-tree-copy:${string}` | `issue-linked-document:${string}`;
+type CreationOperation = 'delivery-blocker-draft' | 'document-template-draft' | 'weekly-report-snapshot'
+  | `document-tree-copy:${string}` | `issue-linked-document:${string}`;
 
 export function bindImportedDocumentSections(document: DocPage): void {
   const sections = new Set<string>();

@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { z } from 'zod';
-import { STATUS, type Issue, type Project, type ProjectReport, type ReportOpenStatusIssue, type ReportQuery, type ReportSnapshot, type ReportSnapshotSummary, type RichContent, type StatusCategory, type User } from '../shared/types.js';
+import { STATUS, type DocPage, type Issue, type Project, type ProjectReport, type ReportOpenStatusIssue, type ReportQuery, type ReportSnapshot, type ReportSnapshotSummary, type RichContent, type StatusCategory, type User } from '../shared/types.js';
+import type { DocumentCreationService } from './document-creation.js';
 import type { ReportingLedger } from './reporting-ledger.js';
 import { aggregateProjectReport, parseReportQuery } from './reporting-metrics.js';
 import type { Store } from './store.js';
@@ -74,7 +75,8 @@ const snapshotShape = z.object({
 
 interface ReportRoutes {
   actor(req: Request): string;
-  createDocument(req: Request, snapshot: ReportSnapshot, content: RichContent, issueIds: string[]): void;
+  documentCreation: DocumentCreationService;
+  createDocument(req: Request, snapshot: ReportSnapshot, content: RichContent, issueIds: string[]): DocPage;
 }
 
 function stateSummary(state: Record<StatusCategory, number>) {
@@ -229,14 +231,14 @@ export class ReportingService {
   registerRoutes(app: Express, hooks: ReportRoutes) {
     const base = '/api/projects/:id';
     app.get(`${base}/report`, (req, res) => {
-      res.json(this.capture(parseReportQuery({...req.query,projectId:req.params.id})));
+      res.set('Cache-Control', 'no-store').json(this.capture(parseReportQuery({...req.query,projectId:req.params.id})));
     });
     app.get(`${base}/report-snapshots`, (req, res) => {
       if (!this.store.get('projects',req.params.id)) throw new ReportingError(404, '프로젝트를 찾을 수 없습니다.');
       const rows = this.store.db.prepare(
         'SELECT json FROM report_snapshots WHERE project_id=? ORDER BY created_at DESC,id DESC LIMIT 100',
       ).all(req.params.id) as {json:string}[];
-      res.json(rows.map(({json}): ReportSnapshotSummary => {
+      res.set('Cache-Control', 'no-store').json(rows.map(({json}): ReportSnapshotSummary => {
         const {report,...metadata} = JSON.parse(json) as ReportSnapshot;
         return {...metadata,query:report.query};
       }));
@@ -244,25 +246,36 @@ export class ReportingService {
     app.get(`${base}/report-snapshots/:snapshotId`, (req, res) => {
       const snapshot = this.store.get<ReportSnapshot>('report_snapshots',req.params.snapshotId);
       if (!snapshot || snapshot.projectId !== req.params.id) throw new ReportingError(404, '저장한 보고서를 찾을 수 없습니다.');
-      res.json(snapshot);
+      res.set('Cache-Control', 'no-store').json(snapshot);
     });
     app.post(`${base}/report-snapshots`, (req, res) => {
-      const title = titleShape.safeParse(req.body.title);
+      const title = titleShape.safeParse(req.body?.title);
       if (!title.success) throw new ReportingError(400, '주간 문서 제목을 1~200자로 입력해 주세요.');
       const query = parseReportQuery(req.body.query);
       if (query.projectId !== req.params.id) throw new ReportingError(400, '보고서와 프로젝트가 일치해야 합니다.');
-      const snapshot = this.store.transaction(() => {
+      const actorId = hooks.actor(req);
+      const creation = { title: title.data, query, ...(Object.hasOwn(req.body, 'requestId') ? { requestId: req.body.requestId } : {}) };
+      let snapshot!: ReportSnapshot;
+      const { duplicate } = hooks.documentCreation.create(actorId, creation, () => {
         const report = this.capture(query);
-        const snapshot: ReportSnapshot = {
-          id:randomUUID(),projectId:query.projectId,actorId:hooks.actor(req),title:title.data,
+        const created: ReportSnapshot = {
+          id:randomUUID(),projectId:query.projectId,actorId,title:title.data,
           createdAt:report.generatedAt,documentId:randomUUID(),report,
         };
-        const {content,issueIds} = this.weeklyContent(snapshot);
-        hooks.createDocument(req,snapshot,content,issueIds);
-        this.insert(snapshot);
-        return snapshot;
+        const {content,issueIds} = this.weeklyContent(created);
+        const document = hooks.createDocument(req,created,content,issueIds);
+        this.insert(created);
+        return document;
+      }, 'weekly-report-snapshot', document => {
+        const row = this.store.db.prepare(`SELECT json FROM report_snapshots
+          WHERE project_id=? AND json_extract(json,'$.documentId')=?`).get(query.projectId, document.id) as {json:string} | undefined;
+        const stored = row && JSON.parse(row.json) as ReportSnapshot;
+        if (!stored || stored.projectId !== query.projectId || stored.documentId !== document.id || stored.actorId !== actorId) {
+          throw new ReportingError(409, '이 요청에서 저장한 보고서 보관본을 찾을 수 없습니다.');
+        }
+        snapshot = stored;
       });
-      res.status(201).json(snapshot);
+      res.set('Cache-Control', 'no-store').status(duplicate ? 200 : 201).json(snapshot);
     });
   }
 }

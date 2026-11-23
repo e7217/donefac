@@ -264,6 +264,29 @@ async function verifyIntegrations(session, anonymous, origin) {
   assert.equal(decisionResult.link.issueId, 'issue-1');
   assert.equal(decisionResult.link.documentSource.revisionId, created.link.documentSource.revisionId);
 
+  const projectReport = '/api/v1/projects/project-neo/report';
+  const reportDates = { startDate: '2026-01-01', endDate: '2026-01-07', timeZone: 'Asia/Seoul' };
+  const reportSearch = new URLSearchParams(reportDates);
+  const liveReport = await call(anonymous, 'GET', `${projectReport}?${reportSearch}`, 200, { headers: bearer });
+  assert.equal(liveReport.headers()['cache-control'], 'no-store');
+  assert.equal((await liveReport.json()).query.projectId, 'project-neo');
+  await call(anonymous, 'GET', `/api/v1/projects/project-team/report?${reportSearch}`, 403, { headers: bearer });
+  const snapshots = `${projectReport}-snapshots`;
+  const snapshotInput = {
+    requestId: randomUUID(), title: 'HTTPS 파일럿 주간 보고서', actorId: 'user-min',
+    query: { projectId: 'project-neo', ...reportDates },
+  };
+  await call(anonymous, 'POST', snapshots, 403, { headers: bearer, data: snapshotInput });
+  const snapshot = await (await call(anonymous, 'POST', snapshots, 201, { headers: writerHeaders, data: snapshotInput })).json();
+  assert.equal(snapshot.actorId, 'user-seo');
+  const snapshotRetry = await (await call(anonymous, 'POST', snapshots, 200, { headers: writerHeaders, data: snapshotInput })).json();
+  assert.deepEqual(snapshotRetry, snapshot);
+  assert.deepEqual(await (await call(anonymous, 'GET', `${snapshots}/${snapshot.id}`, 200, { headers: bearer })).json(), snapshot);
+  const weeklyDocument = await (await call(anonymous, 'GET', `/api/v1/documents/${snapshot.documentId}`, 200, { headers: bearer })).json();
+  assert.equal(weeklyDocument.projectId, 'project-neo');
+  assert.equal(weeklyDocument.status, 'draft');
+  assert.ok(JSON.stringify(weeklyDocument.content).includes(`#/project-neo/reports/${snapshot.id}`));
+
   const findings = '/source-imports/00000000-0000-4000-8000-000000000001/reconciliation/jira-status-findings?expectedVersion=1&finding=unavailable';
   await call(anonymous, 'GET', `/api${findings}`, 401);
   await call(anonymous, 'GET', `/api${findings}`, 401, { headers: bearer });
@@ -424,7 +447,7 @@ async function run() {
     for (const entry of readdirSync(backupDir, { recursive: true, withFileTypes: true })) {
       if (entry.isFile()) checkCredentials(readFileSync(join(entry.parentPath, entry.name)), 'Pilot backup');
     }
-    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups and integrations, logout and backup verified.');
+    console.log('Pilot HTTPS access, browser collaboration, board and Gantt refresh, the shared GitLab board filter, scoped decision follow-ups and weekly reports, integrations, logout and backup verified.');
   } finally {
     try {
       await browser?.close();

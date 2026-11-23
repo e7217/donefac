@@ -959,6 +959,7 @@ export function createApp(options: {
   });
   reports.registerRoutes(app,{
     actor,
+    documentCreation,
     createDocument: createReportDocument,
   });
   automation.registerRoutes(app,{actor,activity});outbound.registerRoutes(app,{actor,activity});gitlab.registerRoutes(app,{actor,activity});

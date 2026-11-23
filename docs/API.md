@@ -27,6 +27,8 @@ curl --fail-with-body \
 | `GET /projects/:id/dependencies` | 같은 프로젝트에 있는 선행·후행 업무의 연결 ID·방향·유형·간격·버전 조회 |
 | `GET /projects/:id/schedule-analysis` | 현재 근무일 계획의 예상 완료일·업무별 여유·중요 연결·제외 목록 조회 |
 | `GET /projects/:id/delivery-blockers` | 미해결 업무 차단·간트 충돌·GitLab 조치 업무와 페이지 조회 |
+| `GET /projects/:id/report` · `GET /projects/:id/report-snapshots` · `GET /projects/:id/report-snapshots/:snapshotId` | 기간별 업무 집계 조회와 저장된 보고서 목록·상세 |
+| `POST /projects/:id/report-snapshots` | 기간별 보고서 보관본과 연결된 주간 문서 초안 생성. UUID v4 요청 ID로 재시도 |
 | `GET /decision-follow-ups` · `GET /projects/:id/decision-follow-ups` · `GET /projects/:id/decision-follow-ups/:linkId/source` | 팀·프로젝트 결정 후속 업무, 접근 가능한 문서의 저장 발췌 조회 |
 | `GET /projects/:id/workload` · `GET /projects/:id/workload-capacity` | 조회 기간의 담당자별 계획 시간·가용 시간·초과 및 프로젝트 설정 |
 | `POST /projects/:id/field-breakdown` · `POST /projects/:id/field-breakdown/issues` | 기본·사용자 정의 필드의 현재 값별 집계, 두 기준의 교차 집계와 해당 업무 조회 |
@@ -839,7 +841,13 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 | `GET /api/projects/:id/report` | 필수 `startDate`·`endDate`(YYYY-MM-DD)·`timeZone`(IANA), 선택 `issueType`·`assigneeId` 조건으로 집계 |
 | `GET /api/projects/:id/report-snapshots` | 최근 보관본 최대 100개의 제목·기준 시각·문서 ID·조회 조건 |
 | `GET /api/projects/:id/report-snapshots/:snapshotId` | 당시 조건·집계·업무 목록을 포함한 보관본 조회 |
-| `POST /api/projects/:id/report-snapshots` | `{title, query}`로 다시 집계하고 보관본과 주간 문서 초안을 같은 트랜잭션에 생성. `query`는 경로와 같은 `projectId` 및 조회 조건을 포함. 성공 시 201 |
+| `POST /api/projects/:id/report-snapshots` | `{title, query}`로 다시 집계하고 보관본과 주간 문서 초안을 같은 트랜잭션에 생성. `query`는 경로와 같은 `projectId` 및 조회 조건을 포함. 신규 생성 시 `201` |
+
+자동화에서는 경로 앞의 `/api`를 `/api/v1`으로 바꾼다. 조회에는 프로젝트 범위의 읽기 또는 쓰기 키를 사용한다. 보관본 목록과 상세에는 URL 쿼리 매개변수가 없다. 업무가 이동하거나 삭제된 뒤에도 출발 프로젝트에서 관측해 저장한 값은 해당 프로젝트의 보관본에 남는다. 연결된 문서의 현재 본문은 `GET /api/v1/documents/:id`로 조회하며 문서의 현재 프로젝트 범위가 적용된다.
+
+`POST /api/v1/projects/:id/report-snapshots`는 쓰기 키와 `{requestId, title, query}`를 받는다. `requestId`는 호출자가 생성한 UUID v4다. `query`에 경로와 일치하는 `projectId`, `startDate`, `endDate`, `timeZone`을 보낸다. `issueType`, `assigneeId`는 생략할 수 있다. 보관본의 작성자는 API 키 소유자다.
+
+최초 요청은 `201`과 보관본(`ReportSnapshot`)을 반환한다. 같은 작업자가 같은 요청 ID로 동일한 제목과 조회 조건을 다시 보내면 `200`과 저장한 당시의 보관본을 받는다. 이후 업무와 문서의 편집은 보관본에 반영되지 않는다. 이미 사용한 ID의 입력이나 작업자가 달라지면 `409`다. 연결 문서가 다른 프로젝트로 이동했거나 휴지통에 있거나 자체 백업 복원으로 생성 기록이 무효화되면 재시도는 `409`로 응답한다. 남아 있는 보관본은 상세 경로에서 조회할 수 있다.
 
 보고서는 요청 시점의 상태·마감과 기간 중 사건을 분리한다. 조회 기간은 현지 시작일 자정부터 종료일 다음 날 경계 직전까지 1~92일이다. 마감은 명시한 마감일을 우선하며 없으면 일정 종료일을 사용한다. 마감 임박은 조회 시점의 현지 오늘부터 7일 뒤까지다. 기간별 유형·담당자 필터는 각 변경의 당시 값으로 적용한다. 업무 행은 현재 또는 기간 내 관측 조건에 해당하는 최대 5,000개까지 조회할 수 있다.
 
@@ -847,7 +855,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 보고서 정의 2의 `statusDuration.completedVisits`는 상태 ID별 실제 이탈을 집계한다. 유형·담당자 조건에는 각 이탈 직전 값을 쓰고, 같은 관측 구간의 진입이 확인된 `samples`에만 `medianHours`와 `maxHours`를 계산한다. 그 밖의 이탈은 `unknownEntries`에 포함한다. `statusDuration.openIssues`는 `generatedAt` 당시의 미완료 업무이며 유형·담당자 조건에는 현재 값을 쓴다. 선택한 날짜 범위 밖에서 진입한 업무도 포함한다. 진입을 확인할 수 없는 행의 `enteredAt`과 `elapsedHours`는 `null`이다. 기존 정의 1 보관본은 당시 집계를 제공한다. 정의 2 보관본은 자체 백업 형식 55에 저장한다.
 
-제목은 공백을 제외해 1~200자다. 서버가 집계하고 저장한 값을 읽기 전용으로 제공하며 주간 문서는 계속 편집할 수 있다. 문서의 업무 참조는 최대 30개이고 전체 행은 보관본에서 확인한다. 경로는 신뢰하는 로컬 브라우저 범위에서 제공한다.
+제목은 앞뒤 공백을 제거한 뒤 1~200자다. 서버가 집계하고 저장한 값을 읽기 전용으로 제공하며 주간 문서는 계속 편집할 수 있다. 문서의 업무 참조는 최대 30개이고 전체 행은 보관본에서 확인한다.
 
 자체 백업 schema10 이상은 `reportingLedger`와 `reportSnapshots`를 포함한다. 백업은 내보낸 시각까지의 이력을 저장한다. 복원 시 새 수집 구간과 당시의 업무 기준 상태를 만든다. schema1~9 복원에는 이전 보고 이력이 없으며 복원 시각부터 수집한다.
 
