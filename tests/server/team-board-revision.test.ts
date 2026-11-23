@@ -106,6 +106,41 @@ test('workspace token checks skip document snapshot work while unchanged and sur
   assert.deepEqual((await f.workspace()).data?.documents.find(page => page.id === doc.id), changed);
 });
 
+test('workspace restore generation fences both conditional reads without becoming backup data', async t => {
+  const f = await fixture(t);
+  const initial = await f.revisions();
+  assert.equal(initial.data?.restoreGeneration, 'initial');
+  const backup = await f.call<WorkspaceSnapshot>('/export');
+  assert.equal(Object.hasOwn(backup, 'restoreGeneration'), false);
+
+  await f.call('/import', 200, 'POST', { data: backup });
+  const restored = await f.revisions({ query: 'ganttSince', token: initial.ganttRevision });
+  const restoredGeneration = restored.data?.restoreGeneration;
+  assert.ok(restoredGeneration && restoredGeneration !== initial.data?.restoreGeneration);
+  assert.notEqual(restored.ganttRevision, initial.ganttRevision);
+  assert.notEqual(restored.boardRevision, initial.boardRevision);
+  assert.deepEqual(await f.revisions({ query: 'teamBoardSince', token: initial.boardRevision }), restored);
+  assert.equal(Object.hasOwn(await f.call<WorkspaceSnapshot>('/export'), 'restoreGeneration'), false);
+
+  await f.restart();
+  assert.deepEqual(await f.revisions(), restored);
+  await f.revisions({ query: 'ganttSince', token: restored.ganttRevision }, 204);
+  await f.revisions({ query: 'teamBoardSince', token: restored.boardRevision }, 204);
+
+  // A committed generation change must invalidate both reads even if the watched rows are identical.
+  const readRawRevisions = f.db.prepare('SELECT board.token AS board, gantt.token AS gantt FROM team_board_revision AS board CROSS JOIN gantt_revision AS gantt');
+  const rawRevisions = readRawRevisions.get();
+  const nextGeneration = randomUUID();
+  f.db.prepare('UPDATE settings SET value=? WHERE key=?').run(JSON.stringify(nextGeneration), 'attachmentImportGeneration');
+  const next = await f.revisions({ query: 'ganttSince', token: restored.ganttRevision });
+  assert.deepEqual(readRawRevisions.get(), rawRevisions);
+  assert.equal(next.data?.restoreGeneration, nextGeneration);
+  assert.deepEqual(next.data?.issues, restored.data?.issues);
+  assert.notEqual(next.ganttRevision, restored.ganttRevision);
+  assert.notEqual(next.boardRevision, restored.boardRevision);
+  assert.deepEqual(await f.revisions({ query: 'teamBoardSince', token: restored.boardRevision }), next);
+});
+
 test('workspace revision includes board and issue context changes, and excludes rolled back and no-op rows', async t => {
   const f = await fixture(t);
   let current = await f.workspace();

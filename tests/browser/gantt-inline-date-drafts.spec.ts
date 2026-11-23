@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type APIResponse, type Dialog, type Locator, type Page } from '@playwright/test';
 import type { Issue, Project, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 const manualPreview = '/api/schedule/manual-preview';
@@ -66,6 +66,14 @@ async function openChart(page: Page, project: Project, actorId: string, prefix: 
     start: (issue: Issue) => chart.getByLabel(`${issue.key} 시작일`, { exact: true }),
     end: (issue: Issue) => chart.getByLabel(`${issue.key} 종료일`, { exact: true }),
   };
+}
+
+async function reloadChart(page: Page, prefix: string) {
+  const allowReload = (dialog: Dialog) => { void dialog.accept(); };
+  page.on('dialog', allowReload);
+  try { await page.reload(); }
+  finally { page.off('dialog', allowReload); }
+  await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(prefix);
 }
 
 test('프로젝트 간트에서 다른 날짜 칸으로 이동해도 두 행의 입력을 유지하고 고른 행만 저장한다', async ({ page, request }) => {
@@ -262,6 +270,166 @@ test('전체 프로젝트 간트의 날짜 초안을 함께 검토하고 동료 
     expect(issues.find(issue => issue.id === unchanged.id)).toEqual(unchanged);
     expect(writes).toEqual([manualPreview, manualPreview, manualApply, manualPreview, manualApply, manualApply, undoPath]);
   } finally { await data.close(); }
+});
+
+test('간트를 다시 불러와도 날짜 초안을 유지하고 확인한 변경과 취소한 변경을 정리한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const data = await fixture(request);
+  try {
+    const first = await data.issue(data.first, '시작일이 겹치는 업무', date(23), date(26));
+    const second = await data.issue(data.second, '제목이 바뀌는 업무', date(24), date(27));
+    const { users: [, peer] } = await workspace(request);
+    const headers = { 'X-Actor-Id': peer.id };
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '?scope=team');
+    const writes = scheduleWrites(page);
+    const review = button(page, '입력한 날짜 2건 검토');
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const firstStart = chart.start(first), secondEnd = chart.end(second);
+
+    async function checkStored(expected: Issue[]) {
+      const { issues } = await workspace(request);
+      for (const issue of expected) expect(issues.find(value => value.id === issue.id)).toEqual(issue);
+    }
+
+    await firstStart.fill(date(25));
+    await secondEnd.fill(date(30));
+    await expect(review).toBeEnabled();
+    await checkStored([first, second]);
+    expect(writes).toEqual([]);
+
+    const peerTitle = `${data.prefix} 동료가 수정한 제목`;
+    const peerUpdates: Issue[] = [];
+    await page.route('**/api/workspace', async route => {
+      try {
+        peerUpdates.push(...await Promise.all([
+          request.patch(`/api/issues/${first.id}`, { headers, data: { expectedVersion: first.version, startDate: date(24) } }).then(response => json<Issue>(response)),
+          request.patch(`/api/issues/${second.id}`, { headers, data: { expectedVersion: second.version, title: peerTitle } }).then(response => json<Issue>(response)),
+        ]));
+      } finally { await route.continue(); }
+    }, { times: 1 });
+    await reloadChart(page, data.prefix);
+    expect(peerUpdates).toHaveLength(2);
+    const [peerFirst, peerSecond] = peerUpdates;
+    await expect(firstStart).toHaveValue(date(25));
+    await expect(secondEnd).toHaveValue(date(30));
+    await expect(review).toBeEnabled();
+    await expect(chart.row(second)).toContainText(peerTitle);
+    expect(writes).toEqual([]);
+
+    await button(chart.row(first), `${first.key} 일정과 연결 편집`).click();
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(date(25));
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveAccessibleDescription(`현재 저장값 ${date(24)}`);
+    await button(editor, '일정과 연결 편집 닫기').click();
+    await button(chart.row(first), `${first.key} 날짜 변경 취소`).click();
+    await expect(firstStart).toHaveValue(date(24));
+    await reloadChart(page, data.prefix);
+    await expect(firstStart).toHaveValue(date(24));
+    await expect(button(chart.row(first), `${first.key} 날짜 저장`)).toHaveCount(0);
+    await expect(secondEnd).toHaveValue(date(30));
+    expect(writes).toEqual([]);
+
+    await button(chart.row(second), `${second.key} 일정과 연결 편집`).click();
+    await expect(editor).toContainText(peerTitle);
+    await expect(editor.getByLabel('종료일', { exact: true })).toHaveValue(date(30));
+    await expect(button(editor, '종료일 저장값 사용')).toHaveCount(0);
+    const previewRequest = nextPost(page, rowPreview);
+    await button(editor, '변경 미리보기').click();
+    const previewResponse = await previewRequest;
+    expect(previewResponse.request().postDataJSON()).toEqual({
+      projectId: second.projectId, issue: { id: second.id, expectedVersion: peerSecond.version }, changes: { endDate: date(30) },
+    });
+    const preview = await json<SchedulePastePreview>(previewResponse);
+    await checkStored([peerFirst, peerSecond]);
+    expect(writes).toEqual([rowPreview]);
+
+    const applyRequest = nextPost(page, rowApply);
+    await button(editor, '일정과 연결 적용').click();
+    const response = await applyRequest;
+    expect(response.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    const receipt = await json<SchedulePasteApplyResult>(response);
+    expect(receipt.updated).toMatchObject([
+      { id: second.id, version: peerSecond.version + 1, title: peerTitle, startDate: date(24), endDate: date(30) },
+    ]);
+    await expect(editor).toHaveCount(0);
+    await reloadChart(page, data.prefix);
+    await expect(firstStart).toHaveValue(date(24));
+    await expect(secondEnd).toHaveValue(date(30));
+    await expect(button(chart.row(second), `${second.key} 날짜 저장`)).toHaveCount(0);
+    await checkStored([peerFirst, receipt.updated[0]]);
+    expect(writes).toEqual([rowPreview, rowApply]);
+  } finally { await data.close(); }
+});
+
+test('저장 응답을 받지 못한 간트 날짜는 새로고침 뒤 서버의 최신값으로 정리된다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const data = await fixture(request);
+  try {
+    const issue = await data.issue(data.first, '저장 결과 확인 업무', date(23), date(26));
+    const { users: [, peer] } = await workspace(request);
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
+    const writes = scheduleWrites(page);
+    const start = chart.start(issue);
+    const save = button(chart.row(issue), `${issue.key} 날짜 저장`);
+    await start.fill(date(25));
+
+    let serverReceipt: SchedulePasteApplyResult | undefined;
+    await page.route(`**${manualApply}`, async route => {
+      serverReceipt = await json<SchedulePasteApplyResult>(await route.fetch());
+      await route.fulfill({ status: 408, json: { error: '합성 응답 시간 초과' } });
+    }, { times: 1 });
+    const applyRequest = nextPost(page, manualApply);
+    await save.click();
+    expect((await applyRequest).status()).toBe(408);
+    await expect(button(page, '적용 결과 다시 확인')).toBeVisible();
+    await expect(start).toHaveValue(date(25));
+    await expect(save).toHaveCount(1);
+    expect(serverReceipt?.updated).toMatchObject([
+      { id: issue.id, version: issue.version + 1, startDate: date(25), endDate: date(26) },
+    ]);
+
+    const peerIssue = await json<Issue>(await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: serverReceipt!.updated[0].version, endDate: date(30) },
+    }));
+    await reloadChart(page, data.prefix);
+    await expect(start).toHaveValue(date(25));
+    await expect(chart.end(issue)).toHaveValue(date(30));
+    await expect(save).toHaveCount(0);
+    await expect(button(page, '적용 결과 다시 확인')).toHaveCount(0);
+    expect((await workspace(request)).issues.find(value => value.id === issue.id)).toEqual(peerIssue);
+    expect(writes).toEqual([manualPreview, manualApply]);
+  } finally { await data.close(); }
+});
+
+test('같은 작업자의 두 간트 탭은 같은 업무의 날짜 초안을 따로 유지한다', async ({ context, page, request }) => {
+  const data = await fixture(request);
+  const other = await context.newPage();
+  try {
+    const issue = await data.issue(data.first, '탭별 초안 업무', date(23), date(26));
+    const firstChart = await openChart(page, data.first, data.actor.id, data.prefix, '');
+    const secondChart = await openChart(other, data.first, data.actor.id, data.prefix, '');
+    const firstStart = firstChart.start(issue);
+    const secondStart = secondChart.start(issue);
+    const firstWrites = scheduleWrites(page), secondWrites = scheduleWrites(other);
+    await expect(firstStart).toHaveValue(date(23));
+    await expect(secondStart).toHaveValue(date(23));
+    await firstStart.fill(date(24));
+    await secondStart.fill(date(25));
+
+    await reloadChart(page, data.prefix);
+    await expect(firstStart).toHaveValue(date(24));
+    await button(firstChart.row(issue), `${issue.key} 날짜 변경 취소`).click();
+    await reloadChart(page, data.prefix);
+    await expect(firstStart).toHaveValue(date(23));
+    await reloadChart(other, data.prefix);
+    await expect(secondStart).toHaveValue(date(25));
+    await expect(button(secondChart.row(issue), `${issue.key} 날짜 저장`)).toBeVisible();
+    expect((await workspace(request)).issues.find(value => value.id === issue.id)).toEqual(issue);
+    expect(firstWrites).toEqual([]);
+    expect(secondWrites).toEqual([]);
+  } finally {
+    await other.close();
+    await data.close();
+  }
 });
 
 test('전체 프로젝트 간트에서 날짜 초안을 같은 행의 연결 편집에 이어 쓰고 적용할 때 함께 저장한다', async ({ page, request }) => {

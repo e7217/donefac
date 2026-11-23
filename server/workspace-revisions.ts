@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import type { Store } from './store.js';
 import { teamWorkloadCapacitySettingKey } from './team-workload-capacity.js';
 
+export function workspaceRestoreGeneration(store: Store): string {
+  return store.setting('attachmentImportGeneration') ?? 'initial';
+}
+
 const boardTables = {
   issues: ['id', 'project_id', 'parent_id', 'assignee_id', 'json'],
   projects: ['id', 'key', 'json'],
@@ -83,7 +87,9 @@ export class WorkspaceRevisions {
     const own = !this.store.db.isTransaction;
     if (own) this.store.db.exec('BEGIN');
     try {
-      const { board: boardRevision, gantt } = this.findRevisions.get() as { board: string; gantt: string };
+      const { board, gantt } = this.findRevisions.get() as { board: string; gantt: string };
+      // A restore invalidates local drafts even when the watched records match.
+      const boardRevision = createHash('sha256').update(board).update(workspaceRestoreGeneration(this.store)).digest('hex').slice(0, 32);
       const ganttRevision = createHash('sha256').update(boardRevision).update(gantt).digest('hex').slice(0, 32);
       const unchanged = since.teamBoardSince === boardRevision || since.ganttSince === ganttRevision;
       const data = unchanged ? null : snapshot();

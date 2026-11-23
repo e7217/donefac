@@ -1662,6 +1662,7 @@ export interface CycleBoardMoveResult extends IssueOrderMoveResult { duplicate: 
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
+  restoreGeneration?: string;
   planningItems?: PlanningItem[];
   calendars?: WorkCalendar[]; milestones?: Milestone[]; baselines?: ScheduleBaseline[];
   workloadCapacities?: ProjectWorkloadCapacity[];

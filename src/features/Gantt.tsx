@@ -55,12 +55,13 @@ import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './G
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { issueReporterFilterLabel, IssueReporterSelect } from './IssueReporterSelect';
+import { ganttDateDraftKey, readGanttDateDrafts, writeGanttDateDrafts, type StoredGanttDateDraft } from './gantt-date-draft-storage';
 import './issues.css';
 import './gantt.css';
 import './gantt-deadline-markers.css';
 
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
-type InlineDateDraft = { source: Issue; startDate: string | null; endDate: string | null; accept: (saved: Issue) => void };
+type InlineDateDraft = { source: Issue; startDate: string | null; endDate: string | null; accept: (saved: Issue) => void; owner: symbol };
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
 type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin; inlineDates?: InlineDateDraft[] };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
@@ -73,6 +74,16 @@ function inlineDateChange(draft: InlineDateDraft, issue = draft.source): Schedul
   return { id: issue.id, expectedVersion: issue.version,
     startDate: draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
     endDate: draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
+}
+function recoverableDates(issue: Issue, draft: StoredGanttDateDraft | undefined) {
+  if (draft?.projectId !== issue.projectId || draft.version > issue.version) return undefined;
+  if (draft.version === issue.version && (draft.startDate !== issue.startDate || draft.endDate !== issue.endDate)) return undefined;
+  return draft;
+}
+function draftDatesAreSaved(issue: Issue, draft: StoredGanttDateDraft) {
+  return issue.version > draft.version &&
+    (draft.draftStart === draft.startDate || issue.startDate === draft.draftStart) &&
+    (draft.draftEnd === draft.endDate || issue.endDate === draft.draftEnd);
 }
 function isUncertainScheduleResponse(cause: unknown): boolean {
   return !(cause instanceof ApiError) || cause.status >= 500 || [408, 425, 429, 499].includes(cause.status);
@@ -215,7 +226,7 @@ function getFixedDateEdge({ startDate, endDate }: Issue): FixedDateEdge | undefi
 }
 
 export function Gantt(props: GanttProps) {
-  return <ProjectGantt key={JSON.stringify([props.projectId, props.actorId, Boolean(props.allProjects), props.initialPlanningId])} {...props} />;
+  return <ProjectGantt key={JSON.stringify([props.projectId, props.actorId, Boolean(props.allProjects), props.initialPlanningId, props.data.restoreGeneration])} {...props} />;
 }
 
 function ProjectGantt(props: GanttProps) {
@@ -348,12 +359,16 @@ function ProjectGantt(props: GanttProps) {
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
   const inlineDateDrafts = useRef(new Map<string, InlineDateDraft>());
+  const retainedDates = useRef(new Map<string, StoredGanttDateDraft>());
+  const storageKey = ganttDateDraftKey(props.actorId, allProjects ? null : projectId, data.restoreGeneration);
+  const [dateRecoveryReady, setDateRecoveryReady] = useState(false);
+  const [dateStorageError, setDateStorageError] = useState(false);
   const draggingRef = useRef(false);
   const viewport = useRef<GanttViewport>(null);
   const restoreViewport = useRef<GanttViewportAnchor>(null);
   const [refreshCount, setRefreshCount] = useState(0);
   const [hasDraft, setHasDraft] = useState(false);
-  const [inlineDateIds, setInlineDateIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
     shiftMode || autoOpen || pasteProject || bulkDateSelection || bulkLinkSelection || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
@@ -442,13 +457,57 @@ function ProjectGantt(props: GanttProps) {
   }, [reconsider]);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
-  const trackInlineDates = useCallback((id: string, draft: InlineDateDraft | null) => {
+  useEffect(() => {
+    if (dateRecoveryReady) return;
+    let active = true;
+    queueMicrotask(() => {
+      if (!active) return;
+      try {
+        const stored = readGanttDateDrafts(window.sessionStorage, storageKey);
+        const count = stored.size;
+        if (count) {
+          for (const issue of data.issues) {
+            const draft = recoverableDates(issue, stored.get(issue.id));
+            if (draft && draftDatesAreSaved(issue, draft)) stored.delete(issue.id);
+          }
+        }
+        retainedDates.current = stored;
+        setInlineDateRecords(new Map(stored));
+        if (count !== stored.size) writeGanttDateDrafts(window.sessionStorage, storageKey, stored);
+      } catch { setDateStorageError(true); }
+      setDateRecoveryReady(true);
+    });
+    return () => { active = false; };
+  }, [data.issues, dateRecoveryReady, storageKey]);
+  const storeInlineDates = useCallback(() => {
+    setInlineDateRecords(new Map(retainedDates.current));
+    try {
+      writeGanttDateDrafts(window.sessionStorage, storageKey, retainedDates.current);
+      setDateStorageError(false);
+    } catch { setDateStorageError(true); }
+  }, [storageKey]);
+  const clearInlineDates = useCallback(() => {
+    inlineDateDrafts.current.clear();
+    if (!retainedDates.current.size) return;
+    retainedDates.current.clear();
+    storeInlineDates();
+  }, [storeInlineDates]);
+  const trackInlineDates = useCallback((id: string, draft: InlineDateDraft | null, owner: symbol, detached = false) => {
     const drafts = inlineDateDrafts.current;
-    const wasDirty = drafts.has(id);
-    if (draft) drafts.set(id, draft);
-    else drafts.delete(id);
-    if (wasDirty !== Boolean(draft)) setInlineDateIds(new Set(drafts.keys()));
-  }, []);
+    if (!draft) {
+      if (drafts.get(id)?.owner !== owner) return;
+      drafts.delete(id);
+      if (!detached && retainedDates.current.delete(id)) storeInlineDates();
+      return;
+    }
+    drafts.set(id, draft);
+    const { projectId, version, startDate, endDate } = draft.source;
+    const previous = retainedDates.current.get(id);
+    if (previous?.projectId === projectId && previous.version === version && previous.startDate === startDate &&
+        previous.endDate === endDate && previous.draftStart === draft.startDate && previous.draftEnd === draft.endDate) return;
+    retainedDates.current.set(id, { id, projectId, version, startDate, endDate, draftStart: draft.startDate, draftEnd: draft.endDate });
+    storeInlineDates();
+  }, [storeInlineDates]);
   const markBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
   useEffect(() => {
     const guard = (event: Event) => {
@@ -471,8 +530,7 @@ function ProjectGantt(props: GanttProps) {
             previewRef.current = null;
             setDatePreviewFocusTarget(null);
             draftsRef.current.clear();
-            inlineDateDrafts.current.clear();
-            setInlineDateIds(new Set());
+            clearInlineDates();
             setHasDraft(false);
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
@@ -492,7 +550,11 @@ function ProjectGantt(props: GanttProps) {
         setBulkLinkSelection(null);
       });
     };
-    const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || previewRef.current || draftsRef.current.size) { event.preventDefault(); event.returnValue = ''; } };
+    const unload = (event: BeforeUnloadEvent) => {
+      const needsConfirmation = [...draftsRef.current].some(([id, draft]) =>
+        !id.startsWith('dates:') || draft.pending || draft.awaitingResult || dateStorageError);
+      if (busyRef.current || previewRef.current || needsConfirmation) { event.preventDefault(); event.returnValue = ''; }
+    };
     const importReset = () => {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
@@ -501,8 +563,7 @@ function ProjectGantt(props: GanttProps) {
       setBulkLinkSelection(null);
       setManualReview(null); setManualProblem(null); setUndoId(null); setDatePreviewFocusTarget(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
-      inlineDateDrafts.current.clear();
-      setInlineDateIds(new Set());
+      clearInlineDates();
       setDraftEpoch(value => value + 1);
     };
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload);
@@ -512,7 +573,7 @@ function ProjectGantt(props: GanttProps) {
       window.removeEventListener('beforeunload', unload);
       window.removeEventListener('teamspace:workspace-imported', importReset);
     };
-  }, [notify, refresh, trackDraft, manualProblem?.kind]);
+  }, [notify, refresh, trackDraft, manualProblem?.kind, clearInlineDates, dateStorageError]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
     if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
@@ -704,12 +765,16 @@ function ProjectGantt(props: GanttProps) {
   }
   const { rows: ordinaryIssues, pinnedIssue } = chartRows(query, hideDone, planningScope);
   const visibleIssues = scheduleFocus ? focusedTrace?.issues ?? [] : ordinaryIssues;
-  // A peer edit can make a dirty row fail its active filters while refreshing a stale preview.
-  const visibleIds = inlineDateIds.size ? new Set(visibleIssues.map(issue => issue.id)) : null;
+  // A peer edit can put a recovered draft outside the current filters.
+  const recoverableRows = inlineDateRecords.size ? projectIssues.filter(issue =>
+    recoverableDates(issue, inlineDateRecords.get(issue.id))) : [];
+  const recoverableIds = new Set(recoverableRows.map(issue => issue.id));
+  const unavailableDateIds = [...inlineDateRecords.keys()].filter(id => !recoverableIds.has(id));
+  const visibleIds = inlineDateRecords.size ? new Set(visibleIssues.map(issue => issue.id)) : null;
   const retainedDateRows = visibleIds && !scheduleFocus
-    ? scopedIssues.filter(issue => inlineDateIds.has(issue.id) && !visibleIds.has(issue.id)) : [];
+    ? recoverableRows.filter(issue => !visibleIds.has(issue.id)) : [];
   const issues = retainedDateRows.length ? [...visibleIssues, ...retainedDateRows] : visibleIssues;
-  const inlineDateCount = inlineDateIds.size ? issues.filter(issue => inlineDateIds.has(issue.id)).length : 0;
+  const inlineDateCount = inlineDateRecords.size ? issues.filter(issue => recoverableIds.has(issue.id)).length : 0;
   const ordinaryIssueIds = focusedTrace ? new Set(ordinaryIssues.map(issue => issue.id)) : null;
   const outsideFilterCount = ordinaryIssueIds ? issues.filter(issue => !ordinaryIssueIds.has(issue.id) && issue.id !== hierarchyTrace?.anchor.id).length : 0;
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
@@ -1957,7 +2022,15 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 여러 행을 입력한 뒤 함께 검토할 수 있습니다. Esc로 날짜 변경을 취소합니다.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
+    {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}
+    {unavailableDateIds.length > 0 && <div className="gantt-hint">
+      <span role="status">원래 업무와 연결할 수 없는 날짜 초안이 {unavailableDateIds.length}건 있습니다.</span>
+      <button className="btn" type="button" disabled={busy || scheduleEditorOpen} onClick={() => {
+        for (const id of unavailableDateIds) retainedDates.current.delete(id);
+        storeInlineDates();
+      }}>연결할 수 없는 초안 지우기</button>
+    </div>}
     <div className="gantt-window-controls">
       <span>표시 범위</span>
       <button type="button" className="btn btn-ghost" aria-label="간트 이전 60일" onClick={() => setWindowStart(isoDay(clampWindowStart(range.start - 60)))}>←</button>
@@ -2085,12 +2158,13 @@ function ProjectGantt(props: GanttProps) {
                 childSchedule={{ label: `${issue.key} 하위 업무 일정 보기`, disabled: Boolean(scheduleFocus),
                   onOpen: opener => openScheduleFocus('hierarchy', issue, opener), onPointerDown: keepInlineDateFocus }} />
             </div>
-            <DateCells key={`${issue.id}:${draftEpoch}`} issue={issue} onDraftChange={trackDraft} onInlineDraftChange={trackInlineDates}
+            {dateRecoveryReady && <DateCells key={`${issue.id}:${issue.projectId}:${draftEpoch}`} issue={issue}
+              recovered={recoverableDates(issue, inlineDateRecords.get(issue.id))} onDraftChange={trackDraft} onInlineDraftChange={trackInlineDates}
               disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
               onReview={outgoingIssueIds.has(issue.id) ? reviewSuccessors : undefined}
               onReviewTeam={teamBlockerChoices.has(issue.id) ? (source, change, origin) =>
-                reviewTeamSuccessors(source, change, { ...origin, source }) : undefined} />
+                reviewTeamSuccessors(source, change, { ...origin, source }) : undefined} />}
           </div>
           <div className="gantt-row-timeline" style={{ width: timelineWidth }}>
           {captured?.startDate && captured.endDate && <div className="gantt-baseline-bar" role="img" aria-label={`${captured.key} 기준선 ${captured.startDate} ~ ${captured.endDate}`} title={`${baseline!.name}: ${captured.title} · ${captured.startDate} ~ ${captured.endDate}`} style={capturedStyle(captured.startDate, captured.endDate)} />}
@@ -2572,18 +2646,21 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   </form>;
 }
 
-function DateCells({ issue, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange }: {
+function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange }: {
   issue: Issue;
+  recovered?: StoredGanttDateDraft;
   onSave: (source: Issue, start: string | null, end: string | null, origin: InlineScheduleOrigin) => Promise<void>;
   onReview?: (anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
   onReviewTeam?: (source: Issue, anchor: CascadeAnchorChange, origin: Extract<CascadeOrigin, { kind: 'inline' }>) => void;
   disabled: boolean;
   onDraftChange: TrackDraft;
-  onInlineDraftChange: (id: string, draft: InlineDateDraft | null) => void;
+  onInlineDraftChange: (id: string, draft: InlineDateDraft | null, owner: symbol, detached?: boolean) => void;
 }) {
-  const [source, setSource] = useState(issue);
-  const [start, setStart] = useState(issue.startDate || '');
-  const [end, setEnd] = useState(issue.endDate || '');
+  const [source, setSource] = useState(() => recovered
+    ? { ...issue, version: recovered.version, startDate: recovered.startDate, endDate: recovered.endDate } : issue);
+  const [start, setStart] = useState((recovered ? recovered.draftStart : issue.startDate) ?? '');
+  const [end, setEnd] = useState((recovered ? recovered.draftEnd : issue.endDate) ?? '');
+  const [owner] = useState(() => Symbol());
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const startField = useRef<HTMLInputElement>(null);
@@ -2593,18 +2670,19 @@ function DateCells({ issue, onSave, onReview, onReviewTeam, disabled, onDraftCha
   const conflict = issue.version > source.version && dirty;
   if (issue.version > source.version && !dirty && !pending) { setSource(issue); setStart(issue.startDate || ''); setEnd(issue.endDate || ''); }
   const accept = useCallback((saved: Issue) => {
+    onInlineDraftChange(issue.id, null, owner);
     setSource(saved);
     setStart(saved.startDate || '');
     setEnd(saved.endDate || '');
-  }, []);
+  }, [issue.id, onInlineDraftChange, owner]);
   useLayoutEffect(() => {
     onDraftChange(draftId, dirty, pending);
-    onInlineDraftChange(issue.id, dirty ? { source, startDate: start || null, endDate: end || null, accept } : null);
-  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, dirty, pending, source, start, end, accept]);
+    onInlineDraftChange(issue.id, dirty ? { source, startDate: start || null, endDate: end || null, accept, owner } : null, owner);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, dirty, pending, source, start, end, accept, owner]);
   useLayoutEffect(() => () => {
     onDraftChange(draftId, false);
-    onInlineDraftChange(issue.id, null);
-  }, [onDraftChange, onInlineDraftChange, draftId, issue.id]);
+    onInlineDraftChange(issue.id, null, owner, true);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, owner]);
 
   const editedField = start !== (source.startDate || '') ? startField : endField;
   function reset(restoreField = false) {
@@ -2633,7 +2711,7 @@ function DateCells({ issue, onSave, onReview, onReviewTeam, disabled, onDraftCha
       });
     }
   }
-  const title = conflict ? '다른 변경이 있습니다. 입력은 보존됩니다. Esc로 최신 날짜 불러오기' : 'Enter로 저장 · Esc로 최신 날짜 불러오기';
+  const title = conflict ? '일정과 연결 편집에서 저장값과 입력을 비교하세요. Esc로 최신 날짜 불러오기' : 'Enter로 저장 · Esc로 최신 날짜 불러오기';
   function dateInput(edge: 'start' | 'end') {
     return <input ref={edge === 'start' ? startField : endField}
       className={`gantt-inline-date ${conflict ? 'has-conflict' : ''}`} type="date" title={title}

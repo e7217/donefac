@@ -7,7 +7,7 @@ import { AttachmentAppend } from './attachment-append.js';
 import { MarkdownArchiveImportError, MarkdownArchiveImportService } from './markdown-archive-import.js';
 import { MAX_MARKDOWN_ARCHIVE_BYTES } from '../shared/document-markdown-archive.js';
 import { Store } from './store.js';
-import { WorkspaceRevisions } from './workspace-revisions.js';
+import { WorkspaceRevisions, workspaceRestoreGeneration } from './workspace-revisions.js';
 import { seed } from './seed.js';
 import { WorkflowService, WorkflowError } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
@@ -404,7 +404,10 @@ export function createApp(options: {
       workloadCapacities:workload.snapshot(),teamWorkloadCapacity:teamCapacity.get(),milestones:scheduleArtifacts.allMilestones(),
       baselines:scheduleArtifacts.allBaselines(),issueSchemas:issueSchemas.snapshot(),
       issueOrders: issueOrders.snapshot(data.projects, issues),
-      ...(purpose === 'workspace' ? { teamScheduleBlockers: issueRelations.teamScheduleBlockers() } : {}),
+      ...(purpose === 'workspace' ? {
+        restoreGeneration: workspaceRestoreGeneration(store),
+        teamScheduleBlockers: issueRelations.teamScheduleBlockers(),
+      } : {}),
       ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
       ...(issueAliases && Object.keys(issueAliases).length ? { issueAliases } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
