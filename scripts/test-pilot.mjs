@@ -882,6 +882,46 @@ async function runStandardPilot() {
     assert.deepEqual(session.document.content.content, [propertyBlock]);
   };
   await verifyDocumentProperties(pilot.url);
+  const tableText = (text, marks) => ({ type: 'paragraph', content: [{ type: 'text', text, ...(marks ? { marks } : {}) }] });
+  const archiveTable = {
+    type: 'doc', content: [{ type: 'table', content: [
+      { type: 'tableRow', content: [
+        { type: 'tableHeader', attrs: { colspan: 2, align: 'center' }, content: [tableText('검토 표')] },
+        { type: 'tableHeader', attrs: { rowspan: 2 }, content: [tableText('공통 확인')] },
+      ] },
+      { type: 'tableRow', content: [
+        { type: 'tableHeader', content: [tableText('결과')] },
+        { type: 'tableCell', attrs: { align: 'right' }, content: [tableText('검토 완료', [{ type: 'bold' }]), tableText('확인 내용')] },
+      ] },
+    ] }],
+  };
+  const tableSource = await (await call(pilot.url, '/documents', { method: 'POST', status: 201, body: {
+    projectId, title: '파일럿 병합 표', content: archiveTable,
+  } })).json();
+  const archiveExportPath = `/document-exports/markdown.zip?${new URLSearchParams({ scope: 'subtree', source: 'saved', documentId: tableSource.id })}`;
+  const exportedTable = Buffer.from(await (await call(pilot.url, archiveExportPath)).arrayBuffer());
+  const archiveContentHeaders = { 'Content-Type': 'application/octet-stream' };
+  const tablePreview = await (await call(pilot.url, '/document-markdown-import/preview?projectId=&parentId=', {
+    method: 'POST', headers: archiveContentHeaders, body: exportedTable,
+  })).json();
+  assert.equal(tablePreview.format, 'teamspace');
+  assert.deepEqual(tablePreview.warnings, []);
+  const tableApplyPath = `/document-markdown-import/apply?previewId=${encodeURIComponent(tablePreview.id)}`;
+  const tableApplyOptions = { method: 'POST', headers: archiveContentHeaders, body: exportedTable };
+  const importedTable = await (await call(pilot.url, tableApplyPath, { ...tableApplyOptions, status: 201 })).json();
+  const [importedTableId] = importedTable.rootIds;
+  const verifyImportedTable = async url => {
+    assert.deepEqual(await (await call(url, tableApplyPath, tableApplyOptions)).json(), { ...importedTable, duplicate: true });
+    const [{ documents }, revisions] = await Promise.all([
+      call(url, '/workspace').then(response => response.json()),
+      call(url, `/documents/${importedTableId}/revisions`).then(response => response.json()),
+    ]);
+    const restored = documents.find(item => item.id === importedTableId);
+    assert.equal(restored.projectId, null);
+    assert.deepEqual(restored.content, tableSource.content);
+    assert.deepEqual(revisions.map(revision => revision.content), [tableSource.content]);
+  };
+  await verifyImportedTable(pilot.url);
   const collaboration = await (await call(pilot.url,`${documentPath}/collaboration/enable`,{
     method:'POST',body:{expectedVersion:document.version},
   })).json();
@@ -1169,6 +1209,7 @@ async function runStandardPilot() {
   await verifyLinkedPaste(copy.url);
   await verifyDecisionDraft(copy.url);
   await verifyDocumentProperties(copy.url);
+  await verifyImportedTable(copy.url);
   await verifyPrerequisite(copy.url);
   const restoredCycleProgress = await readProgress(copy.url);
   assert.equal(restoredCycleProgress.revision, cycleProgress.revision);

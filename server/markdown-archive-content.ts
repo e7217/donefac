@@ -8,6 +8,7 @@ import { hash, sniffMime } from './attachments.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { readMarkdownArchive } from './markdown-archive-format.js';
+import { parseMarkdownArchiveTable } from './markdown-archive-table.js';
 
 type ImportOptions = DocumentMarkdownArchiveTarget & { actorId: string; timestamp: string };
 type ImportedAttachment = { attachment: Attachment; bytes: Buffer };
@@ -63,6 +64,7 @@ export async function prepareMarkdownArchive(bytes: Buffer, { projectId, parentI
       readers.set(page.path, readArchiveMarkdown(page.markdown, {
         exportedTitle: source.format === 'teamspace',
         sectionMarkers: source.format === 'teamspace',
+        parseTable: parseMarkdownArchiveTable,
         resolve(address) {
           const target = archiveDestination(page.path, address);
           if (!target) return undefined;

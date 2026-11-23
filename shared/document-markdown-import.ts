@@ -1,4 +1,6 @@
 import { lexer, type MarkedToken, type Token, type Tokens } from 'marked';
+import { projectMarkdownArchiveTable, type MarkdownArchiveTableHeading } from './document-markdown-archive-table.js';
+import type { MarkdownArchiveHtmlNode } from './document-markdown-archive.js';
 import { markdownImportSectionId } from './document-sections.js';
 import type { RichContent } from './types.js';
 
@@ -20,9 +22,12 @@ const messages = {
 type WarningCode = keyof typeof messages;
 type Mark = NonNullable<RichContent['marks']>[number];
 type Destination = { href: string; imageSrc?: string };
+type HeadingSource = { node: Tokens.Heading; title: string; explicitId?: string } |
+  { token: Token; table: MarkdownArchiveHtmlNode; headings: MarkdownArchiveTableHeading[] };
 interface MarkdownArchiveConversion {
   exportedTitle?: boolean;
   sectionMarkers?: boolean;
+  parseTable?: (html: string) => MarkdownArchiveHtmlNode | undefined;
   resolve: (destination: string) => Destination | undefined;
 }
 const sectionMarker = /^<a id="([a-zA-Z0-9][a-zA-Z0-9_-]{0,79})" name="\1"><\/a>$/;
@@ -90,7 +95,8 @@ function inlineLabel(tokens: Token[], depth = 0): string {
 
 class MarkdownConversion {
   private readonly warningCounts = new Map<WarningCode, number>();
-  private readonly sections = new Map<Tokens.Heading, string>();
+  private readonly sections = new Map<Tokens.Heading | MarkdownArchiveHtmlNode, string>();
+  private readonly tables = new Map<Token, MarkdownArchiveHtmlNode>();
   private readonly anchors = new Map<string, string>();
   private readonly explicitAnchors = new Map<string, string>();
   private readonly omittedBlocks = new Set<Token>();
@@ -111,7 +117,26 @@ class MarkdownConversion {
     return this.explicitAnchors.get(fragment) ?? this.anchors.get(fragment.normalize('NFC'));
   }
 
-  indexHeadings(tokens: Token[], depth = 0): void {
+  private indexHeading(node: Tokens.Heading | MarkdownArchiveHtmlNode, title: string, explicitId?: string): void {
+    if (!this.suggestedTitle && title) {
+      this.suggestedTitle = title.replace(/\s+/gu, ' ').slice(0, 240).toWellFormed();
+    }
+    const id = markdownImportSectionId(this.sections.size + 1);
+    this.sections.set(node, id);
+    if (explicitId) {
+      if (this.explicitAnchors.has(explicitId)) throw new Error('문서에서 같은 절 ID를 두 번 사용할 수 없습니다.');
+      this.explicitAnchors.set(explicitId, id);
+    }
+    const base = title.normalize('NFC').toLowerCase().replace(/\s/gu, ' ').replace(/[^\p{L}\p{N} _-]/gu, '').replaceAll(' ', '-');
+    if (!base) return;
+    let slug = base;
+    let next = this.nextAnchorSuffix.get(base) ?? 1;
+    while (this.anchors.has(slug)) slug = `${base}-${next++}`;
+    this.nextAnchorSuffix.set(base, next);
+    this.anchors.set(slug, id);
+  }
+
+  private collectHeadings(tokens: Token[], sources: HeadingSource[], depth: number): void {
     if (depth > maxDepth) throw new Error(boundsMessage);
     let marker: { token: Token; id: string } | undefined;
     if (depth === 0 && this.archive?.exportedTitle && tokens[0]?.type === 'heading' && (tokens[0] as Tokens.Heading).depth === 1) {
@@ -126,32 +151,39 @@ class MarkdownConversion {
         const explicit = sectionMarker.exec(token.raw.trim())?.[1];
         if (explicit) { marker = { token, id: explicit }; continue; }
       }
-      if (token.type === 'blockquote') this.indexHeadings(token.tokens, depth + 1);
+      if (token.type === 'blockquote') this.collectHeadings(token.tokens, sources, depth + 1);
       if (token.type === 'list') {
-        for (const item of token.items) this.indexHeadings(item.tokens, depth + 1);
+        for (const item of token.items) this.collectHeadings(item.tokens, sources, depth + 1);
       }
       if (token.type === 'heading') {
-        const title = inlineLabel(token.tokens).trim();
-        if (!this.suggestedTitle && title) {
-          this.suggestedTitle = title.replace(/\s+/gu, ' ').slice(0, 240).toWellFormed();
-        }
-        const id = markdownImportSectionId(this.sections.size + 1);
-        this.sections.set(token, id);
-        if (marker) {
-          if (this.explicitAnchors.has(marker.id)) throw new Error('문서에서 같은 절 ID를 두 번 사용할 수 없습니다.');
-          this.explicitAnchors.set(marker.id, id);
-          this.omittedBlocks.add(marker.token);
-        }
-        const base = title.normalize('NFC').toLowerCase().replace(/\s/gu, ' ').replace(/[^\p{L}\p{N} _-]/gu, '').replaceAll(' ', '-');
-        if (base) {
-          let slug = base;
-          let next = this.nextAnchorSuffix.get(base) ?? 1;
-          while (this.anchors.has(slug)) slug = `${base}-${next++}`;
-          this.nextAnchorSuffix.set(base, next);
-          this.anchors.set(slug, id);
-        }
+        sources.push({ node: token, title: inlineLabel(token.tokens).trim(), explicitId: marker?.id });
+        if (marker) this.omittedBlocks.add(marker.token);
+      } else if (token.type === 'html') {
+        const table = this.archive?.parseTable?.(token.raw);
+        const projected = table && projectMarkdownArchiveTable(table);
+        if (table && projected) sources.push({ token, table, headings: projected.headings });
       }
       marker = undefined;
+    }
+  }
+
+  indexHeadings(tokens: Token[]): void {
+    const sources: HeadingSource[] = [];
+    this.collectHeadings(tokens, sources, 0);
+    const explicitIds = new Map<string, number>();
+    for (const source of sources) {
+      for (const { explicitId } of 'table' in source ? source.headings : [source]) {
+        if (explicitId) explicitIds.set(explicitId, (explicitIds.get(explicitId) ?? 0) + 1);
+      }
+    }
+    for (const source of sources) {
+      if ('table' in source) {
+        if (source.headings.some(({ explicitId }) => explicitId && explicitIds.get(explicitId) !== 1)) continue;
+        this.tables.set(source.token, source.table);
+        for (const { node, title, explicitId } of source.headings) this.indexHeading(node, title, explicitId);
+      } else {
+        this.indexHeading(source.node, source.title, source.explicitId);
+      }
     }
   }
 
@@ -192,11 +224,15 @@ class MarkdownConversion {
     if (!this.archive || tokens.length !== 1 || tokens[0].type !== 'image') return null;
     const image = tokens[0] as Tokens.Image;
     const raw = decodeDestination(image.href);
-    if (/[\\\u0000-\u001f\u007f]/.test(raw) || /^\/\//.test(raw.trim())) return null;
-    const destination = this.archive.resolve(raw.trim());
-    if (!destination?.imageSrc) return null;
+    const src = this.resolveArchiveImage(raw);
+    if (!src) return null;
     const alt = inlineLabel(image.tokens).replace(/\s+/gu, ' ').trim();
-    return { type: 'image', attrs: { src: destination.imageSrc, alt, ...(image.title ? { title: image.title } : {}) } };
+    return { type: 'image', attrs: { src, alt, ...(image.title ? { title: image.title } : {}) } };
+  }
+
+  private resolveArchiveImage(raw: string): string | undefined {
+    if (/[\\\u0000-\u001f\u007f]/.test(raw) || /^\/\//.test(raw.trim())) return undefined;
+    return this.archive?.resolve(raw.trim())?.imageSrc;
   }
 
   private inline(tokens: Token[], depth: number, marks: Mark[] = [], literal = false): RichContent[] {
@@ -320,10 +356,24 @@ class MarkdownConversion {
             })),
           })) });
           break;
-        case 'html':
+        case 'html': {
+          const table = this.tables.get(raw);
+          if (table) {
+            const projected = projectMarkdownArchiveTable(table, {
+              sectionId: node => this.sections.get(node),
+              resolveLink: value => this.resolveLink(value),
+              resolveImage: value => this.resolveArchiveImage(value),
+              warn: code => this.warn(code),
+            });
+            if (projected) {
+              content.push(projected.content);
+              break;
+            }
+          }
           this.warn('html');
           content.push(paragraph(literalLines(token.raw)));
           break;
+        }
         default:
           this.warn('unsupported');
           content.push(paragraph(literalLines(raw.raw)));

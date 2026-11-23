@@ -2,6 +2,12 @@ export const MAX_MARKDOWN_ARCHIVE_BYTES = 64 * 1024 * 1024;
 
 export type DocumentMarkdownArchiveFormat = 'teamspace' | 'docmost' | 'markdown';
 
+export interface MarkdownArchiveHtmlNode {
+  tag: string;
+  attributes: Readonly<Record<string, string>>;
+  children: readonly (MarkdownArchiveHtmlNode | string)[];
+}
+
 export interface DocumentMarkdownArchiveTarget {
   projectId: string | null;
   parentId: string | null;

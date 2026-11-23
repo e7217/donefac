@@ -30,6 +30,9 @@ test('360px에서 문서 ZIP을 검토하고 다른 공간에 첨부와 본문 �
   const bytes = Buffer.from('Markdown ZIP 첨부 합성 원본\r\n');
   const imageName = '설정 화면.png';
   const imageAlt = '원본에 삽입한 설정 화면';
+  const mergedHeader = '설정 표 머리글';
+  const editableCell = '저장할 셀';
+  const edit = '의 수정 내용';
   const imageBytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
 
   async function createPage(projectId: string, title: string, content: RichContent, parentId: string | null = null) {
@@ -50,7 +53,15 @@ test('360px에서 문서 ZIP을 검토하고 다른 공간에 첨부와 본문 �
     const image = await attach(child, imageName, 'image/png', imageBytes);
     await json<DocPage>(await request.patch(`/api/documents/${child.id}`, { headers, data: {
       expectedVersion: child.version,
-      content: body(paragraph(childText), { type: 'image', attrs: { src: `/api/attachments/${image.id}/content?inline=1`, alt: imageAlt } }),
+      content: body(paragraph(childText), { type: 'table', content: [
+        { type: 'tableRow', content: [{ type: 'tableHeader', attrs: { colspan: 2, align: 'center' }, content: [paragraph(mergedHeader)] }] },
+        { type: 'tableRow', content: [
+          { type: 'tableCell', content: [paragraph(editableCell)] },
+          { type: 'tableCell', content: [
+            { type: 'image', attrs: { src: `/api/attachments/${image.id}/content?inline=1`, alt: imageAlt } },
+          ] },
+        ] },
+      ] }),
     } }));
 
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
@@ -163,7 +174,11 @@ test('360px에서 문서 ZIP을 검토하고 다른 공간에 첨부와 본문 �
       await reader.goto(`/#/${targetProject.id}/documents/${savedChild.id}`);
       await expect(reader.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(childTitle);
       await expect(reader.locator('.docs-prose p').filter({ hasText: childText }).first()).toBeVisible();
-      const importedImage = reader.getByRole('img', { name: imageAlt, exact: true });
+      const importedTable = reader.locator('.docs-prose[contenteditable="true"] table');
+      await expect(importedTable).toHaveCount(1);
+      const header = importedTable.locator('th').filter({ hasText: mergedHeader });
+      await expect(header).toHaveAttribute('colspan', '2');
+      const importedImage = importedTable.getByRole('img', { name: imageAlt, exact: true });
       await expect(importedImage).toHaveAttribute('src', imagePath);
       await importedImage.scrollIntoViewIfNeeded();
       await expect(importedImage).toHaveJSProperty('naturalWidth', 1);
@@ -171,6 +186,23 @@ test('360px에서 문서 ZIP을 검토하고 다른 공간에 첨부와 본문 �
       expect(response.ok()).toBe(true);
       expect(response.headers()['content-type']).toBe('image/png');
       expect(await response.body()).toEqual(imageBytes);
+
+      const cell = importedTable.locator('td').filter({ hasText: editableCell });
+      await cell.locator('p').click();
+      await reader.keyboard.press('End');
+      await reader.keyboard.insertText(edit);
+      await expect(cell).toHaveText(editableCell + edit);
+      await reader.getByRole('button', { name: '저장', exact: true }).click();
+      await expect(reader.locator('.docs-save-state')).toHaveText('저장됨');
+      const editedPage = (await readWorkspace()).documents.find(item => item.id === savedChild.id);
+      expect(editedPage?.version).toBe(2);
+      expect(editedPage?.content.content?.[1]).toMatchObject({ type: 'table', content: [
+        { type: 'tableRow', content: [{ type: 'tableHeader', attrs: { colspan: 2, align: 'center' } }] },
+        { type: 'tableRow', content: [
+          { type: 'tableCell', content: [paragraph(editableCell + edit)] },
+          { type: 'tableCell', content: [{ type: 'image', attrs: { src: imagePath, alt: imageAlt } }] },
+        ] },
+      ] });
     } finally { await reader.close(); }
   } finally {
     const fixtures = (await readWorkspace()).documents.filter(document => document.title.startsWith(prefix));
