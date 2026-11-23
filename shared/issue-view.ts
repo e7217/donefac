@@ -230,6 +230,7 @@ export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: Issu
     case 'merge_blocked': return Boolean(summary?.blockedMergeRequests);
     case 'failed_pipeline': return Boolean(summary?.failedPipelines);
     case 'running_pipeline': return Boolean(summary?.runningPipelines);
+    case 'manual_pipeline': return Boolean(summary?.manualPipelines);
     case 'no_activity': return !summary?.activityCount;
   }
 }

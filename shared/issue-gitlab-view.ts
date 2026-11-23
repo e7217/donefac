@@ -9,6 +9,7 @@ export interface IssueGitlabSummary {
   blockedMergeRequests: number;
   failedPipelines: number;
   runningPipelines: number;
+  manualPipelines: number;
 }
 
 const activePipelineStates = new Set(['created', 'waiting_for_resource', 'preparing', 'pending', 'running']);
@@ -27,6 +28,7 @@ function pipelineGroup(link: GitlabLink) {
 function countPipeline(summary: IssueGitlabSummary, state: string) {
   if (state === 'failed') summary.failedPipelines++;
   else if (activePipelineStates.has(state)) summary.runningPipelines++;
+  else if (state === 'manual') summary.manualPipelines++;
 }
 
 export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): ReadonlyMap<string, IssueGitlabSummary> {
@@ -35,7 +37,7 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
   for (const link of links) {
     let summary = summaries.get(link.issueId);
     if (!summary) {
-      summary = { activityCount: 0, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 0, runningPipelines: 0 };
+      summary = { activityCount: 0, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 0, runningPipelines: 0, manualPipelines: 0 };
       summaries.set(link.issueId, summary);
     }
     summary.activityCount++;

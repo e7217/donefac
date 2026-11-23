@@ -176,7 +176,7 @@ test('360px 업무 목록과 보드의 GitLab 조건을 저장하고 간트에�
   }
 });
 
-test('같은 커밋에서 푸시 성공과 MR 실패를 구분하고 이후 MR 성공으로 실패 조건을 해제한다', async ({ page, request }) => {
+test('같은 커밋의 실행 유형을 구분하고 수동 대기 조건을 보드와 간트에 공유한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const unique = randomUUID();
   const baseUrl = 'https://gitlab.example.test';
@@ -193,13 +193,14 @@ test('같은 커밋에서 푸시 성공과 MR 실패를 구분하고 이후 MR �
   const issue = await readJson<Issue>(await request.post('/api/issues', { data: {
     projectId: project.id, title: `GitLab 실행 유형 확인 ${unique.slice(0, 8)}`,
   } }), 201);
+  let manualView: SavedView | undefined;
   const ref = `feature/${issue.key}`;
   const at = Date.now() - 60_000;
-  const pipeline = (id: number, source: 'merge_request_event' | 'push', status: 'failed' | 'success', sequence: number) =>
+  const pipeline = (id: number, source: 'merge_request_event' | 'push' | 'schedule', status: 'failed' | 'success' | 'manual' | 'running', sequence: number) =>
     request.post(`${settingsPath}/webhook`, {
       headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
       data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: projectUrl }, object_attributes: {
-        id, source, status, sha, ref, tag: false, finished_at: new Date(at + sequence * 1_000).toISOString(),
+        id, source, status, sha, ref, tag: false, updated_at: new Date(at + sequence * 1_000).toISOString(),
       } },
     }).then(response => readJson<{ duplicate: boolean; linked: number }>(response));
 
@@ -256,7 +257,55 @@ test('같은 커밋에서 푸시 성공과 MR 실패를 구분하고 이후 MR �
       .map(link => [link.iid, link.state, link.pipelineSource, link.pipelineTag]).sort()).toEqual([
       [901, 'failed', 'merge_request_event', false], [902, 'success', 'push', false], [903, 'success', 'merge_request_event', false],
     ]);
+
+    const waiting = '수동 실행 대기 파이프라인';
+    await expect(pipeline(910, 'schedule', 'manual', 4)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+    await expect(pipeline(909, 'schedule', 'manual', 5)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+    await page.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true }).click();
+    await expect(list).toContainText(`${waiting} 1개`);
+    await filter.selectOption({ label: waiting });
+    await expect(list).toBeVisible();
+    await expect(page.locator('.issue-table tr[data-issue-id]')).toHaveCount(1);
+    await page.getByRole('button', { name: '보드', exact: true }).click();
+    await expect(card).toContainText(`${waiting} 1개`);
+    await card.click();
+    const waitingPipeline = ticket.getByRole('region', { name: '파이프라인', exact: true }).getByRole('listitem').filter({ hasText: '#910' });
+    await expect(waitingPipeline.getByText('수동 실행', { exact: true })).toBeVisible();
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+
+    await page.getByRole('button', { name: '현재 보기 저장', exact: true }).click();
+    const save = page.getByRole('dialog', { name: '업무 보기 저장', exact: true });
+    await save.getByLabel('보기 이름', { exact: true }).fill(`수동 실행 검토 ${unique.slice(0, 8)}`);
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/views' && response.request().method() === 'POST');
+    await save.getByRole('button', { name: '저장', exact: true }).click();
+    manualView = await readJson<SavedView>(await saving, 201);
+    expect(manualView).toMatchObject({ layout: 'board', filters: { gitlab: 'manual_pipeline' } });
+    const savedIssues = `#/${project.id}/issues?savedView=${manualView.id}`;
+    const savedGantt = `#/${project.id}/gantt?savedView=${manualView.id}`;
+    await expect(page).toHaveURL(url => url.hash === savedIssues);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === savedGantt);
+    const criteria = page.getByRole('list', { name: '간트에 적용된 GitLab 조건', exact: true });
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const rows = chart.locator('.gantt-row[data-issue-id]');
+    await expect(criteria).toHaveText(waiting);
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toHaveAttribute('data-issue-id', issue.id);
+
+    await expect(pipeline(910, 'schedule', 'running', 6)).resolves.toMatchObject({ duplicate: false, linked: 1 });
+    await page.getByRole('button', { name: '업무 보기에서 열기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === savedIssues);
+    await page.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true }).click();
+    await expect(filter).toHaveValue('manual_pipeline');
+    await expect(card).toHaveCount(0);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === savedGantt);
+    await expect(criteria).toHaveText(waiting);
+    await expect(rows).toHaveCount(0);
+    expect((await workspace()).gitlabLinks.filter(link => link.issueId === issue.id && link.pipelineSource === 'schedule')
+      .map(link => [link.iid, link.state]).sort()).toEqual([[909, 'manual'], [910, 'running']]);
   } finally {
+    if (manualView) await request.delete(`/api/views/${manualView.id}?expectedVersion=${manualView.version}`);
     const deleted = await request.delete(`/api/issues/${issue.id}`);
     if (deleted.ok()) {
       const { trashEntryId } = await deleted.json() as { trashEntryId: string };

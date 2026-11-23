@@ -341,7 +341,7 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 브라우저의 `GET /api/workspace`는 `X-Teamspace-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
 
-팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.
+팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 전체 프로젝트 간트의 주소는 같은 값의 `ganttGitlab` 조건을 받는다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `manual_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.
 
 ## 보드 상태별 업무 한도
 
@@ -1240,10 +1240,13 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 | `open_merge_request` | 저장된 연결에 열린 MR이 있는 업무 |
 | `merge_blocked` | 열린 MR에 승인·충돌·파이프라인 등 확인된 병합 차단 사유가 있는 업무 |
 | `failed_pipeline` | 최신 연결 파이프라인 중 하나 이상이 실패한 업무 |
-| `running_pipeline` | 최신 연결 파이프라인 중 하나 이상이 실행 또는 대기 중인 업무 |
+| `running_pipeline` | 최신 연결 파이프라인 중 하나 이상이 자동 실행을 기다리거나 실행 중인 업무 |
+| `manual_pipeline` | 최신 연결 파이프라인 중 하나 이상이 `manual` 상태로 수동 실행을 기다리는 업무 |
 | `no_activity` | 저장된 GitLab 연결이 없는 업무 |
 
 같은 업무·GitLab 인스턴스·저장소·참조 이름의 파이프라인은 실행 유형별로 가장 큰 GitLab 파이프라인 ID를 현재 상태로 사용한다. 태그로 확인된 실행은 별도로 집계한다. 실행 유형을 확인하지 못한 기존 연결은 같은 참조의 미확인 그룹으로 집계하고, 참조 이름이나 원본 ID를 확인할 수 없는 연결은 각각 평가한다. 최신 상태는 웹훅과 동기화로 저장한 자료를 읽는다. 수정 요청에서 조건을 생략하면 유지하고 `null`을 보내면 해제한다. 자체 백업 형식 57은 MR 병합 상태와 `merge_blocked` 조건을 보존한다. 기존 GitLab 조건은 형식 53에서 지원한다.
+
+`manual_pipeline`은 GitLab이 보고한 파이프라인 상태를 기준으로 집계하며 형식 104에서 복원한다. 파이프라인의 개별 수동 작업과 실패 허용 여부는 **CI 작업 확인**에서 볼 수 있다. [GitLab 파이프라인 상태](https://docs.gitlab.com/api/pipelines/#list-project-pipelines) · [GitLab 수동 작업의 유형](https://docs.gitlab.com/ci/jobs/job_control/#types-of-manual-jobs)
 
 ## 공유 보기의 요청자 조건
 

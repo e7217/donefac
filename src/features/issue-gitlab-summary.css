@@ -29,6 +29,11 @@
   color: #9b3e26;
 }
 
+.issue-gitlab-state.is-manual {
+  background: #fff4d4;
+  color: #755014;
+}
+
 .issue-table .issue-gitlab-summary {
   margin-left: 5px;
 }

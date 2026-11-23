@@ -36,10 +36,10 @@ function pipeline(
 
 test('GitLab view filter validates the exact criteria and an omitted filter', () => {
   assert.equal(parseIssueViewGitlabFilter(undefined), undefined);
-  for (const criterion of ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'no_activity']) {
+  for (const criterion of ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'manual_pipeline', 'no_activity']) {
     assert.equal(parseIssueViewGitlabFilter(criterion), criterion);
   }
-  for (const invalid of [null, false, 0, [], {}, '', 'all', ' failed_pipeline', ['failed_pipeline']]) {
+  for (const invalid of [null, false, 0, [], {}, '', 'all', ' failed_pipeline', ['failed_pipeline'], 'manual', 'MANUAL_PIPELINE']) {
     assert.throws(() => parseIssueViewGitlabFilter(invalid), IssueViewGitlabFilterError);
   }
 });
@@ -96,8 +96,8 @@ test('GitLab summaries use the newest pipeline object per linked ticket, instanc
   ];
   for (const ordered of [links, [...links].reverse()]) {
     const summaries = summarizeIssueGitlabLinks(ordered);
-    assert.deepEqual(summaries.get('first'), { activityCount: 11, openMergeRequests: 1, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 1 });
-    assert.deepEqual(summaries.get('second'), { activityCount: 1, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 0 });
+    assert.deepEqual(summaries.get('first'), { activityCount: 11, openMergeRequests: 1, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 1, manualPipelines: 0 });
+    assert.deepEqual(summaries.get('second'), { activityCount: 1, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 0, manualPipelines: 0 });
     assert.equal(summaries.has('missing'), false);
   }
 });
@@ -111,7 +111,7 @@ test('GitLab summaries retain independent legacy pipelines and distinguish queue
     { ...pipeline(102, 'failed'), projectId: 77 },
   ];
   const summary = summarizeIssueGitlabLinks(links).get('first');
-  assert.deepEqual(summary, { activityCount: 12, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 5 });
+  assert.deepEqual(summary, { activityCount: 12, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 2, runningPipelines: 5, manualPipelines: 1 });
 });
 
 test('a successful push pipeline does not hide a failed MR pipeline until that source succeeds', () => {
@@ -130,7 +130,7 @@ test('tag and branch runs with the same source and ref have independent newest s
   const branchPending = { ...pipeline(102, 'pending'), pipelineSource: 'push' };
   const tagRetry = { ...pipeline(103, 'success'), pipelineSource: 'push', pipelineTag: true };
   assert.deepEqual(summarizeIssueGitlabLinks([branchPending, branchFailure, tagFailure]).get('first'), {
-    activityCount: 3, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1,
+    activityCount: 3, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1, manualPipelines: 0,
   });
   assert.equal(summarizeIssueGitlabLinks([tagRetry, branchPending, branchFailure, tagFailure]).get('first')?.failedPipelines, 0);
 });
@@ -142,8 +142,34 @@ test('invalid and legacy sources stay out of the verified pipeline source groups
   const unknownFutureSource = { ...pipeline(103, 'pending'), pipelineSource: 'new_gitlab_source' };
   assert.equal(summarizeIssueGitlabLinks([knownFailure, legacyFailure]).get('first')?.failedPipelines, 2);
   assert.deepEqual(summarizeIssueGitlabLinks([knownFailure, legacyFailure, invalidSource, unknownFutureSource]).get('first'), {
-    activityCount: 4, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1,
+    activityCount: 4, openMergeRequests: 0, blockedMergeRequests: 0, failedPipelines: 1, runningPipelines: 1, manualPipelines: 0,
   });
+});
+
+test('manual pipeline criteria use latest object per execution source, ref and tag without admitting job-like states', () => {
+  const gated = { ...pipeline(100, 'manual', { iid: 301 }), pipelineSource: 'merge_request_event', updatedAt: '2026-11-20T02:00:00.000Z' };
+  const push = { ...pipeline(101, 'success'), pipelineSource: 'push' };
+  const subsequent = { ...pipeline(102, 'success'), pipelineSource: 'merge_request_event' };
+  const tag = { ...pipeline(103, 'manual'), pipelineSource: 'push', pipelineTag: true };
+  const branch = { ...pipeline(104, 'pending'), pipelineSource: 'push', pipelineTag: false };
+  const alternateRef = { ...pipeline(105, 'manual', { branch: 'release' }), pipelineSource: 'merge_request_event' };
+  const alternateDone = { ...pipeline(106, 'success', { branch: 'release' }), pipelineSource: 'merge_request_event' };
+  const completedTag = { ...pipeline(107, 'success'), pipelineSource: 'push', pipelineTag: true };
+  const manualJobLike = link('first', 'merge_request', 'manual');
+  const links = [gated, push, tag, branch, alternateRef, manualJobLike];
+  const summary = (rows: GitlabLink[]) => summarizeIssueGitlabLinks(rows).get('first');
+  const matches = (rows: GitlabLink[]) => createIssueViewMatcher({ ...filters, gitlab: 'manual_pipeline', query: 'compare', status: 'todo' },
+    { users: [], gitlabLinks: rows }, schema)(issue('first'));
+  for (const rows of [links, [...links].reverse()]) {
+    assert.equal(summary(rows)?.manualPipelines, 3);
+    assert.equal(summary(rows)?.runningPipelines, 1);
+    assert.equal(summary(rows)?.failedPipelines, 0);
+    assert.equal(matches(rows), true);
+  }
+  assert.equal(summary([subsequent, ...links])?.manualPipelines, 2);
+  assert.equal(summary([alternateDone, subsequent, ...links])?.manualPipelines, 1);
+  assert.equal(summary([completedTag, alternateDone, subsequent, ...links])?.manualPipelines, 0);
+  assert.equal(matches([completedTag, alternateDone, subsequent, ...links]), false);
 });
 
 test('pipeline source labels distinguish verified triggers, tags, and unavailable evidence', () => {
@@ -183,8 +209,9 @@ test('GitLab criteria compose with ticket fields and do not treat branch or comm
     link('mr', 'merge_request', 'opened'), link('history', 'commit', 'committed'), link('closed', 'merge_request', 'closed'),
     pipeline(110, 'failed', { issueId: 'ci' }), pipeline(111, 'success', { issueId: 'ci' }),
     pipeline(1, 'failed', { issueId: 'broken' }), pipeline(4, 'running', { issueId: 'active' }),
+    pipeline(5, 'manual', { issueId: 'awaiting' }),
   ];
-  const tickets = ['mr', 'history', 'closed', 'ci', 'broken', 'active', 'unlinked'].map(issue);
+  const tickets = ['mr', 'history', 'closed', 'ci', 'broken', 'active', 'awaiting', 'unlinked'].map(issue);
   function result(criteria: Partial<SavedViewState['filters']>) {
     const match = createIssueViewMatcher({ ...filters, ...criteria }, { users: [], gitlabLinks }, schema);
     return tickets.filter(match).map(ticket => ticket.id);
@@ -193,6 +220,7 @@ test('GitLab criteria compose with ticket fields and do not treat branch or comm
   assert.deepEqual(result({ gitlab: 'open_merge_request', query: 'different' }), []);
   assert.deepEqual(result({ gitlab: 'failed_pipeline' }), ['broken']);
   assert.deepEqual(result({ gitlab: 'running_pipeline' }), ['active']);
+  assert.deepEqual(result({ gitlab: 'manual_pipeline' }), ['awaiting']);
   assert.deepEqual(result({ gitlab: 'no_activity' }), ['unlinked']);
   assert.deepEqual(result({}), tickets.map(ticket => ticket.id));
   assert.equal(createIssueViewMatcher(filters, { users: [] }, schema)(issue('legacy')), true);

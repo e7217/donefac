@@ -42,7 +42,7 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
     return issue;
   }
 
-  async function pipeline(issue: Issue, id: number, state: 'failed' | 'success' | 'running', elapsed: number) {
+  async function pipeline(issue: Issue, id: number, state: 'failed' | 'success' | 'running' | 'manual', elapsed: number) {
     const result = await json<{ linked: number; duplicate: boolean }>(await request.post(`${settingsPath}/webhook`, {
       headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': randomUUID() }, data: {
         object_kind: 'pipeline', project: { id: repositoryId, web_url: `${gitlabUrl}/team/repository` },
@@ -148,6 +148,22 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
     await gitlab.selectOption('running_pipeline');
     await expect.poll(() => location(page)).toEqual({ ...teamScope, ganttGitlab: 'running_pipeline' });
     await expectIssues(gantt, [running]);
+
+    await pipeline(east, 707, 'manual', 7);
+    await pipeline(differentOwner, 708, 'manual', 8);
+    const { path, ...boardFilters } = boardScope;
+    await page.goto(`/${path}?${new URLSearchParams(boardFilters)}`);
+    await gitlab.selectOption('manual_pipeline');
+    await expect.poll(() => location(page)).toEqual({ ...boardScope, boardGitlab: 'manual_pipeline' });
+    await expectIssues(board, [east]);
+    await button(page, '현재 조건으로 간트 열기').click();
+    const manualScope = { ...projectScope, ganttGitlab: 'manual_pipeline' };
+    await expect.poll(() => location(page)).toEqual(manualScope);
+    await expectIssues(gantt, [east]);
+    await page.reload();
+    await expect(gitlab).toHaveValue('manual_pipeline');
+    await expect.poll(() => location(page)).toEqual(manualScope);
+    await expectIssues(gantt, [east]);
   } finally {
     try {
       for (const issue of created.reverse()) {

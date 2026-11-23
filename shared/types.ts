@@ -1600,7 +1600,7 @@ export interface IssueViewPlanningFilter {
   releaseId?: string | null;
   dates?: IssueViewDateFilter;
 }
-export const ISSUE_VIEW_GITLAB_FILTERS = ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'no_activity'] as const;
+export const ISSUE_VIEW_GITLAB_FILTERS = ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'manual_pipeline', 'no_activity'] as const;
 export type IssueViewGitlabFilter = typeof ISSUE_VIEW_GITLAB_FILTERS[number];
 export function isIssueViewGitlabFilter(value: unknown): value is IssueViewGitlabFilter {
   return ISSUE_VIEW_GITLAB_FILTERS.some(filter => filter === value);

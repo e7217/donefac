@@ -106,7 +106,7 @@ test('saved multi-status views keep exact conditions and restore them with nativ
     assert.equal((await f.request(path, 'PATCH', { expectedVersion: created.data.version, filters: { ...base, statusIds: [] } })).status, 409);
 
     const { data: backup } = await f.request('/export');
-    assert.equal(backup.schemaVersion, 103);
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.deepEqual(backup.savedViews[0].filters, edited.data.filters);
     const single = await f.request(path, 'PATCH', { expectedVersion: edited.data.version, filters: { ...base, status: 'done' } });
     assert.equal(single.status, 200);
@@ -117,7 +117,7 @@ test('saved multi-status views keep exact conditions and restore them with nativ
     assert.equal(badVersion.status, 400);
     assert.match(badVersion.data.error, /schemaVersion 103/);
     assert.deepEqual((await f.request(listPath)).data, [single.data]);
-    assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);
+    assert.equal((await f.request('/import', 'POST', { data: { ...backup, schemaVersion: 103 } })).status, 200);
     const [restored] = (await f.request(listPath)).data as SavedView[];
     assert.deepEqual(restored.filters, edited.data.filters);
     assert.ok(restored.version > single.data.version);
@@ -522,7 +522,7 @@ test('native backup preserves merge readiness and blocked views across active an
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
 
-test('saved GitLab view drives field report membership and invalidates drilldown after a subsequent success', async () => {
+test('saved GitLab failed and manual views drive field reports and retain their filters across backup', async () => {
   const f = await fixture();
   try {
     const projectId = definition.projectId;
@@ -540,13 +540,14 @@ test('saved GitLab view drives field report membership and invalidates drilldown
     }
     const repair = await createIssue('GitLab 집계 수정할 CI');
     const healthy = await createIssue('GitLab 집계 성공 CI');
+    const waiting = await createIssue('GitLab 집계 수동 대기 CI');
     await createIssue('GitLab 집계 활동 없음');
     const baseUrl = 'https://git.example.test';
     const webhookSecret = 'synthetic-saved-gitlab-view';
     const {data: settings} = await f.request('/integrations/gitlab');
     const configured = await f.request('/integrations/gitlab', 'PATCH', {baseUrl, projectIds:[42], webhookSecret, expectedVersion:settings.version});
     assert.equal(configured.status, 200, JSON.stringify(configured.data));
-    async function sendPipeline(issueKey: string, id: number, status: 'failed' | 'success') {
+    async function sendPipeline(issueKey: string, id: number, status: 'failed' | 'success' | 'manual') {
       const accepted = await f.request('/integrations/gitlab/webhook', 'POST', {
         object_kind:'pipeline', project:{id:42, web_url:`${baseUrl}/team/repository`},
         object_attributes:{id, ref:`feature/${issueKey}`, status, finished_at:new Date(Date.now() - 1000).toISOString()},
@@ -556,6 +557,7 @@ test('saved GitLab view drives field report membership and invalidates drilldown
     }
     await sendPipeline(repair.key, 200, 'failed');
     await sendPipeline(healthy.key, 201, 'success');
+    await sendPipeline(waiting.key, 202, 'manual');
     const view = await f.request('/views','POST',{...definition, filters:{
       query:'GitLab 집계', type:'all', status:'all', assigneeId:'all', gitlab:'failed_pipeline',
     }});
@@ -572,11 +574,47 @@ test('saved GitLab view drives field report membership and invalidates drilldown
     assert.equal(matching.status, 200, JSON.stringify(matching.data));
     assert.deepEqual(matching.data.issues.map((issue: {id:string}) => issue.id), [repair.id]);
 
-    await sendPipeline(repair.key, 202, 'success');
+    const manualFilters = { ...view.data.filters, gitlab: 'manual_pipeline' };
+    const manual = await f.request('/views', 'POST', { ...definition, name: '수동 확인 대기 업무', filters: manualFilters });
+    assert.equal(manual.status, 201, JSON.stringify(manual.data));
+    const manualSelection = { fieldId, savedViewId: manual.data.id };
+    const manualReport = async () => {
+      const result = await f.request(path, 'POST', manualSelection);
+      assert.equal(result.status, 200, JSON.stringify(result.data));
+      return result.data;
+    };
+    const manualBefore = await manualReport();
+    const manualBucket = manualBefore.groups.find((group: { kind: string }) => group.kind === 'value');
+    assert.equal(manualBefore.totalIssues, 1);
+    const manualDrill = { ...manualSelection, revision: manualBefore.revision, bucketId: manualBucket.id };
+    const manualMatches = await f.request(`${path}/issues`, 'POST', manualDrill);
+    assert.equal(manualMatches.status, 200, JSON.stringify(manualMatches.data));
+    assert.deepEqual(manualMatches.data.issues.map((issue: { id: string }) => issue.id), [waiting.id]);
+
+    await sendPipeline(repair.key, 203, 'success');
     const changed = await f.request(path,'POST',selection);
     assert.equal(changed.status, 200);
     assert.equal(changed.data.totalIssues, 0);
     assert.equal((await f.request(`${path}/issues`, 'POST', drill)).status, 409);
+
+    const { data: backup } = await f.request('/export');
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    assert.equal((backup.savedViews as SavedView[]).find(candidate => candidate.id === manual.data.id)?.filters.gitlab, 'manual_pipeline');
+    const oldFormat = { ...backup, schemaVersion: 103 };
+    const rejected = await f.request('/import', 'POST', { data: oldFormat });
+    assert.equal(rejected.status, 400, JSON.stringify(rejected.data));
+    assert.match(rejected.data.error, /schemaVersion 104/);
+    assert.equal((await manualReport()).totalIssues, 1);
+
+    const previous = { ...oldFormat, savedViews: (backup.savedViews as SavedView[]).filter(candidate => candidate.id !== manual.data.id) };
+    assert.equal((await f.request('/import', 'POST', { data: previous })).status, 200);
+    const listPath = `/views?projectId=${projectId}`;
+    assert.deepEqual(((await f.request(listPath)).data as SavedView[]).map(candidate => candidate.filters.gitlab), ['failed_pipeline']);
+    assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);
+    assert.deepEqual(((await f.request(listPath)).data as SavedView[]).find(candidate => candidate.id === manual.data.id)?.filters, manualFilters);
+    assert.equal((await manualReport()).totalIssues, 1);
+    await sendPipeline(waiting.key, 204, 'success');
+    assert.equal((await manualReport()).totalIssues, 0);
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
 
