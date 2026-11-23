@@ -1,4 +1,4 @@
-import { calculateWorkingDateRange, CalendarError, MAX_WORKING_DURATION_DAYS, type createCalendarMath } from '../shared/calendar.js';
+import { calculateWorkingDateRange, CalendarError, isCalendarDate, MAX_WORKING_DURATION_DAYS, type createCalendarMath } from '../shared/calendar.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import type { AutomaticSchedulePreview, Dependency, Issue, ScheduleChange } from '../shared/types.js';
 
@@ -7,6 +7,7 @@ type CalendarMath = ReturnType<typeof createCalendarMath>;
 interface TeamFollowUpScope {
   sourceId: string;
   targetId: string;
+  anchorChange?: ScheduleDates;
   issues: Issue[];
   selectedIds: string[];
   dependencies: Dependency[];
@@ -27,22 +28,27 @@ function edgesByIssue(dependencies: Dependency[], direction: 'predecessorId' | '
   return groups;
 }
 
-export function teamFollowUpScope(sourceId: string, targetId: string, issues: Issue[], dependencies: Dependency[]): TeamFollowUpScope {
+export function teamFollowUpScope(sourceId: string, targetId: string, issues: Issue[], dependencies: Dependency[],
+  anchorChange?: ScheduleDates): TeamFollowUpScope {
   const byId = new Map(issues.map(issue => [issue.id, issue]));
   if (!byId.has(sourceId) || !byId.has(targetId)) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
   const outgoing = edgesByIssue(dependencies, 'predecessorId');
-  const selected = new Set([targetId]);
+  const selected = new Set([anchorChange ? sourceId : targetId]);
   for (const id of selected) {
     for (const dependency of outgoing.get(id) ?? []) {
       if (!byId.has(dependency.successorId)) throw new TeamFollowUpScheduleError(409, '선후행 연결에 현재 없는 업무가 있습니다.');
       selected.add(dependency.successorId);
-      if (selected.size > 1000) throw new TeamFollowUpScheduleError(422, '후행 업무는 한 번에 1,000개까지 계산할 수 있습니다.');
+      if (selected.size > 1000) throw new TeamFollowUpScheduleError(422, anchorChange
+        ? '선행 업무를 포함해 한 번에 1,000개 업무까지 계산할 수 있습니다.'
+        : '후행 업무는 한 번에 1,000개까지 계산할 수 있습니다.');
     }
   }
+  if (anchorChange && !selected.has(targetId)) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
   const incoming = dependencies.filter(dependency => selected.has(dependency.successorId));
   const references = new Set([...selected, sourceId, ...incoming.map(dependency => dependency.predecessorId)]);
   return {
     sourceId, targetId, issues: issues.filter(issue => references.has(issue.id)), selectedIds: [...selected], dependencies: incoming,
+    ...(anchorChange ? { anchorChange } : {}),
   };
 }
 
@@ -98,33 +104,65 @@ export function calculateTeamFollowUpSchedule(scope: TeamFollowUpScope, calendar
   const warnings: string[] = [];
   const blocking: string[] = [];
   const selected = new Set(scope.selectedIds);
-  if (selected.has(scope.sourceId)) {
+  const incoming = edgesByIssue(scope.dependencies, 'successorId');
+  const cycleThroughSource = scope.anchorChange
+    ? (incoming.get(scope.sourceId) ?? []).some(edge => selected.has(edge.predecessorId))
+    : selected.has(scope.sourceId);
+  if (cycleThroughSource) {
     return { changes, warnings, blocking: ['선행 업무까지 돌아오는 순환 관계가 있습니다. 연결 방향을 확인해 주세요.'] };
   }
   const issues = new Map(scope.issues.map(issue => [issue.id, issue]));
-  const incoming = edgesByIssue(scope.dependencies, 'successorId');
   const outgoing = edgesByIssue(scope.dependencies, 'predecessorId');
   const indegree = new Map(scope.selectedIds.map(id => [id,
     (incoming.get(id) ?? []).filter(edge => selected.has(edge.predecessorId)).length]));
   const queue = scope.selectedIds.filter(id => indegree.get(id) === 0);
   const blocked = new Set<string>();
   const effective = new Map<string, ScheduleDates>();
+  function recordChange(issue: Issue, next: ScheduleDates) {
+    const { startDate, endDate } = next;
+    effective.set(issue.id, next);
+    if (startDate === issue.startDate && endDate === issue.endDate) return;
+    changes.push({ id: issue.id, projectId: issue.projectId, key: issue.key, title: issue.title, version: issue.version,
+      fromStart: issue.startDate, fromEnd: issue.endDate, toStart: startDate, toEnd: endDate });
+    if (issue.dueDate && endDate && endDate > issue.dueDate) {
+      warnings.push(`${issue.key} · 조정한 종료일 ${endDate}이 목표 마감일 ${issue.dueDate} 이후입니다.`);
+    }
+  }
 
   for (const id of queue) {
     const issue = issues.get(id)!;
     const math = calendar(issue.projectId);
     const { dates, problems } = requiredDates(issue, incoming.get(id) ?? [], issues, effective, blocked, math);
-    const conflict = (dates.startDate && (!issue.startDate || dates.startDate > issue.startDate)) ||
-      (dates.endDate && (!issue.endDate || dates.endDate > issue.endDate));
-    if (!problems.length && conflict) {
+    const anchor = id === scope.sourceId ? scope.anchorChange : undefined;
+    const current = anchor ?? issue;
+    const conflict = (dates.startDate && (!current.startDate || dates.startDate > current.startDate)) ||
+      (dates.endDate && (!current.endDate || dates.endDate > current.endDate));
+    if (anchor) {
+      const { startDate, endDate } = anchor;
+      if ((startDate !== null && !isCalendarDate(startDate)) || (endDate !== null && !isCalendarDate(endDate))) {
+        problems.push(`${issue.key} · YYYY-MM-DD 형식의 날짜를 입력해 주세요.`);
+      } else if (startDate && endDate && endDate < startDate) {
+        problems.push(`${issue.key} · 종료일은 시작일보다 빠를 수 없습니다.`);
+      }
+      if (!endDate) problems.push(`${issue.key} · 선택한 차단 관계를 계산하려면 종료일을 입력해 주세요.`);
+      if (terminal(issue) && (startDate !== issue.startDate || endDate !== issue.endDate)) {
+        problems.push(`${issue.key} · 완료·취소 업무의 고정 일정은 변경할 수 없습니다.`);
+      }
+      if (conflict) {
+        for (const endpoint of ['startDate', 'endDate'] as const) {
+          const earliest = dates[endpoint];
+          const actual = anchor[endpoint];
+          if (earliest && (!actual || earliest > actual)) {
+            problems.push(`${issue.key} · 입력한 ${SCHEDULE_DATE_LABELS[endpoint]} ${actual ?? '미정'}이 선후행 조건 ${earliest}을 충족하지 않습니다.`);
+          }
+        }
+      }
+      if (!problems.length) recordChange(issue, anchor);
+    } else if (!problems.length && conflict) {
       if (terminal(issue)) problems.push(`${issue.key} · 완료·취소 업무의 고정 일정과 선후행 조건이 충돌합니다.`);
       else {
         try {
-          const { startDate, endDate } = delaySchedule(issue, dates, math);
-          effective.set(id, { startDate, endDate });
-          changes.push({ id, projectId: issue.projectId, key: issue.key, title: issue.title, version: issue.version,
-            fromStart: issue.startDate, fromEnd: issue.endDate, toStart: startDate, toEnd: endDate });
-          if (issue.dueDate && endDate > issue.dueDate) warnings.push(`${issue.key} · 조정한 종료일 ${endDate}이 목표 마감일 ${issue.dueDate} 이후입니다.`);
+          recordChange(issue, delaySchedule(issue, dates, math));
         } catch (cause) {
           if (!(cause instanceof CalendarError)) throw cause;
           problems.push(`${issue.key} · ${cause.message}`);

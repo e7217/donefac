@@ -1,6 +1,6 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
-import type { AutomaticSchedulePreview, Dependency, Issue, ProjectWorkflow, ProjectWorkloadCapacity, ScheduleChange,
+import type { AutomaticSchedulePreview, Dependency, Issue, ProjectWorkflow, ProjectWorkloadCapacity, ScheduleAnchorChange, ScheduleChange,
   TeamFollowUpScheduleInput, TeamScheduleBlocker, TeamWorkloadCapacity, TeamWorkloadLevelPreview, WorkCalendar, WorkloadLevelPlan, WorkloadLevelPreview } from '../shared/types.js';
 import { createCalendarMath,isCalendarDate,CalendarError } from '../shared/calendar.js';
 import { isRelationId } from '../shared/issue-relations.js';
@@ -15,7 +15,7 @@ import { calculateTeamFollowUpSchedule, teamFollowUpScope, TeamFollowUpScheduleE
 
 export class AutomaticScheduleError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomaticScheduleError(status,message,details);}
-export interface AutomaticScheduleMutation{id:string;expectedVersion:number;startDate:string|null;endDate:string|null}
+export type AutomaticScheduleMutation = ScheduleAnchorChange;
 interface AutomaticScheduleInput{projectId:string;issueIds?:string[];anchorDate?:string|null;defaultDuration?:number|null;seedChanges?:AutomaticScheduleMutation[];anchorChange?:AutomaticScheduleMutation}
 type ScheduleDates = Pick<AutomaticScheduleMutation, 'startDate' | 'endDate'>;
 export interface AutomaticScheduleResult{undoId:string;updated:Issue[];warnings?:string[]}
@@ -66,15 +66,26 @@ const followUpReadset = (issues: Issue[]): [string, number, string][] => issues
   .map(({ id, version, projectId }): [string, number, string] => [id, version, projectId]).sort((a, b) => a[0].localeCompare(b[0]));
 
 function parseTeamFollowUpInput(value: unknown): TeamFollowUpScheduleInput {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).some(key => key !== 'relationId' && key !== 'expectedVersion' && key !== 'anchorChange')) {
     fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
   }
-  const { relationId, expectedVersion } = value as Record<string, unknown>;
+  const { relationId, expectedVersion, anchorChange } = value as Record<string, unknown>;
   if (!isRelationId(relationId) ||
       typeof expectedVersion !== 'number' || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
     fail('선택한 차단 관계와 조회 당시 버전을 확인해 주세요.');
   }
-  return { relationId, expectedVersion };
+  if (anchorChange === undefined) return { relationId, expectedVersion };
+  if (!anchorChange || typeof anchorChange !== 'object' || Array.isArray(anchorChange) ||
+      Object.keys(anchorChange).some(key => key !== 'id' && key !== 'expectedVersion' && key !== 'startDate' && key !== 'endDate')) {
+    fail('원인 업무와 변경할 날짜를 확인해 주세요.');
+  }
+  const { id, expectedVersion: issueVersion, startDate, endDate } = anchorChange as Record<string, unknown>;
+  if (!isRelationId(id) || typeof issueVersion !== 'number' || !Number.isSafeInteger(issueVersion) || issueVersion < 1) {
+    fail('원인 업무와 조회 당시 업무 버전을 확인해 주세요.');
+  }
+  return { relationId, expectedVersion, anchorChange: { id, expectedVersion: issueVersion,
+    startDate: date(startDate, '시작일'), endDate: date(endDate, '종료일') } };
 }
 
 function dependencyHash(dependencies: Dependency[]) {
@@ -457,6 +468,15 @@ export class AutomaticScheduleService{
     if (chosen.version !== input.expectedVersion || terminal(source) || terminal(target)) {
       fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
     }
+    const { anchorChange } = input;
+    if (anchorChange && anchorChange.id !== source.id) {
+      fail('선택한 관계의 원인 업무만 변경할 수 있습니다.', applying ? 409 : 400);
+    }
+    if (anchorChange && anchorChange.expectedVersion !== source.version) {
+      fail('선행 업무가 변경되었습니다. 최신 일정을 확인한 뒤 다시 검토해 주세요.', 409, {
+        reason: 'stale_team_follow_up_source', currentVersion: source.version, startDate: source.startDate, endDate: source.endDate,
+      });
+    }
     for (const { id, sourceIssueId, targetIssueId, version, origin } of blockers) {
       // Imported relations only participate when explicitly chosen for this review.
       if (origin === 'jira' && id !== chosen.id) continue;
@@ -466,8 +486,10 @@ export class AutomaticScheduleService{
       if (dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) limit();
     }
     try {
-      const scope = teamFollowUpScope(source.id, target.id, issues, dependencies);
-      const teamFollowUp: TeamFollowUpRelation = { ...input, sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: source.endDate };
+      const scope = teamFollowUpScope(source.id, target.id, issues, dependencies, anchorChange);
+      const teamFollowUp: TeamFollowUpRelation = { ...input, sourceIssueId: source.id, targetIssueId: target.id,
+        sourceEndDate: anchorChange ? anchorChange.endDate : source.endDate,
+        sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate } };
       return { scope, teamFollowUp, workflow, terminal };
     } catch (error) {
       if (!(error instanceof TeamFollowUpScheduleError)) throw error;

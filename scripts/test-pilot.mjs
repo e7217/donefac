@@ -552,18 +552,20 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.deepEqual(replay.updated.find(value => value.id === issue.id), issue);
   assert.deepEqual(replay.updated.find(value => value.id === otherIssue.id), otherIssue);
   const handoff = traffic.handoff;
+  const anchor = workspace.issues.find(value => value.id === handoff.anchorId && value.projectId === fixture.projectId);
   const downstream = workspace.issues.find(value => value.id === handoff.issueId && value.projectId === bulk.otherProjectId);
   const blocker = workspace.issueRelations.find(value => value.id === handoff.relationId);
   const otherCalendar = workspace.calendars.find(value => value.projectId === bulk.otherProjectId);
-  assert.ok(downstream && blocker && otherCalendar);
+  assert.ok(anchor && downstream && blocker && otherCalendar);
+  assert.deepEqual([anchor.startDate, anchor.endDate], [handoff.anchorDate, handoff.anchorDate]);
   assert.deepEqual([downstream.startDate, downstream.endDate], [handoff.date, handoff.date]);
-  assert.deepEqual([blocker.sourceIssueId, blocker.targetIssueId, blocker.type], [issue.id, downstream.id, 'blocks']);
+  assert.deepEqual([blocker.sourceIssueId, blocker.targetIssueId, blocker.type], [anchor.id, downstream.id, 'blocks']);
   assert.ok(otherCalendar.exceptions.some(value => value.date === handoff.dayOff && value.isWorking === false));
   const handoffReceipt = await api(`/schedule/team-follow-up-result/${handoff.previewId}`, {
     headers: { 'X-Actor-Id': fixture.actorIds[0] },
   });
   assert.equal(handoffReceipt.undoId, handoff.undoId);
-  assert.deepEqual(handoffReceipt.updated, [downstream]);
+  assert.deepEqual(handoffReceipt.updated, [anchor, downstream]);
   const listNode = issueList.content.content?.find(node => node.type === 'issueList' && node.attrs?.projectId === fixture.projectId);
   const view = workspace.savedViews?.find(value => value.id === listNode?.attrs.savedViewId && value.projectId === fixture.projectId);
   assert.ok(listNode && view, 'The issue list must retain its project and same-project saved view.');

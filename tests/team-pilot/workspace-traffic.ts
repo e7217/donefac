@@ -111,29 +111,40 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
 
   const calendarPath = `/api/projects/${otherProject.id}/calendar`;
   const otherCalendar = await json<WorkCalendar>(requests.get(calendarPath, { headers }));
-  const dayOff = shiftWorkingDate(workingDate, 1, otherCalendar);
+  const anchorDate = shiftWorkingDate(workingDate, 1, calendar);
+  const dayOff = shiftWorkingDate(anchorDate, 1, otherCalendar);
   const changedCalendar = await json<WorkCalendar>(requests.patch(calendarPath, { headers, data: {
     expectedVersion: otherCalendar.version, exceptions: [{ date: dayOff, isWorking: false, label: '합성 후행 프로젝트 휴무' }],
   } }));
-  const handoffDate = shiftWorkingDate(workingDate, 1, changedCalendar);
+  const handoffDate = shiftWorkingDate(anchorDate, 1, changedCalendar);
   expect(handoffDate > dayOff).toBe(true);
+  const anchor = await json<Issue>(requests.post('/api/issues', { headers, data: {
+    projectId, title: '프로젝트 간 인계 선행 업무', startDate: workingDate, endDate: workingDate,
+  } }), 201);
   const downstream = await json<Issue>(requests.post('/api/issues', { headers, data: {
     projectId: otherProject.id, title: '프로젝트 간 인계 일정', startDate: workingDate, endDate: workingDate,
   } }), 201);
-  const blocker = await json<IssueRelation>(requests.post(`${issuePath}/relations`, { headers, data: {
+  const blocker = await json<IssueRelation>(requests.post(`/api/issues/${encodeURIComponent(anchor.id)}/relations`, { headers, data: {
     otherIssueId: downstream.id, type: 'blocks', direction: 'outgoing',
   } }), 201);
   const handoff = await json<AutomaticSchedulePreview>(requests.post('/api/schedule/team-follow-up-preview', { headers, data: {
     relationId: blocker.id, expectedVersion: blocker.version,
+    anchorChange: { id: anchor.id, expectedVersion: anchor.version, startDate: anchorDate, endDate: anchorDate },
   } }));
-  expect(handoff.teamFollowUp).toMatchObject({ sourceIssueId: issueId, targetIssueId: downstream.id, sourceEndDate: workingDate });
+  expect(handoff.teamFollowUp).toMatchObject({ sourceIssueId: anchor.id, targetIssueId: downstream.id, sourceEndDate: anchorDate,
+    sourceSchedule: { version: anchor.version, startDate: workingDate, endDate: workingDate } });
   expect(handoff.blocking).toEqual([]);
-  expect(handoff.changes).toMatchObject([{ id: downstream.id, projectId: otherProject.id, toStart: handoffDate, toEnd: handoffDate }]);
+  expect(handoff.changes).toMatchObject([
+    { id: anchor.id, projectId, toStart: anchorDate, toEnd: anchorDate },
+    { id: downstream.id, projectId: otherProject.id, toStart: handoffDate, toEnd: handoffDate },
+  ]);
   const handedOff = await json<ScheduleApplyResult>(requests.post('/api/schedule/team-follow-up-apply', { headers, data: {
     previewId: handoff.previewId,
   } }));
-  expect(handedOff.updated).toMatchObject([{ id: downstream.id, projectId: otherProject.id, startDate: handoffDate, endDate: handoffDate,
-    version: downstream.version + 1 }]);
+  expect(handedOff.updated).toMatchObject([
+    { id: anchor.id, projectId, startDate: anchorDate, endDate: anchorDate, version: anchor.version + 1 },
+    { id: downstream.id, projectId: otherProject.id, startDate: handoffDate, endDate: handoffDate, version: downstream.version + 1 },
+  ]);
 
   const dateQuery = new URLSearchParams({ startDate: workingDate, endDate: workingDate });
   const filters = { query: issue.key, status: changes.status, assigneeId: actorId, type: 'all' };
@@ -165,7 +176,8 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   ]);
   expect(current.issues.find(item => item.id === issueId)).toEqual(coordinated);
   expect(current.issues.find(item => item.id === otherIssue.id)).toEqual(secondary);
-  expect(current.issues.find(item => item.id === downstream.id)).toEqual(handedOff.updated[0]);
+  expect(current.issues.find(item => item.id === anchor.id)).toEqual(handedOff.updated[0]);
+  expect(current.issues.find(item => item.id === downstream.id)).toEqual(handedOff.updated[1]);
   expect(current.calendars?.find(item => item.projectId === otherProject.id)).toEqual(changedCalendar);
   expect(current.issues.find(item => item.id === successor.id)).toEqual(corrected.updated[0]);
   expect(current.dependencies.find(item => item.id === dependency.id)).toEqual(dependency);
@@ -182,7 +194,8 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
     issueId, issueVersion: moved.updated[0].version + 1, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
     bulkDates: { previewId: bulk.previewId, undoId: batch.undoId, dueDate: successorEnd,
       otherProjectId: otherProject.id, otherIssueId: otherIssue.id, otherIssueVersion: otherIssue.version + 1 },
-    handoff: { issueId: downstream.id, date: handoffDate, dayOff, relationId: blocker.id, previewId: handoff.previewId, undoId: handedOff.undoId },
+    handoff: { anchorId: anchor.id, anchorDate, issueId: downstream.id, date: handoffDate, dayOff,
+      relationId: blocker.id, previewId: handoff.previewId, undoId: handedOff.undoId },
     scheduledSuccessor: { issueId: successor.id, issueVersion: corrected.updated[0].version, startDate: successorStart,
       endDate: successorEnd, dependencyId: dependency.id, lagDays },
   };

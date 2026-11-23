@@ -10,7 +10,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
 import { CalendarError, calculateWorkingDateRange, defaultCalendar, validateWorkCalendar, isWorkingDate, shiftWorkingDate,
   countWorkingDays, createCalendarMath, MAX_CALENDAR_DATE, MAX_WORKING_DURATION_DAYS, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
-import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, IssueRelation, ScheduleChange, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomaticSchedulePreview, Dependency, DependencyType, Issue, IssueRelation, ScheduleChange, TeamFollowUpScheduleInput, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(dir=mkdtempSync(join(tmpdir(),'teamspace-calendar-')),createProject=true){
   const service=createApp({dataDir:dir}),server=service.app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${(server.address() as any).port}/api`;let closed=false;
@@ -45,9 +45,9 @@ async function handoffCalendar(f: Fixture, projectId: string, exceptions: WorkCa
 
 const scheduleState = async (f: Fixture) => (await f.request('/workspace')).data as WorkspaceSnapshot;
 
-async function handoff(f: Fixture, relation: IssueRelation): Promise<AutomaticSchedulePreview> {
+async function handoff(f: Fixture, relation: IssueRelation, anchorChange?: TeamFollowUpScheduleInput['anchorChange']): Promise<AutomaticSchedulePreview> {
   assert.ok(relation.version);
-  const result = await f.request(teamReview, 'POST', { relationId: relation.id, expectedVersion: relation.version });
+  const result = await f.request(teamReview, 'POST', { relationId: relation.id, expectedVersion: relation.version, anchorChange });
   assert.equal(result.status, 200, JSON.stringify(result.data));
   return result.data;
 }
@@ -82,7 +82,8 @@ test('cross-project handoff fences a mixed graph, uses each receiving calendar, 
   const preview = await handoff(f, relation);
   assert.deepEqual(preview.blocking, []);
   assert.deepEqual(preview.teamFollowUp, { relationId: relation.id, expectedVersion: relation.version,
-    sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: source.endDate });
+    sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: source.endDate,
+    sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate } });
   assert.equal(preview.calendarVersions?.[secondProjectId], secondCalendar.version);
   assert.equal(preview.calendarVersions?.[thirdProjectId], thirdCalendar.version);
   const expected = [[target.id, '2026-11-21', '2026-11-24'], [native.id, '2026-11-25', '2026-11-25'], [tail.id, '2026-11-28', '2026-11-30']];
@@ -167,6 +168,143 @@ test('cross-project handoff refuses to retime incomplete or terminal work and re
   assert.ok(cycle.blocking.some(item => item.includes('순환')));
   assert.equal((await f.request(teamApply, 'POST', { previewId: cycle.previewId })).status, 422);
   assert.deepEqual(await scheduleState(f), beforeCycle);
+});
+
+test('a proposed source change traverses all native branches and commits and restores every project together', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const secondId = 'project-team', thirdId = 'project-neo';
+  const sourceCalendar = await handoffCalendar(f, f.projectId, [{ date: '2026-11-23', isWorking: false, label: '선행 프로젝트 휴무' }]);
+  const secondCalendar = await handoffCalendar(f, secondId, [
+    { date: '2026-11-26', isWorking: false, label: '후행 프로젝트 휴무' },
+    { date: '2026-11-28', isWorking: true, label: '후행 프로젝트 토요일 근무' },
+  ]);
+  const fixed = await makeIssue(f, '원인 업무의 고정 선행', '2026-11-20', '2026-11-20');
+  const source = await makeIssue(f, '원인 업무 날짜 변경', '2026-11-24', '2026-11-24', { dueDate: '2026-11-24' });
+  const target = await makeIssue(f, '선택한 후행 업무', '2026-11-16', '2026-11-17', { projectId: secondId });
+  const branch = await makeIssue(f, '다른 프로젝트의 갈래', '2026-11-16', '2026-11-16', { projectId: thirdId });
+  const merge = await makeIssue(f, '합쳐진 후행 업무', '2026-11-16', '2026-11-17', { projectId: thirdId });
+  const local = await makeIssue(f, '원인과 같은 프로젝트의 갈래', '2026-11-16', '2026-11-16');
+  const relation = await blocks(f, source, target);
+  await blocks(f, source, branch);
+  await blocks(f, target, merge);
+  await dep(f, fixed, source);
+  await dep(f, branch, merge);
+  const anchorChange = { id: source.id, expectedVersion: source.version, startDate: '2026-11-24', endDate: '2026-11-25' };
+
+  const beforeLocal = await handoff(f, relation, anchorChange);
+  assert.ok(!beforeLocal.changes.some(change => change.id === local.id));
+  await dep(f, source, local);
+  const withLocal = await scheduleState(f);
+  const staleTopology = await f.request(teamApply, 'POST', { previewId: beforeLocal.previewId });
+  assert.equal(staleTopology.status, 409, JSON.stringify(staleTopology.data));
+  assert.deepEqual(await scheduleState(f), withLocal);
+
+  const beforeFixedEdit = await handoff(f, relation, anchorChange);
+  assert.deepEqual(beforeFixedEdit.blocking, []);
+  const edited = await f.request(`/issues/${fixed.id}`, 'PATCH', { expectedVersion: fixed.version, title: '고정 선행 수정' });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  const current = await scheduleState(f);
+  assert.equal((await f.request(teamApply, 'POST', { previewId: beforeFixedEdit.previewId })).status, 409);
+  assert.deepEqual(await scheduleState(f), current);
+
+  const preview = await handoff(f, relation, anchorChange);
+  assert.deepEqual(preview.blocking, []);
+  assert.deepEqual(preview.teamFollowUp, { relationId: relation.id, expectedVersion: relation.version, anchorChange,
+    sourceIssueId: source.id, targetIssueId: target.id, sourceEndDate: anchorChange.endDate,
+    sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate } });
+  assert.equal(preview.calendarVersions?.[f.projectId], sourceCalendar.version);
+  assert.equal(preview.calendarVersions?.[secondId], secondCalendar.version);
+  const expected = new Map([
+    [source.id, ['2026-11-24', '2026-11-25']], [target.id, ['2026-11-27', '2026-11-28']],
+    [branch.id, ['2026-11-26', '2026-11-26']], [merge.id, ['2026-11-30', '2026-12-01']],
+    [local.id, ['2026-11-26', '2026-11-26']],
+  ]);
+  assert.equal(preview.changes[0]?.id, source.id);
+  assert.deepEqual(new Map(preview.changes.map(change => [change.id, [change.toStart, change.toEnd]])), expected);
+  assert.ok(preview.warnings.some(warning => warning.includes(source.key) && warning.includes('목표 마감일')));
+  assert.deepEqual(await scheduleState(f), current);
+
+  const store = new Store(f.dir);
+  try {
+    store.db.exec(`CREATE TRIGGER fail_team_anchor_tail BEFORE UPDATE ON issues
+      WHEN json_extract(NEW.json,'$.title')='합쳐진 후행 업무'
+      BEGIN SELECT RAISE(ABORT,'synthetic cross-project anchor tail write failure'); END`);
+    const refused = await f.request(teamApply, 'POST', { previewId: preview.previewId });
+    assert.equal(refused.status, 500);
+    assert.deepEqual(await scheduleState(f), current);
+    assert.deepEqual(await f.request(teamResult(preview.previewId)), { status: 200, data: { applied: false } });
+    assert.equal(store.db.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+    store.db.exec('DROP TRIGGER fail_team_anchor_tail');
+  } finally { store.db.close(); }
+
+  const applied = await f.request(teamApply, 'POST', { previewId: preview.previewId });
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  const updated = applied.data.updated as Issue[];
+  assert.deepEqual(new Map(updated.map(issue => [issue.id, [issue.startDate, issue.endDate]])), expected);
+  assert.deepEqual(await f.request(teamResult(preview.previewId)), applied);
+  assert.deepEqual(await f.request(teamApply, 'POST', { previewId: preview.previewId }), applied);
+  const undo = await f.request('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+  assert.equal(undo.status, 200, JSON.stringify(undo.data));
+  const restored = await scheduleState(f);
+  for (const previous of current.issues.filter(issue => expected.has(issue.id))) {
+    const issue = restored.issues.find(value => value.id === previous.id)!;
+    assert.deepEqual([issue.startDate, issue.endDate, issue.dueDate, issue.version],
+      [previous.startDate, previous.endDate, previous.dueDate, previous.version + 2]);
+  }
+  assert.deepEqual(restored.dependencies, current.dependencies);
+});
+
+test('a proposed source change fences its version and blocks invalid anchors and fixed or cyclic successors', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const fixed = await makeIssue(f, '고정 선행', '2026-11-20', '2026-11-20');
+  const source = await makeIssue(f, '날짜 변경 원인 업무', '2026-11-23', '2026-11-24');
+  const target = await makeIssue(f, '차단 대상', '2026-11-16', '2026-11-16', { projectId: 'project-team' });
+  const relation = await blocks(f, source, target);
+  await dep(f, fixed, source);
+  const anchorChange = { id: source.id, expectedVersion: source.version, startDate: '2026-11-24', endDate: '2026-11-25' };
+  const input = { relationId: relation.id, expectedVersion: relation.version };
+  for (const invalid of [{ ...anchorChange, id: target.id }, { ...anchorChange, endDate: '2026-11-31' }]) {
+    const result = await f.request(teamReview, 'POST', { ...input, anchorChange: invalid });
+    assert.equal(result.status, 400, JSON.stringify(result.data));
+  }
+  const initial = await scheduleState(f);
+  for (const invalid of [{ ...anchorChange, startDate: '2026-11-20' }, { ...anchorChange, endDate: null }, { ...anchorChange, endDate: '2026-11-23' }]) {
+    const preview = await handoff(f, relation, invalid);
+    assert.ok(preview.blocking.some(item => item.includes(source.key)), JSON.stringify(preview));
+    assert.equal((await f.request(teamApply, 'POST', { previewId: preview.previewId })).status, 422);
+    assert.deepEqual(await scheduleState(f), initial);
+  }
+
+  const proposal = await handoff(f, relation, anchorChange);
+  assert.deepEqual(proposal.blocking, []);
+  const saved = await f.request(`/issues/${source.id}`, 'PATCH', { expectedVersion: source.version, endDate: '2026-11-26' });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const { version: currentVersion, startDate, endDate } = saved.data as Issue;
+  const beforeStale = await scheduleState(f);
+  for (const stale of [await f.request(teamReview, 'POST', { ...input, anchorChange }),
+    await f.request(teamApply, 'POST', { previewId: proposal.previewId })]) {
+    assert.equal(stale.status, 409, JSON.stringify(stale.data));
+    assert.deepEqual(stale.data.details, { reason: 'stale_team_follow_up_source', currentVersion, startDate, endDate });
+  }
+  assert.deepEqual(await scheduleState(f), beforeStale);
+
+  const terminal = await makeIssue(f, '고정된 완료 후행', '2026-11-16', '2026-11-16', { projectId: 'project-team', status: 'done' });
+  await dep(f, target, terminal);
+  const fresh = { ...anchorChange, expectedVersion: currentVersion };
+  const withTerminal = await scheduleState(f);
+  const terminalPreview = await handoff(f, relation, fresh);
+  assert.ok(terminalPreview.blocking.some(item => item.includes(terminal.key) && item.includes('고정 일정')));
+  assert.equal((await f.request(teamApply, 'POST', { previewId: terminalPreview.previewId })).status, 422);
+  assert.deepEqual(await scheduleState(f), withTerminal);
+
+  await blocks(f, target, source);
+  const withCycle = await scheduleState(f);
+  const cycle = await handoff(f, relation, fresh);
+  assert.ok(cycle.blocking.some(item => item.includes('순환')));
+  assert.equal((await f.request(teamApply, 'POST', { previewId: cycle.previewId })).status, 422);
+  assert.deepEqual(await scheduleState(f), withCycle);
 });
 
 test('working-calendar math honors exceptions, working weekends and full four-digit ISO bounds without day scans',()=>{

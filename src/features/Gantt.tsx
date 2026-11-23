@@ -458,7 +458,8 @@ function ProjectGantt(props: GanttProps) {
       return;
     }
     trackDraft(TEAM_FOLLOW_UP_DRAFT, true);
-    setTeamFollowUp({ relation, source: { id: source.id, key: source.key }, target: { id: target.id, key: target.key }, opener });
+    const { id, key, version, startDate, endDate } = source;
+    setTeamFollowUp({ relation, source: { id, key, version, startDate, endDate }, target: { id: target.id, key: target.key }, opener });
   }
   function closeTeamFollowUp(updated?: readonly Issue[]) {
     const opener = teamFollowUp?.opener;
@@ -476,7 +477,8 @@ function ProjectGantt(props: GanttProps) {
     setScheduleWarnings(result.warnings ?? []);
     await refresh();
     closeTeamFollowUp(result.updated);
-    notify(`${result.updated.length}개 후행 업무의 일정을 변경했습니다.`);
+    const includesSource = result.updated.some(issue => issue.id === teamFollowUp?.source.id);
+    notify(`${result.updated.length}개 ${includesSource ? '업무' : '후행 업무'}의 일정을 변경했습니다.`);
   }
   function finishCreating() {
     restoreCreateFocus.current = true;

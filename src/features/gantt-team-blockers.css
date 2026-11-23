@@ -152,6 +152,54 @@
   display: block;
 }
 
+.gantt-team-follow-up-dates {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+  margin: 12px 25px;
+  padding: 8px 12px 10px;
+  border: 1px solid #dce6df;
+  border-radius: 6px;
+}
+
+.gantt-team-follow-up-dates legend {
+  padding-inline: 4px;
+  color: #344d40;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.gantt-team-follow-up-dates label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.gantt-team-follow-up-dates .field {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding-inline: 6px;
+}
+
+.gantt-team-follow-up-dates > :is(button, p) {
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin: 0;
+}
+
+.gantt-team-follow-up-stale,
+.gantt-team-follow-up-notice {
+  margin: 8px 25px;
+  font-size: 12px;
+}
+
+.gantt-team-follow-up-stale p {
+  margin: 0 0 6px;
+}
+
 .gantt-team-blockers-pages {
   justify-content: flex-end;
   margin-top: 6px;
@@ -166,5 +214,11 @@
 
   .gantt-team-blockers-arrow {
     transform: rotate(90deg);
+  }
+
+  .gantt-team-follow-up-dates,
+  .gantt-team-follow-up-stale,
+  .gantt-team-follow-up-notice {
+    margin-inline: 13px;
   }
 }

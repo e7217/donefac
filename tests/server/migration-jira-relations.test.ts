@@ -11,7 +11,7 @@ import { createApp } from '../../server/app.js';
 import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
   IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem,
-  ProjectWorkflow, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive, TeamScheduleBlocker,
+  ProjectWorkflow, ScheduleAnchorChange, SchedulePasteApplyResult, SourceImport, SourceReconciliationAudit, SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -331,6 +331,9 @@ test('a selected proven Jira blocker schedules across project calendars without 
   const local = await f.call<Dependency>('/dependencies', 'POST', {
     predecessorId: target.id, successorId: successor.id, type: 'FS', lagDays: 0,
   }, 201);
+  await f.call<Dependency>('/dependencies', 'POST', {
+    predecessorId: source.id, successorId: later.id, type: 'FS', lagDays: 2,
+  }, 201);
   const [selected] = await f.relations(source);
   const [unselected] = await f.relations(later);
   assert.deepEqual([selected.sourceIssueId, selected.targetIssueId], [source.id, target.id]);
@@ -365,8 +368,8 @@ test('a selected proven Jira blocker schedules across project calendars without 
   const previewPath = '/schedule/team-follow-up-preview';
   const applyPath = '/schedule/team-follow-up-apply';
   await f.call(previewPath, 'POST', { relationId: unproven.id, expectedVersion: unproven.version }, 404);
-  const preview = (relation: IssueRelation) => f.call<AutomaticSchedulePreview>(previewPath, 'POST', {
-    relationId: relation.id, expectedVersion: relation.version,
+  const preview = (relation: IssueRelation, anchorChange?: ScheduleAnchorChange) => f.call<AutomaticSchedulePreview>(previewPath, 'POST', {
+    relationId: relation.id, expectedVersion: relation.version, anchorChange,
   });
   const plannedDates = (proposal: AutomaticSchedulePreview) => proposal.changes.map(row => [row.id, row.toStart, row.toEnd]);
   const expected = [[target.id, '2026-11-21', '2026-11-24'], [successor.id, '2026-11-25', '2026-11-25']];
@@ -390,6 +393,16 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.equal(proposal.calendarVersions?.[source.projectId], sourceCalendar.version);
   assert.equal(proposal.calendarVersions?.[target.projectId], targetCalendar.version);
   assert.deepEqual(plannedDates(proposal), expected);
+  const currentSource = before.issues.find(issue => issue.id === source.id)!;
+  const anchorChange = { id: source.id, expectedVersion: currentSource.version, startDate: source.startDate, endDate: '2026-11-24' };
+  const moved = await preview(selected, anchorChange);
+  assert.deepEqual(moved.blocking, []);
+  assert.equal(moved.teamFollowUp?.sourceEndDate, anchorChange.endDate);
+  assert.deepEqual(moved.teamFollowUp?.anchorChange, anchorChange);
+  assert.deepEqual(plannedDates(moved).sort(), [
+    [source.id, source.startDate, '2026-11-24'], [target.id, '2026-11-25', '2026-11-26'],
+    [successor.id, '2026-11-27', '2026-11-27'], [later.id, '2026-11-27', '2026-11-30'],
+  ].sort());
   assert.deepEqual(await f.workspace(), before);
 
   sourceCalendar = await calendar(source.projectId, [...sourceHours, { date: '2026-11-30', isWorking: false, label: '달력 버전 검증' }]);

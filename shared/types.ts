@@ -1531,14 +1531,20 @@ export interface ScheduleChange {
   toDue?: string | null;
 }
 export interface SchedulePreview { changes: ScheduleChange[]; warnings: string[]; calendarVersions?: Record<string, number>; previewId?: string; blocking?: string[]; expiresAt?: string }
+export interface ScheduleAnchorChange { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }
 export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean } |
-  { changes: { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }[] };
-export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number }
+  { changes: ScheduleAnchorChange[] };
+export interface TeamFollowUpScheduleInput { relationId: string; expectedVersion: number; anchorChange?: ScheduleAnchorChange }
 export interface AutomaticSchedulePreview extends SchedulePreview {
   previewId: string;
   blocking: string[];
   expiresAt: string;
-  teamFollowUp?: TeamFollowUpScheduleInput & { sourceIssueId: string; targetIssueId: string; sourceEndDate: string | null };
+  teamFollowUp?: TeamFollowUpScheduleInput & {
+    sourceIssueId: string;
+    targetIssueId: string;
+    sourceEndDate: string | null;
+    sourceSchedule?: Pick<Issue, 'version' | 'startDate' | 'endDate'>;
+  };
 }
 export interface WorkloadLevelSummary { overloadedCells: number; excessMinutes: number; completionDate: string | null }
 export interface WorkloadLevelConflict { userId: string; date: string; excessMinutes: number; issueIds: string[] }

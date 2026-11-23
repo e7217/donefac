@@ -884,7 +884,9 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/schedule/team-follow-up-preview`에 `/api/schedule/team-blockers`에서 확인한 `{relationId,expectedVersion}`을 보낸다. 두 업무가 서로 다른 프로젝트에 있고 현재 진행 대상인 차단 관계를 선택한다. 차단은 선행 종료 이후 첫 후행 프로젝트 근무일을 계산하며, 대상에서 이어지는 프로젝트별 선후행 연결과 열린 Teamspace 차단을 확인한다. Jira 이관 관계는 선택한 한 건을 이번 일정 계산에 포함한다. 전체 업무 10,000개와 연결 50,000개 이하에서 후행 업무 최대 1,000개를 계산한다.
 
-미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 관련 업무의 버전·소속과 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
+선행 업무의 날짜도 바꾸려면 `anchorChange: {id,expectedVersion,startDate,endDate}`를 함께 보낸다. `id`와 내부 `expectedVersion`은 선택한 관계의 선행 업무에 해당한다. 날짜는 `YYYY-MM-DD` 또는 `null`을 사용한다. 입력한 날짜를 고정하고, 선행 업무로 들어오는 연결과 선행 업무부터 이어지는 모든 프로젝트 내부 연결·열린 Teamspace 차단 및 선택한 Jira 관계를 검사한다. 이 경우 선행 업무를 포함해 최대 1,000개를 계산한다. 날짜가 바뀐 선행 업무는 후행 업무와 함께 `changes`에 들어간다. 선행 업무 버전이 바뀌면 미리보기와 적용은 `409` 및 `details.reason: "stale_team_follow_up_source"`와 현재 `currentVersion`, `startDate`, `endDate`를 반환한다.
+
+미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. `sourceSchedule`은 서버에 저장된 선행 업무의 `version`, `startDate`, `endDate`를 제공한다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 관련 업무의 버전·소속과 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
 
 `POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다.
 

@@ -287,7 +287,7 @@ test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업�
     const proposed = await json<AutomaticSchedulePreview>(response);
     expect(proposed.blocking).toEqual([]);
     expect(proposed.teamFollowUp).toEqual({ relationId: handoff.id, expectedVersion: handoff.version, sourceIssueId: source.id, targetIssueId: target.id,
-      sourceEndDate: source.endDate });
+      sourceEndDate: source.endDate, sourceSchedule: { version: source.version, startDate: source.startDate, endDate: source.endDate } });
     expect(proposed.calendarVersions?.[f.second.id]).toBe(calendar.version);
     expect(proposed.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([
       [target.id, '2026-11-21', '2026-11-24'], [downstream.id, '2026-11-25', '2026-11-25'],
@@ -347,4 +347,137 @@ test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업�
       if (calendar) await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: { ...originalCalendar, expectedVersion: calendar.version } }));
     }
   }
+});
+
+test('360px에서 선행 날짜를 편집하고 동시 수정 확인 후 모든 연결 일정을 함께 적용한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request);
+  const previewPath = '/api/schedule/team-follow-up-preview';
+  const applyPath = '/api/schedule/team-follow-up-apply';
+  const headers = { 'X-Actor-Id': f.actor.id };
+  try {
+    const source = await f.issue(f.first, '날짜를 수정할 선행', { startDate: '2026-11-19', endDate: '2026-11-20' });
+    const target = await f.issue(f.second, '프로젝트 간 후행', { startDate: '2026-11-16', endDate: '2026-11-17' });
+    const local = await f.issue(f.first, '같은 프로젝트의 다른 갈래', { startDate: '2026-11-16', endDate: '2026-11-16' });
+    const relation = await f.relation(source, target);
+    await f.dependency(source, local);
+    const hash = `${gantt(f.first)}&ganttProject=${f.second.id}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    const automaticRefresh = (url: URL) => url.pathname === '/api/workspace' && url.searchParams.has('ganttSince');
+    await page.route(automaticRefresh, route => route.fulfill({ status: 204 }));
+    await page.goto(`/${hash}`);
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
+    const panel = await openBlockers(page);
+    const pair = panel.locator(`[data-team-blocker-id="${relation.id}"]`);
+    const review = button(pair, `${source.key} → ${target.key} 프로젝트 간 일정 검토`);
+    const dialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const start = dialog.getByLabel('선행 업무 시작일', { exact: true });
+    const end = dialog.getByLabel('선행 업무 종료일', { exact: true });
+    const apply = button(dialog, '함께 적용');
+    const recalculate = button(dialog, '미리보기 다시 계산');
+    await expect(review).toBeVisible();
+    const savedBeforeOpen = await json<Issue>(await request.patch(`/api/issues/${source.id}`, { headers,
+      data: { expectedVersion: source.version, endDate: '2026-11-23' },
+    }));
+    const before = await f.schedule();
+    const opening = waitMutation(page, previewPath);
+    await review.click();
+    const opened = await opening;
+    expect(opened.request().postDataJSON()).toEqual({ relationId: relation.id, expectedVersion: relation.version });
+    const originalPreview = await json<AutomaticSchedulePreview>(opened);
+    expect(originalPreview.teamFollowUp?.sourceSchedule).toEqual({
+      version: savedBeforeOpen.version, startDate: savedBeforeOpen.startDate, endDate: savedBeforeOpen.endDate,
+    });
+    expect(originalPreview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([[target.id, '2026-11-24', '2026-11-25']]);
+    await expect(start).toHaveValue(savedBeforeOpen.startDate!);
+    await expect(end).toHaveValue(savedBeforeOpen.endDate!);
+    await page.unroute(automaticRefresh);
+    await start.fill('2026-11-24');
+    await end.fill('2026-11-25');
+    await expect(apply).toBeDisabled();
+    const dismissed = page.waitForEvent('dialog');
+    const staying = button(dialog, '돌아가기').click();
+    const confirm = await dismissed;
+    expect(confirm.message()).toContain('수정한 선행 업무 일정');
+    await confirm.dismiss();
+    await staying;
+    await expect(start).toHaveValue('2026-11-24');
+    await expect(end).toHaveValue('2026-11-25');
+    expect(await f.schedule()).toEqual(before);
+
+    await button(dialog, '저장된 날짜로 되돌리기').click();
+    await expect(start).toHaveValue(savedBeforeOpen.startDate!);
+    await expect(end).toHaveValue(savedBeforeOpen.endDate!);
+    await end.fill('2026-11-25');
+    const firstReviewing = waitMutation(page, previewPath);
+    await recalculate.click();
+    const firstReview = await firstReviewing;
+    expect(firstReview.request().postDataJSON().anchorChange).toEqual({
+      id: source.id, expectedVersion: savedBeforeOpen.version, startDate: savedBeforeOpen.startDate, endDate: '2026-11-25',
+    });
+    const proposed = await json<AutomaticSchedulePreview>(firstReview);
+    expect(proposed.changes.map(change => change.id)).toHaveLength(3);
+    expect(proposed.changes.map(change => change.id)).toEqual(expect.arrayContaining([source.id, target.id, local.id]));
+    await expect(apply).toBeEnabled();
+
+    const updated = await json<Issue>(await request.patch(`/api/issues/${source.id}`, { headers,
+      data: { expectedVersion: savedBeforeOpen.version, startDate: '2026-11-20' },
+    }));
+    const afterEdit = await f.schedule();
+    const staleResponse = waitMutation(page, applyPath);
+    await apply.click();
+    expect((await staleResponse).status()).toBe(409);
+    await expect(dialog.getByText(/^최신 선행 업무 일정.*2026-11-20/)).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await button(dialog, '최신 일정 기준으로 다시 검토').click();
+    await expect(start).toHaveValue(updated.startDate!);
+    await expect(end).toHaveValue('2026-11-25');
+    await expect(apply).toBeDisabled();
+    expect(await f.schedule()).toEqual(afterEdit);
+
+    const revising = waitMutation(page, previewPath);
+    await recalculate.click();
+    const reviewed = await revising;
+    expect(reviewed.request().postDataJSON().anchorChange).toEqual({
+      id: source.id, expectedVersion: updated.version, startDate: updated.startDate, endDate: '2026-11-25',
+    });
+    const latest = await json<AutomaticSchedulePreview>(reviewed);
+    expect(latest.blocking).toEqual([]);
+    const dates = dialog.getByRole('table', { name: '검토할 업무 일정', exact: true });
+    for (const issue of [source, target, local]) {
+      await expect(dates.getByRole('row').filter({ hasText: issue.title })
+        .locator(`[data-schedule-project="${issue.projectId}"]`)).toBeVisible();
+    }
+    const bounds = await dialog.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    const writes: unknown[] = [];
+    let result: SchedulePasteApplyResult | undefined;
+    await page.route(url => url.pathname === applyPath, async intercepted => {
+      writes.push(intercepted.request().postDataJSON());
+      result = await json<SchedulePasteApplyResult>(await intercepted.fetch());
+      await intercepted.abort('failed');
+    });
+    await apply.click();
+    const retry = button(dialog, '적용 결과 다시 확인');
+    await expect(retry).toBeVisible();
+    const recovering = waitMutation(page, `/api/schedule/team-follow-up-result/${latest.previewId}`, 'GET');
+    await retry.click();
+    expect(await json<SchedulePasteApplyResult>(await recovering)).toEqual(result);
+    expect(writes).toEqual([{ previewId: latest.previewId }]);
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toBeFocused();
+    expect((await f.schedule()).dates).toEqual({
+      [source.id]: { startDate: updated.startDate, endDate: '2026-11-25', dueDate: source.dueDate },
+      [target.id]: { startDate: '2026-11-26', endDate: '2026-11-27', dueDate: target.dueDate },
+      [local.id]: { startDate: '2026-11-26', endDate: '2026-11-26', dueDate: local.dueDate },
+    });
+    const undo = waitMutation(page, '/api/schedule/undo');
+    await button(page, '되돌리기').click();
+    await json(await undo);
+    expect(await f.schedule()).toEqual(afterEdit);
+    await expect(page).toHaveURL(url => url.hash === hash);
+  } finally { await f.close(); }
 });
