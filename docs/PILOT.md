@@ -176,7 +176,7 @@ npm run pilot:confluence:audit -- /absolute/path/confluence-audit.json /absolute
 | `MISSING_FROM_ARCHIVE`, `VERSION_MISMATCH`, `HIERARCHY_MISMATCH` | ZIP의 페이지 누락, 현재 버전 또는 상위 관계 차이 |
 | `MISSING_ARCHIVE_BODY`, `ATTACHMENT_EVIDENCE_PROBLEM` | ZIP에서 페이지 본문 또는 첨부 바이트를 확인할 수 있는지 여부 |
 
-리허설에서 분석할 ZIP의 SHA-256과 검토 파일의 해시를 대조한다. 적용 전 **원본 주소와 제외 항목**에서 같은 패키지와 `page` 종류를 고른 뒤 정확한 원본 페이지 ID를 찾아 확인한다. 팀 열람 범위에서 제외해야 하는 페이지는 체크하고 새 미리보기에서 하위 기록까지 적용 범위를 검토한다. 검토 파일에는 원본 페이지 ID가 들어가므로 원본 자료와 함께 비공개로 보관한다.
+리허설의 `stage --confluence-findings`에 이 검토 파일을 지정하면 ZIP의 SHA-256과 크기를 대조해 같은 패키지에 연결한다. 적용 전 보관한 검토 파일에서 페이지 ID를 확인하고 **원본 주소와 제외 항목**에서 같은 패키지와 `page` 종류를 고른 뒤 해당 페이지를 찾는다. 팀 열람 범위에서 제외해야 하는 페이지는 체크하고 새 미리보기에서 하위 기록까지 적용 범위를 검토한다. 검토 파일은 원본 자료와 함께 비공개로 보관한다.
 
 ## 오프라인 원본 이관 리허설
 
@@ -206,6 +206,16 @@ npm run pilot:rehearsal -- review /absolute/path/rehearsal
 ```
 
 `stage --profile`은 `analyzed`와 `review` 상태의 형식 2 보고서를 받는다. 이전 형식은 `profile`로 다시 분석한다. 패키지 수·순서·제품·인스턴스를 실제 업로드할 바이트와 대조한다. 저장된 분석의 원본 형식, 압축 해제 크기와 객체·파일·경고 건수도 확인한다. 동일한 ZIP은 경로나 파일명을 바꿔 지정할 수 있다. 개별 XML·CSV·JSON은 분석에 쓰는 파일명을 유지한다. 보고서가 `blocked`거나 파일·설정·분석이 달라지면 준비를 중단하고 이번 실행이 만든 작업공간을 정리한다. 성공한 준비는 `stage.json`과 후속 검증 보고서의 `profile`에 사전 분석 보고서 자체의 SHA-256과 시각·상태를 남긴다.
+
+Confluence 대조 파일은 같은 `stage` 명령에 별도로 연결할 수 있다.
+
+```bash
+npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/rehearsal \
+  --profile /absolute/path/source-profile.json \
+  --confluence-findings /absolute/path/page-findings.json
+```
+
+`--confluence-findings`는 반복 지정할 수 있다. 같은 ZIP을 여러 페이지 범위로 나눠 대조했다면 각 검토 파일을 지정한다. 각 파일은 SHA-256과 크기가 일치하는 Confluence XML ZIP 패키지 한 개에 연결한다. 같은 ZIP을 여러 인스턴스에 등록해 연결 대상이 모호하거나 동일한 검토 파일을 중복 지정하면 준비를 중단한다. 파일 한 개당 64MiB, 최대 100개와 합계 128MiB까지 읽는다. `confluence-findings/<검토 파일 SHA-256>.json`에 당시 바이트를 권한 `0600`으로 보관한다. `stage.json`의 `confluenceReviews`에는 패키지 ID·해시·대조 범위·사유별 건수만 기록한다. `review`와 `verify`는 보관한 파일과 연결을 다시 확인한다. 페이지 제외 여부와 공간 열람 권한은 적용 전에 담당자가 검토한다.
 
 `--profile`은 선택 옵션이다. `stage`는 새 디렉터리에 `workspace/`와 `stage.json`을 만들며, 옵션 선택에 관계없이 한 파일 64MiB, 최대 20개, 합계 512MiB를 파일럿 시작 전과 실제 읽을 때 검사한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 외부 연동 자격 정보 없이 실행한다.
 
@@ -240,6 +250,8 @@ npm run pilot:rehearsal -- verify /absolute/path/rehearsal
 ```
 
 `verify`는 분석 때 보관한 패키지 파일의 SHA-256을 다시 계산하고, 이관 영수증의 패키지 범위와 전체 원본·첨부 검증 결과를 확인한다. 검사에 사용한 파일럿을 종료한 뒤 물리 백업을 만들고, 별도 경로에 복원해 영수증과 업무·문서·계획 데이터의 해시를 다시 비교한다. 영수증에 연결된 댓글, 문서 이력, 작업 기록, 활성 업무 관계와 티켓에 표시된 Jira 상태 이력도 건수와 SHA-256을 대조한다. 건수가 같아도 대상 내용이 달라지면 보고서의 `changedReceiptIds`에 해당 영수증이 기록된다.
+
+연결한 Confluence 검토 파일이 있으면 검증 보고서에 두 파일의 해시와 사유별 집계를 기록한다. 패키지를 적용한 영수증에서는 검토 페이지를 제외, 문서 연결 기록, 원본 보관만, 영수증 원본에 없음으로 집계하고 복원본의 건수와 해시를 대조한다. 명시적 제외와 상위 페이지로 인해 함께 제외된 항목을 모두 포함한다. 집계 보고서에서 페이지 ID는 생략한다. 검토 파일 상태가 `needs-review`이면 자료가 일치해도 종료 코드 `2`로 남으며, 기존 무결성 실패가 있으면 종료 코드 `1`을 유지한다.
 
 매 실행마다 `verification-*/report.json`에 결과를 남긴다. 원본 검사를 통과하고 적용 영수증이 있으면 해당 디렉터리에 물리 `backup/`과 `restored/`도 보관한다. 보고서는 건수, 해시, 내부 ID를 기록하며, 워크스페이스와 백업에는 원본과 첨부 바이트가 들어 있다.
 

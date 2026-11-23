@@ -10,6 +10,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import { parseConfluenceFindings } from '../../scripts/pilot-migration-confluence-findings.mjs';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const cli = fileURLToPath(new URL('../../scripts/confluence-pilot-audit.mjs', import.meta.url));
@@ -156,7 +157,7 @@ async function assertFindings(path, { directory, archive, status, selection, fin
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   const raw = await readFile(path, 'utf8');
   assertPrivate({ stdout: raw, stderr: '' }, directory);
-  const { checkedAt, ...report } = JSON.parse(raw);
+  const { checkedAt, ...report } = parseConfluenceFindings(JSON.parse(raw));
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
   assert.deepEqual(report, {
     format: 'teamspace-confluence-audit-findings', version: 1, selection, status,

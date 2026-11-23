@@ -227,3 +227,94 @@ test('migration rehearsal surfaces pending stages, conflicted package identities
   assert.doesNotMatch(JSON.stringify(corrupt), /never-emit/);
   assert.deepEqual(compareMigrationEvidence(await evidence(sample()), corrupt).changedReceiptIds, [receiptId]);
 });
+
+const reviewedPageIds = ['100000000000000001', '100000000000000002', '100000000000000003', '100000000000000004', '100000000000000005'];
+const reviewDispositionCounts = { excluded: 2, documentBound: 1, archiveOnly: 1, absent: 1 };
+
+function confluenceReview(sha256: string, pageIds: string[]) {
+  const status = pageIds.length ? 'needs-review' as const : 'matched' as const;
+  return {
+    proof: { packageId: wiki.packageId, sha256, status },
+    findings: { status, archive: { sha256: wiki.sha256, bytes: wiki.size },
+      findings: pageIds.map(pageId => ({ pageId, codes: ['LIVE_RESTRICTED'] })) },
+  };
+}
+
+function reviewedPage(sourceId: string, extras: Record<string, unknown> = {}) {
+  return {
+    sourceImportId: receiptId, packageSha256: wiki.sha256,
+    source: { product: wiki.product, instanceKey: wiki.instanceKey, format: wiki.format },
+    record: { id: `page:${sourceId}`, kind: 'page', sourceId, title: 'never-emit-private-source-page' },
+    targetType: null, targetId: null, ...extras,
+  };
+}
+
+function confluenceEvidence(rows: ReturnType<typeof reviewedPage>[], reviews: ReturnType<typeof confluenceReview>[],
+  offsets: number[] = [], alterPage = (page: object) => page, version = 1) {
+  const input = sample({ version });
+  const receipt = { ...input.receipt, configuration: {
+    ...input.receipt.configuration, excludedRecords: [`${wiki.packageId}/page:${reviewedPageIds[2]}`],
+  } };
+  const previousCount = input.observations.integrity.records.observed;
+  const total = Math.max(previousCount, rows.length + 1);
+  const extra = total - previousCount;
+  const observations = {
+    ...input.observations, recordCounts: { ...input.observations.recordCounts, linked: input.observations.recordCounts.linked + extra },
+    integrity: { ...input.observations.integrity, records: { expected: total, observed: total }, packages:
+      input.observations.integrity.packages.map(pkg => pkg.stagingId === wiki.packageId ? {
+        ...pkg, records: { expected: pkg.records.expected + extra, observed: pkg.records.observed + extra },
+      } : pkg) },
+  };
+  return collectMigrationEvidence(async path => {
+    if (path === '/source-imports') return [receipt];
+    if (path === '/workspace') return input.workspace;
+    if (path === `/source-imports/${receiptId}/reconciliation/audit?expectedVersion=${version}`) return observations;
+    assert.match(path, new RegExp(`^/source-imports/${receiptId}/records\\?kind=page&offset=\\d+&limit=100$`));
+    const offset = Number(new URL(path, 'http://localhost').searchParams.get('offset'));
+    offsets.push(offset);
+    return alterPage({ records: rows.slice(offset, offset + 100), total: rows.length, offset, limit: 100 });
+  }, input.packages, reviews);
+}
+
+test('Confluence findings use exact receipt package identities, one page scan, and a private disposition digest', async () => {
+  const [bound, inheritedExclusion, explicitExclusion, archiveOnly, absent] = reviewedPageIds;
+  const rows = [
+    reviewedPage(absent, { packageSha256: 'e'.repeat(64), targetType: 'document', targetId: 'wrong-zip-document' }),
+    reviewedPage(absent, { source: { product: wiki.product, instanceKey: 'another-instance', format: wiki.format },
+      targetType: 'document', targetId: 'wrong-instance-document' }),
+    ...Array.from({ length: 98 }, (_, index) => reviewedPage(String(index + 1))),
+    reviewedPage(bound, { targetType: 'document', targetId: 'team-document' }),
+    reviewedPage(inheritedExclusion, { excluded: true }),
+    reviewedPage(explicitExclusion),
+    reviewedPage(archiveOnly),
+  ];
+  const offsets: number[] = [];
+  const reviews = [confluenceReview('9'.repeat(64), reviewedPageIds), confluenceReview('8'.repeat(64), [bound, absent])];
+  const before = await confluenceEvidence(rows, reviews, offsets);
+  assert.deepEqual(offsets, [0, 100]);
+  assert.equal(before.status, 'review');
+  const observed = before.receipts[0].confluenceReviews;
+  assert.deepEqual(observed?.map(({ counts }) => counts),
+    [{ excluded: 0, documentBound: 1, archiveOnly: 0, absent: 1 }, reviewDispositionCounts]);
+  assert.ok(observed?.every(({ dispositionsSha256 }) => /^[a-f0-9]{64}$/u.test(dispositionsSha256)));
+  assert.doesNotMatch(JSON.stringify(before), /10000000000000000[1-5]|never-emit|team-document|wrong-.*-document/);
+  const after = await confluenceEvidence([...rows].reverse(), [...reviews].reverse(), [], undefined, 2);
+  assert.equal(compareMigrationEvidence(before, after).matches, true);
+
+  const changed = await confluenceEvidence([...rows.slice(0, -4), reviewedPage(bound), ...rows.slice(-3, -1),
+    reviewedPage(archiveOnly, { targetType: 'document', targetId: 'team-document' })], reviews);
+  assert.deepEqual(changed.receipts[0].confluenceReviews?.[1].counts, reviewDispositionCounts);
+  assert.deepEqual(compareMigrationEvidence(before, changed).changedReceiptIds, [receiptId]);
+});
+
+test('Confluence matched findings with no rows preserve status and malformed page evidence is rejected', async () => {
+  const matched = confluenceReview('9'.repeat(64), []);
+  const offsets: number[] = [];
+  const result = await confluenceEvidence([], [matched], offsets);
+  assert.deepEqual(offsets, []);
+  assert.equal(result.status, 'verified');
+  assert.deepEqual(result.receipts[0].confluenceReviews?.[0].counts, { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 });
+  const review = confluenceReview('8'.repeat(64), [reviewedPageIds[0]]);
+  await assert.rejects(confluenceEvidence([reviewedPage(reviewedPageIds[0])], [review], [], page => ({ ...page, total: 9000 })),
+    /Confluence 페이지별 검토의 영수증 원본 목록/);
+});

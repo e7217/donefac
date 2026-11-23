@@ -29,8 +29,34 @@ const jiraAuthor = 'synthetic-jira-author-key';
 const privateJiraDisplayName = 'Migration fixture Jira author';
 const confluenceAuthor = 'synthetic-confluence-author-key';
 const confluenceGroup = 'synthetic-private-confluence-group';
+const restrictedPage = '280206';
+const restrictedDescendant = '280207';
+const missingPage = '98315877000281463247';
+const restrictedTitle = 'synthetic-private-confluence-restricted-title';
+const restrictedBody = 'synthetic-private-confluence-restricted-body';
 const originalFrom = 'synthetic-source-instance';
 const attachment = Buffer.from('synthetic source attachment\0');
+const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+
+function confluenceFindings(bytes, changes = {}) {
+  return {
+    format: 'teamspace-confluence-audit-findings',
+    version: 1,
+    checkedAt: '2026-11-23T02:00:00.000Z',
+    selection: 'explicit-pages',
+    status: 'needs-review',
+    archive: { sha256: digest(bytes), bytes: bytes.length },
+    spacePermissions: 'manual-review',
+    unidentifiedPages: 0,
+    findings: [
+      { pageId: '200', codes: ['VERSION_MISMATCH'] },
+      { pageId: restrictedPage, codes: ['LIVE_RESTRICTED', 'RESTRICTION_MISMATCH'] },
+      { pageId: restrictedDescendant, codes: ['LIVE_RESTRICTED'] },
+      { pageId: missingPage, codes: ['MISSING_FROM_ARCHIVE'] },
+    ],
+    ...changes,
+  };
+}
 
 function fixturePackages() {
   const jira = zip([
@@ -77,12 +103,23 @@ function fixturePackages() {
       <property name="contentStatus">historical</property><property name="originalVersion" class="Page"><id name="id">200</id></property>
       <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
       <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
+    <object class="Page"><id name="id">${restrictedPage}</id><property name="title">${restrictedTitle}</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
+      <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
+    <object class="Page"><id name="id">${restrictedDescendant}</id><property name="title">${restrictedTitle} child</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">20</id></property><property name="creationDate">${date}</property>
+      <property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property>
+      <property name="parent" class="Page"><id name="id">${restrictedPage}</id></property></object>
     <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>${privateBody}</p><ac:task-list>
       <ac:task><ac:task-id>1</ac:task-id><ac:task-status>complete</ac:task-status><ac:task-body><ac:link><ri:user ri:userkey="${confluenceAuthor}"/></ac:link> ${privateChecklistItem} <time datetime="${checklistDue}"/></ac:task-body></ac:task>
     </ac:task-list>]]></property>
       <property name="content" class="Page"><id name="id">200</id></property></object>
     <object class="BodyContent"><id name="id">301</id><property name="body"><![CDATA[<p>${privateRevision}</p>]]></property>
       <property name="content" class="Page"><id name="id">201</id></property></object>
+    <object class="BodyContent"><id name="id">302</id><property name="body"><![CDATA[<p>${restrictedBody}</p>]]></property>
+      <property name="content" class="Page"><id name="id">${restrictedPage}</id></property></object>
+    <object class="BodyContent"><id name="id">303</id><property name="body"><![CDATA[<p>${restrictedBody} child</p>]]></property>
+      <property name="content" class="Page"><id name="id">${restrictedDescendant}</id></property></object>
     <object class="Comment"><id name="id">400</id><property name="containerContent" class="Page"><id name="id">200</id></property>
       <property name="creationDate">${date}</property><property name="creator" class="ConfluenceUserImpl"><id name="key">${confluenceAuthor}</id></property></object>
     <object class="BodyContent"><id name="id">401</id><property name="body"><![CDATA[<p>${privateConfluenceComment}</p>]]></property>
@@ -138,7 +175,7 @@ async function readReport(root, answer) {
   const raw = await readFile(path, 'utf8');
   for (const value of [root, privateTitle, privateRelatedTitle, privateRelease, privateSprint, privateBody, privateJiraComment, privateConfluenceComment,
     privateRevision, privateWorklog, privateOldStatus, privateOtherStatus, jiraAuthor, privateJiraDisplayName, confluenceAuthor, confluenceGroup, originalFrom,
-    privateChecklistItem,
+    privateChecklistItem, restrictedTitle, restrictedBody, missingPage, '"pageId"',
     'private-wiki.zip', 'private-jira.zip', attachment.toString()]) {
     assert.equal(raw.includes(value), false);
   }
@@ -146,7 +183,7 @@ async function readReport(root, answer) {
   return { attempt: join(path, '..'), report: JSON.parse(raw) };
 }
 
-test('migration rehearsal stages profiled exports, applies a reviewed plan, and compares a separate cold restore', { timeout: 120_000 }, async t => {
+test('migration rehearsal binds Confluence reviews to profiled exports and checks receipts after cold restore', { timeout: 150_000 }, async t => {
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-e2e-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'other-workspace'), TEAMSPACE_PILOT_ACCESS_FILE: join(scratch, 'absent-key'),
@@ -172,14 +209,22 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   const profile = JSON.parse(profileBytes);
   assert.equal(profile.version, 2);
   assert.equal(profile.status, 'review');
-  const expectedProfileProof = { version: 2, status: 'review', checkedAt: profile.checkedAt,
-    sha256: createHash('sha256').update(profileBytes).digest('hex') };
+  const expectedProfileProof = { version: 2, status: 'review', checkedAt: profile.checkedAt, sha256: digest(profileBytes) };
 
   const movedFile = 'relocated-jira.zip';
   await rename(join(scratch, input.packages[0].file), join(scratch, movedFile));
   input.packages[0] = { ...input.packages[0], file: movedFile, instanceKey: ` ${input.packages[0].instanceKey} ` };
   await writeFile(manifest, JSON.stringify(input));
-  const stageArguments = ['stage', manifest, root, '--profile', profilePath];
+  const wikiBytes = packages.find(item => item.product === 'confluence').bytes;
+  const reviewInputs = [confluenceFindings(wikiBytes), confluenceFindings(wikiBytes, {
+    selection: 'visible-space', status: 'matched', findings: [],
+  })];
+  const paths = [join(scratch, 'private-page-findings.json'), join(scratch, 'private-empty-findings.json')];
+  const reportBytes = reviewInputs.map(value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`));
+  const reviewDigests = reportBytes.map(digest);
+  for (const [index, path] of paths.entries()) await writeFile(path, reportBytes[index]);
+  const stageArguments = ['stage', manifest, root, '--confluence-findings', paths[0], '--profile', profilePath,
+    '--confluence-findings', paths[1]];
   const stage = await launch(stageArguments, env).exited;
   assert.equal(stage.code, 0, stage.stderr);
   assert.equal((await stat(root)).mode & 0o777, 0o700);
@@ -188,6 +233,9 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   const initial = await readFile(stagePath, 'utf8');
   const staged = JSON.parse(initial);
   assert.deepEqual(staged.profile, expectedProfileProof);
+  assert.equal(staged.confluenceReviews.length, 2);
+  assert.doesNotMatch(initial, /"pageId"|private-page-findings\.json|private-empty-findings\.json/);
+  assert.equal(initial.includes(missingPage), false);
   assert.deepEqual(staged.packages.map(pkg => pkg.product), ['jira', 'confluence']);
   assert.deepEqual(staged.packages.map(pkg => [pkg.sha256, pkg.size, pkg.format]),
     profile.packages.map(pkg => [pkg.sha256, pkg.size, pkg.analysis.format]));
@@ -195,6 +243,29 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   assert.equal((await stat(stagePath)).mode & 0o777, 0o600);
   assert.equal((await launch(stageArguments, env).exited).code, 1);
   assert.equal(await readFile(stagePath, 'utf8'), initial);
+  const wikiId = staged.packages[1].packageId;
+  for (const [index, reportSha] of reviewDigests.entries()) {
+    const proof = staged.confluenceReviews.find(value => value.sha256 === reportSha);
+    const { status, selection, checkedAt, archive, spacePermissions, unidentifiedPages, findings, version } = reviewInputs[index];
+    assert.deepEqual(proof, { packageId: wikiId, sha256: reportSha, checkedAt, version, selection, status, archive,
+      spacePermissions, pageCount: findings.length, unidentifiedPages,
+      reasonCounts: index === 0 ? { LIVE_RESTRICTED: 2, MISSING_FROM_ARCHIVE: 1, RESTRICTION_MISMATCH: 1, VERSION_MISMATCH: 1 } : {} });
+    const snapshot = join(root, 'confluence-findings', `${reportSha}.json`);
+    assert.deepEqual(await readFile(snapshot), reportBytes[index]);
+    assert.equal((await stat(snapshot)).mode & 0o777, 0o600);
+    await rm(paths[index]);
+  }
+  const reviewSnapshot = join(root, 'confluence-findings', `${reviewDigests[0]}.json`);
+  await rm(reviewSnapshot);
+  const missingSnapshot = await launch(['review', root], env).exited;
+  assert.equal(missingSnapshot.code, 1, missingSnapshot.stderr);
+  assert.doesNotMatch(missingSnapshot.stdout, /이관 검토 주소/);
+  await writeFile(reviewSnapshot, Buffer.concat([reportBytes[0], Buffer.from('\n')]), { mode: 0o600 });
+  const changedSnapshot = await launch(['verify', root], env).exited;
+  assert.equal(changedSnapshot.code, 1, changedSnapshot.stderr);
+  assert.doesNotMatch(changedSnapshot.stdout, /검증 결과/);
+  assert.equal((missingSnapshot.stderr + changedSnapshot.stderr).includes(missingPage), false);
+  await writeFile(reviewSnapshot, reportBytes[0]);
 
   const mappingSourceRoot = join(scratch, 'mapping-source');
   const mappingStage = await launch(['stage', manifest, mappingSourceRoot], env).exited;
@@ -211,6 +282,8 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
     const { defaultConfiguration: configuration, identities } = await json(base, `/migrations/options?${query}`);
     configuration.projects = configuration.projects.map(project => ({ ...project, key: 'REH', name: 'Rehearsal fixture' }));
     configuration.sourceBaseUrls = Object.fromEntries(mappingStageState.packages.map(pkg => [pkg.packageId, `https://${pkg.product}.example.invalid`]));
+    const mappedWiki = mappingStageState.packages.find(pkg => pkg.product === 'confluence');
+    configuration.excludedRecords = [`${mappedWiki.packageId}/page:${restrictedPage}`];
     for (const sourceValue of [jiraAuthor, confluenceAuthor]) {
       const identity = identities.find(value => value.sourceValue === sourceValue);
       assert.ok(identity, `Fixture author ${sourceValue} was not analyzed`);
@@ -232,6 +305,7 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   const pendingEvidence = (await readReport(root, pending)).report;
   assert.equal(pendingEvidence.status, 'review');
   assert.deepEqual(pendingEvidence.profile, expectedProfileProof);
+  assert.deepEqual(pendingEvidence.confluenceReviews, staged.confluenceReviews);
   assert.equal(pendingEvidence.source.evidence.checks.pendingPackages, 2);
   assert.equal(pendingEvidence.restore, null);
 
@@ -252,6 +326,7 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
     const mapping = JSON.parse(await readFile(mappingPath, 'utf8'));
     const { options, configuration } = await json(base, '/migrations/mapping/import', { method: 'POST', actor, body: { mapping } });
     assert.deepEqual(configuration.packageIds, staged.packages.map(pkg => pkg.packageId));
+    assert.deepEqual(configuration.excludedRecords, [`${wikiId}/page:${restrictedPage}`]);
     assert.ok(configuration.packageIds.every(id => !mapping.configuration.packageIds.includes(id)));
     assert.ok(configuration.projects.every(project => project.key === 'REH' && project.name === 'Rehearsal fixture'));
     for (const sourceValue of [jiraAuthor, confluenceAuthor]) {
@@ -263,6 +338,8 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
     assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
     assert.equal(preview.counts.issues, 2);
     assert.equal(preview.counts.documents, 1);
+    assert.equal(preview.counts.explicitExcludedRecords, 1);
+    assert.equal(preview.counts.excludedDescendants, 1);
     assert.equal(preview.counts.comments, 2);
     assert.equal(preview.counts.revisions, 2);
     assert.equal(preview.counts.worklogs, 1);
@@ -336,10 +413,20 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   const { attempt, report } = await readReport(root, requiresReview);
   assert.equal(report.status, 'review');
   assert.deepEqual(report.profile, expectedProfileProof);
+  assert.deepEqual(report.confluenceReviews, staged.confluenceReviews);
   assert.equal(report.source.evidence.checks.pendingPackages, 0);
   assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
   assert.equal(report.source.evidence.receipts.length, 1);
   const [receipt] = report.source.evidence.receipts;
+  assert.equal(receipt.confluenceReviews.length, 2);
+  for (const [index, reportSha] of reviewDigests.entries()) {
+    const review = receipt.confluenceReviews.find(value => value.sha256 === reportSha);
+    assert.match(review.dispositionsSha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(review, { packageId: wikiId, sha256: reportSha, dispositionsSha256: review.dispositionsSha256,
+      counts: index === 0 ? { excluded: 2, documentBound: 1, archiveOnly: 0, absent: 1 } :
+        { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 } });
+  }
+  assert.deepEqual(report.restore.evidence.receipts[0].confluenceReviews, receipt.confluenceReviews);
   assert.deepEqual(report.source.evidence.packages.map(pkg => pkg.receiptIds), [[receipt.id], [receipt.id]]);
   assert.equal(receipt.noticesAvailable, true);
   assert.equal(receipt.attachmentCounts.verified, 1);
@@ -412,7 +499,8 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
     const summary = await upload.json();
     assert.ok(upload.ok, JSON.stringify(summary));
     const options = await json(base, `/migrations/options?${new URLSearchParams({ packageId: summary.id })}`);
-    const configuration = { ...options.defaultConfiguration, appendPagesTo: { projectId: savedPage.projectId, refreshExisting: true } };
+    const configuration = { ...options.defaultConfiguration, excludedRecords: [`${summary.id}/page:${restrictedPage}`],
+      appendPagesTo: { projectId: savedPage.projectId, refreshExisting: true } };
     const reviewed = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration } });
     assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
     assert.ok(reviewed.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_CHECKLIST_RESTORED'));
@@ -437,6 +525,7 @@ test('migration rehearsal stages profiled exports, applies a reviewed plan, and 
   const failedEvidence = (await readReport(root, failed)).report;
   assert.equal(failedEvidence.status, 'failed');
   assert.deepEqual(failedEvidence.profile, expectedProfileProof);
+  assert.deepEqual(failedEvidence.confluenceReviews, staged.confluenceReviews);
   assert.equal(failedEvidence.source.bundles[0].status, 'mismatch');
   assert.equal(failedEvidence.restore, null);
 });
@@ -533,6 +622,48 @@ test('profile-bound stage discards rejected inputs and accepts an exact clean pr
   assert.equal(staged.code, 0, staged.stdout + staged.stderr);
   const accepted = JSON.parse(await readFile(join(root, 'stage.json'), 'utf8'));
   assert.equal(accepted.profile.status, 'analyzed');
+});
+
+test('stage rejects Confluence findings that cannot identify exactly one matching space ZIP', { timeout: 90_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-findings-reject-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const manifest = join(scratch, 'manifest.json');
+  const root = join(scratch, 'run');
+  const findingsPath = join(scratch, 'private-review.json');
+  const duplicatePath = join(scratch, 'duplicate-review.json');
+  const [jira, wiki] = fixturePackages();
+  const jiraSource = { file: jira.filename, product: 'jira', instanceKey: `${originalFrom}-jira` };
+  const wikiSource = { file: wiki.filename, product: 'confluence', instanceKey: `${originalFrom}-wiki` };
+  const finding = confluenceFindings(wiki.bytes);
+  const looseXml = Buffer.from('<hibernate-generic><object class="Space"><id name="id">20</id>' +
+    '<property name="key">QA</property><property name="name">QA</property></object></hibernate-generic>');
+  const looseSource = { ...wikiSource, file: 'entities.xml' };
+  await Promise.all([jira, wiki, { filename: looseSource.file, bytes: looseXml }].map(item =>
+    writeFile(join(scratch, item.filename), item.bytes)));
+  await writeFile(duplicatePath, JSON.stringify(finding));
+
+  const attempts = [
+    { packages: [wikiSource], report: { ...finding, version: 2 } },
+    { packages: [wikiSource], report: { ...finding, archive: { ...finding.archive, sha256: '0'.repeat(64) } } },
+    { packages: [wikiSource], report: { ...finding, archive: { ...finding.archive, bytes: finding.archive.bytes + 1 } } },
+    { packages: [jiraSource, wikiSource], report: confluenceFindings(jira.bytes) },
+    { packages: [looseSource], report: confluenceFindings(looseXml) },
+    { packages: [wikiSource, { ...wikiSource, instanceKey: 'duplicate-private-instance' }], report: finding },
+    { packages: [wikiSource], report: finding, extra: ['--confluence-findings', duplicatePath] },
+  ];
+  for (const { packages, report, extra = [] } of attempts) {
+    await writeFile(manifest, JSON.stringify({ packages }));
+    await writeFile(findingsPath, JSON.stringify(report));
+    const before = (await readdir(scratch)).sort();
+    const rejected = await launch(['stage', manifest, root, '--confluence-findings', findingsPath, ...extra], process.env).exited;
+    assert.equal(rejected.code, 1, rejected.stdout + rejected.stderr);
+    assert.match(rejected.stderr, /Confluence|페이지별/u);
+    assert.equal(existsSync(root), false);
+    assert.deepEqual((await readdir(scratch)).sort(), before);
+    for (const value of [scratch, jira.filename, wiki.filename, missingPage, originalFrom, restrictedTitle, 'duplicate-private-instance']) {
+      assert.equal((rejected.stdout + rejected.stderr).includes(value), false);
+    }
+  }
 });
 
 test('stage applies the aggregate input limit before starting the workspace', { timeout: 30_000 }, async t => {

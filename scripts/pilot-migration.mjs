@@ -2,10 +2,13 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { safeFilename } from '../server/attachments.ts';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
+import { CONFLUENCE_FINDINGS_MAX_BYTES, confluenceFindingsProof, parseConfluenceFindings,
+  validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
 const runFormat = 'teamspace-migration-rehearsal';
@@ -15,6 +18,9 @@ const profileVersion = 2;
 const jsonLimit = 1024 * 1024;
 const packageLimit = 20;
 const totalPackageBytes = 512 * 1024 * 1024;
+const confluenceFindingsLimit = 100;
+const totalConfluenceFindingsBytes = 128 * 1024 * 1024;
+const findingsDirectory = 'confluence-findings';
 const profileTimeout = 25_000;
 const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/;
 const sha256 = /^[a-f\d]{64}$/;
@@ -173,6 +179,84 @@ async function loadStageProfile(path, inputs) {
   return { proof, packages };
 }
 
+async function readConfluenceFindingsBytes(path, remaining) {
+  try { return await readBoundedFile(path, CONFLUENCE_FINDINGS_MAX_BYTES, remaining); }
+  catch {
+    signal.throwIfAborted();
+    throw new Error('Confluence 페이지별 검토 파일을 읽을 수 없습니다. 파일과 크기를 확인해 주세요.');
+  }
+}
+
+function readConfluenceFindings(raw) {
+  let value;
+  try { value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(raw)); }
+  catch { throw new Error('Confluence 페이지별 검토 파일의 JSON 형식을 확인해 주세요.'); }
+  return parseConfluenceFindings(value);
+}
+
+async function loadStageFindings(paths) {
+  const results = [];
+  const hashes = new Set();
+  let remaining = totalConfluenceFindingsBytes;
+  for (const path of paths) {
+    const raw = await readConfluenceFindingsBytes(path, remaining);
+    remaining -= raw.length;
+    const sha256 = digest(raw);
+    if (hashes.has(sha256)) throw new Error('동일한 Confluence 페이지별 검토 파일이 중복되었습니다.');
+    hashes.add(sha256);
+    const proof = confluenceFindingsProof(readConfluenceFindings(raw), sha256, null);
+    results.push({ path, proof });
+  }
+  return results;
+}
+
+function matchConfluenceArchive(archive, packages) {
+  const matches = packages.filter(item => item.product === 'confluence' && item.format === 'confluence-xml' &&
+    item.sha256 === archive.sha256 && item.size === archive.bytes);
+  if (!matches.length) throw new Error('Confluence 페이지별 검토 파일과 일치하는 XML ZIP 패키지가 없습니다.');
+  if (matches.length > 1) throw new Error('Confluence 페이지별 검토 파일과 일치하는 XML ZIP 패키지가 여러 개입니다.');
+  return matches[0];
+}
+
+async function saveStageFindings(root, reports, packages) {
+  const bound = reports.map(({ path, proof }) => ({
+    path, proof: { ...proof, packageId: matchConfluenceArchive(proof.archive, packages).packageId },
+  }));
+  const directory = join(root, findingsDirectory);
+  await mkdir(directory, { mode: 0o700 });
+  let remaining = totalConfluenceFindingsBytes;
+  for (const { path, proof } of bound) {
+    const raw = await readConfluenceFindingsBytes(path, remaining);
+    remaining -= raw.length;
+    if (digest(raw) !== proof.sha256) throw new Error('읽는 동안 Confluence 페이지별 검토 파일이 바뀌었습니다.');
+    await writeFile(join(directory, `${proof.sha256}.json`), raw, { mode: 0o600, flag: 'wx', flush: true });
+  }
+  return bound.map(item => item.proof);
+}
+
+async function loadRunFindings(root, proofs, packages) {
+  if (!Array.isArray(proofs) || proofs.length < 1 || proofs.length > confluenceFindingsLimit ||
+      !proofs.every(validConfluenceFindingsProof) || new Set(proofs.map(proof => proof.sha256)).size !== proofs.length) {
+    throw new Error('리허설의 Confluence 페이지별 검토 기록을 확인해 주세요.');
+  }
+  const reviews = [];
+  let remaining = totalConfluenceFindingsBytes;
+  for (const proof of proofs) {
+    if (matchConfluenceArchive(proof.archive, packages).packageId !== proof.packageId) {
+      throw new Error('Confluence 페이지별 검토 파일과 리허설의 원본 패키지 연결이 다릅니다.');
+    }
+    const raw = await readConfluenceFindingsBytes(join(root, findingsDirectory, `${proof.sha256}.json`), remaining);
+    remaining -= raw.length;
+    if (digest(raw) !== proof.sha256) throw new Error('보관한 Confluence 페이지별 검토 파일의 SHA-256이 다릅니다.');
+    const findings = readConfluenceFindings(raw);
+    if (!isDeepStrictEqual(confluenceFindingsProof(findings, proof.sha256, proof.packageId), proof)) {
+      throw new Error('보관한 Confluence 페이지별 검토 파일과 리허설 기록이 다릅니다.');
+    }
+    reviews.push({ proof, findings });
+  }
+  return reviews;
+}
+
 async function loadRun(directory) {
   const root = await realpath(directory);
   const { data: state } = await readJsonFile(join(root, 'stage.json'), '리허설 기록');
@@ -187,7 +271,9 @@ async function loadRun(directory) {
   if (!(await lstat(workspace)).isDirectory() || !(await lstat(join(workspace, 'teamspace.sqlite'))).isFile()) {
     throw new Error('리허설 워크스페이스를 확인해 주세요.');
   }
-  return { root, workspace, packages: state.packages, profile: state.profile };
+  const confluenceReviews = Object.hasOwn(state, 'confluenceReviews')
+    ? await loadRunFindings(root, state.confluenceReviews, state.packages) : [];
+  return { root, workspace, packages: state.packages, profile: state.profile, confluenceReviews };
 }
 
 function apiCall(pilot) {
@@ -306,10 +392,15 @@ function matchesProfileAnalysis(summary, expected) {
     Object.entries(summary.counts).every(([kind, count]) => count === (expected.counts[kind] ?? 0));
 }
 
-async function stage(manifestPath, root, profilePath) {
+async function stage(manifestPath, root, { profilePath, findingsPaths }) {
   const inputs = await loadManifest(manifestPath);
   const profiled = profilePath ? await loadStageProfile(profilePath, inputs) : null;
+  const findings = await loadStageFindings(findingsPaths);
   const filenames = await preflightStageInputs(inputs, profiled?.packages);
+  const confluenceZips = inputs.map((input, index) => input.product === 'confluence' && /\.zip$/iu.test(filenames[index]));
+  if (findings.length && !confluenceZips.includes(true)) {
+    throw new Error('Confluence 페이지별 검토 파일과 일치하는 XML ZIP 패키지가 없습니다.');
+  }
   signal.throwIfAborted();
   await mkdir(root, { mode: 0o700 });
   try {
@@ -346,8 +437,11 @@ async function stage(manifestPath, root, profilePath) {
       return results;
     });
     signal.throwIfAborted();
+    const confluenceReviews = findings.length
+      ? await saveStageFindings(root, findings, packages.filter((_item, index) => confluenceZips[index])) : [];
     await writeJson(join(root, 'stage.json'), { format: runFormat, version: 1, createdAt: new Date().toISOString(), packages,
-      ...(profiled ? { profile: profiled.proof } : {}) });
+      ...(profiled ? { profile: profiled.proof } : {}),
+      ...(confluenceReviews.length ? { confluenceReviews } : {}) });
   } catch (error) {
     await rm(root, { recursive: true, force: true });
     throw error;
@@ -356,12 +450,23 @@ async function stage(manifestPath, root, profilePath) {
 }
 
 async function review(directory) {
-  const { workspace } = await loadRun(directory);
+  const { workspace, packages, confluenceReviews } = await loadRun(directory);
+  const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
   const pilot = await startRehearsalPilot(workspace, { signal });
-  console.log(`이관 검토 주소 ${pilot.url}`);
-  const { code, signal: stoppedBy, error } = await pilot.exited;
-  signal.throwIfAborted();
-  if (code !== 0) throw new Error(`이관 검토 워크스페이스가 종료되었습니다 (${error?.code ?? stoppedBy ?? code}).`);
+  try {
+    if (confluenceReviews.length) {
+      const bundles = await verifyBundles(workspace, packages.filter(item => reviewedIds.has(item.packageId)));
+      if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Confluence 대조에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
+    }
+    console.log(`이관 검토 주소 ${pilot.url}`);
+    if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 ${findingsDirectory}/에 보관했습니다.`);
+    const { code, signal: stoppedBy, error } = await pilot.exited;
+    signal.throwIfAborted();
+    if (code !== 0) throw new Error(`이관 검토 워크스페이스가 종료되었습니다 (${error?.code ?? stoppedBy ?? code}).`);
+  } catch (error) {
+    await pilot.close().catch(() => {});
+    throw error;
+  }
 }
 
 async function verifyBundles(directory, packages) {
@@ -381,22 +486,23 @@ async function verifyBundles(directory, packages) {
   return results;
 }
 
-async function inspectWorkspace(directory, packages) {
+async function inspectWorkspace(directory, packages, confluenceReviews) {
   return withPilot(directory, async call => {
     const bundles = await verifyBundles(directory, packages);
-    const evidence = bundles.every(bundle => bundle.status === 'verified') ? await collectMigrationEvidence(call, packages) : null;
+    const evidence = bundles.every(bundle => bundle.status === 'verified') ? await collectMigrationEvidence(call, packages, confluenceReviews) : null;
     return { bundles, evidence };
   });
 }
 
 async function verify(directory) {
-  const { root, workspace, packages, profile } = await loadRun(directory);
+  const { root, workspace, packages, profile, confluenceReviews } = await loadRun(directory);
   const attempt = await mkdtemp(join(root, 'verification-'));
   const report = { format: reportFormat, version: 1, checkedAt: new Date().toISOString(), status: 'failed',
-    source: null, restore: null, comparison: null, ...(profile ? { profile } : {}) };
+    source: null, restore: null, comparison: null, ...(profile ? { profile } : {}),
+    ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}) };
   let step = 'source';
   try {
-    report.source = await inspectWorkspace(workspace, packages);
+    report.source = await inspectWorkspace(workspace, packages, confluenceReviews);
     const evidence = report.source.evidence;
     if (evidence && evidence.status !== 'failed') {
       report.status = evidence.status;
@@ -405,7 +511,7 @@ async function verify(directory) {
         const restored = join(attempt, 'restored');
         await backupAndRestoreRehearsal(workspace, join(attempt, 'backup'), restored, { signal });
         step = 'restore';
-        report.restore = await inspectWorkspace(restored, packages);
+        report.restore = await inspectWorkspace(restored, packages, confluenceReviews);
         if (report.restore.evidence) {
           report.comparison = compareMigrationEvidence(evidence, report.restore.evidence);
           report.status = report.comparison.status;
@@ -425,18 +531,33 @@ async function verify(directory) {
 
 const usage = [
   'npm run pilot:rehearsal -- profile <manifest.json> <새 분석 보고서.json>',
-  'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리> [--profile <분석 보고서.json>]',
+  'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리> [--profile <분석 보고서.json>] [--confluence-findings <페이지별 검토 파일.json>]…',
   'npm run pilot:rehearsal -- review <리허설 디렉터리>',
   'npm run pilot:rehearsal -- verify <리허설 디렉터리>',
 ].join('\n');
+
+function stageOptions(args) {
+  if (args.length < 2 || args.length % 2 !== 0 || args.slice(0, 2).some(value => value.startsWith('--'))) throw new Error(usage);
+  const options = { profilePath: undefined, findingsPaths: [] };
+  for (let index = 2; index < args.length; index += 2) {
+    const option = args[index], path = args[index + 1];
+    if (!path || path.startsWith('--')) throw new Error(usage);
+    if (option === '--profile' && !options.profilePath) options.profilePath = resolve(path);
+    else if (option === '--confluence-findings' && options.findingsPaths.length < confluenceFindingsLimit) {
+      options.findingsPaths.push(resolve(path));
+    } else throw new Error(usage);
+  }
+  return options;
+}
 
 process.once('SIGINT', onInterrupt);
 process.once('SIGTERM', onTerminate);
 try {
   const [command, ...args] = process.argv.slice(2);
   if (command === 'profile' && args.length === 2) await profile(resolve(args[0]), resolve(args[1]));
-  else if (command === 'stage' && (args.length === 2 || (args.length === 4 && args[2] === '--profile'))) {
-    await stage(resolve(args[0]), resolve(args[1]), args.length === 4 ? resolve(args[3]) : undefined);
+  else if (command === 'stage') {
+    const options = stageOptions(args);
+    await stage(resolve(args[0]), resolve(args[1]), options);
   }
   else if (command === 'review' && args.length === 1) await review(resolve(args[0]));
   else if (command === 'verify' && args.length === 1) await verify(resolve(args[0]));
