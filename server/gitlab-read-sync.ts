@@ -1,12 +1,12 @@
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabIssueBranchTarget, GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
+import type { GitlabIssueBranchTarget, GitlabPipelineJob, GitlabPipelineJobs, GitlabRepositoryCandidate, GitlabRepositorySearch } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
-  'deployments' | 'deployment-merge-requests';
-type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large';
+  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs';
+type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
   | { repositoryPath: string; kind: 'merge_request' | 'pipeline'; id: number }
@@ -25,6 +25,8 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const MERGE_REQUEST_PAGE_SIZE = 100;
 const MAX_MERGE_REQUEST_PAGES = 10;
 const PIPELINE_PAGE_SIZE = 50;
+const PIPELINE_JOB_PAGE_SIZE = 50;
+const MAX_PIPELINE_JOB_PAGES = 4;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
 const COMMIT_PAGE_SIZE = 100;
@@ -43,6 +45,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   webhooks: '프로젝트 웹훅',
   deployments: '배포',
   'deployment-merge-requests': '배포에 포함된 MR',
+  'pipeline-jobs': '파이프라인 작업',
 };
 
 export class GitlabReadError extends Error {
@@ -53,6 +56,7 @@ export class GitlabReadError extends Error {
       'network': '연결 실패',
       'invalid-response': '응답 형식 오류',
       'response-too-large': '응답 크기 한도 초과',
+      'changed': '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
   }
@@ -601,6 +605,103 @@ export function gitlabLinkedWorkflowReader(connection: Connection, signal?: Abor
     }
     return verified;
   };
+}
+
+function invalidPipelineJobs(): never {
+  throw new GitlabReadError('pipeline-jobs', 'invalid-response');
+}
+
+function pipelineJobsNextPage(headers: Headers, url: URL, page: number, rowCount: number): boolean {
+  const next = headers.get('x-next-page');
+  if (next !== null && next !== '' && next !== String(page + 1)) invalidPipelineJobs();
+  const links = headers.get('link');
+  let nextLink = false;
+  if (links) for (const item of links.split(/,(?=\s*<)/u)) {
+    const match = /^\s*<([^<>]+)>\s*;\s*rel\s*=\s*(?:"([^"<>]+)"|([\w-]+))\s*$/iu.exec(item);
+    if (!match) invalidPipelineJobs();
+    if (!(match[2] ?? match[3]).toLowerCase().split(/\s+/u).includes('next')) continue;
+    if (nextLink) invalidPipelineJobs();
+    let target: URL;
+    try { target = new URL(match[1], url); }
+    catch { return invalidPipelineJobs(); }
+    const pages = target.searchParams.getAll('page');
+    if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
+      pages.length !== 1 || pages[0] !== String(page + 1)) invalidPipelineJobs();
+    nextLink = true;
+  }
+  const reportedNext = next !== null ? next !== '' : links !== null ? nextLink : rowCount === PIPELINE_JOB_PAGE_SIZE;
+  if ((next === '' && nextLink) || (rowCount === 0 && reportedNext)) invalidPipelineJobs();
+  return reportedNext;
+}
+
+function pipelineJobLabel(value: string, limit: number, token: string | null | undefined, fallback: string): string {
+  const label = value.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, limit).toWellFormed();
+  return label && !includesGitlabCredential(token, [value, label]) ? label : fallback;
+}
+
+function pipelineJob(row: GitlabReadObject, repository: { id: number; path: string; base: URL },
+  pipeline: { id: number; sha: string }, token: string | null | undefined): GitlabPipelineJob {
+  const { id, name, stage, status, allow_failure: allowFailure, failure_reason: reason } = row;
+  const source = row.pipeline;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 ||
+    typeof name !== 'string' || !name.trim() || typeof stage !== 'string' || !stage.trim() ||
+    (status !== 'failed' && status !== 'manual') || typeof allowFailure !== 'boolean' ||
+    !isReadObject(source) || source.id !== pipeline.id || source.project_id !== repository.id ||
+    (source.sha != null && gitlabObjectSha(source.sha) !== pipeline.sha)) invalidPipelineJobs();
+  const address = gitlabPageAddress(row.web_url, repository.base, false);
+  const path = address && gitlabPathInScope(address.pathname, address.scope);
+  const canonicalPath = `${repository.path}/-/jobs/${id}`;
+  if (path !== canonicalPath && path !== `${repository.path}/jobs/${id}`) invalidPipelineJobs();
+  const webUrl = new URL(canonicalPath, repository.base.origin).href;
+  if (includesGitlabCredential(token, [webUrl])) invalidPipelineJobs();
+  const failureReason = status === 'failed' && typeof reason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(reason) &&
+    !includesGitlabCredential(token, [reason]) ? reason : null;
+  return { id, name: pipelineJobLabel(name, 255, token, '이름 미확인'), stage: pipelineJobLabel(stage, 128, token, '단계 미확인'),
+    status, failureReason, allowFailure, webUrl };
+}
+
+export async function readGitlabPipelineJobs(connection: Connection, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore'>> {
+  if (!Number.isSafeInteger(pipelineId) || pipelineId < 1) invalidPipelineJobs();
+  const context = await readVerifiedProject(connection, repositoryId, signal);
+  async function readPipeline() {
+    const { object, webUrl } = await readExactWorkflowObject(context, repositoryId,
+      { repositoryPath: context.repositoryPath, kind: 'pipeline', id: pipelineId }, signal);
+    const { status, updated_at: updated, yaml_errors: yamlErrors } = object;
+    const sha = gitlabObjectSha(object.sha);
+    if (!sha || /^0+$/u.test(sha) || typeof status !== 'string' || !/^[a-z][a-z0-9_]{0,39}$/u.test(status) ||
+      (updated != null && (typeof updated !== 'string' || !Number.isFinite(Date.parse(updated)))) ||
+      (yamlErrors != null && typeof yamlErrors !== 'string') || includesGitlabCredential(connection.token, [webUrl, status])) invalidPipelineJobs();
+    return { status, sha, updatedAt: typeof updated === 'string' ? updated : null,
+      configurationError: typeof yamlErrors === 'string' && Boolean(yamlErrors.trim()) };
+  }
+  const observed = await readPipeline();
+  if (expectedSha !== null && observed.sha !== gitlabObjectSha(expectedSha)) invalidPipelineJobs();
+  const repository = { id: repositoryId, path: context.repositoryPath, base: context.base };
+  const pipeline = { id: pipelineId, sha: observed.sha };
+  const jobsUrl = new URL(context.projectUrl);
+  jobsUrl.pathname += `/pipelines/${pipelineId}/jobs`;
+  const jobs: GitlabPipelineJob[] = [];
+  const seen = new Set<number>();
+  let hasMore = false;
+  for (let page = 1; page <= MAX_PIPELINE_JOB_PAGES; page++) {
+    jobsUrl.search = new URLSearchParams([['scope[]', 'failed'], ['scope[]', 'manual'], ['include_retried', 'false'],
+      ['per_page', String(PIPELINE_JOB_PAGE_SIZE)], ['page', String(page)]]).toString();
+    let pagination = new Headers();
+    const rows = await readPage(jobsUrl, context.headers, 'pipeline-jobs', PIPELINE_JOB_PAGE_SIZE, signal, headers => { pagination = headers; });
+    for (const row of rows) {
+      const job = pipelineJob(row, repository, pipeline, connection.token);
+      if (seen.has(job.id)) invalidPipelineJobs();
+      seen.add(job.id);
+      jobs.push(job);
+    }
+    hasMore = pipelineJobsNextPage(pagination, jobsUrl, page, rows.length);
+    if (!hasMore) break;
+  }
+  const latest = await readPipeline();
+  if (latest.sha !== observed.sha || latest.status !== observed.status || latest.updatedAt !== observed.updatedAt ||
+      latest.configurationError !== observed.configurationError) throw new GitlabReadError('pipeline-jobs', 'changed');
+  return { status: observed.status, configurationError: observed.configurationError, jobs, hasMore };
 }
 
 export async function readGitlabManualObject(

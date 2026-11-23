@@ -671,6 +671,14 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 응답의 `links`는 확인한 연결, `failures`는 확인할 수 없었던 항목의 `{linkId,message}`, `skipped`는 이번 범위보다 오래된 항목 수다. 실패한 항목은 직전에 저장한 상태를 유지한다. 조회 중 더 최신 웹훅이 반영되면 그 상태를 반환한다. 연결 설정이나 티켓의 프로젝트·키가 바뀌면 `409`로 응답한다. 이 조회에서 티켓 상태 규칙을 실행하지 않는다.
 
+### 파이프라인 CI 작업 확인
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-jobs`는 해당 업무에 연결한 파이프라인에서 실패(`failed`)와 수동 실행 대기(`manual`) 작업을 읽는다. 저장한 GitLab 주소와 읽기 자격 증명을 사용한다. 저장소와 파이프라인의 실제 ID, 확인 가능한 커밋 SHA를 대조한다. 작업은 50건씩 최대 4페이지를 조회하며 재실행으로 대체된 작업은 제외한다. 새 연결이나 업무 상태를 저장하는 과정과 독립된 브라우저 조회다. [GitLab Jobs API](https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
+응답은 `linkId`, `repositoryId`, `pipelineId`, 파이프라인의 `status`, 조회한 `checkedAt`, 설정 오류 여부인 `configurationError`, 후속 결과가 있을 수 있음을 뜻하는 `hasMore`와 `jobs`를 담는다. 작업별로 `id`, `name`, `stage`, `status`, `failureReason`, `allowFailure`, 확인된 GitLab `webUrl`을 반환한다. 출력 범위는 선택한 파이프라인의 일반 CI 작업 메타데이터다.
+
+조회 앞뒤의 파이프라인 정보나 연결 설정, 업무 위치 또는 파이프라인 연결이 바뀌면 `409`를 반환한다. 현재 연결에서 저장소를 조회할 수 없으면 `403`, 연결이나 원본 파이프라인을 찾지 못하면 `404`, GitLab 요청 한도에 도달하면 `429`, 원본 응답을 검증할 수 없으면 `502`, 조회 시간이 지나면 `504`다. 응답은 `Cache-Control: no-store`를 사용한다.
+
 ### 티켓에서 GitLab 브랜치 만들기
 
 브라우저의 `POST /api/issues/:id/gitlab-branch/preview`에 `{expectedSettingsVersion,repositoryId,branch,ref?,accessToken?}`을 보낸다. 저장한 GitLab 설정의 버전과 저장소 ID를 사용한다. `ref`를 생략하면 기본 브랜치를 사용하며 브랜치 이름이나 전체 커밋 SHA를 지정할 수 있다. 조회 토큰을 별도로 입력하면 해당 요청에서만 사용한다. 같은 이름의 브랜치가 아직 없으면 응답의 `state`는 `ready`이고 `target`, `previewId`, `expiresAt`을 반환한다. `target`에는 저장소 ID·경로, 브랜치 이름, 기준 참조와 고정 SHA, 확인한 GitLab 주소가 담긴다. 같은 이름이 이미 있으면 `existing`과 현재 SHA를 반환한다. [GitLab Branches API](https://docs.gitlab.com/api/branches/)

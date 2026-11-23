@@ -1,12 +1,12 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabPipelineJobs,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedWorkflowReader, readGitlabManualObject, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedWorkflowReader, readGitlabManualObject, readGitlabPipelineJobs, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-branch-creation.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
@@ -527,6 +527,43 @@ export class GitlabIntegrationService{
       ...(sourceSha?{sourceSha:safePreviewValue(sourceSha,token).slice(0,128)}:{}),
     };
     return verified.webUrl===snapshot.webUrl?verified:{...verified,webUrl:snapshot.webUrl};
+  }
+  async pipelineJobs(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabPipelineJobs> {
+    if (!linkId || linkId.length > 500) fail('연결된 GitLab 파이프라인을 선택해 주세요.');
+    const issue = this.requireIssue(issueId);
+    const link = this.store.get<GitlabLink>('gitlab_links', linkId);
+    if (!link || link.issueId !== issueId || link.kind !== 'pipeline') fail('업무에 연결된 GitLab 파이프라인을 찾을 수 없습니다.', 404);
+    const captured = this.raw();
+    if (!captured.baseUrl || !captured.projectIds.includes(link.projectId)) fail('현재 GitLab 연결에 이 저장소가 없습니다.', 403);
+    const target = linkedWorkflowTarget(link, issueId, this.instance(captured));
+    if (!target) fail('현재 GitLab 연결에서 파이프라인의 식별자를 확인할 수 없습니다.', 409);
+    const workspaceGeneration = this.store.setting('attachmentImportGeneration');
+    const token = captured.token ? this.store.unseal(captured.token) : null;
+    const deadline = AbortSignal.timeout(25_000);
+    let result: Awaited<ReturnType<typeof readGitlabPipelineJobs>>;
+    try {
+      result = await readGitlabPipelineJobs({ baseUrl: captured.baseUrl, token }, link.projectId, target.objectId,
+        gitlabObjectSha(link.sourceSha), AbortSignal.any([signal, deadline]));
+    } catch (error) {
+      signal.throwIfAborted();
+      if (deadline.aborted) fail('GitLab CI 작업 조회 시간이 초과되었습니다.', 504);
+      if (!(error instanceof GitlabReadError)) throw error;
+      const status = error.code === 'changed' ? 409 : error.code === 'timeout' ? 504
+        : error.httpStatus === 401 || error.httpStatus === 403 ? 403
+        : error.httpStatus === 404 || error.httpStatus === 429 ? error.httpStatus : 502;
+      fail(error.message, status);
+    }
+    signal.throwIfAborted();
+    assertSettingsVersion(captured.version, this.raw().version);
+    if (this.store.setting('attachmentImportGeneration') !== workspaceGeneration) fail('워크스페이스가 복원되었습니다. 업무를 다시 열어 주세요.', 409);
+    const latestIssue = this.store.get<Issue>('issues', issueId);
+    const latestLink = this.store.get<GitlabLink>('gitlab_links', linkId);
+    if (!latestIssue || latestIssue.projectId !== issue.projectId || latestIssue.key !== issue.key ||
+        !latestLink || latestLink.issueId !== issueId || latestLink.projectId !== link.projectId || latestLink.kind !== link.kind ||
+        latestLink.manualLinkId !== link.manualLinkId || latestLink.sourceSha !== link.sourceSha || latestLink.state !== link.state) {
+      fail('GitLab 파이프라인 연결이 변경되었습니다. 최신 업무에서 다시 확인해 주세요.', 409);
+    }
+    return { ...result, linkId, repositoryId: link.projectId, pipelineId: target.objectId, checkedAt: now() };
   }
   async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal):Promise<GitlabIssueRefreshResult> {
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -1152,7 +1189,8 @@ export class GitlabIntegrationService{
       options.signal?.throwIfAborted();
       try { reads.push({ projectId, plan: await readProjectPlan(connection, projectId, options) }); }
       catch (error) {
-        if (!(error instanceof GitlabReadError) || error.stage === 'webhooks' || error.stage === 'deployments' || error.stage === 'deployment-merge-requests') throw error;
+        if (!(error instanceof GitlabReadError) || error.stage === 'webhooks' || error.stage === 'deployments' ||
+          error.stage === 'deployment-merge-requests' || error.stage === 'pipeline-jobs') throw error;
         const { stage, httpStatus, message } = error;
         reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
       }
@@ -1407,6 +1445,19 @@ export class GitlabIntegrationService{
     app.post('/api/issues/:id/gitlab-branch/preview', issueBranchRequest('preview'));
     app.post('/api/issues/:id/gitlab-branch/apply', issueBranchRequest('apply'));
     app.post('/api/issues/:id/gitlab-branch/reconcile', issueBranchRequest('reconcile'));
+    app.get('/api/issues/:id/gitlab-links/:linkId/pipeline-jobs', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).length) fail('GitLab CI 작업 조회 조건을 확인해 주세요.');
+      hooks.actor(req);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.pipelineJobs(String(req.params.id), String(req.params.linkId), controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
+    });
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;
     app.post('/api/issues/:id/gitlab-links/refresh',async(req,res)=>{
       if (Object.keys(req.query).length) fail('GitLab 활동 갱신 요청을 확인해 주세요.');

@@ -1251,6 +1251,25 @@ export interface GitlabIssueRefreshResult {
   failures: { linkId: string; message: string }[];
   skipped: number;
 }
+export interface GitlabPipelineJob {
+  id: number;
+  name: string;
+  stage: string;
+  status: 'failed' | 'manual';
+  failureReason: string | null;
+  allowFailure: boolean;
+  webUrl: string;
+}
+export interface GitlabPipelineJobs {
+  linkId: string;
+  repositoryId: number;
+  pipelineId: number;
+  status: string;
+  checkedAt: string;
+  configurationError: boolean;
+  hasMore: boolean;
+  jobs: GitlabPipelineJob[];
+}
 export interface GitlabIssueBranchTarget {
   repositoryId: number;
   repositoryPath: string;

@@ -1,11 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { ExternalLink, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
-import type { FeatureProps, GitlabLink, GitlabMergeReadiness } from '../../shared/types';
+import type { FeatureProps, GitlabLink, GitlabMergeReadiness, GitlabPipelineJob, GitlabPipelineJobs } from '../../shared/types';
+import { api, ApiError } from '../lib/api';
 import './gitlab-activity.css';
+import './gitlab-pipeline-jobs.css';
 
 const kinds = [
   { kind: 'branch', label: '브랜치', Icon: GitBranch },
@@ -62,6 +64,142 @@ export function gitlabActivityStateLabel(state: string): string {
 
 function activityTime(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0;
+}
+
+type JobTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
+type JobView = { kind: 'loading' } | { kind: 'failed'; message: string } | { kind: 'ready'; result: GitlabPipelineJobs };
+
+const failureReasonLabels = new Map([
+  ['script_failure', '작업 스크립트 실패'],
+  ['runner_system_failure', '러너 시스템 오류'],
+  ['stuck_or_timeout_failure', '작업이 멈췄거나 시간이 초과됨'],
+  ['job_execution_timeout', '작업 실행 시간 초과'],
+  ['runner_unsupported', '러너에서 지원하지 않는 작업'],
+  ['scheduler_failure', '작업 예약 오류'],
+]);
+
+function pipelineJobsTarget(link: GitlabLink, url: URL | null): JobTarget | null {
+  if (link.kind !== 'pipeline' || !url || !link.issueId) return null;
+  const object = /^gitlab:[a-f0-9]{12}:([1-9]\d*):pipeline:([1-9]\d*):/u.exec(link.id);
+  const route = /^\/.+?\/(?:-\/)?pipelines\/([1-9]\d*)\/?$/u.exec(url.pathname);
+  if (!object || !route || object[2] !== route[1] || link.id.slice(object[0].length) !== link.issueId ||
+      !Number.isSafeInteger(link.projectId) || String(link.projectId) !== object[1]) return null;
+  const pipelineId = Number(object[2]);
+  if (!Number.isSafeInteger(pipelineId)) return null;
+  const pipelineUrl = new URL(url.href);
+  pipelineUrl.search = '';
+  pipelineUrl.hash = '';
+  return { linkId: link.id, issueId: link.issueId, repositoryId: link.projectId, pipelineId, url: pipelineUrl };
+}
+
+function isPipelineJobsResult(result: GitlabPipelineJobs | undefined, target: JobTarget): result is GitlabPipelineJobs {
+  if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId || result.pipelineId !== target.pipelineId ||
+      typeof result.status !== 'string' || !result.status || typeof result.checkedAt !== 'string' || !Number.isFinite(Date.parse(result.checkedAt)) ||
+      typeof result.configurationError !== 'boolean' || typeof result.hasMore !== 'boolean' || !Array.isArray(result.jobs)) return false;
+  const ids = new Set<number>();
+  return result.jobs.every(job => {
+    if (!job || !Number.isSafeInteger(job.id) || job.id < 1 || ids.has(job.id) || typeof job.name !== 'string' ||
+        typeof job.stage !== 'string' || (job.status !== 'failed' && job.status !== 'manual') || typeof job.allowFailure !== 'boolean' ||
+        (job.failureReason !== null && typeof job.failureReason !== 'string') || typeof job.webUrl !== 'string') return false;
+    ids.add(job.id);
+    return true;
+  });
+}
+
+function pipelineJobUrl(job: GitlabPipelineJob, target: JobTarget): URL | null {
+  const url = gitlabActivityUrl(job.webUrl, 'pipeline');
+  const suffix = `/-/jobs/${job.id}`;
+  return url && url.origin === target.url.origin && !url.search && !url.hash && url.pathname.length > suffix.length &&
+    url.pathname.endsWith(suffix) ? url : null;
+}
+
+function pipelineJobsMessage(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    if (cause.status === 401 || cause.status === 403) return 'CI 작업 조회 권한을 확인해 주세요.';
+    if (cause.status === 404) return '연결된 GitLab 파이프라인을 찾을 수 없습니다.';
+    if (cause.status === 409) return '파이프라인이나 GitLab 연결이 변경되었습니다. 다시 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
+    if (cause.message) return cause.message;
+  }
+  return 'GitLab CI 작업을 불러오지 못했습니다. 다시 확인해 주세요.';
+}
+
+function PipelineJobs({ target }: { target: JobTarget }) {
+  const panelId = useId();
+  const [view, setView] = useState<JobView | null>(null);
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => () => request.current?.abort(), []);
+
+  async function load() {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setView({ kind: 'loading' });
+    try {
+      const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-jobs`;
+      const result = await api<GitlabPipelineJobs | undefined>(path, { method: 'GET', cache: 'no-store', signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!isPipelineJobsResult(result, target)) {
+        setView({ kind: 'failed', message: '연결된 파이프라인의 CI 작업 응답을 확인할 수 없습니다.' });
+        return;
+      }
+      setView({ kind: 'ready', result });
+    } catch (cause) {
+      if (!controller.signal.aborted) setView({ kind: 'failed', message: pipelineJobsMessage(cause) });
+    } finally {
+      if (request.current === controller) request.current = null;
+    }
+  }
+
+  function toggle() {
+    if (!view) {
+      void load();
+      return;
+    }
+    request.current?.abort();
+    request.current = null;
+    setView(null);
+  }
+
+  return <div className="gitlab-pipeline-jobs">
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+      <Workflow aria-hidden="true" size={14} />{view ? 'CI 작업 닫기' : 'CI 작업 확인'}
+    </button>
+    {view && <section id={panelId} className="gitlab-pipeline-jobs-panel" aria-label="GitLab CI 작업" aria-busy={view.kind === 'loading'}>
+      {view.kind === 'loading' && <p role="status">GitLab CI 작업을 확인하고 있습니다.</p>}
+      {view.kind === 'failed' && <p className="gitlab-pipeline-jobs-warning" role="alert">{view.message}</p>}
+      {view.kind === 'ready' && <PipelineJobsResult result={view.result} target={target} />}
+      <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+        <RefreshCw aria-hidden="true" size={14} />CI 작업 다시 확인
+      </button>
+    </section>}
+  </div>;
+}
+
+function PipelineJobsResult({ result, target }: { result: GitlabPipelineJobs; target: JobTarget }) {
+  return <>
+    <p className="gitlab-pipeline-jobs-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
+      <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time>
+    </p>
+    {result.configurationError && <p className="gitlab-pipeline-jobs-warning">GitLab에서 파이프라인 설정 오류를 보고했습니다.</p>}
+    {result.jobs.length === 0 ? <p>조회한 CI 작업 중 실패 또는 수동 대기 상태가 없습니다.</p> :
+      <ul className="gitlab-pipeline-job-list" aria-label="실패 및 수동 실행 작업">{result.jobs.map(job => {
+        const href = pipelineJobUrl(job, target);
+        const reason = job.failureReason && (failureReasonLabels.get(job.failureReason) ?? job.failureReason);
+        return <li className="gitlab-pipeline-job" key={job.id}>
+          {href ? <a className="gitlab-pipeline-job-link" href={href.href} target="_blank" rel="noopener noreferrer">
+            <strong>{job.name}</strong><ExternalLink aria-hidden="true" size={13} />
+          </a> : <strong>{job.name}</strong>}
+          <div className="gitlab-pipeline-jobs-meta">
+            <span className="gitlab-pipeline-job-state" data-state={job.status}>{gitlabActivityStateLabel(job.status)}</span>
+            <span>{job.stage}</span>
+            <span>{job.allowFailure ? '실패 허용' : '성공 필요'}</span>
+            {reason && <span>{reason}</span>}
+          </div>
+        </li>;
+      })}</ul>}
+    {result.hasMore && <p>조회 한도를 넘은 작업은 <a href={target.url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
+  </>;
 }
 
 function MergeReadiness({ value }: { value?: GitlabMergeReadiness }) {
@@ -135,6 +273,7 @@ function ActivityGroup({ group, links, issueContext, heading: Heading, manualAct
 
 function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; issueContext?: IssueContext; manualActions?: ManualLinkActions }) {
   const url = gitlabActivityUrl(link.webUrl, link.kind);
+  const jobsTarget = pipelineJobsTarget(link, url);
   const deleted = link.kind === 'branch' && link.state === 'deleted';
   const legacyCommitId = link.kind === 'commit' ? url?.pathname.match(/\/commit\/([^/]+)\/?$/)?.[1] : null;
   const sha = gitlabObjectSha(link.sourceSha) ?? gitlabObjectSha(legacyCommitId);
@@ -165,6 +304,7 @@ function ActivityRow({ link, issueContext, manualActions }: { link: GitlabLink; 
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button" onClick={() => issueContext.openIssue(link.issueId)}>{issueKey}</button>}
     </div>
     <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
+    {jobsTarget && <PipelineJobs key={`${link.id}:${link.manualLinkId ?? ''}:${jobsTarget.url.href}`} target={jobsTarget} />}
     {link.manualLinkId && manualActions && <div className="gitlab-activity-manual-actions">
       <button className="btn btn-ghost" type="button" aria-label="수동 연결 다시 확인" title="수동 연결 다시 확인"
         disabled={manualActions.disabled} onClick={event => manualActions.verify(link, event.currentTarget)}>

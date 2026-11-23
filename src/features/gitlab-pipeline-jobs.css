@@ -1,0 +1,109 @@
+.gitlab-pipeline-jobs {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.gitlab-pipeline-jobs .btn {
+  font-size: 12px;
+}
+
+.gitlab-pipeline-jobs .btn[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.gitlab-pipeline-jobs-panel {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  min-width: 0;
+  margin-top: 5px;
+  padding: 10px;
+  border: 1px solid #dce8e1;
+  border-radius: 6px;
+  background: #f9fbfa;
+  color: #365b4c;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gitlab-pipeline-jobs-panel p {
+  margin: 0;
+}
+
+.gitlab-pipeline-jobs-panel p a,
+.gitlab-pipeline-job-link {
+  color: #245846;
+  text-decoration: underline;
+}
+
+.gitlab-pipeline-jobs-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 8px;
+  min-width: 0;
+}
+
+.gitlab-pipeline-jobs-meta time {
+  color: #547364;
+}
+
+.gitlab-pipeline-jobs-warning {
+  color: #8d402e;
+}
+
+.gitlab-pipeline-job-list {
+  display: grid;
+  width: 100%;
+  max-height: min(24rem, 55vh);
+  overflow-y: auto;
+  padding: 0;
+  margin: 0;
+  border: 1px solid #dce8e1;
+  border-radius: 5px;
+  list-style: none;
+  background: #fff;
+}
+
+.gitlab-pipeline-job {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.gitlab-pipeline-job + .gitlab-pipeline-job {
+  border-top: 1px solid #e5eee8;
+}
+
+.gitlab-pipeline-job-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.gitlab-pipeline-job-link svg {
+  flex: none;
+}
+
+.gitlab-pipeline-job-state {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #edf4ef;
+  color: #3c5f4e;
+}
+
+.gitlab-pipeline-job-state[data-state='failed'] {
+  background: #faeae3;
+  color: #8d402e;
+}
+
+@media (max-width: 520px) {
+  .gitlab-pipeline-jobs .btn,
+  .gitlab-pipeline-job-link {
+    min-height: 44px;
+  }
+}
