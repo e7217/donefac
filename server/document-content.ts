@@ -6,7 +6,7 @@ import { documentPropertyReports, MAX_DOCUMENT_PROPERTY_BLOCKS,
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
   isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
-  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
+  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { documentSelectionText } from '../shared/document-selection.js';
@@ -14,7 +14,7 @@ import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
 import { includeRevisionOwner } from './document-include-revisions.js';
 
-export const MAX_DOCUMENT_BYTES=8*1024*1024;
+export { MAX_DOCUMENT_BYTES };
 const schema=createEditorSchema();
 const selectionDocuments = new WeakMap<RichContent, ReturnType<typeof schema.nodeFromJSON>>();
 

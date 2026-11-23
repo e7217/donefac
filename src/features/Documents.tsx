@@ -35,6 +35,8 @@ import { DocumentTreeCopy } from './DocumentTreeCopy';
 import { DocumentSiblingOrderDialog } from './DocumentSiblingOrderDialog';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
+import { DocumentFindPanel } from './DocumentFindPanel';
+import { documentFindExtension } from './document-find';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentTableTools } from './DocumentTableTools';
@@ -138,6 +140,11 @@ function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
 
 export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false, commentFocus, onCopyCommentLink }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [findScope, setFindScope] = useState<string | null>(null);
+  const findOpener = useRef<HTMLButtonElement>(null);
+  const findInput = useRef<HTMLInputElement>(null);
+  const documentScope = JSON.stringify([actorId, selectedDocumentId]);
+  if (findScope !== null && findScope !== documentScope) setFindScope(null);
   const draftRef = useRef<Draft | null>(null);
   const listDrafts = useRef(new Set<string>());
   const trackListDraft = useCallback((id: string, dirty: boolean) => {
@@ -431,6 +438,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     immediatelyRender: false,
     extensions: [
       ...decorateDocumentExtensions(createEditorExtensions()),
+      documentFindExtension,
       Placeholder.configure({ placeholder: '내용을 작성하세요. / 를 입력해 블록을 추가할 수 있어요.' }),
     ],
     content: { type: 'doc', content: [{ type: 'paragraph' }] },
@@ -442,6 +450,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     onSelectionUpdate: updateEditorSelection,
   });
   const editor = liveMode ? liveEditor : manualEditor;
+  const canFind = Boolean(editor && !editor.isDestroyed && draft?.id && draft.id === selectedPage?.id && (!liveMode || liveState?.ready));
+  const findOpen = canFind && findScope === documentScope;
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
   const annotationDialog = !bodyReadOnly && !publicationOpen && annotationSelection?.editor === editor && annotationSelection.documentId === selectedPage?.id ? annotationSelection : null;
   useEffect(() => {
@@ -1504,6 +1514,29 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
   const inColumnLayout = editor?.isActive('documentColumnLayout');
+  function openFind() {
+    if (!canFind) return;
+    if (findOpen) {
+      findInput.current?.focus({ preventScroll: true });
+      findInput.current?.select();
+    } else setFindScope(documentScope);
+  }
+  function closeFind() {
+    setFindScope(null);
+    findOpener.current?.focus({ preventScroll: true });
+  }
+  function handleEditorKeys(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const { key, target } = event;
+    if (canFind && editor && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
+        !event.nativeEvent.isComposing && key.toLowerCase() === 'f' &&
+        target instanceof Element && target.closest('[contenteditable]') === editor.view.dom) {
+      event.preventDefault();
+      event.stopPropagation();
+      openFind();
+      return;
+    }
+    navigateSlash(event);
+  }
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
@@ -1610,7 +1643,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring}
                 onChange={labels => updateDraft({ labels })} onFilter={onChangeDocumentLabel} />
 
+              <div className="docs-editor-sticky">
               <div className="docs-editor-toolbar" role="toolbar" aria-label="문서 서식">
+                <button ref={findOpener} type="button" className={`docs-format-btn ${findOpen ? 'is-active' : ''}`}
+                  title="본문에서 찾기" aria-label="본문에서 찾기" aria-expanded={findOpen} aria-keyshortcuts="Control+F Meta+F"
+                  disabled={!canFind} onClick={() => findOpen ? closeFind() : openFind()}><Search size={15} aria-hidden="true" /></button>
                 <select disabled={bodyReadOnly} aria-label="문단 서식" value={editor?.isActive('heading', { level: 1 }) ? 'h1' : editor?.isActive('heading', { level: 2 }) ? 'h2' : editor?.isActive('heading', { level: 3 }) ? 'h3' : 'p'} onChange={event => { if (event.target.value === 'p') editor?.chain().focus().setParagraph().run(); else editor?.chain().focus().toggleHeading({ level: Number(event.target.value.slice(1)) as 1 | 2 | 3 }).run(); }}><option value="p">본문</option><option value="h1">제목 1</option><option value="h2">제목 2</option><option value="h3">제목 3</option></select><span className="docs-toolbar-separator" />
                 {button('굵게', <Bold size={15} />, () => editor?.chain().focus().toggleBold().run(), editor?.isActive('bold'))}
                 {button('기울임', <Italic size={15} />, () => editor?.chain().focus().toggleItalic().run(), editor?.isActive('italic'))}
@@ -1652,6 +1689,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}
                   onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }} />
               </div>
+              {findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
+                canReplace={!bodyReadOnly && !saving && !conflict} onClose={closeFind} />}
+              </div>
               {editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
                 <button type="button" aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter" title="Ctrl/⌘+Shift+Enter"
                   onMouseDown={event => event.preventDefault()} onClick={() => exitDocumentColumnLayout(editor)}><CornerDownRight size={12} aria-hidden="true" /> 구역 다음 본문으로 이동</button>
@@ -1663,7 +1703,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
                 sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
                 ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen} />}
-              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={navigateSlash}
+              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={handleEditorKeys}
                 onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
                 onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;

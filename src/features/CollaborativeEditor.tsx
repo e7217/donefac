@@ -9,6 +9,7 @@ import type { CollaborationSession } from '../../shared/collaboration';
 import type { DocPage, RichContent } from '../../shared/types';
 import { documentPlainText } from '../../shared/document-nodes';
 import { decorateDocumentExtensions } from './DocumentBlocks';
+import { documentFindExtension } from './document-find';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { api } from '../lib/api';
 import { CollaborationClient, hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
@@ -106,6 +107,7 @@ function LiveBinding({ client, connected, readOnly, onEditor, onContent }: Colla
     immediatelyRender: false,
     extensions: [
       ...decorateDocumentExtensions(createEditorExtensions({ collaboration: true })),
+      documentFindExtension,
       Collaboration.configure({ document: client.doc, field: 'default' }),
       collaborativeCursors(client),
       Placeholder.configure({ placeholder: '함께 내용을 작성하세요.' }),

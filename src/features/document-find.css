@@ -1,0 +1,66 @@
+.docs-find-panel {
+  display: grid;
+  gap: 7px;
+  margin-top: 5px;
+  padding: 8px;
+  border: 1px solid #dce6f0;
+  border-radius: 7px;
+  background: #f8fbff;
+  color: #354760;
+  font-size: 12px;
+}
+
+.docs-find-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+  align-items: center;
+  gap: 4px;
+}
+
+.docs-find-panel .field {
+  min-width: 0;
+  width: 100%;
+  min-height: 34px;
+  padding-block: 5px;
+  font-size: 13px;
+}
+
+.docs-find-panel .btn {
+  min-height: 32px;
+  padding: 4px 7px;
+  font-size: 12px;
+}
+
+.docs-find-controls .btn {
+  min-width: 32px;
+  justify-content: center;
+}
+
+.docs-find-options,
+.docs-find-replace {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+}
+
+.docs-find-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.docs-find-count { margin-inline-end: auto; }
+.docs-find-replace input { flex: 1 1 10rem; }
+.docs-find-message { margin: 0; }
+
+.docs-prose [data-document-find-match] {
+  border-radius: 2px;
+  background: #fff0bd;
+  color: #302511;
+}
+
+.docs-prose [data-document-find-active] {
+  outline: 1px solid #9a4e13;
+  background: #ffcf85;
+}
