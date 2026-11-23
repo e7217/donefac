@@ -35,11 +35,11 @@ const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'teamspace-migration-profile-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
+  const manifestPath = join(directory, 'private-manifest.json');
   async function write(filename, value) { await writeFile(join(directory, filename), value); }
-  async function manifest(packages) { await write('private-manifest.json', JSON.stringify({ packages })); }
-  async function run(output = 'profile.json') {
-    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/pilot-migration.mjs', 'profile',
-      join(directory, 'private-manifest.json'), join(directory, output)], {
+  async function manifest(packages) { await writeFile(manifestPath, JSON.stringify({ packages })); }
+  async function runCommand(args) {
+    const child = spawn(process.execPath, ['--import', 'tsx', 'scripts/pilot-migration.mjs', ...args], {
       cwd: repo, env: { ...process.env, TEAMSPACE_DATA_DIR: join(directory, 'do-not-start'),
         TEAMSPACE_PILOT_ACCESS_FILE: join(directory, 'missing-key'), TEAMSPACE_PILOT_ORIGIN: 'https://no-pilot.invalid' },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -52,7 +52,9 @@ async function fixture(t) {
       child.once('close', code => resolve({ code, stdout, stderr }));
     });
   }
-  return { directory, write, manifest, run };
+  const run = (output = 'profile.json') => runCommand(['profile', manifestPath, join(directory, output)]);
+  const stage = (workspace, report = 'profile.json') => runCommand(['stage', manifestPath, join(directory, workspace), '--profile', join(directory, report)]);
+  return { directory, write, manifest, run, stage };
 }
 
 function assertSanitized(text, fixtureDirectory, extra = []) {
@@ -151,6 +153,88 @@ test('offline profile reads Jira XML, Jira REST and Confluence ZIP and writes on
   assert.match(again.stderr, /이미 있는 파일/u);
   assertSanitized(again.stdout + again.stderr, f.directory, names);
   assert.equal(await readFile(reportPath, 'utf8'), raw);
+});
+
+test('offline profile stages identified Confluence restrictions for review and blocks unresolved permission ownership', { timeout: 45_000 }, async t => {
+  const f = await fixture(t);
+  const file = 'private-restricted-wiki.zip';
+  const restrictedPage = '911337220012';
+  const childPage = '911337220013';
+  const ref = (field, type, id) => `<property name="${field}" class="${type}"><id name="id">${id}</id></property>`;
+  const object = (type, id, content) => `<object class="${type}"><id name="id">${id}</id>${content}</object>`;
+  const page = (id, title, bodyId, parent = '') => [
+    object('Page', id, `<property name="title">${title}</property><property name="version">1</property>${ref('space', 'Space', '20')}${parent}`),
+    object('BodyContent', bodyId, `<property name="body"><![CDATA[<p>${privateBody}</p>]]></property>${ref('content', 'Page', id)}`),
+  ].join('');
+  const confluence = extra => zip([xml('entities.xml', `<hibernate-generic>
+    ${object('Space', '20', '<property name="key">WIKI</property><property name="name">Wiki fixture</property>')}
+    ${page('200', 'Public page', '300')}
+    ${page(restrictedPage, privateTitle, '301')}
+    ${page(childPage, `${privateTitle} descendant`, '302', ref('parent', 'Page', restrictedPage))}
+    ${object('ContentPermissionSet', '400', `<property name="type">View</property>${ref('owningContent', 'Page', restrictedPage)}`)}
+    ${extra}
+  </hibernate-generic>`)]);
+  await f.write(file, confluence(''));
+  await f.manifest([source(file, 'confluence')]);
+
+  const profiled = await f.run();
+  assert.equal(profiled.code, 2, profiled.stdout + profiled.stderr);
+  const raw = await readFile(join(f.directory, 'profile.json'), 'utf8');
+  const report = JSON.parse(raw);
+  assert.equal(report.version, 2);
+  assert.equal(report.status, 'review');
+  assert.equal(report.packages[0].status, 'review');
+  assert.equal(report.packages[0].analysis.coverage.restrictions.markedRecords, 2);
+  assert.deepEqual(report.packages[0].analysis.diagnostics.filter(row => row.severity === 'error'), [
+    { severity: 'error', code: 'CONFLUENCE_RESTRICTED_CONTENT', count: 2 },
+  ]);
+  const staged = await f.stage('stage');
+  assert.equal(staged.code, 0, staged.stdout + staged.stderr);
+  const state = JSON.parse(await readFile(join(f.directory, 'stage', 'stage.json'), 'utf8'));
+  assert.equal(state.profile.status, 'review');
+  assert.equal(state.profile.sha256, hash(raw));
+  assert.equal(state.packages[0].errors, 2);
+  assert.equal(state.packages[0].counts.page, 3);
+  assertSanitized(raw + profiled.stdout + profiled.stderr + staged.stdout + staged.stderr, f.directory, [file, restrictedPage, childPage]);
+
+  const unresolvedSource = confluence([
+    object('ContentPermissionSet', '401', '<property name="type">View</property>'),
+    object('ContentPermission', '402', ref('owningSet', 'ContentPermissionSet', '403')),
+  ].join(''));
+  await f.write(file, unresolvedSource);
+  const unresolved = await f.run('unresolved.json');
+  assert.equal(unresolved.code, 1, unresolved.stdout + unresolved.stderr);
+  const blocked = JSON.parse(await readFile(join(f.directory, 'unresolved.json'), 'utf8'));
+  assert.equal(blocked.status, 'blocked');
+  assert.equal(blocked.packages[0].status, 'blocked');
+  const blockedCodes = blocked.packages[0].analysis.diagnostics.filter(row => row.severity === 'error').map(row => row.code);
+  assert.deepEqual(blockedCodes, ['CONFLUENCE_RESTRICTED_CONTENT', 'CONFLUENCE_RESTRICTION_OWNER_UNKNOWN', 'CONFLUENCE_RESTRICTION_SET_MISSING']);
+  const refused = await f.stage('blocked-stage', 'unresolved.json');
+  assert.equal(refused.code, 1, refused.stdout + refused.stderr);
+  assert.match(refused.stderr, /blocked/u);
+  await assert.rejects(stat(join(f.directory, 'blocked-stage')), { code: 'ENOENT' });
+
+  const forged = structuredClone(blocked);
+  const [forgedPackage] = forged.packages;
+  forged.status = 'review';
+  forged.totals = { ...forged.totals, review: 1, blocked: 0 };
+  forgedPackage.status = 'review';
+  // Bind the modified report to the actual rejected input so stage must check its parsed errors.
+  forgedPackage.inputSha256 = createHash('sha256')
+    .update(JSON.stringify([forged.format, forged.version, 1, 'confluence', privateInstance, ['zip']]))
+    .update('\0').update(unresolvedSource).digest('hex');
+  const errorCount = forgedPackage.analysis.diagnostics.filter(row => row.severity === 'error')
+    .reduce((total, row) => total + row.count, 0);
+  forgedPackage.analysis.diagnostics = [
+    { severity: 'error', code: 'CONFLUENCE_RESTRICTED_CONTENT', count: errorCount },
+    ...forgedPackage.analysis.diagnostics.filter(row => row.severity !== 'error'),
+  ];
+  forgedPackage.analysis.coverage.restrictions.markedRecords = errorCount;
+  await f.write('forged.json', JSON.stringify(forged));
+  const rejected = await f.stage('forged-stage', 'forged.json');
+  assert.equal(rejected.code, 1, rejected.stdout + rejected.stderr);
+  assert.match(rejected.stderr, /패키지 1.*분석 형식·건수 또는 진단/u);
+  await assert.rejects(stat(join(f.directory, 'forged-stage')), { code: 'ENOENT' });
 });
 
 test('offline profile continues after missing, malformed, oversized and duplicate packages', { timeout: 45_000 }, async t => {

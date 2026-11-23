@@ -32,17 +32,18 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     expect(assignee).toBeDefined();
     expect(reporter).toBeDefined();
     const rows = [
-      ['1', '운영 업무', 'Open', 'api', originalAssignee, originalReporter],
-      ['2', '보류 업무', 'Open', 'hold', originalAssignee, originalReporter],
-      ['3', '라벨 없는 업무', 'Open', '', originalAssignee, originalReporter],
-      ['4', '완료 업무', 'Closed', 'api', originalAssignee, originalReporter],
-      ['5', '요청자가 다른 업무', 'Open', 'api', originalAssignee, ''],
+      ['1', '운영 업무', 'Open', 'api', originalAssignee, originalReporter, '2026-11-25'],
+      ['2', '보류 업무', 'Open', 'hold', originalAssignee, originalReporter, '2026-11-26'],
+      ['3', '라벨 없는 업무', 'Open', '', originalAssignee, originalReporter, '2026-11-25'],
+      ['4', '완료 업무', 'Closed', 'api', originalAssignee, originalReporter, '2026-11-25'],
+      ['5', '요청자가 다른 업무', 'Open', 'api', originalAssignee, '', '2026-11-25'],
+      ['6', '기간 밖 마감 업무', 'Open', 'api', originalAssignee, originalReporter, '2026-11-27'],
     ];
     const csv = [
-      'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Labels,Assignee,Reporter',
-      ...rows.map(([id, title, status, label, assigneeName, reporterName]) => [
+      'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Labels,Assignee,Reporter,Due Date',
+      ...rows.map(([id, title, status, label, assigneeName, reporterName, dueDate]) => [
         id, `${originalKey}-${id}`, '20800', originalKey, 'Jira 프로젝트', `${title} ${suffix}`,
-        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', status, 'Task', label, assigneeName, reporterName,
+        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', status, 'Task', label, assigneeName, reporterName, dueDate,
       ].join(',')),
     ].join('\r\n');
     const query = new URLSearchParams({ filename: `saved-filter-${suffix}.csv`, product: 'jira', instanceKey: `filters-${suffix}` });
@@ -65,17 +66,19 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     }), 201);
     const workspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
     issues.push(...workspace.issues.filter(issue => issue.projectId === projectId));
-    expect(issues).toHaveLength(5);
+    expect(issues).toHaveLength(6);
     const issue = (title: string) => issues.find(value => value.title === `${title} ${suffix}`)!;
     const included = issue('운영 업무');
     const held = issue('보류 업무');
     const unlabeled = issue('라벨 없는 업무');
     const closed = issue('완료 업무');
     const otherReporter = issue('요청자가 다른 업무');
+    const outsideDeadline = issue('기간 밖 마감 업무');
     expect(included.labels).toEqual(['api']);
     expect(held.labels).toEqual(['hold']);
     expect(included.assigneeId).toBe(assignee.id);
     expect(included.reporterId).toBe(reporter.id);
+    expect(outsideDeadline.dueDate).toBe('2026-11-27');
     const workflowPath = `/api/projects/${projectId}/workflow`;
     const schemaPath = `/api/projects/${projectId}/issue-schema`;
     const workflow = await json<ProjectWorkflow>(await request.get(workflowPath));
@@ -111,7 +114,7 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     await expect(dialog.getByRole('alert')).toBeVisible();
     await expect(save).toBeDisabled();
 
-    const jql = `project = ${originalKey} AND status = Open AND issuetype = Task AND assignee = ${originalAssignee} AND reporter = ${originalReporter} AND labels NOT IN ("hold") ORDER BY Rank DESC`;
+    const jql = `project = ${originalKey} AND status = Open AND issuetype = Task AND assignee = ${originalAssignee} AND reporter = ${originalReporter} AND labels NOT IN ("hold") AND due >= "2026/11/25" AND dueDate < "2026-11-27" ORDER BY Rank DESC`;
     await jqlInput.fill(jql);
     async function preview() {
       const pending = postTo(previewPath);
@@ -124,7 +127,8 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     expect(first).toMatchObject({
       total: 1,
       filters: { status: included.status, type: included.type, assigneeId: assignee.id,
-        reporter: { kind: 'member', memberId: reporter.id }, labels: { exclude: ['hold'], presence: 'set' } },
+        reporter: { kind: 'member', memberId: reporter.id }, labels: { exclude: ['hold'], presence: 'set' },
+        planning: { dates: { mode: 'due', from: '2026-11-25', to: '2026-11-26' } } },
       orderBy: [{ field: 'Rank', direction: 'desc' }],
     });
     expect(first.issues.map(value => value.id)).toEqual([included.id]);
@@ -135,6 +139,8 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     }
     await expect(review).not.toContainText(unlabeled.title);
     await expect(review).not.toContainText(otherReporter.title);
+    await expect(review).not.toContainText(outsideDeadline.title);
+    await expect(review).toContainText('목표 마감일 · 2026-11-25 ~ 2026-11-26');
     const name = dialog.getByLabel('보기 이름', { exact: true });
     const order = dialog.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true });
     await name.fill(viewName);
@@ -181,7 +187,8 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
     await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     for (const value of [included, held]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toBeVisible();
-    for (const value of [unlabeled, closed, otherReporter]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toHaveCount(0);
+    for (const value of [unlabeled, closed, otherReporter, outsideDeadline]) await expect(chart.locator(`[data-issue-id="${value.id}"]`)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '간트에 적용된 계획·일정 조건' })).toContainText('목표 마감일 · 2026-11-25 ~ 2026-11-26');
     await page.reload();
     await expect(chart.locator(`[data-issue-id="${included.id}"]`)).toBeVisible();
     await expect(chart.locator(`[data-issue-id="${unlabeled.id}"]`)).toHaveCount(0);

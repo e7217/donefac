@@ -99,7 +99,7 @@ const blockedBytes = Buffer.from('synthetic restricted descendant attachment\x00
 
 function wikiArchive(key, pages) {
   const files = [];
-  const objects = pages.flatMap(({ id, title, parent, attachment }, index) => {
+  const objects = pages.flatMap(({ id, title, parent, attachment, restricted }, index) => {
     const rows = [
       `<object class="Page"><id name="id">${id}</id><property name="title">${title}</property>
         <property name="version">1</property><property name="space" class="Space"><id name="id">20</id></property>
@@ -108,6 +108,11 @@ function wikiArchive(key, pages) {
       `<object class="BodyContent"><id name="id">${300 + index}</id><property name="body"><![CDATA[<p>${title} content</p>]]></property>
         <property name="content" class="Page"><id name="id">${id}</id></property></object>`,
     ];
+    if (restricted) {
+      const permissionSetId = 500 + index;
+      rows.push(`<object class="ContentPermissionSet"><id name="id">${permissionSetId}</id>
+        <property name="type">View</property><property name="owningContent" class="Page"><id name="id">${id}</id></property></object>`);
+    }
     if (attachment) {
       const attachmentId = 700 + index;
       rows.push(`<object class="Attachment"><id name="id">${attachmentId}</id><property name="title">${title}.bin</property>
@@ -215,6 +220,69 @@ async function verification(root, exitCode) {
   assert.ok(!raw.includes(pageId) && !raw.includes(childPageId) && !raw.includes(publicPageId));
   return JSON.parse(raw);
 }
+
+test('profile-bound rehearsal still requires explicit exclusion of restrictions recorded in the Confluence XML', { timeout: 90_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-archived-restriction-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const root = join(scratch, 'run');
+  const manifest = join(scratch, 'manifest.json');
+  const profilePath = join(scratch, 'profile.json');
+  const filename = 'archived-wiki.zip';
+  await writeFile(join(scratch, filename), wikiArchive('ARC', [
+    { id: pageId, title: 'Archived restricted page', restricted: true },
+    { id: childPageId, title: 'Archived restricted child', parent: pageId },
+    { id: publicPageId, title: 'Public page' },
+  ]));
+  await writeFile(manifest, JSON.stringify({ packages: [{ file: filename, product: 'confluence', instanceKey: 'archived-wiki' }] }));
+
+  const profile = await rehearsal(['profile', manifest, profilePath]).exited;
+  assert.equal(profile.code, 2, profile.stdout + profile.stderr);
+  const { status, packages } = JSON.parse(await readFile(profilePath, 'utf8'));
+  assert.equal(status, 'review');
+  assert.deepEqual(packages[0].analysis.diagnostics.filter(row => row.severity === 'error'), [
+    { code: 'CONFLUENCE_RESTRICTED_CONTENT', severity: 'error', count: 2 },
+  ]);
+
+  const stage = await rehearsal(['stage', manifest, root, '--profile', profilePath]).exited;
+  assert.equal(stage.code, 0, stage.stdout + stage.stderr);
+  const staged = JSON.parse(await readFile(join(root, 'stage.json'), 'utf8'));
+  assert.equal(staged.profile.status, 'review');
+  assert.equal(staged.packages[0].errors, 2);
+  assert.equal(staged.confluenceReviews, undefined);
+  const restrictedRecord = `${staged.packages[0].packageId}/page:${pageId}`;
+  const childRecord = `${staged.packages[0].packageId}/page:${childPageId}`;
+
+  await withReview(root, async base => {
+    const { actor, configuration } = await reviewConfiguration(base, staged.packages);
+    const blocked = await previewMigration(base, actor, configuration);
+    assert.equal(blocked.canApply, false);
+    assert.deepEqual(blocked.notices.filter(notice => notice.code === 'SOURCE_CONFLUENCE_RESTRICTED_CONTENT' && notice.severity === 'error')
+      .map(notice => notice.recordId).sort(), [restrictedRecord, childRecord].sort());
+    await applyMigration(base, actor, blocked, 409);
+    assert.deepEqual((await api(base, '/workspace')).documents, []);
+    assert.deepEqual(await api(base, '/source-imports'), []);
+
+    const safe = await previewMigration(base, actor, { ...configuration, excludedRecords: [restrictedRecord] });
+    assert.equal(safe.canApply, true, JSON.stringify(safe.notices));
+    assert.equal(safe.counts.explicitExcludedRecords, 1);
+    assert.equal(safe.counts.excludedDescendants, 1);
+    await applyMigration(base, actor, safe);
+    assert.deepEqual((await api(base, '/workspace')).documents.map(({ title, plainText }) => [title, plainText]), [
+      ['Public page', 'Public page content'],
+    ]);
+  });
+
+  const verified = await verification(root, 2);
+  assert.equal(verified.status, 'review');
+  assert.equal(verified.comparison.matches, true);
+  assert.equal(verified.profile.sha256, staged.profile.sha256);
+  for (const snapshot of [verified.source, verified.restore]) {
+    assert.equal(snapshot.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
+    const [pages] = snapshot.evidence.receipts[0].primaryRecords;
+    assert.equal(pages.packageId, staged.packages[0].packageId);
+    assert.deepEqual(pages.counts, { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 2 });
+  }
+});
 
 test('guarded rehearsal requires excluding ZIP-bound live restrictions and omits their descendants and files', { timeout: 120_000 }, async t => {
   const reviewed = wikiArchive('REV', [

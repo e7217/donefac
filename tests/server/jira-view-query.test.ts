@@ -165,6 +165,48 @@ test('empty assignees and explicitly empty reporters remain distinct from unknow
   assert.deepEqual(examples.filter(match('assignee IS NULL')), [absent, unset, member]);
 });
 
+test('literal Jira deadlines use only due dates and intersect exact inclusive calendar bounds', () => {
+  const jql = 'project = OLD AND ("dueDate" > "2024/02/28" AND due < \'2024-03-02\') AND (status = review OR status = done)';
+  const translated = translateJiraViewQuery(jql, {
+    ...context, prepareSourceAliases: fields => { assert.deepEqual(fields, ['status']); return undefined; },
+  });
+  assert.deepEqual(translated.filters, {
+    ...noFilters, statusIds: ['done', 'review'], planning: { dates: { mode: 'due', from: '2024-02-29', to: '2024-03-01' } },
+  });
+  assert.deepEqual(translated.criteria.find(item => item.field === 'due'), {
+    field: 'due', label: '목표 마감일 · 2024-02-29 ~ 2024-03-01',
+  });
+  const matches = match(jql);
+  assert.equal(matches(issue({ dueDate: '2024-02-29' })), true);
+  assert.equal(matches(issue({ dueDate: '2024-03-01', status: 'done' })), true);
+  assert.equal(matches(issue({ dueDate: '2024-02-28' })), false);
+  assert.equal(matches(issue({ dueDate: '2024-03-02' })), false);
+  assert.equal(matches(issue({ dueDate: '2024-03-01', status: 'todo' })), false);
+  assert.equal(matches(issue({ startDate: '2024-02-29', endDate: '2024-03-01' })), false);
+
+  for (const [input, expected] of [
+    ['due = "2024-02-29" AND due <= "2024-12-31"', { from: '2024-02-29', to: '2024-02-29' }],
+    ['due >= "2024-03-01" AND DUE >= "2024/02/29"', { from: '2024-03-01' }],
+    ['due <= "2024-02-29" AND due <= "2024-03-01"', { to: '2024-02-29' }],
+    ['due < "2024-03-01"', { to: '2024-02-29' }],
+    ['due > "2024-12-31"', { from: '2025-01-01' }],
+  ] as const) {
+    assert.deepEqual(translateJiraViewQuery(input, context).filters.planning?.dates, { mode: 'due', ...expected });
+  }
+});
+
+test('unrepresentable, ambiguous and impossible Jira deadline expressions fail with a JQL position', () => {
+  for (const jql of [
+    'due >= now()', 'due = "1d"', 'due IS EMPTY', 'due != "2024-02-29"', 'due IN ("2024-02-29")',
+    'due = "2023-02-29"', 'due = "2024-02-29 12:00"', 'due = "2024/02-29"', 'due = 2024-02-29',
+    'due >= "2024-03-01" AND due <= "2024-02-29"', 'due < "0000-01-01"', 'due > "9999-12-31"',
+    'due < "2024-02-29" OR status = review', 'due = "2024-02-29" OR due = "2024-03-01"',
+  ]) {
+    assert.throws(() => translateJiraViewQuery(jql, context),
+      error => error instanceof JiraViewQueryError && typeof error.offset === 'number', jql);
+  }
+});
+
 test('JQL sort descriptors are parsed separately from the saved view filters', () => {
   const translated = translateJiraViewQuery('project = TEAM ORDER BY Rank ASC, "Epic Link" dEsC, cf[10001], updated', context);
   assert.deepEqual(translated.filters, noFilters);

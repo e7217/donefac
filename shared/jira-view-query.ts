@@ -1,3 +1,4 @@
+import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from './calendar.js';
 import {
   ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
   issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter,
@@ -26,15 +27,16 @@ export type JiraViewAliasField = 'status' | 'type' | 'assignee' | 'reporter';
 export type JiraViewSourceAlias = { kind: 'mapped'; sourceId: string; targetId: string } | { kind: 'ambiguous' | 'unmapped' };
 export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: string) => JiraViewSourceAlias | undefined;
 type ScalarField = 'project' | JiraViewAliasField;
-type Field = ScalarField | 'labels';
+type Field = ScalarField | 'labels' | 'due';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
-type BasicClause = { field: Field; offset: number } & (
+type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
   | { operator: '=' | '!=' | 'in' | 'not in'; values: Token[] }
   | { operator: 'empty' | 'set' }
 );
 type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
-type Clause = BasicClause | StatusClause;
+type DueClause = { field: 'due'; offset: number; from?: string; to?: string };
+type Clause = BasicClause | StatusClause | DueClause;
 
 function isStatusClause(clause: Clause): clause is StatusClause {
   return clause.field === 'status' && ('branches' in clause || clause.operator === '=' || clause.operator === 'in');
@@ -51,8 +53,9 @@ const reservedWords = new Set([
   'after', 'all', 'and', 'any', 'asc', 'before', 'by', 'cf', 'changed', 'desc', 'during', 'empty', 'from',
   'in', 'is', 'isempty', 'isnull', 'not', 'notin', 'null', 'or', 'order', 'to', 'was',
 ]);
+const dueOperators = ['=', '<', '<=', '>', '>='];
 const fieldLabels: Record<Field, string> = {
-  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', labels: '라벨',
+  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', labels: '라벨', due: '목표 마감일',
 };
 
 function isBare(token: Token, value: string): boolean {
@@ -98,7 +101,8 @@ function tokenize(query: string): Token[] {
       offset = quoted.end;
       continue;
     }
-    const symbol = query.startsWith('!=', offset) ? '!=' : '(),='.includes(character) ? character : undefined;
+    const comparison = query.slice(offset, offset + 2);
+    const symbol = ['!=', '<=', '>='].includes(comparison) ? comparison : '(),=<>'.includes(character) ? character : undefined;
     if (symbol) {
       tokens.push({ kind: 'symbol', value: symbol, offset });
       offset += symbol.length;
@@ -118,10 +122,12 @@ function tokenize(query: string): Token[] {
 function parseField(token: Token): Field {
   const value = token.value.toLowerCase();
   switch (value) {
-    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'labels':
+    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'labels': case 'due':
       return value;
     case 'issuetype':
       return 'type';
+    case 'duedate':
+      return 'due';
     default:
       throw new JiraViewQueryError('이 JQL 필드는 이슈 보기에서 지원되지 않습니다.', token.offset);
   }
@@ -203,7 +209,9 @@ class QueryParser {
 
   private clause(): Clause {
     const start = this.literal('JQL 조건 필드를 입력해 주세요.');
-    const base = { field: parseField(start), offset: start.offset };
+    const field = parseField(start);
+    if (field === 'due') return this.dueClause(start.offset);
+    const base = { field, offset: start.offset };
     if (this.consume('=')) return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
     if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
     if (base.field === 'labels') {
@@ -220,6 +228,32 @@ class QueryParser {
       return { ...base, operator };
     }
     throw new JiraViewQueryError('이 JQL 연산자는 해당 필드의 저장된 보기에서 지원되지 않습니다.', this.current().offset);
+  }
+
+  private dueClause(offset: number): DueClause {
+    const operator = this.current();
+    if (operator.kind !== 'symbol' || !dueOperators.includes(operator.value)) {
+      throw new JiraViewQueryError('목표 마감일에는 =, <, <=, >, >= 중 하나를 사용해 주세요.', operator.offset);
+    }
+    this.index++;
+    const dateMessage = '목표 마감일은 따옴표로 감싼 유효한 YYYY-MM-DD 또는 YYYY/MM/DD 날짜여야 합니다.';
+    const value = this.literal(dateMessage);
+    const date = value.value.replace(/^(\d{4})\/(\d{2})\/(\d{2})$/u, '$1-$2-$3');
+    if (value.kind !== 'quoted' || !isCalendarDate(date)) throw new JiraViewQueryError(dateMessage, value.offset);
+
+    const clause: DueClause = { field: 'due', offset };
+    switch (operator.value) {
+      case '=': return { ...clause, from: date, to: date };
+      case '>=': return { ...clause, from: date };
+      case '<=': return { ...clause, to: date };
+      case '>':
+        if (date !== MAX_CALENDAR_DATE) return { ...clause, from: calendarDate(calendarDay(date) + 1) };
+        break;
+      case '<':
+        if (date !== MIN_CALENDAR_DATE) return { ...clause, to: calendarDate(calendarDay(date) - 1) };
+        break;
+    }
+    throw new JiraViewQueryError('목표 마감일 조건에 일치할 수 있는 날짜가 없습니다.', value.offset);
   }
 
   private list(label: string, limit: number): Token[] {
@@ -323,6 +357,21 @@ function statusIntersection(clauses: readonly StatusClause[], context: JiraViewQ
   return selected ?? new Map<string, string>();
 }
 
+function dueFilter(clauses: readonly DueClause[]) {
+  if (!clauses.length) return undefined;
+  let from: string | undefined;
+  let to: string | undefined;
+  for (const clause of clauses) {
+    if (clause.from && (!from || from < clause.from)) from = clause.from;
+    if (clause.to && (!to || to > clause.to)) to = clause.to;
+    if (from && to && from > to) {
+      throw new JiraViewQueryError('목표 마감일 조건에 공통으로 일치할 수 있는 날짜가 없습니다.', clause.offset);
+    }
+  }
+  const range = from && to ? `${from} ~ ${to}` : from ? `${from}부터` : `${to}까지`;
+  return { dates: { mode: 'due' as const, ...(from ? { from } : {}), ...(to ? { to } : {}) }, label: `${fieldLabels.due} · ${range}` };
+}
+
 function checkLabel(value: Token): string {
   if (value.value.length > ISSUE_VIEW_LABEL_MAX_LENGTH) {
     throw new JiraViewQueryError(`라벨은 최대 ${ISSUE_VIEW_LABEL_MAX_LENGTH}자까지 지정할 수 있습니다.`, value.offset);
@@ -394,13 +443,14 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const { clauses, orderBy } = new QueryParser(tokenize(query)).parse();
   const aliasFields = new Set<JiraViewAliasField>();
   if (context.prepareSourceAliases) for (const clause of clauses) {
-    if (clause.field !== 'project' && clause.field !== 'labels' && ('values' in clause || 'branches' in clause)) aliasFields.add(clause.field);
+    if (('values' in clause || 'branches' in clause) && clause.field !== 'project' && clause.field !== 'labels') aliasFields.add(clause.field);
   }
   const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
   const conditions = new Map<ScalarField, { id: string; label: string }>();
   const labelClauses: BasicClause[] = [];
   const statusClauses: StatusClause[] = [];
+  const dueClauses: DueClause[] = [];
   for (const clause of clauses) {
     if (isStatusClause(clause)) {
       statusClauses.push(clause);
@@ -409,6 +459,10 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     const { field } = clause;
     if (field === 'labels') {
       labelClauses.push(clause);
+      continue;
+    }
+    if (field === 'due') {
+      dueClauses.push(clause);
       continue;
     }
     if (field === 'status') throw new JiraViewQueryError('지원하지 않는 상태 조건입니다.', clause.offset);
@@ -433,12 +487,14 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   }
   const labels = labelFilter(labelClauses);
   if (labels) filters.labels = labels;
+  const due = dueFilter(dueClauses);
+  if (due) filters.planning = { dates: due.dates };
   const fields = new Set(clauses.map(clause => clause.field));
   const criteria: Translation['criteria'] = [
     { field: 'project', label: projectCriterion(context) },
     ...[...fields].flatMap(field => {
       if (field === 'project' || field === 'labels') return [];
-      const label = field === 'status' ? statusLabel : conditions.get(field)?.label;
+      const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : conditions.get(field)?.label;
       return label === undefined ? [] : [{ field, label }];
     }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),

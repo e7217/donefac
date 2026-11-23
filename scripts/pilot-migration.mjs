@@ -161,16 +161,18 @@ async function loadStageProfile(path, inputs) {
         !isCount(item.size) || !item.size || item.size > LEGACY_MAX_RAW_BYTES || !formatsByProduct[item.product].has(format) ||
         !isCount(fileCount) || !isCount(expandedBytes) || !counts || typeof counts !== 'object' || Array.isArray(counts) ||
         !Object.values(counts).every(isCount) || !Array.isArray(diagnostics) || diagnostics.some(row =>
-          !['info', 'warning'].includes(row?.severity) || !isCount(row.count) || row.count === 0)) {
+          !['info', 'warning', 'error'].includes(row?.severity) || !isCount(row.count) || row.count === 0 ||
+          row.severity === 'error' && (item.status !== 'review' || item.product !== 'confluence' || !isMarkedRestriction(row)))) {
       throw new Error(`패키지 ${index + 1}의 원본 분석 결과를 확인할 수 없습니다. profile을 다시 실행해 주세요.`);
     }
+    const errors = diagnostics.reduce((total, row) => total + (row.severity === 'error' ? row.count : 0), 0);
     const warnings = diagnostics.reduce((total, row) => total + (row.severity === 'warning' ? row.count : 0), 0);
-    if (!isCount(warnings) || (item.status === 'analyzed' && warnings > 0)) {
-      throw new Error(`패키지 ${index + 1}의 원본 분석 경고를 확인할 수 없습니다. profile을 다시 실행해 주세요.`);
+    if (!isCount(errors) || !isCount(warnings) || (item.status === 'analyzed' && warnings > 0)) {
+      throw new Error(`패키지 ${index + 1}의 원본 분석 진단을 확인할 수 없습니다. profile을 다시 실행해 주세요.`);
     }
     totals[item.status]++;
     totals.bytes += item.size;
-    return { size: item.size, sha256: item.sha256, inputSha256: item.inputSha256, format, fileCount, expandedBytes, counts, warnings };
+    return { size: item.size, sha256: item.sha256, inputSha256: item.inputSha256, format, fileCount, expandedBytes, counts, errors, warnings };
   });
   if (totals.bytes > totalPackageBytes || (totals.review ? 'review' : 'analyzed') !== report.status ||
       Object.entries(totals).some(([key, value]) => report.totals?.[key] !== value)) {
@@ -386,10 +388,30 @@ async function preflightStageInputs(inputs, expected) {
 }
 
 function matchesProfileAnalysis(summary, expected) {
-  return summary.source.format === expected.format && summary.errors === 0 && summary.warnings === expected.warnings &&
+  return summary.source.format === expected.format && summary.errors === expected.errors && summary.warnings === expected.warnings &&
     summary.fileCount === expected.fileCount && summary.expandedBytes === expected.expandedBytes &&
     Object.entries(expected.counts).every(([kind, count]) => count === (summary.counts[kind] ?? 0)) &&
     Object.entries(summary.counts).every(([kind, count]) => count === (expected.counts[kind] ?? 0));
+}
+
+function isMarkedRestriction(row) {
+  return row.code === 'CONFLUENCE_RESTRICTED_CONTENT';
+}
+
+async function matchesProfileErrors(call, summary) {
+  // The summary counts errors, but the staged diagnostics establish which records are restricted.
+  const limit = 100;
+  const records = new Set();
+  for (let offset = 0; offset < summary.errors; offset += limit) {
+    const page = await call(`/legacy-import/packages/${summary.id}/diagnostics?severity=error&offset=${offset}&limit=${limit}`);
+    if (page?.total !== summary.errors || page.offset !== offset || page.limit !== limit || !Array.isArray(page.diagnostics) ||
+        page.diagnostics.length !== Math.min(limit, summary.errors - offset)) return false;
+    for (const row of page.diagnostics) {
+      if (row?.severity !== 'error' || !isMarkedRestriction(row) || typeof row.recordId !== 'string' || !row.recordId || records.has(row.recordId)) return false;
+      records.add(row.recordId);
+    }
+  }
+  return true;
 }
 
 async function stage(manifestPath, root, { profilePath, findingsPaths }) {
@@ -429,7 +451,9 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
             summary.source.product !== input.product || summary.source.instanceKey !== input.instanceKey) {
           throw new Error(`패키지 ${index + 1}의 저장 결과와 입력 파일이 다릅니다.`);
         }
-        if (expected && !matchesProfileAnalysis(summary, expected)) throw profileMismatch(index, '분석 형식·건수 또는 경고');
+        if (expected && (!matchesProfileAnalysis(summary, expected) || !await matchesProfileErrors(call, summary))) {
+          throw profileMismatch(index, '분석 형식·건수 또는 진단');
+        }
         results.push({ packageId: summary.id, product: input.product, instanceKey: input.instanceKey, sha256: sha, size: bytes.length,
           format: summary.source.format, errors: summary.errors, warnings: summary.warnings, counts: summary.counts });
         console.log(`원본 ${index + 1}/${inputs.length} 분석 완료 (${input.product}, 오류 ${summary.errors}, 경고 ${summary.warnings})`);

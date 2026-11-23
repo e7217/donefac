@@ -161,6 +161,8 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 `status IN ("Open", "In Review")`처럼 여러 상태에 해당하는 조건도 옮길 수 있습니다. `(status = Open OR status = "In Review")`처럼 `OR`로 이어진 상태 조건도 같은 방식으로 미리봅니다. [Atlassian JQL 연산자 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html)
 
+`due >= "2026-11-01" AND due < "2026-12-01"`은 목표 마감일이 11월 안에 있는 업무를 고릅니다. 저장하면 목록·보드·간트와 문서 업무 목록에서 같은 조회 조건을 사용합니다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
+
 예를 들어 `project = OLD AND status = "Open" AND labels NOT IN ("hold") ORDER BY Rank ASC`를 검토할 수 있습니다. 이관 기록으로 `OLD`의 소속을 확인하고 라벨이 있는 업무에서 `hold`를 제외합니다. `ORDER BY`가 있으면 **프로젝트 정렬 사용**을 선택해 현재 Teamspace 업무 순서를 적용합니다. 지원되는 조건과 요청 형식은 API 사용법에 정리했습니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
 
 ### Confluence 문서의 Jira 목록 복원

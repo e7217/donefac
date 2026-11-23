@@ -25,7 +25,7 @@ type JiraSourceIssue = {
   key: string;
   issueId?: string;
   fields?: {
-    summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue;
+    summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue; duedate?: string | null;
     assignee?: JiraRestProfile; reporter?: JiraRestProfile; creator?: JiraRestProfile;
   };
 };
@@ -73,7 +73,7 @@ async function fixture(t: TestContext) {
   const addIssue = (title: string, labels: string[], projectId = PROJECT_ID) =>
     request<Issue>('/issues', 'POST', { projectId, title, labels }, 201);
 
-  async function migrateJira(instanceKey: string, sourceIssues: JiraSourceIssue[], targetKey: string,
+  async function reviewJiraMigration(instanceKey: string, sourceIssues: JiraSourceIssue[], targetKey: string,
     configure?: (options: MigrationOptions) => Partial<MigrationConfiguration>) {
     const issues = sourceIssues.map(({ id, key, issueId, fields }, index) => ({
       id: issueId ?? String(100 + index), key: `${key}-${issueId ?? index + 1}`,
@@ -97,7 +97,11 @@ async function fixture(t: TestContext) {
       projects: defaultConfiguration.projects.map(project => ({ ...project, key: targetKey, name: `${targetKey} local project` })),
       ...configure?.(options),
     };
-    const review = await request<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
+    return request<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
+  }
+
+  async function migrateJira(...args: Parameters<typeof reviewJiraMigration>) {
+    const review = await reviewJiraMigration(...args);
     assert.ok(review.canApply, JSON.stringify(review.notices));
     const result = await request<MigrationApplyResult>(`/migrations/previews/${review.id}/apply`, 'POST', {
       expectedVersion: review.version, acknowledgements: review.requiredAcknowledgements,
@@ -105,7 +109,7 @@ async function fixture(t: TestContext) {
     assert.equal(result.import.projectIds.length, 1);
     return result.import.projectIds[0];
   }
-  return { request, snapshot, preview, addIssue, migrateJira };
+  return { request, snapshot, preview, addIssue, migrateJira, reviewJiraMigration };
 }
 
 test('Jira saved-view preview follows shared filter semantics and manual rank, and imports an ordinary backup-safe view', async t => {
@@ -223,6 +227,39 @@ test('Jira project criteria recognize active archived original keys and numeric 
     await f.request(PREVIEW, 'POST', { projectId: merged, jql: `project = ${alias}` }, 400);
   }
   assert.equal((await f.preview(`project = "${merged}"`, merged)).total, 2);
+});
+
+test('Jira deadline saved views match imported source dates and preserve native date bounds in backup', async t => {
+  const f = await fixture(t);
+  const origin = { id: '41250', key: 'LEGDATE' };
+  const dueDates = ['2024-02-28', '2024-02-29', '2024-03-01', '2024-03-02', null];
+  const projectId = await f.migrateJira('source-dates', dueDates.map((duedate, index) => ({
+    ...origin, issueId: String(1100 + index), fields: { duedate, summary: `Ticket with due date ${duedate ?? 'unset'}` },
+  })), 'TEAMDATED');
+  const imported = (await f.snapshot()).issues.filter(issue => issue.projectId === projectId);
+  assert.deepEqual(new Set(imported.map(issue => issue.dueDate)), new Set(dueDates));
+  const expected = imported.filter(issue => issue.dueDate === '2024-02-29' || issue.dueDate === '2024-03-01').map(issue => issue.id).sort();
+  const jql = `project = ${origin.key} AND dueDate >= "2024/02/29" AND due < "2024-03-02"`;
+  const review = await f.preview(jql, projectId);
+  const planning = { dates: { mode: 'due', from: '2024-02-29', to: '2024-03-01' } };
+  assert.deepEqual(review.filters.planning, planning);
+  assert.deepEqual(review.issues.map(issue => issue.id).sort(), expected);
+  assert.equal(review.total, 2);
+  const view = await f.request<SavedView>(IMPORT, 'POST', {
+    projectId, jql, name: 'Jira deadline window', layout: 'board', acceptProjectOrder: false, revision: review.revision,
+  }, 201);
+  assert.deepEqual(view.filters, review.filters);
+
+  await f.request(PREVIEW, 'POST', { projectId, jql: `project = ${origin.key} AND due >= startOfWeek()` }, 400);
+  const invalid = await f.reviewJiraMigration('invalid-source-date', [{
+    id: '41251', key: 'LEGINVALID', fields: { duedate: 'not-a-date' },
+  }], 'TEAMINVALID');
+  assert.equal(invalid.canApply, false);
+  assert.ok(invalid.notices.some(notice => notice.severity === 'error' && notice.code === 'DATE_UNRESOLVED'));
+  const backup = await f.request<WorkspaceSnapshot>('/export');
+  await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
+  await f.request('/import', 'POST', { data: backup });
+  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [view]);
 });
 
 test('Jira multi-status saved views preserve original aliases while reviewing current workflow names', async t => {

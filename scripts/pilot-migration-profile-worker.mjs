@@ -26,6 +26,7 @@ function summarize({ dataset, files, expandedBytes }, requestedProduct, jiraHist
   const unsupported = { types: dataset.unsupported.length, objects: dataset.unsupported.reduce((sum, item) => sum + item.count, 0) };
   const authors = new Set(records.filter(record => record.kind === 'identity' && record.metadata.identityIncomplete !== true).map(record => record.sourceId));
   const recordIds = new Set(records.map(record => record.id));
+  const restrictedConfluenceRecords = new Set();
   const filesByPath = new Map(files.map(file => [file.path, file]));
   const coverage = {
     metadata: { declaredVersionPresent: Boolean(source.declaredVersion), timezonePresent: Boolean(source.timezone) },
@@ -67,15 +68,22 @@ function summarize({ dataset, files, expandedBytes }, requestedProduct, jiraHist
     } else {
       if (record.kind === 'page' && record.textFormat === 'confluence-storage') coverage.confluence.pagesWithBody++;
       if (record.kind === 'revision') coverage.confluence.revisions++;
-      if (record.metadata.restricted === true) coverage.restrictions.markedRecords++;
+      if (record.metadata.restricted === true) {
+        coverage.restrictions.markedRecords++;
+        restrictedConfluenceRecords.add(record.id);
+      }
       if (record.kind === 'relation' && record.metadata.sourceClass === 'SpacePermission') coverage.restrictions.spacePermissionRecords++;
     }
   }
-  const review = diagnostics.some(group => group.severity === 'warning') || unsupported.objects > 0 ||
+  const errors = dataset.diagnostics.filter(diagnostic => diagnostic.severity === 'error');
+  // The migration preview can require exclusion of these exact records. Other errors still stop staging.
+  const blocked = errors.some(diagnostic => diagnostic.code !== 'CONFLUENCE_RESTRICTED_CONTENT' ||
+    !restrictedConfluenceRecords.has(diagnostic.recordId));
+  const review = errors.length > 0 || diagnostics.some(group => group.severity === 'warning') || unsupported.objects > 0 ||
     coverage.authors.unresolvedAuthors > 0 || coverage.references.unresolvedInPackage > 0 ||
     coverage.attachments.unconfirmed > 0 || coverage.attachments.empty > 0 || coverage.attachments.overUploadLimit > 0 ||
     coverage.restrictions.markedRecords > 0 || coverage.restrictions.spacePermissionRecords > 0;
-  const status = diagnostics.some(group => group.severity === 'error') ? 'blocked' : review ? 'review' : 'analyzed';
+  const status = blocked ? 'blocked' : review ? 'review' : 'analyzed';
   return { status, analysis: { format: source.format, expandedBytes, fileCount: files.length, counts, diagnostics, unsupported, coverage } };
 }
 

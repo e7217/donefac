@@ -204,13 +204,17 @@ npm run pilot:rehearsal -- profile /absolute/path/manifest.json /absolute/path/s
 
 `profile`은 파일럿 빌드나 접속 없이 원본을 읽는다. 파일 순번, 원본 제품·형식, SHA-256·크기, 객체와 첨부 분석 건수, 진단 코드 집계를 새 JSON 보고서에 저장한다. 형식 2는 실제 파일의 바이트와 매니페스트의 순서·제품·인스턴스를 함께 계산한 해시도 기록한다. 원본 이름·경로·인스턴스 식별값·객체 식별자와 본문은 보고서에서 생략한다. 기존 보고서가 있으면 새 경로를 지정한다. 한 파일 64MiB, 최대 20개와 합계 512MiB를 검사한다. 종료 코드 `0`은 분석 완료, `2`는 경고나 확인할 범위가 남은 경우, `1`은 읽기·형식·한도·중복 오류 등으로 일부 파일 분석을 마칠 수 없었거나 실행에 실패한 경우다.
 
+Confluence XML에서 접근 제한 대상이 정확한 원본 객체에 연결되면 `CONFLUENCE_RESTRICTED_CONTENT`는 오류로 기록하고 패키지 판정은 `review`로 남긴다. 이 경우 격리된 리허설을 준비할 수 있다. 제한 대상이나 권한 집합을 확인할 수 없거나 다른 원본 분석 오류가 있으면 `blocked`로 남는다.
+
 ```bash
 npm run build:pilot
 npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/rehearsal --profile /absolute/path/source-profile.json
 npm run pilot:rehearsal -- review /absolute/path/rehearsal
 ```
 
-`stage --profile`은 `analyzed`와 `review` 상태의 형식 2 보고서를 받는다. 이전 형식은 `profile`로 다시 분석한다. 패키지 수·순서·제품·인스턴스를 실제 업로드할 바이트와 대조한다. 저장된 분석의 원본 형식, 압축 해제 크기와 객체·파일·경고 건수도 확인한다. 동일한 ZIP은 경로나 파일명을 바꿔 지정할 수 있다. 개별 XML·CSV·JSON은 분석에 쓰는 파일명을 유지한다. 보고서가 `blocked`거나 파일·설정·분석이 달라지면 준비를 중단하고 이번 실행이 만든 작업공간을 정리한다. 성공한 준비는 `stage.json`과 후속 검증 보고서의 `profile`에 사전 분석 보고서 자체의 SHA-256과 시각·상태를 남긴다.
+`stage --profile`은 `analyzed`와 `review` 상태의 형식 2 보고서를 받는다. 이전 형식은 `profile`로 다시 분석한다. 패키지 수·순서·제품·인스턴스를 실제 업로드할 바이트와 대조한다. 저장된 분석의 원본 형식, 압축 해제 크기와 객체·파일·오류·경고 건수도 확인한다. 오류가 있는 `review` 패키지는 파일럿이 저장한 오류를 전부 읽어 각 오류가 제한 대상 객체와 연결된 `CONFLUENCE_RESTRICTED_CONTENT`인지 확인한다. 동일한 ZIP은 경로나 파일명을 바꿔 지정할 수 있다. 개별 XML·CSV·JSON은 분석에 쓰는 파일명을 유지한다. 보고서가 `blocked`거나 파일·설정·분석이 달라지면 준비를 중단하고 이번 실행이 만든 작업공간을 정리한다. 성공한 준비는 `stage.json`과 후속 검증 보고서의 `profile`에 사전 분석 보고서 자체의 SHA-256과 시각·상태를 남긴다.
+
+`review`에서 **이관 검토 진단**의 접근 제한 오류와 원본을 확인한다. 제한된 페이지를 제외하고 미리보기를 다시 만들면 확인된 하위 페이지·본문 이력·댓글·첨부도 이관 대상에서 빠진다. 오류가 남은 미리보기는 적용할 수 없다.
 
 Confluence 대조 파일은 같은 `stage` 명령에 별도로 연결할 수 있다.
 
