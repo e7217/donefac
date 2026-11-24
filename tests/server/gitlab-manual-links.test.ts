@@ -28,7 +28,11 @@ const pathFor = (id: string) => `/issues/${id}/gitlab-links`;
 const exactRefreshPath = (issueId: string, linkId: string) => `${pathFor(issueId)}/${encodeURIComponent(linkId)}/refresh`;
 const activityStatusReviewPath = (issueId: string, linkId: string) => `${pathFor(issueId)}/${encodeURIComponent(linkId)}/status-review`;
 const deletePath = (id: string, link: GitlabLink) => `${pathFor(id)}/${encodeURIComponent(link.id)}?expectedManualLinkId=${link.manualLinkId}`;
-type Backup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
+type Backup = WorkspaceSnapshot & {
+  schemaVersion: number;
+  trashEntries: { id: string; gitlabLinks: GitlabLink[] }[];
+  gitlabMergeRequestObservations?: unknown[];
+};
 type Options = { method?: string; body?: unknown; headers?: Record<string, string> };
 
 async function fixture(t: TestContext) {
@@ -1511,7 +1515,8 @@ test('GitLab link verification discards changed settings and restores manual lin
   const backup = await f.call<Backup>('/export');
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const restore = (data: Backup, status = 200) => f.call<{ error?: string }>('/import', { method: 'POST', body: { data } }, status);
-  assert.match((await restore({ ...backup, schemaVersion: 51 }, 400)).error!, /schemaVersion 52/);
+  const legacyBackup = (data: Backup, schemaVersion: number): Backup => ({ ...data, schemaVersion, gitlabMergeRequestObservations: undefined });
+  assert.match((await restore(legacyBackup(backup, 51), 400)).error!, /schemaVersion 52/);
   const tampered = structuredClone(backup);
   tampered.gitlabLinks.find(value => value.id === link.id)!.webUrl = `${f.mrUrl}/unexpected`;
   await restore(tampered, 400);
@@ -1520,7 +1525,7 @@ test('GitLab link verification discards changed settings and restores manual lin
   assert.deepEqual({ ...restored, manualLinkId: link.manualLinkId }, link);
   assert.notEqual(restored.manualLinkId, link.manualLinkId);
   await f.call(deletePath(f.issue.id, link), { method: 'DELETE' }, 409);
-  await restore({ ...backup, schemaVersion: 52 });
+  await restore(legacyBackup(backup, 52));
   const [legacyRestored] = await f.links();
   assert.deepEqual({ ...legacyRestored, manualLinkId: link.manualLinkId }, link);
   assert.notEqual(legacyRestored.manualLinkId, restored.manualLinkId);
@@ -1529,7 +1534,7 @@ test('GitLab link verification discards changed settings and restores manual lin
   const trash = await f.call<{ trashEntryId: string }>(`/issues/${saved.id}`, { method: 'DELETE', body: { expectedVersion: saved.version } });
   const archived = await f.call<Backup>('/export');
   assert.deepEqual(archived.trashEntries.find(value => value.id === trash.trashEntryId)?.gitlabLinks, [legacyRestored]);
-  assert.match((await restore({ ...archived, schemaVersion: 51 }, 400)).error!, /schemaVersion 52/);
+  assert.match((await restore(legacyBackup(archived, 51), 400)).error!, /schemaVersion 52/);
   await restore(archived);
   await f.call(`/trash/${trash.trashEntryId}/restore`, { method: 'POST', body: {} });
   const [recovered] = await f.links();

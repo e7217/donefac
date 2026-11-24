@@ -50,6 +50,67 @@ test('exact MR actions and timestamps gate automation while stale/equal-conflict
   }finally{f.close();}
 });
 
+test('verified MR reads fence only the exact lifecycle event while a matching first webhook can run', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const start = Date.now() - 30_000;
+  const at = (offset: number) => new Date(start + offset).toISOString();
+  let repositoryUrl = '';
+  const rows = () => [
+    { id: 701, iid: 7, project_id: 42, target_project_id: 42, title: 'NEO-1 reopened MR', state: 'opened',
+      source_branch: 'feature/NEO-1', updated_at: at(3000), web_url: `${repositoryUrl}/-/merge_requests/7` },
+    { id: 702, iid: 8, project_id: 42, target_project_id: 42, title: 'New MR with no ticket key', state: 'opened',
+      source_branch: 'feature/no-key', updated_at: at(3000), web_url: `${repositoryUrl}/-/merge_requests/8` },
+    { id: 703, iid: 9, project_id: 42, target_project_id: 42, title: 'NEO-2 MR with unverified revision', state: 'opened',
+      source_branch: 'feature/NEO-2', created_at: at(3000), web_url: `${repositoryUrl}/-/merge_requests/9` },
+  ];
+  const mock = await mockServer((path, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify(path.includes('/merge_requests?') ? rows() : []));
+  });
+  t.after(mock.close);
+  repositoryUrl = `${mock.url}/team/repo`;
+  f.configure({ baseUrl: mock.url });
+  assert.equal((await f.service.sync()).linked, 2);
+  const before = links(f);
+  const deliver = (id: number, iid: number, values: Record<string, unknown>) => f.service.webhook(request({
+    ...mr(), project: { id: 42, web_url: repositoryUrl },
+    object_attributes: { id, iid, target_project_id: 42, title: 'NEO-1 webhook', source_branch: 'feature/NEO-1',
+      url: `${repositoryUrl}/-/merge_requests/${iid}`, state: 'closed', action: 'close', updated_at: at(3000), ...values },
+  }));
+
+  // Action and revision are separate clocks. Neither an old action nor an old snapshot can replace the read.
+  assert.equal(deliver(701, 7, { actioned_at: at(1000), updated_at: at(4000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.equal(deliver(701, 7, { actioned_at: at(4000), updated_at: at(1000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.equal(deliver(701, 7, {}).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'ambiguous');
+  assert.equal(deliver(701, 99, { updated_at: at(9000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.equal(deliver(701, 7, { project_id: 43, updated_at: at(9000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.equal(deliver(701, 7, { action: 'merge', state: 'opened', updated_at: at(9000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.equal(deliver(702, 8, { updated_at: at(1000) }).linked, 0);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.deepEqual(links(f), before);
+  assert.deepEqual(f.store.all('gitlab_object_cursors'), []);
+
+  deliver(701, 7, { action: 'reopen', state: 'opened' });
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  deliver(701, 7, { action: 'reopen', state: 'opened' });
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.equal(deliver(701, 7, { updated_at: at(5000) }).linked, 1);
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  assert.equal(links(f).find(link => link.iid === 7)?.state, 'closed');
+
+  // A list row with a creation date alone cannot establish a state revision.
+  deliver(703, 9, { title: 'NEO-2 webhook', source_branch: 'feature/NEO-2', updated_at: at(1000) });
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-2']);
+});
+
 test('pipeline branch ordering prevents late older results and MR inheritance requires identical branch/head SHA',()=>{
   const f=fixture();try{f.configure();const base=Date.now()-10000;f.service.webhook(request(mr({source_branch:'feature/reused',title:'NEO-1 연결',last_commit:{id:'head-a'},updated_at:new Date(base).toISOString()})));f.service.webhook(request(pipeline({id:300,ref:'feature/reused',sha:'head-a',finished_at:new Date(base+1000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,['issue-1']);
     f.service.webhook(request(pipeline({id:301,ref:'feature/reused',sha:'head-b',status:'failed',finished_at:new Date(base+2000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,[]);assert.equal(f.events.at(-1)!.trigger,'pipeline.failed');
@@ -430,13 +491,14 @@ test('MR readiness refreshes an unchanged GitLab revision and reconciles sparse 
   const f=fixture();
   t.after(f.close);
   const updatedAt=new Date(Date.now()-60_000).toISOString(),head='a'.repeat(40);
-  const remote={id:101,iid:7,title:'NEO-1 review',state:'opened',updated_at:updatedAt,source_branch:'feature/review',
-    sha:head,web_url:'https://git.example.test/team/repo/-/merge_requests/7',detailed_merge_status:'not_approved'};
+  const remote={id:101,iid:7,project_id:42,target_project_id:42,title:'NEO-1 review',state:'opened',updated_at:updatedAt,source_branch:'feature/review',
+    sha:head,web_url:'',detailed_merge_status:'not_approved'};
   const mock=await mockServer((path,res)=>{
     res.setHeader('Content-Type','application/json');
     res.end(JSON.stringify(path.includes('/merge_requests?')?[remote]:[]));
   });
   t.after(mock.close);
+  remote.web_url=`${mock.url}/team/repo/-/merge_requests/7`;
   f.configure({baseUrl:mock.url});
   await f.service.sync();
   const [waiting]=links(f);

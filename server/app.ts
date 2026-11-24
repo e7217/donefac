@@ -59,6 +59,7 @@ import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhook
 import { GitlabIntegrationService, GitlabIntegrationError, branchObjectId } from './gitlab-integration.js';
 import { GitlabProjectWebhookSetupError } from './gitlab-project-webhook-setup.js';
 import { GitlabDeploymentError } from './gitlab-deployments.js';
+import { GitlabMergeRequestObservationError } from './gitlab-merge-request-observations.js';
 import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
@@ -3010,7 +3011,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),notificationSubscriptions:subscriptions.all(),favorites:favorites.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),gitlabMergeRequestObservations:gitlab.mergeRequestObservations.exportRows(),notificationSubscriptions:subscriptions.all(),favorites:favorites.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -3229,6 +3230,10 @@ export function createApp(options: {
       fail('GitLab 브랜치 연결에는 schemaVersion 24 백업이 필요합니다.');
     }
     if (!data.gitlabLinks.every(isRestorableGitlabLink)) fail('GitLab 연결 데이터를 확인해 주세요.');
+    if (data.schemaVersion < 117 && data.gitlabMergeRequestObservations !== undefined &&
+        (!Array.isArray(data.gitlabMergeRequestObservations) || data.gitlabMergeRequestObservations.length)) {
+      fail('GitLab MR 상태 관측 정보를 포함한 백업은 schemaVersion 117이 필요합니다.');
+    }
     if (data.schemaVersion < 113 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
       links => links.some((link: GitlabLink) => link.targetBranch !== undefined)
     )) fail('GitLab MR 대상 브랜치 정보가 있는 연결을 포함한 백업은 schemaVersion 113이 필요합니다.');
@@ -3630,6 +3635,8 @@ export function createApp(options: {
       recordIssueRelationVersion(store, restoredIssueRelationVersion);
       sourcePreservation.replaceImported(liveSources,previousImports);
       gitlab.deployments.restore(data.schemaVersion >= 72 ? data.gitlabDeployments : [], data.exportedAt);
+      gitlab.mergeRequestObservations.restore(data.gitlabMergeRequestObservations === undefined ? [] : data.gitlabMergeRequestObservations,
+        data.exportedAt, restoreAt);
       gitlab.resetForImport([...data.gitlabLinks,...importedTrash.flatMap(entry=>entry.gitlabLinks)]);
       trash.replaceImported(importedTrash);
       trashItems.replaceImported(importedTrashItems);
@@ -3666,7 +3673,7 @@ export function createApp(options: {
     if(error instanceof TimeReservationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueAssignmentRulesError||error instanceof IssueBulkEditError||error instanceof IssuePasteError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
-    if(error instanceof GitlabDeploymentError)return res.status(error.status).json({error:error.message});
+    if(error instanceof GitlabDeploymentError||error instanceof GitlabMergeRequestObservationError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCompletionRecordsError||error instanceof CycleProgressError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -9,7 +9,7 @@ import { createServer } from 'node:http';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationPreview, AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationPreview, AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -39,6 +39,128 @@ test('authenticated automation shares issue, audit, receipt and minimal outbox t
     assert.equal((await hook(f,body,id)).data.duplicate,true);assert.equal((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data.length,1);assert.equal((await f.call('/automation-runs')).data.length,1);
     const older=payload(101,'NEO-1',new Date(Date.now()-60000).toISOString());older.object_attributes.action='reopen';older.object_attributes.state='opened';assert.equal((await hook(f,older)).status,200);assert.equal(f.observer.get<Issue>('issues','issue-1')!.status,'done');
   }finally{await f.close();}
+});
+
+test('a newer synced reopened MR prevents delayed close automation without suppressing a later close', async t => {
+  const mock = createServer();
+  mock.listen(0, '127.0.0.1');
+  t.after(() => new Promise<void>(resolve => mock.close(() => resolve())));
+  await once(mock, 'listening');
+  const address = mock.address();
+  assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const repositoryUrl = `${baseUrl}/team/repo`;
+
+  const f = await fixture();
+  t.after(f.close);
+  const configured = await f.call<GitlabSettings>('/integrations/gitlab', 'PATCH', {
+    expectedVersion: 1, baseUrl, projectIds: [42], webhookSecret: 'integration-secret',
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.data));
+  const created = await f.call<Issue>('/issues', 'POST', { projectId: 'project-neo', title: 'Synced reopened MR' });
+  assert.equal(created.status, 201);
+  const issue = created.data;
+  await endpoint(f);
+  const savedRule = await rule(f, {
+    name: 'Close MR after review', trigger: 'merge_request.closed', fromStatuses: [issue.status],
+  });
+  assert.ok(savedRule.enabledAt);
+  const activatedAt = Date.parse(savedRule.enabledAt);
+  const at = (offset: number) => new Date(activatedAt + offset).toISOString();
+  const previousCloseAt = at(1);
+  const reopenedAt = at(2);
+  const finalCloseAt = at(3);
+  const mergeRequest = {
+    id: 101, iid: 7, project_id: 42, source_project_id: 42, target_project_id: 42,
+    title: `${issue.key} synthetic MR`, source_branch: `feature/${issue.key}`, target_branch: 'main',
+    sha: 'a'.repeat(40), web_url: `${repositoryUrl}/-/merge_requests/7`,
+  };
+  const reopenedMergeRequest = { ...mergeRequest, state: 'opened', created_at: at(-1_000), updated_at: reopenedAt };
+  mock.on('request', (request, response) => {
+    const { pathname } = new URL(request.url ?? '/', baseUrl);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method === 'GET' && pathname === '/api/v4/projects/42/merge_requests') {
+      response.end(JSON.stringify([reopenedMergeRequest]));
+    } else if (request.method === 'GET' && pathname === '/api/v4/projects/42/pipelines') {
+      response.end('[]');
+    } else {
+      response.writeHead(404).end('{}');
+    }
+  });
+  const synced = await f.call<GitlabSyncResult>('/integrations/gitlab/sync', 'POST', { expectedVersion: configured.data.version });
+  assert.equal(synced.status, 200, JSON.stringify(synced.data));
+  assert.equal(synced.data.linked, 1);
+
+  async function workspace() {
+    const response = await f.call<WorkspaceSnapshot>('/workspace');
+    assert.equal(response.status, 200);
+    return {
+      issue: response.data.issues.find(candidate => candidate.id === issue.id),
+      links: response.data.gitlabLinks.filter(link => link.issueId === issue.id),
+    };
+  }
+  const syncedWorkspace = await workspace();
+  assert.deepEqual(syncedWorkspace.issue, issue);
+  assert.equal(syncedWorkspace.links.length, 1);
+  const [syncedLink] = syncedWorkspace.links;
+  assert.equal(syncedLink.state, 'opened');
+  assert.equal(syncedLink.updatedAt, reopenedAt);
+  const cursorId = syncedLink.id.slice('gitlab:'.length, -`:${issue.id}`.length);
+  const cursor = () => f.observer.get<{ occurredAt?: string; state?: string }>('gitlab_object_cursors', cursorId);
+  const cursorBefore = cursor();
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
+
+  const closeDelivery = (time: string) => ({
+    object_kind: 'merge_request',
+    project: { id: 42, web_url: repositoryUrl },
+    object_attributes: {
+      ...mergeRequest, action: 'close', state: 'closed', actioned_at: time, updated_at: time,
+      url: mergeRequest.web_url, last_commit: { id: mergeRequest.sha },
+    },
+  });
+  const delayed = await hook(f, closeDelivery(previousCloseAt));
+  assert.equal(delayed.status, 200, JSON.stringify(delayed.data));
+  assert.equal(delayed.data.duplicate, false);
+  assert.equal(delayed.data.runs.length, 1);
+  const [ignoredRun] = delayed.data.runs as AutomationRun[];
+  assert.equal(ignoredRun.outcome, 'ignored');
+  assert.match(ignoredRun.reason, /최신.*MR/u);
+  assert.equal(ignoredRun.occurredAt, previousCloseAt);
+  assert.deepEqual(await workspace(), syncedWorkspace);
+  assert.deepEqual(cursor(), cursorBefore);
+  assert.deepEqual((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data, []);
+
+  const currentDelivery = closeDelivery(finalCloseAt);
+  const deliveryId = randomUUID();
+  const fresh = await hook(f, currentDelivery, deliveryId);
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.data));
+  assert.equal(fresh.data.duplicate, false);
+  assert.equal(fresh.data.runs.length, 1);
+  const [changedRun] = fresh.data.runs as AutomationRun[];
+  assert.equal(changedRun.outcome, 'changed');
+  assert.equal(changedRun.occurredAt, finalCloseAt);
+  const after = await workspace();
+  assert.equal(after.issue?.status, 'done');
+  assert.equal(after.issue?.version, issue.version + 1);
+  assert.equal(after.links.length, 1);
+  assert.equal(after.links[0].id, syncedLink.id);
+  assert.equal(after.links[0].state, 'closed');
+  assert.equal(after.links[0].updatedAt, finalCloseAt);
+  assert.equal(cursor()?.occurredAt, finalCloseAt);
+  assert.equal(cursor()?.state, 'closed');
+  const deliveries = (await f.call<WebhookDelivery[]>('/webhook-deliveries')).data;
+  assert.equal(deliveries.length, 1);
+  assert.equal(deliveries[0].status, 'pending');
+  const { data: { envelope } } = await f.call<{ envelope: WebhookEnvelope }>(`/webhook-deliveries/${deliveries[0].id}`);
+  assert.equal(envelope.sourceEventId, changedRun.eventId);
+  assert.equal(envelope.origin, 'automation');
+  assert.equal(envelope.resource.id, issue.id);
+  assert.equal(envelope.resource.status, 'done');
+  assert.equal((await hook(f, currentDelivery, deliveryId)).data.duplicate, true);
+  assert.deepEqual(await workspace(), after);
+  assert.deepEqual((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data, deliveries);
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data.map(run => run.id).sort(),
+    [ignoredRun.id, changedRun.id].sort());
 });
 
 test('pipeline automation and the direct-review token distinguish compatible runs on the same ref', async t => {

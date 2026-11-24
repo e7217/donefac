@@ -728,6 +728,8 @@ MR 규칙의 선택 필드 `targetBranchPattern`은 같은 패턴 문법으로 �
 
 트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`, `deployment.succeeded`다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 이미 도착 상태이면 업무 버전을 유지한다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
 
+MR 생명주기 이벤트는 정확한 MR ID와 저장소 내 번호를 확인한다. `open`·`reopen`은 `opened`, `merge`는 `merged`, `close`는 `closed`와 일치해야 한다. 저장소 동기화와 단건 확인에서 대조한 MR 상태의 `updated_at`이 더 최신이면 웹훅을 무시로 기록한다. 같은 시각에 상태가 일치하는 첫 인증 이벤트는 규칙을 평가한다. 자체 백업 형식 117의 `gitlabMergeRequestObservations`는 검증한 조회 시각과 상태를 보존하고, 이전 형식은 다음 GitLab 조회에서 기준을 쌓는다. [GitLab MR 이벤트 필드](https://docs.gitlab.com/user/project/integrations/webhook_events/#object_attributes-field)
+
 배포 성공 규칙의 `environment`는 GitLab의 정확한 환경 이름이며 대소문자를 구분한다. 공백으로 시작하거나 끝나는 문자열과 제어 문자를 제외한 1~255자를 받는다. 미리보기 `sample`은 `{trigger:'deployment.succeeded',gitlabProjectId,environment}`다. 실제 실행은 활성화 이후 발생한 인증 성공 이벤트에서 같은 저장소의 전체 SHA나 포함 MR ID·IID가 자동 업무 연결과 일치할 때만 평가한다. 첫 성공 이벤트의 처리는 배포 ID별로 한 번 기록하며 상태 이력 동기화는 읽은 배포와 MR 근거를 보관한다. 실행 기록에는 `context.objectKind: 'deployment'`, `context.objectId`, `context.environment`가 남는다. 자체 백업 형식 75는 배포 규칙과 실행 기록을 보존하며 규칙을 비활성 상태로 복원한다.
 
 브라우저용 `GET /api/issues/:id/automation-runs`는 해당 티켓에 저장된 최근 실행을 20건씩 반환한다. `nextCursor`를 `before`로 보내 이전 기록을 연다. `issueVersion`은 조회 시점의 티켓 버전이고, `latestBlockedRunId`는 가장 최근 유효 실행이 차단됐으며 현재 출발 상태와 전이가 맞을 때 표시한다. 새 실행의 `context`에 저장소·객체·브랜치, 규칙 이름과 당시 상태 표시 이름을 담는다. 목표 상태를 사용한 편집은 일반 티켓 저장 API의 버전·전이·필수 필드 검사를 거친다.
