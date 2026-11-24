@@ -177,6 +177,143 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
   }
 });
 
+test('360px Jira 이력 전이에서 선택한 방향만 기존 매핑에 추가하고 새 프로젝트에 적용한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), sourceKey = `OBS${id}`, targetKey = `WFO${id}`, otherKey = `ALT${id}`, filename = `observed-workflow-${id}.json`;
+  const ready = { id: '11', name: 'Ready' }, done = { id: '12', name: 'Done' };
+  const date = '2020-01-02T03:04:05Z', changedAt = '2020-01-03T03:04:05Z';
+  const sourceIssue = (
+    project: { id: string; key: string; name: string }, number: number, status: typeof ready, from?: typeof ready,
+  ) => {
+    const histories = from ? [{
+      id: String(number + 1000), created: changedAt,
+      items: [{ field: 'status', fieldId: 'status', fieldtype: 'jira', from: from.id, fromString: from.name, to: status.id, toString: status.name }],
+    }] : [];
+    return {
+      id: String(number), key: `${project.key}-${number}`,
+      fields: { project, summary: `상태 이력 업무 ${id} ${number}`, status, issuetype: { id: '3', name: 'Task' }, created: date, updated: changedAt },
+      changelog: { startAt: 0, total: histories.length, histories },
+    };
+  };
+  const source = { id: '10', key: sourceKey, name: `원본 전이 프로젝트 ${id}` };
+  const other = { id: '20', key: otherKey, name: `별도 전이 프로젝트 ${id}` };
+  const toReady = sourceIssue(source, 101, ready, done);
+  const toDone = sourceIssue(source, 102, done, ready);
+  const fixture = { issues: [toReady, toDone, sourceIssue(other, 201, ready, done), sourceIssue(other, 202, done)] };
+  const staged = await upload(request, filename, Buffer.from(JSON.stringify(fixture)), `jira-observed-workflow-${id}`);
+  try {
+    const { settings } = await open(page, request);
+    await selectPackage(settings, filename);
+    await settings.getByLabel(`새 프로젝트 키 ${source.name}`, { exact: true }).fill(targetKey);
+    await settings.getByText('Jira 워크플로 매핑', { exact: true }).click();
+    const flow = settings.getByRole('region', { name: `워크플로 매핑 ${targetKey}`, exact: true });
+    await flow.getByLabel('허용 전이 직접 지정', { exact: true }).check();
+    await flow.getByRole('button', { name: '상태 추가', exact: true }).click();
+    await flow.getByLabel('추가 상태 이름', { exact: true }).fill('팀 승인');
+    await flow.getByRole('combobox', { name: '추가 상태 분류', exact: true }).selectOption('review');
+    await flow.getByRole('combobox', { name: '초기 상태', exact: true }).selectOption({ label: '팀 승인' });
+    const manualFrom = flow.getByRole('combobox', { name: '전이 출발 상태', exact: true });
+    await manualFrom.selectOption({ label: 'Ready' });
+    await flow.getByLabel('전이 허용 팀 승인', { exact: true }).check();
+
+    const first = await preview(page, settings);
+    expect(first.canApply, JSON.stringify(first.notices)).toBe(true);
+    const proposed = first.jiraObservedWorkflows?.find(item => item.projectKey === targetKey);
+    const readyId = proposed?.statuses.find(status => status.label === 'Ready')?.id;
+    const doneId = proposed?.statuses.find(status => status.label === 'Done')?.id;
+    expect(readyId).toBeTruthy();
+    expect(doneId).toBeTruthy();
+    expect(proposed?.transitions).toHaveLength(2);
+    expect(proposed?.transitions).toEqual(expect.arrayContaining([
+      { from: doneId, to: readyId, issueCount: 1 }, { from: readyId, to: doneId, issueCount: 1 },
+    ]));
+    expect(first.jiraObservedWorkflows?.find(item => item.projectKey === otherKey)?.transitions).toEqual([
+      { from: doneId, to: readyId, issueCount: 1 },
+    ]);
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const suggestions = review.getByRole('region', { name: 'Jira 이력에서 확인한 전이', exact: true });
+    const group = suggestions.getByRole('group', { name: `Jira 이력 전이 ${targetKey}`, exact: true });
+    const otherGroup = suggestions.getByRole('group', { name: `Jira 이력 전이 ${otherKey}`, exact: true });
+    const forward = group.getByRole('checkbox', { name: 'Done → Ready', exact: true });
+    const reverse = group.getByRole('checkbox', { name: 'Ready → Done', exact: true });
+    const add = suggestions.getByRole('button', { name: '선택한 전이를 매핑에 추가', exact: true });
+    await expect(add).toBeDisabled();
+    await expect(forward).not.toBeChecked();
+    await expect(reverse).not.toBeChecked();
+    await expect(group.getByText('업무 1개에서 확인', { exact: true })).toHaveCount(2);
+    await acknowledge(review, first);
+    const initialApply = review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true });
+    await expect(initialApply).toBeEnabled();
+    await forward.check();
+    await expect(initialApply).toBeDisabled();
+    await expect(review.getByRole('button', { name: '이관 사전 검토 JSON 내보내기', exact: true })).toBeDisabled();
+    await forward.uncheck();
+    await expect(initialApply).toBeEnabled();
+    await forward.check();
+    await expect(reverse).not.toBeChecked();
+    await expect(otherGroup.getByRole('checkbox', { name: 'Done → Ready', exact: true })).not.toBeChecked();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const migrationWrites: string[] = [];
+    const captureWrite = (event: import('@playwright/test').Request) => {
+      const path = new URL(event.url()).pathname;
+      if (event.method() === 'POST' && path.startsWith('/api/migrations/')) migrationWrites.push(path);
+    };
+    page.on('request', captureWrite);
+    await add.click();
+    await expect(review).toHaveCount(0);
+    await expect(settings.getByRole('button', { name: '적용 전 미리보기 만들기', exact: true })).toBeFocused();
+    const beforeApply = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    expect(beforeApply.projects.some(project => project.key === targetKey || project.key === otherKey)).toBe(false);
+    expect(migrationWrites).toEqual([]);
+    page.off('request', captureWrite);
+    await expect(flow.getByLabel('전이 허용 팀 승인', { exact: true })).toBeChecked();
+    await expect(flow.getByLabel('전이 허용 Done', { exact: true })).not.toBeChecked();
+    await manualFrom.selectOption({ label: 'Done' });
+    await expect(flow.getByLabel('전이 허용 Ready', { exact: true })).toBeChecked();
+
+    const reviewed = await preview(page, settings);
+    expect(reviewed.canApply, JSON.stringify(reviewed.notices)).toBe(true);
+    expect(reviewed.id).not.toBe(first.id);
+    const graph = reviewed.jiraWorkflows?.find(item => item.projectKey === targetKey);
+    const approvalId = graph?.statuses.find(status => status.label === '팀 승인')?.id;
+    expect(approvalId).toBeTruthy();
+    const expectedTransitions = [{ from: readyId, to: approvalId }, { from: doneId, to: readyId }];
+    expect(graph?.initialStatusId).toBe(approvalId);
+    expect(graph?.transitions).toHaveLength(2);
+    expect(graph?.transitions).toEqual(expect.arrayContaining(expectedTransitions));
+    expect(reviewed.configuration.jiraWorkflows?.[otherKey]).toBeUndefined();
+    const apply = review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true });
+    await expect(apply).toBeDisabled();
+    await acknowledge(review, reviewed);
+    const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${reviewed.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await apply.click();
+    const response = await applied;
+    expect(response.status(), await response.text()).toBe(201);
+    const receipt = await response.json() as MigrationApplyResult;
+    const afterApply = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const project = afterApply.projects.find(project => project.key === targetKey)!;
+    expect(receipt.import.projectIds).toContain(project.id);
+    const workflow = await (await request.get(`/api/projects/${project.id}/workflow`)).json() as ProjectWorkflow;
+    expect(workflow.transitions.map(({ from, to }) => ({ from, to }))).toEqual(graph?.transitions);
+    const fromDone = afterApply.issues.find(issue => issue.projectId === project.id && issue.title === toDone.fields.summary)!;
+    expect(fromDone.status).toBe(doneId);
+    const allowed = await request.patch(`/api/issues/${fromDone.id}`, { data: { expectedVersion: fromDone.version, status: readyId } });
+    expect(allowed.ok(), await allowed.text()).toBe(true);
+    const moved = await allowed.json() as Issue;
+    expect(moved.status).toBe(readyId);
+    const forbidden = await request.patch(`/api/issues/${moved.id}`, { data: { expectedVersion: moved.version, status: doneId } });
+    expect(forbidden.status(), await forbidden.text()).toBe(422);
+    const manual = await request.patch(`/api/issues/${moved.id}`, { data: { expectedVersion: moved.version, status: approvalId } });
+    expect(manual.ok(), await manual.text()).toBe(true);
+  } finally {
+    await request.delete(`/api/legacy-import/packages/${staged.id}?expectedVersion=${staged.version}`);
+  }
+});
+
 test('360px에서 같은 Jira 프로젝트의 새 업무를 기존 프로젝트에 추가하고 편집한 업무를 보존한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

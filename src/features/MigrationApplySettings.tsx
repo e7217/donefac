@@ -8,7 +8,7 @@ import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigration
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
-import { MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
+import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceImportRecords } from './SourceOrigins';
 import { downloadDocument } from './document-utils';
@@ -29,6 +29,7 @@ const jiraPlanningReviews = [
   { choices: 'jiraSprintChoices', selections: 'jiraSprintSelections', label: '사이클', original: 'Jira 스프린트 이력' },
 ] as const;
 const noPlanningChoice = '__none__';
+const noObservedChoices: ReadonlySet<string> = new Set();
 type JiraPlanningSelection = typeof jiraPlanningReviews[number]['selections'];
 type JiraPlanningSelections = Pick<MigrationConfiguration, JiraPlanningSelection>;
 type PlanningChoiceMap = Record<string, string | null>;
@@ -124,6 +125,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const [selected, setSelected] = useState<string[]>([]), [options, setOptions] = useState<MigrationOptions | null>(null), [configuration, setConfiguration] = useState<MigrationConfiguration | null>(null);
   const [preview, setPreview] = useState<MigrationPreview | null>(null), [acknowledgements, setAcknowledgements] = useState<string[]>([]), [selectedImport, setSelectedImport] = useState<string | null>(null);
   const [planningDraft, setPlanningDraft] = useState<{ key: string; selections: JiraPlanningSelections } | null>(null);
+  const [observedDraft, setObservedDraft] = useState<{ key: string; selected: ReadonlySet<string> } | null>(null);
   const [loading, setLoading] = useState(true), [pending, setPending] = useState(''), [error, setError] = useState(''), [listError, setListError] = useState(''), [clock, setClock] = useState(() => Date.now());
   const [mappingNotice, setMappingNotice] = useState('');
   const [identityNotice, setIdentityNotice] = useState('');
@@ -138,7 +140,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const receiptToFocus = useRef<string | null>(null);
   const savedDestinationDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping; workflows?: MigrationConfiguration['jiraWorkflows'] }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
-  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); setEmailReview(null); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
+  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setObservedDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); setEmailReview(null); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     try {
@@ -180,7 +182,7 @@ function ActorMigration(props: MigrationApplyProps) {
     window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); };
   }, [notify, reset]);
   async function execute(label: string, action: () => Promise<void>) { if (busyRef.current) return; busyRef.current = true; setPending(label); setError(''); setMappingNotice(''); try { await action(); } catch (cause) { if (active.current) setError(`${errorText(cause)} 입력과 기존 미리보기는 유지됩니다.`); } finally { busyRef.current = false; if (active.current) setPending(''); } }
-  function change(next: MigrationConfiguration) { setConfiguration(next); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); }
+  function change(next: MigrationConfiguration) { setConfiguration(next); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setObservedDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); }
   function mapValue<K extends 'users' | 'statuses' | 'issueTypes' | 'fields' | 'sourceBaseUrls'>(key: K, id: string, value: MigrationConfiguration[K][string]) { if (configuration) change({ ...configuration, [key]: { ...configuration[key], [id]: value } }); }
   function chooseDestination(mode: string) {
     if (!configuration || !options) return;
@@ -242,19 +244,22 @@ function ActorMigration(props: MigrationApplyProps) {
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
   const destinationReady = mode === 'new' ? Boolean(configuration?.projects.length) : Boolean(existingDestination);
-  const planningDraftKey = preview ? `${preview.id}:${preview.version}` : null;
-  const planningChanges = planningDraft?.key === planningDraftKey ? planningDraft.selections : undefined;
+  const previewDraftKey = preview ? `${preview.id}:${preview.version}` : null;
+  const planningChanges = planningDraft?.key === previewDraftKey ? planningDraft.selections : undefined;
   const changedReviews = jiraPlanningReviews.filter(({ selections }) => planningChanges?.[selections]);
   const hasPlanningChanges = changedReviews.length > 0;
+  const observedChoices = observedDraft?.key === previewDraftKey ? observedDraft.selected : noObservedChoices;
+  const hasObservedChanges = observedChoices.size > 0;
+  const hasReviewChanges = hasPlanningChanges || hasObservedChanges;
   const combinedPlanningChanges = changedReviews.length > 1;
-  const canApply = Boolean(preview?.canApply && matching && !expired && !hasPlanningChanges && !preview.notices.some(item => item.severity === 'error') && preview.requiredAcknowledgements.every(code => acknowledgements.includes(code)));
+  const canApply = Boolean(preview?.canApply && matching && !expired && !hasReviewChanges && !preview.notices.some(item => item.severity === 'error') && preview.requiredAcknowledgements.every(code => acknowledgements.includes(code)));
   async function readIdentityRoster(signal?: AbortSignal) {
     const users = await api<User[]>('/migrations/identity-roster', { signal, headers: { 'X-Actor-Id': actorId } });
     if (active.current && !signal?.aborted) setIdentityRoster({ snapshot: data.users, users });
     return users;
   }
   async function openEmailReview(opener: HTMLButtonElement) {
-    if (!configuration || !options || !matching || hasPlanningChanges) return;
+    if (!configuration || !options || !matching || hasReviewChanges) return;
     setIdentityNotice('');
     await execute('일치하는 팀원 이메일 확인 중…', async () => {
       const users = await readIdentityRoster();
@@ -271,27 +276,43 @@ function ActorMigration(props: MigrationApplyProps) {
     setIdentityNotice(`이메일이 일치하는 사용자 매핑 ${matches.length.toLocaleString()}건을 반영했습니다. 새 미리보기를 만들어 주세요.`);
   }
   function choosePlan(field: JiraPlanningSelection, recordId: string, selection: string | null | undefined) {
-    if (!preview || !planningDraftKey || busyRef.current) return;
+    if (!preview || !previewDraftKey || hasObservedChanges || busyRef.current) return;
     const reviewed = preview.configuration[field]?.[recordId];
     setPlanningDraft(previous => {
-      const selections = { ...(previous?.key === planningDraftKey ? previous.selections : undefined) };
+      const selections = { ...(previous?.key === previewDraftKey ? previous.selections : undefined) };
       const draft = { ...selections[field] };
       if (selection === undefined || selection === reviewed) delete draft[recordId];
       else draft[recordId] = selection;
       if (Object.keys(draft).length) selections[field] = draft;
       else delete selections[field];
-      return { key: planningDraftKey, selections };
+      return { key: previewDraftKey, selections };
     });
   }
   function stagePlanningChoices() {
-    if (!configuration || !matching || !hasPlanningChanges || busyRef.current) return;
+    if (!configuration || !matching || !hasPlanningChanges || hasObservedChanges || busyRef.current) return;
     const next = { ...configuration };
     for (const { selections } of changedReviews) next[selections] = { ...next[selections], ...planningChanges?.[selections] };
     change(next);
     requestAnimationFrame(() => previewButton.current?.focus());
   }
+  function chooseObservedTransition(id: string, checked: boolean) {
+    if (!previewDraftKey || !matching || expired || hasPlanningChanges || busyRef.current) return;
+    setObservedDraft(previous => {
+      const selected = new Set(previous?.key === previewDraftKey ? previous.selected : undefined);
+      if (checked) selected.add(id);
+      else selected.delete(id);
+      return selected.size ? { key: previewDraftKey, selected } : null;
+    });
+  }
+  function stageObservedWorkflows(workflows: NonNullable<MigrationConfiguration['jiraWorkflows']>, count: number) {
+    if (!preview || !matching || mode !== 'new' || reviewMode !== 'new' || hasPlanningChanges || busyRef.current ||
+        Date.parse(preview.expiresAt) <= Date.now()) return;
+    changeJiraWorkflows(workflows);
+    requestAnimationFrame(() => previewButton.current?.focus());
+    notify(`전이 ${count.toLocaleString()}개를 매핑에 추가했습니다. 적용 전 미리보기를 다시 만들어 주세요.`);
+  }
   async function createPreview() {
-    if (!configuration || !matching || !destinationReady || hasPlanningChanges) return;
+    if (!configuration || !matching || !destinationReady || hasReviewChanges) return;
     await execute('미리보기 생성 중…', async () => {
       const result = await post<MigrationPreview>('/migrations/preview', { configuration });
       if (!active.current) return;
@@ -322,7 +343,7 @@ function ActorMigration(props: MigrationApplyProps) {
     change(next);
   }
   function stageExclusions(recordIds: readonly string[]) {
-    if (!preview || !configuration || !matching || hasPlanningChanges || busyRef.current) return;
+    if (!preview || !configuration || !matching || hasReviewChanges || busyRef.current) return;
     const excludedRecords = [...new Set([...configuration.excludedRecords, ...recordIds])];
     const added = excludedRecords.length - configuration.excludedRecords.length;
     if (added <= 0) return;
@@ -335,12 +356,12 @@ function ActorMigration(props: MigrationApplyProps) {
     notify(`원본 ${added.toLocaleString()}개를 제외로 지정했습니다. 적용 전 미리보기를 다시 만드세요.`);
   }
   function downloadPreflight() {
-    if (!preview) return;
+    if (!preview || hasReviewChanges || busyRef.current) return;
     const report = buildMigrationPreflightReport(preview, options?.packages ?? packages);
     downloadDocument(`migration-preflight-${preview.id}.json`, JSON.stringify(report, null, 2), 'application/json;charset=utf-8');
   }
   async function exportMapping(opener: HTMLButtonElement) {
-    if (!configuration || !matching || hasPlanningChanges || busyRef.current) return;
+    if (!configuration || !matching || hasReviewChanges || busyRef.current) return;
     await execute('이관 매핑 파일 준비 중…', async () => {
       const file = await post<MigrationMappingFile>('/migrations/mapping/export', { configuration });
       if (!active.current) return;
@@ -352,7 +373,7 @@ function ActorMigration(props: MigrationApplyProps) {
   async function importMapping(input: HTMLInputElement) {
     const file = input.files?.[0];
     input.value = '';
-    if (!file || hasPlanningChanges || busyRef.current) return;
+    if (!file || hasReviewChanges || busyRef.current) return;
     await execute('이관 매핑 파일 확인 중…', async () => {
       if (file.size > MIGRATION_MAPPING_FILE_MAX_BYTES) {
         throw new Error(`이관 매핑 파일은 ${MIGRATION_MAPPING_FILE_MAX_BYTES / (1024 * 1024)}MiB 이하로 선택해 주세요.`);
@@ -430,7 +451,7 @@ function ActorMigration(props: MigrationApplyProps) {
     <header className="migration-heading"><div><h2 ref={migrationHeading} tabIndex={-1}><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>
     {listError && <p className="migration-error" role="alert">{listError} 현재 매핑과 미리보기는 유지됩니다.</p>}{error && <p className="migration-error" role="alert">{error}</p>}{pending && <p role="status" className="migration-pending"><Loader2 className="spin" size={17} />{pending}</p>}
-    <fieldset className="migration-fieldset migration-mapping-files" aria-label="이관 매핑 파일" disabled={Boolean(pending) || hasPlanningChanges}>
+    <fieldset className="migration-fieldset migration-mapping-files" aria-label="이관 매핑 파일" disabled={Boolean(pending) || hasReviewChanges}>
       <div className="migration-mapping-file-actions">
         <label>이관 매핑 파일 불러오기
           <input type="file" className="field" accept=".json,application/json" aria-describedby={mappingFileHelp}
@@ -443,7 +464,7 @@ function ActorMigration(props: MigrationApplyProps) {
       {hasPlanningChanges && <small>계획 선택을 반영하거나 취소한 뒤 매핑 파일을 사용할 수 있습니다.</small>}
     </fieldset>
     {mappingNotice && <p role="status" className="migration-mapping-file-notice">{mappingNotice}</p>}
-    <fieldset disabled={Boolean(pending) || hasPlanningChanges} className="migration-fieldset"><h3>가져올 원본</h3>
+    <fieldset disabled={Boolean(pending) || hasReviewChanges} className="migration-fieldset"><h3>가져올 원본</h3>
       <Paged title="이관 패키지" items={packages} label={item => `${item.filename} ${item.source.instanceKey}`} render={item => <label className="migration-package"><input type="checkbox" aria-label={`이관 패키지 ${item.filename}`} checked={selected.includes(item.id)} onChange={event => { setSelected(previous => event.target.checked ? [...previous, item.id] : previous.filter(id => id !== item.id)); setPreview(null); setAcknowledgements([]); setMappingNotice(''); setIdentityNotice(''); }} /><span><strong>{item.filename}</strong><small>{item.source.product} · {item.source.instanceKey} · 분석 오류 {item.errors}, 경고 {item.warnings}</small></span></label>} />
       {!loading && !packages.length && <p>먼저 위의 원본 분석에서 내보내기 파일을 등록하세요.</p>}
       {selected.some(id => !packages.some(item => item.id === id)) && <p className="migration-error" role="alert">선택한 패키지 일부가 최신 목록에 없습니다. 현재 입력을 유지했으므로 원본 목록을 다시 확인하세요.</p>}
@@ -542,18 +563,22 @@ function ActorMigration(props: MigrationApplyProps) {
       <header>
         <div><h3>{reviewHeading}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div>
         <div className="migration-review-actions">
-          <button type="button" className="btn btn-ghost" disabled={Boolean(pending) || hasPlanningChanges} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button>
-          <button type="button" className="btn btn-ghost" disabled={Boolean(pending) || hasPlanningChanges} onClick={downloadPreflight}><Download size={16} aria-hidden="true" />이관 사전 검토 JSON 내보내기</button>
+          <button type="button" className="btn btn-ghost" disabled={Boolean(pending) || hasReviewChanges} onClick={() => void execute('미리보기 확인 중…', async () => { const latest = await api<MigrationPreview>(`/migrations/previews/${encodeURIComponent(preview.id)}`); if (active.current) { setPreview(latest); setClock(Date.now()); } })}>검토 결과 다시 확인</button>
+          <button type="button" className="btn btn-ghost" disabled={Boolean(pending) || hasReviewChanges} onClick={downloadPreflight}><Download size={16} aria-hidden="true" />이관 사전 검토 JSON 내보내기</button>
         </div>
       </header>
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
       <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
       {Boolean(preview.jiraWorkflows?.length) && <MigrationJiraWorkflowPreview workflows={preview.jiraWorkflows ?? []} />}
+      {mode === 'new' && reviewMode === 'new' && preview.jiraObservedWorkflows?.length ? <MigrationJiraObservedWorkflowReview
+        key={`observed:${preview.id}:${preview.version}`} workflows={preview.jiraObservedWorkflows} drafts={configuration?.jiraWorkflows}
+        disabled={Boolean(pending) || !matching || expired || hasPlanningChanges} selected={observedChoices} onChoose={chooseObservedTransition}
+        onClear={() => setObservedDraft(null)} onAdopt={stageObservedWorkflows} /> : null}
       {jiraPlanningReviews.map(({ choices, selections, label, original }) => {
         const rows = preview[choices];
         if (!rows?.length) return null;
         return <JiraPlanningReview key={`${preview.id}:${preview.version}:${choices}`} rows={rows} label={label} original={original}
-          disabled={Boolean(pending) || !matching}
+          disabled={Boolean(pending) || !matching || hasObservedChanges}
           reviewed={preview.configuration[selections]} changes={planningChanges?.[selections]}
           onChoose={(recordId, choice) => choosePlan(selections, recordId, choice)}
           actions={!combinedPlanningChanges ? <>
@@ -564,7 +589,7 @@ function ActorMigration(props: MigrationApplyProps) {
             {planningChanges?.[selections] && <small role="status">{`새 미리보기에서 바꾼 ${label} 연결을 확인한 후 적용하세요.`}</small>}
           </> : undefined} />;
       })}
-      {combinedPlanningChanges && <fieldset className="migration-fieldset migration-review-diagnostics" disabled={Boolean(pending) || !matching}>
+      {combinedPlanningChanges && <fieldset className="migration-fieldset migration-review-diagnostics" disabled={Boolean(pending) || !matching || hasObservedChanges}>
         <legend>사이클·릴리스 연결 변경</legend>
         <div className="migration-review-actions">
           <button type="button" className="btn" onClick={stagePlanningChoices}>선택한 사이클·릴리스로 다시 검토</button>
@@ -572,7 +597,7 @@ function ActorMigration(props: MigrationApplyProps) {
         </div>
         <small role="status">새 미리보기에서 사이클과 릴리스 연결을 함께 확인한 후 적용하세요.</small>
       </fieldset>}
-      <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending) || hasPlanningChanges} onExclude={stageExclusions} />
+      <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending) || hasReviewChanges} onExclude={stageExclusions} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
         {item.schedule && <p>일정 · {item.schedule.startDate ?? '시작일 미정'} ~ {item.schedule.endDate ?? '종료일 미정'}</p>}

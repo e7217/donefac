@@ -26,10 +26,10 @@ import { JIRA_COMPONENTS_FIELD_ID, JIRA_RAW_COMPONENTS_FIELD_ID } from './legacy
 import { buildJiraComponentOptions } from './migration-jira-component-options.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './migration-identity-email.js';
-import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey, jiraStatusHistoryOwnerAliases, jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
-import type { LegacySource, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
+import type { LegacySource, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -68,6 +68,15 @@ function sourceBuiltin(row: LegacyRecord, kind: 'status' | 'issuetype') {
     label: string(item.name || item.text || item.value) };
 }
 export { sourceBuiltin as jiraSourceBuiltin };
+function jiraOriginalStatusId(source: LegacySource, row: LegacyRecord): string | undefined {
+  const raw = scalar(sourceField(row, 'status'));
+  // Administrator XML puts the original status ID in Issue.status. Other
+  // formats must explicitly provide an ID, since their status may be a name.
+  const id = object(raw).id ?? (source.format === 'jira-backup-xml' ? raw : undefined);
+  const value = typeof id === 'string' ? id : typeof id === 'number' && Number.isSafeInteger(id) ? String(id) : '';
+  return value && value !== '__unspecified__' && value.length <= 200 && value === value.trim() && value.isWellFormed() &&
+    !/[\u0000-\u001f\u007f]/u.test(value) ? value : undefined;
+}
 function builtin(pkg:MigrationPackage,row:LegacyRecord,kind:'status'|'issuetype',index?:Map<string,LegacyRecord>):{value:string;label:string}{
   const { value, label } = sourceBuiltin(row, kind);
   const option=index?index.get(`option:builtin:${kind}:${value}`):pkg.dataset.records.find(option=>option.kind==='option'&&option.sourceId===`builtin:${kind}:${value}`);return{value,label:label||option?.title||(value==='__unspecified__'?(kind==='status'?'상태 미지정':'유형 미지정'):value)};
@@ -1907,6 +1916,94 @@ class Planner{
         this.notice('JIRA_WORKFLOW_PROJECT_INVALID', `${key}의 워크플로는 Jira 업무를 옮길 새 프로젝트에 지정해 주세요.`, 'error');
       }
     }
+    if (!append && !this.input.appendPages) this.observeJiraWorkflows();
+  }
+  private observeJiraWorkflows(): void {
+    const history = this.entries.filter(entry => entry.pkg.dataset.source.product === 'jira' && entry.row.kind === 'history' && !this.skip(entry));
+    if (!history.length) return;
+    const keyFor = (instance: string, sourceId: string) => JSON.stringify([instance, sourceId]);
+    const packages = new Map<string, Map<string, Entry | null>>();
+    const owners = new Map<Entry, Issue>();
+    const destinations = new Map(this.result.projects.flatMap(project => {
+      const workflow = this.workflows.get(project.id)!;
+      if (workflow.statuses.length > 40 || !workflow.statuses.some(status => status.id === workflow.initialStatusId)) return [];
+      return [[project.id, { projectKey: project.key, workflow, statusIds: new Map<string, string>(),
+        transitions: new Map<string, MigrationJiraObservedTransition>(),
+      }] as const];
+    }));
+    if (!destinations.size) return;
+    for (const entry of this.entries) {
+      const { pkg, row } = entry;
+      const source = pkg.dataset.source;
+      if (source.product !== 'jira' || row.kind !== 'issue') continue;
+      let aliases = packages.get(pkg.summary.id);
+      if (!aliases) {
+        aliases = new Map();
+        packages.set(pkg.summary.id, aliases);
+      }
+      // Check alias ambiguity across all original package rows, including exclusions.
+      for (const alias of [row.sourceId, typeof row.metadata.key === 'string' ? row.metadata.key : '']) {
+        if (!alias) continue;
+        const previous = aliases.get(alias);
+        if (previous !== entry) aliases.set(alias, previous === undefined ? entry : null);
+      }
+      const binding = this.bindings.get(entry.key);
+      const issue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
+      const destination = issue && destinations.get(issue.projectId);
+      if (!issue || !destination || this.skip(entry) || this.restricted(entry) || isRestrictedJiraHistoryOwner(row)) continue;
+      // Generated export row IDs cannot establish an original Jira issue's identity.
+      if (row.metadata.syntheticId === true || !row.metadata.key && /^(?:json|xml|csv):.+:\d+$/u.test(row.sourceId)) continue;
+      owners.set(entry, issue);
+      const originalStatus = jiraOriginalStatusId(source, row);
+      if (originalStatus && issue.status === importedStatusId(source, originalStatus)) {
+        destination.statusIds.set(keyFor(source.instanceKey, originalStatus), issue.status);
+      }
+    }
+
+    const historyByOwner = new Map<Entry, LegacyRecord[]>();
+    for (const { pkg, row } of history) {
+      const aliases = jiraStatusHistoryOwnerAliases(row);
+      const packageOwners = packages.get(pkg.summary.id);
+      if (!aliases || !packageOwners) continue;
+      const owner = packageOwners.get(aliases[0]);
+      if (!owner || !owners.has(owner) || aliases.some(alias => packageOwners.get(alias) !== owner)) continue;
+      const records = historyByOwner.get(owner);
+      if (records) records.push(row);
+      else historyByOwner.set(owner, [row]);
+    }
+
+    // The new-project planner rejects overlapping live source issue IDs for
+    // the same source instance before binding. Deduplicate only within each owner.
+    for (const [owner, records] of historyByOwner) {
+      const { statusIds, transitions } = destinations.get(owners.get(owner)!.projectId)!;
+      const instance = owner.pkg.dataset.source.instanceKey;
+      const seen = new Set<string>();
+      for (const row of records) {
+        for (const change of jiraStatusTransitions(row)) {
+          const from = change.from.id && statusIds.get(keyFor(instance, change.from.id));
+          const to = change.to.id && statusIds.get(keyFor(instance, change.to.id));
+          if (!from || !to || from === to) continue;
+          const pair = JSON.stringify([from, to]);
+          if (seen.has(pair)) continue;
+          seen.add(pair);
+          const transition = transitions.get(pair);
+          if (transition) transition.issueCount++;
+          else transitions.set(pair, { from, to, issueCount: 1 });
+        }
+      }
+    }
+
+    const observed: MigrationJiraObservedWorkflow[] = [];
+    for (const { projectKey, workflow, transitions } of destinations.values()) {
+      const { initialStatusId, statuses } = workflow;
+      if (!transitions.size) continue;
+      observed.push({ projectKey, initialStatusId,
+        statuses: statuses.map(({ id, label, category }) => ({ id, label, category })).sort((left, right) => left.id.localeCompare(right.id)),
+        transitions: [...transitions.values()]
+          .sort((left, right) => right.issueCount - left.issueCount || left.from.localeCompare(right.from) || left.to.localeCompare(right.to)),
+      });
+    }
+    if (observed.length) this.result.preview.jiraObservedWorkflows = observed.sort((left, right) => left.projectKey.localeCompare(right.projectKey));
   }
   private reviewJiraWorkflow(projectKey: string, workflow: ProjectWorkflow, review: MigrationJiraWorkflow): void {
     if (!workflow.statuses.length) {

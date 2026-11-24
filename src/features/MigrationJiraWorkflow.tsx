@@ -1,13 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import type {
-  MigrationConfiguration, MigrationJiraWorkflow, MigrationJiraWorkflowReview, MigrationJiraWorkflowStatus, MigrationOptions,
+  MigrationConfiguration, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationJiraWorkflowReview, MigrationJiraWorkflowStatus, MigrationOptions,
 } from '../../shared/types';
 import { STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 
 type WorkflowStatusOption = Pick<MigrationJiraWorkflowStatus, 'id' | 'label'>;
 type WorkflowMappings = NonNullable<MigrationConfiguration['jiraWorkflows']>;
+type WorkflowEdge = MigrationJiraWorkflow['transitions'][number];
 type Destination = {
   key: string;
   name: string;
@@ -16,6 +17,9 @@ type Destination = {
 const projectKey = /^[A-Z][A-Z0-9]{1,11}$/u;
 const statusLimit = 40;
 const additionalStatusIds = Array.from({ length: statusLimit }, (_, index) => `s_new_${index + 1}`);
+const observedPageSize = 12;
+const transitionKey = ({ from, to }: WorkflowEdge) => `${from}:${to}`;
+const observedKey = (project: string, edge: WorkflowEdge) => `${project}:${transitionKey(edge)}`;
 
 function destinations(options: MigrationOptions, projects: MigrationConfiguration['projects']) {
   const projectsByContainer = new Map(projects.map(project => [project.containerId, project]));
@@ -200,6 +204,84 @@ export function MigrationJiraWorkflowPreview({ workflows }: { workflows: readonl
     <h4>적용할 Jira 워크플로</h4>
     {workflows.map(workflow => <WorkflowPreviewRow key={workflow.projectKey} workflow={workflow} />)}
   </section>;
+}
+
+export function MigrationJiraObservedWorkflowReview({ workflows, drafts, disabled, selected, onChoose, onClear, onAdopt }: {
+  workflows: readonly MigrationJiraObservedWorkflow[];
+  drafts: WorkflowMappings | undefined;
+  disabled: boolean;
+  selected: ReadonlySet<string>;
+  onChoose: (id: string, checked: boolean) => void;
+  onClear: () => void;
+  onAdopt: (workflows: WorkflowMappings, count: number) => void;
+}) {
+  function adopt() {
+    const next = { ...drafts };
+    let count = 0;
+    for (const workflow of workflows) {
+      const previous = drafts?.[workflow.projectKey];
+      const configured = new Set(previous?.transitions.map(transitionKey));
+      const additions = workflow.transitions.filter(edge => selected.has(observedKey(workflow.projectKey, edge)) && !configured.has(transitionKey(edge)))
+        .map(({ from, to }) => ({ from, to }));
+      if (!additions.length) continue;
+      next[workflow.projectKey] = {
+        ...previous,
+        initialStatusId: previous?.initialStatusId ?? workflow.initialStatusId,
+        transitions: [...(previous?.transitions ?? []), ...additions],
+      };
+      count += additions.length;
+    }
+    if (count) onAdopt(next, count);
+  }
+
+  return <section className="migration-jira-preview" aria-label="Jira 이력에서 확인한 전이">
+    <h4>Jira 이력에서 확인한 전이</h4>
+    <p>이관할 업무의 이력에서 각 방향을 사용한 업무 수입니다. Jira의 전이 조건·검증기·후처리는 별도로 검토해 주세요.</p>
+    {workflows.map(workflow => <ObservedWorkflowGroup key={workflow.projectKey} workflow={workflow}
+      configured={drafts?.[workflow.projectKey]?.transitions} disabled={disabled} selected={selected} onChoose={onChoose} />)}
+    <div className="migration-review-actions">
+      <button type="button" className="btn" disabled={disabled || !selected.size} onClick={adopt}>선택한 전이를 매핑에 추가</button>
+      {selected.size > 0 && <button type="button" className="btn btn-ghost" onClick={onClear}>전이 선택 취소</button>}
+      <small role="status">전이 {selected.size.toLocaleString()}개 선택{selected.size > 0 && ' · 매핑에 추가하거나 선택을 취소한 뒤 계속해 주세요.'}</small>
+    </div>
+  </section>;
+}
+
+function ObservedWorkflowGroup({ workflow, configured, disabled, selected, onChoose }: {
+  workflow: MigrationJiraObservedWorkflow;
+  configured?: readonly WorkflowEdge[];
+  disabled: boolean;
+  selected: ReadonlySet<string>;
+  onChoose: (id: string, checked: boolean) => void;
+}) {
+  const [page, setPage] = useState(0);
+  const description = useId();
+  const labels = statusLabels(workflow.statuses);
+  const current = new Set(configured?.map(transitionKey));
+  const { projectKey, transitions } = workflow;
+  const start = page * observedPageSize;
+  const end = Math.min(start + observedPageSize, transitions.length);
+  return <fieldset className="migration-jira-workflow migration-jira-observed" aria-label={`Jira 이력 전이 ${projectKey}`} disabled={disabled}>
+    <legend>{projectKey} · 방향 {transitions.length.toLocaleString()}개</legend>
+    {transitions.slice(start, end).map((edge, index) => {
+      const name = `${labels.get(edge.from) ?? edge.from} → ${labels.get(edge.to) ?? edge.to}`;
+      const id = observedKey(projectKey, edge);
+      const detailId = `${description}-${start + index}`;
+      const mapped = current.has(transitionKey(edge));
+      return <label className="migration-jira-workflow-check" key={id}>
+        <input type="checkbox" aria-label={name} aria-describedby={detailId} disabled={mapped} checked={selected.has(id)}
+          onChange={event => onChoose(id, event.target.checked)} />
+        <span>{name}<small id={detailId}>업무 {edge.issueCount.toLocaleString()}개에서 확인{mapped && ' · 이미 매핑됨'}</small></span>
+      </label>;
+    })}
+    {transitions.length > observedPageSize && <div className="migration-pagination">
+      <span role="status">{start + 1}–{end} / {transitions.length.toLocaleString()}</span>
+      <button type="button" className="btn btn-ghost" aria-label={`${projectKey} 관찰 전이 이전 페이지`} disabled={!page}
+        onClick={() => setPage(page - 1)}>이전</button>
+      <button type="button" className="btn btn-ghost" aria-label={`${projectKey} 관찰 전이 다음 페이지`} disabled={end >= transitions.length}
+        onClick={() => setPage(page + 1)}>다음</button>
+    </div>}
+  </fieldset>;
 }
 
 function WorkflowPreviewRow({ workflow }: { workflow: MigrationJiraWorkflowReview }) {

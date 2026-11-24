@@ -61,6 +61,11 @@
 .migration-jira-additional .btn { justify-self: start; }
 .migration-jira-preview { margin: 1rem 0; }
 .migration-jira-preview ul { margin: .45rem 0; padding-inline-start: 1.25rem; font-size: .875rem; }
+.migration-jira-observed legend { padding: 0 .25rem; font-size: .875rem; font-weight: 650; }
+.migration-jira-observed .migration-jira-workflow-check { min-height: 2.75rem; padding: .4rem 0; }
+.migration-jira-observed .migration-jira-workflow-check + .migration-jira-workflow-check { border-top: 1px solid #e4ece9; }
+.migration-jira-observed .migration-jira-workflow-check:has(input:disabled) { cursor: default; }
+.migration-jira-observed .migration-pagination { flex-wrap: wrap; justify-content: flex-start; }
 
 .migration-destination-mode { display: block; max-width: 26rem; margin-top: 1rem; }
 .migration-append-project { margin-top: .75rem; padding: .8rem 1rem; border: 1px solid #d4e2de; border-radius: .5rem; }

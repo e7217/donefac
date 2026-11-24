@@ -373,6 +373,10 @@ export interface MigrationJiraWorkflowReview {
   statuses: MigrationJiraWorkflowStatus[];
   transitions: MigrationJiraWorkflowTransition[];
 }
+export interface MigrationJiraObservedTransition extends MigrationJiraWorkflowTransition { issueCount: number }
+export interface MigrationJiraObservedWorkflow extends Omit<MigrationJiraWorkflowReview, 'transitions'> {
+  transitions: MigrationJiraObservedTransition[];
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
@@ -422,6 +426,7 @@ export interface MigrationPreview {
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
   jiraWorkflows?: MigrationJiraWorkflowReview[];
+  jiraObservedWorkflows?: MigrationJiraObservedWorkflow[];
   jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string;
     sourceProjectName?: string; targetProjectName?: string }[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];

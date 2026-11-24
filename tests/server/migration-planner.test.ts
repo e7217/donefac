@@ -224,6 +224,115 @@ test('reviewed migration workflows reject foreign, excluded and invalid graph el
   reject({ ABSENT: { initialStatusId: ready.id, transitions: [] } }, 'JIRA_WORKFLOW_PROJECT_INVALID');
 });
 
+test('observed Jira workflow directions count distinct proven issues without mixing destinations or treating labels as IDs', () => {
+  const changed = (from: string, to: string) => ({ fieldId: 'status', from, to });
+  const change = (id: string, owner: string, items: LegacyValue[], ownerReference = owner, visibility: LegacyValue = null) =>
+    record('history', id, {
+      containerId: owner, authorId: 'alice', createdAt: created,
+      metadata: { items, ...(visibility === null ? {} : { visibility }) },
+      references: [{ kind: 'issue', sourceId: ownerReference, relation: 'historyOf' }],
+    });
+  const workType = { id: 'bug', name: '버그' };
+  const one = pkg('observed-primary', 'jira', [
+    record('project', 'a', { title: '관측 A' }),
+    record('project', 'apart', { title: '관측 별도' }),
+    workflowIssue('11', 'a', '1', '착수'),
+    workflowIssue('12', 'a', '2', '검토'),
+    issue('13', { containerId: 'a', metadata: { key: 'OLD-13', fields: { status: { name: '3' }, issuetype: workType } } }),
+    workflowIssue('14', 'a', '1', '착수'),
+    workflowIssue('15', 'a', '2', '검토'),
+    issue('16', { containerId: 'a', metadata: { key: 'OLD-16',
+      fields: { status: { id: '1', name: '착수' }, issuetype: workType, security: { id: 'restricted' } } } }),
+    workflowIssue('19', 'apart', '9', '별도 상태'),
+    change('a-first', '11', [changed('1', '2'), changed('1', '2'), changed('2', '4'), changed('1', '3'), changed('1', '9'),
+      { fieldId: 'status', fromString: '검토', toString: '착수' }, { fieldId: 'customfield_100', field: 'status', from: '2', to: '1' }]),
+    change('a-first-overlap', '11', [changed('1', '2')], 'OLD-11'),
+    change('a-second', '12', [changed('1', '2')]),
+    change('a-conflicting-owner', '11', [changed('2', '1')], 'OLD-15'),
+    change('a-unproved-owner', '11', [changed('2', '1')], 'MISSING-11'),
+    change('a-omitted-history', '14', [changed('2', '1')]),
+    change('a-omitted-owner', '15', [changed('2', '1')]),
+    change('a-restricted-owner', '16', [changed('2', '1')]),
+    change('a-restricted-history', '11', [changed('2', '1')], '11', { type: 'group', value: 'internal' }),
+  ]);
+  one.dataset.source.format = 'jira-json';
+  const merged = pkg('observed-merge', 'jira', [
+    record('project', 'extra', { title: '관측 합류' }),
+    workflowIssue('21', 'extra', '4', '완료'),
+  ]);
+  merged.dataset.source.format = 'jira-json';
+  merged.dataset.source.instanceKey = one.dataset.source.instanceKey;
+  const other = pkg('observed-other', 'jira', [
+    record('project', 'b', { title: '관측 B' }),
+    workflowIssue('11', 'b', '1', '착수'),
+    workflowIssue('12', 'b', '2', '검토'),
+    change('b-first', '11', [changed('2', '1')]),
+    change('b-unproved-owner', '21', [changed('1', '2')]),
+  ]);
+  other.dataset.source.format = 'jira-json';
+
+  const packages = [one, merged, other];
+  const options = buildMigrationOptions(packages);
+  const statusId = (container: string, label: string) => options.jiraWorkflowStatuses?.find(
+    state => state.label === label && state.containerIds.includes(options.containers.find(row => row.sourceProjectId === container)!.id),
+  )!.id;
+  const ready = statusId('a', '착수')!, review = statusId('a', '검토')!, done = statusId('extra', '완료')!;
+  const otherReady = statusId('b', '착수')!, otherReview = statusId('b', '검토')!;
+  const request = input(packages);
+  const projectKeys = new Map([['a', 'NEW'], ['extra', 'NEW'], ['apart', 'APART'], ['b', 'OTHER']]);
+  request.configuration.projects = options.containers.map(({ id: containerId, sourceProjectId }) => {
+    const key = projectKeys.get(sourceProjectId)!;
+    return { containerId, key, name: key };
+  });
+  const blocked = buildMigrationPlan(request);
+  assert.equal(blocked.preview.canApply, false);
+  assert.ok(notices(blocked).has('RESTRICTED_CONTENT'));
+  assert.equal(blocked.preview.jiraObservedWorkflows, undefined);
+  request.configuration.excludedRecords = ['issue:15', 'issue:16', 'history:a-omitted-history', 'history:a-restricted-history']
+    .map(recordId => `${one.summary.id}/${recordId}`);
+  request.configuration.jiraWorkflows = { NEW: {
+    initialStatusId: 's_new_1', additionalStatuses: [{ id: 's_new_1', label: '신규 접수', category: 'todo' }],
+    transitions: [{ from: 's_new_1', to: ready }],
+  } };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const observations = plan.preview.jiraObservedWorkflows!;
+  assert.deepEqual(observations.map(group => group.projectKey).sort(), ['NEW', 'OTHER']);
+  const target = observations.find(group => group.projectKey === 'NEW')!;
+  assert.equal(target.initialStatusId, 's_new_1');
+  assert.deepEqual(target.transitions, [{ from: ready, to: review, issueCount: 2 }, { from: review, to: done, issueCount: 1 }]);
+  assert.deepEqual(observations.find(group => group.projectKey === 'OTHER')!.transitions,
+    [{ from: otherReview, to: otherReady, issueCount: 1 }]);
+  assert.doesNotMatch(JSON.stringify(observations), /OLD-11|a-first|restricted|MISSING-11/);
+  const workflow = plan.workflows.find(row => row.projectId === plan.projects.find(project => project.key === 'NEW')!.id)!;
+  assert.deepEqual(workflow.transitions, [{ from: 's_new_1', to: ready, issueTypes: [], requiredFields: [] }]);
+  assert.deepEqual(plan.sourceImport.configuration.jiraWorkflows, request.configuration.jiraWorkflows);
+  assert.ok(!Object.hasOwn(plan.sourceImport, 'jiraObservedWorkflows'));
+
+  request.configuration.excludedRecords.push(`${one.summary.id}/issue:12`);
+  const refreshed = buildMigrationPlan(request).preview;
+  assert.deepEqual(refreshed.jiraObservedWorkflows?.map(group => group.projectKey), ['OTHER']);
+});
+
+test('observed Jira workflow directions also use exact original IDs from an administrator XML export', () => {
+  const source = pkg('observed-admin', 'jira', []);
+  source.dataset = parseJira(new Map([['entities.xml', Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="ADM" pname="Admin fixture"/>
+    <Status id="1" pname="Open"/><Status id="2" pname="Done"/><IssueType id="3" pname="Task"/>
+    <Issue id="101" project="10" number="1" summary="Historical witness" status="2" issuetype="3" created="${created}" updated="${created}"/>
+    <Issue id="102" project="10" number="2" summary="Still open" status="1" issuetype="3" created="${created}" updated="${created}"/>
+    <ChangeGroup id="301" issue="101" created="${created}"/>
+    <ChangeItem id="401" group="301" fieldtype="jira" field="status" oldvalue="1" oldstring="Old label" newvalue="2" newstring="Old final label"/>
+  </entity-engine-xml>`)]]), source.dataset.source.instanceKey);
+  source.summary.source = source.dataset.source;
+  const plan = buildMigrationPlan(input([source]));
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const [group] = plan.preview.jiraObservedWorkflows ?? [];
+  assert.ok(group);
+  const byLabel = new Map(group.statuses.map(state => [state.label, state.id]));
+  assert.deepEqual(group.transitions, [{ from: byLabel.get('Open'), to: byLabel.get('Done'), issueCount: 1 }]);
+});
+
 test('Jira descriptions retain Markdown annotations while comments stay plain and documents retain native nodes', () => {
   const taskSource = jira(), documentSource = confluence();
   const adf = JSON.stringify({ type: 'doc', version: 1, content: [
