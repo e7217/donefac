@@ -63,6 +63,11 @@ function canonicalizeNodeAttributes(node: RichContent) {
     delete attributes.sectionId;
     node.attrs = attributes;
   }
+  if (node.type === 'taskItem' && node.attrs?.checklistItemId === undefined) {
+    const attributes: Record<string, unknown> = Object.assign(Object.create(null), node.attrs);
+    delete attributes.checklistItemId;
+    node.attrs = attributes;
+  }
   if (node.type === 'documentLabelList') node.attrs = { ...normalizeDocumentLabelListOptions(node.attrs)! };
   if (node.type === 'documentChildList') node.attrs = { ...normalizeDocumentChildListOptions(node.attrs)! };
   if (node.type === 'documentProperties') node.attrs = { ...normalizeDocumentPropertiesOptions(node.attrs)! };
@@ -76,6 +81,7 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
   if(!serialized)invalid('문서 내용이 필요합니다.');if(Buffer.byteLength(serialized)>MAX_DOCUMENT_BYTES)invalid('문서 내용이 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
   let count=0, issueBlockCount=0, labelListCount=0, childListCount=0, propertyBlockCount=0;
   const sectionIds = new Set<string>();
+  const checklistIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
     if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
     const node=object(value);if(typeof node.type!=='string')invalid('문서 노드 종류가 필요합니다.');const type=schema.nodes[node.type];if(!type)invalid('지원하지 않는 문서 노드입니다.');
@@ -91,6 +97,12 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
         if (sectionIds.has(id)) invalid('한 문서에서 같은 절 ID를 두 번 사용할 수 없습니다.');
         sectionIds.add(id);
       }
+    }
+    if (node.type === 'taskItem' && attributes.checklistItemId !== undefined) {
+      const id = attributes.checklistItemId;
+      if (!isDocumentSectionId(id)) invalid('체크리스트 항목 ID는 영문·숫자·하이픈·밑줄로 80자 이내여야 합니다.');
+      if (checklistIds.has(id)) invalid('한 문서에서 같은 체크리스트 항목 ID를 두 번 사용할 수 없습니다.');
+      checklistIds.add(id);
     }
     if (isLiveDocumentInclude(node.type) || ['issueReference','documentReference','documentRevisionInclude'].includes(node.type)) {
       const key=node.type==='issueReference'?'issueId':'documentId',id=attributes[key];

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
+import { documentChecklistItemSelection } from '../../shared/document-selection.js';
 import { createEditorSchema } from '../../shared/editor-schema.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
@@ -102,7 +103,7 @@ async function sentenceComment(call: Awaited<ReturnType<typeof fixture>>['call']
   return { comment, source: comment.documentSource };
 }
 
-test('checklist work reads exact current item evidence and skips historical, partial and archived links', async t => {
+test('checklist work reads exact item evidence across metadata revisions and skips partial and archived links', async t => {
   const { call, directory, key, base } = await fixture(t);
   const text = '같은 체크리스트 🔎';
   const paragraph = (value = text): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text: value }] });
@@ -180,9 +181,149 @@ test('checklist work reads exact current item evidence and skips historical, par
   assert.deepEqual(latest.content, document.content);
   const stale = await call<{ details: { currentVersion: number } }>(currentPath, 'GET', undefined, 409);
   assert.equal(stale.details.currentVersion, latest.version);
-  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, []);
+  const historical = ([[firstItem, first], [sibling, second], [child, nested]] as const).map(([created, selection]) => ({
+    ...row(created, selection), pinnedSource: created.link.documentSource,
+  }));
+  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, historical);
   const newItem = await pinned(second, '현재 버전에서 다시 고른 항목 업무', latest);
-  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, [row(newItem, second)]);
+  const combined = [...historical, row(newItem, second)].sort((a, b) => a.sourceSelection.from - b.sourceSelection.from || a.linkId.localeCompare(b.linkId));
+  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, combined);
+});
+
+const checklistParagraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+const checklistItem = (text: string, id?: string, checked = false): RichContent => ({
+  type: 'taskItem', attrs: { checked, ...(id ? { checklistItemId: id } : {}) }, content: [checklistParagraph(text)],
+});
+const checklistList = (...items: RichContent[]): RichContent => ({ type: 'taskList', content: items });
+const checklistBody = (...children: RichContent[]): RichContent => ({ type: 'doc', content: children });
+const checklistPath = (document: DocPage) => `/documents/${document.id}/checklist-work?expectedDocumentVersion=${document.version}`;
+
+function checklistRanges(document: DocPage) {
+  const parsed = createEditorSchema().nodeFromJSON(document.content);
+  const ranges: DocumentSourceSelection[] = [];
+  parsed.descendants((node, position) => {
+    const selection = documentChecklistItemSelection(parsed, node, position);
+    if (selection) ranges.push(selection);
+  });
+  return ranges;
+}
+
+test('stable checklist IDs follow saved rewording and reorder while the pinned evidence and scope remain unchanged', async t => {
+  const { call, directory } = await fixture(t);
+  const first = checklistItem('같은 항목', 'selected-item');
+  const second = checklistItem('같은 항목', 'different-item');
+  const original = await call<DocPage>('/documents', 'POST', {
+    projectId, title: '식별자가 있는 체크리스트', content: checklistBody(checklistList(first, second)),
+  }, 201);
+  const [selected, other] = checklistRanges(original);
+  const connect = (selection: DocumentSourceSelection, title: string) => call<Created>(pathFor(original.id), 'POST', {
+    ...followUp(original, projectId, title), sourceSelection: selection,
+  }, 201);
+  const [one, two] = [await connect(selected, '처음 항목 업무'), await connect(other, '두 번째 항목 업무')];
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(original))).links, [
+    { linkId: one.link.id, issueId: one.issue.id, sourceSelection: selected },
+    { linkId: two.link.id, issueId: two.issue.id, sourceSelection: other },
+  ]);
+  const changed = checklistItem('처음 항목의 새 설명과 이모지 📌', 'selected-item', true);
+  const save = (document: DocPage, content: RichContent) => call<DocPage>(`/documents/${document.id}`, 'PATCH', {
+    expectedVersion: document.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
+  });
+  const updated = await save(original, checklistBody(checklistParagraph('앞에 추가한 문단'), checklistList(second, changed)));
+  const [secondRange, firstRange] = checklistRanges(updated);
+  const expected = [
+    { linkId: two.link.id, issueId: two.issue.id, sourceSelection: secondRange, pinnedSource: two.link.documentSource },
+    { linkId: one.link.id, issueId: one.issue.id, sourceSelection: firstRange, pinnedSource: one.link.documentSource },
+  ];
+  const revisionPath = `/documents/${original.id}/revisions`;
+  const beforeReading = await call<DocRevision[]>(revisionPath);
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links, expected);
+  assert.deepEqual(await call<DocRevision[]>(revisionPath), beforeReading);
+  await call(checklistPath(original), 'GET', undefined, 409);
+
+  const revisionId = one.link.documentSource!.revisionId;
+  const pin = beforeReading.find(revision => revision.id === revisionId)!;
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    const writeDocument = observer.prepare('UPDATE documents SET json=? WHERE id=?');
+    writeDocument.run(JSON.stringify({ ...updated, content: checklistBody(checklistList(second, changed, changed)) }), updated.id);
+    const duplicateCurrent = (await call<DocumentChecklistWork>(checklistPath(updated))).links;
+    assert.deepEqual(duplicateCurrent.map(link => link.linkId), [two.link.id]);
+    writeDocument.run(JSON.stringify(updated), updated.id);
+
+    const writePin = observer.prepare('UPDATE revisions SET json=? WHERE id=?');
+    writePin.run(JSON.stringify({ ...pin, content: checklistBody(checklistList(first, second, first)) }), revisionId);
+    assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links.map(link => link.linkId), [two.link.id]);
+    writePin.run(JSON.stringify({ ...pin, confluenceSourceVersion: 1 }), revisionId);
+    assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links, []);
+    writePin.run(JSON.stringify(pin), revisionId);
+  } finally { observer.close(); }
+
+  const otherDocument = await call<DocPage>('/documents', 'POST', {
+    projectId, title: '항목을 옮긴 다른 문서', content: checklistBody(checklistList(changed)),
+  }, 201);
+  const removed = await save(updated, checklistBody(checklistList(second)));
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(removed))).links.map(link => link.linkId), [two.link.id]);
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(otherDocument))).links, []);
+  const workspace = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(workspace.resourceLinks.find(link => link.id === one.link.id), one.link);
+});
+
+test('anonymous checklist evidence follows only an unambiguous consecutive saved topology and can adopt an established ID', async t => {
+  const { call, directory } = await fixture(t);
+  const duplicate = checklistItem('구분할 수 없는 두 항목');
+  const labeled = checklistItem('나중에 이름을 바꿀 항목');
+  const duplicateRoot = checklistList(checklistItem('같은 별도 목록의 항목'));
+  const parent = (nested: RichContent, checked = false): RichContent => ({
+    ...checklistItem('상위 항목', undefined, checked), content: [checklistParagraph('상위 항목'), checklistList(nested)],
+  });
+  const original = await call<DocPage>('/documents', 'POST', {
+    projectId, title: '식별자가 없는 체크리스트', content: checklistBody(checklistList(duplicate, duplicate, parent(labeled)), duplicateRoot, duplicateRoot),
+  }, 201);
+  const [ambiguous, , , nested, repeatedRoot] = checklistRanges(original);
+  const connect = (selection: DocumentSourceSelection, title: string) => call<Created>(pathFor(original.id), 'POST', {
+    ...followUp(original, projectId, title), sourceSelection: selection,
+  }, 201);
+  const uncertain = await connect(ambiguous, '중복 항목의 기존 업무');
+  const preserved = await connect(nested, '중첩 항목의 기존 업무');
+  const duplicatedRoot = await connect(repeatedRoot, '중복된 별도 목록의 업무');
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(original))).links.map(link => link.linkId),
+    [uncertain.link.id, preserved.link.id, duplicatedRoot.link.id]);
+  const save = (document: DocPage, content: RichContent) => call<DocPage>(`/documents/${document.id}`, 'PATCH', {
+    expectedVersion: document.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content,
+  });
+  const unchangedList = checklistList(duplicate, duplicate, parent(checklistItem(nested.text, undefined, true), true));
+  const shifted = await save(original, checklistBody(checklistParagraph('체크리스트 앞의 새 문단'), unchangedList,
+    duplicateRoot, checklistParagraph('같은 두 목록 사이에 추가한 내용'), duplicateRoot));
+  const only = (sourceSelection: DocumentSourceSelection) => [{
+    linkId: preserved.link.id, issueId: preserved.issue.id, pinnedSource: preserved.link.documentSource, sourceSelection,
+  }];
+  const shiftedNested = checklistRanges(shifted)[3];
+  assert.notEqual(shiftedNested.from, nested.from);
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(shifted))).links, only(shiftedNested));
+
+  const identified = await save(shifted, checklistBody(checklistList(duplicate, duplicate, parent(checklistItem(nested.text, 'adopted-item'))),
+    duplicateRoot, duplicateRoot));
+  const updated = await save(identified, checklistBody(checklistList(checklistItem('식별 후 바뀐 새 이름', 'adopted-item'), duplicate)));
+  assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links, only(checklistRanges(updated)[0]));
+
+  const revisions = await call<DocRevision[]>(`/documents/${original.id}/revisions`);
+  const observed = revisions.find(revision => revision.version === shifted.version)!;
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    const writeDocument = observer.prepare('UPDATE documents SET json=? WHERE id=?');
+    const later = { ...updated, version: updated.version + 40 };
+    writeDocument.run(JSON.stringify(later), updated.id);
+    assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(later))).links, only(checklistRanges(later)[0]));
+    writeDocument.run(JSON.stringify(updated), updated.id);
+    const insert = observer.prepare('INSERT INTO revisions(id,document_id,json) VALUES(?,?,?)');
+    const altered = { ...observed, id: randomUUID(), title: '같은 버전에 충돌하는 저장본' };
+    insert.run(altered.id, altered.documentId, JSON.stringify(altered));
+    assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links, []);
+    const remove = observer.prepare('DELETE FROM revisions WHERE id=?');
+    remove.run(altered.id);
+    remove.run(observed.id);
+    assert.deepEqual((await call<DocumentChecklistWork>(checklistPath(updated))).links, []);
+  } finally { observer.close(); }
 });
 
 test('project documents enforce their project and common documents link to the explicit target without changing the document', async t => {

@@ -11,6 +11,7 @@ import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc,prosemirrorJSONToYXmlFragment,yDocToProsemirrorJSON } from 'y-prosemirror';
 import { getExtensionField, getSchema } from '@tiptap/core';
 import { EditorState, type Plugin } from '@tiptap/pm/state';
+import type { EditorView } from '@tiptap/pm/view';
 import StarterKit from '@tiptap/starter-kit';
 import { Store } from '../../server/store.js';
 import { DocumentContentService,DocumentContentError,normalizeDocumentContent,readDocumentSelection } from '../../server/document-content.js';
@@ -75,6 +76,27 @@ test('heading section IDs are canonical, unique within one document, and require
   assert.equal(normalizeDocumentContent({ type: 'doc', content: [heading('다른 문서', 'section_a-1')] }).content.content?.[0].attrs?.sectionId, 'section_a-1');
 });
 
+test('checklist identities preserve anonymous content and require schema 15 when present', () => {
+  const item = (text: string, checklistItemId?: unknown): RichContent => ({
+    type: 'taskItem', attrs: { checked: false, ...(checklistItemId !== undefined && { checklistItemId }) },
+    content: [body(text).content![0]],
+  });
+  const list = (...content: RichContent[]): RichContent => ({ type: 'doc', content: [{ type: 'taskList', content }] });
+  const anonymous = list(item('같은 문구'));
+  const normalized = normalizeDocumentContent(anonymous);
+  assert.equal(JSON.stringify(normalized.content), JSON.stringify(anonymous));
+  assert.equal(documentContentSchemaVersion(normalized.content), 1);
+  const identified = normalizeDocumentContent(list(item('같은 문구', 'first'), item('같은 문구', 'second')));
+  assert.equal(documentContentSchemaVersion(identified.content), 15);
+  assert.deepEqual(identified.content.content?.[0].content?.map(node => node.attrs?.checklistItemId), ['first', 'second']);
+  for (const invalid of [null, 1, '', '_start', '잘못된 문자', 'bad/name', '끝\n', 'A'.repeat(81)]) {
+    rejects(() => normalizeDocumentContent(list(item('유효하지 않은 ID', invalid))));
+  }
+  const duplicate = item('상위 항목', 'first');
+  duplicate.content!.push({ type: 'taskList', content: [item('하위 항목', 'first')] });
+  rejects(() => normalizeDocumentContent(list(duplicate)));
+});
+
 test('in-body tables of contents store only configuration in schema 8', () => {
   const doc = (...content: RichContent[]): RichContent => ({ type: 'doc', content });
   const toc: RichContent = { type: 'documentToc' };
@@ -109,6 +131,44 @@ test('editor heading copies and splits preserve the original ID and multi-headin
   assert.deepEqual(moved.content.content.map(node => node.attrs.sectionId), ['second', 'first']);
   const reformatted = state.applyTransaction(state.tr.setBlockType(1, document.content.size - 1, schema.nodes.heading, { level: 2 })).state.doc;
   assert.deepEqual(reformatted.content.content.map(node => [node.attrs.level, node.attrs.sectionId]), [[2, 'first'], [2, 'second']]);
+});
+
+test('checklist paste assigns fresh IDs after deletion, while a same-editor drag keeps live IDs', () => {
+  const item = (id: string, text: string, nested?: RichContent): RichContent => ({
+    type: 'taskItem', attrs: { checked: true, checklistItemId: id },
+    content: [body(text).content![0], ...(nested ? [nested] : [])],
+  });
+  const list = (...content: RichContent[]): RichContent => ({ type: 'taskList', content });
+  const document = schema.nodeFromJSON({ type: 'doc', content: [
+    list(item('original', '원래 항목', list(item('nested', '하위 항목')))), body('다음 단락').content![0],
+  ] });
+  const extension = createEditorExtensions().find(candidate => candidate.name === 'checklistItemIdentity');
+  assert.ok(extension);
+  const plugins = getExtensionField<() => Plugin[]>(extension, 'addProseMirrorPlugins')();
+  const transformPasted = plugins[0].props.transformPasted?.bind(plugins[0]);
+  assert.ok(transformPasted);
+  const state = EditorState.create({ doc: document, plugins });
+  const end = document.firstChild!.nodeSize;
+  const dragged = document.slice(0, end);
+  const parsedClipboard = document.slice(0, end);
+  const dragView = { state, dragging: { slice: dragged, move: true } } as EditorView;
+  assert.equal(transformPasted(dragged, dragView, false), dragged);
+  assert.notEqual(transformPasted(parsedClipboard, dragView, false), parsedClipboard);
+
+  const moved = state.tr.delete(0, end);
+  moved.insert(moved.doc.content.size, dragged.content);
+  assert.equal(state.applyTransaction(moved).state.doc.lastChild!.firstChild!.attrs.checklistItemId, 'original');
+
+  const deleted = state.applyTransaction(state.tr.delete(0, end)).state;
+  const clipboardView = { state: deleted, dragging: null } as EditorView;
+  const pasted = transformPasted(parsedClipboard, clipboardView, false);
+  const reinserted = deleted.applyTransaction(deleted.tr.replace(0, 0, pasted)).state.doc.firstChild!.firstChild!;
+  const pastedIds = [reinserted.attrs.checklistItemId, reinserted.lastChild!.firstChild!.attrs.checklistItemId];
+  assert.equal(new Set(pastedIds).size, 2);
+  for (const id of pastedIds) assert.match(id, /^[a-f0-9-]{36}$/);
+  assert.equal(reinserted.attrs.checked, true);
+  assert.equal(reinserted.textContent, '원래 항목하위 항목');
+  assert.notEqual(transformPasted(dragged, { ...dragView, state: deleted } as EditorView, false), dragged);
 });
 
 test('callouts and inline status badges preserve canonical text, selection, and required schema version', () => {
@@ -307,7 +367,7 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
-test('manual child list collaboration rejects schema 13 clients and serves the saved order mode to schema 14', async () => {
+test('manual child list collaboration rejects schema 13 clients and serves the saved order mode to current clients', async () => {
   const f = fixture();
   const service = new CollaborationService(f.store, f.contents);
   const server = createServer();
@@ -331,9 +391,9 @@ test('manual child list collaboration rejects schema 13 clients and serves the s
     const current = new Peer(url);
     peers.push(current);
     await once(current.ws, 'open');
-    current.send({ type: 'hello', epoch: session.epoch, schemaVersion: 14 });
+    current.send({ type: 'hello', epoch: session.epoch, schemaVersion: COLLABORATION_SCHEMA });
     const welcome = await current.next('welcome');
-    assert.equal(welcome.schemaVersion, 14);
+    assert.equal(welcome.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(welcome.document.content, authored.content);
   } finally {
     for (const peer of peers) peer.ws.terminate();

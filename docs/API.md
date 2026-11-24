@@ -236,7 +236,7 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `depth`는 `1`~`60` 또는 모든 하위 단계를 뜻하는 `"all"`이다. 기본값은 `1`이다. `first`는 첫 단계에서 선택하는 문서 수의 상한 `1`~`500`이며 `null`은 첫 단계 제한을 해제한다. 각 계층을 `sort`의 `title`, `created`, `updated` 기준으로 정렬하며 `descending`으로 방향을 바꾼다. `style`은 `list` 또는 `h1`~`h6`, `title`은 최대 160 UTF-16 코드 단위다. 한 문서에 블록 30개, 한 목록에 표시 문서 500개까지 지원한다.
 
-`sort: 'manual'`은 각 상위 문서와 공간의 저장된 형제 순서를 적용한다. 사용자 지정 순서가 없는 그룹은 제목순을 사용한다. `descending`을 적용한 뒤 `first`를 계산한다. 편집 `PATCH`에는 `contentSchemaVersion` 14 이상을 보낸다. 이 옵션은 문서 JSON 형식 14, 자체 백업 형식 105에 저장되며 현재 공동 편집 연결은 프로토콜 14를 사용한다.
+`sort: 'manual'`은 각 상위 문서와 공간의 저장된 형제 순서를 적용한다. 사용자 지정 순서가 없는 그룹은 제목순을 사용한다. `descending`을 적용한 뒤 `first`를 계산한다. 편집 `PATCH`에는 `contentSchemaVersion` 14 이상을 보낸다. 이 옵션은 문서 JSON 형식 14, 자체 백업 형식 105부터 지원한다. 현재 공동 편집 연결은 프로토콜 15를 사용한다.
 
 교체하는 `PATCH`에는 목록을 지원하는 `contentSchemaVersion` 10 이상을 보낸다. 형식 67 이상 자체 백업과 형식 10 이상 문서 JSON에는 목록 설정을 저장한다. 이력·검토본·발행본·고정 포함은 저장 당시 조건을 표시한다. 프로젝트 제한 API 키는 명시한 부모 문서나 대상 프로젝트도 조회 범위에 포함해야 한다.
 
@@ -449,7 +449,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 브라우저의 체크리스트 명령은 커서가 있는 항목의 첫 문단을 `sourceSelection`으로 보낸다. 새 업무의 화면은 이를 한 줄로 정리해 수정 가능한 제목에 채운다. 문서가 바뀌면서 요청이 거절되면 해당 업무 양식의 입력을 유지하고 최신 저장본에서 항목을 다시 고를 수 있다.
 
-브라우저의 `GET /api/documents/:id/checklist-work?expectedDocumentVersion=…`는 `{documentId,documentVersion,links:[{linkId,issueId,sourceSelection}]}`을 반환한다. 서버는 활성 연결의 근거 저장본과 현재 문서의 버전·제목·본문이 일치하고, 발췌의 위치와 텍스트가 체크리스트 항목의 첫 문단과 일치하는지 확인한다. 저장 버전이 달라지면 `409`를 반환한다. 이전 저장본에 고정한 근거는 문서의 연결 목록에서 조회한다.
+브라우저의 `GET /api/documents/:id/checklist-work?expectedDocumentVersion=…`는 `{documentId,documentVersion,links:[{linkId,issueId,sourceSelection,pinnedSource?}]}`를 반환한다. `sourceSelection`은 현재 저장본에서 해당 항목의 첫 문단 범위와 텍스트다. 이전 저장본에 연결한 항목이면 `pinnedSource`에 연결 당시의 `{revisionId,from,to,text}`를 반환하고 저장된 연결의 원문은 보존한다. 서버는 원래 발췌를 대조한 뒤 문서 내 `taskItem.attrs.checklistItemId`로 현재 항목을 찾는다. ID가 없는 예전 연결은 연속 저장본의 체크리스트 구조와 문구에서 동일 항목을 확인할 수 있을 때 표시한다. 항목을 확인할 수 없으면 문서의 전체 연결 목록에서 티켓을 연다. 저장 버전이 달라지면 `409`를 반환한다. 체크리스트 항목 ID는 문서 JSON·공동 편집 형식 15와 자체 백업 형식 108부터 보관한다.
 
 문장 댓글에서 시작할 때는 `sourceComment: {commentId,revisionId}`를 사용한다. `sourceSelection`과 `sourceComment` 중 하나를 선택한다. `expectedDocumentVersion`에는 현재 문서 버전을, `revisionId`에는 댓글에 고정된 원문 저장본을 보낸다. 서버가 같은 문서에 있는 활성 문장 댓글과 저장본의 실제 텍스트·범위, API 키의 원문 범위를 확인한 뒤 `link.documentSource`에 같은 발췌를 기록한다. 댓글이 휴지통으로 이동했거나 원래 문장 댓글이 아니면 새 요청을 보류한다.
 

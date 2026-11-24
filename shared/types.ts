@@ -1154,7 +1154,7 @@ export interface DocumentSourceSelection { from: number; to: number; text: strin
 export interface DocumentChecklistWork {
   documentId: string;
   documentVersion: number;
-  links: {linkId: string; issueId: string; sourceSelection: DocumentSourceSelection}[];
+  links: { linkId: string; issueId: string; sourceSelection: DocumentSourceSelection; pinnedSource?: DocumentDecisionSource }[];
 }
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
 export interface DocumentFollowUpCommentSource { commentId: string; revisionId: string }

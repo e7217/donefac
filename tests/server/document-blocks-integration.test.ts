@@ -34,7 +34,7 @@ type Fixture=Awaited<ReturnType<typeof fixture>>;
 async function make(f:Fixture,title:string,content=body(p('원본')),projectId:string|null='project-neo'){const result=await f.call<DocPage>('/documents','POST',{projectId,title,content});assert.equal(result.status,201,JSON.stringify(result.data));return result.data;}
 const snapshot=async(f:Fixture)=>(await f.call<WorkspaceSnapshot>('/workspace')).data;
 
-test('manual child lists require content and collaboration schema 14 and workspace backup format 105', async () => {
+test('manual child lists require content schema 14 and at least workspace backup format 105', async () => {
   const f = await fixture();
   try {
     const childList = (sort: 'created' | 'manual') => body({ type: 'documentChildList', attrs: { sort } });
@@ -54,9 +54,9 @@ test('manual child lists require content and collaboration schema 14 and workspa
     })).status, 200);
     const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: manual.version });
     assert.equal(live.status, 200);
-    assert.equal(live.data.schemaVersion, 14);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
     const activeBackup = (await f.call<Backup>('/export')).data;
-    assert.equal(activeBackup.schemaVersion, 105);
+    assert.equal(activeBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     const rejectDowngrade = async (backup: Backup) => {
       const rejected = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 104 } });
       assert.equal(rejected.status, 400);
@@ -85,6 +85,44 @@ test('manual child lists require content and collaboration schema 14 and workspa
     assert.equal(session.schemaVersion, COLLABORATION_SCHEMA);
     assert.notEqual(session.epoch, live.data.epoch);
     assert.deepEqual(session.document.content, manual.content);
+  } finally { await f.close(); }
+});
+
+test('identified checklist items survive edits, live startup, and workspace backup and restore', async () => {
+  const f = await fixture();
+  try {
+    const checklist = (text: string, checklistItemId?: string) => body({
+      type: 'taskList', content: [{ type: 'taskItem',
+        attrs: { checked: false, ...(checklistItemId && { checklistItemId }) }, content: [p(text)] }],
+    });
+    const initial = checklist('빌드를 검토한다', 'review-build');
+    const document = await make(f, '출시 점검', initial);
+    const path = `/documents/${document.id}`;
+    const oldWrite = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: document.version, contentSchemaVersion: 14, content: checklist('빌드를 다시 검토한다'),
+    });
+    assert.equal(oldWrite.status, 409);
+    assert.equal(oldWrite.data.details.contentSchemaVersion, 15);
+    const updatedContent = checklist('빌드를 다시 검토한다', 'review-build');
+    const saved = await f.call<DocPage>(path, 'PATCH', {
+      expectedVersion: document.version, contentSchemaVersion: 15, content: updatedContent,
+    });
+    assert.equal(saved.status, 200);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: saved.data.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, 15);
+    assert.deepEqual(live.data.document.content, updatedContent);
+
+    const backup = (await f.call<Backup>('/export')).data;
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+    const downgraded = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 107 } });
+    assert.equal(downgraded.status, 400);
+    assert.match(downgraded.data.error, /schemaVersion 108/u);
+    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    assert.deepEqual((await snapshot(f)).documents.find(candidate => candidate.id === document.id)?.content, updatedContent);
+    const revisions = await f.call<DocRevision[]>(`${path}/revisions`);
+    assert.deepEqual(revisions.data.find(revision => revision.version === document.version)?.content, initial);
+    assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document.content, updatedContent);
   } finally { await f.close(); }
 });
 

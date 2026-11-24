@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { DOCUMENT_SELECTION_TEXT_LIMIT } from '../shared/document-selection.js';
+import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
+import { isDocumentSectionId } from '../shared/document-sections.js';
+import { DOCUMENT_SELECTION_TEXT_LIMIT, documentChecklistItemSelection } from '../shared/document-selection.js';
+import { createEditorSchema } from '../shared/editor-schema.js';
 import type {
   Comment, DocPage, DocRevision, DocumentChecklistWork, DocumentDecisionSource, DocumentFollowUpCommentSource, DocumentFollowUpResult, DocumentIssueLinkResult,
-  DocumentSourceSelection, Issue, ResourceLink,
+  DocumentSourceSelection, Issue, ResourceLink, RichContent,
 } from '../shared/types.js';
 import { readDocumentChecklistItem, readDocumentSelection } from './document-content.js';
 import type { Store } from './store.js';
@@ -100,16 +103,79 @@ function sameSelection(a: DocumentSourceSelection, b: DocumentSourceSelection): 
   return a.from === b.from && a.to === b.to && a.text === b.text;
 }
 
-export function readDocumentChecklistWork(store: Store, documentId: string, expectedVersion: number): DocumentChecklistWork {
+type ChecklistItem = { selection: DocumentSourceSelection | null; id?: string; ambiguous: boolean; index: number };
+type ChecklistSnapshot = {
+  topology: string[];
+  items: ChecklistItem[];
+  byPosition: Map<number, ChecklistItem>;
+  byId: Map<string, ChecklistItem | null>;
+};
+type SavedChecklistBody = { title: string; content: string };
+type SavedChecklistSnapshot = SavedChecklistBody & { snapshot: ChecklistSnapshot };
+const checklistSchema = createEditorSchema();
+const MAX_CHECKLIST_HISTORY_STEPS = 32;
+const MAX_CHECKLIST_HISTORY_BYTES = 32 * 1024 * 1024;
+
+function checklistSnapshot(content: RichContent): ChecklistSnapshot | null {
+  try {
+    const document = checklistSchema.nodeFromJSON(content);
+    if (document.type !== checklistSchema.topNodeType) return null;
+    const result: ChecklistSnapshot = { topology: [], items: [], byPosition: new Map(), byId: new Map() };
+    const hashes = new WeakMap<ProseMirrorNode, string>();
+    const roots: { key: string; from: number; to: number }[] = [];
+    function fingerprint(node: ProseMirrorNode): string {
+      const previous = hashes.get(node);
+      if (previous) return previous;
+      const children: string[] = [];
+      node.forEach(child => { children.push(fingerprint(child)); });
+      const attributes = node.type.name === 'taskItem'
+        ? Object.fromEntries(Object.entries(node.attrs).filter(([key]) => key !== 'checked' && key !== 'checklistItemId'))
+        : node.attrs;
+      const hash = createHash('sha256').update(JSON.stringify([node.type.name, attributes, node.text, node.marks.map(mark => mark.toJSON()), children])).digest('hex');
+      hashes.set(node, hash);
+      return hash;
+    }
+    function visit(node: ProseMirrorNode, position: number, insideList: boolean, ambiguous: boolean) {
+      if (node.type.name === 'taskItem') {
+        const { checklistItemId } = node.attrs;
+        const id = isDocumentSectionId(checklistItemId) ? checklistItemId : undefined;
+        const selection = documentChecklistItemSelection(document, node, position);
+        const item: ChecklistItem = { selection, id, ambiguous, index: result.items.length };
+        result.items.push(item);
+        if (selection) result.byPosition.set(selection.from, item);
+        if (id) result.byId.set(id, result.byId.has(id) ? null : item);
+      }
+      if (node.type.name === 'taskList') {
+        const from = result.items.length;
+        const rootKey = !insideList ? fingerprint(node) : undefined;
+        if (rootKey) result.topology.push(rootKey);
+        const counts = new Map<string, number>();
+        node.forEach(child => { const key = fingerprint(child); counts.set(key, (counts.get(key) ?? 0) + 1); });
+        node.forEach((child, offset) => visit(child, position + 1 + offset, true, ambiguous || (counts.get(fingerprint(child)) ?? 0) > 1));
+        if (rootKey) roots.push({ key: rootKey, from, to: result.items.length });
+      } else {
+        node.forEach((child, offset) => visit(child, position + 1 + offset, insideList, ambiguous));
+      }
+    }
+    visit(document, -1, false, false);
+    const rootCounts = new Map<string, number>();
+    for (const { key } of roots) rootCounts.set(key, (rootCounts.get(key) ?? 0) + 1);
+    for (const { key, from, to } of roots) {
+      if ((rootCounts.get(key) ?? 0) > 1) for (let index = from; index < to; index++) result.items[index].ambiguous = true;
+    }
+    return result;
+  } catch { return null; }
+}
+
+function checklistWork(store: Store, documentId: string, expectedVersion: number): DocumentChecklistWork {
   const row = store.db.prepare(`SELECT d.json AS document, CASE WHEN json_extract(d.json,'$.version')=? THEN (
-    SELECT json_group_array(json_object('linkId',l.id,'issueId',l.issue_id,'source',json_extract(l.json,'$.documentSource')))
+    SELECT json_group_array(json_object('linkId',l.id,'issueId',l.issue_id,'source',json_extract(l.json,'$.documentSource'),
+      'version',json_extract(r.json,'$.version'), 'sameSnapshot', CASE WHEN json_extract(r.json,'$.version')=json_extract(d.json,'$.version') THEN
+      json_extract(r.json,'$.title')=json_extract(d.json,'$.title') AND json_extract(r.json,'$.content')=json_extract(d.json,'$.content') END))
     FROM resource_links l JOIN issues i ON i.id=l.issue_id
     JOIN revisions r ON r.id=json_extract(l.json,'$.documentSource.revisionId') AND r.document_id=d.id
     WHERE l.document_id=d.id AND json_extract(r.json,'$.documentId')=d.id AND json_extract(r.json,'$.id')=r.id
-      AND json_extract(r.json,'$.version')=json_extract(d.json,'$.version')
-      AND json_extract(r.json,'$.title')=json_extract(d.json,'$.title')
-      AND json_extract(r.json,'$.content')=json_extract(d.json,'$.content')
-      AND json_type(r.json,'$.confluenceSourceVersion') IS NULL
+      AND json_type(r.json,'$.version')='integer' AND json_type(r.json,'$.confluenceSourceVersion') IS NULL
   ) END AS candidates FROM documents d WHERE d.id=?`).get(expectedVersion, documentId) as
     { document: string; candidates: string | null } | undefined;
   if (!row) throw new DocumentFollowUpError(404, '문서를 찾을 수 없습니다.');
@@ -119,16 +185,94 @@ export function readDocumentChecklistWork(store: Store, documentId: string, expe
   }
 
   const items = new Map<number, DocumentSourceSelection | null>();
+  const history = new Map<number, SavedChecklistSnapshot | null>();
+  const pins = new Map<string, SavedChecklistSnapshot | null>();
+  let remainingBytes = MAX_CHECKLIST_HISTORY_BYTES;
+  let current: ChecklistSnapshot | null | undefined;
+  let currentContent: string | undefined;
+  const currentSnapshot = () => current === undefined ? (current = checklistSnapshot(document.content)) : current;
+  const pinById = store.db.prepare(`SELECT json_extract(json,'$.title') AS title, json_extract(json,'$.content') AS content
+    FROM revisions WHERE id=? AND length(CAST(json AS BLOB))<=?`);
+  const byVersion = store.db.prepare(`SELECT DISTINCT json_extract(json,'$.title') AS title, json_extract(json,'$.content') AS content
+    FROM revisions WHERE document_id=? AND json_extract(json,'$.documentId')=? AND json_extract(json,'$.id')=id
+    AND json_extract(json,'$.version')=? AND json_type(json,'$.confluenceSourceVersion') IS NULL LIMIT 2`);
+
+  function savedSnapshot(row: SavedChecklistBody | undefined): SavedChecklistSnapshot | null {
+    if (!row || typeof row.title !== 'string' || typeof row.content !== 'string') return null;
+    const bytes = Buffer.byteLength(row.content);
+    if (bytes > remainingBytes) return null;
+    remainingBytes -= bytes;
+    try {
+      const snapshot = checklistSnapshot(JSON.parse(row.content) as RichContent);
+      return snapshot ? { ...row, snapshot } : null;
+    } catch { return null; }
+  }
+
+  function pin(revisionId: string) {
+    if (!pins.has(revisionId)) {
+      const row = pinById.get(revisionId, remainingBytes) as SavedChecklistBody | undefined;
+      pins.set(revisionId, savedSnapshot(row));
+    }
+    return pins.get(revisionId);
+  }
+
+  function saved(version: number) {
+    if (!history.has(version)) {
+      const rows = byVersion.all(document.id, document.id, version) as SavedChecklistBody[];
+      history.set(version, rows.length === 1 ? savedSnapshot(rows[0]) : null);
+    }
+    return history.get(version);
+  }
+
+  function projectHistorical(source: DocumentDecisionSource, version: number): DocumentSourceSelection | null {
+    const old = pin(source.revisionId);
+    const original = old?.snapshot.byPosition.get(source.from);
+    if (!old || !original?.selection || !sameSelection(original.selection, source)) return null;
+    const latest = currentSnapshot();
+    if (!latest) return null;
+    if (original.id) return old.snapshot.byId.get(original.id) === original ? latest.byId.get(original.id)?.selection ?? null : null;
+    if (original.ambiguous) return null;
+    const origin = saved(version);
+    if (!origin || origin.title !== old.title || origin.content !== old.content) return null;
+    const topology = old.snapshot.topology;
+    const lastStep = Math.min(document.version, version + MAX_CHECKLIST_HISTORY_STEPS);
+    for (let step = version + 1; step <= lastStep; step++) {
+      const witness = saved(step);
+      if (!witness || witness.snapshot.topology.length !== topology.length || witness.snapshot.topology.some((key, index) => key !== topology[index])) return null;
+      const item = witness.snapshot.items[original.index];
+      if (!item?.selection || item.ambiguous || item.selection.text !== source.text) return null;
+      if (step === document.version && (witness.title !== document.title || witness.content !== (currentContent ??= JSON.stringify(document.content)))) return null;
+      if (item.id) return witness.snapshot.byId.get(item.id) === item ? latest.byId.get(item.id)?.selection ?? null : null;
+      if (step === document.version) return item.selection;
+    }
+    return null;
+  }
+
   const links: DocumentChecklistWork['links'] = [];
-  const candidates = JSON.parse(row.candidates ?? '[]') as { linkId: string; issueId: string; source: unknown }[];
-  for (const { linkId, issueId, source } of candidates) {
+  const candidates = JSON.parse(row.candidates ?? '[]') as { linkId: string; issueId: string; source: unknown; version: number; sameSnapshot: number | null }[];
+  for (const { linkId, issueId, source, version, sameSnapshot } of candidates) {
     if (!record(source) || Object.keys(source).length !== 4 || !isSourceId(source.revisionId) || !validSelection(source)) continue;
-    if (!items.has(source.from)) items.set(source.from, readDocumentChecklistItem(document.content, source.from));
-    const item = items.get(source.from);
-    if (item && sameSelection(item, source)) links.push({ linkId, issueId, sourceSelection: item });
+    if (!Number.isSafeInteger(version) || version < 1 || version > document.version) continue;
+    if (version === document.version) {
+      if (!sameSnapshot) continue;
+      if (!items.has(source.from)) items.set(source.from, readDocumentChecklistItem(document.content, source.from));
+      const item = items.get(source.from);
+      if (item && sameSelection(item, source)) links.push({ linkId, issueId, sourceSelection: item });
+      continue;
+    }
+    const pinnedSource = { revisionId: source.revisionId, from: source.from, to: source.to, text: source.text };
+    const sourceSelection = projectHistorical(pinnedSource, version);
+    if (sourceSelection) links.push({ linkId, issueId, sourceSelection, pinnedSource });
   }
   links.sort((a, b) => a.sourceSelection.from - b.sourceSelection.from || a.linkId.localeCompare(b.linkId));
   return { documentId, documentVersion: document.version, links };
+}
+
+export function readDocumentChecklistWork(store: Store, documentId: string, expectedVersion: number): DocumentChecklistWork {
+  if (store.db.isTransaction) return checklistWork(store, documentId, expectedVersion);
+  store.db.exec('BEGIN');
+  try { return checklistWork(store, documentId, expectedVersion); }
+  finally { store.db.exec('ROLLBACK'); }
 }
 
 function requestFingerprint(version: number, issue: IssueInput, source?: DocumentSourceSelection | { sourceComment: DocumentFollowUpCommentSource }): string {

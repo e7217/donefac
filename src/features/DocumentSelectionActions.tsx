@@ -48,10 +48,12 @@ function checklistIssues(work: ChecklistWork, range: DocumentSourceSelection): I
   const activeLinks = new Map(work.data.resourceLinks.map(link => [link.id, link]));
   const activeIssues = new Map(work.data.issues.map(issue => [issue.id, issue]));
   const matches = new Map<string, Issue>();
-  for (const { linkId, issueId, sourceSelection } of confirmed) {
+  for (const { linkId, issueId, sourceSelection, pinnedSource } of confirmed) {
     const link = activeLinks.get(linkId);
     const issue = activeIssues.get(issueId);
-    if (issue && link?.issueId === issueId && link.documentSource && sameRange(link.documentSource, sourceSelection)) {
+    const source = link?.documentSource;
+    if (issue && link?.issueId === issueId && source && (!pinnedSource || source.revisionId === pinnedSource.revisionId) &&
+      sameRange(source, pinnedSource ?? sourceSelection)) {
       matches.set(issueId, issue);
     }
   }

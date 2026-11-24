@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
+import { documentContentSchemaVersion } from '../../shared/document-nodes';
 import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentChecklistWork, DocumentFollowUpResult, DocumentIssueLinkResult, Issue,
   LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
@@ -1244,6 +1245,32 @@ function checklistBody(parentLabel: string, nestedLabel: string): RichContent {
   ] }] };
 }
 
+async function linkChecklistIssue(page: Page, documentId: string, item: Locator, issue: Issue, expectedText: string): Promise<ResourceLink> {
+  await item.click();
+  await page.getByRole('button', { name: '체크리스트 항목을 기존 업무에 연결', exact: true }).click();
+  const chooser = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+  await expect(chooser.locator('blockquote')).toHaveText(expectedText);
+  await chooser.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
+  await chooser.getByRole('radio', { name: `${issue.key} ${issue.title}`, exact: true }).check();
+  const posting = page.waitForResponse(response => new URL(response.url()).pathname === `/api/documents/${documentId}/decision-links` &&
+    response.request().method() === 'POST');
+  await chooser.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+  const response = await posting;
+  expect(response.status(), await response.text()).toBe(201);
+  const result = await response.json() as DocumentIssueLinkResult;
+  await expect(chooser).toHaveCount(0);
+  return result.link;
+}
+
+async function saveChecklistDocument(page: Page, documentId: string): Promise<DocPage> {
+  const saving = page.waitForResponse(response => new URL(response.url()).pathname === `/api/documents/${documentId}` &&
+    response.request().method() === 'PATCH');
+  await page.locator('.docs-save-button').click();
+  const saved = await saving;
+  expect(saved.ok(), await saved.text()).toBe(true);
+  return saved.json();
+}
+
 test('360px에서 체크리스트 항목을 후속 업무로 만들고 기존 업무에도 근거를 연결한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const { projects: [project], users: [actor, assignee] } = await workspace(request);
@@ -1419,7 +1446,7 @@ test('360px에서 체크리스트 원문이 바뀌면 작성한 업무 입력을
   }
 });
 
-test('360px에서 같은 문구의 체크리스트 항목을 구분해 업무를 열고 새 저장본의 연결을 확인한다', async ({ page, request }) => {
+test('360px에서 같은 문구의 기존 체크리스트 항목은 앞 문단을 편집한 뒤에도 연결을 구분한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const { projects: [project], users: [actor, assignee] } = await workspace(request);
   const suffix = randomUUID().slice(0, 8);
@@ -1444,30 +1471,18 @@ test('360px에서 같은 문구의 체크리스트 항목을 구분해 업무를
     await openDecision(page, source, project.id);
     const editor = page.locator('.docs-prose');
     await expect(editor).toHaveAttribute('contenteditable', 'true');
+    await expect(editor.locator('[data-checklist-item-id]')).toHaveCount(0);
     const items = editor.getByText(label, { exact: true });
     await expect(items).toHaveCount(2);
     const contextual = page.getByRole('region', { name: '연결된 체크리스트 업무', exact: true });
     const opener = (issue: Issue) => contextual.getByRole('button', { name: `${issue.key} 업무 열기`, exact: true });
 
-    async function attach(item: Locator, issue: Issue) {
-      await item.click();
-      await page.getByRole('button', { name: '체크리스트 항목을 기존 업무에 연결', exact: true }).click();
-      const chooser = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
-      await expect(chooser.locator('blockquote')).toHaveText(label);
-      await chooser.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
-      await chooser.getByRole('radio', { name: `${issue.key} ${issue.title}`, exact: true }).check();
-      const posting = page.waitForResponse(response => response.url().endsWith(`/api/documents/${source.id}/decision-links`) && response.request().method() === 'POST');
-      await chooser.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
-      const response = await posting;
-      expect(response.status(), await response.text()).toBe(201);
-      const result = await response.json() as DocumentIssueLinkResult;
-      await expect(chooser).toHaveCount(0);
-      return result.link.documentSource!;
-    }
-
-    const firstSource = await attach(items.first(), first);
-    const additionalSource = await attach(items.first(), additional);
-    const nestedSource = await attach(items.last(), nested);
+    const firstLink = await linkChecklistIssue(page, source.id, items.first(), first, label);
+    const additionalLink = await linkChecklistIssue(page, source.id, items.first(), additional, label);
+    const nestedLink = await linkChecklistIssue(page, source.id, items.last(), nested, label);
+    const firstSource = firstLink.documentSource!;
+    const additionalSource = additionalLink.documentSource!;
+    const nestedSource = nestedLink.documentSource!;
     expect(additionalSource).toEqual(firstSource);
     expect(nestedSource.text).toBe(firstSource.text);
     expect(nestedSource.from).toBeGreaterThan(firstSource.to);
@@ -1498,9 +1513,10 @@ test('360px에서 같은 문구의 체크리스트 항목을 구분해 업무를
     await expect(opener(first)).toContainText(assignee.name);
     await expect(opener(first).locator('time[datetime="2027-10-28"]')).toBeVisible();
 
-    await editor.getByText('다음 담당자에게 알림', { exact: true }).click();
+    const inserted = ' · 다음 회의 안건 🔎';
+    await editor.getByText('회의 안건', { exact: true }).click();
     await page.keyboard.press('End');
-    await page.keyboard.insertText(' · 다음 회의에서 확인');
+    await page.keyboard.insertText(inserted);
     await items.first().click();
     await expect(page.getByRole('button', { name: '체크리스트 항목을 기존 업무에 연결', exact: true })).toBeDisabled();
     await expect(contextual).toHaveCount(0);
@@ -1510,23 +1526,164 @@ test('360px에서 같은 문구의 체크리스트 항목을 구분해 업무를
       return url.pathname === `/api/documents/${source.id}/checklist-work` &&
         Number(url.searchParams.get('expectedDocumentVersion')) > source.version;
     });
-    const saving = page.waitForResponse(response => response.url().endsWith(`/api/documents/${source.id}`) && response.request().method() === 'PATCH');
-    await page.locator('.docs-save-button').click();
-    const saved = await saving;
-    expect(saved.ok(), await saved.text()).toBe(true);
-    const updated = await saved.json() as DocPage;
+    const updated = await saveChecklistDocument(page, source.id);
     await items.first().click();
     const fresh = await lookup;
     expect(fresh.ok(), await fresh.text()).toBe(true);
-    expect(await fresh.json() as DocumentChecklistWork).toEqual({ documentId: source.id, documentVersion: updated.version, links: [] });
-    await expect(contextual).toHaveCount(0);
+    const checklist = await fresh.json() as DocumentChecklistWork;
+    expect(checklist).toMatchObject({ documentId: source.id, documentVersion: updated.version });
+    expect(checklist.links).toHaveLength(3);
+    for (const link of [firstLink, additionalLink, nestedLink]) {
+      const pin = link.documentSource!;
+      expect(checklist.links.find(item => item.linkId === link.id)).toMatchObject({
+        issueId: link.issueId, pinnedSource: pin,
+        sourceSelection: { from: pin.from + inserted.length, to: pin.to + inserted.length, text: pin.text },
+      });
+    }
+    await expect(opener(first)).toBeVisible();
+    await expect(opener(additional)).toBeVisible();
+    await expect(opener(nested)).toHaveCount(0);
+    await items.last().click();
+    await expect(opener(nested)).toBeVisible();
+    await expect(contextual.getByRole('button')).toHaveCount(1);
 
+    await editor.getByText('다음 담당자에게 알림', { exact: true }).click();
     await page.getByRole('button', { name: '문서에 연결된 업무 보기', exact: true }).click();
     const linked = page.getByRole('region', { name: '연결된 업무', exact: true });
     for (const issue of issues) await expect(linked.locator('.docs-linked-issue').filter({ hasText: issue.title })).toBeVisible();
   } finally {
     for (const item of [...issues.map(({ id }) => `issues/${id}`), `documents/${source.id}`]) {
       const removed = await request.delete(`/api/${item}`, { headers });
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`, { headers });
+    }
+  }
+});
+
+test('360px에서 저장한 체크리스트 ID로 같은 문구의 순서와 문구를 바꾼 뒤에도 연결 업무를 연다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const { projects: [project], users: [actor, peer] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const label = `같은 검토 항목 ${suffix}`;
+  const introduction = '체크리스트 앞의 문단';
+  const paragraph = (value: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text: value }] });
+  const item = (value: string): RichContent => ({ type: 'taskItem', attrs: { checked: false }, content: [paragraph(value)] });
+  const source = await createDecision(request, project.id, `체크리스트 항목의 연결 유지 ${suffix}`, {
+    type: 'doc', content: [paragraph(introduction), { type: 'taskList', content: [item(label), item(label), item('업무를 연결하지 않은 항목')] }],
+  });
+  const issues: Issue[] = [];
+  const headers = { 'X-Actor-Id': actor.id };
+  const taskList = (document: DocPage) => document.content.content!.find(node => node.type === 'taskList')!;
+  const itemIds = (document: DocPage) => taskList(document).content!.map(node => node.attrs?.checklistItemId);
+  async function writePeerOrder(document: DocPage, entries: RichContent[]): Promise<DocPage> {
+    const list = taskList(document);
+    const response = await request.patch(`/api/documents/${document.id}`, {
+      headers: { 'X-Actor-Id': peer.id },
+      data: {
+        expectedVersion: document.version, contentSchemaVersion: documentContentSchemaVersion(document.content),
+        content: { ...document.content, content: document.content.content!.map(node => node === list ? { ...node, content: entries } : node) },
+      },
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+    return response.json();
+  }
+  async function readLinks(document: DocPage) {
+    const response = await request.get(`/api/documents/${document.id}/checklist-work?expectedDocumentVersion=${document.version}`, { headers });
+    expect(response.ok(), await response.text()).toBe(true);
+    return response.json() as Promise<DocumentChecklistWork>;
+  }
+
+  try {
+    for (const position of ['첫 항목 연결 업무', '둘째 항목 연결 업무', 'ID 저장 전의 중복 항목 업무']) {
+      const result = await request.post('/api/issues', { headers, data: { projectId: project.id, title: `${position} ${suffix}` } });
+      expect(result.status(), await result.text()).toBe(201);
+      issues.push(await result.json() as Issue);
+    }
+    const [first, second, anonymous] = issues;
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await openDecision(page, source, project.id);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveAttribute('contenteditable', 'true');
+    await expect(editor.locator('[data-checklist-item-id]')).toHaveCount(0);
+    const items = editor.getByText(label, { exact: true });
+    const anonymousLink = await linkChecklistIssue(page, source.id, items.first(), anonymous, label);
+    expect((await readLinks(source)).links.map(link => link.linkId)).toEqual([anonymousLink.id]);
+    await editor.getByText(introduction, { exact: true }).click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(' · 일반 편집');
+    const stamped = await saveChecklistDocument(page, source.id);
+    const ids = itemIds(stamped);
+    expect(ids).toHaveLength(3);
+    expect(ids.every(id => typeof id === 'string' && id.length > 0)).toBe(true);
+    expect(new Set(ids).size).toBe(3);
+    expect((await readLinks(stamped)).links).toEqual([]);
+
+    const firstLink = await linkChecklistIssue(page, source.id, items.first(), first, label);
+    const secondLink = await linkChecklistIssue(page, source.id, items.last(), second, label);
+    expect(firstLink.documentSource!.from).toBeLessThan(secondLink.documentSource!.from);
+    const contextual = page.getByRole('region', { name: '연결된 체크리스트 업무', exact: true });
+    const opener = (issue: Issue) => contextual.getByRole('button', { name: `${issue.key} 업무 열기`, exact: true });
+
+    const [firstNode, secondNode, other] = taskList(stamped).content!;
+    const reordered = await writePeerOrder(stamped, [secondNode, firstNode, other]);
+    expect(itemIds(reordered)).toEqual([ids[1], ids[0], ids[2]]);
+    await page.reload();
+    await expect(items).toHaveCount(2);
+    await items.first().click();
+    await expect(opener(second)).toBeVisible();
+    await expect(opener(first)).toHaveCount(0);
+    await items.last().click();
+    await expect(opener(first)).toBeVisible();
+    await expect(opener(second)).toHaveCount(0);
+    const moved = await readLinks(reordered);
+    expect(moved.links.find(link => link.linkId === firstLink.id)).toMatchObject({
+      pinnedSource: firstLink.documentSource, sourceSelection: { from: secondLink.documentSource!.from, text: label },
+    });
+    expect(moved.links.find(link => link.linkId === secondLink.id)).toMatchObject({
+      pinnedSource: secondLink.documentSource, sourceSelection: { from: firstLink.documentSource!.from, text: label },
+    });
+
+    const addedText = ' · 수정한 원문 🔎';
+    const rewordedLabel = label + addedText;
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(addedText);
+    await expect(contextual).toHaveCount(0);
+    const reworded = await saveChecklistDocument(page, source.id);
+    expect(itemIds(reworded)).toEqual([ids[1], ids[0], ids[2]]);
+    expect((await readLinks(reworded)).links.find(link => link.linkId === firstLink.id)).toMatchObject({
+      pinnedSource: firstLink.documentSource, sourceSelection: { from: secondLink.documentSource!.from, text: rewordedLabel },
+    });
+    const replacementLabel = editor.getByText(rewordedLabel, { exact: true });
+    await replacementLabel.click();
+    await expect(opener(first)).toBeVisible();
+    await expect(opener(second)).toHaveCount(0);
+    await opener(first).click();
+    const drawer = page.getByRole('dialog', { name: first.title, exact: true });
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(opener(first)).toBeFocused();
+
+    const [remaining, removed, spare] = taskList(reworded).content!;
+    const replacement: RichContent = { ...removed, attrs: { checked: removed.attrs?.checked } };
+    const replaced = await writePeerOrder(reworded, [remaining, replacement, spare]);
+    expect(itemIds(replaced)[1]).not.toBe(ids[0]);
+    expect((await readLinks(replaced)).links.map(link => link.linkId)).toEqual([secondLink.id]);
+    const linkIds = [firstLink.id, secondLink.id, anonymousLink.id];
+    const originalLinks = (await workspace(request)).resourceLinks.filter(link => linkIds.includes(link.id));
+    expect(originalLinks).toHaveLength(3);
+    expect(originalLinks).toEqual(expect.arrayContaining([firstLink, secondLink, anonymousLink]));
+    await page.reload();
+    await items.click();
+    await expect(opener(second)).toBeVisible();
+    await expect(opener(first)).toHaveCount(0);
+    await replacementLabel.click();
+    await expect(contextual).toHaveCount(0);
+    await page.getByRole('button', { name: '문서에 연결된 업무 보기', exact: true }).click();
+    const historical = page.getByRole('region', { name: '연결된 업무', exact: true });
+    await expect(historical.locator('.docs-linked-issue').filter({ hasText: first.title })).toBeVisible();
+    await expect(historical.locator('.docs-linked-issue').filter({ hasText: anonymous.title })).toBeVisible();
+  } finally {
+    for (const resource of [...issues.map(({ id }) => `issues/${id}`), `documents/${source.id}`]) {
+      const removed = await request.delete(`/api/${resource}`, { headers });
       if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`, { headers });
     }
   }

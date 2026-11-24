@@ -1,14 +1,19 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import type { DocPage, DocumentChecklistWork, ResourceLink } from '../../shared/types';
+import type { DocPage, DocumentChecklistWork, DocumentSourceSelection, ResourceLink } from '../../shared/types';
 import { api } from '../lib/api';
+
+function isSelection(range: DocumentSourceSelection | undefined): boolean {
+  return Boolean(range && Number.isSafeInteger(range.from) && Number.isSafeInteger(range.to) &&
+    range.from >= 0 && range.to > range.from && typeof range.text === 'string');
+}
 
 function isChecklistWork(result: DocumentChecklistWork | undefined, documentId: string, documentVersion: number): result is DocumentChecklistWork {
   return Boolean(result && result.documentId === documentId && result.documentVersion === documentVersion &&
     Array.isArray(result.links) && result.links.every(link => link && typeof link.linkId === 'string' && typeof link.issueId === 'string' &&
-      link.sourceSelection && Number.isSafeInteger(link.sourceSelection.from) && Number.isSafeInteger(link.sourceSelection.to) &&
-      link.sourceSelection.from >= 0 && link.sourceSelection.to > link.sourceSelection.from && typeof link.sourceSelection.text === 'string'));
+      isSelection(link.sourceSelection) && (link.pinnedSource === undefined ||
+        (isSelection(link.pinnedSource) && typeof link.pinnedSource.revisionId === 'string' && link.pinnedSource.revisionId.length > 0))));
 }
 
 export function useDocumentChecklistWork(document: Pick<DocPage, 'id' | 'version'> | null,
