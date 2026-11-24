@@ -197,7 +197,7 @@ test('360px 간트에서 보이는 선택 업무의 날짜만 검토하고 응�
   } finally { await fixture.close(); }
 });
 
-test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 업무까지 함께 검토한다', async ({ page, request }) => {
+test('360px 팀 간트에서 날짜 초안과 공통 날짜로 프로젝트 간 후행 업무를 검토하고 되돌린다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const fixture = await makeFixture(request);
   try {
@@ -205,7 +205,13 @@ test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 
     const first = await fixture.create(`${visible} 개별 종료일`, { startDate: date(1), endDate: date(4), dueDate: null });
     const second = await fixture.create(`${visible} 공통 종료일`, { startDate: date(2), endDate: date(5), dueDate: null }, fixture.secondProject.id);
     const successor = await fixture.create(`${fixture.prefix} 필터 밖 후행 업무`, { startDate: date(8), endDate: date(9), dueDate: date(22) });
+    const otherSuccessor = await fixture.create(`${fixture.prefix} 다른 프로젝트 후행 업무`,
+      { startDate: date(10), endDate: date(11), dueDate: date(23) }, fixture.secondProject.id);
     await fixture.link(first, successor);
+    expect((await request.post(`/api/issues/${successor.id}/relations`, {
+      data: { type: 'blocks', direction: 'outgoing', otherIssueId: otherSuccessor.id },
+    })).status()).toBe(201);
+    const originals = [first, second, successor, otherSuccessor];
     const { chart, selected, open, dialog } = await openChart(page, fixture.projectId, visible, true);
     const firstEnd = chart.getByLabel(`${first.key} 종료일`, { exact: true });
     const secondEnd = chart.getByLabel(`${second.key} 종료일`, { exact: true });
@@ -223,29 +229,49 @@ test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 
     await dialog.getByLabel('종료일 값', { exact: true }).fill(date(8));
     await dialog.getByLabel('목표 마감일 변경', { exact: true }).selectOption('set');
     await dialog.getByLabel('목표 마감일 값', { exact: true }).fill(date(30));
-    await dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true }).check();
-
-    const nextPreview = nextPost(page, previewRoute);
-    await dialog.getByRole('button', { name: previewName, exact: true }).click();
-    const previewResponse = await nextPreview;
-    expect(previewResponse.request().postDataJSON()).toMatchObject({
-      projectId: null, changes: { endDate: date(8), dueDate: date(30) }, rescheduleSuccessors: true,
-      dates: [{ issue: { id: first.id, expectedVersion: first.version }, changes: { endDate: date(12) } }],
-    });
-    const preview = await readJson<SchedulePastePreview>(previewResponse, 200);
+    const successors = dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
+    const crossProject = dialog.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true });
+    const apply = dialog.getByRole('button', { name: applyName, exact: true });
+    async function review(includeTeamBlockers: boolean) {
+      const next = nextPost(page, previewRoute);
+      await dialog.getByRole('button', { name: previewName, exact: true }).click();
+      const response = await next;
+      const input = response.request().postDataJSON() as ScheduleBulkDateInput;
+      expect(input).toMatchObject({
+        projectId: null, changes: { endDate: date(8), dueDate: date(30) }, rescheduleSuccessors: true,
+        dates: [{ issue: { id: first.id, expectedVersion: first.version }, changes: { endDate: date(12) } }],
+      });
+      expect(input.includeTeamBlockers).toBe(includeTeamBlockers ? true : undefined);
+      return readJson<SchedulePastePreview>(response, 200);
+    }
+    await expect(crossProject).toHaveCount(0);
+    await successors.check();
+    await expect(crossProject).not.toBeChecked();
+    const localPreview = await review(false);
+    expect(localPreview.followUpIssueIds).toEqual([successor.id]);
+    expect(localPreview.changes.some(change => change.id === otherSuccessor.id)).toBe(false);
+    await crossProject.check();
+    await expect(apply).toBeDisabled();
+    const preview = await review(true);
+    expect(preview.previewId).not.toBe(localPreview.previewId);
     expect(preview.errors).toEqual([]);
-    expect(preview.followUpIssueIds).toEqual([successor.id]);
+    expect(new Set(preview.followUpIssueIds)).toEqual(new Set([successor.id, otherSuccessor.id]));
     expect(preview.changes).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: first.id, toEnd: date(12), toDue: date(30) }),
       expect.objectContaining({ id: second.id, toEnd: date(8), toDue: date(30) }),
       expect.objectContaining({ id: successor.id, toStart: date(15), toEnd: date(16), fromDue: date(22), toDue: date(22) }),
+      expect.objectContaining({ id: otherSuccessor.id, projectId: fixture.secondProject.id, toStart: date(17), toEnd: date(18),
+        fromDue: date(23), toDue: date(23) }),
     ]));
     const table = dialog.getByRole('table', { name: '선택 업무와 후행 업무 날짜 변경 목록', exact: true });
     const followUp = table.getByRole('row').filter({ hasText: successor.key });
     await expect(followUp).toContainText('후행 조정');
     await expect(followUp).toContainText(fixture.firstProject.name);
     await expect(followUp).toContainText(date(22));
-    expect(await fixture.stored()).toEqual([first, second, successor].map(values));
+    const crossFollowUp = table.getByRole('row').filter({ hasText: otherSuccessor.key });
+    await expect(crossFollowUp).toContainText('후행 조정');
+    await expect(crossFollowUp).toContainText(fixture.secondProject.name);
+    expect(await fixture.stored()).toEqual(originals.map(values));
 
     let savedResponse: SchedulePasteApplyResult | undefined;
     await page.route(`**${applyRoute}`, async route => {
@@ -253,7 +279,7 @@ test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 
       await route.fulfill({ status: 408, json: { error: '합성 프록시 응답 시간 초과' } });
     }, { times: 1 });
     const applying = nextPost(page, applyRoute);
-    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    await apply.click();
     expect((await applying).status()).toBe(408);
     const recovery = nextPost(page, applyRoute);
     await dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true }).click();
@@ -265,6 +291,7 @@ test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 
       { ...values(first), version: first.version + 1, endDate: date(12), dueDate: date(30) },
       { ...values(second), version: second.version + 1, endDate: date(8), dueDate: date(30) },
       { ...values(successor), version: successor.version + 1, startDate: date(15), endDate: date(16) },
+      { ...values(otherSuccessor), version: otherSuccessor.version + 1, startDate: date(17), endDate: date(18) },
     ]);
     await expect(firstEnd).toHaveValue(date(12));
     await expect(secondEnd).toHaveValue(date(10));
@@ -272,7 +299,7 @@ test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     await readJson(await undoing, 200);
     for (const [index, stored] of (await fixture.stored()).entries()) {
-      const original = [first, second, successor][index];
+      const original = originals[index];
       expect(stored).toEqual({ ...values(original), version: original.version + 2 });
     }
     await expect(firstEnd).toHaveValue(date(4));

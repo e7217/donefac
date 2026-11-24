@@ -2891,6 +2891,7 @@ function ProjectGantt(props: GanttProps) {
     {schedulePasteTarget && <SchedulePasteDialog
       key={bulkDateIssues ? 'bulk-dates' : 'paste'}
       {...schedulePasteTarget}
+      workspaceProjects={data.projects}
       actorId={props.actorId} undoScope={undoScope}
       notify={notify} onDraftChange={trackDraft}
       onClose={awaitingResult => {

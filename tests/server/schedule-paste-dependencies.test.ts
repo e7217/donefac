@@ -82,14 +82,14 @@ async function fixture(t: TestContext) {
       assert.equal(result.status, 200);
       return result.data;
     },
-    async preview(rows: string[][], { korean = false, includeDueDate = false, projectId = project.id, rescheduleSuccessors }:
-      { korean?: boolean; includeDueDate?: boolean; projectId?: string | null; rescheduleSuccessors?: boolean } = {}) {
+    async preview(rows: string[][], { korean = false, includeDueDate = false, projectId = project.id, rescheduleSuccessors, includeTeamBlockers }:
+      { korean?: boolean; includeDueDate?: boolean; projectId?: string | null; rescheduleSuccessors?: boolean; includeTeamBlockers?: boolean } = {}) {
       const header = korean
         ? ['업무 키', '시작일', '종료일', '선행 업무', '연결 유형', '근무일 간격']
         : ['key', 'startDate', 'endDate', 'predecessor', 'dependency type', 'lag days'];
       if (includeDueDate) header.push(korean ? '목표 마감일' : 'dueDate');
       const text = [header, ...rows].map(row => row.join('\t')).join('\n');
-      const result = await call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId, text, rescheduleSuccessors });
+      const result = await call<SchedulePastePreview>('/schedule/paste-preview', 'POST', { projectId, text, rescheduleSuccessors, includeTeamBlockers });
       assert.equal(result.status, 200, JSON.stringify(result.data));
       return result.data;
     },
@@ -213,6 +213,82 @@ test('repeated successor rows merge split dates once and add, edit and remove di
   assert.deepEqual([restoredEdit?.id, restoredEdit?.lagDays], [editLink.id, editLink.lagDays]);
   assert.deepEqual([restoredRemoval?.id, restoredRemoval?.type, restoredRemoval?.lagDays], [removeLink.id, removeLink.type, removeLink.lagDays]);
   assert.deepEqual(byPair(reverted, kept, successor), keepLink);
+});
+
+test('spreadsheet link additions, updates and removals can reflow cross-project successors without a date anchor', async t => {
+  const f = await fixture(t);
+  const receiving = await f.createProject('PASTEDEST');
+  const added = await f.issue('새 선행 업무', { startDate: '2026-11-19', endDate: '2026-11-19' });
+  const edited = await f.issue('간격이 바뀔 선행 업무');
+  const removed = await f.issue('분리할 늦은 선행 업무', { startDate: '2026-12-01', endDate: '2026-12-04' });
+  const relay = await f.issue('날짜를 입력하지 않은 차단 업무', { startDate: '2026-11-23', endDate: '2026-11-24' });
+  const target = await f.issue('다른 프로젝트에서 차단되는 업무', { projectId: receiving.id, startDate: '2026-11-23', endDate: '2026-11-24' });
+  const ready = await f.issue('이미 조건을 충족하는 간접 후행', { projectId: receiving.id, startDate: '2026-12-08', endDate: '2026-12-08' });
+  const downstream = await f.issue('나중에 연결한 세 번째 업무', { startDate: '2026-11-30', endDate: '2026-11-30' });
+  const beforeEdit = await f.link(edited, relay);
+  const beforeRemoval = await f.link(removed, relay);
+  await f.link(target, ready);
+  const block = (source: Issue, target: Issue) => f.call('/schedule/team-blockers', 'POST', {
+    sourceIssueId: source.id, targetIssueId: target.id, expectedSourceVersion: source.version, expectedTargetVersion: target.version,
+  });
+  const cross = await block(relay, target);
+  assert.equal(cross.status, 201, JSON.stringify(cross.data));
+  const calendarPath = `/projects/${receiving.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  const holiday = await f.call(calendarPath, 'PATCH', { expectedVersion: calendar.data.version,
+    exceptions: [{ date: '2026-11-26', isWorking: false, label: '후행 프로젝트 휴무' }],
+  });
+  assert.equal(holiday.status, 200, JSON.stringify(holiday.data));
+  const bad = await f.call('/schedule/paste-preview', 'POST', { projectId: f.project.id, text: '', includeTeamBlockers: true });
+  assert.equal(bad.status, 400);
+  const rows = [
+    [relay.key, '', '', added.key, 'FS', '0', ''],
+    [relay.key, '', '', edited.key, 'FS', '1', ''],
+    [relay.key, '', '', removed.key, '-', '', ''],
+  ];
+  const local = await f.preview(rows, { includeDueDate: true, rescheduleSuccessors: true });
+  assert.deepEqual(local.followUpIssueIds, [relay.id]);
+  assert.ok(local.teamBlockerWarnings?.some(warning => warning.includes(target.key)));
+  const options = { includeDueDate: true, rescheduleSuccessors: true, includeTeamBlockers: true };
+  const before = await f.workspace();
+  const stale = await f.preview(rows, options);
+  assert.ok(stale.previewId, JSON.stringify(stale.errors));
+  assert.deepEqual(new Set(stale.followUpIssueIds), new Set([relay.id, target.id]));
+  assert.deepEqual(stale.dependencyChanges?.map(({ before, after }) => [before?.lagDays ?? null, after?.lagDays ?? null]),
+    [[null, 0], [0, 1], [0, null]]);
+  assert.deepEqual(await f.workspace(), before);
+
+  const newEdge = await block(ready, downstream);
+  assert.equal(newEdge.status, 201, JSON.stringify(newEdge.data));
+  const current = await f.workspace();
+  assert.equal((await f.apply(stale)).status, 409);
+  assert.deepEqual(await f.workspace(), current);
+  const plan = await f.preview([...rows, [target.key, '', '', '', '', '', '2026-11-26']], { ...options, projectId: null });
+  assert.ok(plan.previewId, JSON.stringify(plan.errors));
+  assert.deepEqual(new Set(plan.followUpIssueIds), new Set([relay.id, target.id, downstream.id]));
+  const expected = new Map([
+    [relay.id, ['2026-11-24', '2026-11-25', null]], [target.id, ['2026-11-27', '2026-11-30', '2026-11-26']],
+    [downstream.id, ['2026-12-09', '2026-12-09', null]],
+  ]);
+  assert.deepEqual(new Map(plan.changes.map(({ id, toStart, toEnd, toDue }) => [id, [toStart, toEnd, toDue ?? null]])), expected);
+  assert.ok(plan.warnings.some(warning => warning.includes(target.key) && warning.includes('마감일 2026-11-26')));
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.equal(applied.data.dependencyChanges, 3);
+  assert.deepEqual(new Map(applied.data.updated.map(({ id, startDate, endDate, dueDate }) => [id, [startDate, endDate, dueDate]])), expected);
+  assert.deepEqual(await f.apply(plan), applied);
+  const saved = await f.workspace();
+  assert.ok(byPair(saved, added, relay));
+  assert.equal(byPair(saved, removed, relay), undefined);
+  assert.equal(byPair(saved, edited, relay)?.lagDays, 1);
+  const undone = await f.undo(applied.data.undoId);
+  assert.equal(undone.status, 200, JSON.stringify(undone.data));
+  assert.deepEqual(new Map(undone.data.updated.map(({ id, startDate, endDate, dueDate }) => [id, [startDate, endDate, dueDate]])),
+    new Map([relay, target, downstream].map(({ id, startDate, endDate, dueDate }) => [id, [startDate, endDate, dueDate]])));
+  const restored = await f.workspace();
+  assert.equal(byPair(restored, added, relay), undefined);
+  assert.equal(byPair(restored, removed, relay)?.id, beforeRemoval.id);
+  assert.equal(byPair(restored, edited, relay)?.lagDays, beforeEdit.lagDays);
 });
 
 test('spreadsheet goal dates merge across predecessor rows and replay and undo with planned dates and links', async t => {

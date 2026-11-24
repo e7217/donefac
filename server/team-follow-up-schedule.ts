@@ -69,10 +69,17 @@ export function teamFollowUpScope(sourceId: string, targetIds: readonly string[]
   return { sourceId, ...followUpGraph(selected, issues, dependencies, sourceId), ...(anchorChange ? { anchorChange } : {}) };
 }
 
-export function teamBatchFollowUpScope(anchors: readonly ScheduleAnchorChange[], issues: Issue[], dependencies: Dependency[]): TeamBatchFollowUpScope {
-  if (!anchors.length) throw new TeamFollowUpScheduleError(400, '후행 일정의 기준 업무를 지정해 주세요.');
-  if (anchors.length > MAX_FOLLOW_UP_ISSUES) throw new TeamFollowUpScheduleError(422, FIXED_FOLLOW_UP_LIMIT);
+export function teamBatchFollowUpScope(anchors: readonly ScheduleAnchorChange[], issues: Issue[], dependencies: Dependency[],
+  successorIds: readonly string[] = []): TeamBatchFollowUpScope {
+  const successorSeeds = new Set(successorIds);
+  if (!anchors.length && !successorSeeds.size) throw new TeamFollowUpScheduleError(400, '후행 일정의 기준 업무를 지정해 주세요.');
+  if (anchors.length > MAX_FOLLOW_UP_ISSUES || successorSeeds.size > MAX_FOLLOW_UP_ISSUES) {
+    throw new TeamFollowUpScheduleError(422, FIXED_FOLLOW_UP_LIMIT);
+  }
   const byId = new Map(issues.map(issue => [issue.id, issue]));
+  for (const id of successorSeeds) {
+    if (!byId.has(id)) throw new TeamFollowUpScheduleError(409, '계속할 후행 업무를 찾을 수 없습니다.');
+  }
   const fixedDates = new Map<string, ScheduleDates>();
   const changedIds: string[] = [];
   for (const { id, expectedVersion, startDate, endDate } of anchors) {
@@ -85,7 +92,7 @@ export function teamBatchFollowUpScope(anchors: readonly ScheduleAnchorChange[],
     if (startDate !== issue.startDate || endDate !== issue.endDate) changedIds.push(id);
   }
   // Unchanged explicit rows remain fixed without pulling in unrelated successors.
-  const selected = reachableSuccessors(changedIds, byId, dependencies, FIXED_FOLLOW_UP_LIMIT);
+  const selected = reachableSuccessors([...changedIds, ...successorSeeds], byId, dependencies, FIXED_FOLLOW_UP_LIMIT);
   for (const id of fixedDates.keys()) selected.add(id);
   if (selected.size > MAX_FOLLOW_UP_ISSUES) throw new TeamFollowUpScheduleError(422, FIXED_FOLLOW_UP_LIMIT);
   return { ...followUpGraph(selected, issues, dependencies), fixedDates };

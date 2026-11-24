@@ -44,6 +44,7 @@ type ProjectLabels = ReadonlyMap<string, ProjectName>;
 export type SchedulePasteDialogProps = {
   actorId: string;
   undoScope: ScheduleUndoScope;
+  workspaceProjects?: readonly Project[];
   notify: FeatureProps['notify'];
   onClose: (awaitingResult?: boolean) => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
@@ -135,6 +136,7 @@ function ProjectScheduleEditDialog({
   undoScope,
   projectId,
   projectLabel,
+  workspaceProjects,
   notify,
   onClose,
   onDraftChange,
@@ -146,6 +148,7 @@ function ProjectScheduleEditDialog({
 }: SchedulePasteDialogProps) {
   const [text, setText] = useState('');
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
+  const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
   const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
   const [linkOperation, setLinkOperation] = useState<BulkLinkOperation>('add');
@@ -255,15 +258,16 @@ function ProjectScheduleEditDialog({
   const hasDateDraftEdits = dateDraftEdits.length > 0;
   const editsLinkDates = Boolean(bulkLinks && hasDateDraftEdits);
   const rowDatesInput = hasDateDraftEdits ? { dates: dateDraftEdits } : {};
-  const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true } : {};
-  const reviewChoices = [[...excludedDateDrafts], [...dateDraftConfirmations], rescheduleSuccessors];
+  const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true as const } : {};
+  const teamFollowUpInput = includeTeamBlockers && rescheduleSuccessors ? { includeTeamBlockers: true as const } : {};
+  const reviewChoices = [[...excludedDateDrafts], [...dateDraftConfirmations], rescheduleSuccessors, includeTeamBlockers];
   const input = blockerInput ? JSON.stringify(blockerInput)
     : bulkLinks ? JSON.stringify([chainMode
       ? [linkMode, chainOrder]
       : [linkMode, link.choice?.id, link.direction],
       linkAction, ...reviewChoices])
       : bulkDates ? JSON.stringify([dates, ...reviewChoices])
-        : JSON.stringify([text, rescheduleSuccessors]);
+        : JSON.stringify([text, rescheduleSuccessors, includeTeamBlockers]);
   const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingDateDrafts &&
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
   const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid && linkAction
@@ -295,6 +299,9 @@ function ProjectScheduleEditDialog({
   const teamProjects = teamProjectList && new Map(teamProjectList.map(project => [project.id, {
     id: project.id, name: bulkDates ? project.name : `${project.key} · ${project.name}`,
   }]));
+  const dateChangeProjects = teamProjects ?? (workspaceProjects && projectId !== null
+    ? new Map(workspaceProjects.filter(project => project.id !== projectId).map(project => [project.id, project]))
+    : undefined);
   const projectCount = selectedProjects ? new Set([...selectedProjects.values()].map(project => project.id)).size : undefined;
   const canPreview = blockerInput
     ? selectedBlockers.length > 0 && selectedBlockers.length <= MAX_SCHEDULE_BLOCKER_LINKS &&
@@ -435,6 +442,7 @@ function ProjectScheduleEditDialog({
 
   function updateSuccessorReview(value: boolean) {
     setRescheduleSuccessors(value);
+    if (!value) setIncludeTeamBlockers(false);
     const edited = bulkLinks ? linkRuleEdited || dateDraftChoicesEdited || linkOperation !== 'add'
       : bulkDates ? datesEdited || dateDraftChoicesEdited : Boolean(text);
     resetReview(edited || value);
@@ -543,7 +551,8 @@ function ProjectScheduleEditDialog({
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects, linkOperation,
       ...(bulkDates && { includedDateDraftIds: dateDraftEdits.map(({ issue }) => issue.id) }) };
-    let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
+    let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true; includeTeamBlockers?: true } |
+      ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
     else if (bulkLinkInput) payload = bulkLinkInput;
@@ -554,8 +563,8 @@ function ProjectScheduleEditDialog({
         const { action, value } = dates[field];
         if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
       }
-      payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput };
-    } else payload = { projectId, text, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}) };
+      payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput };
+    } else payload = { projectId, text, ...followUpInput, ...teamFollowUpInput };
     try {
       const endpoint = blockerLinks ? '/schedule/blocker-links/preview'
         : bulkLinks ? '/schedule/bulk-links/preview' : bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview';
@@ -718,6 +727,21 @@ function ProjectScheduleEditDialog({
         후행 일정 함께 검토
       </label>
       <p id="schedule-paste-follow-up-help">{followUpDescription}</p>
+      {rescheduleSuccessors && !bulkLinks && !blockerLinks && (
+        <div className="schedule-paste-team-follow-up">
+          <label>
+            <input type="checkbox" checked={includeTeamBlockers} aria-describedby="schedule-paste-team-follow-up-help"
+              onChange={event => {
+                setIncludeTeamBlockers(event.currentTarget.checked);
+                resetReview(true);
+              }} />
+            프로젝트 간 차단 포함
+          </label>
+          <p id="schedule-paste-team-follow-up-help">
+            프로젝트 간 차단으로 이어진 후행 업무도 각 프로젝트의 근무일을 기준으로 검토합니다.
+          </p>
+        </div>
+      )}
     </div>
   );
   const dateDraftFields = dateDraftRows.length > 0 && <GanttBulkLinkDateFields rows={dateDraftRows} excluded={excludedDateDrafts}
@@ -1042,7 +1066,7 @@ function ProjectScheduleEditDialog({
               )}
               {result.changes.length > 0 && (
                 <ChangeTable changes={result.changes} bulk={Boolean(bulkDates || bulkLinks)} projects={review?.projects}
-                  teamProjects={teamProjects} followUpIssues={followUpIssues}
+                  teamProjects={dateChangeProjects} followUpIssues={followUpIssues}
                   label={bulk && followUpIssues.size ? '선택 업무와 후행 업무 날짜 변경 목록' : undefined} />
               )}
               {dependencyChanges.length > 0 && (

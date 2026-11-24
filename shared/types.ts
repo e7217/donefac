@@ -2324,6 +2324,7 @@ export interface ScheduleBulkDateInput {
   changes: ScheduleBulkDateChanges;
   dates?: ScheduleBulkLinkDateEdit[];
   rescheduleSuccessors?: boolean;
+  includeTeamBlockers?: boolean;
 }
 type ScheduleRowIssue = { id: string; expectedVersion: number };
 export const MAX_SCHEDULE_BULK_LINK_ISSUES = 100;

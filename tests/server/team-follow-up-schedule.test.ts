@@ -95,6 +95,54 @@ test('only changed anchors start traversal while reached unchanged anchors still
   ]);
 });
 
+test('a projected link seeds an adjustable successor and later cross-project work without any date edits', () => {
+  const stored = issue('LOCAL-1', 'first', mon, mon);
+  const seeded = issue('LOCAL-2', 'first', mon, tue);
+  const downstream = issue('RECV-1', 'receiving', tue, wed);
+  const dependencies = [edge(stored, seeded), edge(seeded, downstream)];
+  const scope = teamBatchFollowUpScope([], [stored, seeded, downstream], dependencies, [seeded.id, seeded.id]);
+
+  assert.deepEqual(scope.selectedIds, [seeded.id, downstream.id]);
+  assert.deepEqual(scope.issues.map(value => value.id), [stored.id, seeded.id, downstream.id]);
+  assert.deepEqual(scope.dependencies, dependencies);
+  assert.equal(scope.fixedDates.size, 0);
+  const result = calculateTeamFollowUpSchedule(scope, calendar, terminal);
+  assert.deepEqual(result.blocking, []);
+  assert.deepEqual(result.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
+    [seeded.id, tue, wed], [downstream.id, fri, nextMon],
+  ]);
+});
+
+test('date anchors and adjustable link seeds converge once while an overlapping anchor stays fixed', () => {
+  const anchor = issue('FIRST-1', 'first', mon, mon);
+  const stored = issue('SECOND-1', 'second', mon, mon);
+  const seeded = issue('SECOND-2', 'second', mon, tue);
+  const convergence = issue('RECV-1', 'receiving', mon, tue);
+  const dependencies = [edge(anchor, convergence), edge(seeded, convergence), edge(stored, seeded)];
+  const scope = teamBatchFollowUpScope([dates(anchor, mon, tue)], [anchor, stored, seeded, convergence], dependencies,
+    [seeded.id, anchor.id]);
+
+  assert.deepEqual(scope.selectedIds, [anchor.id, seeded.id, convergence.id]);
+  assert.deepEqual([...scope.fixedDates], [[anchor.id, { startDate: mon, endDate: tue }]]);
+  const result = calculateTeamFollowUpSchedule(scope, calendar, terminal);
+  assert.deepEqual(result.blocking, []);
+  assert.deepEqual(result.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [
+    [anchor.id, mon, tue], [seeded.id, tue, wed], [convergence.id, fri, nextMon],
+  ]);
+});
+
+test('batch requires at least one anchor or known successor and bounds the seed set', () => {
+  const seed = issue('PRESENT-1', 'first', mon, tue);
+  const status = (expected: number) => (error: unknown) =>
+    error instanceof TeamFollowUpScheduleError && error.status === expected;
+  assert.throws(() => teamBatchFollowUpScope([], [seed], []), status(400));
+  assert.throws(() => teamBatchFollowUpScope([], [seed], [], ['MISSING-1']), status(409));
+  const oversized = Array.from({ length: 1_001 }, (_, index) => issue(`PRESENT-${index + 1}`, 'first', mon, tue));
+  assert.throws(() => teamBatchFollowUpScope([], oversized, [], oversized.map(value => value.id)), status(422));
+  assert.throws(() => teamBatchFollowUpScope([dates(oversized[1_000])], oversized, [], oversized.slice(0, 1_000).map(value => value.id)),
+    status(422));
+});
+
 test('batch rejects stale or duplicate fixed rows and blocks cycles or missing required dates', () => {
   const root = issue('ROOT-1', 'first', mon, mon);
   const downstream = issue('CHILD-1', 'receiving', tue, null);
