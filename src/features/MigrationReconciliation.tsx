@@ -7,7 +7,7 @@ import type {
   SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceRecordArchive,
 } from '../../shared/types';
 import { api } from '../lib/api';
-import { MigrationReceiptAudit, reconciliationPackageIdentity, type PrimaryRecordDrill } from './MigrationReceiptAudit';
+import { MigrationReceiptAudit, primaryRecordFindingLabels, reconciliationPackageIdentity, type PrimaryRecordDrill } from './MigrationReceiptAudit';
 import { SourceArchiveDetail, sourceRecordKindLabels } from './SourceOrigins';
 
 const PAGE_SIZE = 30;
@@ -61,6 +61,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
   const result = load?.filters === filters && 'data' in load ? load.data : null;
   const error = load?.filters === filters && 'error' in load ? load.error : null;
   const loading = load?.filters !== filters;
+  const findingLabel = filters.finding && primaryRecordFindingLabels[filters.finding];
   const auditRecord = record?.area === 'audit' ? record : null;
   const jiraRecord = record?.area === 'jira-audit' ? record : null;
   const authorRecord = record?.area === 'author-audit' ? record : null;
@@ -210,12 +211,12 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
           <input type="search" className="field" value={searchDraft} onChange={event => setSearchDraft(event.target.value)} maxLength={300} placeholder="제목·원본 키·ID" />
         </label>
         <button type="submit" className="btn" aria-label="대조 검색 실행"><Search size={16} aria-hidden="true" />검색</button>
-        {filters.finding && <div className="migration-reconciliation-finding-filter">
-          <span className="migration-audit-status is-mismatch">대상 연결 오류만</span>
+        {findingLabel && <div className="migration-reconciliation-finding-filter">
+          <span className={`migration-audit-status ${filters.finding === 'changed-parent' ? 'is-unbound' : 'is-mismatch'}`}>{findingLabel}만</span>
           <button type="button" className="btn btn-ghost" onClick={() => {
             updateFilters({ finding: '', offset: 0 });
             listHeading.current?.focus();
-          }}>대상 연결 오류 필터 해제</button>
+          }}>{findingLabel} 필터 해제</button>
         </div>}
       </form>
 

@@ -4059,6 +4059,166 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
   } finally { await f.close(); }
 });
 
+test('receipt audits the current Jira and Confluence hierarchy with the latest applied parent evidence', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const created = '2020-01-01T00:00:00Z';
+  const original = '2020-01-02T00:00:00Z';
+  const newer = '2020-01-03T00:00:00Z';
+  const jiraRows = [[101, null], [102, null], [103, 101]] as const;
+  const wikiRows = [[201, null], [202, null], [203, 201]] as const;
+  type Placement = readonly [id: number, parent: number | null];
+  const jiraTitle = (id: number) => `Imported Jira hierarchy ${id}`;
+  const wikiTitle = (id: number) => `Imported Confluence hierarchy ${id}`;
+  const uploadJira = (name: string, updated: string, rows: readonly Placement[]) => f.upload(Buffer.from(JSON.stringify({
+    issues: rows.map(([id, parent]) => ({ id: String(id), key: `TREE-${id}`, changelog: { histories: [] }, fields: {
+      project: { id: '42', key: 'TREE', name: 'Synthetic Jira hierarchy' }, summary: jiraTitle(id),
+      created, updated, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      parent: parent === null ? null : { id: String(parent), key: `TREE-${parent}` },
+    } })),
+  })), `${name}.json`, 'jira', 'synthetic-hierarchy-jira');
+  const uploadWiki = (name: string, updated: string, version: number, rows: readonly Placement[]) => {
+    const xml = `<hibernate-generic>
+      <object class="Space"><id name="id">55</id><property name="key">HTREE</property><property name="name">Synthetic Confluence hierarchy</property></object>
+      ${rows.map(([id, parent]) => `
+        <object class="Page"><id name="id">${id}</id><property name="title">${wikiTitle(id)}</property>
+          <property name="version">${version}</property><property name="creationDate">${created}</property>
+          <property name="lastModificationDate">${updated}</property><property name="space" class="Space"><id name="id">55</id></property>
+          ${parent === null ? '' : `<property name="parent" class="Page"><id name="id">${parent}</id></property>`}</object>
+        <object class="BodyContent"><id name="id">${id + 300}</id><property name="body"><![CDATA[<p>${wikiTitle(id)}</p>]]></property>
+          <property name="content" class="Page"><id name="id">${id}</id></property></object>`).join('')}
+    </hibernate-generic>`;
+    return f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `${name}.zip`, 'confluence', 'synthetic-hierarchy-confluence');
+  };
+  async function apply(configuration: MigrationConfiguration) {
+    const preview = await f.preview(configuration);
+    assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+    const response = await f.apply(preview);
+    assert.equal(response.status, 201, JSON.stringify(response.data));
+    return response.data.import;
+  }
+
+  const jira = await uploadJira('jira-hierarchy', original, jiraRows);
+  const wiki = await uploadWiki('confluence-hierarchy', original, 1, wikiRows);
+  const receipt = await apply(await f.configuration([jira, wiki], 'HIERAUD'));
+  const [projectId] = receipt.projectIds;
+  const initial = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const findTarget = (rows: (Issue | DocPage)[], title: string) => {
+    const target = rows.find(row => row.projectId === projectId && row.title === title);
+    assert.ok(target, title);
+    return target;
+  };
+  const cases = [
+    { pkg: jira, collection: 'issues', sourceId: '103', root: findTarget(initial.issues, jiraTitle(101)),
+      other: findTarget(initial.issues, jiraTitle(102)), child: findTarget(initial.issues, jiraTitle(103)) },
+    { pkg: wiki, collection: 'documents', sourceId: '203', root: findTarget(initial.documents, wikiTitle(201)),
+      other: findTarget(initial.documents, wikiTitle(202)), child: findTarget(initial.documents, wikiTitle(203)) },
+  ] as const;
+
+  async function audit(current = receipt) {
+    const result = await f.call<SourceReconciliationAudit>(`/source-imports/${current.id}/reconciliation/audit?expectedVersion=${current.version}`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return result.data;
+  }
+  function hierarchy(report: SourceReconciliationAudit, pkg: LegacyPackageSummary, counts: { matched: number; changed: number; invalid: number }) {
+    const row = report.primaryRecords.find(record => record.packageId === pkg.id);
+    assert.ok(row?.hierarchy, pkg.filename);
+    const { sha256, ...observed } = row.hierarchy;
+    assert.match(sha256, /^[a-f0-9]{64}$/u);
+    assert.deepEqual(observed, { unavailable: 0, ...counts }, pkg.filename);
+    return sha256;
+  }
+  async function finding(pkg: LegacyPackageSummary, kind: 'changed-parent' | 'invalid-parent', expected: string[]) {
+    const query = new URLSearchParams({ packageId: pkg.id, finding: kind, limit: '1' });
+    const result = await f.call<SourceReconciliationPage>(`/source-imports/${receipt.id}/reconciliation?${query}`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    assert.equal(result.data.total, expected.length);
+    assert.deepEqual(result.data.rows.map(row => row.sourceId), expected);
+    return result.data.rows[0];
+  }
+
+  const matched = { matched: 3, changed: 0, invalid: 0 };
+  const clean = await audit();
+  for (const { pkg, root, other, child } of cases) {
+    assert.equal(root.parentId, null);
+    assert.equal(other.parentId, null);
+    assert.equal(child.parentId, root.id);
+    hierarchy(clean, pkg, matched);
+    await finding(pkg, 'changed-parent', []);
+    await finding(pkg, 'invalid-parent', []);
+  }
+  const move = async ({ collection, child }: typeof cases[number], version: number, parentId: string) => {
+    const result = await f.call<Issue | DocPage>(`/${collection}/${child.id}`, 'PATCH', { expectedVersion: version, parentId });
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    assert.equal(result.data.parentId, parentId);
+    return result.data;
+  };
+  const moved = [];
+  for (const item of cases) moved.push(await move(item, item.child.version, item.other.id));
+  const edited = await audit();
+  assert.equal(edited.receiptVersion, receipt.version);
+  assert.equal(edited.integrity.status, 'verified');
+  assert.deepEqual(edited.recordCounts, clean.recordCounts);
+  for (const [index, item] of cases.entries()) {
+    const { pkg, sourceId, root, child } = item;
+    assert.notEqual(hierarchy(edited, pkg, { matched: 2, changed: 1, invalid: 0 }), hierarchy(clean, pkg, matched));
+    const changed = await finding(pkg, 'changed-parent', [sourceId]);
+    assert.deepEqual([changed.status, changed.target?.id], ['linked', child.id]);
+    await finding(pkg, 'invalid-parent', []);
+    await move(item, moved[index].version, root.id);
+  }
+
+  const restored = await audit();
+  for (const { pkg, collection, root, other, child, sourceId } of cases) {
+    const changeColumn = f.db.prepare(`UPDATE ${collection} SET parent_id=? WHERE id=?`);
+    assert.equal(changeColumn.run(other.id, child.id).changes, 1);
+    const corrupt = await audit();
+    assert.notEqual(hierarchy(corrupt, pkg, { matched: 2, changed: 0, invalid: 1 }), hierarchy(restored, pkg, matched));
+    const invalid = await finding(pkg, 'invalid-parent', [sourceId]);
+    assert.deepEqual([invalid.status, invalid.target?.id], ['linked', child.id]);
+    await finding(pkg, 'changed-parent', []);
+    assert.equal(changeColumn.run(root.id, child.id).changes, 1);
+  }
+
+  const jiraUpdate = await uploadJira('jira-hierarchy-update', newer, [[103, 102]]);
+  const { status, data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${jiraUpdate.id}`);
+  assert.equal(status, 200);
+  const target = options.appendTarget;
+  assert.equal(target?.projectId, projectId);
+  assert.ok(target);
+  const jiraReceipt = await apply({ ...options.defaultConfiguration, appendTo: { projectId, refreshExisting: true,
+    statuses: Object.fromEntries(options.statuses.map(value => [value.id, target.statuses.find(state => state.label === value.label)!.id])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(value => [value.id, target.issueTypes.find(type => type.name === value.label)!.id])),
+    fields: {},
+  } });
+  const wikiUpdate = await uploadWiki('confluence-hierarchy-update', newer, 2, [[203, 202]]);
+  const wikiReceipt = await apply({ ...await f.configuration(wikiUpdate), appendPagesTo: { projectId, refreshExisting: true } });
+  const updated = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const superseded = await audit();
+  for (const { pkg, collection, child, other } of cases) {
+    assert.equal(updated[collection].find(row => row.id === child.id)?.parentId, other.id);
+    hierarchy(superseded, pkg, matched);
+    await finding(pkg, 'changed-parent', []);
+  }
+  hierarchy(await audit(jiraReceipt), jiraUpdate, { ...matched, matched: 1 });
+  hierarchy(await audit(wikiReceipt), wikiUpdate, { ...matched, matched: 1 });
+  const wikiChild = cases[1].child;
+  const trashed = await f.call(`/documents/${wikiChild.id}`, 'DELETE');
+  assert.equal(trashed.status, 200, JSON.stringify(trashed.data));
+  hierarchy(await audit(), wiki, matched);
+  hierarchy(await audit(wikiReceipt), wikiUpdate, { ...matched, matched: 1 });
+  const wikiParent = updated.documents.find(document => document.id === cases[1].other.id)!;
+  const destination = updated.projects.find(project => project.id !== projectId)!;
+  const movedParent = await f.call<DocPage>(`/documents/${wikiParent.id}`, 'PATCH', {
+    expectedVersion: wikiParent.version, projectId: destination.id,
+  });
+  assert.equal(movedParent.status, 200, JSON.stringify(movedParent.data));
+  assert.equal(movedParent.data.projectId, destination.id);
+  hierarchy(await audit(), wiki, matched);
+  hierarchy(await audit(wikiReceipt), wikiUpdate, { ...matched, matched: 1 });
+  await finding(wiki, 'invalid-parent', []);
+});
+
 test('whole-receipt audit detects changed migrated target data with identical counts and versions', async t => {
   const f = await fixture();
   t.after(() => f.close());
@@ -4295,7 +4455,7 @@ test('retained source verification distinguishes archival loss from deleted live
   for (const row of clean.primaryRecords) {
     assert.equal(row.invalidTargets, 0);
     assert.match(row.dispositionSha256, /^[a-f0-9]{64}$/);
-    assert.deepEqual(Object.keys(row).sort(), ['counts', 'dispositionSha256', 'invalidTargets', 'kind', 'packageId']);
+    assert.deepEqual(Object.keys(row).sort(), ['counts', 'dispositionSha256', 'hierarchy', 'invalidTargets', 'kind', 'packageId']);
   }
   assert.doesNotMatch(JSON.stringify(clean.primaryRecords), /OLD-1|Synthetic versioned page|original\.author/);
   assert.deepEqual(clean.recordCounts, page.data.counts);

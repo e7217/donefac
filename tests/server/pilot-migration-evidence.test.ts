@@ -20,6 +20,7 @@ const archivedId = '00000000-0000-0000-0000-000000000030';
 const fileId = '00000000-0000-0000-0000-000000000040';
 const recordCounts = { linked: 4, trashed: 0, missing: 0, 'archive-only': 1, excluded: 0 };
 const primaryCounts = { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
+const hierarchyMatched = { matched: 1, changed: 0, unavailable: 0, invalid: 0, sha256: '8'.repeat(64) };
 const attachmentCounts = { verified: 1, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 };
 const targetDigests = {
   comments: { count: 1, sha256: '1'.repeat(64) },
@@ -66,7 +67,8 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
       })) },
     recordCounts,
     primaryRecords: packages.map(({ packageId, product }) => ({ packageId, kind: product === 'jira' ? 'issue' : 'page',
-      counts: { ...primaryCounts }, invalidTargets: 0, dispositionSha256: 'e'.repeat(64), title: 'never-emit-private-primary-title' })),
+      counts: { ...primaryCounts }, invalidTargets: 0, dispositionSha256: 'e'.repeat(64), title: 'never-emit-private-primary-title',
+      hierarchy: { ...hierarchyMatched, parentId: 'never-emit-parent-id' } })),
     attachmentCounts: corrupt ? { ...attachmentCounts, verified: 0, corrupt: 1 } : attachmentCounts,
     attachments: [{ sourceRecordId: archivedId, fileId, recordStatus: 'linked', status: corrupt ? 'corrupt' : 'verified',
       packageSha256: wiki.sha256, product: wiki.product, sourceInstance: wiki.instanceKey, size: 11,
@@ -142,9 +144,9 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
   assert.deepEqual(before.receipts[0].primaryRecords, [
     { packageId: jira.packageId, kind: 'issue', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
-      records: { expected: 1, observed: 1 } },
+      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched },
     { packageId: wiki.packageId, kind: 'page', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
-      records: { expected: 1, observed: 1 } },
+      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched },
   ]);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.deepEqual(before.receipts[0].jiraStatusHistory, statusHistory);
@@ -169,7 +171,7 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
 test('migration rehearsal distinguishes archive-only primary records from hard coverage failures', async () => {
   const input = sample();
   const [jiraProof, wikiProof] = input.observations.primaryRecords;
-  const archiveOnly = { ...jiraProof, counts: { ...primaryCounts, linked: 0, 'archive-only': 1 } };
+  const archiveOnly = { ...jiraProof, counts: { ...primaryCounts, linked: 0, 'archive-only': 1 }, hierarchy: undefined };
   const observations = { ...input.observations, primaryRecords: [wikiProof, archiveOnly] };
   const review = await evidence(input, observations);
   assert.equal(review.status, 'review');
@@ -215,11 +217,43 @@ test('migration rehearsal requires complete and consistent coverage rows, includ
   for (const invalid of invalidProofs) await assert.rejects(readPrimary(invalid), /검증 (결과|건수)/u);
 
   input.packages = [jira, { ...wiki, counts: {} }];
-  const zero = await readPrimary([jiraProof, { ...wikiProof, counts: { ...primaryCounts, linked: 0 } }]);
+  const zero = await readPrimary([jiraProof, { ...wikiProof, counts: { ...primaryCounts, linked: 0 }, hierarchy: undefined }]);
   assert.equal(zero.status, 'verified');
   assert.deepEqual(zero.receipts[0].primaryRecords[1].records, { expected: 0, observed: 0 });
   input.packages = [jira, { ...wiki, counts: { page: -1 } }];
   await assert.rejects(evidence(input), /이관 준비 기록의 업무·문서 분석 건수/u);
+});
+
+test('migration rehearsal reviews changed and unavailable parent evidence and fails invalid hierarchy', async () => {
+  const input = sample();
+  const [jiraProof, wikiProof] = input.observations.primaryRecords;
+  const observed = (hierarchy: unknown) => evidence(input, { ...input.observations, primaryRecords: [
+    { ...jiraProof, hierarchy }, wikiProof,
+  ] });
+  const legacy = await observed(undefined);
+  assert.equal(legacy.status, 'review');
+  assert.equal(legacy.checks.receiptsWithHierarchyReview, 1);
+  assert.equal(legacy.checks.receiptsWithHierarchyFailures, 0);
+  for (const disposition of ['changed', 'unavailable', 'invalid'] as const) {
+    const hierarchy = { ...hierarchyMatched, matched: 0, [disposition]: 1 };
+    const result = await observed(hierarchy);
+    const failed = disposition === 'invalid';
+    assert.equal(result.status, failed ? 'failed' : 'review');
+    assert.equal(result.checks.receiptsWithHierarchyFailures, Number(failed));
+    assert.equal(result.checks.receiptsWithHierarchyReview, Number(!failed));
+    assert.deepEqual(result.receipts[0].primaryRecords[0].hierarchy, hierarchy);
+  }
+  for (const malformed of [null, { ...hierarchyMatched, invalid: 1 }, { ...hierarchyMatched, matched: -1 },
+    { ...hierarchyMatched, sha256: 'not-a-digest' }]) {
+    await assert.rejects(observed(malformed), /상위 연결 검증 결과/u);
+  }
+  const before = await observed(hierarchyMatched);
+  const after = await observed({ ...hierarchyMatched, sha256: '0'.repeat(64) });
+  assert.equal(before.status, 'verified');
+  assert.equal(after.status, 'verified');
+  assert.deepEqual(compareMigrationEvidence(before, after), {
+    status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: true, packagesMatch: true,
+  });
 });
 
 test('migration rehearsal detects changed primary dispositions even when counts and workspace match', async () => {

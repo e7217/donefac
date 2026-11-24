@@ -538,18 +538,22 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(report.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
   assert.equal(report.source.evidence.checks.receiptsWithInvalidPrimaryTargets, 0);
   assert.equal(report.source.evidence.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithHierarchyFailures, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithHierarchyReview, 0);
   assert.equal(report.source.evidence.checks.receiptsWithResourceLinkFailures, 0);
   assert.equal(report.source.evidence.checks.receiptsWithResourceLinkReview, 0);
   assert.equal(report.source.evidence.receipts.length, 1);
   const [receipt] = report.source.evidence.receipts;
   const coverage = new Map(receipt.primaryRecords.map(entry => [entry.kind, entry]));
-  for (const { packageId, kind, counts, invalidTargets, dispositionSha256, records } of coverage.values()) {
+  for (const { packageId, kind, counts, invalidTargets, dispositionSha256, records, hierarchy } of coverage.values()) {
     const pkg = staged.packages.find(item => item.packageId === packageId);
     assert.equal(pkg.counts[kind], records.expected);
     assert.equal(records.expected, records.observed);
     assert.equal(records.observed, Object.values(counts).reduce((sum, count) => sum + count, 0));
     assert.equal(invalidTargets, 0);
     assert.match(dispositionSha256, /^[a-f0-9]{64}$/);
+    assert.match(hierarchy.sha256, /^[a-f0-9]{64}$/);
+    assert.deepEqual(hierarchy, { matched: counts.linked + counts.trashed, changed: 0, unavailable: 0, invalid: 0, sha256: hierarchy.sha256 });
   }
   assert.equal(coverage.get('issue').counts.linked, 2);
   assert.equal(coverage.get('page').counts.linked, 1);

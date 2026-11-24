@@ -2817,6 +2817,7 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
       expect(good.primaryRecords.find(item => item.packageId === packageId)).toEqual({
         packageId, kind: 'page', counts: { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 },
         invalidTargets: 0, dispositionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+        hierarchy: { matched: 1, changed: 0, unavailable: 0, invalid: 0, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
       });
     }
     await expect(primaryPackage).toHaveCount(1);
@@ -2906,7 +2907,7 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     const primary = good.primaryRecords.find(item => item.packageId === pkg.id)!;
     const archivedOnly: SourceReconciliationAudit = {
       ...good,
-      primaryRecords: [{ ...primary, counts: { ...primary.counts, linked: 0, 'archive-only': 1 } }],
+      primaryRecords: [{ ...primary, counts: { ...primary.counts, linked: 0, 'archive-only': 1 }, hierarchy: undefined }],
     };
     await page.route(url => url.pathname === auditPath, route => route.fulfill({ json: archivedOnly }), { times: 1 });
     await checkAll();

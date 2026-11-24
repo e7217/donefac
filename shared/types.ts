@@ -605,7 +605,10 @@ export interface SourceReconciliationPrimaryRecords {
   counts: Record<SourceReconciliationStatus, number>;
   invalidTargets: number;
   dispositionSha256: string;
+  hierarchy?: Record<SourceReconciliationHierarchyStatus, number> & { sha256: string };
 }
+export type SourceReconciliationHierarchyStatus = 'matched' | 'changed' | 'unavailable' | 'invalid';
+export type SourceReconciliationPrimaryFinding = 'invalid-primary-target' | 'changed-parent' | 'invalid-parent';
 export interface SourceReconciliationTargetContent {
   version: 1;
   comments: SourceReconciliationContentDigest;

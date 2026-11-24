@@ -5,6 +5,7 @@ const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const sha = /^[a-f0-9]{64}$/;
 const sourceFormats = new Set(['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json', 'confluence-xml']);
 const recordStatuses = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
+const hierarchyStatuses = ['matched', 'changed', 'unavailable', 'invalid'];
 const attachmentStatuses = ['verified', 'missing', 'corrupt', 'unbound', 'excluded', 'unreadable'];
 const relationStatuses = ['linked', 'trashed', 'missing', 'mismatch', 'unavailable'];
 const authorKinds = ['document', 'comment', 'revision', 'attachment', 'worklog'];
@@ -132,8 +133,17 @@ function primaryRecordsEvidence(raw, receiptPackages, matches, integrity, record
     const observed = sum(Object.values(statusCounts));
     requireEvidence(count(observed) && observed <= archiveCounts.get(packageId) && invalidTargets <= observed, message);
     for (const status of recordStatuses) totals[status] += statusCounts[status];
+    let hierarchy;
+    if (entry.hierarchy !== undefined) {
+      const message = '영수증의 패키지별 상위 연결 검증 결과가 올바르지 않습니다.';
+      const proof = entry.hierarchy;
+      requireEvidence(isObject(proof) && hex(proof.sha256) && hierarchyStatuses.every(status => count(proof[status])), message);
+      const statuses = counts(proof, hierarchyStatuses);
+      requireEvidence(sum(Object.values(statuses)) === statusCounts.linked + statusCounts.trashed, message);
+      hierarchy = { ...statuses, sha256: proof.sha256 };
+    }
     return { packageId, kind, counts: statusCounts, invalidTargets, dispositionSha256,
-      records: { expected: matches.get(packageId)?.expectedPrimaryRecords ?? null, observed } };
+      records: { expected: matches.get(packageId)?.expectedPrimaryRecords ?? null, observed }, ...(hierarchy ? { hierarchy } : {}) };
   });
   requireEvidence(recordStatuses.every(status => totals[status] <= recordCounts[status]), message);
   return proof.sort((left, right) => left.packageId.localeCompare(right.packageId));
@@ -450,6 +460,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     receiptsWithoutAuthorEvidence: 0, receiptsWithAuthorReview: 0, receiptsWithAuthorMismatches: 0,
     receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
     receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0,
+    receiptsWithHierarchyFailures: 0, receiptsWithHierarchyReview: 0,
     confluencePackagesWithoutFullPageCoverage: withoutFullCoverage.size };
   const seenReceipts = new Set();
   const receipts = [];
@@ -509,11 +520,14 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     if (primaryRecords.some(({ records }) => records.expected !== null && records.expected !== records.observed)) checks.receiptsWithPrimaryRecordCountMismatches++;
     if (primaryRecords.some(record => record.invalidTargets > 0)) checks.receiptsWithInvalidPrimaryTargets++;
     if (primaryRecords.some(record => record.counts['archive-only'] > 0)) checks.receiptsWithArchiveOnlyPrimaryRecords++;
+    if (primaryRecords.some(({ hierarchy }) => hierarchy && hierarchy.invalid > 0)) checks.receiptsWithHierarchyFailures++;
+    if (primaryRecords.some(({ counts, hierarchy }) => hierarchy
+      ? hierarchy.changed > 0 || hierarchy.unavailable > 0 : counts.linked + counts.trashed > 0)) checks.receiptsWithHierarchyReview++;
   }
   receipts.sort((a, b) => a.id.localeCompare(b.id));
   const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 || checks.receiptsWithJiraRelationFailures > 0 ||
     checks.receiptsWithResourceLinkFailures > 0 || checks.receiptsWithPrimaryRecordCountMismatches > 0 ||
-    checks.receiptsWithInvalidPrimaryTargets > 0 || receipts.some(failedAudit);
+    checks.receiptsWithInvalidPrimaryTargets > 0 || checks.receiptsWithHierarchyFailures > 0 || receipts.some(failedAudit);
   const review = confluenceReviews.some(({ proof }) => proof.status === 'needs-review') ||
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>
     receipt.recordCounts.trashed > 0 || receipt.recordCounts.excluded > 0 || receipt.attachmentCounts.unbound > 0);

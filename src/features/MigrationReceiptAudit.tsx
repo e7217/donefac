@@ -31,6 +31,17 @@ const integrityLabels: Record<SourceReconciliationIntegrity['status'], string> =
   unavailable: '비교 기준 없음',
 };
 const primaryRecordLabels = { issue: 'Jira 업무', page: 'Confluence 페이지' } as const;
+export const primaryRecordFindingLabels = {
+  'invalid-primary-target': '대상 연결 오류',
+  'changed-parent': '현재 상위 연결 차이',
+  'invalid-parent': '상위 연결 검증 오류',
+} as const;
+const hierarchyLabels = {
+  matched: '상위 연결 일치',
+  changed: primaryRecordFindingLabels['changed-parent'],
+  unavailable: '상위 연결 비교 불가',
+  invalid: primaryRecordFindingLabels['invalid-parent'],
+};
 const jiraHistoryLabels = {
   sourceChanges: '보존 원본의 변경',
   projected: '현재 업무에 표시',
@@ -61,7 +72,7 @@ export type AuditDetail = {
   onClose: () => void;
 };
 export type PrimaryRecordDrill = Pick<SourceReconciliationPrimaryRecords, 'packageId' | 'kind'> & (
-  { status: SourceReconciliationStatus; finding?: never } | { status?: never; finding: 'invalid-primary-target' }
+  { status: SourceReconciliationStatus; finding?: never } | { status?: never; finding: keyof typeof primaryRecordFindingLabels }
 );
 
 export function reconciliationPackageIdentity({ source, sha256 }: SourceImport['packages'][number]) {
@@ -253,11 +264,11 @@ function PrimaryRecordCoverage({ records, packages, integrityPackages, recordLab
   return <section className="migration-audit-integrity migration-audit-primary-records" aria-label="이관 티켓·문서 대조">
     <div className="migration-audit-integrity-heading"><h5>이관 티켓·문서 대조</h5></div>
     <ul className="migration-audit-integrity-packages" aria-label="원본 패키지별 티켓·문서">
-      {records.map(({ packageId, kind, counts, invalidTargets }) => {
+      {records.map(({ packageId, kind, counts, invalidTargets, hierarchy }) => {
         const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
         const needsReview = counts['archive-only'] > 0 || counts.missing > 0 || counts.trashed > 0;
         const pkg = packagesById.get(packageId);
-        const invalidLabel = `대상 연결 오류 ${count(invalidTargets)}`;
+        const invalidLabel = `${primaryRecordFindingLabels['invalid-primary-target']} ${count(invalidTargets)}`;
         return <li key={packageId}>
           <div className="migration-audit-integrity-heading">
             <strong>{pkg?.filename ?? names.get(packageId) ?? packageId}</strong>
@@ -271,6 +282,15 @@ function PrimaryRecordCoverage({ records, packages, integrityPackages, recordLab
           </div>
           <AuditCounts label={`${primaryRecordLabels[kind]} 상태별 건수`} labels={labels} counts={counts}
             drill={pkg ? { controls: primaryListId, select: status => onDrill({ packageId, kind, status }) } : undefined} />
+          {hierarchy && <div className="migration-audit-findings">
+            <h6>상위 연결 대조</h6>
+            <AuditCounts label={`${primaryRecordLabels[kind]} 상위 연결 대조 건수`} labels={hierarchyLabels} counts={hierarchy}
+              drill={pkg ? {
+                controls: primaryListId,
+                statuses: ['changed', 'invalid'],
+                select: status => onDrill({ packageId, kind, finding: status === 'changed' ? 'changed-parent' : 'invalid-parent' }),
+              } : undefined} />
+          </div>}
         </li>;
       })}
     </ul>
@@ -471,11 +491,11 @@ function comparedCount({ expected, observed }: SourceReconciliationIntegrity['re
 function count(value: number) { return `${value.toLocaleString('ko-KR')}개`; }
 
 function AuditCounts<Status extends string>({ label, labels, counts, drill }: { label: string; labels: Record<Status, string>; counts: Record<Status, number>;
-  drill?: { controls: string; select: (status: Status) => void } }) {
+  drill?: { controls: string; statuses?: readonly Status[]; select: (status: Status) => void } }) {
   return <dl className="migration-reconciliation-counts" aria-label={label}>
     {(Object.keys(labels) as Status[]).map(status => <div key={status}>
       <dt>{labels[status]}</dt>
-      <dd>{drill && counts[status] > 0 ? <button type="button" className="migration-audit-drill migration-audit-count-drill"
+      <dd>{drill && counts[status] > 0 && (!drill.statuses || drill.statuses.includes(status)) ? <button type="button" className="migration-audit-drill migration-audit-count-drill"
         aria-label={`${labels[status]} ${count(counts[status])} 보기`} aria-controls={drill.controls}
         onClick={() => drill.select(status)}>{counts[status].toLocaleString('ko-KR')}</button> : counts[status].toLocaleString('ko-KR')}</dd>
     </div>)}

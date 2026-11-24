@@ -8,6 +8,7 @@ import type {
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraRelationFinding, SourceReconciliationJiraRelationFindingsPage,
   SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
+  SourceReconciliationHierarchyStatus, SourceReconciliationPrimaryFinding,
   SourceReconciliationPage, SourceReconciliationPrimaryRecords, SourceReconciliationRow, SourceReconciliationStatus,
   SourceReconciliationResourceLinkFinding, SourceReconciliationResourceLinkFindingsPage, SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
@@ -16,6 +17,7 @@ import { auditJiraStatusHistory, jiraStatusHistoryFindings } from './jira-status
 import { auditSourceAuthors } from './migration-author-audit.js';
 import { auditJiraRelationProjections } from './migration-jira-relation-audit.js';
 import { auditResourceLinkProjections } from './migration-resource-link-audit.js';
+import { confluencePageFieldDigest, jiraFieldDigest } from './migration-planner.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import type { TrashArchive, TrashService } from './trash.js';
@@ -40,12 +42,16 @@ type AuditMatchRow = MatchRow & {
 };
 type AuditTargetProjection = { auditRowOrder: number; targetPayload: string | null; targetColumns: string | null };
 type ContentFingerprint = { count: number; hash: Hash };
-type PrimaryRecordFingerprint = Pick<SourceReconciliationPrimaryRecords, 'kind' | 'counts' | 'invalidTargets'> & { hash: Hash };
+type PrimaryRecordFingerprint = Pick<SourceReconciliationPrimaryRecords, 'kind' | 'counts' | 'invalidTargets'> & {
+  hash: Hash;
+  hierarchy: Record<SourceReconciliationHierarchyStatus, number>;
+  hierarchyHash: Hash;
+};
 type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
 type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
 type ReceiptPackage = SourceImport['packages'][number];
 type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string;
-  packageId?: string; finding?: 'invalid-primary-target' };
+  packageId?: string; finding?: SourceReconciliationPrimaryFinding };
 type Dependencies = { store: Store; files: AttachmentFiles; preservation: SourcePreservationService; trash: TrashService };
 const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
 const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding']);
@@ -77,7 +83,7 @@ function parseQuery(input: Record<string, unknown>): ReceiptQuery {
   if (packageId !== undefined && (typeof packageId !== 'string' || !packageId.trim() || packageId.length > 200 || /[\x00-\x1f\x7f]/u.test(packageId))) {
     failure(400, '이관 대조 원본 패키지 ID를 확인해 주세요.');
   }
-  if (finding !== undefined && (finding !== 'invalid-primary-target' || packageId === undefined)) {
+  if (finding !== undefined && ((finding !== 'invalid-primary-target' && finding !== 'changed-parent' && finding !== 'invalid-parent') || packageId === undefined)) {
     failure(400, '원본 패키지와 대상 연결 확인 조건을 확인해 주세요.');
   }
   const q = input.q === undefined ? '' : input.q;
@@ -244,6 +250,58 @@ function invalidPrimaryBinding(row: MatchRow, status: SourceReconciliationStatus
   return status !== 'excluded' && (row.invalidSourceIdBinding === 1 || row.invalidJiraKeyBinding === 1);
 }
 
+type CurrentParent = { parentId: string | null; payloadType: string | null; payloadParentId: unknown; validParent: number };
+
+function primaryHierarchyReader(store: Store) {
+  // Later imports may establish a new applied baseline for the same bound target. Compare only the latest
+  // receipt time with a parent checkpoint, with no arbitrary choice among conflicting checkpoints at that time.
+  const latestHashes = store.db.prepare(`WITH checkpoints AS MATERIALIZED (
+    SELECT julianday(json_extract(receipt.json,'$.createdAt')) AS appliedAt,
+      json_extract(proof.json,?) AS digest
+    FROM source_records AS proof INDEXED BY source_records_target
+    JOIN source_imports AS receipt ON receipt.id=proof.import_id
+    WHERE proof.target_type=? AND proof.target_id=? AND proof.product=? AND proof.source_instance=? AND proof.kind=?
+      AND ${intactPrimaryRecord('proof')}
+  ) SELECT DISTINCT digest FROM checkpoints WHERE digest IS NOT NULL
+    AND appliedAt=(SELECT MAX(appliedAt) FROM checkpoints WHERE digest IS NOT NULL) LIMIT 2`);
+  const liveReader = (table: 'issues' | 'documents') => store.db.prepare(`SELECT item.parent_id AS parentId,
+    CASE WHEN json_valid(item.json) THEN json_type(item.json,'$.parentId') END AS payloadType,
+    CASE WHEN json_valid(item.json) THEN json_extract(item.json,'$.parentId') END AS payloadParentId,
+    (item.parent_id IS NULL OR (parent.id IS NOT NULL AND parent.project_id IS item.project_id AND parent.id<>item.id)) AS validParent
+    FROM ${table} AS item LEFT JOIN ${table} AS parent ON item.parent_id=parent.id WHERE item.id=?`);
+  // Trash retains the earlier placement if a live parent moves to another project.
+  const archivedReader = (table: 'issues' | 'documents') => store.db.prepare(`SELECT item.parent_id AS parentId,
+    CASE WHEN json_valid(item.json) THEN json_type(item.json,'$.resource.parentId') END AS payloadType,
+    CASE WHEN json_valid(item.json) THEN json_extract(item.json,'$.resource.parentId') END AS payloadParentId,
+    (item.parent_id IS NULL OR (item.parent_id<>item.resource_id AND (parent.id IS NOT NULL OR archived.resource_id IS NOT NULL))) AS validParent
+    FROM trash_entries AS item LEFT JOIN ${table} AS parent ON item.parent_id=parent.id
+    LEFT JOIN trash_entries AS archived ON archived.resource_type=item.resource_type AND archived.resource_id=item.parent_id
+    WHERE item.id=? AND item.resource_type=?`);
+  const readers = {
+    issue: { live: liveReader('issues'), archived: archivedReader('issues') },
+    document: { live: liveReader('documents'), archived: archivedReader('documents') },
+  };
+
+  return (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null) => {
+    if (status !== 'linked' && status !== 'trashed') return null;
+    const type = row.product === 'jira' ? 'issue' : 'document';
+    const result = (state: SourceReconciliationHierarchyStatus, applied: string | null = null, current: string | null = null) =>
+      ({ state, proof: [row.sourceRecordId, target?.id, status, state, applied, current] });
+    if (target?.type !== type) return result('invalid');
+    const { live, archived } = readers[type];
+    const parent = (status === 'linked' ? live.get(target.id) : archived.get(row.trashId, type)) as CurrentParent | undefined;
+    if (!parent?.validParent || parent.payloadType !== (parent.parentId === null ? 'null' : 'text') || parent.parentId !== parent.payloadParentId) {
+      return result('invalid');
+    }
+    const field = type === 'issue' ? '$.jiraIssueFieldHashes.parentId' : '$.confluencePageFieldHashes.parentId';
+    const hashes = latestHashes.all(field, type, target.id, row.product, row.sourceInstance, row.kind) as { digest: string }[];
+    const current = type === 'issue' ? jiraFieldDigest('parentId', parent.parentId) : confluencePageFieldDigest('parentId', parent.parentId);
+    if (hashes.length !== 1 || !/^[0-9a-f]{64}$/u.test(hashes[0].digest)) return result('unavailable', null, current);
+    const applied = hashes[0].digest;
+    return result(applied === current ? 'matched' : 'changed', applied, current);
+  };
+}
+
 function archiveProjection(archive: TrashArchive, audit: boolean) {
   const labels: Record<string, Map<string, string>> = {
     comment: new Map(archive.comments.map(value => [value.id, '댓글'])),
@@ -326,12 +384,16 @@ function reconciliation(dependencies: Dependencies, importId: string, query: Rec
   const scopedPackage = query.packageId === undefined ? undefined :
     receipt.packages.find(value => value.stagingId === query.packageId) ?? failure(404, '이관 영수증에서 원본 패키지를 찾을 수 없습니다.');
   const rows: SourceReconciliationRow[] = [];
+  const hierarchyFinding = query.finding === 'changed-parent' ? 'changed' : query.finding === 'invalid-parent' ? 'invalid' : null;
+  const readHierarchy = hierarchyFinding ? primaryHierarchyReader(dependencies.store) : null;
   let total = 0;
   const counts = scanReceipt(dependencies, receipt, false, (row, status, target, stagingId) => {
     if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) return;
     const invalidTarget = Boolean(stagingId) && invalidPrimaryTarget(row, status);
     const invalidBinding = Boolean(stagingId) && invalidPrimaryBinding(row, status);
-    if (query.finding && !invalidTarget && !invalidBinding) return;
+    if (query.finding === 'invalid-primary-target' && !invalidTarget && !invalidBinding) return;
+    if (readHierarchy && (!scopedPackage || row.kind !== primaryRecordKind(scopedPackage.source.product) ||
+      readHierarchy(row, status, target)?.state !== hierarchyFinding)) return;
     if (query.q && ![row.sourceId, row.sourceKey, row.title, row.sourceInstance, target?.label, target?.owner?.label]
       .some(value => value && casefold(value).includes(query.q))) return;
     if (total++ < query.offset || rows.length >= query.limit) return;
@@ -535,10 +597,12 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const integrity = compareArchive(receipt, dependencies.preservation.measureArchive(receipt));
   const fingerprint = createHash('sha256');
   fingerprint.update(JSON.stringify(integrity)).update('\n');
+  const readHierarchy = primaryHierarchyReader(dependencies.store);
   const primaryByPackage = new Map<string, PrimaryRecordFingerprint>(receipt.packages.map(({ stagingId, source, sha256 }) => {
     const kind = primaryRecordKind(source.product);
     const hash = createHash('sha256').update(JSON.stringify([stagingId, source.product, source.instanceKey, sha256, kind])).update('\n');
-    return [stagingId, { kind, counts: emptyRecordCounts(), invalidTargets: 0, hash }];
+    return [stagingId, { kind, counts: emptyRecordCounts(), invalidTargets: 0, hash,
+      hierarchy: { matched: 0, changed: 0, unavailable: 0, invalid: 0 }, hierarchyHash: createHash('sha256') }];
   }));
   const orderedEntries: { order: number; entry: AuditEntry }[] = [];
   const contents = { comments: contentFingerprint(), revisions: contentFingerprint(), worklogs: contentFingerprint() };
@@ -556,6 +620,11 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
       primary.hash.update(JSON.stringify([row.sourceRecordId, row.originalRecordId, status,
         row.targetType, row.targetId, target === null ? row.targetProjectId : target.projectId,
         ...(invalidBinding ? [row.invalidSourceIdBinding, row.invalidJiraKeyBinding] : [])])).update('\n');
+      const hierarchy = readHierarchy(row, status, target);
+      if (hierarchy) {
+        primary.hierarchy[hierarchy.state]++;
+        primary.hierarchyHash.update(JSON.stringify(hierarchy.proof)).update('\n');
+      }
     }
     if (collect && row.kind === 'attachment') orderedEntries.push({ order: auditRowOrder, entry: auditEntry(row, status, archivedFile) });
     if (!target) return;
@@ -588,8 +657,8 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const jiraRelationProjection = auditJiraRelationProjections(dependencies, receipt)?.audit ?? null;
   const resourceLinkProjection = auditResourceLinkProjections(dependencies.store, receipt)?.audit ?? null;
   const authorAttribution = auditSourceAuthors(dependencies.store, dependencies.trash, receipt)?.audit ?? null;
-  const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash }]) => ({
-    packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'),
+  const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash, hierarchy, hierarchyHash }]) => ({
+    packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'), hierarchy: { ...hierarchy, sha256: hierarchyHash.digest('hex') },
   }));
   fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory, jiraRelationProjection, resourceLinkProjection, authorAttribution]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
