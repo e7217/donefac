@@ -207,6 +207,7 @@
 }
 
 .cycle-board-row-meta,
+.cycle-board-row-schedule,
 .cycle-board-row-actions {
   display: flex;
   align-items: center;
@@ -214,7 +215,8 @@
   gap: 4px 7px;
 }
 
-.cycle-board-row-meta {
+.cycle-board-row-meta,
+.cycle-board-row-schedule {
   margin-top: 3px;
   color: #526b5f;
   font-size: 0.75rem;
@@ -232,6 +234,16 @@
   height: 7px;
   flex: none;
   border-radius: 50%;
+}
+
+.cycle-board-row-schedule > span {
+  white-space: nowrap;
+}
+
+.cycle-board-row-schedule .btn {
+  min-height: 32px;
+  padding-inline: 6px;
+  font-size: inherit;
 }
 
 .cycle-board-row-actions {

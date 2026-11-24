@@ -6,6 +6,7 @@ import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPub
 import { DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { isCalendarDate } from '../shared/calendar';
+import { planningFields } from '../shared/planning-helpers';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { countActiveMyWork } from '../shared/my-work';
@@ -82,6 +83,7 @@ type WorkspaceRoute = {
   documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
   teamBoardFilters?: TeamBoardFilters;
+  cycleQuery?: string;
   searchFilters?: WorkspaceSearchFilters;
 };
 type WorkspaceCommentFocus = {
@@ -104,7 +106,7 @@ const validViews: View[] = ['overview','issues','backlog','gantt','planning','re
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
 const emptyTeamGanttScheduleFilters: TeamGanttScheduleFilters = {};
-function readTeamIssueQuery(value?: string | null) {
+function readIssueFilterQuery(value?: string | null) {
   return value?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200) || undefined;
 }
 
@@ -135,6 +137,7 @@ function routeHash(route: WorkspaceRoute) {
     if (filters?.gitlab) query.set('ganttGitlab', filters.gitlab);
   }
   if (route.issueId) query.set('issue', route.issueId);
+  if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'gantt' && !teamGantt && route.ganttMilestoneId) query.set('milestone', route.ganttMilestoneId);
   if (route.view === 'reports' && route.blockerScope) {
@@ -298,7 +301,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     assigneeId: requestedGanttAssignee === '' ? null : requestedGanttAssignee !== null &&
       snapshot.users.some(user => user.id === requestedGanttAssignee) ? requestedGanttAssignee : undefined,
     unscheduledOnly: parameters.get('ganttUnscheduled') === '1',
-    query: readTeamIssueQuery(parameters.get('ganttQ')),
+    query: readIssueFilterQuery(parameters.get('ganttQ')),
     gitlab: isIssueViewGitlabFilter(requestedGanttGitlab) ? requestedGanttGitlab : undefined,
   } : undefined;
   const requestedIssue = parameters.get('issue');
@@ -333,8 +336,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedFocusIssue = parameters.get('focusIssue');
   const ganttFocusIssueId = view === 'gantt' && requestedFocusIssue && requestedFocusIssue.length <= 200 &&
     requestedFocusIssue.trim() && !/[\u0000-\u001f\u007f]/.test(requestedFocusIssue) ? requestedFocusIssue : null;
+  const focusedIssue = ganttFocusIssueId && !ganttScope ? snapshot.issues.find(value => value.id === ganttFocusIssueId) : undefined;
   if (ganttFocusIssueId && !ganttScope) {
-    const focusedIssue = snapshot.issues.find(value => value.id === ganttFocusIssueId);
     const moveOrigins = snapshot.issueMoveOrigins?.[ganttFocusIssueId];
     if (focusedIssue && (!issue || issue.id === focusedIssue.id) && Array.isArray(moveOrigins) && moveOrigins.includes(parts[0])) {
       projectId = focusedIssue.projectId;
@@ -345,9 +348,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedMilestone = parameters.get('milestone');
   const ganttMilestoneId = view === 'gantt' && !ganttScope && projectId === parts[0] && isRelationId(requestedMilestone) ? requestedMilestone : null;
   const keepGanttContext = view === 'gantt' && !ganttScope && (!ganttFocusIssueId || Boolean(ganttMilestoneId || ganttFocusDate));
-  const planningId = projectId === parts[0] && (view === 'backlog' ? isRelationId(parts[2])
-    : (view === 'planning' || keepGanttContext) &&
-      snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId)) ? parts[2] : null;
+  const routePlan = projectId === parts[0] && (view === 'planning' || view === 'gantt' && !ganttScope) && parts[2]
+    ? snapshot.planningItems?.find(item => item.id === parts[2] && item.projectId === projectId) : undefined;
+  const linkedPlanFocus = routePlan && focusedIssue?.projectId === projectId &&
+    focusedIssue[planningFields(routePlan.kind).idField] === routePlan.id;
+  const planningId = view === 'backlog' && projectId === parts[0] && isRelationId(parts[2]) ? parts[2]
+    : view === 'planning' || keepGanttContext || linkedPlanFocus ? routePlan?.id ?? null : null;
   const savedViewId = (view === 'issues' || keepGanttContext) && (!issue || projectId === parts[0])
     ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
@@ -372,7 +378,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   } : undefined;
   const boardProject = parameters.get('boardProject');
   const boardMember = parameters.get('boardMember');
-  const boardQuery = readTeamIssueQuery(parameters.get('boardQuery'));
+  const boardQuery = readIssueFilterQuery(parameters.get('boardQuery'));
   const boardGitlab = parameters.get('boardGitlab');
   const teamBoardFilters: TeamBoardFilters | undefined = view === 'teamboard' ? {
     projectId: snapshot.projects.some(project => project.id === boardProject) ? boardProject ?? undefined : undefined,
@@ -383,7 +389,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publication, sectionId, documentCommentId,
-    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters };
+    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
+    cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -417,6 +424,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [sectionId, setSectionId] = useState<string | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [teamBoardFilters, setTeamBoardFilters] = useState(emptyTeamBoardFilters);
+  const [cycleQuery, setCycleQuery] = useState('');
   const [searchFilters, setSearchFilters] = useState(DEFAULT_WORKSPACE_SEARCH_FILTERS);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
@@ -602,6 +610,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       previous.date === filters.date && previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
+    setCycleQuery(route.cycleQuery ?? '');
     const search = route.searchFilters ?? DEFAULT_WORKSPACE_SEARCH_FILTERS;
     setSearchFilters(previous => sameWorkspaceSearchFilters(previous, search) ? previous : search);
   }, []);
@@ -639,12 +648,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, [processLocation]);
   useEffect(() => { if (data) processLocation(); }, [data, processLocation]);
 
-  const requestRoute = (route: WorkspaceRoute, mode: 'push' | 'replace' = 'push', keepIssueReview = false) => {
-    if (!dataRef.current) return false;
-    const next = normalizeRoute(dataRef.current, routeHash(route));
+  const requestRoute = (route: WorkspaceRoute, mode: 'push' | 'replace' = 'push', keepIssueReview = false, returnRoute?: WorkspaceRoute) => {
+    const snapshot = dataRef.current;
+    if (!snapshot) return false;
+    const next = normalizeRoute(snapshot, routeHash(route));
     const previous = acceptedRouteRef.current;
     if (previous && routeHash(next) === routeHash(previous)) { setSidebarOpen(false); return true; }
     if (!confirmRouteNavigation(previous, next)) return false;
+    if (previous && mode === 'push' && returnRoute) {
+      const origin = normalizeRoute(snapshot, routeHash(returnRoute));
+      if (routeHash(origin) !== routeHash(previous)) writeRoute(origin, routeIndexRef.current, 'replace');
+    }
     if (!keepIssueReview && previous?.issueId !== next.issueId) setIssueReview(null);
     writeRoute(next, routeIndexRef.current + (mode === 'push' ? 1 : 0), mode); setSidebarOpen(false);
     return true;
@@ -653,11 +667,19 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const sameView = nextView === view && nextProject === projectId && !(nextView === 'gantt' && ganttScope === 'team');
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
       documentLabel: sameView ? documentLabel : null,
-      planningId: sameView && nextView === 'backlog' ? planningId : null,
+      planningId: sameView && (nextView === 'backlog' || nextView === 'planning') ? planningId : null,
+      cycleQuery: sameView && nextView === 'backlog' ? cycleQuery : undefined,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined,
       teamBoardFilters: sameView && nextView === 'teamboard' ? teamBoardFilters : undefined});
+  };
+  const changeCycleQuery = (query: string) => {
+    const current = acceptedRouteRef.current;
+    const nextQuery = readIssueFilterQuery(query);
+    if (current?.view === 'backlog' && current.cycleQuery !== nextQuery) {
+      writeRoute({ ...current, cycleQuery: nextQuery }, routeIndexRef.current, 'replace', true);
+    }
   };
   const changeTeamBoardFilters = (filters: TeamBoardFilters) => {
     const current = acceptedRouteRef.current;
@@ -693,7 +715,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       (typeof filters.assigneeId === 'string' && !dataRef.current?.users.some(user => user.id === filters.assigneeId))) return false;
     // The chart has already confirmed any drafts this filter would hide.
     const previous = current.ganttScheduleFilters;
-    const next = { ...filters, query: readTeamIssueQuery(filters.query) };
+    const next = { ...filters, query: readIssueFilterQuery(filters.query) };
     if (!sameTeamGanttScheduleFilters(previous, next)) {
       const scopeChanged = previous?.assigneeId !== next.assigneeId || Boolean(previous?.unscheduledOnly) !== Boolean(next.unscheduledOnly) || previous?.gitlab !== next.gitlab;
       writeRoute({ ...current, ganttScheduleFilters: next }, routeIndexRef.current + (scopeChanged ? 1 : 0), scopeChanged ? 'push' : 'replace');
@@ -725,6 +747,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       projectId:view === 'teamoverview' || view === 'reports' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
+      cycleQuery: view === 'backlog' && sameProject ? current?.cycleQuery : undefined,
       blockerScope:view === 'reports' ? current?.blockerScope : null,
       decisionFollowUpScope:view === 'reports' ? current?.decisionFollowUpScope : null,
       fieldBreakdownScope:view === 'reports' ? current?.fieldBreakdownScope : null,
@@ -865,10 +888,37 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const endpoint = !isCalendarDate(issue.startDate) ? 'startDate' : !isCalendarDate(issue.endDate) ? 'endDate' : undefined;
     return openIssueSchedule(id, endpoint);
   };
-  const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) =>
-    requestRoute({projectId, view:nextView, documentId:null, planningId:id, issueId:null});
+  const selectedPlanReturn = (id?: string) => {
+    const current = acceptedRouteRef.current;
+    if (id && current?.view === 'planning' && current.planningId !== id) return { ...current, planningId: id };
+  };
+  const selectPlanning = (id: string | null) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'planning' && requestRoute({ ...current, planningId: id }, 'replace');
+  };
+  const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) => {
+    const current = acceptedRouteRef.current;
+    return requestRoute({ projectId, view: nextView, documentId: null, planningId: id, issueId: null,
+      cycleQuery: nextView === 'backlog' && current?.view === 'backlog' ? current.cycleQuery : undefined },
+    'push', false, selectedPlanReturn(id));
+  };
   const openReleaseReadiness = (id: string) =>
-    requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, blockerScope: { releaseId: id } });
+    requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, blockerScope: { releaseId: id } },
+      'push', false, selectedPlanReturn(id));
+  const openPlannedIssueSchedule = (issueId: string, planId?: string) => {
+    const snapshot = dataRef.current, current = acceptedRouteRef.current;
+    if (!snapshot || !current || (current.view !== 'planning' && current.view !== 'backlog')) return false;
+    const issue = snapshot.issues.find(item => item.id === issueId && item.projectId === current.projectId);
+    const plan = planId ? snapshot.planningItems?.find(item => item.id === planId && item.projectId === current.projectId) : undefined;
+    if (!issue || (planId && (!plan || issue[planningFields(plan.kind).idField] !== plan.id))) {
+      notify('업무나 계획 연결이 바뀌었습니다. 목록에서 다시 확인해 주세요.', 'error');
+      return false;
+    }
+    const returnRoute = plan && current.planningId !== plan.id ? { ...current, planningId: plan.id } : undefined;
+    const endpoint = !isCalendarDate(issue.startDate) ? 'startDate' : !isCalendarDate(issue.endDate) ? 'endDate' : undefined;
+    return requestRoute({ projectId: issue.projectId, view: 'gantt', documentId: null, issueId: null, planningId: plan?.id,
+      ganttFocusIssueId: issue.id, ganttFocusDate: endpoint }, 'push', false, returnRoute);
+  };
   const openDocument = (id: string, requestedSectionId?: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
     if (!document) return;
@@ -1060,6 +1110,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onOpenFieldBreakdown={id => requestRoute({projectId,view:'reports',documentId:null,issueId:null,fieldBreakdownScope:{savedViewId:id}})}/>}
         {view === 'backlog' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>사이클 계획을 불러오는 중입니다.</p></div>}>
           <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
+            query={cycleQuery} onQueryChange={changeCycleQuery} onOpenIssueSchedule={openPlannedIssueSchedule}
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}
         {view === 'gantt' && <Gantt {...props} refreshGantt={refreshGantt} allProjects={teamGantt} teamProjectFilter={ganttProject} onChangeTeamProjectFilter={changeTeamGanttProject}
@@ -1078,6 +1129,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
           <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}
+            onSelectPlanning={selectPlanning} onOpenIssueSchedule={openPlannedIssueSchedule}
             onOpenCycleBoard={id => openPlanIn('backlog', id)} onOpenReleaseReadiness={openReleaseReadiness} />
         </Suspense>}
         {view === 'reports' && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>보고서를 불러오는 중입니다.</p></div>}>

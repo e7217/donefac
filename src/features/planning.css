@@ -6,5 +6,10 @@
 .planning-detail-column { min-width: 0; }
 .planning-detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .planning-detail-actions > a { text-decoration: none; }
+.planning-membership-work { flex: 1; min-width: 0; }
+.planning-membership-work > .planning-linked-issue { width: 100%; }
+.planning-issue-schedule { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 8px; margin-top: 4px; }
+.planning-issue-schedule > span { color: #526d5d; font-size: 10px; white-space: nowrap; }
+.planning-issue-schedule > .btn { height: auto; min-height: 30px; padding: 4px 6px; font-size: 11px; }
 .planning-heading-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 @media(max-width:680px) { .planning-heading-actions { justify-content: flex-start; } }

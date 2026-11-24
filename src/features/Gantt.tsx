@@ -264,9 +264,10 @@ function ProjectGantt(props: GanttProps) {
   const projectPlans = useMemo(() => allProjects ? [] : (data.planningItems ?? []).filter(item => item.projectId === projectId),
     [allProjects, data.planningItems, projectId]);
   const initialPlan = projectPlans.find(item => item.id === initialPlanningId);
+  const focusInPlan = Boolean(initialPlan && focusedIssue?.[planningFields(initialPlan.kind).idField] === initialPlan.id);
   const [planningExpanded, setPlanningExpanded] = useState(Boolean(initialPlan));
   const [selectedPlanningId, setSelectedPlanningId] = useState<string | null>(initialPlan?.id ?? null);
-  const [linkedOnly, setLinkedOnly] = useState(false);
+  const [linkedOnly, setLinkedOnly] = useState(focusInPlan);
   const [planAssignment, setPlanAssignment] = useState<PlanAssignmentInput | null>(null);
   const [planShift, setPlanShift] = useState<PlanningItem | null>(null);
   const [projectQuery, setProjectQuery] = useState('');
@@ -919,7 +920,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function chartRows(text: string, hideTerminal: boolean, scope?: PlanningItem, candidates = scopedIssues, scheduleFilters?: TeamGanttScheduleFilters) {
     const rows = sharedViewRows(locallyVisibleIssues(text, hideTerminal, scope, candidates, scheduleFilters));
-    const pinnedIssue = focusedIssue && (allProjects || focusDateEndpoint) && !rows.some(issue => issue.id === focusedIssue.id) ? focusedIssue : undefined;
+    const pinnedIssue = focusedIssue && (allProjects || focusDateEndpoint || focusInPlan) && !rows.some(issue => issue.id === focusedIssue.id) ? focusedIssue : undefined;
     return { rows: pinnedIssue ? [pinnedIssue, ...rows] : rows, pinnedIssue };
   }
   const { rows: ordinaryIssues, pinnedIssue } = chartRows(query, hideDone, planningScope);

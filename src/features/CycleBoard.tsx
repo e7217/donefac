@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useId, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
-import { ArrowDown, ArrowDownUp, ArrowUp, ListTodo, Loader2, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownUp, ArrowUp, CalendarRange, ListTodo, Loader2, Plus, Search, X } from 'lucide-react';
+import { isCalendarDate } from '../../shared/calendar';
 import { orderProjectIssues } from '../../shared/issue-view';
 import { PRIORITY, type CycleBoardMoveInput, type CycleBoardMoveResult, type FeatureProps, type Issue, type PlanningItem } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
@@ -15,9 +16,12 @@ import './cycle-board.css';
 
 type Props = FeatureProps & {
   initialCycleId?: string | null;
+  query: string;
+  onQueryChange: (query: string) => void;
   onChangeCycle: (id: string) => boolean;
   onOpenPlanning: (id: string) => void;
   onOpenIssues: () => void;
+  onOpenIssueSchedule?: (id: string, planId?: string) => boolean;
 };
 type CycleRef = CycleBoardMoveInput['sourceCycle'];
 type MoveTarget = Pick<CycleBoardMoveInput, 'anchorId' | 'position'> & { cycleId: string | null };
@@ -44,9 +48,8 @@ export function CycleBoard(props: Props) {
 }
 
 function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notify,
-  initialCycleId, onChangeCycle, onOpenPlanning, onOpenIssues, }: Props) {
+  initialCycleId, query, onQueryChange, onChangeCycle, onOpenPlanning, onOpenIssues, onOpenIssueSchedule }: Props) {
   const uid = useId();
-  const [search, setSearch] = useState('');
   const [moveIssue, setMoveIssue] = useState<Issue | null>(null);
   const [creation, setCreation] = useState<Creation | null>(null);
   const [pending, setPending] = useState(false);
@@ -79,7 +82,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const backlog = issues.filter(issue => cycleIdOf(issue) === null);
   const members = cycleId ? issues.filter(issue => cycleIdOf(issue) === cycleId) : [];
   const writable = Boolean(order && actorId && !pending && !hold && !creation);
-  const terms = search.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
+  const terms = query.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
   const matchesSearch = (issue: Issue) => terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
   const created = feedback?.created && (issues.find(issue => issue.id === feedback.created?.id) ?? feedback.created);
   const createdMatchesSearch = created && matchesSearch(created);
@@ -135,7 +138,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     focusTarget.current = null;
     const row = rowOpeners.current.get(target);
     (row ?? searchInput.current)?.focus({ preventScroll: !row });
-  }, [cycleId, cycles, feedback, issues, onChangeCycle, pending, search]);
+  }, [cycleId, cycles, feedback, issues, onChangeCycle, pending, query]);
 
   useEffect(() => {
     if (creation || !created || creationFocus.current !== created.id) return;
@@ -165,7 +168,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
       return;
     }
     focusTarget.current = issue.id;
-    setSearch('');
+    onQueryChange('');
     setFeedback({ text: `${issue.key} 업무를 만들었습니다.` });
   }
 
@@ -331,8 +334,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
       <div>
         <label htmlFor={`${uid}-search`}>업무 검색</label>
         <div className="cycle-board-search"><Search size={16} aria-hidden="true" />
-          <input id={`${uid}-search`} className="field" type="text" ref={searchInput} value={search}
-            placeholder="업무 키 또는 제목" onChange={event => setSearch(event.currentTarget.value)} /></div>
+          <input id={`${uid}-search`} className="field" type="text" ref={searchInput} value={query} maxLength={200}
+            placeholder="업무 키 또는 제목" onChange={event => onQueryChange(event.currentTarget.value)} /></div>
       </div>
       <div>
         <label htmlFor={`${uid}-cycle`}>보고 있는 사이클</label>
@@ -389,6 +392,9 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
               const before = visible[index - 1];
               const after = visible[index + 1];
               const inDrop = drop?.anchorId === issue.id && drop.cycleId === targetId ? drop.position : undefined;
+              const startDate = isCalendarDate(issue.startDate) ? issue.startDate : null;
+              const endDate = isCalendarDate(issue.endDate) ? issue.endDate : null;
+              const scheduleAction = startDate && endDate ? '간트에서 일정 보기' : '간트에서 날짜 입력';
               return <li key={issue.id} className="cycle-board-row" data-issue-id={issue.id} data-cycle-board-card={issue.id}
                 data-drop-position={inDrop} draggable={writable}
                 onDragStart={event => dragStart(event, issue)} onDragEnd={clearDrag}>
@@ -401,6 +407,15 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                     <span><i aria-hidden="true" style={{ background: status.color }} />{status.label}</span>
                     <span>우선순위 {PRIORITY[issue.priority]}</span>
                     <span>{owner?.name ?? (issue.assigneeId ? '담당자 확인 불가' : '담당자 미지정')}</span>
+                  </div>
+                  <div className="cycle-board-row-schedule">
+                    <span>시작일 {startDate ? <time dateTime={startDate}>{startDate}</time> : '미정'}</span>
+                    <span>종료일 {endDate ? <time dateTime={endDate}>{endDate}</time> : '미정'}</span>
+                    {onOpenIssueSchedule && <button className="btn btn-ghost" type="button" disabled={pending}
+                      aria-label={`${issue.key} ${scheduleAction}`} onClick={() => {
+                        if (targetCycle) onOpenIssueSchedule(issue.id, targetCycle.id);
+                        else onOpenIssueSchedule(issue.id);
+                      }}><CalendarRange size={15} aria-hidden="true" />{scheduleAction}</button>}
                   </div>
                 </div>
                 <div className="cycle-board-row-actions">

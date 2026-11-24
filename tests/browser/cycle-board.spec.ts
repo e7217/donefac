@@ -86,6 +86,78 @@ async function openLaneCreation(page: Page, lane: Locator, target: '백로그' |
   return { dialog, title, submit: dialog.getByRole('button', { name: '업무 만들기', exact: true }) };
 }
 
+test('360px 사이클과 백로그에서 비어 있는 간트 날짜로 이동하고 선택한 사이클과 검색으로 돌아온다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const other = await f.plan('다른 사이클');
+    const cycle = await f.plan('날짜를 채울 사이클');
+    const filter = `업무 일정 ${f.suffix}`;
+    const startDate = '2026-11-24', endDate = '2026-11-27';
+    const assigned = await f.issue(`${filter} 사이클 업무`, { cycleId: cycle.id, startDate: null, endDate });
+    const backlog = await f.issue(`${filter} 백로그 업무`, { startDate: null, endDate: null });
+    const outside = await f.issue(`${filter} 다른 사이클 업무`, { cycleId: other.id, startDate, endDate });
+    const board = await openBoard(page, f, 'backlog');
+    await board.selectedCycle.selectOption(cycle.id);
+    await board.search.fill(filter);
+    const boardPath = `#/${f.project.id}/backlog/${cycle.id}`;
+    function matchesBoard(url: URL) {
+      const [path, query] = url.hash.split('?');
+      return path === boardPath && new URLSearchParams(query).get('cycleQ') === filter;
+    }
+    async function expectBoard() {
+      await expect(page).toHaveURL(matchesBoard);
+      await expect(board.selectedCycle).toHaveValue(cycle.id);
+      await expect(board.search).toHaveValue(filter);
+    }
+    await expectBoard();
+    const assignedCard = board.lane.locator(`[data-cycle-board-card="${assigned.id}"]`);
+    const backlogCard = board.backlog.locator(`[data-cycle-board-card="${backlog.id}"]`);
+    await expect(assignedCard.getByText('시작일 미정', { exact: true })).toBeVisible();
+    await expect(assignedCard.locator(`time[datetime="${endDate}"]`)).toHaveText(endDate);
+    await expect(backlogCard.getByText('종료일 미정', { exact: true })).toBeVisible();
+    await expect(board.lane.locator(`[data-cycle-board-card="${outside.id}"]`)).toHaveCount(0);
+
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const row = (value: Issue) => chart.locator(`[data-issue-id="${value.id}"]`);
+    const start = (value: Issue) => row(value).getByLabel(`${value.key} 시작일`, { exact: true });
+    const ganttPath = `#/${f.project.id}/gantt`;
+    const linkedOnly = page.getByRole('checkbox', { name: '연결된 업무만', exact: true });
+    const expectStartFocus = async (path: string, value: Issue) => {
+      await expect(page).toHaveURL(url => {
+        const [route, query] = url.hash.split('?');
+        const params = new URLSearchParams(query);
+        return route === path && params.get('focusIssue') === value.id && params.get('focusDate') === 'startDate';
+      });
+      await expect(start(value)).toBeFocused();
+      await expect(start(value)).toHaveValue('');
+    };
+    await assignedCard.getByRole('button', { name: `${assigned.key} 간트에서 날짜 입력`, exact: true }).click();
+    await expectStartFocus(`${ganttPath}/${cycle.id}`, assigned);
+    await expect(linkedOnly).toBeChecked();
+    await expect(row(outside)).toHaveCount(0);
+    await expect(row(backlog)).toHaveCount(0);
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
+    await start(assigned).fill(startDate);
+    await start(assigned).press('Enter');
+    expect(await json<{ updated: Issue[] }>(await saving)).toMatchObject({ updated: [{ id: assigned.id, cycleId: cycle.id, startDate, endDate }] });
+    await expect(row(assigned).getByRole('button', { name: `${assigned.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await page.goBack();
+    await expectBoard();
+    await expect(assignedCard.locator(`time[datetime="${startDate}"]`)).toHaveText(startDate);
+    await expect(assignedCard.locator(`time[datetime="${endDate}"]`)).toHaveText(endDate);
+    await expect(assignedCard.getByRole('button', { name: `${assigned.key} 간트에서 일정 보기`, exact: true })).toBeVisible();
+
+    await backlogCard.getByRole('button', { name: `${backlog.key} 간트에서 날짜 입력`, exact: true }).click();
+    await expectStartFocus(ganttPath, backlog);
+    await expect(row(outside)).toBeVisible();
+    await page.goBack();
+    await expectBoard();
+    await expect(backlogCard.getByText('시작일 미정', { exact: true })).toBeVisible();
+  } finally { await f.close(); }
+});
+
 test('360px 백로그에서 업무를 만들고 검색에서 숨겨진 결과를 표시한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   await page.setViewportSize({ width: 360, height: 820 });

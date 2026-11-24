@@ -1,5 +1,6 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { Issue, PlanningItem, PlanningKind, WorkspaceSnapshot } from '../../shared/types';
 
 const labels = { cycle: '사이클', module: '모듈', release: '릴리스' };
@@ -7,6 +8,124 @@ const dateAt = (offset: number) => { const date = new Date(); date.setUTCDate(da
 const snapshot = async (request: APIRequestContext) => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
 async function plan(request: APIRequestContext, projectId: string, kind: PlanningKind, name: string) { const response = await request.post('/api/planning-items', { data: { projectId, kind, name } }); expect(response.ok()).toBeTruthy(); return await response.json() as PlanningItem; }
 async function cleanPlan(request: APIRequestContext, id: string) { const response = await request.get(`/api/planning-items/${id}`); if (!response.ok()) return; const item = await response.json() as PlanningItem; await request.delete(`/api/planning-items/${id}?expectedVersion=${item.version}`); }
+
+test('360px에서 선택한 릴리스를 다시 열고 간트에서 연결 업무의 비어 있는 종료일을 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project] } = await snapshot(request);
+  const suffix = randomUUID().slice(0, 8);
+  const created: PlanningItem[] = [];
+  const issues: Issue[] = [];
+  const startDate = dateAt(1), endDate = dateAt(4), targetDate = dateAt(6);
+  async function release(name: string) {
+    const response = await request.post('/api/planning-items', { data: {
+      projectId: project.id, kind: 'release', name: `${name} ${suffix}`, startDate, endDate: targetDate, targetDate,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const result = await response.json() as PlanningItem;
+    created.push(result);
+    return result;
+  }
+  async function issue(title: string, releaseId: string, finish: string | null) {
+    const response = await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${title} ${suffix}`, releaseId, startDate, endDate: finish,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const result = await response.json() as Issue;
+    issues.push(result);
+    return result;
+  }
+
+  try {
+    const other = await release('A 먼저 보이는 릴리스');
+    const selected = await release('Z 직접 선택한 릴리스');
+    const missing = await issue('종료일이 비어 있는 연결 업무', selected.id, null);
+    const outOfPlan = await issue('다른 릴리스에 연결된 업무', other.id, endDate);
+    const planPath = `#/${project.id}/planning`;
+    const selectedPath = `${planPath}/${selected.id}`;
+    const ganttPath = `#/${project.id}/gantt/${selected.id}`;
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const chartRow = (id: string) => chart.locator(`[data-issue-id="${id}"]`);
+    const editor = page.getByRole('region', { name: '릴리스 상세', exact: true });
+    const name = editor.getByLabel('계획 이름', { exact: true });
+    const linked = editor.locator('.planning-membership-row').filter({ hasText: missing.title });
+    const onlyLinked = page.getByRole('checkbox', { name: '연결된 업무만', exact: true });
+
+    await page.goto(`/${planPath}`);
+    await page.locator('.planning-kind-tabs').getByRole('button', { name: /^릴리스/ }).click();
+    await expect(name).toBeVisible();
+    await expect(name).not.toHaveValue(selected.name);
+    await page.locator('.planning-item-card').filter({ hasText: selected.name }).click();
+
+    async function expectSelectedPlan() {
+      await expect(page).toHaveURL(url => url.hash === selectedPath);
+      await expect(name).toHaveValue(selected.name);
+      await expect(linked.getByRole('checkbox', { name: `${missing.key} 계획 연결`, exact: true })).toBeChecked();
+      await expect(linked.locator(`time[datetime="${startDate}"]`)).toBeVisible();
+      await expect(editor.getByText(outOfPlan.title, { exact: true })).toHaveCount(0);
+    }
+    await expectSelectedPlan();
+    await expect(linked.getByText('종료일 미정', { exact: true })).toBeVisible();
+    await page.getByRole('link', { name: '간트에서 열기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === ganttPath);
+    await expect(onlyLinked).not.toBeChecked();
+    await expect(chartRow(outOfPlan.id)).toBeVisible();
+    await page.goBack();
+    await expectSelectedPlan();
+
+    await page.getByRole('link', { name: '릴리스 준비 점검', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === `#/${project.id}/reports/blockers?release=${selected.id}`);
+    const report = page.getByRole('tabpanel', { name: '진행 차단', exact: true });
+    await expect(report.getByRole('region', { name: '릴리스 범위', exact: true })).toContainText(selected.name);
+    await expect(report.getByRole('article', { name: `준비 확인 업무 ${missing.key}`, exact: true })).toContainText('종료일 미정');
+    await page.goBack();
+    await expectSelectedPlan();
+
+    await linked.getByRole('button', { name: `${missing.key} 간트에서 날짜 입력`, exact: true }).click();
+    await expect(page).toHaveURL(url => {
+      const [path, query] = url.hash.split('?');
+      const params = new URLSearchParams(query);
+      return path === ganttPath && params.get('focusIssue') === missing.id && params.get('focusDate') === 'endDate';
+    });
+    await expect(onlyLinked).toBeChecked();
+    await expect(chartRow(outOfPlan.id)).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: '간트 업무 검색', exact: true })).toHaveValue('');
+    const end = chartRow(missing.id).getByLabel(`${missing.key} 종료일`, { exact: true });
+    await expect(end).toBeFocused();
+    await expect(end).toHaveValue('');
+    const preview = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/schedule/manual-preview');
+    const apply = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/schedule/manual-apply');
+    await end.fill(endDate);
+    await end.press('Enter');
+    expect((await preview).request().postDataJSON()).toEqual({ changes: [{ id: missing.id, expectedVersion: missing.version, startDate, endDate }] });
+    const saved = await apply;
+    expect(saved.ok(), await saved.text()).toBe(true);
+    expect(await saved.json()).toMatchObject({ updated: [{ id: missing.id, releaseId: selected.id, startDate, endDate }] });
+    await expect(chartRow(missing.id).getByRole('button', { name: `${missing.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await page.goBack();
+    await expectSelectedPlan();
+    await expect(linked.locator(`time[datetime="${endDate}"]`)).toBeVisible();
+    await expect(linked.getByText('종료일 미정', { exact: true })).toHaveCount(0);
+    await linked.getByRole('button', { name: `${missing.key} 간트에서 일정 보기`, exact: true }).click();
+    await expect(page).toHaveURL(url => {
+      const [path, query] = url.hash.split('?');
+      const params = new URLSearchParams(query);
+      return path === ganttPath && params.get('focusIssue') === missing.id && !params.has('focusDate');
+    });
+    await expect(onlyLinked).toBeChecked();
+    await expect(chartRow(missing.id)).toHaveAttribute('data-focused-issue', 'true');
+    await expect(chartRow(outOfPlan.id)).toHaveCount(0);
+    await page.goBack();
+    await expectSelectedPlan();
+    await expect(linked.locator(`time[datetime="${endDate}"]`)).toBeVisible();
+  } finally {
+    for (const item of issues.reverse()) {
+      const response = await request.delete(`/api/issues/${item.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    for (const item of created.reverse()) await cleanPlan(request, item.id);
+  }
+});
 
 test('사이클·모듈·릴리스를 생성하고 책임자와 날짜 및 상태를 저장한다', async ({ page, request }) => {
   const initial = await snapshot(request), project = initial.projects[0];
