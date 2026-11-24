@@ -1,0 +1,42 @@
+.docs-checklist-work {
+  flex: 0 0 100%;
+  min-width: 0;
+  margin-top: 5px;
+  padding: 6px 2px 1px;
+  border-top: 1px solid #e8ecf3;
+}
+.docs-checklist-work > h3 {
+  margin: 0 0 4px;
+  color: #425773;
+  font-size: 11px;
+}
+.docs-checklist-work-list {
+  display: grid;
+  gap: 4px;
+  max-height: min(21vh, 11rem);
+  margin: 0;
+  padding: 2px;
+  overflow: auto;
+  list-style: none;
+}
+.docs-checklist-work-list > li { min-width: 0; }
+.docs-checklist-work-list .docs-linked-issue { margin: 0; padding: 6px 8px; }
+.docs-checklist-work-list .docs-linked-issue strong,
+.docs-checklist-work-list .docs-linked-issue-meta { margin-top: 2px; }
+
+@media (max-width: 600px) {
+  .docs-checklist-work-list {
+    display: flex;
+    max-height: 7rem;
+  }
+  .docs-checklist-work-list > li { flex: 0 0 90%; }
+  .docs-checklist-work-list .docs-linked-issue strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+@media (max-width: 600px) and (max-height: 700px) {
+  .docs-editor-sticky:has(.docs-checklist-work) { position: static; }
+}

@@ -1145,6 +1145,11 @@ export interface DocumentPublicationList {
 export type DependencyType = 'FS' | 'SS' | 'FF' | 'SF';
 export interface Dependency { id: string; predecessorId: string; successorId: string; type: DependencyType; lagDays: number; version?: number }
 export interface DocumentSourceSelection { from: number; to: number; text: string }
+export interface DocumentChecklistWork {
+  documentId: string;
+  documentVersion: number;
+  links: {linkId: string; issueId: string; sourceSelection: DocumentSourceSelection}[];
+}
 export interface DocumentDecisionSource extends DocumentSourceSelection { revisionId: string }
 export interface DocumentFollowUpCommentSource { commentId: string; revisionId: string }
 export interface ResourceLink { id: string; issueId: string; documentId: string; kind: string; documentSource?: DocumentDecisionSource }

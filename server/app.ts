@@ -32,7 +32,7 @@ import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
 import { DocumentOrderError, DocumentOrderService } from './document-order.js';
 import { DocumentTreeCopyError, DocumentTreeCopyService } from './document-tree-copy.js';
-import { DocumentFollowUpError, DocumentFollowUpService, resolveDocumentDecisionSource, resolveDocumentFollowUpComment, validateDocumentDecisionSource } from './document-follow-up.js';
+import { DocumentFollowUpError, DocumentFollowUpService, readDocumentChecklistWork, resolveDocumentDecisionSource, resolveDocumentFollowUpComment, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
@@ -1804,6 +1804,13 @@ export function createApp(options: {
       onLinked: (issue, document) => { activity(req, 'issue', issue.id, '문서 결정 근거 연결', document.title); },
     });
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.get('/api/documents/:id/checklist-work', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const version = req.query.expectedDocumentVersion;
+    if (Object.keys(req.query).length !== 1 || typeof version !== 'string' || !/^[1-9][0-9]{0,15}$/.test(version)
+      || !Number.isSafeInteger(Number(version))) return fail('체크리스트 업무를 확인할 문서 버전을 보내 주세요.');
+    res.json(readDocumentChecklistWork(store, String(req.params.id), Number(version)));
   });
   app.post('/api/issues/:id/project-move/preview', (req, res) => {
     res.set('Cache-Control', 'no-store').json(issueProjectMove.preview(req.params.id, actor(req), req.body));

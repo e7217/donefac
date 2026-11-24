@@ -9,26 +9,40 @@ import {
   MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
-import { documentSelectionText } from '../shared/document-selection.js';
+import { documentChecklistItemSelection, documentSelectionText } from '../shared/document-selection.js';
 import type { DocPage,Issue,RichContent,SavedView } from '../shared/types.js';
 import type { Store } from './store.js';
 import { includeRevisionOwner } from './document-include-revisions.js';
 
 export { MAX_DOCUMENT_BYTES };
 const schema=createEditorSchema();
-const selectionDocuments = new WeakMap<RichContent, ReturnType<typeof schema.nodeFromJSON>>();
+type SelectionDocument = ReturnType<typeof schema.nodeFromJSON>;
+const selectionDocuments = new WeakMap<RichContent, SelectionDocument>();
 
-export function readDocumentSelection(content: RichContent, from: number, to: number): string | null {
+function readSelectionDocument<Result>(content: RichContent, read: (document: SelectionDocument) => Result | null): Result | null {
   try {
     let document = selectionDocuments.get(content);
     if (!document) {
       document = schema.nodeFromJSON(content);
       selectionDocuments.set(content, document);
     }
-    return document.type === schema.topNodeType ? documentSelectionText(document, from, to) : null;
+    return document.type === schema.topNodeType ? read(document) : null;
   } catch {
     return null;
   }
+}
+
+export function readDocumentSelection(content: RichContent, from: number, to: number): string | null {
+  return readSelectionDocument(content, document => documentSelectionText(document, from, to));
+}
+
+export function readDocumentChecklistItem(content: RichContent, from: number) {
+  return readSelectionDocument(content, document => {
+    const position = from - 2;
+    if (!Number.isSafeInteger(position) || position < 0 || position >= document.content.size) return null;
+    const item = document.nodeAt(position);
+    return item ? documentChecklistItemSelection(document, item, position) : null;
+  });
 }
 
 export class DocumentContentError extends Error{constructor(public status:number,message:string,public code='INVALID_SCHEMA'){super(message);}}

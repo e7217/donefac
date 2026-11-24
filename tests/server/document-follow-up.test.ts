@@ -9,9 +9,10 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
+import { createEditorSchema } from '../../shared/editor-schema.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Comment, DocPage, DocRevision, DocumentCommentReplyResult, DocumentSelectionCommentResult,
+import type { ApiKeyCreated, Comment, DocPage, DocRevision, DocumentChecklistWork, DocumentCommentReplyResult, DocumentSelectionCommentResult,
   DocumentSourceSelection, Issue, Project, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -68,7 +69,7 @@ async function fixture(t: TestContext) {
     const { token } = await call<ApiKeyCreated>('/api-keys', 'POST', { name: '후속 업무 회귀 검사용 키', access, projectIds }, 201, { 'X-Actor-Id': owner });
     return { Authorization: `Bearer ${token}`, 'X-Actor-Id': 'user-jun' };
   }
-  return { call, directory, restart, key };
+  return { call, directory, restart, key, get base() { return service.base; } };
 }
 
 function followUp(document: DocPage, target: string, title: string): FollowUpInput {
@@ -100,6 +101,89 @@ async function sentenceComment(call: Awaited<ReturnType<typeof fixture>>['call']
   assert.ok(comment.documentSource);
   return { comment, source: comment.documentSource };
 }
+
+test('checklist work reads exact current item evidence and skips historical, partial and archived links', async t => {
+  const { call, directory, key, base } = await fixture(t);
+  const text = '같은 체크리스트 🔎';
+  const paragraph = (value = text): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text: value }] });
+  const item = (...children: RichContent[]): RichContent => ({
+    type: 'taskItem', attrs: { checked: false }, content: [paragraph(), ...children],
+  });
+  const list = (...children: RichContent[]): RichContent => ({ type: 'taskList', content: children });
+  const body: RichContent = { type: 'doc', content: [paragraph(), list(item(paragraph()), item(list(item())))] };
+  const document = await call<DocPage>('/documents', 'POST', { projectId, title: '체크리스트 근거 검증', content: body }, 201);
+
+  const ranges: DocumentSourceSelection[] = [];
+  createEditorSchema().nodeFromJSON(document.content).descendants((node, pos) => {
+    if (node.isText && node.text === text) ranges.push({ from: pos, to: pos + text.length, text });
+  });
+  const [regular, first, notes, second, nested] = ranges;
+  assert.equal(ranges.length, 5);
+  const path = (version: number) => `/documents/${document.id}/checklist-work?expectedDocumentVersion=${version}`;
+  const currentPath = path(document.version);
+  const pinned = async (selection: DocumentSourceSelection, title: string, doc = document) => call<Created>(pathFor(doc.id), 'POST', {
+    ...followUp(doc, projectId, title), sourceSelection: selection,
+  }, 201);
+  const row = ({ issue, link }: Created, sourceSelection: DocumentSourceSelection) => ({
+    linkId: link.id, issueId: issue.id, sourceSelection,
+  });
+
+  const child = await pinned(nested, '중첩 항목 업무');
+  const sibling = await pinned(second, '같은 문구의 두 번째 항목 업무');
+  const firstItem = await pinned(first, '같은 문구의 첫 번째 항목 업무');
+  for (const [title, selection] of [['같은 문구의 일반 문단', regular], ['같은 문구의 항목 메모', notes],
+    ['항목의 일부만 선택', { from: first.from, to: first.to - 3, text: text.slice(0, -3) }]] as const) {
+    await pinned(selection, title);
+  }
+  await call(pathFor(document.id), 'POST', followUp(document, projectId, '문서 전체 후속 업무'), 201);
+  const expected = [row(firstItem, first), row(sibling, second), row(child, nested)];
+  const revisionsPath = `/documents/${document.id}/revisions`;
+  const before = await call<DocRevision[]>(revisionsPath);
+  const response = await fetch(base + currentPath);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  assert.deepEqual(await response.json(), { documentId: document.id, documentVersion: document.version, links: expected });
+  assert.deepEqual(await call<DocRevision[]>(revisionsPath), before);
+
+  const plainPath = currentPath.split('?')[0];
+  for (const query of ['', '?expectedDocumentVersion=0', '?expectedDocumentVersion=1.0',
+    '?expectedDocumentVersion=9007199254740992', '?expectedDocumentVersion=1&expectedDocumentVersion=1', '?other=1']) {
+    await call(plainPath + query, 'GET', undefined, 400);
+  }
+  await call('/documents/missing/checklist-work?expectedDocumentVersion=1', 'GET', undefined, 404);
+  await call(`/v1${currentPath}`, 'GET', undefined, 403, await key([projectId], 'read'));
+
+  const revisionId = firstItem.link.documentSource?.revisionId;
+  assert.ok(revisionId);
+  const revision = before.find(value => value.id === revisionId);
+  assert.ok(revision);
+  const db = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    const update = db.prepare('UPDATE revisions SET json=? WHERE id=?');
+    for (const mismatched of [{ ...revision, title: '다른 개정 제목' }, { ...revision, confluenceSourceVersion: 1 },
+      { ...revision, content: { ...revision.content, content: [...(revision.content.content ?? []), paragraph('문서 끝의 변경')] } }]) {
+      update.run(JSON.stringify(mismatched), revisionId);
+      assert.deepEqual((await call<DocumentChecklistWork>(currentPath)).links, []);
+    }
+    update.run(JSON.stringify(revision), revisionId);
+  } finally {
+    db.close();
+  }
+
+  const archived = await call<{ trashEntryId: string }>(`/issues/${sibling.issue.id}`, 'DELETE');
+  assert.deepEqual((await call<DocumentChecklistWork>(currentPath)).links, [expected[0], expected[2]]);
+  await call(`/trash/${archived.trashEntryId}/restore`, 'POST', {});
+  assert.deepEqual((await call<DocumentChecklistWork>(currentPath)).links, expected);
+
+  const renamed = await call<DocPage>(`/documents/${document.id}`, 'PATCH', { expectedVersion: document.version, title: '임시 제목' });
+  const latest = await call<DocPage>(`/documents/${document.id}`, 'PATCH', { expectedVersion: renamed.version, title: document.title });
+  assert.deepEqual(latest.content, document.content);
+  const stale = await call<{ details: { currentVersion: number } }>(currentPath, 'GET', undefined, 409);
+  assert.equal(stale.details.currentVersion, latest.version);
+  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, []);
+  const newItem = await pinned(second, '현재 버전에서 다시 고른 항목 업무', latest);
+  assert.deepEqual((await call<DocumentChecklistWork>(path(latest.version))).links, [row(newItem, second)]);
+});
 
 test('project documents enforce their project and common documents link to the explicit target without changing the document', async t => {
   const { call, key } = await fixture(t);

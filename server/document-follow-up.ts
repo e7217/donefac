@@ -1,10 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DOCUMENT_SELECTION_TEXT_LIMIT } from '../shared/document-selection.js';
 import type {
-  Comment, DocPage, DocRevision, DocumentDecisionSource, DocumentFollowUpCommentSource, DocumentFollowUpResult, DocumentIssueLinkResult,
+  Comment, DocPage, DocRevision, DocumentChecklistWork, DocumentDecisionSource, DocumentFollowUpCommentSource, DocumentFollowUpResult, DocumentIssueLinkResult,
   DocumentSourceSelection, Issue, ResourceLink,
 } from '../shared/types.js';
-import { readDocumentSelection } from './document-content.js';
+import { readDocumentChecklistItem, readDocumentSelection } from './document-content.js';
 import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
@@ -25,7 +25,7 @@ type DecisionLinkReceipt = Receipt & { revisionId: string };
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 
 export class DocumentFollowUpError extends Error {
-  constructor(public status: number, message: string, public details?: { reason: 'source_selection_changed' | 'decision_source_exists' }) { super(message); }
+  constructor(public status: number, message: string, public details?: { reason: 'source_selection_changed' | 'decision_source_exists' } | { currentVersion: number }) { super(message); }
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -98,6 +98,37 @@ function parseDecisionLink(body: unknown) {
 
 function sameSelection(a: DocumentSourceSelection, b: DocumentSourceSelection): boolean {
   return a.from === b.from && a.to === b.to && a.text === b.text;
+}
+
+export function readDocumentChecklistWork(store: Store, documentId: string, expectedVersion: number): DocumentChecklistWork {
+  const row = store.db.prepare(`SELECT d.json AS document, CASE WHEN json_extract(d.json,'$.version')=? THEN (
+    SELECT json_group_array(json_object('linkId',l.id,'issueId',l.issue_id,'source',json_extract(l.json,'$.documentSource')))
+    FROM resource_links l JOIN issues i ON i.id=l.issue_id
+    JOIN revisions r ON r.id=json_extract(l.json,'$.documentSource.revisionId') AND r.document_id=d.id
+    WHERE l.document_id=d.id AND json_extract(r.json,'$.documentId')=d.id AND json_extract(r.json,'$.id')=r.id
+      AND json_extract(r.json,'$.version')=json_extract(d.json,'$.version')
+      AND json_extract(r.json,'$.title')=json_extract(d.json,'$.title')
+      AND json_extract(r.json,'$.content')=json_extract(d.json,'$.content')
+      AND json_type(r.json,'$.confluenceSourceVersion') IS NULL
+  ) END AS candidates FROM documents d WHERE d.id=?`).get(expectedVersion, documentId) as
+    { document: string; candidates: string | null } | undefined;
+  if (!row) throw new DocumentFollowUpError(404, '문서를 찾을 수 없습니다.');
+  const document = JSON.parse(row.document) as DocPage;
+  if (document.version !== expectedVersion) {
+    throw new DocumentFollowUpError(409, '다른 작업자가 변경했습니다. 새로고침 후 다시 시도해 주세요.', { currentVersion: document.version });
+  }
+
+  const items = new Map<number, DocumentSourceSelection | null>();
+  const links: DocumentChecklistWork['links'] = [];
+  const candidates = JSON.parse(row.candidates ?? '[]') as { linkId: string; issueId: string; source: unknown }[];
+  for (const { linkId, issueId, source } of candidates) {
+    if (!record(source) || Object.keys(source).length !== 4 || !isSourceId(source.revisionId) || !validSelection(source)) continue;
+    if (!items.has(source.from)) items.set(source.from, readDocumentChecklistItem(document.content, source.from));
+    const item = items.get(source.from);
+    if (item && sameSelection(item, source)) links.push({ linkId, issueId, sourceSelection: item });
+  }
+  links.sort((a, b) => a.sourceSelection.from - b.sourceSelection.from || a.linkId.localeCompare(b.linkId));
+  return { documentId, documentVersion: document.version, links };
 }
 
 function requestFingerprint(version: number, issue: IssueInput, source?: DocumentSourceSelection | { sourceComment: DocumentFollowUpCommentSource }): string {

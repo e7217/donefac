@@ -25,6 +25,7 @@ import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, dec
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
+import { useDocumentChecklistWork } from './document-checklist-work';
 import { AtlassianLinks } from './AtlassianLinks';
 import { DocumentHistory } from './DocumentHistory';
 import { DocumentLabels } from './DocumentLabels';
@@ -225,6 +226,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sideTab, setSideTab] = useState<SideTab>('comments');
+  const linksTab = useRef<HTMLButtonElement>(null);
   const [comments, setComments] = useState<Comment[]>([]);
   const commentEditing = useCommentEditing({ actorId, resourceId: draft?.id, notify, refresh, onSaved: saved => {
     setComments(previous => previous.map(item => mergeCommentUpdate(item, saved)));
@@ -365,6 +367,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     });
   }, []);
   const [referencesRefreshing, setReferencesRefreshing] = useState(false);
+  const [checklistReload, setChecklistReload] = useState(0);
   const [, forceToolbar] = useState(0);
   const [session, setSession] = useState<CollaborationSession | null>(null);
   const sessionRef = useRef<CollaborationSession | null>(null);
@@ -1428,7 +1431,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function refreshReferences() {
     if (referencesRefreshing) return; setReferencesRefreshing(true);
-    try { await refresh(); notify('참조, 포함 원본, 업무 현황과 문서 목록을 새로 불러왔습니다.', 'success'); }
+    try {
+      await refresh();
+      setChecklistReload(version => version + 1);
+      notify('참조, 포함 원본, 업무 현황과 문서 목록을 새로 불러왔습니다.', 'success');
+    }
     catch (cause) { notify(cause instanceof Error ? cause.message : '참조를 새로 불러오지 못했습니다.', 'error'); }
     finally { setReferencesRefreshing(false); }
   }
@@ -1623,6 +1630,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     selectionUnavailable = '최신 저장본을 확인한 뒤 본문을 선택해 주세요.';
   }
   const selectionIssueUnavailable = data.projects.length ? null : '업무를 연결할 프로젝트가 없습니다.';
+  const checklistWork = useDocumentChecklistWork(!selectionUnavailable && !checklistReselecting ? selectionDocument ?? null : null,
+    data.resourceLinks, { actorId, restoreGeneration: data.restoreGeneration, reload: checklistReload });
+  function showChecklistDocumentLinks() {
+    setSideTab('links');
+    setSidebarOpen(true);
+    requestAnimationFrame(() => linksTab.current?.focus({ preventScroll: true }));
+  }
   function openFollowUp(page: DocPage, opener: HTMLButtonElement, sourceSelection?: DocumentSourceSelection) {
     documentActionOpener.current = opener;
     setDocumentAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
@@ -1888,6 +1902,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}
                   onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }}
                   onCreateChecklist={openChecklistFollowUp} checklistReselecting={checklistReselecting}
+                  checklistWork={checklistWork.links ? { links: checklistWork.links, data, openIssue } : undefined}
+                  onShowDocumentLinks={checklistWork.hasPinnedLinks ? showChecklistDocumentLinks : undefined}
                   onCancelChecklistReselect={cancelChecklistReselect} />
               </div>
               {!checklistReselecting && findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
@@ -1941,7 +1957,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         </main>
 
         {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보" inert={checklistReselecting}
-          style={checklistReselecting ? { display: 'none' } : undefined}><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
+          style={checklistReselecting ? { display: 'none' } : undefined}><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} ref={tab.id === 'links' ? linksTab : undefined} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
             {sideTab === 'comments' && <>
