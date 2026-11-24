@@ -14,6 +14,8 @@ import { countActiveMyWork } from '../shared/my-work';
 import { isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { normalizeDocumentLabelKey } from '../shared/document-labels';
+import { appendDocumentPublicationCriteria, defaultDocumentPublicationCriteria, readDocumentPublicationCriteria,
+  sameDocumentPublicationCriteria, type DocumentPublicationCriteria, type DocumentPublicationReturnTarget } from '../shared/document-publication-route';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput, searchQuickDocuments, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
@@ -78,7 +80,7 @@ type WorkspaceRoute = {
   blockerScope?: DeliveryBlockerDraftScope | null;
   decisionFollowUpScope?: DecisionFollowUpScope | null;
   fieldBreakdownScope?: FieldBreakdownScope | null;
-  publicationTab?: DocumentPublicationListTab; publication?: DocumentPublicationTarget | null;
+  publicationTab?: DocumentPublicationListTab; publicationCriteria?: DocumentPublicationCriteria; publication?: DocumentPublicationTarget | null;
   sectionId?: string | null;
   documentCommentId?: string | null;
   documentLabel?: string | null;
@@ -95,6 +97,15 @@ type WorkspaceCommentFocus = {
   commentId: string;
   activation: number;
 };
+type PublicationHistoryFocus = { hash: string; index: number; actorId: string; target: DocumentPublicationReturnTarget };
+
+function publicationHistoryFocus(value: unknown, hash: string, index: number): PublicationHistoryFocus | null {
+  if (!value || typeof value !== 'object') return null;
+  const { hash: storedHash, index: storedIndex, actorId, target } = value as Partial<PublicationHistoryFocus>;
+  if (storedHash !== hash || storedIndex !== index || !isRelationId(actorId) || !target ||
+      !isRelationId(target.documentId) || !isRelationId(target.revisionId) || (target.kind !== 'review' && target.kind !== 'published')) return null;
+  return { hash, index, actorId, target };
+}
 const ganttRevisionScope = { query: 'ganttSince', header: 'X-Teamspace-Gantt-Revision' } as const;
 const refreshScopes = {
   issues: ganttRevisionScope,
@@ -141,6 +152,9 @@ function routeHash(route: WorkspaceRoute) {
   if (route.issueId) query.set('issue', route.issueId);
   if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
   if (route.view === 'development' && route.gitlabActivityFilters) appendGitlabActivityFilters(query, route.gitlabActivityFilters);
+  if (route.view === 'publication' && route.publicationCriteria) {
+    appendDocumentPublicationCriteria(query, route.publicationCriteria, route.publicationTab ?? 'assigned', route.projectId);
+  }
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'gantt' && !teamGantt && route.ganttMilestoneId) query.set('milestone', route.ganttMilestoneId);
   if (route.view === 'reports' && route.blockerScope) {
@@ -187,6 +201,12 @@ function routeHash(route: WorkspaceRoute) {
   if (route.view === 'search' && route.searchFilters) appendWorkspaceSearchFilters(query, route.searchFilters);
   if (route.issueId && route.documentPreviewId) query.set('documentPreview', route.documentPreviewId);
   return `#/${encodeURIComponent(route.projectId)}/${route.view}${detail ? '/' + encodeURIComponent(detail) : ''}${query.size ? '?' + query.toString() : ''}`;
+}
+function isPublicationPageClamp(previous: WorkspaceRoute | null, next: WorkspaceRoute): boolean {
+  if (previous?.view !== 'publication' || next.view !== 'publication' || previous.issueId || next.issueId ||
+      previous.projectId !== next.projectId || previous.publicationTab !== next.publicationTab) return false;
+  const before = previous.publicationCriteria, after = next.publicationCriteria;
+  return Boolean(before && after && after.offset < before.offset && sameDocumentPublicationCriteria({ ...before, offset: after.offset }, after));
 }
 function hasSameDocumentContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'documents' && next.view === 'documents' && previous.documentId !== null &&
@@ -368,6 +388,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const savedViewId = (view === 'issues' || keepGanttContext) && (!issue || projectId === parts[0])
     ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
+  const publicationCriteria = view === 'publication' ? readDocumentPublicationCriteria(parameters, publicationTab, projectId) : undefined;
   const kind = parameters.get('publication'), revisionId = parameters.get('revision');
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
@@ -399,7 +420,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   } : undefined;
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
-    ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publication, sectionId, documentCommentId,
+    ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
     documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
     gitlabActivityFilters: view === 'development' ? readGitlabActivityFilters(parameters) : undefined };
@@ -411,6 +432,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [failure, setFailure] = useState('');
   const [projectId, setProjectId] = useState('');
   const [actorId, setActorId] = useState('');
+  const actorRef = useRef('');
   const [view, setView] = useState<View>('overview');
   const [issueId, setIssueId] = useState<string | null>(null);
   const [issueReview, setIssueReview] = useState<IssueReview | null>(null);
@@ -432,7 +454,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [issueFocusActivation, setIssueFocusActivation] = useState(0);
   const [commentFocus, setCommentFocus] = useState<WorkspaceCommentFocus | null>(null);
   const [publicationTab, setPublicationTab] = useState<DocumentPublicationListTab>('assigned');
+  const [publicationCriteria, setPublicationCriteria] = useState(() => defaultDocumentPublicationCriteria('assigned', ''));
   const [publication, setPublication] = useState<DocumentPublicationTarget | null>(null);
+  const [publicationReturnFocus, setPublicationReturnFocus] = useState<PublicationHistoryFocus | null>(null);
   const [sectionId, setSectionId] = useState<string | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [teamBoardFilters, setTeamBoardFilters] = useState(emptyTeamBoardFilters);
@@ -481,12 +505,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setData(snapshot);
     setFailure('');
     setProjectId(id => snapshot.projects.some(p => p.id === id) ? id : snapshot.projects[0]?.id || '');
-    setActorId(id => {
-      const stored = id || localStorage.getItem('teamspace.actor') || '';
-      const selected = snapshot.users.some(u => u.id === stored) ? stored : snapshot.users[0]?.id || '';
-      setActor(selected);
-      return selected;
-    });
+    const storedActor = actorRef.current || localStorage.getItem('teamspace.actor') || '';
+    const selectedActor = snapshot.users.some(user => user.id === storedActor) ? storedActor : snapshot.users[0]?.id || '';
+    if (selectedActor !== actorRef.current) {
+      publicationOpenRequest.current++;
+      setPublicationReturnFocus(null);
+    }
+    actorRef.current = selectedActor;
+    setActor(selectedActor);
+    setActorId(selectedActor);
     return true;
   }, []);
   const refresh = useCallback(async () => { applyWorkspace(await readWorkspace()); }, [applyWorkspace, readWorkspace]);
@@ -589,6 +616,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (hasDocumentIssueOverlay(route) || hasContextualIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
+    const returnFocus = route.view === 'publication' && !route.issueId && mode === 'replace' && hash === location.hash
+      ? publicationHistoryFocus(state.teamspacePublicationReturnFocus, hash, index) : null;
+    if (!returnFocus) delete state.teamspacePublicationReturnFocus;
+    const previousHash = previous ? routeHash(previous) : null;
+    const sameIndex = routeIndexRef.current === index;
+    if (!sameIndex || previousHash !== hash) {
+      publicationOpenRequest.current++;
+      // A removed last-page row can shrink the list before focus is restored.
+      const pageClamp = mode === 'replace' && sameIndex && previousHash === location.hash && isPublicationPageClamp(previous, route);
+      if (!pageClamp) setPublicationReturnFocus(previous && returnFocus?.actorId === actorRef.current ? returnFocus : null);
+    }
     if (mode === 'push') history.pushState(state, '', hash);
     else history.replaceState(state, '', hash);
     acceptedRouteRef.current = route;
@@ -616,6 +654,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setGanttFocusDate(route.ganttFocusDate ?? null);
     setGanttMilestoneId(route.ganttMilestoneId ?? null);
     setPublicationTab(route.publicationTab ?? 'assigned');
+    const nextPublicationCriteria = route.publicationCriteria ?? defaultDocumentPublicationCriteria('assigned', '');
+    setPublicationCriteria(previousCriteria => sameDocumentPublicationCriteria(previousCriteria, nextPublicationCriteria) ? previousCriteria : nextPublicationCriteria);
     setPublication(previous => previous?.kind === route.publication?.kind && previous?.revisionId === route.publication?.revisionId ? previous : route.publication ?? null);
     setSectionId(route.sectionId ?? null);
     const filters = route.teamOverviewFilters ?? emptyTeamOverviewFilters;
@@ -662,7 +702,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, [processLocation]);
   useEffect(() => { if (data) processLocation(); }, [data, processLocation]);
 
-  const requestRoute = (route: WorkspaceRoute, mode: 'push' | 'replace' = 'push', keepIssueReview = false, returnRoute?: WorkspaceRoute) => {
+  const requestRoute = useCallback((route: WorkspaceRoute, mode: 'push' | 'replace' = 'push', keepIssueReview = false, returnRoute?: WorkspaceRoute,
+    publicationReturnTarget?: DocumentPublicationReturnTarget) => {
     const snapshot = dataRef.current;
     if (!snapshot) return false;
     const next = normalizeRoute(snapshot, routeHash(route));
@@ -673,10 +714,19 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       const origin = normalizeRoute(snapshot, routeHash(returnRoute));
       if (routeHash(origin) !== routeHash(previous)) writeRoute(origin, routeIndexRef.current, 'replace');
     }
+    if (mode === 'push' && previous?.view === 'publication' && !previous.issueId && publicationReturnTarget &&
+        next.view === 'documents' && next.documentId === publicationReturnTarget.documentId &&
+        next.publication?.kind === publicationReturnTarget.kind && next.publication.revisionId === publicationReturnTarget.revisionId) {
+      const hash = routeHash(previous);
+      if (location.hash === hash) {
+        const focus: PublicationHistoryFocus = { hash, index: routeIndexRef.current, actorId: actorRef.current, target: publicationReturnTarget };
+        history.replaceState({ ...history.state, teamspacePublicationReturnFocus: focus }, '', hash);
+      }
+    }
     if (!keepIssueReview && previous?.issueId !== next.issueId) setIssueReview(null);
     writeRoute(next, routeIndexRef.current + (mode === 'push' ? 1 : 0), mode); setSidebarOpen(false);
     return true;
-  };
+  }, [writeRoute]);
   const navigate = (nextView: View, nextProject = projectId, nextDoc?: string) => {
     const sameView = nextView === view && nextProject === projectId && !(nextView === 'gantt' && ganttScope === 'team');
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
@@ -684,6 +734,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       planningId: sameView && (nextView === 'backlog' || nextView === 'planning') ? planningId : null,
       cycleQuery: sameView && nextView === 'backlog' ? cycleQuery : undefined,
       gitlabActivityFilters: sameView && nextView === 'development' ? gitlabActivityFilters : undefined,
+      publicationTab: sameView && nextView === 'publication' ? publicationTab : undefined,
+      publicationCriteria: sameView && nextView === 'publication' ? publicationCriteria : undefined,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined,
@@ -696,6 +748,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       writeRoute({ ...current, cycleQuery: nextQuery }, routeIndexRef.current, 'replace', true);
     }
   };
+  const changePublicationTab = (tab: DocumentPublicationListTab) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view === 'publication' && !current.issueId && current.publicationTab !== tab) {
+      return requestRoute({ ...current, publicationTab: tab, publicationCriteria: defaultDocumentPublicationCriteria(tab, current.projectId) });
+    }
+    return false;
+  };
+  const changePublicationCriteria = useCallback((criteria: DocumentPublicationCriteria, mode: 'push' | 'replace') => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'publication' && !current.issueId ? requestRoute({ ...current, publicationCriteria: criteria }, mode) : false;
+  }, [requestRoute]);
   const changeGitlabActivityFilters = (filters: GitlabActivityFilters, mode: 'push' | 'replace' = 'replace') => {
     const current = acceptedRouteRef.current;
     if (current?.view !== 'development' || current.issueId) return;
@@ -780,7 +843,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       ganttFocusIssueId:sameProject ? ganttFocusIssueId : null,
       ganttFocusDate:sameProject ? ganttFocusDate : null,
       ganttMilestoneId:sameProject ? ganttMilestoneId : null,
-      publicationTab, issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
+      publicationTab, publicationCriteria: view === 'publication' ? publicationCriteria : undefined,
+      issueId:id, documentPreviewId:retainedPreview, teamOverviewFilters,
     })) {
       if (capacityTrigger && sameProject && view === 'issues') {
         boardIssueOpener.current = capacityTrigger;
@@ -989,24 +1053,34 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     notify('알림의 대상이 삭제되었거나 현재 워크스페이스에 없습니다.', 'error');
     return false;
   };
-  const openPublication = async (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string) => {
+  const openPublication = async (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string, returnToLibrary = false) => {
+    const origin = acceptedRouteRef.current;
+    if (!origin || routeHash(origin) !== location.hash || (returnToLibrary && origin.view !== 'publication')) return;
     const request = ++publicationOpenRequest.current;
     const from = location.hash;
+    const index = routeIndexRef.current;
+    const actor = actorRef.current;
+    const active = () => request === publicationOpenRequest.current && index === routeIndexRef.current && from === location.hash && actor === actorRef.current;
     let document = dataRef.current?.documents.find(value => value.id === id);
     if (!document) {
-      try { await refresh(); }
+      try {
+        const read = await readWorkspace();
+        if (!active()) return;
+        applyWorkspace(read);
+      }
       catch (cause) {
-        if (request === publicationOpenRequest.current && from === location.hash) notify((cause as Error).message,'error');
+        if (active()) notify((cause as Error).message,'error');
         return;
       }
-      if (request !== publicationOpenRequest.current || from !== location.hash) return;
+      if (!active()) return;
       document = dataRef.current?.documents.find(value => value.id === id);
     }
     if (!document) {
       notify('문서가 변경되었거나 삭제되었습니다. 목록을 새로 불러와 주세요.', 'error');
       return;
     }
-    requestRoute({projectId:document.projectId || projectId,view:'documents',documentId:id,publication:{kind,revisionId},issueId:null});
+    requestRoute({projectId:document.projectId || origin.projectId,view:'documents',documentId:id,publication:{kind,revisionId},issueId:null},
+      'push', false, undefined, returnToLibrary ? { documentId: id, kind, revisionId } : undefined);
   };
   const closePublicationLink = useCallback((id: string, target: DocumentPublicationTarget) => {
     const current = acceptedRouteRef.current;
@@ -1105,8 +1179,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         <div className="actor-picker"><span className="avatar" style={{background: actor?.color}}>{actor?.name.slice(0,1)}</span><label className="sr-only" htmlFor="actor-select">작업자 선택</label><select id="actor-select" value={actorId} onChange={e => {
           if(!dispatchWorkspaceNavigation())return;
           publicationOpenRequest.current++;notificationOpenRequest.current++;
+          setPublicationReturnFocus(null);
           setIssueReview(null);
           setCommentFocus(focus => focus?.actorId === null ? focus : null);
+          actorRef.current = e.target.value;
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
@@ -1173,8 +1249,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             const current = acceptedRouteRef.current;
             if (current?.view === 'documents') requestRoute({...current, documentLabel:label});
           }}/></Suspense>}
-        {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} initialTab={publicationTab} onOpenPublication={openPublication}
-          onTabChange={tab => requestRoute({projectId,view:'publication',documentId:null,issueId:null,publicationTab:tab})}/></Suspense>}
+        {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} tab={publicationTab} criteria={publicationCriteria}
+          onTabChange={changePublicationTab} onCriteriaChange={changePublicationCriteria}
+          onOpenPublication={(id, kind, revisionId) => { void openPublication(id, kind, revisionId, true); }}
+          returnFocus={publicationReturnFocus?.actorId === actorId ? publicationReturnFocus.target : undefined}/></Suspense>}
         {view === 'development' && <Development {...props} activityFilters={gitlabActivityFilters}
           onChangeActivityFilters={changeGitlabActivityFilters} onOpenIssueForReview={openIssueForReview} />}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}

@@ -1,9 +1,8 @@
 import type { DocumentPublicationList, DocumentPublicationListItem, DocumentPublicationListTab, DocumentPublicationScope } from '../shared/types.js';
+import { DOCUMENT_PUBLICATION_MAX_OFFSET, DOCUMENT_PUBLICATION_PAGE_SIZE, DOCUMENT_PUBLICATION_QUERY_LIMIT } from '../shared/document-publication-route.js';
 import { DocumentPublicationError } from './document-publication.js';
 import type { Store } from './store.js';
 
-const PAGE_SIZE = 30;
-const MAX_OFFSET = 1_000_000;
 interface Selection { tab: DocumentPublicationListTab; scope: DocumentPublicationScope; projectId: string | null; query: string; offset: number }
 interface Row {
   documentId: string;
@@ -41,10 +40,10 @@ function parse(store: Store, value: Record<string, unknown>): Selection {
     if (!store.db.prepare('SELECT id FROM projects WHERE id=?').get(projectId)) fail(404, '문서 목록의 프로젝트를 찾을 수 없습니다.');
   } else if (suppliedProject) fail(400, '프로젝트 범위에서만 프로젝트 ID를 지정할 수 있습니다.');
   const text = value.q === undefined ? '' : value.q;
-  if (typeof text !== 'string' || text.length > 200 || /[\u0000-\u001f\u007f]/.test(text)) fail(400, '문서 제목 검색어는 200자 이하여야 합니다.');
+  if (typeof text !== 'string' || text.length > DOCUMENT_PUBLICATION_QUERY_LIMIT || /[\u0000-\u001f\u007f]/.test(text)) fail(400, '문서 제목 검색어는 200자 이하여야 합니다.');
   const rawOffset = value.offset === undefined ? 0 : value.offset;
   const offset = typeof rawOffset === 'string' && /^\d{1,7}$/.test(rawOffset) ? Number(rawOffset) : rawOffset;
-  if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > MAX_OFFSET) fail(400, '문서 목록의 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
+  if (typeof offset !== 'number' || !Number.isSafeInteger(offset) || offset < 0 || offset > DOCUMENT_PUBLICATION_MAX_OFFSET) fail(400, '문서 목록의 시작 위치는 0~1,000,000 사이의 정수여야 합니다.');
   return { tab, scope, projectId, query: text.trim().normalize('NFC').toLowerCase(), offset };
 }
 
@@ -159,7 +158,7 @@ export function listDocumentPublications(store: Store, actorId: string, query: R
     for (const raw of rows.iterate(...parameters)) {
       const row = raw as unknown as Row;
       if (selection.query && !row.title.normalize('NFC').toLowerCase().includes(selection.query)) continue;
-      if (total >= selection.offset && items.length < PAGE_SIZE) items.push(publicationItem(row));
+      if (total >= selection.offset && items.length < DOCUMENT_PUBLICATION_PAGE_SIZE) items.push(publicationItem(row));
       total++;
     }
     return { tab: selection.tab, scope: selection.scope, projectId: selection.projectId, offset: selection.offset, total, pendingAssigned: pendingCount(store, actorId), items };

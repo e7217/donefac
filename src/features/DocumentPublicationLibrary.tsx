@@ -1,7 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowUpRight, BookOpen, CheckCircle2, Inbox, RefreshCw, Search, Send } from 'lucide-react';
+import {
+  DOCUMENT_PUBLICATION_MAX_OFFSET, DOCUMENT_PUBLICATION_PAGE_SIZE as PAGE_SIZE, DOCUMENT_PUBLICATION_QUERY_LIMIT,
+  normalizeDocumentPublicationQuery, sameDocumentPublicationCriteria,
+  type DocumentPublicationCriteria, type DocumentPublicationReturnTarget,
+} from '../../shared/document-publication-route';
 import type {
   DocumentPublicationList as PublicationList,
   DocumentPublicationListItem as ListItem,
@@ -13,15 +18,19 @@ import { api } from '../lib/api';
 import './document-publication-library.css';
 
 export interface DocumentPublicationLibraryProps extends FeatureProps {
-  initialTab?: DocumentPublicationListTab;
+  tab: DocumentPublicationListTab;
+  criteria: DocumentPublicationCriteria;
+  onTabChange: (tab: DocumentPublicationListTab) => void;
+  onCriteriaChange: (criteria: DocumentPublicationCriteria, mode: 'push' | 'replace') => boolean;
   onOpenPublication: (documentId: string, kind: 'review' | 'published', revisionId: string) => void;
-  onTabChange?: (tab: DocumentPublicationListTab) => void;
+  returnFocus?: DocumentPublicationReturnTarget | null;
 }
 
-type Criteria = { scope: Scope; projectId: string; query: string; offset: number };
 type LoadedList = { result: PublicationList; query: string };
+type ListRead = { key: string; loaded: LoadedList | null } & (
+  { kind: 'loading' | 'ready' } | { kind: 'error'; message: string }
+);
 
-const PAGE_SIZE = 30;
 const TAB_LABELS: Record<DocumentPublicationListTab, string> = {
   assigned: '내 검토',
   requested: '내 요청',
@@ -50,51 +59,41 @@ const timestamp = (value: string) =>
   });
 
 export function DocumentPublicationLibrary(props: DocumentPublicationLibraryProps) {
-  const [localTab, setLocalTab] = useState<DocumentPublicationListTab>('assigned');
-  const tab = props.initialTab ?? localTab;
-  function selectTab(next: DocumentPublicationListTab) {
-    if (next === tab) return;
-    if (props.initialTab === undefined) setLocalTab(next);
-    props.onTabChange?.(next);
-  }
-  return (
-    <PublicationListView
-      key={`${props.projectId}:${props.actorId}:${tab}`}
-      {...props}
-      tab={tab}
-      selectTab={selectTab}
-    />
-  );
+  return <PublicationListView key={JSON.stringify([props.projectId, props.actorId, props.tab, props.data.restoreGeneration])} {...props} />;
 }
 
 function PublicationListView({
   data,
-  projectId,
   actorId,
   tab,
-  selectTab,
+  criteria,
+  onTabChange,
+  onCriteriaChange,
   onOpenPublication,
-}: DocumentPublicationLibraryProps & {
-  tab: DocumentPublicationListTab;
-  selectTab: (tab: DocumentPublicationListTab) => void;
-}) {
-  const currentProject = data.projects.find((project) => project.id === projectId);
-  const [criteria, setCriteria] = useState<Criteria>(() => ({
-    scope: tab === 'published' && currentProject ? 'project' : 'workspace',
-    projectId: currentProject?.id ?? data.projects[0]?.id ?? '',
-    query: '',
-    offset: 0,
-  }));
-  const [searchInput, setSearchInput] = useState('');
-  const [loaded, setLoaded] = useState<LoadedList | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const active = useRef(true);
+  returnFocus,
+}: DocumentPublicationLibraryProps) {
+  const { scope, projectId: filterProjectId, query, offset } = criteria;
+  const readKey = JSON.stringify([tab, actorId, scope, filterProjectId, query, offset]);
+  const [search, setSearch] = useState(() => ({ criteria, value: query, composing: false }));
+  if (!sameDocumentPublicationCriteria(search.criteria, criteria)) setSearch({ criteria, value: query, composing: false });
+  const [read, setRead] = useState<ListRead | null>(null);
   const request = useRef<AbortController | null>(null);
-  const sequence = useRef(0);
+  const resultHeading = useRef<HTMLHeadingElement>(null);
+  const returnButton = useRef<HTMLButtonElement>(null);
+  const consumedFocus = useRef<string | null>(null);
+  const focusKey = returnFocus ? JSON.stringify([returnFocus.documentId, returnFocus.kind, returnFocus.revisionId]) : null;
+  const loaded = read?.loaded;
   const result = loaded?.result;
-  const debouncePending = searchInput.trim() !== criteria.query;
-  const selectedProject = data.projects.find((project) => project.id === criteria.projectId);
+  const searchQuery = normalizeDocumentPublicationQuery(search.value);
+  const debouncePending = search.composing || searchQuery !== query;
+  const currentRead = read?.key === readKey ? read : null;
+  const loading = !currentRead || currentRead.kind === 'loading';
+  const error = currentRead?.kind === 'error' ? currentRead.message : '';
+  const fresh = currentRead?.kind === 'ready' && result;
+  const clampedOffset = fresh && offset > 0 && offset >= fresh.total
+    ? Math.floor(Math.max(0, fresh.total - 1) / PAGE_SIZE) * PAGE_SIZE : null;
+  const usableResult = Boolean(fresh && !debouncePending && clampedOffset === null);
+  const selectedProject = data.projects.find((project) => project.id === filterProjectId);
   const person = (id: string) =>
     data.users.find((user) => user.id === id)?.name ?? '현재 목록에 없는 팀원';
   const projectName = (id: string | null) =>
@@ -106,40 +105,39 @@ function PublicationListView({
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
-    const ownSequence = ++sequence.current;
-    setLoading(true);
-    setError('');
-    const query = new URLSearchParams({ tab, scope: criteria.scope, offset: String(criteria.offset) });
-    if (criteria.scope === 'project') query.set('projectId', criteria.projectId);
-    if (criteria.query) query.set('q', criteria.query);
+    setRead(previous => ({ key: readKey, kind: 'loading', loaded: previous?.loaded ?? null }));
+    const params = new URLSearchParams({ tab, scope, offset: String(offset) });
+    if (scope === 'project') params.set('projectId', filterProjectId);
+    if (query) params.set('q', query);
     try {
-      const response = await api<PublicationList>(`/document-publications?${query}`, {
+      const response = await api<PublicationList>(`/document-publications?${params}`, {
         signal: controller.signal,
+        cache: 'no-store',
         headers: { 'X-Actor-Id': actorId },
       });
-      if (!active.current || controller.signal.aborted || sequence.current !== ownSequence) return;
-      setLoaded({ result: response, query: criteria.query });
+      if (request.current !== controller || controller.signal.aborted) return;
+      if (response.tab !== tab || response.scope !== scope || response.offset !== offset ||
+          response.projectId !== (scope === 'project' ? filterProjectId : null) ||
+          !Number.isSafeInteger(response.total) || response.total < 0 || !Array.isArray(response.items)) {
+        throw new Error('현재 조회 조건의 문서 목록인지 확인할 수 없습니다.');
+      }
+      setRead({ key: readKey, kind: 'ready', loaded: { result: response, query } });
     } catch (cause) {
-      if (active.current && !controller.signal.aborted && sequence.current === ownSequence)
-        setError(`${messageOf(cause)} 선택한 조건과 이전 조회 결과는 유지됩니다.`);
+      if (request.current === controller && !controller.signal.aborted) {
+        setRead(previous => ({ key: readKey, kind: 'error', loaded: previous?.loaded ?? null,
+          message: `${messageOf(cause)} 선택한 조건과 이전 조회 결과는 유지됩니다.` }));
+      }
     } finally {
-      if (active.current && !controller.signal.aborted && sequence.current === ownSequence)
-        setLoading(false);
+      if (request.current === controller) request.current = null;
     }
-  }, [actorId, tab, criteria]);
+  }, [actorId, filterProjectId, offset, query, readKey, scope, tab]);
 
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-      request.current?.abort();
-    };
-  }, []);
   useEffect(() => {
     const timer = setTimeout(() => void load(), 0);
     return () => {
       clearTimeout(timer);
       request.current?.abort();
+      request.current = null;
     };
   }, [load]);
   useEffect(() => {
@@ -149,49 +147,44 @@ function PublicationListView({
     window.addEventListener('teamspace:publication-changed', changed);
     return () => window.removeEventListener('teamspace:publication-changed', changed);
   }, [load]);
+  const applySearch = useEffectEvent((key: string, requestedQuery: string) => {
+    if (key === readKey && !search.composing && requestedQuery === searchQuery && requestedQuery !== query) {
+      onCriteriaChange({ ...criteria, query: requestedQuery, offset: 0 }, 'replace');
+    }
+  });
   useEffect(() => {
-    const timer = setTimeout(() => {
-      const query = searchInput.trim();
-      setCriteria((previous) =>
-        previous.query === query ? previous : { ...previous, query, offset: 0 },
-      );
-    }, 300);
+    if (search.composing || searchQuery === query) return;
+    const timer = setTimeout(() => applySearch(readKey, searchQuery), 300);
     return () => clearTimeout(timer);
-  }, [searchInput]);
+  }, [query, readKey, search.composing, searchQuery]);
 
-  function invalidate() {
-    request.current?.abort();
-    sequence.current++;
-    setLoading(false);
-  }
+  const clampPage = useEffectEvent(() => {
+    if (clampedOffset !== null && !debouncePending) onCriteriaChange({ ...criteria, offset: clampedOffset }, 'replace');
+  });
+  useEffect(() => {
+    if (clampedOffset !== null && !debouncePending) clampPage();
+  }, [clampedOffset, debouncePending, readKey]);
 
-  function changeScope(scope: Scope) {
-    invalidate();
-    setCriteria((previous) => ({ ...previous, scope, offset: 0 }));
-  }
-
-  function changeProject(id: string) {
-    invalidate();
-    setCriteria((previous) => ({ ...previous, projectId: id, offset: 0 }));
-  }
-
-  function changeSearch(value: string) {
-    setSearchInput(value);
-  }
+  useLayoutEffect(() => {
+    if (!focusKey) { consumedFocus.current = null; return; }
+    if (!usableResult || consumedFocus.current === focusKey) return;
+    consumedFocus.current = focusKey;
+    if (document.activeElement === document.body || document.activeElement === document.documentElement) {
+      (returnButton.current ?? resultHeading.current)?.focus();
+    }
+  }, [focusKey, usableResult]);
 
   function submitSearch(event: FormEvent) {
     event.preventDefault();
-    const query = searchInput.trim();
-    if (query === criteria.query && criteria.offset === 0) void load();
-    else {
-      invalidate();
-      setCriteria((previous) => ({ ...previous, query, offset: 0 }));
-    }
+    if (search.composing) return;
+    if (searchQuery === query && offset === 0) void load();
+    else onCriteriaChange({ ...criteria, query: searchQuery, offset: 0 }, 'push');
   }
 
-  function page(offset: number) {
-    invalidate();
-    setCriteria((previous) => ({ ...previous, offset }));
+  function changePage(next: number) {
+    if (usableResult && next >= 0 && next <= DOCUMENT_PUBLICATION_MAX_OFFSET) {
+      onCriteriaChange({ ...criteria, offset: next }, 'push');
+    }
   }
 
   const resultScope =
@@ -239,7 +232,7 @@ function PublicationListView({
               }
               aria-selected={tab === value}
               aria-controls="publication-library-results"
-              onClick={() => selectTab(value)}
+              onClick={() => { if (value !== tab) onTabChange(value); }}
             >
               <Icon size={16} aria-hidden="true" />
               {TAB_LABELS[value]}
@@ -259,7 +252,7 @@ function PublicationListView({
               className="field"
               aria-label="검토·발행 조회 범위"
               value={criteria.scope}
-              onChange={(event) => changeScope(event.target.value as Scope)}
+              onChange={event => onCriteriaChange({ ...criteria, scope: event.currentTarget.value as Scope, query: searchQuery, offset: 0 }, 'push')}
             >
               <option value="workspace">전체 워크스페이스</option>
               <option value="project" disabled={!data.projects.length}>
@@ -275,7 +268,7 @@ function PublicationListView({
                 className="field"
                 aria-label="검토·발행 프로젝트"
                 value={criteria.projectId}
-                onChange={(event) => changeProject(event.target.value)}
+                onChange={event => onCriteriaChange({ ...criteria, projectId: event.currentTarget.value, query: searchQuery, offset: 0 }, 'push')}
               >
                 {criteria.projectId && !selectedProject && (
                   <option value={criteria.projectId}>현재 목록에 없는 프로젝트</option>
@@ -297,9 +290,11 @@ function PublicationListView({
               <input
                 className="field"
                 aria-label="검토·발행 문서 검색"
-                value={searchInput}
-                onChange={(event) => changeSearch(event.target.value)}
-                maxLength={200}
+                value={search.value}
+                onChange={event => setSearch({ ...search, value: event.currentTarget.value })}
+                onCompositionStart={() => setSearch({ ...search, composing: true })}
+                onCompositionEnd={event => setSearch({ ...search, value: event.currentTarget.value, composing: false })}
+                maxLength={DOCUMENT_PUBLICATION_QUERY_LIMIT}
                 placeholder="검토본·발행본 제목 검색"
                 type="search"
               />
@@ -319,7 +314,7 @@ function PublicationListView({
       >
         <div className="publication-library-result-heading">
           <div>
-            <h2>{TAB_LABELS[tab]}</h2>
+            <h2 ref={resultHeading} tabIndex={-1}>{TAB_LABELS[tab]}</h2>
             <p>{TAB_DESCRIPTIONS[tab]}</p>
           </div>
           {result && <strong>{result.total.toLocaleString('ko-KR')}개 문서</strong>}
@@ -334,7 +329,7 @@ function PublicationListView({
             <span>검토 요청과 발행 기록이 있는 문서를 조회합니다.</span>
           )}
           <span role="status" aria-live="polite">
-            {loading ? '목록을 불러오는 중…' : debouncePending ? '검색어를 반영하는 중…' : ''}
+            {loading || clampedOffset !== null ? '목록을 불러오는 중…' : debouncePending ? '검색어를 반영하는 중…' : ''}
           </span>
         </div>
         {error && (
@@ -354,6 +349,7 @@ function PublicationListView({
               {result.items.map((item) => {
                 const kind = item.status === 'published' ? 'published' : 'review';
                 const kindLabel = kind === 'published' ? '발행본' : '검토본';
+                const restoreRow = returnFocus?.documentId === item.documentId && returnFocus.kind === kind && returnFocus.revisionId === item.revision.id;
                 const reviewers = item.reviewerIds?.map(person);
                 const reviewerLabel = reviewers ? `${reviewers.slice(0, 2).join(', ')}${reviewers.length > 2 ? ` 외 ${reviewers.length - 2}명` : ''}`
                   : person(item.reviewerId);
@@ -361,9 +357,10 @@ function PublicationListView({
                   <li key={`${item.documentId}:${item.revision.id}`}>
                     <button
                       type="button"
+                      ref={restoreRow ? returnButton : undefined}
                       className="publication-library-document"
                       aria-label={`${item.revision.title} ${kindLabel} 열기`}
-                      disabled={loading || debouncePending}
+                      disabled={!usableResult}
                       onClick={() => onOpenPublication(item.documentId, kind, item.revision.id)}
                     >
                       <span className="publication-library-document-title">
@@ -399,8 +396,7 @@ function PublicationListView({
             </ul>
           </>
         ) : (
-          !loading &&
-          !error && (
+          usableResult && (
             <div className="publication-library-empty">
               <BookOpen size={30} aria-hidden="true" />
               <h3>
@@ -431,8 +427,8 @@ function PublicationListView({
               type="button"
               className="btn btn-ghost"
               aria-label="검토·발행 이전 페이지"
-              disabled={loading || debouncePending || result.offset === 0}
-              onClick={() => page(Math.max(0, result.offset - PAGE_SIZE))}
+              disabled={!usableResult || result.offset === 0}
+              onClick={() => changePage(Math.max(0, result.offset - PAGE_SIZE))}
             >
               이전
             </button>
@@ -440,8 +436,8 @@ function PublicationListView({
               type="button"
               className="btn btn-ghost"
               aria-label="검토·발행 다음 페이지"
-              disabled={loading || debouncePending || result.offset + PAGE_SIZE >= result.total}
-              onClick={() => page(result.offset + PAGE_SIZE)}
+              disabled={!usableResult || result.offset + PAGE_SIZE >= result.total || result.offset + PAGE_SIZE > DOCUMENT_PUBLICATION_MAX_OFFSET}
+              onClick={() => changePage(result.offset + PAGE_SIZE)}
             >
               다음
             </button>

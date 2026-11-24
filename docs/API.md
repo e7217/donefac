@@ -1445,6 +1445,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `offset`은 기본 0이며 한 페이지에 최대 30개를 반환한다. `total`은 현재 조건의 일치 수이고 `pendingAssigned`는 범위·탭·검색 조건과 독립적인 현재 작업자의 미처리 검토 건수다. 각 행은 문서·프로젝트·저장본 ID와 버전·고정 제목, 상태, 요청자·검토자, 상태 시각을 포함한다. 여러 검토자가 배정된 행에는 `reviewerIds`와 `approvedCount`가 포함된다. 최신 상태 시각순으로 정렬하며 같은 시각은 문서 ID 순이다. 본문과 메모는 문서별 검토·발행 경로에서 조회한다.
 
+목록 주소 `#/<projectId>/publication/<tab>`은 `scope`, `projectId`, `q`, `offset`으로 조회 조건을 보관한다. 기본 범위는 `assigned`·`requested`에서 전체, `published`에서 주소의 프로젝트다. 목록 주소의 페이지는 30건 단위로 정리하며, 대상이 줄어 페이지가 사라졌으면 남아 있는 마지막 페이지로 이동한다. 목록은 현재 선택한 작업자로 조회한다.
+
 `GET /api/document-publications/count`는 현재 작업자의 전체 `pendingAssigned`만 반환한다. 목록과 건수는 브라우저 경로에서 제공한다. 자동화 키는 문서별 `/api/v1/documents/:id/publication` 경로를 사용한다.
 
 ## 요청자의 업무 알림

@@ -1,12 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test } from '@playwright/test';
-import type { DocPage, DocumentPublicationView, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIRequestContext } from '@playwright/test';
+import type { DocPage, DocumentPublicationList, DocumentPublicationView, WorkspaceSnapshot } from '../../shared/types';
 
-test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 가리키는 버전을 확인한다', async ({ page, request }) => {
+async function publicationFixture(request: APIRequestContext) {
   const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
   const [author, reviewer] = workspace.users;
-  const project = workspace.projects[0];
-  const key = randomUUID().slice(0, 8);
   const created: DocPage[] = [];
   async function create(title: string, text: string, projectId: string | null) {
     const response = await request.post('/api/documents', {
@@ -39,6 +37,15 @@ test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 
     const submitted = await transition(document, await state(document), author.id, 'request');
     return transition(document, submitted, reviewer.id, 'publish');
   }
+  return { workspace, author, reviewer, create, state, transition, publish, async clear() {
+    for (const document of created.reverse()) await request.delete(`/api/documents/${document.id}`);
+  } };
+}
+
+test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 가리키는 버전을 확인한다', async ({ page, request }) => {
+  const { workspace, author, reviewer, create, state, transition, publish, clear } = await publicationFixture(request);
+  const project = workspace.projects[0];
+  const key = randomUUID().slice(0, 8);
 
   try {
     const published = await create(`발행 검색 ${key}`, '팀에 발행한 초기 안내', project.id);
@@ -78,7 +85,9 @@ test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 
     await expect(review).toContainText('검토 당시 안내 문구');
     await dialog.getByLabel('검토 결과 메모', { exact: true }).fill('검토 절차 설명을 보완해 주세요.');
     await dialog.getByRole('button', { name: '수정 요청 보내기', exact: true }).click();
-    await expect(dialog.getByText('검토 절차 설명을 보완해 주세요.', { exact: true })).toBeVisible();
+    const reviewState = dialog.getByRole('region', { name: '현재 검토 요청', exact: true });
+    await expect(reviewState.getByRole('heading', { name: '수정 요청됨', exact: true })).toBeVisible();
+    await expect(reviewState.getByText('검토 절차 설명을 보완해 주세요.', { exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page).toHaveURL(new RegExp(`/documents/${assigned.id}$`));
     await expect(inbox).toHaveAttribute('aria-description', '배정된 검토 0개');
@@ -126,6 +135,143 @@ test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 
     await dialog.getByRole('button', { name: '발행본 불러오기', exact: true }).click();
     await expect(frozenPublication).toContainText(secondRelease.publishedRevision!.title);
   } finally {
-    for (const document of created.reverse()) await request.delete(`/api/documents/${document.id}`);
+    await clear();
+  }
+});
+
+test('360px 검토함에서 프로젝트와 검색 페이지를 주소로 복원하고 뒤로 갈 때 같은 저장본에 초점을 준다', async ({ page, request }) => {
+  test.setTimeout(105_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { workspace, author, reviewer, create, state, transition, clear } = await publicationFixture(request);
+  const [contextProject, scopedProject] = workspace.projects;
+  const query = `검토 돌아오기 ${randomUUID().slice(0, 8)}`;
+  const title = `${query} 공통 제목`;
+  const library = page.getByRole('region', { name: '문서 검토·발행 목록', exact: true });
+  const scope = library.getByLabel('검토·발행 조회 범위', { exact: true });
+  const project = library.getByLabel('검토·발행 프로젝트', { exact: true });
+  const search = library.getByRole('searchbox', { name: '검토·발행 문서 검색', exact: true });
+  const pagination = library.getByRole('navigation', { name: '검토·발행 목록 페이지', exact: true });
+  const next = pagination.getByRole('button', { name: '검토·발행 다음 페이지', exact: true });
+  const reviewRows = library.getByRole('button', { name: `${title} 검토본 열기`, exact: true });
+  const publishedRows = library.getByRole('button', { name: `${title} 발행본 열기`, exact: true });
+  const actor = page.getByLabel('작업자 선택', { exact: true });
+  const dialog = page.getByRole('dialog', { name: '문서 검토·발행', exact: true });
+
+  async function submitFilters() {
+    await scope.selectOption('project');
+    await project.selectOption(scopedProject.id);
+    await search.fill(query);
+    await search.press('Enter');
+  }
+
+  async function expectQueue(tab: 'assigned' | 'published', offset: number) {
+    await expect(page).toHaveURL(url => {
+      const [path, raw] = url.hash.split('?');
+      const parameters = new URLSearchParams(raw);
+      return path === `#/${contextProject.id}/publication/${tab}` && parameters.get('scope') === (tab === 'assigned' ? 'project' : null) &&
+        parameters.get('projectId') === scopedProject.id && parameters.get('q') === query &&
+        parameters.get('offset') === (offset ? String(offset) : null);
+    });
+    await expect(scope).toHaveValue('project');
+    await expect(project).toHaveValue(scopedProject.id);
+    await expect(search).toHaveValue(query);
+  }
+
+  async function listAt(tab: 'assigned' | 'published', offset: number) {
+    const params = new URLSearchParams({ tab, scope: 'project', projectId: scopedProject.id, q: query, offset: String(offset) });
+    const response = await request.get(`/api/document-publications?${params}`, { headers: { 'X-Actor-Id': reviewer.id } });
+    expect(response.status(), await response.text()).toBe(200);
+    return await response.json() as DocumentPublicationList;
+  }
+
+  try {
+    const documents = new Map<string, DocPage>();
+    for (let index = 1; index <= 32; index++) {
+      const document = await create(title, `${query} 저장본 ${index}`, scopedProject.id);
+      await transition(document, await state(document), author.id, 'request');
+      documents.set(document.id, document);
+    }
+    for (const projectId of [contextProject.id, null]) {
+      const decoy = await create(title, `${query} 다른 공간의 저장본`, projectId);
+      await transition(decoy, await state(decoy), author.id, 'request');
+    }
+
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    await page.goto(`/#/${contextProject.id}/publication/assigned`);
+    await expect(library.getByRole('tab', { name: '내 검토', exact: true })).toHaveAttribute('aria-selected', 'true');
+    await submitFilters();
+    await expectQueue('assigned', 0);
+    await expect(pagination).toContainText('1–30 / 32');
+    await next.click();
+    await expectQueue('assigned', 30);
+    await expect(pagination).toContainText('31–32 / 32');
+    const queueUrl = page.url();
+    const secondPage = await listAt('assigned', 30);
+    expect(secondPage).toMatchObject({ offset: 30, total: 32, projectId: scopedProject.id });
+    expect(secondPage.items).toHaveLength(2);
+    const [otherItem, selected] = secondPage.items;
+    const row = reviewRows.nth(1);
+
+    await page.reload();
+    await expect(page).toHaveURL(queueUrl);
+    await expectQueue('assigned', 30);
+    await expect(pagination).toContainText('31–32 / 32');
+    await expect(reviewRows).toHaveCount(2);
+    await row.click();
+    const exactReview = new RegExp(`/documents/${selected.documentId}\\?publication=review&revision=${selected.revision.id}$`);
+    await expect(page).toHaveURL(exactReview);
+    await expect(dialog.getByRole('region', { name: '검토 고정본 내용', exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page).toHaveURL(exactReview);
+    await expect(dialog.getByRole('region', { name: '검토 고정본 내용', exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(queueUrl);
+    await expectQueue('assigned', 30);
+    await expect(row).toBeFocused();
+    await expect(reviewRows.first()).not.toBeFocused();
+
+    await row.press('Enter');
+    await expect(page).toHaveURL(exactReview);
+    for (const item of [selected, otherItem]) {
+      const document = documents.get(item.documentId)!;
+      const released = await transition(document, await state(document), reviewer.id, 'publish');
+      expect(released.publishedRevision?.id).toBe(item.revision.id);
+    }
+    expect((await listAt('assigned', 30)).total).toBe(30);
+    await page.goBack();
+    await expectQueue('assigned', 0);
+    await expect(pagination).toContainText('1–30 / 30');
+    await expect(library.getByRole('heading', { name: '내 검토', exact: true })).toBeFocused();
+    await expect(next).toBeDisabled();
+
+    await library.getByRole('tab', { name: '발행본', exact: true }).click();
+    await submitFilters();
+    await expectQueue('published', 0);
+    const releases = await listAt('published', 0);
+    expect(releases.items).toHaveLength(2);
+    const [published] = releases.items;
+    async function openPublishedDocument() {
+      await publishedRows.first().click();
+      await expect(page).toHaveURL(new RegExp(`/documents/${published.documentId}\\?publication=published&revision=${published.revision.id}$`));
+      await expect(dialog.getByRole('region', { name: '발행 고정본 내용', exact: true })).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(dialog).toHaveCount(0);
+    }
+    await openPublishedDocument();
+    await page.goBack();
+    await expectQueue('published', 0);
+    await expect(publishedRows.first()).toBeFocused();
+    await openPublishedDocument();
+    await actor.selectOption(author.id);
+    await expect(actor).toHaveValue(author.id);
+    await page.goBack();
+    await expectQueue('published', 0);
+    await expect(publishedRows).toHaveCount(2);
+    const focusInQueue = await publishedRows.evaluateAll(rows => new Promise(resolve => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve(rows.some(row => row === document.activeElement))));
+    }));
+    expect(focusInQueue).toBe(false);
+  } finally {
+    await clear();
   }
 });
