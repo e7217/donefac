@@ -152,6 +152,115 @@ test('360px에서 간트 날짜를 키보드로 고르고 이미 저장한 날�
   }
 });
 
+test('360px 간트에서 행에 입력한 날짜와 차트에서 고른 날짜를 함께 검토한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project] } = await workspace(request);
+  const prefix = `차트 날짜 초안 ${randomUUID()}`;
+  const date = datesNearToday();
+  const issues: Issue[] = [];
+  try {
+    const partial = await createIssue(request, issues, project.id, `${prefix} 시작일 입력`);
+    const range = await createIssue(request, issues, project.id, `${prefix} 양쪽 입력`, { startDate: date(-1), endDate: date(1) });
+    const cleared = await createIssue(request, issues, project.id, `${prefix} 저장한 날짜 비우기`, { startDate: date(2) });
+    const stored = async (issue: Issue) => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { chart, picker, day, prompt, preview, undo } = await openChart(page, project.id, prefix, date(-3));
+    const start = (issue: Issue) => chart.getByLabel(`${issue.key} 시작일`, { exact: true });
+    const end = (issue: Issue) => chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const confirmations: string[] = [];
+    page.on('dialog', dialog => { confirmations.push(dialog.message()); void dialog.dismiss(); });
+    const nextSchedulePost = (path: 'manual-preview' | 'manual-apply') => page.waitForResponse(response =>
+      new URL(response.url()).pathname === `/api/schedule/${path}` && response.request().method() === 'POST');
+
+    await start(partial).fill(date(0));
+    await start(range).fill(date(2));
+    await end(range).fill(date(4));
+    await picker(range).click();
+    await expect(prompt.getByText(`입력 중인 일정 ${date(2)} ~ ${date(4)}`, { exact: true })).toBeVisible();
+    await day(range, date(5)).tap();
+    await expect(prompt.getByRole('status')).toContainText(date(5));
+    await expect(preview).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(prompt).toHaveCount(0);
+    await expect(picker(range)).toBeFocused();
+    await expect(start(partial)).toHaveValue(date(0));
+    await expect(start(range)).toHaveValue(date(2));
+    await expect(end(range)).toHaveValue(date(4));
+    expect(await stored(range)).toMatchObject({ startDate: date(-1), endDate: date(1), version: range.version });
+
+    await start(cleared).fill('');
+    await picker(cleared).click();
+    // Clearing the only saved endpoint makes it possible to choose both dates anew.
+    await day(cleared, date(-2)).tap();
+    await expect(prompt.getByRole('status')).toContainText(date(-2));
+    await expect(preview).toHaveCount(0);
+    const clearedPreview = nextSchedulePost('manual-preview');
+    await day(cleared, date(-1)).tap();
+    const clearedResponse = await clearedPreview;
+    expect(clearedResponse.ok(), await clearedResponse.text()).toBeTruthy();
+    expect(clearedResponse.request().postDataJSON()).toEqual({ changes: [
+      { id: cleared.id, expectedVersion: cleared.version, startDate: date(-2), endDate: date(-1) },
+    ] });
+    await preview.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(start(cleared)).toHaveValue('');
+    await expect(end(cleared)).toHaveValue('');
+    expect(await stored(cleared)).toMatchObject({ startDate: date(2), endDate: null, version: cleared.version });
+
+    await picker(partial).press('Enter');
+    await expect(prompt.getByRole('status')).toContainText(`시작일 ${date(0)} 유지`);
+    await expect(day(partial, date(-1))).toBeDisabled();
+    const pending = nextSchedulePost('manual-preview');
+    await day(partial, date(3)).press('Enter');
+    const reviewed = await pending;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [
+      { id: partial.id, expectedVersion: partial.version, startDate: date(0), endDate: date(3) },
+    ] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.changes).toMatchObject([{ fromStart: null, fromEnd: null, toStart: date(0), toEnd: date(3) }]);
+    expect(await stored(partial)).toMatchObject({ startDate: null, endDate: null, version: partial.version });
+    const applying = nextSchedulePost('manual-apply');
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    const saved = await applying;
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+    expect(saved.request().postDataJSON()).toEqual({ previewId: proposal.previewId });
+    await expect.poll(() => stored(partial)).toMatchObject({ startDate: date(0), endDate: date(3), version: partial.version + 1 });
+    await expect(chart.getByRole('button', { name: `${partial.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await expect(start(range)).toHaveValue(date(2));
+    await expect(end(range)).toHaveValue(date(4));
+    await expect(start(cleared)).toHaveValue('');
+    expect(await stored(range)).toMatchObject({ startDate: date(-1), endDate: date(1), version: range.version });
+
+    await undo.click();
+    await expect.poll(() => stored(partial)).toMatchObject({ startDate: null, endDate: null, version: partial.version + 2 });
+    await expect(start(partial)).toHaveValue('');
+    await expect(end(partial)).toHaveValue('');
+    await expect(start(range)).toHaveValue(date(2));
+    await expect(end(range)).toHaveValue(date(4));
+    await expect(start(cleared)).toHaveValue('');
+
+    await picker(range).click();
+    await day(range, date(-1)).tap();
+    await day(range, date(1)).tap();
+    await expect(page.getByText('현재 일정과 같은 날짜입니다. 행에 입력한 날짜를 유지했습니다.', { exact: true })).toBeVisible();
+    await expect(preview).toHaveCount(0);
+    await expect(start(range)).toHaveValue(date(2));
+    await expect(end(range)).toHaveValue(date(4));
+
+    await picker(range).click();
+    await day(range, date(5)).tap();
+    const rangePreview = nextSchedulePost('manual-preview');
+    await day(range, date(7)).tap();
+    expect((await rangePreview).request().postDataJSON()).toEqual({ changes: [
+      { id: range.id, expectedVersion: range.version, startDate: date(5), endDate: date(7) },
+    ] });
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    await expect.poll(() => stored(range)).toMatchObject({ startDate: date(5), endDate: date(7), version: range.version + 1 });
+    await expect(chart.getByRole('button', { name: `${range.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await expect(start(cleared)).toHaveValue('');
+    expect(confirmations).toEqual([]);
+  } finally { await removeIssues(request, issues); }
+});
+
 test('360px에서 빈 날짜를 차트로 고른 뒤 최신 반대쪽 날짜를 유지하고 되돌리기 한다', async ({ page, request }) => {
   const { projects: [project], users: [, peer] } = await workspace(request);
   const title = `차트 빈 날짜 동시 변경 ${randomUUID()}`;
@@ -339,4 +448,56 @@ test('다른 탭에서 바꾼 일정은 덮어쓰지 않고 다시 선택할 때
   } finally {
     await removeIssues(request, issues);
   }
+});
+
+test('차트 날짜 검토를 새로 만들 때 직접 입력하고 고른 날짜를 함께 유지한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const { projects: [project], users: [, peer] } = await workspace(request);
+  const title = `차트 날짜 초안 동시 수정 ${randomUUID()}`;
+  const date = datesNearToday();
+  const original = { startDate: date(-2), endDate: date(2) };
+  const competing = { startDate: date(1), endDate: date(3) };
+  const proposed = { startDate: date(-1), endDate: date(5) };
+  const issues: Issue[] = [];
+  try {
+    const issue = await createIssue(request, issues, project.id, title, original);
+    const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { chart, picker, day, prompt, preview, undo } = await openChart(page, project.id, title, date(-3));
+    const start = chart.getByLabel(`${issue.key} 시작일`, { exact: true });
+    const nextPreview = () => page.waitForResponse(response =>
+      new URL(response.url()).pathname === '/api/schedule/manual-preview' && response.request().method() === 'POST');
+    await start.fill(proposed.startDate);
+    await picker(issue).press('Enter');
+    await expect(prompt.getByRole('status')).toContainText(`시작일 ${proposed.startDate} 유지`);
+
+    const changed = await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { ...competing, expectedVersion: issue.version },
+    });
+    expect(changed.ok(), await changed.text()).toBeTruthy();
+    const latest = await changed.json() as Issue;
+    const stale = nextPreview();
+    await day(issue, proposed.endDate).tap();
+    expect((await stale).status()).toBe(409);
+    await expect(preview.getByRole('alert')).toBeVisible();
+    const apply = preview.getByRole('button', { name: '변경 적용', exact: true });
+    await expect(apply).toBeDisabled();
+    await expect(start).toHaveValue(proposed.startDate);
+    expect(await stored()).toMatchObject({ ...competing, version: latest.version });
+
+    const retry = nextPreview();
+    await preview.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const reviewed = await retry;
+    expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{ id: issue.id, expectedVersion: latest.version, ...proposed }] });
+    const proposal = await reviewed.json() as SchedulePreview;
+    expect(proposal.changes).toMatchObject([{
+      fromStart: competing.startDate, fromEnd: competing.endDate, toStart: proposed.startDate, toEnd: proposed.endDate,
+    }]);
+    await apply.click();
+    await expect.poll(stored).toMatchObject({ ...proposed, version: latest.version + 1 });
+    await expect(chart.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await undo.click();
+    await expect.poll(stored).toMatchObject({ ...competing, version: latest.version + 2 });
+    await expect(start).toHaveValue(competing.startDate);
+  } finally { await removeIssues(request, issues); }
 });

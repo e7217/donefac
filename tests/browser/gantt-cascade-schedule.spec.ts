@@ -20,7 +20,7 @@ function nextWorkweek() {
   };
 }
 
-async function makeCascade(request: APIRequestContext, created: Issue[]) {
+async function makeCascade(request: APIRequestContext, created: Issue[], { showUnrelatedInAnchorSearch = false } = {}) {
   const { projects: [project] } = await workspace(request);
   const date = nextWorkweek();
   const prefix = `간트 후행 ${randomUUID()}`;
@@ -34,7 +34,7 @@ async function makeCascade(request: APIRequestContext, created: Issue[]) {
   const anchor = await issue('기준 업무', [date(0), date(1)]);
   const successor = await issue('직접 후행 업무', [date(2), date(3)]);
   const last = await issue('두 번째 후행 업무', [date(4), date(4)]);
-  const unrelated = await issue('연결 없는 업무', [date(1), date(2)]);
+  const unrelated = await issue(showUnrelatedInAnchorSearch ? '기준 업무와 연결 없는 업무' : '연결 없는 업무', [date(1), date(2)]);
   for (const [from, to] of [[anchor, successor], [successor, last]]) {
     const link = await request.post('/api/dependencies', {
       data: { predecessorId: from.id, successorId: to.id, type: 'FS', lagDays: 0 },
@@ -322,6 +322,62 @@ test('360px 막대 조정에서 잃어버린 적용 응답을 확인하고 중�
     await payload(undone);
     expect(await stored()).toEqual(expectedDates(created, original, 2));
     expect(scheduleRequests).toEqual(['/api/schedule/manual-preview', '/api/schedule/auto-preview', '/api/schedule/auto-apply', '/api/schedule/undo']);
+  } finally { await removeIssues(request, created); }
+});
+
+test('차트에서 완성한 날짜를 숨은 후행 일정과 저장하면 해당 행의 초안만 정리한다', async ({ page, request }) => {
+  test.setTimeout(60_000);
+  const created: Issue[] = [];
+  try {
+    const { date, anchor, successor, last, unrelated } = await makeCascade(request, created, { showUnrelatedInAnchorSearch: true });
+    const original: Dates[] = [[date(0), date(1)], [date(2), date(3)], [date(4), date(4)]];
+    const proposed: Dates[] = [[date(1), date(3)], [date(4), date(7)], [date(8), date(8)]];
+    const stored = storedDates(request, created);
+    const { chart, modal, undo } = await openChart(page, anchor, [successor, last], date(-1));
+    const anchorStart = chart.getByLabel(`${anchor.key} 시작일`, { exact: true });
+    const anchorEnd = chart.getByLabel(`${anchor.key} 종료일`, { exact: true });
+    const unrelatedEnd = chart.getByLabel(`${unrelated.key} 종료일`, { exact: true });
+    const saveDate = (issue: Issue) => chart.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true });
+    const preview = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const posts = trackScheduleRequests(page);
+
+    await unrelatedEnd.fill(date(4));
+    await anchorStart.fill(date(1));
+    await chart.getByRole('button', { name: `${anchor.key} 차트에서 날짜 선택`, exact: true }).press('Enter');
+    const manualPreview = responseAt(page, 'manual-preview');
+    await chart.getByRole('button', { name: `${anchor.key} ${date(3)} 선택`, exact: true }).click();
+    const manual = await manualPreview;
+    expect(manual.request().postDataJSON()).toEqual({ changes: [
+      { id: anchor.id, expectedVersion: anchor.version, startDate: date(1), endDate: date(3) },
+    ] });
+    await payload<SchedulePreview>(manual);
+
+    const calculation = responseAt(page, 'auto-preview');
+    await preview.getByRole('button', { name: '후행 일정 검토', exact: true }).click();
+    const proposal = await payload<AutomaticSchedulePreview>(await calculation);
+    expect(proposal.blocking).toEqual([]);
+    expect(changesOf(proposal.changes)).toEqual(expectedChanges(created, proposed));
+    expect(await stored()).toEqual(expectedDates(created, [], 0));
+
+    const appliedResponse = responseAt(page, 'auto-apply');
+    await modal.getByRole('button', { name: '함께 적용', exact: true }).click();
+    const applied = await payload<ApplyResult>(await appliedResponse);
+    expect(applied.updated.map(issue => issue.id)).toEqual([anchor.id, successor.id, last.id]);
+    expect(await stored()).toEqual(expectedDates(created, proposed, 1));
+    await expect(modal).toHaveCount(0);
+    await expect(preview).toHaveCount(0);
+    await expect(anchorStart).toHaveValue(date(1));
+    await expect(anchorEnd).toHaveValue(date(3));
+    await expect(saveDate(anchor)).toHaveCount(0);
+    await expect(saveDate(unrelated)).toBeVisible();
+    await expect(unrelatedEnd).toHaveValue(date(4));
+
+    await undo.click();
+    await expect.poll(stored).toEqual(expectedDates(created, original, 2));
+    await expect(anchorStart).toHaveValue(date(0));
+    await expect(anchorEnd).toHaveValue(date(1));
+    await expect(unrelatedEnd).toHaveValue(date(4));
+    expect(posts).toEqual(['/api/schedule/manual-preview', '/api/schedule/auto-preview', '/api/schedule/auto-apply', '/api/schedule/undo']);
   } finally { await removeIssues(request, created); }
 });
 

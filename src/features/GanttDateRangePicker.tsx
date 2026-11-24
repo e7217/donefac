@@ -10,21 +10,23 @@ type DateRangePromptProps = {
   issueKey: string;
   issueTitle: string;
   fixedEdge?: FixedDateEdge;
+  fixedFromDraft: boolean;
+  hasDraft: boolean;
   currentRange?: { start: string; end: string };
   firstDate: string | null;
   onReset: () => void;
   onCancel: () => void;
 };
 
-export function GanttDateRangePrompt({ issueKey, issueTitle, fixedEdge, currentRange, firstDate, onReset, onCancel }: DateRangePromptProps) {
+export function GanttDateRangePrompt({ issueKey, issueTitle, fixedEdge, fixedFromDraft, hasDraft, currentRange, firstDate, onReset, onCancel }: DateRangePromptProps) {
   const nextDate = fixedEdge ? fixedEdge.kind === 'end' ? '시작일' : '종료일' : firstDate ? '나머지 날짜' : '첫 날짜';
   return (
     <section className="gantt-date-range-prompt" aria-label="차트 날짜 선택">
       <div className="gantt-date-range-instructions">
         <strong>{issueKey} · {issueTitle}</strong>
-        {currentRange && <p>현재 일정 {currentRange.start} ~ {currentRange.end}</p>}
+        {currentRange && <p>{hasDraft ? '입력 중인 일정' : '현재 일정'} {currentRange.start} ~ {currentRange.end}</p>}
         <p role="status" aria-atomic="true">
-          {fixedEdge ? <>{fixedEdge.kind === 'start' ? '시작일' : '종료일'} {fixedEdge.date} 유지 · </>
+          {fixedEdge ? <>{fixedFromDraft && '입력한 '}{fixedEdge.kind === 'start' ? '시작일' : '종료일'} {fixedEdge.date} 유지 · </>
             : firstDate && <>첫 날짜 {firstDate} · </>}
           차트에서 {nextDate}{fixedEdge ? '을' : '를'} 선택하세요.
           {!fixedEdge && firstDate && ' 하루 일정은 같은 날짜를 고르세요.'}

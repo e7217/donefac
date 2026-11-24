@@ -80,7 +80,7 @@ type ManualReview = {
   preview: SchedulePreview;
   inline?: InlineScheduleOrigin & InlineDateValues;
   inlineDates?: InlineDateDraft[];
-  chartEdge?: InlineDateValues;
+  chartDates?: InlineDateValues & { pickedEdge?: ScheduleDependencyEndpoint; draft?: ChartDateDraft };
 };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
 type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
@@ -88,10 +88,10 @@ type ShiftMode = 'selection' | 'hierarchy';
 function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
   return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
 }
-function inlineDateChange(draft: InlineDateValues, issue = draft.source): ScheduleAnchorChange {
+function inlineDateChange(draft: InlineDateValues, issue = draft.source, picked?: ScheduleDependencyEndpoint): ScheduleAnchorChange {
   return { id: issue.id, expectedVersion: issue.version,
-    startDate: draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
-    endDate: draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
+    startDate: picked !== 'startDate' && draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
+    endDate: picked !== 'endDate' && draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
 }
 function changedInlineDates(draft?: InlineDateValues): ScheduleBulkDateChanges {
   if (!draft) return {};
@@ -150,7 +150,16 @@ type DependencyEditor = {
   opener: HTMLButtonElement;
 };
 type LinkPick = { issueId: string; endpoint: GanttLinkEndpoint; explicit: boolean };
-type DateRangePick = { issue: Issue; fixedEdge?: FixedDateEdge; firstDate: string | null; initialDay: number; opener: HTMLButtonElement };
+type DateRangePick = {
+  issue: Issue;
+  dates: Pick<Issue, 'startDate' | 'endDate'>;
+  draft?: ChartDateDraft;
+  fixedEdge?: FixedDateEdge;
+  fixedFromDraft: boolean;
+  firstDate: string | null;
+  initialDay: number;
+  opener: HTMLButtonElement;
+};
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
 type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement } | { kind: 'preview' } |
@@ -239,7 +248,7 @@ function focusDateFromControl(control: HTMLButtonElement, issue: Issue, edge: 's
   focusGanttDate(control.closest('.gantt-feature'), issue.id, edge);
 }
 
-function getFixedDateEdge({ startDate, endDate }: Issue): FixedDateEdge | undefined {
+function getFixedDateEdge({ startDate, endDate }: Partial<Pick<Issue, 'startDate' | 'endDate'>>): FixedDateEdge | undefined {
   if (startDate && !endDate) return { kind: 'start', date: startDate };
   if (endDate && !startDate) return { kind: 'end', date: endDate };
 }
@@ -802,12 +811,11 @@ function ProjectGantt(props: GanttProps) {
     const savedSource = result.updated.find(issue => issue.id === source.id);
     const accept = origin.kind === 'inline' ? origin.accept : origin.kind === 'preview' && manualReview?.inline?.issueId === source.id
       ? manualReview.inline.accept : undefined;
-    if (savedSource) accept?.(savedSource);
-    else if (accept && unchangedSource) {
-      const original = origin.kind === 'inline' ? origin.source : data.issues.find(issue => issue.id === source.id);
-      if (original) accept({ ...original, ...unchangedSource });
-    }
+    const original = origin.kind === 'inline' ? origin.source : data.issues.find(issue => issue.id === source.id);
+    const confirmedSource = savedSource ?? (original && unchangedSource ? { ...original, ...unchangedSource } : undefined);
+    if (confirmedSource) accept?.(confirmedSource);
     if (origin.kind === 'preview') {
+      if (manualReview && confirmedSource) settlePickedDateDraft(manualReview, [confirmedSource]);
       setManualReview(null);
       setManualProblem(null);
     }
@@ -1575,6 +1583,17 @@ function ProjectGantt(props: GanttProps) {
       if (issue) draft.accept(issue);
     }
   }
+  function settlePickedDateDraft(review: ManualReview, updated: readonly Issue[]) {
+    const draft = review.chartDates?.draft;
+    if (!draft?.stored || retainedDates.current.get(draft.source.id) !== draft.stored || !('changes' in review.input)) return;
+    const change = review.input.changes.find(value => value.id === draft.source.id);
+    if (!change) return;
+    const saved = updated.find(issue => issue.id === change.id) ?? data.issues.find(issue =>
+      issue.id === change.id && issue.version === change.expectedVersion);
+    if (saved?.projectId === draft.source.projectId && saved.startDate === change.startDate && saved.endDate === change.endDate) {
+      acceptChartDateDraft(saved, draft);
+    }
+  }
   async function commitManualReview(review: ManualReview, checking = false) {
     const { previewId } = review.preview;
     if (!previewId) return;
@@ -1600,6 +1619,7 @@ function ProjectGantt(props: GanttProps) {
     const inlineIssue = result.updated.find(issue => issue.id === review.inline?.issueId);
     if (inlineIssue) review.inline?.accept?.(inlineIssue);
     settleInlineDates(review, result.updated);
+    settlePickedDateDraft(review, result.updated);
     rememberUndo(result.undoId);
     setManualReview(null);
     setManualProblem(null);
@@ -1637,7 +1657,8 @@ function ProjectGantt(props: GanttProps) {
   async function reviewManualAgain() {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
-    const singleDateEdit = manualReview.inline ?? manualReview.chartEdge;
+    const chartDates = manualReview.chartDates;
+    const singleDateEdit = manualReview.inline ?? chartDates;
     const dateEdits = manualReview.inlineDates ?? (singleDateEdit ? [singleDateEdit] : undefined);
     if (dateEdits && 'changes' in input) {
       const latest = new Map(data.issues.map(issue => [issue.id, issue]));
@@ -1648,7 +1669,9 @@ function ProjectGantt(props: GanttProps) {
           setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
           return;
         }
-        changes.push(inlineDateChange(draft, issue));
+        if (chartDates && !chartDates.pickedEdge) {
+          changes.push({ id: issue.id, expectedVersion: issue.version, startDate: draft.startDate, endDate: draft.endDate });
+        } else changes.push(inlineDateChange(draft, issue, chartDates?.pickedEdge));
       }
       input = { ...input, changes };
     } else if ('changes' in input) {
@@ -1667,6 +1690,7 @@ function ProjectGantt(props: GanttProps) {
         const current = review.inline && data.issues.find(issue => issue.id === review.inline?.issueId);
         if (current) review.inline?.accept?.(current);
         settleInlineDates(review, []);
+        settlePickedDateDraft(review, []);
         setManualReview(null);
         restoreDatePreviewFocus();
         notify('입력한 날짜가 현재 일정에 모두 반영되어 있습니다.');
@@ -1743,6 +1767,7 @@ function ProjectGantt(props: GanttProps) {
     const accept = origin.kind === 'inline' ? origin.accept : manualReview?.inline?.issueId === anchorChange.id
       ? manualReview.inline.accept : undefined;
     if (anchor) accept?.(anchor);
+    if (origin.kind === 'preview' && manualReview && anchor) settlePickedDateDraft(manualReview, [anchor]);
     rememberUndo(result.undoId);
     setScheduleWarnings(result.warnings ?? []);
     setManualReview(null);
@@ -1952,21 +1977,27 @@ function ProjectGantt(props: GanttProps) {
     if (outside(date)) showDate(date);
     else scrollToDate(dayNumber(date), range.start, 'smooth');
   }
-  async function previewIssueDates(issue: Issue, toStart: string, toEnd: string, opener: HTMLButtonElement, singleEdge: boolean) {
+  async function previewIssueDates(issue: Issue, toStart: string, toEnd: string, opener: HTMLButtonElement,
+    pickedEdge?: ScheduleDependencyEndpoint, draft?: ChartDateDraft) {
     if (busyRef.current) return;
     if (toStart > toEnd) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
     const input = manualDates(issue, toStart, toEnd);
-    const chartEdge = singleEdge ? { source: issue, startDate: toStart, endDate: toEnd } : undefined;
+    const chartDates = { source: issue, startDate: toStart, endDate: toEnd, pickedEdge, draft };
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      if (draft && !preview.previewId && !preview.blocking?.length) {
+        notify('현재 일정과 같은 날짜입니다. 행에 입력한 날짜를 유지했습니다.');
+        focusAfterDatePicking(opener);
+        return;
+      }
       setDatePreviewFocusTarget(opener);
-      setManualReview({ input, preview, chartEdge });
+      setManualReview({ input, preview, chartDates });
       setManualProblem(null);
     } catch (cause) {
       if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
         setDatePreviewFocusTarget(opener);
-        setManualReview({ input, chartEdge, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+        setManualReview({ input, chartDates, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
           fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings: [] } });
         setManualProblem({ kind: 'stale', message: errorMessage(cause) });
         await refresh().catch(() => undefined);
@@ -1980,7 +2011,7 @@ function ProjectGantt(props: GanttProps) {
     if (!issue.startDate || !issue.endDate || !delta) return;
     const startDate = edge === 'start' ? moveDate(issue.startDate, delta) : issue.startDate;
     const endDate = edge === 'end' ? moveDate(issue.endDate, delta) : issue.endDate;
-    void previewIssueDates(issue, startDate, endDate, opener, true);
+    void previewIssueDates(issue, startDate, endDate, opener, edge === 'start' ? 'startDate' : 'endDate');
   }
   function focusAfterDatePicking(opener: DatePreviewOpener) {
     requestAnimationFrame(() => {
@@ -2009,15 +2040,22 @@ function ProjectGantt(props: GanttProps) {
     if (unresolved) void refresh().catch(() => undefined);
   }
   function startDatePicking(issue: Issue, opener: HTMLButtonElement) {
-    if (busyRef.current || !canLeave()) return;
-    const anchor = issue.startDate || issue.endDate;
+    if (busyRef.current) return;
+    const keepDates = canKeepInlineDateDrafts();
+    if (!keepDates && !canLeave()) return;
+    const draft = keepDates ? chartDateDraft(issue) : undefined;
+    const source = draft?.source ?? issue;
+    const dates = { startDate: source.startDate, endDate: source.endDate, ...draft?.changes };
+    const typedEdge = getFixedDateEdge(draft?.changes ?? {});
+    const fixedEdge = typedEdge ?? getFixedDateEdge(dates);
+    const anchor = fixedEdge?.date ?? dates.startDate ?? dates.endDate;
     const initialDay = anchor ? dayNumber(anchor) : Math.min(range.end, Math.max(range.start, dayNumber(todayDate())));
     queueMicrotask(() => {
       setDrag(null);
       setLinkPicker(null);
       setShiftMode(null);
       if (anchor && outside(anchor)) setWindowStart(windowForDate(anchor));
-      setDatePicker({ issue, fixedEdge: getFixedDateEdge(issue), firstDate: null, initialDay, opener });
+      setDatePicker({ issue: source, dates, draft, fixedEdge, fixedFromDraft: Boolean(typedEdge), firstDate: null, initialDay, opener });
     });
   }
   function cancelDatePicking() {
@@ -2030,7 +2068,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function chooseIssueDate(day: number) {
     if (!activeDatePicker || busyRef.current) return;
-    const { issue, fixedEdge, firstDate, opener } = activeDatePicker;
+    const { issue, draft, fixedEdge, fixedFromDraft, firstDate, opener } = activeDatePicker;
     const date = isoDay(day);
     if (!fixedEdge && !firstDate) {
       setDatePicker({ ...activeDatePicker, firstDate: date });
@@ -2040,12 +2078,13 @@ function ProjectGantt(props: GanttProps) {
     const toEnd = fixedEdge?.kind === 'end' ? fixedEdge.date : firstDate && firstDate > date ? firstDate : date;
     if (toStart > toEnd) return;
     setDatePicker(null);
-    if (toStart === issue.startDate && toEnd === issue.endDate) {
+    if (!draft && toStart === issue.startDate && toEnd === issue.endDate) {
       focusAfterDatePicking(opener);
       notify('현재 일정과 같은 날짜입니다.');
       return;
     }
-    void previewIssueDates(issue, toStart, toEnd, opener, Boolean(fixedEdge));
+    const pickedEdge = fixedEdge && !fixedFromDraft ? fixedEdge.kind === 'start' ? 'endDate' : 'startDate' : undefined;
+    void previewIssueDates(issue, toStart, toEnd, opener, pickedEdge, draft);
   }
   function beginDrag(event: PointerEvent<HTMLButtonElement>, issue: Issue, mode: DragMode) {
     if (event.button !== 0 || busy || activeDatePicker) return;
@@ -2462,8 +2501,9 @@ function ProjectGantt(props: GanttProps) {
     {workloadView === 'team' && <TeamWorkload key={draftEpoch} {...props} undoScope={undoScope} initialStartDate={isoDay(range.start)}
       onDraftChange={trackDraft} onBeforeLevel={canOpenWorkloadLevel} scheduleBusy={busy} onScheduleApplied={onWorkloadLevelApplied} />}
     {activeDatePicker && <GanttDateRangePrompt issueKey={activeDatePicker.issue.key} issueTitle={activeDatePicker.issue.title}
-      fixedEdge={activeDatePicker.fixedEdge} currentRange={activeDatePicker.issue.startDate && activeDatePicker.issue.endDate
-        ? { start: activeDatePicker.issue.startDate, end: activeDatePicker.issue.endDate } : undefined}
+      fixedEdge={activeDatePicker.fixedEdge} fixedFromDraft={activeDatePicker.fixedFromDraft} hasDraft={Boolean(activeDatePicker.draft)}
+      currentRange={activeDatePicker.dates.startDate && activeDatePicker.dates.endDate
+        ? { start: activeDatePicker.dates.startDate, end: activeDatePicker.dates.endDate } : undefined}
       firstDate={activeDatePicker.firstDate} onReset={resetDatePicking} onCancel={cancelDatePicking} />}
     <div className="gantt-scroll" data-gantt-focus-control="" ref={scrollRef} tabIndex={-1} role="region" aria-label="간트 차트"
       onPointerDownCapture={event => {
