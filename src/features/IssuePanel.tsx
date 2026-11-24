@@ -1,7 +1,7 @@
 'use client';
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
+import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, Flag, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
@@ -71,6 +71,7 @@ type IssuePanelProps = FeatureProps & {
   onAdvanceReview?: (direction: IssueReviewDirection) => void;
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
+  onOpenMilestone: (id: string) => boolean;
   onPreviewDocument: (id: string) => boolean;
   onCloseDocumentPreview: () => boolean;
 };
@@ -133,10 +134,14 @@ export function IssuePanel(props: IssuePanelProps) {
 }
 
 function IssuePanelContent(props: IssuePanelProps) {
-  const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onPreviewDocument, onCloseDocumentPreview,
+  const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onOpenMilestone, onPreviewDocument, onCloseDocumentPreview,
     reviewPosition, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
   const manageFocus = Boolean(documentOverlay || modalFocus);
   const issue = data.issues.find(i => i.id === issueId);
+  const linkedMilestones = useMemo(() => (data.milestones ?? [])
+    .filter(item => item.projectId === issue?.projectId && item.issueIds.includes(issueId))
+    .sort((left, right) => left.date.localeCompare(right.date) || left.title.localeCompare(right.title, 'ko')),
+  [data.milestones, issue?.projectId, issueId]);
   const previewDocument = previewDocumentId ? data.documents.find(doc => doc.id === previewDocumentId) : undefined;
   const bodyReferences = useMemo(() => new Map(findIssueDocumentReferences(data.documents, issueId)
     .map(reference => [reference.document.id, reference])), [data.documents, issueId]);
@@ -1136,6 +1141,19 @@ function IssuePanelContent(props: IssuePanelProps) {
         </div>}
         <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || dependencyBusy || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
+      {linkedMilestones.length > 0 && <section className="issue-related-section" aria-label="연결된 이정표">
+        <h3><Flag size={16} aria-hidden="true" />연결된 이정표 <span>{linkedMilestones.length}</span></h3>
+        <ul className="issue-milestone-list" role="list">
+          {linkedMilestones.map(item => <li key={item.id}>
+            <div><strong>{item.title}</strong><small><time dateTime={item.date}>{item.date}</time> · {item.status === 'reached' ? '달성' : '예정'}</small></div>
+            <a className="btn btn-ghost" href={`#/${encodeURIComponent(item.projectId)}/gantt?${new URLSearchParams({ milestone: item.id })}`}
+              aria-label={`${item.title} 간트에서 보기`} onClick={event => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault(); onOpenMilestone(item.id);
+              }}><SquareChartGantt size={15} aria-hidden="true" />간트에서 보기</a>
+          </li>)}
+        </ul>
+      </section>}
       <section className="issue-related-section" aria-label="업무 의존성">
         <div className="issue-schedule-heading">
           <h3><Link2 size={16} aria-hidden="true" />업무 의존성 <span>{dependencies.length}</span></h3>

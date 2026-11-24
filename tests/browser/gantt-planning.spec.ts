@@ -278,6 +278,12 @@ test('간트 초안의 작업자 탐색을 보호하고 외부 갱신 후 날짜
     await expect(end).toBeEnabled(); await expect(end).toHaveValue(addDays(monday, 3)); await expect(end).toHaveAttribute('aria-invalid', 'true');
     const rejected = page.waitForResponse(value => value.url().endsWith('/api/schedule/manual-preview') && value.request().method() === 'POST');
     await end.press('Enter'); const result = await rejected; expect(result.status()).toBe(409); expect(result.request().postDataJSON().changes[0].expectedVersion).toBe(first.version);
+    const conflict = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    await expect(conflict).toBeVisible();
+    await expect(conflict.getByRole('button', { name: '변경 적용', exact: true })).toBeDisabled();
+    await expect(end).toBeDisabled();
+    await conflict.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(conflict).toHaveCount(0);
     await expect(end).toHaveValue(addDays(monday, 3)); await expect(end).toBeEnabled();
     await end.press('Escape'); await expect(end).toHaveValue(addDays(monday, 1)); await expect(end).not.toHaveAttribute('aria-invalid', 'true');
     expect((await snapshot(request)).issues.find(value => value.id === first.id)?.description).toBe('새로고침에서 보이는 다른 변경');

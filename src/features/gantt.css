@@ -362,3 +362,21 @@
 .gantt-refresh-feedback.issue-form-error {
   color: #8a3930;
 }
+
+.gantt-milestone-review-button {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 3px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.gantt-milestone-review-button:hover,
+.gantt-milestone-review-button[aria-expanded='true'] {
+  background: var(--accent-soft);
+}

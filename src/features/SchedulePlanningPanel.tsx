@@ -1,12 +1,22 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Flag, History, LoaderCircle, Plus, Save, Trash2, X } from 'lucide-react';
 import type { FeatureProps, Milestone, ScheduleBaseline } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
+import { isGanttPreservedByNavigation } from '../lib/navigation';
+import { ScheduleMilestoneReview, SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
 import './schedule-planning.css';
 
-type Props = FeatureProps & { selectedBaselineId: string | null; onSelectBaseline: (id: string | null) => void };
+type Props = FeatureProps & {
+  selectedBaselineId: string | null;
+  onSelectBaseline: (id: string | null) => void;
+  milestoneReviewId: string | null;
+  onOpenMilestoneReview: (id: string, opener: HTMLButtonElement) => void;
+  onCloseMilestoneReview: () => void;
+  onLocateMilestoneIssue: (id: string) => boolean;
+  onOpenMilestoneIssue: (id: string, opener: HTMLButtonElement) => void;
+};
 type MilestoneFields = Pick<Milestone, 'title' | 'description' | 'date' | 'status' | 'ownerId' | 'issueIds'>;
 type MilestoneDraft = { id: string | null; expectedVersion: number | null; fields: MilestoneFields; original: string };
 type CaptureDraft = { name: string; description: string; expectedIssueVersions: Record<string, number>; expectedMilestoneVersions: Record<string, number>; expectedCalendarVersion: number };
@@ -16,12 +26,14 @@ const messageOf = (error: unknown) => error instanceof Error ? error.message : '
 export function SchedulePlanningPanel(props: Props) {
   return <ProjectSchedulePlanning key={`${props.projectId}:${props.actorId}`} {...props} />;
 }
-function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, openIssue, selectedBaselineId, onSelectBaseline }: Props) {
+function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, openIssue, selectedBaselineId, onSelectBaseline,
+  milestoneReviewId, onOpenMilestoneReview, onCloseMilestoneReview, onLocateMilestoneIssue, onOpenMilestoneIssue }: Props) {
   const milestones = (data.milestones || []).filter(item => item.projectId === projectId).sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
   const baselines = (data.baselines || []).filter(item => item.projectId === projectId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const issues = data.issues.filter(item => item.projectId === projectId);
+  const issues = useMemo(() => data.issues.filter(item => item.projectId === projectId), [data.issues, projectId]);
   const calendar = data.calendars?.find(item => item.projectId === projectId);
   const selected = baselines.find(item => item.id === selectedBaselineId);
+  const reviewedMilestone = milestones.find(item => item.id === milestoneReviewId);
   const [draft, setDraft] = useState<MilestoneDraft | null>(null);
   const [capture, setCapture] = useState<CaptureDraft | null>(null);
   const [error, setError] = useState('');
@@ -36,6 +48,7 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       if (pending.current) { event.preventDefault(); notify('일정 정보를 저장하고 있습니다. 잠시 기다려주세요.', 'error'); return; }
+      if (isGanttPreservedByNavigation(event)) return;
       if (dirty) {
         if (!window.confirm('작성 중인 일정 정보를 버리고 이동할까요?')) { event.preventDefault(); return; }
         reset();
@@ -102,7 +115,26 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
       {busy && <LoaderCircle size={15} className="spin" aria-label="일정 정보 저장 중" />}
     </div>
     {selected && <div className="schedule-baseline-summary"><span><strong>{selected.name}</strong> · {new Date(selected.createdAt).toLocaleString('ko-KR')} · 업무 {selected.issues.length}개 · 이정표 {selected.milestones.length}개 · {selected.calendar.name} v{selected.calendar.version}{selected.description && <small>{selected.description}</small>}</span><button className="btn btn-ghost" aria-label="선택한 기준선 삭제" disabled={busy} onClick={deleteBaseline}><Trash2 size={13} />삭제</button></div>}
-    <details className="schedule-milestone-list"><summary>이정표 {milestones.length}개</summary>{milestones.length === 0 && <p className="muted">출시와 검토 등 중요한 날짜를 이정표로 표시하세요.</p>}{milestones.map(item => <div className="schedule-milestone-row" key={item.id}><span className={`schedule-milestone-dot ${item.status}`} /><button className="schedule-milestone-name" onClick={() => openMilestone(item)} disabled={busy}><strong>{item.title}</strong><small>{item.date} · {item.status === 'reached' ? '달성' : '예정'} · {data.users.find(user => user.id === item.ownerId)?.name || '담당자 없음'} · 연결 업무 {item.issueIds.length}개</small></button><button className="btn btn-ghost" disabled={busy} onClick={() => deleteMilestone(item)} aria-label={`${item.title} 이정표 삭제`}><Trash2 size={14} /></button></div>)}</details>
+    <details className="schedule-milestone-list">
+      <summary>이정표 {milestones.length}개</summary>
+      {milestones.length === 0 && <p className="muted">출시와 검토 등 중요한 날짜를 이정표로 표시하세요.</p>}
+      {milestones.map(item => <div className="schedule-milestone-row" key={item.id}>
+        <span className={`schedule-milestone-dot ${item.status}`} />
+        <button className="schedule-milestone-name" onClick={() => openMilestone(item)} disabled={busy}>
+          <strong>{item.title}</strong>
+          <small>{item.date} · {item.status === 'reached' ? '달성' : '예정'} · {data.users.find(user => user.id === item.ownerId)?.name || '담당자 없음'}</small>
+        </button>
+        <button className="btn btn-ghost schedule-milestone-review-action" type="button" disabled={busy}
+          aria-label={`${item.title} 연결 업무 확인`} aria-expanded={milestoneReviewId === item.id}
+          aria-controls={milestoneReviewId === item.id ? SCHEDULE_MILESTONE_REVIEW_ID : undefined}
+          onClick={event => onOpenMilestoneReview(item.id, event.currentTarget)}>
+          연결 업무 {item.issueIds.length}개
+        </button>
+        <button className="btn btn-ghost" disabled={busy} onClick={() => deleteMilestone(item)} aria-label={`${item.title} 이정표 삭제`}><Trash2 size={14} /></button>
+      </div>)}
+    </details>
+    {milestoneReviewId && <ScheduleMilestoneReview key={milestoneReviewId} milestone={reviewedMilestone} issues={issues}
+      workflows={data.workflows} busy={busy} onClose={onCloseMilestoneReview} onLocateIssue={onLocateMilestoneIssue} onOpenIssue={onOpenMilestoneIssue} />}
     {draft && <form className="schedule-artifact-form" aria-label="이정표 편집" onSubmit={saveMilestone}>
       <div className="schedule-artifact-form-title"><strong>{draft.id ? '이정표 편집' : '새 이정표'}</strong><button type="button" className="btn btn-ghost" aria-label="일정 양식 닫기" disabled={busy} onClick={cancel}><X size={15} /></button></div>
       {draft.id && (!current || current.version !== draft.expectedVersion) && <div className="schedule-artifact-warning">다른 변경사항이 있습니다. 입력은 유지됩니다. 취소 후 이정표를 다시 열어 최신 내용을 확인하세요.</div>}

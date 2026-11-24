@@ -13,7 +13,7 @@ import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
@@ -37,6 +37,7 @@ import { isUncertainScheduleResponse, scheduleUndoHeaders, useScheduleUndo } fro
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
+import { SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { bulkDateResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit, type GanttRowLinkDraft } from './GanttRowScheduleEdit';
@@ -125,6 +126,8 @@ type GanttProps = FeatureProps & {
   onOpenSavedIssueView?: (id: string) => boolean;
   focusIssueId?: string | null;
   focusDateEndpoint?: ScheduleDependencyEndpoint | null;
+  milestoneReviewId: string | null;
+  onChangeMilestoneReview: (id: string | null) => boolean;
   issueFocusActivation?: number;
   issueOverlayOpen?: boolean;
   onClearIssueFocus?: () => boolean;
@@ -241,7 +244,8 @@ export function Gantt(props: GanttProps) {
 function ProjectGantt(props: GanttProps) {
   const { data, projectId, refresh, refreshGantt, notify, openIssue, allProjects = false, teamProjectFilter = null, onChangeTeamProjectFilter,
     teamScheduleFilters, onChangeTeamScheduleFilters, onOpenProjectGantt, initialPlanningId, ganttViewId = null, onChangeGanttView, onOpenSavedIssueView,
-    focusIssueId, focusDateEndpoint, issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus, onLocateIssueDate } = props;
+    focusIssueId, focusDateEndpoint, milestoneReviewId, onChangeMilestoneReview,
+    issueFocusActivation = 0, issueOverlayOpen, onClearIssueFocus, onLocateIssueDate } = props;
   const teamAssigneeId = allProjects ? teamScheduleFilters?.assigneeId : undefined;
   const teamUnscheduledOnly = allProjects && teamScheduleFilters?.unscheduledOnly === true;
   const teamGitlabFilter = allProjects ? teamScheduleFilters?.gitlab : undefined;
@@ -261,6 +265,7 @@ function ProjectGantt(props: GanttProps) {
   const [planAssignment, setPlanAssignment] = useState<PlanAssignmentInput | null>(null);
   const [planShift, setPlanShift] = useState<PlanningItem | null>(null);
   const [projectQuery, setProjectQuery] = useState('');
+  const milestoneReviewOpener = useRef<HTMLButtonElement | null>(null);
   const query = allProjects ? teamQuery : projectQuery;
   const aliasQuery = normalizeWorkspaceSearchKey(query);
   const [zoom, setZoom] = useState<'day' | 'week' | 'month'>('day');
@@ -545,8 +550,11 @@ function ProjectGantt(props: GanttProps) {
   useEffect(() => {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
-      if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) { event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); }
-      else if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
+      if (busyRef.current || [...draftsRef.current.values()].some(value => value.pending)) {
+        event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); return;
+      }
+      if (isGanttPreservedByNavigation(event)) return;
+      if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
@@ -853,6 +861,7 @@ function ProjectGantt(props: GanttProps) {
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
   const milestones = useMemo(() => allProjects || scheduleFocus ? [] : (data.milestones || []).filter(value => value.projectId === projectId),
     [allProjects, data.milestones, projectId, scheduleFocus]);
+  const reviewedMilestone = milestones.find(item => item.id === milestoneReviewId);
   const historicalIssues = scheduleFocus || planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
   const historicalMilestones = scheduleFocus ? [] : baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
   const onlyTeamProjectId = data.projects.length === 1 ? data.projects[0].id : null;
@@ -1950,6 +1959,25 @@ function ProjectGantt(props: GanttProps) {
     if (!props.onOpenIssueForReview) { openIssue(id); return; }
     props.onOpenIssueForReview(id, { issueIds: issues.map(issue => issue.id), opener, fallback: scrollRef.current });
   }
+  function openMilestoneReview(id: string, opener: HTMLButtonElement) {
+    if (!onChangeMilestoneReview(id)) return;
+    milestoneReviewOpener.current = opener;
+    if (id === milestoneReviewId) document.getElementById(SCHEDULE_MILESTONE_REVIEW_ID)?.querySelector('h2')?.focus();
+  }
+  function closeMilestoneReview() {
+    if (!onChangeMilestoneReview(null)) return;
+    const opener = milestoneReviewOpener.current;
+    milestoneReviewOpener.current = null;
+    requestAnimationFrame(() => {
+      const target = opener?.isConnected && !opener.disabled ? opener : scrollRef.current;
+      target?.focus({ preventScroll: true });
+    });
+  }
+  function openMilestoneIssue(id: string, opener: HTMLButtonElement) {
+    if (!reviewedMilestone?.issueIds.includes(id)) return;
+    if (!props.onOpenIssueForReview) { openIssue(id); return; }
+    props.onOpenIssueForReview(id, { issueIds: reviewedMilestone.issueIds, opener, fallback: scrollRef.current });
+  }
   function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
     if (current.delta) { if (current.mode === 'move') void requestShiftPreview({ issueIds: [current.issue.id], days: current.delta, workingDays: false }, event.currentTarget); else previewResize(current.issue, current.mode, current.delta, event.currentTarget); }
@@ -2273,7 +2301,9 @@ function ProjectGantt(props: GanttProps) {
       {selectedIssues.length > 1000 && <span>한 번에 최대 1,000개 업무를 연결하거나 해제할 수 있습니다.</span>}
       {!selectedIssues.length && <span>간트에서 업무를 선택해 계획에 연결하거나 해제할 수 있습니다.</span>}
     </div>}
-    <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId} />
+    <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId}
+      onOpenMilestoneReview={openMilestoneReview} onCloseMilestoneReview={closeMilestoneReview}
+      onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
     <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
     {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}
@@ -2452,7 +2482,33 @@ function ProjectGantt(props: GanttProps) {
         </div></div>;
       })}
       {historicalIssues.map(captured => <div key={`historical:${captured.issueId}`} className="gantt-row gantt-history-row" data-baseline-issue-id={captured.issueId}><div className="gantt-left"><span /><div className="gantt-history-name"><small>{captured.key} · 삭제된 업무 기록</small><strong>{captured.title}</strong></div><button className="gantt-history-date" disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button><button className="gantt-history-date" disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>{captured.startDate && captured.endDate && <div className="gantt-baseline-bar is-historical" role="img" aria-label={`${captured.key} 삭제된 업무 기준선 ${captured.startDate} ~ ${captured.endDate}`} style={capturedStyle(captured.startDate, captured.endDate)} />}</div></div>)}
-      {milestones.map(milestone => { const captured = baseline?.milestones.find(value => value.milestoneId === milestone.id); const delta = captured ? dayNumber(milestone.date) - dayNumber(captured.date) : null; return <div key={milestone.id} className="gantt-row gantt-milestone-row" data-milestone-id={milestone.id}><div className="gantt-left"><Diamond size={13} /><div className="gantt-milestone-name"><small>{milestone.status === 'reached' ? '달성' : '예정'} · 마일스톤</small><strong>{milestone.title}</strong>{delta !== null && <small>기준선 대비 {delta > 0 ? '+' : ''}{delta}일 · 달력일</small>}</div><button className="gantt-history-date" onClick={() => showDate(milestone.date)}>{milestone.date}</button>{captured ? <button className="gantt-history-date" onClick={() => showDate(captured.date)}>기준 {captured.date}</button> : <span />}</div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>{captured && !outside(captured.date) && <span className="gantt-milestone-diamond is-baseline" role="img" aria-label={`${captured.title} 마일스톤 기준선 ${captured.date}`} title={`기준선: ${captured.title} · ${captured.date}`} style={{ left: (dayNumber(captured.date) - range.start + .5) * dayWidth }} />}{!outside(milestone.date) ? <span className={`gantt-milestone-diamond ${milestone.status === 'reached' ? 'is-reached' : ''}`} role="img" aria-label={`${milestone.title} 마일스톤 ${milestone.date}`} title={`${milestone.title} · ${milestone.date}`} style={{ left: (dayNumber(milestone.date) - range.start + .5) * dayWidth }}><span>{milestone.title}</span></span> : <button className="gantt-jump-date" onClick={() => showDate(milestone.date)}>{milestone.date} · 마일스톤으로 이동 →</button>}</div></div>; })}
+      {milestones.map(milestone => {
+        const captured = baseline?.milestones.find(value => value.milestoneId === milestone.id);
+        const delta = captured ? dayNumber(milestone.date) - dayNumber(captured.date) : null;
+        const expanded = milestoneReviewId === milestone.id;
+        return <div key={milestone.id} className="gantt-row gantt-milestone-row" data-milestone-id={milestone.id}>
+          <div className="gantt-left">
+            <Diamond size={13} />
+            <button type="button" className="gantt-milestone-name gantt-milestone-review-button" disabled={busy || scheduleEditorOpen || issueOverlayOpen}
+              aria-label={`${milestone.title} 연결 업무 확인`} aria-expanded={expanded} aria-controls={expanded ? SCHEDULE_MILESTONE_REVIEW_ID : undefined}
+              onClick={event => openMilestoneReview(milestone.id, event.currentTarget)}>
+              <small>{milestone.status === 'reached' ? '달성' : '예정'} · 마일스톤</small><strong>{milestone.title}</strong>
+              {delta !== null && <small>기준선 대비 {delta > 0 ? '+' : ''}{delta}일 · 달력일</small>}
+            </button>
+            <button className="gantt-history-date" onClick={() => showDate(milestone.date)}>{milestone.date}</button>
+            {captured ? <button className="gantt-history-date" onClick={() => showDate(captured.date)}>기준 {captured.date}</button> : <span />}
+          </div>
+          <div className="gantt-row-timeline" style={{ width: timelineWidth }}>
+            {captured && !outside(captured.date) && <span className="gantt-milestone-diamond is-baseline" role="img"
+              aria-label={`${captured.title} 마일스톤 기준선 ${captured.date}`} title={`기준선: ${captured.title} · ${captured.date}`}
+              style={{ left: (dayNumber(captured.date) - range.start + .5) * dayWidth }} />}
+            {!outside(milestone.date) ? <span className={`gantt-milestone-diamond ${milestone.status === 'reached' ? 'is-reached' : ''}`}
+              role="img" aria-label={`${milestone.title} 마일스톤 ${milestone.date}`} title={`${milestone.title} · ${milestone.date}`}
+              style={{ left: (dayNumber(milestone.date) - range.start + .5) * dayWidth }}><span>{milestone.title}</span></span>
+              : <button className="gantt-jump-date" onClick={() => showDate(milestone.date)}>{milestone.date} · 마일스톤으로 이동 →</button>}
+          </div>
+        </div>;
+      })}
       {historicalMilestones.map(captured => <div key={`historical-milestone:${captured.milestoneId}`} className="gantt-row gantt-history-row"><div className="gantt-left"><Diamond size={12} /><div className="gantt-history-name"><small>삭제된 마일스톤 기록</small><strong>{captured.title}</strong></div><button className="gantt-history-date" onClick={() => showDate(captured.date)}>{captured.date}</button><span /></div><div className="gantt-row-timeline" style={{ width: timelineWidth }}>{!outside(captured.date) ? <span className="gantt-milestone-diamond is-baseline is-historical" role="img" aria-label={`${captured.title} 삭제된 마일스톤 기준선 ${captured.date}`} style={{ left: (dayNumber(captured.date) - range.start + .5) * dayWidth }} /> : <button className="gantt-jump-date" onClick={() => showDate(captured.date)}>{captured.date} · 기준선 기록으로 이동 →</button>}</div></div>)}
       <button className="gantt-add-inline-row" style={{ width: LEFT_WIDTH }} onClick={() => { if (canLeave()) setCreateOpen(true); }}><Plus size={14} /> 이 간트에 업무 추가</button>
       {issues.length === 0 && <div className="gantt-no-issues" style={{ width: LEFT_WIDTH }}><CalendarDays size={28} /><strong>표시할 업무가 없습니다</strong><span>{ganttViewId === null ? '업무를 만들거나 검색 조건을 변경하세요.' : '공유 보기나 검색 조건을 변경하세요.'}</span></div>}

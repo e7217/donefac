@@ -284,3 +284,27 @@
   color: var(--accent-hover);
   overflow-wrap: anywhere;
 }
+.issue-milestone-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.issue-milestone-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.issue-milestone-list li > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.issue-milestone-list li small { color: var(--muted); }
