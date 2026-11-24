@@ -742,6 +742,8 @@ export function createApp(options: {
     schema: projectId => issueSchemas.get(projectId), workflow: projectId => workflows.get(projectId),
     calendar: projectId => calendars.get(projectId), order: projectId => issueOrders.get(projectId),
     plans: projectId => planning.forProject(projectId),
+    worklogEvidence: issueIds => worklogs.projectMoveEvidence(issueIds),
+    moveWorklogs: (before, after) => worklogs.moveWithIssue(before, after),
     validate: (issue, moveParents) => { validateIssue(issue, undefined, { moveParents }); },
     validationMessage: error => (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
       error instanceof PlanningError || error instanceof WorkloadError) && error.status < 500 ? error.message : null,

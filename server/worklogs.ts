@@ -93,6 +93,7 @@ export class WorklogService {
         deleted_at TEXT, json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS worklogs_issue_page ON worklogs(issue_id,work_date DESC,created_at DESC,id DESC) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS worklogs_issue_scope ON worklogs(issue_id,id);
       CREATE INDEX IF NOT EXISTS worklogs_project_date ON worklogs(project_id,work_date,author_id) WHERE deleted_at IS NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS worklogs_source_record ON worklogs(json_extract(json,'$.sourceRecordId')) WHERE json_extract(json,'$.sourceRecordId') IS NOT NULL;
     `);
@@ -113,6 +114,46 @@ export class WorklogService {
   }
 
   all(): WorklogRecord[] { return this.store.all<WorklogRecord>('worklogs'); }
+
+  projectMoveEvidence(issueIds: readonly string[]): {
+    fingerprint: string; activeCounts: Record<string, number>; sourceIssueIds: ReadonlySet<string>;
+  } {
+    const hash = createHash('sha256');
+    const activeCounts = Object.create(null) as Record<string, number>;
+    const sourceIssueIds = new Set<string>();
+    const rows = this.store.db.prepare(`
+      SELECT w.id, w.issue_id AS issueId, w.project_id AS projectId, w.deleted_at AS deletedAt,
+        json_extract(w.json,'$.version') AS version, json_extract(w.json,'$.projectId') AS recordProjectId,
+        json_extract(w.json,'$.issueId') AS recordIssueId, json_extract(w.json,'$.issueKey') AS issueKey,
+        json_extract(w.json,'$.issueTitle') AS issueTitle, json_extract(w.json,'$.sourceRecordId') AS sourceRecordId
+      FROM json_each(?) selected JOIN worklogs w ON w.issue_id=selected.value
+      ORDER BY w.issue_id, w.id
+    `).iterate(JSON.stringify(issueIds)) as Iterable<{issueId: string; deletedAt: string | null; sourceRecordId: string | null}>;
+    for (const row of rows) {
+      hash.update(JSON.stringify(row)).update('\n');
+      if (row.deletedAt === null) activeCounts[row.issueId] = (activeCounts[row.issueId] ?? 0) + 1;
+      if (row.sourceRecordId !== null) sourceIssueIds.add(row.issueId);
+    }
+    return {fingerprint:hash.digest('hex'),activeCounts,sourceIssueIds};
+  }
+
+  moveWithIssue(before: Issue, after: Issue): void {
+    if (!this.store.db.isTransaction || before.id !== after.id || before.projectId === after.projectId) {
+      fail(500, '업무 이동 트랜잭션에서 같은 업무의 작업 시간을 옮겨야 합니다.');
+    }
+    const mismatch = this.store.db.prepare(`
+      SELECT 1 FROM worklogs WHERE issue_id=? AND (project_id IS NOT ? OR
+        CASE WHEN json_valid(json) THEN json_extract(json,'$.id') IS NOT id OR
+          json_extract(json,'$.issueId') IS NOT issue_id OR json_extract(json,'$.projectId') IS NOT project_id OR
+          json_extract(json,'$.sourceRecordId') IS NOT NULL
+        ELSE 1 END) LIMIT 1
+    `).get(before.id, before.projectId);
+    if (mismatch) fail(409, '이동할 업무의 작업 시간 기록과 프로젝트·원본 연결을 확인해 주세요.');
+    this.store.db.prepare(`
+      UPDATE worklogs SET project_id=?, json=json_set(json,'$.projectId',?,'$.issueKey',?,'$.issueTitle',?)
+      WHERE issue_id=?
+    `).run(after.projectId, after.projectId, after.key, after.title, before.id);
+  }
 
   /** Caller owns the canonical/source-archive transaction. Never replay a source
    * worklog into an existing row, including an entry already deleted by a user. */

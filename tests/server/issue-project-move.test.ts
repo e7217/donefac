@@ -4,10 +4,13 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
-import type { Comment, CustomFieldDefinition, CycleCompletionPreview, Dependency, DocPage, Issue, IssueRelation, IssueTimeReservationEntry, Milestone, PlanningItem, Project, ProjectIssueOrder, ProjectIssueSchema, ResourceLink, WorkCalendar, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Comment, CustomFieldDefinition, CycleCompletionPreview, Dependency, DocPage, Issue, IssueRelation, IssueTimeReservationEntry, IssueWorklogPage, Milestone, PlanningItem, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorklogReport, ResourceLink, WorkCalendar, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
+
+type WorklogBackup = { worklogs: (WorklogEntry & { createHash: string; deletedAt: string | null })[] };
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-project-move-'));
@@ -30,8 +33,9 @@ async function fixture(t: TestContext) {
     try { await active.close(); }
     finally { rmSync(dataDir, { recursive: true, force: true }); }
   });
-  async function request<T = unknown>(path: string, status = 200, method = 'GET', data?: unknown, actorId = 'user-seo'): Promise<T> {
-    const response = await fetch(active.base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId },
+  async function request<T = unknown>(path: string, status = 200, method = 'GET', data?: unknown, actorId = 'user-seo', token?: string): Promise<T> {
+    const response = await fetch(active.base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       ...(data === undefined ? {} : { body: JSON.stringify(data) }) });
     const text = await response.text();
     assert.equal(response.status, status, `${method} ${path}: ${text}`);
@@ -47,7 +51,7 @@ async function fixture(t: TestContext) {
   const preview = (issue: Issue, body = moveInput(issue)) => request<IssueProjectMovePreview>(`${path(issue.id)}/preview`, 200, 'POST', body);
   const apply = (issue: Issue, body: IssueProjectMoveInput, token: string | null, status = 200, actorId?: string) =>
     request<IssueProjectMoveResult>(`${path(issue.id)}/apply`, status, 'POST', { ...body, token }, actorId);
-  return { source, destination, issue, request, preview, apply, moveInput,
+  return { dataDir, source, destination, issue, request, preview, apply, moveInput,
     async restart() { await active.close(); active = await start(); } };
 }
 
@@ -116,15 +120,12 @@ test('group movement preserves issue identity, native relations and relative ord
   assert.equal(following.key, 'END-5');
 });
 
-test('a transfer cannot strand independently stored time, milestones, cycle receipts, baselines or archived links', async t => {
+test('a transfer cannot strand milestones, cycle receipts, baselines or archived links', async t => {
   const f = await fixture(t);
   const issue = await f.issue('이동을 막는 연결이 생길 업무');
   const input = f.moveInput(issue);
   const before = await f.preview(issue, input);
   assert.ok(before.token);
-  const worklogs = `/issues/${issue.id}/worklogs`;
-  const log = await f.request<WorklogEntry>(worklogs, 201, 'POST', { requestId: randomUUID(), workDate: '2026-11-20', minutes: 25 });
-  await f.request(`${worklogs}/${log.id}`, 200, 'DELETE', { expectedVersion: log.version });
   const child = await f.issue('휴지통의 하위 업무', { parentId: issue.id });
   await f.request('/dependencies', 201, 'POST', { predecessorId: issue.id, successorId: child.id });
   await f.request(`/issues/${child.id}`, 200, 'DELETE', { expectedVersion: child.version });
@@ -143,11 +144,102 @@ test('a transfer cannot strand independently stored time, milestones, cycle rece
   const blocked = await f.preview(issue, input);
   assert.equal(blocked.token, null);
   assert.deepEqual(new Set(blocked.blockers.map(notice => notice.code)),
-    new Set(['worklogs', 'milestones', 'baselines', 'trashed_children', 'trashed_schedule_links']));
+    new Set(['milestones', 'baselines', 'trashed_children', 'trashed_schedule_links']));
   await f.apply(issue, input, before.token, 409);
   const completedCurrent = latest.issues.find(item => item.id === completed.id)!;
   assert.ok((await f.preview(completedCurrent)).blockers.some(notice => notice.code === 'cycle_completion'));
   assert.equal((await f.issue('막힌 이동이 키 번호를 소비하지 않음', { projectId: f.destination.id })).key, 'END-1');
+});
+
+test('moving worklogs transfers their report scope while preserving entries and deletion tombstones', async t => {
+  const f = await fixture(t);
+  const issue = await f.issue('작업 시간과 함께 옮길 업무');
+  const input = f.moveInput(issue);
+  const worklogs = `/issues/${issue.id}/worklogs`;
+  const reportPath = (projectId: string) => `/projects/${projectId}/worklog-report?startDate=2026-11-19&endDate=2026-11-21`;
+  const preview = () => f.preview(issue, input);
+  const addInput = { requestId: randomUUID(), workDate: '2026-11-19', minutes: 25, note: '삭제할 작업 메모' };
+  const empty = await preview();
+  const deleted = await f.request<WorklogEntry>(worklogs, 201, 'POST', addInput);
+  await f.request(`${worklogs}/${deleted.id}`, 200, 'DELETE', { expectedVersion: deleted.version });
+  const tombstoneOnly = await preview();
+  assert.ok(tombstoneOnly.token);
+  assert.notEqual(tombstoneOnly.token, empty.token);
+  assert.ok(!tombstoneOnly.warnings.some(notice => notice.code === 'worklogs_transferred'));
+
+  const activeInput = { requestId: randomUUID(), workDate: '2026-11-20', minutes: 40, note: '출발 프로젝트에서 기록' };
+  const original = await f.request<WorklogEntry>(worklogs, 201, 'POST', activeInput);
+  await f.apply(issue, input, tombstoneOnly.token, 409);
+  const first = await preview();
+  assert.ok(first.token);
+  const warning = first.warnings.find(notice => notice.code === 'worklogs_transferred' && notice.issueId === issue.id);
+  assert.ok(warning);
+  assert.match(warning.message, /작업 시간.*대상 프로젝트/);
+  const edited = await f.request<WorklogEntry>(`${worklogs}/${original.id}`, 200, 'PATCH', {
+    expectedVersion: original.version, workDate: '2026-11-21', minutes: 55, note: '미리보기 뒤 수정한 작업 메모',
+  });
+  await f.apply(issue, input, first.token, 409);
+  assert.equal((await f.request<WorkspaceSnapshot>('/workspace')).issues.find(value => value.id === issue.id)?.version, issue.version);
+  const next = await preview();
+  assert.ok(next.token);
+  assert.notEqual(next.token, first.token);
+
+  const source = await f.request<ApiKeyCreated>('/api-keys', 201, 'POST', { name: '출발 보고서 키', access: 'read', projectIds: [f.source.id] });
+  const target = await f.request<ApiKeyCreated>('/api-keys', 201, 'POST', { name: '도착 보고서 키', access: 'read', projectIds: [f.destination.id] });
+  const getReport = (projectId: string, token: string) =>
+    f.request<ProjectWorklogReport>(`/v1${reportPath(projectId)}`, 200, 'GET', undefined, undefined, token);
+  assert.equal((await getReport(f.source.id, source.token)).minutes, edited.minutes);
+  assert.equal((await getReport(f.destination.id, target.token)).entryCount, 0);
+  const originalBackup = await f.request<WorklogBackup>('/export');
+  assert.equal(originalBackup.worklogs.length, 2);
+  assert.ok(originalBackup.worklogs.find(value => value.id === deleted.id)?.deletedAt);
+
+  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER reject_project_move_receipt BEFORE INSERT ON issue_project_move_receipts
+      BEGIN SELECT RAISE(ABORT, 'synthetic late project move failure'); END`);
+    try {
+      await f.apply(issue, input, next.token, 500);
+      assert.deepEqual((await f.request<WorklogBackup>('/export')).worklogs, originalBackup.worklogs);
+      assert.deepEqual((await f.request<WorkspaceSnapshot>('/workspace')).issues.find(value => value.id === issue.id), issue);
+      assert.equal((await getReport(f.source.id, source.token)).minutes, edited.minutes);
+      assert.equal((await getReport(f.destination.id, target.token)).entryCount, 0);
+    } finally { database.exec('DROP TRIGGER reject_project_move_receipt'); }
+  } finally { database.close(); }
+
+  const result = await f.apply(issue, input, next.token);
+  const [moved] = result.issues;
+  assert.equal(moved.id, issue.id);
+  assert.equal(moved.projectId, f.destination.id);
+  assert.notEqual(moved.key, issue.key);
+  const attribution = { projectId: moved.projectId, issueKey: moved.key, issueTitle: moved.title };
+  const movedList = { entries: [{ ...edited, ...attribution }], totalMinutes: edited.minutes, totalEntries: 1 };
+  assert.deepEqual(await f.request<IssueWorklogPage>(`/v1${worklogs}`, 200, 'GET', undefined, undefined, target.token), movedList);
+  await f.request(`/v1${worklogs}`, 403, 'GET', undefined, undefined, source.token);
+  await f.request(`/v1${reportPath(f.destination.id)}`, 403, 'GET', undefined, undefined, source.token);
+  const afterSourceReport = await getReport(f.source.id, source.token);
+  assert.equal(afterSourceReport.minutes, 0);
+  assert.equal(afterSourceReport.entryCount, 0);
+  assert.deepEqual(afterSourceReport.byIssue, []);
+  const afterTargetReport = await getReport(f.destination.id, target.token);
+  assert.equal(afterTargetReport.minutes, edited.minutes);
+  assert.equal(afterTargetReport.entryCount, 1);
+  assert.deepEqual(afterTargetReport.byIssue, [{ issueId: moved.id, key: moved.key, title: moved.title, deleted: false, minutes: edited.minutes, entries: 1 }]);
+
+  assert.deepEqual(await f.apply(issue, input, next.token), { ...result, duplicate: true });
+  assert.deepEqual(await f.request(worklogs, 201, 'POST', activeInput), movedList.entries[0]);
+  await f.request(worklogs, 409, 'POST', addInput);
+  const movedBackup = await f.request<WorklogBackup>('/export');
+  const expectedRows = originalBackup.worklogs.map(value => ({ ...value, ...attribution }));
+  assert.deepEqual(movedBackup.worklogs, expectedRows);
+
+  const restored = await fixture(t);
+  await restored.request('/import', 200, 'POST', { data: movedBackup });
+  assert.deepEqual(await restored.request(worklogs), movedList);
+  assert.deepEqual((await restored.request<WorklogBackup>('/export')).worklogs, expectedRows);
+  assert.equal((await restored.request<ProjectWorklogReport>(reportPath(f.source.id))).minutes, 0);
+  assert.deepEqual(await restored.request(reportPath(f.destination.id)), afterTargetReport);
+  await restored.request(worklogs, 409, 'POST', addInput);
 });
 
 test('target custom fields carry compatible values by definition and require explicit lossless validation', async t => {
