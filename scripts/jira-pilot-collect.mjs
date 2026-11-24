@@ -189,6 +189,36 @@ function verifySelf(value, requestUrl, issue) {
   }
 }
 
+function remoteLinkSelfMatches(value, base, issue, linkId) {
+  if (typeof value !== 'string' || /[\\\u0000-\u0020\u007f]/u.test(value)) return false;
+  const url = URL.parse(value);
+  // Keep the raw path for the comparison because URL removes dot segments.
+  const path = /^https?:\/\/[^/?#]+(\/[^?#]*)$/iu.exec(value)?.[1];
+  return url?.origin === base.origin && !url.username && !url.password &&
+    ['2', '2.0', 'latest'].some(version => [issue.id, issue.key].some(alias =>
+      path === `${base.pathname}rest/api/${version}/issue/${alias}/remotelink/${linkId}`));
+}
+
+async function collectRemoteLinks(issue, base, getJson, report, seen) {
+  const response = await getJson(`rest/api/2/issue/${issue.id}/remotelink`, undefined, { optionalStatuses: [403, 404] });
+  if (response === null) {
+    report.unavailableRemoteLinkIssues++;
+    return { status: 'unavailable' };
+  }
+  const { value } = response;
+  if (!Array.isArray(value)) collectError('Jira 원격 연결 목록의 형식을 확인할 수 없습니다.');
+  for (const link of value) {
+    const id = typeof link?.id === 'string' ? link.id : Number.isSafeInteger(link?.id) ? String(link.id) : '';
+    if (!jiraNumericId.test(id) || seen.has(id) || !link.object || typeof link.object !== 'object' || Array.isArray(link.object) ||
+        Object.hasOwn(link, 'self') && !remoteLinkSelfMatches(link.self, base, issue, id)) {
+      collectError('Jira 원격 연결의 식별자나 원본 업무가 올바르지 않거나 중복됩니다.');
+    }
+    seen.add(id);
+  }
+  report.remoteLinkCount += value.length;
+  return { status: 'complete', values: value };
+}
+
 async function collectAttachments(issue, configuration, reader, archive, report, seen) {
   const attachments = issue.fields.attachment;
   if (attachments == null) return;
@@ -218,8 +248,9 @@ async function collect(configuration, output, signal, plannedIssues) {
       await selectProjectIssues(configuration.projectKey, reader.getJson, JIRA_COLLECT_MAX_BATCH,
         '프로젝트에서 읽을 수 있는 업무가 500개를 넘습니다. plan으로 분할 수집 계획을 만들어 주세요.'));
     const report = { issueCount: 0, commentCount: 0, worklogCount: 0, historyCount: 0, incompleteHistories: 0,
+      remoteLinkCount: 0, unavailableRemoteLinkIssues: 0,
       attachmentCount: 0, skippedAttachments: 0, unavailableAttachments: 0, oversizedAttachments: 0 };
-    const seen = new Set(), attachments = new Set();
+    const seen = new Set(), attachments = new Set(), remoteLinks = new Set();
     for (const expected of selected) {
       const { value: issue, url } = await reader.getJson(`rest/api/2/issue/${expected.id ?? expected.key}`, {
         fields: '*all', expand: 'names,schema,changelog',
@@ -231,6 +262,7 @@ async function collect(configuration, output, signal, plannedIssues) {
       issue.id = id;
       issue.self = new URL(`rest/api/2/issue/${id}`, configuration.base).href;
       await collectJiraIssueActivity({ issue, getJson: reader.getJson, addJson: archive.addJson, report });
+      issue.remoteLinks = await collectRemoteLinks(issue, configuration.base, reader.getJson, report, remoteLinks);
       await collectAttachments(issue, configuration, reader, archive, report, attachments);
       delete issue.fields.comment;
       delete issue.fields.worklog;

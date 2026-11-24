@@ -135,6 +135,67 @@ test('REST JSON retains ADF, custom fields, actors, changelog and partial-page d
   assert.equal(data.source.format,'jira-json');assert.equal(find(data,'issue:10').textFormat,'adf');assert.deepEqual((find(data,'issue:10').metadata.fields as Record<string,unknown>).security,{id:'private',name:'비공개',present:true});assert.ok(!JSON.stringify(data).includes('NEVER_COPY_SECURITY'));assert.ok(find(data,'issue:10').text.includes('ADF 원문'));assert.equal((find(data,'issue:10').metadata.fields as Record<string,unknown>).customfield_100,false);assert.equal(find(data,'field:customfield_100').title,'확인 여부');assert.equal(find(data,'option:customfield_101:choice-a').metadata.originalId,'choice-a');assert.equal(find(data,'history:60').authorId,'actor-1');assert.equal(find(data,'history:worklog:70').metadata.timeSpentSeconds,'0');assert.ok(codes(data).has('WORKLOGS_PARTIAL'));assert.ok(codes(data).has('JSON_FIELDS_NOT_NORMALIZED'));assert.ok(!JSON.stringify(data).includes('NEVER_COPY_VENDOR'));assert.ok(data.unsupported.some(item=>item.type==='json-field:vendorUnsupported'));assert.ok(codes(data).has('JSON_REST_DIALECT'));assert.ok(codes(data).has('ISSUES_PARTIAL'));assert.ok(codes(data).has('COMMENTS_PARTIAL'));assert.ok(codes(data).has('HISTORY_PARTIAL'));assert.ok(codes(data).has('ATTACHMENT_BYTES_MISSING'));
 });
 
+test('REST remote links archive the exact issue owner and sanitized target with explicit coverage', () => {
+  const source = 'https://jira.example.test/tools/jira/rest/api/2/issue';
+  const wiki = 'https://wiki.example.test/wiki/pages/viewpage.action?pageId=777';
+  const row = (id: number) => ({ id, key: `OLD-${id}`, self: `${source}/${id}`, fields: { summary: `Ticket ${id}` } });
+  const data = parse('rest.json', JSON.stringify({ issues: [
+    { ...row(10), remoteLinks: { status: 'complete', values: [{ id: 90,
+      self: `${source}/OLD-10/remotelink/90`, issueId: '10', relationship: 'mentioned in',
+      globalId: 'appId=synthetic-application&pageId=777&%74oken=NEVER_COPY_GLOBAL',
+      application: { type: 'com.atlassian.confluence', name: 'Source wiki', apiKey: 'NEVER_COPY_APP' },
+      object: { url: `${wiki}&access_token=NEVER_COPY_TARGET`, title: 'Release runbook',
+        icon: { url16x16: 'https://user:NEVER_COPY_ICON@wiki.example.test/assets/icon.png', access_token: 'NEVER_COPY_FIELD' } },
+    }] } },
+    { ...row(11), remoteLinks: { status: 'complete', values: [] } },
+    { ...row(12), remoteLinks: { status: 'unavailable' } },
+    row(13),
+  ] }));
+  const link = find(data, 'relation:remote:90');
+  assert.equal(link.title, 'Release runbook');
+  assert.equal(link.containerId, '10');
+  assert.deepEqual(link.references, [{ kind: 'issue', sourceId: '10', relation: 'source' }]);
+  assert.equal(link.metadata.jiraRestRemoteLink, true);
+  assert.equal(link.metadata.jiraRemoteLinkConflict, undefined);
+  assert.equal(link.metadata.url, wiki);
+  assert.equal(link.metadata.relationship, 'mentioned in');
+  assert.equal(link.metadata.globalId, 'appId=synthetic-application&pageId=777');
+  assert.equal(link.metadata.remoteApplicationType, 'com.atlassian.confluence');
+  assert.equal(link.metadata.remotePageId, '777');
+  assert.deepEqual(link.metadata.application, { type: 'com.atlassian.confluence', name: 'Source wiki' });
+  assert.deepEqual(data.diagnostics.filter(item => item.code === 'JIRA_REMOTE_LINKS_UNAVAILABLE').map(item => item.recordId), ['issue:12']);
+  assert.equal(data.records.filter(item => item.kind === 'relation').length, 1);
+  assert.doesNotMatch(JSON.stringify(data), /NEVER_COPY/u);
+});
+
+test('REST remote links retain invalid identities, conflicting owners, and selectors as inert source rows', () => {
+  const source = 'https://jira.example.test/jira/rest/api/2/issue';
+  const wiki = 'https://wiki.example.test/wiki/pages/viewpage.action?pageId=777';
+  const row = (owner: number, values: unknown[]) => ({ id: owner, key: `OLD-${owner}`, self: `${source}/${owner}`, fields: { summary: 'Issue' },
+    remoteLinks: { status: 'complete', values } });
+  const target = { object: { title: 'Runbook', url: wiki } };
+  const data = parse('rest.json', JSON.stringify({ issues: [
+    row(10, [{ id: '90', ...target }, { id: 91, ...target, self: `${source}/11/remotelink/91` },
+      { id: 92, ...target, self: `${source.replace('/jira/', '/wrong/')}/10/remotelink/92` },
+      { id: 93, ...target, issueId: 11 }, { id: 94, ...target, globalId: 'appId=wiki&pageId=778' },
+      { id: 95, ...target, globalId: 'appId=wiki&pageId=777&pageId=777' },
+      { id: 96, ...target, self: `${source}/10/remotelink/999` },
+      { id: 97, object: { url: `${wiki}&pageVersion=3` } },
+      { id: 98, object: { url: 'https://wiki.example.test/wiki/else/%2e%2e/pages/viewpage.action?pageId=777' } },
+      { id: 'invalid', ...target }, { id: 99, object: { url: 'javascript:alert(1)' } }]),
+    row(11, [{ id: 90, ...target }]),
+    { ...row(12, []), remoteLinks: { status: 'complete', values: {} } },
+  ] }));
+  const relations = data.records.filter(item => item.kind === 'relation');
+  assert.equal(relations.length, 12);
+  assert.ok(relations.every(item => item.metadata.jiraRestRemoteLink === true && item.metadata.jiraRemoteLinkConflict === true));
+  assert.equal(find(data, 'relation:remote:90').containerId, '10');
+  assert.equal(find(data, 'relation:remote:99').metadata.url, null);
+  assert.equal(relations.filter(item => item.sourceId.startsWith('remote-invalid:')).length, 2);
+  assert.ok(codes(data).has('JIRA_REMOTE_LINK_CONFLICT'));
+  assert.ok(codes(data).has('JIRA_REMOTE_LINKS_MALFORMED'));
+});
+
 test('Jira JSON registers custom user identities without inferring users from ordinary fields', () => {
   const data = parse('custom-users.json', JSON.stringify({
     names: { customfield_100: '계정 담당', customfield_101: '서버 담당' },

@@ -162,6 +162,8 @@ npm run pilot:jira:collect -- /absolute/path/jira-config.json /absolute/path/jir
 
 출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Teamspace 분석기로 이 흐름을 검사한다.
 
+업무별 원격 링크 목록은 Jira의 `GET /rest/api/2/issue/{id}/remotelink`에서 읽어 ZIP에 함께 저장한다. 수집 명령은 Jira에만 요청하며 외부 링크의 목적지와 아이콘 주소는 원본 값으로 저장한다. `remoteLinkCount`에는 목록에서 읽은 링크를, `unavailableRemoteLinkIssues`에는 조회가 403 또는 404로 끝난 업무를 센다. 이전 ZIP에서 원격 링크 목록을 읽었는지 확인할 수 없는 경우 이 명령으로 다시 수집한다. Jira ZIP과 Confluence 공간 XML을 함께 이관할 때 서버 주소와 설치 경로 및 페이지가 유일하게 일치하면 티켓과 문서를 양방향으로 연결한다. [Jira 원격 링크 API](https://developer.atlassian.com/server/jira/platform/jira-rest-api-for-remote-issue-links/)
+
 ### Jira 프로젝트 분할 수집
 
 업무가 500개를 넘거나 첨부 때문에 한 ZIP의 용량을 넘을 것으로 예상되면 `projectKey` 설정으로 분할 계획을 만든다. `--batch-size`는 묶음당 1~500개이며 기본값은 100개다. 계획 하나에 Jira 계정에서 열람할 수 있는 업무 최대 10,000개를 담는다.

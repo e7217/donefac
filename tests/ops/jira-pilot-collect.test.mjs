@@ -24,6 +24,9 @@ const attachment = Buffer.from([0, 1, 2, 31, 127, 200, 255]);
 const date = '2020-03-06T02:15:00.000+0900';
 const author = { key: 'synthetic-author', name: 'synthetic-jira-reader', displayName: 'Synthetic Jira Reader' };
 const project = { id: '10', key: 'SRC', name: 'Local Jira project' };
+const privateRemoteTitle = 'Synthetic private remote link title';
+const remotePath = id => `${apiPath}/issue/${id}/remotelink`;
+const remoteObject = url => ({ url, title: privateRemoteTitle, summary: 'Original object metadata', status: { resolved: false } });
 const selectedIssues = [
   { id: '100', key: 'SRC-1', fields: { project } },
   { id: '101', key: 'SRC-2', fields: { project } },
@@ -52,7 +55,7 @@ async function serve(t, handler) {
 }
 
 async function jiraFixture(t, { unavailableHistory = false, searchDrift = false, repeatedComment = false, wrongCommentOwner = false,
-  inconsistentCommentTotal = false, offOriginAttachment } = {}) {
+  inconsistentCommentTotal = false, offOriginAttachment, remoteLinks = () => ({ value: [] }) } = {}) {
   return serve(t, ({ url, request, response, json }) => {
     assert.equal(request.method, 'GET');
     assert.equal(request.headers.authorization, credential);
@@ -68,7 +71,7 @@ async function jiraFixture(t, { unavailableHistory = false, searchDrift = false,
     if (url.pathname === attachmentPath) {
       return response.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': attachment.length }).end(attachment);
     }
-    const route = new RegExp(`^${apiPath}/issue/([^/]+)(?:/(comment|worklog|changelog))?$`).exec(url.pathname);
+    const route = new RegExp(`^${apiPath}/issue/([^/]+)(?:/(comment|worklog|changelog|remotelink))?$`).exec(url.pathname);
     const selected = selectedIssues.find(issue => issue.id === route?.[1] || issue.key === route?.[1]);
     if (!selected) return json({ error: 'synthetic route not found' }, 404);
     const { id, key } = selected;
@@ -94,6 +97,12 @@ async function jiraFixture(t, { unavailableHistory = false, searchDrift = false,
         schema: { customfield_10206: dateSchema, customfield_10207: dateSchema },
         changelog: first ? { startAt: 0, total: 1, maxResults: 1, histories: [statusChange('600')] }
           : { startAt: 0, total: 2, maxResults: 1, histories: [statusChange('601')] } });
+    }
+    if (route[2] === 'remotelink') {
+      assert.equal(route[1], id);
+      assert.equal(url.search, '');
+      const { value, status } = remoteLinks({ id, key, origin: url.origin });
+      return json(value, status);
     }
     const startAt = Number(url.searchParams.get('startAt'));
     function page(field, rows) {
@@ -153,9 +162,10 @@ async function jiraInventoryFixture(t, rows, { searchPage, issueDetail } = {}) {
       return json(searchPage ? searchPage(page, searchPass) : page);
     }
 
-    const route = new RegExp(`^${apiPath}/issue/([0-9]+)(?:/(comment|worklog))?$`, 'u').exec(url.pathname);
+    const route = new RegExp(`^${apiPath}/issue/([0-9]+)(?:/(comment|worklog|remotelink))?$`, 'u').exec(url.pathname);
     const row = rows.find(value => value.id === route?.[1]);
     if (!route || !row) return json({ error: 'synthetic route not found' }, 404);
+    if (route[2] === 'remotelink') return json([]);
     if (route[2]) {
       return json({ startAt: 0, maxResults: 1, total: 0, [route[2] === 'comment' ? 'comments' : 'worklogs']: [] });
     }
@@ -179,14 +189,25 @@ async function inspectArchive(output) {
 }
 
 function assertPrivateOutput(result) {
-  for (const value of [token, 'Synthetic private issue body', 'First private fixture comment', 'Synthetic private worklog']) {
+  for (const value of [token, 'Synthetic private issue body', 'First private fixture comment', 'Synthetic private worklog', privateRemoteTitle]) {
     assert.ok(!`${result.stdout}\n${result.stderr}`.includes(value));
   }
 }
 
 test('Jira pilot collection downloads paged and bound originals into a private Teamspace package', async t => {
   const other = await serve(t, ({ json }) => json({}));
-  const source = await jiraFixture(t, { offOriginAttachment: `${other.origin}${context}/secure/attachment/401/sample.bin` });
+  const sameHostDestinationPath = `${context}/pages/viewpage.action`;
+  const sameHostDestination = `${sameHostDestinationPath}?pageId=700`;
+  const externalDestination = `${other.origin}/wiki/pages/viewpage.action?pageId=701`;
+  const remoteLinks = origin => [
+    { id: 7001, self: `${origin}${remotePath('100')}/7001`, globalId: 'system=synthetic&id=701',
+      relationship: 'documents', application: { type: 'com.atlassian.confluence', name: 'Synthetic wiki' },
+      object: { ...remoteObject(externalDestination), icon: { url16x16: `${other.origin}/private-icon` } } },
+    { id: '7002', self: `${origin}${context}/rest/api/latest/issue/SRC-1/remotelink/7002`, object: remoteObject(origin + sameHostDestination) },
+    { id: 7003, object: remoteObject(`${other.origin}/private-unscoped-destination`) },
+  ];
+  const source = await jiraFixture(t, { offOriginAttachment: `${other.origin}${context}/secure/attachment/401/sample.bin`,
+    remoteLinks: ({ id, origin }) => ({ value: id === '100' ? remoteLinks(origin) : [] }) });
   const { output, collect } = await invocation(t, { baseUrl: source.origin + context, projectKey: 'SRC' });
   const result = await collect();
   assert.equal(result.code, 0, result.stderr);
@@ -194,12 +215,15 @@ test('Jira pilot collection downloads paged and bound originals into a private T
   assertPrivateOutput(result);
   const report = JSON.parse(result.stdout);
   for (const [key, count] of Object.entries({ issueCount: 2, commentCount: 2, worklogCount: 1, historyCount: 3,
+    remoteLinkCount: 3, unavailableRemoteLinkIssues: 0,
     incompleteHistories: 0, attachmentCount: 1, skippedAttachments: 0, unavailableAttachments: 1, oversizedAttachments: 0 })) {
     assert.equal(report[key], count, key);
   }
   assert.deepEqual(source.seen.filter(request => request.path.endsWith('/search')).slice(0, 2).map(request => request.startAt), ['0', '1']);
   assert.deepEqual(source.seen.filter(request => /\/issue\/(?:100|SRC-1)\/comment$/.test(request.path)).map(request => request.startAt), ['0', '1']);
   assert.ok(source.seen.some(request => request.path === attachmentPath));
+  assert.deepEqual(source.seen.filter(({ path }) => path.endsWith('/remotelink')).map(({ path }) => path), [remotePath('100'), remotePath('101')]);
+  assert.ok(!source.seen.some(({ path }) => path === sameHostDestinationPath));
   assert.deepEqual(other.seen, []);
   assert.ok(source.seen.every(request => request.method === 'GET' && request.authorization === credential));
   assert.equal((await stat(output)).mode & 0o777, 0o600);
@@ -210,6 +234,10 @@ test('Jira pilot collection downloads paged and bound originals into a private T
   assert.deepEqual([...files.keys()].filter(path => path.startsWith('issues/')).sort(), ['issues/100.json', 'issues/101.json']);
   const issue = JSON.parse(files.get('issues/100.json'));
   assert.equal(issue.fields.description, 'Synthetic private issue body');
+  assert.deepEqual(issue.remoteLinks, { status: 'complete', values: remoteLinks(source.origin) });
+  assert.deepEqual(JSON.parse(files.get('issues/101.json')).remoteLinks, { status: 'complete', values: [] });
+  assert.ok(!`${result.stdout}\n${result.stderr}`.includes(externalDestination));
+  assert.ok(!`${result.stdout}\n${result.stderr}`.includes(sameHostDestination));
   assert.ok(!Object.hasOwn(issue.fields, 'comment') && !Object.hasOwn(issue.fields, 'worklog'));
   assert.deepEqual(files.get('attachments/400'), attachment);
   assert.ok([...files.values()].every(value => !value.includes(token)));
@@ -231,7 +259,9 @@ test('Jira pilot collection downloads paged and bound originals into a private T
 });
 
 test('explicit issue collection retains partial history and intentionally omitted file metadata', async t => {
-  const source = await jiraFixture(t, { unavailableHistory: true });
+  const source = await jiraFixture(t, { unavailableHistory: true, remoteLinks: ({ id }) => ({
+    status: id === '100' ? 403 : 404, value: { message: privateRemoteTitle },
+  }) });
   const { output, collect } = await invocation(t, { baseUrl: source.origin + context, issueKeys: ['SRC-1', 'SRC-2'], includeAttachments: false });
   const result = await collect();
   assert.equal(result.code, 0, result.stderr);
@@ -242,9 +272,12 @@ test('explicit issue collection retains partial history and intentionally omitte
   const report = JSON.parse(result.stdout);
   assert.equal(report.incompleteHistories, 1);
   assert.equal(report.historyCount, 2);
+  assert.equal(report.remoteLinkCount, 0);
+  assert.equal(report.unavailableRemoteLinkIssues, 2);
   assert.equal(report.attachmentCount, 0);
   assert.equal(report.skippedAttachments, 1);
-  const { dataset, records } = await inspectArchive(output);
+  const { dataset, records, files } = await inspectArchive(output);
+  for (const id of ['100', '101']) assert.deepEqual(JSON.parse(files.get(`issues/${id}.json`)).remoteLinks, { status: 'unavailable' });
   assert.equal(records.get('attachment:400').metadata.bytesPresent, false);
   assert.ok(records.has('history:601'), 'The embedded fragment of the original history must remain.');
   assert.ok(dataset.diagnostics.some(item => item.code === 'HISTORY_PARTIAL' && item.recordId === 'issue:101'));
@@ -287,6 +320,38 @@ test('Jira collection rejects drifting pagination and redirects without publishi
   });
 });
 
+test('Jira remote-link collection rejects malformed or contradictory lists without publishing a partial archive', async t => {
+  const other = await serve(t, ({ json }) => json({}));
+  const destination = `${other.origin}/wiki/private-unread-page`;
+  const object = remoteObject(destination);
+  for (const [name, remote, checkedIds = ['100']] of [
+    ['instead of an array', () => ({ values: [{ id: 7001, object }] })],
+    ['malformed remote object', () => [{ id: 7001, object: [] }]],
+    ['noncanonical link ID', () => [{ id: '07001', object }]],
+    ['duplicate across collected issues', ({ id }) => [{ id: id === '100' ? 7001 : '7001', object }], ['100', '101']],
+    ['self under a different origin', () => [{ id: 7001, object, self: `${other.origin}${remotePath('100')}/7001` }]],
+    ['self under a different mount', ({ origin }) => [{ id: 7001, object, self: `${origin}/other${remotePath('100')}/7001` }]],
+    ['self for another issue', ({ origin }) => [{ id: 7001, object, self: `${origin}${remotePath('101')}/7001` }]],
+    ['self for a different link ID', ({ origin }) => [{ id: 7001, object, self: `${origin}${remotePath('100')}/7002` }]],
+    ['self with a query selector', ({ origin }) => [{ id: 7001, object, self: `${origin}${remotePath('100')}/7001?globalId=other` }]],
+    ['self with a traversal segment', ({ origin }) => [{ id: 7001, object, self: `${origin}/other/%2e%2e${remotePath('100')}/7001` }]],
+  ]) {
+    await t.test(name, async inner => {
+      const source = await jiraFixture(inner, { remoteLinks: input => ({ value: remote(input) }) });
+      const { directory, collect } = await invocation(inner, { baseUrl: source.origin + context, issueKeys: ['SRC-1', 'SRC-2'] });
+      const result = await collect();
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /Jira 원격 연결/u);
+      assertPrivateOutput(result);
+      assert.ok(!`${result.stdout}\n${result.stderr}`.includes(destination));
+      assert.deepEqual(source.errors, []);
+      assert.deepEqual(source.seen.filter(({ path }) => path.endsWith('/remotelink')).map(({ path }) => path), checkedIds.map(remotePath));
+      assert.deepEqual(other.seen, []);
+      assert.deepEqual((await readdir(directory)).sort(), ['jira-auth', 'source.json']);
+    });
+  }
+});
+
 test('Jira project plan covers every visible tuple above 500 and collects a selected batch by ID', async t => {
   const rows = inventoryRows(501);
   const source = await jiraInventoryFixture(t, rows);
@@ -321,15 +386,18 @@ test('Jira project plan covers every visible tuple above 500 and collects a sele
   assertPrivateOutput(collected);
   assert.deepEqual(source.receivedDetails, ['1500']);
   assert.deepEqual(source.seen.slice(requestsBeforeBatch).map(request => request.path), [
-    `${apiPath}/issue/1500`, `${apiPath}/issue/1500/comment`, `${apiPath}/issue/1500/worklog`,
+    `${apiPath}/issue/1500`, `${apiPath}/issue/1500/comment`, `${apiPath}/issue/1500/worklog`, remotePath('1500'),
   ]);
   const { bytes, files, records } = await inspectArchive(output);
   const report = JSON.parse(collected.stdout);
   assert.equal(report.issueCount, 1);
+  assert.equal(report.remoteLinkCount, 0);
+  assert.equal(report.unavailableRemoteLinkIssues, 0);
   assert.equal(report.batch, 6);
   assert.equal(report.planSha256, planSha256);
   assert.equal(report.sha256, createHash('sha256').update(bytes).digest('hex'));
   assert.deepEqual([...files.keys()].filter(path => path.startsWith('issues/')), ['issues/1500.json']);
+  assert.deepEqual(JSON.parse(files.get('issues/1500.json')).remoteLinks, { status: 'complete', values: [] });
   assert.equal(records.get('issue:1500').metadata.key, 'SRC-501');
   assert.equal((await stat(output)).mode & 0o777, 0o600);
 
@@ -404,7 +472,7 @@ test('Jira batch rejects incompatible plans and removes staged data when live id
     assertPrivateOutput(result);
     assert.deepEqual(source.receivedDetails, ['1000', '1001']);
     assert.deepEqual(source.seen.slice(before).map(request => request.path), [
-      `${apiPath}/issue/1000`, `${apiPath}/issue/1000/comment`, `${apiPath}/issue/1000/worklog`, `${apiPath}/issue/1001`,
+      `${apiPath}/issue/1000`, `${apiPath}/issue/1000/comment`, `${apiPath}/issue/1000/worklog`, remotePath('1000'), `${apiPath}/issue/1001`,
     ]);
     assert.deepEqual((await readdir(directory)).sort(), ['duplicate.json', 'incompatible.json', 'jira-auth', 'plan.json', 'source.json']);
   }

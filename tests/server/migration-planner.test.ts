@@ -1662,6 +1662,59 @@ test('source issue links remain typed relations and document links do not become
   const source=jira(),wiki=confluence();source.dataset.records.push(record('relation','remote',{title:'문서 연결',metadata:{url:'https://wiki.test/pages/viewpage.action?pageId=10'},references:[{kind:'issue',sourceId:'1',relation:'source'},{kind:'page',sourceId:'10',relation:'externalDocument'}]}));wiki.dataset.records.find(row=>row.id==='page:10')!.text='<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro>';const request=input([source,wiki]);request.configuration.sourceBaseUrls.wiki='https://wiki.test';const plan=buildMigrationPlan(request);assert.equal(plan.preview.canApply,true);assert.equal(plan.issueRelations.length,1);assert.equal(plan.issueRelations[0].type,'Blocks');assert.equal(plan.resourceLinks.length,1);assert.ok(!Object.hasOwn(plan,'dependencies'));
 });
 
+test('Jira REST remote links resolve exactly scoped Confluence URLs and archive other links', () => {
+  const source = jira();
+  source.summary.source.format = 'jira-json';
+  source.dataset.source.format = 'jira-json';
+  const base = 'https://wiki.example.test/wiki';
+  const peer = 'https://wiki.example.test/peer';
+  const wiki = pkg('wiki-rest-home', 'confluence', [
+    record('project', 's', { title: 'Home', metadata: { spaceKey: 'TEAM' } }),
+    page('200', { title: 'Home guide', authorId: null }), page('202', { title: 'Second page', authorId: null }),
+  ]);
+  const alternate = pkg('wiki-rest-peer', 'confluence', [
+    record('project', 's', { title: 'Peer', metadata: { spaceKey: 'TEAM' } }),
+    page('200', { title: 'Peer guide', authorId: null }),
+  ]);
+  const remote = (id: string, issueId: string, url: string, metadata: LegacyRecord['metadata'] = {}) => record('relation', `remote:${id}`, {
+    title: 'Remote link', containerId: issueId, metadata: { jiraRestRemoteLink: true, url, ...metadata },
+    references: [{ kind: 'issue', sourceId: issueId, relation: 'source' }],
+  });
+  source.dataset.records.push(
+    remote('1', '1', `${base}/display/TEAM/Home+guide`, { remotePageId: '200', remoteApplicationType: 'com.atlassian.confluence' }),
+    remote('2', '1', `${base}/x/y`),
+    remote('3', '2', `${peer}/pages/viewpage.action?pageId=200`),
+    remote('4', '2', `${base}/pages/viewpage.action?pageId=202`, { remotePageId: '200' }),
+    remote('5', '2', `${base}/pages/viewpage.action?pageId=202&version=1`),
+    remote('6', '2', `${base}/pages/viewpage.action?pageId=202`, { jiraRemoteLinkConflict: true }),
+    remote('7', '2', 'https://third-party.example.test/runbooks/123'),
+    remote('8', '404', `${base}/pages/viewpage.action?pageId=202`, { remoteApplicationType: 'com.atlassian.confluence' }),
+    remote('9', '2', `${base}/pages/viewpage.action?pageId=202`, { remoteApplicationType: 'com.atlassian.confluence' }),
+  );
+  const duplicate = pkg('same-jira-instance', 'jira', [
+    record('project', 'j', { title: 'Jira second input', metadata: { key: 'OLD' } }),
+    issue('3', { authorId: null, references: [] }),
+    remote('9', '3', `${base}/pages/viewpage.action?pageId=202`, { remoteApplicationType: 'com.atlassian.confluence' }),
+  ]);
+  duplicate.dataset.source.instanceKey = source.dataset.source.instanceKey;
+  duplicate.dataset.source.format = 'jira-json';
+  const request = input([source, wiki, alternate, duplicate]);
+  request.configuration.sourceBaseUrls = { [wiki.summary.id]: base, [alternate.summary.id]: peer };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.deepEqual(plan.resourceLinks.map(({ issueId, documentId, kind }) => [
+    plan.issues.find(issue => issue.id === issueId)?.title, plan.documents.find(document => document.id === documentId)?.title, kind,
+  ]), [['업무 1', 'Home guide', 'related'], ['업무 2', 'Peer guide', 'related']]);
+  const unresolved = plan.preview.notices.filter(notice => notice.code === 'DOCUMENT_ISSUE_LINK_UNRESOLVED');
+  assert.deepEqual(unresolved.map(notice => notice.recordId).sort(), [
+    'jira/relation:remote:4', 'jira/relation:remote:5', 'jira/relation:remote:6', 'jira/relation:remote:8', 'jira/relation:remote:9',
+    'same-jira-instance/relation:remote:9',
+  ]);
+  assert.equal(plan.sourceRecords.find(archive => archive.record.sourceId === 'remote:7')?.record.metadata.url,
+    'https://third-party.example.test/runbooks/123');
+  assert.equal(plan.preview.counts.resourceLinks, 2);
+});
+
 test('Jira remote Confluence relations only link a page consistent with the declared source ID', () => {
   const source = jira(), wiki = confluence();
   const base = 'https://wiki.example.test/wiki';

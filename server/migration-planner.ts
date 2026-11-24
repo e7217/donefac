@@ -3735,9 +3735,18 @@ class Planner{
   createRelations():void{
     const resourcePairs=new Set<string>(),issuePairs=new Set<string>();
     const resource=(issueId:string,documentId:string)=>{const key=JSON.stringify([issueId,documentId]);if(resourcePairs.has(key))return;resourcePairs.add(key);this.result.resourceLinks.push({id:randomUUID(),issueId,documentId,kind:'related'});};
+    const remoteLinks = Map.groupBy(this.entries.filter(({ row, pkg }) => pkg.dataset.source.product === 'jira' &&
+      row.kind === 'relation' && row.metadata.jiraRestRemoteLink === true), entry => this.jiraRemoteLinkIdentity(entry));
     for(const document of this.result.documents)for(const reference of contentReferences(document.content))if(reference.type==='issue')resource(reference.id,document.id);
     for(const entry of this.entries){if(this.excluded.has(entry.key))continue;const binding=this.bindings.get(entry.key);if(binding?.type==='document')for(const reference of entry.row.references.filter(reference=>reference.kind==='issue')){const target=this.resolve(entry,{kind:'issue',sourceId:reference.sourceId});if(target)resource(target.id,binding.id);}
-      if(entry.row.kind!=='relation'||entry.row.metadata.jiraRelationConflict===true)continue;const issueRefs=entry.row.references.filter(reference=>reference.kind==='issue'),pageRefs=entry.row.references.filter(reference=>reference.kind==='page'),issueTargets=issueRefs.map(reference=>this.resolve(entry,{kind:'issue',sourceId:reference.sourceId}));
+      if(entry.row.kind!=='relation'||entry.row.metadata.jiraRelationConflict===true)continue;
+      if (entry.pkg.dataset.source.product === 'jira' && entry.row.metadata.jiraRestRemoteLink === true) {
+        const related = remoteLinks.get(this.jiraRemoteLinkIdentity(entry));
+        const pair = this.jiraRestResourceLink(entry, related?.length === 1);
+        if (pair) resource(pair.issueId, pair.documentId);
+        continue;
+      }
+      const issueRefs=entry.row.references.filter(reference=>reference.kind==='issue'),pageRefs=entry.row.references.filter(reference=>reference.kind==='page'),issueTargets=issueRefs.map(reference=>this.resolve(entry,{kind:'issue',sourceId:reference.sourceId}));
       if(this.input.append&&!issueTargets.some(target=>target&&this.issueById.has(target.id)))continue;
       if (issueRefs.length >= 2) {
         if (issueTargets.some(target => !target)) {
@@ -3764,6 +3773,29 @@ class Planner{
     }
     this.createJiraRelationRefresh();
     if (this.result.issueRelations.length) this.notice('ISSUE_RELATIONS_PRESERVED', '원본 업무 연결을 관계로 보존합니다. 같은 프로젝트의 차단 관계는 이관 후 티켓에서 일정 연결을 검토할 수 있습니다.', 'info');
+  }
+  private jiraRemoteLinkIdentity({ pkg, row }: Entry) {
+    return JSON.stringify([pkg.dataset.source.instanceKey, row.sourceId]);
+  }
+  private jiraRestResourceLink(entry: Entry, unique: boolean): { issueId: string; documentId: string } | null {
+    const { containerId, metadata, references } = entry.row;
+    const address = confluenceMigrationPageAddress(string(metadata.url));
+    const pageId = string(metadata.remotePageId);
+    const knownConfluenceOrigin = address && this.input.packages.some(pkg => {
+      const base = this.originBases.get(pkg.summary.id);
+      return pkg.dataset.source.product === 'confluence' && base?.origin === address.origin && base.contextPath === address.contextPath;
+    });
+    if (!knownConfluenceOrigin && metadata.remoteApplicationType !== 'com.atlassian.confluence' && !pageId) return null;
+    const owner = containerId && this.sourceEntry(entry, 'issue', containerId);
+    const [source] = references;
+    const binding = unique && owner && !this.excluded.has(owner.key) && !this.restricted(owner) && references.length === 1 &&
+      source?.kind === 'issue' && source.relation === 'source' && source.sourceId === containerId ? this.bindings.get(owner.key) : undefined;
+    const page = address && !address.hasExtraQuery && metadata.jiraRemoteLinkConflict !== true ? this.confluenceAbsolutePage(address) : null;
+    if (binding?.type !== 'issue' || !page || pageId && page.sourceId !== pageId) {
+      this.notice('DOCUMENT_ISSUE_LINK_UNRESOLVED', 'Jira 원격 연결의 업무 또는 Confluence 페이지 주소를 유일하게 확인하지 못해 원본에 보관합니다.', 'warning', entry, true);
+      return null;
+    }
+    return { issueId: binding.id, documentId: page.reference.id };
   }
   private tracedJiraEndpoint(entry: Entry, alias: string, issueId: string): boolean {
     if (this.originalIssue(alias)?.id === issueId) return true;

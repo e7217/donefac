@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import { atlassianContextPath, atlassianWebUrl, isConfluencePageId } from '../shared/atlassian-links.js';
 import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKind,LegacyReference,LegacyValue } from '../shared/types.js';
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
 import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
@@ -13,6 +14,7 @@ import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey, JIRA_EPIC_RELATION_STY
 import { observeJiraIdentityEmail } from './migration-identity-email.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType } from './migration-jira-relations.js';
+import { confluenceMigrationPageAddress } from './migration-origin-links.js';
 
 // Primary dialect references: Jira search export documentation, Importers JSON
 // documentation, and Jira Server parser constants (Action/FileAttachment/ChangeGroup).
@@ -136,6 +138,153 @@ function restIssueLocation(value: unknown, changelog = false): { alias: string; 
   }
 }
 
+type JiraRemoteLinksEnvelope = { issue: LegacyRecord; issueId: unknown; issueSelf: unknown; raw: unknown; path: string };
+const remoteSecretKey = /password|credential|secret|token|private.?key|authorization|api.?key|signature|session/iu;
+const legacyUrlQueryKeys = new Set(['pageId', 'spaceKey', 'title', 'version', 'attachmentId', 'focusedCommentId']);
+
+function jiraRemoteNumericId(value: unknown): string {
+  const id = typeof value === 'string' || typeof value === 'number' && Number.isSafeInteger(value) ? String(value) : '';
+  return isJiraHierarchyIssueId(id) ? id : '';
+}
+
+function jiraRemoteRestSelf(value: unknown, owner: string, key: string, linkId?: string): string | undefined {
+  const url = atlassianWebUrl(value);
+  if (!url || typeof value !== 'string') return;
+  const path = /^https?:\/\/[^/?#]+(\/[^?#]*)$/iu.exec(value)?.[1];
+  const route = path && /^(.*?)\/rest\/api\/(?:2(?:\.0)?|3|latest)\/issue\/([^/]+)(?:\/remotelink\/([^/]+))?$/u.exec(path);
+  if (!route || (route[2] !== owner && (!key || route[2] !== key)) || route[3] !== linkId) return;
+  const context = atlassianContextPath(route[1]);
+  return context === undefined ? undefined : url.origin + context;
+}
+
+function jiraRemoteGlobalId(context: Context, value: unknown, recordId: string) {
+  if (value === undefined || value === null) return { globalId: '', pageId: undefined, invalid: false };
+  if (typeof value !== 'string' || value.length > 4000 || /[\u0000-\u001f\u007f]/u.test(value)) {
+    return { globalId: '', pageId: undefined, invalid: true };
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) {
+    const globalId = jiraRemoteArchiveUrl(context, value, recordId);
+    return { globalId: globalId ?? '', pageId: undefined, invalid: globalId === null };
+  }
+  const isQuery = /^(?:[\w.%-]+=[^&]*)(?:&[\w.%-]+=[^&]*)*$/u.test(value);
+  if (!isQuery) return { globalId: value.includes('=') && remoteSecretKey.test(value) ? '' : value, pageId: undefined, invalid: false };
+  const params = new URLSearchParams(value);
+  const ids = params.getAll('pageId');
+  const original = params.toString();
+  const sanitized = new URLSearchParams();
+  for (const [key, part] of params) {
+    if (remoteSecretKey.test(key)) continue;
+    const safe = /^[a-z][a-z0-9+.-]*:\/\//iu.test(part.trim()) ? jiraRemoteArchiveUrl(context, part, recordId) : part;
+    if (safe !== null) sanitized.append(key, safe);
+  }
+  return { globalId: sanitized.toString() === original ? value : sanitized.toString(),
+    pageId: ids.length === 1 && isConfluencePageId(ids[0]) ? ids[0] : undefined,
+    invalid: ids.length > 1 || ids.length === 1 && !isConfluencePageId(ids[0]) };
+}
+
+function archiveJiraRemoteLink(context: Context, value: unknown, key: string, recordId: string, depth = 0): LegacyValue {
+  if (depth > 30) return '[nested value omitted]';
+  if (typeof value === 'string') {
+    if (key === 'globalId') return jiraRemoteGlobalId(context, value, recordId).globalId;
+    if (/(?:url(?:\d+x\d+)?|uri|href|self)$/iu.test(key) || /^[a-z][a-z0-9+.-]*:\/\//iu.test(value.trim())) {
+      return jiraRemoteArchiveUrl(context, value, recordId);
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(item => archiveJiraRemoteLink(context, item, key, recordId, depth + 1));
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return jsonValue(value);
+  return Object.fromEntries(Object.entries(obj(value)).filter(([k]) => k.length <= 500 &&
+    !['__proto__', 'prototype', 'constructor'].includes(k) && !remoteSecretKey.test(k))
+    .map(([k, item]) => [k, archiveJiraRemoteLink(context, item, k, recordId, depth + 1)]));
+}
+
+function jiraRemoteArchiveUrl(context: Context, value: unknown, recordId: string): string | null {
+  if (typeof value !== 'string' || value.length > 4000 || /[\u0000-\u001f\u007f\\]/u.test(value)) return null;
+  const sanitized = context.url(value, recordId);
+  if (!sanitized) return null;
+  const url = new URL(sanitized);
+  if (url.hash.includes('=') && [...new URLSearchParams(url.hash.slice(1)).keys()].some(key => remoteSecretKey.test(key))) url.hash = '';
+  return url.href;
+}
+
+function jiraRemoteOwnerMatches(row: ObjectValue, owner: string, key: string, base: string | undefined): boolean {
+  if (['issueId', 'issueid'].some(name => Object.hasOwn(row, name) && jiraRemoteNumericId(row[name]) !== owner) ||
+      Object.hasOwn(row, 'issueKey') && (!key || row.issueKey !== key)) return false;
+  if (!Object.hasOwn(row, 'issue')) return true;
+  if (typeof row.issue === 'string' || typeof row.issue === 'number') return jiraRemoteNumericId(row.issue) === owner || Boolean(key && row.issue === key);
+  const identity = obj(row.issue);
+  const self = jiraRemoteRestSelf(identity.self, owner, key);
+  return (Object.hasOwn(identity, 'id') || Object.hasOwn(identity, 'key') || Object.hasOwn(identity, 'self')) &&
+    (!Object.hasOwn(identity, 'id') || jiraRemoteNumericId(identity.id) === owner) &&
+    (!Object.hasOwn(identity, 'key') || Boolean(key && identity.key === key)) &&
+    (!Object.hasOwn(identity, 'self') || Boolean(self && (!base || self === base)));
+}
+
+function readJiraRestRemoteLinks(context: Context, entry: JiraRemoteLinksEnvelope): void {
+  const { issue, raw, path } = entry;
+  const envelope = obj(raw);
+  if (envelope.status === 'unavailable' && Object.keys(envelope).length === 1) {
+    context.warn('JIRA_REMOTE_LINKS_UNAVAILABLE', 'Jira 업무의 원격 연결 목록을 확인할 수 없습니다.', issue.id, path);
+    return;
+  }
+  if (envelope.status !== 'complete' || !Array.isArray(envelope.values) || Object.keys(envelope).length !== 2) {
+    context.warn('JIRA_REMOTE_LINKS_MALFORMED', 'Jira 업무의 원격 연결 목록 형식이 올바르지 않아 이관에 사용하지 않았습니다.', issue.id, path);
+    return;
+  }
+  const owner = jiraRemoteNumericId(entry.issueId);
+  const rawKey = str(issue.metadata.key);
+  const key = isJiraHierarchyIssueKey(rawKey) ? rawKey : '';
+  const issueBase = jiraRemoteRestSelf(entry.issueSelf, owner, key);
+  const confirmedOwner = owner === issue.sourceId && (entry.issueSelf == null || Boolean(issueBase));
+  for (const [index, rawLink] of envelope.values.entries()) {
+    const link = obj(rawLink), target = obj(link.object), application = obj(link.application);
+    const id = jiraRemoteNumericId(link.id);
+    const previous = id ? context.byId.get(`relation:remote:${id}`) : undefined;
+    const sourceId = id && !previous ? `remote:${id}` : `remote-invalid:${createHash('sha256').update(JSON.stringify([issue.id, index])).digest('hex')}`;
+    const recordId = `relation:${sourceId}`;
+    const originalUrl = atlassianWebUrl(target.url);
+    const url = jiraRemoteArchiveUrl(context, target.url, recordId);
+    const global = jiraRemoteGlobalId(context, link.globalId, recordId);
+    const declaredPage = originalUrl?.searchParams.getAll('pageId') ?? [];
+    const address = typeof target.url === 'string' ? confluenceMigrationPageAddress(target.url) : null;
+    const linkBase = jiraRemoteRestSelf(link.self, owner, key, id);
+    const originalPath = typeof target.url === 'string' ? /^https?:\/\/[^/?#]+(\/[^?#]*)/iu.exec(target.url.trim())?.[1] : undefined;
+    const changesPath = originalPath?.split('/').some(part => {
+      try { return decodeURIComponent(part).split('/').some(segment => segment === '.' || segment === '..'); }
+      catch { return true; }
+    });
+    const dropsSelector = originalUrl && [...originalUrl.searchParams.keys()].some(name =>
+      !legacyUrlQueryKeys.has(name) && !remoteSecretKey.test(name));
+    const dropsFragment = originalUrl?.hash && url && !new URL(url).hash;
+    const applicationType = typeof application.type === 'string' ? application.type : '';
+    const selfMatches = !Object.hasOwn(link, 'self') || linkBase && (!issueBase || linkBase === issueBase);
+    const validApplication = link.application == null || typeof link.application === 'object' && !Array.isArray(link.application) &&
+      (!Object.hasOwn(application, 'type') || applicationType && applicationType.length <= 200);
+    const pageIdConflicts = global.invalid || declaredPage.length > 1 || declaredPage.length === 1 && !isConfluencePageId(declaredPage[0]) ||
+      global.pageId && [declaredPage[0], address?.identity.sourceId].some(id => id && id !== global.pageId);
+    const conflict = !confirmedOwner || !id || previous || !jiraRemoteOwnerMatches(link, owner, key, issueBase) || !selfMatches ||
+      !originalUrl || !url || changesPath || dropsSelector || dropsFragment || !validApplication || pageIdConflicts;
+    if (previous) {
+      previous.metadata.jiraRemoteLinkConflict = true;
+      if (previous.metadata.jiraRestRemoteLink !== true) previous.metadata.jiraRelationConflict = true;
+    }
+    if (conflict) context.warn('JIRA_REMOTE_LINK_CONFLICT', 'Jira 원격 연결의 ID, 원본 업무 또는 대상 주소를 확인할 수 없어 원본으로만 보관합니다.', issue.id, path);
+    context.put('relation', sourceId, {
+      title: typeof target.title === 'string' && target.title ? target.title.slice(0, 1000).toWellFormed() : '외부 연결',
+      containerId: owner || null,
+      metadata: {
+        jiraRestRemoteLink: true, url, relationship: typeof link.relationship === 'string' ? link.relationship : '',
+        globalId: global.globalId, application: archiveJiraRemoteLink(context, application, 'application', recordId),
+        raw: archiveJiraRemoteLink(context, rawLink, '', recordId),
+        ...(applicationType && applicationType.length <= 200 ? { remoteApplicationType: applicationType } : {}),
+        ...(global.pageId ? { remotePageId: global.pageId } : {}),
+        ...(conflict ? { jiraRemoteLinkConflict: true } : {}),
+      },
+      references: ref('issue', owner, 'source'),
+    });
+  }
+}
+
 type JiraHistoryPage = {
   owner: ReturnType<typeof restIssueLocation>; path: string; start: number; total: number; groups: unknown[];
 };
@@ -225,6 +374,7 @@ class Context{
   readonly sprints=new JiraSprintProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   readonly restIssues = new Map<LegacyRecord, JiraRestIssueHistory>();
+  readonly restRemoteLinks: JiraRemoteLinksEnvelope[] = [];
   private readonly issueParents = new Map<LegacyRecord, JiraIssueParentEvidence | null | undefined>();
   private readonly epicParents = new Map<LegacyRecord, { evidence: JiraIssueParentEvidence | null | undefined; path: string; fieldId?: string }>();
   private readonly epicFieldTypes = new Map<string, Set<string>>();
@@ -345,7 +495,7 @@ class Context{
   field(id:string,name:string,type='unknown'){return this.ensure('field',id,{title:name,metadata:{fieldType:type,...(/^(?:csv|named):/.test(id)?{syntheticId:true}:{})}})!;}
   option(fieldId:string,value:unknown):string|null{const input=obj(value),id=str(input.id)||str(input.value)||str(input.name)||str(value);if(!id)return null;const sourceId=`${fieldId}:${id}`;this.ensure('option',sourceId,{title:str(input.name||input.value)||id,containerId:fieldId,metadata:{originalId:str(input.id)||null,syntheticId:!str(input.id)},references:ref('field',fieldId,'field')});return sourceId;}
   date(value:unknown,recordId?:string):string|null{const result=str(value);if(!result)return null;if(!/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(result))this.warn('DATE_TIMEZONE_UNRESOLVED','원본 시각의 시간대 또는 상대 날짜 기준을 확정하지 않았습니다.',recordId||null);return result;}
-  url(value:unknown,recordId?:string):string|null{const raw=str(value);if(!raw)return null;try{const url=new URL(raw);if(!['http:','https:'].includes(url.protocol))return null;let removed=!!(url.username||url.password);url.username='';url.password='';for(const key of [...url.searchParams.keys()])if(!['pageId','spaceKey','title','version','attachmentId','focusedCommentId'].includes(key)){url.searchParams.delete(key);removed=true;}if(removed)this.warn('URL_AUTH_PARAMETERS_OMITTED','URL 인증 정보와 허용 목록 밖의 쿼리 매개변수를 미리보기에서 제외했습니다.',recordId||null);return url.toString();}catch{return null;}}
+  url(value:unknown,recordId?:string):string|null{const raw=str(value);if(!raw)return null;try{const url=new URL(raw);if(!['http:','https:'].includes(url.protocol))return null;let removed=!!(url.username||url.password);url.username='';url.password='';for(const key of [...url.searchParams.keys()])if(!legacyUrlQueryKeys.has(key)){url.searchParams.delete(key);removed=true;}if(removed)this.warn('URL_AUTH_PARAMETERS_OMITTED','URL 인증 정보와 허용 목록 밖의 쿼리 매개변수를 미리보기에서 제외했습니다.',recordId||null);return url.toString();}catch{return null;}}
   attachment(id: string, issueId: string, input: ObjectValue): LegacyRecord {
     const uri = str(input.content || input.uri || input.url);
     const recoveredId = uri.match(/\/(?:secure\/)?attachment\/(\d+)(?:\/|$)/)?.[1];
@@ -387,6 +537,7 @@ class Context{
     const issueKeys = new Map(this.dataset.records.filter(item => item.kind === 'issue' && item.metadata.key)
       .map(item => [str(item.metadata.key), item.sourceId]));
     this.checkRestIssueLinks(issueKeys);
+    for (const entry of this.restRemoteLinks) readJiraRestRemoteLinks(this, entry);
     for (const item of this.dataset.records) {
       for (const reference of item.references) if (reference.kind === 'issue') reference.sourceId = issueKeys.get(reference.sourceId) || reference.sourceId;
       item.references = [...new Map(item.references.map(reference => [JSON.stringify(reference), reference])).values()];
@@ -638,6 +789,9 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     context.observeIssueParent(item, fields.parent === null ? null : jiraIssueParentIdentity(parent.id, parent.key));
   }
   if (!importers) restEpicParent(context, item, fields, epicFields, path);
+  if (!importers && Object.hasOwn(input, 'remoteLinks')) {
+    context.restRemoteLinks.push({ issue: item, issueId: input.id, issueSelf: input.self, raw: input.remoteLinks, path });
+  }
   const readActivity = (kind: JiraActivityKind, envelope: unknown, rows: unknown[]) => {
     for (const [position, raw] of rows.entries()) jsonActivity(context, kind, raw, id, position);
     if (!importers) context.activityPages.track(item, input.self, kind, envelope, rows.map(raw => str(obj(raw).id) || null), path);
