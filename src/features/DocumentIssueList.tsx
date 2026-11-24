@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type MouseEvent } from 'react';
-import type { Editor } from '@tiptap/react';
+import type { Editor, JSONContent } from '@tiptap/react';
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model';
 import type { SelectionBookmark, Transaction } from '@tiptap/pm/state';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
@@ -16,14 +16,15 @@ import { createIssueViewMatcher, orderIssueView } from '../../shared/issue-view'
 import type { FeatureProps, SavedView, WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { JiraSavedViewDialog } from './JiraSavedViewDialog';
+import { insertDocumentSlashBlocks, restoreDocumentSlashFocus, useDocumentSlashRange, type DocumentSlashAnchor } from './document-slash-insertion';
 
 type IssueBlockType = 'issueList' | 'issueSummary';
 type IssueBlockAttrs = IssueListAttrs & { groupBy?: IssueSummaryGroupBy };
 type IssueBlockTarget = { getPos: () => number | undefined; attrs: IssueBlockAttrs };
-export type OpenIssueBlock = (editor: Editor, nodeType: IssueBlockType, target?: IssueBlockTarget) => void;
+export type OpenIssueBlock = (editor: Editor, nodeType: IssueBlockType, target?: IssueBlockTarget, slash?: DocumentSlashAnchor) => void;
 type IssueBlockSelectionBase = { editor: Editor; documentId: string; opener: HTMLElement | null; nodeType: IssueBlockType };
 export type IssueBlockSelection = IssueBlockSelectionBase & (
-  { kind: 'insert'; bookmark: SelectionBookmark } |
+  { kind: 'insert'; bookmark: SelectionBookmark; slash?: DocumentSlashAnchor } |
   { kind: 'edit'; target: IssueBlockTarget } |
   { kind: 'restoreJira'; nodeType: 'issueList'; target: { pos: number; node: ProseMirrorNode; macro: ConfluenceJiraList } }
 );
@@ -161,7 +162,7 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
   const projectSelect = useRef<HTMLSelectElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const restoreFocus = useRef(true);
-  const bookmark = useRef(selection.kind === 'insert' ? selection.bookmark : null);
+  const bookmark = useRef(selection.kind === 'insert' && !selection.slash ? selection.bookmark : null);
   const sourcePosition = useRef(restoringJira ? selection.target.pos : null);
   const viewReloading = useRef(false);
   const closeButton = useRef<HTMLButtonElement>(null);
@@ -169,6 +170,8 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
   const applyButton = useRef<HTMLButtonElement>(null);
   const reloadButton = useRef<HTMLButtonElement>(null);
   const { editor, nodeType } = selection;
+  const slash = selection.kind === 'insert' ? selection.slash : undefined;
+  const resolveSlashRange = useDocumentSlashRange(editor, slash);
   const isSummary = nodeType === 'issueSummary';
   const blockLabel = isSummary ? '업무 현황' : '업무 목록';
   const project = data.projects.find(item => item.id === projectId);
@@ -239,6 +242,12 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
     requestAnimationFrame(() => { if (!editor.isDestroyed && editor.isEditable) editor.view.focus(); });
   }
 
+  function cancel() {
+    if (slash) restoreFocus.current = false;
+    onClose();
+    if (slash) restoreDocumentSlashFocus(editor);
+  }
+
   function apply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!project || savedViewId && !view) return;
@@ -281,20 +290,28 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
           sourcePosition.current = null;
           editor.view.dispatch(transaction);
         } else {
-          if (!bookmark.current) throw new Error('삽입할 위치를 다시 선택해 주세요.');
-          const position = bookmark.current.resolve(editor.state.doc);
-          const placed = editor.chain().command(({ tr }) => { tr.setSelection(position); return true; })
-            .insertContent([{ type: nodeType, attrs }, { type: 'paragraph' }]).run();
+          const content: JSONContent[] = [{ type: nodeType, attrs }, { type: 'paragraph' }];
+          let placed: boolean;
+          if (slash) {
+            const range = resolveSlashRange();
+            if (!range) throw new Error('슬래시 명령이 변경되었습니다. 편집 위치를 다시 선택해 주세요.');
+            placed = insertDocumentSlashBlocks(editor, range, content);
+          } else {
+            if (!bookmark.current) throw new Error('삽입할 위치를 다시 선택해 주세요.');
+            const position = bookmark.current.resolve(editor.state.doc);
+            placed = editor.chain().command(({ tr }) => { tr.setSelection(position); return true; }).insertContent(content).run();
+          }
           if (!placed) throw new Error(`이 위치에는 ${blockLabel} 블록을 넣을 수 없습니다.`);
         }
-        focusEditorAfterApply();
+        if (slash) restoreFocus.current = false;
+        else focusEditorAfterApply();
       }
       onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : `${blockLabel} 블록을 적용하지 못했습니다.`); }
   }
 
   function keyboard(event: KeyboardEvent<HTMLFormElement>) {
-    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); return; }
+    if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); return; }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); event.stopPropagation(); return; }
     if (event.key !== 'Tab') return;
     const focusable = form.current?.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled)');
@@ -304,9 +321,9 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
   }
 
-  return <><div className="doc-reference-backdrop" inert={jiraOpen} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+  return <><div className="doc-reference-backdrop" inert={jiraOpen} onMouseDown={event => { if (event.target === event.currentTarget) cancel(); }}>
     <form ref={form} role="dialog" aria-modal="true" aria-label={title} className="doc-reference-chooser doc-issue-list-chooser" onSubmit={apply} onKeyDown={keyboard}>
-      <header><div><h3>{title}</h3><p>{restoringJira ? '원본 업무를 옮긴 프로젝트를 선택하고 Jira 조건을 검토합니다.' : isSummary ? '프로젝트나 공유 보기의 업무 수를 선택한 기준으로 집계합니다.' : '프로젝트 전체 업무 또는 공유 보기에 해당하는 업무를 표시합니다.'}</p></div><button ref={closeButton} type="button" className="btn btn-ghost" aria-label={`${blockLabel} 닫기`} onClick={onClose}><X size={16} /></button></header>
+      <header><div><h3>{title}</h3><p>{restoringJira ? '원본 업무를 옮긴 프로젝트를 선택하고 Jira 조건을 검토합니다.' : isSummary ? '프로젝트나 공유 보기의 업무 수를 선택한 기준으로 집계합니다.' : '프로젝트 전체 업무 또는 공유 보기에 해당하는 업무를 표시합니다.'}</p></div><button ref={closeButton} type="button" className="btn btn-ghost" aria-label={`${blockLabel} 닫기`} onClick={cancel}><X size={16} /></button></header>
       <div className="doc-issue-list-fields">
         {macro && <div className="doc-jira-restore-source"><strong>원본 Jira 검색식</strong>
           <pre>{macro.jql}</pre>
@@ -337,7 +354,7 @@ export function IssueBlockChooser({ selection, data, preferredProjectId, actorId
         </select></label>}
         {error && <p role="alert">{error}</p>}
       </div>
-      <footer><button type="button" className="btn btn-ghost" onClick={onClose}>취소</button>
+      <footer><button type="button" className="btn btn-ghost" onClick={cancel}>취소</button>
         {restoringJira && !restoredView && <button ref={jiraButton} type="button" className="btn" disabled={!project || sourceStale}
           onClick={() => setJiraOpen(true)}>Jira 조건 검토</button>}
         <button ref={applyButton} type="submit" className="btn btn-primary" disabled={!project || (restoringJira ? !canRestoreJira : Boolean(savedViewId && !view))}>

@@ -9,19 +9,19 @@ import {
   CALLOUT_LABELS, CALLOUT_VARIANTS, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH,
   STATUS_BADGE_TONE_LABELS, STATUS_BADGE_TONES, isCalloutVariant, isStatusBadgeTone,
 } from '../../shared/document-nodes';
+import { useDocumentSlashRange, type DocumentSlashAnchor } from './document-slash-insertion';
 import './document-annotations.css';
 
 export type DocumentAnnotationKind = 'callout' | 'statusBadge';
 type AnnotationAttrs = Record<string, unknown>;
 type AnnotationTarget = { getPos: NodeViewProps['getPos']; attrs: AnnotationAttrs };
-type SlashRange = { from: number; to: number; text: string };
 export type DocumentAnnotationSelection = {
   kind: DocumentAnnotationKind;
   documentId: string;
   editor: Editor;
   opener: HTMLElement | null;
 } & (
-  { mode: 'insert'; bookmark: SelectionBookmark; slash?: SlashRange } |
+  { mode: 'insert'; bookmark: SelectionBookmark; slash?: DocumentSlashAnchor } |
   { mode: 'edit'; target: AnnotationTarget }
 );
 export type OpenDocumentAnnotation = (editor: Editor, kind: DocumentAnnotationKind, opener: HTMLElement | null, target?: AnnotationTarget) => void;
@@ -110,8 +110,9 @@ export function DocumentAnnotationDialog({ selection, onClose }: { selection: Do
   const [error, setError] = useState('');
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
-  const bookmark = useRef(mode === 'insert' ? selection.bookmark : null);
-  const slash = useRef(mode === 'insert' ? selection.slash : undefined);
+  const slash = mode === 'insert' ? selection.slash : undefined;
+  const resolveSlash = useDocumentSlashRange(editor, slash);
+  const bookmark = useRef(mode === 'insert' && !slash ? selection.bookmark : null);
   const inserted = useRef(false);
 
   useLayoutEffect(() => {
@@ -120,9 +121,6 @@ export function DocumentAnnotationDialog({ selection, onClose }: { selection: Do
     input.current?.focus();
     const map = ({ transaction }: { transaction: Transaction }) => {
       if (bookmark.current) bookmark.current = bookmark.current.map(transaction.mapping);
-      if (slash.current) {
-        slash.current = { ...slash.current, from: transaction.mapping.map(slash.current.from, 1), to: transaction.mapping.map(slash.current.to, -1) };
-      }
     };
     editor.on('transaction', map);
     return () => {
@@ -156,13 +154,13 @@ export function DocumentAnnotationDialog({ selection, onClose }: { selection: Do
           editor.view.dispatch(state.tr.setNodeMarkup(pos, undefined, attrs, current.marks));
         }
       } else {
-        const position = bookmark.current?.resolve(state.doc);
-        if (!position) return;
-        const range = slash.current;
-        if (range && (range.from > range.to || state.doc.textBetween(range.from, range.to, '\n', '\ufffc') !== range.text)) {
+        const range = slash ? resolveSlash() : null;
+        if (slash && !range) {
           setError('슬래시 명령이 변경되었습니다. 편집 위치를 다시 선택해 주세요.');
           return;
         }
+        const position = range ?? bookmark.current?.resolve(state.doc);
+        if (!position) return;
         const tr = state.tr;
         const node = state.schema.nodes[kind].create(attrs, isCallout ? state.schema.nodes.paragraph.create() : null);
         if (isCallout) {

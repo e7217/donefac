@@ -42,6 +42,7 @@ import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentFindPanel } from './DocumentFindPanel';
 import { documentFindExtension } from './document-find';
+import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlashRange } from './document-slash-insertion';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentTableTools } from './DocumentTableTools';
@@ -343,6 +344,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
   const [referenceSelection, setReferenceSelection] = useState<ReferenceSelection | null>(null);
+  const closeReference = useCallback(() => setReferenceSelection(null), []);
   const [issueBlockSelection, setIssueBlockSelection] = useState<IssueBlockSelection | null>(null);
   const closeIssueBlock = useCallback(() => setIssueBlockSelection(null), []);
   const [annotationSelection, setAnnotationSelection] = useState<DocumentAnnotationSelection | null>(null);
@@ -553,6 +555,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const canFind = Boolean(editor && !editor.isDestroyed && draft?.id && draft.id === selectedPage?.id && (!liveMode || liveState?.ready));
   const findOpen = canFind && findScope === documentScope;
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
+  const referenceDialog = !bodyReadOnly && referenceSelection?.editor === editor && referenceSelection.documentId === draft?.id ? referenceSelection : null;
   const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
   const jiraCode = bodyReadOnly ? undefined : selectedCodeBlock(editor)?.node.textContent;
   const jiraMacro = useMemo(() => jiraCode ? parseConfluenceJiraList(jiraCode) : undefined, [jiraCode]);
@@ -574,12 +577,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       setSlashQuery(null);
     };
   }, [liveEditor, liveMode, updateEditorSelection, updateSlash]);
-  const openIssueBlock = useCallback<OpenIssueBlock>((instance, nodeType, target) => {
+  const openIssueBlock = useCallback<OpenIssueBlock>((instance, nodeType, target, slash) => {
     const current = draftRef.current;
     if (!current || instance !== editor || instance.isDestroyed || !instance.isEditable) return;
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const opener = !slash && document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const context = { editor: instance, documentId: current.id, opener, nodeType };
-    setIssueBlockSelection(target ? { ...context, kind: 'edit', target } : { ...context, kind: 'insert', bookmark: instance.state.selection.getBookmark() });
+    setIssueBlockSelection(target ? { ...context, kind: 'edit', target }
+      : { ...context, kind: 'insert', bookmark: instance.state.selection.getBookmark(), slash });
     setSlashQuery(null); setInsertKind(null); setReferenceSelection(null); closeAnnotation();
   }, [editor, closeAnnotation]);
 
@@ -835,7 +839,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport || issueBlockDialog) return;
+      if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport || referenceDialog || issueBlockDialog) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!publicationOpen && !moveOpen && !copyOpen && !orderOpen) void saveDraft();
@@ -844,7 +848,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, issueBlockDialog]);
+  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, referenceDialog, issueBlockDialog]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1456,9 +1460,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     finally { setReferencesRefreshing(false); }
   }
 
-  function openReference(kind: ReferenceKind) {
+  function openReference(kind: ReferenceKind, slash?: DocumentSlashAnchor) {
     if (!editor?.isEditable || !draftRef.current) return;
-    setReferenceSelection({ kind, editor, bookmark: editor.state.selection.getBookmark(), documentId: draftRef.current.id });
+    setReferenceSelection({ kind, editor, bookmark: editor.state.selection.getBookmark(), documentId: draftRef.current.id, slash });
     setSlashQuery(null); setInsertKind(null); setIssueBlockSelection(null); closeAnnotation();
   }
 
@@ -1500,11 +1504,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!editor.chain().focus().insertContent([block, { type: 'paragraph' }]).run()) notify('이 위치에는 블록을 넣을 수 없습니다.', 'error');
   }
 
-  function insertColumns(count: 2 | 3, slash?: { from: number; to: number; text: string }) {
+  function insertColumns(count: 2 | 3, slash?: DocumentSlashRange) {
     if (editor?.isEditable && !insertDocumentColumnLayout(editor, count, slash)) notify('이 위치에는 다단 구역을 넣을 수 없습니다.', 'error');
   }
 
-  const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind } | { columns: 2 | 3 }))[] = [
+  const slashCommands: ({ label: string; search: string } & (
+    { action: () => unknown } | { annotation: DocumentAnnotationKind } | { columns: 2 | 3 } |
+    { reference: ReferenceKind } | { issueBlock: Parameters<OpenIssueBlock>[1] }
+  ))[] = [
     ...DOCUMENT_HEADING_LEVELS.map(level => ({
       label: `제목 ${level}`,
       search: `h${level} heading 제목`,
@@ -1517,18 +1524,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     { label: '표', search: 'table 표', action: () => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run() },
     { label: '2단 구역', search: 'columns 2cols layout 2열 배치 다단 구역', columns: 2 },
     { label: '3단 구역', search: 'columns 3cols layout 3열 배치 다단 구역', columns: 3 },
-    { label: '업무 참조', search: 'issue ticket 업무 참조', action: () => openReference('issueReference') },
-    { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', action: () => { if (editor) openIssueBlock(editor, 'issueList'); } },
-    { label: '업무 현황', search: 'issue summary chart 업무 현황 집계', action: () => { if (editor) openIssueBlock(editor, 'issueSummary'); } },
-    { label: '문서 참조', search: 'document link 문서 참조', action: () => openReference('documentReference') },
+    { label: '업무 참조', search: 'issue ticket 업무 참조', reference: 'issueReference' },
+    { label: '업무 목록', search: 'issue list view ticket 업무 목록 공유 보기', issueBlock: 'issueList' },
+    { label: '업무 현황', search: 'issue summary chart 업무 현황 집계', issueBlock: 'issueSummary' },
+    { label: '문서 참조', search: 'document link 문서 참조', reference: 'documentReference' },
     { label: '라벨별 문서 목록', search: 'document list labels 라벨별 문서 목록', action: () => insertDocumentList('documentLabelList') },
     { label: '하위 문서 목록', search: 'children child pages descendants tree 하위 문서 목록', action: () => insertDocumentList('documentChildList') },
     { label: '문서 속성', search: 'document properties metadata 문서 속성', action: () => insertPropertyBlock('documentProperties') },
     { label: '문서 속성 보고서', search: 'document property report rollup 문서 속성 보고서', action: () => insertPropertyBlock('documentPropertyReport') },
-    { label: '문서 포함', search: 'include embed 문서 포함', action: () => openReference('documentInclude') },
+    { label: '문서 포함', search: 'include embed 문서 포함', reference: 'documentInclude' },
     { label: '발췌 구역', search: 'excerpt source 발췌 구역', action: insertExcerpt },
-    { label: '발췌 포함', search: 'excerpt include 발췌 포함', action: () => openReference('documentExcerptInclude') },
-    { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', action: () => openReference('documentRevisionInclude') },
+    { label: '발췌 포함', search: 'excerpt include 발췌 포함', reference: 'documentExcerptInclude' },
+    { label: '문서 버전 포함', search: 'pin snapshot version 문서 버전 고정 포함', reference: 'documentRevisionInclude' },
     { label: '본문 목차', search: 'toc table of contents 본문 목차', action: () => insertDocumentToc(editor) },
     { label: '안내 상자', search: 'callout info note warning tip panel 안내 상자', annotation: 'callout' },
     { label: '상태 배지', search: 'status badge 상태 배지', annotation: 'statusBadge' },
@@ -1540,22 +1547,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function runSlash(command: typeof slashCommands[number]) {
     const current = draftRef.current;
-    if (!editor?.isEditable || !current || slashQuery === null) return;
-    const { $from } = editor.state.selection;
+    if (bodyReadOnly || !editor?.isEditable || !current || current.id !== selectedPage?.id || slashQuery === null) return;
+    const { $from, empty } = editor.state.selection;
     const from = $from.start(), to = $from.pos;
     const text = editor.state.doc.textBetween(from, to, '', '\ufffc');
-    if (text !== '/' + slashQuery) { setSlashQuery(null); return; }
-    if ('annotation' in command) {
-      setAnnotationSelection({ editor, documentId: current.id, kind: command.annotation, opener: null, mode: 'insert',
-        bookmark: editor.state.selection.getBookmark(), slash: { from, to, text } });
-      setInsertKind(null); setIssueBlockSelection(null); setReferenceSelection(null);
-    } else if ('columns' in command) {
-      insertColumns(command.columns, { from, to, text });
-    } else {
+    setSlashQuery(null);
+    if (!empty || text !== '/' + slashQuery) return;
+    const range = { from, to, text };
+    if ('columns' in command) insertColumns(command.columns, range);
+    else if ('action' in command) {
       editor.chain().focus().deleteRange({ from, to }).run();
       command.action();
+    } else {
+      const slash = captureDocumentSlashAnchor(editor, range);
+      if (!slash) { notify('슬래시 명령이 변경되었습니다. 편집 위치를 다시 선택해 주세요.', 'error'); return; }
+      if ('reference' in command) openReference(command.reference, slash);
+      else if ('issueBlock' in command) openIssueBlock(editor, command.issueBlock, undefined, slash);
+      else {
+        setAnnotationSelection({ editor, documentId: current.id, kind: command.annotation, opener: null, mode: 'insert',
+          bookmark: editor.state.selection.getBookmark(), slash });
+        setInsertKind(null); setIssueBlockSelection(null); setReferenceSelection(null);
+      }
     }
-    setSlashQuery(null);
   }
 
   function navigateSlash(event: ReactKeyboardEvent<HTMLDivElement>) {
@@ -2166,7 +2179,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       projects={data.projects} actorId={actorId} refreshWorkspace={refresh} onClose={closeCopy} onOpenCopy={selectDocument} />}
     {orderOpen && selectedPage && <DocumentSiblingOrderDialog key={selectedPage.id} documentId={selectedPage.id} documents={data.documents}
       projects={data.projects} refreshWorkspace={refresh} onClose={closeOrder} />}
-    {referenceSelection && referenceSelection.editor === editor && referenceSelection.documentId === draft?.id && <ReferenceChooser selection={referenceSelection} onClose={() => setReferenceSelection(null)} notify={notify} />}
+    {referenceDialog && <ReferenceChooser selection={referenceDialog} onClose={closeReference} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null}
       actorId={actorId} notify={notify} refreshWorkspace={refresh} onClose={closeIssueBlock} />}
     {annotationDialog && <DocumentAnnotationDialog selection={annotationDialog} onClose={closeAnnotation} />}

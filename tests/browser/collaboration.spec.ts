@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { test as base, expect, type APIRequestContext, type BrowserContext, type Page, type WebSocketRoute } from '@playwright/test';
+import { test as base, expect, type APIRequestContext, type BrowserContext, type Locator, type Page, type WebSocketRoute } from '@playwright/test';
 import type { Editor } from '@tiptap/core';
 import type { DocPage, WorkspaceSnapshot } from '../../shared/types';
 
@@ -92,6 +92,172 @@ test('두 브라우저의 실제 공동 편집이 중복 초기화 없이 합쳐
     await synced(a);
     await expect(a.locator('.docs-live-prose')).toHaveText(text);
     await expect(a.locator('.docs-live-prose p')).toHaveCount(1);
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
+test('360px 공동 편집에서 슬래시 삽입을 취소하거나 동료가 편집한 뒤 원래 위치에 적용한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  const created = await fixture.requests.post('/api/documents', { data: {
+    projectId: fixture.document.projectId, title: `${fixture.document.title} 참조 대상`,
+    content: { type: 'doc', content: [{ type: 'paragraph' }] },
+  } });
+  expect(created.status(), await created.text()).toBe(201);
+  const target = await created.json() as DocPage;
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 360, height: 820 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [author, peer] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(author, fixture.document), open(peer, fixture.document)]);
+    await Promise.all([synced(author), synced(peer)]);
+    await expect(author.locator('.docs-collaboration-presence')).toContainText('2명 접속');
+    const authorEditor = author.locator('.docs-live-prose');
+    const peerEditor = peer.locator('.docs-live-prose');
+    const menu = author.getByRole('group', { name: '블록 추가', exact: true });
+    const reference = author.getByRole('dialog', { name: '문서 참조 삽입', exact: true });
+    const list = author.getByRole('dialog', { name: '업무 목록 삽입', exact: true });
+    const referenceQuery = '/document', listQuery = '/list';
+    const tail = '명령 뒤의 문단';
+    const paragraphs = authorEditor.locator(':scope > p');
+    await peerEditor.evaluate((node, value) => {
+      const editor = (node as HTMLElement & { editor?: Editor }).editor;
+      if (!editor) throw new Error('The live editor is unavailable.');
+      const { doc, schema, tr } = editor.state;
+      const paragraph = schema.nodes.paragraph;
+      editor.view.dispatch(tr.insert(doc.content.size, [paragraph.create(), paragraph.create(null, schema.text(value))]));
+    }, tail);
+    await expect(paragraphs).toHaveText([fixture.initialText, '', tail]);
+    await author.bringToFront();
+
+    async function typeCommand(paragraph: Locator, query: string, label: string) {
+      await paragraph.click();
+      await author.keyboard.press('End');
+      if (await paragraph.textContent() === query) {
+        await author.keyboard.press('Backspace');
+        await author.keyboard.insertText(query.slice(-1));
+      } else {
+        await expect(paragraph).toHaveText('');
+        await author.keyboard.insertText(query);
+      }
+      await expect(paragraph).toHaveText(query);
+      await menu.getByRole('button', { name: label, exact: true }).click();
+    }
+    async function appendParagraph() {
+      const count = await paragraphs.count();
+      await peerEditor.evaluate(node => {
+        const editor = (node as HTMLElement & { editor?: Editor }).editor;
+        if (!editor) throw new Error('The live editor is unavailable.');
+        const { doc, schema, tr } = editor.state;
+        editor.view.dispatch(tr.insert(doc.content.size, schema.nodes.paragraph.create()));
+      });
+      await expect(paragraphs).toHaveCount(count + 1);
+      await expect(paragraphs.last()).toHaveText('');
+      return paragraphs.last();
+    }
+    async function chooseReference() {
+      await reference.getByRole('textbox', { name: '참조할 항목 검색', exact: true }).fill(target.title);
+      await reference.locator('.doc-reference-results').getByRole('button').filter({ hasText: target.title }).click();
+    }
+    const expectSharedCommand = async (query: string) => {
+      await expect(authorEditor).toContainText(query);
+      await expect(peerEditor).toContainText(query);
+      await expect(peer.getByRole('group', { name: '블록 추가', exact: true })).toHaveCount(0);
+      await expect.poll(async () => (await canonical(fixture)).plainText).toContain(query);
+    };
+    await typeCommand(paragraphs.nth(1), referenceQuery, '문서 참조');
+    await expect(reference).toBeVisible();
+    await expectSharedCommand(referenceQuery);
+    await author.keyboard.press('Escape');
+    await expect(reference).toHaveCount(0);
+    await expect(paragraphs.nth(1)).toHaveText(referenceQuery);
+    await expect(authorEditor).toBeFocused();
+    await expectSharedCommand(referenceQuery);
+
+    await typeCommand(paragraphs.nth(1), referenceQuery, '문서 참조');
+    const prefix = '동료가 앞 문단에 추가 ';
+    await peerEditor.evaluate((node, value) => {
+      const editor = (node as HTMLElement & { editor?: Editor }).editor;
+      if (!editor) throw new Error('The live editor is unavailable.');
+      editor.view.dispatch(editor.state.tr.insertText(value, 1));
+    }, prefix);
+    await expect(paragraphs.first()).toHaveText(prefix + fixture.initialText);
+    await expect(paragraphs.nth(1)).toHaveText(referenceQuery);
+    await chooseReference();
+    await expect(reference).toHaveCount(0);
+    const peerReference = peerEditor.locator('[data-teamspace-node="documentReference"]');
+    await expect(peerReference).toHaveCount(1);
+    await expect(peerReference).toContainText(target.title);
+    await expect(peerEditor).not.toContainText(referenceQuery);
+    await synced(author);
+    const saved = (await canonical(fixture)).content.content ?? [];
+    const insertedAt = saved.findIndex(node => node.type === 'documentReference');
+    const tailAt = saved.findIndex(node => node.type === 'paragraph' && node.content?.[0]?.text === tail);
+    expect(saved.filter(node => node.type === 'documentReference')).toHaveLength(1);
+    expect(saved[insertedAt]?.attrs?.documentId).toBe(target.id);
+    expect(saved[0]?.content?.[0]?.text).toBe(prefix + fixture.initialText);
+    expect(insertedAt).toBeGreaterThan(0);
+    expect(insertedAt).toBeLessThan(tailAt);
+
+    await typeCommand(await appendParagraph(), listQuery, '업무 목록');
+    await expect(list).toBeVisible();
+    await expectSharedCommand(listQuery);
+    await list.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(list).toHaveCount(0);
+    await expectSharedCommand(listQuery);
+    await typeCommand(paragraphs.last(), listQuery, '업무 목록');
+    await list.getByRole('button', { name: '업무 목록 삽입', exact: true }).click();
+    await expect(list).toHaveCount(0);
+    await expect(peerEditor.locator('[data-teamspace-node="issueList"]')).toHaveCount(1);
+    await expect(peerEditor).not.toContainText(listQuery);
+    await synced(author);
+
+    async function overwritePeerCommand(query: string, replacement: string, duplicate = false) {
+      await peerEditor.evaluate((node, edit) => {
+        const editor = (node as HTMLElement & { editor?: Editor }).editor;
+        if (!editor) throw new Error('The live editor is unavailable.');
+        const { doc, schema, tr } = editor.state;
+        let from: number | undefined;
+        doc.forEach((child, offset) => { if (child.type.name === 'paragraph' && child.textContent === edit.query) from = offset + 1; });
+        if (from === undefined) throw new Error('The slash command is unavailable.');
+        tr.insertText(edit.replacement, from, from + edit.query.length);
+        if (edit.duplicate) tr.insert(tr.doc.content.size, schema.nodes.paragraph.create(null, schema.text(edit.query)));
+        editor.view.dispatch(tr);
+      }, { query, replacement, duplicate });
+    }
+    async function expectStaleReference() {
+      await synced(peer);
+      const before = await canonical(fixture);
+      await chooseReference();
+      await expect(reference.getByRole('alert')).toHaveText('슬래시 명령이 변경되었습니다. 편집 위치를 다시 선택해 주세요.');
+      await expect(peerReference).toHaveCount(1);
+      expect(await canonical(fixture)).toEqual(before);
+    }
+
+    await typeCommand(await appendParagraph(), referenceQuery, '문서 참조');
+    await expectSharedCommand(referenceQuery);
+    const replacement = '동료가 원래 명령을 바꾼 문단';
+    await overwritePeerCommand(referenceQuery, replacement);
+    await expect(paragraphs.filter({ hasText: replacement })).toHaveCount(1);
+    await expect(authorEditor).not.toContainText(referenceQuery);
+    await synced(peer);
+    await peerEditor.evaluate((node, query) => {
+      const editor = (node as HTMLElement & { editor?: Editor }).editor;
+      if (!editor) throw new Error('The live editor is unavailable.');
+      const { doc, schema, tr } = editor.state;
+      editor.view.dispatch(tr.insert(doc.content.size, schema.nodes.paragraph.create(null, schema.text(query))));
+    }, referenceQuery);
+    await expect(paragraphs.last()).toHaveText(referenceQuery);
+    await expectStaleReference();
+    await reference.getByRole('button', { name: '참조 삽입 닫기', exact: true }).click();
+    await expect(reference).toHaveCount(0);
+
+    const relocatedQuery = '/link';
+    const replacedParagraph = '동료가 명령 위치를 바꾼 문단';
+    await typeCommand(await appendParagraph(), relocatedQuery, '문서 참조');
+    await expectSharedCommand(relocatedQuery);
+    await overwritePeerCommand(relocatedQuery, replacedParagraph, true);
+    await expect(paragraphs.filter({ hasText: replacedParagraph })).toHaveCount(1);
+    await expect(paragraphs.last()).toHaveText(relocatedQuery);
+    await expectStaleReference();
   } finally { await Promise.all(contexts.map(context => context.close())); }
 });
 

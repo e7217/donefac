@@ -121,7 +121,7 @@ function LiveBinding({ client, connected, readOnly, onEditor, onContent }: Colla
       documentFindExtension,
       Collaboration.configure({ document: client.doc, field: 'default' }),
       collaborativeCursors(client),
-      Placeholder.configure({ placeholder: '함께 내용을 작성하세요.' }),
+      Placeholder.configure({ placeholder: '함께 내용을 작성하세요. /를 입력해 블록을 추가할 수 있어요.' }),
     ],
     // No JSON `content`: only the server welcome/update may seed this Y.Doc.
     editable: !readOnly,

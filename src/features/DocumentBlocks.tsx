@@ -1,7 +1,7 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type Editor, type NodeViewProps } from '@tiptap/react';
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type Editor, type JSONContent, type NodeViewProps } from '@tiptap/react';
 import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
@@ -27,12 +27,15 @@ import { DocumentOutline, jumpToReadonlyHeading, revealDocumentTarget, type Docu
 import { ReadonlyCallout, ReadonlyStatusBadge, decorateDocumentAnnotation } from './DocumentAnnotations';
 import { DocumentTocNodeView, ReadonlyDocumentToc } from './DocumentToc';
 import { documentColumnLayoutEditingPlugin, exitDocumentColumnLayout } from './document-column-layout';
+import { insertDocumentSlashBlocks, restoreDocumentSlashFocus, useDocumentSlashRange, type DocumentSlashAnchor } from './document-slash-insertion';
 import { documentRevisionLabel } from './document-utils';
 import './document-blocks.css';
 import './document-column-layout.css';
 
 export type ReferenceKind = 'issueReference' | 'documentReference' | 'documentInclude' | 'documentRevisionInclude' | 'documentExcerptInclude';
-export type ReferenceSelection = { kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string };
+export type ReferenceSelection = {
+  kind: ReferenceKind; editor: Editor; bookmark: SelectionBookmark; documentId: string; slash?: DocumentSlashAnchor;
+};
 const MAX_INCLUDE_DEPTH = 5, TOTAL_INCLUDE_NODES = 4000;
 type Context = {
   data: WorkspaceSnapshot;
@@ -702,14 +705,22 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
   const context = contextOf(useContext(BlockContext)), [query, setQuery] = useState('');
   const [source, setSource] = useState<DocPage | null>(null);
   const [noPanel, setNoPanel] = useState(false);
+  const [slashError, setSlashError] = useState('');
+  const { editor, slash } = selection;
   const bookmark = useRef(selection.bookmark);
-  useEffect(() => {
+  const resolveSlashRange = useDocumentSlashRange(editor, slash);
+  const cancel = useCallback(() => {
+    onClose();
+    if (slash) restoreDocumentSlashFocus(editor);
+  }, [editor, onClose, slash]);
+
+  useLayoutEffect(() => {
+    if (slash) return;
+    bookmark.current = selection.bookmark;
     const map = ({ transaction }: { transaction: Transaction }) => { bookmark.current = bookmark.current.map(transaction.mapping); };
-    selection.editor.on('transaction', map);
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } };
-    window.addEventListener('keydown', escape);
-    return () => { selection.editor.off('transaction', map); window.removeEventListener('keydown', escape); };
-  }, [selection.editor, onClose]);
+    editor.on('transaction', map);
+    return () => { editor.off('transaction', map); };
+  }, [editor, selection.bookmark, slash]);
   const issueMode = selection.kind === 'issueReference', includeMode = selection.kind === 'documentInclude', pinnedMode = selection.kind === 'documentRevisionInclude';
   const excerptMode = selection.kind === 'documentExcerptInclude';
   const dialogLabel = excerptMode ? '문서 발췌 포함' : issueMode ? '업무 참조 삽입' : includeMode ? '문서 포함 삽입' : pinnedMode ? '문서 버전 포함 삽입' : '문서 참조 삽입';
@@ -725,18 +736,34 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
   const pages = issueMode ? [] : data.documents.filter(page => `${page.title} ${page.plainText}`.toLowerCase().includes(search) &&
     (!excerptMode || Boolean(findDocumentExcerpt(page.content)))).slice(0, 40);
   function insert(id: string, label: string, revisionId?: string) {
-    if (!selection.editor.isEditable || selection.editor.isDestroyed || context.documentId !== selection.documentId) { notify('현재 편집할 문서를 다시 확인해주세요.', 'error'); return; }
+    if (!editor.isEditable || editor.isDestroyed || context.documentId !== selection.documentId) { notify('현재 편집할 문서를 다시 확인해주세요.', 'error'); return; }
     try {
-      const resolved = bookmark.current.resolve(selection.editor.state.doc);
       const attrs = { [issueMode ? 'issueId' : 'documentId']: id, label, ...(revisionId ? { revisionId } : {}), ...(excerptMode ? { noPanel } : {}) };
-      const success = selection.editor.chain().focus().command(({ tr }) => { tr.setSelection(resolved); return true; }).insertContent([{ type: selection.kind, attrs }, { type: 'paragraph' }]).run();
+      const content: JSONContent[] = [{ type: selection.kind, attrs }, { type: 'paragraph' }];
+      let success: boolean;
+      if (slash) {
+        const range = resolveSlashRange();
+        if (!range) {
+          setSlashError('슬래시 명령이 변경되었습니다. 편집 위치를 다시 선택해 주세요.');
+          return;
+        }
+        success = insertDocumentSlashBlocks(editor, range, content);
+      } else {
+        const resolved = bookmark.current.resolve(editor.state.doc);
+        success = editor.chain().focus().command(({ tr }) => { tr.setSelection(resolved); return true; }).insertContent(content).run();
+      }
       if (!success) throw new Error('이 위치에는 참조 블록을 넣을 수 없습니다.');
       onClose();
     } catch (cause) { notify(cause instanceof Error ? cause.message : '블록을 삽입하지 못했습니다.', 'error'); }
   }
-  return <div className="doc-reference-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="doc-reference-chooser" role="dialog" aria-modal="true" aria-label={dialogLabel}>
-      <header><div><h3>{heading}</h3><p>{description}</p></div><button type="button" className="btn btn-ghost" aria-label="참조 삽입 닫기" onClick={onClose}><X size={16} /></button></header>
+  return <div className="doc-reference-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) cancel(); }}>
+    <section className="doc-reference-chooser" role="dialog" aria-modal="true" aria-label={dialogLabel} onKeyDown={event => {
+      if (event.nativeEvent.isComposing) return;
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
+      else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') { event.preventDefault(); event.stopPropagation(); }
+    }}>
+      <header><div><h3>{heading}</h3><p>{description}</p></div><button type="button" className="btn btn-ghost" aria-label="참조 삽입 닫기" onClick={cancel}><X size={16} /></button></header>
+      {slashError && <p role="alert">{slashError}</p>}
       {source ? <RevisionChoices key={source.id} source={source} onBack={() => setSource(null)} onChoose={revision => insert(source.id, revision.title, revision.id)} /> : <>
         <label><Search size={15} /><input className="field" aria-label="참조할 항목 검색" placeholder={issueMode ? '업무 키(이전 키 포함), 제목, 속성 검색' : '문서 제목 또는 내용 검색'} autoFocus value={query} onChange={event => setQuery(event.target.value)} /></label>
         {excerptMode && <label className="document-excerpt-panel-toggle"><input type="checkbox" checked={noPanel}
