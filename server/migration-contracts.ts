@@ -1,5 +1,6 @@
 import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,DocumentSiblingOrder,DocumentSourceSelection,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,LegacyRecord,MigrationConfiguration,MigrationPreview,PlanningItem,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
+import type { MigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
 export interface MigrationJiraRefreshCandidate {
@@ -91,6 +92,7 @@ export interface MigrationPlanningInput {
   fileInfo?:Record<string,Record<string,{size:number;sha256:string;mimeType:string}>>;
   append?: MigrationAppendContext;
   appendPages?: MigrationPageAppendContext;
+  retainedResourceLinks?: MigrationRetainedResourceLinks;
 }
 export interface MigrationFileCopy { fileId:string;packageId:string;path:string;size:number;sha256:string }
 export interface PreparedMigration {
@@ -104,6 +106,7 @@ export interface PreparedMigration {
   atlassianLinks:Omit<AtlassianLink,'id'|'createdAt'>[];
   append?: { projectId: string; token: string; startIssueNumber: number; planningToken?: string; cyclePlanningToken?: string };
   appendPages?: { projectId: string; token: string; sectionInventory?: boolean; labelListInventory?: true };
+  retainedResourceLinkToken?: string;
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
   jiraAttachmentOwners?: string[];

@@ -67,15 +67,15 @@ function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldO
   return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
 }
 const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문', labels: '라벨', parentId: '상위 문서' };
-const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels, ...documentOrderCountLabels };
+const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', retainedResourceLinks: '기존 항목과의 업무·문서 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels, ...documentOrderCountLabels };
 const appendLabels = {
   append: {
-    item: '업무', counts: ['issues', 'retainedIssues', 'retainedRecords', ...Object.keys(jiraRefreshCountLabels), ...Object.keys(jiraPlanningCountLabels)],
+    item: '업무', counts: ['issues', 'retainedIssues', 'retainedRecords', 'retainedResourceLinks', ...Object.keys(jiraRefreshCountLabels), ...Object.keys(jiraPlanningCountLabels)],
     confirm: '검토한 Jira 업무를 기존 프로젝트에 추가할까요? 적용 결과는 이관 영수증으로 보관됩니다.',
     success: '새 업무를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
   'append-pages': {
-    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords', ...Object.keys(confluenceRefreshCountLabels), ...Object.keys(documentOrderCountLabels)],
+    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords', 'retainedResourceLinks', ...Object.keys(confluenceRefreshCountLabels), ...Object.keys(documentOrderCountLabels)],
     confirm: '검토한 Confluence 문서를 기존 프로젝트에 추가할까요? 적용 결과는 이관 영수증으로 보관됩니다.',
     success: '새 문서를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
@@ -100,6 +100,7 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   const actions: string[] = [];
   if (added) actions.push(`새 ${item} ${added.toLocaleString()}건 추가`);
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
+  if (counts.retainedResourceLinks) actions.push(`기존 항목과의 업무·문서 연결 ${counts.retainedResourceLinks.toLocaleString()}건 추가`);
   if (product === 'Jira') {
     const { updatedCustomFields, newJiraComments, newJiraWorklogs, newJiraAttachments, newJiraRelations } = counts;
     if (updatedCustomFields) actions.push(`사용자 정의 속성 ${updatedCustomFields.toLocaleString()}건 반영`);
@@ -865,6 +866,8 @@ function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }:
     {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
     {preview.jiraRelationRefresh && preview.jiraRelationRefresh.length > 0 && <JiraRelationReview rows={preview.jiraRelationRefresh} total={preview.counts.newJiraRelations} renderOriginal={recordId => originalButton(recordId, 'relation')} />}
     {preview.documentRefresh && preview.documentRefresh.length > 0 && <ConfluenceRefreshReview rows={preview.documentRefresh} renderOriginal={recordId => originalButton(recordId, 'document')} />}
+    {preview.retainedResourceLinks && preview.retainedResourceLinks.length > 0 && <RetainedResourceLinkReview
+      rows={preview.retainedResourceLinks} total={preview.counts.retainedResourceLinks} />}
     <fieldset className="migration-fieldset migration-review-diagnostics" disabled={busy}>
       <legend>이관 검토 진단</legend>
       {candidates.size > 0 && <div className="migration-review-exclusions">
@@ -986,6 +989,23 @@ function JiraRelationReview({ rows, total, renderOriginal }: { rows: NonNullable
         <small>{row.type}</small>
         {row.sourceProjectName && row.targetProjectName && <small>프로젝트 간 관계 · {row.sourceProjectName} → {row.targetProjectName}</small>}
         {renderOriginal(row.recordId)}
+      </li>)}
+    </ul>
+  </section>;
+}
+
+function RetainedResourceLinkReview({ rows, total }: { rows: NonNullable<MigrationPreview['retainedResourceLinks']>; total: number }) {
+  const titleId = useId();
+  const remaining = total - rows.length;
+  return <section className="migration-refresh-review" aria-labelledby={titleId}>
+    <h4 id={titleId}>기존 항목과 연결할 업무·문서</h4>
+    {remaining > 0 && <p>총 {total.toLocaleString()}건 중 {rows.length.toLocaleString()}건을 표시합니다. 나머지 {remaining.toLocaleString()}건도 적용에 포함됩니다.</p>}
+    <ul className="migration-relation-review-list">
+      {rows.map((row, index) => <li className="migration-refresh-entry" key={`${row.issueKey}:${index}`}>
+        <h5>{row.issueKey} · {row.issueTitle}</h5>
+        <small>업무 프로젝트 · {row.issueProjectName}</small>
+        <h5>{row.documentTitle}</h5>
+        <small>문서 프로젝트 · {row.documentProjectName}</small>
       </li>)}
     </ul>
   </section>;

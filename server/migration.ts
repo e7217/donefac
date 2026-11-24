@@ -21,6 +21,7 @@ import { AttachmentFiles } from './attachments.js';
 import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
+import { readMigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
@@ -32,7 +33,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 17;
+const conversionVersion = 18;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -48,6 +49,7 @@ const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 �
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedPlanning = '이관을 검토하는 동안 대상 프로젝트의 릴리스가 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedCyclePlanning = '이관을 검토하는 동안 대상 프로젝트의 사이클이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedRetainedResourceLinks = '이관을 검토하는 동안 기존 업무·문서 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 export const changedConfluenceReplyRoot = '답글을 추가할 문장 댓글이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 
 export function isActiveConfluenceInlineCommentRoot(store: Store, documentId: string, commentId: string): boolean {
@@ -1199,6 +1201,7 @@ export class MigrationService {
       const packages = this.loadPackages(configuration.packageIds);
       const append = this.appendContext(configuration, packages);
       const appendPages = this.pageAppendContext(configuration, packages);
+      const retainedResourceLinks = readMigrationRetainedResourceLinks(this.store, packages, configuration, this.restrictedConfluencePages);
       const restrictedConfluencePages = new Map<string, ReadonlySet<string>>();
       for (const { summary: { source } } of packages) {
         if (source.product !== 'confluence') continue;
@@ -1209,12 +1212,17 @@ export class MigrationService {
         action: 'preview', sources: packages.map(item => this.fileSpec(item.summary)),
         input: { id: randomUUID(), configuration, actorId, packages, now: new Date().toISOString(),
           users: this.store.all<User>('users'), existingProjectKeys: this.store.all<Project>('projects').map(project => project.key),
-          ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}) },
+          ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}), ...(retainedResourceLinks ? { retainedResourceLinks } : {}) },
         ...(restrictedConfluencePages.size ? { restrictedConfluencePages } : {}),
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
       this.verifyPackages(prepared.sourceImport.packages);
+      if (retainedResourceLinks) {
+        const current = readMigrationRetainedResourceLinks(this.store, packages, configuration, this.restrictedConfluencePages);
+        if (retainedResourceLinks.token !== current?.token) fail(409, changedRetainedResourceLinks);
+        prepared.retainedResourceLinkToken = retainedResourceLinks.token;
+      }
       const binding = this.store.db.prepare('SELECT target_type AS type,target_id AS id FROM source_bindings WHERE product=? AND source_instance=? AND kind=? AND source_alias=?');
       const refreshIssueIds = new Set(append?.refreshIssues?.map(candidate => candidate.issue.id));
       const refreshDocumentIds = new Set(appendPages?.refreshDocuments?.map(candidate => candidate.document.id));
@@ -1348,9 +1356,15 @@ export class MigrationService {
           if (Date.parse(preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
           this.verifyPackages(prepared.sourceImport.packages);
           const { append, appendPages } = prepared;
+          let selectedPackages: MigrationPackage[] | undefined;
+          const loadSelectedPackages = () => selectedPackages ??= this.loadPackages(preview.configuration.packageIds, true);
+          if (prepared.retainedResourceLinkToken) {
+            const current = readMigrationRetainedResourceLinks(this.store, loadSelectedPackages(), preview.configuration, this.restrictedConfluencePages);
+            if (current?.token !== prepared.retainedResourceLinkToken) fail(409, changedRetainedResourceLinks);
+          }
           if (Boolean(append) !== Boolean(preview.configuration.appendTo)) fail(409, changedAppend);
           if (append) {
-            const current = this.appendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true);
+            const current = this.appendContext(preview.configuration, loadSelectedPackages(), true);
             if (!current || append.projectId !== current.project.id || append.startIssueNumber !== current.nextIssueNumber ||
                 append.token !== current.token) fail(409, changedAppend);
             if ((append.planningToken !== undefined || prepared.planningItems?.some(item => item.kind === 'release') || prepared.issues.some(issue => issue.releaseId)) &&
@@ -1360,7 +1374,7 @@ export class MigrationService {
           }
           if (Boolean(appendPages) !== Boolean(preview.configuration.appendPagesTo)) fail(409, changedPageAppend);
           if (appendPages) {
-            const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true,
+            const current = this.pageAppendContext(preview.configuration, loadSelectedPackages(), true,
               appendPages.sectionInventory ?? false, appendPages.labelListInventory ?? false);
             if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
             if (prepared.comments.some(comment => comment.parentCommentId !== undefined)) {

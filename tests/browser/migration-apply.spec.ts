@@ -27,11 +27,14 @@ async function preview(page: Page, settings: Locator) { const response = page.wa
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
 
-async function importIntoProject(request: APIRequestContext, source: LegacyPackageSummary, key: string, name: string) {
+async function importIntoProject(request: APIRequestContext, source: LegacyPackageSummary, key: string, name: string, sourceBaseUrl?: string) {
   const optionResponse = await request.get(`/api/migrations/options?${new URLSearchParams({ packageId: source.id })}`);
   expect(optionResponse.ok(), await optionResponse.text()).toBe(true);
   const { defaultConfiguration } = await optionResponse.json() as MigrationOptions;
-  const configuration = { ...defaultConfiguration, projects: defaultConfiguration.projects.map(project => ({ ...project, key, name })) };
+  const configuration = {
+    ...defaultConfiguration, projects: defaultConfiguration.projects.map(project => ({ ...project, key, name })),
+    ...(sourceBaseUrl && { sourceBaseUrls: { ...defaultConfiguration.sourceBaseUrls, [source.id]: sourceBaseUrl } }),
+  };
   const previewResponse = await request.post('/api/migrations/preview', { data: { configuration } });
   expect(previewResponse.status(), await previewResponse.text()).toBe(201);
   const proposed = await previewResponse.json() as MigrationPreview;
@@ -1421,6 +1424,95 @@ test('360px Jira 설명의 확인된 Confluence 문서·절 링크를 열고 티
     }
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
     await page.context().unroute(isOriginal);
+  }
+});
+
+test('360px Jira 이관에서 기존 Confluence 문서와의 연결을 확인하고 적용한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), jiraKey = `RJS${id}`, targetKey = `RJT${id}`, wikiKey = `RWS${id}`;
+  const jiraBase = `https://jira.example.test/team-${id}/tracker`, wikiBase = `https://wiki.example.test/team-${id}/wiki`;
+  const issueTitle = `이미 이관한 운영 문서를 참조하는 Jira 업무 ${id}`, documentTitle = `기존 Confluence 운영 안내 문서 ${id}`;
+  const sourceProjectName = `Jira 원본 프로젝트 ${id}`, issueProjectName = `업무 이관 프로젝트 ${id}`, documentProjectName = `운영 문서 프로젝트 ${id}`;
+  const date = '2020-01-02T00:00:00Z', issueSelf = `${jiraBase}/rest/api/2/issue/100`;
+  const wiki = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${wikiKey}</property><property name="name">${wikiKey}</property></object>
+    <object class="Page"><id name="id">200</id><property name="title">${documentTitle}</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">${date}</property></object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>기존 운영 지침입니다.</p>]]></property>
+      <property name="content" class="Page"><id name="id">200</id></property><property name="bodyType">2</property></object>
+  </hibernate-generic>`) }]);
+  const rest = { issues: [{ id: '100', key: `${jiraKey}-1`, self: issueSelf,
+    fields: { project: { id: '10', key: jiraKey, name: sourceProjectName }, summary: issueTitle,
+      status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' }, created: date, updated: date },
+    remoteLinks: { status: 'complete', values: [{ id: 901, self: `${issueSelf}/remotelink/901`, globalId: 'appId=browser-wiki&pageId=200',
+      application: { type: 'com.atlassian.confluence', name: 'Confluence' },
+      object: { url: `${wikiBase}/pages/viewpage.action?pageId=200`, title: documentTitle } }] },
+  }] };
+  const staged: LegacyPackageSummary[] = [];
+  const createdPaths: string[] = [];
+  try {
+    const wikiPackage = await upload(request, `retained-wiki-${id}.zip`, wiki, `retained-wiki-${id}`);
+    staged.push(wikiPackage);
+    const { import: earlier } = await importIntoProject(request, wikiPackage, `RWT${id}`, documentProjectName, wikiBase);
+    const filename = `retained-jira-${id}.json`;
+    staged.push(await upload(request, filename, Buffer.from(JSON.stringify(rest)), `retained-jira-${id}`));
+    const { settings, workspace } = await open(page, request);
+    const savedDocument = workspace.documents.find(row => row.title === documentTitle && row.projectId === earlier.projectIds[0]);
+    if (!savedDocument) throw new Error('먼저 이관한 Confluence 문서를 찾을 수 없습니다.');
+    createdPaths.push(`/api/documents/${savedDocument.id}`);
+    await selectPackage(settings, filename);
+    await settings.getByLabel(`새 프로젝트 키 ${sourceProjectName}`, { exact: true }).fill(targetKey);
+    await settings.getByLabel(`새 프로젝트 이름 ${sourceProjectName}`, { exact: true }).fill(issueProjectName);
+    await settings.getByText('원본 주소와 제외 항목', { exact: true }).click();
+    await settings.getByLabel(`원본 주소 ${filename}`, { exact: true }).fill(jiraBase);
+
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts).toMatchObject({ issues: 1, documents: 0, resourceLinks: 1, retainedResourceLinks: 1 });
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    await expect(review.getByText('기존 항목과의 업무·문서 연결 1', { exact: true })).toBeVisible();
+    const relations = review.getByRole('region', { name: '기존 항목과 연결할 업무·문서', exact: true });
+    const pair = relations.getByRole('listitem');
+    await expect(pair).toHaveCount(1);
+    await expect(pair.getByRole('heading', { name: `${targetKey}-1 · ${issueTitle}`, exact: true })).toBeVisible();
+    await expect(pair.getByRole('heading', { name: documentTitle, exact: true })).toBeVisible();
+    await expect(pair.getByText(`업무 프로젝트 · ${issueProjectName}`, { exact: true })).toBeVisible();
+    await expect(pair.getByText(`문서 프로젝트 · ${documentProjectName}`, { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const code = 'RETAINED_DOCUMENT_ISSUE_LINKS';
+    expect(plan.requiredAcknowledgements).toContain(code);
+    const approval = review.getByLabel(`이관 확인 ${code}`, { exact: true });
+    const apply = review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true });
+    await acknowledge(review, { ...plan, requiredAcknowledgements: plan.requiredAcknowledgements.filter(value => value !== code) });
+    await expect(approval).not.toBeChecked();
+    await expect(apply).toBeDisabled();
+    await approval.check();
+    await expect(apply).toBeEnabled();
+    const applying = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`) && response.request().method() === 'POST');
+    page.once('dialog', dialog => dialog.accept());
+    await apply.click();
+    const applied = await applying;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const { import: receipt } = await applied.json() as MigrationApplyResult;
+    const current = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const issue = current.issues.find(row => row.key === `${targetKey}-1` && receipt.projectIds.includes(row.projectId));
+    if (!issue) throw new Error('새로 이관한 Jira 업무를 찾을 수 없습니다.');
+    createdPaths.push(`/api/issues/${issue.id}`);
+    expect(issue.projectId).not.toBe(savedDocument.projectId);
+    const links = current.resourceLinks.filter(row => row.issueId === issue.id && row.documentId === savedDocument.id);
+    expect(links).toEqual([{ id: expect.any(String), issueId: issue.id, documentId: savedDocument.id, kind: 'related' }]);
+    expect(receipt.resourceLinkProof).toEqual([{ id: links[0].id, issueId: issue.id, documentId: savedDocument.id }]);
+  } finally {
+    for (const path of createdPaths.reverse()) {
+      const removed = await request.delete(path);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId?: string };
+        if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
 });
 

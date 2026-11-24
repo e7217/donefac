@@ -470,6 +470,8 @@ export interface MigrationPreview {
   jiraObservedWorkflows?: MigrationJiraObservedWorkflow[];
   jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string;
     sourceProjectName?: string; targetProjectName?: string }[];
+  retainedResourceLinks?: { issueKey: string; issueTitle: string; issueProjectName: string;
+    documentTitle: string; documentProjectName: string }[];
   documentRefresh?: ConfluenceMigrationDocumentReview[];
   jiraReleaseChoices?: MigrationJiraPlanningChoice[];
   jiraSprintChoices?: MigrationJiraPlanningChoice[];

@@ -19,8 +19,9 @@ import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migrat
 import type { MigrationContentContext, MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
-import { confluenceMigrationPageAddress, isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase,
+import { confluenceMigrationPageAddress, confluenceMigrationPageKey, isWithinMigrationOrigin, migrationOriginLink, parseMigrationOriginBase,
   type ConfluenceMigrationPageAddress, type MigrationOriginBase } from './migration-origin-links.js';
+import type { RetainedJiraResourceLink, RetainedResourcePage } from './migration-retained-resource-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
 import { jiraMigrationIssueAddress, jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
@@ -2953,7 +2954,7 @@ class Planner{
     const target = this.confluenceHrefTarget(entry, request.url);
     return target && !target.address.hasExtraQuery ? target.page : null;
   }
-  private confluenceAbsolutePage(address: ConfluenceMigrationPageAddress): ResolvedConfluencePage | null {
+  private confluenceAbsoluteCandidates(address: ConfluenceMigrationPageAddress): Entry[] | null {
     const origin = `${address.origin}${address.contextPath}`;
     const atAddress = (candidate: Entry) => candidate.pkg.dataset.source.product === 'confluence'
       && this.originIdentity(candidate) === origin;
@@ -2964,10 +2965,14 @@ class Planner{
     if (spaceKey) {
       const spaces = (this.confluenceSpacesByKey.get(spaceKey) ?? []).filter(atAddress);
       const ids = new Set(spaces.map(space => sourceKey(space, space.row.sourceId)));
-      if (ids.size !== 1) return null;
+      if (ids.size > 1) return null;
       candidates = candidates.filter(candidate => ids.has(sourceKey(candidate, candidate.container)));
     }
-    const identities = new Set(candidates.map(candidate => sourceKey(candidate, candidate.row.sourceId)));
+    return candidates;
+  }
+  private confluenceAbsolutePage(address: ConfluenceMigrationPageAddress, candidates = this.confluenceAbsoluteCandidates(address)): ResolvedConfluencePage | null {
+    if (!candidates) return null;
+    const identities = new Set(candidates.map(candidate => JSON.stringify([candidate.pkg.dataset.source.instanceKey, candidate.row.sourceId])));
     if (identities.size !== 1 || candidates.some(candidate => this.restricted(candidate))) return null;
     const imported = candidates.filter(candidate => !this.excluded.has(candidate.key) && this.bindings.get(candidate.key)?.type === 'document');
     if (imported.length !== 1) return null;
@@ -3733,17 +3738,65 @@ class Planner{
   }
 
   createRelations():void{
-    const resourcePairs=new Set<string>(),issuePairs=new Set<string>();
-    const resource=(issueId:string,documentId:string)=>{const key=JSON.stringify([issueId,documentId]);if(resourcePairs.has(key))return;resourcePairs.add(key);this.result.resourceLinks.push({id:randomUUID(),issueId,documentId,kind:'related'});};
+    const retained = this.input.retainedResourceLinks;
+    const resourcePairs = new Set(retained?.existingPairs.map(pair => JSON.stringify(pair)));
+    const issuePairs = new Set<string>();
+    const resource = (issueId: string, documentId: string) => {
+      const key = JSON.stringify([issueId, documentId]);
+      if (resourcePairs.has(key)) return false;
+      resourcePairs.add(key);
+      this.result.resourceLinks.push({ id: randomUUID(), issueId, documentId, kind: 'related' });
+      return true;
+    };
     const remoteLinks = Map.groupBy(this.entries.filter(({ row, pkg }) => pkg.dataset.source.product === 'jira' &&
       row.kind === 'relation' && row.metadata.jiraRestRemoteLink === true), entry => this.jiraRemoteLinkIdentity(entry));
+    const archivedLinks = Map.groupBy(retained?.links ?? [], link => JSON.stringify([link.instanceKey, link.sourceId]));
+    const retainedOrigins = new Set(retained?.pages.map(page => page.origin));
+    const retainedPages = new Map<string, RetainedResourcePage[]>();
+    for (const page of retained?.pages ?? []) {
+      const { origin, sourceId, sourceSpaceKey: spaceKey, sourceTitle: title } = page;
+      const keys = [confluenceMigrationPageKey(origin, { sourceId })];
+      if (spaceKey) keys.push(confluenceMigrationPageKey(origin, { spaceKey, title }));
+      for (const key of keys) {
+        const matches = retainedPages.get(key) ?? [];
+        matches.push(page);
+        retainedPages.set(key, matches);
+      }
+    }
+    const blockedPageKeys = new Set(retained?.blockedPageKeys);
+    const retainedPagesAt = (address: ConfluenceMigrationPageAddress | null) => {
+      const origin = address ? address.origin + address.contextPath : '';
+      const key = address ? confluenceMigrationPageKey(origin, address.identity) : '';
+      return { pages: retainedPages.get(key) ?? [], hasOrigin: retainedOrigins.has(origin), ambiguous: blockedPageKeys.has(key) };
+    };
+    const projectNames = new Map(this.result.projects.map(project => [project.id, project.name]));
+    const destination = this.input.append?.project ?? this.input.appendPages?.project;
+    if (destination) projectNames.set(destination.id, destination.name);
+    type Review = NonNullable<PreparedMigration['preview']['retainedResourceLinks']>[number];
+    const reviews: Review[] = [];
+    let retainedCount = 0;
+    const addRetained = (issue: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'> & {projectName?: string},
+      document: Pick<DocPage, 'id' | 'projectId' | 'title'> & {projectName?: string}) => {
+      if (!resource(issue.id, document.id)) return;
+      retainedCount++;
+      if (reviews.length < 50) reviews.push({ issueKey: issue.key, issueTitle: issue.title,
+        issueProjectName: issue.projectName ?? projectNames.get(issue.projectId) ?? '', documentTitle: document.title,
+        documentProjectName: document.projectName ?? (document.projectId ? projectNames.get(document.projectId) ?? '' : '팀 공통') });
+    };
     for(const document of this.result.documents)for(const reference of contentReferences(document.content))if(reference.type==='issue')resource(reference.id,document.id);
     for(const entry of this.entries){if(this.excluded.has(entry.key))continue;const binding=this.bindings.get(entry.key);if(binding?.type==='document')for(const reference of entry.row.references.filter(reference=>reference.kind==='issue')){const target=this.resolve(entry,{kind:'issue',sourceId:reference.sourceId});if(target)resource(target.id,binding.id);}
       if(entry.row.kind!=='relation'||entry.row.metadata.jiraRelationConflict===true)continue;
       if (entry.pkg.dataset.source.product === 'jira' && entry.row.metadata.jiraRestRemoteLink === true) {
-        const related = remoteLinks.get(this.jiraRemoteLinkIdentity(entry));
-        const pair = this.jiraRestResourceLink(entry, related?.length === 1);
-        if (pair) resource(pair.issueId, pair.documentId);
+        const identity = this.jiraRemoteLinkIdentity(entry);
+        const address = confluenceMigrationPageAddress(string(entry.row.metadata.url));
+        const prior = archivedLinks.get(identity) ?? [];
+        const unique = remoteLinks.get(identity)?.length === 1 && prior.every(link => !link.conflict && link.ownerSourceId === entry.row.containerId &&
+          link.url === entry.row.metadata.url && (link.pageId ?? '') === string(entry.row.metadata.remotePageId));
+        const pair = this.jiraRestResourceLink(entry, unique, address, retainedPagesAt(address));
+        if (pair?.retained) {
+          const issue = this.issueById.get(pair.issueId);
+          if (issue) addRetained(issue, pair.retained);
+        } else if (pair) resource(pair.issueId, pair.documentId);
         continue;
       }
       const issueRefs=entry.row.references.filter(reference=>reference.kind==='issue'),pageRefs=entry.row.references.filter(reference=>reference.kind==='page'),issueTargets=issueRefs.map(reference=>this.resolve(entry,{kind:'issue',sourceId:reference.sourceId}));
@@ -3771,17 +3824,47 @@ class Planner{
       }
       if(issueRefs.length&&pageRefs.length){for(const issue of issueTargets)for(const page of pageRefs){const target=this.resolve(entry,{kind:'page',sourceId:page.sourceId,url:string(entry.row.metadata.url)||undefined});if(issue&&target)resource(issue.id,target.id);else this.notice('DOCUMENT_ISSUE_LINK_UNRESOLVED','업무·문서 연결의 원본 ID/주소를 유일하게 확인하지 못해 임의 연결하지 않았습니다.','warning',entry,true);}}
     }
+    let unresolved = 0;
+    for (const [identity, records] of archivedLinks) {
+      if (remoteLinks.has(identity)) continue;
+      const link = records.find(record => record.issue);
+      if (!link?.issue) continue;
+      const address = confluenceMigrationPageAddress(link.url);
+      if (!address || address.hasExtraQuery) continue;
+      const candidates = this.confluenceAbsoluteCandidates(address);
+      if (candidates?.length === 0) continue;
+      const previousPages = retainedPagesAt(address);
+      const exact = !previousPages.ambiguous && records.every(other => this.sameArchivedJiraRemoteLink(link, other));
+      const page = exact ? this.confluenceAbsolutePage(address, candidates) : null;
+      const document = page && (!link.pageId || page.sourceId === link.pageId) ? this.documentById.get(page.reference.id) : undefined;
+      if (!document || previousPages.pages.some(previous => previous.document && previous.document.id !== document.id ||
+          previous.instanceKey !== page?.entry?.pkg.dataset.source.instanceKey || previous.sourceId !== page?.sourceId)) {
+        unresolved++;
+        continue;
+      }
+      addRetained(link.issue, document);
+    }
+    if (unresolved) this.notice('RETAINED_DOCUMENT_ISSUE_LINK_UNRESOLVED', `이전에 이관한 Jira의 연결 ${unresolved}건은 이번 Confluence 페이지를 유일하게 확인할 수 없어 원본에 보관합니다.`, 'warning', undefined, true);
+    if (retainedCount) {
+      this.result.preview.counts.retainedResourceLinks = retainedCount;
+      this.result.preview.retainedResourceLinks = reviews;
+      this.notice('RETAINED_DOCUMENT_ISSUE_LINKS', `이번에 이관하는 항목과 기존 업무·문서 사이에 연결 ${retainedCount}건을 추가합니다.`, 'warning', undefined, true);
+    }
     this.createJiraRelationRefresh();
     if (this.result.issueRelations.length) this.notice('ISSUE_RELATIONS_PRESERVED', '원본 업무 연결을 관계로 보존합니다. 같은 프로젝트의 차단 관계는 이관 후 티켓에서 일정 연결을 검토할 수 있습니다.', 'info');
   }
   private jiraRemoteLinkIdentity({ pkg, row }: Entry) {
     return JSON.stringify([pkg.dataset.source.instanceKey, row.sourceId]);
   }
-  private jiraRestResourceLink(entry: Entry, unique: boolean): { issueId: string; documentId: string } | null {
+  private sameArchivedJiraRemoteLink(link: RetainedJiraResourceLink, other: RetainedJiraResourceLink): boolean {
+    return link.issue?.id === other.issue?.id && link.ownerSourceId === other.ownerSourceId && link.url === other.url && link.pageId === other.pageId;
+  }
+  private jiraRestResourceLink(entry: Entry, unique: boolean, address: ConfluenceMigrationPageAddress | null,
+    { pages: retained, hasOrigin, ambiguous }: { pages: RetainedResourcePage[]; hasOrigin: boolean; ambiguous: boolean }):
+    { issueId: string; documentId: string; retained?: NonNullable<RetainedResourcePage['document']> } | null {
     const { containerId, metadata, references } = entry.row;
-    const address = confluenceMigrationPageAddress(string(metadata.url));
     const pageId = string(metadata.remotePageId);
-    const knownConfluenceOrigin = address && this.input.packages.some(pkg => {
+    const knownConfluenceOrigin = hasOrigin || ambiguous || address && this.input.packages.some(pkg => {
       const base = this.originBases.get(pkg.summary.id);
       return pkg.dataset.source.product === 'confluence' && base?.origin === address.origin && base.contextPath === address.contextPath;
     });
@@ -3790,12 +3873,28 @@ class Planner{
     const [source] = references;
     const binding = unique && owner && !this.excluded.has(owner.key) && !this.restricted(owner) && references.length === 1 &&
       source?.kind === 'issue' && source.relation === 'source' && source.sourceId === containerId ? this.bindings.get(owner.key) : undefined;
-    const page = address && !address.hasExtraQuery && metadata.jiraRemoteLinkConflict !== true ? this.confluenceAbsolutePage(address) : null;
-    if (binding?.type !== 'issue' || !page || pageId && page.sourceId !== pageId) {
-      this.notice('DOCUMENT_ISSUE_LINK_UNRESOLVED', 'Jira 원격 연결의 업무 또는 Confluence 페이지 주소를 유일하게 확인하지 못해 원본에 보관합니다.', 'warning', entry, true);
-      return null;
+    if (binding?.type === 'issue' && address && !ambiguous && !address.hasExtraQuery && metadata.jiraRemoteLinkConflict !== true) {
+      const candidates = this.confluenceAbsoluteCandidates(address);
+      if (candidates?.length) {
+        const page = this.confluenceAbsolutePage(address, candidates);
+        if (page && (!pageId || page.sourceId === pageId) && retained.every(previous => previous.sourceId === page.sourceId &&
+            previous.instanceKey === page.entry?.pkg.dataset.source.instanceKey && (!previous.document || previous.document.id === page.reference.id))) {
+          return { issueId: binding.id, documentId: page.reference.id };
+        }
+      } else if (candidates && retained.length && this.issueById.has(binding.id)) {
+        const chosen = retained[0];
+        const spaceKey = address.identity.spaceKey;
+        const conflictingSpace = spaceKey && (this.confluenceSpacesByKey.get(spaceKey) ?? []).some(space =>
+          this.originIdentity(space) === chosen.origin &&
+          (space.pkg.dataset.source.instanceKey !== chosen.instanceKey || space.row.sourceId !== chosen.sourceSpaceId));
+        if (chosen.document && !conflictingSpace && (!pageId || chosen.sourceId === pageId) && retained.every(page => page.sourceId === chosen.sourceId &&
+            page.instanceKey === chosen.instanceKey && page.document?.id === chosen.document?.id)) {
+          return { issueId: binding.id, documentId: chosen.document.id, retained: chosen.document };
+        }
+      }
     }
-    return { issueId: binding.id, documentId: page.reference.id };
+    this.notice('DOCUMENT_ISSUE_LINK_UNRESOLVED', 'Jira 원격 연결의 업무 또는 Confluence 페이지 주소를 유일하게 확인하지 못해 원본에 보관합니다.', 'warning', entry, true);
+    return null;
   }
   private tracedJiraEndpoint(entry: Entry, alias: string, issueId: string): boolean {
     if (this.originalIssue(alias)?.id === issueId) return true;

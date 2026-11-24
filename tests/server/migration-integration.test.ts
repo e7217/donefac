@@ -3400,6 +3400,180 @@ test('receipt verifies exact ticket-document links through same-count drift, tra
   assert.deepEqual(oldAudit.data.resourceLinkProjection?.counts, { linked: 0, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 });
 });
 
+test('separate Jira REST and Confluence ZIP imports link exact remote targets in either order after cold restore', async t => {
+  const requests: string[] = [];
+  const upstream = createServer((request, response) => {
+    requests.push(`${request.method} ${request.url}`);
+    response.writeHead(404).end();
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  t.after(async () => {
+    upstream.closeAllConnections();
+    await new Promise<void>(resolve => upstream.close(() => resolve()));
+  });
+  const origin = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+  const jiraBase = `${origin}/jira-app`;
+  const wikiBase = `${origin}/services/wiki`;
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', TEAMSPACE_JIRA_BASE_URL: jiraBase, TEAMSPACE_CONFLUENCE_BASE_URL: wikiBase };
+  const issueTitle = 'Ticket with exact remote links';
+  const pageTitle = 'Exact reference page';
+  const excludedTitle = 'Intentionally excluded page';
+  const issueProjectName = 'Jira REST project';
+  const documentProjectName = 'Confluence ZIP project';
+  const date = '2020-01-01T00:00:00Z';
+  const wikiUrl = (pageId: number) => `${wikiBase}/pages/viewpage.action?pageId=${pageId}`;
+  const jiraIssueSelf = `${jiraBase}/rest/api/2/issue/20`;
+  const jiraBytes = (exactUrl: string) => Buffer.from(JSON.stringify({ issues: [{
+    id: '20', key: 'OLD-1', self: jiraIssueSelf,
+    fields: { summary: issueTitle, project: { id: '10', key: 'OLD', name: 'Synthetic Jira' },
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' }, created: date, updated: date },
+    changelog: { histories: [] },
+    remoteLinks: { status: 'complete', values: [[901, 100], [902, 101], [903, 102], [904, 103]].map(([id, pageId]) => ({
+      id, self: `${jiraIssueSelf}/remotelink/${id}`, globalId: `appId=synthetic-wiki&pageId=${pageId}`,
+      application: { type: 'com.atlassian.confluence', name: 'Synthetic Confluence' },
+      object: { url: pageId === 100 ? exactUrl : wikiUrl(pageId), title: `Original reference ${pageId}` },
+    })) },
+  }] }));
+  function wikiBytes(space: 'SYN' | 'ALT', pages: [number, string][]) {
+    const xml = `<hibernate-generic>
+      <object class="Space"><id name="id">42</id><property name="key">${space}</property><property name="name">Synthetic ${space}</property></object>
+      ${pages.map(([id, title]) => `
+        <object class="Page"><id name="id">${id}</id><property name="title">${title}</property><property name="version">1</property>
+          <property name="creationDate">${date}</property><property name="lastModificationDate">${date}</property>
+          <property name="space" class="Space"><id name="id">42</id></property></object>
+        <object class="BodyContent"><id name="id">${id + 300}</id><property name="body"><![CDATA[<p>${title}</p>]]></property>
+          <property name="content" class="Page"><id name="id">${id}</id></property></object>`).join('')}
+    </hibernate-generic>`;
+    return zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]);
+  }
+
+  async function stage(f: MigrationFixture, product: 'jira' | 'confluence', exactUrl: string) {
+    if (product === 'jira') {
+      const pkg = await f.upload(jiraBytes(exactUrl), 'remote-links.json', 'jira', 'synthetic-jira');
+      const config = await f.configuration(pkg, 'JIRAREST');
+      config.projects = config.projects.map(project => ({ ...project, name: issueProjectName }));
+      config.sourceBaseUrls[pkg.id] = jiraBase;
+      config.excludedRecords = [`${pkg.id}/relation:remote:904`];
+      return config;
+    }
+    const wiki = await f.upload(wikiBytes('SYN', [[100, pageTitle], [101, 'Ambiguous page one'],
+      [102, excludedTitle], [103, 'Target of excluded relation']]), 'remote-targets.zip', 'confluence', 'synthetic-wiki');
+    const ambiguous = await f.upload(wikiBytes('ALT', [[101, 'Ambiguous page two']]), 'ambiguous-target.zip', 'confluence', 'synthetic-alternate-wiki');
+    const config = await f.configuration([wiki, ambiguous], 'WIKIZIP');
+    config.projects = config.projects.map(project => ({ ...project, name: documentProjectName }));
+    config.sourceBaseUrls[wiki.id] = wikiBase;
+    config.sourceBaseUrls[ambiguous.id] = wikiBase;
+    config.excludedRecords = [`${wiki.id}/page:102`];
+    return config;
+  }
+
+  for (const [first, second] of [['jira', 'confluence'], ['confluence', 'jira']] as const) {
+    await t.test(`${first} before ${second}`, async sub => {
+      const exactUrl = first === 'jira' ? wikiUrl(100) : `${wikiBase}/display/SYN/${encodeURIComponent(pageTitle)}`;
+      const original = await fixture(env);
+      sub.after(() => original.close());
+      const firstPreview = await original.preview(await stage(original, first, exactUrl));
+      assert.equal(firstPreview.canApply, true, JSON.stringify(firstPreview.notices));
+      assert.equal(firstPreview.counts.resourceLinks, 0);
+      const firstApply = await original.apply(firstPreview);
+      assert.equal(firstApply.status, 201, JSON.stringify(firstApply.data));
+      const firstReceipt = firstApply.data.import;
+      const backup = await original.call<WorkspaceSnapshot>('/export');
+      assert.equal(backup.status, 200);
+
+      const f = await fixture(env);
+      sub.after(() => f.close());
+      assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
+      const firstProjectId = firstReceipt.projectIds[0];
+      const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+      const firstTarget = first === 'jira' ? before.issues.find(issue => issue.title === issueTitle)
+        : before.documents.find(doc => doc.title === pageTitle);
+      assert.ok(firstTarget);
+      assert.equal(firstTarget.projectId, firstProjectId);
+
+      const config = await stage(f, second, exactUrl);
+      const stale = await f.preview(config);
+      assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+      assert.equal(stale.counts.resourceLinks, 1, JSON.stringify(stale.notices));
+      assert.equal(stale.counts.retainedResourceLinks, 1);
+      const targetPath = `/${first === 'jira' ? 'issues' : 'documents'}/${firstTarget.id}`;
+      const archived = await f.call<{ trashEntryId: string }>(targetPath, 'DELETE', { expectedVersion: firstTarget.version });
+      assert.equal(archived.status, 200, JSON.stringify(archived.data));
+      const beforeRejected = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+      const rejected = await f.apply(stale);
+      assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+      assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data, beforeRejected);
+      assert.deepEqual((await f.call<SourceImport[]>('/source-imports')).data.map(row => row.id), [firstReceipt.id]);
+      assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+
+      const plan = await f.preview(config);
+      assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+      assert.equal(plan.counts.resourceLinks, 1, JSON.stringify(plan.notices));
+      assert.ok(plan.requiredAcknowledgements.includes('RETAINED_DOCUMENT_ISSUE_LINKS'));
+      const applied = await f.apply(plan);
+      assert.equal(applied.status, 201, JSON.stringify(applied.data));
+      const receipt = applied.data.import;
+      const current = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+      const issue = current.issues.find(row => row.title === issueTitle);
+      const page = current.documents.find(row => row.title === pageTitle);
+      assert.ok(issue && page);
+      const jiraReceipt = first === 'jira' ? firstReceipt : receipt;
+      const wikiReceipt = first === 'confluence' ? firstReceipt : receipt;
+      assert.equal(issue.projectId, jiraReceipt.projectIds[0]);
+      assert.equal(page.projectId, wikiReceipt.projectIds[0]);
+      assert.notEqual(issue.projectId, page.projectId);
+      assert.equal(plan.counts.retainedResourceLinks, 1);
+      assert.deepEqual(plan.retainedResourceLinks, [{
+        issueKey: issue.key, issueTitle, issueProjectName, documentTitle: pageTitle, documentProjectName,
+      }]);
+      assert.ok(!current.documents.some(row => row.title === excludedTitle));
+      assert.equal(current.documents.filter(row => row.title.startsWith('Ambiguous page')).length, 2);
+      assert.ok(current.documents.some(row => row.title === 'Target of excluded relation'));
+      const baselineIds = new Set(before.resourceLinks.map(row => row.id));
+      const newLinks = current.resourceLinks.filter(row => !baselineIds.has(row.id));
+      assert.equal(newLinks.length, 1);
+      const proof = { id: newLinks[0].id, issueId: issue.id, documentId: page.id };
+      assert.deepEqual(newLinks, [{ ...proof, kind: 'related' }]);
+      assert.deepEqual(receipt.resourceLinkProof, [proof]);
+      assert.equal(receipt.counts.resourceLinks, 1);
+
+      const remoteRecords = await f.call<SourceRecordPage>(`/source-imports/${jiraReceipt.id}/records?kind=relation`);
+      assert.equal(remoteRecords.status, 200, JSON.stringify(remoteRecords.data));
+      assert.deepEqual(remoteRecords.data.records.map(({ record, targetId, excluded }) => [record.id, targetId, excluded ?? false]).sort(),
+        [[901, false], [902, false], [903, false], [904, true]].map(([id, excluded]) => [`relation:remote:${id}`, null, excluded]));
+      const records = await f.call<SourceRecordPage>(`/source-imports/${wikiReceipt.id}/records?kind=page`);
+      assert.equal(records.status, 200);
+      const excluded = records.data.records.find(row => row.record.title === excludedTitle);
+      assert.equal(excluded?.excluded, true);
+      assert.equal(excluded?.targetId, null);
+
+      const audit = await f.call<SourceReconciliationAudit>(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`);
+      assert.equal(audit.status, 200, JSON.stringify(audit.data));
+      assert.equal(audit.data.resourceLinkProjection?.expected, 1);
+      assert.deepEqual(audit.data.resourceLinkProjection?.counts, { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 });
+      const receipts = (await f.call<SourceImport[]>('/source-imports')).data;
+      const earlier = receipts.find(row => row.id === firstReceipt.id);
+      assert.equal(earlier?.counts.resourceLinks, 0);
+      assert.deepEqual(earlier?.resourceLinkProof ?? [], []);
+      const reapplied = await f.apply(plan);
+      assert.equal(reapplied.status, 200);
+      assert.deepEqual(reapplied.data, { import: receipt, duplicate: true });
+      if (first === 'jira') {
+        const competing = await f.upload(wikiBytes('ALT', [[100, 'Another exact page claim']]),
+          'competing-target.zip', 'confluence', 'synthetic-third-wiki');
+        const competingConfig = await f.configuration(competing, 'COMPETING');
+        competingConfig.sourceBaseUrls[competing.id] = wikiBase;
+        const competingPlan = await f.preview(competingConfig);
+        assert.equal(competingPlan.canApply, true, JSON.stringify(competingPlan.notices));
+        assert.equal(competingPlan.counts.resourceLinks, 0);
+        assert.ok(competingPlan.notices.some(notice => notice.code === 'RETAINED_DOCUMENT_ISSUE_LINK_UNRESOLVED'));
+      }
+    });
+  }
+  assert.deepEqual(requests, []);
+});
+
 test('actual ZIP attachment versions survive native9 exact downloads and migration audit/save/install failures roll back database and files', async t => {
   const f = await fixture(), binary = confluence(); try {
     const pkg = await f.upload(binary.bytes, 'confluence.zip', 'confluence'), config = await f.configuration(pkg);

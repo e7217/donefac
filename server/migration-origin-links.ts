@@ -21,6 +21,10 @@ export interface ConfluenceMigrationPageAddress extends MigrationOriginBase {
   hasExtraQuery?: true;
 }
 
+export function confluenceMigrationPageKey(origin: string, { sourceId, spaceKey, title }: ConfluenceMigrationPageAddress['identity']): string {
+  return sourceId ? JSON.stringify([origin, 'id', sourceId]) : JSON.stringify([origin, 'title', spaceKey ?? '', title ?? '']);
+}
+
 interface ConfluenceAttachmentDownload {
   url: string;
   identity?: { sourcePageId: string; filename: string; version?: number };
