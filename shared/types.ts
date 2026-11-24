@@ -1530,6 +1530,26 @@ export interface GitlabMergeRequestReview {
     hasMore: boolean;
   } | null;
 }
+export type GitlabMergeRequestPipeline = {
+  linkId: string;
+  repositoryId: number;
+  mergeRequestIid: number;
+  checkedAt: string;
+} & (
+  { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
+  {
+    kind: 'pipeline';
+    pipeline: {
+      repositoryId: number;
+      pipelineId: number;
+      sha: string;
+      status: string;
+      webUrl: string;
+      updatedAt: string | null;
+    };
+    jobs?: GitlabPipelineJobs;
+  }
+);
 export interface GitlabUnresolvedDiscussion {
   noteId: number;
   author: string | null;

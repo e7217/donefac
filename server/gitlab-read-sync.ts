@@ -1,7 +1,7 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestDiscussions, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
+import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts, GitlabUnresolvedDiscussion } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -9,8 +9,8 @@ import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
   'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests' | 'merge-request-review' |
-  'merge-request-discussions';
-type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests'>;
+  'merge-request-discussions' | 'merge-request-pipeline';
+type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests' | 'merge-request-pipeline'>;
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -73,6 +73,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   'pipeline-failed-tests': '파이프라인 실패 테스트 상세',
   'merge-request-review': 'MR 검토',
   'merge-request-discussions': 'MR 토론',
+  'merge-request-pipeline': 'MR 파이프라인',
 };
 
 export class GitlabReadError extends Error {
@@ -84,7 +85,7 @@ export class GitlabReadError extends Error {
       'invalid-response': '응답 형식 오류',
       'response-too-large': '응답 크기 한도 초과',
       'changed': stage === 'branches' ? '브랜치가 변경되었습니다. 다시 확인해 주세요.'
-        : stage === 'merge-request-review' || stage === 'merge-request-discussions'
+        : stage === 'merge-request-review' || stage === 'merge-request-discussions' || stage === 'merge-request-pipeline'
           ? 'MR이 변경되었습니다. 다시 확인해 주세요.' : '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
@@ -667,7 +668,7 @@ export function isExactGitlabPipelineListRow(object: GitlabReadObject, projectId
 
 async function readExactWorkflowObject(
   { base, headers, projectUrl }: ReturnType<typeof projectReadRequest>, projectId: number,
-  { repositoryPath, kind, id }: WorkflowPage, signal?: AbortSignal,
+  { repositoryPath, kind, id }: WorkflowPage, signal?: AbortSignal, derivePipelineAddress = false,
 ): Promise<{ kind: WorkflowPage['kind']; object: GitlabReadObject; webUrl: string }> {
   const stage = kind === 'merge_request' ? 'merge-requests' : 'pipelines';
   const collection = kind === 'merge_request' ? 'merge_requests' : 'pipelines';
@@ -679,9 +680,13 @@ async function readExactWorkflowObject(
       (kind === 'merge_request' ? object.iid !== id || (object.target_project_id !== undefined && object.target_project_id !== projectId)
         : object.id !== id)) throw new GitlabReadError(stage, 'invalid-response');
 
-  const verified = manualPage(object.web_url, base, false);
-  if (!verified || verified.repositoryPath !== repositoryPath || verified.kind !== kind || verified.id !== id) {
-    throw new GitlabReadError(stage, 'invalid-response');
+  // A current MR pipeline is bound by its verified project, object ID and SHA.
+  // Its display URL comes from that project even if GitLab supplies a different web_url.
+  if (kind !== 'pipeline' || !derivePipelineAddress) {
+    const verified = manualPage(object.web_url, base, false);
+    if (!verified || verified.repositoryPath !== repositoryPath || verified.kind !== kind || verified.id !== id) {
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
   }
   const webUrl = new URL(`${repositoryPath}/-/${collection}/${id}`, base.origin).href;
   return { kind, object: { ...object, web_url: webUrl }, webUrl };
@@ -698,6 +703,7 @@ export function gitlabLinkedActivityReader(connection: Connection, signal?: Abor
     return project;
   }
   return {
+    projectFor,
     async workflow(projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number) {
       const context = await projectFor(projectId);
       const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, signal);
@@ -721,9 +727,10 @@ export function gitlabLinkedActivityReader(connection: Connection, signal?: Abor
 }
 
 const reviewStates = new Set<unknown>(['unreviewed', 'review_started', 'reviewed', 'requested_changes', 'approved', 'unapproved']);
-const unavailableReviewStatuses = new Set([401, 403, 404, 405, 501]);
+const unavailableWorkflowStatuses = new Set([401, 403, 404, 405, 501]);
 const reviewStage = 'merge-request-review';
 const discussionStage = 'merge-request-discussions';
+const mergeRequestPipelineStage = 'merge-request-pipeline';
 const positiveId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 const nonNegativeCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
@@ -777,7 +784,7 @@ export async function readGitlabMergeRequestReview(connection: Connection, repos
     try {
       return { available: true as const, payload: await readJson(url, headers, reviewStage, signal, onHeaders) };
     } catch (error) {
-      if (error instanceof GitlabReadError && error.code === 'http' && unavailableReviewStatuses.has(error.httpStatus ?? 0)) {
+      if (error instanceof GitlabReadError && error.code === 'http' && unavailableWorkflowStatuses.has(error.httpStatus ?? 0)) {
         return { available: false as const };
       }
       throw error;
@@ -1110,16 +1117,22 @@ function pipelineTriggerJob(row: GitlabReadObject, repository: PipelineJobReposi
 
 async function pipelineInspection(connection: Connection, repositoryId: number, pipelineId: number,
   expectedSha: string | null, stage: PipelineInspectionStage, signal?: AbortSignal) {
-  if (!Number.isSafeInteger(pipelineId) || pipelineId < 1) throw new GitlabReadError(stage, 'invalid-response');
+  if (!positiveId(pipelineId)) throw new GitlabReadError(stage, 'invalid-response');
   const context = await readVerifiedProject(connection, repositoryId, signal);
+  return inspectVerifiedPipeline(context, repositoryId, pipelineId, expectedSha, stage, connection.token, signal);
+}
+
+async function inspectVerifiedPipeline(context: VerifiedProject, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, stage: PipelineInspectionStage, token: Connection['token'], signal?: AbortSignal) {
   async function readPipeline() {
     const { object, webUrl } = await readExactWorkflowObject(context, repositoryId,
-      { repositoryPath: context.repositoryPath, kind: 'pipeline', id: pipelineId }, signal);
+      { repositoryPath: context.repositoryPath, kind: 'pipeline', id: pipelineId }, signal, stage === mergeRequestPipelineStage);
     const { status, updated_at: updated, yaml_errors: yamlErrors } = object;
     const sha = gitlabObjectSha(object.sha);
     if (!sha || /^0+$/u.test(sha) || typeof status !== 'string' || !/^[a-z][a-z0-9_]{0,39}$/u.test(status) ||
       (updated != null && (typeof updated !== 'string' || !Number.isFinite(Date.parse(updated)))) ||
-      (yamlErrors != null && typeof yamlErrors !== 'string') || includesGitlabCredential(connection.token, [webUrl, status])) {
+      (yamlErrors != null && typeof yamlErrors !== 'string') || includesGitlabCredential(token, [webUrl, status]) ||
+      (stage === mergeRequestPipelineStage && includesGitlabCredential(token, [sha]))) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
     return { status, sha, webUrl, updatedAt: typeof updated === 'string' ? updated : null,
@@ -1130,7 +1143,9 @@ async function pipelineInspection(connection: Connection, repositoryId: number, 
   async function recheck() {
     const latest = await readPipeline();
     if (latest.sha !== observed.sha || latest.webUrl !== observed.webUrl || latest.status !== observed.status ||
-        latest.updatedAt !== observed.updatedAt || latest.configurationError !== observed.configurationError) throw new GitlabReadError(stage, 'changed');
+        latest.updatedAt !== observed.updatedAt || latest.configurationError !== observed.configurationError) {
+      throw new GitlabReadError(stage === mergeRequestPipelineStage ? 'pipeline-jobs' : stage, 'changed');
+    }
   }
   return { context, observed, recheck };
 }
@@ -1168,7 +1183,12 @@ async function readPipelineJobPages<Job extends { id: number }>(url: URL, header
 
 export async function readGitlabPipelineJobs(connection: Connection, repositoryId: number, pipelineId: number,
   expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore' | 'triggerJobs'>> {
-  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-jobs', signal);
+  const inspection = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-jobs', signal);
+  return readInspectedPipelineJobs(inspection, repositoryId, pipelineId, connection.token, signal);
+}
+
+async function readInspectedPipelineJobs({ context, observed, recheck }: Awaited<ReturnType<typeof inspectVerifiedPipeline>>,
+  repositoryId: number, pipelineId: number, token: Connection['token'], signal?: AbortSignal) {
   const repository = { id: repositoryId, path: context.repositoryPath, base: context.base };
   const pipeline = { id: pipelineId, sha: observed.sha };
   const jobsUrl = new URL(context.projectUrl);
@@ -1183,8 +1203,8 @@ export async function readGitlabPipelineJobs(connection: Connection, repositoryI
   const triggerDeadline = AbortSignal.timeout(PIPELINE_TRIGGER_JOBS_TIMEOUT_MS);
   try {
     const [ordinary, triggerJobs] = await Promise.all([
-      readPipelineJobPages(jobsUrl, context.headers, row => pipelineJob(row, repository, pipeline, connection.token), listSignal),
-      readPipelineJobPages(triggerUrl, context.headers, row => pipelineTriggerJob(row, repository, pipeline, connection.token),
+      readPipelineJobPages(jobsUrl, context.headers, row => pipelineJob(row, repository, pipeline, token), listSignal),
+      readPipelineJobPages(triggerUrl, context.headers, row => pipelineTriggerJob(row, repository, pipeline, token),
         AbortSignal.any([listSignal, triggerDeadline]), legacyUrl).catch(cause => {
         listSignal.throwIfAborted();
         if (!(cause instanceof GitlabReadError) && !triggerDeadline.aborted) throw cause;
@@ -1194,6 +1214,76 @@ export async function readGitlabPipelineJobs(connection: Connection, repositoryI
     await recheck();
     return { status: observed.status, configurationError: observed.configurationError, ...ordinary, triggerJobs };
   } finally { lists.abort(); }
+}
+
+type MergeRequestPipelinePointer = { repositoryId: number; pipelineId: number; sha: string };
+type MergeRequestPipelineRead = { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
+  { kind: 'pipeline'; pipeline: Extract<GitlabMergeRequestPipeline, { kind: 'pipeline' }>['pipeline'];
+    jobs?: Awaited<ReturnType<typeof readGitlabPipelineJobs>> };
+
+function mergeRequestPipelineSha(value: unknown): string | null {
+  if (value == null) return null;
+  const sha = gitlabObjectSha(value);
+  if (!sha || /^0+$/u.test(sha)) throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+  return sha;
+}
+
+function currentMergeRequestPipeline(object: GitlabReadObject, targetProjectId: number) {
+  const { source_project_id: sourceProjectId, target_project_id: target, head_pipeline: pointer } = object;
+  if (target !== targetProjectId || !positiveId(sourceProjectId)) throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+  if (object.diff_refs != null && !isReadObject(object.diff_refs)) throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+  const diffHead = isReadObject(object.diff_refs) ? object.diff_refs.head_sha : null;
+  const head = mergeRequestPipelineSha(object.sha), diff = mergeRequestPipelineSha(diffHead);
+  const sourceHead = head ?? diff;
+  if (!sourceHead) throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+  if (head && diff && head !== diff) throw new GitlabReadError(mergeRequestPipelineStage, 'changed');
+
+  let pipeline: MergeRequestPipelinePointer | null | undefined;
+  if (pointer == null) pipeline = pointer;
+  else {
+    if (!isReadObject(pointer) || !positiveId(pointer.id) || !positiveId(pointer.project_id) ||
+        (pointer.project_id !== sourceProjectId && pointer.project_id !== targetProjectId)) {
+      throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+    }
+    const sha = mergeRequestPipelineSha(pointer.sha);
+    if (!sha) throw new GitlabReadError(mergeRequestPipelineStage, 'invalid-response');
+    pipeline = { repositoryId: pointer.project_id, pipelineId: pointer.id, sha };
+  }
+  return { sourceProjectId, sourceHead, pipeline };
+}
+
+export async function readGitlabMergeRequestPipeline(connection: Connection & { projectIds: readonly number[] },
+  repositoryId: number, iid: number, objectId: number, includeJobs: boolean, signal?: AbortSignal): Promise<MergeRequestPipelineRead> {
+  const { projectFor, workflow } = gitlabLinkedActivityReader(connection, signal);
+  async function readRevision() {
+    const { object } = await workflow(repositoryId, 'merge_request', iid, objectId);
+    return currentMergeRequestPipeline(object, repositoryId);
+  }
+  const observed = await readRevision();
+  async function recheckMergeRequest() {
+    const latest = await readRevision();
+    if (JSON.stringify(observed) !== JSON.stringify(latest)) throw new GitlabReadError(mergeRequestPipelineStage, 'changed');
+  }
+  const pointer = observed.pipeline;
+  if (!pointer) return { kind: pointer === null ? 'no_pipeline' : 'pipeline_unavailable' };
+  if (!connection.projectIds.includes(pointer.repositoryId)) return { kind: 'repository_not_connected' };
+
+  let inspection: Awaited<ReturnType<typeof inspectVerifiedPipeline>>;
+  try {
+    const project = await projectFor(pointer.repositoryId);
+    inspection = await inspectVerifiedPipeline(project, pointer.repositoryId, pointer.pipelineId, pointer.sha,
+      mergeRequestPipelineStage, connection.token, signal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (!(error instanceof GitlabReadError) || error.code !== 'http' || !unavailableWorkflowStatuses.has(error.httpStatus ?? 0)) throw error;
+    await recheckMergeRequest();
+    return { kind: 'pipeline_unavailable' };
+  }
+  const { status, webUrl, updatedAt } = inspection.observed;
+  const jobs = includeJobs ? await readInspectedPipelineJobs(inspection, pointer.repositoryId, pointer.pipelineId, connection.token, signal) : undefined;
+  await recheckMergeRequest();
+  return { kind: 'pipeline', pipeline: { ...pointer, status, webUrl, updatedAt: updatedAt === null ? null : new Date(updatedAt).toISOString() },
+    ...(jobs ? { jobs } : {}) };
 }
 
 function pipelineTestCounts(row: GitlabReadObject, fields: readonly string[]): GitlabTestCounts {

@@ -36,6 +36,10 @@
   font-size: inherit;
 }
 
+.gitlab-mr-pipeline-inspection > .gitlab-activity-inspection {
+  justify-self: stretch;
+}
+
 .gitlab-activity-inspection-panel p a,
 .gitlab-pipeline-job-link,
 .gitlab-test-report-link,
