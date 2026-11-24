@@ -142,11 +142,12 @@ function dependencyCheck(check: GanttExportDependency['check']): string {
 }
 
 function dependencyRow(dependency: GanttExportDependency): string {
-  const { predecessorKey, successorKey, type, lagDays, check } = dependency;
+  const { predecessorKey, successorKey, type, lagDays, check, teamBlocker } = dependency;
   const label = isDependencyType(type) ? `${DEPENDENCY_LABELS[type]} (${type})` : text(type);
+  const crossProjectLabel = teamBlocker ? '<strong>프로젝트 간 차단</strong> · ' : '';
   const lag = escapeHtml(`${lagDays > 0 ? '+' : ''}${lagDays}근무일`);
   return `<tr class="dependency-row"><th scope="row">${text(predecessorKey)}</th>
-    <td>${text(successorKey)}</td><td>${label}</td><td>${lag}</td><td>${dependencyCheck(check)}</td></tr>`;
+    <td>${text(successorKey)}</td><td>${crossProjectLabel}${label}</td><td>${lag}</td><td>${dependencyCheck(check)}</td></tr>`;
 }
 
 const styles = `

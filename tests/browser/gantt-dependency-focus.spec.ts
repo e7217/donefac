@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Dependency, Issue, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, IssueRelation, SavedView, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 import { applyGanttLink, linkApplyPath, reviewGanttLink } from './gantt-link-review';
 
 async function payload<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
@@ -119,6 +119,7 @@ test('360px 간트에서 가려진 선후행 업무를 단계별로 보고 일�
     await g.select(independent).uncheck();
     await g.open.press('Enter');
     await expect(g.flow).toBeVisible();
+    await expect(g.flow.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true })).toHaveCount(0);
     await expect(windowStart).not.toHaveValue(d(0));
     const flowBounds = (await g.flow.boundingBox())!;
     expect(flowBounds.x).toBeGreaterThanOrEqual(0);
@@ -188,6 +189,161 @@ test('360px 간트에서 가려진 선후행 업무를 단계별로 보고 일�
     await expect(zoomWeek).toHaveClass(/active/u);
     await expect(page).toHaveURL(url => url.hash === originalHash);
   } finally {
+    await f.close();
+  }
+});
+
+test('360px 팀 간트에서 프로젝트 간 차단 경로를 보고 검색·선택·날짜 초안으로 돌아온다', async ({ page, request }, testInfo) => {
+  test.setTimeout(85_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  const d = dateInNextWeek;
+  const remote = { projectId: f.otherProject.id };
+  const calendarPath = `/api/projects/${remote.projectId}/calendar`;
+  const previousCalendar = await payload<WorkCalendar>(await request.get(calendarPath));
+  let reviewedCalendar: WorkCalendar | undefined;
+  const block = (source: Issue, target: Issue) => request.post(`/api/issues/${source.id}/relations`, {
+    data: { type: 'blocks', direction: 'outgoing', otherIssueId: target.id },
+  }).then(response => payload<IssueRelation>(response, 201));
+
+  try {
+    reviewedCalendar = await payload<WorkCalendar>(await request.patch(calendarPath, {
+      data: { expectedVersion: previousCalendar.version, workingWeekdays: [1, 2, 3, 4, 5],
+        exceptions: [{ date: d(7), isWorking: false, label: `${f.token} 인수 프로젝트 휴무` }] },
+    }));
+    const anchor = await f.issue('현재 표시 기준 업무', { startDate: d(3), endDate: d(4) });
+    const stillVisible = await f.issue('현재 표시 별도 업무', { startDate: d(4), endDate: d(4) });
+    const localPrevious = await f.issue('앵커 프로젝트의 선행', { startDate: d(1), endDate: d(2) });
+    const localNext = await f.issue('앵커 프로젝트의 후행', { startDate: d(7), endDate: d(7) });
+    const remotePrevious = await f.issue('마지막 날짜가 비어 있는 타 프로젝트 선행', { ...remote, startDate: d(2) });
+    const remoteEarlier = await f.issue('타 프로젝트 선행의 앞 업무', { ...remote, startDate: d(0), endDate: d(1) });
+    const remoteNext = await f.issue('타 프로젝트로 인계받는 업무', { ...remote, startDate: d(7), endDate: d(8) });
+    const remoteLater = await f.issue('타 프로젝트에서 이어지는 후행', { ...remote, startDate: d(9), endDate: d(9) });
+    const collateral = await f.issue('타 프로젝트 선행에서 갈라지는 별도 경로', { ...remote, startDate: d(7), endDate: d(8) });
+    const terminal = await f.issue('이미 완료한 타 프로젝트 차단 대상', { ...remote, status: 'done', startDate: d(7), endDate: d(8) });
+    const localLink = await f.link(anchor, localNext);
+    await f.link(localPrevious, anchor);
+    await f.link(remoteEarlier, remotePrevious);
+    await f.link(remotePrevious, collateral);
+    await f.link(remoteNext, remoteLater);
+    await block(remotePrevious, anchor);
+    const handoff = await block(anchor, remoteNext);
+    const bypass = await block(remotePrevious, localNext);
+    await block(anchor, terminal);
+
+    const g = gantt(page);
+    const ordinaryQuery = `${f.token} 현재 표시`;
+    const ordinaryHash = `#/${f.project.id}/gantt?${new URLSearchParams({ scope: 'team', ganttProject: f.project.id, ganttQ: ordinaryQuery })}`;
+    const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    const include = g.flow.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true });
+    const end = g.row(anchor).getByLabel(`${anchor.key} 종료일`, { exact: true });
+    const writes: string[] = [];
+    page.on('request', sent => {
+      const path = new URL(sent.url()).pathname;
+      if ((path.startsWith('/api/schedule/') || path.startsWith('/api/issues/') || path.startsWith('/api/dependencies')) &&
+          ['POST', 'PATCH', 'PUT', 'DELETE'].includes(sent.method())) writes.push(path);
+    });
+    await page.goto(`/${ordinaryHash}`);
+    await expect(projectFilter).toHaveValue(f.project.id);
+    await expect(g.search).toHaveValue(ordinaryQuery);
+    await expect(g.rows).toHaveCount(2);
+    await g.select(anchor).check();
+    await end.fill(d(5));
+    await g.open.click();
+    await expect(include).not.toBeChecked();
+    await expect(g.rows).toHaveCount(3);
+    await expect(end).toHaveValue(d(5));
+    for (const issue of [anchor, localPrevious, localNext]) await expect(g.row(issue)).toBeVisible();
+    for (const issue of [remotePrevious, remoteEarlier, remoteNext, remoteLater]) await expect(g.row(issue)).toHaveCount(0);
+
+    await include.focus();
+    await include.press('Space');
+    await expect(include).toBeChecked();
+    await expect(g.rows).toHaveCount(7);
+    for (const [issue, role, step] of [
+      [remotePrevious, 'predecessor', '선행 1단계'], [remoteEarlier, 'predecessor', '선행 2단계'],
+      [remoteNext, 'successor', '후행 1단계'], [remoteLater, 'successor', '후행 2단계'],
+    ] as const) {
+      const row = g.row(issue);
+      await expect(row).toHaveAttribute('data-dependency-focus-row', role);
+      await expect(row.getByText(step, { exact: true })).toBeVisible();
+      await expect(row.locator('.gantt-row-project')).toHaveText(f.otherProject.key);
+      await expect(row.locator('.gantt-row-project')).toHaveAttribute('title', f.otherProject.name);
+    }
+    for (const issue of [collateral, terminal, stillVisible]) await expect(g.row(issue)).toHaveCount(0);
+    const crossConnector = g.chart.locator(`path[data-team-blocker-id="${handoff.id}"]`);
+    await expect(crossConnector).toHaveCount(1);
+    await expect(crossConnector).not.toHaveCSS('stroke-dasharray', 'none');
+    await expect(crossConnector).toHaveAttribute('data-dependency-conflict', 'true');
+    await expect(g.chart.locator(`.gantt-days [data-date="${d(5)}"]`)).not.toHaveClass(/weekend/u);
+    await expect(g.chart.locator(`path[data-team-blocker-id="${bypass.id}"]`)).toHaveCount(0);
+    await expect(g.chart.locator(`[data-dependency-id="${localLink.id}"]`)).toHaveCount(1);
+    const blockerDetails = g.flow.locator('details').filter({ hasText: '프로젝트 간 차단 2건' });
+    await blockerDetails.getByText('프로젝트 간 차단 2건', { exact: true }).click();
+    await expect(blockerDetails).toContainText(`${remotePrevious.key} → ${anchor.key}`);
+    await expect(blockerDetails).toContainText(`${anchor.key} → ${remoteNext.key}`);
+    expect((await g.flow.boundingBox())!.width).toBeLessThanOrEqual(360);
+    await page.getByRole('button', { name: '일정 충돌', exact: true }).click();
+    const findings = page.getByRole('region', { name: '일정 충돌', exact: true });
+    const handoffFinding = findings.locator(`li[data-team-blocker-id="${handoff.id}"]`);
+    await expect(handoffFinding.getByText('후행 시작일 가능일', { exact: true })).toBeVisible();
+    await expect(handoffFinding.locator(`time[datetime="${d(8)}"]`)).toHaveText(d(8));
+    await expect(findings.locator(`li[data-team-blocker-id="${bypass.id}"]`)).toHaveCount(0);
+    await findings.getByRole('button', { name: '일정 충돌 닫기', exact: true }).click();
+
+    const downloading = page.waitForEvent('download');
+    await page.getByRole('button', { name: '간트 HTML 내려받기', exact: true }).click();
+    const reportPath = testInfo.outputPath('프로젝트-간-선후행-흐름.html');
+    await (await downloading).saveAs(reportPath);
+    const report = await readFile(reportPath, 'utf8');
+    const crossPairs = await page.evaluate(html => {
+      const document = new DOMParser().parseFromString(html, 'text/html');
+      return [...document.querySelectorAll<HTMLTableRowElement>('tr.dependency-row')]
+        .filter(row => row.cells[2]?.textContent?.includes('프로젝트 간 차단'))
+        .map(row => `${row.cells[0].textContent} → ${row.cells[1].textContent}`).sort();
+    }, report);
+    expect(crossPairs).toEqual([`${remotePrevious.key} → ${anchor.key}`, `${anchor.key} → ${remoteNext.key}`].sort());
+    for (const issue of [remotePrevious, anchor, remoteNext]) expect(report).toContain(issue.title);
+    for (const issue of [collateral, terminal, stillVisible]) expect(report).not.toContain(issue.title);
+
+    const remoteTicket = g.row(remoteNext).locator('.gantt-issue-name');
+    await remoteTicket.click();
+    const drawer = page.getByRole('dialog', { name: remoteNext.title, exact: true });
+    const review = drawer.getByRole('navigation', { name: '업무 검토 순서', exact: true });
+    await expect(review.getByRole('status')).toContainText('7개 중');
+    await drawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(drawer).toHaveCount(0);
+    await expect(remoteTicket).toBeFocused();
+    await expect(include).toBeChecked();
+    await expect(end).toHaveValue(d(5));
+
+    await end.fill(d(6));
+    await include.uncheck();
+    await expect(g.rows).toHaveCount(3);
+    await expect(crossConnector).toHaveCount(0);
+    await expect(end).toHaveValue(d(6));
+    await include.check();
+    await expect(g.rows).toHaveCount(7);
+    await expect(end).toHaveValue(d(6));
+    await g.close.click();
+    await expect(g.flow).toHaveCount(0);
+    await expect(g.open).toBeFocused();
+    await expect(g.rows).toHaveCount(2);
+    await expect(projectFilter).toHaveValue(f.project.id);
+    await expect(g.search).toHaveValue(ordinaryQuery);
+    await expect(g.select(anchor)).toBeChecked();
+    await expect(g.select(stillVisible)).not.toBeChecked();
+    await expect(end).toHaveValue(d(6));
+    await expect(page).toHaveURL(url => url.hash === ordinaryHash);
+    expect((await workspace(request)).issues.find(issue => issue.id === anchor.id)?.endDate).toBe(d(4));
+    expect(writes).toEqual([]);
+    await end.press('Escape');
+    await expect(end).toHaveValue(d(4));
+  } finally {
+    if (reviewedCalendar) await payload<WorkCalendar>(await request.patch(calendarPath, {
+      data: { expectedVersion: reviewedCalendar.version, workingWeekdays: previousCalendar.workingWeekdays,
+        exceptions: previousCalendar.exceptions },
+    }));
     await f.close();
   }
 });

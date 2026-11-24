@@ -26,6 +26,7 @@ export interface GanttExportDependency {
   type: string;
   lagDays: number;
   check: DependencyScheduleCheck | null;
+  teamBlocker?: true;
 }
 
 type ReportScope = {
@@ -52,6 +53,7 @@ type GanttExportInput = ReportScope & {
   historicalIssues: BaselineIssue[];
   historicalMilestones: BaselineMilestone[];
   dependencies: Dependency[];
+  teamBlockerIds?: ReadonlySet<string>;
   findings?: ReadonlyMap<string, DependencyScheduleCheck>;
 };
 
@@ -62,7 +64,7 @@ const dates = (startDate: string | null, endDate: string | null, targetDate: str
 export function buildGanttExportReport(input: GanttExportInput): GanttExportReport {
   const {
     title, capturedAt, range, today, nonworkingDates, filters, data, includeProjectLabel, issues, planningRows, milestones, baseline,
-    historicalIssues, historicalMilestones, dependencies, findings,
+    historicalIssues, historicalMilestones, dependencies, teamBlockerIds, findings,
   } = input;
   const users = new Map(data.users.map(user => [user.id, user.name]));
   const projects = new Map(data.projects.map(project => [project.id, project]));
@@ -123,7 +125,8 @@ export function buildGanttExportReport(input: GanttExportInput): GanttExportRepo
       const predecessorKey = issueKeys.get(predecessorId);
       const successorKey = issueKeys.get(successorId);
       if (!predecessorKey || !successorKey) return [];
-      return [{ predecessorKey, successorKey, type, lagDays, check: findings ? findings.get(id) ?? { kind: 'valid' } : null }];
+      const check = findings ? findings.get(id) ?? { kind: 'valid' as const } : null;
+      return [{ predecessorKey, successorKey, type, lagDays, check, ...(teamBlockerIds?.has(id) ? { teamBlocker: true as const } : {}) }];
     }),
   };
 }

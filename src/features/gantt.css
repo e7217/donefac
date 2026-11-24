@@ -209,6 +209,7 @@
 
 .gantt-feature {
   --gantt-dependency-conflict: #ad5c28;
+  --gantt-team-blocker-line: #6451aa;
 }
 .gantt-legend-conflict {
   width: 20px;

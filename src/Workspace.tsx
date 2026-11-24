@@ -953,7 +953,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!issue) return;
     const context = issueReviewContext(current);
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
-      : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null
+      : current.view === 'gantt' && current.ganttScope === 'team' ? (source.projectScope === undefined ? current.ganttProject ?? null : source.projectScope)
         : current.view === 'mywork' ? source.projectScope ?? null : current.projectId;
     if (!requestRoute({ ...current, issueId: id, issueCommentId: null, documentPreviewId: null })) return;
     const opened = acceptedRouteRef.current;

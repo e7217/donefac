@@ -120,6 +120,18 @@ test('Gantt HTML escapes user strings and includes print styles without active o
   assert.match(html, /@media print \{[\s\S]*\.table-scroll \{ overflow: visible;[\s\S]*min-width: 0; width: 100%;[\s\S]*thead \{ display: table-header-group;/);
 });
 
+test('Gantt HTML identifies cross-project blockers without changing other relationship details', () => {
+  const relationship = {
+    predecessorKey: 'TEAM-9', successorKey: 'QA-2', type: 'FS', lagDays: 0,
+    check: { kind: 'conflict', predecessorEndpoint: 'endDate', predecessorDate: '2026-11-23',
+      successorEndpoint: 'startDate', successorDate: '2026-11-24', requiredDate: '2026-11-25' },
+  } as const;
+  const ordinary = renderGanttExport(report({ dependencies: [relationship] }));
+  const marked = renderGanttExport(report({ dependencies: [{ ...relationship, teamBlocker: true }] }));
+  assert.match(bodyRows(marked, 'dependency-row')[0], /TEAM-9[\s\S]*QA-2[\s\S]*프로젝트 간 차단[\s\S]*완료 후 시작 \(FS\)[\s\S]*0근무일[\s\S]*일정 충돌[\s\S]*datetime="2026-11-25"/);
+  assert.equal(marked.replace('<strong>프로젝트 간 차단</strong> · ', ''), ordinary);
+});
+
 test('Gantt HTML handles an empty report and a one-day timeline', () => {
   const empty = renderGanttExport(report({ filters: [], baselineName: null }));
   assert.match(empty, /적용된 조건 없음/);

@@ -9,6 +9,11 @@ interface GanttDependencyFocusPanelProps {
   trace: GanttDependencyFocus | null;
   outsideFilterCount: number;
   disabled: boolean;
+  teamBlockers?: {
+    included: boolean;
+    onChange: (included: boolean) => void;
+    links: readonly { id: string; predecessorKey: string; successorKey: string }[];
+  };
   onClose: () => void;
   onLocate: () => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
@@ -16,7 +21,7 @@ interface GanttDependencyFocusPanelProps {
 
 const count = (value: number) => `${value.toLocaleString('ko-KR')}개`;
 
-export function GanttDependencyFocusPanel({ trace, outsideFilterCount, disabled, onClose, onLocate, onPointerDown }: GanttDependencyFocusPanelProps) {
+export function GanttDependencyFocusPanel({ trace, outsideFilterCount, disabled, teamBlockers, onClose, onLocate, onPointerDown }: GanttDependencyFocusPanelProps) {
   const headingId = useId();
 
   return <section className="gantt-dependency-focus" aria-labelledby={headingId}>
@@ -30,6 +35,17 @@ export function GanttDependencyFocusPanel({ trace, outsideFilterCount, disabled,
           {outsideFilterCount > 0 && <span className="gantt-dependency-focus-extra">기존 보기 밖 {count(outsideFilterCount)}</span>}
         </p>
       </div> : <p className="gantt-dependency-focus-work" role="status">기준 업무를 찾을 수 없습니다.</p>}
+      {trace && teamBlockers && <div className="gantt-focus-team-blockers">
+        <label><input type="checkbox" checked={teamBlockers.included} disabled={disabled} data-gantt-focus-control=""
+          onChange={event => teamBlockers.onChange(event.currentTarget.checked)} /> 프로젝트 간 차단 포함</label>
+        {teamBlockers.included && (teamBlockers.links.length > 0 ? (
+          <details>
+            <summary><span className="gantt-focus-team-swatch" aria-hidden="true" />프로젝트 간 차단 {teamBlockers.links.length}건</summary>
+            <ul>{teamBlockers.links.map(({ id, predecessorKey, successorKey }) =>
+              <li key={id}>{predecessorKey} → {successorKey}</li>)}</ul>
+          </details>
+        ) : <p role="status">이 흐름의 프로젝트 간 차단은 0건입니다.</p>)}
+      </div>}
     </div>
     <div className="gantt-dependency-focus-actions">
       {trace && <button className="btn" type="button" disabled={disabled} data-gantt-focus-control="" onPointerDown={onPointerDown} onClick={onLocate}>

@@ -88,12 +88,20 @@ test('Gantt export retains chart order, full dates and baseline references for v
   assert.ok(report.rows.every(row => row.projectName === undefined));
 
   const other = { ...project, id: 'internal-second-project', key: 'QA', name: '검증 프로젝트' };
+  const receiver = issue('QA-1', { projectId: other.id, startDate: '2026-11-18' });
+  const teamLink: Dependency = { ...visibleLink, id: 'internal-team-link', successorId: receiver.id, lagDays: 0 };
+  const teamCheck = checkDependencySchedule(teamLink, predecessor, receiver, createCalendarMath(defaultWorkCalendar(other.id)));
+  assert.equal(teamCheck.kind, 'conflict');
   const teamReport = buildGanttExportReport({
     ...input, includeProjectLabel: true, nonworkingDates: [],
     data: { ...input.data, projects: [project, other] },
-    issues: [successor, issue('QA-1', { projectId: other.id }), predecessor],
+    issues: [successor, receiver, predecessor], dependencies: [...input.dependencies, teamLink],
+    teamBlockerIds: new Set([teamLink.id, hiddenLink.id]), findings: new Map([[visibleLink.id, check], [teamLink.id, teamCheck]]),
   });
   assert.deepEqual(teamReport.rows.filter(row => row.kind === 'issue' && !row.historical).map(row => [row.key, row.projectName]),
     [[successor.key, project.name], ['QA-1', other.name], [predecessor.key, project.name]]);
+  assert.deepEqual(teamReport.dependencies, [...report.dependencies,
+    { predecessorKey: predecessor.key, successorKey: receiver.key, type: 'FS', lagDays: 0, check: teamCheck, teamBlocker: true }]);
+  assert.doesNotMatch(JSON.stringify(teamReport), /internal-team-link|internal-hidden-link/);
   assert.deepEqual(teamReport.nonworkingDates, []);
 });
