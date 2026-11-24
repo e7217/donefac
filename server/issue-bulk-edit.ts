@@ -13,6 +13,7 @@ import { MAX_PACKAGE_BYTES } from './attachments.js';
 import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
 import { parseFieldBreakdownSelection } from './field-breakdown-routes.js';
 import type { Store } from './store.js';
+import { projectWorkflowIssues, type WorkflowValidationOptions } from './workflows.js';
 
 export class IssueBulkEditError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
@@ -26,7 +27,7 @@ interface BulkEditHooks<T extends { issue: Issue }> {
   actor(request: Request): string;
   configurationToken(projectId: string, changes: IssueBulkEditChanges): string;
   fieldBreakdownMatches?: FieldBreakdownMatches;
-  prepare(before: Issue, update: IssueUpdate, preparedAt: string): T;
+  prepare(before: Issue, update: IssueUpdate, preparedAt: string, projectedIssues?: WorkflowValidationOptions['projectedIssues']): T;
   commit(request: Request, before: Issue, prepared: T): void;
 }
 interface WorkflowBulkEditHooks<T extends { issue: Issue }> extends BulkEditHooks<T> {
@@ -63,7 +64,7 @@ type PlanReview = {
   fingerprint: string;
   labels(issue: Issue): NonNullable<IssueBulkEditRow['plans']>;
 };
-type BulkEditReferences = { parents?: ParentReview; plans?: PlanReview };
+type BulkEditReferences = { parents?: ParentReview; plans?: PlanReview; projectedIssues?: WorkflowValidationOptions['projectedIssues'] };
 
 const TABLE = 'issue_bulk_edit_previews';
 const STALE_MESSAGE = '업무 또는 프로젝트 설정이 변경되었습니다. 다시 미리 확인해 주세요.';
@@ -295,7 +296,7 @@ function sameValues(left: IssueBulkEditValues | null, right: IssueBulkEditValues
 }
 
 function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare'],
-  preparedAt: string, { parents, plans }: BulkEditReferences): BulkEditCandidate<T> {
+  preparedAt: string, { parents, plans, projectedIssues }: BulkEditReferences): BulkEditCandidate<T> {
   const { id, key, title } = before;
   const update = issueUpdate(before, changes);
   const row = { id, key, title, before: values(before, update),
@@ -305,7 +306,7 @@ function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulk
     return { before, row: { ...row, after: row.before, outcome: 'unchanged', reason: null } };
   }
   try {
-    const prepared = prepare(before, update, preparedAt);
+    const prepared = prepare(before, update, preparedAt, projectedIssues);
     const next = prepared.issue;
     if (next.id !== before.id || next.projectId !== before.projectId || next.version !== before.version + 1) {
       fail(500, '일괄 변경할 업무의 식별자 또는 버전이 일치하지 않습니다.');
@@ -332,6 +333,14 @@ function matchesReview(current: IssueBulkEditRow, reviewed: IssueBulkEditRow): b
 function changesFor(scope: EditScope, projectId: string): IssueBulkEditChanges {
   if (!scope.team || !scope.statuses || !Object.hasOwn(scope.statuses, projectId)) return scope.changes;
   return { ...scope.changes, status: scope.statuses[projectId] };
+}
+
+function workflowProjection(scope: EditScope, issues: Issue[]) {
+  if (scope.team ? !scope.statuses : !scope.changes.status || scope.migrationFromStatusId) return;
+  return projectWorkflowIssues(issues.map(({ id, key, projectId, status, parentId }) => {
+    const changes = changesFor(scope, projectId);
+    return { id, key, projectId, status: changes.status ?? status, parentId: changes.parentId === undefined ? parentId : changes.parentId };
+  }));
 }
 
 function reviewCandidate<T extends { issue: Issue }>(scope: EditScope, issue: Issue,
@@ -436,10 +445,11 @@ export class IssueBulkEditService {
     const counts = { changed: 0, unchanged: 0, blocked: 0 };
     const preparedAt = new Date().toISOString();
     const parents = this.parentReview(scope, issues), plans = this.planReview(scope, issues);
+    const references = { parents, plans, projectedIssues: workflowProjection(scope, issues) };
     const hasCustomFields = !scope.team && Boolean(scope.changes.customFields);
     let remainingBytes = hasCustomFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
     for (const issue of issues) {
-      const { row } = reviewCandidate(scope, issue, hooks.prepare, preparedAt, { parents, plans });
+      const { row } = reviewCandidate(scope, issue, hooks.prepare, preparedAt, references);
       if (hasCustomFields) {
         remainingBytes -= Buffer.byteLength(JSON.stringify(row)) + 1;
         if (remainingBytes < 0) fail(413, '미리보기 데이터가 너무 큽니다. 업무 또는 변경할 필드 수를 줄여 주세요.');
@@ -551,7 +561,8 @@ export class IssueBulkEditService {
     const preparedAt = new Date().toISOString();
     const parents = this.parentReview(proposal, issues), plans = this.planReview(proposal, issues);
     if (parents?.fingerprint !== proposal.parentFingerprint || plans?.fingerprint !== proposal.planFingerprint) fail(409, STALE_MESSAGE);
-    const prepared = issues.map(issue => reviewCandidate(proposal, issue, hooks.prepare, preparedAt, { parents, plans }));
+    const references = { parents, plans, projectedIssues: workflowProjection(proposal, issues) };
+    const prepared = issues.map(issue => reviewCandidate(proposal, issue, hooks.prepare, preparedAt, references));
     if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
 
     const result: IssueBulkEditResult = { previewId: proposal.id, updated: [], unchanged: 0 };

@@ -4,12 +4,12 @@ import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationPreview, AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -369,6 +369,153 @@ test('native format 81 retains blocker guards and rejects a mislabeled legacy ba
   } finally {
     await f.close();
   }
+});
+
+const closedSubtaskMessage = '열린 하위 업무를 먼저 완료하거나 취소해 주세요.';
+const subtaskWorkflowPath = '/projects/project-neo/workflow';
+const subtaskGuardEdge = (edge: ProjectWorkflow['transitions'][number]) => edge.from === 'in_progress' && edge.to === 'done';
+const subtaskGuard = (workflow: ProjectWorkflow) => workflow.transitions.find(subtaskGuardEdge)!;
+
+function saveSubtaskGuard(f: Awaited<ReturnType<typeof fixture>>, workflow: ProjectWorkflow, change: Record<string, unknown>) {
+  return f.call<ProjectWorkflow>(subtaskWorkflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => subtaskGuardEdge(edge) ? { ...edge, ...change } : edge),
+  });
+}
+
+async function openSubtaskPair(f: Awaited<ReturnType<typeof fixture>>) {
+  const parent = await f.call<Issue>('/issues', 'POST', { projectId: 'project-neo', status: 'in_progress', title: '합성 상위 업무' });
+  assert.equal(parent.status, 201, JSON.stringify(parent.data));
+  const child = await f.call<Issue>('/issues', 'POST', { projectId: 'project-neo', parentId: parent.data.id, title: '합성 미완료 하위 업무' });
+  assert.equal(child.status, 201, JSON.stringify(child.data));
+  assert.equal(child.data.parentId, parent.data.id);
+  return { parent: parent.data, child: child.data };
+}
+
+test('signed GitLab automation honors the closed-subtask guard and a new event can move the parent after resolution', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const key = Buffer.alloc(32, 19);
+  const configured = await f.call<GitlabSettings>('/integrations/gitlab', 'PATCH', {
+    expectedVersion: 1, baseUrl: 'http://gitlab.synthetic.test', projectIds: [42], signingToken: `whsec_${key.toString('base64')}`,
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.data));
+  assert.equal(configured.data.signingTokenConfigured, true);
+  assert.equal(configured.data.webhookSecretConfigured, false);
+
+  const workflow = (await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data;
+  const enabled = await saveSubtaskGuard(f, workflow, { requireClosedSubtasks: true });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.data));
+  assert.equal(subtaskGuard(enabled.data).requireClosedSubtasks, true);
+  const { parent, child } = await openSubtaskPair(f);
+  const target = f.observer.get<Issue>('issues', parent.id)!;
+  await endpoint(f);
+  const savedRule = await rule(f);
+  const preview = () => f.call<AutomationPreview>('/automation/preview', 'POST', { rule: savedRule, issueIds: [target.id],
+    sample: { trigger: 'merge_request.merged', gitlabProjectId: 42, branch: `feature/${target.key}` } });
+  const blocked = await preview();
+  assert.equal(blocked.status, 200, JSON.stringify(blocked.data));
+  assert.equal(blocked.data.outcomes[0].outcome, 'blocked');
+  assert.equal(blocked.data.outcomes[0].reason, closedSubtaskMessage);
+  assert.ok(!JSON.stringify(blocked.data).includes(child.key));
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data, []);
+
+  function signed(body: ReturnType<typeof payload>, id = randomUUID()) {
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = createHmac('sha256', key).update(`${id}.${timestamp}.`).update(JSON.stringify(body)).digest('base64');
+    return f.call<{ duplicate: boolean; linked: number; runs: AutomationRun[] }>('/integrations/gitlab/webhook', 'POST', body, {
+      'X-Gitlab-Event': 'Merge Request Hook', 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}`,
+    });
+  }
+  const firstEvent = payload(340, target.key);
+  const id = randomUUID();
+  const delivery = await signed(firstEvent, id);
+  assert.equal(delivery.status, 200, JSON.stringify(delivery.data));
+  assert.equal(delivery.data.linked, 1);
+  const [blockedRun] = delivery.data.runs;
+  assert.equal(blockedRun.outcome, 'blocked');
+  assert.equal(blockedRun.reason, closedSubtaskMessage);
+  assert.deepEqual(f.observer.get<Issue>('issues', target.id), target);
+  assert.deepEqual((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data, []);
+
+  const closed = await f.call<Issue>(`/issues/${child.id}`, 'PATCH', { expectedVersion: child.version, status: 'done' });
+  assert.equal(closed.status, 200, JSON.stringify(closed.data));
+  assert.equal(closed.data.status, 'done');
+  assert.equal((await preview()).data.outcomes[0].outcome, 'changed');
+  const retry = await signed(firstEvent, id);
+  assert.equal(retry.status, 200, JSON.stringify(retry.data));
+  assert.equal(retry.data.duplicate, true);
+  assert.deepEqual(f.observer.get<Issue>('issues', target.id), target);
+  const accepted = await signed(payload(341, target.key));
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.deepEqual(accepted.data.runs.map(run => run.outcome), ['changed']);
+  const moved = f.observer.get<Issue>('issues', target.id)!;
+  assert.equal(moved.status, 'done');
+  assert.equal(moved.version, target.version + 1);
+  assert.deepEqual((await f.call<AutomationRun[]>('/automation-runs')).data.map(run => run.outcome), ['changed', 'blocked']);
+  const deliveries = (await f.call<WebhookDelivery[]>('/webhook-deliveries')).data;
+  const envelopes = await Promise.all(deliveries.map(item => f.call<{ envelope: WebhookEnvelope }>(`/webhook-deliveries/${item.id}`)));
+  const automated = envelopes.filter(({ data }) => data.envelope.origin === 'automation');
+  assert.equal(automated.length, 1);
+  assert.equal(automated[0].data.envelope.resource.id, target.id);
+  assert.equal(automated[0].data.envelope.resource.status, 'done');
+});
+
+test('portable backup preserves the closed-subtask guard and older format imports retain permissive behavior', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  const { parent, child } = await openSubtaskPair(f);
+  const workflow = (await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data;
+  type WorkflowBackup = { schemaVersion: number; workflows: ProjectWorkflow[] };
+  const legacy = { ...(await f.call<WorkflowBackup>('/export')).data, schemaVersion: 114 };
+  const enabled = await saveSubtaskGuard(f, workflow, { requireClosedSubtasks: true });
+  assert.equal(enabled.status, 200, JSON.stringify(enabled.data));
+  for (const invalid of [null, 'true', 1]) {
+    const rejected = await saveSubtaskGuard(f, enabled.data, { requireClosedSubtasks: invalid });
+    assert.equal(rejected.status, 400);
+    assert.deepEqual((await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data, enabled.data);
+  }
+
+  const legacyClient = structuredClone(enabled.data);
+  delete subtaskGuard(legacyClient).requireClosedSubtasks;
+  const retained = await saveSubtaskGuard(f, legacyClient, {});
+  assert.equal(retained.status, 200, JSON.stringify(retained.data));
+  assert.equal(subtaskGuard(retained.data).requireClosedSubtasks, true);
+  const backup = (await f.call<WorkflowBackup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.equal(subtaskGuard(backup.workflows.find(item => item.projectId === workflow.projectId)!).requireClosedSubtasks, true);
+
+  const disabled = await saveSubtaskGuard(f, retained.data, { requireClosedSubtasks: false });
+  assert.equal(disabled.status, 200, JSON.stringify(disabled.data));
+  assert.ok(!Object.hasOwn(subtaskGuard(disabled.data), 'requireClosedSubtasks'));
+  const mislabeled = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 114 } });
+  assert.equal(mislabeled.status, 400);
+  assert.match(mislabeled.data.error, /schemaVersion 115/u);
+  assert.deepEqual((await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data, disabled.data);
+
+  assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 200);
+  assert.equal(subtaskGuard((await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data).requireClosedSubtasks, undefined);
+  async function moveParent() {
+    const current = f.observer.get<Issue>('issues', parent.id)!;
+    return f.call<{ error?: string; status?: string; details?: { reason?: string } }>(`/issues/${parent.id}`, 'PATCH', {
+      expectedVersion: current.version, status: 'done',
+    });
+  }
+  const older = await moveParent();
+  assert.equal(older.status, 200, JSON.stringify(older.data));
+  assert.equal(older.data.status, 'done');
+
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  const restored = (await f.call<ProjectWorkflow>(subtaskWorkflowPath)).data;
+  assert.equal(subtaskGuard(restored).requireClosedSubtasks, true);
+  assert.ok(restored.version > disabled.data.version);
+  assert.equal(f.observer.get<Issue>('issues', child.id)?.parentId, parent.id);
+  const before = f.observer.get<Issue>('issues', parent.id)!;
+  const restoredBlock = await moveParent();
+  assert.equal(restoredBlock.status, 422, JSON.stringify(restoredBlock.data));
+  assert.equal(restoredBlock.data.error, closedSubtaskMessage);
+  assert.equal(restoredBlock.data.details?.reason, 'open_subtasks');
+  assert.deepEqual(f.observer.get<Issue>('issues', parent.id), before);
 });
 
 test('native automation backup restores execution history and disabled rules with operational outbox reset',async()=>{

@@ -10,6 +10,19 @@ import type { Store } from './store.js';
 export class WorkflowError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
 }
+type WorkflowIssueState = Pick<Issue, 'id' | 'key' | 'projectId' | 'parentId' | 'status'>;
+type WorkflowIssueProjection = ReturnType<typeof projectWorkflowIssues>;
+export type WorkflowValidationOptions = {
+  checkTransition?: boolean;
+  checkFields?: boolean;
+  projectedIssues?: WorkflowIssueProjection;
+};
+
+export function projectWorkflowIssues(issues: Iterable<WorkflowIssueState>) {
+  const byId = new Map(Array.from(issues, issue => [issue.id, issue]));
+  return { byId, byParent: Map.groupBy(byId.values(), issue => issue.parentId) };
+}
+
 function invalid(message: string, status = 400, details?: unknown): never { throw new WorkflowError(status, message, details); }
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) invalid('워크플로 설정 객체가 필요합니다.'); return value as Record<string, unknown>; }
 function fields(value: unknown, schema: ProjectIssueSchema): IssueRequiredField[] {
@@ -21,7 +34,7 @@ function config(projectId: string, value: unknown, version: number, updatedAt: s
   const source = object(value);
   const issueTypes = new Set(schema.issueTypes.map(type => type.id));
   const previousStatuses = new Map(previous?.statuses.map(status => [status.id, status]));
-  const previousBlockerGuards = new Set(previous?.transitions.filter(edge => edge.requireResolvedBlockers).map(edge => `${edge.from}:${edge.to}`));
+  const previousEdges = new Map(previous?.transitions.map(edge => [`${edge.from}:${edge.to}`, edge]));
   if (!Array.isArray(source.statuses) || source.statuses.length < 1 || source.statuses.length > 40) invalid('상태는 1~40개여야 합니다.');
   const statuses: WorkflowStatus[] = source.statuses.map(value => {
     const status = object(value), id = nonempty(status.id, '상태 ID', 48), label = nonempty(status.label, '상태 이름', 40);
@@ -61,9 +74,15 @@ function config(projectId: string, value: unknown, version: number, updatedAt: s
     if (Object.hasOwn(edge, 'requireResolvedBlockers') && typeof edge.requireResolvedBlockers !== 'boolean') {
       invalid('열린 차단 업무 제한은 true 또는 false여야 합니다.');
     }
-    const requireResolvedBlockers = edge.requireResolvedBlockers ?? previousBlockerGuards.has(pair);
+    if (Object.hasOwn(edge, 'requireClosedSubtasks') && typeof edge.requireClosedSubtasks !== 'boolean') {
+      invalid('하위 업무 종료 조건은 true 또는 false여야 합니다.');
+    }
+    const previousEdge = previousEdges.get(pair);
+    const requireResolvedBlockers = edge.requireResolvedBlockers ?? previousEdge?.requireResolvedBlockers;
+    const requireClosedSubtasks = edge.requireClosedSubtasks ?? previousEdge?.requireClosedSubtasks;
     return { from: edge.from, to: edge.to, issueTypes: [...new Set(edge.issueTypes)] as string[], requiredFields: fields(edge.requiredFields, schema),
-      ...(requireResolvedBlockers ? { requireResolvedBlockers: true } : {}) };
+      ...(requireResolvedBlockers ? { requireResolvedBlockers: true } : {}),
+      ...(requireClosedSubtasks ? { requireClosedSubtasks: true } : {}) };
   });
   if (!Array.isArray(source.fieldRules) || source.fieldRules.length > 1000) invalid('유형·상태별 필수 속성 규칙을 확인해 주세요.');
   const rules = new Set<string>();
@@ -136,7 +155,7 @@ export class WorkflowService {
       this.store.put('workflows', next); afterSave?.(next); return next;
     });
   }
-  validateIssue(next: Issue, previous?: Issue, options: { checkTransition?: boolean; checkFields?: boolean } = {}): void {
+  validateIssue(next: Issue, previous?: Issue, options: WorkflowValidationOptions = {}): void {
     const workflow = this.get(next.projectId);
     if (!workflow.statuses.some(status => status.id === next.status)) invalid('프로젝트 워크플로에 없는 상태입니다.');
     const required = workflow.fieldRules.filter(rule => rule.statusId === next.status && (rule.issueType === '*' || rule.issueType === next.type)).flatMap(rule => rule.requiredFields);
@@ -145,6 +164,11 @@ export class WorkflowService {
       if (!edge) invalid(`허용되지 않은 상태 전이입니다: ${previous.status} → ${next.status}`, 422);
       if (edge.requireResolvedBlockers && this.hasOpenBlockers(next.id, workflow)) {
         invalid('열린 차단 업무를 해결한 뒤 상태를 변경해 주세요.', 422, { reason: 'open_issue_blockers' });
+      }
+      const openSubtask = edge.requireClosedSubtasks ? this.openSubtask(next, workflow, options.projectedIssues) : undefined;
+      if (openSubtask) {
+        invalid('열린 하위 업무를 먼저 완료하거나 취소해 주세요.', 422,
+          { reason: 'open_subtasks', issueId: openSubtask.id, issueKey: openSubtask.key });
       }
       required.push(...edge.requiredFields);
     }
@@ -155,6 +179,15 @@ export class WorkflowService {
       const value = next[field as keyof Issue]; return value === null || value === undefined || (typeof value === 'string' && !value.trim()) || (Array.isArray(value) && !value.some(item => typeof item === 'string' && item.trim()));
     });
     if (missing.length) invalid(`필수 속성을 입력해 주세요: ${requiredFieldLabels({ issueSchemas: [schema] }, next.projectId, missing).join(', ')}`, 422, { requiredFields: missing });
+  }
+  private openSubtask(parent: Issue, workflow: ProjectWorkflow, projected?: WorkflowIssueProjection) {
+    const terminal = new Set(workflow.statuses.filter(status => status.category === 'done' || status.category === 'cancelled').map(status => status.id));
+    const projectedChild = projected?.byParent.get(parent.id)?.find(child => child.projectId === parent.projectId && !terminal.has(child.status));
+    if (projectedChild) return projectedChild;
+    const stored = this.store.db.prepare(`SELECT id, json_extract(json, '$.key') AS key, json_extract(json, '$.status') AS status
+      FROM issues WHERE parent_id=? AND project_id=? ORDER BY rowid`)
+      .iterate(parent.id, parent.projectId) as Iterable<Pick<WorkflowIssueState, 'id' | 'key' | 'status'>>;
+    for (const child of stored) if (!projected?.byId.has(child.id) && !terminal.has(child.status)) return child;
   }
   private hasOpenBlockers(issueId: string, targetWorkflow: ProjectWorkflow): boolean {
     const blockers = this.issueRelations?.directBlockers([issueId]) ?? directTeamspaceBlockers(this.store, [issueId]);

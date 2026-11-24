@@ -21,7 +21,11 @@ function workflowDraft(value: ProjectWorkflow): WorkflowDraft {
     statuses: value.statuses.map(({ wipLimit, defaultDueWorkdays, ...status }) => ({
       ...status, wipLimitText: String(wipLimit ?? ''), defaultDueWorkdaysText: String(defaultDueWorkdays ?? ''),
     })),
-    transitions: value.transitions.map(edge => ({ ...edge, requireResolvedBlockers: edge.requireResolvedBlockers === true })),
+    transitions: value.transitions.map(edge => ({
+      ...edge,
+      requireResolvedBlockers: edge.requireResolvedBlockers === true,
+      requireClosedSubtasks: edge.requireClosedSubtasks === true,
+    })),
   };
 }
 
@@ -83,7 +87,13 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
     setDraft(previous => ({ ...previous, transitions: previous.transitions.map((edge, row) => row === index ? { ...edge, ...changes } : edge) }));
   }
   function addTransition() {
-    for (const from of draft.statuses) for (const to of draft.statuses) if (from.id !== to.id && !draft.transitions.some(edge => edge.from === from.id && edge.to === to.id)) { setDraft(previous => ({ ...previous, transitions: [...previous.transitions, { from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false }] })); return; }
+    for (const from of draft.statuses) for (const to of draft.statuses) if (from.id !== to.id && !draft.transitions.some(edge => edge.from === from.id && edge.to === to.id)) {
+      setDraft(previous => ({
+        ...previous,
+        transitions: [...previous.transitions, { from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false, requireClosedSubtasks: false }],
+      }));
+      return;
+    }
     notify('모든 상태 사이의 전이가 이미 설정되어 있습니다.', 'error');
   }
   function addMissingTransitions() {
@@ -91,7 +101,7 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
       const present = new Set(previous.transitions.map(({ from, to }) => `${from}:${to}`));
       const added = previous.statuses.flatMap(from => previous.statuses
         .filter(to => from.id !== to.id && !present.has(`${from.id}:${to.id}`))
-        .map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false })));
+        .map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [], requireResolvedBlockers: false, requireClosedSubtasks: false })));
       return added.length ? { ...previous, transitions: [...previous.transitions, ...added] } : previous;
     });
   }
@@ -205,11 +215,18 @@ function WorkflowEditor({ data, projectId, actorId, refresh, notify }: FeaturePr
               value={edge.requiredFields} emptyLabel="없음" onChange={values => updateTransition(index, { requiredFields: values as IssueRequiredField[] })} />
             <button type="button" className="issue-icon-button" aria-label={`전이 ${index + 1} 삭제`}
               onClick={() => setDraft(previous => ({ ...previous, transitions: previous.transitions.filter((_, row) => row !== index) }))}><Trash2 size={14} /></button>
-            <label className="workflow-transition-blockers">
-              <input type="checkbox" aria-label={`전이 ${index + 1} 열린 차단 업무 해결 필요`} checked={edge.requireResolvedBlockers === true}
-                onChange={event => updateTransition(index, { requireResolvedBlockers: event.target.checked })} />
-              열린 차단 업무 해결 필요
-            </label>
+            <div className="workflow-transition-conditions">
+              <label>
+                <input type="checkbox" aria-label={`전이 ${index + 1} 열린 차단 업무 해결 필요`} checked={edge.requireResolvedBlockers === true}
+                  onChange={event => updateTransition(index, { requireResolvedBlockers: event.target.checked })} />
+                열린 차단 업무 해결 필요
+              </label>
+              <label>
+                <input type="checkbox" aria-label={`전이 ${index + 1} 하위 업무 종료 필요`} checked={edge.requireClosedSubtasks === true}
+                  onChange={event => updateTransition(index, { requireClosedSubtasks: event.target.checked })} />
+                하위 업무 종료 필요
+              </label>
+            </div>
           </div>)}
         </div>
         {!draft.transitions.length && <div className="workflow-empty">허용 전이가 없습니다. 업무 속성 수정은 가능하며 상태 변경은 제한됩니다.</div>}

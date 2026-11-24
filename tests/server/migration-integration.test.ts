@@ -354,6 +354,67 @@ test('Jira parent refresh restores format 99 safely across packages and uses the
   assert.equal(issue((await target.call<WorkspaceSnapshot>('/workspace')).data, 30).parentId, null);
 });
 
+test('Jira refresh checks the final subtask states before applying a guarded parent transition', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const source = 'synthetic-jira-guarded-closure';
+  const open = { id: '1', name: 'Open' }, done = { id: '2', name: 'Done' };
+  const row = (id: number, updated: string, status: typeof open, parent?: number) => ({ id: String(id), key: `OLD-${id}`, fields: {
+    project: { id: '42', key: 'OLD', name: 'Jira 원본 작업' }, summary: `이관한 업무 ${id}`, status, issuetype: { id: '3', name: 'Task' },
+    created: '2020-01-01T00:00:00Z', updated: `2020-01-${updated}T00:00:00Z`,
+    ...(parent === undefined ? {} : { parent: { id: String(parent), key: `OLD-${parent}` } }),
+  } });
+  const upload = (name: string, rows: ReturnType<typeof row>[]) => f.upload(Buffer.from(JSON.stringify({ issues: rows })), `${name}.json`, 'jira', source);
+  const initial = await upload('initial-guarded-tickets', [row(10, '02', open), row(20, '02', open, 10), row(30, '02', done)]);
+  const applied = await f.apply(await f.preview(await f.configuration(initial, 'SUBTASK')));
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  const projectIssues = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.filter(issue => issue.projectId === projectId);
+  const findIssue = (issues: Issue[], sourceId: number) => issues.find(issue => issue.title === `이관한 업무 ${sourceId}`)!;
+  const before = await projectIssues();
+  const parent = findIssue(before, 10), child = findIssue(before, 20);
+  assert.equal(child.parentId, parent.id);
+  assert.equal(child.status, parent.status);
+  const doneStatusId = findIssue(before, 30).status;
+  const path = `/projects/${projectId}/workflow`;
+  const workflow = (await f.call<ProjectWorkflow>(path)).data;
+  const guarded = (edge: ProjectWorkflow['transitions'][number]) => edge.from === parent.status && edge.to === doneStatusId;
+  assert.ok(workflow.transitions.some(guarded));
+  const saved = await f.call<ProjectWorkflow>(path, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => guarded(edge) ? { ...edge, requireClosedSubtasks: true } : edge) });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+
+  async function review(name: string, rows: ReturnType<typeof row>[]) {
+    const staged = await upload(name, rows);
+    const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${staged.id}`);
+    const target = options.appendTarget;
+    assert.ok(target);
+    return f.preview({ ...options.defaultConfiguration, appendTo: { projectId, refreshExisting: true,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
+      fields: {},
+    } });
+  }
+  const parentDone = row(10, '03', done);
+  const blocked = await review('only-parent-done', [parentDone]);
+  assert.equal(blocked.canApply, false, JSON.stringify(blocked.notices));
+  assert.ok(blocked.notices.some(notice => notice.code === 'JIRA_REFRESH_VALIDATION' &&
+    notice.message.includes(parent.key) && notice.message.includes('열린 하위 업무를 먼저 완료하거나 취소해 주세요.')));
+  assert.equal((await f.apply(blocked)).status, 409);
+  assert.deepEqual(await projectIssues(), before);
+
+  const ready = await review('parent-and-child-done', [parentDone, row(20, '03', done, 10)]);
+  assert.equal(ready.canApply, true, JSON.stringify(ready.notices));
+  assert.equal(ready.counts.updatedIssues, 2);
+  const updated = await f.apply(ready);
+  assert.equal(updated.status, 201, JSON.stringify(updated.data));
+  const after = await projectIssues();
+  assert.deepEqual([findIssue(after, 10), findIssue(after, 20)].map(({ status, version, parentId }) => ({ status, version, parentId })), [
+    { status: doneStatusId, version: parent.version + 1, parentId: parent.parentId },
+    { status: doneStatusId, version: child.version + 1, parentId: parent.id },
+  ]);
+});
+
 test('incremental Jira imports append only new issues to the bound project and reuse active source parents', async t => {
   const f = await fixture();
   t.after(() => f.close());

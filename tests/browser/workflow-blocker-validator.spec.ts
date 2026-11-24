@@ -193,3 +193,101 @@ test('워크플로 전이에서 열린 차단 업무를 해결해야 보드와 �
     }
   }
 });
+
+test('워크플로 전이에서 열린 하위 업무를 완료한 뒤 상위 업무를 완료할 수 있다', async ({ page, request }) => {
+  const { projects: [project], users: [actor] } = await readWorkspace(request);
+  const headers = { 'X-Actor-Id': actor.id };
+  const path = workflowPath(project.id);
+  const baseline = await json<ProjectWorkflow>(await request.get(path));
+  const isCompletion = ({ from, to }: WorkflowTransition) => from === 'in_progress' && to === 'done';
+  const transition = baseline.transitions.findIndex(isCompletion) + 1;
+  expect(transition).toBeGreaterThan(0);
+  const suffix = randomUUID().slice(0, 8);
+  const created: Issue[] = [];
+
+  async function createIssue(title: string, parentId: string | null = null) {
+    const issue = await json<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId: project.id, title: `${title} ${suffix}`, status: 'in_progress', parentId },
+    }), 201);
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const parent = await createIssue('종료할 상위 업무');
+    const child = await createIssue('진행 중인 하위 업무', parent.id);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/settings`);
+    const settings = page.getByRole('region', { name: '프로젝트 워크플로 설정', exact: true });
+    const transitions = settings.locator('.workflow-tabs button').filter({ hasText: '허용 전이' });
+    const requireClosed = settings.getByRole('checkbox', { name: `전이 ${transition} 하위 업무 종료 필요`, exact: true });
+    await transitions.click();
+    await settings.getByLabel('출발 상태로 전이 필터', { exact: true }).selectOption('in_progress');
+    await expect(requireClosed).not.toBeChecked();
+    await requireClosed.check();
+    const saving = waitPatch(page, path);
+    await button(settings, '워크플로 저장').click();
+    const guarded = await json<ProjectWorkflow>(await saving);
+    expect(guarded.transitions.filter(value => value.requireClosedSubtasks)).toEqual([
+      { ...baseline.transitions[transition - 1], requireClosedSubtasks: true },
+    ]);
+    await expect(button(settings, '워크플로 저장')).toBeDisabled();
+    await page.reload();
+    await transitions.click();
+    await expect(requireClosed).toBeChecked();
+
+    await page.goto(`/#/${project.id}/issues?issue=${parent.id}`);
+    const parentPanel = dialog(page, parent);
+    await status(parentPanel).selectOption('done');
+    const rejected = await json<{ error: string }>(await saveIssue(page, parent), 422);
+    expect(rejected.error).toBe('열린 하위 업무를 먼저 완료하거나 취소해 주세요.');
+    await expect(parentPanel.getByRole('alert')).toContainText(rejected.error);
+    await expect(status(parentPanel)).toHaveValue('done');
+    expect((await readWorkspace(request)).issues.find(value => value.id === parent.id)).toEqual(parent);
+
+    page.once('dialog', confirmation => confirmation.accept());
+    await parentPanel.getByRole('region', { name: '하위 업무', exact: true }).getByRole('button').filter({ hasText: child.title }).click();
+    const childPanel = dialog(page, child);
+    await status(childPanel).selectOption('done');
+    const completedChild = await json<Issue>(await saveIssue(page, child));
+    expect(completedChild).toMatchObject({ id: child.id, parentId: parent.id, status: 'done' });
+    expect(completedChild.completedAt).toBeTruthy();
+
+    await expect(button(childPanel, '변경사항 저장')).toBeDisabled();
+    await button(childPanel, `상위 업무 · ${parent.key} ${parent.title}`).click();
+    await expect(status(parentPanel)).toHaveValue('in_progress');
+    await status(parentPanel).selectOption('done');
+    const completedParent = await json<Issue>(await saveIssue(page, parent));
+    expect(completedParent).toMatchObject({ id: parent.id, status: 'done', version: parent.version + 1 });
+    expect(completedParent.completedAt).toBeTruthy();
+    await expect(button(parentPanel, '변경사항 저장')).toBeDisabled();
+
+    await page.goto(`/#/${project.id}/settings`);
+    await transitions.click();
+    await requireClosed.uncheck();
+    const clearing = waitPatch(page, path);
+    await button(settings, '워크플로 저장').click();
+    const cleared = await json<ProjectWorkflow>(await clearing);
+    expect(cleared.transitions.find(isCompletion)).toEqual(baseline.transitions[transition - 1]);
+  } finally {
+    try {
+      for (const issue of created.reverse()) {
+        const removed = await request.delete(issuePath(issue), { headers });
+        if (!removed.ok()) continue;
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`, { headers });
+      }
+    } finally {
+      const current = await json<ProjectWorkflow>(await request.get(path));
+      if (current.version !== baseline.version) {
+        await json<ProjectWorkflow>(await request.patch(path, {
+          headers, data: {
+            ...baseline, expectedVersion: current.version,
+            transitions: baseline.transitions.map(value => ({ ...value, requireClosedSubtasks: value.requireClosedSubtasks === true })),
+          },
+        }));
+      }
+    }
+  }
+});

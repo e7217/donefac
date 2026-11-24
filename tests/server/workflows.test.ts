@@ -201,6 +201,100 @@ test('opt-in transitions require live incoming native blockers to be resolved, w
   } finally { await f.close(); f.remove(); }
 });
 
+test('a selected transition requires direct subtasks to be terminal and preserves the guard for older workflow clients', async () => {
+  const f = await fixture();
+  const projectId = 'project-neo';
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const guarded = (edge: ProjectWorkflow['transitions'][number]) => edge.from === 'todo' && edge.to === 'done';
+  const saveGuard = (workflow: ProjectWorkflow, requireClosedSubtasks: unknown) => f.request<ProjectWorkflow>(workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => guarded(edge) ? { ...edge, requireClosedSubtasks } : edge),
+  });
+  const create = async (title: string, parent?: Issue) => {
+    const result = await f.request<Issue>('/issues', 'POST', { projectId, title, ...(parent ? { parentId: parent.id } : {}) });
+    assert.equal(result.status, 201, JSON.stringify(result.data));
+    return result.data;
+  };
+  const patch = <T = Issue>(issue: Issue, values: Partial<Issue>) => f.request<T>(`/issues/${issue.id}`, 'PATCH', {
+    ...values, expectedVersion: issue.version,
+  });
+  const change = async (issue: Issue, status: string) => {
+    const result = await patch(issue, { status });
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return result.data;
+  };
+  const expectBlocked = async (issue: Issue, activeChildren: Issue[]) => {
+    const { status, data } = await patch<{ error: string; details: { reason: string; issueId: string; issueKey: string } }>(issue, { status: 'done' });
+    assert.equal(status, 422, JSON.stringify(data));
+    assert.equal(data.error, '열린 하위 업무를 먼저 완료하거나 취소해 주세요.');
+    assert.equal(data.details.reason, 'open_subtasks');
+    assert.ok(activeChildren.some(child => child.id === data.details.issueId && child.key === data.details.issueKey));
+  };
+  try {
+    const original = (await f.request<ProjectWorkflow>(workflowPath)).data;
+    const customStates = [
+      { id: 'verified_done', label: '검증 완료', category: 'done', color: '#248964' },
+      { id: 'withdrawn_custom', label: '철회', category: 'cancelled', color: '#7f838f' },
+    ] as const;
+    const configured = await f.request<ProjectWorkflow>(workflowPath, 'PATCH', {
+      ...original, expectedVersion: original.version, statuses: [...original.statuses, ...customStates],
+      transitions: [...original.transitions, ...customStates.flatMap(({ id }) => [
+        { from: 'todo', to: id, issueTypes: [], requiredFields: [] },
+        { from: id, to: 'todo', issueTypes: [], requiredFields: [] },
+      ])],
+    });
+    assert.equal(configured.status, 200, JSON.stringify(configured.data));
+    for (const invalid of [null, 'true', 1, {}]) assert.equal((await saveGuard(configured.data, invalid)).status, 400);
+    const enabled = await saveGuard(configured.data, true);
+    assert.equal(enabled.status, 200, JSON.stringify(enabled.data));
+    const legacy = await f.request<ProjectWorkflow>(workflowPath, 'PATCH', {
+      ...enabled.data, expectedVersion: enabled.data.version,
+      transitions: enabled.data.transitions.map(({ from, to, issueTypes, requiredFields }) => ({ from, to, issueTypes, requiredFields })).reverse(),
+    });
+    assert.equal(legacy.status, 200, JSON.stringify(legacy.data));
+    assert.equal(legacy.data.transitions.find(guarded)?.requireClosedSubtasks, true);
+    assert.equal(legacy.data.transitions.filter(edge => edge.requireClosedSubtasks).length, 1);
+
+    let parent = await create('완료 전에 하위 업무를 검토할 티켓');
+    const first = await create('직접 하위 업무', parent);
+    const second = await create('취소될 직접 하위 업무', parent);
+    const trashed = await create('휴지통으로 보낼 직접 하위 업무', parent);
+    const grandchild = await create('간접 하위 업무', first);
+    const unrelated = await create('별도 흐름에 남는 열린 업무');
+    const ordinaryEdit = await patch(parent, { title: '하위 진행 중에도 업무 제목 편집' });
+    assert.equal(ordinaryEdit.status, 200, JSON.stringify(ordinaryEdit.data));
+    parent = ordinaryEdit.data;
+    await expectBlocked(parent, [first, second, trashed]);
+    parent = await change(await change(parent, 'review'), 'todo');
+    await expectBlocked(parent, [first, second, trashed]);
+
+    const completeChild = await change(first, 'verified_done');
+    await change(second, 'withdrawn_custom');
+    await expectBlocked(parent, [trashed]);
+    const scopedKey = await f.request<ApiKeyCreated>('/api-keys', 'POST', { name: '하위 업무 전이 검사', access: 'write', projectIds: [projectId] });
+    assert.equal(scopedKey.status, 201);
+    assert.deepEqual(await f.request(`/v1/issues/${parent.id}`, 'PATCH', { expectedVersion: parent.version, status: 'done' }, {
+      Authorization: `Bearer ${scopedKey.data.token}`,
+    }), { status: 422, data: { error: '열린 하위 업무를 먼저 완료하거나 취소해 주세요.',
+      details: { reason: 'open_subtasks', issueId: trashed.id, issueKey: trashed.key } } });
+    const deleted = await f.request(`/issues/${trashed.id}?expectedVersion=${trashed.version}`, 'DELETE');
+    assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+    const done = await change(parent, 'done');
+    const latest = (await f.request<WorkspaceSnapshot>('/workspace')).data.issues;
+    assert.deepEqual(latest.find(issue => issue.id === grandchild.id), grandchild);
+    assert.deepEqual(latest.find(issue => issue.id === unrelated.id), unrelated);
+    assert.equal(latest.some(issue => issue.id === trashed.id), false);
+
+    parent = await change(done, 'todo');
+    const reopenedChild = await change(completeChild, 'todo');
+    await expectBlocked(parent, [reopenedChild]);
+    const disabled = await saveGuard(legacy.data, false);
+    assert.equal(disabled.status, 200, JSON.stringify(disabled.data));
+    assert.equal(Object.hasOwn(disabled.data.transitions.find(guarded)!, 'requireClosedSubtasks'), false);
+    await change(parent, 'done');
+  } finally { await f.close(); f.remove(); }
+});
+
 test('workflow CAS, stable state names, in-use deletion guard and initial custom status survive restart', async () => {
   const f = await fixture();
   try {

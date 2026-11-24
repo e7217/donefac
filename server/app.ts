@@ -10,7 +10,7 @@ import { assertPilotRehearsalWorkspace } from './pilot-rehearsal.js';
 import { Store } from './store.js';
 import { WorkspaceRevisions, workspaceRestoreGeneration } from './workspace-revisions.js';
 import { seed } from './seed.js';
-import { WorkflowService, WorkflowError } from './workflows.js';
+import { WorkflowService, WorkflowError, projectWorkflowIssues, type WorkflowValidationOptions } from './workflows.js';
 import { SavedViewService, SavedViewError } from './saved-views.js';
 import { CollaborationService, CollaborationError, type CollaborationUpgradeGuard } from './collaboration.js';
 import { PlanningService, PlanningError } from './planning.js';
@@ -483,7 +483,7 @@ export function createApp(options: {
     }
     if (hierarchy) for (const id of visited) hierarchy.validated.add(id);
   };
-  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & {checkTransition?:boolean;checkFields?:boolean;allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & WorkflowValidationOptions & {allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -733,7 +733,9 @@ export function createApp(options: {
   };
   const done=(issue:Issue)=>workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category==='done';
   const issueAssignments=new IssueAssignmentRulesService(store);
-  type IssueChangeOptions = { assigneeExplicit?: boolean; checkTransition?: boolean; skipAutomaticDueDate?: boolean };
+  type IssueChangeOptions = Pick<WorkflowValidationOptions, 'checkTransition' | 'projectedIssues'> & {
+    assigneeExplicit?: boolean; skipAutomaticDueDate?: boolean;
+  };
   const defaultStatusDueDate = (before: Issue, proposed: Issue, skip = false): string | null => {
     if (skip || before.projectId !== proposed.projectId || before.status === proposed.status ||
         before.dueDate != null || proposed.dueDate != null) return null;
@@ -847,9 +849,12 @@ export function createApp(options: {
       return fail('Jira에서 변경분을 반영할 프로젝트와 업무를 확인해 주세요.', 409);
     }
     const refreshedIssues = updates.map(update => prepareJiraRefresh(update, projectId, allowStandard, allowCustom));
+    const finalIssues = [...value.issues, ...refreshedIssues.map(({ after }) => after)];
+    const projectedIssues = refreshedIssues.some(({ before, after }) => before.status !== after.status)
+      ? projectWorkflowIssues(finalIssues) : undefined;
     // Project final parents together so moving both ends of an existing link can be checked before either write.
     const hierarchy: ProjectedIssueHierarchy | undefined = refreshedIssues.some(({ before, after }) => before.parentId !== after.parentId)
-      ? { issues: new Map([...value.issues, ...refreshedIssues.map(({ after }) => after)].map(issue => [issue.id, issue])), validated: new Set() }
+      ? { issues: new Map(finalIssues.map(issue => [issue.id, issue])), validated: new Set() }
       : undefined;
     const schema = issueSchemas.get(projectId);
     if (hierarchy) for (const issue of value.issues) {
@@ -860,7 +865,7 @@ export function createApp(options: {
       }
     }
     for (const { before, after, fields, customIds } of refreshedIssues) {
-      try { validateIssue(after, before, { hierarchy }); }
+      try { validateIssue(after, before, { hierarchy, projectedIssues }); }
       catch (error) {
         if (error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
             error instanceof PlanningError || error instanceof WorkloadError) return fail(`${before.key} · ${error.message}`, error.status);
@@ -1581,10 +1586,10 @@ export function createApp(options: {
       return JSON.stringify([editToken, calendars.get(projectId).version]);
     },
     fieldBreakdownMatches,
-    prepare(before, changes, preparedAt) {
+    prepare(before, changes, preparedAt, projectedIssues) {
       const { customFields } = changes;
       const values = customFields ? { ...changes, customFields: { ...before.customFields, ...customFields } } : changes;
-      const prepared = prepareIssueUpdate(before, values, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId') }, preparedAt);
+      const prepared = prepareIssueUpdate(before, values, { assigneeExplicit: Object.hasOwn(changes, 'assigneeId'), projectedIssues }, preparedAt);
       if (!customFields) return prepared;
 
       const { issue } = prepared;
@@ -3063,6 +3068,9 @@ export function createApp(options: {
     if (data.schemaVersion < 81 && Array.isArray(data.workflows) && data.workflows.some((workflow: { transitions?: unknown } | null) =>
       Array.isArray(workflow?.transitions) && workflow.transitions.some((edge: { requireResolvedBlockers?: unknown } | null) => edge?.requireResolvedBlockers === true)
     )) fail('차단 업무 해결 전이 규칙이 있는 백업은 schemaVersion 81이 필요합니다.');
+    if (data.schemaVersion < 115 && Array.isArray(data.workflows) && data.workflows.some((workflow: { transitions?: unknown } | null) =>
+      Array.isArray(workflow?.transitions) && workflow.transitions.some((edge: { requireClosedSubtasks?: unknown } | null) => edge?.requireClosedSubtasks === true)
+    )) fail('하위 업무 종료 전이 규칙이 있는 백업은 schemaVersion 115가 필요합니다.');
     if (data.schemaVersion < 93 && Array.isArray(data.workflows) && data.workflows.some((workflow: { statuses?: unknown } | null) =>
       Array.isArray(workflow?.statuses) && workflow.statuses.some((status: { defaultDueWorkdays?: unknown } | null) => status?.defaultDueWorkdays != null)
     )) fail('상태별 자동 목표 마감일이 있는 백업은 schemaVersion 93이 필요합니다.');

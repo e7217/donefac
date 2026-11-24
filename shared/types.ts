@@ -1885,7 +1885,14 @@ export interface WebhookDelivery {
   lastAttemptAt: string | null; httpStatus: number | null; lastError: string | null; version: number; createdAt: string; updatedAt: string;
 }
 export type IssueRequiredField = 'title' | 'description' | 'assigneeId' | 'collaboratorIds' | 'startDate' | 'endDate' | 'dueDate' | 'estimate' | 'labels' | 'parentId' | 'cycle' | 'module' | 'release' | `custom:${string}`;
-export interface WorkflowTransition { from: string; to: string; issueTypes: string[]; requiredFields: IssueRequiredField[]; requireResolvedBlockers?: boolean }
+export interface WorkflowTransition {
+  from: string;
+  to: string;
+  issueTypes: string[];
+  requiredFields: IssueRequiredField[];
+  requireResolvedBlockers?: boolean;
+  requireClosedSubtasks?: boolean;
+}
 export interface WorkflowFieldRule { issueType: string; statusId: string; requiredFields: IssueRequiredField[] }
 export interface ProjectWorkflow { id: string; projectId: string; version: number; initialStatusId: string; statuses: WorkflowStatus[]; transitions: WorkflowTransition[]; fieldRules: WorkflowFieldRule[]; updatedAt: string }
 export type IssueFieldOperator = 'is_set' | 'is_empty' | 'equals' | 'not_equals' | 'contains' | 'gte' | 'lte' | 'includes' | 'excludes';

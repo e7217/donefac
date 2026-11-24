@@ -972,6 +972,93 @@ test('a new or reopened blocker invalidates an otherwise current bulk review wit
   }
 });
 
+test('bulk completion reviews parents with their selected subtasks and checks current unselected subtasks before applying', async t => {
+  const f = await fixture(t);
+  const parent = await f.createIssue('하위 완료를 요구하는 업무');
+  const child = await f.createIssue('같은 일괄 변경에서 완료할 하위 업무', { parentId: parent.id });
+  const other = await f.createIssue('함께 완료할 별도 업무');
+  const workflow = await f.expectStatus<ProjectWorkflow>(200, workflowPath);
+  await f.expectStatus(200, workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'done'
+      ? { ...edge, requireClosedSubtasks: true } : edge),
+  });
+
+  const changes = { status: 'done', priority: 'urgent' } as const;
+  const blocked = await f.preview([parent, other], changes);
+  assert.equal(blocked.previewId, null);
+  assert.equal(blocked.blocked, 1);
+  assert.equal(blocked.rows.find(row => row.id === parent.id)?.reason, '열린 하위 업무를 먼저 완료하거나 취소해 주세요.');
+
+  const selected = [parent, child, other];
+  const beforeAdd = await f.preview(selected, changes);
+  assert.ok(beforeAdd.previewId, JSON.stringify(beforeAdd.rows));
+  assert.equal(beforeAdd.changed, selected.length);
+  const added = await f.expectStatus<Issue>(201, '/issues', 'POST', {
+    projectId, title: '동료가 추가한 하위 업무', parentId: parent.id, status: 'todo',
+  }, reviewer);
+  const afterAdd = await f.snapshot();
+  assert.equal((await f.apply(beforeAdd.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterAdd);
+
+  const closeAdded = await f.editIssue(added, { status: 'done' });
+  const beforeReopen = await f.preview(selected, changes);
+  assert.ok(beforeReopen.previewId, JSON.stringify(beforeReopen.rows));
+  const reopened = await f.expectStatus<Issue>(200, `/issues/${closeAdded.id}`, 'PATCH', {
+    status: 'todo', expectedVersion: closeAdded.version,
+  }, reviewer);
+  const afterReopen = await f.snapshot();
+  assert.equal((await f.apply(beforeReopen.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterReopen);
+
+  await f.editIssue(reopened, { status: 'done' });
+  const ready = await f.preview(selected, changes);
+  assert.ok(ready.previewId, JSON.stringify(ready.rows));
+  const result = await f.apply(ready.previewId);
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.equal(result.data.updated.length, selected.length);
+  const after = await f.snapshot();
+  for (const issue of selected) {
+    const saved = after.issues.find(value => value.id === issue.id);
+    assert.ok(saved);
+    assert.equal(saved.version, issue.version + 1);
+    assert.equal(saved.parentId, issue.parentId);
+    assert.deepEqual(issueFields(saved), { ...changes, assigneeId: issue.assigneeId });
+  }
+  assert.deepEqual((await f.apply(ready.previewId)).data, result.data);
+});
+
+test('team bulk completion reviews the selected subtask with the actual workflow of its project', async t => {
+  const f = await fixture(t);
+  const parent = await f.createIssue('프로젝트 보드에서 완료할 업무');
+  const child = await f.createIssue('완료할 하위 업무', { parentId: parent.id });
+  const foreign = await f.createIssue('다른 워크플로의 업무', { projectId: otherProjectId });
+  const workflow = await f.expectStatus<ProjectWorkflow>(200, workflowPath);
+  const local = await f.expectStatus<ProjectWorkflow>(200, workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'done' ? { ...edge, requireClosedSubtasks: true } : edge),
+  });
+  const opposite = await f.expectStatus<ProjectWorkflow>(200, `/projects/${otherProjectId}/workflow`);
+  const preview = (issues: Issue[]) => f.expectStatus<IssueBulkEditPreview>(200, `${teamBulkPath}-preview`, 'POST', {
+    issues: issues.map(({ id, version, projectId }) => ({ id, expectedVersion: version, projectId })), changes: {},
+    statuses: { [projectId]: 'done', [otherProjectId]: 'review' },
+    workflowVersions: { [projectId]: local.version, [otherProjectId]: opposite.version },
+  });
+  const blocked = await preview([parent, foreign]);
+  assert.equal(blocked.previewId, null);
+  assert.equal(blocked.rows.find(row => row.id === parent.id)?.outcome, 'blocked');
+
+  const ready = await preview([parent, foreign, child]);
+  assert.ok(ready.previewId, JSON.stringify(ready.rows));
+  assert.equal(ready.changed, 3);
+  const result = await f.expectStatus<IssueBulkEditResult>(200, `${teamBulkPath}-apply`, 'POST', { previewId: ready.previewId });
+  assert.equal(result.updated.length, 3);
+  const after = (await f.snapshot()).issues;
+  assert.equal(after.find(issue => issue.id === parent.id)?.status, 'done');
+  assert.equal(after.find(issue => issue.id === child.id)?.status, 'done');
+  assert.equal(after.find(issue => issue.id === foreign.id)?.status, 'review');
+});
+
 test('a late database error rolls back the whole bulk edit with each side effect and permits the same reviewed batch to retry', async t => {
   const f = await fixture(t);
   const first = await f.createIssue('첫 번째 적용 기록');
