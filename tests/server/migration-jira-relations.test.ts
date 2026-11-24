@@ -12,7 +12,7 @@ import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveRe
 import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
   IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem, Project,
-  ProjectWorkflow, ScheduleAnchorChange, ScheduleBlockerLinkPage, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
+  ProjectWorkflow, ScheduleAnchorChange, ScheduleBlockerLinkPage, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, SourceImport, SourceReconciliationAudit,
   SourceReconciliationJiraRelationFinding, SourceReconciliationJiraRelationFindingsPage, SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
@@ -524,6 +524,19 @@ test('a selected Jira blocker schedules across calendars and respects other prov
     [source.id, source.startDate, '2026-11-24'], [target.id, '2026-12-01', '2026-12-02'],
     [successor.id, '2026-12-03', '2026-12-03'], [later.id, '2026-11-27', '2026-11-30'],
   ].sort());
+  const manualPreview = (anchors: ScheduleAnchorChange[]) => f.call<SchedulePreview>('/schedule/manual-preview', 'POST', {
+    changes: anchors, rescheduleSuccessors: true, includeTeamBlockers: true,
+  });
+  const currentLater = before.issues.find(issue => issue.id === later.id)!;
+  const manual = await manualPreview([anchorChange, {
+    id: currentLater.id, expectedVersion: currentLater.version, startDate: '2026-11-27', endDate: '2026-12-04',
+  }]);
+  assert.ok(manual.previewId);
+  assert.deepEqual(new Set(manual.followUpIssueIds), new Set([target.id, successor.id]));
+  assert.deepEqual(new Map(manual.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]])), new Map([
+    [source.id, [source.startDate, '2026-11-24']], [later.id, ['2026-11-27', '2026-12-04']],
+    [target.id, ['2026-12-07', '2026-12-08']], [successor.id, ['2026-12-09', '2026-12-09']],
+  ]));
   assert.deepEqual(await f.workspace(), before);
 
   sourceCalendar = await calendar(source.projectId, [...sourceHours, { date: '2026-11-30', isWorking: false, label: '달력 버전 검증' }]);
@@ -570,9 +583,14 @@ test('a selected Jira blocker schedules across calendars and respects other prov
   const missingFinish = await preview(selected);
   assert.ok(missingFinish.blocking.some(message => message.includes(target.key) && message.includes(`${later.key}의 종료일`)));
   await f.call(applyPath, 'POST', { previewId: missingFinish.previewId }, 422);
-  await schedule(incompletePredecessor, '2026-12-01', '2026-12-02');
+  const putBack = await schedule(incompletePredecessor, '2026-12-01', '2026-12-02');
   const reviewedBeforeProofRemoval = await preview(selected);
   assert.deepEqual(reviewedBeforeProofRemoval.blocking, []);
+  const sourceBeforeProofRemoval = (await f.workspace()).issues.find(issue => issue.id === source.id)!;
+  const manualAnchors = [{ ...anchorChange, expectedVersion: sourceBeforeProofRemoval.version },
+    { id: putBack.id, expectedVersion: putBack.version, startDate: putBack.startDate, endDate: putBack.endDate }];
+  const manualBeforeProofRemoval = await manualPreview(manualAnchors);
+  assert.ok(manualBeforeProofRemoval.previewId);
 
   const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === unselected.id);
   assert.ok(proof);
@@ -581,6 +599,7 @@ test('a selected Jira blocker schedules across calendars and respects other prov
     assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
   } finally { database.close(); }
   await f.call(applyPath, 'POST', { previewId: reviewedBeforeProofRemoval.previewId }, 409);
+  await f.call('/schedule/manual-apply', 'POST', { previewId: manualBeforeProofRemoval.previewId }, 409);
   const afterProofRemoval = await preview(selected);
   assert.deepEqual(afterProofRemoval.blocking, []);
   assert.deepEqual(plannedDates(afterProofRemoval), [

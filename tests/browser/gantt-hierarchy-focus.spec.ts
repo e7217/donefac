@@ -227,12 +227,9 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     await expect(g.select(child)).not.toBeChecked();
     const nestedEnd = g.date(nested, '종료일');
     await nestedEnd.fill(d(8));
-    await dismissDiscard(page, () => openMove.click());
-    await expect(nestedEnd).toBeFocused();
-    await expect(nestedEnd).toHaveValue(d(8));
-    await nestedEnd.press('Escape');
-    await expect(nestedEnd).toHaveValue(d(3));
     await openMove.click();
+    await expect(page.getByLabel('이동 일수', { exact: true })).toBeFocused();
+    await expect(nestedEnd).toHaveValue(d(8));
     await page.getByLabel('이동 일수', { exact: true }).fill('2');
     await page.getByRole('checkbox', { name: '근무일 기준', exact: true }).uncheck();
     const inspected = nextPost(previewPath);
@@ -303,6 +300,7 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     await expect(dialog).toHaveCount(0);
     await expect(openMove).toBeFocused();
     await expect(g.date(added, '시작일')).toHaveValue(d(6));
+    await expect(nestedEnd).toHaveValue(d(8));
     expect(await stored(expectedBefore)).toEqual(moved);
 
     const reverted = nextPost('/api/schedule/undo');
@@ -315,6 +313,9 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     expect(await stored(expectedBefore)).toEqual(expectedBefore.map((issue, index) => ({
       ...schedule(issue), version: issue.version + (index < 4 ? 2 : 0),
     })));
+    await expect(nestedEnd).toHaveValue(d(8));
+    await nestedEnd.press('Escape');
+    await expect(nestedEnd).toHaveValue(d(3));
     await g.close.click();
     await expect(g.search).toHaveValue(query);
     await expect(g.rows).toHaveCount(2);

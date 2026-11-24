@@ -310,6 +310,130 @@ test('manual follow-up keeps explicit unchanged anchors fixed and blocks the ent
   assert.deepEqual(await f.state(), before);
 });
 
+test('manual team follow-up merges fixed anchors and guarded successors across projects in one apply and undo', async t => {
+  const f = await fixture(t);
+  const receiving = await f.call<Project>('/projects', 201, 'POST', { key: 'RECV', name: '받는 프로젝트' });
+  const external = await f.call<Project>('/projects', 201, 'POST', { key: 'PEER', name: '다른 선행과 후행 프로젝트' });
+  const first = await f.issue('첫 선행 업무');
+  const second = await f.issue('둘째 선행 업무');
+  const shared = await f.issue('여러 선행을 기다리는 업무', {
+    startDate: '2026-11-23', endDate: '2026-11-24', dueDate: '2026-11-26',
+  }, receiving.id);
+  const unchanged = await f.issue('조건을 이미 충족하는 후행', { startDate: '2026-12-04', endDate: '2026-12-04' }, receiving.id);
+  const incoming = await f.issue('선택하지 않은 선행 업무', { startDate: '2026-11-25', endDate: '2026-11-25' }, external.id);
+  const downstream = await f.issue('다른 프로젝트의 간접 후행', { startDate: '2026-11-30', endDate: '2026-11-30' }, external.id);
+  const closed = await f.issue('완료한 후행 업무', {}, external.id);
+  const block = (source: Issue, target: Issue) => f.call('/schedule/team-blockers', 201, 'POST', {
+    sourceIssueId: source.id, targetIssueId: target.id, expectedSourceVersion: source.version, expectedTargetVersion: target.version,
+  }, otherActor);
+  await block(first, shared);
+  await block(second, shared);
+  await block(incoming, shared);
+  await block(first, closed);
+  const externalWorkflow = await f.call<ProjectWorkflow>(`/projects/${external.id}/workflow`, 200);
+  const done = externalWorkflow.statuses.find(status => status.category === 'done');
+  assert.ok(done);
+  await f.edit(closed, { status: done.id });
+  await f.link(shared, unchanged);
+  const calendarPath = `/projects/${receiving.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath, 200);
+  const holiday = { date: '2026-11-25', isWorking: false, label: '가상 수요일 휴무' };
+  const receivingCalendar = await f.call<WorkCalendar>(calendarPath, 200, 'PATCH', {
+    expectedVersion: calendar.version, exceptions: [holiday],
+  });
+  const changes = [chooseDate(first, '2026-11-23'), chooseDate(second, '2026-11-24')];
+  const input = { changes, rescheduleSuccessors: true, includeTeamBlockers: true };
+  await f.readPreview({ changes, includeTeamBlockers: true }, 400);
+  await f.readPreview({ ...input, includeTeamBlockers: 'true' }, 400);
+
+  const ordinary = await f.review({ ...input, includeTeamBlockers: false });
+  assert.deepEqual(ordinary.changes.map(change => change.id), [first.id, second.id]);
+  assert.ok(ordinary.teamBlockerWarnings?.some(warning => warning.includes(shared.key)));
+  const invalid = await f.readPreview({ ...input, changes: [...changes, {
+    id: shared.id, expectedVersion: shared.version, startDate: shared.startDate, endDate: shared.endDate,
+  }] });
+  assert.equal(invalid.previewId, undefined);
+  assert.ok(invalid.blocking?.some(warning => warning.includes(shared.key) && warning.includes('2026-11-26')));
+
+  const before = await f.state();
+  const firstReview = await f.review(input);
+  assert.deepEqual(firstReview.followUpIssueIds, [shared.id]);
+  assert.deepEqual(firstReview.changes.find(change => change.id === shared.id), {
+    id: shared.id, projectId: shared.projectId, key: shared.key, title: shared.title, version: shared.version,
+    fromStart: '2026-11-23', fromEnd: '2026-11-24', toStart: '2026-11-26', toEnd: '2026-11-27',
+  });
+  assert.ok(firstReview.warnings.some(warning => warning.includes(shared.key) && warning.includes('목표 마감일')));
+  assert.deepEqual(await f.state(), before);
+
+  await block(unchanged, downstream);
+  const withNewLink = await f.state();
+  await f.apply(firstReview.previewId, 409);
+  assert.deepEqual(await f.state(), withNewLink);
+  const beforeCalendarChange = await f.review(input);
+  assert.deepEqual(beforeCalendarChange.followUpIssueIds, [shared.id, downstream.id]);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: receivingCalendar.version, exceptions: [holiday,
+    { date: '2026-11-26', isWorking: false, label: '가상 목요일 휴무' }] }, otherActor);
+  await f.apply(beforeCalendarChange.previewId, 409);
+  const beforeIncomingEdit = await f.review(input);
+  await f.edit(incoming, { endDate: '2026-11-27' });
+  await f.apply(beforeIncomingEdit.previewId, 409);
+  const beforeWorkflowChange = await f.review(input);
+  const workflowPath = `/projects/${receiving.id}/workflow`;
+  const workflow = await f.call<ProjectWorkflow>(workflowPath, 200);
+  await f.call(workflowPath, 200, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [{ issueType: '*', statusId: shared.status, requiredFields: ['dueDate'] }],
+  }, otherActor);
+  await f.apply(beforeWorkflowChange.previewId, 409);
+
+  const proposal = await f.review(input);
+  const expected = new Map([[first.id, ['2026-11-23', '2026-11-23']], [second.id, ['2026-11-24', '2026-11-24']],
+    [shared.id, ['2026-11-30', '2026-12-01']], [downstream.id, ['2026-12-07', '2026-12-07']]]);
+  assert.deepEqual(new Map(proposal.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]])), expected);
+  const applyToProject = (actorId = actor, status = 200) => f.call<SchedulePasteApplyResult>(applyPath, status, 'POST',
+    { previewId: proposal.previewId }, actorId, { 'X-Teamspace-Schedule-Undo-Scope': `project:${f.project.id}` });
+  await applyToProject(otherActor, 409);
+  await f.restart();
+  const [applied, replayed] = await Promise.all([applyToProject(), applyToProject()]);
+  assert.deepEqual(replayed, applied);
+  assert.deepEqual(new Map(applied.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), expected);
+  assert.deepEqual(applied.warnings, proposal.warnings);
+  const undone = await f.call<ScheduleUndoResult>('/schedule/undo', 200, 'POST', { undoId: applied.undoId }, actor,
+    { 'X-Teamspace-Schedule-Undo-Scope': `project:${f.project.id}` });
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])),
+    new Map([first, second, shared, downstream].map(issue => [issue.id, dates(issue)])));
+  assert.deepEqual(await applyToProject(), applied);
+});
+
+test('selection and hierarchy shifts can opt into cross-project successors', async t => {
+  const f = await fixture(t);
+  const receiving = await f.call<Project>('/projects', 201, 'POST', { key: 'TEAMFLOW', name: '다른 프로젝트' });
+  const parent = await f.issue('상위 업무');
+  const child = await f.edit(await f.issue('차단하는 하위 업무'), { parentId: parent.id });
+  const target = await f.issue('차단받는 업무', { startDate: '2026-11-23', endDate: '2026-11-23' }, receiving.id);
+  await f.call('/schedule/team-blockers', 201, 'POST', {
+    sourceIssueId: child.id, targetIssueId: target.id, expectedSourceVersion: child.version, expectedTargetVersion: target.version,
+  });
+  const selection = shift([parent, child], true);
+  const hierarchy = { hierarchy: { id: parent.id, expectedVersion: parent.version }, days: 1, workingDays: true };
+  for (const body of [selection, hierarchy]) {
+    const local = await f.review({ ...body, rescheduleSuccessors: true });
+    assert.deepEqual(new Set(local.changes.map(({ id }) => id)), new Set([parent.id, child.id]));
+    assert.ok(local.teamBlockerWarnings?.some(warning => warning.includes(target.key)));
+    await f.readPreview({ ...body, includeTeamBlockers: true }, 400);
+    const team = await f.review({ ...body, rescheduleSuccessors: true, includeTeamBlockers: true });
+    assert.deepEqual(team.followUpIssueIds, [target.id]);
+    assert.deepEqual(new Map(team.changes.map(({ id, toStart }) => [id, toStart])), new Map([
+      [parent.id, '2026-11-23'], [child.id, '2026-11-23'], [target.id, '2026-11-24'],
+    ]));
+  }
+  const team = await f.review({ ...hierarchy, rescheduleSuccessors: true, includeTeamBlockers: true });
+  const applied = await f.apply(team.previewId);
+  assert.deepEqual(new Set(applied.updated.map(({ id }) => id)), new Set([parent.id, child.id, target.id]));
+  await f.call('/schedule/undo', 200, 'POST', { undoId: applied.undoId });
+  assert.deepEqual((await f.state()).issues.filter(issue => [parent.id, child.id, target.id].includes(issue.id)).map(issue => dates(issue)),
+    [parent, child, target].map(issue => dates(issue)));
+});
+
 test('relative follow-up moves shared successors once across project calendars and reuses the guarded result and undo', async t => {
   const f = await fixture(t);
   const first = await f.issue('첫 선행');

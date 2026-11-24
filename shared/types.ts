@@ -2182,9 +2182,9 @@ export interface SchedulePreview {
 }
 export interface ScheduleAnchorChange { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }
 export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
-export type ScheduleManualPreviewInput = { issueIds: string[]; days: number; workingDays: boolean; rescheduleSuccessors?: boolean } |
-  { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean; rescheduleSuccessors?: boolean } |
-  { changes: ScheduleAnchorChange[]; rescheduleSuccessors?: boolean };
+export type ScheduleManualPreviewInput = ({ issueIds: string[]; days: number; workingDays: boolean } |
+  { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
+  { changes: ScheduleAnchorChange[] }) & { rescheduleSuccessors?: boolean; includeTeamBlockers?: boolean };
 export const MAX_TEAM_FOLLOW_UP_RELATIONS = 100;
 export interface TeamFollowUpRelationReference { relationId: string; expectedVersion: number }
 export type TeamFollowUpScheduleInput = (TeamFollowUpRelationReference | { relations: TeamFollowUpRelationReference[] }) & {

@@ -4,14 +4,16 @@ import { CalendarError, MAX_WORKING_DURATION_DAYS, calendarDate, calendarDay, cr
 import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkAction, type ScheduleBulkLinkDateEdit, type ScheduleBulkLinkInput,
-  type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteDependencyPair, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
+  type ScheduleAnchorChange, type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteDependencyPair, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleTeamBlockerInput, type ScheduleTeamBlockerPreview,
   type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, TEAM_BLOCKER_SCHEDULE_RULE, checkDependencySchedule, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { MAX_WORKLOAD_LEVEL_DEPENDENCIES, MAX_WORKLOAD_LEVEL_ISSUES } from '../shared/workload-leveling.js';
 import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { addsScheduleDependencyPair, dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
+import { calculateTeamFollowUpSchedule, teamBatchFollowUpScope, TeamFollowUpScheduleError } from './team-follow-up-schedule.js';
 import type { Store } from './store.js';
 
 export class SchedulePasteError extends Error {
@@ -74,6 +76,7 @@ interface PasteProposal extends ScheduleScope {
   incomingTeamBlockerGuard?: string | [issueId: string, hash: string][];
   teamBlockerGuard?: string;
   teamBlockerWarnings?: string[];
+  teamFollowUp?: { anchors: ScheduleAnchorChange[]; guard: string };
   teamBlocker?: TeamBlockerPair;
   kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit' | 'team-blocker-edit' | 'issue-save';
   issueSaveStatus?: string;
@@ -81,7 +84,7 @@ interface PasteProposal extends ScheduleScope {
 }
 
 type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'resolvedKeyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
-  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard' | 'teamBlocker' | 'issueSaveStatus'>;
+  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard' | 'teamBlocker' | 'issueSaveStatus' | 'teamFollowUp'>;
 
 type DependencyCandidate = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
 type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
@@ -284,10 +287,14 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const invalid = () => new SchedulePasteError(400, '일정을 변경할 업무와 날짜 또는 이동 일수를 확인해 주세요.');
   if (!isRecord(raw)) throw invalid();
   const hasFollowUp = Object.hasOwn(raw, 'rescheduleSuccessors');
-  if (hasFollowUp && typeof raw.rescheduleSuccessors !== 'boolean') throw invalid();
-  const followUp = raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {};
+  const hasTeamBlockers = Object.hasOwn(raw, 'includeTeamBlockers');
+  if ((hasFollowUp && typeof raw.rescheduleSuccessors !== 'boolean') ||
+      (hasTeamBlockers && typeof raw.includeTeamBlockers !== 'boolean') ||
+      (raw.includeTeamBlockers === true && raw.rescheduleSuccessors !== true)) throw invalid();
+  const followUp = { ...(raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {}),
+    ...(raw.includeTeamBlockers === true ? { includeTeamBlockers: true } : {}) };
   if (Object.hasOwn(raw, 'changes')) {
-    if (Object.keys(raw).some(key => key !== 'changes' && key !== 'rescheduleSuccessors') ||
+    if (Object.keys(raw).some(key => !['changes', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key)) ||
         !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
@@ -300,7 +307,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
     return { changes, ...followUp };
   }
   const { issueIds, days, workingDays } = raw;
-  if (Object.keys(raw).length !== (hasFollowUp ? 4 : 3) || typeof days !== 'number' || !Number.isSafeInteger(days) ||
+  if (Object.keys(raw).length !== 3 + Number(hasFollowUp) + Number(hasTeamBlockers) || typeof days !== 'number' || !Number.isSafeInteger(days) ||
       Math.abs(days) > MAX_WORKING_DURATION_DAYS || typeof workingDays !== 'boolean') throw invalid();
   if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays, ...followUp };
   if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_SCHEDULE_MANUAL_ISSUES ||
@@ -598,6 +605,49 @@ export class SchedulePasteService {
     return { issues: groups.flatMap(group => group.issues), dependencies: groups.flatMap(group => group.dependencies) };
   }
 
+  private teamFollowUpContext(anchors: ScheduleAnchorChange[], hooks: ScheduleReviewHooks, applying = false) {
+    const error = (status: number, message: string) => new SchedulePasteError(applying ? 409 : status, message);
+    const limit = () => error(422, '프로젝트 간 후행 일정은 전체 업무 10,000개와 연결 50,000개 이하에서 검토할 수 있습니다.');
+    const issueRows = this.store.db.prepare('SELECT json FROM issues ORDER BY id LIMIT ?')
+      .all(MAX_WORKLOAD_LEVEL_ISSUES + 1) as { json: string }[];
+    const linkRows = this.store.db.prepare('SELECT json FROM dependencies ORDER BY id LIMIT ?')
+      .all(MAX_WORKLOAD_LEVEL_DEPENDENCIES + 1) as { json: string }[];
+    if (issueRows.length > MAX_WORKLOAD_LEVEL_ISSUES || linkRows.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) throw limit();
+    const issues = issueRows.map(({ json }) => JSON.parse(json) as Issue);
+    const localLinks = linkRows.map(({ json }) => JSON.parse(json) as Dependency);
+    const issueMap = new Map(issues.map(issue => [issue.id, issue]));
+    const terminalByIssue = new Map<string, boolean>();
+    const terminal = (issue: Issue) => {
+      let closed = terminalByIssue.get(issue.id);
+      if (closed === undefined) terminalByIssue.set(issue.id, closed = hooks.isTerminal(issue));
+      return closed;
+    };
+    const blockers: Dependency[] = [];
+    for (const relation of hooks.teamBlockers([...issueMap.keys()])) {
+      const { id, sourceIssueId, targetIssueId, version, origin } = relation;
+      const source = issueMap.get(sourceIssueId), target = issueMap.get(targetIssueId);
+      if (!source || !target || source.projectId === target.projectId || terminal(source) || terminal(target)) continue;
+      blockers.push({ id: `team-blocker:${origin ?? 'teamspace'}:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId,
+        ...TEAM_BLOCKER_SCHEDULE_RULE, version });
+      if (localLinks.length + blockers.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) throw limit();
+    }
+    let graph: ReturnType<typeof teamBatchFollowUpScope>;
+    try { graph = teamBatchFollowUpScope(anchors, issues, [...localLinks, ...blockers]); }
+    catch (cause) {
+      if (!(cause instanceof TeamFollowUpScheduleError)) throw cause;
+      throw error(cause.status, cause.message);
+    }
+    const projectIds = [...new Set(graph.issues.map(issue => issue.projectId))].sort();
+    const guard = createHash('sha256').update(JSON.stringify({
+      selectedIds: [...graph.selectedIds].sort(),
+      issues: graph.issues.map(issue => [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate, issue.dueDate, issue.status]),
+      dependencies: graph.dependencies.map(dependencyGuardFields).sort(([a], [b]) => a.localeCompare(b)),
+      projects: projectIds.map(id => [id, hooks.versions(id)]),
+    })).digest('hex');
+    const linkIds = new Set(graph.dependencies.map(link => link.id));
+    return { graph, terminal, guard, state: { issues: graph.issues, dependencies: localLinks.filter(link => linkIds.has(link.id)) } };
+  }
+
   private issueScheduleState(issue: Issue): ScheduleState {
     const linkRows = this.store.db.prepare('SELECT json FROM dependencies WHERE predecessor_id=? OR successor_id=? ORDER BY id')
       .all(issue.id, issue.id) as { json: string }[];
@@ -764,10 +814,11 @@ export class SchedulePasteService {
     return { ...preview, ...this.saveProposal(preview, state, proposal, hooks, preview.warnings) };
   }
 
-  private saveProposal(scope: ScheduleScope, state: ScheduleState, proposal: ProposalDraft, hooks: ScheduleReviewHooks, warnings: string[]) {
+  private saveProposal(scope: ScheduleScope, state: ScheduleState, proposal: ProposalDraft, hooks: ScheduleReviewHooks, warnings: string[],
+    teamIssues = state.issues) {
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-    const team = this.reviewTeamBlockerDates(state.issues, proposal.changes, hooks, proposal);
+    const team = this.reviewTeamBlockerDates(teamIssues, proposal.changes, hooks, proposal);
     const reviewedWarnings = [...new Set([...warnings, ...(team?.warnings ?? [])])];
     const savedWarnings = proposal.teamBlocker ? reviewedWarnings : team?.warnings;
     this.store.put(table, {
@@ -871,7 +922,8 @@ export class SchedulePasteService {
         if (error) blocking.push(`${issue.key}: ${error}`);
         else {
           changes.set(issue.id, edit.change);
-          preview.changes.push(omitUnchangedDueDate(edit.summary));
+          const summary = omitUnchangedDueDate(edit.summary);
+          preview.changes.push(input.includeTeamBlockers ? { ...summary, projectId: issue.projectId } : summary);
         }
       };
       for (const { id, expectedVersion, startDate, endDate } of selected) {
@@ -910,43 +962,66 @@ export class SchedulePasteService {
       const selectedIds = selected.map(({ id }) => id);
       const issueIds = new Set(selectedIds);
       const followUpWarnings: string[] = [];
+      let teamFollowUp: PasteProposal['teamFollowUp'];
+      let reviewState = state;
       if (input.rescheduleSuccessors && !blocking.length && ('changes' in input || changes.size)) {
         const followUp = 'changes' in input ? input.changes : [...changes.values()];
         const followUpIssueIds: string[] = [];
-        const anchorsByProject = Map.groupBy(followUp, ({ id }) => byId.get(id)!.projectId);
-        const issuesByProject = Map.groupBy(state.issues, ({ projectId }) => projectId);
-        const dependenciesByProject = Map.groupBy(state.dependencies, ({ predecessorId }) => byId.get(predecessorId)!.projectId);
-        for (const [projectId, anchors] of anchorsByProject) {
-          const plan = calculateFixedFollowUpSchedule({
-            issues: issuesByProject.get(projectId)!, dependencies: dependenciesByProject.get(projectId) ?? [],
-            calendar: hooks.calendar(projectId), workflow: hooks.workflow(projectId), anchors,
-          });
-          // An unchanged successor can gain a dependency before this proposal is applied.
-          for (const id of plan.issueIds) issueIds.add(id);
+        function collectFollowUp(plan: Pick<SchedulePreview, 'changes' | 'warnings'> & { blocking: string[] },
+          anchors: ScheduleAnchorChange[], issues: ReadonlyMap<string, Issue>) {
           blocking.push(...plan.blocking);
           followUpWarnings.push(...plan.warnings);
           const anchorIds = new Set(anchors.map(({ id }) => id));
           for (const { id, toStart, toEnd } of plan.changes) {
             if (anchorIds.has(id)) continue;
-            addDateChange(byId.get(id)!, { startDate: toStart, endDate: toEnd });
+            addDateChange(issues.get(id)!, { startDate: toStart, endDate: toEnd });
             if (changes.has(id)) followUpIssueIds.push(id);
+          }
+        }
+        if (input.includeTeamBlockers) {
+          let context: ReturnType<SchedulePasteService['teamFollowUpContext']>;
+          try { context = this.teamFollowUpContext(followUp, hooks); }
+          catch (cause) {
+            if (!(cause instanceof SchedulePasteError) || cause.status !== 422) throw cause;
+            return { ...preview, blocking: [cause.message] };
+          }
+          teamFollowUp = { anchors: followUp, guard: context.guard };
+          reviewState = context.state;
+          const plan = calculateTeamFollowUpSchedule(context.graph, projectId => {
+            let math = calendars.get(projectId);
+            if (!math) calendars.set(projectId, math = createCalendarMath(hooks.calendar(projectId)));
+            return math;
+          }, context.terminal);
+          collectFollowUp(plan, followUp, new Map(reviewState.issues.map(issue => [issue.id, issue])));
+        } else {
+          const anchorsByProject = Map.groupBy(followUp, ({ id }) => byId.get(id)!.projectId);
+          const issuesByProject = Map.groupBy(state.issues, ({ projectId }) => projectId);
+          const dependenciesByProject = Map.groupBy(state.dependencies, ({ predecessorId }) => byId.get(predecessorId)!.projectId);
+          for (const [projectId, anchors] of anchorsByProject) {
+            const plan = calculateFixedFollowUpSchedule({
+              issues: issuesByProject.get(projectId)!, dependencies: dependenciesByProject.get(projectId) ?? [],
+              calendar: hooks.calendar(projectId), workflow: hooks.workflow(projectId), anchors,
+            });
+            // An unchanged successor can gain a dependency before this proposal is applied.
+            for (const id of plan.issueIds) issueIds.add(id);
+            collectFollowUp(plan, anchors, byId);
+          }
+          for (const { id, key, toEnd } of preview.changes) {
+            const dueDate = byId.get(id)?.dueDate;
+            if (toEnd && dueDate && toEnd > dueDate) followUpWarnings.push(`${key}: 제안한 종료일 ${toEnd}이 목표 마감일 ${dueDate}보다 늦습니다.`);
           }
         }
         if (followUpIssueIds.length) preview.followUpIssueIds = followUpIssueIds;
         if (changes.size > MAX_SCHEDULE_MANUAL_ISSUES) {
           blocking.push(`한 번에 변경할 수 있는 업무는 ${MAX_SCHEDULE_MANUAL_ISSUES}개입니다. 범위를 나누어 미리 확인해 주세요.`);
         }
-        for (const { id, key, toEnd } of preview.changes) {
-          const dueDate = byId.get(id)?.dueDate;
-          if (toEnd && dueDate && toEnd > dueDate) followUpWarnings.push(`${key}: 제안한 종료일 ${toEnd}이 목표 마감일 ${dueDate}보다 늦습니다.`);
-        }
       }
       if (changes.size) {
-        const projected = state.issues.map(issue => {
+        const projected = reviewState.issues.map(issue => {
           const change = changes.get(issue.id);
           return change ? { ...issue, startDate: change.startDate, endDate: change.endDate } : issue;
         });
-        preview.warnings.push(...hooks.warnings(projected, incidentLinks(state.dependencies, changes.keys())));
+        preview.warnings.push(...hooks.warnings(projected, incidentLinks(reviewState.dependencies, changes.keys())));
       }
       if (followUpWarnings.length) preview.warnings = [...new Set([...followUpWarnings, ...preview.warnings])];
       if (blocking.length) return { ...preview, blocking: [...new Set(blocking)] };
@@ -954,8 +1029,9 @@ export class SchedulePasteService {
       return { ...preview, ...this.saveProposal(scope, state, {
         actorId, issueIds: [...issueIds], changes: [...changes.values()], kind: 'manual-edit',
         ...(hierarchy ? { hierarchyId: hierarchy.id, hierarchyIssueIds: selectedIds } : {}),
+        ...(teamFollowUp ? { teamFollowUp } : {}),
         ...(followUpWarnings.length ? { followUpWarnings } : {}),
-      }, hooks, preview.warnings) };
+      }, hooks, preview.warnings, reviewState.issues) };
     });
   }
 
@@ -1560,6 +1636,11 @@ export class SchedulePasteService {
         })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
       }
       const state = this.scopeState(proposal);
+      const teamFollowUp = proposal.teamFollowUp && this.teamFollowUpContext(proposal.teamFollowUp.anchors, hooks, true);
+      if (teamFollowUp && teamFollowUp.guard !== proposal.teamFollowUp?.guard) {
+        throw new SchedulePasteError(409, '프로젝트 간 후행 업무, 연결 또는 프로젝트 규칙이 변경되었습니다. 다시 미리 확인해 주세요.');
+      }
+      const reviewState = teamFollowUp?.state ?? state;
       if (proposal.incomingTeamBlockerGuard) {
         // Older pending previews stored only the selected row's guard.
         const guards = typeof proposal.incomingTeamBlockerGuard === 'string'
@@ -1571,7 +1652,7 @@ export class SchedulePasteService {
           throw new SchedulePasteError(409, '프로젝트 간 선행 업무 또는 차단 관계가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.');
         }
       }
-      const team = this.reviewTeamBlockerDates(state.issues, proposal.changes, hooks, proposal);
+      const team = this.reviewTeamBlockerDates(reviewState.issues, proposal.changes, hooks, proposal);
       if (proposal.teamBlockerGuard ? team?.guard !== proposal.teamBlockerGuard : team?.relationCount) {
         throw new SchedulePasteError(409, '프로젝트 간 연결 업무 또는 차단 관계가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.');
       }
@@ -1598,7 +1679,7 @@ export class SchedulePasteService {
       if (this.guard(proposal, state, proposal.issueIds, hooks) !== proposal.guard) {
         throw new SchedulePasteError(409, '업무, 연결된 일정 또는 프로젝트 규칙이 변경되었습니다. 다시 미리 확인해 주세요.');
       }
-      const { dependencies } = state;
+      const { dependencies } = reviewState;
       const linkChanges = proposal.linkChanges ?? [];
       const projectedLinks = linkChanges.length ? projectScheduleDependencies(dependencies, linkChanges) : dependencies;
       if (linkChanges.some(addsScheduleDependencyPair) && hasScheduleDependencyCycle(projectedLinks)) {
@@ -1607,7 +1688,7 @@ export class SchedulePasteService {
       const links = affectedLinks(projectedLinks, teamBlocker ? proposal.issueIds : proposal.changes.map(change => change.id), linkChanges);
       const result = teamBlocker ? hooks.commitTeamBlocker(request, teamBlocker, proposal.changes, links)
         : hooks.commitChanges(request, proposal.changes, links, linkChanges, {
-        projectId: proposal.projectId ?? undefined,
+        projectId: proposal.projectId ?? (teamFollowUp && proposal.projectIds?.length === 1 ? proposal.projectIds[0] : undefined),
         // The selected row heads the guarded read set even when only successors or links change.
         issueId: proposal.kind === 'row-edit' ? proposal.issueIds[0] : undefined,
       });

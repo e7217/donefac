@@ -224,6 +224,103 @@ test('360px에서 선택한 두 일정과 숨겨진 공유 후행을 옮기고 �
   } finally { await removeIssues(request, created); }
 });
 
+test('360px 막대와 일정 이동에서 다른 프로젝트의 후행을 검토하고 주변 날짜 초안을 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const { projects: [project, receivingProject] } = await workspace(request);
+  const date = nextWorkweek(), prefix = `프로젝트 간 이동 ${randomUUID().slice(0, 7)}`;
+  const created: Issue[] = [];
+  async function create(title: string, projectId: string, start: number, end: number) {
+    const response = await request.post('/api/issues', { data: { projectId, title, startDate: date(start), endDate: date(end) } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const anchor = await create(`${prefix} 기준`, project.id, 0, 1);
+    const successor = await create(`${prefix} 다른 프로젝트`, receivingProject.id, 2, 3);
+    const elsewhere = await create(`${prefix} 다른 초안`, project.id, 4, 4);
+    const linked = await request.post(`/api/issues/${anchor.id}/relations`, {
+      data: { type: 'blocks', direction: 'outgoing', otherIssueId: successor.id },
+    });
+    expect(linked.status(), await linked.text()).toBe(201);
+    const stored = storedDates(request, created);
+    const original = await stored();
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(prefix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill(date(-1));
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const dialog = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const crossReview = dialog.getByRole('button', { name: '프로젝트 간 일정 검토', exact: true });
+    const bar = chart.getByRole('button', { name: `${anchor.key} 일정 이동`, exact: true });
+    await bar.scrollIntoViewIfNeeded();
+    const box = await bar.boundingBox();
+    if (!box) throw new Error('The selected schedule bar must have a visible position.');
+    const center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+    const dragPreview = responseAt(page, 'manual-preview');
+    await page.mouse.move(center.x, center.y);
+    await page.mouse.down();
+    await page.mouse.move(center.x + 32, center.y, { steps: 5 });
+    await page.mouse.up();
+    const dragged = await dragPreview;
+    expect(dragged.request().postDataJSON()).toMatchObject({ issueIds: [anchor.id], days: 1 });
+    await payload<SchedulePreview>(dragged);
+    const teamPreview = responseAt(page, 'team-follow-up-preview');
+    await crossReview.click();
+    const handoff = await payload<AutomaticSchedulePreview>(await teamPreview);
+    expect(handoff.teamFollowUp?.anchorChange).toMatchObject({ id: anchor.id, startDate: date(1), endDate: date(2) });
+    const teamDialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    await teamDialog.getByRole('button', { name: '돌아가기', exact: true }).click();
+    await expect(crossReview).toBeFocused();
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    expect(await stored()).toEqual(original);
+
+    const draft = chart.getByLabel(`${elsewhere.key} 종료일`, { exact: true });
+    const anchorDraft = chart.getByLabel(`${anchor.key} 시작일`, { exact: true });
+    await draft.fill(date(7));
+    await anchorDraft.fill(date(1));
+    await chart.getByRole('checkbox', { name: `${anchor.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '1개 일정 이동', exact: true }).click();
+    const shift = page.locator('#gantt-shift-form');
+    await expect(shift).toContainText('저장된 날짜를 기준으로 이동합니다.');
+    await shift.getByRole('spinbutton', { name: '이동 일수', exact: true }).fill('2');
+    await shift.getByRole('checkbox', { name: '근무일 기준', exact: true }).uncheck();
+    await shift.getByRole('checkbox', { name: '후행 업무도 함께 조정', exact: true }).check();
+    await shift.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true }).check();
+    const submission = responseAt(page, 'manual-preview');
+    await shift.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const response = await submission;
+    expect(response.request().postDataJSON()).toEqual({ issueIds: [anchor.id], days: 2, workingDays: false,
+      rescheduleSuccessors: true, includeTeamBlockers: true });
+    const combined = await payload<SchedulePreview>(response);
+    const moved: Dates[] = [[date(2), date(3)], [date(4), date(7)]];
+    expect(combined.previewId).toBeTruthy();
+    expect(changesOf(combined.changes)).toEqual(expect.arrayContaining(expectedChanges(created, moved)));
+    expect(combined.changes).toHaveLength(2);
+    await expect(dialog.getByRole('row').filter({ hasText: successor.title })).toContainText(receivingProject.name);
+    await expect(draft).toHaveValue(date(7));
+    expect(await stored()).toEqual(original);
+
+    const applying = responseAt(page, 'manual-apply');
+    await dialog.getByRole('button', { name: '변경 적용', exact: true }).click();
+    const applied = await payload<ApplyResult>(await applying);
+    expect(applied.updated.map(({ id }) => id).sort()).toEqual([anchor.id, successor.id].sort());
+    await expect(dialog).toHaveCount(0);
+    await expect(draft).toHaveValue(date(7));
+    await expect(anchorDraft).toHaveValue(date(1));
+    expect(await stored()).toEqual(expectedDates(created, moved, 1));
+    const undoing = responseAt(page, 'undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await payload(await undoing);
+    expect(await stored()).toEqual(expectedDates(created, [[date(0), date(1)], [date(2), date(3)]], 2));
+    await expect(draft).toHaveValue(date(7));
+    await expect(anchorDraft).toHaveValue(date(1));
+  } finally { await removeIssues(request, created); }
+});
+
 test('360px에서 날짜 초안을 보존하며 숨겨진 두 단계의 후행 일정을 함께 적용하고 한 번에 되돌린다', async ({ page, request }) => {
   test.setTimeout(60_000);
   const created: Issue[] = [];

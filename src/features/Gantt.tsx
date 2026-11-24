@@ -317,6 +317,7 @@ function ProjectGantt(props: GanttProps) {
   const [days, setDays] = useState(5);
   const [workingDays, setWorkingDays] = useState(true);
   const [shiftSuccessors, setShiftSuccessors] = useState(false);
+  const [shiftIncludesTeamBlockers, setShiftIncludesTeamBlockers] = useState(false);
   const [shiftMode, setShiftMode] = useState<ShiftMode | null>(null);
   const [linkEditor, setLinkEditor] = useState<DependencyEditor | null>(null);
   const [linkPicker, setLinkPicker] = useState<{ source: LinkPick | null } | null>(null);
@@ -414,7 +415,8 @@ function ProjectGantt(props: GanttProps) {
   const manualReviewAction = useRef<HTMLButtonElement>(null);
   const cascadePreviewButton = useRef<HTMLButtonElement>(null);
   const batchFollowUpOption = useRef<HTMLInputElement>(null);
-  const restoreBatchFollowUpFocus = useRef(false);
+  const batchTeamBlockerOption = useRef<HTMLInputElement>(null);
+  const restoreBatchFollowUpFocus = useRef<'follow-up' | 'team-blockers' | null>(null);
   const teamFollowUpPreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
   const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
@@ -485,12 +487,13 @@ function ProjectGantt(props: GanttProps) {
     return () => clearTimeout(timer);
   });
   useLayoutEffect(() => {
-    if (busy || !restoreBatchFollowUpFocus.current) return;
-    restoreBatchFollowUpFocus.current = false;
-    batchFollowUpOption.current?.focus({ preventScroll: true });
+    const target = restoreBatchFollowUpFocus.current;
+    if (busy || !target) return;
+    restoreBatchFollowUpFocus.current = null;
+    (target === 'team-blockers' ? batchTeamBlockerOption.current : batchFollowUpOption.current)?.focus({ preventScroll: true });
   }, [busy, preview]);
   useLayoutEffect(() => {
-    if (!preview || (batchFollowUpOption.current && document.activeElement === batchFollowUpOption.current)) return;
+    if (!preview || document.activeElement === batchFollowUpOption.current || document.activeElement === batchTeamBlockerOption.current) return;
     previewDialog.current?.focus();
   }, [preview]);
   useLayoutEffect(() => {
@@ -976,7 +979,7 @@ function ProjectGantt(props: GanttProps) {
   const calendar = useMemo(() => timelineProjectId ? calendarFor(timelineProjectId) : undefined, [calendarFor, timelineProjectId]);
   const calendarMath = useMemo(() => calendar && createCalendarMath(calendar), [calendar]);
   const { projectDependencyCount, findings, teamBlockerFindings, conflictingIds, linkedIssueIds, outgoingIssueIds,
-    teamBlockerChoices, incomingTeamBlockers } = useMemo(() => {
+    teamBlockerChoices, incomingTeamBlockers, reachesTeamBlockers } = useMemo(() => {
     const { outgoing: teamBlockerChoices, incoming: incomingTeamBlockers } = groupActiveTeamBlockers(data, projectsById);
     const issuesById = new Map(projectIssues.map(issue => [issue.id, issue]));
     const findings: GanttDependencyFinding[] = [];
@@ -1023,8 +1026,15 @@ function ProjectGantt(props: GanttProps) {
         }
       }
     }
+    const reachesTeamBlockers = new Set(teamBlockerChoices.keys());
+    if (reachesTeamBlockers.size) {
+      const incoming = Map.groupBy(data.dependencies, dependency => dependency.successorId);
+      for (const id of reachesTeamBlockers) {
+        for (const dependency of incoming.get(id) ?? []) reachesTeamBlockers.add(dependency.predecessorId);
+      }
+    }
     return { projectDependencyCount, findings, teamBlockerFindings, conflictingIds, linkedIssueIds, outgoingIssueIds,
-      teamBlockerChoices, incomingTeamBlockers };
+      teamBlockerChoices, incomingTeamBlockers, reachesTeamBlockers };
   }, [projectIssues, data, projectsById, calendarFor, calendarMath, chartProjectFilter, timelineProjectId, findingsProjectId, allProjects, projectId]);
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
@@ -1034,11 +1044,17 @@ function ProjectGantt(props: GanttProps) {
   const batchDateInput = manualReview?.inlineDates && 'changes' in manualReview.input ? manualReview.input : null;
   const hasInlineDateReview = Boolean(manualReview?.inline || manualReview?.inlineDates);
   const batchFollowUp = batchDateInput?.rescheduleSuccessors === true;
-  const canReviewBatchFollowUp = batchDateInput && (batchFollowUp || batchDateInput.changes.some(change => outgoingIssueIds.has(change.id)));
+  const batchIncludesTeamBlockers = batchDateInput?.includeTeamBlockers === true;
+  const canIncludeBatchTeamBlockers = batchIncludesTeamBlockers || batchDateInput?.changes.some(change => reachesTeamBlockers.has(change.id));
+  const canReviewBatchFollowUp = batchDateInput && (batchFollowUp || canIncludeBatchTeamBlockers ||
+    batchDateInput.changes.some(change => outgoingIssueIds.has(change.id)));
   const batchAnchorIds = batchFollowUp ? new Set(batchDateInput.changes.map(change => change.id)) : null;
   const adjustedShiftSuccessors = preview?.followUpIssueIds ? new Set(preview.followUpIssueIds) : null;
-  const previewTeamFollowUp = manualReview && 'changes' in manualReview.input && manualReview.input.changes.length === 1 &&
-    singleChange && teamBlockerChoices.has(singleChange.id) ? singleChange : null;
+  const manualInput = manualReview?.input;
+  const manualAnchorIds = manualInput && ('changes' in manualInput ? manualInput.changes.map(change => change.id)
+    : 'issueIds' in manualInput ? manualInput.issueIds : null);
+  const previewTeamFollowUp = !manualInput?.rescheduleSuccessors && manualAnchorIds?.length === 1 &&
+    singleChange?.id === manualAnchorIds[0] && teamBlockerChoices.has(singleChange.id) ? singleChange : null;
   const analysisResult = useMemo(() => {
     if (!analysisOpen || !hasProject || !calendar) return null;
     try {
@@ -1123,6 +1139,9 @@ function ProjectGantt(props: GanttProps) {
     return () => cancelAnimationFrame(frame);
   }, [dateRecoveryReady, dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
+  const shiftIssues = shiftMode === 'hierarchy' ? hierarchyTrace?.issues ?? [] : selectedIssues;
+  const shiftCanIncludeTeamBlockers = shiftIncludesTeamBlockers || shiftIssues.some(issue => reachesTeamBlockers.has(issue.id));
+  const shiftHasDraft = shiftIssues.some(issue => recoverableIds.has(issue.id));
   const sheetIssues = (selectedIssues.length ? selectedIssues : issues)
     .filter(issue => sheetScope === 'team' || issue.projectId === sheetScope?.id);
   const firstSelectedProject = selectedIssues[0]?.projectId;
@@ -1540,14 +1559,16 @@ function ProjectGantt(props: GanttProps) {
   function toggleShiftForm(mode: ShiftMode) {
     if (busyRef.current) return;
     if (shiftMode === mode) { closeShiftForm(); return; }
-    if (canLeave()) queueMicrotask(() => {
+    if (canKeepInlineDateDrafts() || canLeave()) queueMicrotask(() => {
       setShiftSuccessors(false);
+      setShiftIncludesTeamBlockers(false);
       setShiftMode(mode);
     });
   }
   function submitShift(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const shift = { days, workingDays, ...(shiftSuccessors ? { rescheduleSuccessors: true } : {}) };
+    const shift = { days, workingDays, ...(shiftSuccessors ? { rescheduleSuccessors: true } : {}),
+      ...(shiftSuccessors && shiftIncludesTeamBlockers ? { includeTeamBlockers: true } : {}) };
     if (shiftMode === 'hierarchy') {
       if (!hierarchyTrace) return;
       const { id, version } = hierarchyTrace.anchor;
@@ -1678,16 +1699,19 @@ function ProjectGantt(props: GanttProps) {
     try { await commitManualReview(manualReview, manualProblem?.kind === 'uncertain'); }
     finally { markBusy(false); }
   }
-  async function reviewBatchFollowUp(rescheduleSuccessors: boolean) {
+  async function reviewBatchFollowUp(rescheduleSuccessors: boolean, includeTeamBlockers: boolean, focus: 'follow-up' | 'team-blockers') {
     if (busyRef.current || !manualReview || !batchDateInput || manualProblem) return;
-    const input = { changes: batchDateInput.changes, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}) };
-    restoreBatchFollowUpFocus.current = true;
+    const input = { changes: batchDateInput.changes, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}),
+      ...(rescheduleSuccessors && includeTeamBlockers ? { includeTeamBlockers: true } : {}) };
+    const requested = { ...manualReview, input };
+    restoreBatchFollowUpFocus.current = focus;
     markBusy(true);
+    setManualReview(requested);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
-      setManualReview({ ...manualReview, input, preview });
+      setManualReview({ ...requested, preview });
     } catch (cause) {
-      setManualReview({ ...manualReview, input, preview: { changes: [], warnings: [] } });
+      setManualReview({ ...requested, preview: { changes: [], warnings: [] } });
       setManualProblem({ kind: 'stale', message: errorMessage(cause) });
       await refresh().catch(() => undefined);
     } finally { markBusy(false); }
@@ -1833,7 +1857,7 @@ function ProjectGantt(props: GanttProps) {
     notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);
   }
   async function undo() {
-    if (!undoId || busyRef.current || (scheduleFocus && !canLeave())) return;
+    if (!undoId || busyRef.current || (scheduleFocus && !canKeepInlineDateDrafts() && !canLeave())) return;
     markBusy(true);
     try {
       const result = await undoScheduleChange();
@@ -2465,11 +2489,21 @@ function ProjectGantt(props: GanttProps) {
       <label className="gantt-checkbox-label"><input type="checkbox" checked={workingDays} disabled={busy} onChange={e => setWorkingDays(e.target.checked)} />근무일 기준</label>
       <label className="gantt-checkbox-label"><input type="checkbox" checked={shiftSuccessors} disabled={busy}
         aria-describedby={shiftSuccessors ? 'gantt-shift-follow-up-help' : undefined}
-        onChange={event => setShiftSuccessors(event.target.checked)} />후행 업무도 함께 조정</label>
+        onChange={event => {
+          setShiftSuccessors(event.target.checked);
+          if (!event.target.checked) setShiftIncludesTeamBlockers(false);
+        }} />후행 업무도 함께 조정</label>
+      {shiftSuccessors && shiftCanIncludeTeamBlockers && <label className="gantt-checkbox-label">
+        <input type="checkbox" checked={shiftIncludesTeamBlockers} disabled={busy}
+          onChange={event => setShiftIncludesTeamBlockers(event.target.checked)} />프로젝트 간 차단 포함
+      </label>}
       <small>{shiftMode === 'hierarchy'
         ? '시작일과 종료일을 같은 일수만큼 옮깁니다. 음수는 앞당기며, 근무일 기준은 프로젝트 달력의 근무 요일과 예외를 적용합니다.'
         : '음수는 앞당기기 · 프로젝트 달력의 근무 요일·예외 적용'}</small>
-      {shiftSuccessors && <small id="gantt-shift-follow-up-help">같은 프로젝트에서 선후행 조건을 맞추는 데 필요한 일정만 늦춥니다.</small>}
+      {shiftSuccessors && <small id="gantt-shift-follow-up-help">{shiftIncludesTeamBlockers
+        ? '후행 업무가 속한 프로젝트의 근무일을 적용해 필요한 일정만 늦춥니다.'
+        : '같은 프로젝트에서 선후행 조건을 맞추는 데 필요한 일정만 늦춥니다.'}</small>}
+      {shiftHasDraft && <small>저장된 날짜를 기준으로 이동합니다. 행에서 입력 중인 날짜도 계속 확인할 수 있습니다.</small>}
       <button className="btn btn-primary" type="submit" disabled={busy || (shiftMode === 'hierarchy' ? !hierarchyTrace : !selectedIssues.length)}>변경 미리보기</button>
       <button className="issue-icon-button" type="button" onClick={closeShiftForm} disabled={busy} aria-label="일정 이동 닫기"><X size={16} aria-hidden="true" /></button>
     </form>}
@@ -2783,8 +2817,15 @@ function ProjectGantt(props: GanttProps) {
     }}><header><div><span className="feature-eyebrow">REVIEW CHANGES</span><h2 id="schedule-preview-title">일정 변경 미리보기</h2><p>{preview.changes.length}개 업무의 변경 내용을 확인하세요.</p></div><button className="issue-icon-button" onClick={closePreview} disabled={busy} aria-label="미리보기 닫기"><X size={20} /></button></header>
       {canReviewBatchFollowUp && <div className="gantt-batch-follow-up">
         <label><input ref={batchFollowUpOption} type="checkbox" checked={batchFollowUp} disabled={busy || Boolean(manualProblem)}
-          aria-describedby="gantt-batch-follow-up-help" onChange={event => void reviewBatchFollowUp(event.currentTarget.checked)} />후행 일정 함께 검토</label>
-        <p id="gantt-batch-follow-up-help">입력한 날짜를 기준으로 같은 프로젝트의 후행 일정을 필요한 만큼 늦춥니다.</p>
+          aria-describedby="gantt-batch-follow-up-help"
+          onChange={event => void reviewBatchFollowUp(event.currentTarget.checked, batchIncludesTeamBlockers, 'follow-up')} />후행 일정 함께 검토</label>
+        {batchFollowUp && canIncludeBatchTeamBlockers && <label>
+          <input ref={batchTeamBlockerOption} type="checkbox" checked={batchIncludesTeamBlockers} disabled={busy || Boolean(manualProblem)}
+            onChange={event => void reviewBatchFollowUp(true, event.currentTarget.checked, 'team-blockers')} />프로젝트 간 차단 포함
+        </label>}
+        <p id="gantt-batch-follow-up-help">{batchIncludesTeamBlockers
+          ? '입력한 날짜를 유지하고, 후행 프로젝트마다 근무일을 적용해 필요한 일정만 늦춥니다.'
+          : '입력한 날짜를 기준으로 같은 프로젝트의 후행 일정을 필요한 만큼 늦춥니다.'}</p>
       </div>}
       <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
       {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
@@ -2798,6 +2839,7 @@ function ProjectGantt(props: GanttProps) {
           <tbody>{preview.changes.map(change => <tr key={change.id}>
             <td>
               <span className="issue-key">{change.key}</span><strong>{change.title}</strong>
+              {manualInput?.includeTeamBlockers && change.projectId && <small>{projectsById.get(change.projectId)?.name}</small>}
               {(adjustedShiftSuccessors?.has(change.id) || batchAnchorIds && !batchAnchorIds.has(change.id)) &&
                 <small className="gantt-follow-up-row-label">후행 조정</small>}
             </td>

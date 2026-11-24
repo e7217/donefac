@@ -1,16 +1,26 @@
 import { calculateWorkingDateRange, CalendarError, isCalendarDate, MAX_WORKING_DURATION_DAYS, type createCalendarMath } from '../shared/calendar.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyBound, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
-import type { AutomaticSchedulePreview, Dependency, Issue, ScheduleChange } from '../shared/types.js';
+import type { AutomaticSchedulePreview, Dependency, Issue, ScheduleAnchorChange, ScheduleChange } from '../shared/types.js';
 
 type ScheduleDates = Pick<Issue, 'startDate' | 'endDate'>;
 type CalendarMath = ReturnType<typeof createCalendarMath>;
-interface TeamFollowUpScope {
-  sourceId: string;
-  anchorChange?: ScheduleDates;
+interface FollowUpGraph {
   issues: Issue[];
   selectedIds: string[];
   dependencies: Dependency[];
 }
+
+interface TeamFollowUpScope extends FollowUpGraph {
+  sourceId: string;
+  anchorChange?: ScheduleDates;
+}
+
+interface TeamBatchFollowUpScope extends FollowUpGraph {
+  fixedDates: ReadonlyMap<string, ScheduleDates>;
+}
+
+const MAX_FOLLOW_UP_ISSUES = 1_000;
+const FIXED_FOLLOW_UP_LIMIT = '선행 업무를 포함해 한 번에 1,000개 업무까지 계산할 수 있습니다.';
 
 export class TeamFollowUpScheduleError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
@@ -27,30 +37,58 @@ function edgesByIssue(dependencies: Dependency[], direction: 'predecessorId' | '
   return groups;
 }
 
+function reachableSuccessors(startIds: readonly string[], byId: ReadonlyMap<string, Issue>, dependencies: Dependency[], limitMessage: string) {
+  const outgoing = edgesByIssue(dependencies, 'predecessorId');
+  const selected = new Set(startIds);
+  for (const id of selected) {
+    for (const dependency of outgoing.get(id) ?? []) {
+      if (!byId.has(dependency.successorId)) throw new TeamFollowUpScheduleError(409, '선후행 연결에 현재 없는 업무가 있습니다.');
+      selected.add(dependency.successorId);
+      if (selected.size > MAX_FOLLOW_UP_ISSUES) throw new TeamFollowUpScheduleError(422, limitMessage);
+    }
+  }
+  return selected;
+}
+
+function followUpGraph(selected: ReadonlySet<string>, issues: Issue[], dependencies: Dependency[], sourceId?: string): FollowUpGraph {
+  const incoming = dependencies.filter(dependency => selected.has(dependency.successorId));
+  const references = new Set([...selected, ...incoming.map(dependency => dependency.predecessorId)]);
+  if (sourceId !== undefined) references.add(sourceId);
+  return { issues: issues.filter(issue => references.has(issue.id)), selectedIds: [...selected], dependencies: incoming };
+}
+
 export function teamFollowUpScope(sourceId: string, targetIds: readonly string[], issues: Issue[], dependencies: Dependency[],
   anchorChange?: ScheduleDates): TeamFollowUpScope {
   const byId = new Map(issues.map(issue => [issue.id, issue]));
   if (!byId.has(sourceId) || !targetIds.length || targetIds.some(id => !byId.has(id))) {
     throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
   }
-  const outgoing = edgesByIssue(dependencies, 'predecessorId');
-  const selected = new Set(anchorChange ? [sourceId] : targetIds);
-  for (const id of selected) {
-    for (const dependency of outgoing.get(id) ?? []) {
-      if (!byId.has(dependency.successorId)) throw new TeamFollowUpScheduleError(409, '선후행 연결에 현재 없는 업무가 있습니다.');
-      selected.add(dependency.successorId);
-      if (selected.size > 1000) throw new TeamFollowUpScheduleError(422, anchorChange
-        ? '선행 업무를 포함해 한 번에 1,000개 업무까지 계산할 수 있습니다.'
-        : '후행 업무는 한 번에 1,000개까지 계산할 수 있습니다.');
-    }
-  }
+  const selected = reachableSuccessors(anchorChange ? [sourceId] : targetIds, byId, dependencies,
+    anchorChange ? FIXED_FOLLOW_UP_LIMIT : '후행 업무는 한 번에 1,000개까지 계산할 수 있습니다.');
   if (anchorChange && targetIds.some(id => !selected.has(id))) throw new TeamFollowUpScheduleError(409, '계속할 차단 업무를 찾을 수 없습니다.');
-  const incoming = dependencies.filter(dependency => selected.has(dependency.successorId));
-  const references = new Set([...selected, sourceId, ...incoming.map(dependency => dependency.predecessorId)]);
-  return {
-    sourceId, issues: issues.filter(issue => references.has(issue.id)), selectedIds: [...selected], dependencies: incoming,
-    ...(anchorChange ? { anchorChange } : {}),
-  };
+  return { sourceId, ...followUpGraph(selected, issues, dependencies, sourceId), ...(anchorChange ? { anchorChange } : {}) };
+}
+
+export function teamBatchFollowUpScope(anchors: readonly ScheduleAnchorChange[], issues: Issue[], dependencies: Dependency[]): TeamBatchFollowUpScope {
+  if (!anchors.length) throw new TeamFollowUpScheduleError(400, '후행 일정의 기준 업무를 지정해 주세요.');
+  if (anchors.length > MAX_FOLLOW_UP_ISSUES) throw new TeamFollowUpScheduleError(422, FIXED_FOLLOW_UP_LIMIT);
+  const byId = new Map(issues.map(issue => [issue.id, issue]));
+  const fixedDates = new Map<string, ScheduleDates>();
+  const changedIds: string[] = [];
+  for (const { id, expectedVersion, startDate, endDate } of anchors) {
+    const issue = byId.get(id);
+    if (!issue || issue.version !== expectedVersion) {
+      throw new TeamFollowUpScheduleError(409, '기준 업무가 변경되었습니다. 최신 일정을 확인해 주세요.');
+    }
+    if (fixedDates.has(id)) throw new TeamFollowUpScheduleError(400, '후행 일정의 기준 업무를 중복해서 지정할 수 없습니다.');
+    fixedDates.set(id, { startDate, endDate });
+    if (startDate !== issue.startDate || endDate !== issue.endDate) changedIds.push(id);
+  }
+  // Unchanged explicit rows remain fixed without pulling in unrelated successors.
+  const selected = reachableSuccessors(changedIds, byId, dependencies, FIXED_FOLLOW_UP_LIMIT);
+  for (const id of fixedDates.keys()) selected.add(id);
+  if (selected.size > MAX_FOLLOW_UP_ISSUES) throw new TeamFollowUpScheduleError(422, FIXED_FOLLOW_UP_LIMIT);
+  return { ...followUpGraph(selected, issues, dependencies), fixedDates };
 }
 
 function requiredDates(issue: Issue, incoming: Dependency[], issues: ReadonlyMap<string, Issue>,
@@ -99,16 +137,16 @@ function delaySchedule(issue: Issue, required: ScheduleDates, math: CalendarMath
   return range;
 }
 
-export function calculateTeamFollowUpSchedule(scope: TeamFollowUpScope, calendar: (projectId: string) => CalendarMath,
+export function calculateTeamFollowUpSchedule(scope: TeamFollowUpScope | TeamBatchFollowUpScope, calendar: (projectId: string) => CalendarMath,
   terminal: (issue: Issue) => boolean): Pick<AutomaticSchedulePreview, 'changes' | 'warnings' | 'blocking'> {
   const changes: ScheduleChange[] = [];
   const warnings: string[] = [];
   const blocking: string[] = [];
   const selected = new Set(scope.selectedIds);
   const incoming = edgesByIssue(scope.dependencies, 'successorId');
-  const cycleThroughSource = scope.anchorChange
+  const cycleThroughSource = 'sourceId' in scope && (scope.anchorChange
     ? (incoming.get(scope.sourceId) ?? []).some(edge => selected.has(edge.predecessorId))
-    : selected.has(scope.sourceId);
+    : selected.has(scope.sourceId));
   if (cycleThroughSource) {
     return { changes, warnings, blocking: ['선행 업무까지 돌아오는 순환 관계가 있습니다. 연결 방향을 확인해 주세요.'] };
   }
@@ -134,7 +172,7 @@ export function calculateTeamFollowUpSchedule(scope: TeamFollowUpScope, calendar
     const issue = issues.get(id)!;
     const math = calendar(issue.projectId);
     const { dates, problems } = requiredDates(issue, incoming.get(id) ?? [], issues, effective, blocked, math);
-    const anchor = id === scope.sourceId ? scope.anchorChange : undefined;
+    const anchor = 'fixedDates' in scope ? scope.fixedDates.get(id) : id === scope.sourceId ? scope.anchorChange : undefined;
     const current = anchor ?? issue;
     const conflict = (dates.startDate && (!current.startDate || dates.startDate > current.startDate)) ||
       (dates.endDate && (!current.endDate || dates.endDate > current.endDate));
@@ -145,7 +183,7 @@ export function calculateTeamFollowUpSchedule(scope: TeamFollowUpScope, calendar
       } else if (startDate && endDate && endDate < startDate) {
         problems.push(`${issue.key} · 종료일은 시작일보다 빠를 수 없습니다.`);
       }
-      if (!endDate) problems.push(`${issue.key} · 선택한 차단 관계를 계산하려면 종료일을 입력해 주세요.`);
+      if (!endDate && 'sourceId' in scope) problems.push(`${issue.key} · 선택한 차단 관계를 계산하려면 종료일을 입력해 주세요.`);
       if (terminal(issue) && (startDate !== issue.startDate || endDate !== issue.endDate)) {
         problems.push(`${issue.key} · 완료·취소 업무의 고정 일정은 변경할 수 없습니다.`);
       }
