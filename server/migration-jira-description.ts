@@ -1,4 +1,5 @@
 import { documentNodes } from '../shared/document-references.js';
+import { parseAtlassianSearchInput } from '../shared/atlassian-search.js';
 import type { LegacyRecord, RichContent } from '../shared/types.js';
 import { renderTicketDescriptionMarkdown } from '../shared/document-export-markdown.js';
 import { convertLegacyContent, type MigrationContentContext, type MigrationContentDiagnostic } from './migration-content.js';
@@ -6,6 +7,13 @@ import { convertLegacyContent, type MigrationContentContext, type MigrationConte
 const renderedHtmlTag = /<\/?(?:p|br|h[1-6]|strong|b|em|i|u|del|s|strike|a|code|pre|blockquote|ul|ol|li|table|tr|th|td|img|span|div|hr)\b/i;
 const attachmentLink = /^(\/api\/(?:attachments|attachment-versions)\/([\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})\/(?:content|download))(?:\?inline=1)?$/iu;
 const plainNodes = new Set(['doc', 'paragraph', 'text', 'hardBreak']);
+
+export function jiraMigrationIssueAddress(href: string) {
+  // Filtered or comment-specific links carry information that a ticket-only address cannot preserve.
+  if (/[?#]/u.test(href)) return null;
+  const address = parseAtlassianSearchInput(href);
+  return address?.product === 'jira' ? address : null;
+}
 
 export function jiraRenderedHtmlDescription(record: LegacyRecord): boolean {
   return record.textFormat === 'plain' && record.metadata.descriptionFormat === 'search-rendered-html' && renderedHtmlTag.test(record.text);
@@ -45,7 +53,7 @@ function hasMarkdownContent(body: RichContent, href: (value: string) => string |
 export function projectJiraDescription(record: LegacyRecord, options: ProjectionOptions): JiraDescriptionProjection {
   const renderedHtml = jiraRenderedHtmlDescription(record);
   const input = renderedHtml ? { ...record, textFormat: 'confluence-storage' as const } : record;
-  const converted = convertLegacyContent(input, { resolveReference(request) {
+  const converted = convertLegacyContent(input, { keepUnresolvedIssueUrls: true, resolveReference(request) {
     const target = options.resolveReference(request);
     return request.kind === 'attachment' && target && !options.ownsAttachment(target.id) ? null : target;
   } });
@@ -53,11 +61,18 @@ export function projectJiraDescription(record: LegacyRecord, options: Projection
   const reliable = !diagnostics.some(item => item.severity === 'error' || item.code === 'RAW_CONTENT_FALLBACK');
   if (!reliable) return { description: renderedHtml ? record.text.replace(/\r\n?/gu, '\n') : plainText, diagnostics, reliable };
 
-  const href = (value: string) => linkDestination(value, options.ownsAttachment);
+  const issueHref = (id: string) => `/#/all/issues?issue=${encodeURIComponent(id)}`;
+  const href = (value: string) => {
+    const safe = linkDestination(value, options.ownsAttachment);
+    if (!safe) return undefined;
+    const address = jiraMigrationIssueAddress(value);
+    const target = address && options.resolveReference({ kind: 'issue', url: address.url });
+    return target?.id ? issueHref(target.id) : safe;
+  };
   if (!hasMarkdownContent(content, href)) return { description: plainText, diagnostics, reliable };
   const markdown = renderTicketDescriptionMarkdown(content, { href, reference(kind, id) {
     if (!id) return undefined;
-    return kind === 'issue' ? `/#/all/issues?issue=${encodeURIComponent(id)}` : `/#/all/documents/${encodeURIComponent(id)}`;
+    return kind === 'issue' ? issueHref(id) : `/#/all/documents/${encodeURIComponent(id)}`;
   } });
   return { description: markdown, descriptionFormat: 'markdown', diagnostics, reliable };
 }

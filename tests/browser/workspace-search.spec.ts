@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { DocPage, GitlabLink, Issue, ProjectIssueSchema, ProjectWorkflow, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, GitlabLink, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
+  ProjectIssueSchema, ProjectWorkflow, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   const data = await response.text();
@@ -425,6 +427,78 @@ test('360px에서 Confluence 원본 주소를 검색하고 현재 문서와 공�
   } finally {
     if (trashId) await request.delete(`/api/trash/${trashId}`);
     await f.close();
+  }
+});
+
+test('360px에서 이관한 Confluence 문서의 제목을 바꾼 뒤에도 원래 제목 주소로 찾는다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const key = `CS${suffix}`;
+  const sourceTitle = `작업 계획 + 검토 ${suffix}`;
+  const currentTitle = `이관 뒤 수정한 제목 ${suffix}`;
+  const body = `이관한 작업 계획 본문 ${suffix}`;
+  const sourceBase = `https://title-${suffix.toLowerCase()}.search.invalid/wiki`;
+  const original = `${sourceBase}/display/${key}/${encodeURIComponent(sourceTitle).replace(/%20/gu, '+')}`;
+  const numeric = `${sourceBase}/pages/viewpage.action?pageId=820`;
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${key}</property><property name="name">원본 ${key}</property></object>
+    <object class="Page"><id name="id">820</id><property name="title">${sourceTitle}</property><property name="version">1</property>
+      <property name="creationDate">2020-01-02T03:04:05Z</property><property name="lastModificationDate">2020-01-03T03:04:05Z</property>
+      <property name="space" class="Space"><id name="id">42</id></property></object>
+    <object class="BodyContent"><id name="id">8820</id><property name="bodyType">2</property><property name="body"><![CDATA[<p>${body}</p>]]></property>
+      <property name="content" class="Page"><id name="id">820</id></property></object>
+    </hibernate-generic>`;
+  const params = new URLSearchParams({ filename: `confluence-title-${suffix}.zip`, product: 'confluence', instanceKey: `confluence-title-${suffix}` });
+  const staged = await json<LegacyPackageSummary>(await request.post(`/api/legacy-import/packages?${params}`, {
+    headers: { 'Content-Type': 'application/octet-stream' }, data: zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]),
+  }), 201);
+  let documentId: string | undefined;
+  try {
+    const { defaultConfiguration } = await json<MigrationOptions>(await request.get('/api/migrations/options', { params: { packageId: staged.id } }));
+    const preview = await json<MigrationPreview>(await request.post('/api/migrations/preview', { data: { configuration: {
+      ...defaultConfiguration, sourceBaseUrls: { ...defaultConfiguration.sourceBaseUrls, [staged.id]: sourceBase },
+    } } }), 201);
+    expect(preview.canApply, JSON.stringify(preview.notices)).toBe(true);
+    const { import: receipt } = await json<MigrationApplyResult>(await request.post(`/api/migrations/previews/${preview.id}/apply`, {
+      data: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements },
+    }), 201);
+    const { documents } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    const [projectId] = receipt.projectIds;
+    const imported = documents.find(document => document.projectId === projectId && document.title === sourceTitle);
+    if (!imported) throw new Error('Migrated Confluence document was not found.');
+    documentId = imported.id;
+    const savedOrigins = await json<{ url: string }[]>(await request.get('/api/atlassian-links', {
+      params: { targetId: documentId, targetType: 'document' },
+    }));
+    expect(savedOrigins.map(({ url }) => url)).toEqual([numeric]);
+    const renamed = await json<DocPage>(await request.patch(`/api/documents/${documentId}`, {
+      data: { expectedVersion: imported.version, title: currentTitle },
+    }));
+
+    const outgoing: string[] = [];
+    await page.route(url => url.hostname.endsWith('.search.invalid'), async request => { outgoing.push(request.request().url()); await request.abort(); });
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${projectId}/overview`);
+    await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+    const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+    await quick.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(`${original}?tracking=synthetic-private#section`);
+    await expect(quick.getByText(currentTitle, { exact: true })).toBeVisible();
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+    const result = search(page);
+    await expect.poll(() => route(page)).toEqual({ path: `#/${projectId}/search`, query: { q: original } });
+    await expect(result.rows).toHaveCount(1);
+    await result.document(renamed).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(currentTitle);
+    await expect(page.locator('[aria-label="문서 본문"]')).toContainText(body);
+    await page.goBack();
+    await expect(result.document(renamed)).toBeVisible();
+    expect(outgoing).toEqual([]);
+  } finally {
+    if (documentId) {
+      const removed = await request.delete(`/api/documents/${documentId}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    await request.delete(`/api/legacy-import/packages/${staged.id}?expectedVersion=${staged.version}`);
   }
 });
 

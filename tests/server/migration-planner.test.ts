@@ -1599,6 +1599,75 @@ test('migration origins use each package base and the original key or current pa
   assert.deepEqual(plan.preview.samples.map(sample => sample.sourceUrl), plan.atlassianLinks.map(link => link.url));
 });
 
+test('Jira ADF anchors resolve exact original mounts and preserve unrelated, ambiguous and comment links', () => {
+  const jiraPackage = jira();
+  const nested = pkg('nested-jira', 'jira', [record('project', 'j', { title: '다른 Jira', metadata: { key: 'OLD' } }),
+    record('identity', 'alice', { title: '별도 작성자' }), issue('2', { title: '중첩 설치의 업무' })]);
+  const source = jiraPackage.dataset.records.find(row => row.id === 'issue:1')!;
+  const root = 'https://jira.example.test/jira';
+  const alternate = `${root}/nested`;
+  const bodyUrls = {
+    '원래 업무': `${root}/browse/old-2`,
+    '별도 설치 업무': `${alternate}/browse/OLD-2`,
+    '미확인 하위 URL': `${root}/unknown/browse/OLD-2`,
+    '다른 서버': 'https://other.example.test/jira/browse/OLD-2',
+    '특정 댓글': `${root}/browse/OLD-2?focusedCommentId=8#comment-8`,
+  };
+  source.textFormat = 'adf';
+  source.text = JSON.stringify({ type: 'doc', version: 1, content: Object.entries(bodyUrls).map(([text, href]) => ({
+    type: 'paragraph', content: [{ type: 'text', text, marks: [{ type: 'link', attrs: { href } }] }],
+  })) });
+  jiraPackage.dataset.records.find(row => row.id === 'issue:2')!.metadata.key = 'oLd-2';
+  const verify = (otherBase: string) => {
+    const request = input([jiraPackage, nested]);
+    request.configuration.projects.forEach((value, index) => { value.key = index ? 'OTHER' : 'TEAM'; });
+    request.configuration.sourceBaseUrls = { [jiraPackage.summary.id]: root, [nested.summary.id]: otherBase };
+    const result = buildMigrationPlan(request);
+    assert.equal(result.preview.canApply, true, JSON.stringify(result.preview.notices));
+    assert.equal(result.sourceRecords.find(({ record }) => record.id === source.id)?.record.text, source.text);
+    return result.issues;
+  };
+  const targets = verify(alternate);
+  const description = targets.find(value => value.title === source.title)?.description ?? '';
+  assert.ok(description.includes(`[원래 업무](/#/all/issues?issue=${targets.find(value => value.title === '업무 2')!.id})`));
+  assert.ok(description.includes(`[별도 설치 업무](/#/all/issues?issue=${targets.find(value => value.title === '중첩 설치의 업무')!.id})`));
+  for (const [label, url] of Object.entries(bodyUrls).slice(2)) assert.ok(description.includes(`[${label}](${url})`));
+  const ambiguous = verify(root).find(value => value.title === source.title)?.description;
+  assert.ok(ambiguous?.includes(`[원래 업무](${bodyUrls['원래 업무']})`));
+});
+
+test('Jira ADF links can open a verified retained issue outside the new export', () => {
+  const baseline = buildMigrationPlan(input([jira()]));
+  const [project] = baseline.projects;
+  const [workflow] = baseline.workflows;
+  const [schema] = baseline.issueSchemas;
+  const [existing] = baseline.issues;
+  const sourceUrl = 'https://jira.example.test/jira/browse/OLD-1';
+  const description = JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [
+    { type: 'text', text: '먼저 옮긴 업무', marks: [{ type: 'link', attrs: { href: sourceUrl } }] },
+  ] }] });
+  const delta = pkg('delta-jira', 'jira', [record('project', 'j', { title: '기존 Jira', metadata: { key: 'OLD' } }),
+    record('identity', 'alice', { title: '원래 작성자' }), issue('3', { text: description, textFormat: 'adf' })]);
+  delta.dataset.source.instanceKey = 'jira';
+  const request = input([delta]);
+  request.configuration.sourceBaseUrls = { [delta.summary.id]: 'https://jira.example.test/jira' };
+  const options = buildMigrationOptions([delta]);
+  request.configuration.appendTo = {
+    projectId: project.id, fields: {},
+    statuses: Object.fromEntries(options.statuses.map(option => [option.id, workflow.statuses.find(status => status.label === option.label)!.id])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, schema.issueTypes.find(type => type.name === option.label)!.id])),
+  };
+  request.append = { project, workflow, schema, nextIssueNumber: 3, token: 'verified-append',
+    knownIssues: [{ alias: 'oLd-1', issueId: existing.id, projectId: project.id }] };
+  const result = buildMigrationPlan(request);
+  assert.equal(result.preview.canApply, true, JSON.stringify(result.preview.notices));
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.issues[0].description, `[먼저 옮긴 업무](/#/all/issues?issue=${existing.id})`);
+  request.append.knownIssues.push({ alias: 'OLD-1', issueId: baseline.issues[1].id, projectId: project.id });
+  const ambiguous = buildMigrationPlan(request);
+  assert.equal(ambiguous.issues[0].description, `[먼저 옮긴 업무](${sourceUrl})`);
+});
+
 test('only migrated primary rows count toward aggregated unavailable origin notices', () => {
   const issues = jira();
   issues.dataset.records.push(issue('MIS-9', { metadata: { key: '', originalUrl: 'https://jira.test/browse/MIS-9' } }));

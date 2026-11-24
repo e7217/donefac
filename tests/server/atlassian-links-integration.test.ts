@@ -6,11 +6,12 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AtlassianLink, AtlassianLinkPreview } from '../../shared/atlassian-links.js';
 import type { AtlassianSearchTarget } from '../../shared/atlassian-search.js';
-import type { ApiKeyCreated, DocPage, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Export = WorkspaceSnapshot & { schemaVersion: number; atlassianLinks: AtlassianLink[] };
 const linksRoute = '/atlassian-links';
@@ -215,4 +216,93 @@ test('original address search matches local targets by exact installation and so
   await link(gitlabWithJiraSuffix, issueTarget, 'jira');
   assert.deepEqual(await call(resolveRoute(gitlabWithJiraSuffix)), { targets: [issueTarget] });
   assert.deepEqual(await call(searchRoute(gitlabWithJiraSuffix)), { issues: [], documents: [] });
+});
+
+test('archived Confluence titles find genuinely imported pages only while their numeric origin link is active', async t => {
+  const { base, call } = await appFixture(t, scratch(t));
+  const origin = 'https://wiki.example.invalid/company/wiki';
+  const title = '기존 Release + 검토';
+  const refreshedTitle = '새 원본 제목';
+  const appendedTitle = '추가 문서 제목';
+  const display = (value: string, installation = origin, spaceKey = 'TEAM') =>
+    `${installation}/display/${spaceKey}/${encodeURIComponent(value).replaceAll('%20', '+')}`;
+  const numeric = (id: string, installation = origin) => `${installation}/pages/viewpage.action?pageId=${id}`;
+  const target = ({ id }: DocPage) => ({ targetType: 'document', targetId: id });
+  const resolve = (url: string) => call<{ targets: AtlassianSearchTarget[] }>(resolveRoute(url));
+  const page = (id: string, sourceTitle: string, version = 1) => [
+    `<object class="Page"><id name="id">${id}</id><property name="title">${sourceTitle}</property><property name="version">${version}</property>`,
+    '<property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-01T00:00:00Z</property>',
+    `<property name="lastModificationDate">2020-01-0${version}T00:00:00Z</property></object>`,
+    `<object class="BodyContent"><id name="id">30${id}</id><property name="body"><![CDATA[<p>보관한 이관 문서 ${version}</p>]]></property>`,
+    `<property name="content" class="Page"><id name="id">${id}</id></property></object>`,
+  ].join('');
+  async function migrate(instanceKey: string, pages: string[], projectKey: string, appendTo?: string) {
+    const space = '<object class="Space"><id name="id">42</id><property name="key">TEAM</property><property name="name">원본 팀 공간</property></object>';
+    const bytes = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${pages.join('')}</hibernate-generic>`) }]);
+    const params = new URLSearchParams({ filename: `${projectKey}.zip`, product: 'confluence', instanceKey });
+    const upload = await fetch(`${base}/legacy-import/packages?${params}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-min' }, body: new Uint8Array(bytes),
+    });
+    assert.equal(upload.status, 201, await upload.clone().text());
+    const imported = await upload.json() as LegacyPackageSummary;
+    const { defaultConfiguration: configuration } = await call<MigrationOptions>(`/migrations/options?packageId=${imported.id}`);
+    configuration.projects = configuration.projects.map(project => ({ ...project, key: projectKey }));
+    configuration.sourceBaseUrls[imported.id] = origin;
+    if (appendTo) configuration.appendPagesTo = { projectId: appendTo, refreshExisting: true };
+    const reviewed = await call<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
+    assert.ok(reviewed.canApply, JSON.stringify(reviewed.notices));
+    return call<MigrationApplyResult>(`/migrations/previews/${reviewed.id}/apply`, 'POST', {
+      expectedVersion: reviewed.version, acknowledgements: reviewed.requiredAcknowledgements,
+    }, 201);
+  }
+
+  const first = await migrate('confluence-display-a', [page('100', title)], 'BOOK');
+  const [projectId] = first.import.projectIds;
+  const workspace = () => call<WorkspaceSnapshot>('/workspace');
+  const document = (await workspace()).documents.find(candidate => candidate.projectId === projectId && candidate.title === title);
+  assert.ok(document);
+  const [originalLink] = await call<AtlassianLink[]>(targetRoute('document', document.id));
+  assert.equal(originalLink.url, numeric('100'));
+  const lookalike = await call<DocPage>('/documents', 'POST', { projectId, title }, 201);
+  const addNumeric = (owner: DocPage, installation: string) => call<AtlassianLink>(linksRoute, 'POST', {
+    ...target(owner), product: 'confluence', url: numeric('100', installation),
+  }, 201);
+  await addNumeric(lookalike, origin);
+  const otherInstallation = 'https://wiki.example.invalid/another/wiki';
+  await addNumeric(document, otherInstallation);
+
+  assert.deepEqual(await resolve(display(title) + '?tracking=hide#ignored'), { targets: [target(document)] });
+  assert.deepEqual(await resolve(display(title, otherInstallation)), { targets: [] });
+  assert.deepEqual(await resolve(display(title, origin, 'OTHER')), { targets: [] });
+  const localTitle = '팀에서 수정한 제목';
+  await call(`/documents/${document.id}`, 'PATCH', { expectedVersion: document.version, title: localTitle });
+  assert.deepEqual(await resolve(display(localTitle)), { targets: [] });
+  const searched = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(display(title)));
+  assert.deepEqual(searched.issues, []);
+  assert.deepEqual(searched.documents.map(value => [value.id, value.title]), [[document.id, localTitle]]);
+
+  await migrate('confluence-display-a', [page('100', refreshedTitle, 2), page('101', appendedTitle)], 'BOOK', projectId);
+  const appended = (await workspace()).documents.find(candidate => candidate.projectId === projectId && candidate.title === appendedTitle);
+  assert.ok(appended);
+  assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [target(document)] });
+  assert.deepEqual(await resolve(display(appendedTitle)), { targets: [target(appended)] });
+  assert.deepEqual(await resolve(display(title)), { targets: [target(document)] });
+
+  const second = await migrate('confluence-display-b', [page('200', title)], 'BKMK');
+  const alternative = (await workspace()).documents.find(candidate => candidate.projectId === second.import.projectIds[0] && candidate.title === title);
+  assert.ok(alternative);
+  assert.deepEqual(new Set((await resolve(display(title))).targets.map(value => value.targetId)), new Set([document.id, alternative.id]));
+  const backup = await call<Export>('/export');
+  await call('/import', 'POST', { data: backup });
+  assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [target(document)] });
+  const trash = await call<{ trashEntryId: string }>(`/documents/${document.id}`, 'DELETE');
+  assert.deepEqual(await resolve(display(title)), { targets: [target(alternative)] });
+  await call(`/trash/${trash.trashEntryId}/restore`, 'POST');
+  assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [target(document)] });
+
+  await call(`${linksRoute}/${originalLink.id}`, 'DELETE', undefined, 204);
+  assert.deepEqual(await resolve(display(title)), { targets: [target(alternative)] });
+  assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [] });
+  await call(linksRoute, 'POST', { ...target(document), product: 'confluence', url: display(refreshedTitle) }, 201);
+  assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [target(document)] });
 });

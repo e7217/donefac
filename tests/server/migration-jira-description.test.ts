@@ -60,6 +60,37 @@ test('ADF and Jira wiki project into editable Markdown with safe working links a
   assert.doesNotMatch(wiki.description, /!\[/u);
 });
 
+test('formatted ADF anchor labels and existing cards and Wiki links stay usable in ticket Markdown', () => {
+  const url = 'https://jira.example.test/jira/browse/OLD-7';
+  const external = 'https://other.example.test/jira/browse/OLD-7';
+  const comment = `${url}?focusedCommentId=8#comment-8`;
+  const recordOf = (body: string, format: LegacyRecord['textFormat']) => record('issue', '1', { text: body, textFormat: format });
+  const called: string[] = [];
+  const options = {
+    resolveReference(input: Parameters<typeof resolveReference>[0]) {
+      if (input.url) called.push(input.url);
+      return input.kind === 'issue' && input.url === url ? { id: 'issue-new', label: '이관한 티켓' } : null;
+    },
+    ownsAttachment: () => false,
+  };
+  const marked = (text: string, href: string) => ({ type: 'text', text, marks: [{ type: 'strong' }, { type: 'link', attrs: { href } }] });
+  const adf = JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: [marked('굵은 링크 이름', url)] },
+    { type: 'paragraph', content: [{ type: 'inlineCard', attrs: { url } }] },
+    { type: 'paragraph', content: [marked('댓글 확인', comment)] },
+  ] });
+  const projected = projectJiraDescription(recordOf(adf, 'adf'), options);
+  const html = parse(projected.description, { async: false });
+  assert.match(html, /<a href="\/#\/all\/issues\?issue=issue-new">(?:<strong>)?굵은 링크 이름/u);
+  assert.match(html, /<strong>/u);
+  assert.match(html, /<a href="\/#\/all\/issues\?issue=issue-new">이관한 티켓<\/a>/u);
+  assert.ok(html.includes(`href="${comment}"`));
+  assert.ok(!called.includes(comment));
+  assert.deepEqual(projected.diagnostics, []);
+  const wiki = projectJiraDescription(recordOf(`[원래 이름|${url}] [다른 설치|${external}]`, 'jira-wiki'), options);
+  assert.equal(wiki.description.replace(/\s+/gu, ' '), `[원래 이름](/#/all/issues?issue=issue-new) [다른 설치](${external})`);
+  assert.deepEqual(wiki.diagnostics, []);
+});
+
 test('Jira search-rendered HTML is normalized only when its source identifies the representation', () => {
   const html = '<p><strong>원본 굵게</strong> <a href="https://example.test/help">도움말</a></p>' +
     '<ul><li>업무 하나</li><li>업무 둘</li></ul><img src="https://example.test/remote.png" alt="가져오지 않은 사진"/>';

@@ -18,6 +18,7 @@ import { parseConfluenceColumnLayout } from './migration-confluence-layout.js';
 import {
   confluencePropertyReportMacros, parseConfluenceDocumentProperties, parseConfluenceDocumentPropertyReport,
 } from './migration-confluence-properties.js';
+import { confluenceAttachmentDownloadAddress, isConfluenceAttachmentDownloadUrl, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceSectionAliases, scanConfluenceSections, type ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // Format references (conversion is local and never requests these URLs):
@@ -29,12 +30,15 @@ export interface MigrationReferenceInput extends MigrationPageIdentity {
   url?: string;
   // A null owner marks an explicit container that cannot be resolved safely.
   attachmentOwner?: MigrationPageIdentity | null;
+  attachmentVersion?: number;
 }
 export interface MigrationContentContext {
   resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
+  confluenceOrigin?: MigrationOriginBase;
   // Text-only fields and older migration checkpoints used explicit annotation labels.
   legacyAnnotations?: boolean;
   preserveCommentWebLinks?: boolean;
+  keepUnresolvedIssueUrls?: boolean;
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
   legacyDocumentLabelList?: boolean;
@@ -345,8 +349,25 @@ class Converter {
   private unresolvedSection(): void {
     this.warn('SECTION_LINK_UNRESOLVED', 'Confluence 절 링크의 대상이나 표시 형식을 확정할 수 없어 링크 이름과 원본 대상 정보를 텍스트로 보존했습니다.');
   }
-  image(input: MigrationReferenceInput, alt: string): RichContent[] {
-    const found = this.resolve({ ...input, kind: 'attachment' });
+  private confluenceDownload(url: string | undefined): { url: string; reference?: MigrationReferenceInput } | null {
+    const base = this.context.confluenceOrigin;
+    if (!url || !this.richDocument || !base || !isConfluenceAttachmentDownloadUrl(url)) return null;
+    const address = confluenceAttachmentDownloadAddress(url, base);
+    if (!address?.identity) return { url: address?.url ?? url };
+    const { sourcePageId, filename, version } = address.identity;
+    return { url: address.url, reference: {
+      kind: 'attachment', url: address.url, title: filename, attachmentOwner: { sourceId: sourcePageId },
+      ...(version === undefined ? {} : { attachmentVersion: version }),
+    } };
+  }
+  private confluenceImage(url: string | undefined, alt: string): RichContent[] {
+    const download = this.confluenceDownload(url);
+    if (!download) return this.image({ kind: 'attachment', url }, alt);
+    return download.reference ? this.image(download.reference, alt)
+      : this.image({ kind: 'attachment', url: download.url }, alt, false);
+  }
+  image(input: MigrationReferenceInput, alt: string, lookup = true): RichContent[] {
+    const found = lookup ? this.resolve({ ...input, kind: 'attachment' }) : null;
     if (found?.url && /^\/api\/attachments\/[^/?#]+\/content\?inline=1$/.test(found.url) && this.safeUrl(found.url)) return [{ type: 'image', attrs: { src: found.url, alt: alt || found.label } }];
     this.warn(input.url && /^https?:/i.test(input.url) ? 'REMOTE_IMAGE_NOT_EMBEDDED' : 'UNRESOLVED_IMAGE', '이미지 파일을 로컬 첨부로 확정하지 못해 이름·주소를 텍스트로 보존했습니다. 원격 이미지는 자동으로 불러오지 않습니다.');
     const label = alt || found?.label || input.title || input.sourceId || '이미지', url = found?.url || input.url;
@@ -384,7 +405,10 @@ class Converter {
   urlReference(url: string): MigrationReferenceInput | null {
     const address = url.trim();
     if (this.context.preserveCommentWebLinks && commentWebUrl(address)) return null;
-    if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(address)) return { kind: 'issue', url };
+    if (/\/browse\/[A-Za-z][A-Za-z0-9_]*-\d+(?:[?#/]|$)/.test(address)) {
+      const issue = { kind: 'issue', url } as const;
+      return !this.context.keepUnresolvedIssueUrls || this.resolve(issue) ? issue : null;
+    }
     if (/[?&]pageId=|(?:^|\/)(?:display|spaces)\//.test(address)) return { kind: 'page', url };
     if (/(?:^|\/)x\/[A-Za-z0-9_-]{1,11}\/*$/u.test(address.split(/[?#]/u, 1)[0])) {
       const page = { kind: 'page', url } as const;
@@ -545,8 +569,17 @@ class Converter {
       case 'tr': return [{ type: 'tableRow', content: node.children.filter(value => !(typeof value === 'string' && !value.trim())).flatMap(value => this.xml(value, depth + 1)) }];
       case 'td': case 'th': return [{ type: type === 'td' ? 'tableCell' : 'tableHeader', attrs: { colspan: this.span(node.attrs.colspan), rowspan: this.span(node.attrs.rowspan) }, content: flow(this.xmlParts(node.children, depth, true)) }];
       case 'a': {
-        const url = node.attrs.href || '', reference = this.urlReference(url), label = this.xmlText(node);
+        const url = node.attrs.href || '', label = this.xmlText(node);
         const values = children();
+        const download = this.confluenceDownload(url);
+        if (download) {
+          const target = download.reference && this.resolve(download.reference);
+          if (download.reference && !target?.url) {
+            this.warn('CONFLUENCE_ATTACHMENT_DOWNLOAD_UNRESOLVED', '원본 첨부 주소의 파일이나 버전을 확인하지 못해 원래 주소를 연결했습니다.');
+          }
+          return this.link(values.length ? values : text(label || download.url), target?.url ?? download.url);
+        }
+        const reference = this.urlReference(url);
         const hash = url.indexOf('#');
         const page = reference?.kind === 'page' ? reference : undefined;
         if (this.context.sectionLinks && hash >= 0 && (page || hash === 0 && !url.startsWith('#/'))) {
@@ -582,10 +615,10 @@ class Converter {
       }
       case 'ac:image': {
         const attachment = child('ri:attachment'), url = child('ri:url');
-        const input = attachment ? attachmentIdentity(attachment) : { kind: 'attachment' as const, url: url?.attrs['ri:value'] };
-        return this.image(input, node.attrs['ac:alt'] || node.attrs['ac:title'] || '');
+        const alt = node.attrs['ac:alt'] || node.attrs['ac:title'] || '';
+        return attachment ? this.image(attachmentIdentity(attachment), alt) : this.confluenceImage(url?.attrs['ri:value'], alt);
       }
-      case 'img': return this.image({ kind: 'attachment', url: node.attrs.src }, node.attrs.alt || '');
+      case 'img': return this.confluenceImage(node.attrs.src, node.attrs.alt || '');
       case 'ac:task-list': return this.confluenceTaskList(node, depth);
       case 'ac:task': return [{ type: 'taskList', content: [this.confluenceTask(node, depth)] }];
       case 'ac:structured-macro': case 'ac:macro': return this.richDocument && node.attrs['ac:name'] === 'section'

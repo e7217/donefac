@@ -1,10 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { AtlassianReadError, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
 import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
+import type { SourceImport } from '../shared/types.js';
+import { parseMigrationOriginBase } from './migration-origin-links.js';
 import type { Store } from './store.js';
 
 type LinkTarget = Pick<AtlassianLink, 'targetType' | 'targetId'>;
 type LinkReferences = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
+type ConfluenceTitleAddress = Extract<ParsedAtlassianLink, { title: string }>;
+type ArchivedPage = { targetId: string; importId: string; instanceKey: string; packageSha: string; spaceId: string };
+type ArchivedSpace = { spaceKey: string | null; key: string | null; sourceClass: string | null };
 
 const inputFields = ['targetType', 'targetId', 'product', 'url'];
 const backupFields = ['id', ...inputFields, 'createdAt'];
@@ -90,8 +95,12 @@ export class AtlassianLinksService {
   resolve(address: ParsedAtlassianLink): AtlassianSearchTarget[] {
     const order = 'ORDER BY targetType,targetId';
     if (address.product !== 'confluence' || !('pageId' in address)) {
-      return this.store.db.prepare(`SELECT ${targetColumns} FROM atlassian_links
+      const exact = this.store.db.prepare(`SELECT ${targetColumns} FROM atlassian_links
         WHERE product=? AND url=? AND ${activeTarget} ${order}`).all(address.product, address.url) as unknown as AtlassianSearchTarget[];
+      if (address.product === 'jira') return exact;
+      const targets = new Map(exact.map(target => [`${target.targetType}:${target.targetId}`, target]));
+      for (const target of this.archivedConfluenceTitleTargets(address)) targets.set(`document:${target.targetId}`, target);
+      return [...targets.values()].sort((left, right) => left.targetType.localeCompare(right.targetType) || left.targetId.localeCompare(right.targetId));
     }
 
     const base = `${address.origin}${address.contextPath}`;
@@ -109,6 +118,48 @@ export class AtlassianLinksService {
       if (candidate && sameAtlassianSearchAddress(address, candidate)) targets.set(`${targetType}:${targetId}`, { targetType, targetId });
     }
     return [...targets.values()];
+  }
+
+  private archivedConfluenceTitleTargets(address: ConfluenceTitleAddress): AtlassianSearchTarget[] {
+    const db = this.store.db;
+    if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_records'`).get()) return [];
+    const base = `${address.origin}${address.contextPath}`;
+    // A title is only an alternate locator for a bound page with a still-active numeric origin link.
+    const candidates = db.prepare(`SELECT DISTINCT page.target_id AS targetId, page.import_id AS importId,
+      page.source_instance AS instanceKey, json_extract(page.json,'$.packageSha256') AS packageSha,
+      json_extract(page.json,'$.record.containerId') AS spaceId
+      FROM source_records AS page
+      JOIN source_bindings AS binding ON binding.product=page.product AND binding.source_instance=page.source_instance
+        AND binding.kind=page.kind AND binding.source_alias=page.source_id AND binding.target_type=page.target_type
+        AND binding.target_id=page.target_id
+      JOIN documents AS document ON document.id=page.target_id
+      JOIN atlassian_links AS link ON link.product='confluence' AND link.target_type='document'
+        AND link.target_id=page.target_id AND link.url=? || page.source_id
+      WHERE page.product='confluence' AND page.kind='page' AND page.target_type='document' AND json_valid(page.json)
+        AND json_extract(page.json,'$.record.title')=? AND json_type(page.json,'$.record.containerId')='text'
+        AND coalesce(json_extract(page.json,'$.excluded'),0)=0
+        AND coalesce(json_extract(page.json,'$.record.metadata.sourceClass'),'Page')='Page'`)
+      .all(`${base}/pages/viewpage.action?pageId=`, address.title) as unknown as ArchivedPage[];
+    const spaceQuery = db.prepare(`SELECT json_extract(json,'$.record.metadata.spaceKey') AS spaceKey,
+      json_extract(json,'$.record.metadata.key') AS key, json_extract(json,'$.record.metadata.sourceClass') AS sourceClass
+      FROM source_records WHERE import_id=? AND product='confluence' AND source_instance=? AND kind='project' AND source_id=?
+        AND json_valid(json) AND json_extract(json,'$.packageSha256')=? AND coalesce(json_extract(json,'$.excluded'),0)=0 LIMIT 2`);
+    const receipts = new Map<string, SourceImport | undefined>();
+    const targets: AtlassianSearchTarget[] = [];
+    for (const { targetId, importId, instanceKey, packageSha, spaceId } of candidates) {
+      if (!receipts.has(importId)) receipts.set(importId, this.store.get<SourceImport>('source_imports', importId));
+      const receipt = receipts.get(importId);
+      const packages = receipt?.packages.filter(pkg => pkg.sha256 === packageSha && pkg.source.product === 'confluence' &&
+        pkg.source.instanceKey === instanceKey);
+      if (!receipt || packages?.length !== 1) continue;
+      const origin = parseMigrationOriginBase('confluence', receipt.configuration.sourceBaseUrls?.[packages[0].stagingId]);
+      if (origin?.origin !== address.origin || origin.contextPath !== address.contextPath) continue;
+      const [space, duplicate] = spaceQuery.all(importId, instanceKey, spaceId, packageSha) as unknown as ArchivedSpace[];
+      if (!space || duplicate || (space.sourceClass !== null && space.sourceClass !== 'Space') ||
+          (space.spaceKey || space.key) !== address.spaceKey || (space.key && space.key !== address.spaceKey)) continue;
+      targets.push({ targetType: 'document', targetId });
+    }
+    return targets;
   }
 
   create(input: unknown): AtlassianLink {

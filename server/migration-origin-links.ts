@@ -19,6 +19,11 @@ export interface ConfluenceMigrationPageAddress extends MigrationOriginBase {
   identity: { sourceId?: string; title?: string; spaceKey?: string };
 }
 
+interface ConfluenceAttachmentDownload {
+  url: string;
+  identity?: { sourcePageId: string; filename: string; version?: number };
+}
+
 const invalidAddressCharacters = /[\u0000-\u001f\u007f\\]/u;
 const commentFragment = /^(?:comments?|(?:inline[-_]?comment|comment)[-_:]?\d+)$/iu;
 
@@ -83,6 +88,40 @@ export function confluenceMigrationPageAddress(value: string, base?: MigrationOr
   if (!result || (pageIds.length && pageIds[0] !== result.identity.sourceId) ||
       (base && (result.origin !== base.origin || result.contextPath !== base.contextPath))) return null;
   return result;
+}
+
+export function isConfluenceAttachmentDownloadUrl(value: string): boolean {
+  return /(?:^|\/)download\/attachments\//u.test(value.trim().split(/[?#]/u, 1)[0]);
+}
+
+export function confluenceAttachmentDownloadAddress(value: string, base: MigrationOriginBase): ConfluenceAttachmentDownload | null {
+  if (value.length > MAX_ATLASSIAN_LINK_URL_LENGTH || !value.isWellFormed() || invalidAddressCharacters.test(value)) return null;
+  const text = value.trim();
+  const relative = text.replace(/^\.\//u, '');
+  const absolute = /^https?:\/\//iu.test(text) ? text
+    : /^download\/attachments\//u.test(relative) ? base.origin + base.contextPath + '/' + relative
+    : /^\/(?!\/)/u.test(text) ? base.origin + text : '';
+  const url = atlassianWebUrl(absolute);
+  if (!url || url.origin !== base.origin || !safePagePath(absolute)) return null;
+  const fallback = { url: url.href };
+  const prefix = base.contextPath + '/download/attachments/';
+  if (!url.pathname.startsWith(prefix)) return fallback;
+  const [owner, rawFilename, ...extra] = url.pathname.slice(prefix.length).split('/');
+  const sourcePageId = decodePagePart(owner);
+  const filename = rawFilename && decodePagePart(rawFilename);
+  if (extra.length || !isConfluencePageId(sourcePageId) || !filename || filename.includes('/') || filename === '.' || filename === '..') return fallback;
+
+  // A file fragment or an unknown selector might change the requested representation.
+  const seen = new Set<string>();
+  if (url.hash) return fallback;
+  for (const [key, queryValue] of url.searchParams) {
+    if (seen.has(key) || !(key === 'version' || key === 'modificationDate' && /^\d{1,19}$/u.test(queryValue) ||
+      key === 'api' && /^v[12]$/u.test(queryValue))) return fallback;
+    seen.add(key);
+  }
+  const version = url.searchParams.get('version');
+  if (version !== null && (!/^[1-9]\d*$/u.test(version) || !Number.isSafeInteger(Number(version)))) return fallback;
+  return { ...fallback, identity: { sourcePageId, filename, ...(version === null ? {} : { version: Number(version) }) } };
 }
 
 export function parseMigrationOriginBase(product: AtlassianProduct, value: unknown): MigrationOriginBase | undefined {

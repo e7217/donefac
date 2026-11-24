@@ -8,6 +8,7 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
+import { isJiraIssueKey } from '../shared/atlassian-links.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceParentEvidence, confluencePositionEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
@@ -20,7 +21,7 @@ import { confluenceMigrationPageAddress, isWithinMigrationOrigin, migrationOrigi
   type ConfluenceMigrationPageAddress, type MigrationOriginBase } from './migration-origin-links.js';
 import { confluenceHistoryPage } from './source-preservation.js';
 import { jiraCustomRawField, jiraCustomSourceFieldAliases, jiraCustomSourceFieldId, jiraCustomValueDigest } from './migration-jira-fields.js';
-import { jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
+import { jiraMigrationIssueAddress, jiraRenderedHtmlDescription, projectJiraDescription } from './migration-jira-description.js';
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
 import { JIRA_COMPONENTS_FIELD_ID, JIRA_RAW_COMPONENTS_FIELD_ID } from './legacy-import-jira-components.js';
@@ -496,6 +497,7 @@ function confluenceAttachmentLocation(sourcePageId: string, sourceRootId: string
 class Planner{
   options:MigrationOptions;result:PreparedMigration;entries:Entry[]=[];entryByKey=new Map<string,Entry>();bindings=new Map<string,Binding>();excluded=new Set<string>();projectsByContainer=new Map<string,Project>();schemas=new Map<string,ProjectIssueSchema>();workflows=new Map<string,ProjectWorkflow>();notices:MigrationNotice[]=[];noticeKeys=new Set<string>();timezoneValid=true;archiveIds=new Map<string,string>();ownerCache=new Map<string,Entry|null>();indexes=new Map<string,Map<string,LegacyRecord>>();issueById=new Map<string,Issue>();documentById=new Map<string,PreparedMigration['documents'][number]>();primaryById=new Map<string,Entry>();referenceIndex=new Map<string,Entry[]>();resolutionCache=new Map<string,{id:string;label:string;url?:string}|null>();fieldOptions=new Map<string,Map<string,MigrationOptions['fields'][number]>>();sourceOptions=new Map<string,Map<string,LegacyRecord[]>>();
   originBases = new Map<string, MigrationOriginBase>();
+  private readonly jiraIssuesByAddress = new Map<string, Entry[]>();
   private attachmentRoots = new Map<string, Entry | null>();
   private attachmentVersionsById = new Map<string, AttachmentVersion>();
   private confluenceAttachmentSeries = new Map<string, Map<string, ConfluenceAttachmentSeries>>();
@@ -521,6 +523,7 @@ class Planner{
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
   private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
   private boundIssues = new Map<string, KnownIssue>();
+  private retainedIssuesByJiraKey = new Map<string, KnownIssue | null>();
   private boundPages = new Map<string, KnownPage>();
   private boundPagesByDocument = new Map<string, KnownPage>();
   private confluenceSectionProjections = new Map<Entry, ReadonlyMap<string, string>>();
@@ -590,6 +593,13 @@ class Planner{
     // A retained row can carry an additional alias when the export format changes.
     // Use it for references within the plan without creating a new source binding.
     for (const [alias, issue] of retainedAliases) if (!this.boundIssues.has(alias)) this.boundIssues.set(alias, issue);
+    for (const [alias, issue] of this.boundIssues) {
+      if (!isJiraIssueKey(alias)) continue;
+      const key = alias.toUpperCase();
+      const previous = this.retainedIssuesByJiraKey.get(key);
+      if (previous === undefined) this.retainedIssuesByJiraKey.set(key, issue);
+      else if (previous?.issueId !== issue.issueId || previous.projectId !== issue.projectId) this.retainedIssuesByJiraKey.set(key, null);
+    }
     const retainedIssues = this.retainedEntries.size;
     if (mapping.refreshHistory === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
       this.knownJiraHistory.add(JSON.stringify([kind, sourceId]));
@@ -1187,6 +1197,7 @@ class Planner{
       const incomingBody = confluencePageBodySourceHash(row);
       const contentContext: MigrationContentContext = {
         resolveReference: request => this.resolve(entry, request),
+        confluenceOrigin: this.originBases.get(entry.pkg.summary.id),
         sectionLinks: this.confluenceSectionLinks(entry, document.id),
         resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
         resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, append.project.id),
@@ -1590,6 +1601,15 @@ class Planner{
       this.originBases.set(summary.id, base);
       return [summary.id, `${base.origin}${base.contextPath}`];
     }));
+    for (const entry of this.entries) {
+      const key = entry.row.metadata.key;
+      const base = this.originBases.get(entry.pkg.summary.id);
+      if (entry.row.kind !== 'issue' || entry.pkg.dataset.source.product !== 'jira' || !base || !isJiraIssueKey(key)) continue;
+      const locator = JSON.stringify([base.origin, base.contextPath, key.toUpperCase()]);
+      const candidates = this.jiraIssuesByAddress.get(locator);
+      if (candidates) candidates.push(entry);
+      else this.jiraIssuesByAddress.set(locator, [entry]);
+    }
   }
   createOriginLinks(): void {
     const missingBases = new Map<string, { firstEntry: Entry; count: number }>();
@@ -2837,6 +2857,7 @@ class Planner{
     if (cached) return cached;
     const converted = convertLegacyContent(entry.row, {
       resolveReference: request => this.resolve(entry, request), sectionLinks: { documentId },
+      confluenceOrigin: this.originBases.get(entry.pkg.summary.id),
     });
     const sections = converted.sectionTargets ?? new Map<string, string>();
     this.confluenceSectionProjections.set(entry, sections);
@@ -2904,12 +2925,14 @@ class Planner{
     };
   }
   private confluenceAttachment(entry: Entry, request: MigrationReferenceInput): Entry | null {
-    const { attachmentOwner, sourceId, title } = request;
+    const { attachmentOwner, sourceId, title, attachmentVersion } = request;
     if (attachmentOwner === null) return null;
+    const downloadOrigin = request.url ? this.originIdentity(entry) : undefined;
     let candidates = this.confluenceCandidates(entry, 'attachment', sourceId, title);
+    if (downloadOrigin) candidates = candidates.filter(candidate => this.originIdentity(candidate) === downloadOrigin);
     let ownerId: string | undefined;
     if (attachmentOwner || !sourceId) {
-      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner)?.entry : this.ownerEntry(entry);
+      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner, downloadOrigin)?.entry : this.ownerEntry(entry);
       if (owner?.row.kind !== 'page') return null;
       const binding = this.bindings.get(owner.key);
       if (binding?.type !== 'document') return null;
@@ -2931,13 +2954,16 @@ class Planner{
       const binding = this.bindings.get(candidate.key);
       if (!binding) return false;
       const version = this.attachmentVersionsById.get(binding.id);
-      return version && (!ownerId || version.resourceId === ownerId) && (sourceId || version.attachmentId === version.id);
+      if (!version || ownerId && version.resourceId !== ownerId) return false;
+      if (attachmentVersion !== undefined) return confluenceAttachmentRevision(candidate.row) === attachmentVersion;
+      if (request.url && this.attachmentRoot(candidate) !== candidate) return false;
+      return sourceId || version.attachmentId === version.id;
     });
     return imported.length === 1 ? imported[0] : null;
   }
   private boundConfluenceAttachmentPage(entry: Entry, request: MigrationReferenceInput): string | undefined {
     if (request.attachmentOwner) {
-      const owner = this.confluencePage(entry, request.attachmentOwner);
+      const owner = this.confluencePage(entry, request.attachmentOwner, request.url ? this.originIdentity(entry) : undefined);
       return owner ? this.confluenceAttachmentPages.get(owner.reference.id) : undefined;
     }
     const owner = this.ownerEntry(entry);
@@ -2978,13 +3004,30 @@ class Planner{
     return series.known.filter(file => file.sourceId === series.sourceRootId && (file.sourceRevision ?? 0) === highest);
   }
 
+  private boundConfluenceAttachmentRevision(entry: Entry, series: Iterable<ConfluenceAttachmentSeries>,
+    title: string, revision: number): AttachmentVersion | null {
+    const origin = this.originIdentity(entry);
+    const matches = [...series].filter(line => line.entries.some(row => this.originIdentity(row) === origin && attachmentFilename(row.row) === title) ||
+      line.known.some(file => file.filename === title));
+    if (matches.length !== 1) return null;
+    const [line] = matches;
+    const present = this.localConfluenceAttachmentRows(entry, line.entries.filter(row =>
+      this.originIdentity(row) === origin && confluenceAttachmentRevision(row.row) === revision));
+    const known = line.known.filter(file => file.sourceRevision === revision);
+    if (present.some(row => attachmentFilename(row.row) !== title) || known.some(file => file.filename !== title)) return null;
+    if (present.length) return this.incomingAttachmentVersions(present);
+    return this.uniquelyResolvedAttachment(known.map(file => file.version));
+  }
+
   private lookupBoundConfluenceAttachment(entry: Entry, sourcePageId: string, request: MigrationReferenceInput): ResolvedReference | null {
     if (this.restrictedSourcePages.has(sourcePageId) || this.excludedConfluenceAttachmentPages.has(sourcePageId)) return null;
     const seriesForPage = this.confluenceAttachmentSeries.get(sourcePageId);
     if (!seriesForPage) return null;
-    const { sourceId, title } = request;
+    const { sourceId, title, attachmentVersion } = request;
     let version: AttachmentVersion | null;
-    if (sourceId) {
+    if (attachmentVersion !== undefined && title) {
+      version = this.boundConfluenceAttachmentRevision(entry, seriesForPage.values(), title, attachmentVersion);
+    } else if (sourceId) {
       const lines = [...seriesForPage.values()].filter(series => series.entries.some(row => row.row.sourceId === sourceId) ||
         series.known.some(file => file.sourceId === sourceId));
       if (lines.length !== 1) return null;
@@ -3001,8 +3044,10 @@ class Planner{
       }
     } else if (title) {
       const candidates: (AttachmentVersion | null)[] = [];
+      const downloadOrigin = request.url ? this.originIdentity(entry) : undefined;
       for (const series of seriesForPage.values()) {
-        const roots = series.entries.filter(row => row.row.sourceId === series.sourceRootId && !row.row.metadata.currentVersionId);
+        const roots = series.entries.filter(row => row.row.sourceId === series.sourceRootId && !row.row.metadata.currentVersionId &&
+          (!downloadOrigin || this.originIdentity(row) === downloadOrigin));
         const current = this.confluenceCurrentAttachmentRows(entry, roots);
         if (roots.length) {
           if ((current.length ? current : roots).some(row => attachmentFilename(row.row) === title)) {
@@ -3034,7 +3079,38 @@ class Planner{
     const version = this.attachmentVersionsById.get(binding.id);
     return version ? attachmentReference(version, candidate.row.title) : { id: binding.id, label: candidate.row.title, url: `/api/attachments/${binding.id}/content` };
   }
+  private jiraIssueHref(entry: Entry, href: string, sourceId?: string): ResolvedReference | null {
+    const address = jiraMigrationIssueAddress(href);
+    if (!address || (sourceId && sourceId.toUpperCase() !== address.issueKey)) return null;
+    const locator = JSON.stringify([address.origin, address.contextPath, address.issueKey]);
+    const candidates = this.jiraIssuesByAddress.get(locator) ?? [];
+    if (candidates.some(candidate => this.excluded.has(candidate.key) || this.restricted(candidate))) return null;
+    const identities = new Set(candidates.map(candidate => JSON.stringify([candidate.pkg.dataset.source.instanceKey, candidate.row.sourceId])));
+    if (identities.size > 1) return null;
+    const imported = new Map<string, Entry>();
+    for (const candidate of candidates) {
+      const binding = this.bindings.get(candidate.key);
+      if (binding?.type === 'issue') imported.set(binding.id, candidate);
+    }
+    if (imported.size > 1) return null;
+    const current = imported.values().next().value;
+    const append = this.input.append;
+    if (!append || this.originIdentity(entry) !== `${address.origin}${address.contextPath}`) {
+      return current ? this.resolvedReference(current) : null;
+    }
+    const known = this.retainedIssuesByJiraKey.get(address.issueKey);
+    if (known === null || (known && known.projectId !== append.project.id)) return null;
+    if (current) return !known || this.bindings.get(current.key)?.id === known.issueId ? this.resolvedReference(current) : null;
+    const retained = candidates[0];
+    if (retained && !this.retainedEntries.has(retained.key)) return null;
+    const byId = retained ? this.originalIssue(retained.row.sourceId) : undefined;
+    if (byId && known && byId.id !== known.issueId) return null;
+    const issueId = byId?.id ?? known?.issueId;
+    return issueId ? { id: issueId, label: address.issueKey } : null;
+  }
   resolve(entry: Entry, request: MigrationReferenceInput): ResolvedReference | null {
+    if (entry.row.kind === 'revision' && request.kind === 'attachment' && request.url &&
+        request.attachmentOwner && request.attachmentVersion === undefined) return null;
     const scoped = this.isConfluenceStorageReference(entry, request);
     const pageHref = request.kind === 'page' ? request.url : undefined;
     const space = scoped || (pageHref && entry.pkg.dataset.source.product === 'confluence') ? this.confluenceSpace(entry) : null;
@@ -3042,7 +3118,8 @@ class Planner{
     const key = JSON.stringify([entry.pkg.summary.id, scoped, space, owner, request]);
     if (this.resolutionCache.has(key)) return this.resolutionCache.get(key)!;
     let value: ResolvedReference | null;
-    if (pageHref) value = this.confluencePageHref(entry, pageHref, request.sourceId);
+    if (request.kind === 'issue' && request.url) value = this.jiraIssueHref(entry, request.url, request.sourceId);
+    else if (pageHref) value = this.confluencePageHref(entry, pageHref, request.sourceId);
     else if (scoped && request.kind === 'page') value = this.confluencePage(entry, request)?.reference ?? null;
     else if (scoped) {
       const boundPageId = this.boundConfluenceAttachmentPage(entry, request);
@@ -3076,6 +3153,7 @@ class Planner{
   converted(entry: Entry, { legacyAnnotations = false, documentId }: { legacyAnnotations?: boolean; documentId?: string } = {}) {
     const result = convertLegacyContent(entry.row, {
       resolveReference: request => this.resolve(entry, request), legacyAnnotations,
+      confluenceOrigin: entry.pkg.dataset.source.product === 'confluence' ? this.originBases.get(entry.pkg.summary.id) : undefined,
       sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
       resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, this.project(entry)?.id),
       resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, this.project(entry)?.id),
@@ -3288,6 +3366,7 @@ class Planner{
   }
 
   private historicalConfluenceAttachment(entry: Entry, sourcePageId: string, request: MigrationReferenceInput): ResolvedReference | null {
+    if (request.url && request.attachmentOwner) return this.resolve(entry, request);
     if (request.attachmentOwner === null) return null;
     const owner = request.attachmentOwner === undefined ? sourcePageId : this.boundConfluenceAttachmentPage(entry, request);
     if (!owner || !request.sourceId) return null;
@@ -3358,6 +3437,7 @@ class Planner{
       const converted = convertLegacyContent(row, {
         resolveReference: request => version !== null && request.kind === 'attachment'
           ? this.historicalConfluenceAttachment(entry, sourcePageId, request) : this.resolve(entry, request),
+        confluenceOrigin: this.originBases.get(entry.pkg.summary.id),
         legacyAnnotations: version === null,
         resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, owner.projectId),
         resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, owner.projectId),

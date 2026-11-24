@@ -2491,6 +2491,7 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   const f = await fixture();
   t.after(() => f.close());
   const source = 'synthetic-confluence-attachment-refresh';
+  const sourceBase = 'https://wiki.example.test/confluence';
   const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
   const ref = (name: string, kind: string, id: string) => `<property name="${name}" class="${kind}"><id name="id">${id}</id></property>`;
   const object = (kind: string, id: string, content: string) => `<object class="${kind}"><id name="id">${id}</id>${content}</object>`;
@@ -2520,7 +2521,9 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
     page('100', '원본 첨부 문서', 1, image('ri:filename="diagram.png"')),
     attachment('700', 1, 'diagram.png'),
   ], [['700/1', firstBytes]]);
-  const initial = await f.apply(await f.preview(await f.configuration(initialPack, 'WFIL')));
+  const initialConfig = await f.configuration(initialPack, 'WFIL');
+  initialConfig.sourceBaseUrls[initialPack.id] = sourceBase;
+  const initial = await f.apply(await f.preview(initialConfig));
   assert.equal(initial.status, 201, JSON.stringify(initial.data));
   const [projectId] = initial.data.import.projectIds;
   const workspace = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
@@ -2537,13 +2540,14 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   async function config(pkg: LegacyPackageSummary, refreshAttachments = false, refreshExisting = false): Promise<MigrationConfiguration> {
     const options = (await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`)).data;
     assert.equal(options.appendPagesTarget?.projectId, projectId);
-    return { ...options.defaultConfiguration, appendPagesTo: { projectId,
+    return { ...options.defaultConfiguration, sourceBaseUrls: { [pkg.id]: sourceBase }, appendPagesTo: { projectId,
       ...(refreshAttachments ? { refreshAttachments: true } : {}), ...(refreshExisting ? { refreshExisting: true } : {}),
     } };
   }
 
   const referencePack = await upload('new-page-with-existing-image', [page('200', '기존 이미지를 참조한 새 문서', 1,
-    image('ri:filename="diagram.png"', '<ri:page ri:content-id="100"/>'))]);
+    image('ri:filename="diagram.png"', '<ri:page ri:content-id="100"/>') +
+      '<img src="/confluence/download/attachments/100/diagram.png?version=1" alt="앞서 이관한 이미지"/>')]);
   const referenceConfig = await config(referencePack);
   const anchorFile = join(f.dir, 'uploads', anchor.id);
   try {
@@ -2561,7 +2565,7 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   } finally { writeFileSync(anchorFile, firstBytes); }
   assert.equal((await f.apply(referencePlan)).status, 201);
   const referencing = (await workspace()).documents.find(page => page.title === '기존 이미지를 참조한 새 문서')!;
-  assert.deepEqual(sources(referencing.content), [imageUrl(anchor.id)]);
+  assert.deepEqual(sources(referencing.content), [imageUrl(anchor.id), imageUrl(anchor.id)]);
 
   const reviewVersions = await upload('version-two-and-new-root', [
     page('100', '원본 첨부 문서', 2), attachment('700', 2, 'diagram.png'), attachment('701', 1, 'diagram.png', '700'),
@@ -2591,7 +2595,9 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
 
   const thirdPack = await upload('version-three-and-body', [
     page('100', '원본 첨부 문서', 3, '<p>세 번째 버전과 당시 원본</p>' + image('ri:filename="diagram.png"') +
-      image('ri:filename="diagram.png" ri:content-id="701"')), attachment('700', 3, 'diagram.png'),
+      image('ri:filename="diagram.png" ri:content-id="701"') +
+      '<img src="download/attachments/100/diagram.png?version=2" alt="두 번째 원본 버전"/>' +
+      '<img src="/confluence/download/attachments/100/diagram.png" alt="현재 원본 버전"/>'), attachment('700', 3, 'diagram.png'),
     attachment('701', 1, 'diagram.png', '700'), attachment('702', 2, 'diagram.png', '700'),
   ], [['700/1', firstBytes], ['700/2', secondBytes], ['700/3', thirdBytes]]);
   const thirdConfig = await config(thirdPack, true, true);
@@ -2617,8 +2623,8 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   assert.ok(third);
   assert.equal(versions.length, 4);
   const current = (await workspace()).documents.find(page => page.id === doc.id)!;
-  assert.deepEqual(sources(current.content), [imageUrl(third.id), imageUrl(anchor.id)]);
-  assert.deepEqual(sources((await workspace()).documents.find(page => page.id === referencing.id)!.content), [imageUrl(anchor.id)]);
+  assert.deepEqual(sources(current.content), [imageUrl(third.id), imageUrl(anchor.id), imageUrl(secondHead.currentVersionId), imageUrl(third.id)]);
+  assert.deepEqual(sources((await workspace()).documents.find(page => page.id === referencing.id)!.content), [imageUrl(anchor.id), imageUrl(anchor.id)]);
   await expectedBytes(third.id, thirdBytes);
   await expectedBytes(manualHead.currentVersionId, manualBytes);
   assert.equal((await f.preview(thirdConfig)).canApply, false);
@@ -3065,19 +3071,33 @@ test('Confluence XML worker imports remote page attachments by original owner an
   const date = prop('creationDate', '2020-01-02T00:00:00Z');
   const file = (id: string, owner: string, filename: string, version: string, history: string) =>
     object('Attachment', id, prop('title', filename) + prop('version', version) + ref('containerContent', 'Page', owner) + date + history);
-  const projectPage = (id: string, space: string) => object('Page', id, prop('title', '원본 현황') + prop('version', '1') + ref('space', 'Space', space) + date);
+  const projectPage = (id: string, space: string, version = '1', history = '') =>
+    object('Page', id, prop('title', '원본 현황') + prop('version', version) + ref('space', 'Space', space) + date + history);
+  const sourceBase = 'https://wiki.example.test/confluence';
+  const reportDownload = '/confluence/download/attachments/200/report.bin';
+  const historyMarkup = `<p><a href="${reportDownload}?version=1">과거 버전 명시</a></p>` +
+    `<p><a href="${reportDownload}">과거 버전 미지정</a></p>`;
   const storage = [
     '<p>파일을 참조하는 원본</p>',
     '<ac:image ac:alt="원격 소유 PNG"><ri:attachment ri:filename="shared.png"><ri:page ri:space-key="QA" ri:content-title="원본 현황"/></ri:attachment></ac:image>',
     '<p><ac:link><ri:attachment ri:filename="report.bin" ri:content-id="721"><ri:content-entity ri:content-id="200"/></ri:attachment><ac:link-body>원격 예전 보고서</ac:link-body></ac:link></p>',
     '<ac:image ac:alt="누락된 소유 PNG"><ri:attachment ri:filename="shared.png"><ri:page ri:space-key="ABSENT" ri:content-title="원본 현황"/></ri:attachment></ac:image>',
     '<p><ac:link><ri:attachment ri:filename="report.bin" ri:content-id="701"><ri:content-entity ri:content-id="200"/></ri:attachment><ac:link-body>잘못된 소유 보고서</ac:link-body></ac:link></p>',
+    '<img src="./download/attachments/200/shared.png" alt="상대 주소 이미지"/>',
+    `<ac:image ac:alt="절대 주소 이미지"><ri:url ri:value="${sourceBase}/download/attachments/200/shared.png?version=1&amp;api=v2"/></ac:image>`,
+    `<p><a href="${reportDownload}?version=1&amp;modificationDate=123456&amp;api=v2"><strong>원래 버전 다운로드</strong></a></p>`,
+    '<p><a href="download/attachments/200/report.bin">현재 버전 다운로드</a></p>',
+    `<p><a href="${reportDownload}?version=99">미확인 버전 원본 열기</a></p>`,
+    `<p><a href="${reportDownload}?version=1&amp;version=2">중복 버전 원본 열기</a></p>`,
+    `<p><a href="https://other.example.test${reportDownload}">외부 원본 열기</a></p>`,
+    `<p><a href="${sourceBase}/download/attachments/200/a%2Freport.bin">다른 경로 원본 열기</a></p>`,
   ].join('');
   const xml = `<hibernate-generic>${[
     object('Space', '20', prop('key', 'OPS') + prop('name', '원본 업무 공간')),
     object('Space', '30', prop('key', 'QA') + prop('name', '원본 검증 공간')),
-    projectPage('100', '20'), projectPage('200', '30'),
+    projectPage('100', '20', '2'), projectPage('101', '20', '1', ref('originalVersion', 'Page', '100')), projectPage('200', '30'),
     object('BodyContent', '500', prop('body', `<![CDATA[${storage}]]>`) + ref('content', 'Page', '100')),
+    object('BodyContent', '501', prop('body', `<![CDATA[${historyMarkup}]]>`) + ref('content', 'Page', '101')),
     file('700', '100', 'shared.png', '1', ''),
     file('701', '100', 'report.bin', '1', ''),
     file('710', '200', 'shared.png', '1', ''),
@@ -3096,7 +3116,7 @@ test('Confluence XML worker imports remote page attachments by original owner an
     { path: 'attachments/200/720/2', bytes: Buffer.from('원격 보고서의 현재 버전') },
   ]), 'confluence-remote-owner.zip', 'confluence');
   const configuration = await f.configuration(pack);
-  configuration.sourceBaseUrls[pack.id] = 'https://wiki.example.test/confluence';
+  configuration.sourceBaseUrls[pack.id] = sourceBase;
   const previous = await f.preview(configuration);
   assert.equal(previous.canApply, true, JSON.stringify(previous.notices));
   f.db.prepare("UPDATE migration_previews SET json=json_remove(json,'$.conversionVersion') WHERE id=?").run(previous.id);
@@ -3130,28 +3150,49 @@ test('Confluence XML worker imports remote page attachments by original owner an
     assert.equal(workspace.status, 200);
     const source = workspace.data.documents.find(document => document.id === sourcePage.targetId)!;
     const images: Array<RichContent['attrs']> = [];
-    const links: unknown[] = [];
+    const links = new Map<string, unknown>();
     const pending = [source.content];
     while (pending.length) {
       const node = pending.pop()!;
       if (node.type === 'image') images.push(node.attrs);
-      for (const mark of node.marks ?? []) if (mark.type === 'link') links.push(mark.attrs?.href);
+      for (const mark of node.marks ?? []) if (node.text && mark.type === 'link') links.set(node.text, mark.attrs?.href);
       pending.push(...node.content ?? []);
     }
     const imageUrl = `/api/attachments/${remoteFile.targetId}/content?inline=1`;
     const versionUrl = `/api/attachments/${historicalReport.targetId}/content`;
-    assert.deepEqual(images.map(image => [image?.src, image?.alt]), [[imageUrl, '원격 소유 PNG']]);
-    assert.deepEqual(links, [versionUrl]);
+    const currentUrl = `/api/attachments/${currentReport.targetId}/content`;
+    assert.deepEqual(images.map(image => [image?.src, image?.alt]), [
+      [imageUrl, '절대 주소 이미지'], [imageUrl, '상대 주소 이미지'], [imageUrl, '원격 소유 PNG'],
+    ]);
+    assert.deepEqual(links, new Map([
+      ['다른 경로 원본 열기', `${sourceBase}/download/attachments/200/a%2Freport.bin`],
+      ['외부 원본 열기', `https://other.example.test${reportDownload}`],
+      ['중복 버전 원본 열기', `https://wiki.example.test${reportDownload}?version=1&version=2`],
+      ['미확인 버전 원본 열기', `https://wiki.example.test${reportDownload}?version=99`],
+      ['현재 버전 다운로드', currentUrl],
+      ['원래 버전 다운로드', versionUrl],
+      ['원격 예전 보고서', versionUrl],
+    ]));
     assert.match(source.plainText, /\[이미지: 누락된 소유 PNG\]/);
     assert.match(source.plainText, /\[첨부: 잘못된 소유 보고서\]/);
     const original = await f.call<SourceRecordArchive>(`${recordsPath}/${sourcePage.id}`);
     assert.equal(original.status, 200);
     assert.equal(original.data.record.text, storage);
 
+    const revisions = await f.call<DocRevision[]>(`/documents/${source.id}/revisions`);
+    assert.equal(revisions.status, 200);
+    const historical = revisions.data.find(revision => revision.plainText.includes('과거 버전 명시'));
+    assert.ok(historical);
+    const historicalHrefs = historical.content.content?.map(node => node.content?.[0]?.marks?.find(mark => mark.type === 'link')?.attrs?.href);
+    assert.deepEqual(historicalHrefs, [versionUrl, `https://wiki.example.test${reportDownload}`]);
+
     const version = await fetch(new URL(versionUrl, f.base));
     assert.equal(version.status, 200);
     assert.match(version.headers.get('Content-Disposition') || '', /^attachment;/);
     assert.deepEqual(Buffer.from(await version.arrayBuffer()), oldReport);
+    const current = await fetch(new URL(currentUrl, f.base));
+    assert.equal(current.status, 200);
+    assert.deepEqual(Buffer.from(await current.arrayBuffer()), Buffer.from('원격 보고서의 현재 버전'));
     const image = await fetch(new URL(imageUrl, f.base));
     assert.equal(image.status, 200);
     assert.equal(image.headers.get('Content-Type'), 'image/png');
