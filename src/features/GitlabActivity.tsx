@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
@@ -74,6 +74,7 @@ function activityTime(value: unknown) {
 type PipelineTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
 type ReviewTarget = { linkId: string; issueId: string; repositoryId: number; mergeRequestIid: number; url: URL };
 type BranchTarget = { linkId: string; issueId: string; repositoryId: number; sourceBranch: string; origin: string; repositoryPath: string };
+export type BranchMergeRequest = GitlabBranchMergeRequests['openMergeRequests'][number];
 type ActivityLookup<Value> = { kind: 'loading' } | { kind: 'stale' } | { kind: 'failed'; message: string } | { kind: 'ready'; result: Value };
 type ReviewPerson = GitlabMergeRequestReview['reviewers'][number];
 
@@ -251,6 +252,22 @@ function scopedBranchMergeRequestUrl(value: unknown, target: BranchTarget, route
     url.pathname === `${target.repositoryPath}/-/merge_requests/${route}` ? url : null;
 }
 
+export function gitlabBranchMergeRequestsPath(issueId: string, linkId: string): string {
+  return `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/branch-merge-requests`;
+}
+
+export function matchesBranchMergeRequestLink(link: GitlabLink | undefined, branch: GitlabLink, mr: BranchMergeRequest): boolean {
+  const instance = branch.id.split(':', 2)[1];
+  if (!link || link.kind !== 'merge_request' || link.issueId !== branch.issueId || link.projectId !== branch.projectId ||
+      link.iid !== mr.iid || link.id !== `gitlab:${instance}:${branch.projectId}:merge_request:${mr.id}:${branch.issueId}`) return false;
+  const url = gitlabActivityUrl(link.webUrl, 'merge_request');
+  const suffix = `/merge_requests/${mr.iid}`;
+  const path = url?.pathname.replace(/\/$/u, '');
+  if (!url || url.search || url.hash || !path?.endsWith(suffix)) return false;
+  url.pathname = path.endsWith(`/-${suffix}`) ? path : `${path.slice(0, -suffix.length)}/-${suffix}`;
+  return url.href === mr.webUrl;
+}
+
 function newBranchMergeRequestUrl(result: GitlabBranchMergeRequests, target: BranchTarget): URL | null {
   if (result.hasMore || result.openMergeRequests.length || !result.targetBranch || !result.targetSha || result.targetSha === result.sourceSha) return null;
   const url = scopedBranchMergeRequestUrl(result.newMergeRequestUrl, target, 'new');
@@ -263,7 +280,8 @@ function newBranchMergeRequestUrl(result: GitlabBranchMergeRequests, target: Bra
 }
 
 function isBranchMergeRequestsResult(result: GitlabBranchMergeRequests | undefined, target: BranchTarget, requestedTarget?: string): result is GitlabBranchMergeRequests {
-  if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId || result.sourceBranch !== target.sourceBranch ||
+  if (!result || result.linkId !== target.linkId || typeof result.branchRevision !== 'string' || !/^[a-f\d]{64}$/u.test(result.branchRevision) ||
+      result.repositoryId !== target.repositoryId || result.sourceBranch !== target.sourceBranch ||
       typeof result.sourceSha !== 'string' || gitlabObjectSha(result.sourceSha) !== result.sourceSha || /^0+$/u.test(result.sourceSha) ||
       typeof result.checkedAt !== 'string' || !Number.isFinite(Date.parse(result.checkedAt)) ||
       typeof result.suggestedTitle !== 'string' || !result.suggestedTitle.trim() ||
@@ -275,12 +293,15 @@ function isBranchMergeRequestsResult(result: GitlabBranchMergeRequests | undefin
       typeof result.hasMore !== 'boolean' || !Array.isArray(result.openMergeRequests)) return false;
 
   const ids = new Set<number>();
+  const iids = new Set<number>();
   return result.openMergeRequests.every(mr => {
-    if (!mr || !Number.isSafeInteger(mr.iid) || mr.iid < 1 || ids.has(mr.iid) || typeof mr.title !== 'string' || !mr.title.trim() ||
+    if (!mr || !Number.isSafeInteger(mr.id) || mr.id < 1 || ids.has(mr.id) ||
+        !Number.isSafeInteger(mr.iid) || mr.iid < 1 || iids.has(mr.iid) || typeof mr.title !== 'string' || !mr.title.trim() ||
         !isGitlabBranchName(mr.targetBranch) || mr.targetBranch === target.sourceBranch) return false;
     const url = scopedBranchMergeRequestUrl(mr.webUrl, target, String(mr.iid));
     if (!url || url.href !== `${url.origin}${url.pathname}`) return false;
-    ids.add(mr.iid);
+    ids.add(mr.id);
+    iids.add(mr.iid);
     return true;
   });
 }
@@ -295,18 +316,36 @@ function branchMergeRequestsMessage(cause: unknown): string {
   return 'GitLab 브랜치의 MR을 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function BranchMergeRequests({ target, revision }: { target: BranchTarget; revision: string }) {
+type AttachmentFeedback = { result: GitlabBranchMergeRequests; id: number } & (
+  { kind: 'saving' } | { kind: 'failed'; stale: boolean; message: string }
+);
+
+function branchAttachmentError(cause: unknown) {
+  if (cause instanceof ApiError) {
+    if (cause.status === 404 || cause.status === 409) return '브랜치 또는 MR 정보가 변경되었습니다. 브랜치 MR을 다시 확인해 주세요.';
+    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 MR 조회 권한을 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 연결해 주세요.';
+  }
+  return 'MR 연결 결과를 확인하지 못했습니다. 다시 연결해 주세요.';
+}
+
+function BranchMergeRequests({ branch, target, revision, manualActions }: {
+  branch: GitlabLink; target: BranchTarget; revision: string; manualActions?: ManualLinkActions;
+}) {
   const panelId = useId();
   const [targetDraft, setTargetDraft] = useState<string | null>(null);
   const [requestedTarget, setRequestedTarget] = useState<string>();
+  const [attachment, setAttachment] = useState<AttachmentFeedback | null>(null);
+  const attaching = attachment?.kind === 'saving';
   const { view, toggle, load } = useActivityLookup<GitlabBranchMergeRequests, string>(revision, async (signal, branch) => {
-    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/branch-merge-requests`;
+    const path = gitlabBranchMergeRequestsPath(target.issueId, target.linkId);
     const query = branch === undefined ? '' : `?${new URLSearchParams({ targetBranch: branch })}`;
     const result = await api<GitlabBranchMergeRequests | undefined>(`${path}${query}`, { method: 'GET', cache: 'no-store', signal });
     return isBranchMergeRequestsResult(result, target, branch) ? result : null;
   }, '연결된 브랜치의 MR 응답을 확인할 수 없습니다. 다시 확인해 주세요.', branchMergeRequestsMessage);
   const result = view?.kind === 'ready' ? view.result : null;
   const busy = view?.kind === 'loading';
+  const feedback = attachment?.result === result ? attachment : null;
   const hasExisting = Boolean(result && (result.openMergeRequests.length || result.hasMore));
   const draft = targetDraft ?? result?.targetBranch ?? '';
   const validDraft = isGitlabBranchName(draft) && draft !== target.sourceBranch;
@@ -314,6 +353,7 @@ function BranchMergeRequests({ target, revision }: { target: BranchTarget; revis
   const newUrl = result && verifiedDraft ? newBranchMergeRequestUrl(result, target) : null;
 
   function togglePanel() {
+    if (attaching) return;
     if (view) {
       setTargetDraft(null);
       setRequestedTarget(undefined);
@@ -328,15 +368,37 @@ function BranchMergeRequests({ target, revision }: { target: BranchTarget; revis
     void load(draft);
   }
 
+  async function attach(mr: BranchMergeRequest) {
+    if (!result || !manualActions || manualActions.disabled || attaching || (feedback?.kind === 'failed' && feedback.stale)) return;
+    const attempt = { result, id: mr.id, kind: 'saving' } as const;
+    setAttachment(attempt);
+    try {
+      await manualActions.attachMergeRequest(branch, mr, result.branchRevision);
+      setAttachment(current => current === attempt ? null : current);
+    } catch (cause) {
+      const stale = cause instanceof ApiError && (cause.status === 404 || cause.status === 409);
+      setAttachment(current => current === attempt ? { ...attempt, kind: 'failed', stale, message: branchAttachmentError(cause) } : current);
+    }
+  }
+
   return <div className="gitlab-activity-inspection">
-    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={togglePanel}>
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined}
+      aria-disabled={attaching || undefined} onClick={togglePanel}>
       <GitMerge aria-hidden="true" size={14} />{view ? '브랜치 MR 닫기' : '브랜치 MR 확인'}
     </button>
-    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab 브랜치 MR" aria-busy={busy}>
+    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab 브랜치 MR" aria-busy={busy || attaching}>
       {busy && <p role="status">GitLab 브랜치의 MR을 확인하고 있습니다.</p>}
       {view.kind === 'stale' && <p role="status">브랜치 또는 티켓이 변경되었습니다. MR을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
-      {result && (hasExisting ? <ExistingBranchMergeRequests result={result} /> : <p role="status">이 브랜치에 열린 MR이 없습니다.</p>)}
+      {result && (hasExisting ? <>
+        {result.openMergeRequests.length > 0 && <ul className="gitlab-branch-mr-list" aria-label="열린 MR">
+          {result.openMergeRequests.map(mr => <ExistingBranchMergeRequest key={mr.id} mr={mr}
+            linked={manualActions?.hasMergeRequest(branch, mr) ?? false} feedback={feedback?.id === mr.id ? feedback : null}
+            disabled={Boolean(manualActions?.disabled || attaching || (feedback?.kind === 'failed' && feedback.stale))}
+            onAttach={manualActions ? () => void attach(mr) : undefined} />)}
+        </ul>}
+        {result.hasMore && <p className="gitlab-activity-inspection-warning" role="status">열린 MR 목록이 일부만 확인되었습니다. GitLab에서 이 브랜치의 MR을 확인해 주세요.</p>}
+      </> : <p role="status">이 브랜치에 열린 MR이 없습니다.</p>)}
       {!hasExisting && (result || targetDraft !== null) && <>
         {result && !result.targetBranch && <p>대상 브랜치를 입력하고 확인해 주세요.{result.defaultBranch && <> 기본 브랜치 <code>{result.defaultBranch}</code></>}</p>}
         <div className="gitlab-branch-mr-field">
@@ -360,24 +422,39 @@ function BranchMergeRequests({ target, revision }: { target: BranchTarget; revis
           : !newUrl && <p className="gitlab-activity-inspection-warning">새 GitLab MR 링크를 확인할 수 없습니다. 대상 브랜치를 다시 확인해 주세요.</p>)}
         {newUrl && result && <BranchMergeRequestCreation key={`${result.checkedAt}:${result.suggestedTitle}`} url={newUrl} title={result.suggestedTitle} />}
       </>}
-      <button type="button" className="btn btn-ghost" aria-disabled={busy} onClick={() => void load(requestedTarget)}>
+      <button type="button" className="btn btn-ghost" aria-disabled={busy || attaching} onClick={() => { if (!attaching) void load(requestedTarget); }}>
         <RefreshCw aria-hidden="true" size={14} />브랜치 MR 다시 확인
       </button>
     </section>}
   </div>;
 }
 
-function ExistingBranchMergeRequests({ result }: { result: GitlabBranchMergeRequests }) {
-  return <>
-    {result.openMergeRequests.length > 0 && <ul className="gitlab-branch-mr-list" aria-label="열린 MR">
-      {result.openMergeRequests.map(mr => <li key={mr.iid}>
-        <strong>{mr.title}</strong>
-        <span>대상 브랜치 <code>{mr.targetBranch}</code></span>
-        <a className="btn btn-ghost" href={mr.webUrl} target="_blank" rel="noopener noreferrer"><ExternalLink aria-hidden="true" size={14} />MR !{mr.iid} 열기</a>
-      </li>)}
-    </ul>}
-    {result.hasMore && <p className="gitlab-activity-inspection-warning" role="status">열린 MR 목록이 일부만 확인되었습니다. GitLab에서 이 브랜치의 MR을 확인해 주세요.</p>}
-  </>;
+function ExistingBranchMergeRequest({ mr, linked, feedback, disabled, onAttach }: {
+  mr: BranchMergeRequest; linked: boolean; feedback: AttachmentFeedback | null; disabled: boolean; onAttach?: () => void;
+}) {
+  const link = useRef<HTMLAnchorElement>(null);
+  const transferFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!linked) return;
+    if (transferFocus.current && document.activeElement === document.body) link.current?.focus({ preventScroll: true });
+    transferFocus.current = false;
+  }, [linked]);
+
+  return <li>
+    <strong>{mr.title}</strong>
+    <span>대상 브랜치 <code>{mr.targetBranch}</code></span>
+    <div className="gitlab-activity-actions">
+      <a ref={link} className="btn btn-ghost" href={mr.webUrl} target="_blank" rel="noopener noreferrer"><ExternalLink aria-hidden="true" size={14} />MR !{mr.iid} 열기</a>
+      {linked ? <span className="gitlab-activity-state" role="status">티켓에 연결됨</span> : onAttach &&
+        <button type="button" className="btn btn-ghost" aria-disabled={disabled}
+          aria-label={`MR !${mr.iid} 티켓에 연결`} onClick={event => {
+            if (disabled) return;
+            transferFocus.current = document.activeElement === event.currentTarget;
+            onAttach();
+          }}>{feedback?.kind === 'saving' ? '연결 중…' : `MR !${mr.iid} 티켓에 연결`}</button>}
+    </div>
+    {!linked && feedback?.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{feedback.message}</p>}
+  </li>;
 }
 
 function BranchMergeRequestCreation({ url, title }: { url: URL; title: string }) {
@@ -680,6 +757,8 @@ type ManualLinkActions = {
   disabled: boolean;
   verify: (link: GitlabLink, trigger: HTMLButtonElement) => void;
   unlink: (link: GitlabLink, trigger: HTMLButtonElement) => void;
+  hasMergeRequest: (branch: GitlabLink, mr: BranchMergeRequest) => boolean;
+  attachMergeRequest: (branch: GitlabLink, mr: BranchMergeRequest, branchRevision: string) => Promise<void>;
 };
 
 export function GitlabActivityList({ links, issueContext, issueVersions, heading = 'h4', manualActions }: {
@@ -758,7 +837,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions }: {
       <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
       {pipelineSource && <span className="gitlab-activity-source">{pipelineSource}</span>}
     </div>
-    {branchTarget && <BranchMergeRequests key={`${link.id}:${link.manualLinkId ?? ''}:${link.webUrl}`} target={branchTarget}
+    {branchTarget && <BranchMergeRequests key={`${link.id}:${link.manualLinkId ?? ''}:${link.webUrl}`} branch={link} target={branchTarget} manualActions={manualActions}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, issueVersion])} />}
     {pipeline && <>
       <PipelineJobs key={`jobs:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />

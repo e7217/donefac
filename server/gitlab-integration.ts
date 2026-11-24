@@ -58,6 +58,11 @@ type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
 type SyncOptions=Pick<ReadOptions,'includeHistory'> & { expectedVersion?: unknown; repositoryIds?: unknown };
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
 type WorkflowGitlabKind=Extract<GitlabLink['kind'],'merge_request'|'pipeline'>;
+type VerifiedGitlabActivity = Awaited<ReturnType<typeof readGitlabManualObject>>;
+type BranchMergeRequestAttachment = {
+  assertCurrent: () => void;
+  assertMergeRequest: (activity: VerifiedGitlabActivity, existing: GitlabLink | undefined) => void;
+};
 type IssueMatch=Pick<Issue,'id'|'key'|'title'|'projectId'> & { previousKeys?: PreviousIssueKey[] };
 type JiraKeyBinding={issueId:string;originalJiraKey:string};
 type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
@@ -559,7 +564,8 @@ export class GitlabIntegrationService{
     if (!existing) this.hooks.onIssueBranchAttached?.(actorId, issue.id, link);
     return link;
   }
-  async attachLink(issueId:string,value:unknown,afterAttach?:(link:GitlabLink)=>void,signal?:AbortSignal):Promise<{link:GitlabLink;created:boolean}>{
+  async attachLink(issueId:string,value:unknown,afterAttach?:(link:GitlabLink)=>void,signal?:AbortSignal,
+    branchAttachment?: BranchMergeRequestAttachment):Promise<{link:GitlabLink;created:boolean}>{
     const input=record(value);
     if(Object.keys(input).some(key=>!['repositoryId','url','expectedSettingsVersion','actorId'].includes(key)))fail('GitLab 활동 연결 요청을 확인해 주세요.');
     const captured=this.raw();
@@ -573,7 +579,7 @@ export class GitlabIntegrationService{
     const instance=this.instance(captured);
     let pendingBranchId:string|undefined;
     let branchCursorBeforeRead:PushObservation|undefined;
-    let verified:Awaited<ReturnType<typeof readGitlabManualObject>>;
+    let verified:VerifiedGitlabActivity;
     try {
       verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},repositoryId,input.url,signal,(name,webUrl)=>{
         if(token&&(name.includes(token)||webUrl.includes(token)))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
@@ -584,9 +590,12 @@ export class GitlabIntegrationService{
         branchCursorBeforeRead=this.store.get<PushObservation>('gitlab_push_cursors',id);
       });
     } catch(error) {
+      branchAttachment?.assertCurrent();
       signal?.throwIfAborted();
       assertSettingsVersion(captured.version,this.raw().version);
+      if(branchAttachment&&error instanceof GitlabManualUrlError)fail('GitLab 저장소 또는 브랜치 주소가 변경되었습니다. MR을 다시 확인해 주세요.',409);
       if(error instanceof GitlabManualUrlError)fail(error.message,400);
+      if(branchAttachment&&error instanceof GitlabReadError)failGitlabWorkflowRead(error);
       if(error instanceof GitlabReadError)fail(error.message,error.httpStatus===404?404:502,{stage:error.stage,httpStatus:error.httpStatus});
       throw error;
     } finally {
@@ -596,6 +605,7 @@ export class GitlabIntegrationService{
         else pending.count--;
       }
     }
+    branchAttachment?.assertCurrent();
     signal?.throwIfAborted();
     const {kind,object,webUrl}=verified;
     if(token&&webUrl.includes(token))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
@@ -605,6 +615,7 @@ export class GitlabIntegrationService{
     },[],keys,{source:'read',observedAt:startedAt,repositoryId},kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
     if(!observedDraft.id||!observedDraft.webUrl)fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.',502);
     return this.store.transaction(()=>{
+      branchAttachment?.assertCurrent();
       assertSettingsVersion(captured.version,this.raw().version);
       const currentIssue=this.requireIssue(issueId);
       if(currentIssue.projectId!==issue.projectId)fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 연결해 주세요.',409);
@@ -613,6 +624,10 @@ export class GitlabIntegrationService{
       if(!draft)fail('GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다. 최신 활동을 다시 확인해 주세요.',409);
       const snapshot=linkForIssue(instance,repositoryId,kind,{issue:currentIssue},draft);
       const existing=this.store.get<GitlabLink>('gitlab_links',snapshot.id);
+      if(branchAttachment){
+        branchAttachment.assertMergeRequest(verified,existing);
+        if(existing)return {link:existing,created:false};
+      }
       if(existing&&!existing.manualLinkId)return {link:existing,created:false};
       if(existing&&!matchesManualLink(existing,draft))fail('저장한 GitLab 활동의 식별자와 일치하지 않습니다.',409);
       const link=kind==='branch'
@@ -736,7 +751,7 @@ export class GitlabIntegrationService{
     }
     return { ...result, linkId, repositoryId: link.projectId, mergeRequestIid: target.id, checkedAt: now() };
   }
-  async branchMergeRequests(issueId: string, linkId: string, signal: AbortSignal, targetBranch: string | null): Promise<GitlabBranchMergeRequests> {
+  private branchMergeRequestContext(issueId: string, linkId: string) {
     if (!linkId || linkId.length > 500) fail('연결된 GitLab 브랜치를 선택해 주세요.');
     const issue = this.requireIssue(issueId);
     const link = this.store.get<GitlabLink>('gitlab_links', linkId);
@@ -750,24 +765,36 @@ export class GitlabIntegrationService{
       fail('현재 GitLab 연결에서 브랜치의 식별자를 확인할 수 없습니다.', 409);
     }
     const workspaceGeneration = this.store.setting('attachmentImportGeneration');
-    const token = captured.token ? this.store.unseal(captured.token) : null;
-    const deadline = AbortSignal.timeout(25_000);
+    const linkSnapshot = JSON.stringify(link);
+    const branchRevision = createHash('sha256').update(JSON.stringify([
+      workspaceGeneration, captured.version, issue.id, issue.projectId, issue.version, issue.key, issue.title, linkSnapshot,
+    ])).digest('hex');
     const assertCurrent = () => {
-      signal.throwIfAborted();
       assertSettingsVersion(captured.version, this.raw().version);
-      if (deadline.aborted) fail('GitLab 브랜치의 MR 조회 시간이 초과되었습니다.', 504);
       if (this.store.setting('attachmentImportGeneration') !== workspaceGeneration) fail('워크스페이스가 복원되었습니다. 업무를 다시 열어 주세요.', 409);
       const latestIssue = this.store.get<Issue>('issues', issueId);
       const latestLink = this.store.get<GitlabLink>('gitlab_links', linkId);
       if (!latestIssue || latestIssue.version !== issue.version || latestIssue.projectId !== issue.projectId ||
           latestIssue.key !== issue.key || latestIssue.title !== issue.title ||
-          JSON.stringify(latestLink) !== JSON.stringify(link)) {
+          JSON.stringify(latestLink) !== linkSnapshot) {
         fail('GitLab 브랜치 연결이나 업무가 변경되었습니다. 최신 업무에서 다시 확인해 주세요.', 409);
       }
     };
+    return { issue, link, sourceBranch: source.branch, captured, branchRevision, assertCurrent };
+  }
+  async branchMergeRequests(issueId: string, linkId: string, signal: AbortSignal, targetBranch: string | null): Promise<GitlabBranchMergeRequests> {
+    const context = this.branchMergeRequestContext(issueId, linkId);
+    const { issue, link, sourceBranch, captured, branchRevision } = context;
+    const token = captured.token ? this.store.unseal(captured.token) : null;
+    const deadline = AbortSignal.timeout(25_000);
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      context.assertCurrent();
+      if (deadline.aborted) fail('GitLab 브랜치의 MR 조회 시간이 초과되었습니다.', 504);
+    };
     let result: Awaited<ReturnType<typeof readGitlabBranchMergeRequests>>;
     try {
-      result = await readGitlabBranchMergeRequests({ baseUrl: captured.baseUrl, token }, link.projectId, source.branch,
+      result = await readGitlabBranchMergeRequests({ baseUrl: captured.baseUrl, token }, link.projectId, sourceBranch,
         targetBranch, AbortSignal.any([signal, deadline]));
     } catch (error) {
       assertCurrent();
@@ -777,7 +804,44 @@ export class GitlabIntegrationService{
     assertCurrent();
     const suggestedTitle = `[${issue.key}] ${issue.title}`.replace(/[\s\p{Cc}]+/gu, ' ').trim().toWellFormed()
       .slice(0, 255).replace(/[\uD800-\uDBFF]$/u, '');
-    return { ...result, linkId, repositoryId: link.projectId, suggestedTitle, checkedAt: now() };
+    return { ...result, linkId, repositoryId: link.projectId, branchRevision, suggestedTitle, checkedAt: now() };
+  }
+  private async attachBranchMergeRequest(issueId: string, linkId: string, value: unknown, afterAttach: (link: GitlabLink) => void, signal: AbortSignal) {
+    const input = record(value);
+    const { mergeRequestId, mergeRequestIid, targetBranch, branchRevision, actorId } = input;
+    if (Object.keys(input).some(key => !['mergeRequestId', 'mergeRequestIid', 'targetBranch', 'branchRevision', 'actorId'].includes(key)) ||
+        typeof mergeRequestId !== 'number' || !Number.isSafeInteger(mergeRequestId) || mergeRequestId < 1 ||
+        typeof mergeRequestIid !== 'number' || !Number.isSafeInteger(mergeRequestIid) || mergeRequestIid < 1 || !isGitlabBranchName(targetBranch) ||
+        typeof branchRevision !== 'string' || !/^[a-f0-9]{64}$/u.test(branchRevision) ||
+        (actorId !== undefined && (typeof actorId !== 'string' || !actorId.trim()))) {
+      fail('브랜치에 연결할 GitLab MR의 정보를 확인해 주세요.');
+    }
+    const context = this.branchMergeRequestContext(issueId, linkId);
+    const { link, sourceBranch, captured } = context;
+    if (branchRevision !== context.branchRevision) fail('GitLab 브랜치 연결이나 업무가 변경되었습니다. MR을 다시 확인해 주세요.', 409);
+    if (targetBranch === sourceBranch) fail('소스 브랜치와 다른 대상 브랜치의 MR을 선택해 주세요.');
+    const url = new URL(link.webUrl);
+    const branchSuffix = `/-/tree/${encodeURIComponent(sourceBranch)}`;
+    url.pathname = `${url.pathname.slice(0, -branchSuffix.length)}/-/merge_requests/${mergeRequestIid}`;
+    const deadline = AbortSignal.timeout(25_000);
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      context.assertCurrent();
+      if (deadline.aborted) fail('GitLab MR 연결 확인 시간이 초과되었습니다.', 504);
+    };
+    const assertMergeRequest = ({ kind, object }: VerifiedGitlabActivity, existing: GitlabLink | undefined) => {
+      const savedBindingMatches = !existing || (existing.issueId === issueId && existing.projectId === link.projectId &&
+        existing.kind === 'merge_request' && existing.iid === mergeRequestIid);
+      const existingClosed = existing && (object.state === 'closed' || object.state === 'merged');
+      if (!savedBindingMatches || kind !== 'merge_request' || object.id !== mergeRequestId || object.iid !== mergeRequestIid ||
+          (object.state !== 'opened' && !existingClosed) ||
+          object.source_branch !== sourceBranch || object.target_branch !== targetBranch ||
+          object.source_project_id !== link.projectId || object.target_project_id !== link.projectId) {
+        fail('GitLab MR이 변경되었습니다. 브랜치의 MR을 다시 확인해 주세요.', 409);
+      }
+    };
+    return this.attachLink(issueId, { repositoryId: link.projectId, url: url.href, expectedSettingsVersion: captured.version },
+      afterAttach, AbortSignal.any([signal, deadline]), { assertCurrent, assertMergeRequest });
   }
   async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal):Promise<GitlabIssueRefreshResult> {
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -1905,6 +1969,22 @@ export class GitlabIntegrationService{
     app.get('/api/issues/:id/gitlab-links/:linkId/branch-merge-requests',
       linkedWorkflowRead('GitLab 브랜치의 MR 조회 조건을 확인해 주세요.', this.branchMergeRequests.bind(this), true));
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;
+    app.post('/api/issues/:id/gitlab-links/:linkId/branch-merge-requests', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).length) fail('브랜치에 연결할 GitLab MR의 정보를 확인해 주세요.');
+      hooks.actor(req);
+      const issueId = String(req.params.id);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const { link, created } = await this.attachBranchMergeRequest(issueId, String(req.params.linkId), req.body, link => {
+          hooks.activity(req, 'issue', issueId, 'GitLab 활동 수동 연결', linkDetail(link));
+        }, controller.signal);
+        if (!controller.signal.aborted) res.status(created ? 201 : 200).json(link);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
+    });
     app.post('/api/issues/:id/gitlab-links/refresh',async(req,res)=>{
       if (Object.keys(req.query).length) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
       hooks.actor(req);

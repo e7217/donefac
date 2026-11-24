@@ -2,9 +2,9 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test } from '@playwright/test';
-import type { GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { GitlabBranchMergeRequestAttachment, GitlabBranchMergeRequests, GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
-test('360px 티켓과 개발 화면에서 연결 브랜치의 MR과 새 MR의 대상 브랜치를 확인한다', async ({ page, request, context }) => {
+test('360px 티켓에서 브랜치의 MR을 확인하고 새 MR 화면을 열거나 기존 MR을 연결한다', async ({ page, request, context }) => {
   test.setTimeout(60_000);
   await page.setViewportSize({ width: 360, height: 820 });
   await context.grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -26,6 +26,8 @@ test('360px 티켓과 개발 화면에서 연결 브랜치의 MR과 새 MR의 �
   const calls: { method: string | undefined; url: URL; token: string | string[] | undefined }[] = [];
   let projectUrl = '';
   let hasExisting = true;
+  let listedTarget = 'main';
+  let currentTarget = 'main';
   const mock = createServer((req, res) => {
     const url = new URL(req.url ?? '/', 'http://fixture.test');
     calls.push({ method: req.method, url, token: req.headers['private-token'] });
@@ -34,9 +36,14 @@ test('360px 티켓과 개발 화면에서 연결 브랜치의 MR과 새 MR의 �
       res.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: projectUrl, default_branch: 'main' }));
       return;
     }
-    if (url.pathname === listPath) {
+    if (url.pathname === listPath || url.pathname === `${listPath}/11`) {
       const existing = { id: 811, iid: 11, source_project_id: repositoryId, target_project_id: repositoryId, source_branch: sourceBranch,
-        target_branch: 'main', state: 'opened', title: 'Review deployment config', web_url: `${projectUrl}/-/merge_requests/11` };
+        target_branch: listedTarget, state: 'opened', title: 'Review deployment config', web_url: `${projectUrl}/-/merge_requests/11`,
+        project_id: repositoryId, sha: branchShas.get(sourceBranch), updated_at: timestamp };
+      if (url.pathname === `${listPath}/11`) {
+        res.end(JSON.stringify({ ...existing, target_branch: currentTarget }));
+        return;
+      }
       const fork = { ...existing, id: 812, iid: 12, source_project_id: 77, web_url: `${projectUrl}/-/merge_requests/12` };
       res.end(JSON.stringify(hasExisting ? [fork, existing] : [fork]));
       return;
@@ -92,6 +99,7 @@ test('360px 티켓과 개발 화면에서 연결 브랜치의 MR과 새 MR의 �
     await expect(existing).toHaveAttribute('href', `${projectUrl}/-/merge_requests/11`);
     await expect(existing).toHaveAttribute('rel', 'noopener noreferrer');
     await expect(launch).toHaveCount(0);
+    await expect(lookup.getByRole('button', { name: 'MR !11 티켓에 연결', exact: true })).toBeVisible();
 
     hasExisting = false;
     await lookup.getByRole('button', { name: '브랜치 MR 다시 확인', exact: true }).click();
@@ -136,6 +144,50 @@ test('360px 티켓과 개발 화면에서 연결 브랜치의 MR과 새 MR의 �
       expect(url.searchParams.get('state')).toBe('opened');
       expect(url.searchParams.get('source_branch')).toBe(sourceBranch);
     }
+
+    hasExisting = true;
+    await lookup.getByRole('button', { name: '브랜치 MR 다시 확인', exact: true }).click();
+    const attachMergeRequest = lookup.getByRole('button', { name: 'MR !11 티켓에 연결', exact: true });
+    await expect(attachMergeRequest).toBeEnabled();
+    currentTarget = customBranch;
+    const sending = page.waitForResponse(response => new URL(response.url()).pathname === readPath && response.request().method() === 'POST');
+    await attachMergeRequest.click();
+    const stale = await sending;
+    expect(stale.status(), await stale.text()).toBe(409);
+    await expect(lookup.getByRole('alert')).toHaveText('브랜치 또는 MR 정보가 변경되었습니다. 브랜치 MR을 다시 확인해 주세요.');
+    await expect(attachMergeRequest).toBeDisabled();
+    expect((await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).gitlabLinks.filter(item => item.issueId === issue.id)).toEqual([link]);
+
+    listedTarget = customBranch;
+    const recount = page.waitForResponse(response => new URL(response.url()).pathname === readPath && response.request().method() === 'GET');
+    await lookup.getByRole('button', { name: '브랜치 MR 다시 확인', exact: true }).click();
+    const updated = await recount;
+    expect(updated.ok(), await updated.text()).toBeTruthy();
+    const latest = await updated.json() as GitlabBranchMergeRequests;
+    let discarded: { status: number; request: GitlabBranchMergeRequestAttachment } | undefined;
+    const attachmentRoute = (url: URL) => url.pathname === readPath;
+    await page.route(attachmentRoute, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      const response = await route.fetch();
+      discarded = { status: response.status(), request: route.request().postDataJSON() };
+      await route.abort('failed');
+    });
+    await attachMergeRequest.click();
+    await expect.poll(() => discarded).toEqual({ status: 201,
+      request: { mergeRequestId: 811, mergeRequestIid: 11, targetBranch: customBranch, branchRevision: latest.branchRevision } });
+    await page.unroute(attachmentRoute);
+    await expect(lookup.getByText('티켓에 연결됨', { exact: true })).toBeVisible();
+    await expect(attachMergeRequest).toHaveCount(0);
+    await expect(gitlab.getByRole('region', { name: 'MR', exact: true }).getByRole('button', { name: 'MR 검토 확인', exact: true })).toBeVisible();
+    await expect(title).toHaveValue('저장 전 제목 초안');
+    await expect(comment).toHaveValue('전송 전 검토 댓글');
+    const saved = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const savedMergeRequests = saved.gitlabLinks.filter(item => item.issueId === issue.id && item.kind === 'merge_request');
+    expect(savedMergeRequests).toEqual([expect.objectContaining({ iid: 11, projectId: repositoryId, webUrl: `${projectUrl}/-/merge_requests/11`,
+      sourceBranch, state: 'opened', manualLinkId: expect.any(String) })]);
+    expect(saved.issues.find(item => item.id === issue.id)).toEqual(attachedWorkspace.issues.find(item => item.id === issue.id));
+    expect(saved.activities.filter(item => item.resourceId === issue.id && item.detail.startsWith('MR !11 ·'))).toHaveLength(1);
+    expect(calls.slice(start).every(call => call.method === 'GET' && call.token === token)).toBeTruthy();
   } finally {
     const removed = await request.delete(`/api/issues/${issue.id}`);
     if (removed.ok()) {

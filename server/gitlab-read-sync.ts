@@ -832,11 +832,11 @@ function gitlabDisplayLabel(value: string, limit: number, token: string | null |
 }
 
 type VerifiedProject = Awaited<ReturnType<typeof readVerifiedProject>>;
-type BranchMergeRequests = Omit<GitlabBranchMergeRequests, 'linkId' | 'repositoryId' | 'suggestedTitle' | 'checkedAt'>;
+type BranchMergeRequests = Omit<GitlabBranchMergeRequests, 'linkId' | 'branchRevision' | 'repositoryId' | 'suggestedTitle' | 'checkedAt'>;
 
 function branchMergeRequest(row: GitlabReadObject, project: VerifiedProject, repositoryId: number,
   sourceBranch: string, token: Connection['token']): GitlabBranchMergeRequests['openMergeRequests'][number] | null {
-  const { source_branch: source, target_branch: target, source_project_id: sourceId, target_project_id: targetId, iid, title } = row;
+  const { source_branch: source, target_branch: target, source_project_id: sourceId, target_project_id: targetId, id, iid, title } = row;
   if (!isGitlabBranchName(source)) throw new GitlabReadError('merge-requests', 'invalid-response');
   if (source !== sourceBranch) return null;
   if (!positiveId(sourceId) || !positiveId(targetId) || (sourceId !== repositoryId && targetId !== repositoryId) ||
@@ -845,14 +845,14 @@ function branchMergeRequest(row: GitlabReadObject, project: VerifiedProject, rep
   }
   if (sourceId !== targetId) return null;
   const page = manualPage(row.web_url, project.base, false);
-  if (row.state !== 'opened' || !positiveId(iid) || typeof title !== 'string' || !title.trim() ||
+  if (row.state !== 'opened' || !positiveId(id) || !positiveId(iid) || typeof title !== 'string' || !title.trim() ||
       !isGitlabBranchName(target) || target === source ||
       page?.kind !== 'merge_request' || page.repositoryPath !== project.repositoryPath || page.id !== iid) {
     throw new GitlabReadError('merge-requests', 'invalid-response');
   }
   const webUrl = new URL(`${project.repositoryPath}/-/merge_requests/${iid}`, project.base.origin).href;
   if (includesGitlabCredential(token, [target, webUrl])) throw new GitlabReadError('merge-requests', 'invalid-response');
-  return { iid, title: gitlabDisplayLabel(title, 255, token, `!${iid}`), targetBranch: target, webUrl };
+  return { id, iid, title: gitlabDisplayLabel(title, 255, token, `!${iid}`), targetBranch: target, webUrl };
 }
 
 async function readOpenBranchMergeRequests(project: VerifiedProject, repositoryId: number, sourceBranch: string,
@@ -864,6 +864,7 @@ async function readOpenBranchMergeRequests(project: VerifiedProject, repositoryI
     scope: 'all', state: 'opened', source_branch: sourceBranch, per_page: String(BRANCH_MERGE_REQUEST_PAGE_SIZE),
   }).toString();
   const openMergeRequests = new Map<number, GitlabBranchMergeRequests['openMergeRequests'][number]>();
+  const globalIds = new Set<number>();
   let hasMore = false;
   for (let page = 1; page <= MAX_BRANCH_MERGE_REQUEST_PAGES; page++) {
     url.searchParams.set('page', String(page));
@@ -872,8 +873,11 @@ async function readOpenBranchMergeRequests(project: VerifiedProject, repositoryI
     for (const row of rows) {
       const mergeRequest = branchMergeRequest(row, project, repositoryId, sourceBranch, token);
       if (!mergeRequest) continue;
-      if (openMergeRequests.has(mergeRequest.iid)) throw new GitlabReadError('merge-requests', 'invalid-response');
+      if (openMergeRequests.has(mergeRequest.iid) || globalIds.has(mergeRequest.id)) {
+        throw new GitlabReadError('merge-requests', 'invalid-response');
+      }
       openMergeRequests.set(mergeRequest.iid, mergeRequest);
+      globalIds.add(mergeRequest.id);
     }
     hasMore = gitlabNextPage(pagination, url, page, rows.length, BRANCH_MERGE_REQUEST_PAGE_SIZE, 'merge-requests');
     if (!hasMore) break;
