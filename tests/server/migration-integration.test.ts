@@ -3590,7 +3590,7 @@ test('retained source verification distinguishes archival loss from deleted live
   const wiki = await f.upload(confluence(true).bytes, 'integrity-confluence.zip', 'confluence');
   const linkedWiki = await f.upload(confluence().bytes, 'integrity-linked-confluence.zip', 'confluence');
   const additionalJira = await f.upload(jiraGitlabCsv([['311', 'AUXILIARY-1', 'Additional archived ticket', 'Open']]),
-    'integrity-additional-jira.csv', 'jira', jira.source.instanceKey);
+    jira.filename, 'jira', jira.source.instanceKey);
   const packages = [jira, wiki, linkedWiki, additionalJira];
   const config = await f.configuration(packages);
   config.excludedRecords = [`${wiki.id}/page:100`];
@@ -3623,6 +3623,12 @@ test('retained source verification distinguishes archival loss from deleted live
     assert.equal(inventory.filename, pkg.filename);
     return inventory;
   }
+  async function scoped(pkg: LegacyPackageSummary, conditions: Record<string, string> = {}, service = f) {
+    const params = new URLSearchParams({ packageId: pkg.id, ...conditions });
+    const response = await service.call<SourceReconciliationPage>(`${reconciliationPath}?${params}`);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return response.data;
+  }
 
   const page = await f.call<SourceReconciliationPage>(`${reconciliationPath}?limit=100`);
   assert.equal(page.status, 200);
@@ -3649,6 +3655,22 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.deepEqual(primary(clean, linkedWiki).counts, { ...noPrimaryRows, linked: 1 });
   assert.deepEqual(primary(clean, additionalJira).counts, { ...noPrimaryRows, linked: 1 });
   assert.deepEqual(clean.primaryRecords.map(({ kind }) => kind), ['issue', 'page', 'page', 'issue']);
+  assert.equal(jira.filename, additionalJira.filename);
+  const firstIssuePage = await scoped(jira, { kind: 'issue', status: 'linked', limit: '1' });
+  const secondIssuePage = await scoped(jira, { kind: 'issue', status: 'linked', offset: '1', limit: '1' });
+  assert.equal(firstIssuePage.total, 2);
+  assert.equal(secondIssuePage.total, 2);
+  assert.deepEqual(new Set([...firstIssuePage.rows, ...secondIssuePage.rows].map(row => row.sourceKey)), new Set(['OLD-1', 'OTHER-1']));
+  assert.equal(Object.values(firstIssuePage.counts).reduce((sum, value) => sum + value, 0), packageIntegrity(clean, jira).records.observed);
+  assert.deepEqual((await scoped(additionalJira, { kind: 'issue', q: 'additional archived ticket' })).rows.map(row => row.sourceKey), ['AUXILIARY-1']);
+  assert.equal((await scoped(additionalJira, { kind: 'issue', q: 'OLD-1' })).total, 0);
+  assert.equal((await scoped(linkedWiki, { kind: 'page', status: 'excluded' })).total, 0);
+  assert.equal((await scoped(wiki, { kind: 'page', status: 'excluded' })).total, 1);
+  for (const [query, status] of [
+    ['packageId=', 400], ['packageId=%00', 400], [`packageId=${jira.id}&packageId=${wiki.id}`, 400],
+    [`packageId=${randomUUID()}`, 404], [`packageId=${jira.sha256}`, 404],
+    ['finding=invalid-primary-target', 400], [`packageId=${jira.id}&finding=unknown`, 400],
+  ] as const) assert.equal((await f.call(`${reconciliationPath}?${query}`)).status, status, query);
   for (const row of clean.primaryRecords) {
     assert.equal(row.invalidTargets, 0);
     assert.match(row.dispositionSha256, /^[a-f0-9]{64}$/);
@@ -3684,6 +3706,8 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.equal(unknownPackage.integrity.status, 'mismatch');
   assert.equal(unknownPackage.integrity.unmatchedRecords, 1);
   assert.deepEqual(primary(unknownPackage, additionalJira).counts, noPrimaryRows);
+  assert.equal((await scoped(additionalJira, { kind: 'issue' })).total, 0);
+  assert.equal((await scoped(jira, { kind: 'issue' })).total, 2);
   assert.notEqual(primary(unknownPackage, additionalJira).dispositionSha256, primary(clean, additionalJira).dispositionSha256);
   assert.deepEqual(primary(unknownPackage, jira), primary(clean, jira));
   assert.equal(changePackageSha.run(additionalJira.sha256, additionalIssue.sourceRecordId).changes, 1);
@@ -3696,6 +3720,11 @@ test('retained source verification distinguishes archival loss from deleted live
   const invalidExcluded = primary(await audit(), wiki);
   assert.deepEqual(invalidExcluded.counts, primary(clean, wiki).counts);
   assert.equal(invalidExcluded.invalidTargets, 1);
+  const flagged = await scoped(wiki, { finding: 'invalid-primary-target' });
+  assert.deepEqual(flagged.rows.map(row => [row.sourceRecordId, row.status, row.invalidPrimaryTarget, row.target]),
+    [[excludedPage.sourceRecordId, 'excluded', true, null]]);
+  assert.equal((await scoped(linkedWiki, { finding: 'invalid-primary-target' })).total, 0);
+  assert.equal((await scoped(wiki, { kind: 'attachment', finding: 'invalid-primary-target' })).total, 0);
   assert.notEqual(invalidExcluded.dispositionSha256, primary(clean, wiki).dispositionSha256);
   assert.equal(changeExcludedBinding.run(null, null, excludedPage.sourceRecordId).changes, 1);
 
@@ -3705,6 +3734,7 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.equal(whileTrashed.recordCounts.trashed, clean.recordCounts.trashed + 2, 'The ticket and its migrated comment are both still available in trash.');
   assert.deepEqual(primary(whileTrashed, jira).counts, { ...noPrimaryRows, linked: 1, trashed: 1 });
   assert.equal(primary(whileTrashed, jira).invalidTargets, 0);
+  assert.deepEqual((await scoped(jira, { kind: 'issue', status: 'trashed' })).rows.map(row => row.sourceRecordId), [jiraIssue.sourceRecordId]);
   assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}`, 'DELETE')).status, 200);
   const afterPurge = await audit();
   assert.equal(afterPurge.recordCounts.missing, clean.recordCounts.missing + 2);
@@ -3796,6 +3826,7 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.equal(malformedArchive.integrity.unmatchedRecords, 1);
   assert.equal(malformedArchive.integrity.columnMismatches, 1);
   assert.deepEqual(malformedArchive.integrity.records, missingFileArchive.integrity.records);
+  assert.deepEqual((await scoped(jira, { kind: 'issue' })).rows.map(row => row.sourceKey), ['OTHER-1']);
 
   const reordered = { ...backup.data, sourceRecords: [...backup.data.sourceRecords].reverse() };
   assert.equal((await f.call('/import', 'POST', { data: reordered })).status, 200);
@@ -3805,6 +3836,7 @@ test('retained source verification distinguishes archival loss from deleted live
   assert.deepEqual(restored.attachmentCounts, afterPurge.attachmentCounts);
   assert.deepEqual(restored.integrity, clean.integrity);
   assert.deepEqual(restored.primaryRecords, afterPurge.primaryRecords);
+  assert.deepEqual((await scoped(jira, { kind: 'issue', status: 'missing' })).rows.map(row => row.sourceRecordId), [jiraIssue.sourceRecordId]);
 
   const legacy = await fixture();
   t.after(() => legacy.close());
@@ -3820,6 +3852,7 @@ test('retained source verification distinguishes archival loss from deleted live
   const loadedOld = await legacy.call('/import', 'POST', { data: oldBackup });
   assert.equal(loadedOld.status, 200, JSON.stringify(loadedOld.data));
   const countsOnly = await audit(legacy);
+  assert.deepEqual((await scoped(wiki, { kind: 'page', status: 'excluded' }, legacy)).rows.map(row => row.sourceRecordId), [excludedPage.sourceRecordId]);
   assert.equal(countsOnly.integrity.status, 'counts-only');
   assert.deepEqual(countsOnly.integrity.records, clean.integrity.records);
   assert.deepEqual(countsOnly.integrity.boundAttachments, clean.integrity.boundAttachments);

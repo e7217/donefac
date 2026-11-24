@@ -6,6 +6,20 @@
 .migration-origin-summary { margin: .75rem 0; }
 .migration-origin-summary small { margin-top: .35rem; }
 
+.migration-receipt-heading { scroll-margin-block-start: 1rem; }
+.migration-receipt-heading:focus-visible { outline: 2px solid #177c72; outline-offset: .2rem; border-radius: .15rem; }
+.migration-receipt-summary {
+  margin: .75rem 0;
+  padding: .75rem 1rem;
+  border: 1px solid #d4e2de;
+  border-radius: .5rem;
+  background: #f6faf8;
+}
+.migration-receipt-summary h5 { margin: 0; font-size: .95rem; }
+.migration-receipt-findings { display: flex; flex-wrap: wrap; gap: .35rem .8rem; margin: .35rem 0; padding: 0; list-style: none; font-weight: 650; }
+.migration-receipt-summary p { margin: .35rem 0 0; }
+.migration-receipt-summary .migration-review-actions { margin-top: .55rem; }
+
 .migration-mapping-files { margin-top: .8rem; }
 .migration-mapping-file-actions {
   display: flex;
@@ -147,12 +161,19 @@
 .migration-reconciliation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
 .migration-reconciliation-heading h3 { margin: 0; }
 .migration-reconciliation-heading p { margin: .25rem 0 .75rem; font-size: .875rem; color: #516965; }
+.migration-reconciliation-list-heading { margin: 0 0 .55rem; scroll-margin-top: .75rem; }
+.migration-reconciliation-list-heading:focus { outline: 2px solid #176355; outline-offset: .2rem; border-radius: .2rem; }
 .migration-reconciliation-counts { margin: 0 0 .9rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr)); gap: .4rem; }
 .migration-reconciliation-counts div { padding: .45rem .6rem; border-radius: .4rem; background: #eff6f4; }
 .migration-reconciliation-counts dt { color: #455c55; font-size: .8125rem; }
 .migration-reconciliation-counts dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
 .migration-reconciliation-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.7fr) auto; align-items: end; gap: .6rem; margin-bottom: 1rem; }
 .migration-reconciliation-filters label { min-width: 0; }
+.migration-reconciliation-package-filter, .migration-reconciliation-finding-filter { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .4rem .65rem; min-width: 0; }
+.migration-reconciliation-package-filter { align-items: end; }
+.migration-reconciliation-package-filter label { flex: 1 1 19rem; }
+.migration-reconciliation-package-filter select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+.migration-reconciliation-finding-filter { align-items: center; }
 .migration-reconciliation-list { display: grid; gap: .5rem; padding: 0; margin: 0; list-style: none; }
 .migration-reconciliation-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: .65rem; padding: .75rem; border: 1px solid #dbe7e4; border-radius: .5rem; background: #fafcfb; }
 .migration-reconciliation-source, .migration-reconciliation-target { display: grid; align-content: start; justify-items: start; gap: .15rem; min-width: 0; overflow-wrap: anywhere; }

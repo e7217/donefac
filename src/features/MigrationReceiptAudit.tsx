@@ -3,9 +3,9 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
 import type {
-  SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
+  SourceImport, SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusFindingsPage,
-  SourceReconciliationJiraStatusHistory, SourceReconciliationStatus,
+  SourceReconciliationJiraStatusHistory, SourceReconciliationPrimaryRecords, SourceReconciliationStatus,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { downloadDocument } from './document-utils';
@@ -57,18 +57,29 @@ type AuditDetail = {
   onToggle: (id: string, trigger: HTMLButtonElement) => void;
   onClose: () => void;
 };
+export type PrimaryRecordDrill = Pick<SourceReconciliationPrimaryRecords, 'packageId' | 'kind'> & (
+  { status: SourceReconciliationStatus; finding?: never } | { status?: never; finding: 'invalid-primary-target' }
+);
+
+export function reconciliationPackageIdentity({ source, sha256 }: SourceImport['packages'][number]) {
+  return `${source.product === 'jira' ? 'Jira' : 'Confluence'} · ${source.instanceKey} · ${sha256.slice(0, 12)}`;
+}
 
 type AuditProps = {
   base: string;
   receiptVersion: number | null;
   canStart: boolean;
   recordLabels: Record<SourceReconciliationStatus, string>;
+  packages: SourceImport['packages'];
+  primaryListId: string;
+  onPrimaryDrill: (drill: PrimaryRecordDrill) => void;
   onStale: () => void;
   detail: AuditDetail;
   jiraDetail: AuditDetail;
 };
 
-export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, onStale, detail, jiraDetail }: AuditProps) {
+export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, packages, primaryListId, onPrimaryDrill,
+  onStale, detail, jiraDetail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -147,7 +158,8 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
       {report && <>
         <p className="migration-audit-completed" role="status">원본 연결과 첨부 검증을 마쳤습니다.</p>
         <ReceiptIntegrity integrity={report.integrity} />
-        <PrimaryRecordCoverage records={report.primaryRecords} packages={report.integrity.packages} recordLabels={recordLabels} />
+        <PrimaryRecordCoverage records={report.primaryRecords} packages={packages} integrityPackages={report.integrity.packages}
+          recordLabels={recordLabels} primaryListId={primaryListId} onDrill={onPrimaryDrill} />
         {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
           base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
         <h5>원본 객체 상태</h5>
@@ -203,13 +215,17 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
   </div>;
 }
 
-function PrimaryRecordCoverage({ records, packages, recordLabels }: {
+function PrimaryRecordCoverage({ records, packages, integrityPackages, recordLabels, primaryListId, onDrill }: {
   records: SourceReconciliationAudit['primaryRecords'];
-  packages: SourceReconciliationIntegrityPackage[];
+  packages: SourceImport['packages'];
+  integrityPackages: SourceReconciliationIntegrityPackage[];
   recordLabels: Record<SourceReconciliationStatus, string>;
+  primaryListId: string;
+  onDrill: AuditProps['onPrimaryDrill'];
 }) {
   if (!records?.length) return null;
-  const names = new Map(packages.map(item => [item.stagingId, item.filename]));
+  const packagesById = new Map(packages.map(item => [item.stagingId, item]));
+  const names = new Map(integrityPackages.map(item => [item.stagingId, item.filename]));
   const labels = { ...recordLabels, 'archive-only': '원본 보관만' };
   return <section className="migration-audit-integrity migration-audit-primary-records" aria-label="이관 티켓·문서 대조">
     <div className="migration-audit-integrity-heading"><h5>이관 티켓·문서 대조</h5></div>
@@ -217,14 +233,21 @@ function PrimaryRecordCoverage({ records, packages, recordLabels }: {
       {records.map(({ packageId, kind, counts, invalidTargets }) => {
         const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
         const needsReview = counts['archive-only'] > 0 || counts.missing > 0 || counts.trashed > 0;
+        const pkg = packagesById.get(packageId);
+        const invalidLabel = `대상 연결 오류 ${count(invalidTargets)}`;
         return <li key={packageId}>
           <div className="migration-audit-integrity-heading">
-            <strong>{names.get(packageId) ?? packageId}</strong>
+            <strong>{pkg?.filename ?? names.get(packageId) ?? packageId}</strong>
+            {pkg && <small>{reconciliationPackageIdentity(pkg)}</small>}
             <span>{primaryRecordLabels[kind]} {count(total)}</span>
-            {invalidTargets > 0 ? <span className="migration-audit-status is-mismatch">대상 연결 오류 {count(invalidTargets)}</span>
-              : needsReview && <span className="migration-audit-status is-unbound">확인 필요</span>}
+            {invalidTargets > 0 && (pkg ? <button type="button" className="migration-audit-drill migration-audit-status is-mismatch"
+              aria-label={`${invalidLabel} 보기`} aria-controls={primaryListId}
+              onClick={() => onDrill({ packageId, kind, finding: 'invalid-primary-target' })}>{invalidLabel}</button>
+              : <span className="migration-audit-status is-mismatch">{invalidLabel}</span>)}
+            {invalidTargets === 0 && needsReview && <span className="migration-audit-status is-unbound">확인 필요</span>}
           </div>
-          <AuditCounts label={`${primaryRecordLabels[kind]} 상태별 건수`} labels={labels} counts={counts} />
+          <AuditCounts label={`${primaryRecordLabels[kind]} 상태별 건수`} labels={labels} counts={counts}
+            drill={pkg ? { controls: primaryListId, select: status => onDrill({ packageId, kind, status }) } : undefined} />
         </li>;
       })}
     </ul>
@@ -424,8 +447,14 @@ function comparedCount({ expected, observed }: SourceReconciliationIntegrity['re
 
 function count(value: number) { return `${value.toLocaleString('ko-KR')}개`; }
 
-function AuditCounts<Status extends string>({ label, labels, counts }: { label: string; labels: Record<Status, string>; counts: Record<Status, number> }) {
+function AuditCounts<Status extends string>({ label, labels, counts, drill }: { label: string; labels: Record<Status, string>; counts: Record<Status, number>;
+  drill?: { controls: string; select: (status: Status) => void } }) {
   return <dl className="migration-reconciliation-counts" aria-label={label}>
-    {(Object.keys(labels) as Status[]).map(status => <div key={status}><dt>{labels[status]}</dt><dd>{counts[status].toLocaleString('ko-KR')}</dd></div>)}
+    {(Object.keys(labels) as Status[]).map(status => <div key={status}>
+      <dt>{labels[status]}</dt>
+      <dd>{drill && counts[status] > 0 ? <button type="button" className="migration-audit-drill migration-audit-count-drill"
+        aria-label={`${labels[status]} ${count(counts[status])} 보기`} aria-controls={drill.controls}
+        onClick={() => drill.select(status)}>{counts[status].toLocaleString('ko-KR')}</button> : counts[status].toLocaleString('ko-KR')}</dd>
+    </div>)}
   </dl>;
 }

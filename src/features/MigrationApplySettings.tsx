@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useImperativeHandle, useRef, useState, t
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { suggestMigrationIdentityMappings } from '../../shared/migration-identity-suggestions';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
-import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory, type User } from '../../shared/types';
+import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory, type User } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -109,7 +109,15 @@ type MigrationApplyProps = FeatureProps & {
   prepareMigrationRef: Ref<PrepareMigration>;
 };
 
-export function MigrationApplySettings(props: MigrationApplyProps) { return <ActorMigration key={`${props.actorId}:${props.projectId}`} {...props} />; }
+export function MigrationApplySettings(props: MigrationApplyProps) {
+  const [workspaceRevision, setWorkspaceRevision] = useState(0);
+  useEffect(() => {
+    const restore = () => setWorkspaceRevision(previous => previous + 1);
+    window.addEventListener('teamspace:workspace-imported', restore);
+    return () => window.removeEventListener('teamspace:workspace-imported', restore);
+  }, []);
+  return <ActorMigration key={`${props.actorId}:${workspaceRevision}`} {...props} />;
+}
 function ActorMigration(props: MigrationApplyProps) {
   const { actorId, data, notify, packageInventoryVersion, prepareMigrationRef } = props;
   const [packages, setPackages] = useState<LegacyPackageSummary[]>([]), [imports, setImports] = useState<SourceImport[]>([]);
@@ -126,12 +134,20 @@ function ActorMigration(props: MigrationApplyProps) {
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
   const migrationHeading = useRef<HTMLHeadingElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
+  const receiptHeading = useRef<HTMLHeadingElement>(null);
+  const receiptToFocus = useRef<string | null>(null);
   const savedDestinationDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping; workflows?: MigrationConfiguration['jiraWorkflows'] }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
   const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); setEmailReview(null); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
-    try { const [nextPackages, nextImports] = await Promise.all([api<LegacyPackageSummary[]>('/legacy-import/packages'), api<SourceImport[]>('/source-imports')]); if (active.current && sequence === loadSequence.current) { setPackages(nextPackages); setImports(nextImports); setListError(''); } }
+    try {
+      const [nextPackages, nextImports] = await Promise.all([
+        api<LegacyPackageSummary[]>('/legacy-import/packages', { cache: 'no-store' }),
+        api<SourceImport[]>('/source-imports', { cache: 'no-store' }),
+      ]);
+      if (active.current && sequence === loadSequence.current) { setPackages(nextPackages); setImports(nextImports); setListError(''); }
+    }
     catch (cause) { if (active.current && sequence === loadSequence.current) setListError(errorText(cause)); }
     finally { if (active.current && sequence === loadSequence.current) setLoading(false); }
   }, []);
@@ -380,6 +396,8 @@ function ActorMigration(props: MigrationApplyProps) {
     await execute('실제 이관 적용 중…', async () => {
       const result = await post<MigrationApplyResult>(`/migrations/previews/${encodeURIComponent(preview.id)}/apply`, { expectedVersion: preview.version, acknowledgements });
       if (!active.current) return;
+      ++loadSequence.current;
+      receiptToFocus.current = result.import.id;
       setImports(previous => [result.import, ...previous.filter(item => item.id !== result.import.id)]);
       setSelectedImport(result.import.id);
       reset();
@@ -391,6 +409,19 @@ function ActorMigration(props: MigrationApplyProps) {
     });
   }
   const receipt = imports.find(item => item.id === selectedImport);
+  useEffect(() => {
+    if (receipt?.id !== receiptToFocus.current || !receiptHeading.current) return;
+    receiptToFocus.current = null;
+    receiptHeading.current.focus();
+  }, [receipt]);
+  function selectReceipt(id: string) {
+    if (id === selectedImport) {
+      receiptHeading.current?.focus();
+      return;
+    }
+    receiptToFocus.current = id;
+    setSelectedImport(id);
+  }
   const receiptMode = destinationMode(receipt?.configuration);
   const receiptProduct = refreshProduct(receipt?.configuration);
   const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
@@ -551,10 +582,11 @@ function ActorMigration(props: MigrationApplyProps) {
       {expired && <p className="migration-error" role="alert">이 미리보기가 만료되었습니다. 매핑을 유지한 채 새 미리보기를 만드세요.</p>}
       <fieldset disabled={Boolean(pending)} className="migration-fieldset"><div className="migration-acknowledgements" aria-label="이관 필수 확인">{preview.requiredAcknowledgements.map(code => <label key={code}><input type="checkbox" aria-label={`이관 확인 ${code}`} checked={acknowledgements.includes(code)} onChange={event => setAcknowledgements(previous => event.target.checked ? [...previous, code] : previous.filter(value => value !== code))} /><span>{preview.notices.find(item => item.code === code)?.message || code}<small>{code}</small></span></label>)}</div><button className="btn btn-primary" disabled={!canApply} onClick={() => void apply()}><CheckCircle2 size={17} />검토한 이관 실제 적용</button></fieldset>
     </section>}
-    <section className="migration-receipts" aria-label="완료한 이관 영수증"><h3>완료한 이관</h3><Paged title="이관 영수증" items={imports} label={item => `${item.id} ${item.packages.map(value => value.filename).join(' ')}`} render={item => <button className={`migration-receipt ${selectedImport === item.id ? 'is-selected' : ''}`} onClick={() => setSelectedImport(item.id)}><strong>{item.packages.map(value => value.filename).join(' + ')}</strong><span>{timestamp(item.createdAt)} · {item.projectIds.length}개 프로젝트</span><small>{item.id}</small></button>} />{!imports.length && !loading && <p>아직 적용을 완료한 이관이 없습니다.</p>}
+    <section className="migration-receipts" aria-label="완료한 이관 영수증"><h3>완료한 이관</h3><Paged title="이관 영수증" items={imports} label={item => `${item.id} ${item.packages.map(value => value.filename).join(' ')}`} render={item => <button type="button" className={`migration-receipt ${selectedImport === item.id ? 'is-selected' : ''}`} aria-pressed={selectedImport === item.id} onClick={() => selectReceipt(item.id)}><strong>{item.packages.map(value => value.filename).join(' + ')}</strong><span>{timestamp(item.createdAt)} · {item.projectIds.length}개 프로젝트</span><small>{item.id}</small></button>} />{!imports.length && !loading && <p>아직 적용을 완료한 이관이 없습니다.</p>}
       {receipt && <div aria-label="이관 영수증 상세">
-        <h4>{receiptProduct ? `기존 프로젝트의 ${receiptProduct} 이관 결과` : receiptMode === 'new' ? '원본 기록과 생성 프로젝트' : `원본 기록과 ${appendLabels[receiptMode].item}를 추가한 프로젝트`}</h4>
-        <p>이관 실행자 {data.users.find(user => user.id === receipt.actorId)?.name || receipt.actorId} · 제외한 원본 {receipt.counts.excludedRecords ?? receipt.configuration.excludedRecords.length}개</p>
+        <h4 ref={receiptHeading} tabIndex={-1} className="migration-receipt-heading">{receiptProduct ? `기존 프로젝트의 ${receiptProduct} 이관 결과` : receiptMode === 'new' ? '원본 기록과 생성 프로젝트' : `원본 기록과 ${appendLabels[receiptMode].item}를 추가한 프로젝트`}</h4>
+        <p>이관 실행자 {data.users.find(user => user.id === receipt.actorId)?.name || receipt.actorId}</p>
+        <MigrationReceiptFindings key={`findings:${receipt.id}:${receipt.version}`} receipt={receipt} />
         {receiptMode !== 'new' && <MigrationCounts entries={Object.entries(receipt.counts).filter(([key]) => appendLabels[receiptMode].counts.includes(key))} mode={receiptMode} />}
         {receiptPlanningCounts.length > 0 && <MigrationCounts entries={receiptPlanningCounts} />}
         {receiptLinkCounts.length > 0 && <section className="migration-origin-summary" aria-label="이관 당시 원본 링크 집계">
@@ -562,12 +594,77 @@ function ActorMigration(props: MigrationApplyProps) {
           <small>이관 완료 시점의 집계입니다. 현재 링크는 업무와 문서의 기존 도구 연결에서 확인할 수 있습니다.</small>
         </section>}
         <Paged title={receiptProduct ? '기존 프로젝트 열기' : receiptMode === 'new' ? '생성한 프로젝트 열기' : `${appendLabels[receiptMode].item}를 추가한 프로젝트 열기`} items={receipt.projectIds} label={id => data.projects.find(item => item.id === id)?.name || id} render={id => <a className="btn migration-project-link" href={`#/${encodeURIComponent(id)}/overview`} aria-disabled={Boolean(pending)} onClick={event => { if (busyRef.current) event.preventDefault(); }}>{data.projects.find(item => item.id === id)?.name || id} 프로젝트 열기</a>} />
-        <MigrationReconciliation key={`${receipt.id}:${receipt.version}`} sourceImportId={receipt.id} {...props} />
-        <MappingSection title="검토한 이관 진단">{receipt.notices ? <><p>적용 당시 검토한 진단 {receipt.notices.length}건입니다. 제외·변환하지 않은 항목의 사유도 이 시점의 기록으로 보존합니다.</p><Paged title="영수증 이관 진단" items={receipt.notices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}><strong>{item.severity === 'error' ? '오류' : item.severity === 'warning' ? '경고' : '안내'} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}</div>} /></> : <p>이전 버전에서 만든 영수증이라 검토 진단이 별도로 저장되지 않았습니다. 원본 기록과 이관 설정을 확인하세요.</p>}</MappingSection>
+        <MigrationReconciliation key={`reconciliation:${receipt.id}:${receipt.version}`} sourceImportId={receipt.id} packages={receipt.packages} {...props} />
         <SourceImportRecords sourceImportId={receipt.id} />
       </div>}
     </section>
   </section>;
+}
+
+const receiptNoticeLabels: Record<MigrationNotice['severity'], string> = { warning: '경고', error: '오류', info: '안내' };
+type ReceiptFinding = 'warning' | 'error';
+
+function MigrationReceiptFindings({ receipt }: { receipt: SourceImport }) {
+  const [open, setOpen] = useState(false);
+  const [scope, setScope] = useState<{ severity: ReceiptFinding | ''; revision: number }>({ severity: '', revision: 0 });
+  const scopeHeading = useRef<HTMLHeadingElement>(null);
+  const focusScope = useRef(false);
+  const summaryId = useId();
+  const diagnosticsId = useId();
+  const notices = receipt.notices;
+  const warningCount = notices?.filter(notice => notice.severity === 'warning').length ?? 0;
+  const errorCount = notices?.filter(notice => notice.severity === 'error').length ?? 0;
+  const explicit = receipt.counts.explicitExcludedRecords ?? receipt.configuration.excludedRecords.length;
+  const excluded = receipt.counts.excludedRecords ?? explicit;
+  const descendants = receipt.counts.excludedDescendants ?? Math.max(0, excluded - explicit);
+  const scopedNotices = scope.severity ? notices?.filter(notice => notice.severity === scope.severity) : notices;
+
+  function showDiagnostics(severity: ReceiptFinding | '') {
+    focusScope.current = true;
+    setScope(previous => ({ severity, revision: previous.revision + 1 }));
+    setOpen(true);
+  }
+  useEffect(() => {
+    if (!open || !focusScope.current || !scopeHeading.current) return;
+    focusScope.current = false;
+    scopeHeading.current.focus();
+  }, [open, scope]);
+
+  return <>
+    <section className="migration-receipt-summary" aria-labelledby={summaryId}>
+      <h5 id={summaryId}>이관 후속 확인</h5>
+      <ul className="migration-receipt-findings">
+        <li>제외한 원본 {excluded.toLocaleString()}건</li>
+        {notices && <li>경고 {warningCount.toLocaleString()}건</li>}
+        {errorCount > 0 && <li>오류 {errorCount.toLocaleString()}건</li>}
+      </ul>
+      {descendants > 0 && <small>직접 제외한 원본 {explicit.toLocaleString()}건 · 함께 제외된 하위 기록 {descendants.toLocaleString()}건</small>}
+      {!notices && <p>적용 당시 진단이 저장되지 않았습니다.</p>}
+      {notices && <small>이관 적용 시점의 기록입니다.</small>}
+      {warningCount + errorCount > 0 && <div className="migration-review-actions">
+        {warningCount > 0 && <button type="button" className="btn" aria-controls={diagnosticsId} onClick={() => showDiagnostics('warning')}>적용 당시 경고 보기</button>}
+        {errorCount > 0 && <button type="button" className="btn" aria-controls={diagnosticsId} onClick={() => showDiagnostics('error')}>적용 당시 오류 보기</button>}
+      </div>}
+    </section>
+    <details id={diagnosticsId} className="migration-advanced" open={open} onToggle={event => {
+      const visible = event.currentTarget.open;
+      setOpen(visible);
+      if (!visible) setScope(previous => ({ severity: '', revision: previous.revision + 1 }));
+    }}>
+      <summary>검토한 이관 진단</summary>
+      {open && <div>{scopedNotices ? <>
+        <h5 className="migration-receipt-heading" ref={scopeHeading} tabIndex={-1}>
+          {scope.severity ? `적용 당시 ${receiptNoticeLabels[scope.severity]}` : '적용 당시 진단'}
+        </h5>
+        <p>{scopedNotices.length.toLocaleString()}건</p>
+        {scope.severity && <button type="button" className="btn btn-ghost" onClick={() => showDiagnostics('')}>전체 진단 보기</button>}
+        <Paged key={scope.revision} title="영수증 이관 진단" items={scopedNotices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}>
+          <strong>{receiptNoticeLabels[item.severity]} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}
+        </div>} />
+        {!scopedNotices.length && <p>저장된 진단이 없습니다.</p>}
+      </> : <p>이전 버전에서 만든 영수증이라 검토 진단이 별도로 저장되지 않았습니다. 원본 기록과 이관 설정을 확인하세요.</p>}</div>}
+    </details>
+  </>;
 }
 
 function JiraPlanningReview({ rows, label, original, disabled, reviewed, changes, onChoose, actions }: {

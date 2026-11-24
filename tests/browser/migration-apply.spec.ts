@@ -1921,25 +1921,68 @@ test('Jira 매핑·진단 검토 후 실제 이관하고 409·408·대기 중 �
   await keyInput.fill(key); await expect(settings.getByRole('region', { name: '이관 적용 미리보기', exact: true })).toHaveCount(0);
   const ready = await preview(page, settings); expect(ready.canApply, JSON.stringify(ready.notices)).toBe(true); await acknowledge(settings, ready);
   const applyButton = settings.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }); await expect(applyButton).toBeEnabled();
-  for (const status of [409, 408]) {
-    await page.route(`**/api/migrations/previews/${ready.id}/apply`, route => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ error: `합성 ${status} 응답` }) }));
-    page.once('dialog', dialog => dialog.accept()); await applyButton.click();
-    await expect(settings.getByRole('alert')).toContainText(`합성 ${status}`); await expect(keyInput).toHaveValue(key); await expect(applyButton).toBeEnabled();
+  const applyPath = `/api/migrations/previews/${ready.id}/apply`;
+  const applyRoute = `**${applyPath}`;
+  async function expectInputsPreserved(status: number) {
+    await expect(settings.getByRole('alert')).toContainText(`합성 ${status}`);
+    await expect(keyInput).toHaveValue(key);
+    await expect(applyButton).toBeEnabled();
     for (const code of ready.requiredAcknowledgements) await expect(settings.getByLabel(`이관 확인 ${code}`, { exact: true })).toBeChecked();
-    await page.unroute(`**/api/migrations/previews/${ready.id}/apply`);
   }
-  let release = () => {}, held = () => {}; const gate = new Promise<void>(resolve => { release = resolve; }), received = new Promise<void>(resolve => { held = resolve; });
-  await page.route(`**/api/migrations/previews/${ready.id}/apply`, async route => { const response = await route.fetch(); held(); await gate; await route.fulfill({ response }); });
+  await page.route(applyRoute, route => route.fulfill({ status: 409, json: { error: '합성 409 응답' } }), { times: 1 });
+  page.once('dialog', dialog => dialog.accept());
+  await applyButton.click();
+  await expectInputsPreserved(409);
+
+  let release = () => {};
+  let receive: (result: MigrationApplyResult) => void = () => {};
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const committed = new Promise<MigrationApplyResult>(resolve => { receive = resolve; });
+  await page.route(applyRoute, async route => {
+    const response = await route.fetch();
+    expect(response.status(), await response.text()).toBe(201);
+    receive(await response.json() as MigrationApplyResult);
+    await gate;
+    // The browser times out after the server has successfully committed the migration.
+    await route.fulfill({ status: 408, json: { error: '합성 408 응답' } });
+  }, { times: 1 });
   try {
-    const applied = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${ready.id}/apply`) && value.status() < 400);
-    page.once('dialog', dialog => dialog.accept()); await applyButton.click(); await received;
+    page.once('dialog', dialog => dialog.accept());
+    await applyButton.click();
+    const firstResult = await committed;
+    expect(firstResult.duplicate).toBe(false);
     await expect(keyInput).toBeDisabled(); const actor = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
     await page.getByLabel('작업자 선택', { exact: true }).selectOption(workspace.users.find(user => user.id !== actor)!.id); await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(actor);
     expect(await page.evaluate(() => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })))).toBe(false);
-    release(); const response = await applied; expect(response.ok()).toBe(true); const result = await response.json() as MigrationApplyResult;
-    await expect(settings.getByLabel('이관 영수증 상세', { exact: true })).toBeVisible();
-    await settings.getByLabel('이관 영수증 상세', { exact: true }).getByText('검토한 이관 진단', { exact: true }).click(); await expect(settings.getByLabel('이관 영수증 상세', { exact: true })).toContainText('CSV_HISTORY_NOT_PROVIDED');
-    const current = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot, issue = current.issues.find(value => value.title === title)!;
+    release();
+    await expectInputsPreserved(408);
+
+    const replay = page.waitForResponse(value => new URL(value.url()).pathname === applyPath);
+    page.once('dialog', dialog => dialog.accept());
+    await applyButton.click();
+    const response = await replay;
+    expect(response.ok(), await response.text()).toBe(true);
+    const result = await response.json() as MigrationApplyResult;
+    expect(result.duplicate).toBe(true);
+    expect(result.import.id).toBe(firstResult.import.id);
+    const detail = settings.getByLabel('이관 영수증 상세', { exact: true });
+    await expect(detail.getByRole('heading', { name: '원본 기록과 생성 프로젝트', exact: true })).toBeFocused();
+    const followUp = detail.getByRole('region', { name: '이관 후속 확인', exact: true });
+    const warningCodes = result.import.notices?.filter(notice => notice.severity === 'warning').map(notice => notice.code) ?? [];
+    expect(warningCodes).toContain('SOURCE_CSV_HISTORY_NOT_PROVIDED');
+    await expect(followUp.getByText(`경고 ${warningCodes.length}건`, { exact: true })).toBeVisible();
+    await expect(followUp.getByText('제외한 원본 0건', { exact: true })).toBeVisible();
+    await followUp.getByRole('button', { name: '적용 당시 경고 보기', exact: true }).click();
+    await expect(detail.getByRole('heading', { name: '적용 당시 경고', exact: true })).toBeFocused();
+    await expect(detail.getByText('경고 · SOURCE_CSV_HISTORY_NOT_PROVIDED', { exact: true })).toBeVisible();
+    await expect(detail.locator('.migration-notice.is-info, .migration-notice.is-error')).toHaveCount(0);
+    await detail.getByRole('button', { name: '전체 진단 보기', exact: true }).click();
+    await expect(detail.getByRole('heading', { name: '적용 당시 진단', exact: true })).toBeFocused();
+
+    const current = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const imported = current.issues.filter(value => value.title === title);
+    expect(imported).toHaveLength(1);
+    const issue = imported[0];
     expect(issue.projectId).toBe(result.import.projectIds[0]); expect(issue.createdAt).toBe('2020-01-02T03:04:05.000Z');
     const archives = await (await request.get(`/api/source-imports/${result.import.id}/records?kind=issue&limit=50`)).json() as SourceRecordPage;
     expect(archives.records).toHaveLength(1); expect(archives.records[0].record.sourceId).toBe('100');
@@ -1968,7 +2011,7 @@ test('Jira 매핑·진단 검토 후 실제 이관하고 409·408·대기 중 �
     await page.getByRole('dialog').getByRole('button', { name: '원본 기록', exact: true }).click(); const originPanel = page.getByRole('region', { name: '원본 이관 기록', exact: true }); await expect(originPanel).toContainText('old-author');
     await originPanel.getByLabel('원본 이관 기록 종류', { exact: true }).selectOption('issue'); await originPanel.getByLabel('보존한 원본 기록 목록', { exact: true }).getByRole('button').first().click();
     await expect(originPanel.getByLabel('보존한 원본 본문', { exact: true })).toContainText('원래 설명');
-  } finally { release(); await page.unroute(`**/api/migrations/previews/${ready.id}/apply`); await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
+  } finally { release(); await page.unroute(applyRoute); await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
 });
 
 test('Confluence 문서·이력을 적용하고 원본 작성자와 긴 storage 원문의 전체 JSON을 보존한다', async ({ page, request }) => {
@@ -2033,12 +2076,14 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const unique = suffix(), space = `검증 공간 ${unique}`;
+  const mainTitle = '이관 검증 문서', otherTitle = '다른 패키지의 검증 문서';
+  const mainBody = '검증 보고서에 복사하지 않을 원문';
   const date = '<property name="creationDate">2020-01-02T00:00:00Z</property>';
   const owner = '<property name="containerContent" class="Page"><id name="id">100</id></property>';
   const xml = `<hibernate-generic>
     <object class="Space"><id name="id">42</id><property name="key">BA${unique}</property><property name="name">${space}</property></object>
-    <object class="Page"><id name="id">100</id><property name="title">이관 검증 문서</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property>${date}</object>
-    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>검증 보고서에 복사하지 않을 원문</p>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+    <object class="Page"><id name="id">100</id><property name="title">${mainTitle}</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property>${date}</object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>${mainBody}</p>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
     <object class="Attachment"><id name="id">700</id><property name="title">versioned.txt</property><property name="version">2</property>${owner}${date}<collection name="historicalVersions"><element class="Attachment"><id name="id">701</id></element></collection></object>
     <object class="Attachment"><id name="id">701</id><property name="title">versioned.txt</property><property name="version">1</property>${owner}${date}<property name="originalVersion" class="Attachment"><id name="id">700</id></property></object>
     <object class="Attachment"><id name="id">702</id><property name="title">removed-after-import.txt</property><property name="version">1</property>${owner}${date}</object>
@@ -2051,8 +2096,16 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     { path: 'attachments/100/700/2', bytes: latest },
     { path: 'attachments/100/702/1', bytes: removed },
   ]), `receipt-${unique}`);
+  const otherName = `receipt-other-${unique}.zip`;
+  const otherXml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">BB${unique}</property><property name="name">별도 검증 공간 ${unique}</property></object>
+    <object class="Page"><id name="id">100</id><property name="title">${otherTitle}</property><property name="version">1</property><property name="space" class="Space"><id name="id">42</id></property>${date}</object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p>별도 패키지 원문</p>]]></property><property name="content" class="Page"><id name="id">100</id></property></object>
+  </hibernate-generic>`;
+  const otherPackage = await upload(request, otherName, zip([{ path: 'entities.xml', bytes: Buffer.from(otherXml) }]), `receipt-other-${unique}`);
   try {
     const { settings } = await open(page, request);
+    await settings.getByLabel(`이관 패키지 ${otherName}`, { exact: true }).check();
     await selectPackage(settings, filename);
     const plan = await preview(page, settings);
     expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
@@ -2064,16 +2117,20 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     const application = await applied;
     expect(application.ok(), await application.text()).toBe(true);
     const { import: receipt } = await application.json() as MigrationApplyResult;
+    await expect(settings.getByLabel('이관 영수증 상세', { exact: true })
+      .getByRole('heading', { name: '원본 기록과 생성 프로젝트', exact: true })).toBeFocused();
 
     const reconciliation = await openReconciliation(settings);
     const kinds = reconciliation.getByLabel('대조 원본 종류', { exact: true });
+    const recordRows = reconciliation.getByRole('list', { name: '이관 결과 대조 목록', exact: true }).getByRole('listitem');
     await kinds.selectOption('page');
-    await expect(reconciliation.getByRole('list', { name: '이관 결과 대조 목록' }).getByRole('listitem')).toHaveCount(1);
+    await expect(recordRows).toHaveCount(2);
     const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
     const audit = reconciliation.getByRole('region', { name: '전체 이관 검증', exact: true });
     const comparison = audit.getByRole('region', { name: '이관 당시 기록과 현재 비교', exact: true });
     const coverage = audit.getByRole('region', { name: '이관 티켓·문서 대조', exact: true });
-    const primaryPackage = coverage.getByRole('list', { name: '원본 패키지별 티켓·문서', exact: true }).getByRole('listitem');
+    const coveragePackages = coverage.getByRole('list', { name: '원본 패키지별 티켓·문서', exact: true }).getByRole('listitem');
+    const primaryPackage = coveragePackages.filter({ has: page.getByText(filename, { exact: true }) });
     const output = audit.getByRole('button', { name: '검증 결과 JSON 내보내기', exact: true });
     const filter = audit.getByLabel('첨부 검증 상태', { exact: true });
     const rows = audit.getByRole('list', { name: '첨부 검증 목록', exact: true }).getByRole('listitem');
@@ -2089,10 +2146,13 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
 
     const good = await checkAll();
     expect(good.jiraStatusHistory).toBeNull();
-    expect(good.primaryRecords).toEqual([{
-      packageId: pkg.id, kind: 'page', counts: { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 },
-      invalidTargets: 0, dispositionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
-    }]);
+    expect(good.primaryRecords).toHaveLength(2);
+    for (const packageId of [pkg.id, otherPackage.id]) {
+      expect(good.primaryRecords.find(item => item.packageId === packageId)).toEqual({
+        packageId, kind: 'page', counts: { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 },
+        invalidTargets: 0, dispositionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    }
     await expect(primaryPackage).toHaveCount(1);
     await expect(primaryPackage.getByText(filename, { exact: true })).toBeVisible();
     await expect(primaryPackage.getByText('Confluence 페이지 1개', { exact: true })).toBeVisible();
@@ -2111,6 +2171,43 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(361);
     expect(await audit.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(Math.ceil(box!.width));
+
+    const search = reconciliation.getByLabel('대조 검색', { exact: true });
+    const status = reconciliation.getByLabel('대조 상태', { exact: true });
+    const packages = reconciliation.getByLabel('대조 원본 패키지', { exact: true });
+    await status.selectOption('excluded');
+    await kinds.selectOption('attachment');
+    await search.fill('다른 검색어');
+    await reconciliation.getByRole('button', { name: '대조 검색 실행', exact: true }).click();
+    await expect(reconciliation.getByText('조건에 맞는 원본이 없습니다.', { exact: true })).toBeVisible();
+    const scopedPage = page.waitForResponse(value => {
+      const url = new URL(value.url());
+      return url.pathname === `/api/source-imports/${receipt.id}/reconciliation` && url.searchParams.get('packageId') === pkg.id;
+    });
+    await primaryPackage.getByRole('button', { name: '연결됨 1개 보기', exact: true }).click();
+    const scoped = await scopedPage;
+    expect(scoped.ok(), await scoped.text()).toBe(true);
+    expect(Object.fromEntries(new URL(scoped.url()).searchParams)).toMatchObject({ packageId: pkg.id, kind: 'page', status: 'linked', offset: '0' });
+    expect(new URL(scoped.url()).searchParams.has('q')).toBe(false);
+    await expect(reconciliation.getByRole('heading', { name: '대조 원본 목록', exact: true })).toBeFocused();
+    await expect(packages).toHaveValue(pkg.id);
+    await expect(search).toHaveValue('');
+    await expect(status).toHaveValue('linked');
+    await expect(kinds).toHaveValue('page');
+    await expect(reconciliation.getByLabel('선택한 패키지 원본 대조 건수', { exact: true })).toBeVisible();
+    await expect(recordRows).toHaveCount(1);
+    await expect(recordRows).toContainText(mainTitle);
+    const original = recordRows.getByRole('button', { name: '보존 원본 열기', exact: true });
+    await original.click();
+    await expect(recordRows.getByLabel('보존한 원본 본문', { exact: true })).toContainText(mainBody);
+    await recordRows.getByRole('button', { name: '원본 이관 기록 상세 닫기', exact: true }).click();
+    await expect(original).toBeFocused();
+    await packages.selectOption(otherPackage.id);
+    await expect(recordRows).toHaveCount(1);
+    await expect(recordRows).toContainText(otherTitle);
+    await reconciliation.getByRole('button', { name: '패키지 필터 해제', exact: true }).click();
+    await expect(packages).toHaveValue('');
+    await expect(recordRows).toHaveCount(2);
 
     const target = good.attachments.find(row => row.sourceId === '702')!.fileId;
     expect(target).toBeTruthy();
@@ -2140,7 +2237,7 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     expect(JSON.parse(json)).toEqual(mixed);
 
     const auditPath = `/api/source-imports/${receipt.id}/reconciliation/audit`;
-    const primary = good.primaryRecords[0];
+    const primary = good.primaryRecords.find(item => item.packageId === pkg.id)!;
     const archivedOnly: SourceReconciliationAudit = {
       ...good,
       primaryRecords: [{ ...primary, counts: { ...primary.counts, linked: 0, 'archive-only': 1 } }],
@@ -2186,10 +2283,12 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     await expect(comparison.getByText('건수만 비교', { exact: true })).toBeVisible();
     await expect(comparison.getByText('이 영수증에는 패키지별 검증값이 없습니다.', { exact: true })).toBeVisible();
     await expect(comparison.getByText('보존 원본 검증값 일치', { exact: true })).toHaveCount(0);
-    expect(json).not.toContain('검증 보고서에 복사하지 않을 원문');
+    expect(json).not.toContain(mainBody);
     await filter.selectOption('all');
     await expect(rows).toHaveCount(3);
-  } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
+  } finally {
+    for (const item of [pkg, otherPackage]) await request.delete(`/api/legacy-import/packages/${item.id}?expectedVersion=${item.version}`);
+  }
 });
 
 test('360px 이관 검증에서 Jira 변경과 표시 대상을 비교하고 원본을 확인한다', async ({ page, request }) => {

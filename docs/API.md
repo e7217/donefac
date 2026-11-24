@@ -973,6 +973,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.
 
+`packageId`로 이 영수증의 원본 패키지 `stagingId`를 지정하면 제품·인스턴스·원본 SHA-256이 모두 일치하는 원본을 조회한다. 다른 영수증의 패키지나 알 수 없는 ID에는 `404`를 반환한다. `counts`는 선택한 패키지 전체의 상태별 건수이고, `total`과 `rows`에는 나머지 조건을 함께 적용한다. 패키지와 `finding=invalid-primary-target`을 보내면 전체 이관 검증의 `invalidTargets`에 해당하는 티켓·페이지를 조회한다. 해당 행에는 `invalidPrimaryTarget: true`가 표시된다.
+
 `linked`는 현재 대상, `trashed`는 휴지통에 해당 대상이 보관된 상태, `missing`은 저장한 연결에 해당하는 현재나 휴지통의 대상이 없는 상태다. `archive-only`는 직접 연결 없이 보존한 원본이다. 새 이관의 `excluded`에는 명시적으로 제외한 원본과 함께 제외된 하위 원본이 포함된다. 원본 사용자·속성 등의 매핑 자료와 직접 연결 ID가 없는 관계 자료는 원본 보관으로 표시한다.
 
 `GET /api/source-imports/:id/records/:recordId/check-file`은 지정한 원본 첨부 버전의 저장 바이트를 기록된 파일 크기와 SHA-256으로 검사한다. `verified`, `missing`, `corrupt`, `unbound` 상태와 연결된 파일의 식별 정보를 반환한다. 휴지통에 보관한 파일 버전도 검사할 수 있다.

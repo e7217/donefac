@@ -37,10 +37,12 @@ type ContentFingerprint = { count: number; hash: Hash };
 type PrimaryRecordFingerprint = Pick<SourceReconciliationPrimaryRecords, 'kind' | 'counts' | 'invalidTargets'> & { hash: Hash };
 type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
 type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
-type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string };
+type ReceiptPackage = SourceImport['packages'][number];
+type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string;
+  packageId?: string; finding?: 'invalid-primary-target' };
 type Dependencies = { store: Store; files: AttachmentFiles; preservation: SourcePreservationService; trash: TrashService };
 const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
-const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit']);
+const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding']);
 const jiraFindings: readonly SourceReconciliationJiraFinding[] = ['unavailable', 'restricted', 'excluded', 'unresolved-time', 'unresolved-author'];
 const jiraFindingKeys = new Set(['expectedVersion', 'finding', 'offset', 'limit', 'expectedFingerprint']);
 const casefold = (value: string) => value.normalize('NFC').toLocaleLowerCase('ko-KR');
@@ -57,16 +59,22 @@ function pageInteger(value: unknown, fallback: number, min: number, max: number)
 
 function parseQuery(input: Record<string, unknown>): ReceiptQuery {
   if (Object.keys(input).some(key => !receiptKeys.has(key))) failure(400, '지원하지 않는 이관 대조 조회 조건입니다.');
-  const { kind, status } = input;
+  const { kind, status, packageId, finding } = input;
   if (kind !== undefined && !isLegacyRecordKind(kind)) failure(400, '이관 대조 객체 종류를 확인해 주세요.');
   if (status !== undefined && (typeof status !== 'string' || !statuses.includes(status as SourceReconciliationStatus))) {
     failure(400, '이관 대조 상태를 확인해 주세요.');
+  }
+  if (packageId !== undefined && (typeof packageId !== 'string' || !packageId.trim() || packageId.length > 200 || /[\x00-\x1f\x7f]/u.test(packageId))) {
+    failure(400, '이관 대조 원본 패키지 ID를 확인해 주세요.');
+  }
+  if (finding !== undefined && (finding !== 'invalid-primary-target' || packageId === undefined)) {
+    failure(400, '원본 패키지와 대상 연결 확인 조건을 확인해 주세요.');
   }
   const q = input.q === undefined ? '' : input.q;
   if (typeof q !== 'string' || q.length > 300 || [...q].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
     failure(400, '이관 대조 검색어를 확인해 주세요.');
   }
-  return { kind, status: status as ReceiptQuery['status'], offset: pageInteger(input.offset, 0, 0, 1_000_000),
+  return { kind, status: status as ReceiptQuery['status'], packageId, finding, offset: pageInteger(input.offset, 0, 0, 1_000_000),
     limit: pageInteger(input.limit, 30, 1, 100), q: casefold(q.trim()) };
 }
 
@@ -90,7 +98,9 @@ const auditProjection = `
       WHEN v.id IS NOT NULL THEN json_array('live',v.document_id)
       WHEN w.id IS NOT NULL THEN json_array('worklogs',w.issue_id,w.project_id,w.author_id,w.work_date,w.created_at,w.minutes,w.deleted_at)
     END AS targetColumns,`;
-const rowsSql = (audit: boolean) => `
+const packagePredicate = `AND r.product=? AND r.source_instance=?
+    AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.packageSha256') END=?`;
+const rowsSql = (audit: boolean, scoped = false) => `
   SELECT r.id AS sourceRecordId, r.kind, r.source_id AS sourceId, r.product, r.source_instance AS sourceInstance,
     ${audit ? auditProjection : ''}
     json_extract(r.json,'$.record.id') AS originalRecordId, json_extract(r.json,'$.packageSha256') AS packageSha256,
@@ -146,7 +156,7 @@ const rowsSql = (audit: boolean) => `
     AND archived_attachment.owner_type=r.owner_type AND archived_attachment.owner_id=r.owner_id
   LEFT JOIN trash_entries t ON t.resource_type=CASE WHEN r.target_type IN ('issue','document') THEN r.target_type ELSE r.owner_type END
     AND t.resource_id=CASE WHEN r.target_type IN ('issue','document') THEN r.target_id ELSE r.owner_id END
-  WHERE r.import_id=? AND json_valid(r.json) ORDER BY ${audit ? 'r.id' : 'r.kind,r.rowid'}`;
+  WHERE r.import_id=? AND json_valid(r.json) ${scoped ? packagePredicate : ''} ORDER BY ${audit ? 'r.id' : 'r.kind,r.rowid'}`;
 
 function packageIdentity(product: string, instance: string, sha256: string) {
   return JSON.stringify([product, instance, sha256]);
@@ -154,6 +164,17 @@ function packageIdentity(product: string, instance: string, sha256: string) {
 
 function emptyRecordCounts(): SourceReconciliationPage['counts'] {
   return { linked: 0, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
+}
+
+function primaryRecordKind(product: ReceiptPackage['source']['product']): SourceReconciliationPrimaryRecords['kind'] {
+  return product === 'jira' ? 'issue' : 'page';
+}
+
+function invalidPrimaryTarget(row: MatchRow, status: SourceReconciliationStatus): boolean {
+  const kind = primaryRecordKind(row.product);
+  const targetType = kind === 'issue' ? 'issue' : 'document';
+  return row.kind === kind && (row.targetType !== null || row.targetId !== null) &&
+    (status === 'excluded' || row.targetType !== targetType || !row.targetId);
 }
 
 function archiveProjection(archive: TrashArchive, audit: boolean) {
@@ -178,6 +199,7 @@ function scanReceipt(
   { store, trash }: Dependencies, receipt: SourceImport, audit: boolean,
   visit: (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null,
     stagingId?: string, archivedFile?: FileMetadata, archivedContentSha256?: string) => void,
+  scopedPackage?: ReceiptPackage,
 ): SourceReconciliationPage['counts'] {
   const packages = new Map(receipt.packages.map(value => [packageIdentity(value.source.product, value.source.instanceKey, value.sha256), value.stagingId]));
   const excluded = new Set(receipt.configuration.excludedRecords);
@@ -194,7 +216,8 @@ function scanReceipt(
     return children;
   }
 
-  for (const raw of store.db.prepare(rowsSql(audit)).iterate(receipt.id)) {
+  const args = scopedPackage ? [receipt.id, scopedPackage.source.product, scopedPackage.source.instanceKey, scopedPackage.sha256] : [receipt.id];
+  for (const raw of store.db.prepare(rowsSql(audit, Boolean(scopedPackage))).iterate(...args)) {
     const row = raw as unknown as MatchRow;
     const stagingId = packages.get(packageIdentity(row.product, row.sourceInstance, row.packageSha256));
     const excludedRecord = row.excluded === 1 || (stagingId && excluded.has(`${stagingId}/${row.originalRecordId}`));
@@ -233,16 +256,21 @@ function scanReceipt(
 
 function reconciliation(dependencies: Dependencies, importId: string, query: ReceiptQuery): SourceReconciliationPage {
   const receipt = dependencies.store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+  const scopedPackage = query.packageId === undefined ? undefined :
+    receipt.packages.find(value => value.stagingId === query.packageId) ?? failure(404, '이관 영수증에서 원본 패키지를 찾을 수 없습니다.');
   const rows: SourceReconciliationRow[] = [];
   let total = 0;
-  const counts = scanReceipt(dependencies, receipt, false, (row, status, target) => {
+  const counts = scanReceipt(dependencies, receipt, false, (row, status, target, stagingId) => {
     if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) return;
+    const invalid = Boolean(stagingId) && invalidPrimaryTarget(row, status);
+    if (query.finding && !invalid) return;
     if (query.q && ![row.sourceId, row.sourceKey, row.title, row.sourceInstance, target?.label, target?.owner?.label]
       .some(value => value && casefold(value).includes(query.q))) return;
     if (total++ < query.offset || rows.length >= query.limit) return;
     const { sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance } = row;
-    rows.push({ sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance, status, target });
-  });
+    rows.push({ sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance, status, target,
+      ...(invalid ? { invalidPrimaryTarget: true } : {}) });
+  }, scopedPackage);
   return { importId, receiptVersion: receipt.version, counts, rows, total, offset: query.offset, limit: query.limit };
 }
 
@@ -440,7 +468,7 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const fingerprint = createHash('sha256');
   fingerprint.update(JSON.stringify(integrity)).update('\n');
   const primaryByPackage = new Map<string, PrimaryRecordFingerprint>(receipt.packages.map(({ stagingId, source, sha256 }) => {
-    const kind = source.product === 'jira' ? 'issue' : 'page';
+    const kind = primaryRecordKind(source.product);
     const hash = createHash('sha256').update(JSON.stringify([stagingId, source.product, source.instanceKey, sha256, kind])).update('\n');
     return [stagingId, { kind, counts: emptyRecordCounts(), invalidTargets: 0, hash }];
   }));
@@ -455,9 +483,7 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
     const primary = stagingId ? primaryByPackage.get(stagingId) : undefined;
     if (primary && row.kind === primary.kind) {
       primary.counts[status]++;
-      const expectedTargetType = primary.kind === 'issue' ? 'issue' : 'document';
-      if ((row.targetType !== null || row.targetId !== null) &&
-          (status === 'excluded' || row.targetType !== expectedTargetType || !row.targetId)) primary.invalidTargets++;
+      if (invalidPrimaryTarget(row, status)) primary.invalidTargets++;
       primary.hash.update(JSON.stringify([row.sourceRecordId, row.originalRecordId, status,
         row.targetType, row.targetId, target === null ? row.targetProjectId : target.projectId])).update('\n');
     }
