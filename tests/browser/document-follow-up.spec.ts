@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
 import { documentContentSchemaVersion } from '../../shared/document-nodes';
+import { documentSectionHash } from '../../shared/document-sections';
 import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentChecklistWork, DocumentFollowUpResult, DocumentIssueLinkResult, DocumentSelectionCommentResult, Issue,
   LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
@@ -925,6 +926,161 @@ test('360px 문서에서 직접 연결과 본문의 업무 상태와 결정 당�
         const { trashEntryId } = await deleted.json() as { trashEntryId: string };
         if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
       }
+    }
+  }
+});
+
+test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 초안과 필터로 돌아온다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [firstProject, otherProject] } = await workspace(request);
+  const token = randomUUID().slice(0, 8);
+  const originalTitle = `연결 업무를 검토할 회의록 ${token}`;
+  const originalText = '팀 합의와 후속 업무를 기록했다.';
+  const draftTitle = `${originalTitle} 편집 중`;
+  const draftText = `작성 중인 회의 메모 ${token}`;
+  const sectionId = `work-review-${token}`;
+  const issues: Issue[] = [];
+  let document: DocPage | undefined;
+
+  async function createIssue(projectId: string, title: string, dueDate: string, status = 'review') {
+    const response = await request.post('/api/issues', { data: { projectId, title: `${title} ${token}`, dueDate, status } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    issues.push(issue);
+    return issue;
+  }
+
+  try {
+    const first = await createIssue(firstProject.id, '직접 연결과 본문 참조가 있는 첫 업무', '2027-05-07');
+    const second = await createIssue(otherProject.id, '다른 프로젝트의 본문 참조 업무', '2027-05-09');
+    const third = await createIssue(firstProject.id, '직접 연결만 있는 마지막 업무', '2027-05-11');
+    const closed = await createIssue(otherProject.id, '검토 필터에서 제외할 종료 업무', '2027-05-01', 'done');
+    const reference = (issue: Issue): RichContent => ({ type: 'issueReference', attrs: { issueId: issue.id, label: issue.title } });
+    document = await createDecision(request, null, originalTitle, { type: 'doc', content: [
+      { type: 'heading', attrs: { level: 2, sectionId }, content: [{ type: 'text', text: '회의 후속 업무' }] },
+      { type: 'paragraph', content: [{ type: 'text', text: originalText }] },
+      reference(first), reference(first), reference(second), reference(closed),
+    ] });
+    const documentId = document.id;
+    for (const issue of [first, third]) {
+      const response = await request.post('/api/resource-links', { data: {
+        documentId, issueId: issue.id, kind: '관련 업무',
+      } });
+      expect(response.status(), await response.text()).toBe(201);
+    }
+    const sectionHash = documentSectionHash(documentId, sectionId, firstProject.id);
+    const belongsToSection = (url: URL, issue: Issue) => {
+      const [path, query] = url.hash.split('?');
+      const params = new URLSearchParams(query);
+      return path === sectionHash.split('?')[0] && params.get('section') === sectionId && params.get('issue') === issue.id;
+    };
+    await page.goto(`/${sectionHash}`);
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(title).toHaveValue(originalTitle, { timeout: 25_000 });
+    await title.fill(draftTitle);
+    const editor = page.locator('.docs-prose');
+    await editor.locator('p').filter({ hasText: originalText }).click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(` ${draftText}`);
+    await expect(editor).toContainText(draftText);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    await page.getByRole('button', { name: '연결', exact: true }).click();
+    const linked = page.getByRole('region', { name: '연결된 업무', exact: true });
+    const linkedHeading = linked.getByRole('heading', { name: '연결된 업무', exact: true });
+    const linkedStatus = linked.getByLabel('연결된 업무 상태', { exact: true });
+    const rows = page.locator('.document-linked-work .docs-linked-issue');
+    const row = (issue: Issue) => rows.filter({ hasText: issue.title });
+    const drawer = (issue: Issue) => page.getByRole('dialog', { name: issue.title, exact: true });
+    const review = (issue: Issue) => drawer(issue).getByRole('navigation', { name: '업무 검토 순서', exact: true });
+    const position = (issue: Issue) => review(issue).getByRole('status');
+    const previous = (issue: Issue) => review(issue).getByRole('button', { name: '이전 업무', exact: true });
+    const next = (issue: Issue) => review(issue).getByRole('button', { name: '다음 업무', exact: true });
+    await linkedStatus.selectOption('open');
+    await expect(rows).toHaveCount(3);
+    for (const [index, issue] of [first, second, third].entries()) await expect(rows.nth(index)).toContainText(issue.title);
+    await expect(row(first)).toHaveCount(1);
+    await expect(row(first)).toContainText('본문 참조 2곳');
+    await expect(row(second)).toContainText(otherProject.name);
+    await expect(row(closed)).toHaveCount(0);
+
+    await row(first).click();
+    await expect(page).toHaveURL(url => belongsToSection(url, first));
+    await expect(position(first)).toHaveText('3개 중 1번째');
+    await expect(previous(first)).toBeDisabled();
+    await expect(next(first)).toHaveAttribute('title', second.key);
+    await drawer(first).getByLabel('상태', { exact: true }).selectOption('done');
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${first.id}` &&
+      response.request().method() === 'PATCH');
+    const save = drawer(first).getByRole('button', { name: '변경사항 저장', exact: true });
+    await save.click();
+    const response = await saving;
+    expect(response.ok(), await response.text()).toBe(true);
+    expect(await response.json()).toMatchObject({ id: first.id, status: 'done', version: first.version + 1 });
+    await expect(save).toBeDisabled();
+    await expect(row(first)).toHaveCount(0);
+    await expect(position(first)).toHaveText('3개 중 1번째');
+
+    await next(first).click();
+    await expect(page).toHaveURL(url => belongsToSection(url, second));
+    await expect(position(second)).toHaveText('3개 중 2번째');
+    await expect(previous(second)).toHaveAttribute('title', first.key);
+    await expect(next(second)).toHaveAttribute('title', third.key);
+    await next(second).click();
+    await expect(position(third)).toHaveText('3개 중 3번째');
+    await expect(next(third)).toBeDisabled();
+    await previous(third).click();
+    await expect(position(second)).toHaveText('3개 중 2번째');
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === sectionHash);
+    await expect(drawer(second)).toHaveCount(0);
+    await expect(linkedHeading).toBeFocused();
+    await expect(linkedStatus).toHaveValue('open');
+    await expect(rows).toHaveCount(2);
+    await expect(title).toHaveValue(draftTitle);
+    await expect(editor).toContainText(draftText);
+
+    await linkedStatus.focus();
+    await expect(linkedStatus).toBeFocused();
+    await page.goForward();
+    await expect(page).toHaveURL(url => belongsToSection(url, second));
+    await expect(position(second)).toHaveText('3개 중 2번째');
+    await expect(previous(second)).toHaveAttribute('title', first.key);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === sectionHash);
+    await expect(drawer(second)).toHaveCount(0);
+    await expect(linkedHeading).toBeFocused();
+
+    await row(second).click();
+    await expect(position(second)).toHaveText('2개 중 1번째');
+    await drawer(second).getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(row(second)).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === sectionHash);
+
+    const standalone = await page.context().newPage();
+    try {
+      await standalone.goto(`/${sectionHash}&issue=${encodeURIComponent(second.id)}`);
+      const standaloneDrawer = standalone.getByRole('dialog', { name: second.title, exact: true });
+      await expect(standaloneDrawer).toBeVisible();
+      await expect(standaloneDrawer.getByRole('navigation', { name: '업무 검토 순서', exact: true })).toHaveCount(0);
+    } finally {
+      await standalone.close();
+    }
+    await expect(title).toHaveValue(draftTitle);
+    await expect(editor).toContainText(draftText);
+    await expect(linkedStatus).toHaveValue('open');
+    const saved = (await workspace(request)).documents.find(value => value.id === documentId);
+    expect(saved).toMatchObject({ title: originalTitle, version: document.version, content: document.content });
+  } finally {
+    const paths = [
+      ...(document ? [`/api/documents/${document.id}`] : []),
+      ...issues.map(issue => `/api/issues/${issue.id}`),
+    ];
+    for (const path of paths) {
+      const removed = await request.delete(path);
+      if (!removed.ok()) continue;
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`);
     }
   }
 });

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Dialog, type Page } from '@playwright/test';
 import { documentSectionHash } from '../../shared/document-sections';
-import type { DocPage, Issue, RichContent, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, DocPage, Issue, RichContent, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function readJson<T>(response: APIResponse, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -254,5 +254,54 @@ test('문서의 절에서 티켓과 다른 연결 문서를 열어도 두 초안
     page.off('dialog', handleDialog);
     if (issue) await removeFixture(request, 'issues', issue.id);
     for (const document of documents) await removeFixture(request, 'documents', document.id);
+  }
+});
+
+test('문서 댓글 주소에서 연결 업무를 검토하고 보내지 않은 댓글로 돌아온다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project, relatedProject] } = await readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const prefix = `댓글에서 업무 검토 ${randomUUID().slice(0, 8)}`;
+  const issues: Issue[] = [];
+  const host = await createDocument(request, project.id, `${prefix} 문서`);
+
+  try {
+    for (const [index, issueProject] of [project, relatedProject].entries()) {
+      const issue = await readJson<Issue>(await request.post('/api/issues', { data: {
+        projectId: issueProject.id, title: `${prefix} 업무 ${index + 1}`, dueDate: `2027-06-0${index + 1}`,
+      } }), 201);
+      issues.push(issue);
+      await readJson(await request.post('/api/resource-links', { data: { issueId: issue.id, documentId: host.id, kind: 'related' } }), 201);
+    }
+    const [first, second] = issues;
+    const saved = await readJson<Comment>(await request.post('/api/comments', { data: {
+      resourceType: 'document', resourceId: host.id, body: `${prefix} 저장된 논의`,
+    } }), 201);
+    const path = `#/${project.id}/documents/${host.id}`;
+    const commentQuery = { comment: saved.id };
+    await page.goto(`/${path}?${new URLSearchParams(commentQuery)}`);
+    await expect(page.locator(`#document-comment-${saved.id}`)).toBeFocused();
+    const details = page.getByLabel('문서 상세 정보', { exact: true });
+    const draft = details.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    const draftText = `${prefix} 보내지 않은 문서 댓글`;
+    await draft.fill(draftText);
+    await details.getByRole('button', { name: '연결', exact: true }).click();
+    const opener = details.locator('.docs-linked-issue').filter({ hasText: first.title });
+    await opener.click();
+    const firstTicket = page.getByRole('dialog', { name: first.title, exact: true });
+    await expect.poll(() => route(page)).toEqual({ path, query: { ...commentQuery, issue: first.id } });
+    await firstTicket.getByRole('button', { name: '다음 업무', exact: true }).click();
+    const secondTicket = page.getByRole('dialog', { name: second.title, exact: true });
+    await expect(secondTicket).toBeVisible();
+    await expect.poll(() => route(page)).toEqual({ path, query: { ...commentQuery, issue: second.id } });
+    await secondTicket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(opener).toBeFocused();
+    await expect.poll(() => route(page)).toEqual({ path, query: commentQuery });
+    await details.locator('.docs-detail-tabs').getByRole('button', { name: /^댓글/u }).click();
+    await expect(draft).toHaveValue(draftText);
+    const comments = await readJson<Comment[]>(await request.get(`/api/comments?resourceType=document&resourceId=${host.id}`));
+    expect(comments.map(comment => comment.id)).toEqual([saved.id]);
+  } finally {
+    for (const issue of issues) await removeFixture(request, 'issues', issue.id);
+    await removeFixture(request, 'documents', host.id);
   }
 });

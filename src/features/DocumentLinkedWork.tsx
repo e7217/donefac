@@ -5,6 +5,7 @@ import { ChevronRight, Link2, RefreshCw, SquareChartGantt } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import { buildDocumentLinkedWork } from '../../shared/document-linked-work';
 import type { DocPage, FeatureProps, WorkspaceSnapshot } from '../../shared/types';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { DocumentDecisionRevision } from './DocumentBlocks';
 import './document-linked-work.css';
 
@@ -14,6 +15,7 @@ interface Props {
   data: WorkspaceSnapshot;
   document: Pick<DocPage, 'id' | 'title' | 'projectId'>;
   openIssue: (id: string) => void;
+  onOpenIssueForReview?: OpenIssueForReview;
   onOpenIssueSchedule?: (id: string) => boolean;
   refresh: () => Promise<void>;
   notify: FeatureProps['notify'];
@@ -21,8 +23,10 @@ interface Props {
   children?: ReactNode;
 }
 
-export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueSchedule, refresh, notify, issueDrawerOpen = false, children }: Props) {
+export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueForReview, onOpenIssueSchedule,
+  refresh, notify, issueDrawerOpen = false, children }: Props) {
   const titleId = useId();
+  const heading = useRef<HTMLHeadingElement>(null);
   const statusControl = useRef<HTMLSelectElement>(null);
   const refreshControl = useRef<HTMLButtonElement>(null);
   const issueOpener = useRef<HTMLButtonElement | null>(null);
@@ -63,7 +67,7 @@ export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueSched
 
   return <section className="document-linked-work" aria-labelledby={titleId}>
     <div className="docs-panel-heading document-linked-work-header">
-      <h3 id={titleId}>연결된 업무</h3>
+      <h3 id={titleId} ref={heading} tabIndex={-1}>연결된 업무</h3>
       <div className="document-linked-work-actions">
         {children}
         <button type="button" className="btn btn-ghost" ref={refreshControl} disabled={refreshing}
@@ -87,9 +91,14 @@ export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueSched
       </div>
     </div>}
     {visible.length ? <ul className="document-linked-work-list">{visible.map(({ issue, link, referenceCount, projectName, assigneeName, status, deadline }) => <li key={issue.id}>
-      <button type="button" className="docs-linked-issue" onClick={event => {
-        issueOpener.current = event.currentTarget;
-        openIssue(issue.id);
+      <button type="button" className="docs-linked-issue" data-issue-review-id={issue.id} onClick={event => {
+        const opener = event.currentTarget;
+        if (onOpenIssueForReview) {
+          onOpenIssueForReview(issue.id, { issueIds: visible.map(row => row.issue.id), opener, fallback: heading.current, projectScope: null });
+        } else {
+          issueOpener.current = opener;
+          openIssue(issue.id);
+        }
       }}>
         <span className="docs-linked-issue-key">
           <span>

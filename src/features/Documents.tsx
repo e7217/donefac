@@ -68,6 +68,7 @@ import { FavoriteAction } from './FavoritesState';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
 import { hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import './documents.css';
 import './document-comment-review.css';
 
@@ -81,6 +82,7 @@ type Props = FeatureProps & {
   publicationLink?: DocumentPublicationTarget | null;
   onClosePublicationLink?: (documentId: string, target: DocumentPublicationTarget) => void;
   issueDrawerOpen?: boolean;
+  onOpenIssueForReview?: OpenIssueForReview;
   onOpenIssueSchedule?: (id: string) => boolean;
   commentFocus?: { commentId: string; activation: number };
   onCopyCommentLink?: (commentId: string) => void;
@@ -176,7 +178,7 @@ function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
 
 export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument,
   documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
-  commentFocus, onCopyCommentLink, onOpenIssueSchedule }: Props) {
+  commentFocus, onCopyCommentLink, onOpenIssueForReview, onOpenIssueSchedule }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [findScope, setFindScope] = useState<string | null>(null);
   const findOpener = useRef<HTMLButtonElement>(null);
@@ -2103,7 +2105,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </form>
             </>}
             {sideTab === 'links' && <>
-              <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue} onOpenIssueSchedule={onOpenIssueSchedule}
+              <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue}
+                onOpenIssueForReview={onOpenIssueForReview} onOpenIssueSchedule={onOpenIssueSchedule}
                 refresh={refresh} notify={notify} issueDrawerOpen={issueDrawerOpen}>
                 <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>
               </DocumentLinkedWork>
