@@ -116,17 +116,57 @@ async function invocation(t, options) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const config = join(directory, 'source.json');
   const output = join(directory, 'export.zip');
+  const plan = join(directory, 'plan.json');
   await writeFile(join(directory, 'jira-auth'), `${credential}\n`, { mode: 0o600 });
   await writeFile(config, JSON.stringify({ authFile: 'jira-auth', ...options }), { mode: 0o600 });
-  async function collect() {
+  async function invoke(...args) {
     try {
-      return { code: 0, ...await run(process.execPath, ['--import', 'tsx', cli, config, output], { cwd: repo, timeout: 30_000 }) };
+      return { code: 0, ...await run(process.execPath, ['--import', 'tsx', cli, ...args], { cwd: repo, timeout: 30_000 }) };
     } catch (error) {
       if (typeof error.code !== 'number') throw error;
       return { code: error.code, stdout: error.stdout, stderr: error.stderr };
     }
   }
-  return { directory, output, collect };
+  return { directory, config, output, plan, invoke, collect: () => invoke(config, output) };
+}
+
+function inventoryRows(count) {
+  return Array.from({ length: count }, (_, index) => ({ id: String(1000 + index), key: `SRC-${index + 1}` }));
+}
+
+async function jiraInventoryFixture(t, rows, { searchPage, issueDetail } = {}) {
+  const receivedDetails = [];
+  let searchPass = 0;
+  const mock = await serve(t, ({ url, request, json }) => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers.authorization, credential);
+    if (url.pathname === `${apiPath}/search`) {
+      assert.equal(url.searchParams.get('fields'), 'project');
+      assert.equal(url.searchParams.get('jql'), 'project = "SRC" ORDER BY key ASC');
+      assert.equal(url.searchParams.get('maxResults'), '100');
+      const startAt = Number(url.searchParams.get('startAt'));
+      if (startAt === 0) searchPass++;
+      // Use nonstandard page sizes to observe both full traversals.
+      const pageSize = 73;
+      const issues = rows.slice(startAt, startAt + pageSize).map(row => ({ ...row, fields: { project } }));
+      const page = { startAt, maxResults: pageSize, total: rows.length, issues };
+      return json(searchPage ? searchPage(page, searchPass) : page);
+    }
+
+    const route = new RegExp(`^${apiPath}/issue/([0-9]+)(?:/(comment|worklog))?$`, 'u').exec(url.pathname);
+    const row = rows.find(value => value.id === route?.[1]);
+    if (!route || !row) return json({ error: 'synthetic route not found' }, 404);
+    if (route[2]) {
+      return json({ startAt: 0, maxResults: 1, total: 0, [route[2] === 'comment' ? 'comments' : 'worklogs']: [] });
+    }
+    receivedDetails.push(row.id);
+    const detail = issueDetail ? issueDetail(row) : row;
+    return json({ ...detail, self: `${url.origin}${apiPath}/issue/${detail.id}`,
+      fields: { project, summary: `Synthetic original ${detail.key}`, description: 'Synthetic private issue body', created: date,
+        updated: date, status: { id: '2', name: 'Done' }, issuetype: { id: '3', name: 'Task' } },
+      changelog: { startAt: 0, total: 0, maxResults: 0, histories: [] } });
+  });
+  return { ...mock, receivedDetails };
 }
 
 async function inspectArchive(output) {
@@ -245,4 +285,128 @@ test('Jira collection rejects drifting pagination and redirects without publishi
     assert.deepEqual(other.seen, []);
     assert.deepEqual((await readdir(directory)).sort(), ['jira-auth', 'source.json']);
   });
+});
+
+test('Jira project plan covers every visible tuple above 500 and collects a selected batch by ID', async t => {
+  const rows = inventoryRows(501);
+  const source = await jiraInventoryFixture(t, rows);
+  const { directory, config, plan, output, invoke } = await invocation(t, { baseUrl: source.origin + context, projectKey: 'SRC' });
+
+  const planned = await invoke('plan', config, plan);
+  assert.equal(planned.code, 0, planned.stderr);
+  assert.deepEqual(source.errors, []);
+  assertPrivateOutput(planned);
+  assert.ok(!`${planned.stdout}\n${planned.stderr}`.includes('SRC-501'));
+  const searchOffsets = ['0', '73', '146', '219', '292', '365', '438'];
+  assert.deepEqual(source.seen.map(({ path, startAt }) => [path, startAt]),
+    [...searchOffsets, ...searchOffsets].map(offset => [`${apiPath}/search`, offset]));
+  assert.deepEqual(source.receivedDetails, []);
+  assert.deepEqual((await readdir(directory)).sort(), ['jira-auth', 'plan.json', 'source.json']);
+  assert.equal((await stat(plan)).mode & 0o777, 0o600);
+
+  const planBytes = await readFile(plan);
+  const planSha256 = createHash('sha256').update(planBytes).digest('hex');
+  const { scopeSha256, ...inventory } = JSON.parse(planBytes);
+  assert.match(scopeSha256, /^[0-9a-f]{64}$/u);
+  assert.deepEqual(inventory, {
+    format: 'teamspace-jira-collection-plan', version: 1, batchSize: 100,
+    batches: Array.from({ length: 6 }, (_, index) => rows.slice(index * 100, (index + 1) * 100)),
+  });
+  assert.deepEqual(JSON.parse(planned.stdout), { issueCount: 501, batchCount: 6, sha256: planSha256 });
+
+  const requestsBeforeBatch = source.seen.length;
+  const collected = await invoke('batch', config, plan, '6', output);
+  assert.equal(collected.code, 0, collected.stderr);
+  assert.deepEqual(source.errors, []);
+  assertPrivateOutput(collected);
+  assert.deepEqual(source.receivedDetails, ['1500']);
+  assert.deepEqual(source.seen.slice(requestsBeforeBatch).map(request => request.path), [
+    `${apiPath}/issue/1500`, `${apiPath}/issue/1500/comment`, `${apiPath}/issue/1500/worklog`,
+  ]);
+  const { bytes, files, records } = await inspectArchive(output);
+  const report = JSON.parse(collected.stdout);
+  assert.equal(report.issueCount, 1);
+  assert.equal(report.batch, 6);
+  assert.equal(report.planSha256, planSha256);
+  assert.equal(report.sha256, createHash('sha256').update(bytes).digest('hex'));
+  assert.deepEqual([...files.keys()].filter(path => path.startsWith('issues/')), ['issues/1500.json']);
+  assert.equal(records.get('issue:1500').metadata.key, 'SRC-501');
+  assert.equal((await stat(output)).mode & 0o777, 0o600);
+
+  assert.notEqual((await invoke('batch', config, plan, '6', output)).code, 0, 'A batch must not overwrite an archive.');
+  assert.notEqual((await invoke('plan', config, plan)).code, 0, 'A new plan must not overwrite an existing plan.');
+  assert.deepEqual(await readFile(output), bytes);
+  assert.deepEqual(await readFile(plan), planBytes);
+});
+
+test('Jira project plans reject unstable or incomplete inventories before publication', async t => {
+  const rows = inventoryRows(75);
+  for (const { name, searchPage, expectedOffsets } of [
+    {
+      name: 'same total with a key changed on the second traversal',
+      searchPage: (page, pass) => pass === 2 && page.startAt === 73
+        ? { ...page, issues: [page.issues[0], { ...page.issues[1], key: 'SRC-9000' }] } : page,
+      expectedOffsets: ['0', '73', '0', '73'],
+    },
+    {
+      name: 'repeated issue ID with different keys across pages',
+      searchPage: page => page.startAt === 73 ? { ...page, issues: [{ ...page.issues[0], id: rows[0].id }, page.issues[1]] } : page,
+      expectedOffsets: ['0', '73'],
+    },
+    {
+      name: 'server reports more than 10,000 visible issues',
+      searchPage: page => ({ ...page, total: 10_001 }),
+      expectedOffsets: ['0'],
+    },
+  ]) {
+    await t.test(name, async inner => {
+      const source = await jiraInventoryFixture(inner, rows, { searchPage });
+      const { directory, config, plan, invoke } = await invocation(inner, { baseUrl: source.origin + context, projectKey: 'SRC' });
+      const result = await invoke('plan', config, plan);
+      assert.notEqual(result.code, 0);
+      assertPrivateOutput(result);
+      assert.deepEqual(source.errors, []);
+      assert.deepEqual(source.seen.map(({ path, startAt }) => [path, startAt]), expectedOffsets.map(offset => [`${apiPath}/search`, offset]));
+      assert.deepEqual((await readdir(directory)).sort(), ['jira-auth', 'source.json']);
+    });
+  }
+});
+
+test('Jira batch rejects incompatible plans and removes staged data when live identity changes', async t => {
+  let patchDetail = issue => issue;
+  const source = await jiraInventoryFixture(t, inventoryRows(3), { issueDetail: row => patchDetail(row) });
+  const { directory, config, plan, output, invoke } = await invocation(t, { baseUrl: source.origin + context, projectKey: 'SRC' });
+  assert.notEqual((await invoke('plan', config, plan, '--batch-size', '501')).code, 0);
+  assert.deepEqual(source.seen, []);
+  const planned = await invoke('plan', config, plan, '--batch-size', '2');
+  assert.equal(planned.code, 0, planned.stderr);
+  const inventory = JSON.parse(await readFile(plan));
+  assert.deepEqual(inventory.batches.map(batch => batch.length), [2, 1]);
+  assert.equal(inventory.batchSize, 2);
+  const inventoryRequests = source.seen.length;
+
+  assert.notEqual((await invoke('batch', config, plan, '3', output)).code, 0);
+  const incompatible = join(directory, 'incompatible.json');
+  await writeFile(incompatible, JSON.stringify({ baseUrl: source.origin + context, authFile: 'jira-auth', projectKey: 'OTHER' }), { mode: 0o600 });
+  assert.notEqual((await invoke('batch', incompatible, plan, '1', output)).code, 0);
+  const duplicate = join(directory, 'duplicate.json');
+  const invalid = { ...inventory, batches: [inventory.batches[0], [inventory.batches[0][0]]] };
+  await writeFile(duplicate, JSON.stringify(invalid), { mode: 0o600 });
+  assert.notEqual((await invoke('batch', config, duplicate, '1', output)).code, 0);
+  assert.equal(source.seen.length, inventoryRequests);
+
+  for (const mutation of [{ key: 'SRC-9999' }, { id: '9999' }]) {
+    source.receivedDetails.length = 0;
+    const before = source.seen.length;
+    patchDetail = row => row.id === '1001' ? { ...row, ...mutation } : row;
+    const result = await invoke('batch', config, plan, '1', output);
+    assert.notEqual(result.code, 0);
+    assertPrivateOutput(result);
+    assert.deepEqual(source.receivedDetails, ['1000', '1001']);
+    assert.deepEqual(source.seen.slice(before).map(request => request.path), [
+      `${apiPath}/issue/1000`, `${apiPath}/issue/1000/comment`, `${apiPath}/issue/1000/worklog`, `${apiPath}/issue/1001`,
+    ]);
+    assert.deepEqual((await readdir(directory)).sort(), ['duplicate.json', 'incompatible.json', 'jira-auth', 'plan.json', 'source.json']);
+  }
+  assert.deepEqual(source.errors, []);
 });

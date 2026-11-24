@@ -2,14 +2,15 @@ import { readFile, stat } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { createJiraPilotArchive, jiraCollectAttachmentUrl } from './jira-pilot-collect-archive.mjs';
 import { collectJiraIssueActivity } from './jira-pilot-collect-activity.mjs';
+import {
+  jiraIssueKey, jiraNumericId, JIRA_COLLECT_MAX_BATCH, JIRA_COLLECT_MAX_PLAN, readJiraCollectionBatch, saveJiraCollectionPlan,
+} from './jira-pilot-collect-plan.mjs';
 import { LEGACY_MAX_FILE_BYTES } from '../server/legacy-import-archive.ts';
 import { MAX_FILE_BYTES } from '../server/attachments.ts';
 
-const issueKey = /^[A-Z][A-Z0-9_]{0,39}-[1-9]\d{0,19}$/;
 const projectKey = /^[A-Z][A-Z0-9_]{0,39}$/;
-const numberId = /^[1-9]\d{0,19}$/;
-const maxIssues = 500;
 const pageSize = 100;
+const defaultBatchSize = 100;
 
 function collectError(message) { throw new Error(message); }
 
@@ -38,8 +39,8 @@ async function readConfiguration(path) {
   const hasProject = Object.hasOwn(raw, 'projectKey');
   const hasIssues = Object.hasOwn(raw, 'issueKeys');
   if (hasProject === hasIssues || hasProject && (typeof raw.projectKey !== 'string' || !projectKey.test(raw.projectKey)) ||
-      hasIssues && (!Array.isArray(raw.issueKeys) || !raw.issueKeys.length || raw.issueKeys.length > maxIssues ||
-        raw.issueKeys.some(key => typeof key !== 'string' || !issueKey.test(key)) || new Set(raw.issueKeys).size !== raw.issueKeys.length) ||
+      hasIssues && (!Array.isArray(raw.issueKeys) || !raw.issueKeys.length || raw.issueKeys.length > JIRA_COLLECT_MAX_BATCH ||
+        raw.issueKeys.some(key => typeof key !== 'string' || !jiraIssueKey.test(key)) || new Set(raw.issueKeys).size !== raw.issueKeys.length) ||
       raw.includeAttachments !== undefined && typeof raw.includeAttachments !== 'boolean') {
     collectError('프로젝트 키 하나 또는 서로 다른 현재 업무 키 1~500개를 지정해 주세요.');
   }
@@ -121,7 +122,7 @@ function verifiedIssue(raw, expected) {
   const id = typeof raw?.id === 'string' ? raw.id : Number.isSafeInteger(raw?.id) ? String(raw.id) : '';
   const key = raw?.key;
   const fields = raw?.fields;
-  if (!numberId.test(id) || typeof key !== 'string' || !issueKey.test(key) ||
+  if (!jiraNumericId.test(id) || typeof key !== 'string' || !jiraIssueKey.test(key) ||
       !fields || typeof fields !== 'object' || Array.isArray(fields) ||
       fields.project?.key !== key.slice(0, key.lastIndexOf('-')) ||
       expected.projectKey && fields.project.key !== expected.projectKey || expected.id && id !== expected.id ||
@@ -131,9 +132,8 @@ function verifiedIssue(raw, expected) {
   return { id, key };
 }
 
-async function selectIssues(configuration, getJson) {
-  if (configuration.issueKeys) return configuration.issueKeys.map(key => ({ key }));
-  const expected = { projectKey: configuration.projectKey };
+async function selectProjectIssues(projectKey, getJson, limit, limitMessage) {
+  const expected = { projectKey };
   const selected = [], ids = new Set(), keys = new Set();
   let total;
   do {
@@ -141,9 +141,7 @@ async function selectIssues(configuration, getJson) {
     const { value } = await getJson('rest/api/2/search', {
       jql: `project = "${expected.projectKey}" ORDER BY key ASC`, fields: 'project', startAt, maxResults: pageSize,
     });
-    if (Number.isSafeInteger(value?.total) && value.total > maxIssues) {
-      collectError('프로젝트에서 읽을 수 있는 업무가 500개를 넘습니다. 현재 업무 키를 나누어 수집해 주세요.');
-    }
+    if (Number.isSafeInteger(value?.total) && value.total > limit) collectError(limitMessage);
     if (!Number.isSafeInteger(value?.total) || value.total < startAt || value.startAt !== startAt ||
         !Array.isArray(value.issues) || value.issues.length > Math.min(value.total - startAt, pageSize) ||
         !value.issues.length && startAt < value.total || total !== undefined && value.total !== total) {
@@ -160,6 +158,22 @@ async function selectIssues(configuration, getJson) {
   } while (selected.length < total);
   if (!selected.length) collectError('프로젝트에서 읽을 수 있는 Jira 업무가 없습니다.');
   return selected;
+}
+
+function requireProject(configuration) {
+  if (!configuration.projectKey) collectError('분할 수집에는 projectKey를 지정한 Jira 설정이 필요합니다.');
+}
+
+async function planCollection(configuration, output, batchSize, signal) {
+  const { getJson } = createReader(configuration, signal);
+  const read = () => selectProjectIssues(configuration.projectKey, getJson, JIRA_COLLECT_MAX_PLAN,
+    '프로젝트에서 읽을 수 있는 업무가 10,000개를 넘습니다. 관리자 내보내기를 사용해 주세요.');
+  const first = await read();
+  const second = await read();
+  if (first.length !== second.length || first.some((issue, index) => issue.id !== second[index].id || issue.key !== second[index].key)) {
+    collectError('두 차례 Jira 검색에서 업무 목록이 달라졌습니다. 분할 수집 계획을 다시 만들어 주세요.');
+  }
+  return saveJiraCollectionPlan(output, configuration, first, batchSize, signal);
 }
 
 function verifySelf(value, requestUrl, issue) {
@@ -181,7 +195,7 @@ async function collectAttachments(issue, configuration, reader, archive, report,
   if (!Array.isArray(attachments)) collectError('Jira 업무의 첨부 메타데이터를 확인할 수 없습니다.');
   for (const attachment of attachments) {
     const id = String(attachment?.id ?? '');
-    if (!numberId.test(id) || seen.has(id)) collectError('Jira 첨부의 식별자가 없거나 여러 업무에 겹칩니다.');
+    if (!jiraNumericId.test(id) || seen.has(id)) collectError('Jira 첨부의 식별자가 없거나 여러 업무에 겹칩니다.');
     seen.add(id);
     if (!configuration.includeAttachments) { report.skippedAttachments++; continue; }
     const size = attachment.size;
@@ -196,11 +210,13 @@ async function collectAttachments(issue, configuration, reader, archive, report,
   }
 }
 
-async function collect(configuration, output, signal) {
+async function collect(configuration, output, signal, plannedIssues) {
   const archive = await createJiraPilotArchive(output);
   try {
     const reader = createReader(configuration, signal);
-    const selected = await selectIssues(configuration, reader.getJson);
+    const selected = plannedIssues ?? (configuration.issueKeys ? configuration.issueKeys.map(key => ({ key })) :
+      await selectProjectIssues(configuration.projectKey, reader.getJson, JIRA_COLLECT_MAX_BATCH,
+        '프로젝트에서 읽을 수 있는 업무가 500개를 넘습니다. plan으로 분할 수집 계획을 만들어 주세요.'));
     const report = { issueCount: 0, commentCount: 0, worklogCount: 0, historyCount: 0, incompleteHistories: 0,
       attachmentCount: 0, skippedAttachments: 0, unavailableAttachments: 0, oversizedAttachments: 0 };
     const seen = new Set(), attachments = new Set();
@@ -226,17 +242,47 @@ async function collect(configuration, output, signal) {
   } finally { await archive.close(); }
 }
 
-const [configurationPath, output, ...extra] = process.argv.slice(2);
+const usage = [
+  'npm run pilot:jira:collect -- /absolute/config.json /absolute/output.zip',
+  'npm run pilot:jira:collect -- plan /absolute/config.json /absolute/plan.json [--batch-size 100]',
+  'npm run pilot:jira:collect -- batch /absolute/config.json /absolute/plan.json 1 /absolute/output.zip',
+].join('\n');
+
+const absoluteFile = (path, extension) => Boolean(path && isAbsolute(path) && (!extension || extname(path) === extension));
+
+async function run(args, signal) {
+  if (args[0] === 'plan') {
+    const [, config, output, flag, size, ...extra] = args;
+    const batchSize = flag === undefined ? defaultBatchSize : Number(size);
+    if (!absoluteFile(config) || !absoluteFile(output, '.json') || extra.length ||
+        flag !== undefined && (flag !== '--batch-size' || !/^[1-9]\d{0,2}$/.test(size ?? '') || batchSize > JIRA_COLLECT_MAX_BATCH)) {
+      collectError(`사용법\n${usage}`);
+    }
+    const configuration = await readConfiguration(config);
+    requireProject(configuration);
+    return planCollection(configuration, output, batchSize, signal);
+  }
+  if (args[0] === 'batch') {
+    const [, config, plan, ordinal, output, ...extra] = args;
+    if (!absoluteFile(config) || !absoluteFile(plan, '.json') || !/^[1-9]\d{0,4}$/.test(ordinal ?? '') ||
+        !absoluteFile(output, '.zip') || extra.length) collectError(`사용법\n${usage}`);
+    const batch = Number(ordinal);
+    const configuration = await readConfiguration(config);
+    requireProject(configuration);
+    const { selected, planSha256 } = await readJiraCollectionBatch(plan, configuration, batch, signal);
+    return { ...await collect(configuration, output, signal, selected), batch, planSha256 };
+  }
+  const [config, output, ...extra] = args;
+  if (!absoluteFile(config) || !absoluteFile(output, '.zip') || extra.length) collectError(`사용법\n${usage}`);
+  return collect(await readConfiguration(config), output, signal);
+}
+
 const interrupted = new AbortController();
 const cancel = () => interrupted.abort(new Error('Jira 원본 수집을 중단했습니다.'));
 process.once('SIGINT', cancel);
 process.once('SIGTERM', cancel);
 try {
-  if (!configurationPath || !output || extra.length || !isAbsolute(configurationPath) || !isAbsolute(output) || extname(output) !== '.zip') {
-    collectError('사용법: npm run pilot:jira:collect -- /absolute/config.json /absolute/output.zip');
-  }
-  const configuration = await readConfiguration(configurationPath);
-  const report = await collect(configuration, output, interrupted.signal);
+  const report = await run(process.argv.slice(2), interrupted.signal);
   process.stdout.write(`${JSON.stringify(report)}\n`);
 } catch (error) {
   process.exitCode = interrupted.signal.aborted ? 130 : 1;

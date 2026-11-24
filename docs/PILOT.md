@@ -142,9 +142,23 @@ npm run test:pilot
 npm run pilot:jira:collect -- /absolute/path/jira-config.json /absolute/path/jira-project.zip
 ```
 
-한 번에 500개까지 수집한다. 더 큰 프로젝트는 `projectKey` 대신 `"issueKeys": ["TEAM-11", "TEAM-12"]`처럼 현재 키로 나눈다. 작업은 Jira Data Center REST v2의 GET 요청만 사용한다. 원래 업무 키·필드 이름과 스키마·댓글·작업 시간·변경 이력을 ZIP에 저장한다. 댓글과 작업 시간은 페이지의 소유 업무·원본 ID·범위 및 겹치는 내장 응답을 대조한다. 첨부는 같은 호스트와 서비스 경로에서 ID를 확인한 파일의 바이트를 가져온다. 첨부 없이 먼저 검토할 때는 `includeAttachments`를 `false`로 지정한다. [Jira 검색 API](https://developer.atlassian.com/server/jira/platform/rest/v10000/api-group-search/) · [Jira 업무 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/) · [첨부 메타데이터 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-attachment/)
+한 번에 500개까지 수집한다. 현재 키를 알고 있는 경우 `projectKey` 대신 `"issueKeys": ["TEAM-11", "TEAM-12"]`처럼 범위를 지정해도 된다. 작업은 Jira Data Center REST v2의 GET 요청만 사용한다. 원래 업무 키·필드 이름과 스키마·댓글·작업 시간·변경 이력을 ZIP에 저장한다. 댓글과 작업 시간은 페이지의 소유 업무·원본 ID·범위 및 겹치는 내장 응답을 대조한다. 첨부는 같은 호스트와 서비스 경로에서 ID를 확인한 파일의 바이트를 가져온다. 첨부 없이 먼저 검토할 때는 `includeAttachments`를 `false`로 지정한다. [Jira 검색 API](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-search/) · [Jira 업무 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/) · [첨부 메타데이터 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-attachment/)
 
 출력 ZIP은 새 파일로만 저장하며 크기와 SHA-256을 결과에 기록한다. ZIP 한도인 64MiB를 넘으면 업무 키를 나누어 수집한다. 검색 또는 댓글·작업 시간의 페이지 범위가 달라지면 ZIP 발행을 중단한다. 일부 Data Center에서는 이슈 상세의 변경 이력이 일부만 제공되고 별도 페이지 조회를 지원하지 않는다. 이 경우 받은 원본을 저장하고 `incompleteHistories`에 건수를 기록한다. 생략한 첨부, 조회할 수 없는 첨부, 20MiB를 넘긴 첨부는 메타데이터를 보존하고 각각 건수로 표시한다. 수집 결과의 범위는 해당 Jira 계정에서 열람할 수 있는 자료다. 아래 리허설에서 제한 기록·매핑·누락을 확인한다. `npm run test:pilot:jira`는 로컬 모의 Jira와 Teamspace 분석기로 이 흐름을 검사한다.
+
+### Jira 프로젝트 분할 수집
+
+업무가 500개를 넘거나 첨부 때문에 한 ZIP의 용량을 넘을 것으로 예상되면 `projectKey` 설정으로 분할 계획을 만든다. `--batch-size`는 묶음당 1~500개이며 기본값은 100개다. 계획 하나에 Jira 계정에서 열람할 수 있는 업무 최대 10,000개를 담는다.
+
+```bash
+npm run pilot:jira:collect -- plan /absolute/path/jira-config.json /absolute/path/jira-plan.json --batch-size 250
+npm run pilot:jira:collect -- batch /absolute/path/jira-config.json /absolute/path/jira-plan.json 1 /absolute/path/jira-001.zip
+npm run pilot:jira:collect -- batch /absolute/path/jira-config.json /absolute/path/jira-plan.json 2 /absolute/path/jira-002.zip
+```
+
+계획은 전체 검색을 두 번 읽어 순서·업무 ID·현재 키를 대조한다. 모두 일치하면 권한 `0600`인 새 파일에 묶음별 ID와 키를 저장한다. 계획 생성 결과는 전체 업무 수·묶음 수·SHA-256을 출력한다. 원본 업무 식별자가 들어 있는 계획 파일은 팀 내부에 보관한다. [Jira 검색 페이지 조회](https://developer.atlassian.com/server/jira/platform/rest/v10006/api-group-search/#get-issues-using-jql)
+
+출력된 묶음 수까지 번호를 바꿔 수집한다. 각 ZIP은 지정한 묶음의 업무 ID로 조회하며 현재 키·프로젝트와 계획을 대조한다. 빠진 묶음 번호가 없는지, 각 결과의 `planSha256`과 `issueCount` 합계가 계획 생성 결과의 `sha256`과 전체 업무 수에 각각 일치하는지 확인한다. 실패한 묶음은 같은 번호로 재시도할 수 있다. 원본 ID와 키가 달라졌거나 ZIP 용량 때문에 묶음을 나눠야 하면 새 계획으로 다시 확인한다. ZIP을 이관 매니페스트에 추가할 때는 같은 `instanceKey`를 사용하고, 이관 매핑에서 같은 대상 프로젝트 키와 이름을 지정한다. 리허설당 파일 20개와 합계 512MiB 한도를 적용한다. [오프라인 원본 이관 리허설](#오프라인-원본-이관-리허설)
 
 ## Confluence 공간 XML과 현재 페이지 대조
 

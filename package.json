@@ -19,7 +19,7 @@
     "test:pilot": "npm run build:pilot && node --test tests/ops/pilot-backup.test.mjs && node scripts/test-pilot.mjs",
     "test:pilot:team": "npm run build:pilot && node scripts/test-pilot.mjs --team",
     "test:pilot:access": "npm run build:pilot && node scripts/test-pilot-access.mjs",
-    "test:pilot:rehearsal": "npm run build:pilot && node --test tests/ops/pilot-migration.test.mjs tests/ops/pilot-migration-profile.test.mjs tests/ops/pilot-migration-confluence-findings.test.mjs",
+    "test:pilot:rehearsal": "npm run build:pilot && node --test tests/ops/pilot-migration.test.mjs tests/ops/pilot-migration-profile.test.mjs tests/ops/pilot-migration-confluence-findings.test.mjs tests/ops/jira-pilot-collect-plan-rehearsal.test.mjs",
     "test:pilot:rehearsal:scale": "npm run build:pilot && node --test tests/ops/pilot-migration-scale.test.mjs",
     "test:pilot:jira": "node --import tsx --test tests/ops/jira-pilot-collect.test.mjs",
     "test:pilot:confluence": "node --import tsx --test tests/ops/confluence-pilot-audit.test.mjs",
