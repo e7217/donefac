@@ -943,8 +943,10 @@ export interface WorkflowStatusMigrationPreviewInput {
   toStatusId: string;
   expectedWorkflowVersion: number;
 }
-export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'parentId' | 'labels' | 'customFields'>>;
-export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate' | 'parentId'>> & {
+type IssueBulkEditPlanningField = 'cycleId' | 'moduleId' | 'releaseId';
+export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> &
+  Partial<Pick<Issue, 'dueDate' | 'parentId' | IssueBulkEditPlanningField | 'labels' | 'customFields'>>;
+export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate' | 'parentId' | IssueBulkEditPlanningField>> & {
   addLabels?: string[];
   removeLabels?: string[];
   customFields?: Record<string, CustomFieldValue>;
@@ -957,7 +959,7 @@ export interface IssueBulkEditPreviewInput {
 }
 export interface TeamIssueBulkEditPreviewInput {
   issues: { id: string; expectedVersion: number; projectId: string }[];
-  changes: Omit<IssueBulkEditChanges, 'status' | 'customFields' | 'parentId'>;
+  changes: Omit<IssueBulkEditChanges, 'status' | 'customFields' | 'parentId' | IssueBulkEditPlanningField>;
   statuses?: Record<string, string>;
   workflowVersions?: Record<string, number>;
 }
@@ -967,6 +969,7 @@ export interface IssueBulkEditRow extends Pick<Issue, 'id' | 'key' | 'title'> {
   before: IssueBulkEditValues;
   after: IssueBulkEditValues | null;
   parents?: { before: Pick<Issue, 'id' | 'key' | 'title'> | null; after: Pick<Issue, 'id' | 'key' | 'title'> | null };
+  plans?: Partial<Record<PlanningKind, { before: Pick<PlanningItem, 'id' | 'name'> | null; after: Pick<PlanningItem, 'id' | 'name'> | null }>>;
   reason: string | null;
 }
 export interface IssueBulkEditPreview {

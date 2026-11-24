@@ -118,6 +118,7 @@
 .issue-bulk-removal-option input { flex-shrink: 0; accent-color: #286c5d; }
 
 .issue-bulk-parent-fields,
+.issue-bulk-planning-fields,
 .issue-bulk-custom-fields {
   display: grid;
   grid-column: 1 / -1;
@@ -158,6 +159,13 @@
 
 .issue-bulk-parent-results small { color: #4e695f; }
 .issue-bulk-parent-pages { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
+
+.issue-bulk-planning-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
+  gap: 10px;
+  min-width: 0;
+}
 
 .issue-bulk-custom-picker,
 .issue-bulk-custom-controls {
@@ -290,4 +298,5 @@
   .issue-bulk-label-removal { grid-column: 1 / -1; }
   .issue-bulk-custom-controls { grid-template-columns: minmax(0, 1fr); }
   .issue-bulk-parent-fields .btn { min-height: 44px; }
+  .issue-bulk-planning-controls .field { min-height: 44px; }
 }

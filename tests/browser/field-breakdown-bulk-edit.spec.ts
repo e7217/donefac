@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
-import type { CustomFieldDefinition, Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueFieldBreakdown, IssueFieldBreakdownPage, Project, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { CustomFieldDefinition, Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueFieldBreakdown, IssueFieldBreakdownPage, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   const body = await response.text();
@@ -80,7 +80,11 @@ async function openReport(page: Page, f: Awaited<ReturnType<typeof fixture>>, co
 test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답을 잃어도 같은 결과를 확인한다', async ({ page, request }) => {
   test.setTimeout(120_000);
   const f = await fixture(request);
+  let modulePlan: PlanningItem | undefined;
   try {
+    modulePlan = await json<PlanningItem>(await request.post('/api/planning-items', { data: {
+      projectId: f.project.id, kind: 'module', name: `${f.prefix} 분류 모듈`,
+    } }), 201);
     const firstLabel = '첫 페이지의 근거';
     const lastLabel = '둘째 페이지의 근거';
     const matching: Issue[] = [];
@@ -144,13 +148,14 @@ test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답�
     await report.editor.getByRole('combobox', { name: '일괄 변경 상위 업무', exact: true }).selectOption('set');
     await report.editor.getByRole('searchbox', { name: '상위 업무 검색', exact: true }).fill(outside.key);
     await report.editor.getByRole('button', { name: `${outside.key} · ${outside.title}`, exact: true }).click();
+    await report.editor.getByRole('combobox', { name: '일괄 변경 모듈', exact: true }).selectOption(`plan:${modulePlan.id}`);
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
     const proposed = postAt(page, `${f.bulkPath}-preview`);
     await report.editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
     const previewResponse = await proposed;
     expect(previewResponse.request().postDataJSON()).toMatchObject({
       fieldBreakdown: { ...report.scope, revision: report.report.revision, bucketId: report.row.id, comparisonBucketId: report.unassigned.id },
-      changes: { assigneeId: f.assignee.id, removeLabels: [firstLabel], parentId: outside.id },
+      changes: { assigneeId: f.assignee.id, removeLabels: [firstLabel], parentId: outside.id, moduleId: modulePlan.id },
     });
     const targets = previewResponse.request().postDataJSON().issues as { id: string; expectedVersion: number }[];
     expect(targets).toHaveLength(2);
@@ -158,8 +163,9 @@ test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답�
     const preview = await json<IssueBulkEditPreview>(previewResponse);
     expect(sortIds(preview.rows)).toEqual(sortIds([first, last]));
     for (const row of preview.rows) expect(row).toMatchObject({
-      before: { parentId: null }, after: { parentId: outside.id },
+      before: { parentId: null, moduleId: null }, after: { parentId: outside.id, moduleId: modulePlan.id },
       parents: { before: null, after: { id: outside.id, key: outside.key, title: outside.title } },
+      plans: { module: { before: null, after: { id: modulePlan.id, name: modulePlan.name } } },
     });
     expect(preview.rows.find(row => row.id === first.id)?.after?.labels).toEqual(['유지']);
     expect(preview.rows.find(row => row.id === last.id)?.after?.labels).toEqual(last.labels);
@@ -189,11 +195,14 @@ test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답�
     await expect(page).toHaveURL(url => new URLSearchParams(url.hash.split('?')[1]).get('savedView') === f.view().id);
     const after = await f.savedIssues();
     for (const issue of [first, last]) expect(after.find(current => current.id === issue.id)).toMatchObject({
-      assigneeId: f.assignee.id, parentId: outside.id, version: issue.version + 1,
+      assigneeId: f.assignee.id, parentId: outside.id, moduleId: modulePlan.id, version: issue.version + 1,
       labels: issue.id === first.id ? ['유지'] : issue.labels,
     });
     for (const issue of [matching[1], otherColumn, otherRow, outside]) expect(after.find(current => current.id === issue.id)).toEqual(issue);
-  } finally { await f.close(); }
+  } finally {
+    await f.close();
+    if (modulePlan) await request.delete(`/api/planning-items/${modulePlan.id}?expectedVersion=${modulePlan.version}`);
+  }
 });
 
 test('저장 보기가 바뀌면 집계 일괄 적용을 멈추고 편집값을 유지한 채 다시 선택한다', async ({ page, request }) => {

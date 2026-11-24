@@ -10,7 +10,7 @@ import { createApp } from '../../server/app.js';
 import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, type CustomFieldDefinition, type CustomFieldValue, type Issue, type IssueAssignmentRule, type IssueAssignmentRunPage, type IssueBulkEditChanges,
   type IssueBulkEditPreview, type IssueBulkEditResult, type IssueFieldBreakdown, type IssueFieldBreakdownPage, type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type TeamNotificationPage,
-  type TeamIssueBulkEditPreviewInput, type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
+  type PlanningItem, type PlanningKind, type TeamIssueBulkEditPreviewInput, type WebhookDelivery, type WebhookEndpointCreated, type WebhookEnvelope, type WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const projectId = 'project-neo';
@@ -27,6 +27,7 @@ const teamBulkPath = '/team/issues/bulk';
 const issueFields = ({ status, priority, assigneeId }: Issue) => ({ status, priority, assigneeId });
 const issueVersions = (issues: Issue[]) => issues.map(({ id, version }) => ({ id, expectedVersion: version }));
 const parentLabel = ({ id, key, title }: Issue) => ({ id, key, title });
+const planLabel = ({ id, name }: PlanningItem) => ({ id, name });
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-bulk-edit-'));
@@ -78,6 +79,12 @@ async function fixture(t: TestContext) {
   function editIssue({ id, version }: Issue, fields: Partial<Issue>) {
     return expectStatus<Issue>(200, `/issues/${id}`, 'PATCH', { ...fields, expectedVersion: version });
   }
+  function createPlan(kind: PlanningKind, name: string, project = projectId) {
+    return expectStatus<PlanningItem>(201, '/planning-items', 'POST', { kind, name, projectId: project });
+  }
+  function editPlan({ id, version }: PlanningItem, fields: Partial<PlanningItem>) {
+    return expectStatus<PlanningItem>(200, `/planning-items/${id}`, 'PATCH', { ...fields, expectedVersion: version });
+  }
   function createRule() {
     return expectStatus<IssueAssignmentRule>(201, rulesPath, 'POST', {
       name: '합성 검토 배정', enabled: true, fromStatuses: ['todo'], toStatusId: 'review', issueTypes: [],
@@ -111,12 +118,136 @@ async function fixture(t: TestContext) {
     await service.close();
     service = await start();
   }
-  return { call, expectStatus, createIssue, editIssue, createRule, requireForReview, installFields, enableEndpoint, database, snapshot, deliveries, runs, inbox, preview, apply, restart };
+  return { call, expectStatus, createIssue, editIssue, createPlan, editPlan, createRule, requireForReview, installFields, enableEndpoint,
+    database, snapshot, deliveries, runs, inbox, preview, apply, restart };
 }
 
 function customField(id: string, name: string, kind: CustomFieldDefinition['kind'], options: Partial<CustomFieldDefinition> = {}): CustomFieldDefinition {
   return { id, name, kind, archived: false, description: '', required: false, issueTypes: [], options: [], ...options };
 }
+
+test('project bulk planning assigns and clears touched memberships together and replays its receipt', async t => {
+  const f = await fixture(t);
+  const [oldCycle, oldModule, oldRelease, cycle, module, release] = await Promise.all([
+    f.createPlan('cycle', '기존 사이클'), f.createPlan('module', '기존 모듈'), f.createPlan('release', '기존 릴리스'),
+    f.createPlan('cycle', '새 사이클'), f.createPlan('module', '새 모듈'), f.createPlan('release', '새 릴리스'),
+  ]);
+  const old = { cycleId: oldCycle.id, moduleId: oldModule.id, releaseId: oldRelease.id };
+  const next = { cycleId: cycle.id, moduleId: module.id, releaseId: release.id };
+  const existing = await f.createIssue('기존 계획 변경', { ...old, description: '유지할 설명', labels: ['유지'], dueDate: '2026-11-28' });
+  const unassigned = await f.createIssue('새로 계획 지정');
+  const unchanged = await f.createIssue('이미 같은 계획과 우선순위', { ...next, priority: 'high' });
+  const before = await f.snapshot();
+
+  const reviewed = await f.preview([existing, unassigned, unchanged], { ...next, priority: 'high' });
+  assert.ok(reviewed.previewId);
+  assert.deepEqual([reviewed.changed, reviewed.unchanged, reviewed.blocked], [2, 1, 0]);
+  const labels = (current: [PlanningItem | null, PlanningItem | null, PlanningItem | null]) => ({
+    cycle: { before: current[0] && planLabel(current[0]), after: planLabel(cycle) },
+    module: { before: current[1] && planLabel(current[1]), after: planLabel(module) },
+    release: { before: current[2] && planLabel(current[2]), after: planLabel(release) },
+  });
+  assert.deepEqual(reviewed.rows.map(row => row.plans), [labels([oldCycle, oldModule, oldRelease]), labels([null, null, null]), labels([cycle, module, release])]);
+  assert.deepEqual(reviewed.rows[0].before, { ...issueFields(existing), ...old });
+  assert.deepEqual(reviewed.rows[0].after, { ...issueFields(existing), ...next, priority: 'high' });
+  assert.deepEqual(await f.snapshot(), before);
+
+  const [applied, duplicate] = await Promise.all([f.apply(reviewed.previewId), f.apply(reviewed.previewId)]);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.deepEqual(duplicate, applied);
+  assert.deepEqual(applied.data, { previewId: reviewed.previewId, unchanged: 1, updated: [existing, unassigned]
+    .map(({ id, key, version }) => ({ id, key, version: version + 1 })) });
+  const saved = await f.snapshot();
+  const assigned = saved.issues.find(row => row.id === existing.id)!;
+  const expected = { ...existing, ...next, cycle: cycle.name, module: module.name, release: release.name,
+    priority: 'high', version: existing.version + 1, updatedAt: assigned.updatedAt };
+  assert.deepEqual(assigned, expected);
+  assert.deepEqual(saved.issues.find(row => row.id === unchanged.id), unchanged);
+  assert.deepEqual(saved.planningItems, before.planningItems);
+
+  const clear = await f.preview([assigned], { cycleId: null, releaseId: null });
+  assert.ok(clear.previewId);
+  assert.deepEqual(clear.rows[0].plans, {
+    cycle: { before: planLabel(cycle), after: null }, release: { before: planLabel(release), after: null },
+  });
+  assert.equal(Object.hasOwn(clear.rows[0].before, 'moduleId'), false);
+  assert.equal(Object.hasOwn(clear.rows[0].after!, 'moduleId'), false);
+  assert.equal((await f.apply(clear.previewId)).status, 200);
+  const cleared = await f.snapshot();
+  const clearedIssue = cleared.issues.find(row => row.id === existing.id)!;
+  assert.deepEqual([clearedIssue.cycleId, clearedIssue.cycle, clearedIssue.moduleId, clearedIssue.module, clearedIssue.releaseId, clearedIssue.release],
+    [null, null, module.id, module.name, null, null]);
+  assert.equal((await f.preview([clearedIssue], { cycleId: null, releaseId: null })).previewId, null);
+  await f.restart();
+  assert.deepEqual(await f.apply(reviewed.previewId), applied);
+  assert.deepEqual(await f.snapshot(), cleared);
+});
+
+test('project bulk planning rejects wrong-kind, foreign and new archived memberships without partial changes', async t => {
+  const f = await fixture(t);
+  const cycle = await f.createPlan('cycle', '보관할 사이클');
+  const wrongKind = await f.createPlan('module', '다른 종류');
+  const foreign = await f.createPlan('release', '다른 프로젝트의 릴리스', otherProjectId);
+  const existing = await f.createIssue('보관 전 연결한 업무', { cycleId: cycle.id });
+  const unassigned = await f.createIssue('연결되지 않은 업무');
+  await f.editPlan(cycle, { status: 'archived' });
+  const before = await f.snapshot();
+
+  const archived = await f.preview([existing, unassigned], { cycleId: cycle.id, priority: 'high' });
+  assert.deepEqual([archived.previewId, archived.changed, archived.blocked], [null, 1, 1]);
+  assert.match(archived.rows[1].reason ?? '', /보관된 계획/);
+  assert.deepEqual(archived.rows[1].plans?.cycle, { before: null, after: planLabel(cycle) });
+  for (const changes of [{ cycleId: wrongKind.id }, { releaseId: foreign.id }, { moduleId: 'missing-plan' }]) {
+    const invalid = await f.preview([existing, unassigned], { ...changes, priority: 'high' });
+    assert.deepEqual([invalid.previewId, invalid.changed, invalid.blocked], [null, 0, 2]);
+    assert.ok(invalid.rows.every(row => row.after === null && /프로젝트·종류·ID/.test(row.reason ?? '') &&
+      Object.values(row.plans ?? {}).length === 1 && Object.values(row.plans ?? {})[0]?.after === null));
+  }
+  for (const changes of [{ cycleId: null }, { moduleId: wrongKind.id }, { releaseId: null }]) {
+    await f.expectStatus(400, `${teamBulkPath}-preview`, 'POST', { issues: [{ ...issueVersions([existing])[0], projectId }], changes });
+  }
+  assert.deepEqual(await f.snapshot(), before);
+
+  const cleared = await f.preview([existing, unassigned], { cycleId: null });
+  assert.ok(cleared.previewId);
+  assert.deepEqual([cleared.changed, cleared.unchanged, cleared.blocked], [1, 1, 0]);
+  assert.equal((await f.apply(cleared.previewId)).status, 200);
+  assert.equal((await f.snapshot()).issues.find(row => row.id === existing.id)?.cycleId, null);
+});
+
+test('project bulk planning refuses stale receipts when a reviewed source or destination changes', async t => {
+  const f = await fixture(t);
+  const source = await f.createPlan('cycle', '기존 연결');
+  const destination = await f.createPlan('cycle', '검토할 배정 계획');
+  const linked = await f.createIssue('기존 계획을 옮길 업무', { cycleId: source.id });
+  const unassigned = await f.createIssue('계획을 배정할 업무');
+  const issues = [linked, unassigned];
+  const before = await f.snapshot();
+
+  const first = await f.preview(issues, { cycleId: destination.id });
+  assert.ok(first.previewId);
+  const renamed = await f.editPlan(destination, { name: '다른 작업자가 고친 새 배정 계획 이름' });
+  const afterRename = await f.snapshot();
+  assert.deepEqual(afterRename.issues, before.issues);
+  assert.equal((await f.apply(first.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterRename);
+
+  const second = await f.preview(issues, { cycleId: destination.id });
+  assert.ok(second.previewId);
+  assert.deepEqual(second.rows[0].plans?.cycle?.after, planLabel(renamed));
+  await f.editPlan(source, { status: 'archived' });
+  const afterArchive = await f.snapshot();
+  assert.deepEqual(afterArchive.issues, before.issues);
+  assert.equal((await f.apply(second.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterArchive);
+
+  const third = await f.preview(issues, { cycleId: destination.id });
+  assert.ok(third.previewId);
+  await f.expectStatus(200, `/planning-items/${renamed.id}?expectedVersion=${renamed.version}`, 'DELETE');
+  const afterDeletion = await f.snapshot();
+  assert.equal((await f.apply(third.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), afterDeletion);
+});
 
 test('project bulk parent review can make a selected ancestor and child siblings and clear their shared parent', async t => {
   const f = await fixture(t);
@@ -410,6 +541,7 @@ test('field breakdown bulk requires exact cohort and matching revision until a b
   const otherStatus = await f.createIssue(`${prefix} 다른 행`, { status: 'review' });
   const outsideView = await f.createIssue('저장된 보기 밖의 업무');
   const otherProject = await f.createIssue(`${prefix} 다른 프로젝트`, { projectId: otherProjectId });
+  const release = await f.createPlan('release', '보고서가 배정하는 릴리스');
   const filters = { query: prefix, status: 'all', assigneeId: 'all', type: 'all' };
   let view = await f.expectStatus<SavedView>(201, '/views', 'POST', { projectId, name: '검토 업무 범위', layout: 'board', filters });
   const viewPath = `/views/${view.id}`;
@@ -417,7 +549,7 @@ test('field breakdown bulk requires exact cohort and matching revision until a b
   const query = { groupBy: 'status', comparisonBy: 'assignee', savedViewId: view.id };
   const selection = [first, second];
   const compareIssue = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
-  const changes = { assigneeId: reviewer };
+  const changes = { assigneeId: reviewer, releaseId: release.id };
 
   async function currentCell() {
     const report = await f.expectStatus<IssueFieldBreakdown>(200, path, 'POST', query);
@@ -481,12 +613,16 @@ test('field breakdown bulk requires exact cohort and matching revision until a b
   assert.ok(ready.previewId);
   assert.equal(ready.changed, 2);
   assert.equal(ready.blocked, 0);
+  assert.ok(ready.rows.every(row => row.plans?.release?.after?.id === release.id));
   assert.equal((await f.apply(ready.previewId, reviewer)).status, 404);
   const saved = await f.apply(ready.previewId);
   assert.equal(saved.status, 200, JSON.stringify(saved.data));
   assert.deepEqual(saved.data.updated, selection.map(issue => ({ id: issue.id, key: issue.key, version: issue.version + 1 })));
   const applied = await f.snapshot();
-  for (const issue of selection) assert.equal(applied.issues.find(row => row.id === issue.id)?.assigneeId, reviewer);
+  for (const issue of selection) {
+    const updated = applied.issues.find(row => row.id === issue.id);
+    assert.deepEqual([updated?.assigneeId, updated?.releaseId, updated?.release], [reviewer, release.id, release.name]);
+  }
   for (const issue of [otherAssignee, otherStatus, outsideView, otherProject]) {
     assert.deepEqual(applied.issues.find(row => row.id === issue.id), issue);
   }

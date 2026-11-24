@@ -341,9 +341,11 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 ## 업무 일괄 편집
 
-브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?,customFields?,parentId?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 상태 전이에서 담당자나 목표 마감일을 생략하면 해당 워크플로의 자동 규칙을 적용할 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
+브라우저의 `POST /api/projects/:projectId/issues/bulk-preview`에 `{issues:[{id,expectedVersion}],changes:{status?,priority?,assigneeId?,dueDate?,addLabels?,removeLabels?,customFields?,parentId?,cycleId?,moduleId?,releaseId?}}`를 보낸다. 같은 프로젝트의 업무 1~100개를 받는다. 상태 전이에서 담당자나 목표 마감일을 생략하면 해당 워크플로의 자동 규칙을 적용할 수 있다. 담당자를 직접 지정하거나 해제하는 경우 `assigneeId`에 팀원 ID 또는 `null`을 보낸다. `dueDate`는 `YYYY-MM-DD`로 지정하고 `null`로 해제한다.
 
 `parentId`는 같은 프로젝트의 활성 티켓 ID로 지정하고 `null`로 연결을 해제한다. 생략하면 기존 상위를 유지한다. 미리보기는 각 티켓의 `before.parentId`, `after.parentId`와 `parents.before`, `parents.after`의 키·제목을 반환한다. 검증에 막힌 행은 `after: null`과 이유를 반환한다. 상위 업무의 소속, 자체 참조와 순환, 검토한 상위 연결을 검사한다. 적용 시 근거가 달라졌으면 `409`를 반환하고 새 미리보기를 요구한다.
+
+`cycleId`, `moduleId`, `releaseId`는 종류에 맞는 같은 프로젝트의 계획 ID를 받는다. `null`은 해당 종류의 연결 해제이고 생략은 유지다. `rows[].before`와 `after`에 요청한 계획 ID를 포함하고 `rows[].plans`의 `cycle`, `module`, `release` 항목에 각각 `before`와 `after`의 `{id,name}` 또는 `null`을 담는다. 보관된 계획에 새로 배정하려 하면 해당 행을 차단한다. 적용 전에 검토한 계획 버전을 다시 대조한다.
 
 `addLabels`와 `removeLabels`는 각각 중복 없는 1~100개 문자열 배열이며, 라벨 하나는 최대 60자다. 양쪽에 같은 이름을 넣으면 요청을 거절한다. 대소문자와 공백을 포함한 이름을 그대로 비교한다. 해당 티켓에 있는 제거 대상만 지우고, 없는 추가 대상을 기존 목록 뒤에 붙인다.
 

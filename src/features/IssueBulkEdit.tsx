@@ -4,12 +4,13 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ListChecks, Plus, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import { fieldValueLabel, hasCustomValue, projectIssueSchema } from '../../shared/issue-schema';
+import { PLANNING_STATUS_META, planningFields, planningMeta, projectPlanningItems } from '../../shared/planning-helpers';
 import { projectWorkflow } from '../../shared/workflow-helpers';
 import { issueSearchAliasLabel, searchIssueCandidates, WORKSPACE_SEARCH_QUERY_LIMIT } from '../../shared/workspace-search';
 import {
   ISSUE_BULK_EDIT_LIMIT, ISSUE_BULK_LABEL_LIMIT, ISSUE_BULK_LABEL_MAX_LENGTH, PRIORITY, type CustomFieldDefinition, type CustomFieldValue, type FeatureProps, type Issue, type IssueBulkEditChanges, type IssueBulkEditPreview,
-  type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditTarget, type IssueBulkEditValues, type IssueFieldBreakdownSelection,
-  type Priority, type TeamIssueBulkEditPreviewInput, type WorkflowStatus,
+  type IssueBulkEditPreviewInput, type IssueBulkEditResult, type IssueBulkEditRow, type IssueBulkEditTarget, type IssueBulkEditValues, type IssueFieldBreakdownSelection,
+  type PlanningItem, type PlanningKind, type Priority, type TeamIssueBulkEditPreviewInput, type WorkflowStatus,
 } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
 import { afterAcceptedNavigation, isReportPreservedByNavigation, isTeamBoardPreservedByNavigation } from '../lib/navigation';
@@ -21,6 +22,8 @@ type BasicChanges = Pick<IssueBulkEditChanges, 'status' | 'priority' | 'assignee
 type DueDateMode = 'keep' | 'set' | 'clear';
 type ParentMode = 'keep' | 'set' | 'clear';
 type ParentIssue = Pick<Issue, 'id' | 'key' | 'title'>;
+type PlanningChoice = Pick<PlanningItem, 'id' | 'name'>;
+type PlanningDrafts = Partial<Record<PlanningKind, PlanningChoice | null>>;
 type CustomFieldMode = 'set' | 'clear';
 type CustomFieldDraft = Pick<CustomFieldDefinition, 'id' | 'name' | 'kind'> & { mode: CustomFieldMode; value: CustomFieldValue };
 
@@ -31,6 +34,7 @@ interface EditFields {
   dueDate: string;
   parentMode: ParentMode;
   parentSelection: ParentIssue | null;
+  planningDrafts: PlanningDrafts;
   addLabelsText: string;
   removeLabels: string[];
   customFieldDrafts: CustomFieldDraft[];
@@ -46,7 +50,9 @@ interface EditSession extends EditFields {
 }
 
 const emptyFields: EditFields = { changes: {}, teamStatuses: {}, dueDateMode: 'keep', dueDate: '', parentMode: 'keep', parentSelection: null,
-  addLabelsText: '', removeLabels: [], customFieldDrafts: [] };
+  planningDrafts: {}, addLabelsText: '', removeLabels: [], customFieldDrafts: [] };
+const planningKinds = ['cycle', 'module', 'release'] as const;
+const planningOptionPrefix = 'plan:';
 const parentPageSize = 20;
 const compareParentKeys = new Intl.Collator('ko', { numeric: true }).compare;
 const parentIssueLabel = ({ key, title }: ParentIssue) => `${key} · ${title}`;
@@ -99,7 +105,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   const active = session?.scope === scope;
   const selected = active ? visible.filter(issue => session.ids.has(issue.id)) : [];
   const fields = active ? session : emptyFields;
-  const { dueDateMode, dueDate, parentMode, parentSelection, addLabelsText, removeLabels, customFieldDrafts } = fields;
+  const { dueDateMode, dueDate, parentMode, parentSelection, planningDrafts, addLabelsText, removeLabels, customFieldDrafts } = fields;
   const selectingParent = active && !team && parentMode === 'set';
   const parentCandidates = useMemo(() => selectingParent
     ? data.issues.filter(issue => issue.projectId === projectId).sort((first, second) => compareParentKeys(first.key, second.key))
@@ -111,6 +117,22 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
     else if (session.ids.has(currentParent.id)) parentError = '일괄 변경할 업무는 상위 업무로 지정할 수 없습니다.';
   }
   const validParent = !selectingParent || Boolean(currentParent && !parentError);
+  const { planningItems } = data;
+  const planningOptions = useMemo(() => new Map(planningKinds.map(kind => [kind, active && !team
+    ? projectPlanningItems({ planningItems }, projectId, kind) : []])), [active, planningItems, projectId, team]);
+  const planningChanges: Pick<IssueBulkEditChanges, 'cycleId' | 'moduleId' | 'releaseId'> = {};
+  const planningErrors = new Map<PlanningKind, string>();
+  if (!team) for (const kind of planningKinds) {
+    const choice = planningDrafts[kind];
+    if (choice === undefined) continue;
+    if (choice && !planningOptions.get(kind)?.some(item => item.id === choice.id)) {
+      const archived = planningItems?.some(item => item.id === choice.id && item.projectId === projectId && item.kind === kind && item.status === 'archived');
+      planningErrors.set(kind, archived ? `보관된 ${planningMeta(kind).label}에는 연결할 수 없습니다. 다른 계획을 선택해 주세요.`
+        : '현재 프로젝트에서 이 계획을 찾을 수 없습니다. 다른 계획을 선택해 주세요.');
+      continue;
+    }
+    planningChanges[planningFields(kind).idField] = choice?.id ?? null;
+  }
   const chosenProjectIds = new Set(team ? selected.map(issue => issue.projectId) : []);
   const teamProjects = team ? data.projects.filter(project => chosenProjectIds.has(project.id)) : [];
   const teamWorkflows = teamProjects.map(project => projectWorkflow(data, project.id));
@@ -137,6 +159,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   };
   const changes: IssueBulkEditChanges = {
     ...teamChanges,
+    ...planningChanges,
     ...(!team && status !== undefined ? { status } : {}),
     ...(!team && parentMode === 'clear' ? { parentId: null } : {}),
     ...(selectingParent && currentParent && !parentError ? { parentId: currentParent.id } : {}),
@@ -156,7 +179,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   const changeCount = Object.keys(changes).length + statusCount;
   const applyUncertain = active && session.applyUncertain;
   const dirty = active && (selected.length > 0 || changeCount > 0 || dueDateMode !== 'keep' || parentMode !== 'keep' ||
-    Boolean(addLabelsText) || customFieldDrafts.length > 0 || applyUncertain);
+    Object.keys(planningDrafts).length > 0 || Boolean(addLabelsText) || customFieldDrafts.length > 0 || applyUncertain);
   const input = JSON.stringify(team ? {
     issues: selected.map(({ id, version, projectId }) => ({ id, expectedVersion: version, projectId: projectId ?? '' })),
     changes: teamChanges,
@@ -292,6 +315,19 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
     });
   }
 
+  function setPlanningChoice(kind: PlanningKind, value: string) {
+    const choice = value.startsWith(planningOptionPrefix)
+      ? planningOptions.get(kind)?.find(item => item.id === value.slice(planningOptionPrefix.length)) : undefined;
+    if (team || (value && value !== 'clear' && !choice)) return;
+    updateFields(current => {
+      const next = { ...current.planningDrafts };
+      if (choice) next[kind] = { id: choice.id, name: choice.name };
+      else if (value === 'clear') next[kind] = null;
+      else delete next[kind];
+      return { planningDrafts: next };
+    });
+  }
+
   function toggleLabelRemoval(label: string) {
     updateFields(current => ({ removeLabels: current.removeLabels.includes(label)
       ? current.removeLabels.filter(value => value !== label)
@@ -331,7 +367,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
     return api<T>(`${path}/${action}`, { method: 'POST', body, signal, headers: { 'X-Actor-Id': actorId } });
   }
 
-  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && validParent && !labelsError && !customFieldErrors.size &&
+  const canPreview = active && selected.length > 0 && changeCount > 0 && validDueDate && validParent && !labelsError && !planningErrors.size && !customFieldErrors.size &&
     !session.refreshRequired && !applyUncertain && (!report || Boolean(report.fieldBreakdown)) &&
     (!team || chosenProjectIds.size === teamProjects.length);
   async function review() {
@@ -402,6 +438,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
     parentMode, parentSelection: currentParent ?? parentSelection, parentCandidates, parentError, issueAliases: data.issueAliases,
     setParentMode: (value: ParentMode) => updateFields(() => ({ parentMode: value })),
     selectParent: ({ id, key, title }: ParentIssue) => updateFields(current => current.ids.has(id) ? {} : { parentSelection: { id, key, title } }),
+    planningDrafts, planningOptions, planningErrors, setPlanningChoice,
     customFieldDefinitions, customFieldsById, customFieldDrafts, customFieldErrors, addCustomField, updateCustomField, removeCustomField,
     setDueDateMode: (value: DueDateMode) => updateFields(() => ({ dueDateMode: value })),
     setDueDate: (value: string) => updateFields(() => ({ dueDate: value })),
@@ -427,7 +464,9 @@ export function IssueBulkSelectVisible({ editor, label }: { editor: BulkEditor; 
 }
 
 type BulkBasicField = Exclude<keyof IssueBulkEditValues, 'customFields'>;
-const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자', dueDate: '마감일', labels: '라벨', parentId: '상위 업무' } satisfies Record<BulkBasicField, string>;
+const fieldLabels = { status: '상태', priority: '우선순위', assigneeId: '담당자', dueDate: '마감일', labels: '라벨', parentId: '상위 업무',
+  cycleId: planningMeta('cycle').label, moduleId: planningMeta('module').label, releaseId: planningMeta('release').label,
+} satisfies Record<BulkBasicField, string>;
 const outcomes = { changed: '변경 예정', unchanged: '변경 없음', blocked: '변경 불가' };
 const memberPrefix = 'team-member:';
 const displayLabel = (label: string) => !label || label.trim() !== label || /[",\p{Cc}]/u.test(label) ? JSON.stringify(label) : label;
@@ -444,17 +483,27 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
     ? Object.entries(editor.teamStatuses).some(([id, statusId]) =>
       editor.teamProjectStatuses.get(id)?.find(status => status.id === statusId)?.defaultDueWorkdays != null)
     : statuses.find(status => status.id === changes.status)?.defaultDueWorkdays != null;
-  function valueLabel(field: BulkBasicField, values: IssueBulkEditValues, projectId?: string, parent?: ParentIssue | null) {
+  function valueLabel(field: BulkBasicField, values: IssueBulkEditValues, row: IssueBulkEditRow) {
+    const side = values === row.before ? 'before' : 'after';
     if (field === 'status') {
-      const projectStatuses = projectId ? editor.teamProjectStatuses.get(projectId) : statuses;
+      const projectStatuses = row.projectId ? editor.teamProjectStatuses.get(row.projectId) : statuses;
       return projectStatuses?.find(status => status.id === values.status)?.label ?? values.status;
     }
     if (field === 'priority') return PRIORITY[values.priority];
     if (field === 'dueDate') return values.dueDate ?? '미지정';
     if (field === 'labels') return values.labels?.length ? values.labels.map(displayLabel).join(', ') : '없음';
-    if (field === 'parentId') return values.parentId
-      ? parent && parent.id === values.parentId ? parentIssueLabel(parent) : '확인할 수 없는 상위 업무'
-      : '상위 업무 없음';
+    if (field === 'parentId') {
+      const parent = row.parents?.[side];
+      if (!values.parentId) return '상위 업무 없음';
+      return parent?.id === values.parentId ? parentIssueLabel(parent) : '확인할 수 없는 상위 업무';
+    }
+    const kind = planningKinds.find(kind => planningFields(kind).idField === field);
+    if (kind) {
+      const id = values[planningFields(kind).idField];
+      const item = row.plans?.[kind]?.[side];
+      if (!id) return `${planningMeta(kind).label} 없음`;
+      return item?.id === id ? item.name : `확인할 수 없는 ${planningMeta(kind).label}`;
+    }
     return values.assigneeId ? users.find(user => user.id === values.assigneeId)?.name ?? values.assigneeId : '미지정';
   }
 
@@ -534,6 +583,7 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
           {editor.removeLabels.length > 0 && <p role="status">{editor.removeLabels.length}개 선택 · 최대 {ISSUE_BULK_LABEL_LIMIT}개</p>}
         </details>
         {!editor.team && <BulkParentField editor={editor} />}
+        {!editor.team && <BulkPlanningFields editor={editor} />}
         {!editor.team && <BulkCustomFields editor={editor} users={users} />}
       </fieldset>
       {editor.labelsError && <p className="issue-bulk-error" role="alert">{editor.labelsError}</p>}
@@ -556,8 +606,7 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
             <div className="issue-bulk-preview-heading"><strong>{row.key} {row.title}</strong><span>{outcomes[row.outcome]}</span></div>
             {project && <p>{project.key} · {project.name}</p>}
             {row.reason && <p className="issue-bulk-row-reason">{row.reason}</p>}
-            {row.after && transitionLabels(row.before, row.after, (field, values) =>
-              valueLabel(field, values, row.projectId, values === row.before ? row.parents?.before : row.parents?.after),
+            {row.after && transitionLabels(row.before, row.after, (field, values) => valueLabel(field, values, row),
               editor.customFieldsById, customValueLabel)}
           </li>;
         })}
@@ -634,6 +683,37 @@ function BulkParentField({ editor }: { editor: BulkEditor }) {
           onClick={() => showPage(currentPage + 1)}>다음</button>
       </nav>}
     </>}
+  </section>;
+}
+
+function BulkPlanningFields({ editor }: { editor: BulkEditor }) {
+  const id = useId();
+  return <section className="issue-bulk-planning-fields" aria-label="계획 연결 일괄 변경">
+    <h3>계획 연결</h3>
+    <div className="issue-bulk-planning-controls">
+      {planningKinds.map(kind => {
+        const { label } = planningMeta(kind);
+        const choice = editor.planningDrafts[kind];
+        const options = editor.planningOptions.get(kind) ?? [];
+        const error = editor.planningErrors.get(kind);
+        const errorId = error ? `${id}-${kind}-error` : undefined;
+        const value = choice ? `${planningOptionPrefix}${choice.id}` : choice === null ? 'clear' : '';
+        return <div key={kind}>
+          <label>{label}
+            <select className="field" aria-label={`일괄 변경 ${label}`} aria-invalid={Boolean(error) || undefined} aria-describedby={errorId}
+              value={value} onChange={event => editor.setPlanningChoice(kind, event.currentTarget.value)}>
+              <option value="">현재 {label} 유지</option>
+              <option value="clear">{label} 연결 해제</option>
+              {error && choice && <option value={value} disabled>{choice.name} · 선택 불가</option>}
+              {options.map(item => <option key={item.id} value={`${planningOptionPrefix}${item.id}`}>
+                {item.name} · {PLANNING_STATUS_META[item.status]?.label ?? item.status}
+              </option>)}
+            </select>
+          </label>
+          {error && <p id={errorId} className="issue-bulk-error" role="alert">{error}</p>}
+        </div>;
+      })}
+    </div>
   </section>;
 }
 
