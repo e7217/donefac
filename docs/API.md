@@ -770,6 +770,10 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 응답의 `links`는 확인한 연결, `failures`는 확인할 수 없었던 항목의 `{linkId,message}`, `skipped`는 이번 범위보다 오래된 항목 수다. 실패한 항목은 직전에 저장한 상태를 유지한다. MR·파이프라인은 조회 중 더 최신 웹훅이 반영되면 그 상태를 반환한다. 연결 설정이나 티켓의 프로젝트·키가 바뀌면 `409`로 응답한다. 이 조회에서 티켓 상태 규칙을 실행하지 않는다.
 
+연결된 MR·파이프라인을 모두 정확히 확인했고 적용할 규칙이 있으면 `statusReview`를 반환한다. `kind: 'suggestion'`이면 `suggestion`에 업무·워크플로 버전, 현재 및 목표 상태, 규칙, GitLab 원본과 발생 시각, 가능한 차단 이유인 `blockReason`, `token`, `expiresAt`이 들어간다. `kind: 'ambiguous'`는 일치하는 결과나 같은 우선순위의 규칙이 서로 다른 목표를 요구하는 경우다. 완료 시각은 파이프라인의 `finished_at`, MR의 `merged_at` 또는 `closed_at`을 사용한다. 같은 저장소·브랜치·실행 유형·태그 여부에서는 GitLab 파이프라인 ID가 가장 큰 연결을 사용하고, 더 최근의 인증된 브랜치 관측을 함께 확인한다. [GitLab MR API](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
+검토한 상태를 적용하는 브라우저의 `PATCH /api/issues/:id`에는 일반 업무 변경과 함께 `gitlabStatusSuggestionToken`을 보낸다. 토큰은 발급한 작업자에게 5분 동안 유효하다. 업무 유형·상태·버전, 워크플로·업무 양식·GitLab 설정·규칙과 관측 근거를 한 번 더 확인한다. 증거가 달라지거나 만료되면 `409`와 `details.reason: 'gitlab_status_suggestion_stale'`을 반환한다. 유효한 제안은 저장 시 현재 워크플로의 일반 상태 전이와 필수 입력을 검사한다.
+
 브랜치 단건 조회에 성공하면 같은 저장소·이름의 기존 연결에 확인한 HEAD와 `branchObservationSource: 'read'`를 저장한다. 자체 백업 형식 102는 활성·휴지통 티켓의 확인 결과를 보존한다. 해당 브랜치의 관측이 조회 중 바뀌면 항목별 재확인 메시지를 반환한다. GitLab이 404나 권한 오류를 반환하면 기존 브랜치 상태를 보존한다. [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch)
 
 파이프라인 링크는 원본에서 확인한 `pipelineSource`와 태그 실행 여부인 `pipelineTag`를 선택적으로 포함한다. 저장소 목록은 실행 유형을, 단건 조회와 인증된 웹훅은 실행 유형과 태그 여부를 제공한다. 업데이트에서 값이 생략되면 앞서 확인한 값을 유지한다. 같은 파이프라인의 명시된 값이 저장값과 다르면 해당 관측을 보류한다. 자동 상태 전이는 인증 이벤트와 저장소·브랜치 순서를 기준으로 평가한다. 자체 백업 형식 101은 활성 업무와 휴지통의 값을 보존한다. [GitLab 파이프라인 API](https://docs.gitlab.com/api/pipelines/) · [GitLab Pipeline Hook](https://docs.gitlab.com/user/project/integrations/webhook_events/#pipeline-events)

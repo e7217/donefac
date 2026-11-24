@@ -10,7 +10,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { isGitlabManualLinkId } from '../../shared/gitlab-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueAutomationRunPage, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actor = 'user-seo';
@@ -52,9 +52,12 @@ async function fixture(t: TestContext) {
   const commitUrl = () => `${projectUrl()}/-/commit/${commitSha}`;
   let mr = { id: mrId, iid: mrIid, project_id: repositoryId, target_project_id: repositoryId,
     title: 'Existing implementation review', state: 'opened', source_branch: sourceBranch, sha, updated_at: instant(),
-    detailed_merge_status: undefined as string | undefined };
+    detailed_merge_status: undefined as string | undefined, merged_at: undefined as string | undefined, closed_at: undefined as string | undefined };
   let pipeline = { id: pipelineId, iid: 12, project_id: repositoryId, ref: sourceBranch, sha, status: 'running', updated_at: instant(),
-    source: undefined as unknown, tag: undefined as unknown };
+    source: undefined as unknown, tag: undefined as unknown, finished_at: undefined as string | undefined };
+  const newerPipelineId = pipelineId + 1;
+  const newerPipelineUrl = () => `${projectUrl()}/-/pipelines/${newerPipelineId}`;
+  let newerPipeline: typeof pipeline | undefined;
   const mock = createServer(async (req, res) => {
     const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
     calls.push({ method: req.method, path, credential: req.headers['private-token'] });
@@ -75,7 +78,7 @@ async function fixture(t: TestContext) {
     } else if (path === `${projectPath}/pipelines/${pipelineId}`) {
       res.statusCode = pipelineReadStatus;
       res.end(JSON.stringify(pipelineReadStatus === 200 ? pipelineObject : { message: `fixture ${token}` }));
-    }
+    } else if (newerPipeline && path === `${projectPath}/pipelines/${newerPipelineId}`) res.end(JSON.stringify({ ...newerPipeline, web_url: newerPipelineUrl() }));
     else if (path === `${projectPath}/merge_requests`) res.end(JSON.stringify([mergeRequest]));
     else if (path === `${projectPath}/pipelines`) res.end(JSON.stringify([pipelineObject]));
     else if (path === branchPath) {
@@ -142,6 +145,9 @@ async function fixture(t: TestContext) {
     setBranchRead(status: number, proof: Record<string, unknown> = {}) { branchReadStatus = status; branchProof = proof; },
     setPipelineReadStatus(status: number) { pipelineReadStatus = status; },
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
+    newerPipelineUrl: newerPipelineUrl(), setNewerPipeline(patch: Partial<typeof pipeline>) {
+      newerPipeline = { ...pipeline, ...newerPipeline, id: newerPipelineId, iid: 13, ...patch };
+    },
     setMr(patch: Partial<typeof mr>) { mr = { ...mr, ...patch }; }, holdRead(gate: () => Promise<void>) { objectGate = gate; } };
 }
 
@@ -250,6 +256,198 @@ test('ticket GitLab refresh reads exact linked objects, reports partial failure,
   assert.equal(verifiedPipeline.state, 'success');
   assert.equal(verifiedPipeline.manualLinkId, pipeline.manualLinkId);
   assert.deepEqual((await f.links()).find(link => link.id === pipeline.id), verifiedPipeline);
+});
+
+test('a verified pipeline observation proposes a manual transition and preserves ordinary workflow requirements and attribution', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const issuePath = `/issues/${f.issue.id}`;
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const history = () => f.call<IssueAutomationRunPage>(`${issuePath}/automation-runs`);
+  const workspace = () => f.call<WorkspaceSnapshot>('/workspace');
+  const workflow = await f.call<ProjectWorkflow>(workflowPath);
+  const configured = await f.call<ProjectWorkflow>(workflowPath, { method: 'PATCH', body: { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [{ issueType: '*', statusId: 'done', requiredFields: ['description'] }],
+  } });
+  const automationActor = (await workspace()).users.find(user => user.id !== actor)!;
+  const rule = await f.call<AutomationRule>('/automation-rules', { method: 'POST', body: {
+    projectId, name: 'Pipeline completion review', enabled: true, trigger: 'pipeline.succeeded', gitlabProjectIds: [repositoryId],
+    branchPattern: 'feature/*', issueTypes: [], fromStatuses: [f.issue.status], toStatusId: 'done', actorId: automationActor.id,
+  } }, 201);
+  const attached = await f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201);
+  const before = await workspace();
+  const runsBefore = await history();
+
+  const finishedAt = new Date().toISOString();
+  f.setPipeline({ status: 'success', finished_at: finishedAt, updated_at: finishedAt });
+  const checked = await f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
+  assert.deepEqual(checked.failures, []);
+  assert.equal(checked.links.find(link => link.id === attached.id)?.state, 'success');
+  assert.ok(checked.statusReview?.kind === 'suggestion');
+  const { suggestion } = checked.statusReview;
+  assert.equal(suggestion.issueId, f.issue.id);
+  assert.equal(suggestion.issueVersion, f.issue.version);
+  assert.equal(suggestion.workflowVersion, configured.version);
+  assert.equal(suggestion.projectId, projectId);
+  assert.equal(suggestion.fromStatus, f.issue.status);
+  assert.equal(suggestion.toStatus, 'done');
+  assert.deepEqual(suggestion.rule, { id: rule.id, name: rule.name, version: rule.version });
+  assert.equal(suggestion.evidence.link.id, attached.id);
+  assert.equal(suggestion.evidence.link.projectId, repositoryId);
+  assert.equal(suggestion.evidence.link.state, 'success');
+  assert.equal(suggestion.evidence.trigger, 'pipeline.succeeded');
+  assert.equal(suggestion.evidence.occurredAt, finishedAt);
+  assert.match(suggestion.blockReason ?? '', /설명/u);
+  assert.ok(suggestion.token);
+  assert.ok(Date.parse(suggestion.expiresAt) > Date.now());
+
+  const refreshed = await workspace();
+  assert.deepEqual(refreshed.issues.find(issue => issue.id === f.issue.id), f.issue);
+  assert.deepEqual(refreshed.activities, before.activities);
+  assert.deepEqual(await history(), runsBefore);
+
+  const edit = { expectedVersion: f.issue.version, status: 'done', gitlabStatusSuggestionToken: suggestion.token };
+  const wrongActor = await f.call<{ details?: { reason?: string } }>(issuePath, {
+    method: 'PATCH', headers: { 'X-Actor-Id': automationActor.id }, body: { ...edit, description: '설명을 작성했습니다.' },
+  }, 409);
+  assert.equal(wrongActor.details?.reason, 'gitlab_status_suggestion_stale');
+  const rejected = await f.call<{ error: string }>(issuePath, { method: 'PATCH', body: edit }, 422);
+  assert.match(rejected.error, /설명/u);
+  assert.deepEqual((await workspace()).issues.find(issue => issue.id === f.issue.id), f.issue);
+  const saved = await f.call<Issue>(issuePath, { method: 'PATCH', body: { ...edit, description: '완료 조건을 확인했습니다.' } });
+  assert.equal(saved.status, 'done');
+  assert.equal(saved.version, f.issue.version + 1);
+  const activities = (await workspace()).activities.filter(activity => activity.resourceId === f.issue.id);
+  assert.equal(activities.at(-1)?.actorId, actor);
+  assert.deepEqual((await history()).items, runsBefore.items);
+});
+
+test('manual GitLab suggestions reject unverified results and changed evidence, and disclose conflicting verified targets', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const issuePath = `/issues/${f.issue.id}`;
+  const refresh = () => f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
+  const createRule = (trigger: AutomationRule['trigger'], toStatusId: string) => f.call<AutomationRule>('/automation-rules', {
+    method: 'POST', body: { projectId, name: `Transition for ${trigger}`, enabled: true, trigger, gitlabProjectIds: [repositoryId],
+      branchPattern: 'feature/*', issueTypes: [], fromStatuses: [f.issue.status], toStatusId, priority: 10 },
+  }, 201);
+  const successRule = await createRule('pipeline.succeeded', 'done');
+  f.setMr({ source_branch: 'feature/independent-review' });
+  const [attachedPipeline] = await Promise.all([
+    f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201),
+    f.call<GitlabLink>(path, f.attach(f.mrUrl), 201),
+  ]);
+  const missingFinishedAt = new Date().toISOString();
+  f.setPipeline({ status: 'success', updated_at: missingFinishedAt });
+  const incomplete = await refresh();
+  assert.equal(incomplete.links.find(link => link.id === attachedPipeline.id)?.state, 'success');
+  assert.equal(incomplete.statusReview, undefined);
+
+  const finishedAt = new Date().toISOString();
+  f.setPipeline({ finished_at: finishedAt, updated_at: finishedAt });
+  const verified = (await refresh()).statusReview;
+  assert.ok(verified?.kind === 'suggestion');
+  const stale = async (token: string, expectedVersion: number, target = 'done') => {
+    const failed = await f.call<{ details?: { reason?: string } }>(issuePath, { method: 'PATCH', body: {
+      expectedVersion, status: target, gitlabStatusSuggestionToken: token,
+    } }, 409);
+    assert.equal(failed.details?.reason, 'gitlab_status_suggestion_stale');
+  };
+
+  await f.call(`/automation-rules/${successRule.id}`, { method: 'PATCH', body: { expectedVersion: successRule.version, name: 'Updated recovery rule' } });
+  await stale(verified.suggestion.token, f.issue.version);
+  assert.equal((await refresh()).statusReview, undefined);
+
+  await createRule('merge_request.merged', 'review');
+  const freshEventAt = new Date().toISOString();
+  f.setPipeline({ finished_at: freshEventAt, updated_at: freshEventAt });
+  const fresh = (await refresh()).statusReview;
+  assert.ok(fresh?.kind === 'suggestion');
+  const changedIssue = await f.call<Issue>(issuePath, { method: 'PATCH', body: { expectedVersion: f.issue.version, title: 'Updated independently' } });
+  await stale(fresh.suggestion.token, changedIssue.version);
+
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const beforeWorkflow = (await refresh()).statusReview;
+  assert.ok(beforeWorkflow?.kind === 'suggestion');
+  const workflow = await f.call<ProjectWorkflow>(workflowPath);
+  await f.call(workflowPath, { method: 'PATCH', body: { ...workflow, expectedVersion: workflow.version,
+    statuses: workflow.statuses.map(status => status.id === 'done' ? { ...status, label: '완료 검토됨' } : status),
+  } });
+  await stale(beforeWorkflow.suggestion.token, changedIssue.version);
+
+  const beforeLink = (await refresh()).statusReview;
+  assert.ok(beforeLink?.kind === 'suggestion');
+  await stale(beforeLink.suggestion.token, changedIssue.version, 'review');
+  const retryAt = new Date().toISOString();
+  f.setPipeline({ status: 'running', finished_at: undefined, updated_at: retryAt });
+  await refresh();
+  await stale(beforeLink.suggestion.token, changedIssue.version);
+
+  const mrUpdated = new Date().toISOString();
+  f.setMr({ state: 'merged', updated_at: mrUpdated });
+  const incompleteMr = await refresh();
+  assert.equal(incompleteMr.links.find(link => link.kind === 'merge_request')?.state, 'merged');
+  assert.equal(incompleteMr.statusReview, undefined);
+
+  const mergedAt = new Date().toISOString();
+  f.setMr({ state: 'merged', merged_at: mergedAt, updated_at: mergedAt });
+  const mergeReview = (await refresh()).statusReview;
+  assert.ok(mergeReview?.kind === 'suggestion');
+  assert.equal(mergeReview.suggestion.toStatus, 'review');
+  assert.equal(mergeReview.suggestion.evidence.trigger, 'merge_request.merged');
+  assert.equal(mergeReview.suggestion.evidence.occurredAt, mergedAt);
+
+  const restoredPipelineAt = new Date().toISOString();
+  f.setPipeline({ status: 'success', finished_at: restoredPipelineAt, updated_at: restoredPipelineAt });
+  assert.deepEqual((await refresh()).statusReview, { kind: 'ambiguous' });
+  await stale(mergeReview.suggestion.token, changedIssue.version, 'review');
+
+  f.setPipelineReadStatus(503);
+  const partial = await refresh();
+  assert.deepEqual(partial.failures.map(failure => failure.linkId), [attachedPipeline.id]);
+  assert.equal(partial.statusReview, undefined);
+  f.setPipelineReadStatus(200);
+  f.setPipeline({ id: pipelineId + 1 });
+  const wrongObject = await refresh();
+  assert.deepEqual(wrongObject.failures.map(failure => failure.linkId), [attachedPipeline.id]);
+  assert.equal(wrongObject.statusReview, undefined);
+  const workspace = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(workspace.issues.find(issue => issue.id === f.issue.id), changedIssue);
+  assert.deepEqual((await f.call<IssueAutomationRunPage>(`${issuePath}/automation-runs`)).items, []);
+});
+
+test('a newer running pipeline suppresses an older confirmed failure on the same repository and branch even before attaching', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  await f.call<AutomationRule>('/automation-rules', { method: 'POST', body: {
+    projectId, name: 'Failed pipeline review', enabled: true, trigger: 'pipeline.failed', gitlabProjectIds: [repositoryId],
+    branchPattern: 'feature/*', issueTypes: [], fromStatuses: [f.issue.status], toStatusId: 'review',
+  } }, 201);
+  await f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201);
+  const oldFailure = new Date().toISOString();
+  f.setPipeline({ status: 'failed', finished_at: oldFailure, updated_at: oldFailure });
+  const refresh = () => f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
+  const older = (await refresh()).statusReview;
+  assert.ok(older?.kind === 'suggestion');
+  assert.equal(older.suggestion.evidence.trigger, 'pipeline.failed');
+
+  const newerAt = new Date().toISOString();
+  f.setNewerPipeline({ status: 'running', finished_at: undefined, updated_at: newerAt });
+  const hook = await f.webhook('pipeline', { id: pipelineId + 1, ref: sourceBranch, sha, status: 'running',
+    url: f.newerPipelineUrl, updated_at: newerAt });
+  assert.equal(hook.linked, 0);
+  assert.equal((await f.links()).length, 1);
+  const rejected = await f.call<{ details?: { reason?: string } }>(`/issues/${f.issue.id}`, { method: 'PATCH', body: {
+    expectedVersion: f.issue.version, status: 'review', gitlabStatusSuggestionToken: older.suggestion.token,
+  } }, 409);
+  assert.equal(rejected.details?.reason, 'gitlab_status_suggestion_stale');
+  assert.equal((await refresh()).statusReview, undefined);
+
+  const current = await f.call<GitlabLink>(path, f.attach(f.newerPipelineUrl), 201);
+  const observed = await refresh();
+  assert.deepEqual(observed.failures, []);
+  assert.equal(observed.links.find(link => link.id === current.id)?.state, 'running');
+  assert.equal(observed.statusReview, undefined);
 });
 
 test('ticket GitLab refresh retains a newer webhook and rejects an in-flight connection change before saving', async t => {

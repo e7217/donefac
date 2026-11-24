@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type APIResponse, type Response } from '@playwright/test';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, Issue, IssueAutomationRunPage, Project, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
 const rulesPath = '/api/automation-rules';
@@ -210,6 +210,177 @@ test('360px 티켓에서 GitLab 상태 확인으로 누락된 병합을 읽고 �
       if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
         expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
       } }));
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
+    }
+  }
+});
+
+test('360px 티켓의 GitLab 상태 제안을 검토하고 초안과 워크플로 조건을 유지해 저장한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  const unique = randomUUID();
+  const repositoryId = 42;
+  const pipelineId = 953;
+  const token = `synthetic-pipeline-review-${unique}`;
+  const secret = `synthetic-pipeline-suggestion-${unique}`;
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
+  const { users: [editor, automationActor] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const projectKey = `GR${unique.slice(0, 7).toUpperCase()}`;
+  const project = await json<Project>(await request.post('/api/projects', { data: { key: projectKey, name: `${projectKey} GitLab 상태 검토` } }), 201);
+  const workflowPath = `/api/projects/${project.id}/workflow`;
+  const workflow = await json<ProjectWorkflow>(await request.get(workflowPath));
+  await json<ProjectWorkflow>(await request.patch(workflowPath, { data: { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [{ issueType: '*', statusId: 'done', requiredFields: ['description'] }],
+  } }));
+  const issue = await json<Issue>(await request.post('/api/issues', {
+    data: { projectId: project.id, title: `파이프라인 완료 검토 ${unique.slice(0, 8)}`, status: 'todo' },
+  }), 201);
+  const issuePath = `/api/issues/${issue.id}`;
+  const linksPath = `${issuePath}/gitlab-links`;
+  const refreshPath = `${linksPath}/refresh`;
+  const history = async () => json<IssueAutomationRunPage>(await request.get(`${issuePath}/automation-runs`));
+  const branch = `feature/${issue.key}-review`;
+  const repositoryPath = 'team/review/pipeline-suggestion';
+  const endpoint = `/forge/api/v4/projects/${repositoryId}`;
+  const originalReadAt = new Date(Date.now() - 60_000).toISOString();
+  const sha = 'b'.repeat(40);
+  let finishedAt: string | undefined;
+  let baseUrl = '';
+  const repositoryUrl = () => `${baseUrl}/${repositoryPath}`;
+  const pipelineUrl = () => `${repositoryUrl()}/-/pipelines/${pipelineId}`;
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    response.setHeader('Content-Type', 'application/json');
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) {
+      response.writeHead(401).end('{}');
+    } else if (path === endpoint) {
+      response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repositoryPath, web_url: repositoryUrl() }));
+    } else if (path === `${endpoint}/pipelines/${pipelineId}`) {
+      response.end(JSON.stringify({ id: pipelineId, project_id: repositoryId, status: finishedAt ? 'success' : 'running',
+        ref: branch, sha, updated_at: finishedAt ?? originalReadAt, finished_at: finishedAt, web_url: pipelineUrl() }));
+    } else response.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/forge`;
+  let rule: AutomationRule | undefined;
+  try {
+    const connected = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    rule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `파이프라인 완료 확인 ${unique.slice(0, 8)}`, enabled: true, trigger: 'pipeline.succeeded',
+      gitlabProjectIds: [repositoryId], branchPattern: branch, issueTypes: [], fromStatuses: ['todo'], toStatusId: 'done', actorId: automationActor.id,
+    } }), 201);
+    const attached = await json<GitlabLink>(await request.post(linksPath, { data: {
+      repositoryId, url: pipelineUrl(), expectedSettingsVersion: connected.version,
+    } }), 201);
+    const runsBefore = await history();
+    expect(runsBefore.items).toEqual([]);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+    const gitlab = panel.getByRole('region', { name: 'GitLab', exact: true });
+    const refresh = gitlab.getByRole('button', { name: 'GitLab에서 상태 확인', exact: true });
+    const suggestion = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const stage = suggestion.getByRole('button', { name: '목표 상태로 편집', exact: true });
+    const issueForm = panel.locator('form.issue-detail-form');
+    const save = issueForm.getByRole('button', { name: '변경사항 저장', exact: true });
+    const status = issueForm.getByRole('combobox', { name: '상태', exact: true });
+    const title = issueForm.getByRole('textbox', { name: '제목', exact: true });
+    const description = issueForm.getByRole('textbox', { name: '설명', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const draftTitle = '검토 중인 새 티켓 제목';
+    const draftComment = '아직 보내지 않은 댓글';
+    const neededDescription = '파이프라인 결과 및 완료 조건을 확인했습니다.';
+    await expect(refresh).toBeEnabled({ timeout: 25_000 });
+    await expect(suggestion).toHaveCount(0);
+    await title.fill(draftTitle);
+    await comment.fill(draftComment);
+
+    const checkStatus = async () => {
+      finishedAt = new Date().toISOString();
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === refreshPath && value.request().method() === 'POST');
+      await refresh.click();
+      const result = await json<GitlabIssueRefreshResult>(await response);
+      expect(result.links).toEqual(expect.arrayContaining([expect.objectContaining({ id: attached.id, state: 'success' })]));
+      if (result.statusReview?.kind !== 'suggestion') throw new Error('확인된 파이프라인 상태 제안이 없습니다.');
+      expect(result.statusReview.suggestion.blockReason).toContain('설명');
+      expect(result.statusReview.suggestion.evidence.occurredAt).toBe(finishedAt);
+      await expect(stage).toBeEnabled();
+      return result.statusReview.suggestion.token;
+    };
+    const tokenForFirstReview = await checkStatus();
+    await expect(suggestion).toContainText(rule.name);
+    await expect(suggestion).toContainText('완료');
+    await expect(suggestion).toContainText('설명');
+    await expect(status).toHaveValue('todo');
+    expect((await workspace()).issues.find(item => item.id === issue.id)).toEqual(issue);
+    expect(await history()).toEqual(runsBefore);
+
+    await status.selectOption('in_progress');
+    await expect(stage).toHaveCount(0);
+    await status.selectOption('todo');
+    await stage.click();
+    await expect(status).toHaveValue('done');
+    await expect(status).toBeFocused();
+    await expect(title).toHaveValue(draftTitle);
+    await expect(comment).toHaveValue(draftComment);
+    const saveTicket = async () => {
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === issuePath && value.request().method() === 'PATCH');
+      await save.click();
+      return response;
+    };
+    const blocked = await saveTicket();
+    expect(blocked.status()).toBe(422);
+    expect(blocked.request().postDataJSON()).toMatchObject({ status: 'done', gitlabStatusSuggestionToken: tokenForFirstReview });
+    await expect(issueForm.getByRole('alert')).toContainText('설명');
+    await description.fill(neededDescription);
+
+    rule = await json<AutomationRule>(await request.patch(`${rulesPath}/${rule.id}`, { data: {
+      expectedVersion: rule.version, name: '새로 저장한 파이프라인 완료 규칙',
+    } }));
+    await expect(status).toHaveValue('done');
+    const expired = await saveTicket();
+    expect(await json(expired, 409)).toMatchObject({ details: { reason: 'gitlab_status_suggestion_stale' } });
+    await expect(issueForm.getByRole('alert')).toContainText('다시 확인');
+    await expect(status).toHaveValue('todo');
+    await expect(title).toHaveValue(draftTitle);
+    await expect(description).toHaveValue(neededDescription);
+    await expect(comment).toHaveValue(draftComment);
+    expect((await workspace()).issues.find(item => item.id === issue.id)).toEqual(issue);
+
+    const tokenForCurrentReview = await checkStatus();
+    await expect(suggestion).toContainText(rule.name);
+    await stage.click();
+    const committed = await saveTicket();
+    expect((await json<Issue>(committed)).status).toBe('done');
+    expect(committed.request().postDataJSON()).toMatchObject({ gitlabStatusSuggestionToken: tokenForCurrentReview });
+    const savedPanel = page.getByRole('dialog', { name: draftTitle, exact: true });
+    await expect(savedPanel.getByRole('button', { name: '변경사항 저장', exact: true })).toBeDisabled();
+    await expect(savedPanel.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue(draftComment);
+    const saved = await workspace();
+    expect(saved.issues.find(item => item.id === issue.id)).toMatchObject({ title: draftTitle, description: neededDescription, status: 'done', version: issue.version + 1 });
+    expect(saved.activities.filter(activity => activity.resourceId === issue.id).at(-1)?.actorId).toBe(editor.id);
+    expect((await history()).items).toEqual(runsBefore.items);
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
+      const removed = await request.delete(issuePath);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
     } finally {
       mock.closeAllConnections();
       await new Promise<void>(resolve => mock.close(() => resolve()));

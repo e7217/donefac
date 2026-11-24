@@ -4,9 +4,10 @@ import type { Express,Request,Response,NextFunction } from 'express';
 import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestDiscussions,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
-import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
+import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
+import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
 import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
@@ -17,7 +18,7 @@ import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-bran
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
-import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabSyncStatus } from '../shared/types.js';
+import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabStatusObservation, GitlabStatusReview, GitlabStatusSuggestionTrigger, GitlabSyncStatus } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -45,6 +46,7 @@ type BranchCursor={id:string;pipelineId:number};
 type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string;source?:'read';revision?:string};
 type Hooks={
   processEvent:(event:AutomationEvent)=>AutomationRun[];
+  manualStatusReview?:(issue:Issue, observations:readonly GitlabStatusObservation[], actorId:string, settingsVersion:number)=>GitlabStatusReview|undefined;
   onConnectionChanged:(previous:GitlabSettings,next:GitlabSettings)=>number;
   findArchivedBranchLink?:(cursorId:string)=>GitlabLink|undefined;
   jiraSources?:()=>GitlabJiraSource[];
@@ -174,6 +176,53 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
   };
 }
 type LinkDraft=ReturnType<typeof readLink>;
+type TerminalStatusRead = Pick<GitlabStatusObservation, 'trigger'> & { occurredAt: string | null };
+type ConfirmedWorkflowRead = { link: GitlabLink; terminal: GitlabStatusObservation | null };
+
+function terminalStatusRead(kind: WorkflowGitlabKind, object: Obj): TerminalStatusRead | null {
+  let trigger: GitlabStatusSuggestionTrigger;
+  let timestamp: unknown;
+  if (kind === 'pipeline' && (object.status === 'success' || object.status === 'failed')) {
+    trigger = object.status === 'success' ? 'pipeline.succeeded' : 'pipeline.failed';
+    timestamp = object.finished_at;
+  } else if (kind === 'merge_request' && (object.state === 'merged' || object.state === 'closed')) {
+    trigger = object.state === 'merged' ? 'merge_request.merged' : 'merge_request.closed';
+    timestamp = object.state === 'merged' ? object.merged_at : object.closed_at;
+  } else return null;
+  return { trigger, occurredAt: occurredAt(timestamp) };
+}
+
+function confirmWorkflowRead(link: GitlabLink, draft: LinkDraft, terminal: TerminalStatusRead | null,
+  aliases: readonly GitlabLink[]): ConfirmedWorkflowRead | null {
+  const timestamp = draft.incomingTime;
+  const sha = gitlabObjectSha(draft.sourceSha);
+  if (!timestamp || draft.state === 'unknown' || link.updatedAt !== timestamp || link.state !== draft.state ||
+      !isGitlabBranchName(draft.sourceBranch) || link.sourceBranch !== draft.sourceBranch ||
+      !sha || /^0+$/u.test(sha) || gitlabObjectSha(link.sourceSha) !== sha ||
+      (link.kind === 'pipeline' && link.pipelineObservedAt !== timestamp)) return null;
+  if (terminal && !terminal.occurredAt) return null;
+  const checkedAt = Date.parse(timestamp);
+  if (aliases.some(alias => alias.id !== link.id && alias.pipelineObservedAt !== null &&
+      (Date.parse(alias.updatedAt) > checkedAt || Date.parse(alias.updatedAt) === checkedAt && alias.state !== link.state))) return null;
+  return { link, terminal: terminal?.occurredAt ? { link, trigger: terminal.trigger, occurredAt: terminal.occurredAt } : null };
+}
+
+function currentTerminalObservations(checked: readonly ConfirmedWorkflowRead[], latestVerifiedPipelineId: (link: GitlabLink) => number | null): GitlabStatusObservation[] {
+  const latestPipelineIds = new Map<string, number>();
+  for (const { link } of checked) {
+    if (link.kind !== 'pipeline') continue;
+    const group = gitlabPipelineGroup(link);
+    if (group && group.id > (latestPipelineIds.get(group.key) ?? 0)) latestPipelineIds.set(group.key,group.id);
+  }
+  return checked.flatMap(({ link, terminal }) => {
+    if (!terminal) return [];
+    if (link.kind !== 'pipeline') return [terminal];
+    const group = gitlabPipelineGroup(link);
+    const newestWebhookId = latestVerifiedPipelineId(link);
+    return group && latestPipelineIds.get(group.key) === group.id && (newestWebhookId === null || group.id >= newestWebhookId) ? [terminal] : [];
+  });
+}
+
 type ProjectReadPlan={
   projectId:number;mergeRequests:LinkDraft[];pipelines:LinkDraft[];
   history?:{branches:LinkDraft[];commits:LinkDraft[];limits:GitlabHistoryLimits};
@@ -860,7 +909,15 @@ export class GitlabIntegrationService{
     return this.attachLink(issueId, { repositoryId: link.projectId, url: url.href, expectedSettingsVersion: captured.version },
       afterAttach, AbortSignal.any([signal, deadline]), { assertCurrent, assertMergeRequest });
   }
-  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal):Promise<GitlabIssueRefreshResult> {
+  latestVerifiedPipelineId(link: GitlabLink): number | null {
+    if (link.kind !== 'pipeline' || !isGitlabBranchName(link.sourceBranch)) return null;
+    const identity = gitlabPipelineLinkIdentity(link);
+    if (!identity) return null;
+    const branchId = `${identity.instance}:${link.projectId}:${link.sourceBranch}`;
+    return this.store.get<BranchCursor>('gitlab_branch_cursors',branchId)?.pipelineId ?? null;
+  }
+
+  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string):Promise<GitlabIssueRefreshResult> {
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some(key => key !== 'actorId'))) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
     const issue = this.requireIssue(issueId);
@@ -877,7 +934,7 @@ export class GitlabIntegrationService{
     const token = captured.token ? this.store.unseal(captured.token) : null;
     const startedAt = now();
     const read = gitlabLinkedActivityReader({ baseUrl:captured.baseUrl, token }, signal);
-    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft } |
+    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; terminal:TerminalStatusRead|null } |
       { link:GitlabLink; kind:'branch'; branch:string; cursorId:string; cursor:PushObservation|undefined; aliases:GitlabLink[]; sourceSha:string; webUrl:string } |
       { link:GitlabLink; message:string };
     const readLinkRow = async (link:GitlabLink):Promise<ReadOutcome> => {
@@ -900,7 +957,7 @@ export class GitlabIntegrationService{
         const { object } = await read.workflow(link.projectId, target.kind, target.id, target.objectId);
         const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
-        return { link, kind:target.kind, draft };
+        return { link, kind:target.kind, draft, terminal:actorId && this.hooks.manualStatusReview ? terminalStatusRead(target.kind,object) : null };
       } catch (error) {
         signal?.throwIfAborted();
         if (!(error instanceof GitlabReadError)) throw error;
@@ -924,6 +981,7 @@ export class GitlabIntegrationService{
       if (this.store.setting('attachmentImportGeneration') !== workspaceGeneration) fail('워크스페이스가 복원되었습니다. 업무를 다시 열어 주세요.',409);
       const latestIssue = this.requireIssue(issueId);
       if (latestIssue.projectId !== issue.projectId || latestIssue.key !== issue.key) fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 확인해 주세요.',409);
+      const checked: ConfirmedWorkflowRead[] = [];
       for (const outcome of outcomes) {
         const { link } = outcome;
         if ('message' in outcome) {
@@ -966,8 +1024,9 @@ export class GitlabIntegrationService{
           result.failures.push({ linkId:link.id, message:'GitLab 파이프라인의 브랜치 또는 커밋이 기존 연결과 다릅니다.' });
           continue;
         }
-        const draft = kind==='pipeline'
-          ? classifyPipelineDraft(observed,this.workflowLinksForObject(instance,link.projectId,kind,observed.id)) : observed;
+        const aliases = kind === 'pipeline' || actorId && this.hooks.manualStatusReview
+          ? this.workflowLinksForObject(instance,link.projectId,kind,observed.id) : [];
+        const draft = kind==='pipeline' ? classifyPipelineDraft(observed,aliases) : observed;
         if (!draft) {
           result.failures.push({ linkId:link.id, message:'GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다.' });
           continue;
@@ -984,6 +1043,21 @@ export class GitlabIntegrationService{
         }
         if (updated !== latest) this.store.put('gitlab_links',updated);
         result.links.push(updated);
+        if (actorId && this.hooks.manualStatusReview) {
+          const confirmation = confirmWorkflowRead(updated,draft,outcome.terminal,aliases);
+          if (confirmation) checked.push(confirmation);
+        }
+      }
+      if (actorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.terminal)) {
+        const current = this.store.db.prepare(`SELECT id FROM gitlab_links WHERE issue_id=?
+          AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline') LIMIT ?`)
+          .all(issue.id, ISSUE_REFRESH_LINK_LIMIT + 1) as { id:string }[];
+        const checkedIds = new Set(checked.map(({ link }) => link.id));
+        if (current.length === checkedIds.size && current.every(({ id }) => checkedIds.has(id))) {
+          const observations = currentTerminalObservations(checked,link => this.latestVerifiedPipelineId(link));
+          const review = this.hooks.manualStatusReview(latestIssue,observations,actorId,captured.version);
+          if (review) result.statusReview = review;
+        }
       }
       return result;
     });
@@ -2008,13 +2082,13 @@ export class GitlabIntegrationService{
     });
     app.post('/api/issues/:id/gitlab-links/refresh',async(req,res)=>{
       if (Object.keys(req.query).length) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
-      hooks.actor(req);
+      const actorId=hooks.actor(req);
       res.set('Cache-Control','no-store');
       const controller=new AbortController();
       const disconnected=()=>{if(!res.writableEnded)controller.abort();};
       res.once('close',disconnected);
       try {
-        const result=await this.refreshIssueLinks(String(req.params.id),req.body,controller.signal);
+        const result=await this.refreshIssueLinks(String(req.params.id),req.body,controller.signal,actorId);
         if(!controller.signal.aborted)res.json(result);
       } catch(error) { if(!controller.signal.aborted)throw error; }
       finally { res.off('close',disconnected); }

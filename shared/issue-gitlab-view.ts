@@ -14,7 +14,7 @@ export interface IssueGitlabSummary {
 
 const activePipelineStates = new Set(['created', 'waiting_for_resource', 'preparing', 'pending', 'running']);
 
-function pipelineGroup(link: GitlabLink) {
+export function gitlabPipelineGroup(link: GitlabLink) {
   if (!isGitlabBranchName(link.sourceBranch)) return null;
   const identity = gitlabPipelineLinkIdentity(link);
   if (!identity) return null;
@@ -47,7 +47,7 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
     }
     if (link.kind !== 'pipeline') continue;
 
-    const group = pipelineGroup(link);
+    const group = gitlabPipelineGroup(link);
     if (!group) {
       countPipeline(summary, link.state);
       continue;

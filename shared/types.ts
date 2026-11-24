@@ -1403,7 +1403,30 @@ export interface GitlabIssueRefreshResult {
   links: GitlabLink[];
   failures: { linkId: string; message: string }[];
   skipped: number;
+  statusReview?: GitlabStatusReview;
 }
+export type GitlabStatusSuggestionTrigger = 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
+export interface GitlabStatusObservation {
+  link: GitlabLink;
+  trigger: GitlabStatusSuggestionTrigger;
+  occurredAt: string;
+}
+export interface GitlabStatusSuggestion {
+  issueId: string;
+  projectId: string;
+  issueVersion: number;
+  workflowVersion: number;
+  fromStatus: string;
+  toStatus: string;
+  fromStatusLabel: string;
+  toStatusLabel: string;
+  rule: Pick<AutomationRule, 'id' | 'name' | 'version'>;
+  evidence: GitlabStatusObservation;
+  blockReason: string | null;
+  token: string;
+  expiresAt: string;
+}
+export type GitlabStatusReview = { kind: 'suggestion'; suggestion: GitlabStatusSuggestion } | { kind: 'ambiguous' };
 export interface GitlabPipelineJob {
   id: number;
   name: string;

@@ -2,9 +2,9 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
-import { allowedNextStatuses, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
+import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
 import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
@@ -122,6 +122,11 @@ function isOpenBlockerError(cause: unknown) {
     typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'open_issue_blockers';
 }
 
+function isStaleGitlabStatusSuggestion(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError && cause.status === 409 && cause.details !== null &&
+    typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'gitlab_status_suggestion_stale';
+}
+
 export function IssuePanel(props: IssuePanelProps) {
   const panel = <IssuePanelContent key={JSON.stringify([props.issueId, props.actorId, props.data.restoreGeneration])} {...props} />;
   return props.documentOverlay ? <div className="issue-panel-document-layer">{panel}</div> : panel;
@@ -156,6 +161,8 @@ function IssuePanelContent(props: IssuePanelProps) {
   }, [data.documents, data.resourceLinks, issueId]);
   const [draft, setDraft] = useState<Issue | undefined>(issue);
   const [baseDraft, setBaseDraft] = useState<Issue | undefined>(issue);
+  const [stagedGitlabStatus, setStagedGitlabStatus] = useState<GitlabStatusSuggestion | null>(null);
+  const [rejectedGitlabStatusToken, setRejectedGitlabStatusToken] = useState<string | null>(null);
   const [labels, setLabels] = useState(issue?.labels.join(', ') || '');
   const [comments, setComments] = useState<IssueCommentView[]>([]);
   const commentEditing = useCommentEditing({
@@ -371,7 +378,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   useEffect(() => { dirtyRef.current = dirty || Boolean(commentDraft.body.trim()); }, [dirty, commentDraft.body]);
   if (loadedVersion !== issue?.version) {
     setLoadedVersion(issue?.version);
-    if (!dirty) { setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || ''); setError(null); setConflict(false); setDeleteConfirm(false); }
+    if (!dirty) { setDraft(issue); setBaseDraft(issue); setStagedGitlabStatus(null); setLabels(issue?.labels.join(', ') || ''); setError(null); setConflict(false); setDeleteConfirm(false); }
   }
   if (scheduleReflection) {
     setScheduleReflection(null);
@@ -451,6 +458,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           setDependencyEditor(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
+          setStagedGitlabStatus(null);
           setCommentDraft(emptyCommentDraft()); setError(null); setConflict(false);
         });
       }
@@ -682,38 +690,76 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   function update<K extends keyof Issue>(key: K, value: Issue[K]) {
     if ((key === 'status' || key === 'type') && draft?.[key] !== value && error?.openBlockers) setError(null);
-    setDraft(previous => previous ? { ...previous, [key]: value } : previous);
+    const discardedSuggestion = key === 'type' && draft?.type !== value ? stagedGitlabStatus : null;
+    if (key === 'status' || discardedSuggestion) setStagedGitlabStatus(null);
+    setDraft(previous => previous ? {
+      ...previous, ...(discardedSuggestion && previous.status === discardedSuggestion.toStatus ? { status: discardedSuggestion.fromStatus } : {}), [key]: value,
+    } : previous);
   }
-  function canPrepareAutomationStatus(run: AutomationRun) {
+  function canPrepareStatus(fromStatus: string, toStatus: string) {
     return Boolean(issue && draft && baseDraft && !conflict && !saving && !dependencyBusy && !commenting &&
       draft.version === issue.version && baseDraft.status === issue.status && draft.status === baseDraft.status &&
-      run.issueId === issue.id && run.projectId === issue.projectId && run.outcome === 'blocked' && run.fromStatus === issue.status &&
-      run.toStatus !== issue.status && nextStatuses.some(status => status.id === run.toStatus));
+      fromStatus === issue.status && toStatus !== issue.status && nextStatuses.some(status => status.id === toStatus));
   }
-  function prepareAutomationStatus(run: AutomationRun) {
-    if (!canPrepareAutomationStatus(run)) return;
+  function canPrepareAutomationStatus(run: AutomationRun) {
+    return Boolean(issue && run.issueId === issue.id && run.projectId === issue.projectId && run.outcome === 'blocked' &&
+      canPrepareStatus(run.fromStatus, run.toStatus));
+  }
+  function prepareStatus(toStatus: Issue['status']) {
     if (savingRef.current || dependencyBusyRef.current || gitlabDraft.current?.pending || childDraft.current?.pending) {
       notify('현재 작업을 저장한 뒤 상태를 편집해 주세요.', 'error');
-      return;
+      return false;
     }
-    update('status', run.toStatus);
+    update('status', toStatus);
     setError(null);
     statusField.current?.focus();
+    return true;
+  }
+  function prepareAutomationStatus(run: AutomationRun) {
+    if (canPrepareAutomationStatus(run)) prepareStatus(run.toStatus);
+  }
+  function isCurrentGitlabStatusSuggestion(suggestion: GitlabStatusSuggestion) {
+    if (!issue || suggestion.issueId !== issue.id || suggestion.projectId !== issue.projectId ||
+        suggestion.issueVersion !== issue.version || suggestion.fromStatus !== issue.status ||
+        suggestion.workflowVersion !== projectWorkflow(data, issue.projectId).version || suggestion.token === rejectedGitlabStatusToken) return false;
+    const currentLink = gitlabLinks.find(link => link.id === suggestion.evidence.link.id);
+    return JSON.stringify(currentLink) === JSON.stringify(suggestion.evidence.link);
+  }
+  function canPrepareGitlabStatusSuggestion(suggestion: GitlabStatusSuggestion) {
+    return draft?.type === issue?.type && canPrepareStatus(suggestion.fromStatus, suggestion.toStatus);
+  }
+  function prepareGitlabStatusSuggestion(suggestion: GitlabStatusSuggestion) {
+    if (!isCurrentGitlabStatusSuggestion(suggestion)) {
+      notify('GitLab에서 상태를 다시 확인해 주세요.', 'error');
+      return;
+    }
+    if (canPrepareGitlabStatusSuggestion(suggestion) && prepareStatus(suggestion.toStatus)) setStagedGitlabStatus(suggestion);
   }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   async function save(event: FormEvent) {
     event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError(null);
+    const suggestion = stagedGitlabStatus?.toStatus === draft.status ? stagedGitlabStatus : null;
     try {
       const { descriptionFormat, reporterId, dueDate, ...fields } = editableIssue(draft, labels);
       const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
       const changedDueDate = (dueDate ?? null) !== (baseDraft?.dueDate ?? null);
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
+        ...(suggestion ? { gitlabStatusSuggestionToken: suggestion.token } : {}),
         ...(reporterId !== undefined && reporterId !== baseDraft?.reporterId ? { reporterId } : {}),
         ...(changedDueDate ? { dueDate: dueDate ?? null } : {}),
         ...(changedFormat ? { descriptionFormat } : {}) });
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
+      setStagedGitlabStatus(null);
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
     } catch (err) {
+      if (suggestion && isStaleGitlabStatusSuggestion(err)) {
+        setStagedGitlabStatus(null);
+        setRejectedGitlabStatusToken(suggestion.token);
+        setDraft(current => current?.status === suggestion.toStatus ? { ...current, status: suggestion.fromStatus } : current);
+        setError({ message: err.message });
+        await refresh().catch(() => undefined);
+        return;
+      }
       const openBlockers = isOpenBlockerError(err);
       setError({ message: errorMessage(err), openBlockers });
       if (openBlockers) {
@@ -757,7 +803,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     const hadUnsaved = dirtyRef.current;
     if (!confirmDiscard()) return;
     savingRef.current = true; setSaving(true);
-    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(null); dirtyRef.current = false; await refresh(); }
+    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setStagedGitlabStatus(null); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(null); dirtyRef.current = false; await refresh(); }
     catch (err) { dirtyRef.current = hadUnsaved; setError({ message: errorMessage(err) }); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
@@ -1183,7 +1229,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
-        disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} />
+        disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} isCurrentStatusSuggestion={isCurrentGitlabStatusSuggestion}
+        canPrepareStatusSuggestion={canPrepareGitlabStatusSuggestion} onPrepareStatusSuggestion={prepareGitlabStatusSuggestion} />
       <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}
         canPrepareStatus={canPrepareAutomationStatus} onPrepareStatus={prepareAutomationStatus} />
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>

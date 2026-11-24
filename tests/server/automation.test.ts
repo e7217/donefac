@@ -10,6 +10,7 @@ import { WorkflowService } from '../../server/workflows.js';
 import { IssueSchemaService } from '../../server/issue-schema.js';
 import { branchMatches,sortedAutomationRules } from '../../shared/automation.js';
 import type { AutomationEvent,AutomationRule,AutomationRun,Issue,Project,ProjectIssueSchema,User } from '../../shared/types.js';
+import type { GitlabSettings, GitlabStatusObservation } from '../../shared/types.js';
 
 const timestamp=new Date().toISOString();
 const project:Project={id:'project-auto',name:'자동화 검증',key:'AUTO',color:'#668899',description:'',createdAt:timestamp};
@@ -18,12 +19,135 @@ function issue(id='issue-a',overrides:Partial<Issue>={}):Issue{return{id,key:`AU
 function event(overrides:Partial<AutomationEvent>={}):AutomationEvent{return{id:randomUUID(),trigger:'merge_request.merged',gitlabProjectId:77,objectKind:'merge_request',objectId:'123',branch:'main',issueIds:['issue-a'],occurredAt:new Date(Date.now()+5000).toISOString(),receivedAt:new Date().toISOString(),disposition:'fresh',reason:'',...overrides};}
 function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-')),store=new Store(dir);store.put('projects',project);users.forEach(user=>store.put('users',user));store.put('issues',issue());store.put('issues',issue('issue-b'));
-  const schemas=new IssueSchemaService(store),workflows=new WorkflowService(store,schemas);let connection={baseUrl:'https://git.example.test',projectIds:[77,88],webhookSecretConfigured:true,signingTokenConfigured:false};let failOnCommit=0,commitCount=0;
+  const schemas=new IssueSchemaService(store),workflows=new WorkflowService(store,schemas);let connection:Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'|'jiraRoutes'>={baseUrl:'https://git.example.test',projectIds:[77,88],webhookSecretConfigured:true,signingTokenConfigured:false};let failOnCommit=0,commitCount=0;
   const service=new AutomationService(store,{getGitlabSettings:()=>connection,prepareChange:(before,status)=>{const next={...before,status,version:before.version+1,updatedAt:new Date().toISOString(),completedAt:status==='done'?new Date().toISOString():null};schemas.validateIssue(next,before);workflows.validateIssue(next,before);return next;},commitChange:(rule,before,next,source)=>{store.put('issues',next);store.put('activities',{id:randomUUID(),resourceType:'issue',resourceId:before.id,actorId:rule.actorId,action:'상태 자동 변경',detail:source.id,createdAt:new Date().toISOString()});if(++commitCount===failOnCommit)throw new Error('audit failed');}});
   const create=(overrides:Record<string,unknown>={})=>service.create({projectId:project.id,name:'병합 완료',enabled:true,trigger:'merge_request.merged',gitlabProjectIds:[77],branchPattern:'main',issueTypes:[],fromStatuses:['todo','in_progress','done'],toStatusId:'done',actorId:users[0].id,priority:100,...overrides},users[0].id);
   return{dir,store,schemas,workflows,service,create,process:(source:AutomationEvent)=>store.transaction(()=>service.processEvent(source)),connection:()=>connection,setConnection:(next:typeof connection)=>{connection=next;},failCommit:(after=1)=>{failOnCommit=after;},close:()=>{store.db.close();rmSync(dir,{recursive:true,force:true});}};
 }
 function rejects(action:()=>unknown,status=400){assert.throws(action,(error:unknown)=>error instanceof AutomationError&&error.status===status);}
+
+function pipelineObservation(store: Store, overrides: Partial<GitlabStatusObservation['link']> = {}): GitlabStatusObservation {
+  const occurredAt = new Date().toISOString();
+  const link: GitlabStatusObservation['link'] = { id: 'pipeline-12', issueId: 'issue-a', projectId: 77, iid: 12,
+    kind: 'pipeline', title: 'Synthetic CI', webUrl: 'https://git.example.test/demo/repo/-/pipelines/12',
+    state: 'success', updatedAt: occurredAt, pipelineObservedAt: occurredAt, sourceBranch: 'main', ...overrides };
+  store.put('gitlab_links', link);
+  return { link, trigger: link.state === 'failed' ? 'pipeline.failed' : 'pipeline.succeeded', occurredAt };
+}
+
+test('GitLab status suggestions use the first rule and prepare ordinary workflow checks without creating a run', () => {
+  const f = fixture();
+  try {
+    const workflow = f.workflows.get(project.id);
+    const saved = f.workflows.save(project.id, { ...workflow,
+      fieldRules: [{ issueType: '*', statusId: 'done', requiredFields: ['description'] }],
+    }, workflow.version);
+    const rule = f.create({ trigger: 'pipeline.succeeded', priority: 1 });
+    f.create({ trigger: 'pipeline.succeeded', priority: 2, toStatusId: 'in_progress' });
+    const evidence = pipelineObservation(f.store);
+    const before = f.store.get<Issue>('issues', 'issue-a')!;
+    const review = f.service.manualStatusReview(before, [evidence], users[0].id, 4);
+    assert.equal(review?.kind, 'suggestion');
+    if (review?.kind !== 'suggestion') throw new Error('Expected a status suggestion.');
+    const { suggestion } = review;
+    assert.deepEqual(suggestion.rule, { id: rule.id, name: rule.name, version: rule.version });
+    assert.deepEqual(suggestion.evidence, evidence);
+    assert.equal(suggestion.issueVersion, before.version);
+    assert.equal(suggestion.workflowVersion, saved.version);
+    assert.equal(suggestion.toStatus, 'done');
+    assert.match(suggestion.blockReason ?? '', /설명/u);
+    assert.doesNotThrow(() => f.service.verifyManualStatusSuggestion(before, 'done', undefined, suggestion.token, users[0].id, 4));
+    assert.deepEqual(f.store.get('issues', before.id), before);
+    assert.deepEqual(f.service.runs(), []);
+    assert.deepEqual(f.store.all('activities'), []);
+    assert.equal(f.store.db.prepare('SELECT COUNT(*) AS n FROM webhook_inbox').get()?.n, 0);
+
+    f.workflows.save(project.id, { ...saved, transitions: saved.transitions.filter(edge => edge.to !== 'done') }, saved.version);
+    assert.equal(f.service.manualStatusReview(before, [evidence], users[0].id, 4), undefined);
+  } finally { f.close(); }
+});
+
+test('GitLab status suggestions reject expired or changed actor, issue, workflow, rule, link, connection and workspace evidence', () => {
+  const f = fixture();
+  try {
+    const rule = f.create({ trigger: 'pipeline.succeeded', priority: 1 });
+    const before = f.store.get<Issue>('issues', 'issue-a')!;
+    const evidence = pipelineObservation(f.store);
+    function tokenFor(candidate: GitlabStatusObservation = evidence) {
+      const review = f.service.manualStatusReview(before, [candidate], users[0].id, 4);
+      if (review?.kind !== 'suggestion') throw new Error('Expected a status suggestion.');
+      return review.suggestion.token;
+    }
+    const token = tokenFor();
+    assert.doesNotThrow(() => verify(token));
+    function verify(proof: unknown, issueValue = before, actorId = users[0].id, settingsVersion = 4,
+      status = 'done', issueType = before.type) {
+      f.service.verifyManualStatusSuggestion(issueValue, status, issueType, proof, actorId, settingsVersion);
+    }
+    function stale(action: () => unknown) {
+      assert.throws(action, (cause: unknown) => cause instanceof AutomationError && cause.status === 409 &&
+        (cause.details as { reason?: string })?.reason === 'gitlab_status_suggestion_stale');
+    }
+    stale(() => verify(`${token}!invalid`));
+    stale(() => verify(token, { ...before, version: before.version + 1 }));
+    stale(() => verify(token, before, users[1].id));
+    stale(() => verify(token, before, users[0].id, 5));
+    stale(() => verify(token, before, users[0].id, 4, 'in_progress'));
+    stale(() => verify(token, before, users[0].id, 4, 'done', 'different-type'));
+    const expired = { ...JSON.parse(f.store.unseal(token)), expiresAt: Date.now() - 1 };
+    stale(() => verify(f.store.seal(JSON.stringify(expired))));
+    f.store.put('gitlab_links', { ...evidence.link, state: 'running' });
+    stale(() => verify(token));
+    f.store.put('gitlab_links', evidence.link);
+    f.store.setSetting('attachmentImportGeneration', 'new-generation');
+    stale(() => verify(token));
+    const afterRestore = tokenFor();
+    const schema = f.schemas.get(project.id);
+    f.schemas.save(project.id, schema, schema.version);
+    stale(() => verify(afterRestore));
+    const afterSchemaEdit = tokenFor();
+    const workflow = f.workflows.get(project.id);
+    f.workflows.save(project.id, workflow, workflow.version);
+    stale(() => verify(afterSchemaEdit));
+    const afterWorkflowEdit = tokenFor();
+    f.service.save(rule.id, { name: '수정된 규칙' }, rule.version, users[0].id);
+    stale(() => verify(afterWorkflowEdit));
+    assert.deepEqual(f.service.runs(), []);
+  } finally { f.close(); }
+});
+
+test('GitLab status review filters stale or out-of-scope evidence and withholds competing targets', () => {
+  const f = fixture();
+  try {
+    const rule = f.create({ trigger: 'pipeline.succeeded', priority: 2 });
+    const before = f.store.get<Issue>('issues', 'issue-a')!;
+    const evidence = pipelineObservation(f.store);
+    const review = (...sources: GitlabStatusObservation[]) => f.service.manualStatusReview(before, sources, users[0].id, 1);
+    assert.equal(review({ ...evidence, occurredAt: new Date(Date.parse(rule.enabledAt!) - 1_000).toISOString() }), undefined);
+    assert.equal(review({ ...evidence, link: { ...evidence.link, state: 'running' } }), undefined);
+    assert.equal(review({ ...evidence, occurredAt: new Date(Date.now() + 1_000).toISOString() }), undefined);
+    assert.equal(review(pipelineObservation(f.store, { id: 'other-repo', projectId: 88 })), undefined);
+    assert.equal(review(pipelineObservation(f.store, { id: 'other-branch', sourceBranch: 'feature/no-match' })), undefined);
+    f.setConnection({ ...f.connection(), jiraRoutes: [{ repositoryId: 77, projectId: 'different-project', jiraInstanceKey: 'jira-instance' }] });
+    assert.equal(review(evidence), undefined);
+    f.setConnection({ ...f.connection(), jiraRoutes: [] });
+    assert.equal(review(evidence)?.kind, 'suggestion');
+    const otherTrigger = f.create({ trigger: 'pipeline.failed', priority: 2, toStatusId: 'in_progress' });
+    const failed = pipelineObservation(f.store, { id: 'pipeline-failed', state: 'failed' });
+    assert.deepEqual(review(evidence, failed), { kind: 'ambiguous' });
+    f.service.remove(otherTrigger.id, otherTrigger.version);
+    const sameDestination = f.create({ trigger: 'pipeline.succeeded', priority: 2 });
+    assert.equal(review(pipelineObservation(f.store))?.kind, 'suggestion');
+    f.service.remove(sameDestination.id, sameDestination.version);
+    f.create({ trigger: 'pipeline.succeeded', priority: 2, toStatusId: 'in_progress' });
+    assert.deepEqual(review(pipelineObservation(f.store)), { kind: 'ambiguous' });
+    const observed = pipelineObservation(f.store);
+    const [applied] = f.process(event({ trigger: 'pipeline.succeeded', objectKind: 'pipeline', occurredAt: observed.occurredAt }));
+    assert.equal(applied.outcome, 'changed');
+    f.store.put('issues', { ...before, version: before.version + 2 });
+    assert.equal(f.service.manualStatusReview(f.store.get<Issue>('issues', before.id)!, [observed], users[0].id, 1), undefined);
+  } finally { f.close(); }
+});
 
 test('branch globs are literal apart from bounded * and ? with deterministic priority/id ordering',()=>{
   assert.ok(branchMatches('feature/*','feature/nested/branch'));assert.ok(branchMatches('release/?','release/1'));assert.ok(!branchMatches('release/?','release/12'));assert.ok(branchMatches('기능/🚀?','기능/🚀가'));assert.ok(!branchMatches('main|dev','main'));assert.ok(branchMatches('branch[1]','branch[1]'));assert.ok(!branchMatches('*a'.repeat(64),'b'.repeat(512)));assert.ok(!branchMatches('*'.repeat(129),'main'));assert.ok(!branchMatches('*','x'.repeat(513)));assert.ok(!branchMatches('*','line\nbreak'));

@@ -717,6 +717,7 @@ export function createApp(options: {
   };
   const automation=new AutomationService(store,{
     getGitlabSettings:()=>gitlab.settings(),
+    latestVerifiedPipelineId:link=>gitlab.latestVerifiedPipelineId(link),
     prepareChange:(before,status,onStatusChange)=>{
       const {issue,decision,automaticDueDate}=prepareIssueChange(before,{...before,status,version:before.version+1,updatedAt:now()});
       if(decision || automaticDueDate)onStatusChange((rule,event)=>{
@@ -733,6 +734,7 @@ export function createApp(options: {
   });
   const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{
     processEvent:event=>automation.processEvent(event),
+    manualStatusReview:(issue,observations,actorId,version)=>automation.manualStatusReview(issue,observations,actorId,version),
     onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next),
     findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
     jiraSources:()=>gitlabJiraSources(store),
@@ -1877,7 +1879,11 @@ export function createApp(options: {
   });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
-      const old=get<Issue>('issues',req.params.id);checkVersion(old,req.body.expectedVersion);
+      const old=get<Issue>('issues',req.params.id);
+      if (Object.hasOwn(req.body, 'gitlabStatusSuggestionToken')) {
+        automation.verifyManualStatusSuggestion(old,req.body.status,req.body.type,req.body.gitlabStatusSuggestionToken,actor(req),gitlab.settings().version);
+      }
+      checkVersion(old,req.body.expectedVersion);
       const guardedTransition = Object.hasOwn(req.body, 'expectedWorkflowVersion');
       if (guardedTransition) {
         const { expectedWorkflowVersion } = req.body;

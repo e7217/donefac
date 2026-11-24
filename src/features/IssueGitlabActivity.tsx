@@ -1,10 +1,12 @@
 'use client';
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
-import type { FeatureProps, GitlabBranchMergeRequestAttachment, GitlabIssueRefreshResult, GitlabLink, GitlabSettings } from '../../shared/types';
+import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
+import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
+import type { FeatureProps, GitlabBranchMergeRequestAttachment, GitlabIssueRefreshResult, GitlabLink, GitlabSettings,
+  GitlabStatusSuggestion } from '../../shared/types';
 import { api, ApiError, post, remove } from '../lib/api';
-import { gitlabActivityKindLabel, gitlabBranchMergeRequestsPath, GitlabActivityList, GitlabActivityRefresh,
+import { gitlabActivityKindLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList, GitlabActivityRefresh,
   matchesBranchMergeRequestLink, type BranchMergeRequest } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { IssueGitlabDeployments } from './GitlabDeployments';
@@ -16,19 +18,25 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   links: readonly GitlabLink[];
   disabled: boolean;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
+  isCurrentStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
+  canPrepareStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
+  onPrepareStatusSuggestion: (suggestion: GitlabStatusSuggestion) => void;
 };
 type Draft = { repositoryId: string; url: string; existing?: GitlabLink };
 type LinkView = { source: readonly GitlabLink[]; rows: readonly GitlabLink[] };
 type RefreshFailure = GitlabIssueRefreshResult['failures'][number] & { label: string };
 type RefreshFeedback = { kind: 'checking' } | { kind: 'failed'; message: string } | {
   kind: 'finished'; checked: number; skipped: number; failures: RefreshFailure[]; workspaceRefreshFailed: boolean;
+  issueVersion: number;
+  statusReview?: GitlabIssueRefreshResult['statusReview'];
 };
 
 function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : 'GitLab 연결 요청을 처리하지 못했습니다.';
 }
 
-export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, refresh, notify, disabled, onDraftChange }: Props) {
+export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, refresh, notify, disabled, onDraftChange,
+  isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
   const formHeading = useId(), unlinkHeading = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
@@ -43,6 +51,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
   const [settingsError, setSettingsError] = useState('');
   const [actionError, setActionError] = useState('');
   const [refreshFeedback, setRefreshFeedback] = useState<RefreshFeedback | null>(null);
+  const statusReview = refreshFeedback?.kind === 'finished' && !refreshFeedback.workspaceRefreshFailed &&
+    refreshFeedback.issueVersion === issueVersion ? refreshFeedback.statusReview : undefined;
+  const suggestion = statusReview?.kind === 'suggestion' ? statusReview.suggestion : undefined;
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const settingsRequest = useRef<AbortController | null>(null);
@@ -60,6 +71,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
     refreshRequest.current?.abort();
     mergeRequestAttachment.current?.abort();
   }, []);
+  useEffect(() => {
+    if (!suggestion) return;
+    const timer = window.setTimeout(() => {
+      setRefreshFeedback(current => current?.kind === 'finished' && current.statusReview?.kind === 'suggestion' &&
+        current.statusReview.suggestion.token === suggestion.token ? { ...current, statusReview: undefined } : current);
+    }, Math.max(0, Date.parse(suggestion.expiresAt) - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [suggestion]);
 
   const discard = useCallback(() => {
     settingsRequest.current?.abort();
@@ -284,7 +303,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
         }
       }
       if (!controller.signal.aborted) setRefreshFeedback({ kind: 'finished', checked: result.links.length,
-        skipped: result.skipped, failures, workspaceRefreshFailed });
+        skipped: result.skipped, failures, workspaceRefreshFailed, issueVersion, statusReview: result.statusReview });
     } catch (cause) {
       if (!controller.signal.aborted) setRefreshFeedback({ kind: 'failed', message: errorMessage(cause) });
     } finally {
@@ -315,6 +334,12 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
       </div>
     </div>
     <GitlabStatusFeedback feedback={refreshFeedback} />
+    {statusReview?.kind === 'ambiguous' && <p className="gitlab-activity-hint" role="status">
+      확인한 GitLab 규칙의 목표 상태가 서로 다릅니다. 티켓에서 상태를 선택해 주세요.
+    </p>}
+    {suggestion && isCurrentStatusSuggestion(suggestion) && <GitlabStatusSuggestionCard suggestion={suggestion}
+      canPrepare={canPrepareStatusSuggestion(suggestion)} disabled={controlsDisabled || actionOpen}
+      onPrepare={() => onPrepareStatusSuggestion(suggestion)} />}
     {branchOpen && <IssueGitlabBranchCreate issueId={issueId} issueKey={issueKey} settings={settings} loadingSettings={loading}
       settingsError={settingsError} disabled={disabled || busy} reloadSettings={() => void readSettings(false)} refresh={refresh}
       onClose={closeAction} onDraftChange={trackBranchDraft} onLinked={showLinkedActivity} />}
@@ -362,6 +387,35 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
       attachMergeRequest: attachBranchMergeRequest }} />
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
     <IssueGitlabDeployments issueId={issueId} links={links} />
+  </section>;
+}
+
+function GitlabStatusSuggestionCard({ suggestion, canPrepare, disabled, onPrepare }: {
+  suggestion: GitlabStatusSuggestion;
+  canPrepare: boolean;
+  disabled: boolean;
+  onPrepare: () => void;
+}) {
+  const { link, trigger, occurredAt } = suggestion.evidence;
+  const url = gitlabActivityUrl(link.webUrl, link.kind);
+  const reference = `${gitlabActivityKindLabel(link.kind)} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid}`;
+  return <section className="gitlab-activity-editor" aria-label="GitLab 상태 변경 제안">
+    <h4>GitLab 상태 변경 제안</h4>
+    <p><strong>{suggestion.fromStatusLabel} <span aria-label="에서">→</span> {suggestion.toStatusLabel}</strong></p>
+    <p className="gitlab-activity-hint">{suggestion.rule.name} · {AUTOMATION_TRIGGER_LABELS[trigger]}</p>
+    <p className="gitlab-activity-hint">저장소 #{link.projectId} · {reference}{link.sourceBranch && ` · ${link.sourceBranch}`}
+      {' · '}<time dateTime={occurredAt}>{new Date(occurredAt).toLocaleString('ko-KR')}</time></p>
+    {suggestion.blockReason && <p className="gitlab-activity-hint">확인 당시 {suggestion.blockReason}</p>}
+    {(url || canPrepare) && <div className="gitlab-activity-actions">
+      {url && <a className="btn btn-ghost" href={url.href} target="_blank" rel="noopener noreferrer">
+        GitLab 원본 열기 <ExternalLink size={13} aria-hidden="true" />
+      </a>}
+      {canPrepare && <button type="button" className="btn" disabled={disabled} onClick={() => {
+        if (Date.parse(suggestion.expiresAt) > Date.now()) onPrepare();
+      }}>
+        목표 상태로 편집 <ArrowRight size={13} aria-hidden="true" />
+      </button>}
+    </div>}
   </section>;
 }
 

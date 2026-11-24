@@ -58,6 +58,12 @@ HTTPS 파일럿 검사는 임시 프록시로 네 유형의 합성 웹훅을 전
 
 티켓 키가 없는 작업은 티켓의 **GitLab 개발 활동**에서 허용 저장소를 선택하고 기존 브랜치·커밋·MR·파이프라인 주소를 붙여 넣어 연결한다. 브랜치는 해당 브랜치의 루트 페이지 주소, 커밋은 전체 SHA가 들어간 주소를 사용한다. 연결된 브랜치는 인증된 푸시로 확인한 마지막 SHA와 삭제 상태를 표시한다.
 
+### 티켓에서 GitLab 상태 변경 검토
+
+웹훅으로 상태가 반영되지 않았을 때 티켓의 **GitLab 개발 활동 → GitLab에서 상태 확인**을 누른다. 연결된 MR의 병합·닫기 또는 최신 파이프라인의 성공·실패가 활성 규칙과 일치하면 **GitLab 상태 변경 제안**에서 시작·목표 상태와 규칙, 연결 근거를 확인할 수 있다. 확인한 결과들이 서로 다른 목표를 가리키면 화면에 제안 보류 안내가 표시된다. [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
+**목표 상태로 편집**을 누르면 티켓의 상태 입력에 목표가 들어간다. 제목·설명·댓글 초안을 이어서 쓸 수 있다. 필요한 항목을 채우고 **변경사항 저장**을 누르면 현재 작업자의 변경으로 기록된다. 5분이 지나거나 검토한 업무·규칙·연결이 바뀌면 GitLab에서 다시 확인한다. 보류된 저장의 다른 입력과 댓글 초안은 유지된다.
+
 ## Jira·Confluence 원본 조회
 
 업무 상세 또는 문서 **연결** 탭에서 **기존 도구 연결**을 사용한다. Jira는 `/browse/TEAM-17`, Confluence는 `/pages/viewpage.action?pageId=1234`, `/display/TEAM/Release+Notes`, `/spaces/TEAM/pages/1234/Release-Notes`와 Server·Data Center의 짧은 주소 `/x/ZIAB` 같은 브라우저 주소를 받는다. 기존 서버의 `/jira` 또는 `/wiki` 같은 경로도 주소에 포함한다. 예전에 저장한 본문에 짧은 주소가 있으면 그 주소를 **통합 검색**에 붙여넣어 저장된 원본 연결을 찾을 수 있다. [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)

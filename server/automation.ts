@@ -1,12 +1,23 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
+import type { GitlabLink, GitlabStatusObservation, GitlabStatusReview, GitlabStatusSuggestionTrigger } from '../shared/types.js';
 import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,sortedAutomationRules } from '../shared/automation.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { allowedNextStatuses,defaultWorkflow } from '../shared/workflow-helpers.js';
 import type { Store } from './store.js';
 
 const ISSUE_RUN_PAGE_SIZE = 20;
+const MANUAL_STATUS_TOKEN_DOMAIN = 'teamspace.gitlab-status-suggestion.v1';
+const MANUAL_STATUS_TOKEN_TTL = 5 * 60 * 1_000;
+const MAX_MANUAL_STATUS_TOKEN_LENGTH = 32 * 1024;
+const MANUAL_STATUS_TOKEN = /^[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9+/]+={0,2}$/u;
+const MANUAL_STATUS_SOURCES: Record<GitlabStatusSuggestionTrigger, { kind: GitlabLink['kind']; state: string }> = {
+  'pipeline.succeeded': { kind: 'pipeline', state: 'success' },
+  'pipeline.failed': { kind: 'pipeline', state: 'failed' },
+  'merge_request.merged': { kind: 'merge_request', state: 'merged' },
+  'merge_request.closed': { kind: 'merge_request', state: 'closed' },
+};
 
 export class AutomationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomationError(status,message,details);}
@@ -15,6 +26,7 @@ type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
 type PreparedChange={outcome:AutomationOutcome;next?:Issue;afterStatusChange?:AfterStatusChange};
 export interface AutomationHooks{
   getGitlabSettings:()=>Connection;
+  latestVerifiedPipelineId?:(link:GitlabLink)=>number|null;
   prepareChange:(before:Issue,status:string,afterStatusChange:(effect:AfterStatusChange)=>void)=>Issue;
   commitChange:(rule:AutomationRule,before:Issue,next:Issue,event:AutomationEvent)=>void;
 }
@@ -149,6 +161,89 @@ export class AutomationService{
     }
     catch(error){const status=(error as {status?:unknown})?.status;if(typeof status==='number'&&status>=400&&status<500)return{outcome:this.outcome(rule,issue,'blocked',error instanceof Error?error.message:'현재 업무 조건에서 상태를 변경할 수 없습니다.')};throw error;}
   }
+  private latestAppliedRun(issueId: string): AutomationRun | undefined {
+    const row = this.store.db.prepare(`SELECT json FROM automation_runs WHERE issue_id=?
+      AND outcome IN ('changed','no_op') AND occurred_at IS NOT NULL ORDER BY occurred_at DESC,rowid DESC LIMIT 1`)
+      .get(issueId) as { json: string } | undefined;
+    return row ? JSON.parse(row.json) as AutomationRun : undefined;
+  }
+  private manualStatusContext(issue: Issue) {
+    const settings = this.hooks.getGitlabSettings();
+    const base = normalizeBase(settings.baseUrl);
+    const routedProjects = new Map((settings.jiraRoutes ?? []).map(route => [route.repositoryId, route.projectId]));
+    const repositories = new Set(settings.projectIds.filter(id => !routedProjects.has(id) || routedProjects.get(id) === issue.projectId));
+    const rules = base && (settings.webhookSecretConfigured || settings.signingTokenConfigured) ? this.all().filter(rule =>
+      rule.enabled && rule.projectId === issue.projectId && rule.gitlabBaseUrl === base && Object.hasOwn(MANUAL_STATUS_SOURCES, rule.trigger) &&
+      rule.gitlabProjectIds.some(id => repositories.has(id))) : [];
+    return { repositories, rules, workflow: this.workflow(issue.projectId), latestRun: this.latestAppliedRun(issue.id) };
+  }
+  private manualStatusFence(issue: Issue, settingsVersion: number, { workflow, repositories, rules, latestRun }: ReturnType<AutomationService['manualStatusContext']>) {
+    const digest = createHash('sha256').update(JSON.stringify([
+      this.store.setting('attachmentImportGeneration'), settingsVersion, issue.id, issue.projectId, issue.version, issue.status, issue.type,
+      workflow.version, this.schema(issue.projectId).version, [...repositories], rules.map(({ id, version }) => [id, version]), latestRun?.id ?? null,
+    ]));
+    for (const row of this.store.db.prepare(`SELECT id,json FROM gitlab_links WHERE issue_id=?
+      AND json_extract(json,'$.kind') IN ('merge_request','pipeline') ORDER BY id`).iterate(issue.id)) {
+      const cursor = this.hooks.latestVerifiedPipelineId?.(JSON.parse(String(row.json)) as GitlabLink) ?? null;
+      digest.update('\n').update(JSON.stringify([row, cursor]));
+    }
+    return digest.digest('hex');
+  }
+  manualStatusReview(issue: Issue, observations: readonly GitlabStatusObservation[], actorId: string, settingsVersion: number): GitlabStatusReview | undefined {
+    if (!observations.length) return;
+    const context = this.manualStatusContext(issue);
+    const { repositories, rules, workflow, latestRun } = context;
+    if (!rules.length) return;
+    const reachable = new Map(allowedNextStatuses({ workflows: [workflow] }, issue).map(status => [status.id, status]));
+    const appliedAt = latestRun?.occurredAt ? Date.parse(latestRun.occurredAt) : -Infinity;
+    const checkedAt = Date.now();
+    let selected: { rule: AutomationRule; evidence: GitlabStatusObservation } | undefined;
+    for (const evidence of observations) {
+      const { link, trigger, occurredAt } = evidence;
+      const source = MANUAL_STATUS_SOURCES[trigger];
+      const occurred = Date.parse(occurredAt);
+      if (!source || link.issueId !== issue.id || link.kind !== source.kind || link.state !== source.state || !repositories.has(link.projectId) ||
+        !Number.isFinite(occurred) || occurred > checkedAt || occurred <= appliedAt) continue;
+      const saved = this.store.get<GitlabLink>('gitlab_links', link.id);
+      if (!saved || JSON.stringify(saved) !== JSON.stringify(link)) continue;
+      const sample = { trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '' };
+      const matches = rules.filter(rule => this.matchReason(rule, issue, sample) === null);
+      const [rule] = matches;
+      if (!rule || !validTime(rule.enabledAt) || occurred < Date.parse(rule.enabledAt)) continue;
+      if (matches.some(match => match.priority === rule.priority && match.toStatusId !== rule.toStatusId &&
+        validTime(match.enabledAt) && occurred >= Date.parse(match.enabledAt))) return { kind: 'ambiguous' };
+      if (rule.toStatusId === issue.status || !reachable.has(rule.toStatusId)) continue;
+      if (selected && selected.rule.toStatusId !== rule.toStatusId) return { kind: 'ambiguous' };
+      if (!selected || occurred > Date.parse(selected.evidence.occurredAt) ||
+        occurred === Date.parse(selected.evidence.occurredAt) && link.id < selected.evidence.link.id) selected = { rule, evidence };
+    }
+    if (!selected) return;
+    const { rule, evidence } = selected;
+    const prepared = this.prepare(rule, issue).outcome;
+    const expiresAt = checkedAt + MANUAL_STATUS_TOKEN_TTL;
+    const token = this.store.seal(JSON.stringify({ domain: MANUAL_STATUS_TOKEN_DOMAIN, actorId, expiresAt, toStatus: rule.toStatusId,
+      fence: this.manualStatusFence(issue, settingsVersion, context) }));
+    return { kind: 'suggestion', suggestion: {
+      issueId: issue.id, projectId: issue.projectId, issueVersion: issue.version, workflowVersion: workflow.version,
+      fromStatus: issue.status, toStatus: rule.toStatusId,
+      fromStatusLabel: workflow.statuses.find(status => status.id === issue.status)?.label ?? issue.status,
+      toStatusLabel: reachable.get(rule.toStatusId)!.label,
+      rule: { id: rule.id, name: rule.name, version: rule.version }, evidence,
+      blockReason: prepared.outcome === 'blocked' ? prepared.reason : null, token, expiresAt: new Date(expiresAt).toISOString(),
+    } };
+  }
+  verifyManualStatusSuggestion(issue: Issue, proposedStatus: unknown, proposedType: unknown, token: unknown, actorId: string, settingsVersion: number): void {
+    const stale = () => fail('업무, 규칙 또는 GitLab 활동이 변경되었습니다. GitLab에서 상태를 다시 확인해 주세요.', 409,
+      { reason: 'gitlab_status_suggestion_stale' });
+    if (typeof token !== 'string' || token.length > MAX_MANUAL_STATUS_TOKEN_LENGTH || !MANUAL_STATUS_TOKEN.test(token) ||
+      typeof proposedStatus !== 'string' || proposedStatus === issue.status || (proposedType !== undefined && proposedType !== issue.type)) return stale();
+    let proof: Record<string, unknown>;
+    try { proof = JSON.parse(this.store.unseal(token)); } catch { return stale(); }
+    if (proof?.domain !== MANUAL_STATUS_TOKEN_DOMAIN || proof.actorId !== actorId || proof.toStatus !== proposedStatus ||
+      typeof proof.expiresAt !== 'number' || !Number.isSafeInteger(proof.expiresAt) || Date.now() >= proof.expiresAt) return stale();
+    const context = this.manualStatusContext(issue);
+    if (proof.fence !== this.manualStatusFence(issue, settingsVersion, context)) return stale();
+  }
   processEvent(event:AutomationEvent):AutomationRun[]{
     if(typeof event.id!=='string'||!event.id||event.id.length>300||!AUTOMATION_TRIGGERS.includes(event.trigger)||!Number.isSafeInteger(event.gitlabProjectId)||event.gitlabProjectId<1||typeof event.branch!=='string'||event.branch.length>512||!Array.isArray(event.issueIds)||event.issueIds.length>10000||event.issueIds.some(id=>typeof id!=='string'||id.length>200)||!validTime(event.receivedAt))fail('정규화된 GitLab 이벤트를 확인해 주세요.');
     const deployment = event.trigger === 'deployment.succeeded';
@@ -166,8 +261,8 @@ export class AutomationService{
       else if(!validTime(event.occurredAt))ignored='이벤트 발생 시각을 확인할 수 없습니다.';
       else if(!rule.enabledAt||Date.parse(event.occurredAt)<Date.parse(rule.enabledAt)-(deployment?0:1000))ignored='규칙을 활성화하기 전에 발생한 이벤트입니다.';
       else{
-        const last=this.store.db.prepare("SELECT json FROM automation_runs WHERE issue_id=? AND outcome IN ('changed','no_op') AND occurred_at IS NOT NULL ORDER BY occurred_at DESC,rowid DESC LIMIT 1").get(issueId) as {json:string}|undefined;
-        if(last){const applied=JSON.parse(last.json) as AutomationRun,difference=Date.parse(event.occurredAt)-Date.parse(applied.occurredAt!);if(difference<0)ignored='이 업무에 마지막으로 적용한 이벤트보다 오래된 이벤트입니다.';else if(difference===0&&(applied.toStatus!==rule.toStatusId||issue.status!==rule.toStatusId))ignored='같은 발생 시각의 이벤트가 다른 상태 변경을 요구해 적용하지 않았습니다.';}
+        const applied=this.latestAppliedRun(issueId);
+        if(applied){const difference=Date.parse(event.occurredAt)-Date.parse(applied.occurredAt!);if(difference<0)ignored='이 업무에 마지막으로 적용한 이벤트보다 오래된 이벤트입니다.';else if(difference===0&&(applied.toStatus!==rule.toStatusId||issue.status!==rule.toStatusId))ignored='같은 발생 시각의 이벤트가 다른 상태 변경을 요구해 적용하지 않았습니다.';}
       }
       ignored??=this.matchReason(rule,issue,event);
       let prepared:PreparedChange;
