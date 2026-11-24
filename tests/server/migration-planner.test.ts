@@ -808,6 +808,75 @@ test('pure planning merges selected containers, preserves typed zero/false and a
   const issue=plan.issues.find(issue=>issue.title==='업무 1')!,schema=plan.issueSchemas[0];assert.equal(issue.customFields![schema.fields.find(field=>field.name==='점수')!.id],0);assert.equal(issue.customFields![schema.fields.find(field=>field.name==='확인')!.id],false);assert.equal(plan.workflows[0].statuses[0].label,'원본 열림');assert.equal(plan.issues.find(issue=>issue.title==='업무 2')!.parentId,issue.id);assert.equal(plan.issueRelations[0].type,'Blocks');assert.ok(notices(plan).has('WORKFLOW_RULES_NOT_REPRODUCED'));assert.equal(plan.sourceRecords.length,packages.reduce((sum,pkg)=>sum+pkg.dataset.records.length,0));const history=plan.sourceRecords.find(row=>row.record.id==='history:jh')!;assert.equal(history.targetId,null);assert.equal(history.ownerType,'issue');assert.equal(history.ownerId,issue.id);assert.deepEqual(history.record,packages[0].dataset.records.find(row=>row.id==='history:jh'));assert.ok(plan.sourceRecords.every(row=>row.id!==row.record.id));
 });
 
+test('project merge review counts exact source origins and shows the primary rows contributed by each file', () => {
+  const office = (id: string, instanceKey: string, sourceId: string, issueId: string) => {
+    const source = pkg(id, 'jira', [record('project', sourceId, { title: '같은 Jira 프로젝트', metadata: { key: 'OLD' } }),
+      issue(issueId, { containerId: sourceId })]);
+    source.dataset.source.instanceKey = instanceKey;
+    return source;
+  };
+  const first = office('jira-first', 'work', '41', '1');
+  const second = office('jira-second', 'work', '41', '2');
+  const other = office('jira-other', 'WORK', '41', '3');
+  const distinctProject = office('jira-project', 'work', '42', '4');
+  const wiki = pkg('confluence-first', 'confluence', [
+    record('project', '41', { title: '문서 공간', metadata: { sourceClass: 'Space', originalId: '41', spaceKey: 'TEAM' } }),
+    page('10', { containerId: '41' }),
+  ]);
+  wiki.dataset.source.instanceKey = 'work';
+  const [split] = buildMigrationPlan(input([first, second])).preview.projects;
+  assert.equal(split.sourceOriginCount, 1);
+  assert.equal(split.mergesSources, undefined);
+  assert.equal(split.sources?.length, 2);
+
+  const request = input([first, second, other, distinctProject, wiki]);
+  for (const option of Object.keys(request.configuration.issueTypes)) request.configuration.issueTypes[option] = '작업';
+  const combined = buildMigrationPlan(request);
+  assert.equal(combined.preview.canApply, true, JSON.stringify(combined.preview.notices));
+  assert.equal(combined.preview.projects[0].sourceOriginCount, 4);
+  assert.equal(combined.preview.projects[0].mergesSources, true);
+  assert.equal(combined.preview.requiredAcknowledgements.filter(code => code === 'PROJECT_SOURCE_MERGE').length, 1);
+  assert.deepEqual(combined.preview.notices.filter(notice => notice.code === 'PROJECT_SOURCE_MERGE').map(({ recordId, requiresAcknowledgement }) =>
+    [recordId, requiresAcknowledgement]), [[null, true]]);
+
+  request.configuration.excludedRecords.push('jira-other/issue:3', 'jira-project/issue:4', 'confluence-first/page:10');
+  const excluded = buildMigrationPlan(request).preview;
+  assert.equal(excluded.canApply, true, JSON.stringify(excluded.notices));
+  assert.ok(!excluded.requiredAcknowledgements.includes('PROJECT_SOURCE_MERGE'));
+  const [destination] = excluded.projects;
+  assert.deepEqual({ ...destination, id: '<generated>' }, {
+    id: '<generated>', key: 'NEW', name: '한 팀', issueCount: 2, documentCount: 0, sourceOriginCount: 1,
+    sources: [first, second].map(({ summary }) => ({
+      packageId: summary.id, sourceProjectId: '41', name: '같은 Jira 프로젝트', issueCount: 1, documentCount: 0,
+    })),
+  });
+});
+
+test('project merge review keeps unassigned and key-only source containers separate by package', () => {
+  const source = (name: string, sourceId: string | null, issueId: string) => {
+    const projects = sourceId ? [record('project', sourceId, { title: '같은 표시 이름', metadata: { key: sourceId } })] : [];
+    const result = pkg(name, 'jira', [...projects, issue(issueId, { containerId: sourceId })]);
+    result.dataset.source.format = 'jira-csv';
+    result.dataset.source.instanceKey = 'team';
+    return result;
+  };
+  const plan = buildMigrationPlan(input([
+    source('csv-first', 'OLD', '1'), source('csv-second', 'OLD', '2'),
+    source('csv-unassigned', null, '3'), source('csv-unassigned-next', null, '4'),
+  ]));
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.ok(plan.preview.requiredAcknowledgements.includes('PROJECT_SOURCE_MERGE'));
+  const [destination] = plan.preview.projects;
+  assert.equal(destination.sourceOriginCount, 4);
+  assert.equal(destination.mergesSources, true);
+  assert.equal(destination.issueCount, 4);
+  assert.deepEqual(destination.sources?.map(({ packageId, sourceProjectId, identityUnconfirmed, issueCount, documentCount }) =>
+    [packageId, sourceProjectId, identityUnconfirmed, issueCount, documentCount]), [
+    ['csv-first', 'OLD', true, 1, 0], ['csv-second', 'OLD', true, 1, 0],
+    ['csv-unassigned', null, true, 1, 0], ['csv-unassigned-next', null, true, 1, 0],
+  ]);
+});
+
 test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting changes and protects mixed document graphs', () => {
   const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
   const original = pkg('original-wiki', 'confluence', [space, page('10', { authorId: null })]);

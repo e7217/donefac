@@ -3350,6 +3350,23 @@ test('actual HTTP worker merges source containers into a new project, enforces r
     const bad = structuredClone(config); bad.users[Object.keys(bad.users)[0]] = 'missing-user'; const blocked = await f.preview(bad); assert.equal(blocked.canApply, false); assert.equal((await f.apply(blocked)).status, 409);
     const plan = await f.preview(config); assert.equal(plan.canApply, true, JSON.stringify(plan.notices)); assert.equal(plan.projects.length, 1); assert.ok(plan.requiredAcknowledgements.length > 0);
     assert.equal((await f.apply(plan, {}, 'user-min')).status, 403); assert.equal((await f.apply(plan, { expectedVersion: 99 })).status, 409); assert.equal((await f.apply(plan, { acknowledgements: [] })).status, 400);
+    const [destination] = plan.projects;
+    assert.equal(destination.mergesSources, true);
+    assert.equal(destination.sourceOriginCount, 2);
+    assert.deepEqual(destination.sources?.map(source => [source.sourceProjectId, source.issueCount]).sort(), [['OLD', 1], ['OTHER', 1]]);
+    const mergeCode = 'PROJECT_SOURCE_MERGE';
+    assert.ok(plan.requiredAcknowledgements.includes(mergeCode));
+    const allExceptMerge = plan.requiredAcknowledgements.filter(code => code !== mergeCode);
+    const beforeMerge = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    assert.equal((await f.apply(plan, { acknowledgements: allExceptMerge })).status, 400);
+    assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).data.projects, beforeMerge.projects);
+    const shiftConversion = f.db.prepare(`UPDATE migration_previews SET json=json_set(json,'$.conversionVersion',
+      json_extract(json,'$.conversionVersion') + ?) WHERE id=?`);
+    shiftConversion.run(-1, plan.id);
+    const stale = await f.apply(plan);
+    assert.equal(stale.status, 409);
+    assert.match(JSON.stringify(stale.data), /원본 변환 규칙/);
+    shiftConversion.run(1, plan.id);
     const conflictConfig = structuredClone(config); conflictConfig.projects = conflictConfig.projects.map(value => ({ ...value, key: 'CONFLICT' })); const conflict = await f.preview(conflictConfig); assert.equal(conflict.canApply, true);
     assert.equal((await f.call('/projects', 'POST', { key: 'CONFLICT', name: 'Synthetic competing project' })).status, 201); assert.equal((await f.apply(conflict)).status, 409);
     const before = (await f.call<WorkspaceSnapshot>('/workspace')).data;
@@ -3363,6 +3380,11 @@ test('actual HTTP worker merges source containers into a new project, enforces r
     const receipt = (await f.call<SourceImport[]>('/source-imports')).data[0]; assert.deepEqual(receipt.notices, plan.notices); const originals = (await f.call<SourceRecordPage>(`/source-imports/${plan.id}/records?kind=issue`)).data; assert.equal(originals.total, 2); assert.deepEqual(originals.records.map(value => value.record.sourceId).sort(), ['100', '200']);
     const duplicate = await f.apply(plan); assert.equal(duplicate.status, 200); assert.equal(duplicate.data.duplicate, true); assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.length, after.issues.length);
     const repeatedConfig = structuredClone(config); repeatedConfig.projects = repeatedConfig.projects.map(value => ({ ...value, key: 'SECOND' })); const repeated = await f.preview(repeatedConfig); assert.equal(repeated.canApply, false); assert.ok(repeated.notices.some(value => value.code === 'SOURCE_ALREADY_IMPORTED' && value.severity === 'error')); assert.equal((await f.apply(repeated)).status, 409); assert.equal((await f.call<SourceImport[]>('/source-imports')).data.length, 1); assert.deepEqual((await f.call('/webhook-deliveries')).data, []);
+    const backup = await f.call('/export');
+    const restored = await f.call('/import', 'POST', { data: backup.data });
+    assert.equal(restored.status, 200, JSON.stringify(restored.data));
+    const [restoredReceipt] = (await f.call<SourceImport[]>('/source-imports')).data;
+    assert.deepEqual(restoredReceipt.notices?.find(notice => notice.code === mergeCode), plan.notices.find(notice => notice.code === mergeCode));
   } finally { await f.close(); }
 });
 

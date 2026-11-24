@@ -45,6 +45,141 @@ async function importIntoProject(request: APIRequestContext, source: LegacyPacka
   return await applied.json() as MigrationApplyResult;
 }
 
+test('360px에서 생성할 프로젝트의 원본과 분할 파일을 검토하고 여러 원본 합치기를 명시적으로 적용한다', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const token = suffix(), sourceKey = `MER${token}`, separateKey = `SEP${token}`;
+  const sourceName = `겹치는 Jira 프로젝트 이름 ${token}`;
+  const firstInstance = `jira-merge-${token.toLowerCase()}`, secondInstance = `jira-other-${token.toLowerCase()}`;
+  const inputs = [
+    { tag: 'a', id: '9312', instance: firstInstance, title: `먼저 수집한 업무 ${token}` },
+    { tag: 'shard', id: '9312', instance: firstInstance, title: `분할 파일의 업무 ${token}` },
+    { tag: 'b', id: '9470', instance: secondInstance, title: `별도 원본의 업무 ${token}` },
+  ].map(input => ({ ...input, filename: `source-merge-${token}-${input.tag}.json` }));
+  const staged: LegacyPackageSummary[] = [];
+  const mergeCode = 'PROJECT_SOURCE_MERGE';
+  try {
+    for (const [index, input] of inputs.entries()) {
+      const body = Buffer.from(JSON.stringify({ issues: [{ id: String(4600 + index), key: `${sourceKey}-${index + 1}`,
+        changelog: { total: 0, histories: [] }, fields: {
+          project: { id: input.id, key: sourceKey, name: sourceName }, summary: input.title,
+          status: { id: '1', name: input.instance === firstInstance ? 'Ready' : 'Open' },
+          issuetype: { id: '3', name: input.instance === firstInstance ? 'Task' : 'Bug' },
+          created: '2020-05-01T00:00:00Z', updated: '2020-05-02T00:00:00Z',
+        },
+      }] }));
+      staged.push(await upload(request, input.filename, body, input.instance));
+    }
+
+    const { settings } = await open(page, request);
+    for (const input of inputs) await settings.getByLabel(`이관 패키지 ${input.filename}`, { exact: true }).check();
+    await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();
+    const foreignMapping = settings.getByRole('group', { name: `원본 매핑 ${sourceName} · ${inputs[2].filename}`, exact: true });
+    const keyField = foreignMapping.getByRole('textbox', { name: `새 프로젝트 키 ${sourceName}`, exact: true });
+    await expect(keyField).toHaveValue(sourceKey);
+    await expect(foreignMapping).toContainText(secondInstance);
+    await expect(foreignMapping).toContainText(inputs[2].id);
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const destinations = review.getByLabel('생성할 프로젝트', { exact: true });
+    const apply = review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true });
+    const mergeConfirmation = review.getByLabel(`이관 확인 ${mergeCode}`, { exact: true });
+    const initial = await preview(page, settings);
+    expect(initial.canApply, JSON.stringify(initial.notices)).toBe(true);
+    expect(initial.projects).toMatchObject([{ key: sourceKey, name: sourceName, issueCount: 3, documentCount: 0,
+      sourceOriginCount: 2, mergesSources: true }]);
+    expect(initial.projects[0].sources).toHaveLength(inputs.length);
+    for (const [index, input] of inputs.entries()) {
+      expect(initial.projects[0].sources).toContainEqual({ packageId: staged[index].id, sourceProjectId: input.id,
+        name: sourceName, issueCount: 1, documentCount: 0 });
+    }
+    expect(initial.notices).toEqual(expect.arrayContaining([expect.objectContaining({
+      code: mergeCode, severity: 'warning', requiresAcknowledgement: true,
+    })]));
+    expect(initial.requiredAcknowledgements).toContain(mergeCode);
+    await expect(destinations.getByText('여러 원본을 합치는 프로젝트', { exact: true })).toBeVisible();
+    await destinations.getByText('원본 프로젝트·공간 2개', { exact: true }).click();
+    const sourceFiles = destinations.getByLabel('이관 원본 파일', { exact: true });
+    for (const input of inputs) await expect(sourceFiles.getByText(input.filename, { exact: true })).toBeVisible();
+    await expect(sourceFiles.getByText(`Jira · ${firstInstance} · 원본 ${inputs[0].id}`, { exact: true })).toHaveCount(2);
+    await expect(sourceFiles.getByText(`Jira · ${secondInstance} · 원본 ${inputs[2].id}`, { exact: true })).toBeVisible();
+    await expect(sourceFiles.getByText('업무 1 · 문서 0', { exact: true })).toHaveCount(3);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const acknowledgeOthers = (value: MigrationPreview) => acknowledge(review, {
+      ...value, requiredAcknowledgements: value.requiredAcknowledgements.filter(code => code !== mergeCode),
+    });
+    await acknowledgeOthers(initial);
+    await expect(mergeConfirmation).not.toBeChecked();
+    await expect(apply).toBeDisabled();
+    const missingApproval = await request.post(`/api/migrations/previews/${initial.id}/apply`, {
+      headers: { 'X-Actor-Id': initial.actorId }, data: { expectedVersion: initial.version,
+        acknowledgements: initial.requiredAcknowledgements.filter(code => code !== mergeCode) },
+    });
+    expect(missingApproval.status(), await missingApproval.text()).toBe(400);
+    await mergeConfirmation.check();
+    await expect(apply).toBeEnabled();
+    await keyField.fill(separateKey);
+    await expect(review).toHaveCount(0);
+
+    const separated = await preview(page, settings);
+    expect(separated.canApply, JSON.stringify(separated.notices)).toBe(true);
+    expect(separated.projects).toHaveLength(2);
+    expect(separated.projects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: sourceKey, issueCount: 2, sourceOriginCount: 1 }),
+      expect.objectContaining({ key: separateKey, issueCount: 1, sourceOriginCount: 1 }),
+    ]));
+    expect(separated.requiredAcknowledgements).not.toContain(mergeCode);
+    await expect(mergeConfirmation).toHaveCount(0);
+    await expect(destinations.getByText('여러 원본을 합치는 프로젝트', { exact: true })).toHaveCount(0);
+    await expect(destinations.getByText('원본 프로젝트·공간 1개', { exact: true })).toHaveCount(2);
+    const retainedDestination = destinations.getByRole('article', { name: `${sourceKey} · ${sourceName}`, exact: true });
+    const separatedDestination = destinations.getByRole('article', { name: `${separateKey} · ${sourceName}`, exact: true });
+    await retainedDestination.getByText('원본 프로젝트·공간 1개', { exact: true }).click();
+    await separatedDestination.getByText('원본 프로젝트·공간 1개', { exact: true }).click();
+    await expect(retainedDestination).toContainText(inputs[0].filename);
+    await expect(retainedDestination).toContainText(inputs[1].filename);
+    await expect(retainedDestination).not.toContainText(inputs[2].filename);
+    await expect(separatedDestination).toContainText(inputs[2].filename);
+    await expect(separatedDestination).not.toContainText(inputs[0].filename);
+
+    await keyField.fill(sourceKey);
+    await expect(review).toHaveCount(0);
+    const merged = await preview(page, settings);
+    expect(merged.projects).toMatchObject([{ key: sourceKey, issueCount: 3 }]);
+    expect(merged.requiredAcknowledgements).toContain(mergeCode);
+    await acknowledgeOthers(merged);
+    await expect(mergeConfirmation).not.toBeChecked();
+    await expect(apply).toBeDisabled();
+    await mergeConfirmation.check();
+    const applying = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${merged.id}/apply`));
+    page.once('dialog', confirmation => confirmation.accept());
+    await apply.click();
+    const applied = await applying;
+    expect(applied.status(), await applied.text()).toBe(201);
+    const { import: receipt } = await applied.json() as MigrationApplyResult;
+    expect(receipt.projectIds).toHaveLength(1);
+    const after = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    expect(after.projects.find(project => project.id === receipt.projectIds[0])).toMatchObject({ key: sourceKey, name: sourceName });
+    expect(after.issues.filter(issue => issue.projectId === receipt.projectIds[0]).map(issue => issue.title).sort())
+      .toEqual(inputs.map(input => input.title).sort());
+  } finally {
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const imported = new Set(snapshot.projects.filter(project => [sourceKey, separateKey].includes(project.key)).map(project => project.id));
+    for (const issue of snapshot.issues.filter(issue => imported.has(issue.projectId))) {
+      const removed = await request.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`);
+      expect(removed.ok(), await removed.text()).toBe(true);
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      const purged = await request.delete(`/api/trash/${trashEntryId}`);
+      expect(purged.ok(), await purged.text()).toBe(true);
+    }
+    for (const pack of staged) {
+      const removed = await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`);
+      expect(removed.ok(), await removed.text()).toBe(true);
+    }
+  }
+});
+
 test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 프로젝트에서 사용한다', async ({ page, request }) => {
   test.setTimeout(95_000);
   const id = suffix(), sourceKey = `WF${id}`, targetKey = `WFN${id}`, filename = `workflow-${id}.csv`;

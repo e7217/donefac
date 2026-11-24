@@ -36,7 +36,7 @@ import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHi
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
-import type { LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
+import type { LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
@@ -4402,7 +4402,10 @@ class Planner{
     if(Object.entries(counts).filter(([key])=>['issues','documents','comments','revisions','attachmentVersions','resourceLinks','issueRelations','worklogs'].includes(key)).reduce((sum,[,value])=>sum+value,0)>MAX_RECORDS)this.notice('CANONICAL_RECORD_LIMIT','생성할 현재 객체·이력·파일 버전 합계가100000개를 넘습니다.','error');
     const target = this.input.append?.project ?? this.input.appendPages?.project;
     const projects = target ? [target] : this.result.projects;
-    this.result.preview.projects=projects.map(project=>({id:project.id,key:project.key,name:project.name,issueCount:this.result.issues.filter(issue=>issue.projectId===project.id).length,documentCount:this.result.documents.filter(document=>document.projectId===project.id).length}));
+    this.result.preview.projects = this.previewProjects(projects, !target);
+    if (this.result.preview.projects.some(project => project.mergesSources)) {
+      this.notice('PROJECT_SOURCE_MERGE', '한 대상에 여러 원본이 연결됐습니다. 대상 프로젝트별 원본 목록을 확인해 주세요.', 'warning', undefined, true);
+    }
     const origins = new Map(this.result.atlassianLinks.map(link => [link.targetId, link.url]));
     for (const entry of this.entries) {
       if (this.result.preview.samples.length >= 12) break;
@@ -4441,6 +4444,48 @@ class Planner{
       this.notice('MIGRATION_PROJECT_LIMIT', `한 번에 이관 영수증에 기록할 프로젝트는 ${MAX_PROJECTS}개입니다. 패키지를 나누어 주세요.`, 'error');
     }
     this.result.preview.counts=counts;this.result.sourceImport.counts=counts;this.result.sourceImport.projectIds=receiptProjects;this.result.preview.requiredAcknowledgements=[...new Set(this.notices.filter(notice=>notice.requiresAcknowledgement).map(notice=>notice.code))];this.result.preview.canApply=!this.notices.some(notice=>notice.severity==='error');return this.result;
+  }
+
+  private previewProjects(projects: readonly Project[], reviewMerge: boolean): MigrationPreviewProject[] {
+    const summaries = new Map(projects.map(({ id, key, name }) => [id, {
+      project: { id, key, name, issueCount: 0, documentCount: 0 } as MigrationPreviewProject,
+      sources: new Map<string, MigrationPreviewProjectSource>(),
+      origins: new Set<string>(),
+    }]));
+    const containers = new Map(this.options.containers.map(container =>
+      [JSON.stringify([container.packageId, container.sourceProjectId]), container]));
+
+    // Only primary rows projected into the target contribute to its membership.
+    // For new projects, there can be at most one membership row per configured container.
+    for (const entry of this.primaryById.values()) {
+      const projectId = this.bindings.get(entry.key)?.projectId;
+      const summary = projectId && summaries.get(projectId);
+      if (!summary) continue;
+      const packageId = entry.pkg.summary.id;
+      const containerKey = JSON.stringify([packageId, entry.container]);
+      let source = summary.sources.get(containerKey);
+      if (!source) {
+        const sourceProjectId = entry.container === '__unassigned__' ? null : entry.container;
+        const container = containers.get(containerKey);
+        const record = this.indexes.get(packageId)?.get(`project:${entry.container}`);
+        const { product, instanceKey } = entry.pkg.dataset.source;
+        // Jira key-only exports can infer the project from a ticket key. A numeric project ID
+        // with a declared project row, or an explicit Confluence space, can be compared across files.
+        const confirmed = sourceProjectId !== null && record?.kind === 'project' && record.sourceId === sourceProjectId && record.metadata.syntheticId !== true &&
+          (product === 'jira' ? /^[1-9]\d{0,19}$/u.test(sourceProjectId) && record.metadata.jiraComponentProjectAmbiguous !== true
+            : record.metadata.sourceClass === 'Space' && record.metadata.originalId === sourceProjectId);
+        source = { packageId, sourceProjectId, name: container?.name ?? (sourceProjectId || '원본 프로젝트 미지정'),
+          issueCount: 0, documentCount: 0, ...(confirmed ? {} : { identityUnconfirmed: true }) };
+        summary.sources.set(containerKey, source);
+        summary.origins.add(confirmed ? JSON.stringify(['source', product, instanceKey, sourceProjectId]) : JSON.stringify(['package', containerKey]));
+      }
+      const counter = entry.row.kind === 'issue' ? 'issueCount' : 'documentCount';
+      source[counter]++;
+      summary.project[counter]++;
+    }
+
+    return [...summaries.values()].map(({ project, sources, origins }) => sources.size ? { ...project, sources: [...sources.values()],
+      sourceOriginCount: origins.size, ...(reviewMerge && origins.size > 1 ? { mergesSources: true } : {}) } : project);
   }
 }
 

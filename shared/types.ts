@@ -461,9 +461,27 @@ export interface MigrationJiraPlanningChoice {
   recordId: string; sourceKey: string; title: string;
   candidates: { sourceId: string; name: string }[]; selected: string | null;
 }
+export interface MigrationPreviewProjectSource {
+  packageId: string;
+  sourceProjectId: string | null;
+  name: string;
+  issueCount: number;
+  documentCount: number;
+  identityUnconfirmed?: true;
+}
+export interface MigrationPreviewProject {
+  id: string;
+  key: string;
+  name: string;
+  issueCount: number;
+  documentCount: number;
+  sources?: MigrationPreviewProjectSource[];
+  sourceOriginCount?: number;
+  mergesSources?: true;
+}
 export interface MigrationPreview {
   id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
-  projects:{id:string;key:string;name:string;issueCount:number;documentCount:number}[];
+  projects:MigrationPreviewProject[];
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];

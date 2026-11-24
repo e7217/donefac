@@ -257,7 +257,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const pageDestination = appendPagesTo && appendPagesTo.projectId === appendPagesTarget?.projectId ? appendPagesTarget : undefined;
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
-  const identityFilenames = new Map(options?.packages.map(({ id, filename }) => [id, filename]));
+  const sourcePackagesById = new Map((options?.packages ?? packages).map(item => [item.id, item]));
   const confluenceSourceReview = matching && options?.confluenceReviews?.length ? <ConfluenceSourceReview
     reviews={options.confluenceReviews} coverage={options.confluenceReviewCoverage}
     packages={packages.filter(item => selected.includes(item.id))} /> : null;
@@ -531,8 +531,32 @@ function ActorMigration(props: MigrationApplyProps) {
             새 댓글을 추가하고 과거 원본 버전을 문서 변경 이력에 보관합니다.
           </RefreshOption>}
         </section>}
-        {mode === 'new' && <><h3>새 프로젝트</h3><p>프로젝트 키와 이름을 지정하세요. 여러 원본 컨테이너에 같은 키·이름을 지정하면 하나로 합칩니다.</p>
-        <Paged title="프로젝트 매핑" items={options.containers} label={item => `${item.name} ${item.proposedKey}`} render={item => { const project = configuration.projects.find(value => value.containerId === item.id); if (!project) return <p className="migration-error">기본 매핑에 없는 컨테이너입니다: {item.name}</p>; return <div className="migration-project-row"><div><strong>{item.name}</strong><small>업무 {item.issueCount} · 문서 {item.documentCount}</small></div><label>새 프로젝트 키<input className="field" aria-label={`새 프로젝트 키 ${item.name}`} value={project.key} maxLength={12} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, key: event.target.value } : value) })} /></label><label>새 프로젝트 이름<input className="field" aria-label={`새 프로젝트 이름 ${item.name}`} value={project.name} maxLength={100} onChange={event => change({ ...configuration, projects: configuration.projects.map(value => value.containerId === item.id ? { ...value, name: event.target.value } : value) })} /></label></div>; }} />
+        {mode === 'new' && <>
+          <h3>새 프로젝트</h3>
+          <p>같은 키와 이름을 지정한 원본은 하나로 합칩니다. 대상별 원본을 미리보기에서 확인하세요.</p>
+          <Paged title="프로젝트 매핑" items={options.containers} label={item => {
+            const pack = sourcePackagesById.get(item.packageId);
+            return `${item.name} ${item.proposedKey} ${item.sourceProjectId} ${pack?.filename ?? ''} ${pack?.source.instanceKey ?? ''}`;
+          }} render={item => {
+            const project = configuration.projects.find(value => value.containerId === item.id);
+            if (!project) return <p className="migration-error">기본 매핑에 없는 원본입니다. {item.name}</p>;
+            const pack = sourcePackagesById.get(item.packageId);
+            const filename = pack?.filename ?? item.packageId;
+            const update = (value: { key: string } | { name: string }) => change({ ...configuration,
+              projects: configuration.projects.map(project => project.containerId === item.id ? { ...project, ...value } : project),
+            });
+            return <div className="migration-project-row" role="group" aria-label={`원본 매핑 ${item.name} · ${filename}`}>
+              <div><strong>{item.name}</strong>
+                <small>{filename}</small>
+                <small>{projectSourceLabel(pack, item.sourceProjectId === '__unassigned__' ? null : item.sourceProjectId)}</small>
+                <small>업무 {item.issueCount} · 문서 {item.documentCount}</small>
+              </div>
+              <label>새 프로젝트 키<input className="field" aria-label={`새 프로젝트 키 ${item.name}`} value={project.key} maxLength={12}
+                onChange={event => update({ key: event.target.value })} /></label>
+              <label>새 프로젝트 이름<input className="field" aria-label={`새 프로젝트 이름 ${item.name}`} value={project.name} maxLength={100}
+                onChange={event => update({ name: event.target.value })} /></label>
+            </div>;
+          }} />
         </>}
         <div className="migration-date-grid"><label>원본 시간대<input className="field" aria-label="이관 원본 시간대" value={configuration.timezone} list="migration-timezones" onChange={event => change({ ...configuration, timezone: event.target.value })} maxLength={100} /><datalist id="migration-timezones"><option value="Asia/Seoul" /><option value="UTC" /></datalist></label><label>날짜가 없거나 해석할 수 없을 때<select className="field" aria-label="이관 날짜 처리" value={configuration.datePolicy} onChange={event => change({ ...configuration, datePolicy: event.target.value as MigrationConfiguration['datePolicy'] })}><option value="block">적용 차단 후 검토</option><option value="import-time">현재 항목에는 이관 시각 사용 · 원본 값 별도 보존</option></select></label></div>
         <MappingSection title="사용자 매핑">
@@ -545,10 +569,10 @@ function ActorMigration(props: MigrationApplyProps) {
           </div>}
           {identityNotice && <p role="status" className="migration-mapping-file-notice">{identityNotice}</p>}
           <Paged title="사용자 매핑" items={options.identities}
-            label={item => `${item.label} ${item.sourceValue} ${item.email ?? item.emailEvidence?.email ?? ''} ${identityFilenames.get(item.packageId) ?? ''}`}
+            label={item => `${item.label} ${item.sourceValue} ${item.email ?? item.emailEvidence?.email ?? ''} ${sourcePackagesById.get(item.packageId)?.filename ?? ''}`}
             render={item => {
               const userId = configuration.users[item.id] ?? '';
-              const filename = options.packages.length > 1 ? identityFilenames.get(item.packageId) : undefined;
+              const filename = options.packages.length > 1 ? sourcePackagesById.get(item.packageId)?.filename : undefined;
               const detail = item.email ?? item.emailEvidence?.email ?? item.sourceValue;
               const detailId = filename ? `${mappingFileHelp}-identity-${item.id}` : undefined;
               return <MappingRow label={item.label} detail={filename ? `${detail} · ${filename}` : detail} detailId={detailId}>
@@ -599,7 +623,12 @@ function ActorMigration(props: MigrationApplyProps) {
       </header>
       {confluenceSourceReview}
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
-      <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
+      <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`}
+        items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <article className="migration-project-preview" aria-label={`${item.key} · ${item.name}`}>
+          <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음'
+            : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>
+          <MigrationProjectSources project={item} packagesById={sourcePackagesById} />
+        </article>} />
       {Boolean(preview.jiraWorkflows?.length) && <MigrationJiraWorkflowPreview workflows={preview.jiraWorkflows ?? []} />}
       {mode === 'new' && reviewMode === 'new' && preview.jiraObservedWorkflows?.length ? <MigrationJiraObservedWorkflowReview
         key={`observed:${preview.id}:${preview.version}`} workflows={preview.jiraObservedWorkflows} drafts={configuration?.jiraWorkflows}
@@ -1121,6 +1150,35 @@ function AppendMappingSection({ title, label, options, choices, value, emptyLabe
           .map(choice => <option value={choice.id} key={choice.id}>{choice.label}{choice.detail ? ` · ${choice.detail}` : ''}</option>)}
       </select>
     </MappingRow>} /></MappingSection>;
+}
+
+function projectSourceLabel(pack: LegacyPackageSummary | undefined, sourceId: string | null, unconfirmed = false): string {
+  const scope = pack ? [pack.source.product === 'jira' ? 'Jira' : 'Confluence', pack.source.instanceKey] : [];
+  const source = sourceId === null ? '원본 ID 미확인' : unconfirmed ? `원본 표기 ${sourceId} · ID 미확인` : `원본 ${sourceId}`;
+  return [...scope, source].join(' · ');
+}
+
+function MigrationProjectSources({ project, packagesById }: {
+  project: MigrationPreview['projects'][number]; packagesById: ReadonlyMap<string, LegacyPackageSummary>;
+}) {
+  if (!project.sources?.length) return null;
+  return <>
+    {project.mergesSources && <strong className="migration-project-merge">여러 원본을 합치는 프로젝트</strong>}
+    <MappingSection title={`원본 프로젝트·공간 ${(project.sourceOriginCount ?? project.sources.length).toLocaleString()}개`}>
+      <Paged title="이관 원본 파일" items={project.sources} label={item => {
+        const pack = packagesById.get(item.packageId);
+        return `${item.name} ${item.sourceProjectId ?? ''} ${pack?.filename ?? ''} ${pack?.source.instanceKey ?? ''}`;
+      }} render={item => {
+        const pack = packagesById.get(item.packageId);
+        return <div className="migration-project-source">
+          <strong>{item.name}</strong>
+          <small>{pack?.filename ?? item.packageId}</small>
+          <small>{projectSourceLabel(pack, item.sourceProjectId, item.identityUnconfirmed)}</small>
+          <small>업무 {item.issueCount.toLocaleString()} · 문서 {item.documentCount.toLocaleString()}</small>
+        </div>;
+      }} />
+    </MappingSection>
+  </>;
 }
 
 function MigrationCounts({ entries, mode = 'new' }: { entries: [string, number][]; mode?: DestinationMode }) {

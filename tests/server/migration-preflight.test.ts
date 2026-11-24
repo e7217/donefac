@@ -50,6 +50,13 @@ function makePreview(overrides: Partial<MigrationPreview> = {}): MigrationPrevie
 
 test('migration preflight exports the selected package and counts without copying source details', () => {
   const preview = makePreview();
+  Object.assign(preview.projects[0], { sourceOriginCount: 2, mergesSources: true, sources: [
+    { packageId, sourceProjectId: 'never-emit-container-id', name: 'never-emit-source-name', issueCount: 1, documentCount: 0 },
+    { packageId, sourceProjectId: null, name: 'never-emit-unconfirmed-name', identityUnconfirmed: true, issueCount: 1, documentCount: 0 },
+  ] });
+  preview.notices.push({ severity: 'warning', code: 'PROJECT_SOURCE_MERGE', message: 'never-emit-origin-details', recordId: null,
+    requiresAcknowledgement: true });
+  preview.requiredAcknowledgements.push('PROJECT_SOURCE_MERGE');
   const report = buildMigrationPreflightReport(preview, [{ ...jira, id: unrelatedPackageId }, jira]);
   assert.deepEqual(report, {
     format: 'teamspace-migration-preflight', version: 1,
@@ -62,10 +69,11 @@ test('migration preflight exports the selected package and counts without copyin
       jiraSprints: 2, jiraSprintLinks: 1, jiraSprintUnassigned: 0, jiraSprintHistoryOnly: 1 },
     diagnostics: [
       { severity: 'error', code: 'RESTRICTED_CONTENT', count: 1 },
+      { severity: 'warning', code: 'PROJECT_SOURCE_MERGE', count: 1 },
       { severity: 'warning', code: 'RECORDS_EXCLUDED', count: 2 },
       { severity: 'info', code: 'UNRECOGNIZED_CODE', count: 1 },
     ],
-    requiredAcknowledgements: ['RECORDS_EXCLUDED'],
+    requiredAcknowledgements: ['PROJECT_SOURCE_MERGE', 'RECORDS_EXCLUDED'],
     mapping: { users: { mapped: 1, unmapped: 1 }, explicitExclusions: 1 },
   });
   assert.doesNotMatch(JSON.stringify(report), /never-emit|NEVER_EMIT|\/private\/|company\.test/i);
