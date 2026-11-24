@@ -364,6 +364,65 @@ test('Jira JSON registers custom user identities without inferring users from or
   assert.equal(values['named:비움'], null);
 });
 
+test('Jira REST preserves account proof from typed user roles and withholds conflicting or fallback IDs', () => {
+  const profiles = [
+    { accountId: 'cloud:account', displayName: 'First name' }, { accountId: 'cloud:account', displayName: 'Renamed' },
+    { key: 'JIRAUSER10000', name: 'native-name' }, { name: 'fallback-name' }, { accountId: 'unknown' }, { accountId: 1234 },
+    { accountId: 'same-id' }, { key: 'same-id' }, { accountId: 'same-id' },
+    { accountId: 'alias-conflict', key: 'old-a' }, { accountId: 'alias-conflict', key: 'old-b' },
+    { accountId: 'cloud:one', key: 'shared-key' }, { accountId: 'cloud:two', key: 'shared-key' }, { key: 'shared-key' },
+    'fallback-collision', { accountId: 'fallback-collision' },
+  ];
+  const issues = profiles.map((creator, index) => ({ id: String(index + 1), key: `OLD-${index + 1}`, fields: {
+    summary: 'Synthetic issue', creator,
+  } }));
+  const data = parse('issues.json', JSON.stringify({ issues: [...issues, { id: '99', key: 'OLD-99', fields: {
+    summary: 'Typed and untyped sources', customfield_10001: { accountId: 'untyped-custom-value' },
+    comment: { comments: [{ id: '40', author: { accountId: 'cloud-comment-author' }, body: 'Comment' }] },
+  } }] }));
+  const markers = (row: LegacyDataset['records'][number]) => [row.metadata.migrationAccountKind, row.metadata.migrationAccountKey];
+  assert.deepEqual(markers(find(data, 'identity:cloud:account')), ['jira-account-id', 'cloud:account']);
+  assert.deepEqual(markers(find(data, 'identity:JIRAUSER10000')), ['jira-user-key', 'JIRAUSER10000']);
+  assert.deepEqual(markers(find(data, 'identity:cloud-comment-author')), ['jira-account-id', 'cloud-comment-author']);
+  for (const id of ['fallback-name', 'unknown', '1234', 'untyped-custom-value']) {
+    assert.deepEqual(markers(find(data, `identity:${id}`)), [undefined, undefined]);
+  }
+  for (const id of ['same-id', 'alias-conflict', 'cloud:one', 'cloud:two', 'shared-key', 'fallback-collision']) {
+    assert.deepEqual(markers(find(data, `identity:${id}`)), [null, undefined]);
+  }
+  const imported = parse('importers.json', JSON.stringify({
+    users: [{ accountId: 'imported-actor' }], projects: [{ key: 'OLD', issues: [{ key: 'OLD-1', creator: { key: 'imported-key' } }] }],
+  }));
+  assert.deepEqual(markers(find(imported, 'identity:imported-actor')), [undefined, undefined]);
+  assert.deepEqual(markers(find(imported, 'identity:imported-key')), [undefined, undefined]);
+});
+
+test('Jira administrator analysis proves only exact unique ApplicationUser keys', () => {
+  const data = parse('entities.xml', `<entity-engine-xml>
+    <ApplicationUser id="1" lowerUserName="jane" userKey="JIRAUSER10001"/>
+    <CwdUser id="21" userName="Jane" lowerUserName="jane" displayName="Jane"/>
+    <ApplicationUser id="2" lowerUserName="without-profile"><userKey>auth-key</userKey></ApplicationUser>
+    <ApplicationUser id="3" lowerUserName="duplicated" userKey="first-claim"/>
+    <ApplicationUser id="4" lowerUserName="duplicated" userKey="second-claim"/>
+    <ApplicationUser id="5" lowerUserName="ambiguous-directory" userKey="directory-account"/>
+    <CwdUser id="22" userName="ambiguous-directory" displayName="First directory"/>
+    <CwdUser id="23" userName="ambiguous-directory" displayName="Second directory"/>
+    <ApplicationUser id="6" lowerUserName="mismatched-key" userKey="first-form"><userKey>second-form</userKey></ApplicationUser>
+    <CwdUser id="24" userName="fallback-name" userKey="fallback-key"/>
+    <Issue id="30" summary="Synthetic issue" creator="duplicated" assignee="jane" reporter="mismatched-key"/>
+    </entity-engine-xml>`);
+  const markers = (id: string) => {
+    const { migrationAccountKind, migrationAccountKey } = find(data, `identity:${id}`).metadata;
+    return [migrationAccountKind, migrationAccountKey];
+  };
+  assert.deepEqual(markers('JIRAUSER10001'), ['jira-user-key', 'JIRAUSER10001']);
+  assert.deepEqual(markers('auth-key'), ['jira-user-key', 'auth-key']);
+  assert.deepEqual(markers('second-claim'), [null, undefined]);
+  assert.deepEqual(markers('directory-account'), [null, undefined]);
+  for (const id of ['second-form', 'fallback-key']) assert.deepEqual(markers(id), [undefined, undefined]);
+  assert.equal(find(data, 'issue:30').authorId, 'second-claim');
+});
+
 test('Jira REST email evidence stays uncertain after conflicting or malformed claims for the same account', () => {
   const row = (id: number, accountId: string, emails: Record<string, unknown>) => ({ id, key: `OLD-${id}`, fields: {
     project: { id: '20', key: 'OLD' }, summary: `업무 ${id}`, assignee: { accountId, displayName: accountId, ...emails },

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, User, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, User, WorkspaceSnapshot } from '../../shared/types';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
@@ -200,5 +200,136 @@ test('360px 이관에서 이메일 일치 후보를 확인하고 선택한 Jira�
       const deleted = await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`);
       expect(deleted.ok(), await deleted.text()).toBe(true);
     }
+  }
+});
+
+test('360px에서 같은 Jira 원본 계정에 팀원 매핑을 재사용하고 다른 인스턴스와 매핑 충돌은 보존한다', async ({ page, request }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const workspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const [actor, member, conflictFirstMember, conflictSecondMember] = ['user-seo', 'user-min', 'user-jun', 'user-yun']
+    .map(id => workspace.users.find(user => user.id === id)!);
+  expect([actor, member, conflictFirstMember, conflictSecondMember].every(Boolean)).toBe(true);
+  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const instance = `same-jira-${suffix.toLowerCase()}`;
+  const accountId = `reuse-${suffix.toLowerCase()}`;
+  const conflictingAccountId = `conflict-${suffix.toLowerCase()}`;
+  const account = (accountId: string, displayName: string) => ({ accountId, displayName: `${displayName} ${suffix}` });
+  const seed = account(accountId, '기존 담당자 매핑'), target = account(accountId, '댓글이 있는 대상 계정'),
+    foreign = account(accountId, '다른 Jira의 동명 계정');
+  const conflictFirst = account(conflictingAccountId, '직접 매핑한 충돌 A'),
+    conflictSecond = account(conflictingAccountId, '직접 매핑한 충돌 B'),
+    conflictEmpty = account(conflictingAccountId, '값 없는 충돌 대상');
+  const commentBody = `같은 원본으로 확인한 Jira 댓글 ${suffix}`;
+  const packs = [
+    { tag: 'A', instance, entries: [{ identity: seed }, { identity: conflictFirst }] },
+    { tag: 'B', instance, entries: [{ identity: target, comment: commentBody }, { identity: conflictSecond }] },
+    { tag: 'C', instance, entries: [{ identity: conflictEmpty }] },
+    { tag: 'D', instance: `${instance}-other`, entries: [{ identity: foreign }] },
+  ].map((pack, index) => ({ ...pack, filename: `account-reuse-${suffix}-${pack.tag}.json`,
+    project: { id: String(2100 + index), key: `AR${suffix}${pack.tag}`, name: `Jira 사용자 원본 ${pack.tag} ${suffix}` },
+  }));
+  const projectKeys = new Set(packs.map(pack => pack.project.key));
+  const staged: LegacyPackageSummary[] = [];
+  const title = (identity: typeof seed) => `원본 담당자 확인 · ${identity.displayName}`;
+  try {
+    for (const [packIndex, pack] of packs.entries()) {
+      const issues = pack.entries.map(({ identity, comment }, index) => ({
+        id: String(4100 + packIndex * 10 + index), key: `${pack.project.key}-${index + 1}`, changelog: { total: 0, histories: [] },
+        fields: {
+          project: pack.project, summary: title(identity), assignee: identity, reporter: identity,
+          status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+          created: '2020-03-01T00:00:00Z', updated: '2020-03-02T00:00:00Z',
+          ...(comment ? { comment: { startAt: 0, maxResults: 1, total: 1, comments: [{
+            id: String(5100 + packIndex * 10 + index), author: identity, body: comment, visibility: null,
+            created: '2020-03-02T00:00:00Z', updated: '2020-03-02T00:00:00Z',
+          }] } } : {}),
+        },
+      }));
+      staged.push(await upload(request, pack.filename, pack.instance, Buffer.from(JSON.stringify({ issues }))));
+    }
+    await page.goto(`/#/${workspace.projects[0].id}/settings`);
+    const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
+    await expect(settings).toBeVisible({ timeout: 30_000 });
+    for (const pack of packs) await settings.getByLabel(`이관 패키지 ${pack.filename}`, { exact: true }).check();
+    const loading = responseFor(page, '/api/migrations/options', 'GET');
+    await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();
+    const options = await json<MigrationOptions>(await loading);
+    await settings.getByText('사용자 매핑', { exact: true }).click();
+    const mapping = (identity: typeof seed) => settings.getByRole('combobox', { name: `사용자 매핑 ${identity.displayName}`, exact: true });
+    await expect(mapping(seed)).toHaveAccessibleDescription(`${accountId} · ${packs[0].filename}`);
+    await mapping(seed).selectOption(member.id);
+    await mapping(conflictFirst).selectOption(conflictFirstMember.id);
+    await mapping(conflictSecond).selectOption(conflictSecondMember.id);
+
+    const before = await createPreview(page, settings);
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    for (const code of before.requiredAcknowledgements) await review.getByLabel(`이관 확인 ${code}`, { exact: true }).check();
+    const apply = review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true });
+    await expect(apply).toBeEnabled();
+
+    const name = '같은 원본 계정 매핑 검토';
+    const opener = settings.getByRole('button', { name, exact: true });
+    const dialog = page.getByRole('dialog', { name, exact: true });
+    const candidate = dialog.getByRole('checkbox', { name: `매핑 선택 ${target.displayName} · ${packs[1].filename}`, exact: true });
+    await opener.click();
+    await expect(candidate).toBeChecked();
+    await expect(dialog.getByRole('checkbox')).toHaveCount(1);
+    await expect(dialog).toContainText(`기존 매핑 · ${seed.displayName} · ${packs[0].filename}`);
+    await expect(dialog).toContainText(packs[1].filename);
+    await expect(dialog).toContainText(member.name);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    await candidate.uncheck();
+    await expect(dialog.getByRole('button', { name: '선택한 매핑 반영', exact: true })).toBeDisabled();
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    await expect(apply).toBeEnabled();
+    await expect(mapping(target)).toHaveValue('');
+
+    await opener.click();
+    await expect(candidate).toBeChecked();
+    await dialog.getByRole('button', { name: '선택한 매핑 반영', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(review).toHaveCount(0);
+    for (const [identity, value] of [[seed, member.id], [target, member.id], [foreign, ''],
+      [conflictFirst, conflictFirstMember.id], [conflictSecond, conflictSecondMember.id], [conflictEmpty, '']] as const) {
+      await expect(mapping(identity)).toHaveValue(value);
+    }
+
+    const proposed = await createPreview(page, settings);
+    const identityId = options.identities.find(identity => identity.packageId === staged[1].id && identity.label === target.displayName)?.id;
+    expect(identityId).toBeDefined();
+    expect(proposed.id).not.toBe(before.id);
+    expect(proposed.configuration.users).toEqual({ ...before.configuration.users, [identityId!]: member.id });
+    for (const code of proposed.requiredAcknowledgements) await review.getByLabel(`이관 확인 ${code}`, { exact: true }).check();
+    const applying = responseFor(page, `/api/migrations/previews/${proposed.id}/apply`, 'POST');
+    page.once('dialog', confirmation => confirmation.accept());
+    await apply.click();
+    const { import: receipt } = await json<MigrationApplyResult>(await applying, 201);
+    expect(receipt.projectIds).toHaveLength(packs.length);
+
+    const imported = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    const issueFor = (identity: typeof seed) => imported.issues.find(issue => issue.title === title(identity));
+    expect(issueFor(seed)).toMatchObject({ assigneeId: member.id, reporterId: member.id });
+    const targetIssue = issueFor(target);
+    expect(targetIssue).toMatchObject({ assigneeId: member.id, reporterId: member.id });
+    expect(issueFor(foreign)).toMatchObject({ assigneeId: null });
+    expect(issueFor(conflictFirst)).toMatchObject({ assigneeId: conflictFirstMember.id });
+    expect(issueFor(conflictSecond)).toMatchObject({ assigneeId: conflictSecondMember.id });
+    expect(issueFor(conflictEmpty)).toMatchObject({ assigneeId: null });
+    const params = new URLSearchParams({ resourceType: 'issue', resourceId: targetIssue!.id });
+    const comments = await json<Comment[]>(await request.get(`/api/comments?${params}`));
+    expect(comments).toMatchObject([{ body: commentBody, authorId: member.id }]);
+  } finally {
+    const after = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    const projectIds = new Set(after.projects.filter(project => projectKeys.has(project.key)).map(project => project.id));
+    for (const issue of after.issues.filter(issue => projectIds.has(issue.projectId))) {
+      const { trashEntryId } = await json<{ trashEntryId: string }>(await request.delete(`/api/issues/${issue.id}?expectedVersion=${issue.version}`));
+      await json(await request.delete(`/api/trash/${trashEntryId}`));
+    }
+    for (const pack of staged) await json(await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`));
   }
 });

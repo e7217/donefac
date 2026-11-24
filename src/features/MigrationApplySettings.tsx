@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
-import { suggestMigrationIdentityMappings } from '../../shared/migration-identity-suggestions';
+import { suggestMigrationIdentityMappings, suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
 import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type SourceRecordArchive, type StatusCategory, type User } from '../../shared/types';
 import { api, post } from '../lib/api';
@@ -144,7 +144,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const [mappingNotice, setMappingNotice] = useState('');
   const [identityNotice, setIdentityNotice] = useState('');
   const [identityRoster, setIdentityRoster] = useState<{ snapshot: User[]; users: User[] } | null>(null);
-  const [emailReview, setEmailReview] = useState<{ opener: HTMLButtonElement; rows: IdentitySuggestionRow[] } | null>(null);
+  const [identityReview, setIdentityReview] = useState<{ mode: IdentityReviewMode; opener: HTMLButtonElement; rows: IdentitySuggestionRow[] } | null>(null);
   const teamUsers = identityRoster?.snapshot === data.users ? identityRoster.users : data.users;
   const mappingFileHelp = useId();
   const active = useRef(true), busyRef = useRef(false), dirtyRef = useRef(false), loadSequence = useRef(0);
@@ -154,7 +154,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const receiptToFocus = useRef<string | null>(null);
   const savedDestinationDraft = useRef<{ issues?: AppendMapping; pages?: PageAppendMapping; workflows?: MigrationConfiguration['jiraWorkflows'] }>({});
   useEffect(() => { dirtyRef.current = selected.length > 0 || Boolean(configuration || preview); }, [selected, configuration, preview]);
-  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setObservedDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); setEmailReview(null); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
+  const reset = useCallback(() => { setSelected([]); setOptions(null); setConfiguration(null); setPreview(null); setAcknowledgements([]); setPlanningDraft(null); setObservedDraft(null); setError(''); setMappingNotice(''); setIdentityNotice(''); setIdentityReview(null); savedDestinationDraft.current = {}; dirtyRef.current = false; }, []);
   const load = useCallback(async () => {
     const sequence = ++loadSequence.current;
     try {
@@ -257,6 +257,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const pageDestination = appendPagesTo && appendPagesTo.projectId === appendPagesTarget?.projectId ? appendPagesTarget : undefined;
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
+  const identityFilenames = new Map(options?.packages.map(({ id, filename }) => [id, filename]));
   const confluenceSourceReview = matching && options?.confluenceReviews?.length ? <ConfluenceSourceReview
     reviews={options.confluenceReviews} coverage={options.confluenceReviewCoverage}
     packages={packages.filter(item => selected.includes(item.id))} /> : null;
@@ -275,22 +276,23 @@ function ActorMigration(props: MigrationApplyProps) {
     if (active.current && !signal?.aborted) setIdentityRoster({ snapshot: data.users, users });
     return users;
   }
-  async function openEmailReview(opener: HTMLButtonElement) {
+  async function openIdentityReview(mode: IdentityReviewMode, opener: HTMLButtonElement) {
     if (!configuration || !options || !matching || hasReviewChanges) return;
     setIdentityNotice('');
-    await execute('일치하는 팀원 이메일 확인 중…', async () => {
+    await execute('팀원과 사용자 매핑 후보 확인 중…', async () => {
       const users = await readIdentityRoster();
-      if (active.current) setEmailReview({ opener, rows: identitySuggestionRows(options, users, configuration.users) });
+      if (active.current) setIdentityReview({ mode, opener, rows: identitySuggestionRows(mode, options, users, configuration.users) });
     });
     requestAnimationFrame(() => { if (document.activeElement === document.body && opener.isConnected) opener.focus({ preventScroll: true }); });
   }
-  function applyEmailMatches(matches: readonly IdentitySuggestionRow[]) {
-    if (!configuration || !matching || !matches.length) return;
+  function applyIdentityMatches(matches: readonly IdentitySuggestionRow[]) {
+    if (!configuration || !matching || !identityReview || !matches.length) return;
     const users = { ...configuration.users };
     for (const { identity, user } of matches) users[identity.id] = user.id;
     change({ ...configuration, users });
-    setEmailReview(null);
-    setIdentityNotice(`이메일이 일치하는 사용자 매핑 ${matches.length.toLocaleString()}건을 반영했습니다. 새 미리보기를 만들어 주세요.`);
+    setIdentityReview(null);
+    const label = identityReview.mode === 'email' ? '이메일이 일치하는 사용자 매핑' : '같은 원본 계정의 사용자 매핑';
+    setIdentityNotice(`${label} ${matches.length.toLocaleString()}건을 반영했습니다. 새 미리보기를 만들어 주세요.`);
   }
   function choosePlan(field: JiraPlanningSelection, recordId: string, selection: string | null | undefined) {
     if (!preview || !previewDraftKey || hasObservedChanges || busyRef.current) return;
@@ -535,20 +537,29 @@ function ActorMigration(props: MigrationApplyProps) {
         <div className="migration-date-grid"><label>원본 시간대<input className="field" aria-label="이관 원본 시간대" value={configuration.timezone} list="migration-timezones" onChange={event => change({ ...configuration, timezone: event.target.value })} maxLength={100} /><datalist id="migration-timezones"><option value="Asia/Seoul" /><option value="UTC" /></datalist></label><label>날짜가 없거나 해석할 수 없을 때<select className="field" aria-label="이관 날짜 처리" value={configuration.datePolicy} onChange={event => change({ ...configuration, datePolicy: event.target.value as MigrationConfiguration['datePolicy'] })}><option value="block">적용 차단 후 검토</option><option value="import-time">현재 항목에는 이관 시각 사용 · 원본 값 별도 보존</option></select></label></div>
         <MappingSection title="사용자 매핑">
           <p>원본 신원만 보존하면 현재 항목의 작성자는 이관 실행자로 지정됩니다.{mode !== 'append-pages' && ' Jira 작업 시간은 매핑된 작성자에게 집계합니다. 작성자를 매핑하지 않은 작업 시간은 원본 기록에 보관합니다.'}</p>
-          {options.identities.length > 0 && <button className="btn" type="button" disabled={!matching}
-            onClick={event => void openEmailReview(event.currentTarget)}>이메일 일치 후보 검토</button>}
+          {options.identities.length > 0 && <div className="migration-review-actions">
+            <button className="btn" type="button" disabled={!matching || hasReviewChanges}
+              onClick={event => void openIdentityReview('email', event.currentTarget)}>{identityReviewCopy.email.title}</button>
+            {options.packages.length > 1 && <button className="btn" type="button" disabled={!matching || hasReviewChanges}
+              onClick={event => void openIdentityReview('account', event.currentTarget)}>{identityReviewCopy.account.title}</button>}
+          </div>}
           {identityNotice && <p role="status" className="migration-mapping-file-notice">{identityNotice}</p>}
-          <Paged title="사용자 매핑" items={options.identities} label={item => `${item.label} ${item.email ?? item.emailEvidence?.email ?? ''}`} render={item => {
-            const userId = configuration.users[item.id] ?? '';
-            return <MappingRow label={item.label} detail={item.email ?? item.emailEvidence?.email ?? item.sourceValue}>
-              <select className="field" aria-label={`사용자 매핑 ${item.label}`} value={userId}
-                onChange={event => mapValue('users', item.id, event.target.value || null)}>
-                <option value="">원본 신원만 보존 · 실행자 사용</option>
-                {userId && !teamUsers.some(user => user.id === userId) && <option value={userId}>현재 사용자 목록에 없음 · {userId}</option>}
-                {teamUsers.map(user => <option value={user.id} key={user.id}>{user.name} · {user.email}</option>)}
-              </select>
-            </MappingRow>;
-          }} />
+          <Paged title="사용자 매핑" items={options.identities}
+            label={item => `${item.label} ${item.sourceValue} ${item.email ?? item.emailEvidence?.email ?? ''} ${identityFilenames.get(item.packageId) ?? ''}`}
+            render={item => {
+              const userId = configuration.users[item.id] ?? '';
+              const filename = options.packages.length > 1 ? identityFilenames.get(item.packageId) : undefined;
+              const detail = item.email ?? item.emailEvidence?.email ?? item.sourceValue;
+              const detailId = filename ? `${mappingFileHelp}-identity-${item.id}` : undefined;
+              return <MappingRow label={item.label} detail={filename ? `${detail} · ${filename}` : detail} detailId={detailId}>
+                <select className="field" aria-label={`사용자 매핑 ${item.label}`} value={userId} aria-describedby={detailId}
+                  onChange={event => mapValue('users', item.id, event.target.value || null)}>
+                  <option value="">원본 신원만 보존 · 실행자 사용</option>
+                  {userId && !teamUsers.some(user => user.id === userId) && <option value={userId}>현재 사용자 목록에 없음 · {userId}</option>}
+                  {teamUsers.map(user => <option value={user.id} key={user.id}>{user.name} · {user.email}</option>)}
+                </select>
+              </MappingRow>;
+            }} />
         </MappingSection>
         {appendTo && issueDestination && <AppendMappings options={options} target={issueDestination} value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} />}
         {mode === 'new' && <>
@@ -575,9 +586,9 @@ function ActorMigration(props: MigrationApplyProps) {
         <button ref={previewButton} className="btn btn-primary" disabled={!matching || !destinationReady} onClick={() => void createPreview()}><FileCheck2 size={17} />적용 전 미리보기 만들기</button>
       </div>}
     </fieldset>
-    {emailReview && options && configuration && <MigrationEmailReview
-      {...emailReview} options={options} mappings={configuration.users} readRoster={readIdentityRoster}
-      onApply={applyEmailMatches} onClose={() => setEmailReview(null)} />}
+    {identityReview && options && configuration && <MigrationIdentityReview
+      {...identityReview} options={options} mappings={configuration.users} readRoster={readIdentityRoster}
+      onApply={applyIdentityMatches} onClose={() => setIdentityReview(null)} />}
     {preview && <section className="migration-review" aria-label="이관 적용 미리보기">
       <header>
         <div><h3>{reviewHeading}</h3><p>만료 {timestamp(preview.expiresAt)} · 버전 {preview.version} · 생성 당시 고정된 결과</p></div>
@@ -1118,24 +1129,49 @@ function MigrationCounts({ entries, mode = 'new' }: { entries: [string, number][
     : mode === 'append' ? { ...countLabels, issues: '새로 추가할 업무' } : countLabels;
   return <div className="migration-counts">{visible.map(([name, count]) => <span key={name}>{labels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>;
 }
-function MappingRow({ label, detail, children }: { label: string; detail: string; children: ReactNode }) { return <div className="migration-mapping-row"><div><strong>{label}</strong><small>{detail}</small></div>{children}</div>; }
-type IdentitySuggestionRow = { identity: MigrationIdentityOption; user: User; source: string };
+function MappingRow({ label, detail, detailId, children }: { label: string; detail: string; detailId?: string; children: ReactNode }) { return <div className="migration-mapping-row"><div><strong>{label}</strong><small id={detailId}>{detail}</small></div>{children}</div>; }
+const identityReviewCopy = {
+  email: {
+    title: '이메일 일치 후보 검토', candidates: '이메일 일치 후보',
+    instruction: '아직 매핑되지 않은 원본과 이메일이 일치하는 팀원을 확인해 주세요.',
+    empty: '현재 팀원 이메일과 일치하는 후보가 없습니다.',
+  },
+  account: {
+    title: '같은 원본 계정 매핑 검토', candidates: '같은 원본 계정 후보',
+    instruction: '다른 파일에 있는 같은 원본 계정으로 기존 팀원 매핑을 복사합니다. 적용할 행을 골라 주세요.',
+    empty: '다른 파일의 매핑을 복사할 수 있는 원본 계정이 없습니다.',
+  },
+};
+type IdentityReviewMode = keyof typeof identityReviewCopy;
+type IdentitySuggestionRow = {
+  identity: MigrationIdentityOption; user: User; source: string; filename: string;
+  fromIdentityId: string | null; fromSource?: string;
+};
 
-function identitySuggestionRows(options: MigrationOptions, users: User[], mappings: MigrationConfiguration['users']) {
+function identitySuggestionRows(mode: IdentityReviewMode, options: MigrationOptions, users: User[], mappings: MigrationConfiguration['users']): IdentitySuggestionRow[] {
   const identities = new Map(options.identities.map(identity => [identity.id, identity]));
   const usersById = new Map(users.map(user => [user.id, user]));
   const packages = new Map(options.packages.map(item => [item.id, item]));
-  return suggestMigrationIdentityMappings(options, users, mappings).flatMap(({ identityId, userId }) => {
+  const suggestions = mode === 'account' ? suggestSameSourceAccountMappings(options, users, mappings)
+    : suggestMigrationIdentityMappings(options, users, mappings).map(suggestion => ({ ...suggestion, fromIdentityId: null }));
+  return suggestions.flatMap(({ identityId, userId, fromIdentityId }) => {
     const identity = identities.get(identityId);
     const user = usersById.get(userId);
     const pkg = identity && packages.get(identity.packageId);
     if (!identity || !user || !pkg) return [];
     const product = pkg.source.product === 'jira' ? 'Jira' : 'Confluence';
-    return [{ identity, user, source: `${product} · ${pkg.source.instanceKey} · ${identity.sourceValue} · ${pkg.filename}` }];
+    const from = fromIdentityId ? identities.get(fromIdentityId) : undefined;
+    const fromPackage = from && packages.get(from.packageId);
+    if (fromIdentityId && (!from || !fromPackage)) return [];
+    return [{ identity, user, filename: pkg.filename, fromIdentityId,
+      source: `${product} · ${pkg.source.instanceKey} · ${identity.sourceValue} · ${pkg.filename}`,
+      ...(from && fromPackage ? { fromSource: `${from.label} · ${fromPackage.filename}` } : {}),
+    }];
   });
 }
 
-function MigrationEmailReview({ opener, rows, options, mappings, readRoster, onApply, onClose }: {
+function MigrationIdentityReview({ mode, opener, rows, options, mappings, readRoster, onApply, onClose }: {
+  mode: IdentityReviewMode;
   opener: HTMLButtonElement;
   rows: IdentitySuggestionRow[];
   options: MigrationOptions;
@@ -1152,6 +1188,7 @@ function MigrationEmailReview({ opener, rows, options, mappings, readRoster, onA
   const [selected, setSelected] = useState(() => new Set(rows.map(({ identity }) => identity.id)));
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState('');
+  const copy = identityReviewCopy[mode];
 
   useEffect(() => {
     const dialog = element.current;
@@ -1179,9 +1216,12 @@ function MigrationEmailReview({ opener, rows, options, mappings, readRoster, onA
     try {
       const users = await readRoster(request.signal);
       if (request.signal.aborted) return;
-      const current = identitySuggestionRows(options, users, mappings);
-      const currentById = new Map(current.map(row => [row.identity.id, row]));
-      const confirmed = candidates.filter(row => selected.has(row.identity.id) && currentById.get(row.identity.id)?.user.id === row.user.id);
+      const current = identitySuggestionRows(mode, options, users, mappings);
+      const candidatesById = new Map(candidates.map(row => [row.identity.id, row]));
+      const confirmed = current.filter(row => {
+        const original = candidatesById.get(row.identity.id);
+        return selected.has(row.identity.id) && original?.user.id === row.user.id && original.fromIdentityId === row.fromIdentityId;
+      });
       if (confirmed.length !== selected.size) {
         setCandidates(current);
         setSelected(new Set(confirmed.map(({ identity }) => identity.id)));
@@ -1204,15 +1244,15 @@ function MigrationEmailReview({ opener, rows, options, mappings, readRoster, onA
   return <dialog className="migration-original-dialog migration-email-review" ref={element} aria-labelledby={titleId}
     aria-busy={checking} onCancel={event => { event.preventDefault(); cancel(); }}>
     <header className="migration-original-heading"><div>
-      <h3 ref={heading} id={titleId} tabIndex={-1}>이메일 일치 후보 검토</h3>
-      <p>아직 매핑되지 않은 원본과 이메일이 일치하는 팀원을 확인해 주세요.</p>
+      <h3 ref={heading} id={titleId} tabIndex={-1}>{copy.title}</h3>
+      <p>{copy.instruction}</p>
     </div></header>
     {error && <p className="migration-error" role="alert">{error}</p>}
-    {!candidates.length && <p>현재 팀원 이메일과 일치하는 후보가 없습니다.</p>}
-    {candidates.length > 0 && <Paged title="이메일 일치 후보" items={candidates}
-      label={({ identity, user, source }) => `${identity.label} ${source} ${user.name} ${user.email}`}
-      render={({ identity, user, source }) => <label className="migration-email-choice">
-        <input type="checkbox" aria-label={`매핑 선택 ${identity.label}`} disabled={checking} checked={selected.has(identity.id)}
+    {!candidates.length && <p>{copy.empty}</p>}
+    {candidates.length > 0 && <Paged title={copy.candidates} items={candidates}
+      label={({ identity, user, source, fromSource }) => `${identity.label} ${source} ${fromSource ?? ''} ${user.name} ${user.email}`}
+      render={({ identity, user, source, filename, fromSource }) => <label className="migration-email-choice">
+        <input type="checkbox" aria-label={`매핑 선택 ${identity.label}${mode === 'account' ? ` · ${filename}` : ''}`} disabled={checking} checked={selected.has(identity.id)}
           onChange={event => {
             const checked = event.currentTarget.checked;
             setSelected(previous => {
@@ -1222,7 +1262,10 @@ function MigrationEmailReview({ opener, rows, options, mappings, readRoster, onA
               return next;
             });
           }} />
-        <span><strong>{identity.label}</strong><small>{source}</small><small>{identity.emailEvidence?.email}</small></span>
+        <span><strong>{identity.label}</strong><small>{source}</small>
+          {fromSource && <small>기존 매핑 · {fromSource}</small>}
+          {identity.emailEvidence?.email && <small>{identity.emailEvidence.email}</small>}
+        </span>
         <span className="migration-email-target"><strong>{user.name}</strong><small>{user.email}</small></span>
       </label>} />}
     <footer className="migration-email-actions">

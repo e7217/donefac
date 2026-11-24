@@ -293,6 +293,7 @@ export interface MigrationValueOption { id:string;packageId:string;sourceValue:s
 export interface MigrationIdentityOption extends MigrationValueOption {
   email: string | null;
   emailEvidence?: { email: string; accountId?: string } | null;
+  accountEvidence?: { kind: 'jira-account-id' | 'jira-user-key' | 'confluence-user-key'; key: string };
 }
 export interface MigrationFieldOption extends MigrationValueOption {
   suggestedKind: CustomFieldKind | 'archive';

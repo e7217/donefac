@@ -25,6 +25,32 @@ const inlineProperty = (id: string, name: string, value: string, owner = '', val
 const authenticComment = (id: string, fields: string) =>
   `<object class="Comment" package="com.atlassian.confluence.pages"><id name="id">${id}</id>${fields}</object>`;
 
+test('Confluence XML proves only a native account object with one exact scalar user key', () => {
+  const user = (id: string, fields = '', type = 'ConfluenceUserImpl', packageName = 'com.atlassian.confluence.user') =>
+    `<object class="${type}" package="${packageName}">${id}${fields}</object>`;
+  const data = parseConfluence(files([
+    user('<id name="key"><![CDATA[account-key]]></id>', p('name', 'alice')),
+    user('<id name="key">other-key</id>', p('name', 'alice')),
+    user('<id name="id">numeric-fallback</id>'),
+    user('<id name="key">extra-id</id><id name="id">another-id</id>'),
+    user('<id name="key" type="alias">attribute-key</id>'),
+    user('<id name="key">parent-key<value>alias</value></id>'),
+    user('<id name="key"> trimmed-key </id>'),
+    user('<id name="key">foreign-class</id>', '', 'foreign.ConfluenceUserImpl'),
+    user('<id name="key">foreign-package</id>', '', 'ConfluenceUserImpl', 'foreign.package'),
+    object('UserInfo', '9', p('username', 'alice')),
+  ]), 'confluence-account-proof');
+  const markers = (id: string) => {
+    const { migrationAccountKind, migrationAccountKey } = find(data, 'identity', id).metadata;
+    return [migrationAccountKind, migrationAccountKey];
+  };
+  assert.deepEqual(markers('account-key'), ['confluence-user-key', 'account-key']);
+  assert.deepEqual(markers('other-key'), ['confluence-user-key', 'other-key']);
+  for (const id of ['numeric-fallback', 'extra-id', 'attribute-key', 'parent-key', 'trimmed-key', 'foreign-class', 'foreign-package', 'UserInfo:9']) {
+    assert.deepEqual(markers(id), [undefined, undefined]);
+  }
+});
+
 test('Confluence inline comment evidence follows exact collection, reverse and agreeing bidirectional property ownership', () => {
   const comment = (id: string, extra = '') => authenticComment(id, r('containerContent', 'Page', '100') + extra);
   const data = parseConfluence(files([

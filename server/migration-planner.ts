@@ -148,9 +148,14 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
     for (const id of identityIds) {
       const row = index.get(`identity:${id}`);
       const emailEvidence = isJira ? jiraIdentityEmailEvidence(row) : confluenceEmailEvidence?.get(id);
+      const accountKind = row?.metadata.migrationAccountKind;
+      const accountKey = row?.metadata.migrationAccountKey;
+      const verifiedKind = isJira && (accountKind === 'jira-account-id' || accountKind === 'jira-user-key') ||
+        !isJira && accountKind === 'confluence-user-key';
       identities.push({ id: optionId(pkg.summary.id, 'identity', id), packageId: pkg.summary.id, sourceValue: id,
         label: row?.title || id, email: string(row?.metadata.emailAddress || row?.metadata.email) || null,
         ...(emailEvidence !== undefined ? { emailEvidence } : {}),
+        ...(verifiedKind && accountKey === id ? { accountEvidence: { kind: accountKind, key: id } } : {}),
       });
     }
     for(const[value,label]of statusValues)statuses.push({id:optionId(pkg.summary.id,'status',value),packageId:pkg.summary.id,sourceValue:value,label});for(const[value,label]of typeValues)issueTypes.push({id:optionId(pkg.summary.id,'issuetype',value),packageId:pkg.summary.id,sourceValue:value,label});

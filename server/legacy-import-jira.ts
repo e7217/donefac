@@ -36,6 +36,24 @@ const selected=(value:ObjectValue,names:string[]):Record<string,LegacyValue>=>Ob
 function jsonValue(value:unknown,depth=0):LegacyValue{if(depth>30)return'[nested value omitted]';if(value===null||typeof value==='string'||typeof value==='boolean')return value;if(typeof value==='number')return Number.isFinite(value)?value:null;if(Array.isArray(value))return value.map(item=>jsonValue(item,depth+1));return Object.fromEntries(Object.entries(obj(value)).filter(([key])=>!/(?:password|credential|secret|token|privatekey)/i.test(key)).map(([key,value])=>[key,jsonValue(value,depth+1)]));}
 
 type JiraIssueParentEvidence = { id?: string; key?: string };
+type JiraMigrationAccountKind = 'jira-account-id' | 'jira-user-key';
+type JiraRestIdentitySource = 'rest-embedded' | 'rest-page';
+
+function isMigrationAccountKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 500 && value === value.trim() &&
+    value.isWellFormed() && !/\p{Cc}/u.test(value) && value.toLowerCase() !== 'unknown';
+}
+
+function observeMigrationAccount(identity: LegacyRecord, kind: JiraMigrationAccountKind | null) {
+  const previous = identity.metadata.migrationAccountKind;
+  if (!kind || previous !== undefined && previous !== kind) {
+    identity.metadata.migrationAccountKind = null;
+    delete identity.metadata.migrationAccountKey;
+    return;
+  }
+  identity.metadata.migrationAccountKind = kind;
+  identity.metadata.migrationAccountKey = identity.sourceId;
+}
 const JIRA_EPIC_LINK_TYPE = 'com.pyxis.greenhopper.jira:gh-epic-link';
 const jiraCustomFieldId = /^customfield_[1-9]\d{0,24}$/u;
 type RestEpicField = { id: string; exact: boolean };
@@ -61,17 +79,17 @@ function stableHistoryId(value: unknown): boolean {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/.test(value);
 }
 
-function jsonHistoryGroup(context: Context, raw: unknown, issueId: string, fallbackId: string, allowPageOverlap = false): LegacyRecord {
+function jsonHistoryGroup(context: Context, raw: unknown, issueId: string, fallbackId: string, source?: JiraRestIdentitySource): LegacyRecord {
   const group = obj(raw);
   const groupId = str(group.id) || fallbackId;
-  const authorId = context.identity(group.author);
+  const authorId = context.identity(group.author, source !== undefined);
   const metadata = { ...jiraVisibilityMetadata(group, !stableHistoryId(group.id)), items: list(group.items).map(rawItem => {
     const item = obj(rawItem);
     return { ...selected(item, ['id', 'field', 'fieldId', 'fieldtype', 'fieldType', 'from', 'fromString', 'to', 'toString']),
       ...jiraVisibilityMetadata(item, false) };
   }) };
   const previous = context.byId.get(`history:${groupId}`);
-  if (allowPageOverlap && previous && stableHistoryId(group.id)) {
+  if (source === 'rest-page' && previous && stableHistoryId(group.id)) {
     if (previous.containerId === issueId && previous.authorId === authorId && previous.createdAt === (str(group.created) || null) &&
         isDeepStrictEqual(previous.metadata, metadata)) return previous;
     throw new LegacyImportError(400, '같은 Jira 변경 이력 ID의 업무 또는 원본 내용이 페이지마다 다릅니다.');
@@ -97,20 +115,20 @@ function jsonWorklogMetadata(input: ObjectValue, syntheticId: boolean): Record<s
   return metadata;
 }
 
-function jsonActivity(context: Context, kind: JiraActivityKind, raw: unknown, issueId: string, index: number, allowPageOverlap = false): void {
+function jsonActivity(context: Context, kind: JiraActivityKind, raw: unknown, issueId: string, index: number, source?: JiraRestIdentitySource): void {
   const input = obj(raw);
   const originalId = str(input.id);
   const worklog = kind === 'worklog';
   const recordKind = worklog ? 'history' : 'comment';
   const sourceId = worklog ? `worklog:${originalId || `${issueId}:${index}`}` : originalId || `json:${issueId}:comment:${index}`;
   const recordId = `${recordKind}:${sourceId}`;
-  const authorId = context.identity(input.author);
+  const authorId = context.identity(input.author, source !== undefined);
   const body = worklog ? input.comment : input.body;
   const richText = typeof body === 'object' && (worklog || body !== null);
   const textFormat = richText ? 'adf' : worklog ? 'plain' : 'jira-wiki';
   const created = worklog ? input.created || input.startDate || input.started || input.startdate : input.created;
   const metadata = worklog ? jsonWorklogMetadata(input, !originalId) : jiraVisibilityMetadata(input, !originalId);
-  const previous = allowPageOverlap ? context.byId.get(recordId) : undefined;
+  const previous = source === 'rest-page' ? context.byId.get(recordId) : undefined;
   if (previous) {
     if (previous.containerId === issueId && previous.authorId === authorId && previous.createdAt === (str(created) || null) &&
         previous.updatedAt === (str(input.updated) || null) && previous.textFormat === textFormat &&
@@ -342,7 +360,7 @@ function applyStandaloneHistory(context: Context): void {
     for (const [pageIndex, page] of pages.entries()) {
       if (page.total !== total) consistent = false;
       for (const [index, raw] of page.groups.entries()) {
-        const group = jsonHistoryGroup(context, raw, issue.sourceId, `json:${issue.sourceId}:history-page:${pageIndex}:${index}`, true);
+        const group = jsonHistoryGroup(context, raw, issue.sourceId, `json:${issue.sourceId}:history-page:${pageIndex}:${index}`, 'rest-page');
         const offset = page.start + index;
         const before = byOffset.get(offset);
         if (group.metadata.syntheticId || before && before !== group.sourceId || !before && ids.has(group.sourceId)) consistent = false;
@@ -380,6 +398,9 @@ class Context{
   private readonly issueParents = new Map<LegacyRecord, JiraIssueParentEvidence | null | undefined>();
   private readonly epicParents = new Map<LegacyRecord, { evidence: JiraIssueParentEvidence | null | undefined; path: string; fieldId?: string }>();
   private readonly epicFieldTypes = new Map<string, Set<string>>();
+  private readonly unprovenRestAccounts = new Set<string>();
+  private readonly restAccountAliases = new Map<string, string>();
+  private readonly restKeyOwners = new Map<string, Set<string>>();
   private readonly repeatedLinks: { first: LegacyRecord; next: LegacyRecord; path: string }[] = [];
   readonly historyPages: JiraHistoryPage[] = [];
   readonly activityPages = new JiraActivityPages((code, message, recordId, path) => this.warn(code, message, recordId, path));
@@ -471,9 +492,36 @@ class Context{
   }
   warn(code:string,message:string,recordId:string|null=null,path:string|null=null,severity:'info'|'warning'|'error'='warning'){diagnostic(this.dataset,{severity,code,message,recordId,path});}
   unsupported(type:string,count=1){const existing=this.dataset.unsupported.find(value=>value.type===type);if(existing)existing.count+=count;else this.dataset.unsupported.push({type,count});}
-  identity(value: unknown): string | null {
+  private observeRestAccount(identity: LegacyRecord, input: ObjectValue) {
+    const { sourceId } = identity;
+    const { accountId, key } = input;
+    const kind = isMigrationAccountKey(accountId) && accountId === sourceId ? 'jira-account-id' :
+      (accountId === undefined || accountId === null || accountId === '') && isMigrationAccountKey(key) && key === sourceId ? 'jira-user-key' : undefined;
+    if (!kind) {
+      this.unprovenRestAccounts.add(sourceId);
+      if (identity.metadata.migrationAccountKind) observeMigrationAccount(identity, null);
+      return;
+    }
+    if (this.unprovenRestAccounts.has(sourceId)) {
+      observeMigrationAccount(identity, null);
+      return;
+    }
+    if (kind === 'jira-account-id' && isMigrationAccountKey(key)) {
+      const prior = this.restAccountAliases.get(sourceId);
+      if (prior !== undefined && prior !== key) observeMigrationAccount(identity, null);
+      this.restAccountAliases.set(sourceId, key);
+      const owners = this.restKeyOwners.get(key) ?? new Set<string>();
+      owners.add(sourceId);
+      this.restKeyOwners.set(key, owners);
+    }
+    observeMigrationAccount(identity, kind);
+  }
+  identity(value: unknown, rest = false): string | null {
     if (typeof value === 'string') {
-      if (value) this.ensure('identity', value, { title: value, metadata: { identityIncomplete: true } });
+      if (value) {
+        const identity = this.ensure('identity', value, { title: value, metadata: { identityIncomplete: true } });
+        if (identity && rest) this.observeRestAccount(identity, {});
+      }
       return value || null;
     }
     const input = obj(value);
@@ -492,18 +540,19 @@ class Context{
       Object.assign(existing.metadata, profile);
     }
     observeJiraIdentityEmail(identity, [input.emailAddress, input.email]);
+    if (rest) this.observeRestAccount(identity, input);
     return identity.sourceId;
   }
   field(id:string,name:string,type='unknown'){return this.ensure('field',id,{title:name,metadata:{fieldType:type,...(/^(?:csv|named):/.test(id)?{syntheticId:true}:{})}})!;}
   option(fieldId:string,value:unknown):string|null{const input=obj(value),id=str(input.id)||str(input.value)||str(input.name)||str(value);if(!id)return null;const sourceId=`${fieldId}:${id}`;this.ensure('option',sourceId,{title:str(input.name||input.value)||id,containerId:fieldId,metadata:{originalId:str(input.id)||null,syntheticId:!str(input.id)},references:ref('field',fieldId,'field')});return sourceId;}
   date(value:unknown,recordId?:string):string|null{const result=str(value);if(!result)return null;if(!/(?:Z|[+-]\d\d:?\d\d|\bUTC\b|\bGMT\b)(?:\s*\([^)]*\))?$/.test(result))this.warn('DATE_TIMEZONE_UNRESOLVED','원본 시각의 시간대 또는 상대 날짜 기준을 확정하지 않았습니다.',recordId||null);return result;}
   url(value:unknown,recordId?:string):string|null{const raw=str(value);if(!raw)return null;try{const url=new URL(raw);if(!['http:','https:'].includes(url.protocol))return null;let removed=!!(url.username||url.password);url.username='';url.password='';for(const key of [...url.searchParams.keys()])if(!legacyUrlQueryKeys.has(key)){url.searchParams.delete(key);removed=true;}if(removed)this.warn('URL_AUTH_PARAMETERS_OMITTED','URL 인증 정보와 허용 목록 밖의 쿼리 매개변수를 미리보기에서 제외했습니다.',recordId||null);return url.toString();}catch{return null;}}
-  attachment(id: string, issueId: string, input: ObjectValue): LegacyRecord {
+  attachment(id: string, issueId: string, input: ObjectValue, rest = false): LegacyRecord {
     const uri = str(input.content || input.uri || input.url);
     const recoveredId = uri.match(/\/(?:secure\/)?attachment\/(\d+)(?:\/|$)/)?.[1];
     if (recoveredId && /^(?:csv|json|xml):/.test(id)) id = recoveredId;
     const filename = str(input.filename || input.name) || id;
-    const authorId = this.identity(input.author || input.attacher);
+    const authorId = this.identity(input.author || input.attacher, rest && Boolean(input.author));
     const candidates = new Set<string>();
     for (const name of [id, `${id}_${filename}`]) {
       for (const path of this.fileNames.get(name) ?? []) {
@@ -532,7 +581,14 @@ class Context{
   }
   finish():LegacyDataset{
     applyStandaloneHistory(this);
-    this.activityPages.finish((kind, raw, issue, _path, index) => jsonActivity(this, kind, raw, issue.sourceId, index, true));
+    this.activityPages.finish((kind, raw, issue, _path, index) => jsonActivity(this, kind, raw, issue.sourceId, index, 'rest-page'));
+    for (const [key, owners] of this.restKeyOwners) {
+      if (owners.size < 2) continue;
+      for (const id of new Set([key, ...owners])) {
+        const identity = this.byId.get(`identity:${id}`);
+        if (identity?.metadata.migrationAccountKind) observeMigrationAccount(identity, null);
+      }
+    }
     this.scheduleDates.apply();
     this.sprints.apply(this.dataset);
     for (const [issue, ids] of this.fixVersionIds) issue.metadata.jiraFixVersionIds = [...ids];
@@ -734,13 +790,13 @@ function parseCsv(context:Context,path:string,source:string):void{
   context.warn('CSV_HISTORY_NOT_PROVIDED','검색 CSV는 완전한 변경 이력이나 첨부 바이트를 보장하지 않습니다. 실제 제공된 댓글·첨부 열만 분석했습니다.',null,path);
 }
 
-function reporterIdentity(context: Context, raw: unknown): string | null | undefined {
+function reporterIdentity(context: Context, raw: unknown, rest = false): string | null | undefined {
   if (raw === null || typeof raw === 'string' && !raw.trim()) return null;
   const profile = obj(raw);
   const id = typeof raw === 'string' ? raw : profile.accountId || profile.key || profile.name || profile.username || profile.id;
   if (!(typeof id === 'string' && id.length <= 500 && id.trim() && id.isWellFormed() && !/\p{Cc}/u.test(id)) &&
       !(typeof id === 'number' && Number.isSafeInteger(id) && id > 0)) return undefined;
-  return context.identity(raw) ?? undefined;
+  return context.identity(raw, rest) ?? undefined;
 }
 
 function recordJiraReporter(item: LegacyRecord, reporter: string | null | undefined): void {
@@ -825,12 +881,12 @@ function restEpicParent(context: Context, issue: LegacyRecord, fields: ObjectVal
 function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean,dateFields:ProjectedDateField[]=[],epicFields:RestEpicField[]=[]):void{
   const fields=importers?input:obj(input.fields),id=str(input.id||input.externalId||input.key)||`json:${path}:${index}`,key=str(input.key),project=obj(fields.project),containerId=str(project.id||project.key)||projectId;
   if(containerId)context.ensure('project',containerId,{title:str(project.name)||containerId,metadata:{key:str(project.key)||projectId}});
-  const authorId=context.identity(fields.creator||fields.reporter),assignee=context.identity(fields.assignee),parent=obj(fields.parent),parentId=str(parent.id||parent.key)||str(fields.parent),description=fields.description;
+  const authorId=context.identity(fields.creator||fields.reporter,!importers),assignee=context.identity(fields.assignee,!importers),parent=obj(fields.parent),parentId=str(parent.id||parent.key)||str(fields.parent),description=fields.description;
   const jiraSnapshotFields: JiraMigrationIssueField[] = [];
   if (description === null || typeof description === 'string' || Object.hasOwn(obj(description), 'type')) jiraSnapshotFields.push('description');
   if (fields.assignee === null || fields.assignee === '' || assignee) jiraSnapshotFields.push('assigneeId');
   const item=context.put('issue',id,{title:str(fields.summary),containerId:containerId||null,parentId:parentId||null,authorId,createdAt:context.date(fields.created,`issue:${id}`),updatedAt:context.date(fields.updated,`issue:${id}`),text:typeof description==='object'&&description!==null?JSON.stringify(description):str(description),textFormat:typeof description==='object'&&description!==null?'adf':'jira-wiki',metadata:{key,dialect:importers?'importers-json':'rest-json',...selected(fields,['resolutiondate','duedate','environment','originalEstimate','timeSpent','estimate']),jiraSnapshotFields,fields:{}},references:[...ref('project',containerId,'project'),...ref('identity',authorId,'creatorOrReporter'),...ref('identity',assignee,'assignee'),...ref('issue',parentId,'parent')]});
-  if (Object.hasOwn(fields, 'reporter')) recordJiraReporter(item, reporterIdentity(context, fields.reporter));
+  if (Object.hasOwn(fields, 'reporter')) recordJiraReporter(item, reporterIdentity(context, fields.reporter, !importers));
   if (!importers && Object.hasOwn(fields, 'parent')) {
     context.observeIssueParent(item, fields.parent === null ? null : jiraIssueParentIdentity(parent.id, parent.key));
   }
@@ -839,7 +895,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     context.restRemoteLinks.push({ issue: item, issueId: input.id, issueSelf: input.self, raw: input.remoteLinks, path });
   }
   const readActivity = (kind: JiraActivityKind, envelope: unknown, rows: unknown[]) => {
-    for (const [position, raw] of rows.entries()) jsonActivity(context, kind, raw, id, position);
+    for (const [position, raw] of rows.entries()) jsonActivity(context, kind, raw, id, position, importers ? undefined : 'rest-embedded');
     if (!importers) context.activityPages.track(item, input.self, kind, envelope, rows.map(raw => str(obj(raw).id) || null), path);
   };
   const values=item.metadata.fields as Record<string,LegacyValue>;
@@ -887,11 +943,11 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     }
   }
   readActivity('comment', fields.comment, list(importers ? fields.comments : obj(fields.comment).comments));
-  for(let attachmentIndex=0;attachmentIndex<list(fields.attachments||fields.attachment).length;attachmentIndex++){const attachment=obj(list(fields.attachments||fields.attachment)[attachmentIndex]);context.attachment(str(attachment.id)||`json:${id}:attachment:${attachmentIndex}`,id,attachment);}
+  for(let attachmentIndex=0;attachmentIndex<list(fields.attachments||fields.attachment).length;attachmentIndex++){const attachment=obj(list(fields.attachments||fields.attachment)[attachmentIndex]);context.attachment(str(attachment.id)||`json:${id}:attachment:${attachmentIndex}`,id,attachment,!importers);}
   const changelog = obj(input.changelog);
   const embedded = Array.isArray(changelog.histories) ? changelog.histories : Array.isArray(changelog.values) ? changelog.values : undefined;
   const history = importers ? list(fields.history) : embedded ?? [];
-  const embeddedIds = history.map((group, index) => jsonHistoryGroup(context, group, id, `json:${id}:history:${index}`).sourceId);
+  const embeddedIds = history.map((group, index) => jsonHistoryGroup(context, group, id, `json:${id}:history:${index}`, importers ? undefined : 'rest-embedded').sourceId);
   if (!importers) {
     const total = historyPageCount(changelog.total), startAt = historyPageCount(changelog.startAt);
     if (!embedded) {
@@ -1096,14 +1152,22 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   const exactIssueRows = new Map<LegacyRecord, string | null | undefined>();
   const appUsers = new Map<string, string>();
   const ambiguousUsernames = new Set<string>();
-  for (const { name, value } of values) {
+  const exactAppUsers = new Map<string, string>(), appKeyUses = new Map<string, number>(), appNameUses = new Map<string, number>();
+  for (const { name, value, node } of values) {
     if (name !== 'ApplicationUser') continue;
     const username = str(value.lowerUserName), key = str(value.userKey);
     if (appUsers.has(username) && appUsers.get(username) !== key) ambiguousUsernames.add(username);
     appUsers.set(username, key);
+    for (const candidate of new Set(adminXmlScalarCandidates(node, 'userKey'))) appKeyUses.set(candidate, (appKeyUses.get(candidate) ?? 0) + 1);
+    for (const candidate of new Set(adminXmlScalarCandidates(node, 'lowerUserName').map(value => value.toLowerCase()))) {
+      appNameUses.set(candidate, (appNameUses.get(candidate) ?? 0) + 1);
+    }
+    if (isMigrationAccountKey(key) && adminXmlScalar(node, 'userKey') === key && isMigrationAccountKey(username) &&
+        username === username.toLowerCase() && adminXmlScalar(node, 'lowerUserName') === username) exactAppUsers.set(key, username);
   }
   const projectedFields = new Map<string,JiraDateRole>();
   const rawIssueParents = new Map<LegacyRecord, string | null>();
+  const profileUses = new Map<string, number>(), conflictingProfiles = new Set<string>();
   for (const { name, value, node } of values) {
     if (!['User', 'OSUser', 'CwdUser'].includes(name)) continue;
     const username = str(value.userName || value.name || value.lowerUserName);
@@ -1115,12 +1179,27 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       metadata: { ...selected(value, ['id', 'userName', 'name', 'lowerUserName', 'displayName', 'fullName', 'emailAddress', 'email', 'active']), identityIncomplete: false },
     });
     if (!identity) continue;
+    if (exactAppUsers.has(id)) {
+      profileUses.set(id, (profileUses.get(id) ?? 0) + 1);
+      const usernames = ['userName', 'name', 'lowerUserName'].map(field => adminXmlScalar(node, field));
+      const profileKey = adminXmlScalar(node, 'userKey');
+      const expected = exactAppUsers.get(id);
+      if (lowerName !== expected || usernames.some(alias => alias === null || alias && alias.toLowerCase() !== expected) ||
+          profileKey === null || profileKey && profileKey !== id) conflictingProfiles.add(id);
+    }
     const emailValues = ['emailAddress', 'email'].flatMap(field => [node.attributes[field],
       ...children(node, field).map(element => element.children.length || Object.keys(element.attributes).length ? false : element.text)]);
     if (ambiguousUsernames.has(lowerName) && emailValues.some(email => email === false || email?.trim())) emailValues.push(false);
     observeJiraIdentityEmail(identity, emailValues);
   }
   for(const[username,id]of appUsers)context.ensure('identity',id,{title:username||id,metadata:{key:id,name:username,identityIncomplete:true}});
+  for (const [key, username] of exactAppUsers) {
+    const identity = context.byId.get(`identity:${key}`);
+    if (!identity) continue;
+    const exact = appUsers.get(username) === key && appKeyUses.get(key) === 1 && appNameUses.get(username) === 1 &&
+      (profileUses.get(key) ?? 0) <= 1 && !conflictingProfiles.has(key);
+    observeMigrationAccount(identity, exact ? 'jira-user-key' : null);
+  }
   const resolveActor=(value:unknown):string|null=>{const original=str(value);return context.identity(appUsers.get(original.toLowerCase())||original);};
   for(const{name,value:v,node}of values){if(name==='Project'){
     const project = context.put('project',v.id||v.key||v.pkey,{title:str(v.name),text:str(v.description),textFormat:'plain',authorId:resolveActor(v.lead),metadata:{...selected(v,['key','pkey','projecttype','assigneetype']),url:context.url(v.url)}});

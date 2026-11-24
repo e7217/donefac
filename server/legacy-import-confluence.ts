@@ -82,7 +82,18 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
     if(type==='BodyContent'||type==='Label'||RELATION_TYPES.has(type))continue;
     const kind=kindFor(type,id),sourceId=sourceIdFor(type,id),spaceId=ref(node,'space'),parent=ref(node,'parent')||ref(node,'parentComment');
     const row=record(kind,sourceId,{title:prop(node,'title')||prop(node,'name')||prop(node,'username')||prop(node,'userName'),containerId:nullString(spaceId),parentId:nullString(parent),authorId:nullString(ref(node,'creator')||prop(node,'creatorName')),createdAt:nullString(prop(node,'creationDate')),updatedAt:nullString(prop(node,'lastModificationDate')),metadata:{sourceClass:type,originalId:id,...primitiveProperties(node,['version','contentStatus','versionComment','position','fileName','contentType','fileSize','mediaType','size','spaceType','key','name','username','userName','lowerName','displayName','email','emailAddress'])}});
-    if(type==='ConfluenceUserImpl'){row.title=prop(node,'displayName')||prop(node,'name');row.authorId=null;}
+    if (type === 'ConfluenceUserImpl') {
+      row.title = prop(node, 'displayName') || prop(node, 'name');
+      row.authorId = null;
+      const ids = node.children.filter(value => value.name === 'id');
+      const [account] = ids;
+      if (exactClass(node, 'ConfluenceUserImpl') && ids.length === 1 && account.attributes.name === 'key' &&
+          Object.keys(account.attributes).length === 1 && !account.children.length && account.text === id &&
+          id.length <= 500 && id.isWellFormed() && !/\p{Cc}/u.test(id)) {
+        row.metadata.migrationAccountKey = id;
+        row.metadata.migrationAccountKind = 'confluence-user-key';
+      }
+    }
     if(type==='Attachment')row.title=prop(node,'title')||prop(node,'fileName');
     if(type==='Space'){row.title=prop(node,'name');row.metadata.spaceKey=prop(node,'key');row.containerId=null;const home=ref(node,'homePage');if(home)addReference(row,'page',home,'home-page');}
     if(type==='UserInfo'){row.title=prop(node,'username')||prop(node,'userName')||row.title;row.metadata.profileContent=true;}
@@ -183,7 +194,7 @@ function inlineCommentProperties(node: LegacyXmlNode): InlineCommentPropertyName
 
 const confluenceClassPackages = {
   BlogPost: 'com.atlassian.confluence.pages', Comment: 'com.atlassian.confluence.pages', Page: 'com.atlassian.confluence.pages',
-  ContentProperty: 'com.atlassian.confluence.content', Space: 'com.atlassian.confluence.spaces',
+  ContentProperty: 'com.atlassian.confluence.content', Space: 'com.atlassian.confluence.spaces', ConfluenceUserImpl: 'com.atlassian.confluence.user',
 };
 
 function exactClass(node: LegacyXmlNode, type: keyof typeof confluenceClassPackages): boolean {

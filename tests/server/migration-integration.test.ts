@@ -19,6 +19,7 @@ import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/doc
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
 import type { ProjectWorkloadResult, SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
@@ -50,6 +51,45 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('Confluence user keys support reviewed author mapping across exported files', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-confluence-account-mapping';
+  const userKey = 'source-wiki-user';
+  const pack = (pageId: number, title: string, author: string) => zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">60</id><property name="key">WIKI</property><property name="name">Synthetic knowledge</property></object>
+    <object class="ConfluenceUserImpl" package="com.atlassian.confluence.user"><id name="key">${userKey}</id>
+      <property name="displayName">${author}</property></object>
+    <object class="Page"><id name="id">${pageId}</id><property name="title">${title}</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">60</id></property>
+      <property name="creator" class="ConfluenceUserImpl"><id name="key">${userKey}</id></property>
+      <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-02T00:00:00Z</property></object>
+    <object class="BodyContent"><id name="id">${1000 + pageId}</id><property name="body"><![CDATA[<p>테스트 본문</p>]]></property>
+      <property name="bodyType">2</property><property name="content" class="Page"><id name="id">${pageId}</id></property></object>
+  </hibernate-generic>`) }]);
+  const first = await f.upload(pack(61, '첫 원본 문서', '이전 사용자 이름'), 'wiki-export-one.zip', 'confluence', instance);
+  const second = await f.upload(pack(62, '두 번째 원본 문서', '변경된 사용자 이름'), 'wiki-export-two.zip', 'confluence', instance);
+  const { data: options, status } = await f.call<MigrationOptions>(`/migrations/options?packageId=${first.id}&packageId=${second.id}`);
+  assert.equal(status, 200);
+  assert.equal(options.identities.length, 2);
+  assert.ok(options.identities.every(identity => identity.email === null));
+  assert.deepEqual(options.identities.map(identity => identity.accountEvidence), [
+    { kind: 'confluence-user-key', key: userKey }, { kind: 'confluence-user-key', key: userKey },
+  ]);
+  const [assigned, pending] = options.identities;
+  const config = options.defaultConfiguration;
+  config.users[assigned.id] = 'user-jun';
+  const { data: roster } = await f.call<WorkspaceSnapshot['users']>('/migrations/identity-roster');
+  const suggestions = suggestSameSourceAccountMappings(options, roster, config.users);
+  assert.deepEqual(suggestions, [{ identityId: pending.id, userId: 'user-jun', fromIdentityId: assigned.id }]);
+  for (const { identityId, userId } of suggestions) config.users[identityId] = userId;
+  const applied = await f.apply(await f.preview(config));
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const { data: workspace } = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.equal(workspace.documents.find(page => page.title === '첫 원본 문서')?.authorId, 'user-jun');
+  assert.equal(workspace.documents.find(page => page.title === '두 번째 원본 문서')?.authorId, 'user-jun');
+});
 
 test('previous Jira archive analyses and previews cannot bypass backup directory review', async t => {
   const f = await fixture();

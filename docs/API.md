@@ -969,7 +969,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | 요청 | 동작 |
 | --- | --- |
 | `GET /api/migrations/options?packageId=…&packageId=…` | 분석 패키지의 프로젝트·작성자·상태·유형·필드 매핑과 확인한 Jira·Confluence 추가 대상 |
-| `GET /api/migrations/identity-roster` | 이메일 후보 검토에 사용할 현재 Teamspace 팀원 목록 |
+| `GET /api/migrations/identity-roster` | 사용자 매핑 후보 검토에 사용할 현재 Teamspace 팀원 목록 |
 | `POST /api/migrations/mapping/export` | `{configuration}`으로 다시 사용할 수 있는 이관 매핑 JSON 반환 |
 | `POST /api/migrations/mapping/import` | `{mapping}`의 원본과 현재 워크스페이스를 대조해 `{options, configuration}` 반환 |
 | `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 업무·문서 추가 계획과 보존·누락 진단 검토 |
@@ -991,6 +991,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 별도로 준비한 Jira REST와 Confluence 패키지 사이에서 확인한 연결은 `preview.retainedResourceLinks`에 업무·문서와 양쪽 프로젝트 이름을 최대 50건까지 반환한다. 전체 적용 수는 `preview.counts.retainedResourceLinks`에서 읽고 `RETAINED_DOCUMENT_ISSUE_LINKS` 확인 코드를 적용 요청에 포함한다. 이전 영수증의 원본과 연결된 활성 대상을 다시 확인하므로 미리보기 이후 근거가 변경되면 `409`로 새 검토를 요구한다. 적용된 연결 ID와 양쪽 대상 ID는 두 번째 이관의 영수증에 기록한다.
 
 `options.identities[]`의 `email`은 수동 매핑에서 참고할 원본 표시 값이다. 선택적으로 제공하는 `emailEvidence`에는 비교 가능한 `email`을 담고, 원본 계정과 프로필 사이의 연결을 확인한 경우 `accountId`도 담는다. 주소 근거가 불명확하면 `null`을 반환한다. 브라우저는 후보를 열거나 반영할 때 현재 팀원 목록을 조회한다. 사용자가 확인한 항목은 기존 `configuration.users`에 팀원 ID로 저장하며 이후 기존 미리보기·적용 절차를 사용한다.
+
+원본 형식에서 계정 식별값을 확인하면 `options.identities[].accountEvidence`에 `{kind,key}`를 반환한다. `kind`는 `jira-account-id`, `jira-user-key`, `confluence-user-key` 중 하나다. 같은 제품·인스턴스·종류·키에서 이미 지정된 팀원이 한 명이면 다른 패키지의 미지정 행을 검토할 수 있다. 선택 결과는 기존 `configuration.users`에 저장한다. 이전에 분석한 패키지에서 계정 근거를 사용하려면 필요에 따라 원본을 다시 분석한다.
 
 Confluence 본문의 `/display/SPACE/제목`, `/pages/viewpage.action?pageId=…`, `/spaces/SPACE/pages/…` 주소는 `sourceBaseUrls`의 서버와 설치 경로로 대조한다. 상대 주소는 원래 패키지의 설정을 사용한다. 다른 원본을 가리키는 절대 주소는 입력한 서버·설치 경로에서 하나의 원본 페이지로 확인될 때 연결한다. 주소가 절을 지정하면 해당 대상 페이지에서 유일하게 확인한 제목이나 앵커로 연결한다. 원본 관계에 페이지 ID가 명시됐으면 URL의 대상과도 일치해야 한다. 추가 이관이나 변경분 반영은 현재 연결을 확인한 기존 페이지도 대상으로 사용할 수 있다. 대상을 확인할 수 없으면 원본 주소와 진단을 남긴다. 페이지의 진단은 `UNRESOLVED_REFERENCE`, 절의 진단은 `SECTION_LINK_UNRESOLVED`다. Server·Data Center의 짧은 주소 `/x/…`도 대상 페이지를 확인하면 문서 참조로 옮긴다. 대상 페이지를 확인할 수 없는 짧은 주소에는 일반 본문 링크 규칙을 적용한다. [Confluence 페이지 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 

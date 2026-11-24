@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeMigrationEmail, suggestMigrationIdentityMappings } from '../../shared/migration-identity-suggestions.js';
+import { normalizeMigrationEmail, suggestMigrationIdentityMappings, suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions.js';
 import type { LegacyPackageSummary, LegacySource, MigrationIdentityOption, User } from '../../shared/types.js';
 
 function sourcePackage(id: string, product: LegacySource['product'], instanceKey: string): LegacyPackageSummary {
@@ -19,6 +19,11 @@ function identity(packageId: string, sourceValue: string, email: string | null,
 
 function teamUser(id: string, email: string): User {
   return { id, email, name: '같은 이름', color: '#236456' };
+}
+
+function withAccount(row: MigrationIdentityOption, kind: NonNullable<MigrationIdentityOption['accountEvidence']>['kind'],
+  key = row.sourceValue): MigrationIdentityOption {
+  return { ...row, accountEvidence: { kind, key } };
 }
 
 test('uses exact normalized addresses with explicit evidence, keeping existing user selections', () => {
@@ -96,4 +101,69 @@ test('validates plain addresses and keeps punctuation, Unicode and domain spelli
   assert.deepEqual(suggestMigrationIdentityMappings({ identities: items, packages: [pkg] }, [teamUser('one', 'jo.smith@example.test')], {}), [
     { identityId: items[2].id, userId: 'one' },
   ]);
+});
+
+test('suggests a previously assigned exact source account from the first other package in input order', () => {
+  const first = sourcePackage('first', 'jira', 'eng');
+  const second = sourcePackage('second', 'jira', 'eng');
+  const third = sourcePackage('third', 'jira', 'eng');
+  const key = 'owner-identity';
+  const original = withAccount(identity(first.id, 'first-201', null), 'jira-account-id', key);
+  const source = withAccount(identity(second.id, 'second-201', ' OWNER@EXAMPLE.TEST '), 'jira-account-id', key);
+  const samePackage = withAccount(identity(first.id, 'first-copy', 'owner@example.test'), 'jira-account-id', key);
+  const thirdPackage = withAccount(identity(third.id, 'third-copy', null), 'jira-account-id', key);
+  const roster = [teamUser('owner', 'renamed@example.test')];
+  const mappings = { [original.id]: 'owner', [source.id]: 'owner', [thirdPackage.id]: null };
+  const options = { identities: [samePackage, original, thirdPackage, source], packages: [third, second, first] };
+
+  assert.deepEqual(suggestSameSourceAccountMappings(options, roster, mappings), [
+    { identityId: samePackage.id, userId: 'owner', fromIdentityId: source.id },
+    { identityId: thirdPackage.id, userId: 'owner', fromIdentityId: original.id },
+  ]);
+  assert.deepEqual(mappings, { [original.id]: 'owner', [source.id]: 'owner', [thirdPackage.id]: null });
+});
+
+test('does not share assignments across products, instances, ID namespaces, case, or unproven rows', () => {
+  const jira = sourcePackage('jira-first', 'jira', 'eng');
+  const nextJira = sourcePackage('jira-next', 'jira', 'eng');
+  const outside = sourcePackage('outside', 'jira', 'Eng');
+  const wiki = sourcePackage('wiki-first', 'confluence', 'eng');
+  const nextWiki = sourcePackage('wiki-next', 'confluence', 'eng');
+  const from = withAccount(identity(jira.id, '001', null), 'jira-user-key');
+  const wikiFrom = withAccount(identity(wiki.id, '001', null), 'confluence-user-key');
+  const wikiNext = withAccount(identity(nextWiki.id, '001', null), 'confluence-user-key');
+  const rows = [
+    from, wikiFrom, wikiNext,
+    withAccount(identity(nextJira.id, 'different-namespace', null), 'jira-account-id', '001'),
+    withAccount(identity(wiki.id, 'unrelated-product', null), 'jira-user-key', '001'),
+    withAccount(identity(nextJira.id, 'changed-key', null), 'jira-user-key', 'ABC'),
+    withAccount(identity(jira.id, 'case-source', null), 'jira-user-key', 'abc'),
+    withAccount(identity(outside.id, '001', null), 'jira-user-key'),
+    withAccount(identity(jira.id, 'same-package', null), 'jira-user-key', '001'),
+    withAccount(identity('unselected', '001', null), 'jira-user-key'),
+    identity(nextJira.id, '001', 'owner@example.test'),
+  ];
+  assert.deepEqual(suggestSameSourceAccountMappings({ identities: rows, packages: [jira, nextJira, outside, wiki, nextWiki] },
+    [teamUser('owner', 'owner@example.test')], { [from.id]: 'owner', [wikiFrom.id]: 'owner', [`${jira.id}/case-source`]: 'owner' }), [
+    { identityId: wikiNext.id, userId: 'owner', fromIdentityId: wikiFrom.id },
+  ]);
+});
+
+test('withholds the whole source account when assignments, email claims, or the live roster conflict', () => {
+  const one = sourcePackage('one', 'jira', 'eng');
+  const two = sourcePackage('two', 'jira', 'eng');
+  const three = sourcePackage('three', 'jira', 'eng');
+  const base = withAccount(identity(one.id, 'assigned', 'one@example.test'), 'jira-account-id', '001');
+  const copy = withAccount(identity(two.id, 'copy', null), 'jira-account-id', '001');
+  const third = withAccount(identity(three.id, 'third', null), 'jira-account-id', '001');
+  const packages = [one, two, three];
+  const roster = [teamUser('owner', 'owner@example.test'), teamUser('other', 'other@example.test')];
+  const assignments = { [base.id]: 'owner' };
+  const options = { identities: [base, copy, third], packages };
+  assert.equal(suggestSameSourceAccountMappings(options, roster, assignments).length, 2);
+  assert.deepEqual(suggestSameSourceAccountMappings(options, roster, { ...assignments, [third.id]: 'other' }), []);
+  assert.deepEqual(suggestSameSourceAccountMappings(options, roster.slice(1), assignments), []);
+  assert.deepEqual(suggestSameSourceAccountMappings(options, roster, {}), []);
+  assert.deepEqual(suggestSameSourceAccountMappings({ ...options, identities: [base, copy, { ...third, emailEvidence: null }] }, roster, assignments), []);
+  assert.deepEqual(suggestSameSourceAccountMappings({ ...options, identities: [base, copy, { ...third, email: 'two@example.test' }] }, roster, assignments), []);
 });
