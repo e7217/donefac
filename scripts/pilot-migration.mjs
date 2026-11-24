@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { Worker } from 'node:worker_threads';
 import { safeFilename } from '../server/attachments.ts';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
+import { PILOT_REHEARSAL_DIRECTORY } from '../server/pilot-rehearsal.ts';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
 import { CONFLUENCE_FINDINGS_MAX_BYTES, confirmedConfluenceRestrictions, confluenceFindingsProof, parseConfluenceFindings,
   validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
@@ -259,9 +260,27 @@ async function loadRunFindings(root, proofs, packages) {
   return reviews;
 }
 
+async function embeddedRunDirectory(workspace) {
+  const path = join(workspace, PILOT_REHEARSAL_DIRECTORY);
+  const entry = await lstat(path).catch(error => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  if (!entry) return undefined;
+  if (!entry.isDirectory()) throw new Error('리허설 기록 디렉터리를 확인해 주세요.');
+  return path;
+}
+
 async function loadRun(directory) {
-  const root = await realpath(directory);
-  const { data: state } = await readJsonFile(join(root, 'stage.json'), '리허설 기록');
+  const input = await realpath(directory);
+  const direct = await embeddedRunDirectory(input);
+  const root = direct ? dirname(input) : input;
+  const workspace = direct ? input : join(input, 'workspace');
+  if (!(await lstat(workspace)).isDirectory() || !(await lstat(join(workspace, 'teamspace.sqlite'))).isFile()) {
+    throw new Error('리허설 워크스페이스를 확인해 주세요.');
+  }
+  const embedded = direct ?? await embeddedRunDirectory(workspace);
+  const stateDirectory = embedded ?? root;
+  const { data: state, sha256: stageSha256 } = await readJsonFile(join(stateDirectory, 'stage.json'), '리허설 기록');
   if (state?.format !== runFormat || state.version !== 1 || !packageList(state) ||
       (Object.hasOwn(state, 'profile') && !validProfileProof(state.profile)) ||
       state.packages.some(item => !item || !uuid.test(item.packageId) || !products.has(item.product) ||
@@ -269,13 +288,10 @@ async function loadRun(directory) {
         item.size < 1 || item.size > LEGACY_MAX_RAW_BYTES)) {
     throw new Error('stage 명령이 만든 리허설 기록이 필요합니다.');
   }
-  const workspace = join(root, 'workspace');
-  if (!(await lstat(workspace)).isDirectory() || !(await lstat(join(workspace, 'teamspace.sqlite'))).isFile()) {
-    throw new Error('리허설 워크스페이스를 확인해 주세요.');
-  }
   const confluenceReviews = Object.hasOwn(state, 'confluenceReviews')
-    ? await loadRunFindings(root, state.confluenceReviews, state.packages) : [];
-  return { root, workspace, packages: state.packages, profile: state.profile, confluenceReviews };
+    ? await loadRunFindings(stateDirectory, state.confluenceReviews, state.packages) : [];
+  return { input, root, workspace, embedded: Boolean(embedded), stageSha256,
+    packages: state.packages, profile: state.profile, confluenceReviews };
 }
 
 function apiCall(pilot) {
@@ -289,8 +305,8 @@ function apiCall(pilot) {
   };
 }
 
-async function withPilot(directory, action) {
-  const pilot = await startRehearsalPilot(directory, { signal });
+async function withPilot(directory, action, reviewOptions) {
+  const pilot = await startRehearsalPilot(directory, { signal, ...reviewOptions });
   try { return await action(apiCall(pilot)); }
   finally { await pilot.close(); }
 }
@@ -426,7 +442,11 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
   signal.throwIfAborted();
   await mkdir(root, { mode: 0o700 });
   try {
-    const packages = await withPilot(join(root, 'workspace'), async call => {
+    const workspace = join(root, 'workspace');
+    const stateDirectory = join(workspace, PILOT_REHEARSAL_DIRECTORY);
+    await mkdir(workspace, { mode: 0o700 });
+    await mkdir(stateDirectory, { mode: 0o700 });
+    await withPilot(workspace, async call => {
       const actor = await call('/users', { method: 'POST', statuses: [201], body: { name: '이관 검토', email: 'migration-review@example.invalid' } });
       const results = [], namespacedHashes = new Set();
       let remaining = totalPackageBytes;
@@ -458,14 +478,13 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
           format: summary.source.format, errors: summary.errors, warnings: summary.warnings, counts: summary.counts });
         console.log(`원본 ${index + 1}/${inputs.length} 분석 완료 (${input.product}, 오류 ${summary.errors}, 경고 ${summary.warnings})`);
       }
-      return results;
+      signal.throwIfAborted();
+      const confluenceReviews = findings.length
+        ? await saveStageFindings(stateDirectory, findings, results.filter((_item, index) => confluenceZips[index])) : [];
+      await writeJson(join(stateDirectory, 'stage.json'), { format: runFormat, version: 1, createdAt: new Date().toISOString(), packages: results,
+        ...(profiled ? { profile: profiled.proof } : {}),
+        ...(confluenceReviews.length ? { confluenceReviews } : {}) });
     });
-    signal.throwIfAborted();
-    const confluenceReviews = findings.length
-      ? await saveStageFindings(root, findings, packages.filter((_item, index) => confluenceZips[index])) : [];
-    await writeJson(join(root, 'stage.json'), { format: runFormat, version: 1, createdAt: new Date().toISOString(), packages,
-      ...(profiled ? { profile: profiled.proof } : {}),
-      ...(confluenceReviews.length ? { confluenceReviews } : {}) });
   } catch (error) {
     await rm(root, { recursive: true, force: true });
     throw error;
@@ -473,11 +492,8 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
   console.log('검토할 워크스페이스를 준비했습니다. review 명령으로 열 수 있습니다.');
 }
 
-async function review(directory) {
-  const { workspace, packages, confluenceReviews } = await loadRun(directory);
-  const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
-  const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
-  const restricted = confirmedConfluenceRestrictions(confluenceReviews, reviewedPackages);
+function pilotReviewOptions(packages, confluenceReviews) {
+  const restricted = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const restrictions = [...restricted].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
   const reviews = confluenceReviews.map(({ proof }) => ({
     packageId: proof.packageId, archiveSha256: proof.archive.sha256, archiveBytes: proof.archive.bytes,
@@ -485,7 +501,14 @@ async function review(directory) {
     findingsPages: proof.pageCount, unidentifiedPages: proof.unidentifiedPages,
     ...(proof.coverage ? { coverage: proof.coverage } : {}),
   }));
-  const pilot = await startRehearsalPilot(workspace, { signal, restrictions, reviews });
+  return { restrictions, reviews };
+}
+
+async function review(directory) {
+  const { workspace, packages, confluenceReviews } = await loadRun(directory);
+  const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
+  const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
+  const pilot = await startRehearsalPilot(workspace, { signal, ...pilotReviewOptions(reviewedPackages, confluenceReviews) });
   try {
     if (confluenceReviews.length) {
       const bundles = await verifyBundles(workspace, reviewedPackages);
@@ -500,7 +523,7 @@ async function review(directory) {
       }
     }
     console.log(`이관 검토 주소 ${pilot.url}`);
-    if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 ${findingsDirectory}/에 보관했습니다.`);
+    if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 불러왔습니다.`);
     const { code, signal: stoppedBy, error } = await pilot.exited;
     signal.throwIfAborted();
     if (code !== 0) throw new Error(`이관 검토 워크스페이스가 종료되었습니다 (${error?.code ?? stoppedBy ?? code}).`);
@@ -532,11 +555,11 @@ async function inspectWorkspace(directory, packages, confluenceReviews) {
     const bundles = await verifyBundles(directory, packages);
     const evidence = bundles.every(bundle => bundle.status === 'verified') ? await collectMigrationEvidence(call, packages, confluenceReviews) : null;
     return { bundles, evidence };
-  });
+  }, pilotReviewOptions(packages, confluenceReviews));
 }
 
 async function verify(directory) {
-  const { root, workspace, packages, profile, confluenceReviews } = await loadRun(directory);
+  const { input, root, workspace, embedded, stageSha256, packages, profile, confluenceReviews } = await loadRun(directory);
   const attempt = await mkdtemp(join(root, 'verification-'));
   const report = { format: reportFormat, version: 1, checkedAt: new Date().toISOString(), status: 'failed',
     source: null, restore: null, comparison: null, ...(profile ? { profile } : {}),
@@ -552,7 +575,11 @@ async function verify(directory) {
         const restored = join(attempt, 'restored');
         await backupAndRestoreRehearsal(workspace, join(attempt, 'backup'), restored, { signal });
         step = 'restore';
-        report.restore = await inspectWorkspace(restored, packages, confluenceReviews);
+        const restoredRun = embedded ? await loadRun(restored) : { packages, confluenceReviews };
+        if (embedded && (!restoredRun.embedded || restoredRun.stageSha256 !== stageSha256)) {
+          throw new Error('복원한 리허설 준비 기록이 원본과 일치하지 않습니다.');
+        }
+        report.restore = await inspectWorkspace(restored, restoredRun.packages, restoredRun.confluenceReviews);
         if (report.restore.evidence) {
           report.comparison = compareMigrationEvidence(evidence, report.restore.evidence);
           report.status = report.comparison.status;
@@ -565,7 +592,7 @@ async function verify(directory) {
     throw error;
   } finally {
     await writeJson(join(attempt, 'report.json'), report);
-    console.log(`검증 결과 ${basename(attempt)}/report.json (${report.status})`);
+    console.log(`검증 결과 ${relative(input, join(attempt, 'report.json'))} (${report.status})`);
   }
   process.exitCode = report.status === 'verified' ? 0 : report.status === 'review' ? 2 : 1;
 }
@@ -573,8 +600,8 @@ async function verify(directory) {
 const usage = [
   'npm run pilot:rehearsal -- profile <manifest.json> <새 분석 보고서.json>',
   'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리> [--profile <분석 보고서.json>] [--confluence-findings <페이지별 검토 파일.json>]…',
-  'npm run pilot:rehearsal -- review <리허설 디렉터리>',
-  'npm run pilot:rehearsal -- verify <리허설 디렉터리>',
+  'npm run pilot:rehearsal -- review <리허설 디렉터리 또는 복원된 워크스페이스>',
+  'npm run pilot:rehearsal -- verify <리허설 디렉터리 또는 복원된 워크스페이스>',
 ].join('\n');
 
 function stageOptions(args) {

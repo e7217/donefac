@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, stat, truncate, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -38,6 +38,7 @@ const restrictedBody = 'synthetic-private-confluence-restricted-body';
 const originalFrom = 'synthetic-source-instance';
 const attachment = Buffer.from('synthetic source attachment\0');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+const rehearsalState = workspace => join(workspace, '.teamspace-rehearsal');
 
 function confluenceFindings(bytes, changes = {}) {
   return {
@@ -170,7 +171,7 @@ function jiraFindingsPath(receipt, finding, fingerprint) {
 }
 
 async function readReport(root, answer) {
-  const match = /검증 결과 (verification-[a-z\d]+\/report\.json) \(/i.exec(answer.stdout);
+  const match = /검증 결과 ((?:\.\.\/)?verification-[a-z\d]+\/report\.json) \(/i.exec(answer.stdout);
   assert.ok(match, answer.stdout + answer.stderr);
   const path = join(root, match[1]);
   const raw = await readFile(path, 'utf8');
@@ -285,7 +286,8 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(stage.code, 0, stage.stderr);
   assert.equal((await stat(root)).mode & 0o777, 0o700);
   assert.equal(existsSync(env.TEAMSPACE_DATA_DIR), false);
-  const stagePath = join(root, 'stage.json');
+  const stateDirectory = rehearsalState(join(root, 'workspace'));
+  const stagePath = join(stateDirectory, 'stage.json');
   const initial = await readFile(stagePath, 'utf8');
   const staged = JSON.parse(initial);
   assert.deepEqual(staged.profile, expectedProfileProof);
@@ -297,9 +299,15 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     profile.packages.map(pkg => [pkg.sha256, pkg.size, pkg.analysis.format]));
   assert.equal(staged.packages[0].instanceKey, `${originalFrom}-jira`);
   assert.equal((await stat(stagePath)).mode & 0o777, 0o600);
+  assert.equal((await stat(stateDirectory)).mode & 0o777, 0o700);
   assert.equal((await launch(stageArguments, env).exited).code, 1);
   assert.equal(await readFile(stagePath, 'utf8'), initial);
   const wikiId = staged.packages[1].packageId;
+  const expectedReviews = reviewInputs.map(({ checkedAt, selection, status, spacePermissions, unidentifiedPages, findings, coverage }) => ({
+    packageId: wikiId, checkedAt, selection, status, spacePermissions, findingsPages: findings.length, unidentifiedPages,
+    ...(coverage ? { coverage } : {}),
+  }));
+  const optionsPath = packageId => `/migrations/options?${new URLSearchParams({ packageId })}`;
   for (const [index, reportSha] of reviewDigests.entries()) {
     const proof = staged.confluenceReviews.find(value => value.sha256 === reportSha);
     const { status, selection, checkedAt, archive, spacePermissions, unidentifiedPages, findings, version, coverage } = reviewInputs[index];
@@ -307,12 +315,12 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
       spacePermissions, pageCount: findings.length, unidentifiedPages,
       reasonCounts: index === 0 ? { LIVE_RESTRICTED: 2, MISSING_FROM_ARCHIVE: 1, RESTRICTION_MISMATCH: 1, VERSION_MISMATCH: 1 } : {},
       ...(coverage ? { coverage } : {}) });
-    const snapshot = join(root, 'confluence-findings', `${reportSha}.json`);
+    const snapshot = join(stateDirectory, 'confluence-findings', `${reportSha}.json`);
     assert.deepEqual(await readFile(snapshot), reportBytes[index]);
     assert.equal((await stat(snapshot)).mode & 0o777, 0o600);
     await rm(paths[index]);
   }
-  const reviewSnapshot = join(root, 'confluence-findings', `${reviewDigests[0]}.json`);
+  const reviewSnapshot = join(stateDirectory, 'confluence-findings', `${reviewDigests[0]}.json`);
   await rm(reviewSnapshot);
   const missingSnapshot = await launch(['review', root], env).exited;
   assert.equal(missingSnapshot.code, 1, missingSnapshot.stderr);
@@ -352,7 +360,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     const base = await waitForReview(mappingReview);
     const workspace = await json(base, '/workspace');
     previousActor = workspace.users[0].id;
-    const mappingStageState = JSON.parse(await readFile(join(mappingSourceRoot, 'stage.json'), 'utf8'));
+    const mappingStageState = JSON.parse(await readFile(join(rehearsalState(join(mappingSourceRoot, 'workspace')), 'stage.json'), 'utf8'));
     const query = new URLSearchParams(mappingStageState.packages.map(pkg => ['packageId', pkg.packageId]));
     const { defaultConfiguration: configuration, identities } = await json(base, `/migrations/options?${query}`);
     configuration.projects = configuration.projects.map(project => ({ ...project, key: 'REH', name: 'Rehearsal fixture' }));
@@ -375,9 +383,11 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     await mappingReview.exited;
   }
 
-  const pending = await launch(['verify', root], env).exited;
+  const workspacePath = join(root, 'workspace');
+  const pending = await launch(['verify', workspacePath], env).exited;
   assert.equal(pending.code, 2, pending.stderr);
-  const pendingEvidence = (await readReport(root, pending)).report;
+  assert.match(pending.stdout, /검증 결과 \.\.\/verification-/);
+  const pendingEvidence = (await readReport(workspacePath, pending)).report;
   assert.equal(pendingEvidence.status, 'review');
   assert.deepEqual(pendingEvidence.profile, expectedProfileProof);
   assert.deepEqual(pendingEvidence.confluenceReviews, staged.confluenceReviews);
@@ -398,11 +408,6 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     const actor = workspace.users[0].id;
     assert.notEqual(actor, previousActor);
     assert.equal(workspace.issues.length + workspace.documents.length, 0);
-    const expectedReviews = reviewInputs.map(({ checkedAt, selection, status, spacePermissions, unidentifiedPages, findings, coverage }) => ({
-      packageId: wikiId, checkedAt, selection, status, spacePermissions, findingsPages: findings.length, unidentifiedPages,
-      ...(coverage ? { coverage } : {}),
-    }));
-    const optionsPath = packageId => `/migrations/options?${new URLSearchParams({ packageId })}`;
     const wikiOptions = await json(base, optionsPath(wikiId), { actor });
     assert.deepEqual(wikiOptions.confluenceReviews, expectedReviews);
     const jiraOptions = await json(base, optionsPath(staged.packages[0].packageId), { actor });
@@ -571,24 +576,74 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(report.comparison.status, 'review');
   assert.equal(report.comparison.matches, true);
   assert.deepEqual(report.source.bundles, report.restore.bundles);
-  assert.ok(existsSync(join(attempt, 'backup', 'manifest.json')));
-  assert.ok(existsSync(join(attempt, 'restored', 'teamspace.sqlite')));
-  const restored = await startRehearsalPilot(join(attempt, 'restored'));
+  const backupRoot = join(attempt, 'backup');
+  const backupManifest = JSON.parse(await readFile(join(backupRoot, 'manifest.json'), 'utf8'));
+  const backedUpFiles = new Map(backupManifest.files.map(({ path, sha256 }) => [path, sha256]));
+  assert.equal(backedUpFiles.get('.teamspace-rehearsal/stage.json'), digest(initial));
+  for (const sha of reviewDigests) assert.equal(backedUpFiles.get(`.teamspace-rehearsal/confluence-findings/${sha}.json`), sha);
+  const backupState = rehearsalState(join(backupRoot, 'data'));
+  const restoredWorkspacePath = join(attempt, 'restored');
+  const restoredState = rehearsalState(restoredWorkspacePath);
+  assert.ok(existsSync(join(restoredWorkspacePath, 'teamspace.sqlite')));
+  for (const copy of [backupState, restoredState]) {
+    assert.equal(await readFile(join(copy, 'stage.json'), 'utf8'), initial);
+    for (const [index, sha] of reviewDigests.entries()) {
+      const snapshot = join(copy, 'confluence-findings', `${sha}.json`);
+      assert.deepEqual(await readFile(snapshot), reportBytes[index]);
+      assert.equal((await stat(snapshot)).mode & 0o777, 0o600);
+    }
+  }
+
+  const restoredFindings = join(restoredState, 'confluence-findings', `${reviewDigests[0]}.json`);
+  await writeFile(restoredFindings, reportBytes[1]);
+  try {
+    const swapped = await launch(['review', restoredWorkspacePath], env).exited;
+    assert.equal(swapped.code, 1, swapped.stderr);
+    assert.match(swapped.stderr, /보관한 Confluence 페이지별 검토 파일의 SHA-256이 다릅니다/);
+    assert.doesNotMatch(swapped.stdout, /이관 검토 주소/);
+    assert.deepEqual(await readFile(reviewSnapshot), reportBytes[0]);
+  } finally { await writeFile(restoredFindings, reportBytes[0]); }
+
+  const heldState = join(scratch, 'original-rehearsal-state');
+  await rename(stateDirectory, heldState);
+  const restored = launch(['review', restoredWorkspacePath], env);
   let legacyBackup;
   try {
-    const restoredWorkspace = await json(restored.url, '/workspace');
+    const base = await waitForReview(restored);
+    const restoredWorkspace = await json(base, '/workspace');
     assert.deepEqual(restoredWorkspace.documents.find(document => document.id === importedDocument.id), importedDocument);
-    legacyBackup = await json(restored.url, '/export');
-    assert.deepEqual(await json(restored.url, `/issues/${importedIssueId}/jira-status-history`), importedStatusHistory);
+    const actor = restoredWorkspace.users[0].id;
+    const options = await json(base, optionsPath(wikiId), { actor });
+    assert.deepEqual(options.confluenceReviews, expectedReviews);
+    const configuration = { ...options.defaultConfiguration,
+      projects: options.defaultConfiguration.projects.map(project => ({ ...project, key: 'RESUME' })) };
+    const blocked = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration } });
+    assert.equal(blocked.canApply, false);
+    assert.ok(blocked.notices.some(notice => notice.code === 'RESTRICTED_CONTENT' &&
+      notice.recordId === `${wikiId}/page:${restrictedPage}` && notice.severity === 'error'), JSON.stringify(blocked.notices));
+    await json(base, `/migrations/previews/${blocked.id}/apply`, { method: 'POST', actor, status: 409,
+      body: { expectedVersion: blocked.version, acknowledgements: blocked.requiredAcknowledgements } });
+    legacyBackup = await json(base, '/export');
+    assert.deepEqual(await json(base, `/issues/${importedIssueId}/jira-status-history`), importedStatusHistory);
     const stablePage = jiraFindingsPath(importedReceipt, 'unresolved-time', importedFinding.fingerprint);
-    assert.deepEqual(await json(restored.url, stablePage), importedFinding);
-    await json(restored.url, `/issues/${importedRelated.id}?expectedVersion=${importedRelated.version}`, { method: 'DELETE' });
-    await json(restored.url, stablePage, { status: 409 });
-    const unavailable = await json(restored.url, jiraFindingsPath(importedReceipt, 'unavailable'));
+    assert.deepEqual(await json(base, stablePage), importedFinding);
+    await json(base, `/issues/${importedRelated.id}?expectedVersion=${importedRelated.version}`, { method: 'DELETE' });
+    await json(base, stablePage, { status: 409 });
+    const unavailable = await json(base, jiraFindingsPath(importedReceipt, 'unavailable'));
     assert.equal(unavailable.totalChanges, 1);
     assert.deepEqual(unavailable.rows, [{ ...importedFinding.rows[0], reason: 'issue-in-trash' }]);
   } finally {
-    await restored.close();
+    restored.child.kill('SIGINT');
+    await restored.exited;
+    await rename(heldState, stateDirectory);
+  }
+  const original = launch(['review', root], env);
+  try {
+    const base = await waitForReview(original);
+    assert.deepEqual(await json(base, jiraFindingsPath(importedReceipt, 'unresolved-time', importedFinding.fingerprint)), importedFinding);
+  } finally {
+    original.child.kill('SIGINT');
+    await original.exited;
   }
 
   const legacyPilot = await startRehearsalPilot(join(scratch, 'legacy-checklist'));
@@ -756,8 +811,46 @@ test('profile-bound stage discards rejected inputs and accepts an exact clean pr
   await writeManifest([{ file: relocatedJira, product: 'jira', instanceKey: originalFrom }]);
   const staged = await launch(['stage', manifest, root, '--profile', cleanPath], env).exited;
   assert.equal(staged.code, 0, staged.stdout + staged.stderr);
-  const accepted = JSON.parse(await readFile(join(root, 'stage.json'), 'utf8'));
+  const accepted = JSON.parse(await readFile(join(rehearsalState(join(root, 'workspace')), 'stage.json'), 'utf8'));
   assert.equal(accepted.profile.status, 'analyzed');
+});
+
+test('review opens a legacy rehearsal with Confluence proof beside its workspace', { timeout: 60_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-legacy-layout-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const root = join(scratch, 'run');
+  const manifest = join(scratch, 'manifest.json');
+  const findings = join(scratch, 'private-review.json');
+  const wiki = fixturePackages().find(pkg => pkg.product === 'confluence');
+  await writeFile(join(scratch, wiki.filename), wiki.bytes);
+  await writeFile(manifest, JSON.stringify({ packages: [{ file: wiki.filename, product: wiki.product, instanceKey: originalFrom }] }));
+  await writeFile(findings, JSON.stringify(confluenceFindings(wiki.bytes)), { mode: 0o600 });
+  const stage = await launch(['stage', manifest, root, '--confluence-findings', findings], process.env).exited;
+  assert.equal(stage.code, 0, stage.stderr);
+
+  const state = rehearsalState(join(root, 'workspace'));
+  const legacyStage = join(root, 'stage.json');
+  await rename(join(state, 'stage.json'), legacyStage);
+  await rename(join(state, 'confluence-findings'), join(root, 'confluence-findings'));
+  await rmdir(state);
+  const { packages: [{ packageId }] } = JSON.parse(await readFile(legacyStage, 'utf8'));
+
+  const review = launch(['review', root], process.env);
+  try {
+    const base = await waitForReview(review);
+    const { users: [{ id: actor }] } = await json(base, '/workspace');
+    const options = await json(base, `/migrations/options?${new URLSearchParams({ packageId })}`, { actor });
+    assert.deepEqual(options.confluenceReviews, [{ packageId, checkedAt: '2026-11-23T02:00:00.000Z', selection: 'explicit-pages',
+      status: 'needs-review', spacePermissions: 'manual-review', findingsPages: 4, unidentifiedPages: 0 }]);
+    const preview = await json(base, '/migrations/preview', { method: 'POST', actor, status: 201, body: { configuration: options.defaultConfiguration } });
+    assert.equal(preview.canApply, false);
+    assert.ok(preview.notices.some(notice => notice.code === 'RESTRICTED_CONTENT' &&
+      notice.recordId === `${packageId}/page:${restrictedPage}` && notice.severity === 'error'), JSON.stringify(preview.notices));
+  } finally {
+    review.child.kill('SIGINT');
+    await review.exited;
+  }
+  assert.equal(existsSync(state), false);
 });
 
 test('stage rejects Confluence findings that cannot identify exactly one matching space ZIP', { timeout: 90_000 }, async t => {

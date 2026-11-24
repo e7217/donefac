@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { createPilotAccess } from './pilot-access.js';
 import { readPilotConfluenceReview } from './pilot-confluence-review.js';
+import { assertPilotRehearsalWorkspace } from './pilot-rehearsal.js';
 
 const { TEAMSPACE_DATA_DIR: dataDir, TEAMSPACE_PILOT_LOCKED_DIR: lockedDir, TEAMSPACE_PILOT_LOCK_FD: lockDescriptor } = process.env;
 if (!dataDir || dataDir !== lockedDir || !lockDescriptor || !/^\d+$/.test(lockDescriptor)) {
@@ -15,6 +16,13 @@ if (!dataDir || dataDir !== lockedDir || !lockDescriptor || !/^\d+$/.test(lockDe
 const lock = fstatSync(Number(lockDescriptor));
 const lockPath = statSync(`${dataDir}.teamspace.lock`);
 if (!lock.isFile() || lock.dev !== lockPath.dev || lock.ino !== lockPath.ino) throw new Error('The Teamspace data lock is missing.');
+
+const migrationRehearsal = process.env.TEAMSPACE_PILOT_MIGRATION_REHEARSAL === '1';
+assertPilotRehearsalWorkspace(dataDir, migrationRehearsal);
+if (migrationRehearsal &&
+    (process.env.TEAMSPACE_PILOT_ORIGIN !== undefined || process.env.TEAMSPACE_PILOT_ACCESS_FILE !== undefined)) {
+  throw new Error('이관 리허설에는 팀 접속 설정을 사용할 수 없습니다.');
+}
 
 const portValue = process.env.TEAMSPACE_PILOT_PORT ?? '5190';
 const port = Number(portValue);
@@ -33,6 +41,7 @@ const confluenceReview = await readPilotConfluenceReview(process.env, Boolean(ac
 const teamIndex = access ? readFileSync(index, 'utf8').replace('</head>', '<meta name="teamspace-pilot-access" content="enabled"></head>') : null;
 const api = createApp({
   dataDir,
+  migrationRehearsal,
   browserOrigin: access?.origin,
   gitlabWebhookPublicOrigin: access?.origin,
   ...confluenceReview,

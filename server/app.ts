@@ -6,6 +6,7 @@ import { AttachmentVersionsService, AttachmentVersionError } from './attachment-
 import { AttachmentAppend } from './attachment-append.js';
 import { MarkdownArchiveImportError, MarkdownArchiveImportService } from './markdown-archive-import.js';
 import { MAX_MARKDOWN_ARCHIVE_BYTES } from '../shared/document-markdown-archive.js';
+import { assertPilotRehearsalWorkspace } from './pilot-rehearsal.js';
 import { Store } from './store.js';
 import { WorkspaceRevisions, workspaceRestoreGeneration } from './workspace-revisions.js';
 import { seed } from './seed.js';
@@ -190,6 +191,7 @@ function shiftDate(value: string, days: number, working: boolean): string {
 
 export function createApp(options: {
   dataDir?: string;
+  migrationRehearsal?: boolean;
   seed?: boolean;
   outboundWorker?: boolean;
   deadlineReminderWorker?: boolean;
@@ -205,6 +207,11 @@ export function createApp(options: {
   confluenceReviews?: readonly PilotConfluenceReview[];
 } = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
+  const migrationRehearsal = options.migrationRehearsal === true;
+  assertPilotRehearsalWorkspace(dataDir, migrationRehearsal);
+  if (migrationRehearsal && (options.browserOrigin !== undefined || options.gitlabWebhookPublicOrigin !== undefined)) {
+    throw new Error('이관 리허설에는 팀 접속 설정을 사용할 수 없습니다.');
+  }
   const store = new Store(dataDir);
   const dependencyVersionFloor=()=>{
     const value=store.setting(dependencyVersionKey);
@@ -215,7 +222,7 @@ export function createApp(options: {
   };
   const files = new AttachmentFiles(dataDir);
   files.recover(store.setting('attachmentImportGeneration'));
-  if (options.seed !== false) seed(store);
+  if (!migrationRehearsal && options.seed !== false) seed(store);
   const issueSchemas=new IssueSchemaService(store);
   const sourcePreservation=new SourcePreservationService(store);
   const jiraOriginalCommentLinks = new JiraOriginalCommentLinks(store, sourcePreservation);
@@ -737,7 +744,7 @@ export function createApp(options: {
       error instanceof PlanningError || error instanceof WorkloadError) && error.status < 500 ? error.message : null,
     appendOrder: (order, ids) => issueOrders.appendTransferredIssues(order, ids),
   });
-  const outbound=new OutboundWebhookService(store,{autoStart:options.outboundWorker!==false});
+  const outbound = new OutboundWebhookService(store, { autoStart: !migrationRehearsal && options.outboundWorker !== false });
   legacyImport.registerRoutes(app,{actor,activity});
   sourcePreservation.registerRoutes(app);
   registerSourceReconciliationRoutes(app, { store, files, preservation: sourcePreservation, trash });
@@ -3366,14 +3373,14 @@ export function createApp(options: {
     try { deadlineReminders.sweep(); }
     catch (error) { console.error('[teamspace deadlines]', error instanceof Error ? error.message : error); }
   }
-  const deadlineReminderTimer = options.deadlineReminderWorker === false ? undefined
+  const deadlineReminderTimer = migrationRehearsal || options.deadlineReminderWorker === false ? undefined
     : setInterval(sweepDeadlineReminders, options.deadlineReminderIntervalMs ?? 60_000).unref();
   if (deadlineReminderTimer) sweepDeadlineReminders();
   function sweepRecurringIssues() {
     try { runRecurringIssues(); }
     catch (error) { console.error('[teamspace recurring issues]', error instanceof Error ? error.message : error); }
   }
-  const recurringIssueTimer = options.recurringIssueWorker === false ? undefined
+  const recurringIssueTimer = migrationRehearsal || options.recurringIssueWorker === false ? undefined
     : setInterval(sweepRecurringIssues, options.recurringIssueIntervalMs ?? 60_000).unref();
   if (recurringIssueTimer) sweepRecurringIssues();
   return {

@@ -222,7 +222,7 @@ async function prepareRehearsal(t, sources, findings, bind = true) {
   await writeFile(findingsPath, raw, { mode: 0o600 });
   const stage = await rehearsal(['stage', manifest, root, ...(bind ? ['--confluence-findings', findingsPath] : [])]).exited;
   assert.equal(stage.code, 0, stage.stdout + stage.stderr);
-  const stagePath = join(root, 'stage.json');
+  const stagePath = join(root, 'workspace', '.teamspace-rehearsal', 'stage.json');
   const staged = JSON.parse(await readFile(stagePath, 'utf8'));
   return { root, stagePath, staged, raw };
 }
@@ -286,7 +286,7 @@ test('profile-bound rehearsal still requires explicit exclusion of restrictions 
 
   const stage = await rehearsal(['stage', manifest, root, '--profile', profilePath]).exited;
   assert.equal(stage.code, 0, stage.stdout + stage.stderr);
-  const staged = JSON.parse(await readFile(join(root, 'stage.json'), 'utf8'));
+  const staged = JSON.parse(await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8'));
   assert.equal(staged.profile.status, 'review');
   assert.equal(staged.packages[0].errors, 2);
   assert.equal(staged.confluenceReviews, undefined);
@@ -417,7 +417,7 @@ test('verification fails for a legacy receipt that linked a live restricted page
 
   // Reconstruct the proof files recorded by the previous, unguarded rehearsal implementation.
   const proof = confluenceFindingsProof(parseConfluenceFindings(JSON.parse(raw)), digest(raw), staged.packages[0].packageId);
-  const proofs = join(root, 'confluence-findings');
+  const proofs = join(root, 'workspace', '.teamspace-rehearsal', 'confluence-findings');
   await mkdir(proofs, { mode: 0o700 });
   await writeFile(join(proofs, `${proof.sha256}.json`), raw, { mode: 0o600 });
   await writeFile(stagePath, JSON.stringify({ ...staged, confluenceReviews: [proof] }));

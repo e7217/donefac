@@ -67,8 +67,7 @@ export async function startRehearsalPilot(dataDir, { signal, port = 0, restricti
   const reviewEnv = reviews.length ? { TEAMSPACE_PILOT_CONFLUENCE_REVIEW: 'stdin' }
     : restrictions.length ? { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' } : {};
   const { child, exited } = launch('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
-    ...commandEnv, TEAMSPACE_PILOT_PORT: String(port), TEAMSPACE_PILOT_DEMO: '0', TEAMSPACE_PILOT_OUTBOUND: '0',
-    TEAMSPACE_PILOT_DEADLINE_REMINDERS: '0', TEAMSPACE_PILOT_RECURRING_ISSUES: '0',
+    ...commandEnv, TEAMSPACE_PILOT_PORT: String(port), TEAMSPACE_PILOT_MIGRATION_REHEARSAL: '1',
     ...reviewEnv,
   }, false, input);
   let startupError = '', stdout = '', stopping;

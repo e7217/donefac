@@ -190,7 +190,7 @@ test('offline profile stages identified Confluence restrictions for review and b
   ]);
   const staged = await f.stage('stage');
   assert.equal(staged.code, 0, staged.stdout + staged.stderr);
-  const state = JSON.parse(await readFile(join(f.directory, 'stage', 'stage.json'), 'utf8'));
+  const state = JSON.parse(await readFile(join(f.directory, 'stage', 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8'));
   assert.equal(state.profile.status, 'review');
   assert.equal(state.profile.sha256, hash(raw));
   assert.equal(state.packages[0].errors, 2);

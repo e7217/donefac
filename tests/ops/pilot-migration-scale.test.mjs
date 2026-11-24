@@ -176,7 +176,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
   assert.equal(profile.packages[0].analysis.counts.issue, issueCount);
   assert.equal(profile.packages[1].analysis.counts.page, pageCount);
   await runRehearsal(['stage', manifest, root, '--profile', profilePath], 0);
-  const staged = JSON.parse(await readFile(join(root, 'stage.json')));
+  const staged = JSON.parse(await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json')));
   assert.equal(staged.profile.sha256, digest(profileRaw));
 
   const expected = { issues: issueCount, documents: pageCount, issueRelations: issueCount - 1, resourceLinks: pageCount,
