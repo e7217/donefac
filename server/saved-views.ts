@@ -14,6 +14,7 @@ import {
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
 import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
+import { jiraSavedViewComponents } from './jira-saved-view-components.js';
 import { jiraSavedViewSourceAliases } from './jira-saved-view-sources.js';
 import { Store } from './store.js';
 
@@ -161,6 +162,11 @@ export class SavedViewService {
     let blockedPriorities: ReadonlySet<Issue['priority']> | undefined;
     const translated = translateJiraViewQuery(jql, {
       project, ...aliases, statuses: workflow.statuses, issueTypes: schema.issueTypes, users,
+      prepareComponentField: () => {
+        if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
+        return jiraSavedViewComponents(this.store, schema, aliases.sourceInstance, aliases.sourceProjectAliases,
+          (sourceId, targetId) => sourceMatches.push(['component', sourceId, targetId]));
+      },
       prepareSourceAliases: fields => {
         if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
         const evidence = jiraSavedViewSourceAliases(this.store, projectId, aliases.sourceInstance, aliases.sourceProjectAliases, fields);

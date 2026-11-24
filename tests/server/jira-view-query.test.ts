@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import { createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT } from '../../shared/issue-view.js';
-import { JiraViewQueryError, translateJiraViewQuery, type JiraViewQueryContext, type JiraViewSourceAlias } from '../../shared/jira-view-query.js';
+import { JiraViewQueryError, translateJiraViewQuery, type JiraViewComponentField, type JiraViewQueryContext, type JiraViewSourceAlias } from '../../shared/jira-view-query.js';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type Issue } from '../../shared/types.js';
 
 const project = { id: 'project-id', key: 'TEAM', name: 'Team project' };
@@ -224,6 +224,82 @@ test('label exclusions keep Jira null behavior and compose without broadening in
     { include: ['a', 'c'], match: 'all' });
   assert.deepEqual(translateJiraViewQuery('labels IN (a, b) AND labels != a AND labels IN (b, c)', context).filters.labels,
     { include: ['b'], match: 'all', exclude: ['a'], presence: 'set' });
+});
+
+const componentField: JiraViewComponentField = {
+  fieldId: 'jira-components',
+  name: 'Jira 컴포넌트',
+  hasCompleteCoverage: true,
+  resolve: (value, quoted) => {
+    if (value === 'duplicated') return { kind: 'ambiguous' };
+    if (value === 'removed') return { kind: 'unmapped' };
+    if (value === 'Web UI' || value === '20701' && !quoted) return { kind: 'mapped', targetId: 'web', label: 'Web Platform' };
+    if (value === 'API') return { kind: 'mapped', targetId: 'api', label: 'API' };
+    if (value === '20801' && quoted) return { kind: 'mapped', targetId: 'numeric-name', label: '20801' };
+    if (/^option[0-9]$/.test(value)) return { kind: 'mapped', targetId: value, label: value };
+  },
+};
+const componentContext: JiraViewQueryContext = { ...context, prepareComponentField: () => componentField };
+
+test('Jira component comparisons use the native multiple-choice filter with current option labels', () => {
+  const { fieldId, name } = componentField;
+  const componentSchema = {
+    ...schema,
+    fields: [{
+      id: fieldId, name, description: '', kind: 'multi_select' as const, required: false, issueTypes: [], archived: false,
+      options: [
+        { id: 'web', name: 'Web Platform', archived: false }, { id: 'api', name: 'API', archived: false },
+        { id: 'numeric-name', name: '20801', archived: false },
+      ],
+    }],
+  };
+  const issues = [
+    ['web'], ['api'], ['web', 'api'], ['numeric-name'], [],
+  ].map((values, index) => issue({ id: String(index), customFields: { [fieldId]: values } }));
+  const matchingIndexes = (jql: string) => {
+    const { filters } = translateJiraViewQuery(jql, componentContext);
+    return issues.filter(createIssueViewMatcher(filters, { users: [] }, componentSchema)).map(({ id }) => id);
+  };
+  const either = 'project = OLD AND (component = "Web UI" OR component IN (API, 20701)) AND status = review';
+  const translated = translateJiraViewQuery(either, componentContext);
+  assert.deepEqual(translated.filters.fieldFilter, { match: 'any', rules: [
+    { fieldId, operator: 'includes', value: 'web' }, { fieldId, operator: 'includes', value: 'api' },
+  ] });
+  assert.deepEqual(translated.criteria.find(criterion => criterion.field === 'component'), {
+    field: 'component', label: 'Jira 컴포넌트 · 포함 Web Platform 또는 포함 API',
+  });
+  assert.deepEqual(matchingIndexes(either), ['0', '1', '2']);
+  assert.deepEqual(matchingIndexes('component = 20701 AND component = API'), ['2']);
+  assert.deepEqual(matchingIndexes('component = "20801"'), ['3']);
+  assert.deepEqual(matchingIndexes('component IN (20701, API) AND component != API'), ['0']);
+  assert.deepEqual(matchingIndexes('component NOT IN (20701, API)'), ['3']);
+  assert.deepEqual(matchingIndexes('component != 20701 OR component IS EMPTY'), ['1', '3', '4']);
+  assert.deepEqual(matchingIndexes('component IS NULL'), ['4']);
+  assert.deepEqual(matchingIndexes('component IS NOT EMPTY'), ['0', '1', '2', '3']);
+});
+
+test('Jira component translation rejects unverified values and Boolean combinations that need nested native filters', () => {
+  assert.throws(() => translateJiraViewQuery('component = API', context), /이관한 Jira 컴포넌트 필드/);
+  assert.throws(() => translateJiraViewQuery('component = duplicated', componentContext), { offset: 12 });
+  assert.throws(() => translateJiraViewQuery('component = removed', componentContext), /현재 Jira 컴포넌트 값/);
+  assert.throws(() => translateJiraViewQuery('component = absent', componentContext), /현재 Jira 컴포넌트 값/);
+  for (const query of [
+    'component = API AND component != API',
+    'component = API AND component IS EMPTY',
+    'component IN (20701, API) AND component != option0',
+    'component = API OR (component = 20701 AND component = option0)',
+    'component = API OR status = review',
+    'component IN (componentsLeadByUser())',
+    `component IN (${Array.from({ length: 9 }, (_, index) => `option${index}`).join(', ')})`,
+  ]) assert.throws(() => translateJiraViewQuery(query, componentContext), JiraViewQueryError, query);
+  const uncertain = {
+    ...componentContext,
+    prepareComponentField: () => ({ ...componentField, hasCompleteCoverage: false }),
+  };
+  assert.doesNotThrow(() => translateJiraViewQuery('component = API', uncertain));
+  for (const query of ['component IS EMPTY', 'component IS NOT EMPTY', 'component != API', 'component NOT IN (API)']) {
+    assert.throws(() => translateJiraViewQuery(query, uncertain), /이관 원본에서 컴포넌트/);
+  }
 });
 
 test('empty assignees and explicitly empty reporters remain distinct from unknown reporters', () => {

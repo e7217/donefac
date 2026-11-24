@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import { importedCustomFieldOptionId } from '../../server/migration-planner.js';
 import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view.js';
 import type {
   Issue, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions,
@@ -26,7 +27,7 @@ type JiraSourceIssue = {
   issueId?: string;
   fields?: {
     summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue; duedate?: string | null; priority?: JiraRestValue;
-    assignee?: JiraRestProfile; reporter?: JiraRestProfile; creator?: JiraRestProfile;
+    assignee?: JiraRestProfile; reporter?: JiraRestProfile; creator?: JiraRestProfile; components?: JiraRestValue[];
   };
 };
 
@@ -268,6 +269,174 @@ test('Jira project criteria recognize active archived original keys and numeric 
     await f.request(PREVIEW, 'POST', { projectId: merged, jql: `project = ${alias}` }, 400);
   }
   assert.equal((await f.preview(`project = "${merged}"`, merged)).total, 2);
+});
+
+test('Jira component criteria survive native choice rename and save as a live backup-safe field filter', async t => {
+  const f = await fixture(t);
+  const origin = { id: '24100', key: 'COMPONENTS' };
+  const api = { id: '24201', name: 'REST API' };
+  const web = { id: '24202', name: 'Web UI' };
+  const [apiOnly, webOnly, both, empty] = ['API only', 'Web only', 'Both components', 'Explicitly empty'];
+  const projectId = await f.migrateJira('jira-saved-component', [
+    { ...origin, fields: { summary: apiOnly, components: [api], duedate: '2026-11-22' } },
+    { ...origin, fields: { summary: webOnly, components: [web], duedate: '2026-11-23' } },
+    { ...origin, fields: { summary: both, components: [api, web], duedate: '2026-11-24' } },
+    { ...origin, fields: { summary: empty, components: [], duedate: '2026-11-22' } },
+  ], 'TEAMCOMP');
+  const schemaPath = `/projects/${projectId}/issue-schema`;
+  const schema = await f.request<ProjectIssueSchema>(schemaPath);
+  const componentField = schema.fields.find(field => field.name === 'Jira 컴포넌트');
+  assert.equal(componentField?.kind, 'multi_select');
+  const apiOption = componentField.options.find(value => value.name === api.name);
+  const webOption = componentField.options.find(value => value.name === web.name);
+  assert.ok(apiOption && webOption);
+  const nameCondition = `component = "${api.name}"`;
+  const titled = (result: JiraSavedViewPreview) => result.issues.map(issue => issue.title).sort();
+  const original = await f.preview(nameCondition, projectId);
+  const renamedChoice = 'Integration layer';
+  await f.request(schemaPath, 'PATCH', {
+    ...schema, expectedVersion: schema.version,
+    fields: schema.fields.map(field => field.id === componentField.id ? {
+      ...field, options: field.options.map(option => option.id === apiOption.id ? { ...option, name: renamedChoice } : option),
+    } : field),
+  });
+  const renamed = await f.preview(nameCondition, projectId);
+  assert.deepEqual(renamed.filters, original.filters);
+  assert.deepEqual(renamed.issues, original.issues);
+  assert.notEqual(renamed.revision, original.revision);
+  assert.ok(renamed.criteria.find(criterion => criterion.field === 'component')?.label.includes(renamedChoice));
+
+  const queries: [string, string[]][] = [
+    [nameCondition, [apiOnly, both]],
+    [`project = ${origin.id} AND component = ${api.id}`, [apiOnly, both]],
+    [`component IN (${api.id}, "${web.name}")`, [apiOnly, webOnly, both]],
+    [`${nameCondition} OR component = ${web.id}`, [apiOnly, webOnly, both]],
+    [`${nameCondition} AND component = ${web.id}`, [both]],
+    [`component != ${api.id}`, [webOnly]],
+    [`component NOT IN (${api.id}, ${web.id})`, []],
+    ['component IS EMPTY', [empty]],
+    ['component IS NOT EMPTY', [apiOnly, webOnly, both]],
+  ];
+  for (const [jql, expected] of queries) {
+    const review = await f.preview(jql, projectId);
+    assert.equal(review.total, expected.length, jql);
+    assert.deepEqual(titled(review), expected.toSorted(), jql);
+  }
+  for (const value of ['999999', '"Unknown component"', `"${renamedChoice}"`]) {
+    const rejected = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: `component = ${value}` }, 400);
+    assert.match(rejected.error, /컴포넌트/u);
+  }
+
+  const jql = `project = ${origin.key} AND component IN (${api.id}, ${web.id}) AND due <= "2026-11-23"`;
+  const beforeEdit = await f.preview(jql, projectId);
+  assert.deepEqual(titled(beforeEdit), [apiOnly, webOnly]);
+  const fieldFilter = beforeEdit.filters.fieldFilter;
+  assert.equal(fieldFilter?.match, 'any');
+  assert.deepEqual(fieldFilter.rules.toSorted((left, right) => String(left.value).localeCompare(String(right.value))),
+    [apiOption.id, webOption.id].sort((left, right) => left.localeCompare(right))
+      .map(value => ({ fieldId: componentField.id, operator: 'includes', value })));
+
+  const snapshot = await f.snapshot();
+  const rescheduled = snapshot.issues.find(issue => issue.projectId === projectId && issue.title === both);
+  assert.ok(rescheduled);
+  await f.request(`/issues/${rescheduled.id}`, 'PATCH', { expectedVersion: rescheduled.version, dueDate: '2026-11-23' });
+  const input = { projectId, jql, name: 'Jira component due dates', layout: 'board', acceptProjectOrder: false };
+  const stale = await f.request<{ details: unknown }>(IMPORT, 'POST', { ...input, revision: beforeEdit.revision }, 409);
+  assert.deepEqual(stale.details, STALE);
+  const fresh = await f.preview(jql, projectId);
+  assert.deepEqual(titled(fresh), [apiOnly, both, webOnly]);
+  const saved = await f.request<SavedView>(IMPORT, 'POST', { ...input, revision: fresh.revision }, 201);
+  assert.equal(saved.layout, 'board');
+  assert.deepEqual(saved.filters, fresh.filters);
+  const backup = await f.request<WorkspaceSnapshot>('/export');
+  await f.request('/import', 'POST', { data: backup });
+  const [restored] = await f.request<SavedView[]>(`/views?projectId=${projectId}`);
+  assert.deepEqual(restored.filters, saved.filters);
+  const current = await f.snapshot();
+  const restoredSchema = await f.request<ProjectIssueSchema>(schemaPath);
+  assert.deepEqual(current.issues.filter(createIssueViewMatcher(restored.filters, current, restoredSchema)).map(issue => issue.title).sort(),
+    titled(fresh));
+  assert.deepEqual((await f.preview(nameCondition, projectId)).issues, original.issues);
+});
+
+test('Jira component preview requires a proven source project and distinguishes omitted data from empty values', async t => {
+  const f = await fixture(t);
+  const component = { id: '24301', name: 'Shared' };
+  const source = { id: '24300', key: 'COMPVALID' };
+  const known = { ...source, fields: { summary: 'Component provided', components: [component] } };
+  const projectId = await f.migrateJira('component-partial', [known, { ...source, fields: { summary: 'Component omitted' } }], 'TEAMVALID');
+  const review = await f.preview(`component = ${component.name}`, projectId);
+  assert.deepEqual(review.issues.map(value => value.title), [known.fields.summary]);
+  await f.request(PREVIEW, 'POST', { projectId, jql: 'component IS EMPTY' }, 400);
+  await f.request(PREVIEW, 'POST', { projectId, jql: `component != ${component.id}` }, 400);
+
+  const merged = await f.migrateJira('component-merged-projects', [known, {
+    id: '24400', key: 'COMPOTHER', fields: { components: [{ ...component, id: '24401' }] },
+  }], 'TEAMMERGED');
+  assert.equal((await f.preview(`project = "${merged}"`, merged)).total, 2);
+  await f.request(PREVIEW, 'POST', { projectId: merged, jql: `project = "${merged}" AND component = ${component.name}` }, 400);
+  await f.request(PREVIEW, 'POST', { projectId: PROJECT_ID, jql: `component = ${component.id}` }, 400);
+});
+
+test('Jira component preview uses proven append mappings and rejects a later key for an earlier name-only assignment', async t => {
+  const f = await fixture(t);
+  const instance = 'jira-component-append';
+  const origin = { id: '24500', key: 'COMPRUN' };
+  const targetKey = 'TEAMRUN';
+  const projectId = await f.migrateJira(instance, [{ ...origin, issueId: '24511' }], targetKey);
+  const baseline = (await f.snapshot()).issues.find(issue => issue.projectId === projectId);
+  assert.ok(baseline);
+  const schemaPath = `/projects/${projectId}/issue-schema`;
+  const schema = await f.request<ProjectIssueSchema>(schemaPath);
+  const practices = { id: '24501', name: 'Runbooks' };
+  const tooling = { id: '24502', name: 'Automation' };
+  const nativeByName = { id: 'team_runbooks', name: practices.name, archived: false };
+  const field = { id: 'team_area', name: 'Team area', kind: 'multi_select', description: '', required: false,
+    issueTypes: [], archived: false, options: [nativeByName] };
+  const withNativeField = await f.request<ProjectIssueSchema>(schemaPath, 'PATCH', {
+    ...schema, expectedVersion: schema.version, fields: [...schema.fields, field],
+  });
+  const append = (issues: JiraSourceIssue[]) => f.migrateJira(instance, issues, targetKey, options => {
+    const componentField = options.fields.find(option => option.sourceValue === 'jira:components');
+    assert.ok(componentField);
+    return { appendTo: {
+      projectId,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, baseline.status])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, baseline.type])),
+      fields: { [componentField.id]: field.id },
+    } };
+  });
+  const firstTitle = 'First runbook imported by name';
+  await append([{ ...origin, issueId: '24512', fields: { summary: firstTitle, components: [practices] } }]);
+  const byName = (await f.snapshot()).issues.find(issue => issue.projectId === projectId && issue.title === firstTitle);
+  assert.deepEqual(byName?.customFields?.[field.id], [nativeByName.id]);
+
+  const keyedPractice = importedCustomFieldOptionId(field.id, practices.id);
+  const keyedTooling = importedCustomFieldOptionId(field.id, tooling.id);
+  await f.request(schemaPath, 'PATCH', {
+    ...withNativeField, expectedVersion: withNativeField.version, fields: withNativeField.fields.map(value => value.id === field.id ? {
+      ...value, options: [...value.options, { id: keyedPractice, name: 'Jira runbooks', archived: false },
+        { id: keyedTooling, name: 'Jira automation', archived: false }],
+    } : value),
+  });
+  const keyedTitle = 'Second runbook imported by key';
+  const toolingTitle = 'Automation imported by key';
+  await append([
+    { ...origin, issueId: '24513', fields: { summary: keyedTitle, components: [practices] } },
+    { ...origin, issueId: '24514', fields: { summary: toolingTitle, components: [tooling] } },
+  ]);
+  const current = (await f.snapshot()).issues.filter(issue => issue.projectId === projectId);
+  for (const [title, id] of [[firstTitle, nativeByName.id], [keyedTitle, keyedPractice], [toolingTitle, keyedTooling]]) {
+    assert.deepEqual(current.find(issue => issue.title === title)?.customFields?.[field.id], [id], title);
+  }
+
+  const known = await f.preview(`component = ${tooling.id}`, projectId);
+  assert.deepEqual(known.issues.map(issue => issue.title), [toolingTitle]);
+  assert.deepEqual((await f.preview(`component = ${tooling.name}`, projectId)).filters, known.filters);
+  for (const value of [practices.id, practices.name]) {
+    const unproven = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql: `component = ${value}` }, 400);
+    assert.match(unproven.error, /컴포넌트/u);
+  }
 });
 
 test('Jira deadline saved views match imported source dates and preserve native date bounds in backup', async t => {

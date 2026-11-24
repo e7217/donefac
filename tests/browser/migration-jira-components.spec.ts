@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse, type Response } from '@playwright/test';
-import type { IssueFieldBreakdown, LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { IssueFieldBreakdown, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationPreview, SavedView, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
@@ -49,6 +49,7 @@ test('360px Jira 컴포넌트 이관에서 여러 멤버십을 보존하고 업�
   const { projects: [homeProject] } = await snapshot();
   let source: LegacyPackageSummary | undefined;
   let importedProjects: string[] = [];
+  let savedView: SavedView | undefined;
 
   try {
     await page.goto(`/#/${homeProject.id}/settings`);
@@ -146,6 +147,36 @@ test('360px Jira 컴포넌트 이관에서 여러 멤버십을 보존하고 업�
     await expect(list.getByText(storageTitle, { exact: true })).toBeVisible();
     await expect(list.getByText(emptyTitle, { exact: true })).toHaveCount(0);
 
+    const byName = await json<JiraSavedViewPreview>(await request.post('/api/views/jira/preview', {
+      data: { projectId: project.id, jql: `component = "${searchComponent}"` },
+    }));
+    expect(byName.issues.map(issue => issue.id)).toEqual([both.id]);
+    await json(await request.post('/api/views/jira/preview', {
+      data: { projectId: project.id, jql: 'component = 7211' },
+    }), 400);
+
+    await page.getByRole('button', { name: 'Jira 필터 옮기기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Jira 필터 옮기기', exact: true });
+    await dialog.getByLabel('Jira 검색식 (JQL)', { exact: true }).fill(`project = ${projectKey} AND component = 7111`);
+    const previewing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/views/jira/preview');
+    await dialog.getByRole('button', { name: '조건 미리보기', exact: true }).click();
+    const componentPreview = await json<JiraSavedViewPreview>(await previewing);
+    expect(componentPreview.issues.map(issue => issue.id)).toEqual([both.id]);
+    expect(componentPreview.filters.fieldFilter?.rules).toEqual([{ fieldId: field.id, operator: 'includes', value: searchId }]);
+    await expect(dialog.getByRole('list', { name: '적용할 검색 조건' })).toContainText(searchComponent);
+    await dialog.getByLabel('보기 이름', { exact: true }).fill(`검색 컴포넌트 ${suffix}`);
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/views/jira/import');
+    await dialog.getByRole('button', { name: '공유 보기 저장', exact: true }).click();
+    savedView = await json<SavedView>(await saving, 201);
+    await expect(page.getByLabel('저장된 업무 보기', { exact: true })).toHaveValue(savedView.id);
+    await expect(list.getByText(storageTitle, { exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(chart.locator(`[data-issue-id="${both.id}"]`)).toBeVisible();
+    await expect(chart.locator(`[data-issue-id="${storageOnly.id}"]`)).toHaveCount(0);
+    await page.reload();
+    await expect(chart.locator(`[data-issue-id="${both.id}"]`)).toBeVisible();
+
     await page.goto(`/#/${project.id}/reports`);
     await page.getByRole('tab', { name: '필드 집계', exact: true }).click();
     const query = page.getByRole('form', { name: '필드 집계 조회 조건', exact: true });
@@ -166,6 +197,7 @@ test('360px Jira 컴포넌트 이관에서 여러 멤버십을 보존하고 업�
     await expect(drilldown.getByRole('button', { name: `${storageOnly.key} ${storageTitle}`, exact: true })).toBeVisible();
     await expect(drilldown.getByText(emptyTitle, { exact: false })).toHaveCount(0);
   } finally {
+    if (savedView) await request.delete(`/api/views/${savedView.id}?expectedVersion=${savedView.version}`);
     if (importedProjects.length) {
       const current = await snapshot();
       for (const issue of current.issues.filter(issue => importedProjects.includes(issue.projectId))) {

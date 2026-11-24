@@ -41,6 +41,9 @@ const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_selec
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 export const importedStatusId = (source: LegacySource, value: string) => `s_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
 export const importedIssueTypeId = (source: LegacySource, value: string) => `t_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
+export const importedCustomFieldId = (source: Pick<LegacySource, 'product' | 'instanceKey'>, value: string) =>
+  `f_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
+export const importedCustomFieldOptionId = (fieldId: string, value: string) => `o_${hash(fieldId, value).slice(0, 24)}`;
 export { optionId as migrationOptionId };
 const qualified=(packageId:string,row:LegacyRecord)=>`${packageId}/${row.id}`;
 const string=(value:unknown)=>typeof value==='string'?value:typeof value==='number'||typeof value==='boolean'?String(value):'';
@@ -870,7 +873,7 @@ class Planner{
     const hashes: JiraMigrationCustomFieldHashes = {};
     const seen = new Set<string>();
     for (const option of this.jiraCustomSourceOptions(entry, true)) {
-      const fieldId = mapping ? mapping[option.id] : `f_${hash(entry.pkg.dataset.source.product,entry.pkg.dataset.source.instanceKey,option.sourceValue).slice(0,24)}`;
+      const fieldId = mapping ? mapping[option.id] : importedCustomFieldId(entry.pkg.dataset.source, option.sourceValue);
       const field = definitions.find(field => field.id === fieldId);
       if (!field || field.archived || !fieldApplies(field, issue.type) || !mapping && this.configuration.fields[option.id] !== field.kind) continue;
       const canonical = issue.customFields && Object.hasOwn(issue.customFields, field.id) ? issue.customFields[field.id] : undefined;
@@ -899,7 +902,7 @@ class Planner{
       if (raw === undefined) continue;
       const archivedOptionId = optionId(stagingId, 'field', sourceFieldId);
       const fieldId = configuration.appendTo ? configuration.appendTo.fields[archivedOptionId]
-        : `f_${hash(archive.source.product,archive.source.instanceKey,sourceFieldId).slice(0,24)}`;
+        : importedCustomFieldId(archive.source, sourceFieldId);
       const field = fieldId && definitions.get(fieldId);
       if (!field || !configuration.appendTo && configuration.fields[archivedOptionId] !== field.kind) continue;
       const values = mappings.get(field.id) ?? [];
@@ -2199,7 +2202,7 @@ class Planner{
       const rawId = string(row.metadata.originalId);
       if (!rawId) continue;
       const instance = pkg.dataset.source.instanceKey;
-      const fieldId = `f_${hash('jira', instance, JIRA_COMPONENTS_FIELD_ID).slice(0,24)}`;
+      const fieldId = importedCustomFieldId(pkg.dataset.source, JIRA_COMPONENTS_FIELD_ID);
       for (const reference of row.references) {
         if (reference.kind !== 'project' || reference.relation !== 'project') continue;
         const project = this.projectsByContainer.get(optionId(pkg.summary.id, 'container', reference.sourceId));
@@ -2223,7 +2226,7 @@ class Planner{
         if (!catalog) projectCatalogs.set(fieldId, catalog = {
           instance, label: option.label, description: definition.row.text.slice(0, 20000), choices: [],
         });
-        catalog.choices.push({ id: `o_${hash(fieldId, rawId).slice(0,24)}`, name: row.title, scope });
+        catalog.choices.push({ id: importedCustomFieldOptionId(fieldId, rawId), name: row.title, scope });
       }
     }
     for (const [schema, grouped] of catalogs) {
@@ -2261,7 +2264,7 @@ class Planner{
         this.noticeArchivedCustomField(entry, option);
         continue;
       }
-      const fieldId = `f_${hash(entry.pkg.dataset.source.product, entry.pkg.dataset.source.instanceKey, option.sourceValue).slice(0,24)}`;
+      const fieldId = importedCustomFieldId(entry.pkg.dataset.source, option.sourceValue);
       let definition = schema.fields.find(field => field.id === fieldId);
       if (definition && definition.kind !== kind) {
         this.notice('FIELD_MAPPING_CONFLICT', '같은 원본 필드를 다른 자료형으로 매핑했습니다.', 'error', entry);
@@ -2276,7 +2279,7 @@ class Planner{
           required: false, issueTypes: [], options: [], archived: false };
         if (kind === 'select' || kind === 'multi_select') {
           definition.options = (this.sourceOptions.get(entry.pkg.summary.id)?.get(option.sourceValue) ?? []).map(row => ({
-            id: `o_${hash(fieldId, string(row.metadata.originalId) || row.sourceId).slice(0,24)}`, name: row.title,
+            id: importedCustomFieldOptionId(fieldId, string(row.metadata.originalId) || row.sourceId), name: row.title,
             archived: ['Y', 'true', '1'].includes(string(row.metadata.disabled)),
           }));
         }
@@ -2405,7 +2408,7 @@ class Planner{
       const optionEntry = this.sourceEntry(entry, 'option', direct?.containerId === sourceId ? id : `${sourceId}:${id}`);
       const original = optionEntry?.row;
       const label = string(objectValue.value || objectValue.name) || original?.title || id;
-      const optionId = `o_${hash(definition.id,id).slice(0,24)}`;
+      const optionId = importedCustomFieldOptionId(definition.id, id);
       if (refresh?.originalMapping === 'generated') return optionId;
       const jiraComponent = sourceId === JIRA_COMPONENTS_FIELD_ID;
       if (jiraComponent && !refresh?.originalMapping && (!optionEntry ||

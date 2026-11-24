@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { expect, test as base, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
 import type {
   DocPage, DocRevision, Issue, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult,
-  MigrationOptions, MigrationPreview, SavedView, User, WorkspaceSnapshot,
+  MigrationOptions, MigrationPreview, ProjectIssueSchema, SavedView, User, WorkspaceSnapshot,
 } from '../../shared/types';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const beforeList = '공유할 운영 절차입니다.';
 const afterList = '업무 표 다음의 회의 기록입니다.';
 const archivedUrl = 'https://legacy-jira.example.test/sr/jira.issueviews:searchrequest-xml/123/SearchRequest-123.xml';
+const releaseComponent = 'Release operations';
+const renamedReleaseComponent = '배포 운영';
 
 async function read<T>(response: Pick<APIResponse, 'status' | 'text'>, status = 200): Promise<T> {
   const body = await response.text();
@@ -39,10 +41,11 @@ function wikiExport(key: string, title: string, jql: string) {
 
 function jiraExport(key: string, suffix: string, login: string) {
   return Buffer.from([
-    'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Assignee,Priority,Due Date',
-    ...[['1', `배포 예정 ${suffix}`, 'High', '2026-11-25'], ['2', `다른 마감 업무 ${suffix}`, 'Low', '2026-11-27']].map(([id, title, priority, dueDate]) =>
+    'Issue id,Issue key,Project id,Project key,Project name,Summary,Created,Updated,Status,Issue Type,Assignee,Priority,Due Date,Component/s',
+    ...[['1', `배포 예정 ${suffix}`, 'High', '2026-11-25', releaseComponent],
+      ['2', `다른 마감 업무 ${suffix}`, 'Low', '2026-11-27', 'Release research']].map(([id, title, priority, dueDate, component]) =>
       [id, `${key}-${id}`, '20800', key, 'Original Jira project', title,
-        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 'Open', 'Task', login, priority, dueDate].join(',')),
+        '2020-01-01T00:00:00Z', '2020-01-02T00:00:00Z', 'Open', 'Task', login, priority, dueDate, component].join(',')),
   ].join('\r\n'));
 }
 
@@ -90,7 +93,7 @@ async function remove(request: APIRequestContext, path: string) {
 
 type Fixture = {
   original: DocPage; jiraProjectId: string; jql: string; suffix: string; matched: Issue; unmatched: Issue;
-  assignee: User; secondActor: User;
+  assignee: User; secondActor: User; componentFieldId: string; componentOptionId: string;
 };
 const test = base.extend<{ migratedJiraList: Fixture }>({
   migratedJiraList: [async ({ request }, provide) => {
@@ -98,7 +101,7 @@ const test = base.extend<{ migratedJiraList: Fixture }>({
     const jiraKey = `JR${suffix}`, wikiKey = `WK${suffix}`;
     const login = `legacy_owner_${suffix}`;
     const title = `이관한 배포 문서 ${suffix}`;
-    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND priority = High AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY due DESC`;
+    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND priority = High AND component = "${releaseComponent}" AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY due DESC`;
     const { users: [assignee, secondActor] } = await workspace(request);
     expect(assignee).toBeDefined();
     expect(secondActor).toBeDefined();
@@ -120,7 +123,19 @@ const test = base.extend<{ migratedJiraList: Fixture }>({
       expect(original.content.content?.filter(node => node.type === 'codeBlock')).toHaveLength(2);
       expect(matched.assigneeId).toBe(assignee.id);
       expect([matched.priority, unmatched.priority]).toEqual(['high', 'low']);
-      await provide({ original, jiraProjectId, jql, suffix, matched, unmatched, assignee, secondActor });
+      const schemaPath = `/api/projects/${jiraProjectId}/issue-schema`;
+      const schema = await read<ProjectIssueSchema>(await request.get(schemaPath));
+      const field = schema.fields.find(candidate => candidate.name === 'Jira 컴포넌트');
+      const option = field?.options.find(candidate => candidate.name === releaseComponent);
+      if (!field || !option) throw new Error('The Jira archive did not preserve the release component.');
+      await read<ProjectIssueSchema>(await request.patch(schemaPath, { data: {
+        ...schema, expectedVersion: schema.version,
+        fields: schema.fields.map(candidate => candidate.id === field.id ? { ...field,
+          options: field.options.map(value => value.id === option.id ? { ...value, name: renamedReleaseComponent } : value),
+        } : candidate),
+      } }));
+      await provide({ original, jiraProjectId, jql, suffix, matched, unmatched, assignee, secondActor,
+        componentFieldId: field.id, componentOptionId: option.id });
     } finally {
       const snapshot = await workspace(request);
       if (wikiProjectId) {
@@ -156,8 +171,10 @@ async function openReview(page: Page, editor: Locator, fixture: Fixture) {
   expect(preview.issues.map(issue => issue.id)).toEqual([fixture.matched.id]);
   expect(preview.sort).toEqual([{ field: 'dueDate', direction: 'desc' }]);
   expect(preview.filters).toMatchObject({ status: fixture.matched.status, assigneeId: fixture.assignee.id, priorities: ['high'],
+    fieldFilter: { rules: [{ fieldId: fixture.componentFieldId, operator: 'includes', value: fixture.componentOptionId }] },
     planning: { dates: { mode: 'due', from: '2026-11-25', to: '2026-11-26' } } });
   await expect(review.getByText('우선순위 · 높음', { exact: true })).toBeVisible();
+  await expect(review.getByRole('list', { name: '적용할 검색 조건' })).toContainText(renamedReleaseComponent);
   await review.getByLabel('보기 이름', { exact: true }).fill(`이관한 업무 표 ${fixture.suffix}`);
   await expect(review.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true })).toHaveCount(0);
   return review;
@@ -243,8 +260,14 @@ test('360px에서 보관한 Confluence Jira 목록을 복원하고 초안과 원
   expect(refreshed.ok()).toBe(true);
   await expect(refreshButton).toBeEnabled();
   await expect(list).not.toContainText(f.unmatched.title);
-  await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
+  const prioritized = await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
     data: { expectedVersion: moved.version, priority: 'high' },
+  }));
+  await refreshButton.click();
+  await expect(refreshButton).toBeEnabled();
+  await expect(list).not.toContainText(f.unmatched.title);
+  await read<Issue>(await request.patch(`/api/issues/${f.unmatched.id}`, {
+    data: { expectedVersion: prioritized.version, customFields: { [f.componentFieldId]: [f.componentOptionId] } },
   }));
   await refreshButton.click();
   await expect(list).toContainText(f.unmatched.title);

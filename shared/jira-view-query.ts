@@ -1,9 +1,18 @@
 import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from './calendar.js';
+import { MAX_FIELD_FILTER_RULES } from './issue-field-filter.js';
 import {
   ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
   issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
 } from './issue-view.js';
-import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
+import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueFieldFilter, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
+
+export interface JiraViewComponentField {
+  fieldId: string;
+  name: string;
+  resolve: (value: string, quoted: boolean) => { kind: 'mapped'; targetId: string; label: string }
+    | { kind: 'ambiguous' | 'unmapped' } | undefined;
+  hasCompleteCoverage: boolean;
+}
 
 export interface JiraViewQueryContext {
   project: Pick<Project, 'id' | 'key' | 'name'>;
@@ -13,6 +22,7 @@ export interface JiraViewQueryContext {
   issueTypes: readonly Pick<IssueTypeDefinition, 'id' | 'name' | 'archived'>[];
   users: readonly Pick<User, 'id' | 'name' | 'email'>[];
   prepareSourceAliases?: (fields: readonly JiraViewAliasField[]) => JiraViewSourceAliasResolver | undefined;
+  prepareComponentField?: () => JiraViewComponentField | undefined;
 }
 
 export class JiraViewQueryError extends Error {
@@ -35,7 +45,7 @@ export type JiraViewSourceAlias = {
 } | { kind: 'ambiguous' | 'unmapped' };
 export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: string) => JiraViewSourceAlias | undefined;
 type ScalarField = 'project' | Exclude<JiraViewAliasField, 'priority'>;
-type Field = ScalarField | 'priority' | 'labels' | 'due';
+type Field = ScalarField | 'priority' | 'labels' | 'due' | 'component';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
 type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
   | { operator: '=' | '!=' | 'in' | 'not in'; values: Token[] }
@@ -43,12 +53,17 @@ type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
 );
 type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
+type ComponentClause = (BasicClause & { field: 'component' }) | { field: 'component'; offset: number; branches: ComponentClause[][] };
 type PriorityClause = { offset: number; values: Token[] };
 type DueClause = { field: 'due'; offset: number; from?: string; to?: string };
-type Clause = BasicClause | StatusClause | DueClause;
+type Clause = BasicClause | StatusClause | ComponentClause | DueClause;
 
 function isStatusClause(clause: Clause): clause is StatusClause {
   return clause.field === 'status' && ('branches' in clause || clause.operator === '=' || clause.operator === 'in');
+}
+
+function isComponentClause(clause: Clause): clause is ComponentClause {
+  return clause.field === 'component';
 }
 
 const MAX_TOKENS = 512;
@@ -64,8 +79,10 @@ const reservedWords = new Set([
 ]);
 const dueOperators = ['=', '<', '<=', '>', '>='];
 const fieldLabels: Record<Field, string> = {
-  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', priority: '우선순위', labels: '라벨', due: '목표 마감일',
+  project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', priority: '우선순위',
+  labels: '라벨', due: '목표 마감일', component: 'Jira 컴포넌트',
 };
+const disjunctionMessage = 'OR는 상태 조건끼리 또는 컴포넌트 조건끼리 연결할 수 있습니다. 다른 조건과 AND로 연결할 때는 OR 조건을 괄호로 묶어 주세요.';
 const priorities = (Object.keys(PRIORITY) as Priority[]).map(id => ({ id, label: PRIORITY[id] }));
 
 function isBare(token: Token, value: string): boolean {
@@ -132,7 +149,7 @@ function tokenize(query: string): Token[] {
 function parseField(token: Token): Field {
   const value = token.value.toLowerCase();
   switch (value) {
-    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'priority': case 'labels': case 'due':
+    case 'project': case 'status': case 'type': case 'assignee': case 'reporter': case 'priority': case 'labels': case 'due': case 'component':
       return value;
     case 'issuetype':
       return 'type';
@@ -185,18 +202,22 @@ class QueryParser {
     const first = this.conjunction(depth);
     const offset = this.current().offset;
     if (!this.consume('or')) return first;
-    const message = 'OR는 상태 조건끼리만 연결할 수 있습니다. 다른 조건과 AND로 연결할 때는 상태 OR 조건을 괄호로 묶어 주세요.';
-    if (!first.every(isStatusClause)) throw new JiraViewQueryError(message, offset);
+    if (first.every(isStatusClause)) return [{ field: 'status', offset, branches: this.branches(first, depth, offset, isStatusClause) }];
+    if (first.every(isComponentClause)) return [{ field: 'component', offset, branches: this.branches(first, depth, offset, isComponentClause) }];
+    throw new JiraViewQueryError(disjunctionMessage, offset);
+  }
+
+  private branches<T extends Clause>(first: T[], depth: number, offset: number, check: (clause: Clause) => clause is T): T[][] {
     const branches = [first];
     let separator = offset;
     while (true) {
       const branch = this.conjunction(depth);
-      if (!branch.every(isStatusClause)) throw new JiraViewQueryError(message, separator);
+      if (!branch.every(check)) throw new JiraViewQueryError(disjunctionMessage, separator);
       branches.push(branch);
       separator = this.current().offset;
       if (!this.consume('or')) break;
     }
-    return [{ field: 'status', offset, branches }];
+    return branches;
   }
 
   private conjunction(depth: number): Clause[] {
@@ -225,16 +246,22 @@ class QueryParser {
     if (this.consume('=')) return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
     if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
     if (base.field === 'priority' && this.consume('in')) return { ...base, operator: 'in', values: this.list(fieldLabels.priority, MAX_TOKENS) };
-    if (base.field === 'labels') {
-      if (this.consume('!=')) return { ...base, operator: '!=', values: [this.literal('제외할 라벨을 입력해 주세요.')] };
-      if (this.consume('in')) return { ...base, operator: 'in', values: this.list('라벨', ISSUE_VIEW_LABEL_FILTER_LIMIT) };
+    const isMultiValue = field === 'labels' || field === 'component';
+    if (isMultiValue) {
+      const label = fieldLabels[field];
+      const limit = field === 'labels' ? ISSUE_VIEW_LABEL_FILTER_LIMIT : MAX_TOKENS;
+      if (this.consume('!=')) {
+        const valueMessage = field === 'labels' ? '제외할 라벨을 입력해 주세요.' : '제외할 컴포넌트를 입력해 주세요.';
+        return { ...base, operator: '!=', values: [this.literal(valueMessage)] };
+      }
+      if (this.consume('in')) return { ...base, operator: 'in', values: this.list(label, limit) };
       if (this.consume('not')) {
-        this.expect('in', '라벨 제외 목록에는 NOT IN을 사용해 주세요.');
-        return { ...base, operator: 'not in', values: this.list('라벨', ISSUE_VIEW_LABEL_FILTER_LIMIT) };
+        this.expect('in', `${label} 제외 목록에는 NOT IN을 사용해 주세요.`);
+        return { ...base, operator: 'not in', values: this.list(label, limit) };
       }
     }
-    if ((base.field === 'assignee' || base.field === 'reporter' || base.field === 'labels') && this.consume('is')) {
-      const operator = base.field === 'labels' && this.consume('not') ? 'set' : 'empty';
+    if ((field === 'assignee' || field === 'reporter' || isMultiValue) && this.consume('is')) {
+      const operator = isMultiValue && this.consume('not') ? 'set' : 'empty';
       if (!this.consume('empty') && !this.consume('null')) throw new JiraViewQueryError('값이 비어 있는지 확인하려면 EMPTY 또는 NULL을 사용해 주세요.', this.current().offset);
       return { ...base, operator };
     }
@@ -500,6 +527,109 @@ function labelFilter(clauses: BasicClause[]): IssueViewLabelFilter | undefined {
   });
 }
 
+type ComponentRule = { operator: 'includes' | 'excludes'; value: string } | { operator: 'is_empty' | 'is_set'; value?: never };
+
+function componentRuleKey(rule: ComponentRule): string {
+  return `${rule.operator}:${rule.value ?? ''}`;
+}
+
+function incompatibleComponentRules(left: ComponentRule, right: ComponentRule) {
+  if (left.operator === right.operator) return false;
+  if (left.operator === 'is_empty' || right.operator === 'is_empty') return true;
+  return left.value !== undefined && right.value !== undefined && left.value === right.value;
+}
+
+/** Each group is an OR of rules. All groups must match. */
+function simplifyComponentGroups(groups: ComponentRule[][], offset: number): ComponentRule[][] {
+  const required = new Map<string, ComponentRule>();
+  let alternatives = groups.map(group => [...new Map(group.map(rule => [componentRuleKey(rule), rule])).values()]);
+  // A required term can leave just one viable alternative, which then becomes required itself.
+  for (;;) {
+    const before = required.size;
+    alternatives = alternatives.flatMap(group => {
+      const present = [...required.values()];
+      if (group.some(rule => required.has(componentRuleKey(rule)) ||
+          rule.operator === 'is_set' && present.some(known => known.operator !== 'is_empty'))) return [];
+      const possible = group.filter(rule => !present.some(known => incompatibleComponentRules(known, rule)));
+      if (!possible.length) throw new JiraViewQueryError('서로 충돌하는 컴포넌트 조건은 가져올 수 없습니다.', offset);
+      if (possible.length > 1) return [possible];
+      required.set(componentRuleKey(possible[0]), possible[0]);
+      return [];
+    });
+    if (before === required.size) break;
+  }
+  if (required.size > 1) required.delete(componentRuleKey({ operator: 'is_set' }));
+  const minimal: ComponentRule[][] = [];
+  for (const group of alternatives.sort((left, right) => left.length - right.length)) {
+    const keys = new Set(group.map(componentRuleKey));
+    if (!minimal.some(smaller => smaller.every(rule => keys.has(componentRuleKey(rule))))) minimal.push(group);
+  }
+  return [...[...required.values()].map(rule => [rule]), ...minimal];
+}
+
+function componentFilter(clauses: readonly ComponentClause[], context: JiraViewQueryContext) {
+  if (!clauses.length) return undefined;
+  const field = context.prepareComponentField?.();
+  const offset = clauses[0].offset;
+  if (!field) throw new JiraViewQueryError('선택한 프로젝트에서 이관한 Jira 컴포넌트 필드를 확인할 수 없습니다.', offset);
+
+  const labels = new Map<string, string>();
+  const collect = (conditions: readonly ComponentClause[]): ComponentRule[][] => {
+    return simplifyComponentGroups(conditions.flatMap(clause => {
+      if ('branches' in clause) {
+        const branches = clause.branches.map(collect);
+        if (branches.some(branch => branch.length !== 1)) {
+          throw new JiraViewQueryError('이 컴포넌트 OR 조합을 하나의 이슈 보기 조건으로 표현할 수 없습니다.', clause.offset);
+        }
+        return [branches.flatMap(branch => branch[0])];
+      }
+      if (!('values' in clause)) {
+        if (!field.hasCompleteCoverage) {
+          throw new JiraViewQueryError('이관 원본에서 컴포넌트 값 유무를 확인할 수 없습니다.', clause.offset);
+        }
+        return [[{ operator: clause.operator === 'empty' ? 'is_empty' : 'is_set' }]];
+      }
+      const excludes = clause.operator === '!=' || clause.operator === 'not in';
+      if (excludes && !field.hasCompleteCoverage) {
+        throw new JiraViewQueryError('이관 원본에서 컴포넌트 제외 조건의 결과를 확인할 수 없습니다.', clause.offset);
+      }
+      const rules: ComponentRule[] = clause.values.map(value => {
+        const source = field.resolve(value.value, value.kind === 'quoted');
+        if (source?.kind === 'ambiguous') {
+          throw new JiraViewQueryError('이관 원본에서 컴포넌트 값을 하나로 구분할 수 없습니다. 원본 컴포넌트와 이관 매핑을 확인해 주세요.', value.offset);
+        }
+        if (source?.kind !== 'mapped') {
+          throw new JiraViewQueryError('이관 원본에 대응하는 현재 Jira 컴포넌트 값을 찾을 수 없습니다.', value.offset);
+        }
+        labels.set(source.targetId, source.label);
+        return { operator: excludes ? 'excludes' : 'includes', value: source.targetId };
+      });
+      // Each exclusion must match, and native exclusions already require a present value.
+      return excludes ? rules.map(rule => [rule]) : [rules];
+    }), conditions[0].offset);
+  };
+
+  const groups = collect(clauses);
+  const match = groups.length === 1 && groups[0].length > 1 ? 'any' : 'all';
+  if (match === 'all' && groups.some(group => group.length > 1)) {
+    throw new JiraViewQueryError('이 컴포넌트 조합을 하나의 이슈 보기 조건으로 표현할 수 없습니다.', offset);
+  }
+  const rules = groups.flat();
+  if (rules.length > MAX_FIELD_FILTER_RULES) {
+    throw new JiraViewQueryError(`합쳐진 컴포넌트 조건은 최대 ${MAX_FIELD_FILTER_RULES}개까지 지정할 수 있습니다.`, offset);
+  }
+  const filter: IssueFieldFilter = { match, rules: rules.map(rule => ({ fieldId: field.fieldId, ...rule })) };
+  const label = rules.map(rule => {
+    switch (rule.operator) {
+      case 'is_empty': return '값 없음';
+      case 'is_set': return '값 있음';
+      case 'includes': return `포함 ${labels.get(rule.value)}`;
+      case 'excludes': return `제외 ${labels.get(rule.value)}`;
+    }
+  }).join(match === 'any' ? ' 또는 ' : ', ');
+  return { filter, label: `${field.name} · ${label}` };
+}
+
 /** Translate only conditions the normal project issue matcher can evaluate without approximation. */
 export function translateJiraViewQuery(query: unknown, context: JiraViewQueryContext): Translation {
   if (typeof query !== 'string') throw new JiraViewQueryError('JQL을 입력해 주세요.');
@@ -509,7 +639,8 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const { clauses, orderBy } = new QueryParser(tokenize(query)).parse();
   const aliasFields = new Set<JiraViewAliasField>();
   if (context.prepareSourceAliases) for (const clause of clauses) {
-    if (('values' in clause || 'branches' in clause) && clause.field !== 'project' && clause.field !== 'labels') aliasFields.add(clause.field);
+    if (('values' in clause || 'branches' in clause) &&
+        clause.field !== 'project' && clause.field !== 'labels' && clause.field !== 'component') aliasFields.add(clause.field);
   }
   const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
@@ -524,6 +655,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
       continue;
     }
     const { field } = clause;
+    if (field === 'component') continue;
     if (field === 'labels') {
       labelClauses.push(clause);
       continue;
@@ -565,12 +697,15 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const [priorityLabel] = issuePriorityLabelFilterLabels({ priorities: selectedPriorities });
   const due = dueFilter(dueClauses);
   if (due) filters.planning = { dates: due.dates };
+  const component = componentFilter(clauses.filter(isComponentClause), context);
+  if (component) filters.fieldFilter = component.filter;
   const fields = new Set(clauses.map(clause => clause.field));
   const criteria: Translation['criteria'] = [
     { field: 'project', label: projectCriterion(context) },
     ...[...fields].flatMap(field => {
       if (field === 'project' || field === 'labels') return [];
-      const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : field === 'priority' ? priorityLabel : conditions.get(field)?.label;
+      const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : field === 'priority' ? priorityLabel
+        : field === 'component' ? component?.label : conditions.get(field)?.label;
       return label === undefined ? [] : [{ field, label }];
     }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),

@@ -173,6 +173,8 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 `priority = High`나 `priority IN (11, "Blocker")`는 이관 기록에서 확인한 원본 이름과 ID를 사용합니다. `Highest`와 `Blocker`가 둘 다 **긴급**으로 이관됐다면 그 두 값을 함께 고르는 조건을 옮길 수 있습니다. 미리보기에서 현재 티켓의 우선순위까지 대조합니다. 저장한 보기는 이후에도 현재 Teamspace 우선순위로 조회합니다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
+`component = "Firmware"`나 `component IN (7111, 7112)`는 이관 기록으로 확인한 원본 이름과 ID를 사용합니다. 두 컴포넌트를 모두 고르려면 `component = 7111 AND component = 7112`를 사용합니다. 미리보기에는 현재 선택지 이름이 표시되며, 공유 보기와 복원한 Confluence 업무 목록은 현재 티켓의 **Jira 컴포넌트** 값으로 조회합니다. [Atlassian JQL 컴포넌트](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Component)
+
 `due >= "2026-11-01" AND due < "2026-12-01"`은 목표 마감일이 11월 안에 있는 업무를 고릅니다. 저장하면 목록·보드·간트와 문서 업무 목록에서 같은 조회 조건을 사용합니다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
 `ORDER BY due ASC, updated DESC`를 추가하면 목표 마감일과 수정일 정렬을 검토하고 공유 보기에 저장할 수 있습니다. 원본이 `Rank ASC`나 지원 범위 밖의 정렬을 지정한 경우 **프로젝트 정렬 사용**을 확인해 현재 Teamspace 업무 순서로 저장합니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
