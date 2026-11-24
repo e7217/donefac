@@ -1259,11 +1259,11 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `POST /api/schedule/row-edit/preview`는 `{projectId,issue:{id,expectedVersion},changes?,relatedDates?,dependencies?,rescheduleSuccessors?,reviewIncomingTeamBlockers?}`를 받는다. `changes`는 `startDate`, `endDate`, `dueDate` 중 바꿀 항목을 보낸다. 날짜는 `YYYY-MM-DD`로 지정하며 `null`로 비운다. `dependencies`에는 같은 기준 업무의 연결 작업을 최대 100건까지 보낸다. 기존 단일 작업용 `dependency`도 쓸 수 있으며 두 필드 중 하나를 선택한다. 각 작업의 `relatedIssue`는 `{id,expectedVersion}`으로 지정하며 기준 업무와 같은 프로젝트에 있어야 한다.
 
-연결 추가는 `{action:'add',relatedIssue,direction,type,lagDays}`를 사용한다. `direction`이 `predecessor`이면 `relatedIssue`가 기준 업무의 선행 업무이며, `successor`이면 후행 업무다. 기존 연결의 유형·간격 변경은 `{action:'update',id,expectedVersion,relatedIssue,type,lagDays}`를 사용하고, 해제는 `{action:'remove',id,expectedVersion,relatedIssue}`를 사용한다. 유형은 `FS`, `SS`, `FF`, `SF`를 지원하며 간격은 -3,650~3,650의 정수 근무일이다. 같은 연결이나 같은 방향의 업무 쌍에 대한 작업은 한 건만 지정한다. 순환 검사는 모든 추가·수정·해제를 적용한 상태를 기준으로 한다.
+연결 추가는 `{action:'add',relatedIssue,direction,type,lagDays}`를 사용한다. `direction`이 `predecessor`이면 `relatedIssue`가 기준 업무의 선행 업무이며, `successor`이면 후행 업무다. 기존 연결의 유형·간격 변경은 `{action:'update',id,expectedVersion,relatedIssue,type,lagDays,reverse?}`를 사용하고, 해제는 `{action:'remove',id,expectedVersion,relatedIssue}`를 사용한다. `reverse:true`는 같은 연결 ID의 방향을 바꾼다. 미리보기에는 제안한 방향과 `beforeDirection`에 기존 방향을 표시한다. 유형은 `FS`, `SS`, `FF`, `SF`를 지원하며 간격은 -3,650~3,650의 정수 근무일이다. 같은 연결이나 같은 방향의 업무 쌍에 대한 작업은 한 건만 지정한다. 순환 검사는 모든 추가·수정·해제를 적용한 상태를 기준으로 한다.
 
 연결할 상대 업무의 일정도 저장하려면 `relatedDates`에 `{issue:{id,expectedVersion},changes}`를 보낸다. 같은 프로젝트에 있는 별도 업무 한 건과 최소 한 개의 날짜 필드를 지정한다. 검토할 연결 변경을 반영한 뒤에도 두 업무 사이에 선후행 연결이 있어야 한다. 연결 경고는 두 업무의 제안 날짜를 사용해 계산한다.
 
-날짜 또는 연결을 바꾸면서 `rescheduleSuccessors: true`를 보내면 기준 업무와 `relatedDates` 업무의 입력 날짜를 고정하고 연결 변경 후의 선후행 관계로 후행 일정을 계산한다. 바뀌는 직접·간접 후행 업무도 `changes`에 포함된다. 모든 조건을 이미 충족하는 후행 업무는 날짜를 유지한다. 종료일이 목표 마감일을 넘으면 `warnings`에 표시하고, 필요한 날짜나 기존 근무일 기간을 계산할 수 없거나 고정 일정과 충돌하면 `errors`에 표시한다. 적용은 날짜가 바뀌지 않는 후행 업무 및 별도 선행 업무에 대한 변경도 검사한다. 생략하거나 `false`를 보내면 직접 지정한 날짜와 연결만 검토한다.
+날짜를 바꾸면서 `rescheduleSuccessors: true`를 보내면 기준 업무와 `relatedDates` 업무의 입력 날짜를 고정하고 연결 변경 후의 선후행 관계로 후행 일정을 계산한다. 날짜 입력 없이 연결만 바꿀 때는 추가·수정한 연결의 후행 업무부터 계산한다. 바뀌는 직접·간접 후행 업무도 `changes`에 포함된다. 모든 조건을 이미 충족하는 후행 업무는 날짜를 유지한다. 종료일이 목표 마감일을 넘으면 `warnings`에 표시하고, 필요한 날짜나 기존 근무일 기간을 계산할 수 없거나 고정 일정과 충돌하면 `errors`에 표시한다. 적용은 날짜가 바뀌지 않는 후행 업무 및 별도 선행 업무에 대한 변경도 검사한다. 생략하거나 `false`를 보내면 직접 지정한 날짜와 연결만 검토한다.
 
 날짜 제안으로 시작일 또는 종료일을 바꿀 때는 `reviewIncomingTeamBlockers: true`를 보낸다. 서버는 일반 날짜 변경의 차단 경고와 함께 시작일 또는 종료일을 바꾼 각 입력 업무로 들어오는 열린 프로젝트 간 차단 관계를 검증한다. 프로젝트 달력으로 FS·0근무일 조건을 확인하며, 선행 조건 충돌은 `errors`, 필요한 날짜가 미정인 관계는 `warnings`에 표시한다. 적용 시 선행 업무 버전과 관계의 방향·출처·버전을 비교한다. 확인한 관계가 없어도 새 관계가 생기면 적용은 `409`를 반환한다.
 

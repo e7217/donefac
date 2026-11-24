@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
 import type { Dependency, Issue, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import { applyGanttLink, linkApplyPath, reviewGanttLink } from './gantt-link-review';
 
 async function payload<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -206,11 +207,11 @@ test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연�
     await f.link(next, downstream);
     const g = gantt(page);
     let dateWrites = 0;
-    let linkDeletes = 0;
+    let linkApplies = 0;
     page.on('request', work => {
       const path = new URL(work.url()).pathname;
       if ((path === '/api/schedule/manual-apply' || path === '/api/schedule/apply') && work.method() === 'POST') dateWrites++;
-      if (path === `/api/dependencies/${removed.id}` && work.method() === 'DELETE') linkDeletes++;
+      if (path === linkApplyPath && work.method() === 'POST') linkApplies++;
     });
     await page.goto(`/#/${f.project.id}/gantt`);
     await g.search.fill(anchor.title);
@@ -247,23 +248,15 @@ test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연�
     const unlink = links.getByRole('button', { name: `${anchor.key}와 ${next.key} 연결 해제`, exact: true });
     await g.flow.getByRole('button', { name: '기준 업무로 이동', exact: true }).click();
     await expect(g.chart).toBeFocused();
-    const dismissUnlink = page.waitForEvent('dialog').then(async dialog => {
-      expect(dialog.type()).toBe('confirm');
-      await dialog.dismiss();
-    });
     await unlink.click();
-    await dismissUnlink;
-    await expect(nextStart).toHaveValue(d(4));
+    const dialog = page.getByRole('dialog', { name: '업무 연결 해제', exact: true });
+    expect((await reviewGanttLink(page, dialog)).preview.changes).toEqual([]);
     expect(dateWrites).toBe(0);
-    expect(linkDeletes).toBe(0);
+    expect(linkApplies).toBe(0);
     expect((await workspace(request)).dependencies.some(dependency => dependency.id === removed.id)).toBe(true);
-    await nextStart.press('Escape');
-    await expect(nextStart).toHaveValue('');
-
-    const unlinking = page.waitForResponse(response => new URL(response.url()).pathname === `/api/dependencies/${removed.id}` && response.request().method() === 'DELETE');
-    await unlink.click();
-    const unlinked = await unlinking;
-    expect(unlinked.ok(), await unlinked.text()).toBe(true);
+    expect((await applyGanttLink(page, dialog)).dependencyChanges).toBe(1);
+    await expect(dialog).toHaveCount(0);
+    expect(linkApplies).toBe(1);
     await expect(g.flow).toBeVisible();
     await expect(g.rows).toHaveCount(2);
     await expect(g.row(previous)).toHaveAttribute('data-dependency-focus-row', 'predecessor');
@@ -271,8 +264,12 @@ test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연�
     await expect(g.row(downstream)).toHaveCount(0);
     expect((await workspace(request)).dependencies.some(dependency => dependency.id === removed.id)).toBe(false);
     await g.close.click();
-    await expect(g.rows).toHaveCount(1);
+    await expect(g.flow).toHaveCount(0);
+    await expect(g.rows).toHaveCount(2);
     await expect(g.search).toHaveValue(anchor.title);
+    await expect(g.row(next)).toContainText('현재 보기 조건 밖');
+    await expect(nextStart).toHaveValue(d(4));
+    expect((await workspace(request)).issues.find(issue => issue.id === next.id)?.startDate).toBeNull();
   } finally {
     await f.close();
   }

@@ -8,6 +8,10 @@ export function dependencyPair(predecessorId: string, successorId: string) {
   return JSON.stringify([predecessorId, successorId]);
 }
 
+export function addsScheduleDependencyPair({ before, after }: ScheduleDependencyMutation) {
+  return Boolean(after && (!before || before.predecessorId !== after.predecessorId || before.successorId !== after.successorId));
+}
+
 export function projectScheduleDependencies(current: Dependency[], changes: ScheduleDependencyMutation[]) {
   const links = new Map(current.map(link => [link.id, link]));
   for (const { before, after } of changes) {

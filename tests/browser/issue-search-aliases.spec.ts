@@ -3,9 +3,10 @@ import { expect, test, type APIRequestContext, type APIResponse } from '@playwri
 import { contentReferences } from '../../shared/document-nodes';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 import type {
-  Dependency, DocPage, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project,
+  DocPage, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project,
   SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
 } from '../../shared/types';
+import { applyGanttLink, reviewGanttLink } from './gantt-link-review';
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text'>, expected = 200): Promise<T> {
   const body = await response.text();
@@ -397,12 +398,10 @@ test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현�
     await expect(options.nth(1)).toContainText(jiraAliasLabel);
     await expect(candidate).toHaveValue('');
     await candidate.selectOption(first.issue.id);
-    const creating = page.waitForResponse(response => new URL(response.url()).pathname === '/api/dependencies' && response.request().method() === 'POST');
-    await link.getByRole('button', { name: '업무 연결', exact: true }).click();
-    const created = await creating;
-    expect(created.request().postDataJSON()).toMatchObject({ predecessorId: anchor.id, successorId: first.issue.id });
-    expect(created.status(), await created.text()).toBe(201);
-    expect(await created.json() as Dependency).toMatchObject({ predecessorId: anchor.id, successorId: first.issue.id });
+    const review = await reviewGanttLink(page, link);
+    expect(review.input).toMatchObject({ issue: { id: anchor.id }, dependency: { action: 'add', relatedIssue: { id: first.issue.id } } });
+    expect((await applyGanttLink(page, link)).dependencyChanges).toBe(1);
+    expect((await snapshot()).dependencies).toContainEqual(expect.objectContaining({ predecessorId: anchor.id, successorId: first.issue.id }));
     await expect(link).toHaveCount(0);
 
     await chartSelect(anchor).check();

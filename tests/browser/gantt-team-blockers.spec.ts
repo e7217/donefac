@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
 import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import { applyGanttLink, reviewGanttLink } from './gantt-link-review';
 
 const title = '프로젝트 간 차단';
 const blockersPath = '/api/schedule/team-blockers';
@@ -92,7 +93,10 @@ test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차�
     const picker = button(page, '차트에서 연결');
     const dependencyWrites: string[] = [];
     page.on('request', outgoing => {
-      if (new URL(outgoing.url()).pathname === '/api/dependencies' && outgoing.method() !== 'GET') dependencyWrites.push(outgoing.method());
+      const path = new URL(outgoing.url()).pathname;
+      if ((path === '/api/dependencies' || path.startsWith('/api/dependencies/')) && outgoing.method() !== 'GET') {
+        dependencyWrites.push(outgoing.method());
+      }
     });
     const pickRows = async (successor: Issue) => {
       await picker.click();
@@ -162,13 +166,17 @@ test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차�
     await expect(localLink.getByLabel('선행 업무', { exact: true })).toHaveValue(source.id);
     await expect(localLink.getByLabel('후행 업무', { exact: true })).toHaveValue(local.id);
     await expect(localLink.getByLabel('연결 유형', { exact: true })).toHaveValue('FS');
-    const creating = waitMutation(page, '/api/dependencies');
-    await button(localLink, '업무 연결').click();
-    const dependency = await json<Dependency>(await creating, 201);
-    expect(dependency).toMatchObject({ predecessorId: source.id, successorId: local.id, type: 'FS', lagDays: 0 });
+    const { input, preview } = await reviewGanttLink(page, localLink);
+    expect(input).toMatchObject({ issue: { id: source.id, expectedVersion: source.version + 1 },
+      dependency: { action: 'add', direction: 'successor', relatedIssue: { id: local.id, expectedVersion: local.version }, type: 'FS', lagDays: 0 } });
+    expect(preview.dependencyChanges).toMatchObject([{ predecessorKey: source.key, successorKey: local.key, before: null,
+      after: { type: 'FS', lagDays: 0 } }]);
+    expect(await f.schedule()).toEqual(before);
+    expect(await applyGanttLink(page, localLink)).toMatchObject({ dependencyChanges: 1, updated: [] });
     await expect(localLink).toHaveCount(0);
-    expect(await f.schedule()).toEqual({ ...before, dependencies: [dependency] });
-    expect(dependencyWrites).toEqual(['POST']);
+    expect(await f.schedule()).toEqual({ ...before, dependencies: [expect.objectContaining({ predecessorId: source.id,
+      successorId: local.id, type: 'FS', lagDays: 0 })] });
+    expect(dependencyWrites).toEqual([]);
   } finally {
     await f.close();
   }

@@ -64,6 +64,12 @@ export class Store {
       BEGIN
         DELETE FROM schedule_dependency_removals WHERE predecessor_id=NEW.predecessor_id AND successor_id=NEW.successor_id;
       END;
+      CREATE TRIGGER IF NOT EXISTS clear_schedule_dependency_removal_on_direction_change
+      AFTER UPDATE OF predecessor_id, successor_id ON dependencies
+      WHEN OLD.predecessor_id<>NEW.predecessor_id OR OLD.successor_id<>NEW.successor_id
+      BEGIN
+        DELETE FROM schedule_dependency_removals WHERE predecessor_id=NEW.predecessor_id AND successor_id=NEW.successor_id;
+      END;
       CREATE TABLE IF NOT EXISTS issue_sequences(project_id TEXT PRIMARY KEY REFERENCES projects(id),next_number INTEGER NOT NULL);
       CREATE INDEX IF NOT EXISTS issues_project ON issues(project_id);
       CREATE INDEX IF NOT EXISTS documents_parent ON documents(parent_id);

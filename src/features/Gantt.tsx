@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type Ref } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePastePreview, type SchedulePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -14,7 +14,7 @@ import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shar
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
 import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
-import { api, ApiError, patch, post, remove } from '../lib/api';
+import { api, ApiError, post } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
@@ -144,6 +144,7 @@ type BulkDateSelection = { issues: Issue[]; dateDrafts: ChartDateDraft[] };
 type BulkLinkSelection = BulkDateSelection & { project: Project };
 type DependencyEditor = {
   dependency?: Dependency;
+  removal?: boolean;
   prefill?: DependencyPrefill;
   anchor?: { issueId: string; otherRole: RelatedIssueDirection };
   opener: HTMLButtonElement;
@@ -585,12 +586,13 @@ function ProjectGantt(props: GanttProps) {
       const discardableDrafts = [...draftsRef.current].filter(([id]) => !keepDates || !id.startsWith('dates:'));
       if (previewRef.current || discardableDrafts.some(([, value]) => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
-        const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
+        const awaitingLinkResult = draftsRef.current.get('dependency')?.awaitingResult ||
+          draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult ||
           draftsRef.current.get(BULK_DATES_DRAFT)?.awaitingResult;
         const awaitingFollowUpResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult || draftsRef.current.get(TEAM_BLOCKER_EDIT_DRAFT)?.awaitingResult;
         const awaitingScheduleResult = awaitingPasteResult || awaitingFollowUpResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
-        const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
+        const confirmation = awaitingLinkResult ? '연결 변경이 이미 적용됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
@@ -875,10 +877,8 @@ function ProjectGantt(props: GanttProps) {
   const rowEditCalendar = useMemo(() => rowEditProjectId ? calendarFor(rowEditProjectId) : undefined, [calendarFor, rowEditProjectId]);
   const editingDependency = linkEditor?.dependency;
   const latestDependency = editingDependency && data.dependencies.find(link => link.id === editingDependency.id);
-  const staleDependencyMessage = editingDependency && (!latestDependency
-    ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.'
-    : (latestDependency.version ?? 1) !== (editingDependency.version ?? 1)
-      ? '다른 작업자가 이 연결을 변경했습니다. 편집을 닫고 다시 열어 최신 연결을 확인하세요.' : undefined);
+  const staleDependencyMessage = editingDependency && !latestDependency
+    ? '이 연결이 더 이상 존재하지 않습니다. 편집을 닫고 현재 목록을 확인하세요.' : undefined;
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
   const project = allProjects ? undefined : projectsById.get(projectId);
   const hasProject = Boolean(project);
@@ -1894,53 +1894,58 @@ function ProjectGantt(props: GanttProps) {
     linkEditorFocusTarget.current = linkEditor?.opener ?? null;
     setLinkEditor(null);
   }
-  function cancelLinkEditor() {
-    if (busyRef.current || (draftsRef.current.get('dependency')?.dirty &&
-        !window.confirm('저장하지 않은 업무 연결 변경을 버릴까요?'))) return;
+  function cancelLinkEditor(awaitingResult = false) {
+    if (busyRef.current) return;
+    const confirmation = awaitingResult ? '연결 변경이 이미 적용됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
+      : draftsRef.current.get('dependency')?.dirty ? '저장하지 않은 업무 연결 변경을 버릴까요?' : undefined;
+    if (confirmation && !window.confirm(confirmation)) return;
     closeLinkEditor();
+    if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
   }
-  async function refreshAfterDependencyChange(message: string) {
+  async function previewDependency(input: DependencyInput, rescheduleSuccessors: boolean) {
+    const { predecessorId, successorId, type, lagDays } = input;
+    const predecessor = projectIssues.find(issue => issue.id === predecessorId);
+    const successor = projectIssues.find(issue => issue.id === successorId);
+    if (!predecessor || !successor || predecessor.projectId !== successor.projectId || staleDependencyMessage) {
+      throw new Error(staleDependencyMessage ?? '같은 프로젝트의 선행·후행 업무를 다시 확인해 주세요.');
+    }
+    const relatedIssue = { id: successor.id, expectedVersion: successor.version };
+    const savedLink = latestDependency && { id: latestDependency.id, expectedVersion: latestDependency.version ?? 1, relatedIssue };
+    const dependency: ScheduleRowDependencyEdit = savedLink
+      ? linkEditor?.removal ? { action: 'remove', ...savedLink }
+        : { action: 'update', ...savedLink, type, lagDays,
+          ...(predecessorId === latestDependency?.successorId ? { reverse: true } : {}) }
+      : { action: 'add', direction: 'successor', relatedIssue, type, lagDays };
+    const request: ScheduleRowEditInput = { projectId: predecessor.projectId,
+      issue: { id: predecessor.id, expectedVersion: predecessor.version }, changes: {}, dependency,
+      ...(rescheduleSuccessors && !linkEditor?.removal ? { rescheduleSuccessors: true } : {}) };
     try {
-      await refresh();
-      notify(message);
-    } catch (err) {
-      notify(`${message} 최신 목록을 불러오지 못했습니다. ${errorMessage(err)}`, 'error');
+      const result = await post<SchedulePastePreview>('/schedule/row-edit/preview', request);
+      if (result.errors.length) await refresh().catch(() => {});
+      return result;
+    } catch (cause) {
+      if (cause instanceof ApiError && [404, 409].includes(cause.status)) await refresh().catch(() => {});
+      throw cause;
     }
   }
-  async function saveDependency(input: DependencyInput) {
-    if (busyRef.current || staleDependencyMessage) return;
-    markBusy(true);
+  async function applyDependency(previewId: string) {
     try {
-      if (editingDependency) {
-        const { predecessorId, successorId, type, lagDays } = input;
-        const reverse = predecessorId === editingDependency.successorId && successorId === editingDependency.predecessorId;
-        await patch(`/dependencies/${encodeURIComponent(editingDependency.id)}`, {
-          expectedVersion: editingDependency.version ?? 1, type, lagDays, ...(reverse ? { reverse: true } : {}),
-        });
-      } else {
-        await post('/dependencies', input);
-      }
-      await refreshAfterDependencyChange(editingDependency ? '업무 연결을 수정했습니다.' : '선행·후행 업무를 연결했습니다.');
-      closeLinkEditor();
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => {});
-      throw err;
-    } finally {
-      markBusy(false);
+      return await api<SchedulePasteApplyResult>('/schedule/row-edit/apply', {
+        method: 'POST', headers: scheduleUndoHeaders(undoScope, props.actorId), body: JSON.stringify({ previewId }),
+      });
+    } catch (cause) {
+      if (cause instanceof ApiError && [404, 409].includes(cause.status)) await refresh().catch(() => {});
+      throw cause;
     }
   }
-  async function unlink(dependency: Dependency) {
-    if (busyRef.current || (scheduleFocus && !canLeave())) return;
-    markBusy(true);
-    try {
-      await remove(`/dependencies/${encodeURIComponent(dependency.id)}?expectedVersion=${dependency.version ?? 1}`);
-      await refreshAfterDependencyChange('선행·후행 연결을 해제했습니다.');
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 409 || err.status === 404)) await refresh().catch(() => {});
-      notify(errorMessage(err), 'error');
-    } finally {
-      markBusy(false);
-    }
+  async function reflectDependency(result: SchedulePasteApplyResult) {
+    rememberUndo(result.undoId);
+    setScheduleWarnings(result.warnings);
+    await refresh();
+    closeLinkEditor();
+    notify(result.updated.length ? '업무 연결과 후행 일정을 변경했습니다.'
+      : linkEditor?.removal ? '선행·후행 연결을 해제했습니다.'
+        : editingDependency ? '업무 연결을 수정했습니다.' : '선행·후행 업무를 연결했습니다.');
   }
   function goToToday() {
     const date = todayDate();
@@ -2652,7 +2657,7 @@ function ProjectGantt(props: GanttProps) {
             <span>{dependencyLabel(dependency)}</span>
             <div className="gantt-dependency-actions">
               <button className="issue-icon-button" type="button" onClick={event => showLinkEditor(event.currentTarget, { dependency })} disabled={busy} aria-label={`${predecessor.key}와 ${successor.key} 연결 수정`} title="연결 수정"><Pencil size={14} /></button>
-              <button className="issue-icon-button" type="button" onClick={() => unlink(dependency)} disabled={busy}
+              <button className="issue-icon-button" type="button" onClick={event => showLinkEditor(event.currentTarget, { dependency, removal: true })} disabled={busy}
                 data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined}
                 aria-label={`${predecessor.key}와 ${successor.key} 연결 해제`} title="연결 해제"><X size={14} /></button>
             </div>
@@ -2779,7 +2784,9 @@ function ProjectGantt(props: GanttProps) {
     {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch}
       issues={editingDependency || linkEditor.prefill || linkEditor.anchor ? projectIssues : scopedIssues} issueAliases={data.issueAliases}
       dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
-      staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={cancelLinkEditor} onSubmit={saveDependency} />}
+      staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={cancelLinkEditor}
+      scheduleReview={{ preview: previewDependency, apply: applyDependency, reflect: reflectDependency, remove: linkEditor.removal,
+        currentDependency: latestDependency, revision: latestDependency && `${latestDependency.id}:${latestDependency.version ?? 1}` }} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
       onClose={() => { if (canLeave()) setPlanAssignment(null); }}
       onApplied={updated => setSelected(previous => {

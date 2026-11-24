@@ -1,6 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import type { AutomaticSchedulePreview, Dependency, Issue, Milestone, ScheduleBaseline, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, Milestone, ScheduleBaseline, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import { applyGanttLink, reviewGanttLink } from './gantt-link-review';
 
 const snapshot = async (request: APIRequestContext) => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
 const addDays = (date: string, amount: number) => new Date(Date.parse(`${date}T00:00:00Z`) + amount * 86_400_000).toISOString().slice(0, 10);
@@ -26,13 +27,14 @@ test('360px 간트에서 업무 연결 유형과 음수 간격을 수정하고 �
     await create.getByLabel('후행 업무',{exact:true}).selectOption(successor.id);
     await create.getByLabel('연결 유형',{exact:true}).selectOption('SS');
     await create.getByLabel('추가 간격 근무일',{exact:true}).fill('1');
-    const created = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/dependencies'&&value.request().method()==='POST');
-    await create.getByRole('button',{name:'업무 연결',exact:true}).click();
-    const response = await created;
-    expect(response.status(),await response.text()).toBe(201);
-    const dependency = await response.json() as Dependency;
-    expect(dependency).toMatchObject({type:'SS',lagDays:1});
+    const creation = await reviewGanttLink(page, create);
+    expect(creation.input.dependency).toMatchObject({ action:'add',type:'SS',lagDays:1 });
+    expect(creation.preview.dependencyChanges).toMatchObject([{ predecessorKey:predecessor.key,successorKey:successor.key,
+      before:null,after:{type:'SS',lagDays:1} }]);
+    expect(await applyGanttLink(page, create)).toMatchObject({ dependencyChanges:1,updated:[] });
     await expect(create).toHaveCount(0);
+    const dependency = (await snapshot(request)).dependencies.find(value => value.predecessorId===predecessor.id && value.successorId===successor.id)!;
+    expect(dependency).toMatchObject({type:'SS',lagDays:1});
     const path = page.locator(`[data-dependency-id="${dependency.id}"]`);
     await expect(path).toHaveAttribute('data-dependency-type','SS');
     await expect(path).toHaveAttribute('data-predecessor-anchor','startDate');
@@ -43,12 +45,12 @@ test('360px 간트에서 업무 연결 유형과 음수 간격을 수정하고 �
     await expect(edit.getByLabel('연결 유형',{exact:true})).toHaveValue('SS');
     await edit.getByLabel('연결 유형',{exact:true}).selectOption('FF');
     await edit.getByLabel('추가 간격 근무일',{exact:true}).fill('-1');
-    const updated = page.waitForResponse(value=>new URL(value.url()).pathname===`/api/dependencies/${dependency.id}`&&value.request().method()==='PATCH');
-    await edit.getByRole('button',{name:'연결 변경 저장',exact:true}).click();
-    const mutation = await updated;
-    expect(mutation.ok(),await mutation.text()).toBeTruthy();
-    expect(mutation.request().postDataJSON()).toMatchObject({expectedVersion:dependency.version??1,type:'FF',lagDays:-1});
+    const update = await reviewGanttLink(page, edit);
+    expect(update.input.dependency).toMatchObject({ action:'update',id:dependency.id,expectedVersion:dependency.version??1,type:'FF',lagDays:-1 });
+    expect(update.preview.dependencyChanges).toMatchObject([{ before:{type:'SS',lagDays:1},after:{type:'FF',lagDays:-1} }]);
+    expect(await applyGanttLink(page, edit)).toMatchObject({ dependencyChanges:1,updated:[] });
     await expect(edit).toHaveCount(0);
+    expect((await snapshot(request)).dependencies.find(value=>value.id===dependency.id)).toMatchObject({type:'FF',lagDays:-1});
     await expect(connectionList).toContainText('-1근무일');
     await expect(path).toHaveAttribute('data-dependency-type','FF');
     await expect(path).toHaveAttribute('data-predecessor-anchor','endDate');

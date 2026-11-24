@@ -2150,6 +2150,7 @@ export interface SchedulePasteDependencyPair {
 export interface SchedulePasteDependencyChange extends SchedulePasteDependencyPair {
   before: Pick<Dependency, 'type' | 'lagDays'> | null;
   after: Pick<Dependency, 'type' | 'lagDays'> | null;
+  beforeDirection?: { predecessorKey: string; successorKey: string };
 }
 export interface SchedulePasteKeyMapping {
   inputKey: string;
@@ -2251,7 +2252,7 @@ export type ScheduleBlockerLinkInput =
 export const MAX_SCHEDULE_ROW_DEPENDENCY_EDITS = 100;
 export type ScheduleRowDependencyEdit =
   | { action: 'add'; relatedIssue: ScheduleRowIssue; direction: 'predecessor' | 'successor'; type: DependencyType; lagDays: number }
-  | { action: 'update'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue; type: DependencyType; lagDays: number }
+  | { action: 'update'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue; type: DependencyType; lagDays: number; reverse?: boolean }
   | { action: 'remove'; id: string; expectedVersion: number; relatedIssue: ScheduleRowIssue };
 export interface ScheduleRowEditInput {
   projectId: string;

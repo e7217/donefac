@@ -68,3 +68,62 @@
 .gantt-link-fields > .issue-dependent-search {
   grid-column: 1 / -1;
 }
+
+.gantt-link-follow-up {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.gantt-link-review {
+  display: grid;
+  gap: 10px;
+  margin: 0 20px 18px;
+  padding: 14px;
+  border: 1px solid #dae6de;
+  border-radius: 8px;
+  background: #f7faf8;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.gantt-link-review :is(h3, h4, dl, dd, p, ul) {
+  margin: 0;
+}
+
+.gantt-link-direction-review {
+  display: grid;
+  gap: 8px;
+}
+
+.gantt-link-direction-review dt,
+.gantt-link-review-list small {
+  font-weight: 600;
+  color: #557264;
+}
+
+.gantt-link-review-list {
+  max-height: 240px;
+  overflow: auto;
+  list-style: none;
+  padding: 0;
+}
+
+.gantt-link-review-list li {
+  display: grid;
+  gap: 3px;
+  padding: 8px 3px;
+  border-top: 1px solid #dae6de;
+}
+
+.gantt-link-review .gantt-link-review-messages {
+  padding: 8px 8px 8px 24px;
+}
+
+.gantt-link-review-warnings {
+  border-radius: 6px;
+  background: #fff8e8;
+  color: #695021;
+}

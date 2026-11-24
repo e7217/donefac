@@ -315,7 +315,9 @@ test('row edit preserves predecessor direction on update and shares link-only re
   const f = await fixture(t);
   const anchor = await f.issue('연결 수정할 업무');
   const predecessor = await f.issue('연결 유지할 선행 업무');
+  const untouched = await f.issue('해제와 무관한 후행 업무');
   const link = await f.link(predecessor, anchor);
+  await f.link(anchor, untouched);
   const update: ScheduleRowEditInput = {
     projectId: f.project.id, issue: versionOf(anchor), changes: { startDate: '2026-11-24' },
     dependency: { action: 'update', id: link.id, expectedVersion: link.version!, relatedIssue: versionOf(predecessor), type: 'SS', lagDays: -2 },
@@ -343,6 +345,7 @@ test('row edit preserves predecessor direction on update and shares link-only re
   const removal: ScheduleRowEditInput = {
     projectId: f.project.id, issue: versionOf(undone.updated[0]), changes: {},
     dependency: { action: 'remove', id: restored.id, expectedVersion: restored.version, relatedIssue: versionOf(predecessor) },
+    rescheduleSuccessors: true,
   };
   const removalReview = await f.review(removal);
   assert.deepEqual(removalReview.changes, []);
@@ -356,6 +359,188 @@ test('row edit preserves predecessor direction on update and shares link-only re
   assert.ok(replaced);
   assert.equal(replaced.id, link.id);
   assert.deepEqual(linkFields(replaced), linkFields(link));
+  assert.deepEqual((await f.workspace()).issues.find(issue => issue.id === untouched.id), untouched);
+});
+
+test('link-only row review adjusts the edited successor subtree and retries one applied result', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('새 선행 업무');
+  const target = await f.issue('이번에 연결할 후행 업무', { startDate: '2026-11-24', endDate: '2026-11-25' });
+  const downstream = await f.issue('필터 밖에서 영향을 받는 후행 업무', { startDate: '2026-11-26', endDate: '2026-11-27' });
+  const sibling = await f.issue('별도 관리 중인 기존 연결 업무');
+  await f.link(target, downstream);
+  await f.link(predecessor, sibling);
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(predecessor), changes: {},
+    dependency: { action: 'add', direction: 'successor', relatedIssue: versionOf(target), type: 'FS', lagDays: 1 },
+  };
+  const ordinary = await f.review(input);
+  reviewId(ordinary);
+  assert.deepEqual(ordinary.changes, []);
+  assert.ok(ordinary.warnings.some(warning => warning.includes(`${predecessor.key} → ${target.key}`) && warning.includes('2026-11-26')));
+
+  const reviewedInput = { ...input, rescheduleSuccessors: true };
+  const proposed = await f.review(reviewedInput);
+  const stale = reviewId(proposed);
+  assert.deepEqual(new Set(proposed.followUpIssueIds), new Set([target.id, downstream.id]));
+  const expected = new Map([
+    [target.id, ['2026-11-26', '2026-11-27']],
+    [downstream.id, ['2026-11-30', '2026-12-01']],
+  ]);
+  const proposedDates = (answer: SchedulePastePreview) => new Map(answer.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]]));
+  assert.deepEqual(proposedDates(proposed), expected);
+  assert.equal(findLink(await f.workspace(), predecessor, target), undefined);
+
+  const updated = await f.call<Issue>(`/issues/${downstream.id}`, 200, 'PATCH', { expectedVersion: downstream.version,
+    title: '검토 뒤 수정된 후행 제목' }, otherActor);
+  const before = await f.workspace();
+  await f.apply(stale, 409);
+  assert.deepEqual(await f.workspace(), before);
+  const fresh = await f.review(reviewedInput);
+  assert.deepEqual(proposedDates(fresh), expected);
+  const previewId = reviewId(fresh);
+  const applied = await f.apply(previewId);
+  assert.equal(applied.dependencyChanges, 1);
+  assert.deepEqual(new Map(applied.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), expected);
+  const saved = await f.workspace();
+  assert.ok(findLink(saved, predecessor, target));
+  for (const unchanged of [predecessor, sibling]) assert.deepEqual(saved.issues.find(issue => issue.id === unchanged.id), unchanged);
+  assert.equal(saved.issues.find(issue => issue.id === updated.id)?.title, updated.title);
+  assert.deepEqual(await f.apply(previewId), applied);
+  assert.deepEqual(await f.workspace(), saved);
+
+  const undone = await f.undo(applied.undoId);
+  assert.equal(undone.dependencyChanges, 1);
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])), new Map([target, downstream].map(issue => [issue.id, dates(issue)])));
+  assert.deepEqual((await f.workspace()).dependencies, before.dependencies);
+});
+
+test('link-only row review allows connecting an undated task when schedule adjustment is off', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('날짜가 있는 선행 업무');
+  const target = await f.issue('날짜를 입력하지 않은 후행 업무', { startDate: null, endDate: null });
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(predecessor), changes: {},
+    dependency: { action: 'add', direction: 'successor', relatedIssue: versionOf(target), type: 'FS', lagDays: 0 },
+  };
+  const blocked = await f.review({ ...input, rescheduleSuccessors: true });
+  assert.equal(blocked.previewId, null);
+  assert.ok(blocked.errors.some(error => error.message.includes(target.key)));
+  const preview = await f.review(input);
+  const warning = preview.warnings.find(value => value.includes('날짜 미정') && value.includes(`${target.key} 시작일`));
+  assert.ok(warning);
+  const result = await f.apply(reviewId(preview));
+  assert.deepEqual(result.updated, []);
+  assert.ok(result.warnings.includes(warning));
+  const saved = await f.workspace();
+  assert.ok(findLink(saved, predecessor, target));
+  assert.deepEqual(saved.issues.find(issue => issue.id === target.id), target);
+});
+
+test('reviewed reversal preserves link identity and records both sides before a guarded undo', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('기존 선행 업무');
+  const successor = await f.issue('기존 후행 업무');
+  const link = await f.link(predecessor, successor);
+  const before = await f.workspace();
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(successor), changes: {},
+    dependency: { action: 'update', id: link.id, expectedVersion: link.version!, relatedIssue: versionOf(predecessor),
+      type: 'SS', lagDays: -1, reverse: true },
+  };
+  await f.review({ ...input, dependency: { ...input.dependency, reverse: 'true' } }, 400);
+  const review = await f.review(input);
+  assert.deepEqual(review.dependencyChanges, [{
+    line: 1, predecessorKey: successor.key, predecessorTitle: successor.title, successorKey: predecessor.key, successorTitle: predecessor.title,
+    beforeDirection: { predecessorKey: predecessor.key, successorKey: successor.key },
+    before: { type: 'FS', lagDays: 0 }, after: { type: 'SS', lagDays: -1 },
+  }]);
+  assert.deepEqual(review.changes, []);
+  assert.deepEqual(await f.workspace(), before);
+  const previewId = reviewId(review);
+  const applied = await f.apply(previewId);
+  const saved = await f.workspace();
+  const reversed = findLink(saved, successor, predecessor);
+  assert.ok(reversed?.version);
+  assert.equal(findLink(saved, predecessor, successor), undefined);
+  assert.equal(reversed.id, link.id);
+  assert.ok(reversed.version > (link.version ?? 1));
+  assert.deepEqual(linkFields(reversed), { type: 'SS', lagDays: -1 });
+  const eventIds = new Set(before.activities.map(event => event.id));
+  const events = saved.activities.filter(event => !eventIds.has(event.id) && event.action === '선후행 방향 변경');
+  assert.equal(events.length, 2);
+  assert.deepEqual(new Set(events.map(event => event.resourceId)), new Set([predecessor.id, successor.id]));
+  for (const event of events) {
+    assert.equal(event.actorId, actor);
+    assert.ok(event.detail.includes(`${predecessor.key} → ${successor.key}`));
+    assert.ok(event.detail.includes(`${successor.key} → ${predecessor.key}`));
+  }
+  assert.deepEqual(await f.apply(previewId), applied);
+  assert.deepEqual(await f.workspace(), saved);
+  const undone = await f.undo(applied.undoId);
+  assert.equal(undone.dependencyChanges, 1);
+  assert.deepEqual(undone.updated, []);
+  const restored = findLink(await f.workspace(), predecessor, successor);
+  assert.ok(restored?.version);
+  assert.equal(restored.id, link.id);
+  assert.ok(restored.version > reversed.version);
+  assert.deepEqual(linkFields(restored), linkFields(link));
+});
+
+test('reviewed reversal rechecks cycles at preview, apply and undo', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('순환 경로의 시작');
+  const successor = await f.issue('순환 경로의 끝');
+  const firstMiddle = await f.issue('간접 경로의 첫 업무');
+  const lastMiddle = await f.issue('간접 경로의 마지막 업무');
+  const undoMiddle = await f.issue('되돌리기 직전 연결할 업무');
+  const link = await f.link(predecessor, successor);
+  await f.link(predecessor, firstMiddle);
+  await f.link(lastMiddle, successor);
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(successor), changes: {},
+    dependency: { action: 'update', id: link.id, expectedVersion: link.version!, relatedIssue: versionOf(predecessor),
+      type: 'FS', lagDays: 0, reverse: true },
+  };
+  const stale = reviewId(await f.review(input));
+  const bridge = await f.link(firstMiddle, lastMiddle);
+  const before = await f.workspace();
+  const cyclic = await f.review(input);
+  assert.equal(cyclic.previewId, null);
+  assert.ok(cyclic.errors.some(error => error.message.includes('순환')));
+  await f.apply(stale, 409);
+  assert.deepEqual(await f.workspace(), before);
+
+  await f.call(`/dependencies/${bridge.id}?expectedVersion=${bridge.version}`, 200, 'DELETE');
+  const applied = await f.apply(reviewId(await f.review(input)));
+  await f.link(successor, undoMiddle);
+  await f.link(undoMiddle, predecessor);
+  const beforeUndo = await f.workspace();
+  const blocked = await f.call<{ error: string }>(undoPath, 409, 'POST', { undoId: applied.undoId });
+  assert.match(blocked.error, /순환/u);
+  assert.deepEqual(await f.workspace(), beforeUndo);
+});
+
+test('a reviewed removal cannot restore a pair that was recreated through two later reversals', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('해제한 원래 선행 업무');
+  const successor = await f.issue('해제한 원래 후행 업무');
+  const original = await f.link(predecessor, successor);
+  const removal: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(predecessor), changes: {},
+    dependency: { action: 'remove', id: original.id, expectedVersion: original.version!, relatedIssue: versionOf(successor) },
+  };
+  const applied = await f.apply(reviewId(await f.review(removal)));
+  const newLink = await f.link(successor, predecessor);
+  const reversed = await f.call<Dependency>(`/dependencies/${newLink.id}`, 200, 'PATCH', { expectedVersion: newLink.version, reverse: true });
+  assert.equal(reversed.predecessorId, predecessor.id);
+  const restored = await f.call<Dependency>(`/dependencies/${reversed.id}`, 200, 'PATCH', { expectedVersion: reversed.version, reverse: true });
+  await f.call(`/dependencies/${restored.id}?expectedVersion=${restored.version}`, 200, 'DELETE');
+  const before = await f.workspace();
+  assert.equal(findLink(before, predecessor, successor), undefined);
+  assert.equal(findLink(before, successor, predecessor), undefined);
+  await f.undo(applied.undoId, 409);
+  assert.deepEqual(await f.workspace(), before);
 });
 
 test('row edit rejects apply after anchor, related issue, link or calendar changes with no partial date writes', async t => {

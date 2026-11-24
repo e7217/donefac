@@ -21,7 +21,7 @@ import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
 import { AutomaticScheduleService, AutomaticScheduleError, AUTO_RESULT_RETENTION_MS, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { SchedulePasteService, SchedulePasteError, type ScheduleDateMutation } from './schedule-paste.js';
-import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
+import { addsScheduleDependencyPair, dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedule-shift.js';
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
@@ -569,6 +569,13 @@ export function createApp(options: {
     }
     return warnings;
   };
+  const recordDependencyDirectionChange = (req: Request, prior: Dependency, undo = false) => {
+    const predecessor = get<Issue>('issues', prior.predecessorId), successor = get<Issue>('issues', prior.successorId);
+    const detail = `${predecessor.key} → ${successor.key}에서 ${successor.key} → ${predecessor.key}로 변경`;
+    const action = undo ? '선행 업무 연결 되돌리기' : '선후행 방향 변경';
+    activity(req, 'issue', predecessor.id, action, detail);
+    activity(req, 'issue', successor.id, action, detail);
+  };
   const writeScheduleDependencyChanges = (req:Request, changes:ScheduleDependencyMutation[], projectIds:Set<string>, undoId:string|null): ScheduleDependencyMutation[] => changes.map(change => {
     const {before,after} = change;
     const link = after ?? before!;
@@ -588,8 +595,11 @@ export function createApp(options: {
     const next = {...after,version};
     store.put('dependencies',next);
     trackDependencyVersion(version);
-    const action = undo ? '선행 업무 연결 되돌리기' : before ? '선후행 일정 변경' : '선행 업무 연결';
-    activity(req,'issue',link.successorId,action,`${predecessor.key} · ${next.type} ${next.lagDays}근무일`);
+    if (before && addsScheduleDependencyPair(change)) recordDependencyDirectionChange(req, before, undo);
+    else {
+      const action = undo ? '선행 업무 연결 되돌리기' : before ? '선후행 일정 변경' : '선행 업무 연결';
+      activity(req,'issue',link.successorId,action,`${predecessor.key} · ${next.type} ${next.lagDays}근무일`);
+    }
     return {before,after:next};
   });
   const prepareDependencyUndo = (undoId:string, changes:ScheduleDependencyMutation[]): ScheduleDependencyMutation[] => {
@@ -605,7 +615,11 @@ export function createApp(options: {
       if (after) {
         if (!saved || saved.version!==after.version || saved.type!==after.type || saved.lagDays!==after.lagDays ||
           saved.predecessorId!==after.predecessorId || saved.successorId!==after.successorId) fail('업무 연결이 변경되었습니다. 현재 연결을 확인해 주세요.',409);
-        return {before:after,after:before};
+        const reversal = {before:after,after:before};
+        if (before && addsScheduleDependencyPair(reversal) && pairs.has(dependencyPair(before.predecessorId,before.successorId))) {
+          fail('업무 연결이 변경되었습니다. 현재 연결을 확인해 주세요.',409);
+        }
+        return reversal;
       }
       const marker = removal.get(link.predecessorId,link.successorId);
       if (saved || pairs.has(dependencyPair(link.predecessorId,link.successorId)) || marker?.undo_id!==undoId) {
@@ -613,7 +627,7 @@ export function createApp(options: {
       }
       return {before:null,after:link};
     });
-    if (reverse.some(change=>!change.before) && hasScheduleDependencyCycle(projectScheduleDependencies(current,reverse))) {
+    if (reverse.some(addsScheduleDependencyPair) && hasScheduleDependencyCycle(projectScheduleDependencies(current,reverse))) {
       fail('되돌리면 업무 연결에 순환 관계가 생깁니다. 현재 연결을 확인해 주세요.',409);
     }
     return reverse;
@@ -2801,12 +2815,8 @@ export function createApp(options: {
       if(reverse)validateDependency(next);
       store.put('dependencies',next);
       trackDependencyVersion(version);
-      if(reverse){
-        const predecessor=get<Issue>('issues',prior.predecessorId),successor=get<Issue>('issues',prior.successorId);
-        const detail=`${predecessor.key} → ${successor.key}에서 ${successor.key} → ${predecessor.key}로 변경`;
-        activity(req,'issue',predecessor.id,'선후행 방향 변경',detail);
-        activity(req,'issue',successor.id,'선후행 방향 변경',detail);
-      }else activity(req,'issue',next.successorId,'선후행 일정 변경',`${prior.type} ${prior.lagDays}근무일 → ${next.type} ${next.lagDays}근무일`);
+      if(reverse)recordDependencyDirectionChange(req,prior);
+      else activity(req,'issue',next.successorId,'선후행 일정 변경',`${prior.type} ${prior.lagDays}근무일 → ${next.type} ${next.lagDays}근무일`);
       return next;
     });
     res.json(result);
