@@ -11,6 +11,7 @@ import { IssueGitlabDeployments } from './GitlabDeployments';
 type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   issueId: string;
   issueKey: string;
+  issueVersion: number;
   links: readonly GitlabLink[];
   disabled: boolean;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
@@ -26,7 +27,7 @@ function errorMessage(cause: unknown) {
   return cause instanceof Error ? cause.message : 'GitLab 연결 요청을 처리하지 못했습니다.';
 }
 
-export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify, disabled, onDraftChange }: Props) {
+export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, refresh, notify, disabled, onDraftChange }: Props) {
   const formHeading = useId(), unlinkHeading = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
@@ -322,7 +323,7 @@ export function IssueGitlabActivity({ issueId, issueKey, links, refresh, notify,
         <button className="btn issue-btn-danger" type="button" disabled={controlsDisabled || Boolean(staleTarget)} onClick={unlink}>연결 해제</button>
       </div>
     </div>}
-    {visibleLinks.length ? <GitlabActivityList links={visibleLinks} manualActions={{ disabled: controlsDisabled || actionOpen,
+    {visibleLinks.length ? <GitlabActivityList links={visibleLinks} issueVersions={new Map([[issueId, issueVersion]])} manualActions={{ disabled: controlsDisabled || actionOpen,
       verify: (link, trigger) => showEditor(trigger, link), unlink: showUnlink }} />
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
     <IssueGitlabDeployments issueId={issueId} links={links} />

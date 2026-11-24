@@ -1182,7 +1182,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         {bodyOnlyReferences.map(({ document }) => <div key={document.id}>{linkedDocumentRow(document)}</div>)}
       </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
-      <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} links={gitlabLinks} refresh={refresh} notify={notify}
+      <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} />
       <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}
         canPrepareStatus={canPrepareAutomationStatus} onPrepareStatus={prepareAutomationStatus} />

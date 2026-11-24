@@ -1421,6 +1421,20 @@ export interface GitlabMergeRequestReview {
     hasMore: boolean;
   } | null;
 }
+export interface GitlabBranchMergeRequests {
+  linkId: string;
+  repositoryId: number;
+  sourceBranch: string;
+  sourceSha: string;
+  defaultBranch: string | null;
+  targetBranch: string | null;
+  targetSha: string | null;
+  openMergeRequests: { iid: number; title: string; targetBranch: string; webUrl: string }[];
+  hasMore: boolean;
+  newMergeRequestUrl: string | null;
+  suggestedTitle: string;
+  checkedAt: string;
+}
 export interface GitlabIssueBranchTarget {
   repositoryId: number;
   repositoryPath: string;

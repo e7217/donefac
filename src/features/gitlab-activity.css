@@ -87,6 +87,49 @@
 .gitlab-branch-target dt { font-weight: 650; }
 .gitlab-branch-target dd { margin: 0; overflow-wrap: anywhere; }
 
+.gitlab-branch-mr-field {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  justify-self: stretch;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gitlab-branch-mr-field label {
+  display: grid;
+  flex: 1 1 12rem;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gitlab-branch-mr-field .field {
+  width: 100%;
+  min-width: 0;
+}
+
+.gitlab-branch-mr-list {
+  display: grid;
+  justify-self: stretch;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #dce8e1;
+  border-radius: 5px;
+  list-style: none;
+  background: #fff;
+}
+
+.gitlab-branch-mr-list li {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+  padding: 7px 9px;
+}
+
+.gitlab-branch-mr-list li + li { border-top: 1px solid #e5eee8; }
+
 .gitlab-activity-list {
   display: grid;
   gap: 13px;

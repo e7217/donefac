@@ -766,6 +766,12 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 `POST /api/issues/:id/gitlab-branch/reconcile`에 `{expectedSettingsVersion,repositoryId,branch,accessToken?}`을 보낸다. 기록된 시도와 GitLab의 현재 이름·SHA를 조회한다. 검토한 SHA와 일치하면 연결하고 `found`를 반환한다. 접속이 끊겼을 때도 생성 시도를 물리 DB에서 찾고 조회로만 확인한다. 다른 SHA는 `conflict`, 아직 GitLab에서 찾을 수 없으면 `pending`을 반환한다. 시도 자체가 남아 있지 않으면 `404`와 `attempt_missing`을 반환하므로 다시 미리본다. 저장한 요청으로 이전에 사용한 이름은 조회 대상으로 남으며 새 브랜치를 시작할 때는 다른 이름을 고른다. 프로젝트 이동 후에도 동일한 활성 티켓 ID에서 명시적으로 연결을 확인할 수 있다. 티켓 자동 전이는 기존의 인증된 이벤트와 활성 규칙을 따른다.
 
+### 연결 브랜치의 MR 확인
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/branch-merge-requests`는 연결된 활성 브랜치에서 같은 저장소를 대상으로 하는 열린 MR을 찾는다. 저장한 읽기 자격 증명으로 최대 50개씩 네 페이지를 조회한다. 선택적 `targetBranch`에는 같은 저장소의 브랜치 이름을 URL 인코딩해 보낸다. 열린 MR이 없고 조회가 끝났을 때 직접 입력한 브랜치 또는 저장소의 기본 브랜치를 확인한다. [GitLab MR 목록 API](https://docs.gitlab.com/api/merge_requests/#list-project-merge-requests) · [GitLab 브랜치 API](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch)
+
+응답은 `linkId`, `repositoryId`, `sourceBranch`, `sourceSha`, `defaultBranch`, `targetBranch`, `targetSha`, `openMergeRequests`, `hasMore`, `newMergeRequestUrl`, `suggestedTitle`, `checkedAt`을 반환한다. 열린 MR마다 `iid`, `title`, `targetBranch`, `webUrl`을 제공한다. 열린 MR이 없고 추가 페이지가 없으며 현재 커밋이 서로 다른 출발·대상 브랜치를 확인하면 `newMergeRequestUrl`에 GitLab 생성 화면 주소를 반환한다. 저장된 티켓 키와 제목은 복사용 `suggestedTitle`로 제공한다. 요청 중 연결·업무·브랜치가 바뀌면 `409`, 활성 연결·출발 브랜치·직접 입력한 대상을 찾지 못하면 `404`를 반환한다.
+
 ### MR 병합 상태
 
 열린 MR의 `GitlabLink.mergeReadiness`는 확인한 `state`, 기준 시각 `observedAt`, 출처 `source`를 담는다. `source`는 `read` 또는 `webhook`이다. 기존 MR 조회와 인증된 MR 이벤트에서 GitLab의 병합 상태를 읽는다. 확인한 사유는 `approval_required`, `changes_requested`, `conflict`, `ci_required` 등 제한된 값으로 반환한다. `checking`, `unknown` 또는 필드 부재는 별도로 표시되며 병합 확인 필터의 대상에서 빠진다. 병합하거나 닫힌 MR은 일반 링크의 수명주기 상태로 표시한다. [GitLab Merge Requests API](https://docs.gitlab.com/api/merge_requests/#merge-status) · [GitLab 웹훅](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events)

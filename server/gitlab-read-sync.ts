@@ -1,7 +1,7 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
+import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -28,6 +28,8 @@ const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 10_000;
 const MERGE_REQUEST_PAGE_SIZE = 100;
 const MAX_MERGE_REQUEST_PAGES = 10;
+const BRANCH_MERGE_REQUEST_PAGE_SIZE = 50;
+const MAX_BRANCH_MERGE_REQUEST_PAGES = 4;
 const PIPELINE_PAGE_SIZE = 50;
 const PIPELINE_JOB_PAGE_SIZE = 50;
 const MAX_PIPELINE_JOB_PAGES = 4;
@@ -71,7 +73,8 @@ export class GitlabReadError extends Error {
       'network': '연결 실패',
       'invalid-response': '응답 형식 오류',
       'response-too-large': '응답 크기 한도 초과',
-      'changed': stage === 'merge-request-review' ? 'MR이 변경되었습니다. 다시 확인해 주세요.' : '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
+      'changed': stage === 'branches' ? '브랜치가 변경되었습니다. 다시 확인해 주세요.'
+        : stage === 'merge-request-review' ? 'MR이 변경되었습니다. 다시 확인해 주세요.' : '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
   }
@@ -798,32 +801,129 @@ function invalidPipelineJobs(): never {
   throw new GitlabReadError('pipeline-jobs', 'invalid-response');
 }
 
-function pipelineJobsNextPage(headers: Headers, url: URL, page: number, rowCount: number): boolean {
+function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number,
+  stage: 'pipeline-jobs' | 'merge-requests'): boolean {
+  const invalid = () => { throw new GitlabReadError(stage, 'invalid-response'); };
   const next = headers.get('x-next-page');
-  if (next !== null && next !== '' && next !== String(page + 1)) invalidPipelineJobs();
+  if (next !== null && next !== '' && next !== String(page + 1)) invalid();
   const links = headers.get('link');
   let nextLink = false;
   if (links) for (const item of links.split(/,(?=\s*<)/u)) {
     const match = /^\s*<([^<>]+)>\s*;\s*rel\s*=\s*(?:"([^"<>]+)"|([\w-]+))\s*$/iu.exec(item);
-    if (!match) invalidPipelineJobs();
+    if (!match) return invalid();
     if (!(match[2] ?? match[3]).toLowerCase().split(/\s+/u).includes('next')) continue;
-    if (nextLink) invalidPipelineJobs();
+    if (nextLink) invalid();
     let target: URL;
     try { target = new URL(match[1], url); }
-    catch { return invalidPipelineJobs(); }
+    catch { return invalid(); }
     const pages = target.searchParams.getAll('page');
     if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
-      pages.length !== 1 || pages[0] !== String(page + 1)) invalidPipelineJobs();
+      pages.length !== 1 || pages[0] !== String(page + 1)) invalid();
     nextLink = true;
   }
-  const reportedNext = next !== null ? next !== '' : links !== null ? nextLink : rowCount === PIPELINE_JOB_PAGE_SIZE;
-  if ((next === '' && nextLink) || (rowCount === 0 && reportedNext)) invalidPipelineJobs();
+  const reportedNext = next !== null ? next !== '' : links !== null ? nextLink : rowCount === pageSize;
+  if ((next === '' && nextLink) || (rowCount === 0 && reportedNext)) invalid();
   return reportedNext;
 }
 
 function gitlabDisplayLabel(value: string, limit: number, token: string | null | undefined, fallback: string): string {
   const label = value.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, limit).toWellFormed();
   return label && !includesGitlabCredential(token, [value, label]) ? label : fallback;
+}
+
+type VerifiedProject = Awaited<ReturnType<typeof readVerifiedProject>>;
+type BranchMergeRequests = Omit<GitlabBranchMergeRequests, 'linkId' | 'repositoryId' | 'suggestedTitle' | 'checkedAt'>;
+
+function branchMergeRequest(row: GitlabReadObject, project: VerifiedProject, repositoryId: number,
+  sourceBranch: string, token: Connection['token']): GitlabBranchMergeRequests['openMergeRequests'][number] | null {
+  const { source_branch: source, target_branch: target, source_project_id: sourceId, target_project_id: targetId, iid, title } = row;
+  if (!isGitlabBranchName(source)) throw new GitlabReadError('merge-requests', 'invalid-response');
+  if (source !== sourceBranch) return null;
+  if (!positiveId(sourceId) || !positiveId(targetId) || (sourceId !== repositoryId && targetId !== repositoryId) ||
+      (row.project_id !== undefined && row.project_id !== targetId)) {
+    throw new GitlabReadError('merge-requests', 'invalid-response');
+  }
+  if (sourceId !== targetId) return null;
+  const page = manualPage(row.web_url, project.base, false);
+  if (row.state !== 'opened' || !positiveId(iid) || typeof title !== 'string' || !title.trim() ||
+      !isGitlabBranchName(target) || target === source ||
+      page?.kind !== 'merge_request' || page.repositoryPath !== project.repositoryPath || page.id !== iid) {
+    throw new GitlabReadError('merge-requests', 'invalid-response');
+  }
+  const webUrl = new URL(`${project.repositoryPath}/-/merge_requests/${iid}`, project.base.origin).href;
+  if (includesGitlabCredential(token, [target, webUrl])) throw new GitlabReadError('merge-requests', 'invalid-response');
+  return { iid, title: gitlabDisplayLabel(title, 255, token, `!${iid}`), targetBranch: target, webUrl };
+}
+
+async function readOpenBranchMergeRequests(project: VerifiedProject, repositoryId: number, sourceBranch: string,
+  token: Connection['token'], signal?: AbortSignal): Promise<Pick<BranchMergeRequests, 'openMergeRequests' | 'hasMore'>> {
+  const { projectUrl, headers } = project;
+  const url = new URL(projectUrl);
+  url.pathname += '/merge_requests';
+  url.search = new URLSearchParams({
+    scope: 'all', state: 'opened', source_branch: sourceBranch, per_page: String(BRANCH_MERGE_REQUEST_PAGE_SIZE),
+  }).toString();
+  const openMergeRequests = new Map<number, GitlabBranchMergeRequests['openMergeRequests'][number]>();
+  let hasMore = false;
+  for (let page = 1; page <= MAX_BRANCH_MERGE_REQUEST_PAGES; page++) {
+    url.searchParams.set('page', String(page));
+    let pagination = new Headers();
+    const rows = await readPage(url, headers, 'merge-requests', BRANCH_MERGE_REQUEST_PAGE_SIZE, signal, value => { pagination = value; });
+    for (const row of rows) {
+      const mergeRequest = branchMergeRequest(row, project, repositoryId, sourceBranch, token);
+      if (!mergeRequest) continue;
+      if (openMergeRequests.has(mergeRequest.iid)) throw new GitlabReadError('merge-requests', 'invalid-response');
+      openMergeRequests.set(mergeRequest.iid, mergeRequest);
+    }
+    hasMore = gitlabNextPage(pagination, url, page, rows.length, BRANCH_MERGE_REQUEST_PAGE_SIZE, 'merge-requests');
+    if (!hasMore) break;
+  }
+  return { openMergeRequests: Array.from(openMergeRequests.values()), hasMore };
+}
+
+export async function readGitlabBranchMergeRequests(connection: Connection, repositoryId: number, sourceBranch: string,
+  requestedTarget: string | null, signal?: AbortSignal): Promise<BranchMergeRequests> {
+  const { token } = connection;
+  if (!isGitlabBranchName(sourceBranch) || (requestedTarget !== null && !isGitlabBranchName(requestedTarget)) ||
+      includesGitlabCredential(token, [sourceBranch, requestedTarget ?? ''])) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+  const project = await readVerifiedProject(connection, repositoryId, signal);
+  const defaultBranch = project.project.default_branch ?? null;
+  if ((defaultBranch !== null && !isGitlabBranchName(defaultBranch)) ||
+      includesGitlabCredential(token, [defaultBranch ?? '', decodeURIComponent(project.repositoryPath)])) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+  const sourceSha = await readExactBranch(project, repositoryId, sourceBranch, signal);
+  if (!sourceSha) throw new GitlabReadError('branches', 'http', 404);
+  if (includesGitlabCredential(token, [sourceSha])) throw new GitlabReadError('branches', 'invalid-response');
+
+  const list = await readOpenBranchMergeRequests(project, repositoryId, sourceBranch, token, signal);
+  const candidate = requestedTarget ?? defaultBranch;
+  const targetBranch = list.openMergeRequests.length === 0 && !list.hasMore && candidate !== sourceBranch ? candidate : null;
+  const targetSha = targetBranch ? await readExactBranch(project, repositoryId, targetBranch, signal) : null;
+  if (targetBranch && requestedTarget !== null && !targetSha) throw new GitlabReadError('branches', 'http', 404);
+
+  const [currentSource, currentTarget] = await Promise.all([
+    readExactBranch(project, repositoryId, sourceBranch, signal),
+    targetBranch ? readExactBranch(project, repositoryId, targetBranch, signal) : null,
+  ]);
+  if (sourceSha !== currentSource || targetSha !== currentTarget) throw new GitlabReadError('branches', 'changed');
+  if (targetSha && includesGitlabCredential(token, [targetSha])) throw new GitlabReadError('branches', 'invalid-response');
+
+  let newMergeRequestUrl: string | null = null;
+  if (targetBranch && targetSha && targetSha !== sourceSha) {
+    const url = new URL(`${project.repositoryPath}/-/merge_requests/new`, project.base.origin);
+    url.search = new URLSearchParams({
+      'merge_request[source_branch]': sourceBranch,
+      'merge_request[target_branch]': targetBranch,
+      'merge_request[source_project_id]': String(repositoryId),
+      'merge_request[target_project_id]': String(repositoryId),
+    }).toString();
+    if (includesGitlabCredential(token, [url.href])) throw new GitlabReadError('merge-requests', 'invalid-response');
+    newMergeRequestUrl = url.href;
+  }
+  return { sourceBranch, sourceSha, defaultBranch, targetBranch: targetSha ? targetBranch : null, targetSha, ...list, newMergeRequestUrl };
 }
 
 type PipelineJobRepository = { id: number; path: string; base: URL };
@@ -949,7 +1049,7 @@ async function readPipelineJobPages<Job extends { id: number }>(url: URL, header
       seen.add(job.id);
       jobs.push(job);
     }
-    hasMore = pipelineJobsNextPage(pagination, url, page, rows.length);
+    hasMore = gitlabNextPage(pagination, url, page, rows.length, PIPELINE_JOB_PAGE_SIZE, 'pipeline-jobs');
     if (!hasMore) break;
   }
   return { jobs, hasMore };

@@ -260,7 +260,9 @@ export function Development(props:FeatureProps){
       if (previewRequest.current === controller) previewRequest.current = null;
     }
   }
-  const issueKeys = new Map(props.data.issues.filter(issue => issue.projectId === props.projectId).map(issue => [issue.id, issue.key]));
+  const projectIssues = props.data.issues.filter(issue => issue.projectId === props.projectId);
+  const issueKeys = new Map(projectIssues.map(issue => [issue.id, issue.key]));
+  const issueVersions = new Map(projectIssues.map(issue => [issue.id, issue.version]));
   const links = props.data.gitlabLinks.filter(link => issueKeys.has(link.issueId));
   const repositoryIds = editableRepoIds(draft.ids);
   const currentSyncRead = syncRead?.version === settings?.version ? syncRead : null;
@@ -300,7 +302,7 @@ export function Development(props:FeatureProps){
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
     <section className="card linked-development" aria-label="연결된 개발 활동">
       <div className="card-heading gitlab-activity-header"><h2>연결된 개발 활동 <span className="count-pill">{links.length}</span></h2><GitlabActivityRefresh refresh={props.refresh} notify={notify} /></div>
-      {links.length ? <GitlabActivityList links={links} heading="h3" issueContext={{ keys: issueKeys, openIssue: props.openIssue }} /> : <div className="empty-state"><GitBranch aria-hidden="true"/><h3>아직 연결된 개발 활동이 없습니다</h3><p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}
+      {links.length ? <GitlabActivityList links={links} heading="h3" issueVersions={issueVersions} issueContext={{ keys: issueKeys, openIssue: props.openIssue }} /> : <div className="empty-state"><GitBranch aria-hidden="true"/><h3>아직 연결된 개발 활동이 없습니다</h3><p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}
     </section>
   </div>;
 }
