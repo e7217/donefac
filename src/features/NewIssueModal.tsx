@@ -24,8 +24,9 @@ import './issues.css';
 import './issue-schedule-successor.css';
 
 export type FollowUpSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & (
-  { sourceSelection?: DocumentSourceSelection; comment?: never } |
-  { sourceSelection?: never; comment: { id: string; body: string; source: DocumentDecisionSource } }
+  { sourceSelection?: DocumentSourceSelection; checklistTitle?: never; comment?: never } |
+  { sourceSelection: DocumentSourceSelection; checklistTitle: string; comment?: never } |
+  { sourceSelection?: never; checklistTitle?: never; comment: { id: string; body: string; source: DocumentDecisionSource } }
 );
 type ParentIssue = Pick<Issue, 'id' | 'key' | 'title' | 'projectId' | 'version'>;
 type ScheduledIssue = ParentIssue & Pick<Issue, 'startDate' | 'endDate'>;
@@ -35,6 +36,8 @@ export type ScheduleIssueLink = {
 };
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStatus?: IssueStatus;
+  selectingChecklist?: boolean;
+  onReselectChecklist?: () => void;
   onClose: () => void;
 } & (
   { sourceDocument?: FollowUpSource; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
@@ -158,10 +161,21 @@ function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagD
   }
 }
 
-export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue, onBlockedIssueCreated, onClose, refresh, notify, openIssue }: Props) {
+function titleFromChecklist(text: string): string {
+  // Match the issue title's UTF-16 limit without leaving a split surrogate at the end.
+  return text.replace(/\s+/gu, ' ').trim().slice(0, 300).replace(/[\uD800-\uDBFF]$/u, '').trimEnd();
+}
+
+export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, selectingChecklist = false,
+  onReselectChecklist, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue,
+  onBlockedIssueCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const sourceComment = sourceDocument?.comment;
+  const checklistMode = sourceDocument?.checklistTitle !== undefined;
+  const checklistPicking = checklistMode && selectingChecklist;
+  const [initialTitle] = useState(() => cloneIssue?.title ?? (checklistMode ? titleFromChecklist(sourceDocument.checklistTitle) : undefined));
+  const [previousChecklistSource, setPreviousChecklistSource] = useState(checklistMode ? sourceDocument : undefined);
   const [description, setDescription] = useState(cloneIssue?.description ?? sourceComment?.body ?? '');
   const [priority, setPriority] = useState<Priority>(cloneIssue?.priority ?? 'medium');
   const [appliedTemplate, setAppliedTemplate] = useState<IssueTemplate | null>(null);
@@ -208,6 +222,18 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [recovering, setRecovering] = useState(false);
   const [replayRejected, setReplayRejected] = useState(false);
   const [versionConflict, setVersionConflict] = useState(false);
+  if (checklistMode && sourceDocument !== previousChecklistSource) {
+    setPreviousChecklistSource(sourceDocument);
+    setSourceVersion(sourceDocument.version);
+    setSourceSelection(sourceDocument.sourceSelection);
+    if (sourceDocument.projectId && sourceDocument.projectId !== selectedProject) {
+      setSelectedProject(sourceDocument.projectId);
+      setSelectedType(initialIssueType(data, sourceDocument.projectId));
+      setSelectedStatus(projectWorkflow(data, sourceDocument.projectId).initialStatusId);
+    }
+    setVersionConflict(false);
+    setError('');
+  }
   const attempt = useRef<IssueCreationAttempt | null>(null);
   const dirtyRef = useRef(false);
   const pendingRef = useRef(false);
@@ -259,7 +285,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     : reviewedBlocked ? `/issues/${encodeURIComponent(reviewedBlocked.id)}/blocked-issues`
     : sourceDocument ? `/documents/${encodeURIComponent(sourceDocument.id)}/follow-up-issues` : undefined;
   const linkedCreation = Boolean(linkedPath);
-  const usesIssueReceipt = !linkedCreation || scheduleMode || cloneMode || blockedMode;
+  const usesIssueReceipt = !linkedCreation || scheduleMode || cloneMode || blockedMode || checklistMode;
   const currentParent = reviewedParent && data.issues.find(issue => issue.id === reviewedParent.id);
   const parentUnavailable = reviewedParent && (!currentParent || currentParent.projectId !== reviewedParent.projectId);
   const needsParentReview = Boolean(parentReview || parentUnavailable);
@@ -284,7 +310,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
       : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
   }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, blockedMode, sourceDocument, refresh, notify]);
-  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode;
+  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode;
 
   function close() {
     if (pendingRef.current) return;
@@ -330,13 +356,17 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   }, [handlesNestedNavigation, confirmationLocation, usesIssueReceipt, notify, onClose, refreshAfterClose]);
 
   useEffect(() => {
-    if (handlesNestedNavigation && busy) dialog.current?.focus({ preventScroll: true });
-  }, [busy, handlesNestedNavigation]);
+    if (handlesNestedNavigation && busy && !checklistPicking) dialog.current?.focus({ preventScroll: true });
+  }, [busy, checklistPicking, handlesNestedNavigation]);
 
   useEffect(() => {
     const retry = submitButton.current;
     if (recovering && !busy && retry && !retry.disabled) retry.focus();
   }, [recovering, busy]);
+
+  useEffect(() => {
+    if (checklistMode && !checklistPicking) titleInput.current?.focus({ preventScroll: true });
+  }, [checklistMode, checklistPicking]);
 
   function applyTemplate(template: IssueTemplate) {
     const defaults = template.defaults;
@@ -532,7 +562,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pendingRef.current || !selectedProject || needsSourceReview || needsParentReview || needsScheduleReview ||
+    if (pendingRef.current || checklistPicking || !selectedProject || needsSourceReview || needsParentReview || needsScheduleReview ||
       needsCloneReview || needsBlockedReview || (blockedMode && !blockedCalendar) || replayRejected) return;
     const replay = Boolean(attempt.current);
     if (scheduleMode && lagDays === null && !replay) return;
@@ -644,6 +674,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         if (!result?.issue?.id ||
           (reviewedParent && (result.issue.parentId !== reviewedParent.id || result.issue.projectId !== reviewedParent.projectId)) ||
           (sourceDocument && (documentLink?.issueId !== result.issue.id || documentLink.documentId !== sourceDocument.id)) ||
+          (checklistMode && (!sourceSelection || !pinned?.revisionId || pinned.from !== sourceSelection.from ||
+            pinned.to !== sourceSelection.to || pinned.text !== sourceSelection.text)) ||
           (sourceComment && (pinned?.revisionId !== sourceComment.source.revisionId || pinned?.from !== sourceComment.source.from ||
             pinned?.to !== sourceComment.source.to || pinned?.text !== sourceComment.source.text))) {
           throw new Error('업무 생성 응답을 읽을 수 없습니다.');
@@ -689,6 +721,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         }
       } else {
         const templateRejected = typeof details?.reason === 'string' && details.reason.startsWith('issue-template-');
+        const staleChecklistSource = checklistMode &&
+          (details?.reason === 'source_selection_changed' || Number.isSafeInteger(details?.currentVersion));
         if (!replay || linkedCreation || templateRejected) attempt.current = null;
         setRecovering(false);
         if (reviewedSchedule && status === 409 && (details?.reason === scheduleCopy.changed || details?.reason === 'calendar_changed')) {
@@ -706,6 +740,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           setBlockedReview({ state: 'missing' });
         } else if (templateRejected) {
           setTemplateError(errorMessage(cause));
+        } else if (sourceDocument && status === 409 && (!replay || staleChecklistSource)) {
+          await refresh().catch(() => {});
+          setVersionConflict(true);
+          setError(errorMessage(cause));
         } else if (replay) {
           setReplayRejected(true);
           setError(linkedCreation ? `${errorMessage(cause)} ${confirmationLocation}을 확인해 주세요.` : errorMessage(cause));
@@ -715,10 +753,6 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           setError(errorMessage(cause));
         } else if (reviewedParent && status === 409 && Number.isSafeInteger(details?.currentVersion)) {
           await readParentReview(reviewedParent);
-        } else if (sourceDocument && status === 409) {
-          await refresh().catch(() => {});
-          setVersionConflict(true);
-          setError(errorMessage(cause));
         } else {
           setError(errorMessage(cause));
           if (!linkedCreation) requestAnimationFrame(() => submitButton.current?.focus());
@@ -767,7 +801,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     onApply={applyCalculatedDates} disabled={fieldsLocked || needsScheduleReview || needsBlockedReview} />;
   const availableProjects = reviewedBlocked ? data.projects.filter(project => project.id !== reviewedBlocked.projectId) : data.projects;
 
-  return <div className="issue-modal-overlay" onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
+  return <div className="issue-modal-overlay" style={checklistPicking ? { display: 'none' } : undefined} inert={checklistPicking}
+    onMouseDown={event => { if (event.target === event.currentTarget) close(); }}>
     <section ref={dialog} tabIndex={handlesNestedNavigation ? -1 : undefined} onKeyDown={keyboard} className="issue-create-modal" role="dialog" aria-modal="true" aria-labelledby="new-issue-title">
       <form onSubmit={submit} onChange={() => { dirtyRef.current = true; }}>
         <header><div>
@@ -779,8 +814,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           {reviewedClone && <p className="issue-follow-up-source">원본 업무 · <strong>{reviewedClone.key} {reviewedClone.title}</strong></p>}
           {reviewedBlocked && <p className="issue-follow-up-source">차단하는 업무 · <strong>{reviewedBlocked.key} {reviewedBlocked.title}</strong></p>}
         </div><button ref={closeButton} className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
-        {sourceSelection && <section className="issue-follow-up-passage" aria-label="선택한 본문">
-          <strong>선택한 본문</strong>
+        {sourceSelection && <section className="issue-follow-up-passage" aria-label={checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}>
+          <strong>{checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}</strong>
           <blockquote>{sourceSelection.text}</blockquote>
         </section>}
         {sourceComment && <section className="issue-follow-up-passage" aria-label="댓글 원문">
@@ -818,7 +853,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
                 setTemplateError('');
                 setTemplateNotice('');
               }} />}
-            <label className="issue-form-label">업무 제목<input ref={titleInput} autoFocus={!blockedMode} className="field issue-title-input" name="title" placeholder="무엇을 해야 하나요?" maxLength={300} defaultValue={cloneIssue?.title} required /></label>
+            <label className="issue-form-label">업무 제목<input ref={titleInput} autoFocus={!blockedMode} className="field issue-title-input" name="title" placeholder="무엇을 해야 하나요?" maxLength={300} defaultValue={initialTitle} required /></label>
             {scheduleMode && <section className="issue-successor-schedule" aria-label={`${scheduleAnchorRole} 일정 연결`}>
               <div className="issue-form-grid">
                 <label className="issue-form-label">연결 유형<select className="field" aria-label="연결 유형" value={dependencyType} onChange={event => {
@@ -911,7 +946,9 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         </fieldset>
         {linkedCreation && linkedError && <div className="issue-follow-up-error">
           <div className="issue-form-error" role="alert">{linkedError}</div>
-          {canReviewVersion && <button type="button" className="btn" disabled={busy} onClick={() => {
+          {checklistMode && needsSourceReview && onReselectChecklist && <button type="button" className="btn" disabled={busy}
+            onClick={onReselectChecklist}>최신 체크리스트 항목 다시 선택</button>}
+          {!checklistMode && canReviewVersion && <button type="button" className="btn" disabled={busy} onClick={() => {
             setSourceVersion(currentDocument.version);
             setSourceSelection(undefined);
             setVersionConflict(false);

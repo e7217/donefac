@@ -441,6 +441,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 선택한 원문을 연결하려면 `sourceSelection`에 저장 본문의 ProseMirror 위치 `{from,to,text}`를 보낸다. 텍스트는 선택 범위에서 구한 최대 2,000 UTF-16 단위의 발췌이며, 문단과 줄바꿈은 LF로 연결한다. 서버가 저장된 본문에서 같은 범위를 다시 읽고 텍스트가 다르면 `409`를 반환한다. 정확히 일치하면 `link.documentSource`에 `{revisionId,from,to,text}`를 기록한다. 저장본이 필요하면 업무와 함께 생성한다. 원문은 `GET /api/documents/:id/include-revisions/:revisionId`에서 읽으며, 자체 백업 형식 36은 이 연결을 보존한다.
 
+브라우저의 체크리스트 명령은 커서가 있는 항목의 첫 문단을 `sourceSelection`으로 보낸다. 새 업무의 화면은 이를 한 줄로 정리해 수정 가능한 제목에 채운다. 문서가 바뀌면서 요청이 거절되면 해당 업무 양식의 입력을 유지하고 최신 저장본에서 항목을 다시 고를 수 있다.
+
 문장 댓글에서 시작할 때는 `sourceComment: {commentId,revisionId}`를 사용한다. `sourceSelection`과 `sourceComment` 중 하나를 선택한다. `expectedDocumentVersion`에는 현재 문서 버전을, `revisionId`에는 댓글에 고정된 원문 저장본을 보낸다. 서버가 같은 문서에 있는 활성 문장 댓글과 저장본의 실제 텍스트·범위, API 키의 원문 범위를 확인한 뒤 `link.documentSource`에 같은 발췌를 기록한다. 댓글이 휴지통으로 이동했거나 원래 문장 댓글이 아니면 새 요청을 보류한다.
 
 응답을 받지 못하면 같은 작업자와 문서에서 같은 요청 ID와 본문으로 재시도한다. 기존 업무와 연결을 열 수 있으면 `200`과 `{issue, link, duplicate:true}`로 응답한다. 요청 내용이나 연결 상태가 바뀌면 `409`를 반환한다. 자체 백업은 업무와 `후속 업무` 연결을 보존하며 복원 시 재시도용 기록을 초기화한다.

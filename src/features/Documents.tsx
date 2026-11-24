@@ -350,12 +350,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [linkBusy, setLinkBusy] = useState(false);
   const linkBusyRef = useRef(false);
   const [documentAction, setDocumentAction] = useState<DocumentAction | null>(null);
+  const [checklistReselecting, setChecklistReselecting] = useState(false);
   const documentActionOpener = useRef<HTMLButtonElement>(null);
   const closeDocumentAction = useCallback((restoreFocus = true) => {
     const opener = documentActionOpener.current;
     setDocumentAction(null);
+    setChecklistReselecting(false);
     documentActionOpener.current = null;
-    if (restoreFocus) requestAnimationFrame(() => { if (opener?.isConnected) opener.focus({ preventScroll: true }); });
+    if (restoreFocus && opener) requestAnimationFrame(() => {
+      const target = opener.isConnected && !opener.disabled ? opener : editorWrap.current?.querySelector<HTMLElement>('.docs-prose');
+      target?.focus({ preventScroll: true });
+    });
   }, []);
   const [referencesRefreshing, setReferencesRefreshing] = useState(false);
   const [, forceToolbar] = useState(0);
@@ -1613,6 +1618,26 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     documentActionOpener.current = opener;
     setDocumentAction({ kind: 'create', source: { id: page.id, title: page.title, projectId: page.projectId, version: page.version, sourceSelection } });
   }
+  function openChecklistFollowUp(sourceSelection: DocumentSourceSelection, opener: HTMLButtonElement) {
+    if (!selectionDocument || selectionUnavailable || selectionIssueUnavailable) return;
+    const { id, title, projectId, version } = selectionDocument;
+    if (checklistReselecting) {
+      if (documentAction?.kind !== 'create' || documentAction.source.checklistTitle === undefined || documentAction.source.id !== id) return;
+      setChecklistReselecting(false);
+    } else {
+      documentActionOpener.current = opener;
+    }
+    setDocumentAction({ kind: 'create', source: { id, title, projectId, version, sourceSelection, checklistTitle: sourceSelection.text } });
+  }
+  function reselectChecklistSource() {
+    if (documentAction?.kind !== 'create' || documentAction.source.checklistTitle === undefined || documentAction.source.id !== draft?.id) return;
+    if (!liveMode && !manualRecovery && latestPage?.id === draft.id) {
+      observeDocument({ document: latestPage, live: false });
+    }
+    setChecklistReselecting(true);
+    requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
+  }
+  function cancelChecklistReselect() { setChecklistReselecting(false); }
   function openCommentFollowUp(comment: Comment, opener: HTMLButtonElement) {
     const source = comment.documentSource;
     if (!source || comment.resourceType !== 'document' || comment.parentCommentId !== undefined || latestPage?.id !== comment.resourceId) return;
@@ -1668,6 +1693,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     findOpener.current?.focus({ preventScroll: true });
   }
   function handleEditorKeys(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (checklistReselecting) return;
     const { key, target } = event;
     if (canFind && editor && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey &&
         !event.nativeEvent.isComposing && key.toLowerCase() === 'f' &&
@@ -1681,9 +1707,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
-    openIssueBlock={bodyReadOnly ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
-    <DocumentAnnotationProvider value={bodyReadOnly ? undefined : openAnnotation}><section className="documents-feature">
-    <div className="docs-heading" inert={newOpen || archiveImport || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
+    openIssueBlock={bodyReadOnly || checklistReselecting ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
+    <DocumentAnnotationProvider value={bodyReadOnly || checklistReselecting ? undefined : openAnnotation}><section className="documents-feature">
+    <div className="docs-heading" inert={newOpen || archiveImport || checklistReselecting || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>
       <div className="document-template-heading-actions">
         <button className="btn" type="button" onClick={event => openOfflineExport(currentProject ? 'project' : 'common', event.currentTarget)}>
           <ArrowDownToLine size={15} aria-hidden="true" />Markdown ZIP 내보내기
@@ -1696,8 +1722,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         <button className="btn btn-primary" onClick={() => openNew()}><Plus size={16} /> 새 문서</button>
       </div>
     </div>
-    <div className={`docs-layout ${sidebarOpen ? 'has-panel' : ''}`} inert={publicationOpen || newOpen || archiveImport || Boolean(issueBlockDialog || documentAction || templateManager || offlineExport)}>
-      <aside className="docs-tree" aria-label="문서 목록">
+    <div className={`docs-layout ${sidebarOpen && !checklistReselecting ? 'has-panel' : ''}`}
+      inert={publicationOpen || newOpen || archiveImport || Boolean(issueBlockDialog || templateManager || offlineExport || (documentAction && !checklistReselecting))}
+      onKeyDownCapture={event => {
+        if (!checklistReselecting || event.key !== 'Escape' || event.nativeEvent.isComposing) return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancelChecklistReselect();
+      }}>
+      <aside className="docs-tree" aria-label="문서 목록" inert={checklistReselecting}>
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         {onChangeDocumentLabel && <div className="docs-label-filters">
           <select aria-label="문서 라벨 필터" value={documentLabel ?? ''} onChange={event => onChangeDocumentLabel(event.target.value || null)}>
@@ -1731,7 +1764,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
       {draft && selectedPage ? <>
         <main className="docs-document">
-          <div className="docs-document-topbar">
+          <div className="docs-document-topbar" inert={checklistReselecting}>
             <div className="docs-breadcrumb"><FileText size={14} /><span>{selectedPage.projectId ? data.projects.find(project => project.id === selectedPage.projectId)?.name || '프로젝트' : '팀 공통'}</span><ChevronRight size={12} /><span>{draft.title || '제목 없는 문서'}</span></div>
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
               <FavoriteAction type="document" id={selectedPage.id} />
@@ -1787,13 +1820,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           <div className="docs-paper-scroll">
             <div className="docs-paper">
               <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime((latestPage ?? selectedPage).updatedAt)}</span></div>
-              <input ref={titleInput} className="docs-title-input" disabled={restoring} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
+              <input ref={titleInput} className="docs-title-input" disabled={restoring || checklistReselecting} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
               <div className="docs-author-row"><span className="docs-avatar" style={{ background: data.users.find(user => user.id === selectedPage.authorId)?.color || '#78849a' }}>{data.users.find(user => user.id === selectedPage.authorId)?.name.slice(0, 1) || '팀'}</span><span>{data.users.find(user => user.id === selectedPage.authorId)?.name || '팀원'}</span><span className="docs-meta-dot">·</span><span>{when(selectedPage.createdAt)}</span><span className="docs-meta-dot">·</span><span>버전 {draft.expectedVersion}</span></div>
-              <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring}
+              <DocumentLabels key={`${actorId}:${draft.id}`} labels={draft.labels} activeKey={documentLabel} disabled={restoring || checklistReselecting}
                 onChange={labels => updateDraft({ labels })} onFilter={onChangeDocumentLabel} />
 
               <div className="docs-editor-sticky">
-              <div className="docs-editor-toolbar" role="toolbar" aria-label="문서 서식">
+              <div className="docs-editor-toolbar" role="toolbar" aria-label={checklistReselecting ? '체크리스트 항목 다시 선택' : '문서 서식'}>
+                {!checklistReselecting && <>
                 <button ref={findOpener} type="button" className={`docs-format-btn ${findOpen ? 'is-active' : ''}`}
                   title="본문에서 찾기" aria-label="본문에서 찾기" aria-expanded={findOpen} aria-keyshortcuts="Control+F Meta+F"
                   disabled={!canFind} onClick={() => findOpen ? closeFind() : openFind()}><Search size={15} aria-hidden="true" /></button>
@@ -1835,27 +1869,39 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('접기 블록 모두 펼치기', <ChevronRight size={15} />, () => unfoldDetails(editor))}
                 {editor?.isActive('details') && button('접기 블록 해제', <Unlink size={15} />, () => unwrapDetails(editor))}
                 {button('파일 첨부', <Paperclip size={15} />, () => { setSidebarOpen(true); setSideTab('attachments'); })}
+                </>}
+                {checklistReselecting && !liveMode && draft.bodyDirty && <button className="btn docs-selection-action" type="button"
+                  disabled={saving || manualRecovery || Boolean(metadataReview)} onClick={() => void saveDraft()}>
+                  <Save size={15} aria-hidden="true" />본문 저장
+                </button>}
                 <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable} issueUnavailable={selectionIssueUnavailable}
                   onCreate={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }}
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}
-                  onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }} />
+                  onComment={(selection, opener) => { if (selectionDocument) openSelectionComment(selectionDocument, opener, selection); }}
+                  onCreateChecklist={openChecklistFollowUp} checklistReselecting={checklistReselecting}
+                  onCancelChecklistReselect={cancelChecklistReselect} />
               </div>
-              {findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
+              {!checklistReselecting && findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
                 canReplace={!bodyReadOnly && !saving && !conflict} onClose={closeFind} />}
               </div>
-              {editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
+              {!checklistReselecting && editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
                 <button type="button" aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter" title="Ctrl/⌘+Shift+Enter"
                   onMouseDown={event => event.preventDefault()} onClick={() => exitDocumentColumnLayout(editor)}><CornerDownRight size={12} aria-hidden="true" /> 구역 다음 본문으로 이동</button>
                 <button type="button" onMouseDown={event => event.preventDefault()} onClick={() => unwrapDocumentColumnLayout(editor)}>다단 구역 해제</button>
               </div>}
-              {editor && !bodyReadOnly && <DocumentTableTools key={`${draft.id}:${liveMode}`} editor={editor} />}
-              {insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
+              {!checklistReselecting && editor && !bodyReadOnly && <DocumentTableTools key={`${draft.id}:${liveMode}`} editor={editor} />}
+              {!checklistReselecting && insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
               {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor}
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
                 sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
-                ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen} />}
+                ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen && !checklistReselecting} />}
               <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={handleEditorKeys}
                 onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
+                onClickCapture={event => {
+                  if (!checklistReselecting || !(event.target instanceof Element) || !event.target.closest('a[href], button, input[type="checkbox"]')) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
                 onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                 const href = event.target.closest('a[href]')?.getAttribute('href');
@@ -1874,7 +1920,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   window.location.hash = link.hash;
                 }
               }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} labels={draft.labels} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
-                {!bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
+                {!checklistReselecting && !bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
                   <div className="docs-slash-caption" aria-hidden="true">블록 추가</div>
                   {matchingSlashCommands.map((command, index) => <button key={command.label} type="button" aria-current={index === slashIndex || undefined}
                     onMouseDown={event => event.preventDefault()} onClick={() => runSlash(command)}>{command.label}</button>)}
@@ -1885,7 +1931,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           </div>
         </main>
 
-        {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보"><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
+        {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보" inert={checklistReselecting}
+          style={checklistReselecting ? { display: 'none' } : undefined}><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
             {sideTab === 'comments' && <>
@@ -2012,7 +2059,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {archiveImport && <DocumentMarkdownArchiveImport projects={data.projects} documents={data.documents} initialProjectId={currentProject?.id ?? null}
       actorId={actorId} refresh={refresh} openDocument={openDocument} onNavigationChange={recordArchiveImportNavigation} onClose={closeArchiveImport} />}
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
-      sourceDocument={documentAction.source} onClose={closeDocumentAction} />}
+      sourceDocument={documentAction.source} selectingChecklist={checklistReselecting} onReselectChecklist={reselectChecklistSource} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
       refresh={refresh} notify={notify} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialDraft={documentAction.initialDraft}

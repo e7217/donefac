@@ -1232,3 +1232,189 @@ test('360px 결정 후속 업무에서 마감일과 미정 일정을 구분하�
     }
   }
 });
+
+function checklistBody(parentLabel: string, nestedLabel: string): RichContent {
+  const paragraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+  const item = (content: RichContent[]): RichContent => ({ type: 'taskItem', attrs: { checked: false }, content });
+  return { type: 'doc', content: [paragraph('회의 안건'), { type: 'taskList', content: [
+    item([{ type: 'paragraph', content: [{ type: 'text', text: parentLabel, marks: [{ type: 'bold' }] }] },
+      paragraph('이 설명은 체크리스트 제목에 포함하지 않습니다.'),
+      { type: 'taskList', content: [item([paragraph(nestedLabel)])] }]),
+    item([paragraph('다음 담당자에게 알림')]),
+  ] }] };
+}
+
+test('360px에서 체크리스트 항목을 후속 업무로 만들고 기존 업무에도 근거를 연결한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const { projects: [project], users: [actor, assignee] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const title = `회의 체크리스트 ${suffix}`;
+  const parentLabel = `외부 통신 검증 ${suffix}`;
+  const nestedLabel = `재시도 조건 확인 ${suffix} 🔎`;
+  const quote = `${nestedLabel} 완료 기준`;
+  const existingTitle = `기존 통신 시험 ${suffix}`;
+  const source = await createDecision(request, project.id, title, checklistBody(parentLabel, nestedLabel));
+  try {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: existingTitle } });
+    expect(created.status(), await created.text()).toBe(201);
+    const existing = await created.json() as Issue;
+    const enabled = await request.post(`/api/documents/${source.id}/collaboration/enable`, { data: { expectedVersion: source.version } });
+    expect(enabled.ok(), await enabled.text()).toBe(true);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await openDecision(page, source, project.id);
+    const editor = page.locator('.docs-live-prose');
+    await expect(editor).toHaveAttribute('contenteditable', 'true');
+    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    const newIssue = page.getByRole('button', { name: '체크리스트 항목으로 후속 업무 만들기', exact: true });
+    const existingIssue = page.getByRole('button', { name: '체크리스트 항목을 기존 업무에 연결', exact: true });
+    await editor.getByText('회의 안건', { exact: true }).click();
+    await expect(newIssue).toHaveCount(0);
+    const nested = editor.getByText(nestedLabel, { exact: true });
+    await nested.click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(' 완료 기준');
+    await expect.poll(async () => (await workspace(request)).documents.find(document => document.id === source.id)?.plainText).toContain(quote);
+    await expect(newIssue).toBeEnabled();
+    await newIssue.click();
+    const dialog = page.getByRole('dialog', { name: '후속 업무 만들기', exact: true });
+    await expect(dialog.getByRole('textbox', { name: '업무 제목', exact: true })).toHaveValue(quote);
+    await expect(dialog.getByRole('region', { name: '선택한 체크리스트 항목', exact: true }).locator('blockquote')).toHaveText(quote);
+    await dialog.getByRole('combobox', { name: '담당자', exact: true }).selectOption(assignee.id);
+    await dialog.getByText('추가 속성', { exact: true }).click();
+    await dialog.getByLabel('목표 마감일', { exact: true }).fill('2027-02-16');
+    const followUpPath = `/api/documents/${source.id}/follow-up-issues`;
+    const posting = page.waitForResponse(response => new URL(response.url()).pathname === followUpPath && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '업무 만들고 연결', exact: true }).click();
+    const response = await posting;
+    expect(response.status(), await response.text()).toBe(201);
+    const result = await response.json() as DocumentFollowUpResult;
+    expect(result.issue).toMatchObject({ title: quote, assigneeId: assignee.id, dueDate: '2027-02-16' });
+    expect(result.link.documentSource).toMatchObject({ text: quote });
+    await expect(dialog).toHaveCount(0);
+    await expect(newIssue).toBeFocused();
+
+    await editor.getByText(parentLabel, { exact: true }).click();
+    await existingIssue.click();
+    const link = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    await expect(link.locator('blockquote')).toHaveText(parentLabel);
+    await link.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(existing.key);
+    await link.getByRole('radio', { name: new RegExp(`${existing.key}.*${existingTitle}`) }).check();
+    const linking = page.waitForResponse(answer => answer.url().endsWith(`/api/documents/${source.id}/decision-links`) && answer.request().method() === 'POST');
+    await link.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+    const linkedResponse = await linking;
+    expect(linkedResponse.status(), await linkedResponse.text()).toBe(201);
+    const linked = await linkedResponse.json() as DocumentIssueLinkResult;
+    expect(linked.link.documentSource).toMatchObject({ text: parentLabel });
+    expect(linked.link.documentSource?.from).toBeLessThan(result.link.documentSource!.from);
+    await expect(link).toHaveCount(0);
+
+    const responseReport = await request.get(`/api/projects/${project.id}/decision-follow-ups?assigneeId=${assignee.id}&q=${encodeURIComponent(result.issue.key)}`);
+    expect(responseReport.ok(), await responseReport.text()).toBe(true);
+    const report = await responseReport.json() as DecisionFollowUpPage;
+    expect(report.items).toHaveLength(1);
+    expect(report.items[0]).toMatchObject({ linkId: result.link.id, issue: { id: result.issue.id, assigneeId: assignee.id, deadline: '2027-02-16' } });
+  } finally {
+    await cleanupDecision(request, source.id, quote);
+    for (const issue of (await workspace(request)).issues.filter(item => item.title === existingTitle)) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
+
+test('360px에서 체크리스트 원문이 바뀌면 작성한 업무 입력을 유지하며 항목을 다시 선택한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const { projects: [project], users: [actor, peer] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const issueTitle = `회의 후속 입력 ${suffix}`;
+  const originalLabel = `이전 검사 항목 ${suffix}`;
+  const currentLabel = `최신 검사 항목 ${suffix}`;
+  const source = await createDecision(request, project.id, `바뀌는 체크리스트 ${suffix}`, checklistBody('상위 업무', originalLabel));
+  const path = `/api/documents/${source.id}/follow-up-issues`;
+  const nextRequest = () => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await openDecision(page, source, project.id);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveAttribute('contenteditable', 'true');
+    await editor.getByText(originalLabel, { exact: true }).click();
+    await page.getByRole('button', { name: '체크리스트 항목으로 후속 업무 만들기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '후속 업무 만들기', exact: true });
+    const excerpt = dialog.getByRole('region', { name: '선택한 체크리스트 항목', exact: true });
+    const title = dialog.getByRole('textbox', { name: '업무 제목', exact: true });
+    const description = dialog.getByRole('textbox', { name: '설명', exact: true });
+    const assignee = dialog.getByRole('combobox', { name: '담당자', exact: true });
+    const due = dialog.getByLabel('목표 마감일', { exact: true });
+    const submit = dialog.getByRole('button', { name: '업무 만들고 연결', exact: true });
+    await title.fill(issueTitle);
+    await description.fill('두 작업장의 결과를 한 표로 확인한다.');
+    await assignee.selectOption(peer.id);
+    await dialog.getByText('추가 속성', { exact: true }).click();
+    await due.fill('2027-02-16');
+
+    const changed = await request.patch(`/api/documents/${source.id}`, { headers: { 'X-Actor-Id': peer.id }, data: {
+      expectedVersion: source.version, content: checklistBody('상위 업무', currentLabel),
+    } });
+    expect(changed.ok(), await changed.text()).toBe(true);
+    const current = await changed.json() as DocPage;
+    const rejected = nextRequest();
+    await submit.click();
+    expect((await rejected).status()).toBe(409);
+    const reselect = dialog.getByRole('button', { name: '최신 체크리스트 항목 다시 선택', exact: true });
+    await reselect.click();
+    const cancel = page.getByRole('button', { name: '항목 다시 선택 취소', exact: true });
+    await expect(dialog).toHaveCount(0);
+    await expect(editor.getByText(currentLabel, { exact: true })).toBeVisible();
+    await cancel.click();
+    await expect(excerpt.locator('blockquote')).toHaveText(originalLabel);
+    await expect(due).toHaveValue('2027-02-16');
+    await expect(submit).toBeDisabled();
+
+    await reselect.click();
+    await editor.getByText('회의 안건', { exact: true }).click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(' 정리');
+    const useItem = page.getByRole('button', { name: '이 체크리스트 항목 사용', exact: true });
+    await editor.getByText(currentLabel, { exact: true }).click();
+    await expect(useItem).toBeDisabled();
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === `/api/documents/${source.id}` && response.request().method() === 'PATCH');
+    await page.getByRole('button', { name: '본문 저장', exact: true }).click();
+    const savedResponse = await saving;
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    const latest = await savedResponse.json() as DocPage;
+    expect(latest.version).toBeGreaterThan(current.version);
+    expect(latest.plainText).toContain('회의 안건 정리');
+    await editor.getByText(currentLabel, { exact: true }).click();
+    await useItem.click();
+    await expect(excerpt.locator('blockquote')).toHaveText(currentLabel);
+    await expect(title).toHaveValue(issueTitle);
+    await expect(description).toHaveValue('두 작업장의 결과를 한 표로 확인한다.');
+    await expect(assignee).toHaveValue(peer.id);
+    await expect(due).toHaveValue('2027-02-16');
+
+    const attempts: unknown[] = [];
+    await page.route(`**${path}`, async route => {
+      attempts.push(route.request().postDataJSON());
+      if (attempts.length > 1) return route.continue();
+      const result = await route.fetch();
+      expect(result.status(), await result.text()).toBe(201);
+      await route.fulfill({ status: 408, json: { error: '합성 응답 유실' } });
+    });
+    await submit.click();
+    const retry = dialog.getByRole('button', { name: '업무 생성 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    const replayed = nextRequest();
+    await retry.click();
+    const response = await replayed;
+    expect(response.status(), await response.text()).toBe(200);
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ expectedDocumentVersion: latest.version, sourceSelection: { text: currentLabel } });
+    expect(attempts[1]).toEqual(attempts[0]);
+    const saved = await response.json() as DocumentFollowUpResult;
+    expect(saved.duplicate).toBe(true);
+    expect(saved.link.documentSource).toMatchObject({ text: currentLabel });
+    const snapshot = await workspace(request);
+    expect(snapshot.documents.find(document => document.id === source.id)).toEqual(latest);
+    expect(snapshot.issues.filter(issue => issue.title === issueTitle)).toHaveLength(1);
+    await expect(dialog).toHaveCount(0);
+  } finally {
+    await cleanupDecision(request, source.id, issueTitle);
+  }
+});
