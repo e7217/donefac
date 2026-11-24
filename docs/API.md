@@ -89,6 +89,10 @@ curl --fail-with-body \
 
 Confluence 댓글 주소에는 `focusedCommentId` 또는 `#comment-<원본 댓글 ID>`가 들어간다. 둘을 함께 쓰면 번호가 일치해야 한다. 검색용 주소는 원본 댓글 번호를 `focusedCommentId`에 보존한다. 해당 설치의 이관 영수증·페이지 연결·댓글 기록을 확인하고 활성 문서의 댓글을 하나로 찾으면 `targets`에 `{targetType:'document',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. 잘못된 선택자는 `400`, 문서나 댓글의 소유 관계가 불명확하거나 대상이 휴지통에 있으면 빈 `targets`가 반환된다. `GET /api/search`는 정확한 댓글이 있을 때 문서 ID와 댓글 ID를 연결하는 `documentCommentIds`도 반환한다.
 
+Jira 댓글 주소는 `/browse/TEAM-17?focusedCommentId=42` 또는 `/browse/TEAM-17#comment-42` 형식을 지원한다. 두 선택자의 번호가 모두 있으면 일치해야 한다. `focusedId`는 `?focusedId=42#comment-42`처럼 같은 번호의 프래그먼트와 함께 제공하는 경우에만 유효하며 `focusedCommentId`와 함께 쓸 수 없다. 정규화한 검색 주소는 `focusedCommentId`를 보존한다.
+
+Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업무 연결·댓글 소유 관계를 대조한다. 접근 제한이 없는 활성 이관 댓글을 하나로 확인하면 `targets`에 `{targetType:'issue',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. `/api/atlassian-links/resolve`는 잘못된 선택자에 `400`을 반환한다. 대상이 없거나 휴지통에 있거나 소유 근거가 모호한 유효 주소에는 빈 `targets`를 반환한다. `GET /api/search`는 정확한 결과에 업무 ID와 댓글 ID를 연결하는 `issueCommentIds`도 반환한다. 잘못된 Jira 댓글 선택자는 빈 검색 결과를 반환한다. 브라우저의 Teamspace 티켓 주소는 `issueComment`에 현재 댓글 ID를 보관한다.
+
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.

@@ -286,7 +286,7 @@ export function createApp(options: {
   const issueSubscribers=(issue: Issue)=>[...subscriptions.recipients('issue',issue.id),...projectSubscribers(issue)];
   const spaceSubscribers=(document: DocPage)=>subscriptions.recipients('space',documentNotificationSpaceId(document.projectId));
   const documentSubscribers=(document: DocPage)=>[...subscriptions.recipients('document',document.id),...spaceSubscribers(document)];
-  const atlassianLinks=new AtlassianLinksService(store);
+  const atlassianLinks=new AtlassianLinksService(store,sourcePreservation);
   const atlassian=new AtlassianReader(options.atlassianEnv);
   const documentPublication=new DocumentPublicationService(store,notifications,documentSubscribers);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
@@ -1345,7 +1345,7 @@ export function createApp(options: {
   app.get('/api/atlassian-links/resolve', (req, res) => {
     if (Object.keys(req.query).length !== 1 || typeof req.query.url !== 'string') return fail('검색할 원본 주소 한 개를 입력해 주세요.');
     const address = parseAtlassianSearchInput(req.query.url);
-    if (!address) return fail('Jira 업무 또는 Confluence 페이지·댓글 주소를 확인해 주세요.');
+    if (!address) return fail('Jira 업무·댓글 또는 Confluence 페이지·댓글 주소를 확인해 주세요.');
     res.set('Cache-Control', 'no-store').json({ targets: atlassianLinks.resolve(address) });
   });
   app.post('/api/atlassian-links',(req,res)=>{
@@ -2958,11 +2958,15 @@ export function createApp(options: {
     const originalAddress = gitlabQuery ? null : parseAtlassianSearchInput(query);
     if (originalAddress) {
       const issues: Issue[] = [], documents: DocPage[] = [];
+      const issueCommentIds = Object.create(null) as Record<string, string>;
       const documentCommentIds = Object.create(null) as Record<string, string>;
       for (const { targetType, targetId, commentId } of atlassianLinks.resolve(originalAddress)) {
         if (targetType === 'issue') {
           const issue = store.get<Issue>('issues', targetId);
-          if (issue) issues.push(issue);
+          if (issue) {
+            issues.push(issue);
+            if (commentId) issueCommentIds[targetId] = commentId;
+          }
         } else {
           const document = store.get<DocPage>('documents', targetId);
           if (document) {
@@ -2972,9 +2976,13 @@ export function createApp(options: {
         }
       }
       return res.set('Cache-Control', 'no-store').json({ issues, documents,
+        ...(Object.keys(issueCommentIds).length ? { issueCommentIds } : {}),
         ...(Object.keys(documentCommentIds).length ? { documentCommentIds } : {}) });
     }
     if(q.length>500 && !gitlabQuery)fail('검색어가 너무 깁니다.');
+    if (!gitlabQuery && parseAtlassianSearchInput(query.split(/[?#]/u, 1)[0])?.product === 'jira') {
+      return res.set('Cache-Control', 'no-store').json({ issues: [], documents: [] });
+    }
     const gitlabMatches = gitlabQuery ? matchingGitlabSearchLinks(store.all<GitlabLink>('gitlab_links'), gitlabQuery) : null;
     if(q.length>500 && !gitlabMatches?.size && !/^https?:\/\//u.test(gitlabQuery ?? ''))fail('검색어가 너무 깁니다.');
     const documentQuery=documentLabelKey(query);

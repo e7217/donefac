@@ -30,6 +30,36 @@ test('Jira search canonicalizes issue keys without crossing source origin or ins
   ]) assert.equal(sameAtlassianSearchAddress(input, address(other)), false, other);
 });
 
+test('Jira comment permalinks preserve the exact comment across supported source forms', () => {
+  const base = 'https://jira.example.test/jira/browse/OPS-42';
+  const commentId = '90071992547409931234';
+  const canonical = `${base}?focusedCommentId=${commentId}`;
+  for (const url of [
+    canonical, `${base}?focusedCommentId=${commentId}&page=issuetabpanels%3Acomment-tabpanel#comment-${commentId}`,
+    `${base}#%63omment%2D${commentId}`, `${base}?tracking=excluded#comment-${commentId}`,
+    `${base}?focusedId=${commentId}#comment-${commentId}`,
+  ]) {
+    const parsed = address(url);
+    assert.equal(parsed.product, 'jira');
+    assert.equal(parsed.commentId, commentId, url);
+    assert.equal(parsed.url, canonical, url);
+    assert.deepEqual(address(canonical), parsed);
+    assert.ok(sameAtlassianSearchAddress(parsed, address(base)));
+  }
+  assert.equal(address(`${base}?page=issuetabpanels%3Acomment-tabpanel#comments`).commentId, undefined);
+});
+
+test('Jira rejects malformed or inconsistent comment selectors without falling back to the ticket', () => {
+  const issue = 'https://jira.example.test/jira/browse/OPS-42';
+  for (const suffix of [
+    '?focusedCommentId=', '?focusedCommentId=0', '?focusedCommentId=09', '?focusedCommentId=9.1',
+    '?focusedCommentId=9&%66ocusedCommentId=9', '?focusedCommentId=9#comment-10', '?focusedCommentId=9#comment-9/extra',
+    '?commentId=9', '?inlineCommentId=9#comment-9', '?FocusedCommentId=9', '#comment-0', '#comment-09', '#Comment-9', '#comment-%GG',
+    '?focusedId=9', '?focusedId=9#comments', '?focusedId=8#comment-9', '?focusedId=9&focusedId=9#comment-9',
+    '?focusedId=9&focusedCommentId=9#comment-9', '?FocusedId=9#comment-9',
+  ]) assert.equal(parseAtlassianSearchInput(`${issue}${suffix}`), null, suffix);
+});
+
 test('numeric Confluence locators match across page URL forms without rounding long IDs', () => {
   const pageId = '90071992547409931234';
   const base = 'https://kb.example.test/wiki';

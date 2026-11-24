@@ -369,6 +369,8 @@ Jira에서 쓰던 업무 키나 프로젝트를 옮기기 전 티켓 번호를 *
 
 기존 Jira 업무나 Confluence 페이지의 주소를 **통합 검색**에 붙여넣으면 이관할 때 저장했거나 **기존 도구 연결**에서 추가한 연결로 현재 업무·문서를 엽니다. Confluence 페이지 ID 주소는 같은 서버·설치 경로와 페이지 ID로 찾습니다. 이관한 문서의 `/display/공간/제목` 주소는 보관된 원본 제목·공간과 페이지 ID 연결에서 찾습니다. Teamspace에서 제목을 바꾼 뒤에도 원래 주소를 검색할 수 있습니다. **전체 검색 결과**에서 프로젝트·문서 라벨 등으로 좁히고 같은 검색을 공유할 수 있습니다. [원본 주소로 업무와 문서 찾기](docs/API.md#원본-주소로-업무와-문서-찾기) · [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
+이관한 Jira 댓글의 고정 주소도 **통합 검색**이나 **전체 검색 결과**에 붙여넣을 수 있습니다. **Jira 댓글 주소**로 표시된 결과를 열면 현재 티켓의 해당 댓글에 초점이 이동합니다. 열린 Teamspace 주소를 새로고침하거나 다시 열어도 같은 댓글을 찾습니다. [Jira·Confluence 원본 조회](docs/PILOT.md#jiraconfluence-원본-조회) · [Jira 댓글 링크 복사](https://support.atlassian.com/jira/kb/link-to-a-comment-missing-after-an-upgrade/)
+
 GitLab에서 보고 있던 MR·브랜치·커밋·파이프라인의 주소를 **통합 검색**에 붙여넣으면 이미 연결된 티켓을 찾습니다. `group/repo!91`, 정확한 브랜치 이름 또는 전체 커밋 SHA로도 찾을 수 있습니다. 결과에는 일치한 저장소와 참조가 표시되며 **전체 검색 결과**에서 현재 소속 프로젝트로 좁힐 수 있습니다. [GitLab 참조 검색](docs/API.md#gitlab-참조로-티켓-찾기)
 
 상단의 **통합 검색** 또는 `Ctrl+K`·`⌘+K`로 업무나 문서를 찾습니다. **전체 검색 결과**에서 업무·문서, 프로젝트·팀 공통 공간, 문서 라벨을 선택한 뒤 **검색**을 누르면 20건씩 볼 수 있습니다. 검색어 없이 문서 라벨만 선택하는 것도 가능합니다.

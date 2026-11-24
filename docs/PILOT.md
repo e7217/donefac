@@ -82,6 +82,8 @@ HTTPS 파일럿 검사는 임시 프록시로 네 유형의 합성 웹훅을 전
 
 업무 상세 또는 문서 **연결** 탭에서 **기존 도구 연결**을 사용한다. Jira는 `/browse/TEAM-17`, Confluence는 `/pages/viewpage.action?pageId=1234`, `/display/TEAM/Release+Notes`, `/spaces/TEAM/pages/1234/Release-Notes`와 Server·Data Center의 짧은 주소 `/x/ZIAB` 같은 브라우저 주소를 받는다. 기존 서버의 `/jira` 또는 `/wiki` 같은 경로도 주소에 포함한다. 예전에 저장한 본문에 짧은 주소가 있으면 그 주소를 **통합 검색**에 붙여넣어 저장된 원본 연결을 찾을 수 있다. [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
+이관 시 Jira 원본 기본 주소를 지정했다면 `/browse/TEAM-17?focusedCommentId=42#comment-42` 같은 Jira 댓글 주소를 **통합 검색**이나 **전체 검색 결과**에 붙여넣는다. **Jira 댓글 주소**로 표시된 티켓을 열어 이관한 댓글에 초점이 이동하는지 확인한다. 열린 Teamspace 주소를 새로고침해 같은 댓글을 찾는지, 다른 티켓의 댓글 번호로 검색했을 때 결과가 비어 있는지도 대조한다.
+
 이관 시 Confluence 원본 기본 주소를 지정한 프로젝트에서는 기존 댓글의 고정 주소를 **통합 검색**에 붙여넣는다. **Confluence 댓글 주소**로 표시된 문서를 열면 이관한 댓글 또는 답글에 초점이 이동한다. 원래 제목 주소와 번호 주소를 확인하고, 문서 제목을 바꾸거나 문서를 옮긴 뒤에도 같은 댓글이 열리는지 대조한다.
 
 **원본 정보 조회**를 활성화하려면 파일럿 실행 환경에 사용할 기본 주소를 지정한다. 한 제품에 서버 한 곳을 설정하며, 저장한 링크의 서버 주소와 기본 경로가 설정값과 일치할 때 조회한다.

@@ -2,16 +2,19 @@ import { randomUUID } from 'node:crypto';
 import { AtlassianReadError, isConfluencePageId, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
 import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
 import type { Comment, SourceImport, SourceRecordArchive } from '../shared/types.js';
-import { parseMigrationOriginBase } from './migration-origin-links.js';
-import { confluenceHistoryPage } from './source-preservation.js';
+import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { migrationOriginLink, parseMigrationOriginBase } from './migration-origin-links.js';
+import { confluenceHistoryPage, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 
 type LinkTarget = Pick<AtlassianLink, 'targetType' | 'targetId'>;
 type LinkReferences = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
+type JiraAddress = Extract<ParsedAtlassianLink, { product: 'jira' }>;
 type ConfluenceAddress = Extract<ParsedAtlassianLink, { product: 'confluence' }>;
 type ArchivedPage = { targetId: string; importId: string; instanceKey: string; packageSha: string; spaceId: string; sourceId: string; projectId: string | null };
 type ArchivedSpace = { spaceKey: string | null; key: string | null; sourceClass: string | null };
 type ArchiveRow = { json: string | null };
+type JiraCommentArchiveRow = ArchiveRow & { archiveId: string; importId: string; instanceKey: string; issueId: string; commentId: string };
 
 const inputFields = ['targetType', 'targetId', 'product', 'url'];
 const backupFields = ['id', ...inputFields, 'createdAt'];
@@ -62,7 +65,7 @@ function linkNotFound(): never {
 }
 
 export class AtlassianLinksService {
-  constructor(private readonly store: Store) {
+  constructor(private readonly store: Store, private readonly sources?: Pick<SourcePreservationService, 'jiraIssueOrigins'>) {
     // Keep the link when its owner moves to the trash. The purge removes it explicitly.
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS atlassian_links (
@@ -95,7 +98,8 @@ export class AtlassianLinksService {
   }
 
   resolve(address: AtlassianSearchAddress): AtlassianSearchTarget[] {
-    if (address.product === 'confluence' && address.commentId) return this.resolveConfluenceComment(address, address.commentId);
+    if (address.commentId) return address.product === 'jira'
+      ? this.resolveJiraComment(address, address.commentId) : this.resolveConfluenceComment(address, address.commentId);
     const order = 'ORDER BY targetType,targetId';
     if (address.product !== 'confluence' || !('pageId' in address)) {
       const exact = this.store.db.prepare(`SELECT ${targetColumns} FROM atlassian_links
@@ -121,6 +125,70 @@ export class AtlassianLinksService {
       if (candidate && sameAtlassianSearchAddress(address, candidate)) targets.set(`${targetType}:${targetId}`, { targetType, targetId });
     }
     return [...targets.values()];
+  }
+
+  private jiraArchivePackage(archive: SourceRecordArchive) {
+    if (archive.source?.product !== 'jira' || archive.excluded || !archive.targetProjectId) return;
+    const receipt = this.store.get<SourceImport>('source_imports', archive.sourceImportId);
+    if (!receipt?.projectIds.includes(archive.targetProjectId)) return;
+    const packages = receipt.packages.filter(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' &&
+      pkg.source.instanceKey === archive.source.instanceKey && pkg.source.format === archive.source.format);
+    if (packages.length === 1) return { configuredBase: receipt.configuration.sourceBaseUrls?.[packages[0].stagingId] };
+  }
+
+  private resolveJiraComment(address: JiraAddress, sourceCommentId: string): AtlassianSearchTarget[] {
+    const { sources } = this;
+    if (!sources) return [];
+    const issueUrl = `${address.origin}${address.contextPath}/browse/${address.issueKey}`;
+    const db = this.store.db;
+    const rows = db.prepare(`SELECT archive.id AS archiveId, archive.import_id AS importId, archive.source_instance AS instanceKey,
+        live.resource_id AS issueId, live.id AS commentId,
+        CASE WHEN json_valid(archive.json) THEN json_set(archive.json,'$.record.text','') END AS json
+      FROM source_records AS archive
+      JOIN comments AS live ON live.id=archive.target_id AND live.resource_type='issue' AND live.resource_id=archive.owner_id
+      JOIN issues AS issue ON issue.id=live.resource_id
+      JOIN atlassian_links AS link ON link.product='jira' AND link.target_type='issue' AND link.target_id=issue.id AND link.url=?
+      WHERE archive.product='jira' AND archive.kind='comment' AND archive.source_id=? AND archive.target_type='comment'
+        AND archive.owner_type='issue' AND NOT EXISTS (SELECT 1 FROM source_records AS duplicate
+          WHERE duplicate.product='jira' AND duplicate.source_instance=archive.source_instance AND duplicate.kind='comment'
+            AND duplicate.source_id=archive.source_id AND duplicate.target_type='comment' AND duplicate.id<>archive.id)
+      `).iterate(issueUrl, sourceCommentId) as Iterable<JiraCommentArchiveRow>;
+    const ownerById = db.prepare(`SELECT CASE WHEN json_valid(json) THEN json_set(json,'$.record.text','') END AS json FROM source_records WHERE id=?`);
+    let found: AtlassianSearchTarget | undefined;
+    for (const { json, archiveId, importId, instanceKey, issueId, commentId } of rows) {
+      const archive = json ? JSON.parse(json) as SourceRecordArchive | null : null;
+      if (!archive?.record || archive.id !== archiveId || archive.sourceImportId !== importId || archive.source?.instanceKey !== instanceKey ||
+          archive.targetType !== 'comment' || archive.targetId !== commentId ||
+          archive.ownerType !== 'issue' || archive.ownerId !== issueId || isRestrictedJiraHistory(archive.record)) continue;
+      const recordKey = jiraHistorySourceKey(archive.record);
+      if (recordKey?.kind !== 'comment' || recordKey.sourceId !== sourceCommentId) continue;
+      const pkg = this.jiraArchivePackage(archive);
+      if (!pkg) continue;
+      if (pkg.configuredBase != null) {
+        const origin = parseMigrationOriginBase('jira', pkg.configuredBase);
+        if (origin?.origin !== address.origin || origin.contextPath !== address.contextPath) continue;
+      }
+      const ownerAliases = jiraHistoryOwnerAliases(archive.record);
+      if (!ownerAliases) continue;
+      const bindings = sources.jiraIssueOrigins(instanceKey, [issueId], 'issue');
+      const aliases = new Set(bindings.map(binding => binding.alias));
+      if (bindings.some(binding => binding.projectId !== archive.targetProjectId) || ownerAliases.some(alias => !aliases.has(alias))) continue;
+      const ownerIds = new Set(bindings.map(binding => binding.archiveId));
+      if (ownerIds.size !== 1) continue;
+      const [ownerId] = ownerIds;
+      const ownerRow = ownerById.get(ownerId) as ArchiveRow | undefined;
+      const owner = ownerRow?.json ? JSON.parse(ownerRow.json) as SourceRecordArchive | null : null;
+      if (owner?.record?.kind !== 'issue' || owner.id !== ownerId || owner.source?.instanceKey !== instanceKey ||
+          owner.targetType !== 'issue' || owner.targetId !== issueId || owner.ownerType !== 'issue' || owner.ownerId !== issueId ||
+          owner.targetProjectId !== archive.targetProjectId || owner.record.metadata.restricted === true || isRestrictedJiraHistoryOwner(owner.record)) continue;
+      const originalKey = owner.record.metadata.key;
+      if (typeof originalKey !== 'string' || !aliases.has(originalKey)) continue;
+      const issueOrigin = parseMigrationOriginBase('jira', this.jiraArchivePackage(owner)?.configuredBase);
+      if (!issueOrigin || migrationOriginLink(issueOrigin, 'jira', owner.record) !== issueUrl) continue;
+      if (found) return [];
+      found = { targetType: 'issue', targetId: issueId, commentId };
+    }
+    return found ? [found] : [];
   }
 
   private archivedConfluencePages(address: ConfluenceAddress): ArchivedPage[] {

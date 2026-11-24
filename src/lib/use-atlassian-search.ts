@@ -37,13 +37,16 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
       if (controller.signal.aborted) return;
       await ensureTargetsLoaded(targets);
       if (controller.signal.aborted) return;
-      const issueIds = new Set<string>(), documentIds = new Set<string>(), documentCommentIds = new Map<string, string>();
+      const issueIds = new Set<string>(), documentIds = new Set<string>();
+      const issueCommentIds = new Map<string, string>(), documentCommentIds = new Map<string, string>();
       for (const { targetType, targetId, commentId } of targets) {
-        if (targetType === 'issue') issueIds.add(targetId);
-        else if (commentId) documentCommentIds.set(targetId, commentId);
+        if (targetType === 'issue') {
+          if (commentId) issueCommentIds.set(targetId, commentId);
+          else issueIds.add(targetId);
+        } else if (commentId) documentCommentIds.set(targetId, commentId);
         else documentIds.add(targetId);
       }
-      return { issueIds, documentIds, documentCommentIds };
+      return { issueIds, documentIds, issueCommentIds, documentCommentIds };
     }
     const timer = window.setTimeout(() => {
       void resolve(request.url).then(matches => {
@@ -62,8 +65,9 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
     return () => { for (const event of events) window.removeEventListener(event, retry); };
   }, [url, retry]);
 
+  const product = address?.product === 'jira' ? 'Jira' : 'Confluence';
   return {
-    label: address?.commentId ? 'Confluence 댓글 주소' : address ? address.product === 'jira' ? 'Jira 원본 주소' : 'Confluence 원본 주소' : null,
+    label: address ? `${product} ${address.commentId ? '댓글' : '원본'} 주소` : null,
     matches: current?.matches ?? undefined,
     pending: Boolean(request && !current),
     failed: current?.matches === null,

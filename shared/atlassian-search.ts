@@ -7,6 +7,7 @@ export type AtlassianSearchAddress = ParsedAtlassianLink & { commentId?: string 
 export type AtlassianSearchTarget = Pick<AtlassianLink, 'targetType' | 'targetId'> & { commentId?: string };
 
 const commentParam = 'focusedCommentId';
+const jiraAlternateCommentParam = 'focusedId';
 const commentParamAliases = new Set(['focusedcommentid', 'commentid', 'inlinecommentid']);
 const commentFragmentPrefix = /^(?:comment|inline[-_]?comment)(?:[-_:]|\d)/iu;
 
@@ -22,9 +23,10 @@ function safeSearchPath(value: string): boolean {
   }
 }
 
-function confluenceCommentId(url: URL): string | null | undefined {
+function sourceCommentId(url: URL, product: ParsedAtlassianLink['product']): string | null | undefined {
   for (const name of url.searchParams.keys()) {
     if (name !== commentParam && commentParamAliases.has(name.toLowerCase())) return null;
+    if (product === 'jira' && name !== jiraAlternateCommentParam && name.toLowerCase() === 'focusedid') return null;
   }
   const [focused, duplicate] = url.searchParams.getAll(commentParam);
   if (duplicate !== undefined || (focused !== undefined && !isConfluencePageId(focused))) return null;
@@ -32,6 +34,11 @@ function confluenceCommentId(url: URL): string | null | undefined {
   let fragment: string;
   try { fragment = decodeURIComponent(url.hash.slice(1)); }
   catch { return null; }
+  if (product === 'jira' && url.searchParams.has(jiraAlternateCommentParam)) {
+    const [alternate, duplicate] = url.searchParams.getAll(jiraAlternateCommentParam);
+    if (focused !== undefined || duplicate !== undefined || !isConfluencePageId(alternate) || fragment !== `comment-${alternate}`) return null;
+    return alternate;
+  }
   if (!commentFragmentPrefix.test(fragment)) return focused;
   const anchored = fragment.startsWith('comment-') ? fragment.slice('comment-'.length) : undefined;
   if (!isConfluencePageId(anchored) || (focused !== undefined && focused !== anchored)) return null;
@@ -48,13 +55,13 @@ export function parseAtlassianSearchInput(input: string): AtlassianSearchAddress
       if (parsed.product === 'confluence') {
         const pageIds = url.searchParams.getAll('pageId');
         if (pageIds.length && (pageIds.length !== 1 || !('pageId' in parsed) || pageIds[0] !== parsed.pageId)) return null;
-        const commentId = confluenceCommentId(url);
-        if (commentId === null) return null;
-        if (commentId !== undefined) {
-          const canonical = new URL(parsed.url);
-          canonical.searchParams.set(commentParam, commentId);
-          return canonical.href.length <= MAX_ATLASSIAN_LINK_URL_LENGTH ? { ...parsed, commentId, url: canonical.href } : null;
-        }
+      }
+      const commentId = sourceCommentId(url, parsed.product);
+      if (commentId === null) return null;
+      if (commentId !== undefined) {
+        const canonical = new URL(parsed.url);
+        canonical.searchParams.set(commentParam, commentId);
+        return canonical.href.length <= MAX_ATLASSIAN_LINK_URL_LENGTH ? { ...parsed, commentId, url: canonical.href } : null;
       }
       return parsed;
     } catch (error) {

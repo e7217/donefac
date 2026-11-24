@@ -72,6 +72,7 @@ const navigation = [
 
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
+  issueCommentId?: string | null;
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttScope?: 'team'; ganttProject?: string | null;
   ganttScheduleFilters?: TeamGanttScheduleFilters;
@@ -149,7 +150,10 @@ function routeHash(route: WorkspaceRoute) {
     if (filters?.query) query.set('ganttQ', filters.query);
     if (filters?.gitlab) query.set('ganttGitlab', filters.gitlab);
   }
-  if (route.issueId) query.set('issue', route.issueId);
+  if (route.issueId) {
+    query.set('issue', route.issueId);
+    if (route.issueCommentId) query.set('issueComment', route.issueCommentId);
+  }
   if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
   if (route.view === 'development' && route.gitlabActivityFilters) appendGitlabActivityFilters(query, route.gitlabActivityFilters);
   if (route.view === 'publication' && route.publicationCriteria) {
@@ -284,9 +288,16 @@ function canPreviewIssueDocument(snapshot: WorkspaceSnapshot, issueId: string, d
   return Boolean(document && (snapshot.resourceLinks.some(link => link.issueId === issueId && link.documentId === documentId) ||
     countIssueDocumentReferences(document.content, issueId) > 0));
 }
+function requestIssueCommentFocus(issueId: string) {
+  return window.dispatchEvent(new CustomEvent('teamspace:focus-issue-comment', { cancelable: true, detail: { issueId } }));
+}
 function confirmRouteNavigation(previous: WorkspaceRoute | null, next: WorkspaceRoute): boolean {
   if (previous?.issueId && previous.documentPreviewId !== next.documentPreviewId &&
       routeHash({ ...previous, documentPreviewId: null }) === routeHash({ ...next, documentPreviewId: null })) return true;
+  if (previous?.issueId && previous.issueId === next.issueId && previous.issueCommentId !== next.issueCommentId &&
+      routeHash({ ...previous, issueCommentId: null }) === routeHash({ ...next, issueCommentId: null })) {
+    return !next.issueCommentId || requestIssueCommentFocus(next.issueId);
+  }
   if (previous && previous.projectId === next.projectId && hasSameDocumentContext(previous, next)) {
     if (previous.issueId === next.issueId && (previous.sectionId !== next.sectionId || previous.documentCommentId !== next.documentCommentId) &&
         previous.documentPreviewId === next.documentPreviewId) return true;
@@ -348,6 +359,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && view !== 'favorites' && !ganttScope && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
+  const issueCommentSelectors = parameters.getAll('issueComment');
+  const issueCommentId = issueId && issueCommentSelectors.length === 1 && isRelationId(issueCommentSelectors[0])
+    ? issueCommentSelectors[0] : null;
   const requestedDocumentPreview = parameters.get('documentPreview');
   const documentPreviewId = issueId && requestedDocumentPreview &&
     canPreviewIssueDocument(snapshot, issueId, requestedDocumentPreview) ? requestedDocumentPreview : null;
@@ -430,7 +444,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     delete activityFilters.memberId;
     activityFilters.pages = {};
   }
-  return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
+  return { projectId, view, documentId, issueId, issueCommentId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
     documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
@@ -582,11 +596,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         route.ganttFocusDate !== previous.ganttFocusDate || route.ganttMilestoneId !== previous.ganttMilestoneId);
       if (changedPane || changedChart || changedIssueView) refreshContextEpoch.current++;
     }
-    const { documentId, documentCommentId } = route;
-    const linkedComment: WorkspaceCommentFocus | null = documentId && documentCommentId &&
-      (previous?.documentId !== documentId || previous.documentCommentId !== documentCommentId)
-      ? { targetType: 'document', targetId: documentId, actorId: null, commentId: documentCommentId, activation: ++commentFocusActivation.current }
-      : null;
+    const { issueId, issueCommentId, documentId, documentCommentId } = route;
+    let linkedComment: WorkspaceCommentFocus | null = null;
+    if (issueId && issueCommentId && (previous?.issueId !== issueId || previous.issueCommentId !== issueCommentId)) {
+      linkedComment = { targetType: 'issue', targetId: issueId, actorId: null, commentId: issueCommentId, activation: ++commentFocusActivation.current };
+    } else if (documentId && documentCommentId && (previous?.documentId !== documentId || previous.documentCommentId !== documentCommentId)) {
+      linkedComment = { targetType: 'document', targetId: documentId, actorId: null, commentId: documentCommentId, activation: ++commentFocusActivation.current };
+    }
     const boardTrigger = boardIssueOpener.current;
     if (boardTrigger) {
       const sameContext = (target: WorkspaceRoute) => boardTrigger.reviewContext !== undefined
@@ -647,7 +663,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setCommentFocus(focus => {
       if (linkedComment) return linkedComment;
       if (!focus) return null;
-      if (focus.actorId === null) return route.documentCommentId === focus.commentId ? focus : null;
+      if (focus.actorId === null) {
+        const sameTarget = focus.targetType === 'issue' ? route.issueId === focus.targetId && route.issueCommentId === focus.commentId
+          : route.documentId === focus.targetId && route.documentCommentId === focus.commentId;
+        return sameTarget ? focus : null;
+      }
       if (focus.targetType === 'issue') return route.issueId === focus.targetId ? focus : null;
       return route.view === 'documents' && route.documentId === focus.targetId && !route.issueId && !route.publication ? focus : null;
     });
@@ -821,17 +841,26 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     return true;
   };
-  const openIssue = (id: string, capacityTrigger?: { opener: HTMLElement; fallback: HTMLElement | null }) => {
+  const openIssue = (id: string, capacityTrigger?: { opener: HTMLElement; fallback: HTMLElement | null }, issueCommentId?: string) => {
     const issue = dataRef.current?.issues.find(i => i.id === id);
-    if (!issue) return;
+    if (!issue || (issueCommentId !== undefined && !isRelationId(issueCommentId))) return;
     const current = acceptedRouteRef.current;
-    const retainedPreview = current?.issueId === id ? current.documentPreviewId : null;
+    const retainedPreview = !issueCommentId && current?.issueId === id ? current.documentPreviewId : null;
+    const requestIssueRoute = (route: WorkspaceRoute) => {
+      const next = { ...route, issueCommentId };
+      const repeat = issueCommentId && current && routeHash(current) === routeHash(next);
+      if (repeat && !requestIssueCommentFocus(id)) return false;
+      if (!requestRoute(next)) return false;
+      if (repeat) setCommentFocus({ targetType: 'issue', targetId: id, actorId: null, commentId: issueCommentId,
+        activation: ++commentFocusActivation.current });
+      return true;
+    };
     if (current?.view === 'documents' && current.documentId) {
-      requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview });
+      requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview });
       return;
     }
     if (current?.view === 'teamboard') {
-      if (requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview }) && capacityTrigger) {
+      if (requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview }) && capacityTrigger) {
         boardIssueOpener.current = capacityTrigger;
         setBoardDialogIssueId(id);
       }
@@ -839,11 +868,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
     if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'gantt' && current.ganttScope === 'team' ||
         current?.view === 'development' && current.projectId === issue.projectId) {
-      if (requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
+      if (requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
     }
     const sameProject = issue.projectId === projectId;
-    if (requestRoute({
+    if (requestIssueRoute({
       projectId:view === 'teamoverview' || view === 'reports' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
@@ -864,9 +893,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       setSearchOpen(false);
     }
   };
+  const openSearchIssue = (id: string, commentId?: string) => openIssue(id, undefined, commentId);
   const closeIssuePanel = (id: string) => {
     const current = acceptedRouteRef.current;
-    if (current?.issueId === id) requestRoute({ ...current, issueId: null, documentPreviewId: null });
+    if (current?.issueId === id) requestRoute({ ...current, issueId: null, issueCommentId: null, documentPreviewId: null });
   };
   const openIssueForReview: OpenIssueForReview = (id, source) => {
     const current = acceptedRouteRef.current;
@@ -885,7 +915,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const context = issueReviewContext(current);
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
       : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null : current.projectId;
-    if (!requestRoute({ ...current, issueId: id, documentPreviewId: null })) return;
+    if (!requestRoute({ ...current, issueId: id, issueCommentId: null, documentPreviewId: null })) return;
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
     boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
@@ -899,7 +929,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!review || !latest || !current?.issueId || review.actorId !== actorId || issueReviewContext(current) !== review.context) return;
     const target = issueReviewPosition(review.issueIds, current.issueId, latest.issues, review.projectScope)?.[direction];
     // Replace the drawer's history slot so Back returns to the originating view.
-    if (target && requestRoute({ ...current, issueId: target.id, documentPreviewId: null }, 'replace', true)) {
+    if (target && requestRoute({ ...current, issueId: target.id, issueCommentId: null, documentPreviewId: null }, 'replace', true)) {
       const opened = acceptedRouteRef.current;
       if (opened?.issueId === target.id && issueReviewContext(opened) === review.context) {
         setIssueReview({ ...review, gitlabActivity: undefined, focusDirection: direction });
@@ -1061,7 +1091,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       const { targetId, commentId } = notification;
       const previous = acceptedRouteRef.current;
       if (commentId && targetType === 'issue' && previous && routeHash(previous) === routeHash(route) &&
-          !window.dispatchEvent(new CustomEvent('teamspace:focus-issue-comment', { cancelable: true, detail: { issueId: targetId } }))) return false;
+          !requestIssueCommentFocus(targetId)) return false;
       if (!requestRoute(route)) return false;
       setCommentFocus(commentId ? { targetType, targetId, actorId, commentId, activation: ++commentFocusActivation.current } : null);
       return true;
@@ -1230,7 +1260,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
         {view === 'favorites' && <FavoritesPage data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh}/>}
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
-          <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openIssue} openDocument={openDocument}/>
+          <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openSearchIssue} openDocument={openDocument}/>
         </Suspense>}
         {view === 'issues' && <Issues {...props} savedViewId={savedViewId} refreshIssues={refreshIssues} issueOverlayOpen={Boolean(issueId)}
           onOpenIssueForReview={openIssueForReview}
@@ -1296,7 +1326,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       gitlabActivitySelection={gitlabActivitySelection}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
-    {searchOpen && <SearchDialog {...props} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
+    {searchOpen && <SearchDialog {...props} openIssue={openSearchIssue} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
   </div></FavoritesProvider>;
@@ -1368,7 +1398,8 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
 
-function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: Pick<FeatureProps, 'data' | 'refresh' | 'openIssue'> & {
+function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: Pick<FeatureProps, 'data' | 'refresh'> & {
+  openIssue: (id: string, commentId?: string) => void;
   openDocument: (id: string, sectionId?: string, commentId?: string) => void;
   onClose: () => void;
   onShowAll: (query: string) => void;
@@ -1393,7 +1424,8 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
       <div className="search-results">
         {!trimmed ? <div className="search-intro"><Command size={30}/><h3>팀의 업무와 지식을 찾아보세요</h3><p>모든 프로젝트의 티켓과 문서를 검색합니다.</p></div> : <>
           {issues.length > 0 && <div className="search-label">업무</div>}
-          {issues.map(({issue, matchedAliases, matchedGitlab}) => <button type="button" className="search-result search-result-issue" key={issue.id} onClick={() => openIssue(issue.id)}>
+          {issues.map(({issue, matchedAliases, matchedGitlab, commentId}) => <button type="button" className="search-result search-result-issue" key={issue.id}
+            aria-label={commentId ? `${issue.key} ${issue.title} 댓글 열기` : undefined} onClick={() => openIssue(issue.id, commentId)}>
             <CircleDot size={17} style={{color:statusMeta(data, issue.projectId, issue.status).color}} aria-hidden="true"/>
             <span className="search-result-issue-content">
               <span className="search-result-issue-title"><span className="workspace-search-issue-key">{issue.key}</span><span>{issue.title}</span></span>

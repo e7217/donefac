@@ -201,6 +201,8 @@ function IssuePanelContent(props: IssuePanelProps) {
   const commentsHeading = useRef<HTMLHeadingElement>(null);
   const commentActivation = commentFocus?.activation;
   const [commentError, setCommentError] = useState('');
+  const missingFocusedComment = commentFocus && loadedCommentActivation === commentActivation && !loadingComments && !commentError &&
+    !comments.some(comment => comment.id === commentFocus.commentId);
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [scheduleSaveReview, setScheduleSaveReview] = useState<ScheduleSaveReview | null>(null);
@@ -1347,7 +1349,10 @@ function IssuePanelContent(props: IssuePanelProps) {
         canPrepareStatus={canPrepareAutomationStatus} onPrepareStatus={prepareAutomationStatus} />
       <section className="issue-related-section"><Attachments resourceType="issue" resourceId={issueId} actorId={props.actorId} notify={notify} onChanged={refresh}/></section>
       <section className="issue-related-section issue-comments">
-        <h3 ref={commentsHeading} tabIndex={-1}><MessageSquare size={16} /> 댓글 <span>{comments.length}</span></h3>
+        <h3 ref={commentsHeading} tabIndex={-1} aria-describedby={missingFocusedComment ? 'issue-comment-unavailable' : undefined}>
+          <MessageSquare size={16} /> 댓글 <span>{comments.length}</span>
+        </h3>
+        {missingFocusedComment && <p id="issue-comment-unavailable" className="issue-section-empty">댓글을 찾을 수 없습니다.</p>}
         {loadingComments ? <p className="issue-section-empty">댓글을 불러오는 중…</p> : comments.length === 0 ? <p className="issue-section-empty">논의와 결정사항을 남겨주세요.</p> : comments.map(comment => {
           const user = data.users.find(value => value.id === comment.authorId);
           return <article id={`issue-comment-${comment.id}`} key={comment.id} className="issue-comment" tabIndex={-1}>

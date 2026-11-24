@@ -3,7 +3,7 @@ import { documentPlainText } from './document-plain-text.js';
 import { documentNodes } from './document-references.js';
 import { isDocumentSectionId, outlineHeadingTitle } from './document-sections.js';
 import { GITLAB_SEARCH_INPUT_LIMIT, matchingGitlabSearchLinks, normalizeGitlabSearchInput } from './gitlab-search.js';
-import { parseAtlassianSearchInput } from './atlassian-search.js';
+import { parseAtlassianSearchInput, type AtlassianSearchAddress } from './atlassian-search.js';
 import { issueSearchText } from './issue-schema.js';
 import type { DocPage, Issue, IssueSearchAlias, RichContent, WorkspaceSnapshot } from './types.js';
 import { projectStatuses } from './workflow-helpers.js';
@@ -22,6 +22,7 @@ export const WORKSPACE_SEARCH_INPUT_LIMIT = GITLAB_SEARCH_INPUT_LIMIT;
 export type OriginalAddressMatches = {
   issueIds: ReadonlySet<string>;
   documentIds: ReadonlySet<string>;
+  issueCommentIds?: ReadonlyMap<string, string>;
   documentCommentIds?: ReadonlyMap<string, string>;
 };
 const pageSize = 20;
@@ -31,14 +32,15 @@ const excerptLimit = 160;
 const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'base' });
 const httpUrlStart = /^https?:\/\//iu;
 
-type IssueSearchMatch = { issue: Issue; matchedAliases?: IssueSearchAlias[]; matchedGitlab?: string };
+type IssueSearchMatch = { issue: Issue; matchedAliases?: IssueSearchAlias[]; matchedGitlab?: string; commentId?: string };
 type DocumentSearchMatch = { document: DocPage; sectionId?: string; commentId?: string };
 type IssueAliasData = Pick<WorkspaceSnapshot, 'issueAliases'>;
 export type WorkspaceSearchDocument = { kind: 'document'; parentTitles: string[]; excerpt: string | null } & DocumentSearchMatch;
 export type WorkspaceSearchResult = ({ kind: 'issue'; excerpt: string | null } & IssueSearchMatch) | WorkspaceSearchDocument;
 
-type Match = { title: string; rank: number } & ({ kind: 'issue'; value: Issue; matchedAliases: IssueSearchAlias[]; matchedGitlab?: string }
-  | { kind: 'document'; value: DocPage; bodyOnly?: boolean; commentId?: string });
+type Match = { title: string; rank: number; commentId?: string } &
+  ({ kind: 'issue'; value: Issue; matchedAliases: IssueSearchAlias[]; matchedGitlab?: string }
+  | { kind: 'document'; value: DocPage; bodyOnly?: boolean });
 
 const documentSearchTextBlocks = new Set(['paragraph', 'codeBlock', 'detailsSummary']);
 
@@ -123,12 +125,16 @@ export function searchIssueCandidates<T extends Pick<Issue, 'id' | 'key' | 'titl
   }).sort((left, right) => left.rank - right.rank);
 }
 
+function matchOriginalIssue(issue: Issue, address: AtlassianSearchAddress, original?: OriginalAddressMatches): IssueSearchMatch | null {
+  if (!address.commentId) return original?.issueIds.has(issue.id) ? { issue } : null;
+  if (address.product !== 'jira') return null;
+  const commentId = original?.issueCommentIds?.get(issue.id);
+  return commentId ? { issue, commentId } : null;
+}
+
 export function searchQuickIssues(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): IssueSearchMatch[] {
   const address = workspaceAtlassianSearchAddress(input);
-  if (address?.commentId) return [];
-  if (address) {
-    return data.issues.filter(issue => original?.issueIds.has(issue.id)).slice(0, quickIssueLimit).map(issue => ({ issue }));
-  }
+  if (address) return data.issues.flatMap(issue => matchOriginalIssue(issue, address, original) ?? []).slice(0, quickIssueLimit);
   const trimmed = input.trim();
   const textQuery = httpUrlStart.test(trimmed) ? normalizeWorkspaceSearchInput(trimmed).toLowerCase() : trimmed.toLocaleLowerCase();
   if (!textQuery) return [];
@@ -160,6 +166,7 @@ export function searchQuickIssues(data: WorkspaceSnapshot, input: string, origin
 export function searchQuickDocuments(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): DocumentSearchMatch[] {
   const address = workspaceAtlassianSearchAddress(input);
   if (address?.commentId) {
+    if (address.product !== 'confluence') return [];
     return data.documents.flatMap(document => {
       const commentId = original?.documentCommentIds?.get(document.id);
       return commentId ? [{ document, commentId }] : [];
@@ -304,14 +311,15 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
 
   const spaces = new Map(data.projects.map(({ id, key, name }) => [id, `${name} ${key}`]));
   const matches: Match[] = [];
-  if (query && !originalAddress?.commentId && !label && filters.kind !== 'document') {
+  if (query && !label && filters.kind !== 'document' && (!originalAddress?.commentId || originalAddress.product === 'jira')) {
     const statuses = new Map(originalAddress ? [] : data.projects.map(({ id }) => [id, new Map(projectStatuses(data, id).map(status => [status.id, status.label]))]));
     const gitlabMatches = originalAddress ? null : matchingGitlabSearchLinks(data.gitlabLinks, filters.query);
     for (const issue of data.issues) {
       if (!scopeMatches(issue.projectId, filters.scope)) continue;
       const title = normalizeWorkspaceSearchKey(issue.title);
       if (originalAddress) {
-        if (original?.issueIds.has(issue.id)) matches.push({ kind: 'issue', value: issue, title, rank: 0, matchedAliases: [] });
+        const match = matchOriginalIssue(issue, originalAddress, original);
+        if (match) matches.push({ kind: 'issue', value: issue, title, rank: 0, matchedAliases: [], commentId: match.commentId });
         continue;
       }
       const status = statuses.get(issue.projectId)?.get(issue.status) ?? issue.status;
@@ -322,7 +330,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       if (rank !== null) matches.push({ kind: 'issue', value: issue, title, rank, matchedAliases, matchedGitlab });
     }
   }
-  if (filters.kind !== 'issue') {
+  if (filters.kind !== 'issue' && (!originalAddress?.commentId || originalAddress.product === 'confluence')) {
     for (const document of data.documents) {
       if (!scopeMatches(document.projectId, filters.scope)) continue;
       const labels = document.labels ?? [];
@@ -351,7 +359,8 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
   const visible = matches.slice((page - 1) * pageSize, page * pageSize);
   const documentsById = new Map(visible.some(item => item.kind === 'document') ? data.documents.map(doc => [doc.id, doc]) : []);
   const items = visible.map((item): WorkspaceSearchResult => {
-    if (item.kind === 'issue') return { kind: 'issue', issue: item.value, excerpt: excerptOf(item.value.description, query),
+    if (item.kind === 'issue') return { kind: 'issue', issue: item.value, excerpt: item.commentId ? null : excerptOf(item.value.description, query),
+      ...(item.commentId ? { commentId: item.commentId } : {}),
       ...(item.matchedAliases.length ? { matchedAliases: item.matchedAliases } : {}),
       ...(item.matchedGitlab ? { matchedGitlab: item.matchedGitlab } : {}) };
     const section = item.bodyOnly ? documentSearchSection(item.value, value => normalizeWorkspaceSearchKey(value).includes(query)) : undefined;

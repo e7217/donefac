@@ -11,7 +11,8 @@ import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AtlassianLink, AtlassianLinkPreview } from '../../shared/atlassian-links.js';
 import type { AtlassianSearchTarget } from '../../shared/atlassian-search.js';
-import type { ApiKeyCreated, Comment, DocPage, DocumentTreeMovePreview, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types.js';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
+import type { ApiKeyCreated, Comment, DocPage, DocumentTreeMovePreview, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Export = WorkspaceSnapshot & { schemaVersion: number; atlassianLinks: AtlassianLink[] };
 const linksRoute = '/atlassian-links';
@@ -91,8 +92,9 @@ test('linked Jira and Confluence metadata is fetched on demand from the configur
   assert.deepEqual(await call(targetRoute('document','doc-overview')),[wiki]);
   assert.deepEqual(await call(targetRoute('issue','issue-2')),[]);
   assert.deepEqual(await call(linksRoute,'POST',{targetType:'issue',targetId:'issue-1',product:'jira',url:jira.url},201),jira);
-  assert.deepEqual(await call(resolveRoute(base+'/jira/browse/leg-17?focusedCommentId=9#comments')),
+  assert.deepEqual(await call(resolveRoute(base+'/jira/browse/leg-17?page=comments#comments')),
     { targets: [{ targetType: 'issue', targetId: 'issue-1' }] });
+  assert.deepEqual(await call(resolveRoute(base+'/jira/browse/leg-17?focusedCommentId=9#comments')), { targets: [] });
   assert.deepEqual(await call(resolveRoute(base+'/wiki/spaces/TEAM/pages/1234/Retitled%20Page')),
     { targets: [{ targetType: 'document', targetId: 'doc-overview' }] });
   const search = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(wiki.url));
@@ -400,4 +402,121 @@ test('Confluence comment permalinks require a proven active source comment and e
   await migrate(page('100', sourceTitle) + comment(parentSourceId, '100', '다른 원본 인스턴스의 같은 ID'), 'confluence-overlap', 'OVRP');
   assert.deepEqual(await resolve(rootUrl), { targets: [] });
   assert.deepEqual(await resolve(replyUrl), { targets: [target(doc, reply)] });
+});
+
+test('Jira comment locators require one active, unrestricted comment and its proven source issue and installation', async t => {
+  const { base, call } = await appFixture(t, scratch(t));
+  const origin = 'https://jira.example.invalid/company/jira';
+  const instance = 'jira-comment-locator';
+  const longId = '90071992547409931234';
+  const author = { name: 'source-writer', displayName: '원본 댓글 작성자' };
+  const created = '2020-01-01T00:00:00Z';
+  const jiraComment = (id: string, body: string, restricted = false) => ({
+    id, body, author, created, ...(restricted ? { visibility: { type: 'role', value: 'Administrators' } } : {}),
+  });
+  const jiraIssue = (id: string, number: number, title: string, comments: ReturnType<typeof jiraComment>[]) => ({
+    id, key: `SRC-${number}`, fields: {
+      project: { id: '4020', key: 'SRC', name: 'Jira 원본 프로젝트' }, summary: title,
+      created, updated: created, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      comment: { comments },
+    },
+  });
+  async function migrate(key: string, issues: ReturnType<typeof jiraIssue>[], instanceKey = instance, appendProjectId?: string) {
+    const params = new URLSearchParams({ filename: `${key}.json`, product: 'jira', instanceKey });
+    const upload = await fetch(`${base}/legacy-import/packages?${params}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-min' },
+      body: JSON.stringify({ issues }),
+    });
+    assert.equal(upload.status, 201, await upload.clone().text());
+    const imported = await upload.json() as LegacyPackageSummary;
+    const { defaultConfiguration: configuration, identities } = await call<MigrationOptions>(`/migrations/options?packageId=${imported.id}`);
+    configuration.projects = configuration.projects.map(project => ({ ...project, key }));
+    const sourceUser = identities.find(identity => identity.sourceValue === author.name);
+    assert.ok(sourceUser);
+    configuration.users[sourceUser.id] = 'user-min';
+    configuration.excludedRecords = issues.flatMap(issue => issue.fields.comment.comments
+      .filter(comment => comment.visibility).map(comment => `${imported.id}/comment:${comment.id}`));
+    if (appendProjectId) configuration.appendTo = { projectId: appendProjectId, refreshHistory: true, statuses: {}, issueTypes: {}, fields: {} };
+    else configuration.sourceBaseUrls[imported.id] = origin;
+    const preview = await call<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
+    assert.ok(preview.canApply, JSON.stringify(preview.notices));
+    return call<MigrationApplyResult>(`/migrations/previews/${preview.id}/apply`, 'POST', {
+      expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements,
+    }, 201);
+  }
+  const initial = await migrate('JIRAEX', [
+    jiraIssue('1200', 1, '이관한 댓글의 원래 업무', [jiraComment(longId, '첫 번째 이관 댓글'), jiraComment('302', '두 번째 이관 댓글'), jiraComment('303', '공개하지 않을 댓글', true)]),
+    { ...jiraIssue('1201', 2, '다른 원래 업무', [jiraComment('304', '다른 업무 댓글')]), key: 'src-2' },
+  ]);
+  const [projectId] = initial.import.projectIds;
+  const { issues } = await call<WorkspaceSnapshot>('/workspace');
+  const issue = issues.find(issue => issue.projectId === projectId && issue.title === '이관한 댓글의 원래 업무');
+  const other = issues.find(issue => issue.projectId === projectId && issue.title === '다른 원래 업무');
+  assert.ok(issue && other && issue.key !== 'SRC-1');
+  const comments = (issue: Issue) => call<Comment[]>(`/comments?resourceType=issue&resourceId=${issue.id}`);
+  const first = (await comments(issue)).find(comment => comment.body === '첫 번째 이관 댓글');
+  const second = (await comments(issue)).find(comment => comment.body === '두 번째 이관 댓글');
+  const [otherComment] = await comments(other);
+  assert.ok(first && second && otherComment);
+  const firstUrl = `${origin}/browse/SRC-1?focusedCommentId=${longId}#comment-${longId}`;
+  const secondUrl = `${origin}/browse/SRC-1#comment-302`;
+  const conflicting = firstUrl.replace(`#comment-${longId}`, '#comment-302');
+  const showAsText = 'https://example.invalid/not-an-atlassian-locator?ordinary=value';
+  const manualIssue = await call<Issue>('/issues', 'POST', { projectId, title: '수동 링크가 있는 업무', description: `${conflicting}\n${showAsText}` }, 201);
+  const bareIssueUrl = firstUrl.split('?')[0];
+  const resolve = (url: string) => call<{ targets: AtlassianSearchTarget[] }>(resolveRoute(url));
+  const expected = (issue: Issue, comment: Comment) => ({ targets: [{ targetType: 'issue', targetId: issue.id, commentId: comment.id }] });
+  await call(linksRoute, 'POST', { targetType: 'issue', targetId: manualIssue.id, product: 'jira', url: firstUrl }, 201);
+  assert.deepEqual(await resolve(firstUrl), expected(issue, first));
+  assert.deepEqual(await resolve(secondUrl), expected(issue, second));
+  assert.deepEqual(await resolve(`${origin}/browse/src-2?focusedId=304#comment-304`), expected(other, otherComment));
+  const search = await call<{ documents: DocPage[]; issues: Issue[]; issueCommentIds: Record<string, string> }>(searchRoute(secondUrl));
+  assert.deepEqual(search.issues.map(value => value.id), [issue.id]);
+  assert.deepEqual(search.documents, []);
+  assert.deepEqual(search.issueCommentIds, { [issue.id]: second.id });
+
+  const wrongInstallation = firstUrl.replace('/company/jira/', '/elsewhere/jira/');
+  await call(linksRoute, 'POST', { targetType: 'issue', targetId: issue.id, product: 'jira', url: wrongInstallation }, 201);
+  for (const url of [firstUrl.replace('SRC-1', 'SRC-2'), firstUrl.replace('jira.example', 'other.example'), wrongInstallation,
+    `${bareIssueUrl}#comment-303`, `${bareIssueUrl}#comment-304`, `${bareIssueUrl}#comment-999`]) {
+    assert.deepEqual(await resolve(url), { targets: [] });
+  }
+  await call(resolveRoute(conflicting), 'GET', undefined, 400);
+  assert.deepEqual(await call(searchRoute(conflicting)), { issues: [], documents: [] });
+  assert.deepEqual((await call<{ issues: Issue[] }>(searchRoute(showAsText))).issues.map(value => value.id), [manualIssue.id]);
+
+  await migrate('JIRAUP', [jiraIssue('1200', 1, '이관한 댓글의 원래 업무', [jiraComment('305', '추가한 원본 댓글')])], instance, projectId);
+  const appended = (await comments(issue)).find(comment => comment.body === '추가한 원본 댓글');
+  assert.ok(appended);
+  const appendedUrl = `${bareIssueUrl}#comment-305`;
+  assert.deepEqual(await resolve(appendedUrl), expected(issue, appended));
+  const archived = await call<{ trashItemId: string }>(`/comments/${first.id}`, 'DELETE');
+  assert.deepEqual(await resolve(firstUrl), { targets: [] });
+  assert.deepEqual(await resolve(secondUrl), expected(issue, second));
+  await call(`/trash/items/${archived.trashItemId}/restore`, 'POST');
+  await call('/import', 'POST', { data: await call<Export>('/export') });
+  assert.deepEqual(await resolve(firstUrl), expected(issue, first));
+  assert.deepEqual(await resolve(appendedUrl), expected(issue, appended));
+
+  const destination = 'project-team';
+  const [workspace, schema, workflow] = await Promise.all([
+    call<WorkspaceSnapshot>('/workspace'), call<ProjectIssueSchema>(`/projects/${destination}/issue-schema`),
+    call<ProjectWorkflow>(`/projects/${destination}/workflow`),
+  ]);
+  const current = workspace.issues.find(value => value.id === issue.id);
+  const activeType = schema.issueTypes.find(type => !type.archived);
+  assert.ok(current && activeType);
+  const move: IssueProjectMoveInput = { projectId: destination, expectedVersion: current.version, includeConnected: false,
+    mappings: [{ issueId: issue.id, type: activeType.id, status: workflow.initialStatusId }] };
+  const movePath = `/issues/${issue.id}/project-move`;
+  const review = await call<IssueProjectMovePreview>(`${movePath}/preview`, 'POST', move);
+  assert.ok(review.token, JSON.stringify(review.blockers));
+  const moved = await call<IssueProjectMoveResult>(`${movePath}/apply`, 'POST', { ...move, token: review.token });
+  assert.equal(moved.issues[0].projectId, destination);
+  assert.deepEqual(await resolve(firstUrl), expected(issue, first));
+  assert.deepEqual(await resolve(appendedUrl), expected(issue, appended));
+
+  await migrate('JIRAALT', [jiraIssue('1200', 1, '다른 인스턴스의 원래 업무', [jiraComment(longId, '같은 원본 번호의 별도 댓글')])], 'jira-other-instance');
+  assert.deepEqual(await resolve(firstUrl), { targets: [] });
+  assert.deepEqual(await resolve(secondUrl), expected(issue, second));
 });

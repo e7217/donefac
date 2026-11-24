@@ -10,10 +10,11 @@ import {
 } from '../../shared/workspace-search';
 import { useAtlassianSearch } from '../lib/use-atlassian-search';
 
-type Props = Pick<FeatureProps, 'openIssue' | 'refresh'> & {
+type Props = Pick<FeatureProps, 'refresh'> & {
   data: WorkspaceSnapshot;
   filters: WorkspaceSearchFilters;
   onChange: (next: WorkspaceSearchFilters) => boolean;
+  openIssue: (id: string, commentId?: string) => void;
   openDocument: (id: string, sectionId?: string, commentId?: string) => void;
 };
 
@@ -123,12 +124,12 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
         {results.items.map((result, index) => {
           const detailId = `${resultsId}-${index}`;
           if (result.kind === 'issue') {
-            const { issue, excerpt, matchedAliases, matchedGitlab } = result;
+            const { issue, excerpt, matchedAliases, matchedGitlab, commentId } = result;
             const project = projectsById.get(issue.projectId);
             const status = statusMeta(data, issue.projectId, issue.status);
             return <li key={`issue:${issue.id}`}>
-              <button type="button" className="workspace-search-result" aria-label={`${issue.key} 업무 열기`} aria-describedby={detailId}
-                onClick={() => openIssue(issue.id)}>
+              <button type="button" className="workspace-search-result" aria-label={commentId ? `${issue.key} ${issue.title} 댓글 열기` : `${issue.key} 업무 열기`}
+                aria-describedby={detailId} onClick={() => openIssue(issue.id, commentId)}>
                 <CircleDot size={18} style={{ color: status.color }} aria-hidden="true" />
                 <span className="workspace-search-result-content" id={detailId}>
                   <span className="workspace-search-result-title"><span className="workspace-search-issue-key">{issue.key}</span><strong>{issue.title}</strong></span>
