@@ -31,6 +31,8 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
   chartPair?: ChartPair;
   onChartPairSettled?: () => void;
+  hasDateDraft: (issue: Issue) => boolean;
+  onReviewDates: (source: Issue, target: Issue, opener: HTMLButtonElement) => void;
 };
 
 interface Draft {
@@ -45,7 +47,7 @@ interface Draft {
 export function GanttTeamBlockers({
   id, data, visibleIssueIds, selectedIssueIds, busy, openIssue, refresh, notify,
   onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onReviewTogether, createdBlockedIssue, onCreateBlockedIssue, onPointerDown,
-  chartPair, onChartPairSettled,
+  chartPair, onChartPairSettled, hasDateDraft, onReviewDates,
 }: Props) {
   const heading = useId();
   const formHeading = useId();
@@ -119,6 +121,8 @@ export function GanttTeamBlockers({
   const disabled = busy || saving;
   const draftOpen = draft !== null;
   const reviewedChartPair = draft?.chartPair;
+  const duplicateForDates = source && target && relations.some(relation => relation.sourceIssueId === source.id && relation.targetIssueId === target.id);
+  const datesToReview = source && target && (hasDateDraft(source) || hasDateDraft(target));
 
   const load = useCallback(async () => {
     getRequest.current?.abort();
@@ -322,7 +326,11 @@ export function GanttTeamBlockers({
       {duplicate && <p role="status">이미 같은 방향의 차단 관계가 있습니다.</p>}
       {saveError && <p role="alert">{saveError}</p>}
       <div className="gantt-team-blockers-actions">
-        <button type="submit" className="btn btn-primary" disabled={disabled || loading || refreshing || !source || !target || invalidPair || duplicate}>
+        {datesToReview && source && target &&
+          <button type="button" className="btn btn-primary" aria-haspopup="dialog"
+            disabled={disabled || loading || refreshing || invalidPair || Boolean(duplicateForDates)}
+            onClick={event => onReviewDates(source, target, event.currentTarget)}>날짜와 차단 관계 검토</button>}
+        <button type="submit" className={datesToReview ? 'btn' : 'btn btn-primary'} disabled={disabled || loading || refreshing || !source || !target || invalidPair || duplicate}>
           {saving ? '차단 관계 저장 중' : '차단 관계 저장'}
         </button>
         {source && <button type="button" className="btn" aria-haspopup="dialog" disabled={disabled || refreshing}

@@ -1,0 +1,94 @@
+.gantt-team-blocker-edit {
+  box-sizing: border-box;
+  width: min(44rem, calc(100% - 1.5rem));
+  max-height: min(90dvh, 52rem);
+  margin: auto;
+  padding: 0;
+}
+
+.gantt-team-blocker-edit:not([open]) {
+  display: none;
+}
+
+.gantt-team-blocker-edit::backdrop {
+  background: #17352e66;
+}
+
+.gantt-team-blocker-edit > header svg {
+  flex: none;
+}
+
+.gantt-team-blocker-edit-rows {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.gantt-team-blocker-edit-row,
+.gantt-team-blocker-edit-preview > li {
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #dce7e1;
+  border-radius: 0.45rem;
+  overflow-wrap: anywhere;
+}
+
+.gantt-team-blocker-edit-row > p {
+  margin: 0.25rem 0;
+  font-size: 0.875rem;
+}
+
+.gantt-team-blocker-edit dl {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.4rem 0 0;
+  font-size: 0.875rem;
+}
+
+.gantt-team-blocker-edit dl > div {
+  display: grid;
+  grid-template-columns: 3.25rem minmax(0, 1fr);
+  gap: 0.35rem;
+}
+
+.gantt-team-blocker-edit dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-team-blocker-peer-date {
+  color: #79490f;
+}
+
+.gantt-team-blocker-edit .gantt-team-blocker-include {
+  display: flex;
+  align-items: start;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0;
+}
+
+.gantt-team-blocker-include input {
+  margin-top: 0.28em;
+  accent-color: #177c72;
+}
+
+.gantt-team-blocker-edit-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.75rem;
+}
+
+.gantt-team-blocker-edit-preview {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0;
+  margin: 0.6rem 0;
+  list-style: none;
+}
+
+@media (max-width: 480px) {
+  .gantt-team-blocker-edit-rows {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

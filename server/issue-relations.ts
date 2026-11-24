@@ -254,13 +254,16 @@ export class IssueRelationsService {
 
   remove(issueId: string, relationId: string, expected: unknown, audit: Audit, notifyChange: NotifyChange): void {
     const expectedVersion = typeof expected === 'string' && /^\d+$/.test(expected) ? Number(expected) : undefined;
-    this.store.transaction(() => {
-      const { issue, other, relation } = this.requireLocalRelation(issueId, relationId);
-      verifyVersion(relation, expectedVersion);
-      this.store.remove('issue_relations', relation.id);
-      this.recordActivity(issue, other, relation, '업무 관계 해제', audit);
-      notifyChange(relation, undefined);
-    });
+    this.store.transaction(() => this.removeInTransaction(issueId, relationId, expectedVersion, audit, notifyChange));
+  }
+
+  removeInTransaction(issueId: string, relationId: string, expectedVersion: number | undefined, audit: Audit, notifyChange: NotifyChange): void {
+    if (!this.store.db.isTransaction) throw new Error('Removing an issue relation requires a transaction.');
+    const { issue, other, relation } = this.requireLocalRelation(issueId, relationId);
+    verifyVersion(relation, expectedVersion);
+    this.store.remove('issue_relations', relation.id);
+    this.recordActivity(issue, other, relation, '업무 관계 해제', audit);
+    notifyChange(relation, undefined);
   }
 
   private requireIssue(id: string): Issue {

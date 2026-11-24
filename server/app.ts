@@ -124,8 +124,10 @@ import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELD
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
+type ScheduleUndoBlocker = { relation:IssueRelation; sourceProjectId:string; targetProjectId:string };
 type ScheduleUndoRecord = {
   id:string; records:ScheduleUndoIssue[]; used:boolean; plan?:ScheduleUndoPlan; linkChanges?:ScheduleDependencyMutation[];
+  blocker?:ScheduleUndoBlocker;
   actorId?:string; appliedAt?:string; scope?:string; scopeProjectId?:string;
 };
 
@@ -630,13 +632,23 @@ export function createApp(options: {
     const previousPlan=record.plan&&get<PlanningItem>('planning_items',record.plan.id);
     if(record.plan&&previousPlan)checkVersion(previousPlan,record.plan.appliedVersion);
     for(const entry of record.records)checkVersion(get<Issue>('issues',entry.id),entry.appliedVersion);
+    if(record.blocker){
+      const {relation,sourceProjectId,targetProjectId}=record.blocker;
+      const saved=store.get<IssueRelation>('issue_relations',relation.id);
+      if(!saved||saved.origin!=='teamspace'||saved.type!=='blocks'||saved.version!==relation.version||
+          saved.sourceIssueId!==relation.sourceIssueId||saved.targetIssueId!==relation.targetIssueId||
+          store.get<Issue>('issues',relation.sourceIssueId)?.projectId!==sourceProjectId||
+          store.get<Issue>('issues',relation.targetIssueId)?.projectId!==targetProjectId){
+        fail('차단 관계 또는 업무의 소속이 변경되었습니다. 현재 관계를 확인해 주세요.',409);
+      }
+    }
     const reverseLinks=record.linkChanges?.length?prepareDependencyUndo(record.id,record.linkChanges):[];
     return {previousPlan,reverseLinks};
   };
   /** Caller owns the transaction, shared by manual edits and guarded proposals. */
   const commitScheduleChanges=(req:Request,changes:unknown,dependencies?:Dependency[],plan?:ScheduleUndoPlan,
-    dependencyChanges:ScheduleDependencyMutation[] = [],allowDueDate=false,origin:ScheduleUndoOrigin={})=>{
-    if(!Array.isArray(changes)||(!changes.length&&!plan&&!dependencyChanges.length)||changes.length>1000)return fail('변경할 일정이나 업무 연결을 선택해 주세요.');
+    dependencyChanges:ScheduleDependencyMutation[] = [],allowDueDate=false,origin:ScheduleUndoOrigin={},blocker?:ScheduleUndoBlocker)=>{
+    if(!Array.isArray(changes)||(!changes.length&&!plan&&!dependencyChanges.length&&!blocker)||changes.length>1000)return fail('변경할 일정이나 업무 연결을 선택해 주세요.');
     const scope=requestedUndoScope(req);
     const seen=new Set<string>(),records:ScheduleUndoIssue[]=[],updated:Issue[]=[];
     for(const c of changes){
@@ -652,13 +664,15 @@ export function createApp(options: {
       activity(req,'issue',i.id,'일정 변경',`${issueScheduleLabel(old,dueChanged)} → ${issueScheduleLabel(i,dueChanged)}`);updated.push(i);
     }
     const projectIds=new Set(updated.map(issue=>issue.projectId));
+    if(blocker){projectIds.add(blocker.sourceProjectId);projectIds.add(blocker.targetProjectId);}
     const undoId=uid();
     const linkChanges=writeScheduleDependencyChanges(req,dependencyChanges,projectIds,undoId);
     const scopeProjectId=scope&&checkUndoOrigin(scope,origin,projectIds);
     const record:ScheduleUndoRecord={id:undoId,records,used:false,actorId:actor(req),appliedAt:now(),
       ...(scope?{scope:undoScopeKey(scope)}:{}),...(scopeProjectId?{scopeProjectId}:{}),
-      ...(plan?{plan}:{}),...(linkChanges.length?{linkChanges}:{})};
-    const linkDetail=linkChanges.length?` · 업무 연결 ${linkChanges.length}건`:'';
+      ...(plan?{plan}:{}),...(linkChanges.length?{linkChanges}:{}),...(blocker?{blocker}:{})};
+    const linkCount=linkChanges.length+Number(Boolean(blocker));
+    const linkDetail=linkCount?` · 업무 연결 ${linkCount}건`:'';
     store.put('schedule_undos',record);activity(req,'schedule',undoId,'일정 일괄 변경',`${plan?'계획 1개 · ':''}${updated.length}개 티켓${linkDetail}`);
     const warnings=projectIds.size?scheduleWarnings(store.all<Issue>('issues').filter(issue=>projectIds.has(issue.projectId)),dependencies):[];
     return{undoId,updated,warnings,...(linkChanges.length?{dependencyChanges:linkChanges.length}:{})};
@@ -1192,6 +1206,15 @@ export function createApp(options: {
     directBlockers:targetId=>issueRelations.directBlockers([targetId]),
     isTerminal:isIssueTerminal,
     commitChanges:(request,changes,dependencies,linkChanges,origin)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true,origin),
+    commitTeamBlocker(request,{source,target},changes,dependencies){
+      const predecessor=get<Issue>('issues',source.id),successor=get<Issue>('issues',target.id);
+      checkVersion(predecessor,source.expectedVersion);checkVersion(successor,target.expectedVersion);
+      const {relation,created}=issueRelations.createInTransaction(predecessor.id,
+        {otherIssueId:successor.id,type:'blocks',direction:'outgoing'},relationAudit(request),relationNotification(request));
+      if(!created) return fail('같은 방향의 차단 관계가 이미 있습니다. 최신 관계를 확인해 주세요.',409);
+      const blocker={relation,sourceProjectId:predecessor.projectId,targetProjectId:successor.projectId};
+      return {...commitScheduleChanges(request,changes,dependencies,undefined,[],false,{},blocker),relation};
+    },
   });
   planScheduleShift.registerRoutes(app,{
     actor,calendar:projectId=>calendars.get(projectId),versions:scheduleVersions,
@@ -2759,7 +2782,7 @@ export function createApp(options: {
       try{prepareScheduleUndo(record);}
       catch(error){if(error instanceof ApiError&&(error.status===404||error.status===409))return null;throw error;}
       return {undoId:record.id,appliedAt:record.appliedAt,issueCount:record.records.length,
-        dependencyChanges:record.linkChanges?.length??0,planCount:record.plan?1:0};
+        dependencyChanges:record.linkChanges?.length??0,planCount:record.plan?1:0,...(record.blocker?{relationChanges:1}:{})};
     });
     res.set('Cache-Control','no-store').json({undo});
   });
@@ -2797,11 +2820,17 @@ export function createApp(options: {
       if(plan&&previousPlan)activity(req,'planning',plan.id,'계획 일정 되돌리기',`${planScheduleLabel(previousPlan)} → ${planScheduleLabel(plan)}`);
       const projects=new Set(updated.map(issue=>issue.projectId));
       writeScheduleDependencyChanges(req,reverseLinks,projects,null);
+      if(record.blocker){
+        const {relation}=record.blocker;
+        issueRelations.removeInTransaction(relation.sourceIssueId,relation.id,relation.version,relationAudit(req),relationNotification(req));
+      }
       store.put('schedule_undos',{...record,used:true});
-      const linkDetail=reverseLinks.length?` · 업무 연결 ${reverseLinks.length}건`:'';
+      const linkCount=reverseLinks.length+Number(Boolean(record.blocker));
+      const linkDetail=linkCount?` · 업무 연결 ${linkCount}건`:'';
       activity(req,'schedule',record.id,'일정 변경 되돌리기',`${plan?'계획 1개 · ':''}${updated.length}개 티켓${linkDetail}`);
       const warnings=projects.size?scheduleWarnings(store.all<Issue>('issues').filter(issue=>projects.has(issue.projectId))):[];
-      const confirmation:ScheduleUndoResult={updated,warnings,...(plan?{plan}:{}),...(reverseLinks.length?{dependencyChanges:reverseLinks.length}:{})};
+      const confirmation:ScheduleUndoResult={updated,warnings,...(plan?{plan}:{}),...(reverseLinks.length?{dependencyChanges:reverseLinks.length}:{}),
+        ...(record.blocker?{relationChanges:1}:{})};
       if(record.actorId){
         store.db.prepare('DELETE FROM schedule_undo_results WHERE completed_at<=?').run(scheduleUndoCutoff());
         store.db.prepare('INSERT INTO schedule_undo_results(undo_id,completed_at,json) VALUES(?,?,?)')

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -56,6 +56,7 @@ import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
+import { GanttTeamBlockerEdit, type TeamBlockerDateDraft } from './GanttTeamBlockerEdit';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { groupActiveTeamBlockers } from './team-follow-up-choices';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
@@ -70,6 +71,8 @@ import './gantt-deadline-markers.css';
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type InlineDateValues = { source: Issue; startDate: string | null; endDate: string | null };
 type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owner: symbol };
+type ChartBlockerDraft = TeamBlockerDateDraft & { owner?: symbol; stored?: StoredGanttDateDraft };
+type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartBlockerDraft; targetDraft?: ChartBlockerDraft };
 type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener };
 type ManualReview = {
@@ -199,6 +202,7 @@ const BULK_DATES_DRAFT = 'schedule-bulk-dates';
 const BULK_LINKS_DRAFT = 'schedule-bulk-links';
 const BLOCKER_LINKS_DRAFT = 'schedule-blocker-links';
 const TEAM_BLOCKER_DRAFT = 'team-blocker';
+const TEAM_BLOCKER_EDIT_DRAFT = 'team-blocker-edit';
 const TEAM_FOLLOW_UP_DRAFT = 'team-follow-up';
 const REFRESH_FEEDBACK = {
   updated: '간트를 새로고침했습니다.', skipped: '간트 새로고침을 건너뛰었습니다.', failed: '간트를 새로고침하지 못했습니다. 다시 시도해 주세요.',
@@ -307,6 +311,8 @@ function ProjectGantt(props: GanttProps) {
   const [deadlinesOpen, setDeadlinesOpen] = useState(false);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
   const [teamBlockerChartPair, setTeamBlockerChartPair] = useState<{ sourceId: string; targetId: string; opener: HTMLButtonElement }>();
+  const [teamBlockerEdit, setTeamBlockerEdit] = useState<ChartBlockerEdit | null>(null);
+  const [teamBlockerListRevision, setTeamBlockerListRevision] = useState(0);
   const [teamFollowUp, setTeamFollowUp] = useState<TeamFollowUpReview | null>(null);
   const [teamFollowUpHandoff, setTeamFollowUpHandoff] = useState<TeamFollowUpHandoff | null>(null);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
@@ -401,7 +407,7 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const otherScheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || preview || cascade ||
     shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
-    createOpen || scheduleIssueCreation || blockedIssueCreation || linkEditor || planAssignment || planShift);
+    createOpen || scheduleIssueCreation || blockedIssueCreation || teamBlockerEdit || linkEditor || planAssignment || planShift);
   const scheduleEditorOpen = otherScheduleEditorOpen || Boolean(linkPicker);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
@@ -494,6 +500,8 @@ function ProjectGantt(props: GanttProps) {
   }, [reconsider]);
   const trackReservationDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TIME_RESERVATIONS_DRAFT, dirty, pending), [trackDraft]);
   const trackTeamBlockerDraft = useCallback((dirty: boolean, pending: boolean) => trackDraft(TEAM_BLOCKER_DRAFT, dirty, pending), [trackDraft]);
+  const trackTeamBlockerEdit = useCallback((dirty: boolean, pending: boolean, awaitingResult?: boolean) =>
+    trackDraft(TEAM_BLOCKER_EDIT_DRAFT, dirty, pending, awaitingResult), [trackDraft]);
   const trackTeamFollowUpOutcome = useCallback((unknown: boolean) => trackDraft(TEAM_FOLLOW_UP_DRAFT, true, false, unknown), [trackDraft]);
   useEffect(() => {
     if (dateRecoveryReady) return;
@@ -558,7 +566,7 @@ function ProjectGantt(props: GanttProps) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
-        const awaitingFollowUpResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult;
+        const awaitingFollowUpResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult || draftsRef.current.get(TEAM_BLOCKER_EDIT_DRAFT)?.awaitingResult;
         const awaitingScheduleResult = awaitingPasteResult || awaitingFollowUpResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
         const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
@@ -579,6 +587,7 @@ function ProjectGantt(props: GanttProps) {
             setTeamFollowUp(null);
             setTeamFollowUpHandoff(null);
             setTeamBlockerChartPair(undefined);
+            setTeamBlockerEdit(null);
             setPasteScope(null);
             setBulkLinkSelection(null);
             setBlockerLinksScope(null);
@@ -608,6 +617,7 @@ function ProjectGantt(props: GanttProps) {
       setTeamFollowUp(null);
       setTeamFollowUpHandoff(null);
       setTeamBlockerChartPair(undefined);
+      setTeamBlockerEdit(null);
       setPasteScope(null);
       setBulkLinkSelection(null);
       setBlockerLinksScope(null);
@@ -633,6 +643,54 @@ function ProjectGantt(props: GanttProps) {
     setTeamBlockerChartPair(undefined);
     setCreatedBlockedIssue(null);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
+  }
+  function blockerDateDraft(issue: Issue): ChartBlockerDraft | undefined {
+    const live = inlineDateDrafts.current.get(issue.id);
+    const stored = recoverableDates(issue, retainedDates.current.get(issue.id));
+    if (live?.source.projectId === issue.projectId) {
+      const changes = changedInlineDates(live);
+      return Object.keys(changes).length ? { source: live.source, changes, owner: live.owner, stored } : undefined;
+    }
+    if (!stored || draftDatesAreSaved(issue, stored)) return undefined;
+    const source = { ...issue, version: stored.version, startDate: stored.startDate, endDate: stored.endDate };
+    const changes = changedInlineDates({ source, startDate: stored.draftStart, endDate: stored.draftEnd });
+    return Object.keys(changes).length ? { source, changes, stored } : undefined;
+  }
+  function reviewTeamBlockerDates(source: Issue, target: Issue, opener: HTMLButtonElement) {
+    if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
+        [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
+    const sourceDraft = blockerDateDraft(source), targetDraft = blockerDateDraft(target);
+    if (sourceDraft || targetDraft) setTeamBlockerEdit({ source, target, opener, sourceDraft, targetDraft });
+  }
+  function closeTeamBlockerEdit() {
+    const opener = teamBlockerEdit?.opener;
+    setTeamBlockerEdit(null);
+    requestAnimationFrame(() => {
+      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+    });
+  }
+  async function applyTeamBlockerEdit(result: ScheduleTeamBlockerApplyResult) {
+    rememberUndo(result.undoId);
+    setScheduleWarnings(result.warnings);
+    for (const saved of result.updated) {
+      const selected = [teamBlockerEdit?.sourceDraft, teamBlockerEdit?.targetDraft].find(draft => draft?.source.id === saved.id);
+      const live = inlineDateDrafts.current.get(saved.id);
+      if (live && live.owner === selected?.owner) live.accept(saved);
+      else if (selected?.stored && retainedDates.current.get(saved.id) === selected.stored) {
+        if (live) live.accept(saved);
+        else { retainedDates.current.delete(saved.id); storeInlineDates(); }
+      }
+    }
+    const opener = teamBlockerChartPair?.opener;
+    try {
+      await refresh();
+      notify(result.updated.length ? '날짜와 차단 관계를 함께 저장했습니다.' : '차단 관계를 저장했습니다.');
+    }
+    catch { notify('변경을 저장했습니다. 간트 목록을 다시 불러와 주세요.', 'error'); }
+    setTeamBlockerEdit(null);
+    setTeamBlockerChartPair(undefined);
+    setTeamBlockerListRevision(value => value + 1);
+    requestAnimationFrame(() => (opener?.isConnected && !opener.disabled ? opener : teamBlockersTrigger.current)?.focus({ preventScroll: true }));
   }
   function openBlockedIssueCreation(issue: Issue, opener: HTMLButtonElement) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
@@ -1670,7 +1728,7 @@ function ProjectGantt(props: GanttProps) {
       const date = result.plan && (result.plan.startDate ?? result.plan.targetDate ?? result.plan.endDate);
       if (date && result.plan?.id === selectedPlanningId && outside(date)) showDate(date);
       if (result.plan) notify('계획과 연결 업무의 일정 변경을 되돌렸습니다.');
-      else if (result.dependencyChanges) notify(result.updated.length ? '일정과 업무 연결 변경을 되돌렸습니다.' : '업무 연결 변경을 되돌렸습니다.');
+      else if (result.dependencyChanges || result.relationChanges) notify(result.updated.length ? '일정과 업무 연결 변경을 되돌렸습니다.' : '업무 연결 변경을 되돌렸습니다.');
       else notify('마지막 일정 변경을 되돌렸습니다.');
     }
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
@@ -2235,15 +2293,22 @@ function ProjectGantt(props: GanttProps) {
     {deadlinesOpen && <GanttDeadlines id={DEADLINES_PANEL_ID} issues={issues} disabled={deadlineActionsDisabled}
       onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, { focusDate: 'dueDate' })}
       onPointerDown={keepInlineDateFocus} />}
-    {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
+    {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={`${draftEpoch}:${teamBlockerListRevision}`} id={TEAM_BLOCKERS_PANEL_ID} data={data}
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
-      busy={busy || Boolean(issueOverlayOpen || linkPicker)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
+      busy={busy || Boolean(issueOverlayOpen || linkPicker || teamBlockerEdit)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
       chartPair={teamBlockerChartPair} onChartPairSettled={() => setTeamBlockerChartPair(undefined)}
+      hasDateDraft={issue => Boolean(blockerDateDraft(issue))} onReviewDates={reviewTeamBlockerDates}
       onReviewSchedule={(relation, source, target, opener) => reviewTeamBlockerSchedules(source, [{ relation, target }], opener)}
       onReviewTogether={reviewTeamBlockerSchedules}
       createdBlockedIssue={createdBlockedIssue} onCreateBlockedIssue={openBlockedIssueCreation}
       onPointerDown={keepInlineDateFocus} refresh={refresh} notify={notify} onClose={closeTeamBlockers}
       onDraftChange={trackTeamBlockerDraft} />}
+    {teamBlockerEdit && <GanttTeamBlockerEdit
+      source={data.issues.find(issue => issue.id === teamBlockerEdit.source.id) ?? teamBlockerEdit.source}
+      target={data.issues.find(issue => issue.id === teamBlockerEdit.target.id) ?? teamBlockerEdit.target}
+      sourceDraft={teamBlockerEdit.sourceDraft} targetDraft={teamBlockerEdit.targetDraft}
+      actorId={props.actorId} undoScope={undoScope} refresh={refresh} onDraftChange={trackTeamBlockerEdit}
+      onClose={closeTeamBlockerEdit} onApplied={applyTeamBlockerEdit} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
       onClose={() => { setAnalysisOpen(false); analysisTrigger.current?.focus(); }} openIssue={openIssue}
       canLocateIssue={issueId => Boolean(issueRows.get(issueId)?.issue.startDate)} onLocateIssue={locateAnalysisIssue} onLocateFinish={locateTimelineDate} />}

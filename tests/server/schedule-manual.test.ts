@@ -4,9 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { Dependency, Issue, Project, ProjectWorkflow, SchedulePasteApplyResult, SchedulePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import type { Dependency, Issue, IssueRelation, Project, ProjectWorkflow, SchedulePasteApplyResult, SchedulePreview, ScheduleTeamBlockerApplyResult,
+  ScheduleTeamBlockerPreview, ScheduleUndoInfo, ScheduleUndoResult, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
 
 const actor = 'user-min';
 const otherActor = 'user-seo';
@@ -36,9 +38,9 @@ async function fixture(t: TestContext) {
     try { await server.close(); }
     finally { rmSync(dir, { recursive: true, force: true }); }
   });
-  async function call<T = unknown>(path: string, status: number, method = 'GET', body?: unknown, actorId = actor) {
+  async function call<T = unknown>(path: string, status: number, method = 'GET', body?: unknown, actorId = actor, headers: Record<string, string> = {}) {
     const response = await fetch(server.base + path, {
-      method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId },
+      method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId, ...headers },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const data = await response.json() as T;
@@ -49,7 +51,7 @@ async function fixture(t: TestContext) {
   const state = () => call<WorkspaceSnapshot>('/workspace', 200);
   const readPreview = (body: unknown, status = 200) => call<SchedulePreview>(previewPath, status, 'POST', body);
   return {
-    call, project, state, readPreview,
+    call, dir, project, state, readPreview,
     async restart() { await server.close(); server = await start(); },
     issue: (title: string, schedule: Partial<ReturnType<typeof dates>> = {}, projectId = project.id) => call<Issue>('/issues', 201, 'POST', {
       title, projectId, startDate: '2026-11-20', endDate: '2026-11-20', dueDate: '2026-11-26', ...schedule,
@@ -67,6 +69,77 @@ async function fixture(t: TestContext) {
     apply: (previewId: string, status = 200, actorId = actor) => call<SchedulePasteApplyResult>(applyPath, status, 'POST', { previewId }, actorId),
   };
 }
+
+test('date edits and a cross-project blocker share guarded apply, rollback, restart reuse and undo', async t => {
+  const f = await fixture(t);
+  const targetProject = await f.call<Project>('/projects', 201, 'POST', { key: 'BLOCK', name: '후행 업무 달력' });
+  const source = await f.issue('다른 프로젝트를 차단할 업무');
+  const target = await f.issue('차단 저장 중 오류를 재현할 업무', { endDate: '2026-11-26' }, targetProject.id);
+  const input = { source: { id: source.id, expectedVersion: source.version, dates: { endDate: '2026-11-23' } },
+    target: { id: target.id, expectedVersion: target.version, dates: { startDate: '2026-11-24' } } };
+  const scope = { 'X-Teamspace-Schedule-Undo-Scope': 'team' };
+  const preview = (status = 200) => f.call<ScheduleTeamBlockerPreview>('/schedule/team-blocker-edit/preview', status, 'POST', input);
+  const apply = (previewId: string | null, status = 200, actorId = actor) =>
+    f.call<ScheduleTeamBlockerApplyResult>('/schedule/team-blocker-edit/apply', status, 'POST', { previewId }, actorId, scope);
+  const links = () => f.call<IssueRelation[]>(`/issues/${source.id}/relations`, 200);
+  const before = await f.state();
+  const old = await preview();
+  assert.ok(old.previewId);
+  assert.deepEqual(old.warnings, []);
+  assert.deepEqual(await f.state(), before);
+  assert.deepEqual(await links(), []);
+
+  const calendarPath = `/projects/${targetProject.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath, 200);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-24', isWorking: false, label: '후행 프로젝트 휴무' }] }, otherActor);
+  await apply(old.previewId, 409);
+  const reviewed = await preview();
+  assert.ok(reviewed.previewId);
+  assert.ok(reviewed.warnings.some(warning => warning.includes('2026-11-25')));
+  await apply(reviewed.previewId, 409, otherActor);
+
+  const concurrent = await f.call<IssueRelation>('/schedule/team-blockers', 201, 'POST', {
+    sourceIssueId: source.id, targetIssueId: target.id, expectedSourceVersion: source.version, expectedTargetVersion: target.version,
+  }, otherActor);
+  const withConcurrent = await f.state();
+  await apply(reviewed.previewId, 409);
+  await preview(409);
+  assert.deepEqual(await f.state(), withConcurrent);
+  assert.deepEqual(await links(), [concurrent]);
+  await f.call(`/issues/${source.id}/relations/${concurrent.id}?expectedVersion=${concurrent.version}`, 200, 'DELETE', undefined, otherActor);
+
+  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER reject_second_blocker_date BEFORE UPDATE OF json ON issues
+      WHEN json_extract(OLD.json,'$.title')='차단 저장 중 오류를 재현할 업무'
+      BEGIN SELECT RAISE(ABORT,'synthetic blocker date failure'); END`);
+    const beforeFailure = await f.state();
+    await apply(reviewed.previewId, 500);
+    assert.deepEqual(await f.state(), beforeFailure);
+    assert.deepEqual(await links(), []);
+  } finally { db.exec('DROP TRIGGER IF EXISTS reject_second_blocker_date'); db.close(); }
+
+  const applied = await apply(reviewed.previewId);
+  assert.equal(applied.relation.type, 'blocks');
+  assert.deepEqual(await links(), [applied.relation]);
+  assert.deepEqual(applied.updated.map(issue => [issue.id, dates(issue), issue.version]), [
+    [source.id, { ...dates(source), endDate: '2026-11-23' }, source.version + 1],
+    [target.id, { ...dates(target), startDate: '2026-11-24' }, target.version + 1],
+  ]);
+  assert.deepEqual(applied.warnings, reviewed.warnings);
+  await f.restart();
+  assert.deepEqual(await apply(reviewed.previewId), applied);
+  const { undo } = await f.call<{ undo: ScheduleUndoInfo }>('/schedule/undo/latest?scope=team', 200);
+  assert.equal(undo.undoId, applied.undoId);
+  assert.equal(undo.relationChanges, 1);
+  const undone = await f.call<ScheduleUndoResult>('/schedule/undo', 200, 'POST', { undoId: undo.undoId }, actor, scope);
+  assert.equal(undone.relationChanges, 1);
+  assert.deepEqual(undone.updated.map(issue => [issue.id, dates(issue)]), [[source.id, dates(source)], [target.id, dates(target)]]);
+  assert.deepEqual(await links(), []);
+  const replay = await f.call<ScheduleUndoResult>('/schedule/undo?retry=true', 200, 'POST', { undoId: undo.undoId }, actor, scope);
+  assert.deepEqual(replay, { ...undone, duplicate: true });
+});
 
 test('manual shift rejects a changed unselected predecessor or incident dependency before writing', async t => {
   const f = await fixture(t);
