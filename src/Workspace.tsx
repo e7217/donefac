@@ -25,7 +25,7 @@ import { issueReviewPosition, type IssueReviewDirection, type OpenIssueForReview
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
-import { clearGanttDateDrafts } from './features/gantt-date-draft-storage';
+import { clearGanttDateDrafts, type GanttIssueDateDrafts } from './features/gantt-date-draft-storage';
 import { IssuePanel } from './features/IssuePanel';
 import { MyWork } from './features/MyWork';
 import { FavoritesPage, FavoritesProvider } from './features/FavoritesState';
@@ -263,6 +263,10 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   if (previous && hasSameReportContext(previous, next) && previous.issueId !== next.issueId) {
     return dispatchWorkspaceNavigation(null, true);
   }
+  if (previous?.view === 'gantt' && next.view === 'gantt' && previous.issueId !== next.issueId &&
+      issueReviewContext(previous) === issueReviewContext(next)) {
+    return dispatchWorkspaceNavigation(null, false, false, 'dateDrafts');
+  }
   if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) && hasSameProjectGanttContext(previous, next)) {
     return dispatchWorkspaceNavigation(null, false, false, true);
   }
@@ -430,6 +434,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const rollbackHashRef = useRef<string | null>(null);
   const overlayIssueOpener = useRef<HTMLElement | null>(null);
   const workspaceMain = useRef<HTMLElement>(null);
+  const ganttDateDraftsRef = useRef<GanttIssueDateDrafts>(null);
   const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null; reviewContext?: string } | null>(null);
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
@@ -1058,7 +1063,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}
         {view === 'gantt' && <Gantt {...props} refreshGantt={refreshGantt} allProjects={teamGantt} teamProjectFilter={ganttProject} onChangeTeamProjectFilter={changeTeamGanttProject}
-          onOpenIssueForReview={openIssueForReview}
+          onOpenIssueForReview={openIssueForReview} issueDateDraftsRef={ganttDateDraftsRef}
           teamScheduleFilters={ganttScheduleFilters} onChangeTeamScheduleFilters={changeTeamGanttScheduleFilters}
           onOpenProjectGantt={id => requestRoute({ projectId: id, view: 'gantt', documentId: null, issueId: null })}
           initialPlanningId={planningId} ganttViewId={savedViewId} onOpenPlanning={id => openPlanIn('planning',id)}
@@ -1100,6 +1105,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     </div>
     {openedIssue && <IssuePanel key={`${openedIssue.id}:${actorId}`} {...props} projectId={openedIssue.projectId} documentOverlay={documentIssueOpen} modalFocus={boardIssueFocus || contextualIssueOpen || Boolean(reviewPosition)}
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onOpenMilestone={openIssueMilestone} onClose={() => closeIssuePanel(openedIssue.id)}
+      ganttDateDraftsRef={view === 'gantt' ? ganttDateDraftsRef : undefined}
       reviewPosition={reviewPosition && { ...reviewPosition, focusDirection: issueReview?.focusDirection }} onAdvanceReview={advanceIssueReview}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}

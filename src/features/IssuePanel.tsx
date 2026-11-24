@@ -1,6 +1,6 @@
 'use client';
 
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, Flag, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
 import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
@@ -43,6 +43,7 @@ import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
+import type { GanttIssueDateDrafts, StoredGanttDateDraft } from './gantt-date-draft-storage';
 import { GanttCascadeDialog, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { groupActiveTeamBlockers } from './team-follow-up-choices';
@@ -68,6 +69,7 @@ type IssuePanelProps = FeatureProps & {
   previewDocumentId: string | null;
   commentFocus?: { commentId: string; activation: number };
   reviewPosition?: IssueReviewPosition;
+  ganttDateDraftsRef?: RefObject<GanttIssueDateDrafts | null>;
   onAdvanceReview?: (direction: IssueReviewDirection) => void;
   onClose: () => void;
   onOpenIssueSchedule: (id: string) => boolean;
@@ -244,7 +246,10 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const [dependencyEditor, setDependencyEditor] = useState<IssueDependencyEditor | null>(null);
   const [rowScheduleEdit, setRowScheduleEdit] = useState<{
-    issue: Issue; initialDates: ScheduleBulkDateChanges; initialDateDraft?: Issue;
+    issue: Issue;
+    initialDates: ScheduleBulkDateChanges;
+    initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+    ganttDateDraft?: StoredGanttDateDraft;
   } | null>(null);
   const [teamFollowUp, setTeamFollowUp] = useState<TicketTeamFollowUp | null>(null);
   const teamBlockers = useMemo(() => groupActiveTeamBlockers(data,
@@ -615,8 +620,22 @@ function IssuePanelContent(props: IssuePanelProps) {
     for (const field of scheduleDateFields) {
       if (draft[field] !== baseDraft[field]) initialDates[field] = draft[field] ?? null;
     }
-    setRowScheduleEdit({ issue: savedRelationIssue, initialDates,
-      initialDateDraft: Object.keys(initialDates).length ? baseDraft : undefined });
+    if (Object.keys(initialDates).length) {
+      setRowScheduleEdit({ issue: savedRelationIssue, initialDates, initialDateDraft: baseDraft });
+      return;
+    }
+    const ganttDateDraft = props.ganttDateDraftsRef?.current?.read(savedRelationIssue);
+    if (ganttDateDraft) {
+      const { version, startDate, endDate, draftStart, draftEnd } = ganttDateDraft;
+      if (draftStart !== startDate) initialDates.startDate = draftStart;
+      if (draftEnd !== endDate) initialDates.endDate = draftEnd;
+      if (Object.keys(initialDates).length) {
+        setRowScheduleEdit({ issue: savedRelationIssue, initialDates, ganttDateDraft,
+          initialDateDraft: { version, startDate, endDate, dueDate: savedRelationIssue.dueDate } });
+        return;
+      }
+    }
+    setRowScheduleEdit({ issue: savedRelationIssue, initialDates });
   }
   function openTeamFollowUp() {
     if (!issue || !draft || !baseDraft || !teamFollowUpChoices.length) return;
@@ -648,6 +667,9 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   async function reflectRowScheduleEdit(result: SchedulePasteApplyResult, reviewedAnchorVersion: number) {
     rememberScheduleUndo(result.undoId);
+    const ganttDateDraft = rowScheduleEdit?.ganttDateDraft;
+    const saved = result.updated.find(value => value.id === issueId);
+    if (ganttDateDraft && saved) props.ganttDateDraftsRef?.current?.acceptSaved(ganttDateDraft, saved);
     await reflectScheduleChange(result, 'none', reviewedAnchorVersion);
     closeRowScheduleEdit();
     const datesChanged = result.updated.length > 0;
@@ -1321,7 +1343,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     {blockedIssueCreation && <NewIssueModal {...props} blockedByIssue={blockedIssueCreation.issue}
       onClose={closeBlockedIssueCreation} refresh={refreshIssueRelations} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
-      initialDateDraft={rowScheduleEdit.initialDateDraft}
+      initialDateDraft={rowScheduleEdit.initialDateDraft} datesFromGantt={Boolean(rowScheduleEdit.ganttDateDraft)}
       issues={data.issues} issueAliases={data.issueAliases}
       incomingTeamBlockers={teamBlockers.incoming.get(rowScheduleEdit.issue.id)}
       outgoingTeamBlockers={teamBlockers.outgoing.get(rowScheduleEdit.issue.id)}

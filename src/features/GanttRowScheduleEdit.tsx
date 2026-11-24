@@ -36,6 +36,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+  datesFromGantt?: boolean;
   initialRelatedDates?: { source: Issue; changes: ScheduleBulkDateChanges };
   initialLink?: GanttRowLinkDraft;
   otherDateDrafts?: ReadonlySet<string>;
@@ -161,7 +162,7 @@ const incomingBlockerVersions = ({ relation, source }: TeamIncomingBlocker) =>
 
 export function GanttRowScheduleEdit({
   issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
-  initialRelatedDates, initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied,
+  initialRelatedDates, initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied, datesFromGantt,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
@@ -554,6 +555,7 @@ export function GanttRowScheduleEdit({
       <form className="schedule-paste-input" onSubmit={preview}>
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>날짜</legend>
+          {datesFromGantt && <p className="gantt-row-edit-hint">간트에 입력한 날짜 초안을 불러왔습니다.</p>}
           <div className="gantt-row-edit-columns">
             {dates.map(({ field, label }) => {
               const conflicting = transferredDatesStale && Object.hasOwn(initialDates ?? {}, field) &&

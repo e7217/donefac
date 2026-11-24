@@ -1,4 +1,5 @@
 import { isCalendarDate } from '../../shared/calendar';
+import type { Issue } from '../../shared/types';
 
 export type StoredGanttDateDraft = {
   id: string;
@@ -8,6 +9,11 @@ export type StoredGanttDateDraft = {
   endDate: string | null;
   draftStart: string | null;
   draftEnd: string | null;
+};
+
+export type GanttIssueDateDrafts = {
+  read: (issue: Issue) => StoredGanttDateDraft | undefined;
+  acceptSaved: (draft: StoredGanttDateDraft, saved: Issue) => void;
 };
 
 export const GANTT_DATE_DRAFT_PREFIX = 'teamspace:gantt-date-drafts:';

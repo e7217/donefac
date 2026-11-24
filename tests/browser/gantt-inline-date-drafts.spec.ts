@@ -92,13 +92,14 @@ test('프로젝트 간트에서 다른 날짜 칸으로 이동해도 두 행의 
     await expect(firstStart).toHaveValue(date(24));
     await expect(secondEnd).toHaveValue(date(30));
 
-    const title = chart.row(second).locator('.gantt-issue-name');
+    const safeRoute = page.url();
     const discarded = page.waitForEvent('dialog', { timeout: 5_000 }).then(async confirmation => {
       const message = confirmation.message();
       await confirmation.dismiss();
       expect(message).toContain('저장하지 않은 간트 입력');
     });
-    await Promise.all([discarded, title.click()]);
+    await Promise.all([discarded, page.evaluate(hash => { location.hash = hash; }, `#/${data.first.id}/teamboard`)]);
+    await expect(page).toHaveURL(safeRoute);
     await expect(page.locator('.issue-detail-panel')).toHaveCount(0);
     await expect(firstStart).toHaveValue(date(24));
     await expect(secondEnd).toHaveValue(date(30));
@@ -130,6 +131,165 @@ test('프로젝트 간트에서 다른 날짜 칸으로 이동해도 두 행의 
     const after = await workspace(request);
     expect(after.issues.find(issue => issue.id === first.id)).toEqual(applied.updated[0]);
     expect(after.issues.find(issue => issue.id === second.id)).toEqual(second);
+  } finally { await data.close(); }
+});
+
+test('360px 프로젝트 간트의 날짜 초안을 티켓 일정 편집에서 연결과 함께 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const data = await fixture(request);
+  try {
+    const first = await data.issue(data.first, '검토 대상 첫 업무', date(23), date(26));
+    const second = await data.issue(data.first, '검토 대상 두 번째 업무', date(24), date(27));
+    const predecessor = await data.issue(data.first, '간트 검색 밖 선행 업무', date(18), date(20));
+    const chart = await openChart(page, data.first, data.actor.id, `${data.prefix} 검토 대상`, '');
+    const writes = scheduleWrites(page);
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    const firstDraft = { startDate: date(24), endDate: date(29) };
+    const secondEnd = date(30);
+    const firstOpener = chart.row(first).locator('.gantt-issue-name');
+    const firstTicket = page.getByRole('dialog', { name: first.title, exact: true });
+    const secondTicket = page.getByRole('dialog', { name: second.title, exact: true });
+    const schedule = button(firstTicket, '일정과 연결 편집');
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const inherited = editor.getByText('간트에 입력한 날짜 초안을 불러왔습니다.', { exact: true });
+    const editorStart = editor.getByLabel('시작일', { exact: true });
+    const editorEnd = editor.getByLabel('종료일', { exact: true });
+    const closeEditor = button(editor, '닫기');
+    const openSibling = (ticket: Locator, next: Issue) =>
+      ticket.locator(`button[title="${next.key}"]:is([aria-label="이전 업무"], [aria-label="다음 업무"])`);
+    await expect(chart.row(predecessor)).toHaveCount(0);
+    await chart.start(first).fill(firstDraft.startDate);
+    await chart.end(first).fill(firstDraft.endDate);
+    await chart.end(second).fill(secondEnd);
+
+    await firstOpener.click();
+    await expect(firstTicket).toBeVisible();
+    await openSibling(firstTicket, second).click();
+    await expect(secondTicket).toBeVisible();
+    await openSibling(secondTicket, first).click();
+    await expect(firstTicket).toBeVisible();
+    await schedule.click();
+    await expect(inherited).toBeVisible();
+    await expect(editorStart).toHaveValue(firstDraft.startDate);
+    await expect(editorEnd).toHaveValue(firstDraft.endDate);
+    await editorEnd.fill(date(30));
+    const discardEditor = page.waitForEvent('dialog', { timeout: 5000 }).then(async confirmation => {
+      expect(confirmation.message()).toContain('버리고 닫을까요');
+      await confirmation.accept();
+    });
+    await Promise.all([discardEditor, closeEditor.click()]);
+    await expect(editor).toHaveCount(0);
+    await expect(schedule).toBeFocused();
+
+    const ticketEnd = firstTicket.getByLabel('종료일', { exact: true });
+    await ticketEnd.fill(date(28));
+    await schedule.click();
+    await expect(editorEnd).toHaveValue(date(28));
+    await expect(editorStart).toHaveValue(first.startDate!);
+    await expect(inherited).toHaveCount(0);
+    await closeEditor.click();
+    await expect(editor).toHaveCount(0);
+    await ticketEnd.fill(first.endDate!);
+    await button(firstTicket, '업무 상세 닫기').click();
+    await expect(firstTicket).toHaveCount(0);
+    await expect(chart.start(first)).toHaveValue(firstDraft.startDate);
+    await expect(chart.end(first)).toHaveValue(firstDraft.endDate);
+    await expect(chart.end(second)).toHaveValue(secondEnd);
+    expect(writes).toEqual([]);
+    const before = await workspace(request);
+    expect(before.issues.filter(issue => [first.id, second.id].includes(issue.id))).toEqual(expect.arrayContaining([first, second]));
+    expect(before.dependencies.filter(edge => edge.successorId === first.id)).toEqual([]);
+
+    await firstOpener.click();
+    const title = firstTicket.getByLabel('제목', { exact: true });
+    const comment = firstTicket.getByLabel('댓글 내용', { exact: true });
+    const titleDraft = `${first.title} 제목 초안`;
+    const commentDraft = '일정과 연결을 저장하는 동안 보존할 댓글';
+    await title.fill(titleDraft);
+    await comment.fill(commentDraft);
+    await schedule.click();
+    await expect(inherited).toBeVisible();
+    await expect(editorStart).toHaveValue(firstDraft.startDate);
+    await expect(editorEnd).toHaveValue(firstDraft.endDate);
+    const change = editor.getByRole('group', { name: '연결 변경 1', exact: true });
+    await change.getByLabel('선후행 연결 작업', { exact: true }).selectOption('add');
+    await change.getByLabel('연결할 업무 검색', { exact: true }).fill(predecessor.key);
+    await button(change, `${predecessor.key} · ${predecessor.title}`).click();
+    await change.getByLabel('연결 방향', { exact: true }).selectOption('predecessor');
+    await change.getByLabel('연결 유형', { exact: true }).selectOption('FS');
+    const previewing = nextPost(page, rowPreview);
+    await button(editor, '변경 미리보기').click();
+    const planned = await previewing;
+    expect(planned.request().postDataJSON()).toMatchObject({
+      projectId: data.first.id, issue: { id: first.id, expectedVersion: first.version }, changes: firstDraft,
+      dependency: { action: 'add', type: 'FS', direction: 'predecessor', relatedIssue: { id: predecessor.id, expectedVersion: predecessor.version } },
+    });
+    const preview = await json<SchedulePastePreview>(planned);
+    expect(preview.changes).toEqual([expect.objectContaining({ id: first.id, toStart: firstDraft.startDate, toEnd: firstDraft.endDate })]);
+    expect(preview.dependencyChanges).toMatchObject([{ predecessorKey: predecessor.key, successorKey: first.key, after: { type: 'FS', lagDays: 0 } }]);
+    const applying = nextPost(page, rowApply);
+    await button(editor, '일정과 연결 적용').click();
+    const applied = await json<SchedulePasteApplyResult>(await applying);
+    expect(applied).toMatchObject({ updated: [{ id: first.id, version: first.version + 1, title: first.title, ...firstDraft }], dependencyChanges: 1 });
+    await expect(editor).toHaveCount(0);
+    await expect(schedule).toBeFocused();
+    await expect(firstTicket.getByLabel('시작일', { exact: true })).toHaveValue(firstDraft.startDate);
+    await expect(ticketEnd).toHaveValue(firstDraft.endDate);
+    await expect(title).toHaveValue(titleDraft);
+    await expect(comment).toHaveValue(commentDraft);
+    const after = await workspace(request);
+    expect(after.issues.find(issue => issue.id === second.id)).toEqual(second);
+    expect(after.dependencies.filter(edge => edge.successorId === first.id)).toMatchObject([{ predecessorId: predecessor.id, successorId: first.id, type: 'FS', lagDays: 0 }]);
+
+    const discardTicket = page.waitForEvent('dialog', { timeout: 5000 }).then(async confirmation => {
+      expect(confirmation.message()).toContain('업무 변경사항');
+      await confirmation.accept();
+    });
+    await Promise.all([discardTicket, button(firstTicket, '업무 상세 닫기').click()]);
+    await expect(firstTicket).toHaveCount(0);
+    await expect(search).toHaveValue(`${data.prefix} 검토 대상`);
+    await expect(chart.start(first)).toHaveValue(firstDraft.startDate);
+    await expect(chart.end(first)).toHaveValue(firstDraft.endDate);
+    await expect(button(chart.row(first), `${first.key} 날짜 저장`)).toHaveCount(0);
+    await expect(chart.end(second)).toHaveValue(secondEnd);
+    await expect(button(chart.row(second), `${second.key} 날짜 저장`)).toBeVisible();
+    expect(writes).toEqual([rowPreview, rowApply]);
+  } finally { await data.close(); }
+});
+
+test('360px 전체 프로젝트 간트에서 초안을 유지하며 두 티켓을 검토하고 다른 화면 이동을 막는다', async ({ page, request }) => {
+  test.setTimeout(65_000);
+  const data = await fixture(request);
+  try {
+    const first = await data.issue(data.first, '첫 프로젝트 업무', date(20), date(24));
+    const second = await data.issue(data.second, '다른 프로젝트 업무', date(23), date(27));
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '?scope=team');
+    const writes = scheduleWrites(page);
+    await chart.start(first).fill(date(21));
+    await chart.end(second).fill(date(29));
+    const firstOpener = chart.row(first).locator('.gantt-issue-name');
+    await firstOpener.click();
+    const firstTicket = page.getByRole('dialog', { name: first.title, exact: true });
+    await expect(firstTicket).toBeVisible();
+    await firstTicket.locator(`button[title="${second.key}"]:is([aria-label="이전 업무"], [aria-label="다음 업무"])`).click();
+    const otherTicket = page.getByRole('dialog', { name: second.title, exact: true });
+    await expect(otherTicket).toBeVisible();
+    await button(otherTicket, '업무 상세 닫기').click();
+    await expect(otherTicket).toHaveCount(0);
+    await expect(firstOpener).toBeFocused();
+    await expect(chart.start(first)).toHaveValue(date(21));
+    await expect(chart.end(second)).toHaveValue(date(29));
+    const safeRoute = page.url();
+    const leaving = page.waitForEvent('dialog', { timeout: 5000 }).then(async confirmation => {
+      expect(confirmation.message()).toContain('저장하지 않은 간트 입력');
+      await confirmation.dismiss();
+    });
+    await Promise.all([leaving, page.evaluate(hash => { location.hash = hash; }, `#/${data.first.id}/teamboard`)]);
+    await expect(page).toHaveURL(safeRoute);
+    await expect(chart.start(first)).toHaveValue(date(21));
+    await expect(chart.end(second)).toHaveValue(date(29));
+    expect((await workspace(request)).issues.filter(issue => [first.id, second.id].includes(issue.id))).toEqual(expect.arrayContaining([first, second]));
+    expect(writes).toEqual([]);
   } finally { await data.close(); }
 });
 

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type Ref } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
 import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePreview, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
@@ -13,7 +13,7 @@ import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
-import { afterAcceptedNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
@@ -63,7 +63,7 @@ import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './G
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
 import { issueReporterFilterLabel, IssueReporterSelect } from './IssueReporterSelect';
-import { ganttDateDraftKey, readGanttDateDrafts, writeGanttDateDrafts, type StoredGanttDateDraft } from './gantt-date-draft-storage';
+import { ganttDateDraftKey, readGanttDateDrafts, writeGanttDateDrafts, type GanttIssueDateDrafts, type StoredGanttDateDraft } from './gantt-date-draft-storage';
 import './issues.css';
 import './gantt.css';
 import './gantt-deadline-markers.css';
@@ -133,6 +133,7 @@ type GanttProps = FeatureProps & {
   onChangeMilestoneReview: (id: string | null) => boolean;
   issueFocusActivation?: number;
   issueOverlayOpen?: boolean;
+  issueDateDraftsRef?: Ref<GanttIssueDateDrafts>;
   onClearIssueFocus?: () => boolean;
   onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
   onOpenIssueForReview?: OpenIssueForReview;
@@ -532,6 +533,22 @@ function ProjectGantt(props: GanttProps) {
       setDateStorageError(false);
     } catch { setDateStorageError(true); }
   }, [storageKey]);
+  useImperativeHandle(props.issueDateDraftsRef, () => ({
+    read(issue) {
+      const draft = recoverableDates(issue, retainedDates.current.get(issue.id));
+      return draft && !draftDatesAreSaved(issue, draft) ? draft : undefined;
+    },
+    acceptSaved(draft, saved) {
+      if (retainedDates.current.get(draft.id) !== draft || saved.id !== draft.id ||
+          saved.projectId !== draft.projectId || !draftDatesAreSaved(saved, draft)) return;
+      const live = inlineDateDrafts.current.get(saved.id);
+      if (live) live.accept(saved);
+      else {
+        retainedDates.current.delete(saved.id);
+        storeInlineDates();
+      }
+    },
+  }), [storeInlineDates]);
   const clearInlineDates = useCallback(() => {
     inlineDateDrafts.current.clear();
     if (!retainedDates.current.size) return;
@@ -562,7 +579,9 @@ function ProjectGantt(props: GanttProps) {
         event.preventDefault(); notify('일정 변경이 끝난 뒤 이동해 주세요.', 'error'); return;
       }
       if (isGanttPreservedByNavigation(event)) return;
-      if (previewRef.current || [...draftsRef.current.values()].some(value => value.dirty)) {
+      const keepDates = areGanttDateDraftsPreservedByNavigation(event);
+      const discardableDrafts = [...draftsRef.current].filter(([id]) => !keepDates || !id.startsWith('dates:'));
+      if (previewRef.current || discardableDrafts.some(([, value]) => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
         const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
@@ -572,6 +591,7 @@ function ProjectGantt(props: GanttProps) {
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
+          : keepDates ? '열린 간트 편집과 미리보기를 닫고 티켓을 볼까요? 행에 입력한 날짜는 유지됩니다.'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
         if (!window.confirm(confirmation)) event.preventDefault();
         else {
@@ -580,9 +600,9 @@ function ProjectGantt(props: GanttProps) {
           afterAcceptedNavigation(event, () => {
             previewRef.current = null;
             setDatePreviewFocusTarget(null);
-            draftsRef.current.clear();
-            clearInlineDates();
-            setHasDraft(false);
+            for (const [id] of discardableDrafts) draftsRef.current.delete(id);
+            if (!keepDates) clearInlineDates();
+            setHasDraft(draftsRef.current.size > 0);
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setTeamFollowUpHandoff(null);

@@ -1,4 +1,5 @@
-export function dispatchWorkspaceNavigation(preservedDocumentId?: string | null, preserveReport = false, preserveTeamBoard = false, preserveGantt = false) {
+export function dispatchWorkspaceNavigation(preservedDocumentId?: string | null, preserveReport = false, preserveTeamBoard = false,
+  preserveGantt: boolean | 'dateDrafts' = false) {
   const event = preservedDocumentId || preserveReport || preserveTeamBoard || preserveGantt
     ? new CustomEvent('teamspace:navigate', { cancelable: true, detail: { preservedDocumentId, preserveReport, preserveTeamBoard, preserveGantt } })
     : new Event('teamspace:navigate', { cancelable: true });
@@ -19,6 +20,10 @@ export function isTeamBoardPreservedByNavigation(event: Event): boolean {
 
 export function isGanttPreservedByNavigation(event: Event): boolean {
   return event instanceof CustomEvent && event.detail?.preserveGantt === true;
+}
+
+export function areGanttDateDraftsPreservedByNavigation(event: Event): boolean {
+  return event instanceof CustomEvent && event.detail?.preserveGantt === 'dateDrafts';
 }
 
 /** Other forms may still cancel the same synchronous navigation dispatch. */
