@@ -46,6 +46,14 @@ export interface MigrationConfluenceKnownHistory {
   documentId: string;
   sourceVersion: number | null;
 }
+export interface MigrationConfluencePropertyScope {
+  instanceKey: string;
+  spaceId: string;
+  spaceKey: string;
+  projectId: string;
+  origin?: string;
+  isolated: boolean;
+}
 export interface MigrationJiraWorklogCandidate {
   sourceId: string;
   originalRecordId: string;
@@ -113,6 +121,7 @@ export interface MigrationPlanningInput {
   append?: MigrationAppendContext;
   appendPages?: MigrationPageAppendContext;
   retainedResourceLinks?: MigrationRetainedResourceLinks;
+  retainedConfluencePropertyScopes?: MigrationConfluencePropertyScope[];
 }
 export interface MigrationFileCopy { fileId:string;packageId:string;path:string;size:number;sha256:string }
 export interface PreparedMigration {
@@ -127,6 +136,7 @@ export interface PreparedMigration {
   append?: { projectId: string; token: string; startIssueNumber: number; planningToken?: string; cyclePlanningToken?: string };
   appendPages?: { projectId: string; token: string; sectionInventory?: boolean; labelListInventory?: true };
   retainedResourceLinkToken?: string;
+  retainedConfluencePropertyScopeCheck?: { instanceKeys: string[]; token: string };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
   jiraWorklogUpdates?: MigrationJiraWorklogUpdate[];

@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { convertLegacyContent } from '../../server/migration-content.js';
 import { record } from '../../server/legacy-import-model.js';
+import { parseConfluenceLabelList } from '../../server/migration-confluence-label-list.js';
 import { buildMigrationOptions, buildMigrationPlan } from '../../server/migration-planner.js';
 import type { MigrationPackage, MigrationPlanningInput } from '../../server/migration-contracts.js';
-import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT } from '../../shared/document-properties.js';
+import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT, MAX_DOCUMENT_PROPERTY_REPORT_SPACES } from '../../shared/document-properties.js';
 import type { LegacyRecord, User } from '../../shared/types.js';
 
 const now = '2026-11-23T02:00:00Z';
@@ -57,6 +58,70 @@ test('property reports keep exact filters and columns with only proven scope and
   assert.ok(children.slice(MAX_DOCUMENT_PROPERTY_BLOCKS).every(child => child.type === 'codeBlock' && child.content?.[0].text?.includes('ac:name="details"')));
 });
 
+test('explicit multi-space property reports retain filters, exact projects, and the former body for safe refresh', () => {
+  const cql = `type = page AND (space IN ("DEV", 'OPS') AND label IN (Release, hotfix)) ORDER BY title DESC`;
+  const modern = report({ cql: cql.replaceAll('"', '&quot;'), headings: '담당, 기한', id: 'release' });
+  const legacy = report({ label: 'Review', spaces: ' OPS , DEV ', reverseSort: 'true' }, 'page-properties-report');
+  const single = report({ cql: 'type = page AND space IN (DEV) AND label = release ORDER BY title DESC' });
+  const scopes: (string | null)[] = [];
+  const resolvePropertyReportSpaceProject = (spaceKey: string | null) => {
+    scopes.push(spaceKey);
+    return spaceKey ? `project-${spaceKey}` : null;
+  };
+  const context = { ...withoutReferences, resolvePropertyReportSpaceProject };
+  const converted = convertLegacyContent(page('1', modern + legacy + single), context);
+  assert.deepEqual(scopes, ['DEV', 'OPS', 'OPS', 'DEV', 'DEV']);
+  assert.deepEqual(converted.diagnostics.map(item => item.code), ['DOCUMENT_PROPERTY_REPORT_PAGINATION_CHANGED']);
+  const [modernNode, legacyNode, singleNode] = converted.content.content!;
+  assert.equal(modernNode.type, 'documentPropertyReport');
+  assert.deepEqual({ ...modernNode.attrs }, { projectId: null, projectIds: ['project-DEV', 'project-OPS'], group: 'release',
+    labels: ['hotfix', 'Release'], match: 'any', columns: ['담당', '기한'], sort: 'title', descending: true,
+    limit: MAX_DOCUMENT_PROPERTY_REPORT_LIMIT, title: '' });
+  assert.deepEqual({ ...legacyNode.attrs }, { projectId: null, projectIds: ['project-OPS', 'project-DEV'], group: '',
+    labels: ['Review'], match: 'all', columns: [], sort: 'updated', descending: false, limit: MAX_DOCUMENT_PROPERTY_REPORT_LIMIT, title: '' });
+  assert.equal(singleNode.attrs?.projectId, 'project-DEV');
+  assert.equal(Object.hasOwn(singleNode.attrs!, 'projectIds'), false);
+  assert.equal(parseConfluenceLabelList({ cql }), null);
+  assert.equal(parseConfluenceLabelList({ cql: 'type = page AND space IN (DEV) AND label = release ORDER BY title DESC' })?.spaceKey, 'DEV');
+
+  scopes.length = 0;
+  const former = convertLegacyContent(page('1', modern + legacy + single), { ...context, legacyMultiSpacePropertyReports: true });
+  assert.deepEqual(scopes, ['DEV']);
+  assert.deepEqual(former.diagnostics.map(item => item.code), ['LEGACY_MULTI_SPACE_PROPERTY_REPORT', 'DOCUMENT_PROPERTY_REPORT_PAGINATION_CHANGED']);
+  assert.deepEqual(former.content.content?.map(node => node.type), ['codeBlock', 'codeBlock', 'documentPropertyReport']);
+  assert.deepEqual(former.content.content?.slice(0, 2).map(node => node.content?.[0].text), [modern, legacy]);
+  assert.deepEqual(former.content.content?.[2], singleNode);
+});
+
+test('multi-space property report projection is all-or-nothing and rejects broad, duplicate and oversized scopes', () => {
+  const modern = (keys: string) => report({ cql: `type = page AND space IN (${keys.replaceAll('"', '&quot;')}) AND label = release` });
+  const legacy = (keys: string) => report({ label: 'release', space: keys });
+  const tooManyKeys = Array.from({ length: MAX_DOCUMENT_PROPERTY_REPORT_SPACES + 1 }, (_, index) => `SPACE${index}`).join(',');
+  const allowedKeys = tooManyKeys.slice(0, tooManyKeys.lastIndexOf(','));
+  const context = { ...withoutReferences, resolveLabelListProject: (key: string | null) => key && `project-${key}` };
+  for (const source of [modern(allowedKeys), legacy(allowedKeys)]) {
+    const converted = convertLegacyContent(page('1', source), context);
+    assert.equal(converted.content.content?.[0].type, 'documentPropertyReport');
+    assert.equal((converted.content.content?.[0].attrs?.projectIds as string[]).length, MAX_DOCUMENT_PROPERTY_REPORT_SPACES);
+  }
+  for (const source of [modern('DEV,dev'), modern('DEV,'), modern('DEV, currentSpace()'), modern('DEV, "~private"'),
+    modern('DEV, "OPS*"'), modern(tooManyKeys), legacy('DEV,dev'), legacy('DEV,,OPS'), legacy('DEV, @self'), legacy('DEV, @all'),
+    legacy('DEV,~private'), legacy(tooManyKeys), report({ label: 'release', space: 'DEV,OPS', spaces: 'OTHER' }),
+    report({ cql: 'type = page AND space IN (DEV, OPS) AND label = release OR label = unrelated' })]) {
+    const converted = convertLegacyContent(page('1', source), context);
+    assert.deepEqual(converted.diagnostics.map(item => item.code), ['DOCUMENT_PROPERTY_REPORT_PARAMETERS_UNSUPPORTED'], source);
+    assert.equal(converted.content.content?.[0].type, 'codeBlock', source);
+    assert.equal(converted.content.content?.[0].content?.[0].text, source);
+  }
+  const original = modern('DEV,OPS');
+  for (const resolvePropertyReportSpaceProject of [(key: string | null) => key === 'DEV' ? 'shared' : null, () => 'shared']) {
+    const converted = convertLegacyContent(page('1', original), { ...context, resolvePropertyReportSpaceProject });
+    assert.deepEqual(converted.diagnostics.map(item => item.code), ['DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED']);
+    assert.equal(converted.content.content?.[0].type, 'codeBlock');
+    assert.equal(converted.content.content?.[0].content?.[0].text, original);
+  }
+});
+
 test('unrepresentable Confluence table values, layouts or report filters retain inert macro XML', () => {
   const cases = [
     [properties('<table><tr><td>요구 근거</td><td><a href="https://example.test/work">업무</a></td></tr></table>'), 'DOCUMENT_PROPERTIES_VALUES_UNSUPPORTED'],
@@ -105,6 +170,34 @@ test('migration resolves an exact separately mapped Confluence report scope and 
   assert.ok(baseline.sourceRecords.some(archive => archive.record.text === source));
 
   input.configuration.projects = input.configuration.projects.map(project => ({ ...project, key: 'MERGED', name: '합친 프로젝트' }));
+  const merged = buildMigrationPlan(input);
+  assert.equal(merged.preview.canApply, true, JSON.stringify(merged.preview.notices));
+  assert.ok(merged.preview.notices.some(item => item.code === 'DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED'));
+  assert.equal(merged.documents.find(document => document.title === '문서 1')?.content.content?.[0].type, 'codeBlock');
+});
+
+test('migration binds reports to the exact named projects and rejects a partial or merged target set', () => {
+  const query = report({ cql: 'type = page AND space IN (OPS, DEV) AND label = release' });
+  const records = [space('42', 'WIKI'), space('43', 'DEV'), space('44', 'OPS'), space('45', 'OTHER'),
+    page('1', query), page('2', properties(vertical), '43'), page('3', properties(vertical), '44'), page('4', properties(vertical), '45')];
+  const input = migrationInput('multi-scope', records);
+  const baseline = buildMigrationPlan(input);
+  assert.equal(baseline.preview.canApply, true, JSON.stringify(baseline.preview.notices));
+  const scoped = baseline.documents.find(document => document.title === '문서 1')?.content.content?.[0];
+  assert.equal(scoped?.type, 'documentPropertyReport');
+  assert.equal(scoped.attrs?.projectId, null);
+  assert.deepEqual(scoped.attrs?.projectIds, ['OPS', 'DEV'].map(key => baseline.projects.find(project => project.key === key)?.id));
+  assert.ok(baseline.sourceRecords.some(archive => archive.record.text === query));
+
+  const partial = buildMigrationPlan(migrationInput('multi-scope-partial', records.filter(row => row.sourceId !== '44' && row.sourceId !== '3')));
+  assert.equal(partial.preview.canApply, true, JSON.stringify(partial.preview.notices));
+  const partialReport = partial.documents.find(document => document.title === '문서 1')?.content.content?.[0];
+  assert.equal(partialReport?.type, 'codeBlock');
+  assert.equal(partialReport.content?.[0].text, query);
+  assert.ok(partial.preview.notices.some(item => item.code === 'DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED'));
+
+  input.configuration.projects = input.configuration.projects.map(project => project.key === 'DEV' || project.key === 'OPS'
+    ? { ...project, key: 'MERGED', name: '합친 프로젝트' } : project);
   const merged = buildMigrationPlan(input);
   assert.equal(merged.preview.canApply, true, JSON.stringify(merged.preview.notices));
   assert.ok(merged.preview.notices.some(item => item.code === 'DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED'));

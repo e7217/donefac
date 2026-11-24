@@ -10,7 +10,7 @@ import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, Worksp
 import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel, isLiveDocumentInclude, MAX_DOCUMENT_TABLE_SPAN, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
-import { collectDocumentPropertyReport, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
+import { collectDocumentPropertyReport, documentPropertyReportProjectIds, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { DocumentSelectionHighlight } from '../../shared/document-selection-highlight';
 import { attachmentDownloadIdFromUrl, inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
@@ -345,9 +345,11 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   if (node.type === 'documentPropertyReport') {
     const options = normalizeDocumentPropertyReportOptions(node.attrs);
     if (!options) return <Notice key={key}>저장된 속성 보고서 설정을 확인할 수 없습니다.</Notice>;
-    const projection = collectDocumentPropertyReport(context.data.documents, options);
-    const limit = Math.min(state.remaining, projection.rows.length);
-    if (limit < projection.rows.length) state.exhausted = true;
+    const available = documentPropertyReportProjectIds(options).every(id => id === null || context.data.projects.some(project => project.id === id));
+    const projection = available ? collectDocumentPropertyReport(context.data.documents, options) : undefined;
+    const rowCount = projection?.rows.length ?? 0;
+    const limit = Math.min(state.remaining, rowCount);
+    if (limit < rowCount) state.exhausted = true;
     state.remaining -= limit;
     return <DocumentPropertyReportCard key={key} attrs={node.attrs} data={context.data} documentId={state.documentId}
       openDocument={context.openDocument} projection={projection} renderLimit={limit} />;
@@ -573,7 +575,7 @@ function DocumentChildListNodeView({ node, selected, editor, getPos, updateAttri
   </NodeViewWrapper>;
 }
 function DocumentPropertyNodeView({ node, selected, editor, getPos, updateAttributes, deleteNode }: NodeViewProps) {
-  const { data, documentId, openDocument, onListDraftChange } = contextOf(useContext(BlockContext));
+  const { data, documentId, openDocument, onListDraftChange, editorReadOnly } = contextOf(useContext(BlockContext));
   const id = useId();
   const type = node.type.name;
   const trackSettingsDraft = useCallback((dirty: boolean) => onListDraftChange?.(id, dirty), [id, onListDraftChange]);
@@ -587,14 +589,15 @@ function DocumentPropertyNodeView({ node, selected, editor, getPos, updateAttrib
   }
 
   const actions = {
-    onDelete: editor.isEditable ? () => { if (editor.isEditable) deleteNode(); } : undefined,
+    onDelete: !editorReadOnly ? () => { if (editor.isEditable) deleteNode(); } : undefined,
     onSettingsDraftChange: trackSettingsDraft,
   };
   return <NodeViewWrapper className={`doc-reference-node${selected ? ' is-selected' : ''}`} contentEditable={false} data-teamspace-node={type}>
     {type === 'documentProperties' ? <DocumentPropertiesCard attrs={node.attrs} {...actions}
-      onChange={editor.isEditable ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertiesOptions) : undefined} />
+      onChange={!editorReadOnly ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertiesOptions) : undefined} />
       : <DocumentPropertyReportCard attrs={node.attrs} {...actions} data={data} documentId={documentId} openDocument={openDocument}
-        onChange={editor.isEditable ? (options, baseline) => apply(options, baseline, normalizeDocumentPropertyReportOptions) : undefined} />}
+        onChange={!editorReadOnly ? (options, baseline) => apply<typeof options>(
+          { ...options, projectIds: options.projectIds ?? null }, baseline, normalizeDocumentPropertyReportOptions) : undefined} />}
   </NodeViewWrapper>;
 }
 function detailsBody(editor: Editor): boolean {

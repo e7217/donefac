@@ -6,6 +6,7 @@ import { ArrowLeft, ChevronLeft, ChevronRight, Columns2, GitCompareArrows, Histo
 import type { DocRevision, RichContent, User } from '../../shared/types';
 import { diffDocuments, DOCUMENT_DIFF_LIMITS, type DocumentDiffResult, type DocumentDiffRun, type DocumentDiffSource, type DocumentDiffUnit } from '../../shared/document-diff';
 import { CALLOUT_LABELS, contentReferences, ISSUE_SUMMARY_GROUP_LABELS, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone, STATUS_BADGE_TONE_LABELS } from '../../shared/document-nodes';
+import { documentPropertyReportProjectIds, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
 import { containsDocumentNavigation, ReadonlyDocumentContent } from './DocumentBlocks';
 import { documentRevisionLabel, hasDocumentFormattedBlocks } from './document-utils';
 import './document-history.css';
@@ -264,7 +265,14 @@ function metadataSummary(unit: DocumentDiffUnit): { lines: SummaryLine[]; additi
   }
   if (unit.nodeType === 'documentPropertyReport') {
     attribute('title', '보고서 제목');
-    attribute('projectId', '문서 공간', true, value => value ?? '팀 공통');
+    const report = normalizeDocumentPropertyReportOptions(attrs);
+    if (report?.projectIds) {
+      used.add('projectId');
+      attribute('projectIds', '문서 공간', true, () => documentPropertyReportProjectIds(report).map(id => id ?? '팀 공통').join(', '));
+    } else {
+      if (attrs.projectIds == null) used.add('projectIds');
+      attribute('projectId', '문서 공간', true, value => value ?? '팀 공통');
+    }
     attribute('group', '속성 그룹', true, value => value || '모든 그룹');
     attribute('labels', '라벨', true, value => Array.isArray(value) ? value.join(', ') : value);
     attribute('match', '라벨 일치 방식', true, value => value === 'all' ? '모든 라벨' : '라벨 하나 이상');

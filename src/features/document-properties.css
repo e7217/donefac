@@ -67,6 +67,21 @@
 .doc-properties-form textarea { resize: vertical; }
 .doc-properties-form .doc-properties-check { display: flex; align-items: center; gap: 6px; min-height: 30px; }
 .doc-properties-check input { accent-color: #4168aa; }
+.doc-properties-spaces,
+.doc-properties-space-error { grid-column: 1 / -1; }
+.doc-properties-spaces { min-width: 0; margin: 0; padding: 5px 8px 7px; border: 1px solid #d7e0f0; border-radius: 6px; }
+.doc-properties-spaces legend { color: #405372; font-size: 12px; }
+.doc-properties-space-choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 155px), 1fr));
+  align-items: start;
+  column-gap: 8px;
+  max-height: 9rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+.doc-properties-space-choices input { flex: none; }
+.doc-properties-spaces .doc-properties-space-count { margin: 4px 0 0; color: #526581; font-size: 11px; }
 .doc-properties-form .doc-properties-add { width: fit-content; }
 .doc-properties-form-actions { flex-wrap: wrap; justify-content: flex-end; }
 

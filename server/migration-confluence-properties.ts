@@ -5,7 +5,7 @@ import {
   normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions,
   type DocumentPropertiesOptions, type DocumentPropertyReportOptions,
 } from '../shared/document-properties.js';
-import { parseConfluencePageLabelScope } from './migration-confluence-label-list.js';
+import { parseConfluencePagePropertyReportScope, parseConfluencePropertyReportSpaces } from './migration-confluence-label-list.js';
 import type { ConfluenceStorageNode as XmlNode } from './migration-confluence-sections.js';
 
 // https://confluence.atlassian.com/spaces/CONF52/pages/401441890/Confluence+Storage+Format+for+Macros
@@ -153,18 +153,16 @@ function parseFlag(value: string | undefined, fallback: boolean) {
 }
 
 const labelPattern = /^[\p{L}\p{N}_][\p{L}\p{N}_-]*$/u;
-const spacePattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/u;
 
 function reportScope(params: Record<string, string>) {
   if (Object.hasOwn(params, 'cql')) {
     if (['label', 'space', 'spaces'].some(key => Object.hasOwn(params, key))) return null;
-    return parseConfluencePageLabelScope(params.cql.trim());
+    return parseConfluencePagePropertyReportScope(params.cql.trim());
   }
   if (!params.label || !labelPattern.test(params.label.trim()) || Object.hasOwn(params, 'space') && Object.hasOwn(params, 'spaces')) return null;
-  const rawSpace = (params.space ?? params.spaces ?? '').trim();
-  const spaceKey = !rawSpace || rawSpace === '@self' ? null : rawSpace;
+  const spaceKeys = parseConfluencePropertyReportSpaces((params.space ?? params.spaces ?? '').trim());
   const labels = normalizeDocumentLabels([params.label]);
-  return labels && (spaceKey === null || spacePattern.test(spaceKey)) ? { spaceKey, labels, match: 'all' as const, order: undefined } : null;
+  return labels && spaceKeys ? { spaceKeys, labels, match: 'all' as const, order: undefined } : null;
 }
 
 function reportColumns(raw: string | undefined): string[] | null {
@@ -186,7 +184,7 @@ function reportColumns(raw: string | undefined): string[] | null {
 const reportParameters = new Set(['label', 'space', 'spaces', 'cql', 'id', 'firstcolumn', 'headings', 'pageSize',
   'sortBy', 'reverseSort', 'countComments', 'countLikes']);
 
-export function parseConfluenceDocumentPropertyReport(params: Record<string, string>): { spaceKey: string | null; options: DocumentPropertyReportOptions } | null {
+export function parseConfluenceDocumentPropertyReport(params: Record<string, string>): { spaceKeys: (string | null)[]; options: DocumentPropertyReportOptions } | null {
   if (Object.keys(params).some(key => !reportParameters.has(key)) || !['', 'Title'].includes(params.firstcolumn?.trim() ?? '') ||
     parseFlag(params.countComments, false) !== false || parseFlag(params.countLikes, false) !== false) return null;
   const pageSize = params.pageSize?.trim();
@@ -201,5 +199,5 @@ export function parseConfluenceDocumentPropertyReport(params: Record<string, str
     (Boolean(sourceSort) || Object.hasOwn(params, 'reverseSort')) && (scope.order.sort !== sort || scope.order.descending !== descending))) return null;
   const normalized = normalizeDocumentPropertyReportOptions({ group: params.id ?? '', labels: scope.labels, match: scope.match, columns,
     sort: scope.order?.sort ?? sort, descending: scope.order?.descending ?? descending, limit: MAX_DOCUMENT_PROPERTY_REPORT_LIMIT });
-  return normalized ? { spaceKey: scope.spaceKey, options: normalized } : null;
+  return normalized ? { spaceKeys: scope.spaceKeys, options: normalized } : null;
 }

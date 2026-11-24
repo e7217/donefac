@@ -1,10 +1,12 @@
 import { normalizeDocumentLabels } from '../shared/document-labels.js';
+import { MAX_DOCUMENT_PROPERTY_REPORT_SPACES } from '../shared/document-properties.js';
 
 // https://confluence.atlassian.com/spaces/CONF54/pages/428803038/_ContentByLabelMacroMarkup
 // https://developer.atlassian.com/server/confluence/advanced-searching-using-cql/
 type Sort = 'title' | 'created' | 'updated';
 type Scope = { spaceKey: string | null; labels: string[]; match: 'any' | 'all' };
 type Order = { sort: Sort; descending: boolean };
+type PageScope = Omit<Scope, 'spaceKey'> & { spaceKeys: (string | null)[]; order?: Order };
 export type ConfluenceLabelList = Scope & Order & {
   limit: number; title: string; showLabels: boolean; showSpace: boolean; excludeCurrent: boolean;
 };
@@ -59,10 +61,21 @@ function cqlTokens(query: string): Token[] | null {
   return tokens;
 }
 
-export function parseConfluencePageLabelScope(query: string): (Scope & { order?: Order }) | null {
+function explicitSpaceKeys(keys: string[]): string[] | null {
+  return keys.every(key => spaceKeyPattern.test(key)) && new Set(keys.map(key => key.toUpperCase())).size === keys.length ? keys : null;
+}
+
+export function parseConfluencePropertyReportSpaces(raw: string): (string | null)[] | null {
+  if (!raw || raw === '@self') return [null];
+  const keys = raw.split(',', MAX_DOCUMENT_PROPERTY_REPORT_SPACES + 1).map(key => key.trim());
+  return keys.length <= MAX_DOCUMENT_PROPERTY_REPORT_SPACES ? explicitSpaceKeys(keys) : null;
+}
+
+function parseConfluencePageScope(query: string, maximumSpaces: number): PageScope | null {
   const tokens = cqlTokens(query);
   if (!tokens?.length) return null;
-  let index = 0, space: string | null | undefined, pages = false;
+  let index = 0, pages = false;
+  let spaceKeys: (string | null)[] | undefined;
   let match: Scope['match'] = 'all';
   const rawLabels: string[] = [];
   const consume = (term: string) => {
@@ -83,16 +96,26 @@ export function parseConfluencePageLabelScope(query: string): (Scope & { order?:
       if (pages || !consume('=') || value()?.toLowerCase() !== 'page') return false;
       pages = true;
     } else if (consume('space')) {
-      if (space !== undefined) return false;
-      const explicitValueList = consume('in');
-      if (explicitValueList ? !consume('(') : !consume('=')) return false;
-      if (!explicitValueList && consume('currentspace')) {
+      if (spaceKeys !== undefined) return false;
+      if (consume('in')) {
+        if (!consume('(')) return false;
+        const keys: string[] = [];
+        do {
+          const key = value();
+          if (!key || keys.length >= maximumSpaces) return false;
+          keys.push(key);
+        } while (consume(','));
+        const explicit = explicitSpaceKeys(keys);
+        if (!explicit || !consume(')')) return false;
+        spaceKeys = explicit;
+      } else if (!consume('=')) return false;
+      else if (consume('currentspace')) {
         if (!consume('(') || !consume(')')) return false;
-        space = null;
+        spaceKeys = [null];
       } else {
         const key = value();
-        if (!key || !spaceKeyPattern.test(key) || explicitValueList && !consume(')')) return false;
-        space = key;
+        if (!key || !spaceKeyPattern.test(key)) return false;
+        spaceKeys = [key];
       }
     } else if (consume('label')) {
       if (consume('=')) {
@@ -130,7 +153,18 @@ export function parseConfluencePageLabelScope(query: string): (Scope & { order?:
     order = { sort, descending };
   }
   const labels = normalizeDocumentLabels(rawLabels);
-  return space !== undefined && pages && labels?.length && index === tokens.length ? { spaceKey: space, labels, match, order } : null;
+  return spaceKeys && pages && labels?.length && index === tokens.length ? { spaceKeys, labels, match, order } : null;
+}
+
+export function parseConfluencePageLabelScope(query: string): (Scope & { order?: Order }) | null {
+  const scope = parseConfluencePageScope(query, 1);
+  if (!scope) return null;
+  const { spaceKeys: [spaceKey], ...rest } = scope;
+  return { ...rest, spaceKey };
+}
+
+export function parseConfluencePagePropertyReportScope(query: string): PageScope | null {
+  return parseConfluencePageScope(query, MAX_DOCUMENT_PROPERTY_REPORT_SPACES);
 }
 
 export function parseConfluenceLabelList(params: Record<string, string>): ConfluenceLabelList | null {

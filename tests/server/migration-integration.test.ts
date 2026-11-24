@@ -18,6 +18,7 @@ import type { MigratedConfluenceDocumentTarget } from '../../shared/confluence-m
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/document-labels.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
+import { collectDocumentPropertyReport, documentPropertyReports } from '../../shared/document-properties.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions.js';
@@ -3202,6 +3203,108 @@ test('Confluence label-list XML migrates into a proven project and refreshes exa
   });
   assert.equal(JSON.stringify(current.find(doc => doc.id === edited.id)?.content), JSON.stringify(edited.content));
   assert.equal(current.find(doc => doc.title === '추가 목록')?.content.content?.[0].type, 'documentLabelList');
+});
+
+test('Confluence multi-space property reports recover from the same archived source and fence retained-space drift', async t => {
+  const f = await fixture(), restored = await fixture();
+  t.after(() => Promise.all([f.close(), restored.close()]));
+  const instance = 'synthetic-multi-space-report';
+  const origin = 'https://report-spaces.example.test/wiki';
+  const report = '<ac:structured-macro ac:name="detailssummary">' +
+    confluenceListParameter('cql', 'type = page AND space IN (WIKI42, WIKI43) AND label = release ORDER BY title ASC') +
+    confluenceListParameter('id', '배포') + '</ac:structured-macro>';
+  const properties = (value: string) => '<ac:structured-macro ac:name="details">' + confluenceListParameter('id', '배포') +
+    `<ac:rich-text-body><table><tr><th>결과</th><td>${value}</td></tr></table></ac:rich-text-body></ac:structured-macro>`;
+  const docs = async (target = f) => (await target.call<WorkspaceSnapshot>('/workspace')).data.documents;
+  const appendConfig = async (bundle: LegacyPackageSummary, projectId: string) => {
+    const config = await f.configuration(bundle);
+    config.sourceBaseUrls[bundle.id] = origin;
+    return { ...config, appendPagesTo: { projectId, refreshExisting: true as const } };
+  };
+  const initial = await labelListExport(f, instance, 'original-property-report', [
+    { id: '801', title: '원래 배포 보고서', body: report },
+    { id: '802', title: '팀이 편집할 보고서', body: report },
+    { id: '803', title: '개발 배포', body: properties('개발 승인') },
+  ]);
+  const initialConfig = await f.configuration(initial, 'PROPREPORT');
+  initialConfig.sourceBaseUrls[initial.id] = origin;
+  const initialPlan = await f.preview(initialConfig);
+  assert.equal(initialPlan.canApply, true, JSON.stringify(initialPlan.notices));
+  assert.ok(initialPlan.notices.some(notice => notice.code === 'DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED'));
+  const initialReceipt = await f.apply(initialPlan);
+  assert.equal(initialReceipt.status, 201, JSON.stringify(initialReceipt.data));
+  const [reportProjectId] = initialReceipt.data.import.projectIds;
+  const originalDocs = await docs();
+  const original = originalDocs.find(document => document.title === '원래 배포 보고서')!;
+  const locallyEdited = originalDocs.find(document => document.title === '팀이 편집할 보고서')!;
+  const firstProperty = originalDocs.find(document => document.title === '개발 배포')!;
+  assert.ok(original && locallyEdited && firstProperty);
+  assert.equal(original.content.content?.[0].type, 'codeBlock');
+  assert.equal(original.content.content?.[0].content?.[0].text, report);
+  const edited = await f.call<DocPage>(`/documents/${locallyEdited.id}`, 'PATCH', {
+    expectedVersion: locallyEdited.version, contentSchemaVersion: 1, content: { type: 'doc', content: [
+      ...locallyEdited.content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀에서 추가한 검토 내용' }] },
+    ] },
+  });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+
+  const second = await labelListExport(f, instance, 'other-property-space', [
+    { id: '901', title: '운영 배포', body: properties('운영 승인'), space: '43' },
+  ], ['43']);
+  const secondConfig = await f.configuration(second, 'PROPOTHER');
+  secondConfig.sourceBaseUrls[second.id] = origin;
+  const secondReceipt = await f.apply(await f.preview(secondConfig));
+  assert.equal(secondReceipt.status, 201, JSON.stringify(secondReceipt.data));
+  const [secondProjectId] = secondReceipt.data.import.projectIds;
+  const secondProperty = (await docs()).find(document => document.title === '운영 배포')!;
+  for (const document of [firstProperty, secondProperty]) {
+    const labeled = await f.call<DocPage>(`/documents/${document.id}`, 'PATCH', {
+      expectedVersion: document.version, labels: ['release'],
+    });
+    assert.equal(labeled.status, 200, JSON.stringify(labeled.data));
+  }
+
+  const config = await appendConfig(initial, reportProjectId);
+  const prospective = await f.preview(config);
+  assert.equal(prospective.canApply, true, JSON.stringify(prospective.notices));
+  const decision = (plan: MigrationPreview, documentId: string) =>
+    plan.documentRefresh?.find(row => row.documentId === documentId)?.fields.find(field => field.field === 'content')?.decision;
+  assert.equal(decision(prospective, original.id), 'apply');
+  assert.equal(decision(prospective, locallyEdited.id), 'conflict');
+
+  const outOfScope = await f.call<DocPage>('/documents', 'POST', {
+    projectId: secondProjectId, title: '이관 범위에 없는 현지 문서', labels: ['release'],
+  });
+  assert.equal(outOfScope.status, 201, JSON.stringify(outOfScope.data));
+  const stale = await f.apply(prospective);
+  assert.equal(stale.status, 409, JSON.stringify(stale.data));
+  assert.match(JSON.stringify(stale.data), /속성 보고서의 원본 공간 연결/u);
+  assert.equal((await docs()).find(document => document.id === original.id)?.content.content?.[0].type, 'codeBlock');
+  const mixed = await f.preview(config);
+  assert.equal(mixed.canApply, false, JSON.stringify(mixed.notices));
+  assert.equal((await f.call(`/documents/${outOfScope.data.id}?expectedVersion=${outOfScope.data.version}`, 'DELETE')).status, 200);
+
+  const fresh = await f.preview(config);
+  assert.equal(fresh.canApply, true, JSON.stringify(fresh.notices));
+  assert.equal(decision(fresh, locallyEdited.id), 'conflict');
+  const applied = await f.apply(fresh);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const assertReport = (documents: DocPage[]) => {
+    const live = documents.find(item => item.id === original.id)!;
+    assert.equal(documentContentSchemaVersion(live.content), 17);
+    const [options] = documentPropertyReports(live.content);
+    assert.deepEqual(options.projectIds, [reportProjectId, secondProjectId]);
+    assert.deepEqual(collectDocumentPropertyReport(documents, options).rows.map(row => [row.document.id, row.entries['결과']]),
+      [[firstProperty.id, '개발 승인'], [secondProperty.id, '운영 승인']]);
+    assert.deepEqual(documents.find(item => item.id === locallyEdited.id)?.content, edited.data.content);
+  };
+  assertReport(await docs());
+  const native = (await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[] }>('/export')).data;
+  assert.equal(native.schemaVersion, 119);
+  assert.equal(native.sourceRecords.find(record => record.sourceImportId === initialReceipt.data.import.id && record.targetId === original.id)?.record.text, report);
+  const imported = await restored.call('/import', 'POST', { data: native });
+  assert.equal(imported.status, 200, JSON.stringify(imported.data));
+  assertReport(await docs(restored));
 });
 
 test('Confluence label-list scope does not broaden through merged space mapping or other projected content kinds', async t => {

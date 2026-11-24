@@ -8,7 +8,7 @@ import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARA
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelLists } from '../shared/document-label-list.js';
-import { documentPropertyReports } from '../shared/document-properties.js';
+import { documentPropertyReportProjectIds, documentPropertyReports } from '../shared/document-properties.js';
 import { documentNodes } from '../shared/document-references.js';
 
 export class ApiKeyError extends Error {
@@ -127,7 +127,8 @@ export class ApiKeyService {
     return (
       documentIssueBlocks(content).every(({ type, projectId }) => type !== 'issueSummary' || projects.includes(projectId)) &&
       documentLabelLists(content).every(({ projectId }) => projectId !== null && projects.includes(projectId)) &&
-      documentPropertyReports(content).every(({ projectId }) => projectId !== null && projects.includes(projectId)) &&
+      documentPropertyReports(content).every(report =>
+        documentPropertyReportProjectIds(report).every(projectId => projectId !== null && projects.includes(projectId))) &&
       documentChildLists(content).every(({ scope, projectId, documentId }) => {
         if (scope === 'space') return projectId !== null && projects.includes(projectId);
         return scope !== 'document' || !documentId || allowsDocument(documentId);
@@ -195,7 +196,9 @@ export class ApiKeyService {
       }
       for (const { projectId } of documentIssueBlocks(content)) this.allowedProject(key, projectId);
       for (const { projectId } of documentLabelLists(content)) this.allowedProject(key, projectId);
-      for (const { projectId } of documentPropertyReports(content)) this.allowedProject(key, projectId);
+      for (const report of documentPropertyReports(content)) {
+        for (const projectId of documentPropertyReportProjectIds(report)) this.allowedProject(key, projectId);
+      }
       for (const { scope, projectId } of documentChildLists(content)) {
         if (scope === 'space') this.allowedProject(key, projectId);
       }

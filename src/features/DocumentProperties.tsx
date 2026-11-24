@@ -1,12 +1,12 @@
 'use client';
 
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useId, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FormEvent, type ReactNode } from 'react';
 import { ChevronLeft, ChevronRight, ListTree, Plus, SlidersHorizontal, Table2, X } from 'lucide-react';
 import { MAX_DOCUMENT_LABELS, MAX_DOCUMENT_LABEL_LENGTH } from '../../shared/document-labels';
 import {
-  collectDocumentPropertyReport, DOCUMENT_PROPERTIES_DEFAULTS, DOCUMENT_PROPERTY_REPORT_DEFAULTS, MAX_DOCUMENT_PROPERTY_ENTRIES,
+  collectDocumentPropertyReport, documentPropertyReportProjectIds, DOCUMENT_PROPERTIES_DEFAULTS, DOCUMENT_PROPERTY_REPORT_DEFAULTS, MAX_DOCUMENT_PROPERTY_ENTRIES,
   MAX_DOCUMENT_PROPERTY_GROUP_LENGTH, MAX_DOCUMENT_PROPERTY_NAME_LENGTH, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT,
-  MAX_DOCUMENT_PROPERTY_REPORT_TITLE_LENGTH, MAX_DOCUMENT_PROPERTY_VALUE_LENGTH,
+  MAX_DOCUMENT_PROPERTY_REPORT_SPACES, MAX_DOCUMENT_PROPERTY_REPORT_TITLE_LENGTH, MAX_DOCUMENT_PROPERTY_VALUE_LENGTH,
   normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions,
   type DocumentPropertiesOptions, type DocumentPropertyReportOptions,
 } from '../../shared/document-properties';
@@ -192,10 +192,13 @@ export function DocumentPropertiesCard({ attrs, onChange, onDelete, onSettingsDr
 
 function reportDraft(options: DocumentPropertyReportOptions | null) {
   const source = options ?? DOCUMENT_PROPERTY_REPORT_DEFAULTS;
-  return { ...source, labels: source.labels.join('\n'), columns: source.columns.join('\n'), limit: String(source.limit) };
+  return { ...source, projectIds: source.projectIds ?? null, labels: source.labels.join('\n'), columns: source.columns.join('\n'), limit: String(source.limit) };
 }
 
 function lines(text: string) { return text.split('\n').map(line => line.trim()).filter(Boolean); }
+
+// A valid stored project ID has no surrounding whitespace.
+const multipleReportSpaces = ' multiple spaces ';
 
 function ReportSettings({ options, projects, onApply, onClose, onDraftChange }: SettingsProps<DocumentPropertyReportOptions> & {
   projects: WorkspaceSnapshot['projects'];
@@ -203,14 +206,23 @@ function ReportSettings({ options, projects, onApply, onClose, onDraftChange }: 
   const state = useSettingsDraft(options, reportDraft, onDraftChange, onClose);
   const { draft } = state;
   const titleInput = useRef<HTMLInputElement>(null);
-  const missingProject = draft.projectId !== null && !projects.some(project => project.id === draft.projectId);
+  const selectedSpaces = draft.projectIds ?? [draft.projectId];
+  const missingProjects = selectedSpaces.filter((id): id is string => id !== null && !projects.some(project => project.id === id));
+  const invalidSpaceCount = draft.projectIds !== null && (selectedSpaces.length < 2 || selectedSpaces.length > MAX_DOCUMENT_PROPERTY_REPORT_SPACES);
+  const spaceChoices = [{ id: null, name: '팀 공통 문서' }, ...projects.map(project => ({
+    id: project.id,
+    name: project.name === '팀 공통 문서' || projects.some(other => other.id !== project.id && other.name === project.name)
+      ? `${project.name} · ${project.key}` : project.name,
+  })), ...missingProjects.map(id => ({ id, name: `찾을 수 없는 프로젝트 ${id}` }))];
 
   useLayoutEffect(() => { titleInput.current?.focus({ preventScroll: true }); }, []);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (state.outdated || missingProject) return;
-    const updated = normalizeDocumentPropertyReportOptions({ ...draft, labels: lines(draft.labels), columns: lines(draft.columns), limit: Number(draft.limit) });
+    if (state.outdated || missingProjects.length || invalidSpaceCount) return;
+    const { projectIds, ...values } = draft;
+    const updated = normalizeDocumentPropertyReportOptions({ ...values, ...(projectIds && { projectIds }),
+      labels: lines(draft.labels), columns: lines(draft.columns), limit: Number(draft.limit) });
     if (!updated) {
       state.setError(`라벨은 ${MAX_DOCUMENT_LABELS}개, 열은 ${MAX_DOCUMENT_PROPERTY_ENTRIES}개까지 입력할 수 있습니다. 줄마다 하나씩 쓰고 같은 이름의 열은 한 번만 입력해 주세요.`);
       return;
@@ -222,15 +234,36 @@ function ReportSettings({ options, projects, onApply, onClose, onDraftChange }: 
     onClose();
   }
 
-  return <SettingsForm {...state} label="문서 속성 보고서 설정" submitLabel="보고서 설정 적용" disabled={missingProject} onSubmit={submit}>
+  return <SettingsForm {...state} label="문서 속성 보고서 설정" submitLabel="보고서 설정 적용"
+    disabled={Boolean(missingProjects.length || invalidSpaceCount)} onSubmit={submit}>
     <div className="doc-properties-fields">
       <label>보고서 제목<input ref={titleInput} maxLength={MAX_DOCUMENT_PROPERTY_REPORT_TITLE_LENGTH} value={draft.title}
         onChange={event => state.update({ title: event.target.value })} /></label>
-      <label>문서 공간<select value={draft.projectId ?? ''} onChange={event => state.update({ projectId: event.target.value || null })}>
+      <label>문서 공간<select value={draft.projectIds ? multipleReportSpaces : draft.projectId ?? ''} onChange={event => {
+        const scope = event.currentTarget.value;
+        if (scope === multipleReportSpaces) state.update({ projectId: null, projectIds: [draft.projectId] });
+        else state.update({ projectId: scope || null, projectIds: null });
+      }}>
         <option value="">팀 공통 문서</option>
-        {missingProject && <option value={draft.projectId ?? ''}>찾을 수 없는 프로젝트</option>}
+        {draft.projectIds === null && missingProjects.length > 0 && <option value={draft.projectId ?? ''}>찾을 수 없는 프로젝트</option>}
         {projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}
+        <option value={multipleReportSpaces}>여러 문서 공간</option>
       </select></label>
+      {draft.projectIds && <fieldset className="doc-properties-spaces">
+        <legend>집계할 문서 공간</legend>
+        <div className="doc-properties-space-choices">
+          {spaceChoices.map(({ id, name }) => {
+            const checked = selectedSpaces.includes(id);
+            return <label className="doc-properties-check" key={id ?? ''}>
+              <input type="checkbox" checked={checked} disabled={!checked && selectedSpaces.length >= MAX_DOCUMENT_PROPERTY_REPORT_SPACES}
+                onChange={event => state.update({ projectIds: event.currentTarget.checked ? [...selectedSpaces, id] : selectedSpaces.filter(space => space !== id) })} />
+              {name}
+            </label>;
+          })}
+        </div>
+        <p className="doc-properties-space-count" role="status">{selectedSpaces.length}곳 선택 · 2–{MAX_DOCUMENT_PROPERTY_REPORT_SPACES}곳 선택 가능</p>
+      </fieldset>}
+      {missingProjects.length > 0 && <p className="doc-properties-error doc-properties-space-error" role="alert">집계할 프로젝트를 찾을 수 없습니다. 문서 공간을 다시 선택해 주세요.</p>}
       <label>속성 그룹<input value={draft.group} placeholder="모든 그룹" maxLength={MAX_DOCUMENT_PROPERTY_GROUP_LENGTH}
         onChange={event => state.update({ group: event.target.value })} /></label>
       <label>라벨 일치 방식<select value={draft.match} onChange={event => state.update({ match: event.target.value as DocumentPropertyReportOptions['match'] })}>
@@ -254,14 +287,16 @@ function ReportSettings({ options, projects, onApply, onClose, onDraftChange }: 
 const REPORT_PAGE_SIZE = 20;
 type Report = ReturnType<typeof collectDocumentPropertyReport>;
 
-function ReportRows({ report, title, limit, documentId, openDocument }: {
+function ReportRows({ report, title, limit, documentId, openDocument, projectNames }: {
   report: Report;
   title: string;
   limit: number;
   documentId: string | null;
   openDocument: (id: string) => void;
+  projectNames?: ReadonlyMap<string, string>;
 }) {
   const [requestedPage, setPage] = useState(1);
+  const spaceLabel = useId();
   const count = Math.min(limit, report.rows.length);
   const pageCount = Math.ceil(count / REPORT_PAGE_SIZE);
   const page = Math.min(requestedPage, pageCount);
@@ -273,16 +308,19 @@ function ReportRows({ report, title, limit, documentId, openDocument }: {
   return <>
     <div className="doc-properties-table-scroll" role="region" aria-label="문서 속성 보고서 표" tabIndex={0}>
       <table aria-label={title}><thead><tr><th scope="col">문서</th>{report.columns.map(name => <th key={name} scope="col">{name}</th>)}</tr></thead>
-        <tbody>{rows.map(({ id, document, group, entries }) => {
+        <tbody>{rows.map(({ id, document, group, entries }, index) => {
           const title = document.title || '제목 없는 문서';
+          const projectName = projectNames && (document.projectId === null ? '팀 공통 문서' : projectNames.get(document.projectId));
+          const projectLabelId = projectName ? `${spaceLabel}-${index}` : undefined;
           return <tr key={id}><th scope="row">
-            <a aria-label={`원본 문서 열기 ${title}`} aria-current={document.id === documentId ? 'page' : undefined}
+            <a aria-label={`원본 문서 열기 ${title}`} aria-describedby={projectLabelId} aria-current={document.id === documentId ? 'page' : undefined}
               href={`#/${encodeURIComponent(document.projectId ?? 'all')}/documents/${encodeURIComponent(document.id)}`}
               onMouseDown={event => { if (!modified(event)) event.preventDefault(); }}
               onClick={event => {
                 event.stopPropagation();
                 if (!modified(event)) { event.preventDefault(); openDocument(document.id); }
               }}>{title}</a>
+            {projectName && <small id={projectLabelId}>{projectName}</small>}
             {group && <small>{group}</small>}
           </th>{report.columns.map(name => <td key={name}>{Object.hasOwn(entries, name) && entries[name] ? entries[name] : '—'}</td>)}</tr>;
         })}</tbody>
@@ -309,20 +347,24 @@ EditorActions<DocumentPropertyReportOptions> & {
   renderLimit?: number;
 }) {
   const options = useMemo(() => normalizeDocumentPropertyReportOptions(attrs), [attrs]);
-  const space = options?.projectId === null ? '팀 공통' : data.projects.find(project => project.id === options?.projectId)?.name;
-  const report = useMemo(() => options && space !== undefined ? projection ?? collectDocumentPropertyReport(data.documents, options) : null,
-    [data.documents, options, projection, space]);
+  const projectNames = useMemo(() => new Map(data.projects.map(project => [project.id, project.name])), [data.projects]);
+  const scopes = options ? documentPropertyReportProjectIds(options) : [];
+  const missingProject = scopes.some(id => id !== null && !projectNames.has(id));
+  const space = options?.projectIds ? `문서 공간 ${scopes.length}곳`
+    : options?.projectId ? projectNames.get(options.projectId) : '팀 공통';
+  const report = useMemo(() => options && !missingProject ? projection ?? collectDocumentPropertyReport(data.documents, options) : null,
+    [data.documents, missingProject, options, projection]);
   const title = options?.title || '문서 속성 보고서';
   const limit = renderLimit ?? report?.rows.length ?? 0;
-  const summary = space === undefined ? '' : [space, options?.group, report?.total ? `${report.total.toLocaleString('ko-KR')}행` : ''].filter(Boolean).join(' · ');
+  const summary = !options || missingProject ? '' : [space, options.group, report?.total ? `${report.total.toLocaleString('ko-KR')}행` : ''].filter(Boolean).join(' · ');
 
   return <PropertyBlock label="문서 속성 보고서" title={title} summary={summary} icon={<Table2 size={16} aria-hidden="true" />}
     onDelete={onDelete} onSettingsDraftChange={onSettingsDraftChange}
     settings={onChange ? { component: ReportSettings, props: { projects: data.projects, options, onApply: onChange } } : undefined}>
     {options && report?.rows.length && limit > 0 ? <ReportRows key={JSON.stringify(options)} report={report} title={title}
-      limit={limit} documentId={documentId} openDocument={openDocument} />
+      limit={limit} documentId={documentId} openDocument={openDocument} projectNames={options.projectIds ? projectNames : undefined} />
       : <p className="doc-properties-message">{!options ? '저장된 속성 보고서 설정을 확인할 수 없습니다.'
-        : space === undefined ? '보고서의 프로젝트를 찾을 수 없습니다.'
+        : missingProject ? '보고서의 프로젝트를 찾을 수 없습니다.'
           : !options.labels.length ? '속성을 모을 문서의 라벨을 지정해 주세요.'
             : report?.rows.length ? '보고서 표시 한도에 도달했습니다.' : '조건과 일치하는 문서 속성이 없습니다.'}</p>}
   </PropertyBlock>;

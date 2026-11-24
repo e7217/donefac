@@ -9,6 +9,7 @@ export const MAX_DOCUMENT_PROPERTY_VALUE_LENGTH = 800;
 export const MAX_DOCUMENT_PROPERTY_GROUP_LENGTH = 80;
 export const MAX_DOCUMENT_PROPERTY_REPORT_LIMIT = 200;
 export const MAX_DOCUMENT_PROPERTY_REPORT_TITLE_LENGTH = 160;
+export const MAX_DOCUMENT_PROPERTY_REPORT_SPACES = 50;
 
 export interface DocumentPropertiesOptions {
   group: string;
@@ -18,6 +19,7 @@ export interface DocumentPropertiesOptions {
 
 export interface DocumentPropertyReportOptions {
   projectId: string | null;
+  projectIds?: (string | null)[] | null;
   group: string;
   labels: string[];
   match: 'any' | 'all';
@@ -30,7 +32,7 @@ export interface DocumentPropertyReportOptions {
 
 export const DOCUMENT_PROPERTIES_DEFAULTS: Readonly<DocumentPropertiesOptions> = { group: '', hidden: false, entries: [] };
 export const DOCUMENT_PROPERTY_REPORT_DEFAULTS: Readonly<DocumentPropertyReportOptions> = {
-  projectId: null, group: '', labels: [], match: 'all', columns: [], sort: 'updated', descending: true, limit: 30, title: '',
+  projectId: null, projectIds: null, group: '', labels: [], match: 'all', columns: [], sort: 'updated', descending: true, limit: 30, title: '',
 };
 
 function hasOnlyAttributes(raw: unknown, keys: object): raw is Record<string, unknown> {
@@ -74,27 +76,42 @@ export function normalizeDocumentPropertiesOptions(raw: unknown): DocumentProper
   return { group, hidden: source.hidden, entries };
 }
 
+function isReportProjectId(value: unknown): value is string | null {
+  return value === null || (typeof value === 'string' && !!value && value === value.trim() &&
+    value.isWellFormed() && value.length <= 200 && !singleLineControls.test(value));
+}
+
 export function normalizeDocumentPropertyReportOptions(raw: unknown): DocumentPropertyReportOptions | null {
   if (raw !== undefined && !hasOnlyAttributes(raw, DOCUMENT_PROPERTY_REPORT_DEFAULTS)) return null;
   const source = { ...DOCUMENT_PROPERTY_REPORT_DEFAULTS, ...(raw as Record<string, unknown> | undefined) };
-  const { projectId, match, sort, descending, limit } = source;
+  const { projectId, projectIds, match, sort, descending, limit } = source;
   const group = displayName(source.group, MAX_DOCUMENT_PROPERTY_GROUP_LENGTH);
   const title = displayName(source.title, MAX_DOCUMENT_PROPERTY_REPORT_TITLE_LENGTH);
   const labels = normalizeDocumentLabels(source.labels);
-  if (projectId !== null && (typeof projectId !== 'string' || !projectId || projectId !== projectId.trim() ||
-      !projectId.isWellFormed() || projectId.length > 200 || singleLineControls.test(projectId))) return null;
-  if (group === null || title === null || !labels || (match !== 'any' && match !== 'all') ||
+  if (!isReportProjectId(projectId) || group === null || title === null || !labels || (match !== 'any' && match !== 'all') ||
       (sort !== 'title' && sort !== 'updated') || typeof descending !== 'boolean' ||
       typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1 || limit > MAX_DOCUMENT_PROPERTY_REPORT_LIMIT ||
       !Array.isArray(source.columns) || source.columns.length > MAX_DOCUMENT_PROPERTY_ENTRIES) return null;
 
+  const selected = new Set<string | null>();
+  if (projectIds !== null && projectIds !== undefined) {
+    if (projectId !== null || !Array.isArray(projectIds) || projectIds.length < 2 || projectIds.length > MAX_DOCUMENT_PROPERTY_REPORT_SPACES) return null;
+    for (const id of projectIds) {
+      if (!isReportProjectId(id) || selected.has(id)) return null;
+      selected.add(id);
+    }
+  }
   const columns = new Set<string>();
   for (const column of source.columns) {
     const name = displayName(column, MAX_DOCUMENT_PROPERTY_NAME_LENGTH);
     if (!name || columns.has(name)) return null;
     columns.add(name);
   }
-  return { projectId, group, labels, match, columns: [...columns], sort, descending, limit, title };
+  return { projectId, ...(selected.size ? { projectIds: [...selected] } : {}), group, labels, match, columns: [...columns], sort, descending, limit, title };
+}
+
+export function documentPropertyReportProjectIds(options: DocumentPropertyReportOptions): readonly (string | null)[] {
+  return options.projectIds ?? [options.projectId];
 }
 
 export function documentPropertyReports(content: RichContent): DocumentPropertyReportOptions[] {
@@ -109,7 +126,9 @@ export function documentPropertyReports(content: RichContent): DocumentPropertyR
 
 export function documentPropertyReportDescription(options: DocumentPropertyReportOptions): string {
   const labels = options.labels.length ? `${options.match === 'all' ? '모든 라벨' : '선택 라벨 중 하나'} ${options.labels.join(', ')}` : '라벨 미지정';
-  return [options.title, options.projectId === null ? '팀 공통' : `프로젝트 ${options.projectId}`, labels,
+  const selected = documentPropertyReportProjectIds(options).map(id => id === null ? '팀 공통' : `프로젝트 ${id}`);
+  const scope = selected.length === 1 ? selected[0] : `문서 공간 ${selected.length}곳 (${selected.join(', ')})`;
+  return [options.title, scope, labels,
     options.group ? `속성 그룹 ${options.group}` : '모든 속성 그룹', options.columns.length ? options.columns.join(', ') : '자동 열',
     `${options.sort === 'title' ? '제목' : '수정일'} ${options.descending ? '내림차순' : '오름차순'}`, `최대 ${options.limit}행`]
     .filter(Boolean).join(' · ');
@@ -131,9 +150,10 @@ export function collectDocumentPropertyReport(documents: readonly DocPage[], opt
   let total = 0;
   if (!options.labels.length) return { columns: [...columns], rows, total };
 
+  const selected = new Set(documentPropertyReportProjectIds(options));
   const labels = options.labels.map(documentLabelKey);
   const matchingDocuments = documents.filter(document => {
-    if (document.projectId !== options.projectId) return false;
+    if (!selected.has(document.projectId)) return false;
     const available = new Set((document.labels ?? []).map(documentLabelKey));
     return options.match === 'all' ? labels.every(label => available.has(label)) : labels.some(label => available.has(label));
   }).sort((a, b) => {

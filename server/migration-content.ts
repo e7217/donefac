@@ -10,7 +10,7 @@ import type { DocumentSourceSelection, LegacyRecord, RichContent } from '../shar
 import { MAX_DOCUMENT_CHILD_LIST_DEPTH, MAX_DOCUMENT_CHILD_LIST_FIRST, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
-import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT } from '../shared/document-properties.js';
+import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT, normalizeDocumentPropertyReportOptions } from '../shared/document-properties.js';
 import { attachmentDownloadIdFromUrl } from '../shared/inline-attachment.js';
 import { safeFilename } from './attachments.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
@@ -54,8 +54,10 @@ export interface MigrationContentContext {
   legacyDocumentExcerpt?: boolean;
   legacyDocumentLayout?: boolean;
   legacyDocumentProperties?: boolean;
+  legacyMultiSpacePropertyReports?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
+  resolvePropertyReportSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   sectionLinks?: {
     documentId: string;
     resolvePageSection?: (page: MigrationReferenceInput, fragment: string, fromUrl: boolean) => { documentId: string; sectionId: string } | null;
@@ -956,13 +958,23 @@ class Converter {
       this.warn('DOCUMENT_PROPERTY_REPORT_PARAMETERS_UNSUPPORTED', '현재 문서 속성 보고서로 재현할 수 없는 검색 조건이나 표시 설정을 원문 코드 블록으로 보존했습니다.');
       return [codeBlock(serializeXml(node))];
     }
-    const projectId = this.context.resolveChildListSpaceProject?.(parsed.spaceKey) ?? this.context.resolveLabelListProject?.(parsed.spaceKey);
-    if (!projectId) {
-      this.warn('DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED', '원본 공간의 문서만 조회하는 이관 프로젝트를 확인할 수 없어 보고서를 원문 코드 블록으로 보존했습니다.');
+    const multipleSpaces = parsed.spaceKeys.length > 1;
+    if (multipleSpaces && this.context.legacyMultiSpacePropertyReports) {
+      this.warn('LEGACY_MULTI_SPACE_PROPERTY_REPORT', '이전 이관에서 원문 코드 블록으로 보존한 여러 공간의 속성 보고서를 확인했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    const resolveSpace = this.context.resolvePropertyReportSpaceProject ?? ((spaceKey: string | null) =>
+      this.context.resolveChildListSpaceProject?.(spaceKey) ?? this.context.resolveLabelListProject?.(spaceKey) ?? null);
+    const projectIds = parsed.spaceKeys.map(resolveSpace);
+    const options = projectIds.every(projectId => Boolean(projectId)) && normalizeDocumentPropertyReportOptions({ ...parsed.options,
+      ...(multipleSpaces ? { projectId: null, projectIds } : { projectId: projectIds[0] }),
+    });
+    if (!options) {
+      this.warn('DOCUMENT_PROPERTY_REPORT_SCOPE_UNRESOLVED', '지정한 원본 공간마다 그 공간의 문서만 조회하는 이관 프로젝트를 확인할 수 없어 보고서를 원문 코드 블록으로 보존했습니다.');
       return [codeBlock(serializeXml(node))];
     }
     this.warn('DOCUMENT_PROPERTY_REPORT_PAGINATION_CHANGED', `이관 보고서는 원본의 페이지 나누기를 적용하지 않고 최대 ${MAX_DOCUMENT_PROPERTY_REPORT_LIMIT}행을 표시합니다.`);
-    return [{ type: 'documentPropertyReport', attrs: { ...parsed.options, projectId } }];
+    return [{ type: 'documentPropertyReport', attrs: { ...options } }];
   }
   private documentExcerpt(node: XmlNode, depth: number): RichContent[] {
     const firstDefinition = node === this.firstSourceExcerpt;

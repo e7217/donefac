@@ -1,7 +1,7 @@
 import { createEditorSchema } from '../shared/editor-schema.js';
 import { documentChildLists, MAX_DOCUMENT_CHILD_LISTS, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentLabelLists, MAX_DOCUMENT_LABEL_LISTS, normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
-import { documentPropertyReports, MAX_DOCUMENT_PROPERTY_BLOCKS,
+import { documentPropertyReportProjectIds, documentPropertyReports, MAX_DOCUMENT_PROPERTY_BLOCKS,
   normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../shared/document-properties.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
@@ -182,7 +182,9 @@ export function validateDocumentListProjects(contents: Iterable<RichContent>, ha
   };
   for (const content of contents) {
     for (const { projectId } of documentLabelLists(content)) checkProject(projectId, '라벨별 문서 목록');
-    for (const { projectId } of documentPropertyReports(content)) checkProject(projectId, '문서 속성 보고서');
+    for (const report of documentPropertyReports(content)) {
+      for (const projectId of documentPropertyReportProjectIds(report)) checkProject(projectId, '문서 속성 보고서');
+    }
     for (const { scope, projectId } of documentChildLists(content)) {
       if (scope === 'space') checkProject(projectId, '하위 문서 목록');
     }

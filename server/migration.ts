@@ -15,7 +15,7 @@ import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
 import { hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
   remapMappingConfiguration, resolveMappingPackages, restoreMappedUsers } from './migration-mapping.js';
-import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
+import type { MigrationAppendContext, MigrationConfluencePropertyScope, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
 import { installMigrationContentReview, migrationContentReviewDetail, migrationContentReviewList, migrationContentReviewNumber,
   storeMigrationContentReview } from './migration-content-review.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
@@ -26,6 +26,7 @@ import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import { readJiraWorklogCorrectionCandidates } from './jira-worklog-corrections.js';
 import { readMigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
+import { parseMigrationOriginBase } from './migration-origin-links.js';
 import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
 import type { LegacyImportService, StoredLegacyPackageDetail } from './legacy-import.js';
@@ -37,7 +38,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 23;
+const conversionVersion = 24;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -63,6 +64,7 @@ const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번�
 const changedPlanning = '이관을 검토하는 동안 대상 프로젝트의 릴리스가 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedCyclePlanning = '이관을 검토하는 동안 대상 프로젝트의 사이클이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedRetainedResourceLinks = '이관을 검토하는 동안 기존 업무·문서 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+const changedConfluencePropertyScope = '이관을 검토하는 동안 문서 속성 보고서의 원본 공간 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 export const changedConfluenceReplyRoot = '답글을 추가할 문장 댓글이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 
 function reviewStoredJiraBackup(detail: StoredLegacyPackageDetail, dataset: MigrationPackage['dataset']): void {
@@ -668,7 +670,8 @@ export class MigrationService {
       .all(instanceKey, JSON.stringify([...ownerPages])) as { space: string | null }[];
     return rows.length === 1 ? rows[0].space ?? undefined : undefined;
   }
-  private confluenceLabelListIsolated({ project, instanceKey, sourceSpaceId }: PageAppendDestination): boolean {
+  private confluenceLabelListIsolated({ project, instanceKey, sourceSpaceId }:
+    Omit<PageAppendDestination, 'project'> & { project: Pick<Project, 'id'> }): boolean {
     const row = this.store.db.prepare(`WITH source_pages AS (
       SELECT DISTINCT binding.target_id AS id FROM source_bindings AS binding
       JOIN source_records AS archive ON archive.import_id=binding.import_id AND archive.product=binding.product
@@ -684,6 +687,52 @@ export class MigrationService {
       WHERE document.project_id=? AND source.id IS NULL
     ) AS isolated`).get(instanceKey, sourceSpaceId, project.id, instanceKey, sourceSpaceId, project.id) as { isolated: number };
     return row.isolated === 1;
+  }
+  private retainedConfluencePropertyScopes(instanceKeys: string[]) {
+    const rows = this.store.db.prepare(`SELECT binding.source_instance AS instanceKey, binding.source_alias AS spaceId,
+      binding.target_id AS projectId, archive.id AS archiveId, json_remove(archive.json,'$.record.text') AS json
+      FROM source_bindings binding
+      JOIN source_records archive ON archive.import_id=binding.import_id AND archive.product=binding.product
+        AND archive.source_instance=binding.source_instance AND archive.kind=binding.kind AND archive.source_id=binding.source_alias
+        AND archive.target_type=binding.target_type AND archive.target_id=binding.target_id AND json_valid(archive.json)
+      WHERE binding.product='confluence' AND binding.kind='project' AND binding.target_type='project'
+        AND binding.source_instance IN (SELECT value FROM json_each(?))
+      ORDER BY binding.source_instance,binding.source_alias,binding.target_id,archive.id`)
+      .all(JSON.stringify(instanceKeys)) as { instanceKey: string; spaceId: string; projectId: string; archiveId: string; json: string }[];
+    const receipts = new Map<string, SourceImport | undefined>();
+    const scopes = new Map<string, MigrationConfluencePropertyScope>();
+    const isolated = new Map<string, boolean>();
+    for (const { instanceKey, spaceId, projectId, archiveId, json } of rows) {
+      const archive = JSON.parse(json) as SourceRecordArchive;
+      if (archive.id !== archiveId || archive.source?.product !== 'confluence' || archive.source.instanceKey !== instanceKey ||
+          archive.record?.kind !== 'project' || archive.record.sourceId !== spaceId || archive.record.metadata?.sourceClass !== 'Space' ||
+          archive.targetType !== 'project' || archive.targetId !== projectId || archive.targetProjectId !== projectId || archive.excluded ||
+          String(archive.record.metadata.spaceType ?? '').toLowerCase() === 'personal') continue;
+      const keys = [...new Set([archive.record.metadata.spaceKey, archive.record.metadata.key, archive.record.metadata.pkey]
+        .filter((key): key is string => typeof key === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/u.test(key)))];
+      if (!keys.length) continue;
+      const receiptId = archive.sourceImportId;
+      if (!receipts.has(receiptId)) receipts.set(receiptId, this.store.get<SourceImport>('source_imports', receiptId));
+      const receipt = receipts.get(receiptId);
+      const members = receipt?.packages.filter(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'confluence' &&
+        pkg.source.instanceKey === instanceKey && pkg.source.format === archive.source.format &&
+        pkg.source.declaredVersion === archive.source.declaredVersion && pkg.source.timezone === archive.source.timezone);
+      if (!receipt || members?.length !== 1 || !receipt.projectIds.includes(projectId) ||
+          receipt.configuration.excludedRecords.includes(`${members[0].stagingId}/${archive.record.id}`)) continue;
+      const base = parseMigrationOriginBase('confluence', receipt.configuration.sourceBaseUrls[members[0].stagingId]);
+      const origin = base && `${base.origin}${base.contextPath}`;
+      const identity = JSON.stringify([instanceKey, spaceId, projectId]);
+      if (!isolated.has(identity)) {
+        isolated.set(identity, Boolean(this.store.get<Project>('projects', projectId) &&
+          this.confluenceLabelListIsolated({ project: { id: projectId }, instanceKey, sourceSpaceId: spaceId })));
+      }
+      for (const spaceKey of keys) {
+        const scope = { instanceKey, spaceId, spaceKey, projectId, origin, isolated: isolated.get(identity)! };
+        scopes.set(JSON.stringify(scope), scope);
+      }
+    }
+    const evidence = [...scopes.keys()].sort();
+    return { scopes: evidence.map(key => scopes.get(key)!), token: createHash('sha256').update(JSON.stringify(evidence)).digest('hex') };
   }
   private pageAppendContext(configuration: MigrationConfiguration, packages: MigrationPackage[], applying = false,
     sectionInventory?: boolean, labelListInventory?: boolean): MigrationPageAppendContext | undefined {
@@ -1234,6 +1283,11 @@ export class MigrationService {
       const append = this.appendContext(configuration, packages);
       const appendPages = this.pageAppendContext(configuration, packages);
       const retainedResourceLinks = readMigrationRetainedResourceLinks(this.store, packages, configuration, this.restrictedConfluencePages);
+      const propertyReportInstances = [...new Set(packages.filter(({ dataset }) => dataset.source.product === 'confluence' &&
+        dataset.records.some(record => (record.kind === 'page' || record.kind === 'revision') &&
+          record.textFormat === 'confluence-storage' && hasConfluencePropertyReportMacro(record.text)))
+        .map(({ dataset }) => dataset.source.instanceKey))];
+      const retainedPropertyScopes = propertyReportInstances.length ? this.retainedConfluencePropertyScopes(propertyReportInstances) : undefined;
       const restrictedConfluencePages = new Map<string, ReadonlySet<string>>();
       for (const { summary: { source } } of packages) {
         if (source.product !== 'confluence') continue;
@@ -1244,7 +1298,8 @@ export class MigrationService {
         action: 'preview', sources: packages.map(item => this.fileSpec(item.summary)),
         input: { id: randomUUID(), configuration, actorId, packages, now: new Date().toISOString(),
           users: this.store.all<User>('users'), existingProjectKeys: this.store.all<Project>('projects').map(project => project.key),
-          ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}), ...(retainedResourceLinks ? { retainedResourceLinks } : {}) },
+          ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}), ...(retainedResourceLinks ? { retainedResourceLinks } : {}),
+          ...(retainedPropertyScopes ? { retainedConfluencePropertyScopes: retainedPropertyScopes.scopes } : {}) },
         ...(restrictedConfluencePages.size ? { restrictedConfluencePages } : {}),
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
@@ -1254,6 +1309,11 @@ export class MigrationService {
         const current = readMigrationRetainedResourceLinks(this.store, packages, configuration, this.restrictedConfluencePages);
         if (retainedResourceLinks.token !== current?.token) fail(409, changedRetainedResourceLinks);
         prepared.retainedResourceLinkToken = retainedResourceLinks.token;
+      }
+      if (retainedPropertyScopes) {
+        const { token } = retainedPropertyScopes;
+        if (token !== this.retainedConfluencePropertyScopes(propertyReportInstances).token) fail(409, changedConfluencePropertyScope);
+        prepared.retainedConfluencePropertyScopeCheck = { instanceKeys: propertyReportInstances, token };
       }
       const binding = this.store.db.prepare('SELECT target_type AS type,target_id AS id FROM source_bindings WHERE product=? AND source_instance=? AND kind=? AND source_alias=?');
       const refreshIssueIds = new Set(append?.refreshIssues?.map(candidate => candidate.issue.id));
@@ -1419,6 +1479,10 @@ export class MigrationService {
           if (prepared.retainedResourceLinkToken) {
             const current = readMigrationRetainedResourceLinks(this.store, loadSelectedPackages(), preview.configuration, this.restrictedConfluencePages);
             if (current?.token !== prepared.retainedResourceLinkToken) fail(409, changedRetainedResourceLinks);
+          }
+          const propertyScope = prepared.retainedConfluencePropertyScopeCheck;
+          if (propertyScope && this.retainedConfluencePropertyScopes(propertyScope.instanceKeys).token !== propertyScope.token) {
+            fail(409, changedConfluencePropertyScope);
           }
           if (Boolean(append) !== Boolean(preview.configuration.appendTo)) fail(409, changedAppend);
           if (append) {

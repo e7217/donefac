@@ -7,6 +7,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../shared/project-workload.js';
 import { documentChildLists } from '../shared/document-child-list.js';
+import { documentPropertyReports } from '../shared/document-properties.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { documentSectionHash } from '../shared/document-sections.js';
 import { contentReferences } from '../shared/document-nodes.js';
@@ -15,7 +16,7 @@ import { readDocumentSelection } from './document-content.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceParentEvidence, confluencePositionEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
-import { hasConfluencePropertyMacro } from './migration-confluence-properties.js';
+import { hasConfluencePropertyMacro, hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
 import { jiraWorklogNoteHash, jiraWorklogProjectedNote, jiraWorklogSourceUpdatedAt } from './jira-worklog-corrections.js';
 import type { MigrationContentContext, MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
@@ -1302,6 +1303,7 @@ class Planner{
       const contentContext = this.confluencePageContentContext(entry, document.id, append.project.id);
       let childListBaseline: string | undefined;
       let headingDepthBaseline: string | undefined;
+      let multiSpaceReportBaseline: string | undefined;
       const canCheckFormerBody = (newer || sameSourceRevision) && !sourceBodyErrors.has(entry.key) &&
         incomingBody !== undefined && (!acceptedBody || incomingBody === acceptedBody) &&
         hasConfluenceBody(previous.record) && row.text === previous.record.text;
@@ -1328,6 +1330,20 @@ class Planner{
           }
         }
       }
+      let multiSpaceProjection: ReturnType<typeof convertLegacyContent> | undefined;
+      if (canCheckFormerBody && hasConfluencePropertyReportMacro(row.text)) {
+        const candidate = convertLegacyContent(row, contentContext);
+        if (usableConfluenceBody(candidate) && documentPropertyReports(candidate.content).some(report => Array.isArray(report.projectIds))) {
+          const former = convertLegacyContent(row, { ...contentContext, resolvePropertyReportSpaceProject: undefined, legacyMultiSpacePropertyReports: true });
+          const diagnostics = former.diagnostics.filter(item => item.code !== 'LEGACY_MULTI_SPACE_PROPERTY_REPORT');
+          const formerHash = confluencePageFieldDigest('content', former.content);
+          const checkpoint = previous.confluencePageFieldHashes?.content ?? confluencePageFieldDigest('content', document.content);
+          if (diagnostics.length < former.diagnostics.length && usableConfluenceBody({ ...former, diagnostics }) && formerHash === checkpoint) {
+            multiSpaceReportBaseline = formerHash;
+            multiSpaceProjection = candidate;
+          }
+        }
+      }
       const sameRevision = sameSourceRevision && (row.metadata.labelSetComplete === true || originalChecklistFallback ||
         propertiesProjection || childListBaseline !== undefined || headingDepthBaseline !== undefined);
       const sourceParent = confluenceParentEvidence(row);
@@ -1342,9 +1358,10 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
       const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (originalChecklistFallback ||
-        childListBaseline !== undefined || headingDepthBaseline !== undefined || incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
+        childListBaseline !== undefined || headingDepthBaseline !== undefined || multiSpaceReportBaseline !== undefined ||
+        incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
-        ? convertLegacyContent(row, contentContext) : null;
+        ? multiSpaceProjection ?? convertLegacyContent(row, contentContext) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (needsBodyReview && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
@@ -1383,6 +1400,7 @@ class Planner{
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
       if (childListBaseline) hashes.content = childListBaseline;
       if (headingDepthBaseline) hashes.content = headingDepthBaseline;
+      if (multiSpaceReportBaseline) hashes.content = multiSpaceReportBaseline;
       if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = confluencePageFieldDigest('parentId', initialParentId);
       if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
         // For old receipts, the full original code block is the only proven baseline.
@@ -2920,6 +2938,23 @@ class Planner{
       scope?.source === source && (!origin || !scope.origin || scope.origin === origin));
     return projects.length === 1 ? projects[0][0] : null;
   }
+  private confluencePropertyReportProject(entry: Entry, spaceKey: string | null, projectId?: string | null): string | null {
+    const projected = this.confluenceChildListProject(entry, spaceKey, projectId);
+    if (spaceKey === null || !this.sourceLabelListScope(entry)) return projected;
+    const instanceKey = entry.pkg.dataset.source.instanceKey;
+    const origin = this.originIdentity(entry);
+    const retained = (this.input.retainedConfluencePropertyScopes ?? []).filter(scope =>
+      scope.instanceKey === instanceKey && scope.spaceKey === spaceKey && (!origin || !scope.origin || origin === scope.origin));
+    if (!retained.length) return projected;
+    const staged = this.inConfluenceSource(entry, this.confluenceSpacesByKey.get(spaceKey) ?? []);
+    if (staged.some(candidate => this.excluded.has(candidate.key) ||
+      string(candidate.row.metadata.spaceType).toLowerCase() === 'personal') || retained.some(scope => !scope.isolated)) return null;
+    const sourceIds = new Set([...staged.map(candidate => candidate.row.sourceId), ...retained.map(scope => scope.spaceId)]);
+    const origins = new Set([...staged.map(candidate => this.originIdentity(candidate)), ...retained.map(scope => scope.origin)].filter(Boolean));
+    const projects = new Set([...retained.map(scope => scope.projectId), ...(projected ? [projected] : [])]);
+    if (sourceIds.size !== 1 || origins.size > 1 || projects.size !== 1) return null;
+    return [...projects][0];
+  }
   private originIdentity(entry: Entry): string | undefined {
     const base = this.originBases.get(entry.pkg.summary.id);
     return base && `${base.origin}${base.contextPath}`;
@@ -3320,6 +3355,7 @@ class Planner{
       sectionLinks: this.confluenceSectionLinks(entry, documentId),
       resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, projectId),
       resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, projectId),
+      resolvePropertyReportSpaceProject: space => this.confluencePropertyReportProject(entry, space, projectId),
     };
   }
 
@@ -3433,6 +3469,7 @@ class Planner{
       sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
       resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, this.project(entry)?.id),
       resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, this.project(entry)?.id),
+      resolvePropertyReportSpaceProject: space => this.confluencePropertyReportProject(entry, space, this.project(entry)?.id),
       captureInlineCommentAnchors: Boolean(documentId && this.confluenceInlineClaims.has(entry.key)),
     });
     if (documentId) this.rememberConfluenceInlineProjection(entry, result);
@@ -3748,6 +3785,7 @@ class Planner{
         legacyAnnotations: version === null,
         resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, owner.projectId),
         resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, owner.projectId),
+        resolvePropertyReportSpaceProject: space => this.confluencePropertyReportProject(entry, space, owner.projectId),
       });
       const createdAt = version !== null ? row.updatedAt || row.createdAt : row.createdAt;
       const invalidBody = version === null

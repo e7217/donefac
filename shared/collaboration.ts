@@ -1,10 +1,10 @@
 import type { DocPage } from './types';
 
 /** Persistent schema/version and transport contract shared by local clients and server. */
-export const COLLABORATION_SCHEMA = 16;
+export const COLLABORATION_SCHEMA = 17;
 export const COLLABORATION_CURSOR_PROTOCOL = 1;
 export const MAX_COLLABORATION_CURSOR_BYTES = 256;
-export type CollaborationSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | typeof COLLABORATION_SCHEMA;
+export type CollaborationSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | typeof COLLABORATION_SCHEMA;
 export function supportsCollaborationSchema(version: unknown): version is CollaborationSchemaVersion {
   return typeof version === 'number' && Number.isInteger(version) && version >= 1 && version <= COLLABORATION_SCHEMA;
 }

@@ -394,7 +394,7 @@ test('heading levels 4 through 6 require content schema 16 and backup format 110
     assert.equal(reapplied.status, 200);
     const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: reapplied.data.version });
     assert.equal(live.status, 200);
-    assert.equal(live.data.schemaVersion, 16);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(live.data.document.content, deep);
     const { data: liveBackup } = await f.call<Backup>('/export');
     const wrongSchema = structuredClone(liveBackup);
@@ -406,7 +406,7 @@ test('heading levels 4 through 6 require content schema 16 and backup format 110
     assert.equal((await f.call('/import', 'POST', { data: liveBackup })).status, 200);
     const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
     assert.notEqual(restored.epoch, live.data.epoch);
-    assert.equal(restored.schemaVersion, 16);
+    assert.equal(restored.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(restored.document.content, deep);
 
     const template = await f.call<DocumentTemplateSummary>('/document-templates', 'POST', {

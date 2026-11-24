@@ -179,6 +179,121 @@ test('360px에서 문서 속성과 보고서를 작성하고 최신 집계와 �
   }
 });
 
+test('360px에서 라벨이 붙은 여러 프로젝트 문서의 속성을 모아 원본으로 이동하고 고정 검토본에는 범위를 남긴다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  const { workspace, headers, suffix, create, close } = await fixture(request);
+  const [home, remote] = workspace.projects;
+  const reviewer = workspace.users[1];
+  const group = '프로젝트 합동 검토';
+  const labels = [`릴리스 ${suffix}`, `운영 ${suffix}`];
+  await page.setViewportSize({ width: 360, height: 820 });
+
+  try {
+    const homeNote = await create('공동 점검', home.id, body(properties(group, '현장 승인')), labels);
+    const remoteNote = await create('공동 점검', remote.id, body(properties(group, '기술 승인', true)), labels);
+    const common = await create('팀 공통 점검', null, body(properties(group, '운영 승인')), labels);
+    const partial = await create('라벨 하나만 일치', remote.id, body(properties(group, '집계하면 안 되는 값')), [labels[0]]);
+    const wrongGroup = await create('다른 속성 그룹', home.id, body(properties('별도 그룹', '집계하면 안 되는 그룹')), labels);
+    const host = await create('합동 검토 보고서', home.id, body(paragraph('다른 프로젝트의 승인 근거를 함께 확인합니다.')));
+
+    await page.goto(path(host));
+    await expect(title(page)).toHaveValue(host.title, { timeout: 30_000 });
+    const editor = page.locator('.docs-prose[contenteditable=true]');
+    await editor.getByText('다른 프로젝트의 승인 근거를 함께 확인합니다.', { exact: true }).click();
+    await page.getByRole('button', { name: '문서 속성 보고서 삽입', exact: true }).click();
+    const report = editor.getByRole('region', { name: '문서 속성 보고서', exact: true });
+    const settings = report.getByRole('button', { name: '문서 속성 보고서 설정', exact: true });
+    const form = report.getByRole('form', { name: '문서 속성 보고서 설정', exact: true });
+    const submit = form.getByRole('button', { name: '보고서 설정 적용', exact: true });
+    const space = form.getByRole('combobox', { name: '문서 공간', exact: true });
+    const selectedSpaces = form.getByRole('group', { name: '집계할 문서 공간', exact: true });
+    const choice = (name: string) => selectedSpaces.getByRole('checkbox', { name, exact: true });
+    await settings.click();
+    await expect(space).toHaveValue(home.id);
+    await expect(selectedSpaces).toHaveCount(0);
+    await space.selectOption({ label: '여러 문서 공간' });
+    await expect(choice(home.name)).toBeChecked();
+    await expect(choice('팀 공통 문서')).not.toBeChecked();
+    await expect(submit).toBeDisabled();
+    await choice(remote.name).check();
+    await expect(submit).toBeEnabled();
+    await form.getByLabel('보고서 제목', { exact: true }).fill('프로젝트 합동 승인 현황');
+    await form.getByLabel('속성 그룹', { exact: true }).fill(group);
+    await form.getByLabel('문서 라벨', { exact: true }).fill(labels.join('\n'));
+    await form.getByLabel('표시 열', { exact: true }).fill('상태');
+    const bounds = await selectedSpaces.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    await submit.click();
+
+    const grid = report.getByRole('table', { name: '프로젝트 합동 승인 현황', exact: true });
+    const link = (document: DocPage) => grid.getByRole('link', { name: `원본 문서 열기 ${document.title}`, exact: true });
+    const homeRow = grid.getByRole('row').filter({ has: page.getByRole('cell', { name: '현장 승인', exact: true }) });
+    const remoteRow = grid.getByRole('row').filter({ has: page.getByRole('cell', { name: '기술 승인', exact: true }) });
+    await expect(homeRow.getByRole('rowheader')).toContainText(home.name);
+    await expect(remoteRow.getByRole('rowheader')).toContainText(remote.name);
+    await expect(link(homeNote)).toHaveCount(2);
+    for (const outside of [common, partial, wrongGroup]) await expect(link(outside)).toHaveCount(0);
+    const saved = await save(page, host);
+    expect(saved.content.content?.find(node => node.type === 'documentPropertyReport')?.attrs).toMatchObject({
+      projectId: null, projectIds: [home.id, remote.id], group, labels: labels.toSorted(), columns: ['상태'],
+    });
+
+    await page.reload();
+    await expect(remoteRow).toBeVisible();
+    const remoteLink = remoteRow.getByRole('link', { name: `원본 문서 열기 ${remoteNote.title}`, exact: true });
+    await expect(remoteLink).toHaveAttribute('href', `#/${remote.id}/documents/${remoteNote.id}`);
+    await expect(remoteLink).toHaveAccessibleDescription(remote.name);
+    await remoteLink.click();
+    await expect(page).toHaveURL(url => url.hash === `#/${remote.id}/documents/${remoteNote.id}`);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === `#/${home.id}/documents/${host.id}`);
+    await expect(remoteRow).toBeVisible();
+
+    await settings.click();
+    await expect(space.locator('option:checked')).toHaveText('여러 문서 공간');
+    await expect(choice(home.name)).toBeChecked();
+    await expect(choice(remote.name)).toBeChecked();
+    await space.selectOption(remote.id);
+    await expect(selectedSpaces).toHaveCount(0);
+    await submit.click();
+    await expect(remoteRow).toBeVisible();
+    await expect(homeRow).toHaveCount(0);
+
+    await settings.click();
+    await space.selectOption({ label: '여러 문서 공간' });
+    await expect(choice(remote.name)).toBeChecked();
+    await choice(home.name).check();
+    await choice('팀 공통 문서').check();
+    await submit.click();
+    const commonRow = grid.getByRole('row').filter({ has: page.getByRole('link', { name: `원본 문서 열기 ${common.title}`, exact: true }) });
+    await expect(commonRow.getByRole('rowheader')).toContainText('팀 공통 문서');
+    const withCommon = await save(page, host);
+    expect(withCommon.content.content?.find(node => node.type === 'documentPropertyReport')?.attrs?.projectIds).toEqual([remote.id, home.id, null]);
+    const publication = `/api/documents/${host.id}/publication`;
+    const state = await read<DocumentPublicationView>(request, publication);
+    const requested = await request.post(publication, { headers, data: {
+      action: 'request', expectedVersion: state.version, workspaceGeneration: state.workspaceGeneration,
+      expectedDocumentVersion: withCommon.version, reviewerId: reviewer.id,
+    } });
+    expect(requested.status(), await requested.text()).toBe(200);
+    await page.getByLabel('작업자 선택', { exact: true }).selectOption(reviewer.id);
+    await page.getByRole('button', { name: '검토·발행', exact: true }).click();
+    const reviewing = page.getByRole('dialog', { name: '문서 검토·발행', exact: true });
+    await reviewing.getByRole('button', { name: '검토본 불러오기', exact: true }).click();
+    const frozen = reviewing.getByRole('region', { name: '검토 고정본 내용', exact: true });
+    await expect(frozen).toContainText('문서 공간 3곳');
+    await expect(frozen).toContainText(home.id);
+    await expect(frozen).toContainText(remote.id);
+    await expect(frozen).toContainText('팀 공통');
+    await expect(frozen.getByRole('table')).toHaveCount(0);
+    await expect(frozen).not.toContainText('기술 승인');
+  } finally {
+    await close();
+  }
+});
+
 test('공동 편집에서 속성 값과 추가한 항목을 동기화하고 다시 연다', async ({ page, browser, baseURL, request }) => {
   test.setTimeout(90_000);
   const { workspace, headers, create, close } = await fixture(request);

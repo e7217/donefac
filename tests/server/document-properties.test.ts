@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,9 +10,10 @@ import type { CollaborationExport } from '../../server/collaboration.js';
 import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
 import { renderDocumentExportMarkdown } from '../../shared/document-export-markdown.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, documentContentSchemaVersion } from '../../shared/document-nodes.js';
-import { collectDocumentPropertyReport, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties.js';
+import { collectDocumentPropertyReport, documentPropertyReportProjectIds, MAX_DOCUMENT_PROPERTY_REPORT_SPACES,
+  normalizeDocumentPropertyReportOptions } from '../../shared/document-properties.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, DocPage, DocRevision, DocumentPublicationView, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, DocPage, DocRevision, DocumentPublicationView, DocumentTemplate, Project, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
 
 const paragraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
 const body = (...content: RichContent[]): RichContent => ({ type: 'doc', content });
@@ -226,4 +228,131 @@ test('scoped document API keys fence property reports on writes, collections, hi
     assert.equal((await f.call(snapshot)).status, 200);
     assert.equal((await f.call(`/v1${snapshot}`, 'GET', undefined, token)).status, 403);
   }
+});
+
+test('selected-space reports use exactly the saved projects and each is required by scoped API keys', async t => {
+  const f = await fixture(t);
+  const projects = ['project-neo', 'project-team'];
+  const options = { projectId: null, projectIds: projects, labels: ['공통 검토'], sort: 'title', descending: false };
+  const optionsBody = body(report(options));
+  const invalidScopes = [
+    { projectIds: [] }, { projectIds: [projects[0]] }, { projectIds: [projects[0], projects[0]] },
+    { projectIds: [null, null] }, { projectIds: [projects[0], ''] }, { projectIds: [projects[0], 42] },
+    { projectIds: [projects[0], ' unknown'] }, { projectIds: [projects[0], 'unknown-project'] },
+    { projectIds: 'project-neo,project-team' }, { projectId: projects[0], projectIds: projects },
+    { projectIds: Array.from({ length: MAX_DOCUMENT_PROPERTY_REPORT_SPACES + 1 }, (_, index) => `scope-${index}`) },
+  ];
+  for (const scope of invalidScopes) {
+    const result = await f.call('/documents', 'POST', { title: '유효하지 않은 보고서 범위', projectId: projects[0],
+      content: body(report({ ...options, ...scope })) });
+    assert.equal(result.status, 422, JSON.stringify([scope, result.data]));
+  }
+  assert.equal(Object.hasOwn(normalizeDocumentPropertyReportOptions({ projectId: projects[0], projectIds: null })!, 'projectIds'), false);
+  assert.equal(normalizeDocumentPropertyReportOptions({ projectIds: Array.from({ length: MAX_DOCUMENT_PROPERTY_REPORT_SPACES },
+    (_, index) => `scope-${index}`) })?.projectIds?.length, MAX_DOCUMENT_PROPERTY_REPORT_SPACES);
+
+  const unselected = await f.call<Project>('/projects', 'POST', { key: 'OTHERPROPS', name: '선택하지 않은 문서 공간' });
+  assert.equal(unselected.status, 201);
+  const source = (title: string, projectId: string | null) => f.create(title,
+    body(properties({ entries: [{ name: '진행', value: title }] })), { projectId, labels: options.labels });
+  const first = await source('Alpha 운영 결정', projects[0]);
+  const second = await source('Beta 운영 결정', projects[1]);
+  const common = await source('Zulu 공통 운영 결정', null);
+  await source('Gamma 제외 문서', unselected.data.id);
+  const host = await f.create('여러 공간의 운영 결정 보고서', optionsBody);
+  assert.equal(documentContentSchemaVersion(host.content), 17);
+  const canonical = normalizeDocumentPropertyReportOptions(host.content.content?.[0]?.attrs);
+  assert.ok(canonical);
+  assert.deepEqual(documentPropertyReportProjectIds(canonical), projects);
+  const workspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const rows = collectDocumentPropertyReport(workspace.documents, canonical).rows;
+  assert.deepEqual(rows.map(row => row.document.id), [first.id, second.id]);
+  const commonScope = { projectId: null, projectIds: [projects[0], null] };
+  assert.deepEqual(collectDocumentPropertyReport(workspace.documents, { ...canonical, ...commonScope }).rows.map(row => row.document.id), [first.id, common.id]);
+  const exportText = renderDocumentExportMarkdown(host, { document: () => undefined, attachment: () => undefined }).markdown;
+  assert.match(exportText, /문서 공간 2곳.*project\\-neo.*project\\-team/u);
+
+  async function key(projectIds: string[]) {
+    const result = await f.call<ApiKeyCreated>('/api-keys', 'POST', { name: `공간 키 ${projectIds.length}`, access: 'write', projectIds });
+    assert.equal(result.status, 201, JSON.stringify(result.data));
+    return result.data.token;
+  }
+  const included = await key(projects);
+  const partial = await key([projects[0]]);
+  const writeBody = { title: 'API 여러 공간 보고서', projectId: projects[0], content: optionsBody };
+  const allowed = await f.call<DocPage>('/v1/documents', 'POST', writeBody, included);
+  assert.equal(allowed.status, 201, JSON.stringify(allowed.data));
+  assert.equal((await f.call('/v1/documents', 'POST', writeBody, partial)).status, 403);
+  assert.equal((await f.call('/v1/documents', 'POST', { ...writeBody, content: body(report({ ...options, ...commonScope })) }, included)).status, 403);
+  const path = `/v1/documents/${host.id}`;
+  assert.equal((await f.call(path, 'GET', undefined, included)).status, 200);
+  assert.equal((await f.call(path, 'GET', undefined, partial)).status, 403);
+  const listed = await f.call<DocPage[]>('/v1/documents', 'GET', undefined, partial);
+  assert.equal(listed.status, 200);
+  assert.ok(listed.data.some(document => document.id === first.id));
+  assert.ok(listed.data.every(document => document.id !== host.id));
+  assert.equal((await f.call(`/v1/documents/${first.id}`, 'PATCH', {
+    expectedVersion: first.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content: optionsBody,
+  }, partial)).status, 403);
+});
+
+test('selected-space reports require matching editor and native backup formats across history, trash and templates', async t => {
+  const f = await fixture(t);
+  const scope = ['project-neo', 'project-team'];
+  const host = await f.create('여러 공간을 보는 회의 기록', body(report({ projectIds: scope, labels: ['회의'] })));
+  const path = `/documents/${host.id}`;
+  const stale = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+    expectedVersion: host.version, contentSchemaVersion: 16, content: body(paragraph('이전 문서 편집기의 저장')),
+  });
+  assert.equal(stale.status, 409, JSON.stringify(stale.data));
+  assert.equal(stale.data.details.contentSchemaVersion, 17);
+  const collaboration = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: host.version });
+  assert.equal(collaboration.status, 200, JSON.stringify(collaboration.data));
+  assert.equal(collaboration.data.schemaVersion, COLLABORATION_SCHEMA);
+  assert.deepEqual(collaboration.data.document.content, host.content);
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; collabStates: CollaborationExport[]; documentTemplates: DocumentTemplate[] };
+  const backup = async () => {
+    const result = await f.call<Backup>('/export');
+    assert.equal(result.status, 200);
+    return result.data;
+  };
+  const restore = (data: Backup) => f.call<{ error: string }>('/import', 'POST', { data });
+  const expectOlderFormatRefused = async (data: Backup) => {
+    const result = await restore({ ...data, schemaVersion: 118 });
+    assert.equal(result.status, 400, JSON.stringify(result.data));
+    assert.match(result.data.error, /schemaVersion 119/u);
+    return result.data.error;
+  };
+  const active = await backup();
+  assert.equal(active.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  await expectOlderFormatRefused(active);
+  assert.equal((await restore({ ...active, collabStates: active.collabStates.map(state =>
+    state.documentId === host.id ? { ...state, schemaVersion: 16 } : state) })).status, 422);
+  assert.equal((await restore(active)).status, 200);
+  const current = (await f.call<CollaborationSession>(`${path}/collaboration`)).data.document;
+  assert.deepEqual(current.content, host.content);
+
+  const template = await f.call<DocumentTemplate>('/document-templates', 'POST', {
+    requestId: randomUUID(), sourceDocumentId: host.id, expectedDocumentVersion: current.version, name: '여러 공간 검토 템플릿',
+  });
+  assert.equal(template.status, 201, JSON.stringify(template.data));
+  assert.match(await expectOlderFormatRefused(await backup()), /템플릿/u);
+  const plain = await f.call<DocPage>(path, 'PATCH', { expectedVersion: current.version, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION,
+    content: body(paragraph('현재 문서에서 보고서를 제거했습니다.')) });
+  assert.equal(plain.status, 200, JSON.stringify(plain.data));
+  const history = await backup();
+  assert.ok(history.revisions.some(revision => revision.documentId === host.id && documentContentSchemaVersion(revision.content) === 17));
+  await expectOlderFormatRefused({ ...history, documentTemplates: [] });
+
+  const trash = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: plain.data.version });
+  assert.equal(trash.status, 200);
+  const archived = await backup();
+  assert.ok(archived.documents.every(document => document.id !== host.id));
+  assert.ok(archived.revisions.every(revision => revision.documentId !== host.id));
+  await expectOlderFormatRefused({ ...archived, documentTemplates: [] });
+  assert.equal((await restore(archived)).status, 200);
+  assert.equal((await f.call(`/trash/${trash.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+  const restored = (await f.call<DocRevision[]>(`${path}/revisions`)).data.find(revision => documentContentSchemaVersion(revision.content) === 17);
+  assert.deepEqual(restored?.content.content?.[0]?.attrs?.projectIds, scope);
 });

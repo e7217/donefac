@@ -13,7 +13,7 @@ export { documentPlainText, ISSUE_SUMMARY_GROUP_BY, ISSUE_SUMMARY_GROUP_LABELS, 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 16;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 17;
 export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_DOCUMENT_COLUMNS = 3;
 export const MAX_DOCUMENT_TABLE_SPAN = 100;
@@ -65,10 +65,11 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 const isDeepHeadingLevel = (level: unknown) => isDocumentHeadingLevel(level) && level > 3;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentPropertyReport' && Array.isArray(attrs?.projectIds)) return 17;
   if ((nodeType === 'heading' && isDeepHeadingLevel(attrs?.level)) || (nodeType === 'documentToc' &&
       (isDeepHeadingLevel(attrs?.minLevel) || isDeepHeadingLevel(attrs?.maxLevel)))) return 16;
   if (nodeType === 'taskItem' && attrs?.checklistItemId !== undefined) return 15;
