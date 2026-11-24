@@ -411,7 +411,7 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
     refreshingLinkId: string | null;
     onCheckActivityStatus: (link: GitlabLink, trigger: HTMLButtonElement, fallback: HTMLElement | null) => void;
   }) {
-  const { scope, query, pages } = activityFilters;
+  const { scope, query, memberId, pages } = activityFilters;
   const heading = useRef<HTMLHeadingElement>(null);
   const [search, setSearch] = useState({ source: query, value: query, invalid: false });
   if (search.source !== query) setSearch({ source: query, value: query, invalid: false });
@@ -419,9 +419,9 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
   const issueKeys = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.key])), [projectIssues]);
   const issueVersions = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.version])), [projectIssues]);
   const links = useMemo(() => data.gitlabLinks.filter(link => issueKeys.has(link.issueId)), [data.gitlabLinks, issueKeys]);
-  const matching = useMemo(() => filterGitlabActivityLinks({ issues: projectIssues, issueAliases: data.issueAliases }, links, { scope, query, pages: {} }),
-    [data.issueAliases, projectIssues, links, scope, query]);
-  const hasFilters = scope !== 'all' || Boolean(query || search.value || Object.keys(pages).length);
+  const matching = useMemo(() => filterGitlabActivityLinks({ issues: projectIssues, issueAliases: data.issueAliases }, links,
+    { scope, query, memberId, pages: {} }), [data.issueAliases, projectIssues, links, scope, query, memberId]);
+  const hasFilters = scope !== 'all' || Boolean(query || memberId || search.value || Object.keys(pages).length);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -431,13 +431,13 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
       return;
     }
     setSearch({ source: query, value: nextQuery, invalid: false });
-    onChangeActivityFilters({ scope, query: nextQuery, pages: {} }, 'replace');
+    onChangeActivityFilters({ ...activityFilters, query: nextQuery, pages: {} }, 'replace');
   }
   function changePage(kind: GitlabLink['kind'], page: number) {
     const next = { ...pages };
     if (page === 1) delete next[kind];
     else next[kind] = page;
-    onChangeActivityFilters({ scope, query, pages: next }, 'push');
+    onChangeActivityFilters({ ...activityFilters, pages: next }, 'push');
   }
   function clearFilters() {
     setSearch({ source: query, value: '', invalid: false });
@@ -453,9 +453,16 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
       <label className="form-label development-activity-scope">개발 활동 범위
         <select className="field" value={scope} onChange={event => {
           const nextScope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
-          if (nextScope) onChangeActivityFilters({ scope: nextScope, query, pages: {} }, 'push');
+          if (nextScope) onChangeActivityFilters({ ...activityFilters, scope: nextScope, pages: {} }, 'push');
         }}>
           {GITLAB_ACTIVITY_SCOPES.map(value => <option key={value} value={value}>{scopeLabels[value]}</option>)}
+        </select>
+      </label>
+      <label className="form-label development-activity-member">팀원
+        <select className="field" aria-label="GitLab 활동 팀원" value={memberId ?? ''} onChange={event =>
+          onChangeActivityFilters({ ...activityFilters, memberId: event.currentTarget.value || undefined, pages: {} }, 'push')}>
+          <option value="">전체 팀원</option>
+          {data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}
         </select>
       </label>
       <form className="development-activity-search" onSubmit={submitSearch}>

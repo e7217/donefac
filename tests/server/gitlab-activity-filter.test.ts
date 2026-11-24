@@ -47,6 +47,26 @@ test('GitLab activity routes persist only canonical object URLs and valid indepe
   assert.deepEqual(Object.fromEntries(params), { lane: 'development' });
 });
 
+test('GitLab activity member selection round-trips alongside the existing route filters', () => {
+  const params = new URLSearchParams({ view: 'development' });
+  const withoutMember: GitlabActivityFilters = { scope: 'open_merge_requests', query: '!21', pages: { merge_request: 2 } };
+  const filters = { ...withoutMember, memberId: 'user-test' };
+  appendGitlabActivityFilters(params, filters);
+  assert.deepEqual(Object.fromEntries(params), { view: 'development', activityScope: 'open_merge_requests', activityQ: '!21',
+    activityMember: 'user-test', activityMrPage: '2' });
+  assert.deepEqual(readGitlabActivityFilters(params), filters);
+
+  for (const memberId of ['', '  ', 'member\nother', 'x'.repeat(201)]) {
+    params.set('activityMember', memberId);
+    assert.deepEqual(readGitlabActivityFilters(params), withoutMember);
+    appendGitlabActivityFilters(params, { ...withoutMember, memberId });
+    assert.equal(params.has('activityMember'), false);
+  }
+  params.set('activityMember', filters.memberId);
+  appendGitlabActivityFilters(params, withoutMember);
+  assert.deepEqual(readGitlabActivityFilters(params), withoutMember);
+});
+
 test('GitLab activity search uses ticket aliases, safe object addresses and displayed numbers within the caller links', () => {
   const first = link('first', { title: 'MR 검토', sourceBranch: 'feature/TS-21' });
   const second = link('second', { iid: 213, webUrl: `${repository}/-/merge_requests/213` });
@@ -84,4 +104,27 @@ test('failed and manual GitLab triage selects current pipeline representatives b
   assert.deepEqual(find('pipeline', 'older failure'), [oldFailure]);
   assert.deepEqual(find('manual_pipelines'), [latestGate]);
   assert.deepEqual(find('manual_pipelines', 'older gate'), []);
+});
+
+test('GitLab activity member filtering includes assigned and collaborating tickets with the same scope and search rules', () => {
+  const memberId = 'user-test';
+  const assigned = { ...issue, assigneeId: memberId };
+  const collaborating = { ...issue, id: 'collaborating', status: 'done', collaboratorIds: [memberId], reporterId: memberId };
+  const reported = { ...issue, id: 'reported', reporterId: memberId };
+  const other = { ...issue, id: 'other', assigneeId: 'other-user' };
+  const workspace = { ...data, issues: [assigned, collaborating, reported, other] };
+  const assignedMr = link('assigned', { issueId: assigned.id });
+  const collaboratingMr = link('collaborating', { issueId: collaborating.id });
+  const latestFailure = pipeline(800, 'failed', { issueId: collaborating.id });
+  const links = [assignedMr, collaboratingMr, link('reported', { issueId: reported.id }), link('other', { issueId: other.id }),
+    link('orphan', { issueId: 'missing' }), pipeline(799, 'failed', { issueId: assigned.id }), pipeline(801, 'success', { issueId: assigned.id }),
+    latestFailure, pipeline(802, 'failed', { issueId: reported.id })];
+  const find = (scope: GitlabActivityFilters['scope'], query: string) =>
+    filterGitlabActivityLinks(workspace, links, { scope, query, memberId, pages: {} });
+
+  assert.deepEqual(find('open_merge_requests', '!21'), [assignedMr, collaboratingMr]);
+  assert.deepEqual(find('open_merge_requests', assignedMr.webUrl), [assignedMr, collaboratingMr]);
+  assert.deepEqual(find('open_merge_requests', 'JIRA-21'), [assignedMr]);
+  assert.deepEqual(find('failed_pipelines', ''), [latestFailure]);
+  assert.deepEqual(filterGitlabActivityLinks(workspace, links, DEFAULT_GITLAB_ACTIVITY_FILTERS), links);
 });

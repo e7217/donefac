@@ -16,7 +16,8 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue'> & {
   filters: TeamOverviewFilters;
   onFiltersChange: (filters: TeamOverviewFilters) => void;
   openPublication: (id: string, kind: DocumentPublicationTarget['kind'], revisionId: string) => void | Promise<void>;
-  openProject: (projectId: string, destination: 'overview' | 'gantt' | 'development') => void;
+  openProject: (projectId: string, destination: 'overview' | 'gantt') => void;
+  openGitlabActivity: (projectId: string, memberId: string) => void;
   onOpenIssueSchedule: (issueId: string, endpoint: ScheduleDependencyEndpoint) => boolean;
 };
 type SectionKey = 'deadlines' | 'reviews' | 'gitlab' | 'reservations';
@@ -102,7 +103,7 @@ export function TeamOverview(props: Props) {
   </div>;
 }
 
-function OverviewContent({ data, filters, openIssue, openPublication, openProject, onFiltersChange, onOpenIssueSchedule, refreshVersion, onDefaultDate }: Props & {
+function OverviewContent({ data, filters, openIssue, openPublication, openProject, openGitlabActivity, onFiltersChange, onOpenIssueSchedule, refreshVersion, onDefaultDate }: Props & {
   refreshVersion: number;
   onDefaultDate: (date: string) => void;
 }) {
@@ -297,7 +298,7 @@ function OverviewContent({ data, filters, openIssue, openPublication, openProjec
             </div>
             <div className="team-overview-project-actions">
               <button className="btn" type="button" onClick={() => openProject(project.projectId, 'gantt')}><SquareChartGantt size={15} aria-hidden="true" />간트 열기</button>
-              <button className="btn" type="button" onClick={() => openProject(project.projectId, 'development')}><GitBranch size={15} aria-hidden="true" />GitLab 활동 열기</button>
+              <button className="btn" type="button" onClick={() => openGitlabActivity(project.projectId, filters.memberId)}><GitBranch size={15} aria-hidden="true" />GitLab 활동 열기</button>
             </div>
           </article>)}
         </div> : <p className="team-overview-empty">표시할 프로젝트가 없습니다.</p>}

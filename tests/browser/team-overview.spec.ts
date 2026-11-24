@@ -89,7 +89,7 @@ test('360px 팀 개요의 프로젝트·팀원 조건을 적용하고 원래 업
       projectId: anotherProject.id, assigneeId: member.id, endDate: date,
     });
     const wrongMember = await createIssue('다른 팀원이 담당하는 업무', {
-      projectId: project.id, assigneeId: anotherMember.id, dueDate: date,
+      projectId: project.id, assigneeId: anotherMember.id, reporterId: member.id, dueDate: date,
     });
     const finished = await createIssue('기한이 지난 완료 업무', { projectId: project.id, assigneeId: member.id, status: 'done', dueDate: dateBefore });
     const review = await requestReview('조건에 맞는 대기 문서', project.id, member.id);
@@ -214,7 +214,15 @@ test('360px 팀 개요의 프로젝트·팀원 조건을 적용하고 원래 업
     await page.goBack();
     await expect(page).toHaveURL(url => url.hash === savedHash);
     await shortcuts.getByRole('button', { name: 'GitLab 활동 열기', exact: true }).click();
-    await expect(page).toHaveURL(url => url.hash.startsWith(`#/${project.id}/development`));
+    await expect(page).toHaveURL(url => {
+      const [path, query] = url.hash.split('?');
+      return path === `#/${project.id}/development` && new URLSearchParams(query).toString() === new URLSearchParams({ activityMember: member.id }).toString();
+    });
+    const development = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
+    await expect(development.getByRole('combobox', { name: 'GitLab 활동 팀원', exact: true })).toHaveValue(member.id);
+    await expect(development.getByRole('combobox', { name: '개발 활동 범위', exact: true })).toHaveValue('all');
+    await atLeast(development, [merge.title, olderMerge.title]);
+    await absent(development, [mergeWrongProject.title, mergeWrongMember.title]);
     await page.goBack();
     await expect(page).toHaveURL(url => url.hash === savedHash);
     await page.reload();
@@ -224,6 +232,19 @@ test('360px 팀 개요의 프로젝트·팀원 조건을 적용하고 원래 업
     await atLeast(deadline, [matching.title]);
     await atLeast(reviews, [review.title]);
     await absent(gitlabActivity, [mergeWrongMember.title]);
+
+    const unknownMember = new URLSearchParams({
+      activityMember: `missing-${key}`, activityScope: 'merge_request', activityQ: key, activityMrPage: '2',
+    });
+    await page.goto(`/#/${project.id}/development?${unknownMember}`);
+    await expect(page).toHaveURL(url => {
+      const [path, query] = url.hash.split('?');
+      const params = new URLSearchParams(query);
+      return path === `#/${project.id}/development` && params.size === 2 &&
+        params.get('activityScope') === 'merge_request' && params.get('activityQ') === key;
+    });
+    await expect(development.getByRole('combobox', { name: 'GitLab 활동 팀원', exact: true })).toHaveValue('');
+    await atLeast(development, [merge.title, mergeWrongMember.title]);
   } finally {
     try {
       for (const [collection, resources] of [['documents', docs], ['issues', issues]] as const) {

@@ -2,6 +2,8 @@ import { gitlabObjectSha, isGitlabBranchName } from './gitlab-links.js';
 import { isGitlabMergeReadinessBlocked } from './gitlab-merge-readiness.js';
 import { GITLAB_SEARCH_INPUT_LIMIT, normalizeGitlabSearchInput } from './gitlab-search.js';
 import { latestGitlabPipelineLinks } from './issue-gitlab-view.js';
+import { isRelationId } from './issue-relations.js';
+import { myWorkMembership } from './my-work.js';
 import type { GitlabLink, WorkspaceSnapshot } from './types.js';
 import { issueSearchAliases, normalizeWorkspaceSearchKey, normalizeWorkspaceSearchQuery } from './workspace-search.js';
 
@@ -15,6 +17,7 @@ export interface GitlabActivityFilters {
   scope: GitlabActivityScope;
   query: string;
   pages: Partial<Record<GitlabLink['kind'], number>>;
+  memberId?: string;
 }
 
 export const DEFAULT_GITLAB_ACTIVITY_FILTERS: GitlabActivityFilters = { scope: 'all', query: '', pages: {} };
@@ -44,6 +47,7 @@ export function readGitlabActivityFilters(params: URLSearchParams): GitlabActivi
   const rawScope = params.get('activityScope');
   const scope = GITLAB_ACTIVITY_SCOPES.find(value => value === rawScope) ?? 'all';
   const query = normalizeGitlabActivityQuery(params.get('activityQ') ?? '');
+  const memberId = params.get('activityMember');
   const pages: GitlabActivityFilters['pages'] = {};
   for (const [kind, key] of activityPages) {
     const raw = params.get(key);
@@ -51,7 +55,7 @@ export function readGitlabActivityFilters(params: URLSearchParams): GitlabActivi
     const page = Number(raw);
     if (isActivityPage(page)) pages[kind] = page;
   }
-  return { scope, query, pages };
+  return { scope, query, pages, ...(isRelationId(memberId) ? { memberId } : {}) };
 }
 
 export function appendGitlabActivityFilters(params: URLSearchParams, filters: GitlabActivityFilters): void {
@@ -61,6 +65,9 @@ export function appendGitlabActivityFilters(params: URLSearchParams, filters: Gi
   const query = normalizeGitlabActivityQuery(filters.query);
   if (query) params.set('activityQ', query);
   else params.delete('activityQ');
+
+  if (isRelationId(filters.memberId)) params.set('activityMember', filters.memberId);
+  else params.delete('activityMember');
 
   for (const [kind, key] of activityPages) {
     const page = filters.pages[kind];
@@ -99,9 +106,15 @@ type ActivitySearchData = Pick<WorkspaceSnapshot, 'issues' | 'issueAliases'>;
 export function filterGitlabActivityLinks(
   data: ActivitySearchData, links: readonly GitlabLink[], filters: GitlabActivityFilters,
 ): GitlabLink[] {
+  const { memberId } = filters;
+  const memberIssues = memberId ? new Set(data.issues.filter(issue => {
+    const participation = myWorkMembership(issue, memberId);
+    return participation === 'assigned' || participation === 'collaborating';
+  }).map(issue => issue.id)) : null;
+  const memberLinks = memberIssues ? links.filter(link => memberIssues.has(link.issueId)) : links;
   const latest = filters.scope === 'failed_pipelines' || filters.scope === 'manual_pipelines'
-    ? new Set(latestGitlabPipelineLinks(links)) : null;
-  const scoped = links.filter(link => matchesScope(link, filters.scope, latest));
+    ? new Set(latestGitlabPipelineLinks(memberLinks)) : null;
+  const scoped = memberLinks.filter(link => matchesScope(link, filters.scope, latest));
   const query = normalizeGitlabActivityQuery(filters.query);
   if (!query) return scoped;
   if (httpUrlStart.test(query)) return scoped.filter(link => canonicalLinkAddress(link)?.canonical === query);

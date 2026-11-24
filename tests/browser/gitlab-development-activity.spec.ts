@@ -59,9 +59,9 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
   const snapshot = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
   const settings = () => request.get(settingsPath).then(response => json<GitlabSettings>(response));
   const issueIds = new Set<string>();
-  async function createIssue(project: Project, label: string) {
+  async function createIssue(project: Project, label: string, membership: Partial<Pick<Issue, 'assigneeId' | 'collaboratorIds' | 'reporterId'>> = {}) {
     const issue = await json<Issue>(await request.post('/api/issues', { data: {
-      projectId: project.id, title: `개발 활동 ${label} ${suffix}`,
+      projectId: project.id, title: `개발 활동 ${label} ${suffix}`, ...membership,
     } }), 201);
     issueIds.add(issue.id);
     return issue;
@@ -80,18 +80,18 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
   });
 
   try {
-    const { projects: [project, previousProject] } = await snapshot();
+    const { projects: [project, previousProject], users: [member, anotherMember] } = await snapshot();
     const originalSettings = await settings();
     expect(originalSettings.baseUrl).toBe('');
     const configured = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
       expectedVersion: originalSettings.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
     } }));
-    const first = await createIssue(project, '여러 브랜치 확인');
+    const first = await createIssue(project, '여러 브랜치 확인', { assigneeId: member.id });
     const firstLinksPath = `/api/issues/${encodeURIComponent(first.id)}/gitlab-links`;
     oldestPipelineRef = ref(first, 'first-3');
-    const former = await createIssue(previousProject, '이동한 업무');
-    const last = await createIssue(project, '다음 업무');
-    const recovered = await createIssue(project, '복구된 업무');
+    const former = await createIssue(previousProject, '이동한 업무', { assigneeId: anotherMember.id, collaboratorIds: [member.id] });
+    const last = await createIssue(project, '다음 업무', { assigneeId: member.id });
+    const recovered = await createIssue(project, '복구된 업무', { assigneeId: anotherMember.id, reporterId: member.id });
     const movePath = `/api/issues/${former.id}/project-move`;
     const move: IssueProjectMoveInput = { expectedVersion: former.version, projectId: project.id, includeConnected: false, mappings: [] };
     const preview = await json<IssueProjectMovePreview>(await request.post(`${movePath}/preview`, { data: move }));
@@ -105,6 +105,7 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await pipeline(1092, ref(recovered, 'replaced'), 'success', 30);
     await pipeline(1091, ref(recovered, 'replaced'), 'failed', 31);
     await pipeline(1093, ref(first, 'manual'), 'manual', 32);
+    await pipeline(1094, ref(recovered, 'reported-only'), 'failed', 32);
     await send('merge_request', {
       id: 1101, iid: 71, title: `${first.key} 합성 검토`, state: 'opened', action: 'open',
       target_project_id: repositoryId, source_branch: ref(first, 'mr'), detailed_merge_status: 'not_approved',
@@ -118,7 +119,7 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     const before = await snapshot();
     expect(before.issueAliases?.[moved.id]).toContainEqual({ key: former.key, source: 'move' });
     expect(before.gitlabLinks.filter(link => link.issueId === recovered.id).map(link => [link.iid, link.state]).sort())
-      .toEqual([[1091, 'failed'], [1092, 'success']]);
+      .toEqual([[1091, 'failed'], [1092, 'success'], [1094, 'failed']]);
     const blockedMr = before.gitlabLinks.find(link => link.kind === 'merge_request' && link.issueId === first.id && link.iid === 71)!;
     expect(blockedMr.mergeReadiness?.state).toBe('approval_required');
     const oldestPipeline = before.gitlabLinks.find(link => link.kind === 'pipeline' && link.issueId === first.id && link.iid === oldestPipelineId)!;
@@ -139,6 +140,7 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await page.goto(`/#/${project.id}/development`);
     const feed = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
     const scope = feed.getByRole('combobox', { name: '개발 활동 범위', exact: true });
+    const activityMember = feed.getByRole('combobox', { name: 'GitLab 활동 팀원', exact: true });
     const query = feed.getByRole('searchbox', { name: '개발 활동 검색', exact: true });
     const pipelineGroup = feed.getByRole('region', { name: '파이프라인', exact: true });
     const rows = pipelineGroup.locator('.gitlab-activity-row');
@@ -161,6 +163,9 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await expect(draft).toBeEnabled();
     await expect(scope).toHaveValue('all');
     await expect(row(1091)).toBeVisible();
+    await expect(row(1094)).toBeVisible();
+    await activityMember.selectOption(member.id);
+    await expect(row(1094)).toHaveCount(0);
     await draft.fill('저장하지 않은 연결 초안');
     await search(repoName);
     await scope.selectOption('manual_pipelines');
@@ -200,11 +205,30 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     const params = new URLSearchParams(feedHash.split('?')[1]);
     expect(params.get('activityScope')).toBe('failed_pipelines');
     expect(params.get('activityQ')).toBe(refMarker);
+    expect(params.get('activityMember')).toBe(member.id);
     expect(params.get('activityPipelinePage')).toBe('2');
+    await activityMember.selectOption(anotherMember.id);
+    await expect(activityMember).toHaveValue(anotherMember.id);
+    await expect(scope).toHaveValue('failed_pipelines');
+    await expect(query).toHaveValue(refMarker);
+    await expect(rows).toHaveCount(2);
+    await expect(row(1094)).toBeVisible();
+    await expect(row(1002)).toBeVisible();
+    await expect(row(1001)).toHaveCount(0);
+    await expect(page).toHaveURL(url => {
+      const selected = new URLSearchParams(url.hash.split('?')[1]);
+      return selected.get('activityMember') === anotherMember.id && !selected.has('activityPipelinePage');
+    });
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === feedHash);
+    await expect(activityMember).toHaveValue(member.id);
+    await expect(rows).toHaveCount(3);
+    await expect(draft).toHaveValue('저장하지 않은 연결 초안');
     await draft.fill('');
     await page.reload();
     await expect(page).toHaveURL(url => url.hash === feedHash);
     await expect(scope).toHaveValue('failed_pipelines');
+    await expect(activityMember).toHaveValue(member.id);
     await expect(query).toHaveValue(refMarker);
     await expect(row(1002)).toBeVisible();
     await expect(rows).toHaveCount(3);
@@ -229,6 +253,7 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await expect(opener).toBeFocused();
     await expect(query).toHaveValue(refMarker);
     await expect(scope).toHaveValue('failed_pipelines');
+    await expect(activityMember).toHaveValue(member.id);
     await expect(rows).toHaveCount(3);
     await expect(draft).toHaveValue('티켓 검토 중 보존할 연결 초안');
 
@@ -275,7 +300,18 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await expect(oldestOpener).toBeFocused();
     await expect(query).toHaveValue(refMarker);
     await expect(scope).toHaveValue('failed_pipelines');
+    await expect(activityMember).toHaveValue(member.id);
     await expect(draft).toHaveValue('티켓 검토 중 보존할 연결 초안');
+
+    const exactRefreshPath = `${firstLinksPath}/${encodeURIComponent(oldestPipeline.id)}/refresh`;
+    const refreshing = page.waitForResponse(response => new URL(response.url()).pathname === exactRefreshPath);
+    await button(feedRow(oldestPipeline), '이 GitLab 활동 상태 확인').click();
+    const refreshed = await refreshing;
+    expect(refreshed.request().method()).toBe('POST');
+    expect(await json<GitlabIssueRefreshResult>(refreshed)).toEqual(result);
+    await expect(page).toHaveURL(url => url.hash === feedHash);
+    await expect(activityMember).toHaveValue(member.id);
+    await expect(row(1002)).toBeVisible();
 
     await scope.selectOption('all');
     await search(`!${linkedMrIid}`);
@@ -320,8 +356,8 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
       .map(link => link.id === oldestPipeline.id ? result.links[0] : link));
     expect(await settings()).toEqual(configured);
     expect(prompts).toEqual([expect.stringMatching(/저장하지 않은/u), expect.stringMatching(/저장하지 않은/u)]);
-    expect(activityRequests).toEqual([`POST ${exactReviewPath}`]);
-    expect(remoteCalls).toEqual([projectRead, pipelineRead].map(path => ({ method: 'GET', path, credential: token })));
+    expect(activityRequests).toEqual([`POST ${exactReviewPath}`, `POST ${exactRefreshPath}`]);
+    expect(remoteCalls).toEqual([projectRead, pipelineRead, projectRead, pipelineRead].map(path => ({ method: 'GET', path, credential: token })));
   } finally {
     try {
       for (const id of issueIds) {

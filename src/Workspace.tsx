@@ -420,11 +420,16 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
+  const activityFilters = view === 'development' ? readGitlabActivityFilters(parameters) : undefined;
+  if (activityFilters?.memberId && !snapshot.users.some(user => user.id === activityFilters.memberId)) {
+    delete activityFilters.memberId;
+    activityFilters.pages = {};
+  }
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
     documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
-    gitlabActivityFilters: view === 'development' ? readGitlabActivityFilters(parameters) : undefined };
+    gitlabActivityFilters: activityFilters };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -1208,7 +1213,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
             onFiltersChange={filters => requestRoute({projectId,view,documentId:null,issueId,teamOverviewFilters:filters})}
-            openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}/>
+            openProject={(id, destination) => navigate(destination,id)} onOpenIssueSchedule={openIssueSchedule}
+            openGitlabActivity={(id, memberId) => requestRoute({ projectId: id, view: 'development', documentId: null, issueId: null,
+              gitlabActivityFilters: { ...DEFAULT_GITLAB_ACTIVITY_FILTERS, memberId: memberId || undefined } })}/>
         </Suspense>}
         {teamBoard && project && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>전체 프로젝트 보드를 불러오는 중입니다.</p></div>}>
           <TeamBoard {...props} filters={teamBoardFilters} onFiltersChange={changeTeamBoardFilters} onOpenGantt={openTeamGanttFromBoard} onOpenBoardIssue={openIssue}
