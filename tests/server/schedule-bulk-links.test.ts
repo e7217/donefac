@@ -215,6 +215,119 @@ test('mixed ordered chain rejects unmatched, invalid, stale or cyclic date and r
   assert.deepEqual(await f.workspace(), topology);
 });
 
+test('bulk chain follow-up keeps actual input dates fixed and guards unchanged downstream links before one reversible write', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('날짜를 직접 바꾼 선행');
+  const second = await f.issue('마감일만 직접 바꾼 후행');
+  const third = await f.issue('기존 연결의 후행');
+  const hidden = await f.issue('선택 범위 밖의 후행');
+  const stable = await f.issue('일정이 충분히 늦은 후행', f.project.id, { startDate: '2026-12-10', endDate: '2026-12-11' });
+  const incoming = await f.issue('새로 연결할 외부 선행');
+  const retained = await f.link(second, third);
+  const hiddenLink = await f.link(third, hidden);
+  await f.link(hidden, stable);
+  const body: ScheduleBulkChainInput = { ...chain(f.project.id, [first, second, third]), type: 'FS', lagDays: 0, dates: [
+    { issue: reference(first), changes: { endDate: '2026-11-24' } },
+    { issue: reference(second), changes: { startDate: second.startDate, dueDate: '2026-11-25' } },
+  ] };
+  for (const rescheduleSuccessors of ['true', null]) {
+    await f.call(previewPath, 400, 'POST', { ...body, rescheduleSuccessors });
+  }
+  const before = await f.workspace();
+  const ordinary = await f.review(body);
+  const disabled = await f.review({ ...body, rescheduleSuccessors: false });
+  assert.ok(ordinary.previewId);
+  assert.equal(disabled.followUpIssueIds, undefined);
+  assert.deepEqual(disabled.changes, ordinary.changes);
+  assert.deepEqual(disabled.warnings, ordinary.warnings);
+
+  const optIn = { ...body, rescheduleSuccessors: true };
+  const preview = await f.review(optIn);
+  const expected = new Map([
+    [first.id, [first.startDate, '2026-11-24', first.dueDate]],
+    [second.id, ['2026-11-25', '2026-11-26', '2026-11-25']],
+    [third.id, ['2026-11-27', '2026-11-30', third.dueDate]],
+    [hidden.id, ['2026-12-01', '2026-12-02', hidden.dueDate]],
+  ]);
+  const original = new Map(before.issues.map(issue => [issue.id, issue]));
+  const dateRows = ({ changes }: SchedulePastePreview) => new Map(changes.map(({ id, toStart, toEnd, toDue }) =>
+    [id, [toStart, toEnd, toDue === undefined ? original.get(id)?.dueDate : toDue]]));
+  assert.ok(preview.previewId, JSON.stringify(preview.errors));
+  assert.deepEqual(dateRows(preview), expected);
+  assert.deepEqual(new Set(preview.followUpIssueIds), new Set([second.id, third.id, hidden.id]));
+  assert.equal(preview.dependencyChanges?.length, 1);
+  assert.deepEqual(preview.retainedDependencies?.map(item => item.after), [{ type: 'FS', lagDays: 0 }]);
+  assert.ok(preview.warnings.some(warning => warning.includes(second.key) && warning.includes('목표 마감일')));
+  assert.ok(!preview.warnings.some(warning => warning.includes(`${first.key} → ${second.key}`)));
+  assert.deepEqual(await f.workspace(), before);
+
+  await f.link(incoming, stable, 'SS');
+  const concurrent = await f.workspace();
+  await f.apply(preview.previewId, 409);
+  assert.deepEqual(await f.workspace(), concurrent);
+  const fresh = await f.review(optIn);
+  assert.ok(fresh.previewId, JSON.stringify(fresh.errors));
+  assert.deepEqual(dateRows(fresh), expected);
+
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER fail_follow_up_chain_link BEFORE INSERT ON dependencies
+      WHEN NEW.predecessor_id='${first.id}' AND NEW.successor_id='${second.id}'
+      BEGIN SELECT RAISE(ABORT,'synthetic cascade link failure'); END`);
+    await f.apply(fresh.previewId, 500);
+    assert.deepEqual(await f.workspace(), concurrent);
+    assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+    database.exec('DROP TRIGGER fail_follow_up_chain_link');
+
+    const dateValues = ({ id, startDate, endDate, dueDate }: Issue) => [id, [startDate, endDate, dueDate]] as const;
+    const applied = await f.apply(fresh.previewId);
+    assert.equal(applied.dependencyChanges, 1);
+    assert.deepEqual(new Map(applied.updated.map(dateValues)), expected);
+    assert.deepEqual(applied.warnings, fresh.warnings);
+    assert.deepEqual(await f.apply(fresh.previewId), applied);
+    const changed = await f.workspace();
+    assert.deepEqual(findLink(changed, second, third), retained);
+    assert.deepEqual(findLink(changed, third, hidden), hiddenLink);
+    assert.deepEqual(changed.issues.find(issue => issue.id === stable.id), stable);
+
+    const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: applied.undoId });
+    assert.equal(undo.dependencyChanges, 1);
+    assert.deepEqual(new Map(undo.updated.map(dateValues)), new Map([first, second, third, hidden].map(dateValues)));
+    assert.deepEqual((await f.workspace()).dependencies, concurrent.dependencies);
+  } finally { database.close(); }
+});
+
+test('common-anchor follow-up uses both newly linked predecessors and blocks incomplete or conflicting fixed dates', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('공통 후행 업무');
+  const first = await f.issue('이른 선행 업무', f.project.id, { startDate: '2026-11-23', endDate: '2026-11-24' });
+  const second = await f.issue('늦은 선행 업무', f.project.id, { startDate: '2026-11-25', endDate: '2026-11-26' });
+  const hidden = await f.issue('기간이 불완전한 하위 후행', f.project.id, { endDate: null });
+  await f.link(anchor, hidden);
+  const payload = { ...input(anchor, [first, second], 'successor'), lagDays: 0, rescheduleSuccessors: true };
+  const before = await f.workspace();
+  const missing = await f.review(payload);
+  assert.equal(missing.previewId, null);
+  assert.ok(missing.errors.some(({ message }) => message.includes(hidden.key) && message.includes('기간을 계산하지 않았습니다.')));
+  assert.deepEqual(await f.workspace(), before);
+
+  const available = await f.call<Issue>(`/issues/${hidden.id}`, 200, 'PATCH', { expectedVersion: hidden.version, endDate: '2026-11-20' });
+  const known = await f.workspace();
+  const fixed = await f.review({ ...payload, dates: [{ issue: reference(anchor), changes: { endDate: '2026-11-25' } }] });
+  assert.equal(fixed.previewId, null);
+  assert.ok(fixed.errors.some(({ message }) => message.includes(anchor.key) && message.includes('입력한 시작일')));
+  assert.deepEqual(await f.workspace(), known);
+
+  const preview = await f.review(payload);
+  assert.ok(preview.previewId, JSON.stringify(preview.errors));
+  assert.deepEqual(new Set(preview.followUpIssueIds), new Set([anchor.id, available.id]));
+  const applied = await f.apply(preview.previewId);
+  assert.equal(applied.dependencyChanges, 2);
+  assert.deepEqual(new Map(applied.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), new Map([
+    [anchor.id, ['2026-11-27', '2026-11-30']], [available.id, ['2026-12-01', '2026-12-02']],
+  ]));
+});
+
 test('ordered bulk chain previews only adjacent pairs and undoes its new links without changing dates or retained rules', async t => {
   const f = await fixture(t);
   const second = await f.issue('두 번째 연결 업무');

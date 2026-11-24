@@ -189,14 +189,21 @@ function parseBulkLinkInput(raw: unknown): ScheduleBulkLinkInput | ScheduleBulkC
   if (!isDependencyType(raw.type) || !isDependencyLag(raw.lagDays)) {
     throw new SchedulePasteError(400, '업무 연결 유형과 -3650~3650 사이의 정수 근무일 간격을 확인해 주세요.');
   }
+  const hasFollowUp = Object.hasOwn(raw, 'rescheduleSuccessors');
+  if (hasFollowUp && typeof raw.rescheduleSuccessors !== 'boolean') {
+    throw new SchedulePasteError(400, '후행 일정 검토 여부를 확인해 주세요.');
+  }
   if (!Array.isArray(raw.issues) || raw.issues.length < 2 || raw.issues.length > MAX_SCHEDULE_BULK_LINK_ISSUES) {
     throw new SchedulePasteError(400, `한 프로젝트에서 업무를 2~${MAX_SCHEDULE_BULK_LINK_ISSUES}개 선택해 주세요.`);
   }
   const issues = raw.issues.map(parseScheduleIssue);
   const ids = new Set(issues.map(issue => issue.id));
-  const selection = { projectId: raw.projectId, issues, type: raw.type, lagDays: raw.lagDays };
+  const selection = {
+    projectId: raw.projectId, issues, type: raw.type, lagDays: raw.lagDays,
+    rescheduleSuccessors: raw.rescheduleSuccessors === true,
+  };
   const hasDates = Object.hasOwn(raw, 'dates');
-  const linkFieldCount = Object.keys(raw).length - Number(hasDates);
+  const linkFieldCount = Object.keys(raw).length - Number(hasDates) - Number(hasFollowUp);
   const datePayload = (targets: ScheduleBulkLinkInput['issues']) => hasDates ? { dates: parseBulkLinkDates(raw.dates, targets) } : {};
   if (raw.mode === 'chain' && linkFieldCount === 5) {
     if (ids.size !== issues.length) throw new SchedulePasteError(400, '순서에 같은 업무를 두 번 지정할 수 없습니다.');
@@ -449,14 +456,12 @@ function reviewPastedFollowUps(preview: SchedulePastePreview, issues: ReadonlyMa
   return warnings;
 }
 
-function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[], settings: Pick<Dependency, 'type' | 'lagDays'>,
-  calculateWarnings: PasteHooks['warnings'], dates?: ReadonlyMap<string, ScheduleDateMutation>) {
+function prepareLinkAdditions(dependencies: Dependency[], pairs: DependencyAddition[], settings: Pick<Dependency, 'type' | 'lagDays'>) {
   const dependencyChanges: SchedulePasteDependencyChange[] = [];
   const retainedDependencies: SchedulePasteDependencyChange[] = [];
   const linkChanges: ScheduleDependencyMutation[] = [];
-  const missingDateWarnings: string[] = [];
   const errors: SchedulePastePreview['errors'] = [];
-  const linksByPair = new Map(state.dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
+  const linksByPair = new Map(dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
   for (const { line, predecessor, successor, projectId } of pairs) {
     const summary = { line, predecessorKey: predecessor.key, predecessorTitle: predecessor.title,
       successorKey: successor.key, successorTitle: successor.title, ...(projectId ? { projectId } : {}) };
@@ -470,17 +475,22 @@ function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[],
     dependencyChanges.push({ ...summary, before: null, after: settings });
   }
 
-  const projected = linkChanges.length ? projectScheduleDependencies(state.dependencies, linkChanges) : state.dependencies;
-  if (linkChanges.length && hasScheduleDependencyCycle(projected)) {
+  const projectedLinks = linkChanges.length ? projectScheduleDependencies(dependencies, linkChanges) : dependencies;
+  if (linkChanges.length && hasScheduleDependencyCycle(projectedLinks)) {
     errors.push({ line: null, message: '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.' });
   }
-  const related = affectedLinks(projected, dates?.keys() ?? [], linkChanges);
+  return { dependencyChanges, retainedDependencies, unchanged: retainedDependencies.length, errors, linkChanges, projectedLinks };
+}
+
+function reviewAddedLinkDates(issues: Issue[], related: Dependency[], calculateWarnings: PasteHooks['warnings'],
+  dates?: ReadonlyMap<string, ScheduleDateMutation>) {
+  const missingDateWarnings: string[] = [];
   let warnings: string[] = [];
   if (related.length) {
-    const projectedIssues = dates?.size ? state.issues.map(issue => {
+    const projectedIssues = dates?.size ? issues.map(issue => {
       const change = dates.get(issue.id);
       return change ? { ...issue, startDate: change.startDate, endDate: change.endDate } : issue;
-    }) : state.issues;
+    }) : issues;
     const byId = new Map(projectedIssues.map(issue => [issue.id, issue]));
     for (const link of related) {
       const predecessor = byId.get(link.predecessorId), successor = byId.get(link.successorId);
@@ -493,7 +503,7 @@ function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[],
     }
     warnings = [...missingDateWarnings, ...calculateWarnings(projectedIssues, related)];
   }
-  return { dependencyChanges, retainedDependencies, unchanged: retainedDependencies.length, warnings, errors, linkChanges, missingDateWarnings };
+  return { warnings, missingDateWarnings };
 }
 
 export class SchedulePasteService {
@@ -1179,7 +1189,7 @@ export class SchedulePasteService {
 
   private previewBulkLinks(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
     const input = parseBulkLinkInput(raw);
-    const { projectId, issues: selected, type, lagDays, dates = [] } = input;
+    const { projectId, issues: selected, type, lagDays, dates = [], rescheduleSuccessors } = input;
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
@@ -1189,7 +1199,8 @@ export class SchedulePasteService {
         projectId, previewId: null, expiresAt: null, changes: [], dependencyChanges: [], retainedDependencies: [], warnings: [], errors: [], unchanged: 0,
       };
       const pairs: DependencyAddition[] = [];
-      const issueIds = selected.map(issue => issue.id);
+      const issueIds = new Set('mode' in input ? [] : [input.anchor.id]);
+      for (const { id } of selected) issueIds.add(id);
       if ('mode' in input) {
         const ordered = selected.map((entry, index) => findPreviewIssue(issuesById, preview.errors, entry, index + 1));
         for (let index = 1; index < ordered.length; index++) {
@@ -1200,7 +1211,6 @@ export class SchedulePasteService {
       } else {
         const anchor = findPreviewIssue(issuesById, preview.errors, input.anchor);
         if (!anchor) return preview;
-        issueIds.unshift(anchor.id);
         for (const [index, entry] of selected.entries()) {
           const line = index + 1;
           const issue = findPreviewIssue(issuesById, preview.errors, entry, line);
@@ -1223,9 +1233,16 @@ export class SchedulePasteService {
           preview.changes.push(omitUnchangedDueDate(edit.summary));
         }
       }
-      const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type, lagDays }, hooks.warnings, changes);
-      return this.savePreview({ ...preview, ...review, errors: [...preview.errors, ...errors] }, state, {
-        actorId, issueIds, changes: [...changes.values()], linkChanges, kind: 'bulk-links',
+      const { linkChanges, projectedLinks, errors, ...review } = prepareLinkAdditions(state.dependencies, pairs, { type, lagDays });
+      preview.errors.push(...errors);
+      const followUpWarnings = rescheduleSuccessors && !preview.errors.length
+        ? reviewPastedFollowUps(preview, issuesById, projectedLinks, changes, linkChanges, issueIds, hooks) : [];
+      const related = affectedLinks(projectedLinks, changes.keys(), linkChanges);
+      const { warnings, missingDateWarnings } = reviewAddedLinkDates(state.issues, related, hooks.warnings, changes);
+      preview.warnings = followUpWarnings.length ? [...new Set([...followUpWarnings, ...warnings])] : warnings;
+      return this.savePreview({ ...preview, ...review }, state, {
+        actorId, issueIds: [...issueIds], changes: [...changes.values()], linkChanges, kind: 'bulk-links',
+        ...(followUpWarnings.length ? { followUpWarnings } : {}),
         ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
       }, hooks);
     });
@@ -1346,9 +1363,10 @@ export class SchedulePasteService {
         issueIds.add(successor.id);
         pairs.push({ line, predecessor, successor, ...rowProject });
       }
-      const { linkChanges, missingDateWarnings, errors, ...review } = prepareLinkAdditions(state, pairs, { type: 'FS', lagDays: 0 }, hooks.warnings);
+      const { linkChanges, projectedLinks, errors, ...review } = prepareLinkAdditions(state.dependencies, pairs, { type: 'FS', lagDays: 0 });
+      const { warnings, missingDateWarnings } = reviewAddedLinkDates(state.issues, affectedLinks(projectedLinks, [], linkChanges), hooks.warnings);
       return this.savePreview({
-        ...scope, previewId: null, expiresAt: null, changes: [], ...review, errors: [...selectionErrors, ...errors],
+        ...scope, previewId: null, expiresAt: null, changes: [], warnings, ...review, errors: [...selectionErrors, ...errors],
       }, state, {
         actorId, issueIds: [...issueIds], changes: [], linkChanges, kind: 'blocker-links', blockerRelations: reviewedRelations,
         ...(missingDateWarnings.length ? { missingDateWarnings } : {}),

@@ -2184,6 +2184,7 @@ export interface ScheduleBulkLinkInput {
   type: DependencyType;
   lagDays: number;
   dates?: ScheduleBulkLinkDateEdit[];
+  rescheduleSuccessors?: boolean;
 }
 export interface ScheduleBulkChainInput {
   mode: 'chain';
@@ -2192,6 +2193,7 @@ export interface ScheduleBulkChainInput {
   type: DependencyType;
   lagDays: number;
   dates?: ScheduleBulkLinkDateEdit[];
+  rescheduleSuccessors?: boolean;
 }
 export const SCHEDULE_BLOCKER_LINK_PAGE_SIZE = 25;
 export const MAX_SCHEDULE_BLOCKER_LINKS = 100;

@@ -2821,10 +2821,12 @@ function ProjectGantt(props: GanttProps) {
         refresh,
       }}
       notify={notify} onDraftChange={trackDraft} onClose={() => closeBulkLinks()}
-      onApplied={async result => {
+      onApplied={async (result, followUpIssueIds) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
+        const adjusted = new Set(followUpIssueIds);
         for (const saved of result.updated) {
+          if (adjusted.has(saved.id)) continue;
           const draft = bulkLinkSelection.dateDrafts.find(candidate => candidate.source.id === saved.id);
           const capturedDatesSaved = draft && (['startDate', 'endDate'] as const).every(field =>
             !Object.hasOwn(draft.changes, field) || saved[field] === draft.changes[field]);
