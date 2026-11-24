@@ -330,17 +330,21 @@ type FixedFollowUpInput = {
   calendar: WorkCalendar;
   workflow: ProjectWorkflow;
 } & (
-  { anchor: AutomaticScheduleMutation; anchors?: never } |
-  { anchors: readonly AutomaticScheduleMutation[]; anchor?: never }
+  { anchor: AutomaticScheduleMutation; anchors?: never; successorIssueIds?: never } |
+  { anchors: readonly AutomaticScheduleMutation[]; anchor?: never; successorIssueIds?: readonly string[] }
 );
 
-export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar, workflow, anchor, anchors }: FixedFollowUpInput) {
+export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar, workflow, anchor, anchors, successorIssueIds = [] }: FixedFollowUpInput) {
   if (issues.length > 10000) fail('자동 일정은 프로젝트 업무 10,000개 이하에서 계산해 주세요.');
-  const anchorChanges = anchor ? [anchor] : anchors;
-  if (!anchorChanges?.length || anchorChanges.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) {
+  const anchorChanges = anchor ? [anchor] : anchors ?? [];
+  const selected = new Set([...anchorChanges.map(({ id }) => id), ...successorIssueIds]);
+  if (!selected.size || selected.size > MAX_AUTOMATIC_SCHEDULE_CHANGES || anchorChanges.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) {
     fail('후행 일정의 기준 업무는 1~1000개를 지정해 주세요.');
   }
   const byId = new Map(issues.map(issue => [issue.id, issue]));
+  for (const id of successorIssueIds) {
+    if (byId.get(id)?.projectId !== calendar.projectId) fail('후행 일정의 업무가 작업 달력의 프로젝트에 없습니다.');
+  }
   const fixedDates = new Map<string, ScheduleDates>();
   for (const change of anchorChanges) {
     const { issue, dates } = readSeedChange(change, byId);
@@ -350,7 +354,7 @@ export function calculateFixedFollowUpSchedule({ issues, dependencies, calendar,
   }
   const workflowData = { workflows: [workflow] };
   const { changes, warnings, blocking, issueIds } = calculateProjectSchedule({
-    issues: byId, dependencies, math: createCalendarMath(calendar), selected: new Set(fixedDates.keys()), fixedDates,
+    issues: byId, dependencies, math: createCalendarMath(calendar), selected, fixedDates,
     terminal: issue => isTerminalStatus(workflowData, issue.projectId, issue.status), preserveSatisfied: true,
   });
   if (changes.length > MAX_AUTOMATIC_SCHEDULE_CHANGES) blocking.push(CHANGE_LIMIT_MESSAGE);

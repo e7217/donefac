@@ -105,6 +105,7 @@ function ProjectScheduleEditDialog({
   teamPaste,
 }: SchedulePasteDialogProps) {
   const [text, setText] = useState('');
+  const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
   const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
   const [linkMode, setLinkMode] = useState<LinkMode>(() => {
@@ -169,7 +170,7 @@ function ProjectScheduleEditDialog({
     : bulkLinks ? JSON.stringify(chainMode
       ? [linkMode, chainOrder, chainRule.type, chainRule.lagDays]
       : [linkMode, link.choice?.id, link.direction, link.type, link.lagDays])
-      : bulkDates ? JSON.stringify(dates) : text;
+      : bulkDates ? JSON.stringify(dates) : JSON.stringify([text, rescheduleSuccessors]);
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
   const selectedIds = new Set(issues.map(issue => issue.id));
   const sameProjectCandidates = bulkLinks?.candidates.filter(issue => issue.projectId === projectId) ?? [];
@@ -220,7 +221,8 @@ function ProjectScheduleEditDialog({
       ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
       : Boolean(text.trim());
   const editLocked = Boolean(pending || applied || (preserveUnknownResult && retryApply));
-  const dirty = !applied && Boolean((blockerLinks ? blockerSelection.size : bulkLinks ? linksEdited : bulkDates ? datesEdited : text) || review || latest || error);
+  const dirty = !applied && Boolean((blockerLinks ? blockerSelection.size
+    : bulkLinks ? linksEdited : bulkDates ? datesEdited : text || rescheduleSuccessors) || review || latest || error);
   const awaitingResult = Boolean(reportUnknownResult && retryApply);
   const expiresAt = review?.result.expiresAt;
   const expiry = expiresAt ? Date.parse(expiresAt) : NaN;
@@ -343,7 +345,12 @@ function ProjectScheduleEditDialog({
 
   function updateText(value: string) {
     setText(value);
-    resetReview(Boolean(value));
+    resetReview(Boolean(value || rescheduleSuccessors));
+  }
+
+  function updateSuccessorReview(value: boolean) {
+    setRescheduleSuccessors(value);
+    resetReview(Boolean(text || value));
   }
 
   function updateDate(field: DateField, entry: DateEntry) {
@@ -419,7 +426,7 @@ function ProjectScheduleEditDialog({
     setRetryApply(null);
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects };
-    let payload: { projectId: string | null; text: string } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
+    let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
     else if (bulkLinkInput) payload = bulkLinkInput;
@@ -431,7 +438,7 @@ function ProjectScheduleEditDialog({
         if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
       }
       payload = { projectId, issues, changes };
-    } else payload = { projectId, text };
+    } else payload = { projectId, text, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}) };
     try {
       const endpoint = blockerLinks ? '/schedule/blocker-links/preview'
         : bulkLinks ? '/schedule/bulk-links/preview' : bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview';
@@ -558,6 +565,8 @@ function ProjectScheduleEditDialog({
   }
 
   const result = review?.result;
+  const followUpIssues = new Set(result?.followUpIssueIds);
+  const appliedFollowUpCount = applied?.updated.filter(issue => followUpIssues.has(issue.id)).length ?? 0;
   const dependencyChanges = result?.dependencyChanges ?? [];
   const retainedDependencies = result?.retainedDependencies ?? [];
   const keyMappings = result?.keyMappings ?? [];
@@ -695,6 +704,14 @@ function ProjectScheduleEditDialog({
                   선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
                   {isTeamPaste && ' 선후행 업무는 같은 프로젝트에 속해야 합니다.'}
                 </p>
+                <div className="schedule-paste-follow-up">
+                  <label>
+                    <input type="checkbox" checked={rescheduleSuccessors} aria-describedby="schedule-paste-follow-up-help"
+                      onChange={event => updateSuccessorReview(event.currentTarget.checked)} />
+                    후행 일정 함께 검토
+                  </label>
+                  <p id="schedule-paste-follow-up-help">직접 바꾼 시작일과 종료일을 유지합니다. 각 프로젝트의 선후행 연결에 맞춰 후행 일정을 필요한 만큼 늦춥니다.</p>
+                </div>
                 <details className="schedule-paste-examples">
                   <summary>입력 예시 보기</summary>
                   <p>스프레드시트에서 헤더를 포함해 복사한 표는 탭으로 구분됩니다.</p>
@@ -767,6 +784,7 @@ function ProjectScheduleEditDialog({
               {directLinks ? `선후행 연결 ${applied.dependencyChanges ?? 0}건을 추가했습니다. `
                 : bulkDates ? bulkDateResultMessage(applied.updated, team)
                   : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
+              {appliedFollowUpCount > 0 && ` 후행 일정 ${appliedFollowUpCount}건을 조정했습니다.`}
               적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
           )}
@@ -808,6 +826,7 @@ function ProjectScheduleEditDialog({
                       : bulkDates ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
                         : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
+                  {followUpIssues.size > 0 && <p>후행 일정 조정 {followUpIssues.size}건</p>}
                   {result.projectIds && <p>대상 프로젝트 {result.projectIds.length}개</p>}
                   {result.expiresAt && (
                     <p>검토 유효 시간 {new Date(result.expiresAt).toLocaleTimeString('ko-KR')}까지</p>
@@ -850,7 +869,8 @@ function ProjectScheduleEditDialog({
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
               {result.changes.length > 0 && (
-                <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} projects={review?.projects} teamProjects={teamProjects} />
+                <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} projects={review?.projects}
+                  teamProjects={teamProjects} followUpIssues={followUpIssues} />
               )}
               {dependencyChanges.length > 0 && (
                 <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? 'added' : 'paste'} teamProjects={teamProjects} />
@@ -955,16 +975,17 @@ function ScheduleKeyMappings({ mappings, teamProjects, projectLabel }: {
   </section>;
 }
 
-function ChangeTable({ changes, bulk, projects, teamProjects }: {
+function ChangeTable({ changes, bulk, projects, teamProjects, followUpIssues }: {
   changes: SchedulePastePreview['changes']; bulk: boolean; projects?: ProjectLabels; teamProjects?: ProjectLabels;
+  followUpIssues: ReadonlySet<string>;
 }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
   const showDueDate = !bulk && changes.some(hasDueDateChange);
   return (
     <div className={`schedule-paste-change-table${bulk ? ' schedule-bulk-date-table' : ''}`}>
-      <div className="schedule-paste-table-scroll" tabIndex={showDueDate ? 0 : undefined}
-        role={showDueDate ? 'region' : undefined} aria-label={showDueDate ? '일정 변경 표 스크롤' : undefined}>
+      <div className="schedule-paste-table-scroll" tabIndex={!bulk ? 0 : undefined}
+        role={!bulk ? 'region' : undefined} aria-label={!bulk ? '일정 변경 표 스크롤' : undefined}>
         <table aria-label={bulk ? '선택 업무 날짜 변경 목록' : '붙여넣기 일정 변경 목록'}>
           <thead>
             <tr>
@@ -987,6 +1008,7 @@ function ChangeTable({ changes, bulk, projects, teamProjects }: {
                   <small>{change.key}</small>
                   <strong>{change.title}</strong>
                   <ScheduleProject project={projects?.get(change.id) ?? (change.projectId ? teamProjects?.get(change.projectId) : undefined)} />
+                  {followUpIssues.has(change.id) && <small className="schedule-paste-follow-up-label">후행 조정</small>}
                 </th>
                 {bulk ? (
                   <>

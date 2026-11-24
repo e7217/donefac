@@ -1907,6 +1907,7 @@ export interface SchedulePastePreview {
   previewId: string | null;
   expiresAt: string | null;
   changes: ScheduleChange[];
+  followUpIssueIds?: string[];
   dependencyChanges?: SchedulePasteDependencyChange[];
   retainedDependencies?: SchedulePasteDependencyChange[];
   keyMappings?: SchedulePasteKeyMapping[];

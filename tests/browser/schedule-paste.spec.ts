@@ -376,3 +376,80 @@ test('360px 간트에서 한 업무의 선행 연결 여러 개와 날짜를 함
     for (const issue of [edited, removed, added, successor]) await request.delete(`/api/issues/${issue.id}`);
   }
 });
+
+test('360px 일정 붙여넣기에서 새 연결과 숨겨진 후행 일정을 한 번에 적용하고 되돌린다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project] } = await workspace(request);
+  const created: Issue[] = [];
+  async function addIssue(title: string, startDate: string, endDate: string) {
+    const response = await request.post('/api/issues', { data: { projectId: project.id, title, startDate, endDate } });
+    expect(response.ok(), await response.text()).toBe(true);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const source = await addIssue(`붙여넣기 일정 전달 ${Date.now()}`, '2030-01-07', '2030-01-08');
+    const middle = await addIssue('붙여넣기로 새 연결을 만드는 업무', '2030-01-09', '2030-01-10');
+    const last = await addIssue('현재 차트 검색에 없는 다음 업무', '2030-01-11', '2030-01-11');
+    const link = await request.post('/api/dependencies', { data: { predecessorId: middle.id, successorId: last.id, type: 'FS', lagDays: 0 } });
+    expect(link.ok(), await link.text()).toBe(true);
+    const installed = await link.json() as Dependency;
+
+    await page.goto(`/#/${project.id}/gantt`);
+    const search = page.getByLabel('간트 업무 검색');
+    await search.fill(source.title);
+    await expect(page.getByLabel(`${last.key} 종료일`, { exact: true })).toHaveCount(0);
+    await page.getByRole('button', { name: '일정 붙여넣기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
+    const option = dialog.getByRole('checkbox', { name: /후행 일정 함께 검토/ });
+    const preview = dialog.getByRole('button', { name: '붙여넣기 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '검토한 일정 적용', exact: true });
+    const table = dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
+    const text = [
+      '업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형',
+      `${source.key}\t\t2030-01-10\t\t\t`,
+      `${middle.key}\t2030-01-09\t2030-01-10\t2030-01-10\t${source.key}\tFS`,
+    ].join('\n');
+    await input.fill(text);
+    await expect(option).not.toBeChecked();
+    await preview.click();
+    await expect(apply).toBeEnabled();
+    await expect(table).not.toContainText(last.key);
+    await option.check();
+    await expect(apply).toBeDisabled();
+    await expect(input).toHaveValue(text);
+    await preview.click();
+
+    const row = (issue: Issue) => table.getByRole('row', { name: new RegExp(issue.key) });
+    await expect(row(source)).not.toContainText('후행 조정');
+    await expect(row(middle)).toContainText('후행 조정');
+    await expect(row(middle)).toContainText('2030-01-14');
+    await expect(row(last)).toContainText('후행 조정');
+    await expect(row(last)).toContainText('2030-01-15');
+    await expect(dialog.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록' })).toContainText(`${source.key}`);
+    const bounds = (await dialog.boundingBox())!;
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(360);
+
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    const applied = await workspace(request);
+    expect(applied.issues.find(issue => issue.id === source.id)).toMatchObject({ endDate: '2030-01-10', version: source.version + 1 });
+    expect(applied.issues.find(issue => issue.id === middle.id)).toMatchObject({ startDate: '2030-01-11', endDate: '2030-01-14', dueDate: '2030-01-10', version: middle.version + 1 });
+    expect(applied.issues.find(issue => issue.id === last.id)).toMatchObject({ startDate: '2030-01-15', endDate: '2030-01-15', version: last.version + 1 });
+    expect(applied.dependencies).toContainEqual(expect.objectContaining({ predecessorId: source.id, successorId: middle.id, type: 'FS', lagDays: 0 }));
+
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await expect(page.getByLabel(`${source.key} 종료일`, { exact: true })).toHaveValue(source.endDate!);
+    const reverted = await workspace(request);
+    for (const issue of created) expect(reverted.issues.find(value => value.id === issue.id)).toMatchObject({
+      startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate,
+    });
+    expect(reverted.dependencies.some(value => value.predecessorId === source.id && value.successorId === middle.id)).toBe(false);
+    expect(reverted.dependencies).toContainEqual(installed);
+  } finally {
+    for (const issue of created) await request.delete(`/api/issues/${issue.id}`);
+  }
+});

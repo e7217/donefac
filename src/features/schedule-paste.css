@@ -107,6 +107,23 @@
   outline-offset: 2px;
 }
 
+.schedule-paste-follow-up {
+  margin: 0.85rem 0;
+}
+
+.schedule-paste-input .schedule-paste-follow-up label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.schedule-paste-dialog .schedule-paste-follow-up p {
+  margin: 0.25rem 0 0;
+  color: #526f62;
+  font-size: 0.8125rem;
+}
+
 .schedule-paste-examples {
   margin: 0.75rem 0 1rem;
   padding: 0.75rem 1rem;
@@ -302,6 +319,15 @@
   display: block;
   margin-top: 0.2rem;
   font-weight: 500;
+}
+
+.schedule-paste-change-table tbody th .schedule-paste-follow-up-label {
+  display: inline-block;
+  margin-top: 0.3rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: #1d5d4c;
+  background: #e3f2ea;
 }
 
 .schedule-paste-date {

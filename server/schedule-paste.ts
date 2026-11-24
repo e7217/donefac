@@ -7,7 +7,7 @@ import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
-import { AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
+import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
@@ -317,6 +317,71 @@ function affectedLinks(dependencies: Dependency[], issueIds: Iterable<string>, l
   return dependencies.filter(link => linkIds.has(link.id) || targets.has(link.predecessorId) || targets.has(link.successorId));
 }
 
+function reviewPastedFollowUps(preview: SchedulePastePreview, issues: ReadonlyMap<string, Issue>, projectedLinks: Dependency[],
+  changes: Map<string, ScheduleDateMutation>, linkChanges: ScheduleDependencyMutation[], targetIds: Set<string>, hooks: PasteHooks) {
+  const projectOf = (id: string) => issues.get(id)!.projectId;
+  const fixedChanges = [...changes.values()].filter(({ id, startDate, endDate }) => {
+    const issue = issues.get(id)!;
+    return startDate !== issue.startDate || endDate !== issue.endDate;
+  });
+  const fixedIds = new Set(fixedChanges.map(({ id }) => id));
+  const anchors = Map.groupBy(fixedChanges, ({ id }) => projectOf(id));
+  const successors = Map.groupBy(new Set(linkChanges.flatMap(({ after }) => after ? [after.successorId] : [])), projectOf);
+  const projects = new Set([...anchors.keys(), ...successors.keys()]);
+  if (!projects.size) return [];
+
+  const issuesByProject = Map.groupBy(issues.values(), ({ projectId }) => projectId);
+  const linksByProject = Map.groupBy(projectedLinks, ({ predecessorId }) => projectOf(predecessorId));
+  const summaries = new Map(preview.changes.map(summary => [summary.id, summary]));
+  const followUpIds: string[] = [], warnings: string[] = [];
+  for (const projectId of projects) {
+    let plan: ReturnType<typeof calculateFixedFollowUpSchedule>;
+    try {
+      plan = calculateFixedFollowUpSchedule({
+        issues: issuesByProject.get(projectId)!, dependencies: linksByProject.get(projectId) ?? [],
+        calendar: hooks.calendar(projectId), workflow: hooks.workflow(projectId),
+        anchors: anchors.get(projectId) ?? [], successorIssueIds: successors.get(projectId),
+      });
+    } catch (error) {
+      if (!(error instanceof AutomaticScheduleError)) throw error;
+      preview.errors.push({ line: null, message: error.message });
+      continue;
+    }
+    // Guard every reviewed successor, including unchanged tasks that could gain links or a different predecessor constraint.
+    for (const id of plan.issueIds) targetIds.add(id);
+    const newChangeCount = plan.changes.filter(({ id }) => !changes.has(id)).length;
+    if (changes.size + newChangeCount > MAX_SCHEDULE_MANUAL_ISSUES) {
+      preview.errors.push({ line: null, message: `한 번에 변경할 수 있는 업무는 ${MAX_SCHEDULE_MANUAL_ISSUES}개입니다. 범위를 나누어 미리 확인해 주세요.` });
+      break;
+    }
+    for (const message of plan.blocking) preview.errors.push({ line: null, message });
+    warnings.push(...plan.warnings);
+    for (const { id, toStart, toEnd } of plan.changes) {
+      if (fixedIds.has(id)) continue;
+      const issue = issues.get(id)!;
+      const edit = proposeDateEdit(issue, { startDate: toStart, endDate: toEnd, dueDate: changes.get(id)?.dueDate });
+      if (!edit) continue;
+      const error = hooks.validateChange(issue, edit.change);
+      if (error) preview.errors.push({ line: null, issueId: id, key: issue.key, message: error });
+      else {
+        changes.set(id, edit.change);
+        const summary = omitUnchangedDueDate(edit.summary);
+        summaries.set(id, preview.projectId === null ? { ...summary, projectId } : summary);
+        followUpIds.push(id);
+      }
+    }
+  }
+  preview.changes = [...summaries.values()];
+  if (followUpIds.length) preview.followUpIssueIds = followUpIds;
+  for (const { id, startDate, endDate, dueDate } of changes.values()) {
+    const issue = issues.get(id)!;
+    if (startDate === issue.startDate && endDate === issue.endDate) continue;
+    const deadline = dueDate === undefined ? issue.dueDate : dueDate;
+    if (endDate && deadline && endDate > deadline) warnings.push(`${issue.key}: 제안한 종료일 ${endDate}이 목표 마감일 ${deadline}보다 늦습니다.`);
+  }
+  return warnings;
+}
+
 function prepareLinkAdditions(state: ScheduleState, pairs: DependencyAddition[], settings: Pick<Dependency, 'type' | 'lagDays'>,
   calculateWarnings: PasteHooks['warnings']) {
   const dependencyChanges: SchedulePasteDependencyChange[] = [];
@@ -602,7 +667,7 @@ export class SchedulePasteService {
     });
   }
 
-  private preview(projectId: unknown, raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
+  private preview(projectId: unknown, raw: unknown, actorId: string, hooks: PasteHooks, rescheduleSuccessors: boolean): SchedulePastePreview {
     if (projectId !== null && (typeof projectId !== 'string' || !projectId || projectId.length > 200)) {
       throw new SchedulePasteError(400, '붙여넣을 프로젝트를 선택해 주세요.');
     }
@@ -628,6 +693,7 @@ export class SchedulePasteService {
       const scopeLabel = projectId === null ? '전체 프로젝트에' : '이 프로젝트에';
       const dependencyChanges: SchedulePasteDependencyChange[] = [];
       const retainedDependencies: SchedulePasteDependencyChange[] = [];
+      const unchangedRows: string[] = [];
       const preview: SchedulePastePreview = {
         ...scope, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
         ...(keyMappings.length ? { keyMappings } : {}),
@@ -742,13 +808,17 @@ export class SchedulePasteService {
           }
           if (before && after) retainedDependencies.push(summary);
         }
-        if (!datesChanged) preview.unchanged++;
+        if (!datesChanged) unchangedRows.push(issue.id);
       }
       if (retainedDependencies.length) preview.retainedDependencies = retainedDependencies;
       const projectedLinks = linkChanges.length ? projectScheduleDependencies(dependencies, linkChanges) : dependencies;
       if (linkChanges.some(change => !change.before) && hasScheduleDependencyCycle(projectedLinks)) {
         preview.errors.push({line:null,message:'적용할 선행 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.'});
       }
+      const followUpWarnings = rescheduleSuccessors && !preview.errors.length
+        ? reviewPastedFollowUps(preview, byId, projectedLinks, changes, linkChanges, targetIds, hooks) : [];
+      const adjustedIssues = new Set(preview.followUpIssueIds);
+      preview.unchanged = unchangedRows.filter(id => !adjustedIssues.has(id)).length;
       preview.errors.sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
       if (changes.size || linkChanges.length) {
         const projected = issues.map(issue => {
@@ -758,11 +828,13 @@ export class SchedulePasteService {
             dueDate: change.dueDate === undefined ? issue.dueDate : change.dueDate,
           } : issue;
         });
-        preview.warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
+        const warnings = hooks.warnings(projected, affectedLinks(projectedLinks, changes.keys(), linkChanges));
+        preview.warnings = followUpWarnings.length ? [...new Set([...followUpWarnings, ...warnings])] : warnings;
       }
       const resolvedKeyBindings = [...keys.values()].filter((binding): binding is ResolvedScheduleKeyBinding => Boolean(binding && targetIds.has(binding.id)));
       return this.savePreview(preview, state, {
         actorId, issueIds: [...targetIds], changes: [...changes.values()], linkChanges, resolvedKeyBindings,
+        ...(followUpWarnings.length ? { followUpWarnings } : {}),
       }, hooks);
     });
   }
@@ -1115,7 +1187,10 @@ export class SchedulePasteService {
       res.set('Cache-Control', 'no-store').json(this.apply(req, req.body.previewId, hooks, 'manual-edit'));
     });
     app.post('/api/schedule/paste-preview', (req, res) => {
-      res.json(this.preview(req.body.projectId, req.body.text, hooks.actor(req), hooks));
+      if (!isRecord(req.body) || (Object.hasOwn(req.body, 'rescheduleSuccessors') && typeof req.body.rescheduleSuccessors !== 'boolean')) {
+        throw new SchedulePasteError(400, '후행 일정 검토 여부를 확인해 주세요.');
+      }
+      res.json(this.preview(req.body.projectId, req.body.text, hooks.actor(req), hooks, req.body.rescheduleSuccessors === true));
     });
     app.post('/api/schedule/paste-apply', (req, res) => {
       res.json(this.apply(req, req.body.previewId, hooks));
