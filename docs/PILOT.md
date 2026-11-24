@@ -166,6 +166,17 @@ npm run pilot:jira:collect -- batch /absolute/path/jira-config.json /absolute/pa
 
 출력된 묶음 수까지 번호를 바꿔 수집한다. 각 ZIP은 지정한 묶음의 업무 ID로 조회하며 현재 키·프로젝트와 계획을 대조한다. 빠진 묶음 번호가 없는지, 각 결과의 `planSha256`과 `issueCount` 합계가 계획 생성 결과의 `sha256`과 전체 업무 수에 각각 일치하는지 확인한다. 실패한 묶음은 같은 번호로 재시도할 수 있다. 원본 ID와 키가 달라졌거나 ZIP 용량 때문에 묶음을 나눠야 하면 새 계획으로 다시 확인한다. ZIP을 이관 매니페스트에 추가할 때는 같은 `instanceKey`를 사용하고, 이관 매핑에서 같은 대상 프로젝트 키와 이름을 지정한다. 리허설당 파일 20개와 합계 512MiB 한도를 적용한다. [오프라인 원본 이관 리허설](#오프라인-원본-이관-리허설)
 
+분할 수집한 ZIP을 리허설에 넣을 때는 `stage`에 수집 계획을 함께 지정한다. 여러 프로젝트의 계획을 대조하려면 `--jira-plan`을 반복한다. `--profile`과 `--confluence-findings`도 같은 명령에서 사용할 수 있다.
+
+```bash
+npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/rehearsal \
+  --jira-plan /absolute/path/jira-plan.json
+```
+
+ZIP이 매니페스트에 적힌 순서와 관계없이 계획의 각 묶음과 업무 ID·현재 키의 전체 집합을 대조한다. Jira 기준 주소와 서비스 경로, 원본 프로젝트도 확인한다. 묶음이 빠지거나 중복되거나, 같은 계획의 ZIP에 서로 다른 `instanceKey`를 지정하면 준비를 중단한다. 파일과 댓글·작업 시간·변경 이력의 누락 여부는 원본 분석과 적용 결과에서 별도로 확인한다.
+
+수집 계획은 리허설과 물리 백업에 접근 권한 `0600`인 파일로 보관된다. `review`에서 연결된 ZIP을 다시 확인하고, `verify`에서 원본과 별도 복원본의 묶음 연결을 재검사한다. 검증 보고서의 `jiraPlans`에는 계획 SHA-256·업무 및 묶음 수·묶음 번호순 패키지 ID가 들어 있다. `source.jiraPlanCoverage`와 `restore.jiraPlanCoverage`는 각 워크스페이스에서 대조를 끝냈을 때 기록된다. Jira 업무 ID·키·서버 주소는 보고서에서 생략한다.
+
 ## Confluence 공간 XML과 현재 페이지 대조
 
 Confluence Server에서 공간 XML ZIP을 받은 후, 같은 공간의 현재 페이지 목록과 대조할 수 있다. `baseUrl`에는 실제 서비스 경로를 포함한다. 인증 파일은 저장소 밖에 두고 서버에서 허용하는 `Basic ...` 또는 `Bearer ...` 값을 한 줄로 작성한다. `pageIds`를 생략하면 현재 계정으로 목록에 보이는 페이지를 최대 500개까지 확인한다. 페이지를 나눠 확인할 때는 문자열 ID 목록을 추가한다. 선택한 페이지의 상위 페이지도 계층과 상속된 읽기 제한을 확인할 때 조회한다. [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/) · [페이지 제한과 상속](https://confluence.atlassian.com/conf59/page-restrictions-792498763.html)

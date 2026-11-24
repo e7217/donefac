@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,7 +73,7 @@ async function run(t, script, args, expectedCode = 0) {
     return error;
   });
   assert.equal(result.code, expectedCode, `${script} ${args[0]}\n${result.stdout}\n${result.stderr}`);
-  return result.stdout;
+  return result;
 }
 
 async function json(pilot, path, { status = 200, ...options } = {}) {
@@ -101,7 +101,7 @@ async function readTickets(pilot, projectId, baseUrl) {
   return tickets.map(issue => issue.id);
 }
 
-test('two Jira collection batches import as one project and survive physical restore', { timeout: 120_000 }, async t => {
+test('a Jira collection plan requires the exact batches and survives physical restore', { timeout: 120_000 }, async t => {
   const source = await jira(t);
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-jira-batch-rehearsal-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
@@ -110,22 +110,59 @@ test('two Jira collection batches import as one project and survive physical res
   const authFile = join(scratch, 'jira-auth');
   await writeFile(authFile, `${credential}\n`, { mode: 0o600 });
   await writeFile(config, JSON.stringify({ baseUrl: source.baseUrl, projectKey: 'SRC', authFile }), { mode: 0o600 });
-  const planned = JSON.parse(await run(t, collector, ['plan', config, plan, '--batch-size', '2']));
+  const planned = JSON.parse((await run(t, collector, ['plan', config, plan, '--batch-size', '2'])).stdout);
   assert.equal(planned.issueCount, jiraIssues.length);
   assert.equal(planned.batchCount, files.length);
+  const planBytes = await readFile(plan);
+  assert.equal(createHash('sha256').update(planBytes).digest('hex'), planned.sha256);
+  const batchHashes = [];
   for (const [index, file] of files.entries()) {
-    const collection = JSON.parse(await run(t, collector, ['batch', config, plan, String(index + 1), join(scratch, file)]));
+    const collection = JSON.parse((await run(t, collector, ['batch', config, plan, String(index + 1), join(scratch, file)])).stdout);
     assert.equal(collection.issueCount, index === 0 ? 2 : 1);
     assert.equal(collection.planSha256, planned.sha256);
     assert.equal(collection.sha256, createHash('sha256').update(await readFile(join(scratch, file))).digest('hex'));
+    batchHashes.push(collection.sha256);
   }
   assert.deepEqual(source.details, jiraIssues.map(issue => issue.id));
 
   const manifest = join(scratch, 'manifest.json'), root = join(scratch, 'run');
-  await writeFile(manifest, JSON.stringify({ packages: files.map(file => ({ file, product: 'jira', instanceKey: 'synthetic-jira-batches' })) }));
-  await run(t, rehearsal, ['stage', manifest, root]);
+  const writeManifest = selected => writeFile(manifest, JSON.stringify({
+    packages: selected.map(file => ({ file, product: 'jira', instanceKey: 'synthetic-jira-batches' })),
+  }));
+  await writeManifest(files.slice(0, 1));
+  const incomplete = join(scratch, 'missing-batch');
+  const rejected = await run(t, rehearsal, ['stage', manifest, incomplete, '--jira-plan', plan], 1);
+  assert.match(rejected.stderr, /Jira.*(계획|묶음)/u);
+  await assert.rejects(lstat(incomplete), { code: 'ENOENT' });
+
+  await writeManifest(files.slice().reverse());
+  const mixedPlan = join(scratch, 'mixed-plan.json');
+  const mixed = JSON.parse(planBytes);
+  // The union and sizes still agree, but neither submitted ZIP contains this exact batch.
+  const [[first, second], [third]] = mixed.batches;
+  mixed.batches = [[first, third], [second]];
+  await writeFile(mixedPlan, JSON.stringify(mixed));
+  const wrongMembership = join(scratch, 'wrong-membership');
+  const mismatched = await run(t, rehearsal, ['stage', manifest, wrongMembership, '--jira-plan', mixedPlan], 1);
+  assert.match(mismatched.stderr, /Jira.*(계획|묶음)/u);
+  await assert.rejects(lstat(wrongMembership), { code: 'ENOENT' });
+
+  await run(t, rehearsal, ['stage', manifest, root, '--jira-plan', plan]);
   const workspace = join(root, 'workspace');
-  const { packages } = JSON.parse(await readFile(join(workspace, '.teamspace-rehearsal', 'stage.json')));
+  const { packages, jiraPlans } = JSON.parse(await readFile(join(workspace, '.teamspace-rehearsal', 'stage.json')));
+  assert.deepEqual(packages.map(pkg => pkg.sha256), batchHashes.slice().reverse());
+  const expectedPlans = [{
+    sha256: planned.sha256,
+    issueCount: jiraIssues.length,
+    batchCount: files.length,
+    packageIds: batchHashes.map(hash => packages.find(pkg => pkg.sha256 === hash).packageId),
+  }];
+  assert.deepEqual(jiraPlans, expectedPlans);
+  const privatePlan = directory => join(directory, '.teamspace-rehearsal', 'jira-plans', `${planned.sha256}.json`);
+  assert.deepEqual(await readFile(privatePlan(workspace)), planBytes);
+  assert.equal((await lstat(privatePlan(workspace))).mode & 0o777, 0o600);
+  // Verification and backup must use the staged private copy once the operator moves the input plan.
+  await rm(plan);
   const pilot = await startRehearsalPilot(workspace, { signal: t.signal });
   let receipt, originalTicketIds;
   try {
@@ -153,9 +190,15 @@ test('two Jira collection batches import as one project and survive physical res
   const attempts = (await readdir(root)).filter(name => name.startsWith('verification-'));
   assert.equal(attempts.length, 1);
   const attempt = join(root, attempts[0]);
-  const report = JSON.parse(await readFile(join(attempt, 'report.json')));
+  const reportText = await readFile(join(attempt, 'report.json'), 'utf8');
+  const report = JSON.parse(reportText);
+  assert.deepEqual(report.jiraPlans, expectedPlans);
+  for (const secret of [credential, authFile, source.baseUrl, '"scopeSha256"', '"batches"', ...jiraIssues.map(issue => issue.key)]) {
+    assert.ok(!reportText.includes(secret), 'The verification report exposed source identifiers or collection configuration.');
+  }
   assert.deepEqual(report.comparison, { status: 'review', matches: true, changedReceiptIds: [], workspaceMatches: true, packagesMatch: true });
-  for (const { evidence } of [report.source, report.restore]) {
+  for (const { evidence, jiraPlanCoverage } of [report.source, report.restore]) {
+    assert.deepEqual(jiraPlanCoverage, expectedPlans);
     assert.equal(evidence.checks.pendingPackages, 0);
     assert.equal(evidence.receipts.length, 1);
     const [audited] = evidence.receipts;
@@ -165,8 +208,20 @@ test('two Jira collection batches import as one project and survive physical res
       .sort((a, b) => a[0] - b[0]), [[1, 1, 1, 0], [2, 2, 2, 0]]);
     assert.equal(audited.targetContent.issueRelations.count, 1);
   }
-  const restored = await startRehearsalPilot(join(attempt, 'restored'), { signal: t.signal });
+  const restoredPath = join(attempt, 'restored');
+  const restoredStatePath = join(restoredPath, '.teamspace-rehearsal', 'stage.json');
+  const restoredState = JSON.parse(await readFile(restoredStatePath));
+  assert.deepEqual(restoredState.jiraPlans, expectedPlans);
+  assert.deepEqual(await readFile(privatePlan(restoredPath)), planBytes);
+  assert.equal((await lstat(privatePlan(restoredPath))).mode & 0o777, 0o600);
+  const restored = await startRehearsalPilot(restoredPath, { signal: t.signal });
   try { assert.deepEqual(await readTickets(restored, receipt.projectIds[0], source.baseUrl), originalTicketIds); }
   finally { await restored.close(); }
+
+  restoredState.jiraPlans[0].packageIds.reverse();
+  await writeFile(restoredStatePath, JSON.stringify(restoredState));
+  const badProof = await run(t, rehearsal, ['review', restoredPath], 1);
+  assert.match(badProof.stderr, /Jira.*보관한 ZIP 연결/u);
+  assert.doesNotMatch(badProof.stdout, /이관 검토 주소/u);
   assert.deepEqual(source.unexpected, []);
 });

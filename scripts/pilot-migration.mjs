@@ -8,9 +8,11 @@ import { safeFilename } from '../server/attachments.ts';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
 import { PILOT_REHEARSAL_DIRECTORY } from '../server/pilot-rehearsal.ts';
 import { readConfluenceArchivePageIds } from './confluence-pilot-audit-archive.mjs';
+import { JIRA_COLLECTION_PLAN_MAX_BYTES, parseJiraCollectionPlan } from './jira-pilot-collect-plan.mjs';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
 import { CONFLUENCE_FINDINGS_MAX_BYTES, CONFLUENCE_FINDINGS_VERSION, combinedConfluenceCoverage, confirmedConfluenceRestrictions,
   confluenceFindingsProof, parseConfluenceFindings, validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
+import { createJiraPlanCoverage } from './pilot-migration-jira-plan.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
 const runFormat = 'teamspace-migration-rehearsal';
@@ -23,6 +25,7 @@ const totalPackageBytes = 512 * 1024 * 1024;
 const confluenceFindingsLimit = 100;
 const totalConfluenceFindingsBytes = 128 * 1024 * 1024;
 const findingsDirectory = 'confluence-findings';
+const jiraPlansDirectory = 'jira-plans';
 const profileTimeout = 25_000;
 const uuid = /^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/;
 const sha256 = /^[a-f\d]{64}$/;
@@ -263,6 +266,47 @@ async function loadRunFindings(root, proofs, packages) {
   return reviews;
 }
 
+async function readJiraPlanFile(path) {
+  let raw;
+  try { raw = await readBoundedFile(path, JIRA_COLLECTION_PLAN_MAX_BYTES); }
+  catch {
+    signal.throwIfAborted();
+    throw new Error('Jira 수집 계획 파일을 읽을 수 없습니다. 파일과 크기를 확인해 주세요.');
+  }
+  return { raw, plan: parseJiraCollectionPlan(raw) };
+}
+
+async function saveJiraPlanFiles(root, inputs) {
+  const directory = join(root, jiraPlansDirectory);
+  await mkdir(directory, { mode: 0o700 });
+  for (const { raw, plan } of inputs) {
+    await writeFile(join(directory, `${plan.sha256}.json`), raw, { mode: 0o600, flag: 'wx', flush: true });
+  }
+}
+
+async function loadRunJiraPlans(root, proofs, packages) {
+  const eligiblePackages = new Set(packages.filter(item => item.product === 'jira' && item.format === 'jira-json').map(item => item.packageId));
+  const invalid = '리허설의 Jira 수집 계획 기록을 확인해 주세요.';
+  if (!Array.isArray(proofs) || !proofs.length || proofs.length > packageLimit) throw new Error(invalid);
+  const planHashes = new Set(), packageIds = new Set(), results = [];
+  for (const proof of proofs) {
+    if (!proof || Object.keys(proof).length !== 4 || !isSha256(proof.sha256) || planHashes.has(proof.sha256) ||
+        !isCount(proof.issueCount) || !Array.isArray(proof.packageIds) || !proof.packageIds.length ||
+        proof.batchCount !== proof.packageIds.length || proof.batchCount > packageLimit) throw new Error(invalid);
+    planHashes.add(proof.sha256);
+    for (const id of proof.packageIds) {
+      if (!eligiblePackages.has(id) || packageIds.has(id)) throw new Error(invalid);
+      packageIds.add(id);
+    }
+    const { plan } = await readJiraPlanFile(join(root, jiraPlansDirectory, `${proof.sha256}.json`));
+    if (plan.sha256 !== proof.sha256 || plan.issueCount !== proof.issueCount || plan.batches.length !== proof.batchCount) {
+      throw new Error('보관한 Jira 수집 계획의 SHA-256 또는 범위가 리허설 기록과 다릅니다.');
+    }
+    results.push({ plan, proof });
+  }
+  return results;
+}
+
 async function embeddedRunDirectory(workspace) {
   const path = join(workspace, PILOT_REHEARSAL_DIRECTORY);
   const entry = await lstat(path).catch(error => {
@@ -293,8 +337,9 @@ async function loadRun(directory) {
   }
   const confluenceReviews = Object.hasOwn(state, 'confluenceReviews')
     ? await loadRunFindings(stateDirectory, state.confluenceReviews, state.packages) : [];
+  const jiraPlans = Object.hasOwn(state, 'jiraPlans') ? await loadRunJiraPlans(stateDirectory, state.jiraPlans, state.packages) : [];
   return { input, root, workspace, embedded: Boolean(embedded), stageSha256,
-    packages: state.packages, profile: state.profile, confluenceReviews };
+    packages: state.packages, profile: state.profile, confluenceReviews, jiraPlans };
 }
 
 function apiCall(pilot) {
@@ -433,10 +478,13 @@ async function matchesProfileErrors(call, summary) {
   return true;
 }
 
-async function stage(manifestPath, root, { profilePath, findingsPaths }) {
+async function stage(manifestPath, root, { profilePath, findingsPaths, jiraPlanPaths }) {
   const inputs = await loadManifest(manifestPath);
   const profiled = profilePath ? await loadStageProfile(profilePath, inputs) : null;
   const findings = await loadStageFindings(findingsPaths);
+  const jiraPlanFiles = [];
+  for (const path of jiraPlanPaths) jiraPlanFiles.push(await readJiraPlanFile(path));
+  const jiraCoverage = jiraPlanFiles.length ? createJiraPlanCoverage(jiraPlanFiles.map(({ plan }) => plan)) : null;
   const filenames = await preflightStageInputs(inputs, profiled?.packages);
   const confluenceZips = inputs.map((input, index) => input.product === 'confluence' && /\.zip$/iu.test(filenames[index]));
   if (findings.length && !confluenceZips.includes(true)) {
@@ -477,17 +525,22 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
         if (expected && (!matchesProfileAnalysis(summary, expected) || !await matchesProfileErrors(call, summary))) {
           throw profileMismatch(index, '분석 형식·건수 또는 진단');
         }
-        results.push({ packageId: summary.id, product: input.product, instanceKey: input.instanceKey, sha256: sha, size: bytes.length,
-          format: summary.source.format, errors: summary.errors, warnings: summary.warnings, counts: summary.counts });
+        const staged = { packageId: summary.id, product: input.product, instanceKey: input.instanceKey, sha256: sha, size: bytes.length,
+          format: summary.source.format, errors: summary.errors, warnings: summary.warnings, counts: summary.counts };
+        await jiraCoverage?.addPackage(staged, bytes);
+        results.push(staged);
         console.log(`원본 ${index + 1}/${inputs.length} 분석 완료 (${input.product}, 오류 ${summary.errors}, 경고 ${summary.warnings})`);
       }
       signal.throwIfAborted();
       const confluenceReviews = findings.length
         ? await saveStageFindings(stateDirectory, findings, results.filter((_item, index) => confluenceZips[index])) : [];
       await verifiedConfluenceCoverage(workspace, results, confluenceReviews);
+      const jiraPlans = jiraCoverage?.finish();
+      if (jiraPlans) await saveJiraPlanFiles(stateDirectory, jiraPlanFiles);
       await writeJson(join(stateDirectory, 'stage.json'), { format: runFormat, version: 1, createdAt: new Date().toISOString(), packages: results,
         ...(profiled ? { profile: profiled.proof } : {}),
-        ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}) });
+        ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}),
+        ...(jiraPlans ? { jiraPlans } : {}) });
     });
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -509,10 +562,15 @@ function pilotReviewOptions(packages, confluenceReviews, coverage = []) {
 }
 
 async function review(directory) {
-  const { workspace, packages, confluenceReviews } = await loadRun(directory);
+  const { workspace, packages, confluenceReviews, jiraPlans } = await loadRun(directory);
   const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
   const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
   const coverage = await verifiedConfluenceCoverage(workspace, reviewedPackages, confluenceReviews);
+  if (jiraPlans.length) {
+    const ids = new Set(jiraPlans.flatMap(({ proof }) => proof.packageIds));
+    const { bundles } = await verifyBundles(workspace, packages.filter(pkg => ids.has(pkg.packageId)), [], jiraPlans);
+    if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Jira 수집 계획에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
+  }
   const pilot = await startRehearsalPilot(workspace, { signal, ...pilotReviewOptions(reviewedPackages, confluenceReviews, coverage) });
   try {
     if (confluenceReviews.length) {
@@ -529,6 +587,7 @@ async function review(directory) {
     }
     console.log(`이관 검토 주소 ${pilot.url}`);
     if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 불러왔습니다.`);
+    if (jiraPlans.length) console.log(`Jira 수집 계획 ${jiraPlans.length}개의 전체 묶음을 확인했습니다.`);
     const { code, signal: stoppedBy, error } = await pilot.exited;
     signal.throwIfAborted();
     if (code !== 0) throw new Error(`이관 검토 워크스페이스가 종료되었습니다 (${error?.code ?? stoppedBy ?? code}).`);
@@ -542,9 +601,10 @@ function exactCoveragePackageIds(reviews) {
   return new Set(reviews.filter(({ proof }) => proof.version === CONFLUENCE_FINDINGS_VERSION).map(({ proof }) => proof.packageId));
 }
 
-async function verifyBundles(directory, packages, confluenceReviews = []) {
+async function verifyBundles(directory, packages, confluenceReviews = [], jiraPlans = []) {
   const bundles = [], archivePageIds = new Map();
   const exactReviews = exactCoveragePackageIds(confluenceReviews);
+  const jiraCoverage = jiraPlans.length ? createJiraPlanCoverage(jiraPlans.map(({ plan }) => plan)) : null;
   for (const item of packages) {
     signal.throwIfAborted();
     let bytes;
@@ -560,11 +620,16 @@ async function verifyBundles(directory, packages, confluenceReviews = []) {
       archivePageIds.set(item.packageId, await readConfluenceArchivePageIds(bytes));
       signal.throwIfAborted();
     }
+    if (matches) await jiraCoverage?.addPackage(item, bytes);
     bundles.push({ packageId: item.packageId, status: matches ? 'verified' : 'mismatch' });
   }
-  const confluenceReviewCoverage = bundles.every(bundle => bundle.status === 'verified')
-    ? combinedConfluenceCoverage(confluenceReviews, archivePageIds) : [];
-  return { bundles, confluenceReviewCoverage };
+  const verified = bundles.every(bundle => bundle.status === 'verified');
+  const confluenceReviewCoverage = verified ? combinedConfluenceCoverage(confluenceReviews, archivePageIds) : [];
+  const jiraPlanCoverage = verified ? jiraCoverage?.finish() : undefined;
+  if (jiraPlanCoverage && !isDeepStrictEqual(jiraPlanCoverage, jiraPlans.map(({ proof }) => proof))) {
+    throw new Error('Jira 수집 계획의 묶음과 보관한 ZIP 연결이 리허설 기록과 다릅니다.');
+  }
+  return { bundles, confluenceReviewCoverage, jiraPlanCoverage };
 }
 
 async function verifiedConfluenceCoverage(directory, packages, confluenceReviews) {
@@ -576,24 +641,25 @@ async function verifiedConfluenceCoverage(directory, packages, confluenceReviews
   return confluenceReviewCoverage;
 }
 
-async function inspectWorkspace(directory, packages, confluenceReviews) {
+async function inspectWorkspace(directory, packages, confluenceReviews, jiraPlans) {
   return withPilot(directory, async call => {
-    const { bundles, confluenceReviewCoverage } = await verifyBundles(directory, packages, confluenceReviews);
+    const { bundles, confluenceReviewCoverage, jiraPlanCoverage } = await verifyBundles(directory, packages, confluenceReviews, jiraPlans);
     const evidence = bundles.every(bundle => bundle.status === 'verified')
       ? await collectMigrationEvidence(call, packages, confluenceReviews, confluenceReviewCoverage) : null;
-    return { bundles, evidence };
+    return { bundles, evidence, ...(jiraPlanCoverage ? { jiraPlanCoverage } : {}) };
   }, pilotReviewOptions(packages, confluenceReviews));
 }
 
 async function verify(directory) {
-  const { input, root, workspace, embedded, stageSha256, packages, profile, confluenceReviews } = await loadRun(directory);
+  const { input, root, workspace, embedded, stageSha256, packages, profile, confluenceReviews, jiraPlans } = await loadRun(directory);
   const attempt = await mkdtemp(join(root, 'verification-'));
   const report = { format: reportFormat, version: 1, checkedAt: new Date().toISOString(), status: 'failed',
     source: null, restore: null, comparison: null, ...(profile ? { profile } : {}),
-    ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}) };
+    ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}),
+    ...(jiraPlans.length ? { jiraPlans: jiraPlans.map(({ proof }) => proof) } : {}) };
   let step = 'source';
   try {
-    report.source = await inspectWorkspace(workspace, packages, confluenceReviews);
+    report.source = await inspectWorkspace(workspace, packages, confluenceReviews, jiraPlans);
     const evidence = report.source.evidence;
     if (evidence && evidence.status !== 'failed') {
       report.status = evidence.status;
@@ -602,11 +668,11 @@ async function verify(directory) {
         const restored = join(attempt, 'restored');
         await backupAndRestoreRehearsal(workspace, join(attempt, 'backup'), restored, { signal });
         step = 'restore';
-        const restoredRun = embedded ? await loadRun(restored) : { packages, confluenceReviews };
+        const restoredRun = embedded ? await loadRun(restored) : { packages, confluenceReviews, jiraPlans };
         if (embedded && (!restoredRun.embedded || restoredRun.stageSha256 !== stageSha256)) {
           throw new Error('복원한 리허설 준비 기록이 원본과 일치하지 않습니다.');
         }
-        report.restore = await inspectWorkspace(restored, restoredRun.packages, restoredRun.confluenceReviews);
+        report.restore = await inspectWorkspace(restored, restoredRun.packages, restoredRun.confluenceReviews, restoredRun.jiraPlans);
         if (report.restore.evidence) {
           report.comparison = compareMigrationEvidence(evidence, report.restore.evidence);
           report.status = report.comparison.status;
@@ -626,18 +692,19 @@ async function verify(directory) {
 
 const usage = [
   'npm run pilot:rehearsal -- profile <manifest.json> <새 분석 보고서.json>',
-  'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리> [--profile <분석 보고서.json>] [--confluence-findings <페이지별 검토 파일.json>]…',
+  'npm run pilot:rehearsal -- stage <manifest.json> <새 리허설 디렉터리> [--profile <분석 보고서.json>] [--jira-plan <수집 계획.json>]… [--confluence-findings <페이지별 검토 파일.json>]…',
   'npm run pilot:rehearsal -- review <리허설 디렉터리 또는 복원된 워크스페이스>',
   'npm run pilot:rehearsal -- verify <리허설 디렉터리 또는 복원된 워크스페이스>',
 ].join('\n');
 
 function stageOptions(args) {
   if (args.length < 2 || args.length % 2 !== 0 || args.slice(0, 2).some(value => value.startsWith('--'))) throw new Error(usage);
-  const options = { profilePath: undefined, findingsPaths: [] };
+  const options = { profilePath: undefined, findingsPaths: [], jiraPlanPaths: [] };
   for (let index = 2; index < args.length; index += 2) {
     const option = args[index], path = args[index + 1];
     if (!path || path.startsWith('--')) throw new Error(usage);
     if (option === '--profile' && !options.profilePath) options.profilePath = resolve(path);
+    else if (option === '--jira-plan' && options.jiraPlanPaths.length < packageLimit) options.jiraPlanPaths.push(resolve(path));
     else if (option === '--confluence-findings' && options.findingsPaths.length < confluenceFindingsLimit) {
       options.findingsPaths.push(resolve(path));
     } else throw new Error(usage);
