@@ -894,6 +894,10 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 두 조회에서 `kind: pipeline`이면 연결 검토에 사용할 `revision`도 반환한다. `POST /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline`에 `{repositoryId,pipelineId,sha,revision}`을 보내면 MR과 파이프라인을 다시 조회해 현재 티켓에 연결한다. 요청의 `repositoryId`는 실행 저장소다. 동일한 실행을 처음 연결하면 `201`, 이미 연결했으면 `200`과 저장된 `GitlabLink`를 반환한다. 검토한 MR HEAD·파이프라인 또는 로컬 연결 근거가 달라지면 `409`를 반환한다. 성공한 새 연결은 티켓에 기록되며 상태는 별도의 단건 검토와 티켓 저장으로 변경한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 병합 결과 파이프라인](https://docs.gitlab.com/ci/pipelines/merged_results_pipelines/)
 
+`GET /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline-test-report?revision=…`는 MR이 가리키는 최신 실행의 테스트 요약을 읽는다. `GET /api/issues/:id/gitlab-links/:linkId/merge-request-pipeline-failed-tests?revision=…`는 해당 실행의 실패·오류 사례를 읽는다. 두 조회에는 MR 최신 파이프라인 응답에서 받은 소문자 16진수 64자리의 `revision`을 보낸다. 응답은 [파이프라인 테스트 결과 확인](#파이프라인-테스트-결과-확인)의 형식과 한도를 사용한다. `linkId`는 티켓에 연결된 MR의 ID이고 `repositoryId`와 `pipelineId`는 실제 실행을 가리킨다. 두 경로는 파이프라인 연결이 없어도 사용할 수 있는 읽기 전용 조회로, `Cache-Control: no-store`를 적용한다. [GitLab 테스트 결과 요약 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-test-report-summary-for-a-pipeline) · [GitLab 상세 테스트 결과 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-test-report-for-a-pipeline)
+
+테스트 결과를 조회할 때 저장된 MR 연결, MR의 소스 HEAD와 지정한 파이프라인, 실행의 저장소·ID·SHA를 다시 확인한다. `revision`이 없거나 형식이 잘못되면 `400`, 검토한 근거가 바뀌면 `409`를 반환한다. 화면에서 **MR 최신 파이프라인 다시 확인**을 누르면 현재 실행의 테스트 결과를 열 수 있다.
+
 ### 연결된 MR 미해결 토론 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-discussions`는 사용자가 요청할 때만 현재 티켓에 연결된 열린 MR의 토론을 읽는다. 저장된 저장소와 전역 MR ID·IID를 대조한 뒤 GitLab에서 50개씩 최대 4페이지를 읽는다. 응답의 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`에 `threads`와 `hasMore`를 더한다. 확인한 미해결 토론은 최대 30개까지 표시한다. 표시 한도를 넘었거나 다음 원본 페이지가 남으면 `hasMore`는 `true`다. [GitLab 토론 API](https://docs.gitlab.com/api/discussions/#list-all-merge-request-discussion-items)

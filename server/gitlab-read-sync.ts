@@ -1189,11 +1189,11 @@ async function inspectVerifiedPipeline(context: VerifiedProject, repositoryId: n
   }
   const { object, observed } = await readPipeline();
   if (expectedSha !== null && observed.sha !== gitlabObjectSha(expectedSha)) throw new GitlabReadError(stage, 'invalid-response');
-  async function recheck() {
+  async function recheck(recheckStage = stage) {
     const { observed: latest } = await readPipeline();
     if (latest.sha !== observed.sha || latest.webUrl !== observed.webUrl || latest.status !== observed.status ||
         latest.updatedAt !== observed.updatedAt || latest.configurationError !== observed.configurationError) {
-      throw new GitlabReadError(stage === mergeRequestPipelineStage ? 'pipeline-jobs' : stage, 'changed');
+      throw new GitlabReadError(recheckStage, 'changed');
     }
   }
   return { context, object, observed, recheck };
@@ -1260,16 +1260,23 @@ async function readInspectedPipelineJobs({ context, observed, recheck }: Awaited
         return null;
       }),
     ]);
-    await recheck();
+    await recheck('pipeline-jobs');
     return { status: observed.status, configurationError: observed.configurationError, ...ordinary, triggerJobs };
   } finally { lists.abort(); }
 }
 
 type MergeRequestPipelinePointer = { repositoryId: number; pipelineId: number; sha: string };
-type MergeRequestPipelineRead = { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
-  { kind: 'pipeline'; pipeline: Extract<GitlabMergeRequestPipeline, { kind: 'pipeline' }>['pipeline'];
-    verification: { sourceProjectId: number; sourceHead: string; pipelineObject: GitlabReadObject };
-    jobs?: Awaited<ReturnType<typeof readGitlabPipelineJobs>> };
+type VerifiedMergeRequestPipeline = {
+  kind: 'pipeline'; pipeline: Extract<GitlabMergeRequestPipeline, { kind: 'pipeline' }>['pipeline'];
+  verification: { sourceProjectId: number; sourceHead: string; pipelineObject: GitlabReadObject };
+  jobs?: Awaited<ReturnType<typeof readGitlabPipelineJobs>>;
+};
+type MergeRequestPipelineRead<Report> = { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
+  (VerifiedMergeRequestPipeline & { report?: Report });
+export type MergeRequestPipelineTestReaders = {
+  testReport: () => ReturnType<typeof readGitlabPipelineTestReport>;
+  failedTests: () => ReturnType<typeof readGitlabPipelineFailedTests>;
+};
 
 function mergeRequestPipelineSha(value: unknown): string | null {
   if (value == null) return null;
@@ -1302,8 +1309,10 @@ function currentMergeRequestPipeline(object: GitlabReadObject, targetProjectId: 
   return { sourceProjectId, sourceHead, pipeline };
 }
 
-export async function readGitlabMergeRequestPipeline(connection: Connection & { projectIds: readonly number[] },
-  repositoryId: number, iid: number, objectId: number, includeJobs: boolean, signal?: AbortSignal): Promise<MergeRequestPipelineRead> {
+export async function readGitlabMergeRequestPipeline<Report = never>(connection: Connection & { projectIds: readonly number[] },
+  repositoryId: number, iid: number, objectId: number, includeJobs: boolean, signal?: AbortSignal,
+  readReport?: (selected: VerifiedMergeRequestPipeline, readers: MergeRequestPipelineTestReaders) => Promise<Report>,
+): Promise<MergeRequestPipelineRead<Report>> {
   const { projectFor, workflow } = gitlabLinkedActivityReader(connection, signal);
   async function readRevision() {
     const { object } = await workflow(repositoryId, 'merge_request', iid, objectId);
@@ -1331,10 +1340,16 @@ export async function readGitlabMergeRequestPipeline(connection: Connection & { 
   }
   const { status, webUrl, updatedAt } = inspection.observed;
   const jobs = includeJobs ? await readInspectedPipelineJobs(inspection, pointer.repositoryId, pointer.pipelineId, connection.token, signal) : undefined;
-  await recheckMergeRequest();
-  return { kind: 'pipeline', pipeline: { ...pointer, status, webUrl, updatedAt: updatedAt === null ? null : new Date(updatedAt).toISOString() },
+  const selected: VerifiedMergeRequestPipeline = { kind: 'pipeline',
+    pipeline: { ...pointer, status, webUrl, updatedAt: updatedAt === null ? null : new Date(updatedAt).toISOString() },
     verification: { sourceProjectId: observed.sourceProjectId, sourceHead: observed.sourceHead, pipelineObject: inspection.object },
     ...(jobs ? { jobs } : {}) };
+  const report = readReport ? await readReport(selected, {
+    testReport: () => readInspectedPipelineTestReport(inspection, pointer.pipelineId, connection.token, signal),
+    failedTests: () => readInspectedPipelineFailedTests(inspection, pointer.pipelineId, connection.token, signal),
+  }) : undefined;
+  await recheckMergeRequest();
+  return report === undefined ? selected : { ...selected, report };
 }
 
 function pipelineTestCounts(row: GitlabReadObject, fields: readonly string[]): GitlabTestCounts {
@@ -1352,8 +1367,13 @@ function pipelineTestCounts(row: GitlabReadObject, fields: readonly string[]): G
 
 export async function readGitlabPipelineTestReport(connection: Connection, repositoryId: number, pipelineId: number,
   expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineTestReport, 'status' | 'total' | 'suites' | 'hasMore'>> {
+  const inspection = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-test-report', signal);
+  return readInspectedPipelineTestReport(inspection, pipelineId, connection.token, signal);
+}
+
+async function readInspectedPipelineTestReport({ context, observed, recheck }: Awaited<ReturnType<typeof inspectVerifiedPipeline>>,
+  pipelineId: number, token: Connection['token'], signal?: AbortSignal) {
   const stage = 'pipeline-test-report';
-  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, stage, signal);
   const url = new URL(context.projectUrl);
   url.pathname += `/pipelines/${pipelineId}/test_report_summary`;
   const payload = await readJson(url, context.headers, stage, signal);
@@ -1363,17 +1383,22 @@ export async function readGitlabPipelineTestReport(connection: Connection, repos
   const total = pipelineTestCounts(payload.total, ['count', 'success', 'failed', 'skipped', 'error']);
   const suites = payload.test_suites.slice(0, PIPELINE_TEST_SUITE_LIMIT).map(row => {
     if (!isReadObject(row) || typeof row.name !== 'string') throw new GitlabReadError(stage, 'invalid-response');
-    return { name: gitlabDisplayLabel(row.name, 255, connection.token, '이름 미확인'),
+    return { name: gitlabDisplayLabel(row.name, 255, token, '이름 미확인'),
       ...pipelineTestCounts(row, ['total_count', 'success_count', 'failed_count', 'skipped_count', 'error_count']) };
   });
-  await recheck();
+  await recheck(stage);
   return { status: observed.status, total, suites, hasMore: payload.test_suites.length > PIPELINE_TEST_SUITE_LIMIT };
 }
 
 export async function readGitlabPipelineFailedTests(connection: Connection, repositoryId: number, pipelineId: number,
   expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineFailedTests, 'status' | 'cases' | 'hasMore'>> {
+  const inspection = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-failed-tests', signal);
+  return readInspectedPipelineFailedTests(inspection, pipelineId, connection.token, signal);
+}
+
+async function readInspectedPipelineFailedTests({ context, observed, recheck }: Awaited<ReturnType<typeof inspectVerifiedPipeline>>,
+  pipelineId: number, token: Connection['token'], signal?: AbortSignal) {
   const stage = 'pipeline-failed-tests';
-  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, stage, signal);
   const url = new URL(context.projectUrl);
   url.pathname += `/pipelines/${pipelineId}/test_report`;
   url.searchParams.set('per_page', String(PIPELINE_TEST_REPORT_PAGE_SIZE));
@@ -1401,7 +1426,7 @@ export async function readGitlabPipelineFailedTests(connection: Connection, repo
       if (!isReadObject(suite) || typeof suite.name !== 'string' || !Array.isArray(suite.test_cases)) {
         throw new GitlabReadError(stage, 'invalid-response');
       }
-      const suiteName = gitlabDisplayLabel(suite.name, 255, connection.token, '이름 미확인');
+      const suiteName = gitlabDisplayLabel(suite.name, 255, token, '이름 미확인');
       if (typeof suite.suite_error === 'string' && suite.suite_error.trim()) omitted = true;
       for (const testCase of suite.test_cases) {
         if (!isReadObject(testCase)) throw new GitlabReadError(stage, 'invalid-response');
@@ -1412,14 +1437,14 @@ export async function readGitlabPipelineFailedTests(connection: Connection, repo
         if (cases.length === PIPELINE_FAILED_TEST_LIMIT) { omitted = true; break pages; }
         if (status === 'failed') failed++;
         else errors++;
-        const className = typeof classname === 'string' ? gitlabDisplayLabel(classname, 255, connection.token, '') : '';
-        cases.push({ suite: suiteName, name: gitlabDisplayLabel(name, 255, connection.token, '이름 미확인'),
+        const className = typeof classname === 'string' ? gitlabDisplayLabel(classname, 255, token, '') : '';
+        cases.push({ suite: suiteName, name: gitlabDisplayLabel(name, 255, token, '이름 미확인'),
           ...(className ? { className } : {}), status });
       }
     }
     if (!hasNext || cases.length === PIPELINE_FAILED_TEST_LIMIT) break;
   }
-  await recheck();
+  await recheck(stage);
   return { status: observed.status, cases, hasMore: omitted || hasNext || failed < expectedFailed || errors < expectedErrors };
 }
 

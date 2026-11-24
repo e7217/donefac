@@ -3,7 +3,10 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabMergeRequestPipeline, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type {
+  AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabMergeRequestPipeline, GitlabPipelineFailedTests, GitlabPipelineTestReport,
+  GitlabSettings, Issue, WorkspaceSnapshot,
+} from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
 const rulesPath = '/api/automation-rules';
@@ -22,6 +25,8 @@ const upstreamPipeline = `${upstreamPipelineList}/${pipelineId}`;
 const upstreamJobs = `${upstreamPipeline}/jobs`;
 const upstreamTriggerJobs = `${upstreamPipeline}/trigger_jobs`;
 const upstreamBridges = `${upstreamPipeline}/bridges`;
+const upstreamTestReport = `${upstreamPipeline}/test_report_summary`;
+const upstreamFailedTests = `${upstreamPipeline}/test_report`;
 const unrelatedUrl = 'https://unrelated.invalid/team/other/-/pipelines/703?secret=synthetic#jobs';
 const button = (container: Locator, name: string) => container.getByRole('button', { name, exact: true });
 
@@ -31,13 +36,13 @@ async function json<T>(response: APIResponse | Response, status = 200): Promise<
   return JSON.parse(body) as T;
 }
 
-async function check(page: Page, trigger: Locator, path: string, status = 200) {
+async function check(page: Page, trigger: Locator, path: string, status = 200, query = '') {
   const receiving = page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'GET');
   await trigger.press('Enter');
   const response = await receiving;
   expect(response.status(), await response.text()).toBe(status);
   expect(response.request().method()).toBe('GET');
-  expect(new URL(response.url()).search).toBe('');
+  expect(new URL(response.url()).search).toBe(query);
   expect(response.headers()['cache-control']).toBe('no-store');
   return response;
 }
@@ -48,6 +53,11 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
   const token = `synthetic-mr-pipeline-api-${suffix}`;
   const secret = `synthetic-mr-pipeline-hook-${suffix}`;
   const at = new Date(Date.now() - 60_000).toISOString();
+  const suite = 'MR 업무 연결 통합 검사';
+  const failedTest = 'MR 파이프라인의 업무 참조 확인';
+  const errorTest = 'MR 파이프라인의 샘플 준비';
+  const passedTest = 'MR 파이프라인의 입력 형식 확인';
+  const privateOutput = `synthetic-private-junit-output-${suffix}`;
   const snapshot = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
   const settings = () => request.get(settingsPath).then(response => json<GitlabSettings>(response));
   const initialSettings = await settings();
@@ -96,7 +106,18 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
       failure_reason: 'script_failure', pipeline: pipeline(), web_url: jobUrl(),
     }]));
     else if (path === upstreamTriggerJobs || path === upstreamBridges) response.end('[]');
-    else response.writeHead(404).end('{}');
+    else if (path === upstreamTestReport && !url.search) response.end(JSON.stringify({
+      total: { count: 3, success: 1, failed: 1, skipped: 0, error: 1 },
+      test_suites: [{ name: suite, total_count: 3, success_count: 1, failed_count: 1, skipped_count: 0, error_count: 1 }],
+    }));
+    else if (path === upstreamFailedTests && url.searchParams.get('page') === '1' && url.searchParams.get('per_page') === '50') {
+      response.end(JSON.stringify({ total_count: 3, success_count: 1, failed_count: 1, skipped_count: 0, error_count: 1,
+        test_suites: [{ name: suite, test_cases: [
+          { name: failedTest, classname: 'app.ProjectTaskTest', status: 'failed', stack_trace: privateOutput },
+          { name: errorTest, status: 'error', system_output: privateOutput }, { name: passedTest, status: 'success' },
+        ] }],
+      }));
+    } else response.writeHead(404).end('{}');
   });
   remote.listen(0, '127.0.0.1');
   await once(remote, 'listening');
@@ -120,6 +141,8 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     const mrPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(links[0].id)}`;
     const lookupPath = `${mrPath}/merge-request-pipeline`;
     const jobsPath = `${mrPath}/merge-request-pipeline-jobs`;
+    const reportPath = `${mrPath}/merge-request-pipeline-test-report`;
+    const failedTestsPath = `${mrPath}/merge-request-pipeline-failed-tests`;
     const browserWrites: string[] = [];
     page.context().on('request', sent => {
       const { pathname } = new URL(sent.url());
@@ -136,15 +159,48 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     const openPipeline = panel.getByRole('link', { name: `파이프라인 #${pipelineId} GitLab에서 열기`, exact: true });
     const title = ticket.getByRole('textbox', { name: '제목', exact: true });
     const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const testReport = (scope: Locator) => scope.getByRole('region', { name: 'GitLab 테스트 결과', exact: true });
+    const readPipelineTests = async (surface: Page, scope: Locator, observed: GitlabMergeRequestPipeline) => {
+      if (observed.kind !== 'pipeline') throw new Error('The synthetic MR must have a verified latest pipeline.');
+      const query = `?revision=${observed.revision}`;
+      expect(observed.revision).toMatch(/^[a-f\d]{64}$/u);
+      const report = testReport(scope);
+      await expect(report).toHaveCount(0);
+      const start = calls.length;
+      const summary = await json<GitlabPipelineTestReport>(await check(surface, button(scope, '테스트 결과 확인'), reportPath, 200, query));
+      expect(summary).toMatchObject({ linkId: links[0].id, repositoryId, pipelineId, status: 'failed',
+        total: { count: 3, passed: 1, failed: 1, errors: 1 }, suites: [{ name: suite }] });
+      await expect(report.getByRole('group', { name: '전체 테스트', exact: true })).toContainText('실패 1개');
+      await expect(report.getByRole('list', { name: '테스트 스위트', exact: true })).toContainText(suite);
+      await expect(report.getByRole('link', { name: 'GitLab에서 파이프라인 열기', exact: true })).toHaveAttribute('href', pipelineUrl());
+      const reportReads = () => calls.slice(start).map(call => call.path).filter(path => [upstreamTestReport, upstreamFailedTests].includes(path));
+      expect(reportReads()).toEqual([upstreamTestReport]);
+
+      const details = await json<GitlabPipelineFailedTests>(await check(surface, button(report, '실패 테스트 확인'), failedTestsPath, 200, query));
+      expect(details).toMatchObject({ linkId: links[0].id, repositoryId, pipelineId, status: 'failed' });
+      expect(details.cases).toEqual([
+        { suite, name: failedTest, className: 'app.ProjectTaskTest', status: 'failed' }, { suite, name: errorTest, status: 'error' },
+      ]);
+      const failures = report.getByRole('region', { name: 'GitLab 실패 테스트', exact: true });
+      const cases = failures.getByRole('list', { name: '실패 및 오류 테스트', exact: true });
+      await expect(cases.getByRole('listitem').filter({ hasText: failedTest })).toContainText('실패');
+      await expect(cases.getByRole('listitem').filter({ hasText: errorTest })).toContainText('오류');
+      await expect(cases).not.toContainText(passedTest);
+      await expect(failures).not.toContainText(privateOutput);
+      await expect(failures.getByRole('link', { name: 'GitLab 원본 파이프라인 열기', exact: true })).toHaveAttribute('href', pipelineUrl());
+      expect(reportReads()).toEqual([upstreamTestReport, upstreamFailedTests]);
+    };
     await expect(trigger).toBeVisible();
     expect(calls).toHaveLength(0);
     await title.fill('저장하지 않은 업무 제목');
     await comment.fill('보내지 않은 검토 댓글');
-    await check(page, trigger, lookupPath);
+    const inspected = await json<GitlabMergeRequestPipeline>(await check(page, trigger, lookupPath));
+    if (inspected.kind !== 'pipeline') throw new Error('The synthetic MR must have a verified latest pipeline.');
     await expect(openPipeline).toHaveAttribute('href', pipelineUrl());
     await expect(panel.getByText('실패', { exact: true })).toBeVisible();
     await expect(panel).not.toContainText(unrelatedUrl);
     expect(calls.map(call => call.path)).toEqual([upstreamRepo, upstreamMr, upstreamPipeline, upstreamMr]);
+    await readPipelineTests(page, panel, inspected);
 
     const jobs = panel.getByRole('region', { name: 'GitLab CI 작업', exact: true });
     await expect(jobs).toHaveCount(0);
@@ -154,12 +210,21 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(calls.filter(call => call.path === upstreamJobs)).toHaveLength(1);
     expect(await jobs.evaluate(region => region.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
 
-    const completedPipelineReads = calls.filter(call => call.path === upstreamPipeline).length;
+    await button(panel, '테스트 결과 닫기').press('Enter');
     mode = 'null';
+    const completedReportReads = calls.filter(call => call.path === upstreamTestReport).length;
+    await check(page, button(panel, '테스트 결과 확인'), reportPath, 409, `?revision=${inspected.revision}`);
+    await expect(testReport(panel).getByRole('alert')).toHaveText('MR 또는 최신 파이프라인이 변경되었습니다. MR 최신 파이프라인 다시 확인을 눌러 주세요.');
+    await expect(testReport(panel).getByRole('list', { name: '테스트 스위트', exact: true })).toHaveCount(0);
+    expect(calls.filter(call => call.path === upstreamTestReport)).toHaveLength(completedReportReads);
+
+    const completedPipelineReads = calls.filter(call => call.path === upstreamPipeline).length;
     await check(page, retry, lookupPath);
     await expect(panel).toContainText('이 MR에 최신 파이프라인이 없습니다.');
     await expect(openPipeline).toHaveCount(0);
     await expect(jobs).toHaveCount(0);
+    await expect(testReport(panel)).toHaveCount(0);
+    await expect(button(panel, '테스트 결과 확인')).toHaveCount(0);
     mode = 'unreported';
     await check(page, retry, lookupPath);
     await expect(panel).toContainText('MR의 최신 파이프라인을 확인할 수 없습니다.');
@@ -168,6 +233,13 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(calls.filter(call => call.path === upstreamPipeline)).toHaveLength(completedPipelineReads);
 
     mode = 'ready';
+    currentSourceSha = 'f'.repeat(40);
+    const refreshed = await json<GitlabMergeRequestPipeline>(await check(page, retry, lookupPath));
+    if (refreshed.kind !== 'pipeline') throw new Error('The synthetic MR must have a verified latest pipeline.');
+    expect(refreshed.revision).not.toBe(inspected.revision);
+    await check(page, button(panel, '테스트 결과 확인'), reportPath, 200, `?revision=${refreshed.revision}`);
+    await expect(testReport(panel).getByRole('list', { name: '테스트 스위트', exact: true })).toContainText(suite);
+
     moveHeadDuringNextRead = true;
     await check(page, retry, lookupPath, 409);
     await expect(panel).toContainText('변경되었습니다.');
@@ -185,11 +257,12 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
       const developmentTrigger = button(activity, 'MR 최신 파이프라인 확인');
       await expect(developmentTrigger).toBeVisible();
       expect(calls).toHaveLength(callsBeforeDevelopment);
-      await check(development, developmentTrigger, lookupPath);
+      const inspected = await json<GitlabMergeRequestPipeline>(await check(development, developmentTrigger, lookupPath));
       const details = activity.getByRole('region', { name: 'GitLab MR 최신 파이프라인', exact: true });
       await expect(details.getByRole('link', { name: `파이프라인 #${pipelineId} GitLab에서 열기`, exact: true })).toHaveAttribute('href', pipelineUrl());
       await expect(button(details, 'CI 작업 확인')).toBeVisible();
       await expect(button(details, '이 업무에 파이프라인 연결')).toHaveCount(0);
+      await readPipelineTests(development, details, inspected);
       expect(calls.filter(call => call.path === upstreamJobs)).toHaveLength(1);
     } finally { await development.close(); }
 
@@ -229,10 +302,12 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(fresh.revision).not.toBe(prior.revision);
 
     let savedLink: GitlabLink | undefined;
-    await page.route(url => url.pathname === lookupPath, async route => {
+    const attachmentRoute = `**${lookupPath}`;
+    await page.route(attachmentRoute, async route => {
+      if (route.request().method() !== 'POST' || savedLink) return route.continue();
       savedLink = await json<GitlabLink>(await route.fetch(), 201);
       await route.fulfill({ status: 408, json: { error: '합성 연결 응답 유실' } });
-    }, { times: 1 });
+    });
     const attaching = postTo(lookupPath);
     await attach.click();
     const attached = await attaching;
@@ -243,6 +318,7 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
       sourceSha: pipelineSha, pipelineSource: 'merge_request_event', webUrl: pipelineUrl(), manualLinkId: expect.any(String) });
     const review = button(panel, '연결한 파이프라인으로 상태 검토');
     await expect(review).toBeEnabled();
+    await page.unroute(attachmentRoute);
     expect(browserWrites).toEqual([`POST ${lookupPath}`, `POST ${lookupPath}`]);
     await expect(title).toHaveValue('저장하지 않은 업무 제목');
     await expect(comment).toHaveValue('보내지 않은 검토 댓글');
@@ -274,8 +350,8 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(await json<Issue>(await applying)).toMatchObject({ title: '저장하지 않은 업무 제목', status: 'done' });
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
     expect(calls.every(call => call.method === 'GET' && call.token === token)).toBe(true);
-    expect(calls.every(call => [upstreamRepo, upstreamMr, upstreamPipeline, upstreamPipelineList, upstreamJobs, upstreamTriggerJobs, upstreamBridges]
-      .includes(call.path))).toBe(true);
+    const paths = [upstreamRepo, upstreamMr, upstreamPipeline, upstreamPipelineList, upstreamJobs, upstreamTriggerJobs, upstreamBridges, upstreamTestReport, upstreamFailedTests];
+    expect(calls.every(call => paths.includes(call.path))).toBe(true);
   } finally {
     try {
       if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);

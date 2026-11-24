@@ -97,6 +97,7 @@ function activityTime(value: unknown) {
 }
 
 type PipelineTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
+type PipelineTestTarget = PipelineTarget & { mergeRequestRevision?: string };
 type ReviewTarget = { linkId: string; issueId: string; repositoryId: number; mergeRequestIid: number; url: URL };
 type BranchTarget = { linkId: string; issueId: string; repositoryId: number; sourceBranch: string; origin: string; repositoryPath: string };
 export type BranchMergeRequest = GitlabBranchMergeRequests['openMergeRequests'][number];
@@ -621,26 +622,37 @@ function isPipelineTestReport(result: GitlabPipelineTestReport | undefined, targ
     result.suites.every(suite => isTestCounts(suite) && typeof suite.name === 'string' && suite.name.trim()));
 }
 
-function pipelineTestReportMessage(cause: unknown, label = '테스트 결과'): string {
+function pipelineTestPath(target: PipelineTestTarget, result: 'test-report' | 'failed-tests') {
+  const { issueId, linkId, mergeRequestRevision } = target;
+  if (mergeRequestRevision) {
+    const query = new URLSearchParams({ revision: mergeRequestRevision });
+    return `${gitlabMergeRequestPipelinePath(issueId, linkId)}-${result}?${query}`;
+  }
+  return `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-${result}`;
+}
+
+function pipelineTestReportMessage(cause: unknown, label = '테스트 결과', mergeRequest = false): string {
   if (cause instanceof ApiError) {
     if (cause.status === 401 || cause.status === 403) return `GitLab 연결과 ${label} 조회 권한을 확인해 주세요.`;
     if (cause.status === 404) {
       if (cause.message === `GitLab에서 이 파이프라인의 ${label}를 제공하지 않습니다.`) return cause.message;
       return '연결된 GitLab 파이프라인을 찾을 수 없습니다.';
     }
-    if (cause.status === 409) return '파이프라인이나 GitLab 연결이 변경되었습니다. 다시 확인해 주세요.';
+    if (cause.status === 409) return mergeRequest
+      ? 'MR 또는 최신 파이프라인이 변경되었습니다. MR 최신 파이프라인 다시 확인을 눌러 주세요.'
+      : '파이프라인이나 GitLab 연결이 변경되었습니다. 다시 확인해 주세요.';
     if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
   }
   return `GitLab ${label}를 불러오지 못했습니다. 다시 확인해 주세요.`;
 }
 
-function PipelineTestReport({ target, revision }: { target: PipelineTarget; revision: string }) {
+function PipelineTestReport({ target, revision }: { target: PipelineTestTarget; revision: string }) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
-    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-test-report`;
-    const result = await api<GitlabPipelineTestReport | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    const result = await api<GitlabPipelineTestReport | undefined>(pipelineTestPath(target, 'test-report'), { method: 'GET', cache: 'no-store', signal });
     return isPipelineTestReport(result, target) ? result : null;
-  }, '연결된 파이프라인의 테스트 결과 응답을 확인할 수 없습니다.', pipelineTestReportMessage);
+  }, '연결된 파이프라인의 테스트 결과 응답을 확인할 수 없습니다.',
+    cause => pipelineTestReportMessage(cause, '테스트 결과', Boolean(target.mergeRequestRevision)));
 
   return <div className="gitlab-activity-inspection">
     <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
@@ -675,7 +687,7 @@ function TestCounts({ counts, label }: { counts: GitlabTestCounts; label?: strin
   </div>;
 }
 
-function PipelineTestReportResult({ result, target, revision }: { result: GitlabPipelineTestReport; target: PipelineTarget; revision: string }) {
+function PipelineTestReportResult({ result, target, revision }: { result: GitlabPipelineTestReport; target: PipelineTestTarget; revision: string }) {
   const reportError = result.total.reportError || result.suites.some(suite => suite.reportError);
   const hasFailures = result.total.failed > 0 || result.total.errors > 0 || result.suites.some(suite => suite.failed > 0 || suite.errors > 0);
   return <>
@@ -706,13 +718,13 @@ function isPipelineFailedTestsResult(result: GitlabPipelineFailedTests | undefin
       (testCase.className === undefined || isLabel(testCase.className)) && (testCase.status === 'failed' || testCase.status === 'error')));
 }
 
-function PipelineFailedTests({ target, revision }: { target: PipelineTarget; revision: string }) {
+function PipelineFailedTests({ target, revision }: { target: PipelineTestTarget; revision: string }) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
-    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-failed-tests`;
-    const result = await api<GitlabPipelineFailedTests | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    const result = await api<GitlabPipelineFailedTests | undefined>(pipelineTestPath(target, 'failed-tests'), { method: 'GET', cache: 'no-store', signal });
     return isPipelineFailedTestsResult(result, target) ? result : null;
-  }, '연결된 파이프라인의 실패 테스트 상세 응답을 확인할 수 없습니다.', cause => pipelineTestReportMessage(cause, '실패 테스트 상세'));
+  }, '연결된 파이프라인의 실패 테스트 상세 응답을 확인할 수 없습니다.',
+    cause => pipelineTestReportMessage(cause, '실패 테스트 상세', Boolean(target.mergeRequestRevision)));
 
   return <div className="gitlab-failed-tests">
     <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
@@ -917,6 +929,8 @@ function MergeRequestPipelineDetails({ initial, target, revision, mr, manualActi
         ? <PipelineJobsResult result={current.jobs} target={current.target} showStatus={false} />
         : <p role="status">현재 파이프라인의 CI 작업을 다시 확인해 주세요.</p>)}
     </PipelineJobsInspection>
+    <PipelineTestReport target={{ ...current.target, mergeRequestRevision: current.revision }}
+      revision={JSON.stringify([revision, current.revision, pipeline.status, pipeline.updatedAt])} />
   </>;
 }
 

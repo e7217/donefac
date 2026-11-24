@@ -9,7 +9,8 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
-  AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabMergeRequestPipeline, GitlabSettings, Issue, IssueAutomationRunPage, Project, WorkspaceSnapshot,
+  AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabMergeRequestPipeline, GitlabPipelineFailedTests, GitlabPipelineTestReport,
+  GitlabSettings, Issue, IssueAutomationRunPage, Project, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const targetRepository = 42;
@@ -31,7 +32,7 @@ type Options = { method?: string; body?: unknown; headers?: Record<string, strin
 
 async function fixture(t: TestContext, configuredRepositories = [targetRepository, sourceRepository, unrelatedRepository]) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-mr-pipeline-'));
-  const calls: { method: string; path: string; credential?: string | string[] }[] = [];
+  const calls: { method: string; path: string; query: URLSearchParams; credential?: string | string[] }[] = [];
   let baseUrl = '';
   const targetUrl = () => baseUrl + '/team/app';
   const sourceUrl = () => baseUrl + '/fork/app';
@@ -45,11 +46,13 @@ async function fixture(t: TestContext, configuredRepositories = [targetRepositor
   let remotePipelineSource: string | undefined = 'merge_request_event';
   let currentHead = sourceHead;
   let duringPipeline: (() => Promise<void> | void) | undefined;
+  let duringTestReport: (() => Promise<void> | void) | undefined;
+  let testReportStatus = 200;
   const remotePipeline = (id: number) => ({ id, project_id: sourceRepository, sha: remotePipelineSha, status: 'failed',
     updated_at: remotePipelineAt, finished_at: remotePipelineAt, ref: pipelineRef, source: remotePipelineSource, web_url: pipelineUrl(id) });
   const mock = createServer(async (req, res) => {
     const { pathname: path, searchParams } = new URL(req.url ?? '/', 'http://fixture.test');
-    calls.push({ method: req.method ?? '', path, credential: req.headers['private-token'] });
+    calls.push({ method: req.method ?? '', path, query: searchParams, credential: req.headers['private-token'] });
     let body: unknown;
     if (path === repositoryPath(targetRepository)) {
       body = { id: targetRepository, path_with_namespace: 'team/app', web_url: targetUrl() };
@@ -71,6 +74,21 @@ async function fixture(t: TestContext, configuredRepositories = [targetRepositor
         pipeline: { id: pipelineId, project_id: sourceRepository, sha: pipelineSha } }];
     } else if (path === pipelinePath + '/trigger_jobs') {
       body = [];
+    } else if (path === pipelinePath + '/test_report_summary' || path === pipelinePath + '/test_report') {
+      await duringTestReport?.();
+      res.statusCode = testReportStatus;
+      if (testReportStatus !== 200) body = { message: `private report ${token}` };
+      else if (path.endsWith('/test_report_summary')) {
+        body = { total: { count: 3, success: 1, failed: 1, skipped: 0, error: 1 },
+          test_suites: [{ name: 'Widget suite', total_count: 3, success_count: 1, failed_count: 1, skipped_count: 0, error_count: 1,
+            suite_error: `private report ${token}` }] };
+      } else {
+        body = { failed_count: 1, error_count: 1, test_suites: [{ name: 'Widget suite', test_cases: [
+          { name: 'Passing case', status: 'success' },
+          { name: 'Failing widget', classname: 'Widgets', status: 'failed', stack_trace: `private report ${token}` },
+          { name: 'Setup error', status: 'error', system_output: `private report ${token}` },
+        ] }] };
+      }
     } else {
       res.statusCode = 404;
       body = { message: 'synthetic-unexpected-request' };
@@ -120,6 +138,8 @@ async function fixture(t: TestContext, configuredRepositories = [targetRepositor
     setPipelineAt(value: string) { remotePipelineAt = value; },
     setPipelineSource(value: string | undefined) { remotePipelineSource = value; },
     setDuringPipeline(next: typeof duringPipeline) { duringPipeline = next; },
+    setDuringTestReport(next: typeof duringTestReport) { duringTestReport = next; },
+    setTestReportStatus(status: number) { testReportStatus = status; },
     changeSourceHead() { currentHead = 'c'.repeat(40); },
   };
 }
@@ -131,6 +151,85 @@ async function reviewedAttachment(f: Awaited<ReturnType<typeof fixture>>) {
   assert.match(result.revision, /^[a-f0-9]{64}$/u);
   return { method: 'POST', body: { repositoryId, pipelineId, sha, revision: result.revision } };
 }
+
+test('reads bounded MR-only pipeline test summaries and failures from the exact configured fork on demand', async t => {
+  const f = await fixture(t);
+  const before = await f.snapshot();
+  const current = await f.call<GitlabMergeRequestPipeline>(f.path);
+  assert.equal(current.kind, 'pipeline');
+  assert.equal(f.calls.some(call => call.path.includes('test_report')), false);
+  const expected = { linkId: f.link.id, repositoryId: sourceRepository, pipelineId, status: 'failed' };
+
+  f.calls.length = 0;
+  const summary = await f.request<GitlabPipelineTestReport>(`${f.path}-test-report?revision=${current.revision}`);
+  assert.equal(summary.status, 200, JSON.stringify(summary.body));
+  assert.match(summary.headers.get('cache-control') ?? '', /\bno-store\b/u);
+  const { checkedAt, ...summaryDetails } = summary.body;
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(summaryDetails, { ...expected, hasMore: false,
+    total: { count: 3, passed: 1, failed: 1, skipped: 0, errors: 1, reportError: false },
+    suites: [{ name: 'Widget suite', count: 3, passed: 1, failed: 1, skipped: 0, errors: 1, reportError: true }],
+  });
+  assert.deepEqual(f.calls.map(call => call.path), [repositoryPath(targetRepository), mrPath, repositoryPath(sourceRepository), pipelinePath,
+    pipelinePath + '/test_report_summary', pipelinePath, mrPath]);
+
+  f.calls.length = 0;
+  const detail = await f.call<GitlabPipelineFailedTests>(`${f.path}-failed-tests?revision=${current.revision}`);
+  const { checkedAt: casesCheckedAt, ...failedCases } = detail;
+  assert.equal(new Date(casesCheckedAt).toISOString(), casesCheckedAt);
+  assert.deepEqual(failedCases, { ...expected, hasMore: false, cases: [
+    { suite: 'Widget suite', name: 'Failing widget', className: 'Widgets', status: 'failed' },
+    { suite: 'Widget suite', name: 'Setup error', status: 'error' },
+  ] });
+  assert.deepEqual(f.calls.map(call => call.path), [repositoryPath(targetRepository), mrPath, repositoryPath(sourceRepository), pipelinePath,
+    pipelinePath + '/test_report', pipelinePath, mrPath]);
+  const reportQuery = f.calls.find(call => call.path === pipelinePath + '/test_report')?.query;
+  assert.equal(reportQuery?.get('per_page'), '50');
+  assert.equal(reportQuery?.get('page'), '1');
+  assert.ok(f.calls.every(call => call.method === 'GET' && call.credential === token));
+  assert.doesNotMatch(JSON.stringify([summary.body, detail]), /private report|stack_trace|system_output|synthetic-mr-pipeline-read-token/u);
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('validates exactly one MR-pipeline revision and withholds report results if current evidence changes', async t => {
+  const f = await fixture(t);
+  const current = await f.call<GitlabMergeRequestPipeline>(f.path);
+  assert.equal(current.kind, 'pipeline');
+  const route = `${f.path}-test-report`;
+  const query = `?revision=${current.revision}`;
+  f.calls.length = 0;
+  for (const invalid of ['', '?revision=bad', `${query}&revision=${current.revision}`, `${query}&targetBranch=main`]) {
+    await f.call(route + invalid, undefined, 400);
+  }
+  assert.equal(f.calls.length, 0);
+
+  await f.call(`${route}?revision=${'0'.repeat(64)}`, undefined, 409);
+  assert.equal(f.calls.some(call => call.path.includes('test_report')), false);
+  f.setHeadPipeline({ ...f.head, id: pipelineId + 1 });
+  await f.call(route + query, undefined, 409);
+  assert.equal(f.calls.some(call => call.path.includes('test_report')), false);
+
+  f.setHeadPipeline(f.head);
+  f.setTestReportStatus(404);
+  const unavailable = await f.call<{ error: string }>(route + query, undefined, 404);
+  assert.match(unavailable.error, /테스트 결과를 제공하지 않습니다/u);
+  assert.doesNotMatch(unavailable.error, /private report|synthetic-mr-pipeline-read-token/u);
+  f.setTestReportStatus(200);
+
+  const before = await f.snapshot();
+  f.calls.length = 0;
+  f.setDuringTestReport(f.changeSourceHead);
+  await f.call(route + query, undefined, 409);
+  assert.equal(f.calls.at(-1)?.path, mrPath);
+  assert.ok(f.calls.some(call => call.path === pipelinePath + '/test_report_summary'));
+  assert.deepEqual(await f.snapshot(), before);
+  const next = await f.call<GitlabMergeRequestPipeline>(f.path);
+  assert.equal(next.kind, 'pipeline');
+  assert.notEqual(next.revision, current.revision);
+  f.setDuringTestReport(() => f.setPipelineSha('d'.repeat(40)));
+  await f.call(`${f.path}-failed-tests?revision=${next.revision}`, undefined, 409);
+  assert.deepEqual(await f.snapshot(), before);
+});
 
 test('uses the verified MR head pipeline from a configured fork and reads jobs only on explicit request', async t => {
   const f = await fixture(t);
