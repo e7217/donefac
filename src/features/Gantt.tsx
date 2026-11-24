@@ -281,6 +281,7 @@ function ProjectGantt(props: GanttProps) {
   const [findingsOpen, setFindingsOpen] = useState(false);
   const [deadlinesOpen, setDeadlinesOpen] = useState(false);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
+  const [teamBlockerChartPair, setTeamBlockerChartPair] = useState<{ sourceId: string; targetId: string; opener: HTMLButtonElement }>();
   const [teamFollowUp, setTeamFollowUp] = useState<TeamFollowUpReview | null>(null);
   const [teamFollowUpHandoff, setTeamFollowUpHandoff] = useState<TeamFollowUpHandoff | null>(null);
   const [selectedBaselineId, setSelectedBaselineId] = useState<string | null>(null);
@@ -548,6 +549,7 @@ function ProjectGantt(props: GanttProps) {
             setManualReview(null); setManualProblem(null); setCascade(null); setCreateOpen(false); setLinkEditor(null); setLinkPicker(null); setDatePicker(null); setShiftMode(null); setDrag(null); setPlanAssignment(null);
             setTeamFollowUp(null);
             setTeamFollowUpHandoff(null);
+            setTeamBlockerChartPair(undefined);
             setPasteScope(null);
             setBulkLinkSelection(null);
             setBlockerLinksScope(null);
@@ -576,6 +578,7 @@ function ProjectGantt(props: GanttProps) {
       trackDraft(TEAM_FOLLOW_UP_DRAFT, false);
       setTeamFollowUp(null);
       setTeamFollowUpHandoff(null);
+      setTeamBlockerChartPair(undefined);
       setPasteScope(null);
       setBulkLinkSelection(null);
       setBlockerLinksScope(null);
@@ -597,6 +600,7 @@ function ProjectGantt(props: GanttProps) {
   function closeTeamBlockers() {
     if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
     setTeamBlockersOpen(false);
+    setTeamBlockerChartPair(undefined);
     setCreatedBlockedIssue(null);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
   }
@@ -1010,16 +1014,36 @@ function ProjectGantt(props: GanttProps) {
   }, [activeDatePicker?.firstDate, trackDraft]);
   if (datePicker && !datePickerRow) setDatePicker(null);
   const visibleProjectCounts = new Map<string, number>();
-  for (const issue of issues) visibleProjectCounts.set(issue.projectId, (visibleProjectCounts.get(issue.projectId) ?? 0) + 1);
+  const openLinkIssues = new Set<string>();
+  const openLinkProjects = new Set<string>();
+  for (const issue of issues) {
+    visibleProjectCounts.set(issue.projectId, (visibleProjectCounts.get(issue.projectId) ?? 0) + 1);
+    if (canShowTeamBlockers && !isTerminalStatus(data, issue.projectId, issue.status)) {
+      openLinkIssues.add(issue.id);
+      openLinkProjects.add(issue.projectId);
+    }
+  }
+  const hasCrossProjectPair = openLinkProjects.size > 1;
   const hasLinkPair = (id: string) => (visibleProjectCounts.get(id) ?? 0) >= 2;
+  const hasOtherProjectTarget = (issue: Issue) => hasCrossProjectPair && openLinkIssues.has(issue.id);
+  const canStartLink = (issue: Issue, endpoint: GanttLinkEndpoint) =>
+    hasLinkPair(issue.projectId) || (endpoint === 'endDate' && hasOtherProjectTarget(issue));
   const candidateSource = linkPicker?.source;
   const candidateRow = candidateSource ? issueRows.get(candidateSource.issueId) : undefined;
-  const sourceRow = candidateRow && hasLinkPair(candidateRow.issue.projectId) ? candidateRow : undefined;
+  const sourceRow = candidateRow && candidateSource && canStartLink(candidateRow.issue, candidateSource.endpoint) ? candidateRow : undefined;
   const pickedSource = sourceRow ? candidateSource : undefined;
   if (candidateSource && !sourceRow) setLinkPicker({ source: null });
   const linkStep = pickedSource ? '후행' : '선행';
-  const hasVisibleLinkPair = [...visibleProjectCounts.values()].some(count => count >= 2);
+  const hasVisibleLinkPair = hasCrossProjectPair || [...visibleProjectCounts.values()].some(count => count >= 2);
   const canPickLink = !busy && hasVisibleLinkPair;
+  function canPickLinkEndpoint(issue: Issue, endpoint: GanttLinkEndpoint) {
+    if (!canPickLink) return false;
+    if (!sourceRow || !pickedSource) return canStartLink(issue, endpoint);
+    const source = sourceRow.issue;
+    if (source.id === issue.id) return false;
+    return source.projectId === issue.projectId || (pickedSource.endpoint === 'endDate' && endpoint === 'startDate' &&
+      hasOtherProjectTarget(source) && hasOtherProjectTarget(issue));
+  }
   const dependencies = data.dependencies.flatMap(dependency => {
     const predecessor = issueRows.get(dependency.predecessorId);
     const successor = issueRows.get(dependency.successorId);
@@ -1656,7 +1680,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function pickLink(issueId: string, endpoint: GanttLinkEndpoint, explicit: boolean) {
     const target = issueRows.get(issueId)?.issue;
-    if (!linkPicker || !canPickLink || !target || !hasLinkPair(target.projectId)) return;
+    if (!linkPicker || !target || !canPickLinkEndpoint(target, endpoint)) return;
     if (!pickedSource) {
       setLinkPicker({ source: { issueId, endpoint, explicit } });
       const previousFocus = document.activeElement;
@@ -1668,8 +1692,17 @@ function ProjectGantt(props: GanttProps) {
       return;
     }
     const opener = linkPickerTrigger.current;
-    if (!opener || pickedSource.issueId === issueId || target.projectId !== sourceRow?.issue.projectId) return;
+    if (!opener || !sourceRow) return;
     const predecessorId = pickedSource.issueId;
+    if (target.projectId !== sourceRow.issue.projectId) {
+      if (!canLeave()) return;
+      queueMicrotask(() => {
+        setLinkPicker(null);
+        setTeamBlockerChartPair({ sourceId: predecessorId, targetId: issueId, opener });
+        setTeamBlockersOpen(true);
+      });
+      return;
+    }
     const dependency = data.dependencies.find(link => link.predecessorId === predecessorId && link.successorId === issueId);
     const type = DEPENDENCY_TYPES.find(value => DEPENDENCY_ENDPOINTS[value].predecessor === pickedSource.endpoint &&
       DEPENDENCY_ENDPOINTS[value].successor === endpoint);
@@ -2079,7 +2112,7 @@ function ProjectGantt(props: GanttProps) {
         <MoveHorizontal size={14} aria-hidden="true" />상위·하위 일정 함께 이동
       </button>} />}
     {linkPicker && <GanttLinkPrompt source={sourceRow && pickedSource ? { key: sourceRow.issue.key, endpoint: pickedSource.endpoint } : null}
-      canPick={hasVisibleLinkPair} onReset={() => {
+      canPick={hasVisibleLinkPair} crossProject={hasCrossProjectPair} onReset={() => {
         setLinkPicker({ source: null });
         linkPickerTrigger.current?.focus({ preventScroll: true });
       }} onCancel={cancelLinkPicking} />}
@@ -2093,7 +2126,8 @@ function ProjectGantt(props: GanttProps) {
       onPointerDown={keepInlineDateFocus} />}
     {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
-      busy={busy || Boolean(issueOverlayOpen)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
+      busy={busy || Boolean(issueOverlayOpen || linkPicker)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
+      chartPair={teamBlockerChartPair} onChartPairSettled={() => setTeamBlockerChartPair(undefined)}
       onReviewSchedule={(relation, source, target, opener) => reviewTeamBlockerSchedules(source, [{ relation, target }], opener)}
       onReviewTogether={reviewTeamBlockerSchedules}
       createdBlockedIssue={createdBlockedIssue} onCreateBlockedIssue={openBlockedIssueCreation}
@@ -2244,7 +2278,8 @@ function ProjectGantt(props: GanttProps) {
         const captured = baseline?.issues.find(value => value.issueId === issue.id);
         const endDelta = captured?.endDate && issue.endDate ? dayNumber(issue.endDate) - dayNumber(captured.endDate) : null;
         const isSource = pickedSource?.issueId === issue.id;
-        const canPickRow = canPickLink && hasLinkPair(issue.projectId) && (!sourceRow || !isSource && sourceRow.issue.projectId === issue.projectId);
+        const rowLinkEndpoint = pickedSource ? 'startDate' : 'endDate';
+        const canPickRow = canPickLinkEndpoint(issue, rowLinkEndpoint);
         const startPosition = start !== null && start >= range.start && start <= range.end ? (start - range.start) * dayWidth + BAR_EDGE_INSET : null;
         const endPosition = end !== null && end >= range.start && end <= range.end ? (end - range.start + 1) * dayWidth - BAR_EDGE_INSET : null;
         const barClass = `gantt-bar ${dragging ? 'is-dragging' : ''} ${status.category === 'done' ? 'is-done' : ''}`;
@@ -2276,7 +2311,7 @@ function ProjectGantt(props: GanttProps) {
                 disabled={datePickingDisabled} iconOnly onOpen={startDatePicking} />}
               <button type="button" className="gantt-issue-name" disabled={Boolean(linkPicker && !canPickRow)}
                 aria-label={linkPicker ? `${issue.key} ${linkStep} 업무 선택` : undefined}
-                onClick={event => linkPicker ? pickLink(issue.id, pickedSource ? 'startDate' : 'endDate', false) : openIssueRow(issue.id, event.currentTarget)}>
+                onClick={event => linkPicker ? pickLink(issue.id, rowLinkEndpoint, false) : openIssueRow(issue.id, event.currentTarget)}>
                 <IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />
                 <span><small>{rowProject && <><span className="gantt-row-project" title={rowProject.name}>{rowProject.key}</span> · </>}{issue.key} · <IssueTypeName data={data} issue={issue} />
                   {hierarchyTrace && <GanttHierarchyFocusLabel trace={hierarchyTrace} issueId={issue.id} />}</small><strong title={issue.title}>{issue.title}</strong>
@@ -2327,7 +2362,7 @@ function ProjectGantt(props: GanttProps) {
               disabled={datePickingDisabled} onOpen={startDatePicking} />
           </div>}
           {linkPicker && <GanttLinkEndpoints issueKey={issue.key} step={linkStep} startPosition={startPosition} endPosition={endPosition}
-            timelineWidth={timelineWidth} disabled={!canPickRow} onPick={endpoint => pickLink(issue.id, endpoint, true)} />}
+            timelineWidth={timelineWidth} canPick={endpoint => canPickLinkEndpoint(issue, endpoint)} onPick={endpoint => pickLink(issue.id, endpoint, true)} />}
           {deadline && deadlineX !== null && !linkPicker && !activeDatePicker && <span className="gantt-deadline-marker"
             data-gantt-deadline={deadline.kind} data-gantt-focus-control="" style={{ left: deadlineX }} role="img"
             aria-label={deadlineLabel || undefined} aria-describedby={`gantt-deadline-label-${deadline.kind}`} tabIndex={-1} />}

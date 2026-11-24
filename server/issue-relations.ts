@@ -11,7 +11,8 @@ type NotifyChange = (before: IssueRelation | undefined, after: IssueRelation | u
 type Row = { json: string };
 
 export class IssueRelationError extends Error {
-  constructor(readonly status: number, message: string, readonly details?: { currentVersion: number }) { super(message); }
+  constructor(readonly status: number, message: string,
+    readonly details?: { currentVersion: number; reason?: 'source_version_changed' | 'target_version_changed' }) { super(message); }
 }
 
 function relationInput(input: unknown, key: 'otherIssueId' | 'expectedVersion') {
@@ -143,6 +144,39 @@ export class IssueRelationsService {
 
   create(issueId: string, input: unknown, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {
     return this.store.transaction(() => this.createInTransaction(issueId, input, audit, notifyChange));
+  }
+
+  createTeamBlocker(input: unknown, isTerminal: (issue: Issue) => boolean, audit: Audit, notifyChange: NotifyChange): {
+    relation: IssueRelation; created: boolean;
+  } {
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 4) {
+      throw new IssueRelationError(400, '프로젝트 간 차단 관계 요청을 확인해 주세요.');
+    }
+    const { sourceIssueId, targetIssueId, expectedSourceVersion, expectedTargetVersion } = input as Record<string, unknown>;
+    if (!isRelationId(sourceIssueId) || !isRelationId(targetIssueId) || sourceIssueId === targetIssueId ||
+        ![expectedSourceVersion, expectedTargetVersion].every(value => typeof value === 'number' && Number.isSafeInteger(value) && value > 0)) {
+      throw new IssueRelationError(400, '두 업무와 확인한 업무 버전을 보내 주세요.');
+    }
+    return this.store.transaction(() => {
+      const source = this.requireIssue(sourceIssueId);
+      const target = this.requireIssue(targetIssueId);
+      if (source.projectId === target.projectId) {
+        throw new IssueRelationError(409, '서로 다른 프로젝트의 업무를 선택해 주세요.');
+      }
+      if (isTerminal(source) || isTerminal(target)) {
+        throw new IssueRelationError(409, '완료 또는 취소된 업무는 프로젝트 간 차단에 추가할 수 없습니다.');
+      }
+      const staleSource = source.version !== expectedSourceVersion;
+      if (staleSource || target.version !== expectedTargetVersion) {
+        const existing = findTeamspaceIssueRelation(this.store, { sourceIssueId, targetIssueId, type: 'blocks' });
+        if (existing) return { relation: existing, created: false };
+        throw new IssueRelationError(409, `${staleSource ? '차단하는 업무' : '차단되는 업무'}가 변경되었습니다. 최신 업무를 확인해 주세요.`, {
+          currentVersion: staleSource ? source.version : target.version,
+          reason: staleSource ? 'source_version_changed' : 'target_version_changed',
+        });
+      }
+      return this.createInTransaction(source.id, { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }, audit, notifyChange);
+    });
   }
 
   createDuplicateInTransaction(issueId: string, originalIssueId: string, audit: Audit, notifyChange: NotifyChange): { relation: IssueRelation; created: boolean } {

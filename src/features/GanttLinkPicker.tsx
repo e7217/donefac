@@ -8,11 +8,12 @@ export type GanttLinkEndpoint = keyof typeof SCHEDULE_DATE_LABELS;
 type PromptProps = {
   source: { key: string; endpoint: GanttLinkEndpoint } | null;
   canPick: boolean;
+  crossProject: boolean;
   onReset: () => void;
   onCancel: () => void;
 };
 
-export function GanttLinkPrompt({ source, canPick, onReset, onCancel }: PromptProps) {
+export function GanttLinkPrompt({ source, canPick, crossProject, onReset, onCancel }: PromptProps) {
   return (
     <section className="gantt-link-prompt" aria-label="차트 연결 선택">
       <div className="gantt-link-instructions">
@@ -23,6 +24,7 @@ export function GanttLinkPrompt({ source, canPick, onReset, onCancel }: PromptPr
             : '같은 프로젝트의 업무 두 개 이상을 차트에 표시해 주세요.'}
         </p>
         {canPick && <p>막대에서 시작일이나 종료일을 고르세요. 업무 이름을 선택하면 선행 종료일과 후행 시작일을 사용합니다.</p>}
+        {crossProject && <p>서로 다른 프로젝트의 진행 가능한 업무는 선행 종료일과 후행 시작일을 선택해 차단 관계를 검토합니다.</p>}
       </div>
       <div className="gantt-link-prompt-actions">
         {source && <button type="button" className="btn" onClick={onReset}>선행 다시 선택</button>}
@@ -38,11 +40,11 @@ type EndpointsProps = {
   startPosition: number | null;
   endPosition: number | null;
   timelineWidth: number;
-  disabled: boolean;
+  canPick: (endpoint: GanttLinkEndpoint) => boolean;
   onPick: (endpoint: GanttLinkEndpoint) => void;
 };
 
-export function GanttLinkEndpoints({ issueKey, step, startPosition, endPosition, timelineWidth, disabled, onPick }: EndpointsProps) {
+export function GanttLinkEndpoints({ issueKey, step, startPosition, endPosition, timelineWidth, canPick, onPick }: EndpointsProps) {
   if ((startPosition === null && endPosition === null) || timelineWidth <= 0) return null;
   const width = Math.min(timelineWidth, 44);
   const halfWidth = width / 2;
@@ -60,7 +62,7 @@ export function GanttLinkEndpoints({ issueKey, step, startPosition, endPosition,
         return (
           <button key={endpoint} type="button" className="gantt-link-endpoint"
             data-endpoint={endpoint} aria-label={accessibleLabel} title={accessibleLabel}
-            style={{ left: center, width }} disabled={disabled} onClick={() => onPick(endpoint)}>
+            style={{ left: center, width }} disabled={!canPick(endpoint)} onClick={() => onPick(endpoint)}>
             <span aria-hidden="true">{label}</span>
           </button>
         );

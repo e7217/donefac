@@ -6,13 +6,15 @@ import type { ScheduleDependencyEndpoint } from '../../shared/schedule-dependenc
 import type { FeatureProps, Issue, IssueRelation, TeamScheduleBlocker, WorkspaceSnapshot } from '../../shared/types';
 import { isTerminalStatus } from '../../shared/workflow-helpers';
 import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
-import { api } from '../lib/api';
+import { ApiError, api } from '../lib/api';
 import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
 import './gantt-team-blockers.css';
 
 const ROWS_PER_PAGE = 8;
 const ISSUE_MATCH_LIMIT = 40;
+
+type ChartPair = { sourceId: string; targetId: string; opener: HTMLButtonElement };
 
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   id: string;
@@ -27,6 +29,8 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   createdBlockedIssue: Pick<Issue, 'id' | 'key'> | null;
   onCreateBlockedIssue: (source: Issue, opener: HTMLButtonElement) => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
+  chartPair?: ChartPair;
+  onChartPairSettled?: () => void;
 };
 
 interface Draft {
@@ -35,11 +39,13 @@ interface Draft {
   sourceQuery: string;
   targetQuery: string;
   initialTargetId: string;
+  chartPair?: ChartPair;
 }
 
 export function GanttTeamBlockers({
   id, data, visibleIssueIds, selectedIssueIds, busy, openIssue, refresh, notify,
   onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onReviewTogether, createdBlockedIssue, onCreateBlockedIssue, onPointerDown,
+  chartPair, onChartPairSettled,
 }: Props) {
   const heading = useId();
   const formHeading = useId();
@@ -52,12 +58,19 @@ export function GanttTeamBlockers({
   const [page, setPage] = useState(0);
   const [revealedBlockedIssueId, setRevealedBlockedIssueId] = useState<string>();
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [openedChartPair, setOpenedChartPair] = useState<ChartPair>();
+  if (chartPair && chartPair !== openedChartPair) {
+    setOpenedChartPair(chartPair);
+    setSaveError('');
+    setDraft({ chartPair, sourceId: chartPair.sourceId, targetId: chartPair.targetId, initialTargetId: chartPair.targetId, sourceQuery: '', targetQuery: '' });
+  }
   const getRequest = useRef<AbortController | null>(null);
   const saveRequest = useRef<AbortController | null>(null);
   const refreshRequest = useRef<AbortController | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
+  const formTitle = useRef<HTMLHeadingElement>(null);
   const sourceSearch = useRef<HTMLInputElement>(null);
-  const restoreAddFocus = useRef(false);
+  const restoreFormFocus = useRef<{ opener?: HTMLButtonElement } | null>(null);
   const { issues, projects, workflows, issueSchemas } = data;
 
   const projectNames = useMemo(() => new Map(projects.map(project => [project.id, project.name])), [projects]);
@@ -97,7 +110,7 @@ export function GanttTeamBlockers({
   const target = draft && activeById.get(draft.targetId);
   const selectedSource = selectedIssueIds.length === 1 && visibleIssueIds.has(selectedIssueIds[0])
     ? activeById.get(selectedIssueIds[0]) : undefined;
-  const dirty = Boolean(draft && (draft.sourceId || draft.targetId !== draft.initialTargetId ||
+  const dirty = Boolean(draft && (draft.sourceId !== (draft.chartPair?.sourceId ?? '') || draft.targetId !== draft.initialTargetId ||
     draft.sourceQuery.trim() || draft.targetQuery.trim()));
   const duplicate = Boolean(source && target && relations.some(relation => relation.origin !== 'jira' &&
     relation.sourceIssueId === source.id && relation.targetIssueId === target.id));
@@ -105,6 +118,7 @@ export function GanttTeamBlockers({
   const unavailable = Boolean(draft && ((draft.sourceId && !source) || (draft.targetId && !target)));
   const disabled = busy || saving;
   const draftOpen = draft !== null;
+  const reviewedChartPair = draft?.chartPair;
 
   const load = useCallback(async () => {
     getRequest.current?.abort();
@@ -148,12 +162,22 @@ export function GanttTeamBlockers({
     return () => onDraftChange(false, false);
   }, [dirty, saving, onDraftChange]);
 
-  useLayoutEffect(() => { if (draftOpen) sourceSearch.current?.focus(); }, [draftOpen]);
+  useLayoutEffect(() => {
+    if (!draftOpen) return;
+    if (reviewedChartPair) {
+      formTitle.current?.focus({ preventScroll: true });
+      formTitle.current?.scrollIntoView({ block: 'nearest' });
+    } else {
+      sourceSearch.current?.focus();
+    }
+  }, [draftOpen, reviewedChartPair]);
 
   useLayoutEffect(() => {
-    if (draftOpen || disabled || !restoreAddFocus.current) return;
-    restoreAddFocus.current = false;
-    addButton.current?.focus({ preventScroll: true });
+    if (draftOpen || disabled || !restoreFormFocus.current) return;
+    const { opener } = restoreFormFocus.current;
+    restoreFormFocus.current = null;
+    const target = opener?.isConnected && !opener.disabled ? opener : addButton.current;
+    target?.focus({ preventScroll: !opener });
   }, [draftOpen, disabled]);
 
   function startDraft() {
@@ -170,9 +194,10 @@ export function GanttTeamBlockers({
 
   function cancelDraft() {
     if (dirty && !window.confirm('입력한 차단 관계를 취소하시겠습니까?')) return;
-    restoreAddFocus.current = true;
+    restoreFormFocus.current = { opener: reviewedChartPair?.opener };
     setDraft(null);
     setSaveError('');
+    if (reviewedChartPair) onChartPairSettled?.();
   }
 
   async function refreshList() {
@@ -205,9 +230,10 @@ export function GanttTeamBlockers({
     try {
       let relation: TeamScheduleBlocker | undefined;
       try {
-        const { id, sourceIssueId, targetIssueId, version } = await api<IssueRelation>(`/issues/${encodeURIComponent(source.id)}/relations`, {
+        const { id, sourceIssueId, targetIssueId, version } = await api<IssueRelation>('/schedule/team-blockers', {
           method: 'POST', signal: request.signal,
-          body: JSON.stringify({ otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }),
+          body: JSON.stringify({ sourceIssueId: source.id, targetIssueId: target.id,
+            expectedSourceVersion: source.version, expectedTargetVersion: target.version }),
         });
         relation = { id, sourceIssueId, targetIssueId, version };
       } catch (cause) {
@@ -216,7 +242,10 @@ export function GanttTeamBlockers({
         if (request.signal.aborted) return;
         relation = current?.find(row => row.origin !== 'jira' && row.sourceIssueId === source.id && row.targetIssueId === target.id);
         if (!relation) {
-          setSaveError(errorMessage(cause));
+          if (cause instanceof ApiError && (cause.status === 409 || cause.status === 404)) {
+            await refresh().catch(() => {});
+          }
+          if (!request.signal.aborted) setSaveError(errorMessage(cause));
           return;
         }
       }
@@ -225,7 +254,7 @@ export function GanttTeamBlockers({
       setRelations(previous => [...previous.filter(row => row.id !== saved.id &&
         !(row.origin === 'jira' && row.sourceIssueId === saved.sourceIssueId && row.targetIssueId === saved.targetIssueId)), saved]);
       setPage(0);
-      restoreAddFocus.current = true;
+      restoreFormFocus.current = { opener: reviewedChartPair?.opener };
       setDraft(null);
       const outsideView = !visibleIssueIds.has(source.id) && !visibleIssueIds.has(target.id);
       notify(`${source.key} → ${target.key} 차단 관계를 저장했습니다.${outsideView ? ' 두 업무가 모두 현재 보기 범위 밖에 있습니다.' : ''}`);
@@ -234,7 +263,10 @@ export function GanttTeamBlockers({
       } catch (cause) {
         if (!request.signal.aborted) notify(`업무 목록을 새로고침하지 못했습니다. ${errorMessage(cause)}`, 'error');
       }
-      if (!request.signal.aborted) await load();
+      if (!request.signal.aborted) {
+        await load();
+        if (!request.signal.aborted && reviewedChartPair) onChartPairSettled?.();
+      }
     } finally {
       if (!request.signal.aborted) {
         saveRequest.current = null;
@@ -270,7 +302,7 @@ export function GanttTeamBlockers({
       새 업무에 연결할 원인 업무를 간트에서 하나 선택하세요.
     </p>}
     {draft && <form id={`${formHeading}-form`} className="gantt-team-blockers-form" aria-labelledby={formHeading} onSubmit={event => void save(event)}>
-      <h3 id={formHeading}>프로젝트 간 차단 관계 추가</h3>
+      <h3 id={formHeading} ref={formTitle} tabIndex={reviewedChartPair ? -1 : undefined}>프로젝트 간 차단 관계 추가</h3>
       <fieldset disabled={disabled}>
         <IssuePicker label="차단하는 업무" searchLabel="원인 업무 검색" searchRef={sourceSearch}
           selectedId={draft.sourceId} query={draft.sourceQuery} excludedProjectId={target?.projectId}
@@ -281,6 +313,10 @@ export function GanttTeamBlockers({
           issues={activeIssues} issueAliases={data.issueAliases} projectNames={projectNames} onSelect={targetId => changeDraft({ targetId })}
           onQuery={targetQuery => changeDraft({ targetQuery })} />
       </fieldset>
+      {reviewedChartPair && <p>
+        {source && target && <><strong>{source.key} → {target.key}</strong> · </>}
+        일정 검토는 완료 후 시작(FS) · 0근무일을 기준으로 합니다.
+      </p>}
       {invalidPair && <p role="status">서로 다른 프로젝트의 업무를 선택해 주세요.</p>}
       {unavailable && <p role="status">현재 진행 가능한 업무를 선택해 주세요.</p>}
       {duplicate && <p role="status">이미 같은 방향의 차단 관계가 있습니다.</p>}

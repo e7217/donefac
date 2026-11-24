@@ -466,6 +466,62 @@ test('team Gantt blockers expose only native cross-project relations between liv
   assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).dependencies, scheduleBefore);
 });
 
+test('team Gantt blocker writes check both reviewed versions and retain an existing eligible relation on retry', async t => {
+  const f = await fixture(t);
+  const source = await f.create('차트에서 선택한 선행 업무');
+  const target = await f.create('차트에서 선택한 후행 업무', secondary);
+  const local = await f.create('같은 프로젝트 업무');
+  const path = '/schedule/team-blockers';
+  const body = { sourceIssueId: source.id, targetIssueId: target.id,
+    expectedSourceVersion: source.version, expectedTargetVersion: target.version };
+  const post = { method: 'POST', body };
+  const changedSource = await f.call<Issue>(`/issues/${source.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': otherActor }, body: {
+    expectedVersion: source.version, endDate: '2026-11-26',
+  } });
+  const changedTarget = await f.call<Issue>(`/issues/${target.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': otherActor }, body: {
+    expectedVersion: target.version, startDate: '2026-11-23',
+  } });
+  const writeKey = await f.key('팀 차단 두 프로젝트 쓰기', [primary, secondary], 'write');
+  const before = await f.call<WorkspaceSnapshot>('/workspace');
+  type ReviewError = { error: string; details: { reason: string; currentVersion: number } };
+  const firstConflict = await f.call<ReviewError>(path, post, 409);
+  assert.deepEqual(firstConflict.details, { reason: 'source_version_changed', currentVersion: changedSource.version });
+  const currentSource = { ...body, expectedSourceVersion: changedSource.version };
+  const secondConflict = await f.call<ReviewError>(path, { ...post, body: currentSource }, 409);
+  assert.deepEqual(secondConflict.details, { reason: 'target_version_changed', currentVersion: changedTarget.version });
+  const current = { ...post, body: { ...currentSource, expectedTargetVersion: changedTarget.version } };
+  await f.call(path, { ...post, body: { ...current.body, actorId: actor } }, 400);
+  await f.call(path, { ...post, body: { ...current.body, expectedTargetVersion: '1' } }, 400);
+  assert.match((await f.call<ReviewError>(path, { ...post, body: { ...current.body, targetIssueId: local.id, expectedTargetVersion: local.version } }, 409)).error,
+    /다른 프로젝트/u);
+  await f.call(path, { ...post, body: { ...current.body, targetIssueId: 'missing-issue' } }, 404);
+  await f.call(`/v1${path}`, { ...current, headers: writeKey }, 403);
+  assert.deepEqual(await f.call<WorkspaceSnapshot>('/workspace'), before);
+
+  const results = await Promise.all([f.request<IssueRelation>(path, current), f.request<IssueRelation>(path, current)]);
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  const relation = results[0].data;
+  assert.deepEqual(results[1].data, relation);
+  assert.ok(results.every(result => result.headers.get('cache-control') === 'no-store'));
+  assert.deepEqual({ origin: relation.origin, type: relation.type, source: relation.sourceIssueId, target: relation.targetIssueId },
+    { origin: 'teamspace', type: 'blocks', source: source.id, target: target.id });
+  assert.deepEqual(await f.call<IssueRelation>(path, post), relation);
+  assert.deepEqual(await f.call(pathFor(source.id)), [relation]);
+  assert.deepEqual(await f.call(pathFor(target.id)), [relation]);
+  const after = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.issues, before.issues);
+  assert.deepEqual(after.dependencies, before.dependencies);
+  const added = after.activities.filter(event => event.action === '업무 관계 추가' && [source.id, target.id].includes(event.resourceId));
+  assert.deepEqual(added.map(event => event.resourceId).sort(), [source.id, target.id].sort());
+  assert.ok(added.every(event => event.actorId === actor));
+
+  await f.call(`/issues/${target.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': otherActor }, body: {
+    expectedVersion: changedTarget.version, status: 'done',
+  } });
+  assert.match((await f.call<ReviewError>(path, current, 409)).error, /완료 또는 취소/u);
+  assert.deepEqual(await f.call(pathFor(target.id)), [relation]);
+});
+
 test('restore preserves legacy labels and advances active and archived team links past stale versions', async t => {
   const f = await fixture(t);
   const a = await f.create('복원할 관계의 한쪽 업무');

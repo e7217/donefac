@@ -265,10 +265,9 @@ export function createApp(options: {
   const markdownArchiveImport = new MarkdownArchiveImportService(store, documentDraftFiles);
   const collaboration=new CollaborationService(store,documentContent);
   const notifications=new NotificationsService(store);
+  const isIssueTerminal = (issue: Issue) => isTerminalStatus({ workflows: [workflows.get(issue.projectId)] }, issue.projectId, issue.status);
   const deadlineReminders = new DeadlineRemindersService(
-    store, notifications,
-    issue => isTerminalStatus({ workflows: [workflows.get(issue.projectId)] }, issue.projectId, issue.status),
-    options.deadlineReminderClock,
+    store, notifications, isIssueTerminal, options.deadlineReminderClock,
   );
   const subscriptions=new NotificationSubscriptionsService(store);
   const favorites = new FavoritesService(store);
@@ -2511,6 +2510,10 @@ export function createApp(options: {
   });
   app.get('/api/schedule/team-blockers',(_req,res)=>{
     res.set('Cache-Control','no-store').json(issueRelations.teamScheduleBlockers());
+  });
+  app.post('/api/schedule/team-blockers', (req, res) => {
+    const { relation, created } = issueRelations.createTeamBlocker(req.body, isIssueTerminal, relationAudit(req), relationNotification(req));
+    res.set('Cache-Control', 'no-store').status(created ? 201 : 200).json(relation);
   });
   app.post('/api/issues/:id/relations',(req,res)=>{
     const { relation, created }=issueRelations.create(req.params.id,req.body,relationAudit(req),relationNotification(req));

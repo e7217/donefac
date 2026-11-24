@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
 import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const title = '프로젝트 간 차단';
@@ -74,6 +74,106 @@ async function openBlockers(page: Page) {
   return panel;
 }
 
+test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차단 관계를 검토하고 저장한다', async ({ page, request }) => {
+  const f = await fixture(request);
+  try {
+    const source = await f.issue(f.first, '교차 연결 원인', { startDate: '2026-11-19', endDate: '2026-11-20' });
+    const target = await f.issue(f.second, '교차 연결 대상', { startDate: null, endDate: null });
+    const local = await f.issue(f.first, '같은 프로젝트 후행', { startDate: '2026-11-24', endDate: '2026-11-26' });
+    const before = await f.schedule();
+    const crossProjectQuery = `${f.prefix} 교차 연결`;
+    const hash = gantt(f.first);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/${ganttSearch(hash, crossProjectQuery)}`);
+    await expect(row(page, source)).toBeVisible();
+    await expect(row(page, target)).toBeVisible();
+    await expect(row(page, local)).toHaveCount(0);
+    const picker = button(page, '차트에서 연결');
+    const dependencyWrites: string[] = [];
+    page.on('request', outgoing => {
+      if (new URL(outgoing.url()).pathname === '/api/dependencies' && outgoing.method() !== 'GET') dependencyWrites.push(outgoing.method());
+    });
+    const pickRows = async (successor: Issue) => {
+      await picker.click();
+      await button(row(page, source), `${source.key} 선행 업무 선택`).click();
+      await button(row(page, successor), `${successor.key} 후행 업무 선택`).click();
+    };
+    const panel = blockerPanel(page);
+    const form = panel.getByRole('form', { name: '프로젝트 간 차단 관계 추가', exact: true });
+    const sourceField = form.getByRole('combobox', { name: '차단하는 업무', exact: true });
+    const targetField = form.getByRole('combobox', { name: '차단되는 업무', exact: true });
+    await pickRows(target);
+    await expect(form).toBeVisible();
+    await expect(sourceField).toHaveValue(source.id);
+    await expect(targetField).toHaveValue(target.id);
+    await expect(form.getByRole('heading', { name: '프로젝트 간 차단 관계 추가', exact: true })).toBeFocused();
+    await expect(picker).toHaveAttribute('aria-pressed', 'false');
+    expect(await f.schedule()).toEqual(before);
+    expect((await teamBlockers(request)).filter(item => item.sourceIssueId === source.id)).toEqual([]);
+
+    await button(form, '차단 관계 입력 취소').click();
+    await expect(form).toHaveCount(0);
+    await expect(picker).toBeFocused();
+    expect((await teamBlockers(request)).filter(item => item.sourceIssueId === source.id)).toEqual([]);
+
+    await pickRows(target);
+    await expect(sourceField).toHaveValue(source.id);
+    await expect(targetField).toHaveValue(target.id);
+    const updatedTitle = `${source.title} 갱신`;
+    const updateBeforePost = async (route: Route) => {
+      if (route.request().method() !== 'POST') return route.continue();
+      await json<Issue>(await request.patch(`/api/issues/${source.id}`, {
+        headers: { 'X-Actor-Id': f.actor.id }, data: { expectedVersion: source.version, title: updatedTitle },
+      }));
+      await route.continue();
+    };
+    await page.route(`**${blockersPath}`, updateBeforePost);
+    const stale = waitMutation(page, blockersPath);
+    await button(form, '차단 관계 저장').click();
+    expect((await stale).status()).toBe(409);
+    await page.unroute(`**${blockersPath}`, updateBeforePost);
+    await expect(form.getByRole('alert')).toBeVisible();
+    await expect(sourceField.locator('option:checked')).toContainText(updatedTitle);
+    await expect(targetField).toHaveValue(target.id);
+    expect((await teamBlockers(request)).filter(item => item.sourceIssueId === source.id)).toEqual([]);
+
+    const saving = waitMutation(page, blockersPath);
+    await button(form, '차단 관계 저장').click();
+    const savedResponse = await saving;
+    expect(savedResponse.request().postDataJSON()).toEqual({ sourceIssueId: source.id, targetIssueId: target.id,
+      expectedSourceVersion: source.version + 1, expectedTargetVersion: target.version });
+    const relation = await json<IssueRelation>(savedResponse, 201);
+    expect(relation).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
+    await expect(form).toHaveCount(0);
+    const relationRow = panel.locator(`[data-team-blocker-id="${relation.id}"]`);
+    await expect(issueButton(relationRow, source)).toBeVisible();
+    await expect(issueButton(relationRow, target)).toBeVisible();
+    await expect(page).toHaveURL(url => url.hash === ganttSearch(hash, crossProjectQuery));
+    expect((await teamBlockers(request)).filter(item => item.sourceIssueId === source.id || item.targetIssueId === target.id)
+      .map(item => item.id)).toEqual([relation.id]);
+    expect(await f.schedule()).toEqual(before);
+    expect(dependencyWrites).toEqual([]);
+
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(f.prefix);
+    await expect(row(page, local)).toBeVisible();
+    await pickRows(local);
+    const localLink = page.getByRole('dialog', { name: '선행·후행 업무 연결', exact: true });
+    await expect(localLink.getByLabel('선행 업무', { exact: true })).toHaveValue(source.id);
+    await expect(localLink.getByLabel('후행 업무', { exact: true })).toHaveValue(local.id);
+    await expect(localLink.getByLabel('연결 유형', { exact: true })).toHaveValue('FS');
+    const creating = waitMutation(page, '/api/dependencies');
+    await button(localLink, '업무 연결').click();
+    const dependency = await json<Dependency>(await creating, 201);
+    expect(dependency).toMatchObject({ predecessorId: source.id, successorId: local.id, type: 'FS', lagDays: 0 });
+    await expect(localLink).toHaveCount(0);
+    expect(await f.schedule()).toEqual({ ...before, dependencies: [dependency] });
+    expect(dependencyWrites).toEqual(['POST']);
+  } finally {
+    await f.close();
+  }
+});
+
 test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되어도 실제 결과를 확인한다', async ({ page, request }) => {
   const f = await fixture(request);
   try {
@@ -101,7 +201,7 @@ test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되�
 
     const writes: unknown[] = [];
     let committed: IssueRelation | undefined;
-    await page.route(`**${relationsPath(source)}`, async route => {
+    await page.route(`**${blockersPath}`, async route => {
       if (route.request().method() !== 'POST') return route.continue();
       writes.push(route.request().postDataJSON());
       committed = await json<IssueRelation>(await route.fetch(), 201);
@@ -111,7 +211,8 @@ test('전체 프로젝트 간트에서 차단 관계 저장 응답이 유실되�
     await expect(form).toHaveCount(0);
     await expect(issueButton(panel, source)).toBeVisible();
     await expect(issueButton(panel, target)).toBeVisible();
-    expect(writes).toEqual([{ otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }]);
+    expect(writes).toEqual([{ sourceIssueId: source.id, targetIssueId: target.id,
+      expectedSourceVersion: source.version, expectedTargetVersion: target.version }]);
     expect(committed).toMatchObject({ origin: 'teamspace', type: 'blocks', sourceIssueId: source.id, targetIssueId: target.id });
     await expect(panel).toContainText(f.first.name);
     await expect(panel).toContainText(f.second.name);
