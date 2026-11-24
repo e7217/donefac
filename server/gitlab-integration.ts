@@ -179,6 +179,7 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
 type LinkDraft=ReturnType<typeof readLink>;
 type TerminalStatusRead = Pick<GitlabStatusObservation, 'trigger'> & { occurredAt: string | null };
 type ConfirmedWorkflowRead = { link: GitlabLink; terminal: GitlabStatusObservation | null };
+type IssueGitlabRefreshMode = 'all' | 'exact' | 'status-review';
 
 function terminalStatusRead(kind: WorkflowGitlabKind, object: Obj): TerminalStatusRead | null {
   let trigger: GitlabStatusSuggestionTrigger;
@@ -960,7 +961,26 @@ export class GitlabIntegrationService{
     return this.latestCompatiblePipelineId(identity.instance, link.projectId, link.sourceBranch, link);
   }
 
-  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string, linkId?:string):Promise<GitlabIssueRefreshResult> {
+  private hasNewerLinkedPipeline(link: GitlabLink): boolean {
+    if (link.kind !== 'pipeline' || !isGitlabBranchName(link.sourceBranch)) return false;
+    const identity = gitlabPipelineLinkIdentity(link);
+    if (!identity) return false;
+    const prefix = `gitlab:${identity.instance}:${link.projectId}:pipeline`;
+    const rows = this.store.db.prepare(`SELECT json FROM gitlab_links WHERE issue_id=? AND id>=? AND id<?
+      AND json_extract(json,'$.sourceBranch')=?`).iterate(link.issueId, `${prefix}:`, `${prefix};`, link.sourceBranch) as Iterable<{ json: string }>;
+    for (const { json } of rows) {
+      const candidate = JSON.parse(json) as GitlabLink;
+      // A link without a verified observation can have an IID in the object-ID slot.
+      if (candidate.kind !== 'pipeline' || candidate.pipelineObservedAt === null) continue;
+      const candidateIdentity = gitlabPipelineLinkIdentity(candidate);
+      if (candidateIdentity && candidateIdentity.objectId > identity.objectId &&
+          !conflictingPipelineClassification(link, candidate)) return true;
+    }
+    return false;
+  }
+
+  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string, linkId?:string,
+    reviewSelected = false):Promise<GitlabIssueRefreshResult> {
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some(key => key !== 'actorId'))) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
     const issue = this.requireIssue(issueId);
@@ -972,8 +992,9 @@ export class GitlabIntegrationService{
       if (!linkId || linkId.length > 500) fail('갱신할 GitLab 활동을 선택해 주세요.');
       const link = this.store.get<GitlabLink>('gitlab_links',linkId);
       if (!link || link.issueId !== issueId) fail('업무에 연결된 GitLab 활동을 찾을 수 없습니다.',404);
-      if (link.kind !== 'merge_request' && link.kind !== 'pipeline' && (link.kind !== 'branch' || link.state !== 'active')) {
-        fail('연결된 MR, 파이프라인 또는 활성 브랜치를 선택해 주세요.');
+      if (link.kind !== 'merge_request' && link.kind !== 'pipeline') {
+        if (reviewSelected) fail('상태 변경을 검토할 MR 또는 파이프라인을 선택해 주세요.');
+        if (link.kind !== 'branch' || link.state !== 'active') fail('연결된 MR, 파이프라인 또는 활성 브랜치를 선택해 주세요.');
       }
       selected = [link];
     } else {
@@ -985,7 +1006,7 @@ export class GitlabIntegrationService{
       selected = rows.map(({ json }) => JSON.parse(json) as GitlabLink);
     }
     if (!selected.length) return result;
-    const reviewActorId = linkId === undefined ? actorId : undefined;
+    const reviewActorId = linkId === undefined || reviewSelected ? actorId : undefined;
 
     const instance = this.instance(captured);
     const token = captured.token ? this.store.unseal(captured.token) : null;
@@ -1106,15 +1127,17 @@ export class GitlabIntegrationService{
         }
       }
       if (reviewActorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.terminal)) {
-        const current = this.store.db.prepare(`SELECT id FROM gitlab_links WHERE issue_id=?
-          AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline') LIMIT ?`)
-          .all(issue.id, ISSUE_REFRESH_LINK_LIMIT + 1) as { id:string }[];
-        const checkedIds = new Set(checked.map(({ link }) => link.id));
-        if (current.length === checkedIds.size && current.every(({ id }) => checkedIds.has(id))) {
-          const observations = currentTerminalObservations(checked,link => this.latestVerifiedPipelineId(link));
-          const review = this.hooks.manualStatusReview(latestIssue,observations,reviewActorId,captured.version);
-          if (review) result.statusReview = review;
+        if (!reviewSelected) {
+          const current = this.store.db.prepare(`SELECT id FROM gitlab_links WHERE issue_id=?
+            AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline') LIMIT ?`)
+            .all(issue.id, ISSUE_REFRESH_LINK_LIMIT + 1) as { id:string }[];
+          const checkedIds = new Set(checked.map(({ link }) => link.id));
+          if (current.length !== checkedIds.size || current.some(({ id }) => !checkedIds.has(id))) return result;
         }
+        const observations = currentTerminalObservations(checked, link => this.latestVerifiedPipelineId(link))
+          .filter(({ link }) => !reviewSelected || !this.hasNewerLinkedPipeline(link));
+        const review = this.hooks.manualStatusReview(latestIssue,observations,reviewActorId,captured.version);
+        if (review) result.statusReview = review;
       }
       return result;
     });
@@ -2158,7 +2181,7 @@ export class GitlabIntegrationService{
       } catch (error) { if (!controller.signal.aborted) throw error; }
       finally { res.off('close', disconnected); }
     });
-    const issueGitlabRefresh = (exact: boolean) => async (req: Request, res: Response) => {
+    const issueGitlabRefresh = (mode: IssueGitlabRefreshMode) => async (req: Request, res: Response) => {
       res.set('Cache-Control','no-store');
       if (Object.keys(req.query).length) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
       const actorId=hooks.actor(req);
@@ -2167,13 +2190,14 @@ export class GitlabIntegrationService{
       res.once('close',disconnected);
       try {
         const result=await this.refreshIssueLinks(String(req.params.id),req.body,controller.signal,actorId,
-          exact ? String(req.params.linkId) : undefined);
+          mode === 'all' ? undefined : String(req.params.linkId), mode === 'status-review');
         if(!controller.signal.aborted)res.json(result);
       } catch(error) { if(!controller.signal.aborted)throw error; }
       finally { res.off('close',disconnected); }
     };
-    app.post('/api/issues/:id/gitlab-links/refresh',issueGitlabRefresh(false));
-    app.post('/api/issues/:id/gitlab-links/:linkId/refresh',issueGitlabRefresh(true));
+    app.post('/api/issues/:id/gitlab-links/refresh',issueGitlabRefresh('all'));
+    app.post('/api/issues/:id/gitlab-links/:linkId/refresh',issueGitlabRefresh('exact'));
+    app.post('/api/issues/:id/gitlab-links/:linkId/status-review',issueGitlabRefresh('status-review'));
     app.post('/api/issues/:id/gitlab-links',async(req,res)=>{
       hooks.actor(req);
       const issueId=String(req.params.id),controller=new AbortController();

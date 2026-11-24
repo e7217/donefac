@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
@@ -69,15 +69,27 @@ export function gitlabActivityStateLabel(state: string): string {
   return states.get(state) ?? state;
 }
 
-export function gitlabLinkedStatusRefreshPath(issueId: string, linkId: string): string {
-  return `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/refresh`;
+export type GitlabLinkedStatusAction = 'refresh' | 'status-review';
+
+export function gitlabLinkedStatusRefreshPath(issueId: string, linkId: string, action: GitlabLinkedStatusAction = 'refresh'): string {
+  return `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/${action}`;
 }
 
-export function isGitlabLinkedStatusRefreshResult(result: GitlabIssueRefreshResult | undefined, link: GitlabLink): result is GitlabIssueRefreshResult {
-  return Boolean(result && result.skipped === 0 && result.statusReview === undefined && Array.isArray(result.links) && Array.isArray(result.failures) &&
-    result.links.length + result.failures.length === 1 &&
-    result.links.every(saved => saved?.id === link.id && saved.issueId === link.issueId && saved.kind === link.kind && typeof saved.state === 'string') &&
-    result.failures.every(failure => failure?.linkId === link.id && typeof failure.message === 'string'));
+export function isGitlabLinkedStatusRefreshResult(
+  result: GitlabIssueRefreshResult | undefined, link: GitlabLink, action: GitlabLinkedStatusAction = 'refresh',
+): result is GitlabIssueRefreshResult {
+  if (!result || result.skipped !== 0 || !Array.isArray(result.links) || !Array.isArray(result.failures) ||
+    result.links.length + result.failures.length !== 1 ||
+    result.links.some(saved => saved?.id !== link.id || saved.issueId !== link.issueId || saved.projectId !== link.projectId ||
+      saved.kind !== link.kind || typeof saved.state !== 'string') ||
+    result.failures.some(failure => failure?.linkId !== link.id || typeof failure.message !== 'string')) return false;
+
+  const review = result.statusReview;
+  if (review === undefined) return true;
+  if (action !== 'status-review' || result.failures.length || (link.kind !== 'merge_request' && link.kind !== 'pipeline')) return false;
+  if (review?.kind === 'ambiguous') return true;
+  return review?.kind === 'suggestion' && review.suggestion?.issueId === link.issueId &&
+    JSON.stringify(review.suggestion.evidence?.link) === JSON.stringify(result.links[0]);
 }
 
 function activityTime(value: unknown) {
@@ -1031,7 +1043,9 @@ type ManualLinkActions = {
 export type GitlabActivityStatusActions = {
   disabled?: boolean;
   refreshingLinkId?: string | null;
+  reviewingLinkId?: string | null;
   checkStatus: (link: GitlabLink, trigger: HTMLButtonElement) => void;
+  reviewStatus?: (link: GitlabLink, trigger: HTMLButtonElement) => void;
 };
 
 export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination }: {
@@ -1101,7 +1115,10 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
   const pipelineSource = link.kind === 'pipeline' ? gitlabPipelineSourceLabel(link.pipelineSource, link.pipelineTag) : null;
   const issueKey = issueContext?.keys.get(link.issueId);
   const statusCheck = link.kind === 'pipeline' || link.kind === 'merge_request' || (link.kind === 'branch' && state === 'active') ? statusActions : undefined;
+  const reviewStatus = link.kind === 'pipeline' || link.kind === 'merge_request' ? statusActions?.reviewStatus : undefined;
+  const statusActionDisabled = statusCheck?.disabled || Boolean(statusCheck?.refreshingLinkId || statusCheck?.reviewingLinkId);
   const refreshing = statusCheck?.refreshingLinkId === link.id;
+  const reviewing = statusCheck?.reviewingLinkId === link.id;
   const manual = link.manualLinkId ? manualActions : undefined;
   const titleContent = <>
     {number && <span className="gitlab-activity-number">{number}</span>}
@@ -1141,9 +1158,14 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
     {(statusCheck || manual) && <div className="gitlab-activity-row-actions">
       {statusCheck && <button className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
-        disabled={statusCheck.disabled || Boolean(statusCheck.refreshingLinkId)} aria-busy={refreshing || undefined}
+        disabled={statusActionDisabled} aria-busy={refreshing || undefined}
         onClick={event => statusCheck.checkStatus(link, event.currentTarget)}>
         <RefreshCw size={14} aria-hidden="true" />{refreshing ? '확인 중…' : '상태 확인'}
+      </button>}
+      {reviewStatus && <button className="btn btn-ghost" type="button" aria-label="이 활동으로 상태 검토"
+        disabled={statusActionDisabled} aria-busy={reviewing || undefined}
+        onClick={event => reviewStatus(link, event.currentTarget)}>
+        <ClipboardCheck size={14} aria-hidden="true" />{reviewing ? '검토 중…' : '이 활동으로 상태 검토'}
       </button>}
       {manual && <>
         <button className="btn btn-ghost" type="button" aria-label="수동 연결 다시 확인" title="수동 연결 다시 확인"

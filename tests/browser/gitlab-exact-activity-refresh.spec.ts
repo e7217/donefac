@@ -14,6 +14,7 @@ const pipelineRead = (id: number) => `${projectRead}/pipelines/${id}`;
 const oldPipelineId = 701;
 const button = (container: Locator, name: string) => container.getByRole('button', { name, exact: true });
 const exactAction = '이 GitLab 활동 상태 확인';
+const selectedReviewAction = '이 활동으로 상태 검토';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   const body = await response.text();
@@ -32,7 +33,7 @@ async function refreshActivity(page: Page, trigger: Locator, path: string) {
   return json<GitlabIssueRefreshResult>(response);
 }
 
-test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 해소된 실패 목록에 초점을 돌려준다', async ({ page, request }) => {
+test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하고 해소된 실패 목록에 초점을 돌려준다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const suffix = randomUUID();
   const marker = `old-triage-${suffix.slice(0, 8)}`;
@@ -104,8 +105,11 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 
     expect(oldLink.manualLinkId).toBeUndefined();
     const runsPath = `/api/automation-runs?projectId=${encodeURIComponent(project.id)}`;
     const beforeRuns = await json(await request.get(runsPath));
-    const bulkPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/refresh`;
-    const exactPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(oldLink.id)}/refresh`;
+    const issuePath = `/api/issues/${encodeURIComponent(issue.id)}`;
+    const selectedLinkPath = `${issuePath}/gitlab-links/${encodeURIComponent(oldLink.id)}`;
+    const bulkPath = `${issuePath}/gitlab-links/refresh`;
+    const exactPath = `${selectedLinkPath}/refresh`;
+    const selectedReviewPath = `${selectedLinkPath}/status-review`;
     const browserWrites: string[] = [];
     page.context().on('request', sent => {
       const { pathname } = new URL(sent.url());
@@ -127,6 +131,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 
     const bulk = await refreshActivity(page, bulkTrigger, bulkPath);
     expect(bulk.links.map(link => link.iid).sort((left, right) => left - right)).toEqual(newer.map(value => value.id));
     expect(bulk).toMatchObject({ failures: [], skipped: 1 });
+    expect(bulk.statusReview).toBeUndefined();
     expect(calls.map(call => call.path).sort()).toEqual([projectRead, ...newer.map(value => pipelineRead(value.id))].sort());
     await expect(bulkTrigger).toBeEnabled();
     const afterBulk = await workspace();
@@ -163,6 +168,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 
       await expect(filtered).toHaveCount(1);
       await expect(filtered).toHaveAttribute('data-gitlab-state', 'failed');
       await expect(filtered.getByText(`#${oldPipelineId}`, { exact: true })).toBeVisible();
+      await expect(button(filtered, selectedReviewAction)).toHaveCount(0);
       expect(calls).toHaveLength(readsBeforeOpening);
       const hash = new URL(development.url()).hash;
 
@@ -186,7 +192,56 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 
       expect(await settings()).toEqual(configured);
     } finally { await development.close(); }
 
-    expect(browserWrites).toEqual([`POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`]);
+    await page.bringToFront();
+    if (await oldRow.count() === 0) await button(pages, '이전').click();
+    const selectedReview = button(oldRow, selectedReviewAction);
+    await expect(selectedReview).toBeEnabled();
+    const issueForm = ticket.locator('form.issue-detail-form');
+    const status = issueForm.getByRole('combobox', { name: '상태', exact: true });
+    const suggestionCard = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const prepare = button(suggestionCard, '목표 상태로 편집');
+    const save = button(issueForm, '변경사항 저장');
+    await expect(suggestionCard).toHaveCount(0);
+    const completedAt = new Date().toISOString();
+    remoteOld = { ...remoteOld, updated_at: completedAt, finished_at: completedAt };
+    const readsBeforeReview = calls.length;
+    const selected = await refreshActivity(page, selectedReview, selectedReviewPath);
+    expect(calls.slice(readsBeforeReview).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
+    expect(selected).toMatchObject({ links: [expect.objectContaining({ id: oldLink.id, state: 'success' })], failures: [], skipped: 0 });
+    if (selected.statusReview?.kind !== 'suggestion') throw new Error('선택한 GitLab 활동의 상태 제안이 없습니다.');
+    const { suggestion } = selected.statusReview;
+    expect(suggestion).toMatchObject({
+      issueId: issue.id, issueVersion: issue.version, fromStatus: issue.status, toStatus: 'done',
+      rule: { id: rule.id }, evidence: { link: { id: oldLink.id }, trigger: 'pipeline.succeeded', occurredAt: completedAt },
+    });
+    await expect(suggestionCard.getByText('선택한 GitLab 활동 기준', { exact: true })).toBeVisible();
+    await expect(suggestionCard).toContainText(rule.name);
+    await expect(suggestionCard).toContainText(`#${oldPipelineId}`);
+    await expect(status).toHaveValue(issue.status);
+    await expect(title).toHaveValue('저장하지 않은 티켓 제목');
+    await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+    expect((await workspace()).issues.find(value => value.id === issue.id)).toEqual(issue);
+    expect(browserWrites).toEqual([`POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`]);
+
+    await prepare.click();
+    await expect(status).toHaveValue('done');
+    await expect(status).toBeFocused();
+    await expect(title).toHaveValue('저장하지 않은 티켓 제목');
+    await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+    expect((await workspace()).issues.find(value => value.id === issue.id)).toEqual(issue);
+    const savedResponse = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
+    await save.click();
+    const saved = await savedResponse;
+    expect(saved.request().postDataJSON()).toMatchObject({
+      expectedVersion: issue.version, title: '저장하지 않은 티켓 제목', status: 'done', gitlabStatusSuggestionToken: suggestion.token,
+    });
+    expect(await json<Issue>(saved)).toMatchObject({ status: 'done', title: '저장하지 않은 티켓 제목', version: issue.version + 1 });
+    const savedTicket = page.getByRole('dialog', { name: '저장하지 않은 티켓 제목', exact: true });
+    await expect(savedTicket.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue('전송하지 않은 티켓 댓글');
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
+    expect(browserWrites).toEqual([
+      `POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`, `PATCH ${issuePath}`,
+    ]);
     expect(calls.every(call => call.method === 'GET' && call.credential === token)).toBe(true);
   } finally {
     try {

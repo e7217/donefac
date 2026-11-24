@@ -792,6 +792,12 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 응답은 선택한 연결 한 건을 `links` 또는 `failures`에 담으며 `skipped`는 `0`이다. 브랜치를 확인하면 같은 저장소·이름으로 연결된 기존 행에 HEAD를 함께 기록한다. 이 요청은 연결된 개발 활동을 갱신한다. 전체 연결을 근거로 하는 티켓 상태 제안은 위의 최근 활동 확인 경로에서 검토한다.
 
+### 선택한 GitLab 활동으로 상태 변경 검토
+
+브라우저의 `POST /api/issues/:id/gitlab-links/:linkId/status-review`에 빈 객체를 보낸다. 해당 티켓에 연결된 MR 또는 파이프라인 한 건을 조회하며 최근 20건 밖의 활동도 선택할 수 있다. 지정한 연결의 저장소와 원본 객체를 검증한 뒤 확인한 상태를 `links`에, 확인하지 못한 한 건을 `failures`에 담는다. `skipped`는 `0`이다. [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
+확인한 MR의 병합·닫기나 파이프라인의 성공·실패가 현재 활성 규칙에 해당하면 `statusReview`를 반환한다. 같은 우선순위의 규칙이 서로 다른 상태를 제안하면 `kind: 'ambiguous'`를 반환한다. 파이프라인은 같은 GitLab 인스턴스·저장소·참조에서 현재 티켓에 연결된 결과와 인증 수신 기록을 대조한다. 실행 유형과 태그 여부가 일치하거나 그 값이 없어 같은 실행 계열일 수 있는 더 큰 원본 ID가 있으면 제안을 보류한다. 제안은 선택한 활동을 기준으로 하며, **목표 상태로 편집**으로 연 일반 티켓 저장에서 기존 작업자·버전·규칙·워크플로·연결 및 만료 검증을 적용한다. 조회 시점에는 확인한 활동 정보를 갱신한다.
+
 ### 파이프라인 CI 작업 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-jobs`는 해당 업무에 연결한 파이프라인에서 실패(`failed`)와 수동 실행 대기(`manual`) 작업을 읽는다. 저장한 GitLab 주소와 읽기 자격 증명을 사용한다. 저장소와 파이프라인의 실제 ID, 확인 가능한 커밋 SHA를 대조한다. 작업은 50건씩 최대 4페이지를 조회하며 재실행으로 대체된 작업은 제외한다. 새 연결이나 업무 상태를 저장하는 과정과 독립된 브라우저 조회다. [GitLab Jobs API](https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
