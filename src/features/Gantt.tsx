@@ -1711,14 +1711,14 @@ function ProjectGantt(props: GanttProps) {
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
       const review = { input, preview, inline: dateOrigin };
-      if (preview.teamBlockerWarnings?.length) {
+      if (preview.warnings.length || preview.blocking?.length) {
         setDatePreviewFocusTarget(inline.focus);
         setManualReview(review);
         setManualProblem(null);
         return;
       }
       if (!preview.previewId) {
-        notify(preview.blocking?.join(' · ') || '변경할 일정이 없습니다.', 'error');
+        notify('변경할 일정이 없습니다.', 'error');
         return;
       }
       await commitManualReview(review);

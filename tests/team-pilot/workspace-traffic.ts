@@ -3,7 +3,7 @@ import { defaultWorkCalendar, shiftWorkingDate, workingDateOnOrAfter } from '../
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import type {
-  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, IssueRelation, Project, ProjectWorkloadResult, RichContent,
+  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, IssueChangeHistoryPage, IssueRelation, Project, ProjectWorkloadResult, RichContent,
   SavedView, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, TeamWorkloadResult, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types';
 
@@ -17,9 +17,15 @@ async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> 
 
 /** Exercise independent project work while the main document receives concurrent edits. */
 export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
-  projectId, issueId, actorId, workingDate: providedDate, origin,
-}: { projectId: string; issueId: string; actorId: string; workingDate?: string; origin?: string }) {
+  projectId, issueId, actorId, concurrentActor, workingDate: providedDate, origin,
+}: {
+  projectId: string; issueId: string; actorId: string; workingDate?: string; origin?: string;
+  concurrentActor: { requests: APIRequestContext; actorId: string };
+}) {
   const headers = { 'X-Actor-Id': actorId, ...(origin ? { Origin: origin } : {}) };
+  const concurrentHeaders = { ...headers, 'X-Actor-Id': concurrentActor.actorId };
+  expect(concurrentActor.actorId).not.toBe(actorId);
+  expect(concurrentActor.requests).not.toBe(requests);
   const before = await json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers }));
   const issue = before.issues.find(item => item.id === issueId && item.projectId === projectId);
   expect(issue, 'Expected the synthetic pilot issue in its project').toBeDefined();
@@ -95,22 +101,65 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   const otherIssue = await json<Issue>(requests.post('/api/issues', {
     headers, data: { projectId: otherProject.id, title: '다른 프로젝트의 공동 마감 업무' },
   }), 201);
-  const bulk = await json<SchedulePastePreview>(requests.post('/api/schedule/bulk-dates/preview', {
-    headers, data: { projectId: null, issues: [moved.updated[0], otherIssue].map(({ id, version }) => ({ id, expectedVersion: version })),
+  const reviewDueDates = (issues: readonly Issue[]) => json<SchedulePastePreview>(requests.post('/api/schedule/bulk-dates/preview', {
+    headers, data: { projectId: null, issues: issues.map(({ id, version }) => ({ id, expectedVersion: version })),
       changes: { dueDate: successorEnd } },
   }));
+  const firstReview = await reviewDueDates([moved.updated[0], otherIssue]);
+  expect(firstReview.errors).toEqual([]);
+  expect(firstReview.previewId).toBeTruthy();
+  expect(firstReview.changes).toHaveLength(2);
+
+  const competingEdit = { startDate: workingDate, endDate: workingDate };
+  const competingReview = await json<SchedulePastePreview>(concurrentActor.requests.post('/api/schedule/bulk-dates/preview', {
+    headers: concurrentHeaders, data: { projectId: otherProject.id, issues: [{ id: otherIssue.id, expectedVersion: otherIssue.version }], changes: competingEdit },
+  }));
+  expect(competingReview.errors).toEqual([]);
+  expect(competingReview.previewId).toBeTruthy();
+  expect(competingReview.changes).toMatchObject([{ id: otherIssue.id, fromStart: null, fromEnd: null, toStart: workingDate, toEnd: workingDate }]);
+  const competingSave = await json<SchedulePasteApplyResult>(concurrentActor.requests.post('/api/schedule/bulk-dates/apply', {
+    headers: concurrentHeaders, data: { previewId: competingReview.previewId },
+  }));
+  const [competingIssue] = competingSave.updated;
+  expect(competingSave.updated).toHaveLength(1);
+  expect(competingIssue).toMatchObject({ id: otherIssue.id, ...competingEdit, dueDate: null, version: otherIssue.version + 1 });
+
+  const stale = await json<{ error: string }>(requests.post('/api/schedule/bulk-dates/apply', {
+    headers, data: { previewId: firstReview.previewId },
+  }), 409);
+  expect(stale.error).toContain('업무, 연결된 일정 또는 프로젝트 규칙이 변경되었습니다.');
+  const refreshed = await json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers }));
+  const latestIssue = refreshed.issues.find(value => value.id === issueId);
+  const latestOtherIssue = refreshed.issues.find(value => value.id === otherIssue.id);
+  expect(latestIssue).toEqual(moved.updated[0]);
+  expect(latestOtherIssue).toEqual(competingIssue);
+  if (!latestIssue || !latestOtherIssue) throw new Error('The reviewed schedule issues must still be in the workspace.');
+
+  const bulk = await reviewDueDates([latestIssue, latestOtherIssue]);
   expect(bulk.errors).toEqual([]);
   expect(new Set(bulk.projectIds)).toEqual(new Set([projectId, otherProject.id]));
   expect(bulk.previewId).toBeTruthy();
+  expect(bulk.previewId).not.toBe(firstReview.previewId);
   expect(bulk.changes).toHaveLength(2);
   expect(bulk.changes.every(change => change.toDue === successorEnd)).toBe(true);
+  expect(bulk.changes.find(change => change.id === otherIssue.id)).toMatchObject({ fromStart: workingDate, fromEnd: workingDate,
+    toStart: workingDate, toEnd: workingDate, version: competingIssue.version });
   const batch = await json<SchedulePasteApplyResult>(requests.post('/api/schedule/bulk-dates/apply', {
     headers, data: { previewId: bulk.previewId },
   }));
   const coordinated = batch.updated.find(value => value.id === issueId);
   const secondary = batch.updated.find(value => value.id === otherIssue.id);
   expect(coordinated).toMatchObject({ startDate: workingDate, endDate: workingDate, dueDate: successorEnd, version: moved.updated[0].version + 1 });
-  expect(secondary).toMatchObject({ projectId: otherProject.id, dueDate: successorEnd, version: otherIssue.version + 1 });
+  expect(secondary).toMatchObject({ projectId: otherProject.id, ...competingEdit, dueDate: successorEnd, version: competingIssue.version + 1 });
+  const history = await json<IssueChangeHistoryPage>(requests.get(`/api/issues/${otherIssue.id}/change-history`, { headers }));
+  const competingRevision = history.entries.find(entry => entry.issueVersion === competingIssue.version);
+  expect(competingRevision).toMatchObject({ issueId: otherIssue.id, actorId: concurrentActor.actorId, changes: expect.arrayContaining([
+    { field: 'startDate', label: expect.any(String), before: expect.objectContaining({ value: null }), after: expect.objectContaining({ value: workingDate }) },
+    { field: 'endDate', label: expect.any(String), before: expect.objectContaining({ value: null }), after: expect.objectContaining({ value: workingDate }) },
+  ]) });
+  expect(history.entries[0]).toMatchObject({ actorId, issueVersion: competingIssue.version + 1,
+    changes: [{ field: 'dueDate', label: expect.any(String), before: expect.objectContaining({ value: null }), after: expect.objectContaining({ value: successorEnd }) }] });
+  if (!competingRevision) throw new Error('The concurrent date edit must remain in the issue history.');
 
   const calendarPath = `/api/projects/${otherProject.id}/calendar`;
   const otherCalendar = await json<WorkCalendar>(requests.get(calendarPath, { headers }));
@@ -196,7 +245,10 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   return {
     issueId, issueVersion: moved.updated[0].version + 1, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
     bulkDates: { previewId: bulk.previewId, undoId: batch.undoId, dueDate: successorEnd,
-      otherProjectId: otherProject.id, otherIssueId: otherIssue.id, otherIssueVersion: otherIssue.version + 1 },
+      otherProjectId: otherProject.id, otherIssueId: otherIssue.id, otherIssueVersion: competingIssue.version + 1,
+      competingEdit: { actorId: concurrentActor.actorId, date: workingDate, version: competingIssue.version,
+        previewId: competingReview.previewId, undoId: competingSave.undoId, historyId: competingRevision.id },
+    },
     handoff: { anchorId: anchor.id, anchorDate, issueId: downstream.id, date: handoffDate, dayOff,
       relationId: blocker.id, previewId: handoff.previewId, undoId: handedOff.undoId },
     scheduledSuccessor: { issueId: successor.id, issueVersion: corrected.updated[0].version, startDate: successorStart,

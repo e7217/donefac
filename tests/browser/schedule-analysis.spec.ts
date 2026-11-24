@@ -88,7 +88,6 @@ test('360px 간트에서 프로젝트 일정 여유와 주공정을 읽고 날�
 
     const endDate = page.getByLabel(`${successor.key} 종료일`, { exact: true });
     const reviewing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-preview' && response.request().method() === 'POST');
-    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
     await endDate.fill(wednesday);
     await endDate.press('Enter');
     const reviewed = await reviewing;
@@ -98,6 +97,15 @@ test('360px 간트에서 프로젝트 일정 여유와 주공정을 읽고 날�
     }] });
     const proposal = await reviewed.json() as SchedulePreview;
     expect(proposal.previewId).toBeTruthy();
+    expect(proposal.warnings).toEqual([expect.stringContaining(`${predecessor.key} → ${successor.key}`)]);
+    expect(proposal.warnings[0]).toContain(`후행 업무 시작일은 ${wednesday} 이후여야 합니다.`);
+    const preview = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    await expect(preview.getByText(proposal.warnings[0], { exact: true })).toBeVisible();
+    expect(mutations).toEqual(['POST /api/schedule/manual-preview']);
+    expect(await savedIssues(request, project.id)).toEqual(before);
+    await expect(finish).toHaveAttribute('datetime', thursday);
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/manual-apply' && response.request().method() === 'POST');
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
     const saved = await saving;
     expect(saved.ok(), await saved.text()).toBeTruthy();
     expect(saved.request().postDataJSON()).toEqual({ previewId: proposal.previewId });

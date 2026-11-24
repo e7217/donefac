@@ -545,13 +545,40 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.equal(issue.dueDate, bulk.dueDate);
   assert.equal(otherIssue.dueDate, bulk.dueDate);
   assert.equal(otherIssue.version, bulk.otherIssueVersion);
-  const replay = await api('/schedule/bulk-dates/apply', {
-    method: 'POST', headers: { 'X-Actor-Id': fixture.actorIds[0] }, body: { previewId: bulk.previewId },
+  const competingEdit = bulk.competingEdit;
+  assert.equal(competingEdit.actorId, fixture.actorIds[2]);
+  assert.equal(otherIssue.version, competingEdit.version + 1);
+  assert.deepEqual([otherIssue.startDate, otherIssue.endDate], [competingEdit.date, competingEdit.date]);
+  const replayBulkDates = (actorId, previewId) => api('/schedule/bulk-dates/apply', {
+    method: 'POST', headers: { 'X-Actor-Id': actorId }, body: { previewId },
   });
+  const [replay, competingReplay, competingHistory] = await Promise.all([
+    replayBulkDates(fixture.actorIds[0], bulk.previewId),
+    replayBulkDates(competingEdit.actorId, competingEdit.previewId),
+    api(`/issues/${encodeURIComponent(otherIssue.id)}/change-history`),
+  ]);
   assert.equal(replay.undoId, bulk.undoId);
   assert.equal(replay.updated.length, 2);
   assert.deepEqual(replay.updated.find(value => value.id === issue.id), issue);
   assert.deepEqual(replay.updated.find(value => value.id === otherIssue.id), otherIssue);
+  assert.equal(competingReplay.undoId, competingEdit.undoId);
+  assert.equal(competingReplay.updated.length, 1);
+  const { id, version, startDate, endDate, dueDate } = competingReplay.updated[0];
+  assert.deepEqual({ id, version, startDate, endDate, dueDate },
+    { id: otherIssue.id, version: competingEdit.version, startDate: competingEdit.date, endDate: competingEdit.date, dueDate: null });
+  const competingRevision = competingHistory.entries.find(entry => entry.id === competingEdit.historyId);
+  assert.ok(competingRevision);
+  assert.equal(competingRevision.issueId, otherIssue.id);
+  assert.equal(competingRevision.actorId, competingEdit.actorId);
+  assert.equal(competingRevision.issueVersion, competingEdit.version);
+  assert.deepEqual(Object.fromEntries(competingRevision.changes.map(change => [change.field, [change.before.value, change.after.value]])),
+    { startDate: [null, competingEdit.date], endDate: [null, competingEdit.date] });
+  const [dueDateRevision] = competingHistory.entries;
+  assert.ok(dueDateRevision);
+  assert.equal(dueDateRevision.issueId, otherIssue.id);
+  assert.equal(dueDateRevision.actorId, fixture.actorIds[0]);
+  assert.equal(dueDateRevision.issueVersion, otherIssue.version);
+  assert.deepEqual(dueDateRevision.changes.map(change => [change.field, change.before.value, change.after.value]), [['dueDate', null, bulk.dueDate]]);
   const handoff = traffic.handoff;
   const anchor = workspace.issues.find(value => value.id === handoff.anchorId && value.projectId === fixture.projectId);
   const downstream = workspace.issues.find(value => value.id === handoff.issueId && value.projectId === bulk.otherProjectId);
@@ -602,7 +629,8 @@ async function teamSnapshot(api, fixture, evidence) {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
-      otherCalendar, successor, dependency, issueList, view, gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
+      otherCalendar, successor, dependency, issueList, view, competingReplay, competingRevision, dueDateRevision,
+      gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
   };
 }
 

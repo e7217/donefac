@@ -327,7 +327,10 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       if (round === 1) {
         [current, workspaceTraffic, gitlabTraffic] = await Promise.all([
           wave(request, current, originalEpoch, peers, edits, fixture),
-          verifyWorkspaceTraffic(peers[0].context.request, { projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL }),
+          verifyWorkspaceTraffic(peers[0].context.request, {
+            projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL,
+            concurrentActor: { requests: peers[2].context.request, actorId: peers[2].actorId },
+          }),
           verifyGitlabTraffic(),
         ]);
       } else current = await wave(request, current, originalEpoch, peers, edits, fixture);
