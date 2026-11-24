@@ -59,23 +59,26 @@ function inlineCommentExport(key: string, title: string) {
   return zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]);
 }
 
-test('360px에서 Confluence 문장 댓글의 원래 위치와 답글을 열고 연결을 확인할 수 없는 댓글을 별도로 표시한다', async ({ page, request }) => {
+test('360px에서 Confluence 원본 주소로 문장 댓글과 답글을 열고 일반 댓글도 찾는다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const suffix = randomUUID().slice(0, 7).toUpperCase();
   const key = `IC${suffix}`;
   const title = `이관한 문장 댓글 ${suffix}`;
+  const sourceBase = `https://inline-${suffix.toLowerCase()}.search.invalid/wiki`;
   const query = new URLSearchParams({ filename: `${key}.zip`, instanceKey: `inline-comment-${suffix}`, product: 'confluence' });
   const source = await json<LegacyPackageSummary>(await request.post(`/api/legacy-import/packages?${query}`, {
     headers: { 'Content-Type': 'application/octet-stream' }, data: inlineCommentExport(key, title),
   }), 201);
   let documentIds: string[] = [];
+  let removedCommentId: string | undefined;
   try {
     const { users: [reviewer] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
     const { defaultConfiguration, identities } = await json<MigrationOptions>(await request.get(`/api/migrations/options?packageId=${source.id}`));
     const configuration = {
       ...defaultConfiguration,
       datePolicy: 'import-time',
+      sourceBaseUrls: { ...defaultConfiguration.sourceBaseUrls, [source.id]: sourceBase },
       projects: defaultConfiguration.projects.map(mapping => ({ ...mapping, key, name: `댓글 이관 ${suffix}` })),
       users: Object.fromEntries(identities.map(identity => [identity.id, reviewer.id])),
     };
@@ -124,7 +127,7 @@ test('360px에서 Confluence 문장 댓글의 원래 위치와 답글을 열고 
     const latestText = '팀에서 다시 쓴 현재 문서 본문';
     const content: RichContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: latestText }] }] };
     const path = `/api/documents/${original.id}`;
-    await json<DocPage>(await request.patch(path, { data: {
+    const edited = await json<DocPage>(await request.patch(path, { data: {
       expectedVersion: original.version, contentSchemaVersion: documentContentSchemaVersion(content), content,
     } }));
     await page.goto(`/#/${projectId}/documents/${original.id}?comment=${encodeURIComponent(saved.id)}`);
@@ -161,10 +164,90 @@ test('360px에서 Confluence 문장 댓글의 원래 위치와 답글을 열고 
     expect(after.resolution?.state).toBe('resolved');
     expect(after.documentSource).toEqual(saved.documentSource);
     await expect(article.getByRole('button', { name: '다시 열기', exact: true })).toBeVisible();
-    await page.goto(`/#/${projectId}/documents/${original.id}?comment=${encodeURIComponent(reply.id)}`);
+
+    const outbound: string[] = [];
+    await page.route(url => url.hostname.endsWith('.search.invalid'), async route => {
+      outbound.push(route.request().url());
+      await route.abort();
+    });
+    const renamed = `이관 뒤 제목 ${suffix}`;
+    await json<DocPage>(await request.patch(path, { data: { expectedVersion: edited.version, title: renamed } }));
+    await page.reload();
+    const quick = page.getByRole('dialog', { name: '통합 검색', exact: true });
+    const quickInput = quick.getByRole('textbox', { name: '통합 검색어', exact: true });
+    const quickComment = quick.getByRole('button', { name: `${renamed} 댓글 열기`, exact: true });
+    const chosenComment = new RegExp(`${renamed} 댓글 열기`, 'u');
+    const quickSearch = async (url: string) => {
+      if (!await quick.isVisible()) await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+      await quickInput.fill(url);
+    };
+    const documentHash = `#/${projectId}/documents/${original.id}`;
+    const assertCommentHash = async (id: string) => {
+      await expect.poll(() => new URL(page.url()).hash).toBe(`${documentHash}?comment=${encodeURIComponent(id)}`);
+    };
+    const archivedTitle = encodeURIComponent(title).replace(/%20/gu, '+');
+    await quickSearch(`${sourceBase}/display/${key}/${archivedTitle}?focusedCommentId=300&token=synthetic-comment-secret#comment-300`);
+    await expect(quick.getByText('Confluence 댓글 주소', { exact: true })).toBeVisible();
+    await quickComment.click();
+    await assertCommentHash(saved.id);
+    await expect(article).toBeFocused({ timeout: 25_000 });
+
+    const numeric = `${sourceBase}/pages/viewpage.action?pageId=100`;
+    await quickSearch(`${numeric}&tracking=synthetic-comment-secret#comment-303`);
+    await expect(quickComment).toBeVisible();
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+    const results = page.getByRole('region', { name: '검색 결과', exact: true });
+    const fullComment = results.getByRole('button', { name: chosenComment });
+    const assertSharedReply = async () => {
+      await expect(fullComment).toBeVisible();
+      const hash = new URL(page.url()).hash;
+      const split = hash.indexOf('?');
+      expect(hash.slice(0, split)).toBe(`#/${projectId}/search`);
+      const equivalent = new URL(new URLSearchParams(hash.slice(split + 1)).get('q')!);
+      expect(`${equivalent.origin}${equivalent.pathname}?pageId=${equivalent.searchParams.get('pageId')}`).toBe(numeric);
+      expect(equivalent.searchParams.get('focusedCommentId') === '303' || equivalent.hash === '#comment-303').toBe(true);
+      expect(equivalent.href).not.toContain('synthetic-comment-secret');
+    };
+    await assertSharedReply();
+    await page.reload();
+    await assertSharedReply();
+    await fullComment.click();
+    await assertCommentHash(reply.id);
     await expect(replyArticle).toBeFocused({ timeout: 25_000 });
     await expect(replyArticle.getByText(confirmedReply, { exact: true })).toBeVisible();
+    await page.goBack();
+    await assertSharedReply();
+
+    const ordinary = comments.find(comment => comment.body === ambiguous)!;
+    const ordinaryUrl = `${sourceBase}/spaces/${key}/pages/100/source-title?focusedCommentId=301`;
+    await quickSearch(ordinaryUrl);
+    await quickComment.click();
+    await assertCommentHash(ordinary.id);
+    const ordinaryArticle = page.locator(`#document-comment-${ordinary.id}`);
+    await expect(ordinaryArticle).toBeFocused({ timeout: 25_000 });
+    await expect(ordinaryArticle.locator('blockquote')).toHaveCount(0);
+
+    const noQuickResult = async (url: string) => {
+      await quickSearch(url);
+      await expect(quick.getByText('빠른 검색 결과가 없습니다.', { exact: true })).toBeVisible();
+      await expect(quick.getByRole('button', { name: chosenComment })).toHaveCount(0);
+    };
+    await noQuickResult(`${sourceBase}/pages/viewpage.action?pageId=101&focusedCommentId=300#comment-300`);
+    await noQuickResult(`${numeric.replace('/wiki/', '/other-install/')}#comment-300`);
+    const removed = await json<{ trashItemId: string }>(await request.delete(`/api/comments/${ordinary.id}`, {
+      headers: { 'X-Actor-Id': reviewer.id },
+    }));
+    removedCommentId = removed.trashItemId;
+    await noQuickResult(ordinaryUrl);
+    const restored = await request.post(`/api/trash/items/${removedCommentId}/restore`, { headers: { 'X-Actor-Id': reviewer.id } });
+    expect(restored.ok(), await restored.text()).toBe(true);
+    removedCommentId = undefined;
+    await quick.getByRole('button', { name: '검색 닫기', exact: true }).click();
+    await quickSearch(ordinaryUrl);
+    await expect(quickComment).toBeVisible();
+    expect(outbound).toEqual([]);
   } finally {
+    if (removedCommentId) await request.delete(`/api/trash/items/${removedCommentId}`);
     for (const id of documentIds) {
       const removed = await request.delete(`/api/documents/${id}`);
       if (!removed.ok()) continue;

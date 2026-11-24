@@ -1009,18 +1009,25 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     return requestRoute({ projectId: issue.projectId, view: 'gantt', documentId: null, issueId: null, planningId: plan?.id,
       ganttFocusIssueId: issue.id, ganttFocusDate: endpoint }, 'push', false, returnRoute);
   };
-  const openDocument = (id: string, requestedSectionId?: string) => {
+  const openDocument = (id: string, requestedSectionId?: string, requestedCommentId?: string) => {
     const document = dataRef.current?.documents.find(d => d.id === id);
-    if (!document) return;
-    const targetSectionId = isDocumentSectionId(requestedSectionId) ? requestedSectionId : null;
+    if (!document || requestedCommentId !== undefined && !isRelationId(requestedCommentId)) return;
+    const targetSectionId = !requestedCommentId && isDocumentSectionId(requestedSectionId) ? requestedSectionId : null;
     const current = acceptedRouteRef.current;
-    if (!targetSectionId && current?.view === 'documents' && current.documentId === id && current.issueId) {
+    if (!requestedCommentId && !targetSectionId && current?.view === 'documents' && current.documentId === id && current.issueId) {
       closeIssuePanel(current.issueId);
       return;
     }
     const targetProject = document.projectId || projectId;
-    if (requestRoute({projectId:targetProject, view:'documents',documentId:id,issueId:null, sectionId:targetSectionId,
-      documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null})) setSearchOpen(false);
+    const next: WorkspaceRoute = { projectId: targetProject, view: 'documents', documentId: id, issueId: null,
+      sectionId: targetSectionId, documentCommentId: requestedCommentId,
+      documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null };
+    if (requestRoute(next)) {
+      setSearchOpen(false);
+      if (requestedCommentId && current && routeHash(current) === routeHash(next)) {
+        setCommentFocus({ targetType: 'document', targetId: id, actorId: null, commentId: requestedCommentId, activation: ++commentFocusActivation.current });
+      }
+    }
   };
   const openNotification = async (notification: TeamNotification) => {
     const request = ++notificationOpenRequest.current;
@@ -1266,7 +1273,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       reviewPosition={reviewPosition && { ...reviewPosition, focusDirection: issueReview?.focusDirection }} onAdvanceReview={advanceIssueReview}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
-    {searchOpen && <SearchDialog {...props} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
+    {searchOpen && <SearchDialog {...props} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
     {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
   </div></FavoritesProvider>;
@@ -1339,7 +1346,7 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
 function Metric({label,value,icon,caption,warning=false}:{label:string;value:number;icon:React.ReactNode;caption:string;warning?:boolean}) {return <div className={`metric-card ${warning ? 'warning' : ''}`}><div className="metric-top"><span>{label}</span><span className="metric-icon">{icon}</span></div><strong>{value}<small>개</small></strong><p>{caption}</p></div>;}
 
 function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowAll }: Pick<FeatureProps, 'data' | 'refresh' | 'openIssue'> & {
-  openDocument: (id: string, sectionId?: string) => void;
+  openDocument: (id: string, sectionId?: string, commentId?: string) => void;
   onClose: () => void;
   onShowAll: (query: string) => void;
 }) {
@@ -1377,8 +1384,8 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
             <ChevronRight size={15} aria-hidden="true"/>
           </button>)}
           {docs.length > 0 && <div className="search-label">문서</div>}
-          {docs.map(({ document: doc, sectionId }) => <button type="button" className="search-result" key={doc.id}
-            onClick={() => openDocument(doc.id, sectionId)}>
+          {docs.map(({ document: doc, sectionId, commentId }) => <button type="button" className="search-result" key={doc.id}
+            aria-label={commentId ? `${doc.title} 댓글 열기` : undefined} onClick={() => openDocument(doc.id, sectionId, commentId)}>
             <BookOpen size={17} aria-hidden="true"/>
             <span className="search-result-issue-content">
               <span>{doc.title}</span>

@@ -119,6 +119,27 @@ test('workspace original-address searches only linked local targets and preserve
   assert.equal(normalizeWorkspaceSearchInput(overlappingGitlabUrl), `${gitlabRepository}/-/tree/browse%2FTEAM-1`);
 });
 
+test('workspace comment addresses retain exact comment navigation through quick and full search', () => {
+  const page = 'https://wiki.search.invalid/wiki/pages/viewpage.action?pageId=123';
+  const address = `${page}&private_token=synthetic-secret#comment-456`;
+  const conflicting = `${page}&focusedCommentId=456#comment-457`;
+  const document = doc('current-doc', '이동한 문서 제목', { projectId: secondProject.id, plainText: conflicting });
+  const data = snapshot([issue('linked-ticket', '옮긴 업무')], [document]);
+  const ordinary = { issueIds: new Set(['linked-ticket']), documentIds: new Set(['current-doc']) };
+  const exact = { ...ordinary, documentCommentIds: new Map([['current-doc', 'native-comment-id']]) };
+  const normalized = `${page}&focusedCommentId=456`;
+  assert.equal(normalizeWorkspaceSearchInput(address), normalized);
+  assert.equal(normalizeWorkspaceSearchInput(conflicting), '');
+  assert.deepEqual(searchQuickIssues(data, address, exact), []);
+  assert.deepEqual(searchQuickDocuments(data, address, ordinary), []);
+  assert.deepEqual(searchQuickDocuments(data, conflicting, exact), []);
+  assert.deepEqual(searchQuickDocuments(data, address, exact), [{ document, commentId: 'native-comment-id' }]);
+  assert.equal(searchWorkspace(data, filters({ query: normalized }), ordinary).total, 0);
+  assert.equal(searchWorkspace(data, filters({ query: normalized, scope: `project:${firstProject.id}` }), exact).total, 0);
+  assert.deepEqual(searchWorkspace(data, filters({ query: normalized, scope: `project:${secondProject.id}` }), exact).items,
+    [{ kind: 'document', document, parentTitles: [], excerpt: null, commentId: 'native-comment-id' }]);
+});
+
 test('GitLab URL lookup matches the exact local object for all active linked tickets', () => {
   const data = snapshot([issue('one', '첫 번째 검토'), issue('two', '두 번째 검토', { projectId: secondProject.id }),
     issue('other', '다른 저장소 검토'), issue('branch', '브랜치 업무'), issue('commit', '커밋 업무'), issue('pipeline', '파이프라인 업무')]);

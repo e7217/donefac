@@ -1305,7 +1305,7 @@ export function createApp(options: {
   app.get('/api/atlassian-links/resolve', (req, res) => {
     if (Object.keys(req.query).length !== 1 || typeof req.query.url !== 'string') return fail('검색할 원본 주소 한 개를 입력해 주세요.');
     const address = parseAtlassianSearchInput(req.query.url);
-    if (!address) return fail('Jira 업무 또는 Confluence 페이지 주소를 확인해 주세요.');
+    if (!address) return fail('Jira 업무 또는 Confluence 페이지·댓글 주소를 확인해 주세요.');
     res.set('Cache-Control', 'no-store').json({ targets: atlassianLinks.resolve(address) });
   });
   app.post('/api/atlassian-links',(req,res)=>{
@@ -2889,16 +2889,21 @@ export function createApp(options: {
     const originalAddress = gitlabQuery ? null : parseAtlassianSearchInput(query);
     if (originalAddress) {
       const issues: Issue[] = [], documents: DocPage[] = [];
-      for (const { targetType, targetId } of atlassianLinks.resolve(originalAddress)) {
+      const documentCommentIds = Object.create(null) as Record<string, string>;
+      for (const { targetType, targetId, commentId } of atlassianLinks.resolve(originalAddress)) {
         if (targetType === 'issue') {
           const issue = store.get<Issue>('issues', targetId);
           if (issue) issues.push(issue);
         } else {
           const document = store.get<DocPage>('documents', targetId);
-          if (document) documents.push(document);
+          if (document) {
+            documents.push(document);
+            if (commentId) documentCommentIds[targetId] = commentId;
+          }
         }
       }
-      return res.set('Cache-Control', 'no-store').json({ issues, documents });
+      return res.set('Cache-Control', 'no-store').json({ issues, documents,
+        ...(Object.keys(documentCommentIds).length ? { documentCommentIds } : {}) });
     }
     if(q.length>500 && !gitlabQuery)fail('검색어가 너무 깁니다.');
     const gitlabMatches = gitlabQuery ? matchingGitlabSearchLinks(store.all<GitlabLink>('gitlab_links'), gitlabQuery) : null;

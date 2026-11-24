@@ -14,7 +14,7 @@ type Props = Pick<FeatureProps, 'openIssue' | 'refresh'> & {
   data: WorkspaceSnapshot;
   filters: WorkspaceSearchFilters;
   onChange: (next: WorkspaceSearchFilters) => boolean;
-  openDocument: (id: string, sectionId?: string) => void;
+  openDocument: (id: string, sectionId?: string, commentId?: string) => void;
 };
 
 type Criteria = Omit<WorkspaceSearchFilters, 'page'>;
@@ -144,13 +144,13 @@ export function WorkspaceSearch({ data, filters, onChange, openIssue, openDocume
               </button>
             </li>;
           }
-          const { document, parentTitles, excerpt, sectionId } = result;
+          const { document, parentTitles, excerpt, sectionId, commentId } = result;
           const title = document.title || '제목 없는 문서';
           const space = document.projectId === null ? '팀 공통' : projectsById.get(document.projectId)?.name ?? '프로젝트';
           const path = [space, ...parentTitles].join(' › ');
           return <li key={`document:${document.id}`}>
-            <button type="button" className="workspace-search-result" aria-label={`${title} 문서 열기 · ${path}`}
-              aria-describedby={excerpt ? detailId : undefined} onClick={() => openDocument(document.id, sectionId)}>
+            <button type="button" className="workspace-search-result" aria-label={`${title} ${commentId ? '댓글' : '문서'} 열기 · ${path}`}
+              aria-describedby={excerpt ? detailId : undefined} onClick={() => openDocument(document.id, sectionId, commentId)}>
               <BookOpen size={18} aria-hidden="true" />
               <span className="workspace-search-result-content">
                 <span className="workspace-search-result-title"><strong>{title}</strong></span>

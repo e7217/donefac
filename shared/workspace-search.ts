@@ -19,7 +19,11 @@ export interface WorkspaceSearchFilters {
 export const DEFAULT_WORKSPACE_SEARCH_FILTERS: WorkspaceSearchFilters = { query: '', kind: 'all', scope: '', label: '', page: 1 };
 export const WORKSPACE_SEARCH_QUERY_LIMIT = 200;
 export const WORKSPACE_SEARCH_INPUT_LIMIT = GITLAB_SEARCH_INPUT_LIMIT;
-export type OriginalAddressMatches = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
+export type OriginalAddressMatches = {
+  issueIds: ReadonlySet<string>;
+  documentIds: ReadonlySet<string>;
+  documentCommentIds?: ReadonlyMap<string, string>;
+};
 const pageSize = 20;
 const quickIssueLimit = 12;
 const quickDocumentLimit = 8;
@@ -28,13 +32,13 @@ const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'base'
 const httpUrlStart = /^https?:\/\//iu;
 
 type IssueSearchMatch = { issue: Issue; matchedAliases?: IssueSearchAlias[]; matchedGitlab?: string };
-type DocumentSearchMatch = { document: DocPage; sectionId?: string };
+type DocumentSearchMatch = { document: DocPage; sectionId?: string; commentId?: string };
 type IssueAliasData = Pick<WorkspaceSnapshot, 'issueAliases'>;
 export type WorkspaceSearchDocument = { kind: 'document'; parentTitles: string[]; excerpt: string | null } & DocumentSearchMatch;
 export type WorkspaceSearchResult = ({ kind: 'issue'; excerpt: string | null } & IssueSearchMatch) | WorkspaceSearchDocument;
 
 type Match = { title: string; rank: number } & ({ kind: 'issue'; value: Issue; matchedAliases: IssueSearchAlias[]; matchedGitlab?: string }
-  | { kind: 'document'; value: DocPage; bodyOnly?: boolean });
+  | { kind: 'document'; value: DocPage; bodyOnly?: boolean; commentId?: string });
 
 const documentSearchTextBlocks = new Set(['paragraph', 'codeBlock', 'detailsSummary']);
 
@@ -73,8 +77,12 @@ export function normalizeWorkspaceSearchInput(input: string): string {
   try {
     const url = new URL(trimmed);
     const sanitized = `${url.origin}${match[1] ?? ''}`;
-    // Removing userinfo or a conflicting page ID must not turn a rejected original address into a match.
-    return sanitized.length <= WORKSPACE_SEARCH_INPUT_LIMIT && !parseAtlassianSearchInput(sanitized) ? sanitized : '';
+    const pageOnly = new URL(sanitized);
+    const pageId = url.searchParams.get('pageId');
+    if (pageId !== null) pageOnly.searchParams.set('pageId', pageId);
+    // Detect rejected original locators even when query-only page IDs are required by their path.
+    return sanitized.length <= WORKSPACE_SEARCH_INPUT_LIMIT && !parseAtlassianSearchInput(pageOnly.href) &&
+      !parseAtlassianSearchInput(sanitized) ? sanitized : '';
   } catch {
     return '';
   }
@@ -116,7 +124,9 @@ export function searchIssueCandidates<T extends Pick<Issue, 'id' | 'key' | 'titl
 }
 
 export function searchQuickIssues(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): IssueSearchMatch[] {
-  if (workspaceAtlassianSearchAddress(input)) {
+  const address = workspaceAtlassianSearchAddress(input);
+  if (address?.commentId) return [];
+  if (address) {
     return data.issues.filter(issue => original?.issueIds.has(issue.id)).slice(0, quickIssueLimit).map(issue => ({ issue }));
   }
   const trimmed = input.trim();
@@ -148,10 +158,18 @@ export function searchQuickIssues(data: WorkspaceSnapshot, input: string, origin
 }
 
 export function searchQuickDocuments(data: WorkspaceSnapshot, input: string, original?: OriginalAddressMatches): DocumentSearchMatch[] {
-  if (workspaceAtlassianSearchAddress(input)) {
+  const address = workspaceAtlassianSearchAddress(input);
+  if (address?.commentId) {
+    return data.documents.flatMap(document => {
+      const commentId = original?.documentCommentIds?.get(document.id);
+      return commentId ? [{ document, commentId }] : [];
+    }).slice(0, quickDocumentLimit);
+  }
+  if (address) {
     return data.documents.filter(document => original?.documentIds.has(document.id)).slice(0, quickDocumentLimit)
       .map(document => ({ document }));
   }
+  if (httpUrlStart.test(input.trim()) && !normalizeWorkspaceSearchInput(input)) return [];
   const query = documentLabelKey(input.trim());
   if (!query) return [];
   const matches = (text: string) => documentLabelKey(text).includes(query);
@@ -286,7 +304,7 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
 
   const spaces = new Map(data.projects.map(({ id, key, name }) => [id, `${name} ${key}`]));
   const matches: Match[] = [];
-  if (query && !label && filters.kind !== 'document') {
+  if (query && !originalAddress?.commentId && !label && filters.kind !== 'document') {
     const statuses = new Map(originalAddress ? [] : data.projects.map(({ id }) => [id, new Map(projectStatuses(data, id).map(status => [status.id, status.label]))]));
     const gitlabMatches = originalAddress ? null : matchingGitlabSearchLinks(data.gitlabLinks, filters.query);
     for (const issue of data.issues) {
@@ -311,7 +329,10 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       if (label && !labels.some(value => normalizeDocumentLabelKey(value) === label)) continue;
       const title = normalizeWorkspaceSearchKey(document.title);
       if (originalAddress) {
-        if (original?.documentIds.has(document.id)) matches.push({ kind: 'document', value: document, title, rank: 0 });
+        const commentId = originalAddress.commentId && original?.documentCommentIds?.get(document.id);
+        if (originalAddress.commentId ? commentId : original?.documentIds.has(document.id)) {
+          matches.push({ kind: 'document', value: document, title, rank: 0, ...(commentId ? { commentId } : {}) });
+        }
         continue;
       }
       const space = document.projectId === null ? '팀 공통' : spaces.get(document.projectId) ?? '';
@@ -335,7 +356,8 @@ export function searchWorkspace(data: WorkspaceSnapshot, filters: WorkspaceSearc
       ...(item.matchedGitlab ? { matchedGitlab: item.matchedGitlab } : {}) };
     const section = item.bodyOnly ? documentSearchSection(item.value, value => normalizeWorkspaceSearchKey(value).includes(query)) : undefined;
     return { kind: 'document', document: item.value, parentTitles: ancestorTitles(item.value, documentsById),
-      excerpt: excerptOf(section?.text ?? item.value.plainText, query), ...(section ? { sectionId: section.sectionId } : {}) };
+      excerpt: item.commentId ? null : excerptOf(section?.text ?? item.value.plainText, query),
+      ...(section ? { sectionId: section.sectionId } : {}), ...(item.commentId ? { commentId: item.commentId } : {}) };
   });
   return { items, total, page, pageCount };
 }

@@ -11,7 +11,7 @@ import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { AtlassianLink, AtlassianLinkPreview } from '../../shared/atlassian-links.js';
 import type { AtlassianSearchTarget } from '../../shared/atlassian-search.js';
-import type { ApiKeyCreated, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Comment, DocPage, DocumentTreeMovePreview, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Export = WorkspaceSnapshot & { schemaVersion: number; atlassianLinks: AtlassianLink[] };
 const linksRoute = '/atlassian-links';
@@ -305,4 +305,99 @@ test('archived Confluence titles find genuinely imported pages only while their 
   assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [] });
   await call(linksRoute, 'POST', { ...target(document), product: 'confluence', url: display(refreshedTitle) }, 201);
   assert.deepEqual(await resolve(display(refreshedTitle)), { targets: [target(document)] });
+});
+
+test('Confluence comment permalinks require a proven active source comment and exact owning page', async t => {
+  const { base, call } = await appFixture(t, scratch(t));
+  const origin = 'https://wiki.example.invalid/team/wiki';
+  const sourceTitle = 'Source Release Notes';
+  const parentSourceId = '9007199254740997';
+  const object = (type: string, id: string, fields: string) => `<object class="${type}"><id name="id">${id}</id>${fields}</object>`;
+  const prop = (name: string, text: string) => `<property name="${name}"><![CDATA[${text}]]></property>`;
+  const ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`;
+  const dated = prop('creationDate', '2020-01-01T00:00:00Z') + prop('lastModificationDate', '2020-01-01T00:00:00Z');
+  const content = (type: string, id: string, text: string) =>
+    object('BodyContent', `${type === 'Page' ? '1' : '2'}${id}`, prop('body', text) + ref('content', type, id));
+  const storage = '<p>앞부분 <ac:inline-comment-marker ac:ref="release-marker">배포 기준</ac:inline-comment-marker> 뒷부분</p>';
+  const page = (id: string, title: string, markup = '<p>본문</p>') => object('Page', id,
+    prop('title', title) + prop('version', '1') + ref('space', 'Space', '42') + dated) + content('Page', id, markup);
+  const comment = (id: string, pageId: string, text: string, parent?: string) => object('Comment', id,
+    ref('containerContent', 'Page', pageId) + (parent ? ref('parent', 'Comment', parent) : '') + dated) + content('Comment', id, `<p>${text}</p>`);
+  const attribute = object('ContentProperty', '802', prop('name', 'inline-marker-ref') + prop('stringValue', 'release-marker') +
+    ref('contentEntity', 'Comment', parentSourceId));
+  async function migrate(records: string, instanceKey: string, key: string, appendProjectId?: string) {
+    const space = object('Space', '42', prop('key', 'TEAM') + prop('name', '원본 팀 공간'));
+    const bytes = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${records}</hibernate-generic>`) }]);
+    const params = new URLSearchParams({ filename: `${key}.zip`, product: 'confluence', instanceKey });
+    const upload = await fetch(`${base}/legacy-import/packages?${params}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-min' }, body: new Uint8Array(bytes),
+    });
+    assert.equal(upload.status, 201, await upload.clone().text());
+    const imported = await upload.json() as LegacyPackageSummary;
+    const { defaultConfiguration: configuration } = await call<MigrationOptions>(`/migrations/options?packageId=${imported.id}`);
+    configuration.projects = configuration.projects.map(project => ({ ...project, key }));
+    if (appendProjectId) configuration.appendPagesTo = { projectId: appendProjectId, refreshHistory: true };
+    else configuration.sourceBaseUrls[imported.id] = origin;
+    const preview = await call<MigrationPreview>('/migrations/preview', 'POST', { configuration }, 201);
+    assert.ok(preview.canApply, JSON.stringify(preview.notices));
+    return call<MigrationApplyResult>(`/migrations/previews/${preview.id}/apply`, 'POST', {
+      expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements,
+    }, 201);
+  }
+  const instance = 'confluence-conversation';
+  const first = await migrate(page('100', sourceTitle, storage) + page('101', 'Other Page') +
+    comment(parentSourceId, '100', '원문이 있는 문장 댓글') + attribute + comment('301', '100', '직접 답글', parentSourceId) +
+    comment('302', '101', '다른 문서의 일반 댓글'), instance, 'TALK');
+  const [projectId] = first.import.projectIds;
+  const workspace = () => call<WorkspaceSnapshot>('/workspace');
+  const doc = (await workspace()).documents.find(value => value.projectId === projectId && value.title === sourceTitle);
+  const other = (await workspace()).documents.find(value => value.projectId === projectId && value.title === 'Other Page');
+  assert.ok(doc && other);
+  const readComments = (document: DocPage) => call<Comment[]>(`/comments?resourceType=document&resourceId=${document.id}`);
+  const comments = await readComments(doc);
+  const root = comments.find(value => value.documentSource?.text === '배포 기준');
+  const reply = comments.find(value => value.parentCommentId === root?.id && value.body === '직접 답글');
+  const [ordinary] = await readComments(other);
+  assert.ok(root && reply && ordinary);
+  const classic = (pageId: string, commentId: string) => `${origin}/pages/viewpage.action?pageId=${pageId}&focusedCommentId=${commentId}#comment-${commentId}`;
+  const rootUrl = classic('100', parentSourceId);
+  const replyUrl = `${origin}/display/TEAM/Source+Release+Notes?focusedCommentId=301#comment-301`;
+  const otherUrl = `${origin}/spaces/TEAM/pages/101/Other+Page?focusedCommentId=302`;
+  const resolve = (url: string) => call<{ targets: AtlassianSearchTarget[] }>(resolveRoute(url));
+  const target = (document: DocPage, comment: Comment) => ({ targetType: 'document', targetId: document.id, commentId: comment.id });
+  await call(linksRoute, 'POST', { targetType: 'document', targetId: 'doc-overview', product: 'confluence', url: rootUrl }, 201);
+  assert.deepEqual(await resolve(rootUrl), { targets: [target(doc, root)] });
+  assert.deepEqual(await resolve(replyUrl), { targets: [target(doc, reply)] });
+  assert.deepEqual(await resolve(otherUrl), { targets: [target(other, ordinary)] });
+  for (const url of [classic('101', parentSourceId), classic('100', '302'), classic('100', '399'),
+    rootUrl.replace('/team/wiki/', '/other/wiki/'), replyUrl.replace('/TEAM/', '/OTHER/'), rootUrl.replace('wiki.example.invalid', 'other.example.invalid')]) {
+    assert.deepEqual(await resolve(url), { targets: [] });
+  }
+  await call(resolveRoute(rootUrl.replace(`#comment-${parentSourceId}`, '#comment-301')), 'GET', undefined, 400);
+  const exact = await call<{ issues: Issue[]; documents: DocPage[]; documentCommentIds: Record<string, string> }>(searchRoute(replyUrl));
+  assert.deepEqual(exact.issues, []);
+  assert.deepEqual(exact.documents.map(value => value.id), [doc.id]);
+  assert.deepEqual(exact.documentCommentIds, { [doc.id]: reply.id });
+  assert.deepEqual(await call(searchRoute(classic('101', parentSourceId))), { issues: [], documents: [] });
+
+  await migrate(page('100', sourceTitle, storage) + comment('303', '100', '상위 객체 없이 추가한 답글', parentSourceId), instance, 'TAKU', projectId);
+  const appended = (await readComments(doc)).find(value => value.body === '상위 객체 없이 추가한 답글');
+  assert.ok(appended && appended.parentCommentId === root.id);
+  const appendedUrl = classic('100', '303');
+  assert.deepEqual(await resolve(appendedUrl), { targets: [target(doc, appended)] });
+  const archived = await call<{ trashItemId: string }>(`/comments/${root.id}`, 'DELETE');
+  for (const url of [rootUrl, replyUrl, appendedUrl]) assert.deepEqual(await resolve(url), { targets: [] });
+  await call(`/trash/items/${archived.trashItemId}/restore`, 'POST');
+  assert.deepEqual(await resolve(replyUrl), { targets: [target(doc, reply)] });
+  await call('/import', 'POST', { data: await call<Export>('/export') });
+  assert.deepEqual(await resolve(appendedUrl), { targets: [target(doc, appended)] });
+  const move = { projectId: 'project-neo', parentId: null };
+  const review = await call<DocumentTreeMovePreview>(`/documents/${doc.id}/move-preview`, 'POST', move);
+  await call(`/documents/${doc.id}/move`, 'POST', { ...move, token: review.token });
+  assert.equal((await workspace()).documents.find(value => value.id === doc.id)?.projectId, 'project-neo');
+  assert.deepEqual(await resolve(replyUrl), { targets: [target(doc, reply)] });
+
+  await migrate(page('100', sourceTitle) + comment(parentSourceId, '100', '다른 원본 인스턴스의 같은 ID'), 'confluence-overlap', 'OVRP');
+  assert.deepEqual(await resolve(rootUrl), { targets: [] });
+  assert.deepEqual(await resolve(replyUrl), { targets: [target(doc, reply)] });
 });

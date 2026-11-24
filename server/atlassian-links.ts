@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto';
-import { AtlassianReadError, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
-import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
-import type { SourceImport } from '../shared/types.js';
+import { AtlassianReadError, isConfluencePageId, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
+import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
+import type { Comment, SourceImport, SourceRecordArchive } from '../shared/types.js';
 import { parseMigrationOriginBase } from './migration-origin-links.js';
+import { confluenceHistoryPage } from './source-preservation.js';
 import type { Store } from './store.js';
 
 type LinkTarget = Pick<AtlassianLink, 'targetType' | 'targetId'>;
 type LinkReferences = { issueIds: ReadonlySet<string>; documentIds: ReadonlySet<string> };
-type ConfluenceTitleAddress = Extract<ParsedAtlassianLink, { title: string }>;
-type ArchivedPage = { targetId: string; importId: string; instanceKey: string; packageSha: string; spaceId: string };
+type ConfluenceAddress = Extract<ParsedAtlassianLink, { product: 'confluence' }>;
+type ArchivedPage = { targetId: string; importId: string; instanceKey: string; packageSha: string; spaceId: string; sourceId: string; projectId: string | null };
 type ArchivedSpace = { spaceKey: string | null; key: string | null; sourceClass: string | null };
+type ArchiveRow = { json: string | null };
 
 const inputFields = ['targetType', 'targetId', 'product', 'url'];
 const backupFields = ['id', ...inputFields, 'createdAt'];
@@ -92,14 +94,15 @@ export class AtlassianLinksService {
     return rows.map(row => ({ ...row }));
   }
 
-  resolve(address: ParsedAtlassianLink): AtlassianSearchTarget[] {
+  resolve(address: AtlassianSearchAddress): AtlassianSearchTarget[] {
+    if (address.product === 'confluence' && address.commentId) return this.resolveConfluenceComment(address, address.commentId);
     const order = 'ORDER BY targetType,targetId';
     if (address.product !== 'confluence' || !('pageId' in address)) {
       const exact = this.store.db.prepare(`SELECT ${targetColumns} FROM atlassian_links
         WHERE product=? AND url=? AND ${activeTarget} ${order}`).all(address.product, address.url) as unknown as AtlassianSearchTarget[];
       if (address.product === 'jira') return exact;
       const targets = new Map(exact.map(target => [`${target.targetType}:${target.targetId}`, target]));
-      for (const target of this.archivedConfluenceTitleTargets(address)) targets.set(`document:${target.targetId}`, target);
+      for (const { targetId } of this.archivedConfluencePages(address)) targets.set(`document:${targetId}`, { targetType: 'document', targetId });
       return [...targets.values()].sort((left, right) => left.targetType.localeCompare(right.targetType) || left.targetId.localeCompare(right.targetId));
     }
 
@@ -120,14 +123,17 @@ export class AtlassianLinksService {
     return [...targets.values()];
   }
 
-  private archivedConfluenceTitleTargets(address: ConfluenceTitleAddress): AtlassianSearchTarget[] {
+  private archivedConfluencePages(address: ConfluenceAddress): ArchivedPage[] {
     const db = this.store.db;
     if (!db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_records'`).get()) return [];
     const base = `${address.origin}${address.contextPath}`;
-    // A title is only an alternate locator for a bound page with a still-active numeric origin link.
+    const numeric = 'pageId' in address;
+    const locator = numeric ? `page.source_id=? AND page.import_id=binding.import_id` : `json_extract(page.json,'$.record.title')=?`;
+    // Title aliases can come from later refresh receipts for the original bound page.
     const candidates = db.prepare(`SELECT DISTINCT page.target_id AS targetId, page.import_id AS importId,
       page.source_instance AS instanceKey, json_extract(page.json,'$.packageSha256') AS packageSha,
-      json_extract(page.json,'$.record.containerId') AS spaceId
+      json_extract(page.json,'$.record.containerId') AS spaceId, page.source_id AS sourceId,
+      json_extract(page.json,'$.targetProjectId') AS projectId
       FROM source_records AS page
       JOIN source_bindings AS binding ON binding.product=page.product AND binding.source_instance=page.source_instance
         AND binding.kind=page.kind AND binding.source_alias=page.source_id AND binding.target_type=page.target_type
@@ -136,30 +142,89 @@ export class AtlassianLinksService {
       JOIN atlassian_links AS link ON link.product='confluence' AND link.target_type='document'
         AND link.target_id=page.target_id AND link.url=? || page.source_id
       WHERE page.product='confluence' AND page.kind='page' AND page.target_type='document' AND json_valid(page.json)
-        AND json_extract(page.json,'$.record.title')=? AND json_type(page.json,'$.record.containerId')='text'
+        AND ${locator} AND json_type(page.json,'$.record.containerId')='text'
         AND coalesce(json_extract(page.json,'$.excluded'),0)=0
+        AND coalesce(json_extract(page.json,'$.record.metadata.restricted'),0)=0
         AND coalesce(json_extract(page.json,'$.record.metadata.sourceClass'),'Page')='Page'`)
-      .all(`${base}/pages/viewpage.action?pageId=`, address.title) as unknown as ArchivedPage[];
+      .all(`${base}/pages/viewpage.action?pageId=`, numeric ? address.pageId : address.title) as unknown as ArchivedPage[];
     const spaceQuery = db.prepare(`SELECT json_extract(json,'$.record.metadata.spaceKey') AS spaceKey,
       json_extract(json,'$.record.metadata.key') AS key, json_extract(json,'$.record.metadata.sourceClass') AS sourceClass
       FROM source_records WHERE import_id=? AND product='confluence' AND source_instance=? AND kind='project' AND source_id=?
         AND json_valid(json) AND json_extract(json,'$.packageSha256')=? AND coalesce(json_extract(json,'$.excluded'),0)=0 LIMIT 2`);
     const receipts = new Map<string, SourceImport | undefined>();
-    const targets: AtlassianSearchTarget[] = [];
-    for (const { targetId, importId, instanceKey, packageSha, spaceId } of candidates) {
+    const pages: ArchivedPage[] = [];
+    for (const candidate of candidates) {
+      const { importId, instanceKey, packageSha, spaceId, sourceId } = candidate;
+      if (!isConfluencePageId(sourceId)) continue;
       if (!receipts.has(importId)) receipts.set(importId, this.store.get<SourceImport>('source_imports', importId));
       const receipt = receipts.get(importId);
-      const packages = receipt?.packages.filter(pkg => pkg.sha256 === packageSha && pkg.source.product === 'confluence' &&
-        pkg.source.instanceKey === instanceKey);
-      if (!receipt || packages?.length !== 1) continue;
-      const origin = parseMigrationOriginBase('confluence', receipt.configuration.sourceBaseUrls?.[packages[0].stagingId]);
+      const sourcePackage = this.confluenceSourcePackage(receipt, instanceKey, packageSha);
+      if (!receipt || !sourcePackage) continue;
+      const origin = parseMigrationOriginBase('confluence', receipt.configuration.sourceBaseUrls?.[sourcePackage.stagingId]);
       if (origin?.origin !== address.origin || origin.contextPath !== address.contextPath) continue;
-      const [space, duplicate] = spaceQuery.all(importId, instanceKey, spaceId, packageSha) as unknown as ArchivedSpace[];
-      if (!space || duplicate || (space.sourceClass !== null && space.sourceClass !== 'Space') ||
-          (space.spaceKey || space.key) !== address.spaceKey || (space.key && space.key !== address.spaceKey)) continue;
-      targets.push({ targetType: 'document', targetId });
+      if (!numeric) {
+        const [space, duplicate] = spaceQuery.all(importId, instanceKey, spaceId, packageSha) as unknown as ArchivedSpace[];
+        if (!space || duplicate || (space.sourceClass !== null && space.sourceClass !== 'Space') ||
+            (space.spaceKey || space.key) !== address.spaceKey || (space.key && space.key !== address.spaceKey)) continue;
+      }
+      pages.push(candidate);
     }
-    return targets;
+    return pages;
+  }
+
+  private confluenceSourcePackage(receipt: SourceImport | undefined, instanceKey: string, packageSha: string) {
+    const packages = receipt?.packages.filter(pkg => pkg.sha256 === packageSha && pkg.source.product === 'confluence' &&
+      pkg.source.instanceKey === instanceKey && pkg.source.format === 'confluence-xml');
+    return packages?.length === 1 ? packages[0] : undefined;
+  }
+
+  private resolveConfluenceComment(address: ConfluenceAddress, sourceCommentId: string): AtlassianSearchTarget[] {
+    const pages = this.archivedConfluencePages(address);
+    if (!pages.length) return [];
+    const db = this.store.db;
+    // The original comment body is unnecessary for comparing page ownership.
+    const withoutBody = `CASE WHEN json_valid(json) THEN json_set(json,'$.record.text','') END`;
+    const comments = db.prepare(`SELECT ${withoutBody} AS json FROM source_records
+      WHERE product='confluence' AND source_instance=? AND kind='comment' AND source_id=?
+        AND target_type='comment' LIMIT 2`);
+    const related = db.prepare(`SELECT ${withoutBody} AS json FROM source_records
+      WHERE import_id=? AND product='confluence' AND source_instance=? AND kind=? AND source_id=?
+        AND CASE WHEN json_valid(json) THEN json_extract(json,'$.packageSha256') END=? LIMIT 2`);
+    const found = new Map<string, AtlassianSearchTarget>();
+    for (const page of pages) {
+      const [row, duplicate] = comments.all(page.instanceKey, sourceCommentId) as ArchiveRow[];
+      if (!row?.json || duplicate) continue;
+      const archive = JSON.parse(row.json) as SourceRecordArchive | null;
+      if (!archive?.source || !archive.record || archive.excluded || archive.source.product !== 'confluence' || archive.source.format !== 'confluence-xml' ||
+          archive.source.instanceKey !== page.instanceKey || archive.record.sourceId !== sourceCommentId ||
+          archive.targetType !== 'comment' || typeof archive.targetId !== 'string' ||
+          archive.ownerType !== 'document' || archive.ownerId !== page.targetId || archive.targetProjectId !== page.projectId) continue;
+      const receipt = this.store.get<SourceImport>('source_imports', archive.sourceImportId);
+      const sourcePackage = this.confluenceSourcePackage(receipt, page.instanceKey, archive.packageSha256);
+      if (!receipt || !sourcePackage || !page.projectId || !receipt.projectIds.includes(page.projectId)) continue;
+      const configuredBase = receipt.configuration.sourceBaseUrls?.[sourcePackage.stagingId];
+      const origin = parseMigrationOriginBase('confluence', configuredBase);
+      if (configuredBase && (origin?.origin !== address.origin || origin.contextPath !== address.contextPath)) continue;
+      const owner = confluenceHistoryPage(archive.record, (kind, sourceId) => {
+        const [value, extra] = related.all(archive.sourceImportId, page.instanceKey, kind, sourceId, archive.packageSha256) as ArchiveRow[];
+        if (!value?.json || extra) return;
+        const record = JSON.parse(value.json) as SourceRecordArchive | null;
+        return record?.excluded ? undefined : record?.record;
+      });
+      if (owner !== page.sourceId || !this.activeDocumentComment(page.targetId, archive.targetId)) continue;
+      const target = { targetType: 'document', targetId: page.targetId, commentId: archive.targetId } as const;
+      found.set(JSON.stringify([page.instanceKey, page.sourceId, target.targetId, target.commentId]), target);
+    }
+    return found.size === 1 ? [...found.values()] : [];
+  }
+
+  private activeDocumentComment(documentId: string, commentId: string): boolean {
+    const comment = this.store.get<Comment>('comments', commentId);
+    if (!comment || comment.id !== commentId || comment.resourceType !== 'document' || comment.resourceId !== documentId) return false;
+    if (comment.parentCommentId === undefined) return true;
+    const root = this.store.get<Comment>('comments', comment.parentCommentId);
+    return Boolean(root?.id === comment.parentCommentId && root.resourceType === 'document' && root.resourceId === documentId &&
+      root.parentCommentId === undefined && root.documentSource && !comment.documentSource && !comment.resolution);
   }
 
   create(input: unknown): AtlassianLink {

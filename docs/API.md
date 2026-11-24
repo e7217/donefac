@@ -87,6 +87,8 @@ curl --fail-with-body \
 
 같은 스킴·호스트·포트·설치 경로의 Jira 업무 키 또는 Confluence 페이지 ID를 저장된 링크에서 찾는다. `/display/…` 주소는 직접 저장한 제목 링크와, 같은 원본 패키지에서 제목·공간을 확인한 이관 문서를 찾는다. 이관 문서는 영수증의 서버·설치 경로, 보관된 문서와 원본의 연결, 현재 저장된 숫자 페이지 ID 링크를 함께 대조한다. 활성 업무·문서를 한 번씩 반환하며 같은 주소에 연결된 별도 대상은 각각 반환한다. 원본 서버에 접속하지 않는다. `GET /api/search?q=…`에 유효한 원본 주소를 보내면 같은 대상을 기존 `{issues, documents}` 형식으로 반환한다.
 
+Confluence 댓글 주소에는 `focusedCommentId` 또는 `#comment-<원본 댓글 ID>`가 들어간다. 둘을 함께 쓰면 번호가 일치해야 한다. 검색용 주소는 원본 댓글 번호를 `focusedCommentId`에 보존한다. 해당 설치의 이관 영수증·페이지 연결·댓글 기록을 확인하고 활성 문서의 댓글을 하나로 찾으면 `targets`에 `{targetType:'document',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. 잘못된 선택자는 `400`, 문서나 댓글의 소유 관계가 불명확하거나 대상이 휴지통에 있으면 빈 `targets`가 반환된다. `GET /api/search`는 정확한 댓글이 있을 때 문서 ID와 댓글 ID를 연결하는 `documentCommentIds`도 반환한다.
+
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.

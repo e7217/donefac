@@ -83,6 +83,45 @@ test('Confluence display locators use the exact decoded source space and title',
   ]) assert.equal(sameAtlassianSearchAddress(canonical, address(other)), false, other);
 });
 
+test('Confluence comment permalinks preserve one exact selector across canonical page forms', () => {
+  const base = 'https://kb.example.test/wiki';
+  const commentId = '90071992547409931234';
+  const numeric = `${base}/pages/viewpage.action?pageId=42`;
+  const display = `${base}/display/PLAN/Release+notes`;
+  const modern = `${base}/spaces/PLAN/pages/42/Release%20notes`;
+  for (const [input, canonical] of [
+    [`${numeric}&focusedCommentId=${commentId}&tracking=discard#comment-${commentId}`, `${numeric}&focusedCommentId=${commentId}`],
+    [`${display}?tracking=discard#comment-${commentId}`, `${display}?focusedCommentId=${commentId}`],
+    [`${display}?focusedCommentId=${commentId}#heading`, `${display}?focusedCommentId=${commentId}`],
+    [`${modern}?focusedCommentId=${commentId}`, `${modern}?focusedCommentId=${commentId}`],
+    [`${base}/x/ZIAB#%63omment%2D${commentId}`, `${base}/pages/viewpage.action?pageId=98404&focusedCommentId=${commentId}`],
+  ]) {
+    const parsed = address(input);
+    assert.equal(parsed.commentId, commentId, input);
+    assert.equal(parsed.url, canonical, input);
+    assert.deepEqual(address(canonical), parsed, input);
+  }
+  assert.equal(address(`${display}#comments`).commentId, undefined);
+  assert.equal(address(`${display}#release-comment-42`).url, display);
+  assert.ok(sameAtlassianSearchAddress(address(`${numeric}&focusedCommentId=9`), address(`${modern}#comment-10`)));
+});
+
+test('invalid Confluence comment selectors never fall back to the page locator', () => {
+  const page = 'https://kb.example.test/wiki/display/PLAN/Release+notes';
+  for (const suffix of [
+    '?focusedCommentId=', '?focusedCommentId=0', '?focusedCommentId=042', '?focusedCommentId=2.1',
+    '?focusedCommentId=9&focusedCommentId=9', '?focusedCommentId=9&%66ocusedCommentId=9',
+    '?focusedCommentId=9#comment-10', '?focusedCommentId=9#comment-9/extra',
+    '?commentId=9', '?inlineCommentId=9#comment-9', '?FocusedCommentId=9', '?focusedCommentId=9&commentId=9',
+    '#comment-', '#comment-zero', '#comment-0', '#comment-09', '#comment-9%00', '#Comment-9', '#inline-comment-9', '#%63omment-%GG',
+  ]) assert.equal(parseAtlassianSearchInput(`${page}${suffix}`), null, suffix);
+
+  const prefix = 'https://kb.example.test/wiki/spaces/PLAN/pages/42/';
+  const fragment = '#comment-42';
+  const tooLongAfterCanonicalization = `${prefix}${'a'.repeat(MAX_ATLASSIAN_LINK_URL_LENGTH - prefix.length - fragment.length)}${fragment}`;
+  assert.equal(parseAtlassianSearchInput(tooLongAfterCanonicalization), null);
+});
+
 test('malformed source addresses never become canonical lookup input', () => {
   const base = 'https://kb.example.test';
   for (const invalid of [

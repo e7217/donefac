@@ -20,9 +20,9 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
   const [lookup, setLookup] = useState<Lookup>();
   const current = lookup?.request === request ? lookup : undefined;
   const ensureTargetsLoaded = useEffectEvent(async (targets: readonly AtlassianSearchTarget[]) => {
-    if (targets.some(({ targetType, targetId }) => {
+    if (targets.some(({ targetType, targetId, commentId }) => {
       const items = targetType === 'issue' ? data.issues : data.documents;
-      return !items.some(item => item.id === targetId);
+      return commentId || !items.some(item => item.id === targetId);
     })) await refresh();
   });
 
@@ -37,9 +37,13 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
       if (controller.signal.aborted) return;
       await ensureTargetsLoaded(targets);
       if (controller.signal.aborted) return;
-      const issueIds = new Set<string>(), documentIds = new Set<string>();
-      for (const { targetType, targetId } of targets) (targetType === 'issue' ? issueIds : documentIds).add(targetId);
-      return { issueIds, documentIds };
+      const issueIds = new Set<string>(), documentIds = new Set<string>(), documentCommentIds = new Map<string, string>();
+      for (const { targetType, targetId, commentId } of targets) {
+        if (targetType === 'issue') issueIds.add(targetId);
+        else if (commentId) documentCommentIds.set(targetId, commentId);
+        else documentIds.add(targetId);
+      }
+      return { issueIds, documentIds, documentCommentIds };
     }
     const timer = window.setTimeout(() => {
       void resolve(request.url).then(matches => {
@@ -53,13 +57,13 @@ export function useAtlassianSearch(query: string, data: FeatureProps['data'], re
 
   useEffect(() => {
     if (!url) return;
-    const events = ['focus', ATLASSIAN_LINKS_CHANGED, 'teamspace:workspace-imported'];
+    const events = ['focus', ATLASSIAN_LINKS_CHANGED, 'teamspace:workspace-imported', 'teamspace:trash-changed'];
     for (const event of events) window.addEventListener(event, retry);
     return () => { for (const event of events) window.removeEventListener(event, retry); };
   }, [url, retry]);
 
   return {
-    label: address ? address.product === 'jira' ? 'Jira 원본 주소' : 'Confluence 원본 주소' : null,
+    label: address?.commentId ? 'Confluence 댓글 주소' : address ? address.product === 'jira' ? 'Jira 원본 주소' : 'Confluence 원본 주소' : null,
     matches: current?.matches ?? undefined,
     pending: Boolean(request && !current),
     failed: current?.matches === null,
