@@ -1570,6 +1570,7 @@ export type GitlabMergeRequestPipeline = {
   { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
   {
     kind: 'pipeline';
+    revision: string;
     pipeline: {
       repositoryId: number;
       pipelineId: number;

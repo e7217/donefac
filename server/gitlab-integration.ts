@@ -783,29 +783,100 @@ export class GitlabIntegrationService{
     return { ...result, linkId, repositoryId: link.projectId, pipelineId: target.objectId, checkedAt: now() };
   }
   async mergeRequestReview(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestReview> {
-    return this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 검토 정보', readGitlabMergeRequestReview);
+    const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 검토 정보', readGitlabMergeRequestReview);
+    return { ...result, ...response };
   }
   async mergeRequestDiscussions(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestDiscussions> {
-    return this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 토론', readGitlabMergeRequestDiscussions);
+    const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 토론', readGitlabMergeRequestDiscussions);
+    return { ...result, ...response };
   }
   private async mergeRequestPipeline(issueId: string, linkId: string, signal: AbortSignal, includeJobs: boolean): Promise<GitlabMergeRequestPipeline> {
-    const result = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 파이프라인',
+    const { result, context, response } = await this.readLinkedMergeRequestPipeline(issueId, linkId, signal, { includeJobs });
+    if (result.kind !== 'pipeline') return { ...response, kind: result.kind };
+    const { pipeline, jobs } = result;
+    return {
+      ...response,
+      kind: 'pipeline',
+      pipeline,
+      revision: this.mergeRequestPipelineRevision(context, result),
+      ...(jobs ? { jobs: { ...jobs, linkId, repositoryId: pipeline.repositoryId, pipelineId: pipeline.pipelineId, checkedAt: response.checkedAt } } : {}),
+    };
+  }
+  private readLinkedMergeRequestPipeline(issueId: string, linkId: string, signal: AbortSignal,
+    { includeJobs, attaching = false }: { includeJobs: boolean; attaching?: boolean }) {
+    return this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 파이프라인',
       (connection, repositoryId, iid, objectId, readSignal) =>
-        readGitlabMergeRequestPipeline(connection, repositoryId, iid, objectId, includeJobs, readSignal));
-    if (result.kind !== 'pipeline') return result;
-    const { jobs, ...pipeline } = result;
-    return { ...pipeline, ...(jobs ? { jobs: { ...jobs, linkId, repositoryId: pipeline.pipeline.repositoryId,
-      pipelineId: pipeline.pipeline.pipelineId, checkedAt: result.checkedAt } } : {}) };
+        readGitlabMergeRequestPipeline(connection, repositoryId, iid, objectId, includeJobs, readSignal), attaching);
+  }
+  private mergeRequestPipelineRevision(context: { issue: Issue; link: GitlabLink; captured: RawSettings; workspaceGeneration: unknown },
+    result: Extract<Awaited<ReturnType<typeof readGitlabMergeRequestPipeline>>, { kind: 'pipeline' }>) {
+    const { issue, link, captured, workspaceGeneration } = context;
+    const { sourceHead, sourceProjectId } = result.verification;
+    const { repositoryId, pipelineId, sha } = result.pipeline;
+    return createHash('sha256').update(JSON.stringify([
+      workspaceGeneration, captured.version, captured.baseUrl, issue.id, issue.projectId, issue.key, link,
+      sourceProjectId, sourceHead, repositoryId, pipelineId, sha,
+    ])).digest('hex');
+  }
+  private async attachMergeRequestPipeline(issueId: string, linkId: string, value: unknown, afterAttach: (link: GitlabLink) => void, signal: AbortSignal) {
+    const input = record(value);
+    const { repositoryId, pipelineId, sha, revision, actorId } = input;
+    if (Object.keys(input).some(key => !['repositoryId', 'pipelineId', 'sha', 'revision', 'actorId'].includes(key)) ||
+        typeof repositoryId !== 'number' || !Number.isSafeInteger(repositoryId) || repositoryId < 1 ||
+        typeof pipelineId !== 'number' || !Number.isSafeInteger(pipelineId) || pipelineId < 1 ||
+        typeof sha !== 'string' || gitlabObjectSha(sha) !== sha || /^0+$/u.test(sha) ||
+        typeof revision !== 'string' || !/^[a-f0-9]{64}$/u.test(revision) ||
+        (actorId !== undefined && (typeof actorId !== 'string' || !actorId.trim()))) {
+      fail('업무에 연결할 GitLab MR 파이프라인 정보를 확인해 주세요.');
+    }
+    const startedAt = now();
+    const { result, context } = await this.readLinkedMergeRequestPipeline(issueId, linkId, signal, { includeJobs: false, attaching: true });
+    if (result.kind !== 'pipeline' || result.pipeline.repositoryId !== repositoryId ||
+        result.pipeline.pipelineId !== pipelineId || result.pipeline.sha !== sha ||
+        this.mergeRequestPipelineRevision(context, result) !== revision) {
+      fail('GitLab MR 또는 최신 파이프라인이 변경되었습니다. 다시 확인해 주세요.', 409);
+    }
+    const { issue, captured, token, assertCurrent } = context;
+    const instance = this.instance(captured);
+    const object = result.verification.pipelineObject;
+    const observed = readLink('pipeline', {
+      ...object,
+      sha,
+      web_url: result.pipeline.webUrl,
+      state: result.pipeline.status,
+      iid: Number(numericObjectId(object.iid) || numericObjectId(object.id)),
+    }, [], keys, undefined, readPipelineClassification(object, true, token));
+    return this.store.transaction(() => {
+      assertCurrent();
+      const aliases = this.workflowLinksForObject(instance, repositoryId, 'pipeline', observed.id);
+      const draft = this.classifyReadPipeline(instance, repositoryId, observed, aliases);
+      if (!draft) fail('GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다. 최신 활동을 다시 확인해 주세요.', 409);
+      const snapshot = linkForIssue(instance, repositoryId, 'pipeline', { issue }, draft);
+      const existing = this.store.get<GitlabLink>('gitlab_links', snapshot.id);
+      if (existing) {
+        const target = linkedWorkflowTarget(existing, issueId, instance);
+        if (target?.kind !== 'pipeline' || target.objectId !== pipelineId || existing.projectId !== repositoryId ||
+            !isRestorableGitlabLink(existing) || !matchesManualLink(existing, draft)) {
+          fail('저장한 GitLab 파이프라인의 식별자가 일치하지 않습니다.', 409);
+        }
+        return { link: existing, created: false };
+      }
+      const link = this.verifiedWorkflowAttachment('pipeline', instance, snapshot, draft, undefined, token, startedAt);
+      if (!isRestorableGitlabLink(link)) fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.', 502);
+      this.store.put('gitlab_links', link);
+      afterAttach(link);
+      return { link, created: true };
+    });
   }
   private async readLinkedMergeRequest<Result>(issueId: string, linkId: string, signal: AbortSignal, description: string,
     read: (connection: { baseUrl: string; token: string | null; projectIds: readonly number[] }, repositoryId: number, iid: number,
-      objectId: number, signal: AbortSignal) => Promise<Result>) {
+      objectId: number, signal: AbortSignal) => Promise<Result>, attaching = false) {
     if (!linkId || linkId.length > 500) fail('연결된 GitLab MR을 선택해 주세요.');
     const issue = this.requireIssue(issueId);
     const link = this.store.get<GitlabLink>('gitlab_links', linkId);
     if (!link || link.issueId !== issueId || link.kind !== 'merge_request') fail('업무에 연결된 GitLab MR을 찾을 수 없습니다.', 404);
     const captured = this.raw();
-    if (!captured.baseUrl || !captured.projectIds.includes(link.projectId)) fail('현재 GitLab 연결에 이 저장소가 없습니다.', 403);
+    if (!captured.baseUrl || !captured.projectIds.includes(link.projectId)) fail('현재 GitLab 연결에 이 저장소가 없습니다.', attaching ? 409 : 403);
     const target = linkedWorkflowTarget(link, issueId, this.instance(captured));
     if (!target) fail('현재 GitLab 연결에서 MR의 식별자를 확인할 수 없습니다.', 409);
     const workspaceGeneration = this.store.setting('attachmentImportGeneration');
@@ -837,7 +908,8 @@ export class GitlabIntegrationService{
       failGitlabWorkflowRead(error);
     }
     assertCurrent();
-    return { ...result, linkId, repositoryId: link.projectId, mergeRequestIid: target.id, checkedAt: now() };
+    return { result, context: { issue, link, captured, workspaceGeneration, token, assertCurrent },
+      response: { linkId, repositoryId: link.projectId, mergeRequestIid: target.id, checkedAt: now() } };
   }
   private branchMergeRequestContext(issueId: string, linkId: string) {
     if (!linkId || linkId.length > 500) fail('연결된 GitLab 브랜치를 선택해 주세요.');
@@ -2248,6 +2320,22 @@ export class GitlabIntegrationService{
     app.get('/api/issues/:id/gitlab-links/:linkId/branch-merge-requests',
       linkedWorkflowRead('GitLab 브랜치의 MR 조회 조건을 확인해 주세요.', this.branchMergeRequests.bind(this), true));
     const linkDetail=(link:GitlabLink)=>`${link.kind==='merge_request'?`MR !${link.iid}`:`파이프라인 #${link.iid}`} · 저장소 ${link.projectId}`;
+    app.post('/api/issues/:id/gitlab-links/:linkId/merge-request-pipeline', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).length) fail('업무에 연결할 GitLab MR 파이프라인 정보를 확인해 주세요.');
+      hooks.actor(req);
+      const issueId = String(req.params.id);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const { link, created } = await this.attachMergeRequestPipeline(issueId, String(req.params.linkId), req.body, link => {
+          hooks.activity(req, 'issue', issueId, 'GitLab 활동 수동 연결', linkDetail(link));
+        }, controller.signal);
+        if (!controller.signal.aborted) res.status(created ? 201 : 200).json(link);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
+    });
     app.post('/api/issues/:id/gitlab-links/:linkId/branch-merge-requests', async (req, res) => {
       res.set('Cache-Control', 'no-store');
       if (Object.keys(req.query).length) fail('브랜치에 연결할 GitLab MR의 정보를 확인해 주세요.');

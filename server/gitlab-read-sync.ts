@@ -1148,19 +1148,19 @@ async function inspectVerifiedPipeline(context: VerifiedProject, repositoryId: n
       (stage === mergeRequestPipelineStage && includesGitlabCredential(token, [sha]))) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
-    return { status, sha, webUrl, updatedAt: typeof updated === 'string' ? updated : null,
-      configurationError: typeof yamlErrors === 'string' && Boolean(yamlErrors.trim()) };
+    return { object, observed: { status, sha, webUrl, updatedAt: typeof updated === 'string' ? updated : null,
+      configurationError: typeof yamlErrors === 'string' && Boolean(yamlErrors.trim()) } };
   }
-  const observed = await readPipeline();
+  const { object, observed } = await readPipeline();
   if (expectedSha !== null && observed.sha !== gitlabObjectSha(expectedSha)) throw new GitlabReadError(stage, 'invalid-response');
   async function recheck() {
-    const latest = await readPipeline();
+    const { observed: latest } = await readPipeline();
     if (latest.sha !== observed.sha || latest.webUrl !== observed.webUrl || latest.status !== observed.status ||
         latest.updatedAt !== observed.updatedAt || latest.configurationError !== observed.configurationError) {
       throw new GitlabReadError(stage === mergeRequestPipelineStage ? 'pipeline-jobs' : stage, 'changed');
     }
   }
-  return { context, observed, recheck };
+  return { context, object, observed, recheck };
 }
 
 async function readPipelineJobPages<Job extends { id: number }>(url: URL, headers: Record<string, string>,
@@ -1232,6 +1232,7 @@ async function readInspectedPipelineJobs({ context, observed, recheck }: Awaited
 type MergeRequestPipelinePointer = { repositoryId: number; pipelineId: number; sha: string };
 type MergeRequestPipelineRead = { kind: 'no_pipeline' | 'pipeline_unavailable' | 'repository_not_connected' } |
   { kind: 'pipeline'; pipeline: Extract<GitlabMergeRequestPipeline, { kind: 'pipeline' }>['pipeline'];
+    verification: { sourceProjectId: number; sourceHead: string; pipelineObject: GitlabReadObject };
     jobs?: Awaited<ReturnType<typeof readGitlabPipelineJobs>> };
 
 function mergeRequestPipelineSha(value: unknown): string | null {
@@ -1296,6 +1297,7 @@ export async function readGitlabMergeRequestPipeline(connection: Connection & { 
   const jobs = includeJobs ? await readInspectedPipelineJobs(inspection, pointer.repositoryId, pointer.pipelineId, connection.token, signal) : undefined;
   await recheckMergeRequest();
   return { kind: 'pipeline', pipeline: { ...pointer, status, webUrl, updatedAt: updatedAt === null ? null : new Date(updatedAt).toISOString() },
+    verification: { sourceProjectId: observed.sourceProjectId, sourceHead: observed.sourceHead, pipelineObject: inspection.object },
     ...(jobs ? { jobs } : {}) };
 }
 

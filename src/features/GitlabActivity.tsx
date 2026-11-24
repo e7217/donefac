@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
-import { gitlabObjectSha, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
+import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type { GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
@@ -526,15 +526,17 @@ function PipelineJobs({ target, revision }: { target: PipelineTarget; revision: 
   </PipelineJobsInspection>;
 }
 
-function PipelineJobsInspection({ view, toggle, reload, children }: {
+function PipelineJobsInspection({ view, toggle, reload, disabled = false, children }: {
   view: ActivityLookup<unknown> | null;
   toggle: () => void;
   reload: () => void;
+  disabled?: boolean;
   children?: ReactNode;
 }) {
   const panelId = useId();
   return <div className="gitlab-activity-inspection">
-    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined}
+      aria-disabled={disabled || undefined} onClick={() => { if (!disabled) toggle(); }}>
       <Workflow aria-hidden="true" size={14} />{view ? 'CI 작업 닫기' : 'CI 작업 확인'}
     </button>
     {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab CI 작업" aria-busy={view.kind === 'loading'}>
@@ -542,7 +544,8 @@ function PipelineJobsInspection({ view, toggle, reload, children }: {
       {view.kind === 'stale' && <p role="status">파이프라인이 변경되었습니다. CI 작업을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
       {view.kind === 'ready' && children}
-      <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={reload}>
+      <button type="button" className="btn btn-ghost" aria-disabled={disabled || view.kind === 'loading'}
+        onClick={() => { if (!disabled) reload(); }}>
         <RefreshCw aria-hidden="true" size={14} />CI 작업 다시 확인
       </button>
     </section>}
@@ -783,6 +786,7 @@ function MergeRequestReview({ target, revision }: { target: ReviewTarget; revisi
 }
 
 type AvailableMergeRequestPipeline = Extract<GitlabMergeRequestPipeline, { kind: 'pipeline' }>;
+export type MergeRequestObservedPipeline = AvailableMergeRequestPipeline['pipeline'];
 type MergeRequestPipelineSnapshot = Exclude<GitlabMergeRequestPipeline, AvailableMergeRequestPipeline> |
   (AvailableMergeRequestPipeline & { target: PipelineTarget });
 
@@ -792,16 +796,34 @@ const unavailableMergeRequestPipeline = {
   repository_not_connected: 'MR 파이프라인의 저장소가 GitLab 연결에 포함되지 않았습니다.',
 } satisfies Record<Exclude<GitlabMergeRequestPipeline['kind'], 'pipeline'>, string>;
 
+export function gitlabMergeRequestPipelinePath(issueId: string, linkId: string): string {
+  return `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-pipeline`;
+}
+
+export function matchesMergeRequestPipelineLink(link: GitlabLink | undefined, mr: GitlabLink, pipeline: MergeRequestObservedPipeline,
+  newlyCreated = false): boolean {
+  if (link?.kind !== 'pipeline' || mr.kind !== 'merge_request' || link.issueId !== mr.issueId ||
+      link.projectId !== pipeline.repositoryId) return false;
+  const identity = gitlabPipelineLinkIdentity(link);
+  if (!identity || identity.instance !== mr.id.split(':', 2)[1] || identity.objectId !== pipeline.pipelineId) return false;
+  if (newlyCreated) return link.sourceSha === pipeline.sha && link.webUrl === pipeline.webUrl;
+  if (link.sourceSha != null && gitlabObjectSha(link.sourceSha) !== pipeline.sha) return false;
+  const saved = gitlabActivityUrl(link.webUrl, 'pipeline');
+  const verified = gitlabActivityUrl(pipeline.webUrl, 'pipeline');
+  const route = saved && /^\/.+?\/(?:-\/)?pipelines\/([1-9]\d*)\/?$/u.exec(saved.pathname);
+  return Boolean(saved && verified && !saved.search && !saved.hash && saved.origin === verified.origin && route?.[1] === String(pipeline.pipelineId));
+}
+
 async function readMergeRequestPipeline(target: ReviewTarget, signal: AbortSignal, withJobs = false): Promise<MergeRequestPipelineSnapshot | null> {
-  const resource = withJobs ? 'merge-request-pipeline-jobs' : 'merge-request-pipeline';
-  const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/${resource}`;
+  const path = `${gitlabMergeRequestPipelinePath(target.issueId, target.linkId)}${withJobs ? '-jobs' : ''}`;
   const result = await api<GitlabMergeRequestPipeline | undefined>(path, { method: 'GET', cache: 'no-store', signal });
   if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId ||
       result.mergeRequestIid !== target.mergeRequestIid || typeof result.checkedAt !== 'string' || !Number.isFinite(Date.parse(result.checkedAt))) return null;
   if (result.kind !== 'pipeline') return Object.hasOwn(unavailableMergeRequestPipeline, result.kind) ? result : null;
 
   const pipeline = result.pipeline;
-  if (!pipeline || !Number.isSafeInteger(pipeline.repositoryId) || pipeline.repositoryId < 1 ||
+  if (typeof result.revision !== 'string' || !/^[a-f\d]{64}$/u.test(result.revision) ||
+      !pipeline || !Number.isSafeInteger(pipeline.repositoryId) || pipeline.repositoryId < 1 ||
       !Number.isSafeInteger(pipeline.pipelineId) || pipeline.pipelineId < 1 ||
       !pipeline.sha || gitlabObjectSha(pipeline.sha) !== pipeline.sha || /^0+$/u.test(pipeline.sha) ||
       typeof pipeline.status !== 'string' || !/^[a-z][a-z0-9_]{0,39}$/u.test(pipeline.status) ||
@@ -826,13 +848,18 @@ function mergeRequestPipelineMessage(cause: unknown): string {
   return 'GitLab MR의 최신 파이프라인을 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function MergeRequestPipeline({ target, revision }: { target: ReviewTarget; revision: string }) {
+function MergeRequestPipeline({ target, revision, mr, manualActions, reviewStatus }: {
+  target: ReviewTarget; revision: string; mr: GitlabLink; manualActions?: ManualLinkActions;
+  reviewStatus?: GitlabActivityStatusActions['reviewStatus'];
+}) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, signal => readMergeRequestPipeline(target, signal),
     'MR의 최신 파이프라인 응답을 확인할 수 없습니다.', mergeRequestPipelineMessage);
+  const disabled = Boolean(manualActions?.disabled);
 
   return <div className="gitlab-activity-inspection">
-    <button type="button" className="btn btn-ghost" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+    <button type="button" className="btn btn-ghost" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined}
+      aria-disabled={disabled || undefined} onClick={() => { if (!disabled) toggle(); }}>
       <Workflow aria-hidden="true" size={14} />{view ? 'MR 최신 파이프라인 닫기' : 'MR 최신 파이프라인 확인'}
     </button>
     {view && <section id={panelId} className="gitlab-activity-inspection-panel gitlab-mr-pipeline-inspection"
@@ -840,16 +867,19 @@ function MergeRequestPipeline({ target, revision }: { target: ReviewTarget; revi
       {view.kind === 'loading' && <p role="status">GitLab에서 MR의 최신 파이프라인을 확인하고 있습니다.</p>}
       {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 최신 파이프라인을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
-      {view.kind === 'ready' && <MergeRequestPipelineDetails initial={view.result} target={target} revision={revision} />}
-      <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+      {view.kind === 'ready' && <MergeRequestPipelineDetails initial={view.result} target={target} revision={revision}
+        mr={mr} manualActions={manualActions} reviewStatus={reviewStatus} />}
+      <button type="button" className="btn btn-ghost" aria-disabled={disabled || view.kind === 'loading'}
+        onClick={() => { if (!disabled) void load(); }}>
         <RefreshCw aria-hidden="true" size={14} />MR 최신 파이프라인 다시 확인
       </button>
     </section>}
   </div>;
 }
 
-function MergeRequestPipelineDetails({ initial, target, revision }: {
-  initial: MergeRequestPipelineSnapshot; target: ReviewTarget; revision: string;
+function MergeRequestPipelineDetails({ initial, target, revision, mr, manualActions, reviewStatus }: {
+  initial: MergeRequestPipelineSnapshot; target: ReviewTarget; revision: string; mr: GitlabLink; manualActions?: ManualLinkActions;
+  reviewStatus?: GitlabActivityStatusActions['reviewStatus'];
 }) {
   const [observation, setObservation] = useState({ initial, current: initial, changed: false });
   if (observation.initial !== initial) setObservation({ initial, current: initial, changed: false });
@@ -879,11 +909,76 @@ function MergeRequestPipelineDetails({ initial, target, revision }: {
       파이프라인 #{pipeline.pipelineId}<ExternalLink aria-hidden="true" size={13} />
     </a>
     {changed && <p role="status">MR의 최신 파이프라인이 바뀌어 현재 정보를 표시합니다.</p>}
-    <PipelineJobsInspection view={view} toggle={toggle} reload={() => void load()}>
+    {manualActions && <MergeRequestPipelineAttachment result={current} mr={mr} actions={manualActions}
+      reviewStatus={reviewStatus} verifying={view?.kind === 'loading'} />}
+    <PipelineJobsInspection view={view} toggle={toggle} reload={() => void load()} disabled={manualActions?.disabled}>
       {view?.kind === 'ready' && view.result === current && (current.jobs
         ? <PipelineJobsResult result={current.jobs} target={current.target} showStatus={false} />
         : <p role="status">현재 파이프라인의 CI 작업을 다시 확인해 주세요.</p>)}
     </PipelineJobsInspection>
+  </>;
+}
+
+type MergeRequestPipelineAttachmentFeedback = { result: AvailableMergeRequestPipeline } & (
+  { kind: 'saving' } | { kind: 'failed'; stale: boolean; message: string }
+);
+
+function mergeRequestPipelineAttachmentError(cause: unknown) {
+  if (cause instanceof ApiError) {
+    if (cause.status === 404 || cause.status === 409) return 'MR 또는 파이프라인 정보가 변경되었습니다. 최신 파이프라인을 다시 확인해 주세요.';
+    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 파이프라인 조회 권한을 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 연결해 주세요.';
+  }
+  return '파이프라인 연결 결과를 확인하지 못했습니다. 다시 연결해 주세요.';
+}
+
+function MergeRequestPipelineAttachment({ result, mr, actions, reviewStatus, verifying }: {
+  result: AvailableMergeRequestPipeline; mr: GitlabLink; actions: ManualLinkActions;
+  reviewStatus?: GitlabActivityStatusActions['reviewStatus']; verifying: boolean;
+}) {
+  const linked = actions.findMergeRequestPipeline(mr, result.pipeline);
+  const [feedback, setFeedback] = useState<MergeRequestPipelineAttachmentFeedback | null>(null);
+  const current = feedback?.result === result ? feedback : null;
+  const attaching = current?.kind === 'saving';
+  const disabled = actions.disabled || verifying || attaching;
+  const reviewButton = useRef<HTMLButtonElement>(null);
+  const status = useRef<HTMLSpanElement>(null);
+  const transferFocus = useRef(false);
+  useLayoutEffect(() => {
+    if (!linked || disabled || !transferFocus.current) return;
+    transferFocus.current = false;
+    if (document.activeElement === document.body) (reviewButton.current ?? status.current)?.focus({ preventScroll: true });
+  }, [linked, disabled]);
+
+  async function attach(trigger: HTMLButtonElement) {
+    if (disabled || (current?.kind === 'failed' && current.stale)) return;
+    transferFocus.current = document.activeElement === trigger;
+    const attempt = { result, kind: 'saving' } as const;
+    setFeedback(attempt);
+    try {
+      await actions.attachMergeRequestPipeline(mr, result.pipeline, result.revision);
+      setFeedback(previous => previous === attempt ? null : previous);
+    } catch (cause) {
+      const stale = cause instanceof ApiError && (cause.status === 404 || cause.status === 409);
+      setFeedback(previous => previous === attempt ? { ...attempt, kind: 'failed', stale, message: mergeRequestPipelineAttachmentError(cause) } : previous);
+    }
+  }
+
+  return <>
+    <div className="gitlab-activity-actions">
+      {linked ? <>
+        <span ref={status} tabIndex={-1} className="gitlab-activity-state" role="status">티켓에 연결됨</span>
+        {reviewStatus && <button ref={reviewButton} type="button" className="btn btn-ghost" aria-disabled={disabled || undefined}
+          onClick={event => { if (!disabled) reviewStatus(linked, event.currentTarget); }}>
+          <ClipboardCheck aria-hidden="true" size={14} />연결한 파이프라인으로 상태 검토
+        </button>}
+      </> : <button type="button" className="btn btn-ghost" aria-label="이 업무에 파이프라인 연결"
+        aria-disabled={disabled || (current?.kind === 'failed' && current.stale) || undefined}
+        onClick={event => void attach(event.currentTarget)}>
+        {attaching ? '연결 중…' : '이 업무에 파이프라인 연결'}
+      </button>}
+    </div>
+    {!linked && current?.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{current.message}</p>}
   </>;
 }
 
@@ -1039,6 +1134,8 @@ type ManualLinkActions = {
   unlink: (link: GitlabLink, trigger: HTMLButtonElement) => void;
   hasMergeRequest: (branch: GitlabLink, mr: BranchMergeRequest) => boolean;
   attachMergeRequest: (branch: GitlabLink, mr: BranchMergeRequest, branchRevision: string) => Promise<void>;
+  findMergeRequestPipeline: (mr: GitlabLink, pipeline: MergeRequestObservedPipeline) => GitlabLink | undefined;
+  attachMergeRequestPipeline: (mr: GitlabLink, pipeline: MergeRequestObservedPipeline, revision: string) => Promise<void>;
 };
 export type GitlabActivityStatusActions = {
   disabled?: boolean;
@@ -1152,7 +1249,8 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       <PipelineTestReport key={`tests:${link.id}:${link.manualLinkId ?? ''}:${pipeline.url.href}`} target={pipeline} revision={pipelineRevision} />
     </>}
     {mr && <MergeRequestPipeline key={`mr-pipeline:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
-      revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas])} />}
+      mr={link} manualActions={manualActions} reviewStatus={reviewStatus}
+      revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas, manualActions ? issueVersion : null])} />}
     {mr && state === 'opened' && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}

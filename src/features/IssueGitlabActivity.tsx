@@ -6,10 +6,11 @@ import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
 import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
   type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabSettings,
   type GitlabStatusSuggestion } from '../../shared/types';
-import { api, ApiError, post, remove } from '../lib/api';
+import { api, ApiError, apiResponse, post, remove } from '../lib/api';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList,
-  GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, isGitlabLinkedStatusRefreshResult, matchesBranchMergeRequestLink,
-  type BranchMergeRequest, type GitlabLinkedStatusAction } from './GitlabActivity';
+  GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, gitlabMergeRequestPipelinePath, isGitlabLinkedStatusRefreshResult,
+  matchesBranchMergeRequestLink, matchesMergeRequestPipelineLink,
+  type BranchMergeRequest, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { deploymentSource, gitlabDeploymentKey, gitlabDeploymentStatusLabels, IssueGitlabDeployments } from './GitlabDeployments';
 
@@ -99,7 +100,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
   const pending = useRef(false);
   const settingsRequest = useRef<AbortController | null>(null);
   const refreshRequest = useRef<AbortController | null>(null);
-  const mergeRequestAttachment = useRef<AbortController | null>(null);
+  const activityAttachment = useRef<AbortController | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
   const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean } | null>(null);
@@ -111,7 +112,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
   useEffect(() => () => {
     settingsRequest.current?.abort();
     refreshRequest.current?.abort();
-    mergeRequestAttachment.current?.abort();
+    activityAttachment.current?.abort();
   }, []);
   useEffect(() => {
     if (!suggestion) return;
@@ -273,34 +274,49 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
   const controlsDisabled = disabled || busy || branchDraft.pending;
   const canCheckStatus = visibleLinks.some(link => link.kind === 'branch' || link.kind === 'merge_request' || link.kind === 'pipeline');
 
-  async function attachBranchMergeRequest(branch: GitlabLink, mr: BranchMergeRequest, branchRevision: string) {
+  async function attachVerifiedActivity(path: string, input: object,
+    matches: (link: GitlabLink, newlyCreated: boolean) => boolean, message: string) {
     if (controlsDisabled || actionOpen || pending.current) return;
     const controller = new AbortController();
-    mergeRequestAttachment.current = controller;
+    activityAttachment.current = controller;
     pending.current = true;
     setBusy(true);
-    const input: GitlabBranchMergeRequestAttachment = {
-      mergeRequestId: mr.id, mergeRequestIid: mr.iid, targetBranch: mr.targetBranch, branchRevision,
-    };
     try {
-      const link = await api<GitlabLink | undefined>(gitlabBranchMergeRequestsPath(issueId, branch.id), {
+      const response = await apiResponse(path, {
         method: 'POST', body: JSON.stringify(input), signal: controller.signal,
       });
+      const link = await response.json() as GitlabLink | null;
       if (controller.signal.aborted) return;
-      if (!link || !matchesBranchMergeRequestLink(link, branch, mr)) throw new Error('저장한 MR 연결 정보를 확인할 수 없습니다.');
+      if (!link || ![200, 201].includes(response.status) || !matches(link, response.status === 201)) {
+        throw new Error('저장한 GitLab 연결 정보를 확인할 수 없습니다.');
+      }
       showLinkedActivity(link);
-      await afterChange(`MR !${mr.iid}을 티켓에 연결했습니다.`);
+      await afterChange(message);
     } catch (cause) {
       if (controller.signal.aborted) return;
-      if (!(cause instanceof ApiError) || cause.status === 404 || cause.status === 409 || cause.status >= 500) {
+      if (!(cause instanceof ApiError) || [404, 408, 409].includes(cause.status) || cause.status >= 500) {
         await refresh().catch(() => undefined);
       }
       if (!controller.signal.aborted) throw cause;
     } finally {
-      mergeRequestAttachment.current = null;
+      activityAttachment.current = null;
       pending.current = false;
       if (!controller.signal.aborted) setBusy(false);
     }
+  }
+
+  function attachBranchMergeRequest(branch: GitlabLink, mr: BranchMergeRequest, branchRevision: string) {
+    const input: GitlabBranchMergeRequestAttachment = {
+      mergeRequestId: mr.id, mergeRequestIid: mr.iid, targetBranch: mr.targetBranch, branchRevision,
+    };
+    return attachVerifiedActivity(gitlabBranchMergeRequestsPath(issueId, branch.id), input,
+      link => matchesBranchMergeRequestLink(link, branch, mr), `MR !${mr.iid}을 티켓에 연결했습니다.`);
+  }
+
+  function attachMergeRequestPipeline(mr: GitlabLink, pipeline: MergeRequestObservedPipeline, revision: string) {
+    const { repositoryId, pipelineId, sha } = pipeline;
+    return attachVerifiedActivity(gitlabMergeRequestPipelinePath(issueId, mr.id), { repositoryId, pipelineId, sha, revision },
+      (link, newlyCreated) => matchesMergeRequestPipelineLink(link, mr, pipeline, newlyCreated), `파이프라인 #${pipelineId}을 티켓에 연결했습니다.`);
   }
 
   async function reloadSavedActivity() {
@@ -477,7 +493,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
         reviewStatus: (link, trigger) => void checkGitlabStatus(trigger, link, 'status-review') }}
       manualActions={{ disabled: controlsDisabled || actionOpen, verify: (link, trigger) => showEditor(trigger, link), unlink: showUnlink,
         hasMergeRequest: (branch, mr) => visibleLinks.some(link => matchesBranchMergeRequestLink(link, branch, mr)),
-        attachMergeRequest: attachBranchMergeRequest }} />
+        attachMergeRequest: attachBranchMergeRequest,
+        findMergeRequestPipeline: (mr, pipeline) => visibleLinks.find(link => matchesMergeRequestPipelineLink(link, mr, pipeline)),
+        attachMergeRequestPipeline }} />
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
     <IssueGitlabDeployments issueId={issueId} links={links} review={{ disabled: controlsDisabled || actionOpen,
       pendingKey: refreshFeedback?.kind === 'checking' ? refreshFeedback.deploymentKey : undefined,

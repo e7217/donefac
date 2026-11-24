@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabMergeRequestPipeline, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
+const rulesPath = '/api/automation-rules';
 const repositoryId = 42;
 const mrId = 872;
 const mrIid = 8;
@@ -23,24 +24,25 @@ const upstreamBridges = `${upstreamPipeline}/bridges`;
 const unrelatedUrl = 'https://unrelated.invalid/team/other/-/pipelines/703?secret=synthetic#jobs';
 const button = (container: Locator, name: string) => container.getByRole('button', { name, exact: true });
 
-async function json<T>(response: APIResponse, status = 200): Promise<T> {
+async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   const body = await response.text();
   expect(response.status(), body).toBe(status);
   return JSON.parse(body) as T;
 }
 
 async function check(page: Page, trigger: Locator, path: string, status = 200) {
-  const receiving = page.waitForResponse(response => new URL(response.url()).pathname === path);
+  const receiving = page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'GET');
   await trigger.press('Enter');
   const response = await receiving;
   expect(response.status(), await response.text()).toBe(status);
   expect(response.request().method()).toBe('GET');
   expect(new URL(response.url()).search).toBe('');
   expect(response.headers()['cache-control']).toBe('no-store');
+  return response;
 }
 
-test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업을 명시적으로 확인한다', async ({ page, request }) => {
-  test.setTimeout(85_000);
+test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 해당 실행으로 상태를 검토한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
   const suffix = randomUUID();
   const token = `synthetic-mr-pipeline-api-${suffix}`;
   const secret = `synthetic-mr-pipeline-hook-${suffix}`;
@@ -57,6 +59,8 @@ test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업�
   const calls: { path: string; method?: string; token?: string | string[] }[] = [];
   let mode: 'ready' | 'null' | 'unreported' = 'ready';
   let currentSourceSha = sourceSha;
+  let pipelineUpdatedAt = at;
+  let includeCanonicalPipelineUrl = false;
   let moveHeadDuringNextRead = false;
   let baseUrl = '';
   const repoUrl = () => `${baseUrl}/team/app`;
@@ -67,7 +71,8 @@ test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업�
     source_project_id: repositoryId, title: `${issue.key} 합성 병합 요청`, state: 'opened', source_branch: branch,
     target_branch: 'main', sha: currentSourceSha, diff_refs: { head_sha: currentSourceSha }, updated_at: at, web_url: mrUrl() });
   const pipeline = () => ({ id: pipelineId, iid: 19, project_id: repositoryId, status: 'failed', ref: pipelineRef,
-    source: 'merge_request_event', sha: pipelineSha, created_at: at, updated_at: at, web_url: unrelatedUrl });
+    source: 'merge_request_event', tag: false, sha: pipelineSha, created_at: at, updated_at: pipelineUpdatedAt,
+    finished_at: pipelineUpdatedAt, web_url: includeCanonicalPipelineUrl ? pipelineUrl() : unrelatedUrl });
   const remote = createServer((incoming, response) => {
     const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
     calls.push({ path, method: incoming.method, token: incoming.headers['private-token'] });
@@ -92,6 +97,7 @@ test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업�
   remote.listen(0, '127.0.0.1');
   await once(remote, 'listening');
   baseUrl = `http://127.0.0.1:${(remote.address() as AddressInfo).port}/forge`;
+  let rule: AutomationRule | undefined;
 
   try {
     const configured = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
@@ -179,6 +185,7 @@ test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업�
       const details = activity.getByRole('region', { name: 'GitLab MR 최신 파이프라인', exact: true });
       await expect(details.getByRole('link', { name: `파이프라인 #${pipelineId} GitLab에서 열기`, exact: true })).toHaveAttribute('href', pipelineUrl());
       await expect(button(details, 'CI 작업 확인')).toBeVisible();
+      await expect(button(details, '이 업무에 파이프라인 연결')).toHaveCount(0);
       expect(calls.filter(call => call.path === upstreamJobs)).toHaveLength(1);
     } finally { await development.close(); }
 
@@ -188,10 +195,83 @@ test('360px에서 MR만 연결된 티켓의 최신 파이프라인과 CI 작업�
     expect(after.activities).toEqual(before.activities);
     expect(await settings()).toEqual(configured);
     expect(browserWrites).toEqual([]);
+
+    includeCanonicalPipelineUrl = true;
+    rule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `MR 파이프라인 결과 검토 ${suffix.slice(0, 8)}`, enabled: true, trigger: 'pipeline.failed',
+      gitlabProjectIds: [repositoryId], branchPattern: pipelineRef, pipelineSources: ['merge_request_event'],
+      issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    } }), 201);
+    pipelineUpdatedAt = new Date().toISOString();
+    const runsPath = `/api/automation-runs?projectId=${encodeURIComponent(project.id)}`;
+    const beforeRuns = await json(await request.get(runsPath));
+    const postTo = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+    const attach = button(panel, '이 업무에 파이프라인 연결');
+    const readPipeline = async () => {
+      const result = await json<GitlabMergeRequestPipeline>(await check(page, retry, lookupPath));
+      if (result.kind !== 'pipeline') throw new Error('The synthetic MR must have a verified latest pipeline.');
+      expect(result.revision).toMatch(/^[a-f\d]{64}$/);
+      return result;
+    };
+    const prior = await readPipeline();
+    currentSourceSha = 'c'.repeat(40);
+    const rejected = postTo(lookupPath);
+    await attach.click();
+    expect((await rejected).status()).toBe(409);
+    await expect(panel.getByRole('alert')).toBeVisible();
+    expect((await snapshot()).gitlabLinks.filter(link => link.issueId === issue.id)).toEqual(links);
+    const fresh = await readPipeline();
+    expect(fresh.pipeline).toEqual(prior.pipeline);
+    expect(fresh.revision).not.toBe(prior.revision);
+
+    let savedLink: GitlabLink | undefined;
+    await page.route(url => url.pathname === lookupPath, async route => {
+      savedLink = await json<GitlabLink>(await route.fetch(), 201);
+      await route.fulfill({ status: 408, json: { error: '합성 연결 응답 유실' } });
+    }, { times: 1 });
+    const attaching = postTo(lookupPath);
+    await attach.click();
+    const attached = await attaching;
+    expect(attached.request().postDataJSON()).toEqual({ repositoryId, pipelineId, sha: pipelineSha, revision: fresh.revision });
+    expect(attached.status()).toBe(408);
+    if (!savedLink) throw new Error('Teamspace did not save the inspected pipeline.');
+    expect(savedLink).toMatchObject({ issueId: issue.id, projectId: repositoryId, kind: 'pipeline', state: 'failed',
+      sourceSha: pipelineSha, pipelineSource: 'merge_request_event', webUrl: pipelineUrl(), manualLinkId: expect.any(String) });
+    const review = button(panel, '연결한 파이프라인으로 상태 검토');
+    await expect(review).toBeEnabled();
+    expect(browserWrites).toEqual([`POST ${lookupPath}`, `POST ${lookupPath}`]);
+    await expect(title).toHaveValue('저장하지 않은 업무 제목');
+    await expect(comment).toHaveValue('보내지 않은 검토 댓글');
+    const attachedWorkspace = await snapshot();
+    const attachedLinks = attachedWorkspace.gitlabLinks.filter(link => link.issueId === issue.id);
+    expect(attachedLinks).toHaveLength(2);
+    expect(attachedLinks).toEqual(expect.arrayContaining([...links, savedLink]));
+    expect(attachedWorkspace.issues.find(item => item.id === issue.id)).toEqual(issue);
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
+
+    const reviewing = postTo(`/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(savedLink.id)}/status-review`);
+    await review.click();
+    const result = await json<GitlabIssueRefreshResult>(await reviewing);
+    expect(result.failures).toEqual([]);
+    expect(result.statusReview).toMatchObject({ kind: 'suggestion', suggestion: { issueId: issue.id, toStatus: 'done', rule: { id: rule.id },
+      evidence: { link: { id: savedLink.id }, trigger: 'pipeline.failed' } } });
+    const proposal = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    await expect(proposal).toContainText(rule.name);
+    await button(proposal, '목표 상태로 편집').click();
+    const form = ticket.locator('form.issue-detail-form');
+    await expect(form.getByRole('combobox', { name: '상태', exact: true })).toHaveValue('done');
+    await expect(title).toHaveValue('저장하지 않은 업무 제목');
+    await expect(comment).toHaveValue('보내지 않은 검토 댓글');
+    expect((await snapshot()).issues.find(item => item.id === issue.id)).toEqual(issue);
+    const applying = page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${encodeURIComponent(issue.id)}` && response.request().method() === 'PATCH');
+    await button(form, '변경사항 저장').click();
+    expect(await json<Issue>(await applying)).toMatchObject({ title: '저장하지 않은 업무 제목', status: 'done' });
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
     expect(calls.every(call => call.method === 'GET' && call.token === token)).toBe(true);
     expect(calls.every(call => [upstreamRepo, upstreamMr, upstreamPipeline, upstreamJobs, upstreamTriggerJobs, upstreamBridges].includes(call.path))).toBe(true);
   } finally {
     try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
       const deleted = await request.delete(`/api/issues/${issue.id}`);
       if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
       const current = await settings();
