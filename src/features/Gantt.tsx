@@ -74,7 +74,11 @@ type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owne
 type ChartDateDraft = { source: Issue; changes: ScheduleBulkDateChanges; owner?: symbol; stored?: StoredGanttDateDraft };
 type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartDateDraft; targetDraft?: ChartDateDraft };
 type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
-type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener };
+type QuickScheduleCompletion = { entered: ScheduleBulkDateChanges; fallbackStart: string };
+type InlineScheduleOrigin = {
+  issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener;
+  completion?: QuickScheduleCompletion;
+};
 type ManualReview = {
   input: ScheduleManualPreviewInput;
   preview: SchedulePreview;
@@ -220,6 +224,14 @@ const REFRESH_FEEDBACK = {
   updated: '간트를 새로고침했습니다.', skipped: '간트 새로고침을 건너뛰었습니다.', failed: '간트를 새로고침하지 못했습니다. 다시 시도해 주세요.',
 } as const;
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
+
+function completeDateRange(issue: Issue, { entered, fallbackStart }: QuickScheduleCompletion) {
+  const existingEnd = entered.endDate ?? issue.endDate;
+  const startDate = entered.startDate ?? issue.startDate ??
+    (existingEnd ? isoDay(Math.max(MIN_TIMELINE_DAY, dayNumber(existingEnd) - 2)) : fallbackStart);
+  const endDate = existingEnd ?? isoDay(Math.min(MAX_TIMELINE_DAY, dayNumber(startDate) + 2));
+  return { startDate, endDate };
+}
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
 const windowForDate = (date: string) => isoDay(clampWindowStart(dayNumber(date) - 7));
@@ -1684,6 +1696,7 @@ function ProjectGantt(props: GanttProps) {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
     const chartDates = manualReview.chartDates;
+    const completion = manualReview.inline?.completion;
     const singleDateEdit = manualReview.inline ?? chartDates;
     const dateEdits = manualReview.inlineDates ?? (singleDateEdit ? [singleDateEdit] : undefined);
     if (dateEdits && 'changes' in input) {
@@ -1695,7 +1708,9 @@ function ProjectGantt(props: GanttProps) {
           setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
           return;
         }
-        if (chartDates && !chartDates.pickedEdge) {
+        if (completion) {
+          changes.push({ id: issue.id, expectedVersion: issue.version, ...completeDateRange(issue, completion) });
+        } else if (chartDates && !chartDates.pickedEdge) {
           changes.push({ id: issue.id, expectedVersion: issue.version, startDate: draft.startDate, endDate: draft.endDate });
         } else changes.push(inlineDateChange(draft, issue, chartDates?.pickedEdge));
       }
@@ -1758,9 +1773,20 @@ function ProjectGantt(props: GanttProps) {
     } finally { markBusy(false); }
   }
   function completeMissingDates(issue: Issue, opener: HTMLButtonElement) {
-    const startDate = issue.startDate ?? (issue.endDate ? moveDate(issue.endDate, -2) : todayDate());
-    const endDate = issue.endDate ?? moveDate(startDate, 2);
-    void saveDates(issue, startDate, endDate, { issueId: issue.id, returnToMissingRow: true, focus: opener });
+    if (!canKeepInlineDateDrafts()) return;
+    const draft = chartDateDraft(issue);
+    const entered = draft?.changes ?? {};
+    if (entered.startDate === null || entered.endDate === null) {
+      openRowScheduleEdit(issue, opener);
+      return;
+    }
+    const source = draft?.source ?? issue;
+    const completion = { entered, fallbackStart: todayDate() };
+    const { startDate, endDate } = completeDateRange(source, completion);
+    void saveDates(source, startDate, endDate, {
+      issueId: issue.id, returnToMissingRow: true, focus: opener, completion,
+      accept: draft ? saved => acceptChartDateDraft(saved, draft) : undefined,
+    });
   }
   function reviewSuccessors(anchorChange: CascadeAnchorChange, origin: CascadeOrigin) {
     const issue = projectIssues.find(value => value.id === anchorChange.id);
@@ -2700,17 +2726,23 @@ function ProjectGantt(props: GanttProps) {
     {baseline && <details className="gantt-baseline-records"><summary>기준선 업무 기록 {baseline.issues.length}개 · 캡처된 이름과 날짜 확인</summary><div><table><thead><tr><th>기준선 업무</th><th>시작일</th><th>종료일</th><th>현재 상태</th></tr></thead><tbody>{baseline.issues.map(captured => <tr key={captured.issueId}><td><small>{captured.key}</small><strong>{captured.title}</strong></td><td><button disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button></td><td><button disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></td><td>{projectIssues.some(issue => issue.id === captured.issueId) ? '현재 업무 있음' : '삭제된 업무 기록'}</td></tr>)}</tbody></table></div></details>}
     {scheduleWarnings.length > 0 && <div className="gantt-current-warnings" role="status"><AlertCircle size={16} /><div><strong>일정 의존성 확인</strong>{scheduleWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="issue-icon-button" onClick={() => setScheduleWarnings([])} aria-label="경고 닫기"><X size={14} /></button></div>}
     <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span>{hierarchyTrace?.span && <span><span className="gantt-hierarchy-span-key" />하위 업무 범위</span>}<span><span className="gantt-legend-line" />선행 → 후행</span>{conflictingIds.size > 0 && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span>{hasProject && <span><Diamond size={12} />마일스톤</span>}{calendarMath && <span><span className="gantt-nonworking-key" />비근무일</span>}{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
-    <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => <div key={issue.id} className="gantt-unscheduled-row">
-      <button type="button" onClick={event => openIssueRow(issue.id, event.currentTarget)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
-      <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
-        disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
-      <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
-      {(linkedIssueIds.has(issue.id) || incomingTeamBlockers.has(issue.id))
-        ? <button type="button" className="btn gantt-missing-date-action" disabled={busy || Boolean(linkPicker || activeDatePicker)}
-          onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><CalendarRange size={13} aria-hidden="true" />연결 기준으로 일정 제안</button>
-        : <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)}
-          onClick={event => completeMissingDates(issue, event.currentTarget)}><Plus size={13} />{issue.startDate || issue.endDate ? '일정 완성' : '오늘부터 3일'}</button>}
-    </div>) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
+    <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => {
+      const stored = recoverableDates(issue, inlineDateRecords.get(issue.id));
+      const draft = stored && !draftDatesAreSaved(issue, stored) ? stored : undefined;
+      const clearedDate = draft && ((draft.startDate && draft.draftStart === null) || (draft.endDate && draft.draftEnd === null));
+      const completionLabel = clearedDate ? '일정과 연결 편집' : issue.startDate || issue.endDate || draft ? '일정 완성' : '오늘부터 3일';
+      return <div key={issue.id} className="gantt-unscheduled-row">
+        <button type="button" onClick={event => openIssueRow(issue.id, event.currentTarget)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
+        <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
+          disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
+        <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
+        {(linkedIssueIds.has(issue.id) || incomingTeamBlockers.has(issue.id))
+          ? <button type="button" className="btn gantt-missing-date-action" disabled={busy || Boolean(linkPicker || activeDatePicker)}
+            onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><CalendarRange size={13} aria-hidden="true" />연결 기준으로 일정 제안</button>
+          : <button type="button" className="btn btn-ghost" disabled={busy || scheduleEditorOpen || Boolean(issueOverlayOpen)}
+            onClick={event => completeMissingDates(issue, event.currentTarget)}><Plus size={13} aria-hidden="true" />{completionLabel}</button>}
+      </div>;
+    }) : <div className="gantt-bottom-empty">{issues.length ? <><Check size={17} />표시된 업무의 일정이 모두 잡혀 있습니다.</> : '현재 보기에 표시할 업무가 없습니다.'}</div>}</section>
       <section className="gantt-bottom-card" aria-label="업무 연결 목록">
         <div className="gantt-bottom-heading">
           <h3><Link2 size={16} />업무 연결 <span>{dependencies.length}</span></h3>

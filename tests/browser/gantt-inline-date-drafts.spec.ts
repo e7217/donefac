@@ -24,7 +24,7 @@ async function fixture(request: APIRequestContext) {
   const ids: string[] = [];
   return {
     first, second, actor, prefix,
-    async issue(project: Project, label: string, startDate: string, endDate: string) {
+    async issue(project: Project, label: string, startDate: string | null, endDate: string | null) {
       const created = await json<Issue>(await request.post('/api/issues', {
         headers, data: { projectId: project.id, title: `${prefix} ${label}`, startDate, endDate },
       }), 201);
@@ -131,6 +131,128 @@ test('프로젝트 간트에서 다른 날짜 칸으로 이동해도 두 행의 
     const after = await workspace(request);
     expect(after.issues.find(issue => issue.id === first.id)).toEqual(applied.updated[0]);
     expect(after.issues.find(issue => issue.id === second.id)).toEqual(second);
+  } finally { await data.close(); }
+});
+
+test('360px 간트의 일정 완성은 입력한 시작일을 기준으로 종료일을 채우고 다른 날짜 초안을 유지한다', async ({ page, request }) => {
+  const data = await fixture(request);
+  try {
+    const issue = await data.issue(data.first, '시작일만 입력할 업무', null, null);
+    const other = await data.issue(data.first, '입력을 유지할 업무', date(24), date(27));
+    const typedStart = '2027-02-09';
+    const inferredEnd = '2027-02-11';
+    const otherDraftEnd = date(30);
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
+    const writes = scheduleWrites(page);
+    const unscheduled = page.locator('.gantt-unscheduled-row').filter({ hasText: issue.title });
+    const initial = button(unscheduled, '오늘부터 3일');
+    const complete = button(unscheduled, '일정 완성');
+    await expect(initial).toBeVisible();
+    await chart.end(other).fill(otherDraftEnd);
+    await chart.start(issue).fill(typedStart);
+    await expect(chart.start(issue)).toHaveValue(typedStart);
+    await expect(chart.end(issue)).toHaveValue('');
+    await expect(initial).toHaveCount(0);
+    await expect(complete).toBeEnabled();
+    expect(writes).toEqual([]);
+    const before = await workspace(request);
+    expect(before.issues.find(item => item.id === issue.id)).toEqual(issue);
+    expect(before.issues.find(item => item.id === other.id)).toEqual(other);
+
+    const previewRequest = nextPost(page, manualPreview), applyRequest = nextPost(page, manualApply);
+    await complete.click();
+    const previewResponse = await previewRequest;
+    expect(previewResponse.request().postDataJSON()).toEqual({ changes: [{
+      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: inferredEnd,
+    }] });
+    const preview = await json<SchedulePreview>(previewResponse);
+    expect(preview.changes).toEqual([expect.objectContaining({ id: issue.id, toStart: typedStart, toEnd: inferredEnd })]);
+    const applyResponse = await applyRequest;
+    expect(applyResponse.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    const applied = await json<SchedulePasteApplyResult>(applyResponse);
+    expect(applied.updated).toMatchObject([{ id: issue.id, version: issue.version + 1, startDate: typedStart, endDate: inferredEnd }]);
+    await expect(unscheduled).toHaveCount(0);
+    await expect(chart.start(issue)).toHaveValue(typedStart);
+    await expect(chart.end(issue)).toHaveValue(inferredEnd);
+    await expect(button(chart.row(issue), `${issue.key} 날짜 저장`)).toHaveCount(0);
+    await expect(chart.end(other)).toHaveValue(otherDraftEnd);
+    await expect(button(chart.row(other), `${other.key} 날짜 저장`)).toBeVisible();
+    expect(writes).toEqual([manualPreview, manualApply]);
+    const after = await workspace(request);
+    expect(after.issues.find(item => item.id === issue.id)).toEqual(applied.updated[0]);
+    expect(after.issues.find(item => item.id === other.id)).toEqual(other);
+  } finally { await data.close(); }
+});
+
+test('간트의 일정 완성을 다시 미리볼 때 입력한 시작일과 동료가 저장한 종료일을 함께 유지한다', async ({ page, request }) => {
+  const data = await fixture(request);
+  try {
+    const issue = await data.issue(data.first, '동료가 종료일을 저장할 업무', null, null);
+    const typedStart = '2027-02-09';
+    const inferredEnd = '2027-02-11';
+    const peerEnd = '2027-02-16';
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
+    const writes = scheduleWrites(page);
+    const unscheduled = page.locator('.gantt-unscheduled-row').filter({ hasText: issue.title });
+    const complete = button(unscheduled, '일정 완성');
+    const dialog = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    const apply = button(dialog, '변경 적용');
+    await chart.start(issue).fill(typedStart);
+    await expect(complete).toBeEnabled();
+
+    const { users: [, peer] } = await workspace(request);
+    const peerChange = await json<Issue>(await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: issue.version, endDate: peerEnd },
+    }));
+    const rejectedPreview = nextPost(page, manualPreview);
+    await complete.click();
+    const rejected = await rejectedPreview;
+    expect(rejected.request().postDataJSON()).toEqual({ changes: [{
+      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: inferredEnd,
+    }] });
+    expect(rejected.status(), await rejected.text()).toBe(409);
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(chart.start(issue)).toHaveValue(typedStart);
+    await expect(apply).toBeDisabled();
+    expect(writes).toEqual([manualPreview]);
+
+    const reviewing = nextPost(page, manualPreview);
+    await button(dialog, '다시 미리보기').click();
+    const reviewed = await reviewing;
+    expect(reviewed.request().postDataJSON()).toEqual({ changes: [{
+      id: issue.id, expectedVersion: peerChange.version, startDate: typedStart, endDate: peerEnd,
+    }] });
+    const preview = await json<SchedulePreview>(reviewed);
+    expect(preview.changes).toEqual([expect.objectContaining({ id: issue.id, fromStart: null, fromEnd: peerEnd, toStart: typedStart, toEnd: peerEnd })]);
+    await expect(dialog.locator('.gantt-new-dates')).toHaveText(`${typedStart}${peerEnd}`);
+    const before = await workspace(request);
+    expect(before.issues.find(item => item.id === issue.id)).toEqual(peerChange);
+
+    const applying = nextPost(page, manualApply);
+    await apply.click();
+    const appliedResponse = await applying;
+    expect(appliedResponse.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    const applied = await json<SchedulePasteApplyResult>(appliedResponse);
+    expect(applied.updated).toMatchObject([{ id: issue.id, version: peerChange.version + 1, startDate: typedStart, endDate: peerEnd }]);
+    await expect(dialog).toHaveCount(0);
+    await expect(unscheduled).toHaveCount(0);
+    await expect(chart.start(issue)).toHaveValue(typedStart);
+    await expect(chart.end(issue)).toHaveValue(peerEnd);
+    await expect(button(chart.row(issue), `${issue.key} 날짜 저장`)).toHaveCount(0);
+
+    const undoing = nextPost(page, undoPath);
+    await button(page, '되돌리기').click();
+    const undone = await undoing;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    await json(undone);
+    await expect(complete).toBeEnabled();
+    await expect(chart.start(issue)).toHaveValue('');
+    await expect(chart.end(issue)).toHaveValue(peerEnd);
+    expect(writes).toEqual([manualPreview, manualPreview, manualApply, undoPath]);
+    const after = await workspace(request);
+    expect(after.issues.find(item => item.id === issue.id)).toMatchObject({
+      id: issue.id, version: peerChange.version + 2, startDate: null, endDate: peerEnd,
+    });
   } finally { await data.close(); }
 });
 

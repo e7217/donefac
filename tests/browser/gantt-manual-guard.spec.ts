@@ -336,6 +336,32 @@ test('360px 간트 일정 완성의 저장 응답이 끊겨도 결과를 확인�
   } finally { await fixture.close(); }
 });
 
+test('간트 일정 미정 목록에서 직접 비운 날짜를 검토하고 그대로 저장한다', async ({ page, request }) => {
+  const fixture = await makeFixture(request);
+  try {
+    const issue = await fixture.create('저장한 종료일을 비우려는 업무', null, 4);
+    const proposedStart = fixture.date(2);
+    await page.setViewportSize({ width: 360, height: 820 });
+    const { chart } = await openChart(page, issue);
+    const partialRow = page.locator('.gantt-unscheduled-row').filter({ hasText: issue.title });
+    await expect(partialRow.getByRole('button', { name: '일정 완성', exact: true })).toBeVisible();
+    await chart.getByLabel(`${issue.key} 시작일`, { exact: true }).fill(proposedStart);
+    await chart.getByLabel(`${issue.key} 종료일`, { exact: true }).fill('');
+    await partialRow.getByRole('button', { name: '일정과 연결 편집', exact: true }).click();
+
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(proposedStart);
+    await expect(editor.getByLabel('종료일', { exact: true })).toHaveValue('');
+    expect(await fixture.stored()).toEqual([schedule(issue)]);
+
+    await editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    await editor.getByRole('button', { name: '일정과 연결 적용', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    await expect(partialRow.getByRole('button', { name: '일정 완성', exact: true })).toBeVisible();
+    expect(await fixture.stored()).toEqual([{ ...schedule(issue), startDate: proposedStart, endDate: null, version: issue.version + 1 }]);
+  } finally { await fixture.close(); }
+});
+
 test('막대의 종료일을 조정하고 다시 검토할 때 동료가 바꾼 시작일을 유지한다', async ({ page, request }) => {
   const fixture = await makeFixture(request);
   try {
