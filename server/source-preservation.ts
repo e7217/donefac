@@ -562,6 +562,12 @@ export class SourcePreservationService {
       CREATE INDEX IF NOT EXISTS source_records_confluence_page_title
         ON source_records(json_extract(json,'$.record.title'))
         WHERE product='confluence' AND kind='page' AND target_type='document' AND json_valid(json);
+      CREATE INDEX IF NOT EXISTS source_records_confluence_document_source
+        ON source_records(source_id)
+        WHERE product='confluence' AND kind='page' AND target_type='document';
+      CREATE INDEX IF NOT EXISTS source_records_confluence_unapplied_page_source
+        ON source_records(source_id)
+        WHERE product='confluence' AND kind='page' AND target_type IS NULL;
       CREATE INDEX IF NOT EXISTS source_records_jira_history
         ON source_records(source_instance,kind,source_id) WHERE product='jira';
       CREATE INDEX IF NOT EXISTS source_records_jira_unbound_issue_key

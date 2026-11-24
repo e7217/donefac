@@ -2147,6 +2147,7 @@ export interface WorkspaceSnapshot {
   issueOrders?: ProjectIssueOrder[];
   issueMoveOrigins?: Record<string, string[]>;
   issueAliases?: Record<string, IssueSearchAlias[]>;
+  confluenceMigrationOrigins?: string[];
   documentOrders?: (DocumentSiblingOrder & { custom?: true })[];
 }
 export interface ScheduleChange {
@@ -2385,5 +2386,5 @@ export interface PlanScheduleShiftResult extends SchedulePasteApplyResult { plan
 export interface FeatureProps {
   data: WorkspaceSnapshot; projectId: string; actorId: string;
   refresh: () => Promise<void>; notify: (message: string, kind?: 'success' | 'error') => void;
-  openIssue: (id: string) => void; openDocument: (id: string) => void;
+  openIssue: (id: string) => void; openDocument: (id: string, sectionId?: string) => void;
 }

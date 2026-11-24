@@ -5,6 +5,7 @@ import { Bold, Code2, Heading2, Link2, List, ListChecks } from 'lucide-react';
 import { lexer, type MarkedToken, type Token } from 'marked';
 import { parseDocumentHash } from '../../shared/document-sections';
 import type { IssueDescriptionFormat } from '../../shared/types';
+import { MigratedDescriptionLink, MigratedDescriptionLinks, type MigratedDocumentLinks } from './MigratedDescriptionLinks';
 import './issue-description-editor.css';
 
 type Props = {
@@ -15,6 +16,7 @@ type Props = {
   disabled?: boolean;
   name?: string;
   initialPreview?: boolean;
+  migratedDocuments?: MigratedDocumentLinks;
 };
 
 const MAX_DESCRIPTION = 200_000;
@@ -47,7 +49,7 @@ function safeLink(value: string) {
   return undefined;
 }
 
-type PreviewBudget = { remaining: number; inertLinks: boolean };
+type PreviewBudget = { remaining: number; inertLinks: boolean; migratedDocumentLinks: boolean };
 
 function spend(budget: PreviewBudget, depth: number) {
   if (depth > MAX_PREVIEW_DEPTH || --budget.remaining < 0) throw new Error('Markdown preview bounds');
@@ -110,6 +112,9 @@ function renderTokens(tokens: readonly Token[], budget: PreviewBudget, depth = 0
         const documentLink = href?.startsWith('/#/') && parseDocumentHash(href.slice(1));
         const label = token.autolink ? token.text
           : token.tokens.length ? renderTokens(token.tokens, budget, depth + 1, true) : displayText(token.text) || '링크';
+        if (href && !documentLink && budget.migratedDocumentLinks) {
+          return <MigratedDescriptionLink key={index} href={href} title={token.title ?? undefined}>{label}</MigratedDescriptionLink>;
+        }
         return href ? <a key={index} href={href} title={token.title ?? undefined} target={documentLink ? undefined : '_blank'} rel="noopener noreferrer">{label}</a>
           : <span key={index}>{label}</span>;
       }
@@ -172,29 +177,30 @@ function markdownEdit(value: string, start: number, end: number, action: EditAct
     start: start + leading.length, end: start + leading.length + text.length };
 }
 
-export function ReadonlyIssueDescription({ value, format, inertLinks = false }: {
-  value: string; format: IssueDescriptionFormat; inertLinks?: boolean;
+export function ReadonlyIssueDescription({ value, format, inertLinks = false, migratedDocuments }: {
+  value: string; format: IssueDescriptionFormat; inertLinks?: boolean; migratedDocuments?: MigratedDocumentLinks;
 }) {
+  const migratedDocumentLinks = Boolean(migratedDocuments?.origins.length) && !inertLinks;
   const preview = useMemo(() => {
     if (!value.trim() || format !== 'markdown') return null;
     try {
       if (value.length > MAX_DESCRIPTION || !value.isWellFormed() || value.includes('\u0000')) throw new Error('Markdown preview bounds');
-      return { body: renderTokens(lexer(value, { gfm: true }), { remaining: MAX_PREVIEW_NODES, inertLinks }), fallback: false };
+      return { body: renderTokens(lexer(value, { gfm: true }), { remaining: MAX_PREVIEW_NODES, inertLinks, migratedDocumentLinks }), fallback: false };
     } catch {
       return { body: value, fallback: true };
     }
-  }, [format, inertLinks, value]);
+  }, [format, inertLinks, migratedDocumentLinks, value]);
 
+  const body = preview && !preview.fallback ? preview.body : value.trim()
+    ? <div className="issue-description-literal">{value}</div> : <p className="issue-description-note">작성된 설명이 없습니다.</p>;
   return <section className="issue-description-preview" aria-label="설명 미리보기">
-    {preview?.fallback ? <>
-      <p className="issue-description-note" role="status">미리보기를 표시할 수 없어 설명 원문을 보여줍니다.</p>
-      <div className="issue-description-literal">{preview.body}</div>
-    </> : preview?.body ?? (value.trim() ? <div className="issue-description-literal">{value}</div>
-      : <p className="issue-description-note">작성된 설명이 없습니다.</p>)}
+    {preview?.fallback && <p className="issue-description-note" role="status">미리보기를 표시할 수 없어 설명 원문을 보여줍니다.</p>}
+    {migratedDocuments && migratedDocumentLinks && preview && !preview.fallback
+      ? <MigratedDescriptionLinks key={value} {...migratedDocuments}>{body}</MigratedDescriptionLinks> : body}
   </section>;
 }
 
-export function IssueDescriptionEditor({ value, format, onChange, onFormatChange, disabled, name, initialPreview }: Props) {
+export function IssueDescriptionEditor({ value, format, onChange, onFormatChange, disabled, name, initialPreview, migratedDocuments }: Props) {
   const uid = useId();
   const input = useRef<HTMLTextAreaElement>(null);
   const [view, setView] = useState<'edit' | 'preview'>(initialPreview && format === 'markdown' ? 'preview' : 'edit');
@@ -253,6 +259,6 @@ export function IssueDescriptionEditor({ value, format, onChange, onFormatChange
         }} />
       {toolMessage && <p className="issue-description-note" role="status">{toolMessage}</p>}
     </div>
-    {showPreview && <ReadonlyIssueDescription value={value} format={format} />}
+    {showPreview && <ReadonlyIssueDescription value={value} format={format} migratedDocuments={migratedDocuments} />}
   </div>;
 }

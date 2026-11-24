@@ -93,6 +93,12 @@ Jira 댓글 주소는 `/browse/TEAM-17?focusedCommentId=42` 또는 `/browse/TEAM
 
 Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업무 연결·댓글 소유 관계를 대조한다. 접근 제한이 없는 활성 이관 댓글을 하나로 확인하면 `targets`에 `{targetType:'issue',targetId,commentId}`를 반환한다. `commentId`는 Teamspace 댓글 ID다. `/api/atlassian-links/resolve`는 잘못된 선택자에 `400`을 반환한다. 대상이 없거나 휴지통에 있거나 소유 근거가 모호한 유효 주소에는 빈 `targets`를 반환한다. `GET /api/search`는 정확한 결과에 업무 ID와 댓글 ID를 연결하는 `issueCommentIds`도 반환한다. 잘못된 Jira 댓글 선택자는 빈 검색 결과를 반환한다. 브라우저의 Teamspace 티켓 주소는 `issueComment`에 현재 댓글 ID를 보관한다.
 
+### 저장된 티켓 설명의 Confluence 주소
+
+브라우저는 저장된 Markdown 티켓 설명에서 이관 영수증으로 확인한 Confluence 서버·포트·설치 경로의 지원 주소를 일반 클릭하면 `GET /api/atlassian-links/resolve-migrated-document?url=…`로 조회한다. 확인한 설치 주소 목록은 워크스페이스 응답의 `confluenceMigrationOrigins`에서 읽는다. 절대 HTTP(S) 주소 하나를 인코딩해 보낸다. 서버는 저장된 이관 근거에서 페이지 ID 또는 원래 공간 키와 제목을 해석하고 원본 주소를 다시 대조한다. 절을 지정한 주소는 보존한 원본의 제목·앵커를 정확히 해석할 수 있고 대응하는 절 식별자가 현재 문서에 있을 때 연결한다.
+
+접근 제한과 제외 여부를 확인한 활성 이관 문서가 하나면 `{target:{documentId,sectionId?}}`를 반환한다. 문서·절의 근거가 모호하거나 유효한 주소의 서버·설치 경로를 확인할 수 없으면 `{target:null}`을 반환한다. 잘못된 주소, 중복되거나 지원하지 않는 선택자, 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회는 읽기 전용이며 Teamspace에 보존된 기록을 사용하므로 원본 서버에 접속하지 않는다.
+
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.
@@ -1024,7 +1030,7 @@ Confluence 본문의 `/download/attachments/{pageId}/{filename}` 다운로드 �
 
 Jira 설명의 ADF 텍스트에 붙은 절대 `/browse/{issueKey}` 링크는 설정된 원본 서버·설치 경로와 대상을 확인한 경우 글자와 서식을 유지해 현재 티켓으로 연결한다. 원본 댓글이나 다른 세부 위치가 붙은 주소는 원래 위치를 연다. 본문 링크 변환은 새 이관이나 검토한 원본 변경분을 적용할 때 사용한다. [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
 
-Jira 설명의 ADF 링크·카드, 위키 링크, 검색 결과의 렌더링 HTML에 들어 있는 Confluence 절대 주소도 검사한다. 같은 이관에서 설정한 서버·설치 경로와 페이지를 대조하고, 절이 있으면 해당 페이지의 고유한 제목이나 앵커를 추가로 확인한다. 매핑이 없거나 모호한 주소, 확인할 수 없는 절, 원본 댓글·버전을 지정한 주소는 유효한 원본 링크로 유지한다.
+Jira 설명의 ADF 링크·카드, 위키 링크, 검색 결과의 렌더링 HTML에 들어 있는 Confluence 절대 주소도 검사한다. 같은 이관에서 설정한 서버·설치 경로와 페이지를 대조하고, 절이 있으면 해당 페이지의 고유한 제목이나 앵커를 추가로 확인한다. 매핑이 없거나 모호한 주소, 확인할 수 없는 절, 원본 댓글·버전을 지정한 주소는 유효한 원본 링크로 유지한다. 따로 이관한 뒤에도 저장된 Markdown 설명에 남은 일반 페이지·절 주소를 클릭해 현재 문서를 찾을 수 있다. [저장된 티켓 설명의 Confluence 주소](#저장된-티켓-설명의-confluence-주소)
 
 이관 매핑 파일의 형식은 `teamspace-migration-mapping`, 버전은 `1`, 최대 크기는 16MiB다. 파일의 `packages`에는 당시 분석 ID와 원본 제품·인스턴스 식별값·내보내기 형식·SHA-256을 저장한다. 복원 시 네 원본 속성이 일치하는 현재 분석 패키지를 찾는다. 당시 ID가 같은 원본을 가리키면 이를 사용하고, 새 ID로 다시 분석했으면 일치 항목이 하나여야 한다. 패키지·매핑·제외 항목의 ID는 현재 분석 결과로 바꾼다. `mappedUsers`에는 매핑된 팀원 ID와 공백 제거·소문자 변환한 이메일의 SHA-256을 기록한다. 현재 팀원과 유일하게 일치해야 매핑을 복원한다. 기존 프로젝트 추가 설정은 현재 확인한 대상과 연결이 일치해야 복원한다.
 

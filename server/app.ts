@@ -95,8 +95,10 @@ import { documentNotificationSpaceProject, NotificationSubscriptionError, Notifi
 import { FavoriteError, FavoritesService } from './favorites.js';
 import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { parseAtlassianSearchInput } from '../shared/atlassian-search.js';
+import { confluenceMigratedDocumentAddress } from '../shared/confluence-migration-address.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
+import { MigratedConfluenceDocuments } from './migrated-confluence-documents.js';
 import { TrashService, TrashError, type TrashArchive } from './trash.js';
 import { TrashItemsService, trashItemComments, trashItemFiles, validateCommentReplyTopology } from './trash-items.js';
 import { DocumentTreeMoveError, DocumentTreeMoveService } from './document-tree-move.js';
@@ -288,6 +290,7 @@ export function createApp(options: {
   const spaceSubscribers=(document: DocPage)=>subscriptions.recipients('space',documentNotificationSpaceId(document.projectId));
   const documentSubscribers=(document: DocPage)=>[...subscriptions.recipients('document',document.id),...spaceSubscribers(document)];
   const atlassianLinks=new AtlassianLinksService(store,sourcePreservation);
+  const migratedConfluenceDocuments = new MigratedConfluenceDocuments(store, options.restrictedConfluencePages);
   const atlassian=new AtlassianReader(options.atlassianEnv);
   const documentPublication=new DocumentPublicationService(store,notifications,documentSubscribers);
   const planning=new PlanningService(store);planning.migrateLegacyIssues();
@@ -443,6 +446,7 @@ export function createApp(options: {
       .filter(([id]) => activeIssueIds.has(id))
       .map(([id, origins]) => [id, [...new Set(origins.map(origin => origin.projectId))]]) : [];
     const issueAliases = priorIssueKeys ? readIssueSearchAliases(store, issues, priorIssueKeys) : null;
+    const confluenceMigrationOrigins = purpose === 'workspace' ? migratedConfluenceDocuments.origins() : [];
     return {
       ...data,
       workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
@@ -455,6 +459,7 @@ export function createApp(options: {
       } : {}),
       ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
       ...(issueAliases && Object.keys(issueAliases).length ? { issueAliases } : {}),
+      ...(confluenceMigrationOrigins.length ? { confluenceMigrationOrigins } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
     } as unknown as WorkspaceSnapshot;
   };
@@ -1348,6 +1353,13 @@ export function createApp(options: {
     const address = parseAtlassianSearchInput(req.query.url);
     if (!address) return fail('Jira 업무·댓글 또는 Confluence 페이지·댓글 주소를 확인해 주세요.');
     res.set('Cache-Control', 'no-store').json({ targets: atlassianLinks.resolve(address) });
+  });
+  app.get('/api/atlassian-links/resolve-migrated-document', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const url = req.query.url;
+    const address = Object.keys(req.query).length === 1 && typeof url === 'string' ? confluenceMigratedDocumentAddress(url) : null;
+    if (!address) return fail('이관한 Confluence 문서의 원본 주소를 확인해 주세요.');
+    res.json({ target: migratedConfluenceDocuments.resolve(address) });
   });
   app.post('/api/atlassian-links',(req,res)=>{
     actor(req);

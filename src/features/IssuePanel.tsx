@@ -1194,6 +1194,14 @@ function IssuePanelContent(props: IssuePanelProps) {
       <form className="issue-detail-form" onSubmit={submitIssue} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <label className="issue-form-label">제목<input aria-label="제목" className="field issue-title-input" value={draft.title} onChange={e => update('title', e.target.value)} maxLength={300} required /></label>
         <IssueDescriptionEditor value={draft.description} format={draft.descriptionFormat ?? 'plain'} disabled={saving} initialPreview
+          migratedDocuments={data.confluenceMigrationOrigins && draft.description === issue.description &&
+            (draft.descriptionFormat ?? 'plain') === (issue.descriptionFormat ?? 'plain') ? {
+              origins: data.confluenceMigrationOrigins,
+              open: async ({ documentId, sectionId }, signal) => {
+                if (!data.documents.some(document => document.id === documentId)) await refresh();
+                if (!signal.aborted) openDocument(documentId, sectionId);
+              },
+            } : undefined}
           onChange={value => update('description', value)} onFormatChange={format => update('descriptionFormat', format)} />
         <div className="issue-properties"><div className="issue-section-caption">속성</div><div className="issue-form-grid">
           <label className="issue-form-label">상태<select ref={statusField} aria-label="상태" className="field" value={draft.status} onChange={e => update('status', e.target.value as Issue['status'])}>{!nextStatuses.some(status => status.id === draft.status) && <option value={draft.status} disabled>{statusMeta(data,draft.projectId,draft.status).label} (현재 허용되지 않음)</option>}{nextStatuses.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}</select></label>

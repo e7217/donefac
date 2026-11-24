@@ -121,6 +121,13 @@
   text-underline-offset: 2px;
 }
 
+.issue-description-link-status {
+  display: inline-block;
+  margin-inline-start: .4em;
+  color: #4f685a;
+  font-size: .8125rem;
+}
+
 .issue-description-preview code {
   border-radius: 3px;
   background: #eaf3ee;

@@ -14,6 +14,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { historicalMigrationBackup } from '../fixtures/historical-migration-backup.js';
 import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
+import type { MigratedConfluenceDocumentTarget } from '../../shared/confluence-migration-address.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/document-labels.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
@@ -51,6 +52,126 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('migrated Confluence description destinations resolve unique source sections across separate imports and restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const origin = 'https://migration-wiki.example.test/confluence';
+  const pageUrl = `${origin}/pages/viewpage.action?pageId=501`;
+  const href = `${pageUrl}#ReleasePlan-SecondaryAnchor`;
+  const section = (name: string) => `<ac:structured-macro ac:name="anchor"><ac:parameter>${name}</ac:parameter></ac:structured-macro>`;
+  const wikiBody = `${section('FirstAnchor')}${section('SecondaryAnchor')}<h2>Release readiness</h2>
+    <p>Synthetic release note</p><h3>Repeated heading</h3><h3>Repeated heading</h3>`;
+  const wikiPack = (instance: string, title: string, { extra = '', space = 'TEAM' } = {}) => f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">60</id><property name="key">${space}</property><property name="name">Synthetic wiki</property></object>
+    <object class="Page"><id name="id">501</id><property name="title">${title}</property>
+      <property name="version">1</property><property name="space" class="Space"><id name="id">60</id></property></object>
+    <object class="BodyContent"><id name="id">601</id><property name="bodyType">2</property>
+      <property name="body"><![CDATA[${wikiBody}]]></property>
+      <property name="content" class="Page"><id name="id">501</id></property></object>
+    ${extra}
+  </hibernate-generic>`) }]), 'sequential-confluence.zip', 'confluence', instance);
+  const resolvePath = (url: string) => `/atlassian-links/resolve-migrated-document?${new URLSearchParams({ url })}`;
+  const resolve = async (url: string) => {
+    const { status, data } = await f.call<{ target: MigratedConfluenceDocumentTarget | null }>(resolvePath(url));
+    assert.equal(status, 200, JSON.stringify(data));
+    return data.target;
+  };
+  const loadWorkspace = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+
+  const manualDocument = await f.call<DocPage>('/documents', 'POST', { title: 'Manually associated document',
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Manual content' }] }] } });
+  assert.equal(manualDocument.status, 201);
+  const manual = await f.call('/atlassian-links', 'POST', { targetType: 'document', targetId: manualDocument.data.id,
+    product: 'confluence', url: pageUrl });
+  assert.equal(manual.status, 201);
+  assert.equal(await resolve(pageUrl), null);
+  assert.equal((await loadWorkspace()).confluenceMigrationOrigins, undefined);
+
+  const jira = await f.upload(Buffer.from(JSON.stringify({ id: '710', key: 'JDOC-1', fields: {
+    project: { id: '61', key: 'JDOC', name: 'Synthetic Jira' }, summary: 'Jira release check',
+    status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+    created: '2020-01-01T00:00:00Z', updated: '2020-01-01T00:00:00Z',
+    description: { type: 'doc', version: 1, content: [{ type: 'paragraph',
+      content: [{ type: 'text', text: 'Release protocol', marks: [{ type: 'link', attrs: { href } }] }] }] },
+  } })), 'sequential-jira.json', 'jira', 'sequential-jira-first');
+  const jiraImport = await f.apply(await f.preview(await f.configuration(jira, 'JIRAFIRST')));
+  assert.equal(jiraImport.status, 201, JSON.stringify(jiraImport.data));
+  const issue = (await loadWorkspace()).issues.find(value => value.title === 'Jira release check')!;
+  assert.ok(issue.description.includes(href));
+  assert.equal(await resolve(href), null);
+
+  const wiki = await wikiPack('sequential-wiki', 'Release Plan');
+  const configuration = await f.configuration(wiki, 'WIKILATER');
+  configuration.sourceBaseUrls[wiki.id] = origin;
+  assert.equal((await f.apply(await f.preview(configuration))).status, 201);
+  const snapshot = await loadWorkspace();
+  const doc = snapshot.documents.find(value => value.title === 'Release Plan')!;
+  const heading = doc.content.content?.find(value => value.type === 'heading');
+  const sectionId = heading?.attrs?.sectionId;
+  assert.equal(typeof sectionId, 'string');
+  const exact = { documentId: doc.id, sectionId };
+  assert.deepEqual(snapshot.confluenceMigrationOrigins, [origin]);
+  assert.deepEqual(await resolve(pageUrl), { documentId: doc.id });
+  assert.deepEqual(await resolve(href), exact);
+  assert.deepEqual(await resolve(`${origin}/display/TEAM/Release+Plan#SecondaryAnchor`), exact);
+  assert.equal(await resolve(`${pageUrl}#Repeatedheading`), null);
+  assert.equal(await resolve(`${pageUrl.replace('/confluence/', '/other/')}#SecondaryAnchor`), null);
+  assert.equal(await resolve(`${pageUrl}#missing`), null);
+  for (const bad of [`${pageUrl}&pageId=502`, `${pageUrl}&focusedCommentId=4`, `${pageUrl}&pageVersion=2`,
+    `${pageUrl}#comment-4`, `${origin}/pages/../pages/501`, '/pages/501', `${origin}/browse/JDOC-1`]) {
+    assert.equal((await f.call(resolvePath(bad))).status, 400, bad);
+  }
+  const response = await fetch(`${f.base}${resolvePath(href)}`);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  await response.arrayBuffer();
+
+  const movePath = `/documents/${doc.id}`;
+  const move = await f.call<{ token: string; projectId: string; parentId: string | null }>(`${movePath}/move-preview`, 'POST',
+    { projectId: issue.projectId, parentId: null });
+  assert.equal(move.status, 200, JSON.stringify(move.data));
+  const { token, projectId, parentId } = move.data;
+  assert.equal((await f.call(`${movePath}/move`, 'POST', { token, projectId, parentId })).status, 200);
+  assert.deepEqual(await resolve(href), exact);
+  assert.deepEqual((await loadWorkspace()).issues.find(value => value.id === issue.id), issue);
+
+  const native = await f.call<WorkspaceSnapshot>('/export');
+  assert.equal(native.data.confluenceMigrationOrigins, undefined);
+  const restore = await f.call('/import', 'POST', { data: native.data });
+  assert.equal(restore.status, 200, JSON.stringify(restore.data));
+  assert.deepEqual((await loadWorkspace()).confluenceMigrationOrigins, [origin]);
+  assert.deepEqual(await resolve(href), exact);
+
+  const moved = (await loadWorkspace()).documents.find(value => value.id === doc.id)!;
+  const edited = await f.call<DocPage>(movePath, 'PATCH', { expectedVersion: moved.version,
+    contentSchemaVersion: documentContentSchemaVersion(moved.content),
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Local page edit removed the heading' }] }] },
+  });
+  assert.equal(edited.status, 200, JSON.stringify(edited.data));
+  assert.equal(await resolve(href), null);
+  assert.deepEqual(await resolve(pageUrl), { documentId: doc.id });
+
+  const restricted = await wikiPack('sequential-restricted-wiki', 'Unbound restricted page at the same ID', { space: 'PRIVATE', extra: `
+    <object class="Page"><id name="id">502</id><property name="title">Public sibling</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">60</id></property></object>
+    <object class="ContentPermissionSet"><id name="id">80</id>
+      <property name="owningContent" class="Page"><id name="id">501</id></property></object>` });
+  const restrictedConfig = await f.configuration(restricted, 'WIKIRESTRICT');
+  restrictedConfig.sourceBaseUrls[restricted.id] = origin;
+  restrictedConfig.excludedRecords.push(`${restricted.id}/page:501`);
+  const restrictedApply = await f.apply(await f.preview(restrictedConfig));
+  assert.equal(restrictedApply.status, 201, JSON.stringify(restrictedApply.data));
+  assert.equal(await resolve(pageUrl), null);
+  assert.deepEqual(await resolve(`${origin}/display/TEAM/Release+Plan`), { documentId: doc.id });
+
+  const ambiguous = await wikiPack('sequential-other-wiki', 'Second page at the same ID');
+  const ambiguousConfig = await f.configuration(ambiguous, 'WIKIOTHER');
+  ambiguousConfig.sourceBaseUrls[ambiguous.id] = origin;
+  assert.equal((await f.apply(await f.preview(ambiguousConfig))).status, 201);
+  assert.deepEqual((await loadWorkspace()).confluenceMigrationOrigins, [origin]);
+  assert.equal(await resolve(pageUrl), null);
+  assert.equal(await resolve(`${origin}/display/TEAM/Release+Plan`), null);
+});
 
 test('migration content review pages through the exact plan and keeps excluded and restricted content out', async t => {
   const f = await fixture();
