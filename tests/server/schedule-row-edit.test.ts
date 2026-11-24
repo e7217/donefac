@@ -47,12 +47,12 @@ async function fixture(t: TestContext) {
     try { await stop(); }
     finally { rmSync(dir, { recursive: true, force: true }); }
   });
-  const request = (path: string, method = 'GET', body?: unknown, actorId = actor) => fetch(running.base + path, {
-    method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId },
+  const request = (path: string, method = 'GET', body?: unknown, actorId = actor, headers: Record<string, string> = {}) => fetch(running.base + path, {
+    method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actorId, ...headers },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  async function call<T = unknown>(path: string, status = 200, method = 'GET', body?: unknown, actorId?: string) {
-    const response = await request(path, method, body, actorId);
+  async function call<T = unknown>(path: string, status = 200, method = 'GET', body?: unknown, actorId?: string, headers?: Record<string, string>) {
+    const response = await request(path, method, body, actorId, headers);
     const data = await response.json() as T;
     assert.equal(response.status, status, `${method} ${path}: ${JSON.stringify(data)}`);
     return data;
@@ -413,6 +413,81 @@ test('link-only row review adjusts the edited successor subtree and retries one 
   assert.equal(undone.dependencyChanges, 1);
   assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])), new Map([target, downstream].map(issue => [issue.id, dates(issue)])));
   assert.deepEqual((await f.workspace()).dependencies, before.dependencies);
+});
+
+test('a quick link can retime cross-project successors and keep the row undo scope', async t => {
+  const f = await fixture(t);
+  const receiving = await f.call<Project>('/projects', 201, 'POST', { key: 'ROWDEST', name: '일정을 받는 프로젝트' });
+  const predecessor = await f.issue('새 연결의 선행');
+  const relay = await f.issue('공통 프로젝트의 후행');
+  const target = await f.issue('가려진 프로젝트의 차단 대상', { projectId: receiving.id });
+  const downstream = await f.issue('다른 프로젝트의 간접 후행', { projectId: receiving.id });
+  const closing = await f.issue('검토 중 완료될 차단 대상', { projectId: receiving.id });
+  const retained = await f.link(target, downstream);
+  await f.blocker(relay, target);
+  await f.blocker(relay, closing);
+  const input: ScheduleRowEditInput = { projectId: f.project.id, issue: versionOf(predecessor), changes: {},
+    dependency: { action: 'add', direction: 'successor', relatedIssue: versionOf(relay), type: 'FS', lagDays: 0 },
+    rescheduleSuccessors: true, includeTeamBlockers: true,
+  };
+  await f.review({ ...input, rescheduleSuccessors: false }, 400);
+  await f.review({ ...input, includeTeamBlockers: 'true' }, 400);
+  const before = await f.workspace();
+  const existing = { id: retained.id, expectedVersion: retained.version ?? 1, relatedIssue: versionOf(downstream) };
+  const existingInput = { ...input, projectId: receiving.id, issue: versionOf(target) };
+  const unchanged = await f.review({ ...existingInput, dependency: { ...existing, action: 'update', type: 'FS', lagDays: 0 } });
+  assert.equal(unchanged.previewId, null);
+  assert.equal(unchanged.unchanged, 1);
+  const removal = await f.review({ ...existingInput, dependency: { ...existing, action: 'remove' } });
+  reviewId(removal);
+  assert.deepEqual(removal.changes, []);
+  assert.equal(removal.followUpIssueIds, undefined);
+  const local = await f.review({ ...input, includeTeamBlockers: false });
+  reviewId(local);
+  assert.deepEqual(local.followUpIssueIds, [relay.id]);
+  assertHandoffConflict(local, relay, target, '2026-11-27');
+  const mixed = await f.review({ ...input, changes: { endDate: '2026-11-25' },
+    relatedDates: { issue: versionOf(relay), changes: { dueDate: '2026-11-26' } },
+  });
+  reviewId(mixed);
+  assert.deepEqual(mixed.changes.slice(0, 2).map(({ id, toStart, toEnd, toDue, projectId }) => [id, toStart, toEnd, toDue, projectId]), [
+    [predecessor.id, predecessor.startDate, '2026-11-25', predecessor.dueDate, f.project.id],
+    [relay.id, '2026-11-26', '2026-11-27', '2026-11-26', f.project.id],
+  ]);
+  const old = reviewId(await f.review(input));
+  assert.deepEqual(await f.workspace(), before);
+
+  const calendarPath = `/projects/${receiving.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-27', isWorking: false, label: '검토 후 추가한 휴무' }],
+  }, otherActor);
+  await f.apply(old, 409);
+  const beforeClosing = reviewId(await f.review(input));
+  await f.call(`/issues/${closing.id}`, 200, 'PATCH', { expectedVersion: closing.version, status: 'done' }, otherActor);
+  const concurrent = await f.workspace();
+  await f.apply(beforeClosing, 409);
+  assert.deepEqual(await f.workspace(), concurrent);
+
+  const reviewed = await f.review(input);
+  const id = reviewId(reviewed);
+  const expected = new Map([[relay.id, ['2026-11-25', '2026-11-26']], [target.id, ['2026-11-30', '2026-12-01']],
+    [downstream.id, ['2026-12-02', '2026-12-03']]]);
+  assert.deepEqual(new Set(reviewed.followUpIssueIds), new Set(expected.keys()));
+  assert.deepEqual(new Map(reviewed.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]])), expected);
+  assert.equal(reviewed.changes.find(change => change.id === downstream.id)?.projectId, receiving.id);
+  const undoScope = { 'X-Teamspace-Schedule-Undo-Scope': `issue:${predecessor.id}` };
+  const apply = () => f.call<SchedulePasteApplyResult>(applyPath, 200, 'POST', { previewId: id }, actor, undoScope);
+  await f.restart();
+  const result = await apply();
+  assert.equal(result.dependencyChanges, 1);
+  assert.deepEqual(new Map(result.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), expected);
+  assert.deepEqual(await apply(), result);
+  const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: result.undoId }, actor, undoScope);
+  assert.equal(undo.dependencyChanges, 1);
+  assert.deepEqual(new Map(undo.updated.map(issue => [issue.id, dates(issue)])),
+    new Map([relay, target, downstream].map(issue => [issue.id, dates(issue)])));
+  assert.deepEqual((await f.workspace()).dependencies, concurrent.dependencies);
 });
 
 test('link-only row review allows connecting an undated task when schedule adjustment is off', async t => {

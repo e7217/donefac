@@ -272,11 +272,11 @@ function ProjectScheduleEditDialog({
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
   const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid && linkAction
     ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction,
-      ...linkAction, ...rowDatesInput, ...followUpInput }
+      ...linkAction, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput }
     : null;
   const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && linkAction && chainIssues.length === issues.length
     ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })),
-      ...linkAction, ...rowDatesInput, ...followUpInput }
+      ...linkAction, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput }
     : null;
   const blockerIssues = blockerLinks?.issues;
   const blockerDependencies = blockerLinks?.dependencies;
@@ -727,7 +727,7 @@ function ProjectScheduleEditDialog({
         후행 일정 함께 검토
       </label>
       <p id="schedule-paste-follow-up-help">{followUpDescription}</p>
-      {rescheduleSuccessors && !bulkLinks && !blockerLinks && (
+      {rescheduleSuccessors && !blockerLinks && (
         <div className="schedule-paste-team-follow-up">
           <label>
             <input type="checkbox" checked={includeTeamBlockers} aria-describedby="schedule-paste-team-follow-up-help"

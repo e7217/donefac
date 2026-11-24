@@ -10,7 +10,7 @@ import {
 import { suggestMissingScheduleDates, type MissingScheduleLink } from '../../shared/schedule-missing-dates';
 import {
   MAX_SCHEDULE_ROW_DEPENDENCY_EDITS,
-  type Dependency, type DependencyType, type FeatureProps, type Issue, type ScheduleBulkDateChanges,
+  type Dependency, type DependencyType, type FeatureProps, type Issue, type Project, type ScheduleBulkDateChanges,
   type SchedulePasteApplyResult, type SchedulePastePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput,
   type ScheduleUndoScope, type WorkCalendar, type WorkspaceSnapshot,
 } from '../../shared/types';
@@ -27,6 +27,7 @@ import './gantt-row-schedule-edit.css';
 type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issue: Issue;
   issues: readonly Issue[];
+  workspaceProjects?: readonly Pick<Project, 'id' | 'name'>[];
   issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
   incomingTeamBlockers?: readonly TeamIncomingBlocker[];
@@ -161,7 +162,7 @@ const incomingBlockerVersions = ({ relation, source }: TeamIncomingBlocker) =>
   [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate];
 
 export function GanttRowScheduleEdit({
-  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  issue, issues, workspaceProjects, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
   initialRelatedDates, initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied, datesFromGantt,
 }: Props) {
   const uid = useId();
@@ -171,6 +172,7 @@ export function GanttRowScheduleEdit({
   const [drafts, setDrafts] = useState<LinkDraft[]>(() => [{ ...linkDraft(1), ...initialLink }]);
   const [includeRelatedDates, setIncludeRelatedDates] = useState(true);
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
+  const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const nextDraftId = useRef(2);
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
@@ -242,6 +244,7 @@ export function GanttRowScheduleEdit({
     ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}),
     ...(relatedDates ? { relatedDates } : {}),
     ...(rescheduleSuccessors ? { rescheduleSuccessors } : {}),
+    ...(rescheduleSuccessors && includeTeamBlockers ? { includeTeamBlockers: true } : {}),
     ...(suggestionApplied ? { reviewIncomingTeamBlockers: true } : {}) };
   const input = JSON.stringify({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
@@ -256,6 +259,7 @@ export function GanttRowScheduleEdit({
   const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length || pairedDatesChanged) &&
     [...Object.values(changes), ...Object.values(relatedDates?.changes ?? {})].every(value => value === null || isCalendarDate(value)));
   const result = review?.result;
+  const otherProjectNames = new Map(workspaceProjects?.filter(project => project.id !== issue.projectId).map(project => [project.id, project.name]));
   const expiry = result?.expiresAt ? Date.parse(result.expiresAt) : NaN;
   const reviewStale = review && (input !== review.input || expiry <= clock);
   const applyId = !editLocked && !reloadNeeded && review && !reviewStale && Number.isFinite(expiry) &&
@@ -653,6 +657,7 @@ export function GanttRowScheduleEdit({
               <input type="checkbox" checked={rescheduleSuccessors} aria-describedby={`${uid}-reschedule-help`}
                 onChange={event => {
                   setRescheduleSuccessors(event.currentTarget.checked);
+                  if (!event.currentTarget.checked) setIncludeTeamBlockers(false);
                   invalidate();
                 }} />
               후행 일정 함께 검토
@@ -661,6 +666,14 @@ export function GanttRowScheduleEdit({
               {relatedDates ? '두 업무는 입력한 날짜를 유지합니다. ' : '선택한 업무는 위 날짜를 유지합니다. '}
               변경할 연결을 기준으로 후행 업무의 근무일 기간을 유지하며 일정을 필요한 만큼 늦춥니다.
             </p>
+            {rescheduleSuccessors && (workspaceProjects?.length ?? 0) > 1 && <label>
+              <input type="checkbox" checked={includeTeamBlockers}
+                onChange={event => {
+                  setIncludeTeamBlockers(event.currentTarget.checked);
+                  invalidate();
+                }} />
+              프로젝트 간 차단 포함
+            </label>}
           </div>
         </fieldset>
         <div className="gantt-row-edit-actions">
@@ -686,6 +699,7 @@ export function GanttRowScheduleEdit({
           {result.changes.map(change => <div className="gantt-row-edit-diff" key={change.id}>
             {(rescheduleSuccessors || review?.relatedIssue) && <header className="gantt-row-edit-diff-title">
               <h4>{change.key} · {change.title}</h4>
+              {change.projectId && otherProjectNames.has(change.projectId) && <small className="gantt-row-edit-hint">{otherProjectNames.get(change.projectId)}</small>}
               <small className="gantt-row-edit-hint">{change.id === anchor.id ? '선택한 업무' : change.id === review?.relatedIssue?.id ? '연결 업무' : '후행 업무'}</small>
             </header>}
             <dl>{dates.filter(({ from, to }) => (change[from] ?? null) !== (change[to] ?? null)).map(({ field, label, from, to }) =>

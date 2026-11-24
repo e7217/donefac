@@ -2338,6 +2338,7 @@ type ScheduleBulkLinkSelection = {
   issues: ScheduleRowIssue[];
   dates?: ScheduleBulkLinkDateEdit[];
   rescheduleSuccessors?: boolean;
+  includeTeamBlockers?: boolean;
 };
 export type ScheduleBulkLinkInput = ScheduleBulkLinkSelection & ScheduleBulkLinkAction & {
   anchor: ScheduleRowIssue;
@@ -2371,6 +2372,7 @@ export interface ScheduleRowEditInput {
   dependency?: ScheduleRowDependencyEdit;
   dependencies?: readonly ScheduleRowDependencyEdit[];
   rescheduleSuccessors?: boolean;
+  includeTeamBlockers?: boolean;
   reviewIncomingTeamBlockers?: boolean;
 }
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;

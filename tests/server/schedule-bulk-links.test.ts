@@ -297,6 +297,71 @@ test('bulk chain follow-up keeps actual input dates fixed and guards unchanged d
   } finally { database.close(); }
 });
 
+test('common and ordered bulk links can review cross-project successors with included date drafts', async t => {
+  const f = await fixture(t);
+  const receiving = await f.call<Project>('/projects', 201, 'POST', { key: 'BULKDEST', name: '후행 프로젝트' });
+  const anchor = await f.issue('날짜 초안이 있는 기준 업무');
+  const first = await f.issue('첫 선택 업무');
+  const second = await f.issue('마감일만 바꿀 선택 업무');
+  const shared = await f.issue('두 선행을 공유하는 다른 프로젝트 업무', receiving.id, { startDate: '2026-11-23', endDate: '2026-11-24' });
+  const stable = await f.issue('일정이 충분히 늦은 후행 업무', receiving.id, { startDate: '2026-12-10', endDate: '2026-12-11' });
+  for (const source of [first, second]) {
+    await f.call('/schedule/team-blockers', 201, 'POST', { sourceIssueId: source.id, targetIssueId: shared.id,
+      expectedSourceVersion: source.version, expectedTargetVersion: shared.version });
+  }
+  const calendarPath = `/projects/${receiving.id}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version, exceptions: [
+    { date: '2026-11-27', isWorking: false, label: '다른 프로젝트의 금요일 휴무' },
+    { date: '2026-12-01', isWorking: false, label: '다른 프로젝트의 화요일 휴무' },
+  ] });
+  const settings = { rescheduleSuccessors: true, includeTeamBlockers: true, dates: [
+    { issue: reference(anchor), changes: { endDate: '2026-11-24' } },
+    { issue: reference(second), changes: { dueDate: '2026-11-25' } },
+  ] };
+  const common: ScheduleBulkLinkInput = { ...input(anchor, [first, second]), operation: 'add', type: 'FS', lagDays: 0, ...settings };
+  const ordered: ScheduleBulkChainInput = { ...chain(f.project.id, [anchor, first, second]), type: 'FS', lagDays: 0, ...settings };
+  await f.call(previewPath, 400, 'POST', { ...common, rescheduleSuccessors: false });
+  await f.call(previewPath, 400, 'POST', { ...ordered, includeTeamBlockers: 'true' });
+  const initial = await f.workspace();
+  const local = await f.review({ ...common, includeTeamBlockers: false });
+  assert.deepEqual(new Set(local.followUpIssueIds), new Set([first.id, second.id]));
+  assert.ok(local.teamBlockerWarnings?.some(warning => warning.includes(shared.key)));
+  const commonReview = await f.review(common);
+  assert.ok(commonReview.previewId, JSON.stringify(commonReview.errors));
+  assert.deepEqual(new Set(commonReview.followUpIssueIds), new Set([first.id, second.id, shared.id]));
+  const commonTarget = commonReview.changes.find(change => change.id === shared.id);
+  assert.deepEqual([commonTarget?.toStart, commonTarget?.toEnd, commonTarget?.projectId], ['2026-11-30', '2026-12-02', receiving.id]);
+  const old = await f.review(ordered);
+  assert.ok(old.previewId, JSON.stringify(old.errors));
+  assert.deepEqual(await f.workspace(), initial);
+
+  await f.link(shared, stable);
+  const concurrent = await f.workspace();
+  await f.apply(old.previewId, 409);
+  assert.deepEqual(await f.workspace(), concurrent);
+  const latest = await f.review(ordered);
+  assert.ok(latest.previewId, JSON.stringify(latest.errors));
+  const initialById = new Map(initial.issues.map(issue => [issue.id, issue]));
+  const previewDates = new Map(latest.changes.map(({ id, toStart, toEnd, toDue }) =>
+    [id, [toStart, toEnd, toDue === undefined ? initialById.get(id)?.dueDate : toDue]]));
+  const expected = new Map([[anchor.id, ['2026-11-19', '2026-11-24', anchor.dueDate]],
+    [first.id, ['2026-11-25', '2026-11-26', first.dueDate]], [second.id, ['2026-11-27', '2026-11-30', '2026-11-25']],
+    [shared.id, ['2026-12-02', '2026-12-03', shared.dueDate]]]);
+  assert.deepEqual(previewDates, expected);
+  assert.ok(latest.changes.every(change => change.projectId === initialById.get(change.id)?.projectId));
+  assert.ok(latest.warnings.some(warning => warning.includes(second.key) && warning.includes('마감일 2026-11-25')));
+  const result = await f.apply(latest.previewId);
+  assert.equal(result.dependencyChanges, 2);
+  const storedDates = (issues: Issue[]) => new Map(issues.map(({ id, startDate, endDate, dueDate }) => [id, [startDate, endDate, dueDate]]));
+  assert.deepEqual(storedDates(result.updated), expected);
+  assert.deepEqual(await f.apply(latest.previewId), result);
+  const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: result.undoId });
+  assert.equal(undo.dependencyChanges, 2);
+  assert.deepEqual(storedDates(undo.updated), storedDates([anchor, first, second, shared]));
+  assert.deepEqual((await f.workspace()).dependencies, concurrent.dependencies);
+});
+
 test('common-anchor follow-up uses both newly linked predecessors and blocks incomplete or conflicting fixed dates', async t => {
   const f = await fixture(t);
   const anchor = await f.issue('공통 후행 업무');

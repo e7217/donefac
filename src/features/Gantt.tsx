@@ -2039,7 +2039,7 @@ function ProjectGantt(props: GanttProps) {
     closeLinkEditor();
     if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
   }
-  async function previewDependency(input: DependencyInput, rescheduleSuccessors: boolean) {
+  async function previewDependency(input: DependencyInput, rescheduleSuccessors: boolean, includeTeamBlockers: boolean) {
     const { predecessorId, successorId, type, lagDays } = input;
     const predecessor = projectIssues.find(issue => issue.id === predecessorId);
     const successor = projectIssues.find(issue => issue.id === successorId);
@@ -2055,7 +2055,8 @@ function ProjectGantt(props: GanttProps) {
       : { action: 'add', direction: 'successor', relatedIssue, type, lagDays };
     const request: ScheduleRowEditInput = { projectId: predecessor.projectId,
       issue: { id: predecessor.id, expectedVersion: predecessor.version }, changes: {}, dependency,
-      ...(rescheduleSuccessors && !linkEditor?.removal ? { rescheduleSuccessors: true } : {}) };
+      ...(rescheduleSuccessors && !linkEditor?.removal
+        ? { rescheduleSuccessors: true, ...(includeTeamBlockers && { includeTeamBlockers: true }) } : {}) };
     try {
       const result = await post<SchedulePastePreview>('/schedule/row-edit/preview', request);
       if (result.errors.length) await refresh().catch(() => {});
@@ -2977,6 +2978,7 @@ function ProjectGantt(props: GanttProps) {
       dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
       staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={cancelLinkEditor}
       scheduleReview={{ preview: previewDependency, apply: applyDependency, reflect: reflectDependency, remove: linkEditor.removal,
+        projects: data.projects,
         currentDependency: latestDependency, revision: latestDependency && `${latestDependency.id}:${latestDependency.version ?? 1}` }} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
       onClose={() => { if (canLeave()) setPlanAssignment(null); }}
@@ -2997,7 +2999,7 @@ function ProjectGantt(props: GanttProps) {
       }} />}
   </div>
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
-      issue={rowScheduleEdit.issue} issues={rowEditIssues} issueAliases={data.issueAliases}
+      issue={rowScheduleEdit.issue} issues={rowEditIssues} workspaceProjects={data.projects} issueAliases={data.issueAliases}
       incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}
       relatedIncomingTeamBlockers={rowScheduleEdit.relatedInlineDraft && incomingTeamBlockers.get(rowScheduleEdit.relatedInlineDraft.source.id)}
       outgoingTeamBlockers={teamBlockerChoices.get(rowScheduleEdit.issue.id)}
@@ -3029,6 +3031,7 @@ function ProjectGantt(props: GanttProps) {
       }} />}
     {bulkLinkSelection && <SchedulePasteDialog
       actorId={props.actorId} undoScope={undoScope}
+      workspaceProjects={data.projects}
       projectId={bulkLinkSelection.project.id} projectLabel={`${bulkLinkSelection.project.key} · ${bulkLinkSelection.project.name}`}
       bulkLinks={{
         issues: bulkLinkSelection.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original),

@@ -3,7 +3,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type Ref } from 'react';
 import { ArrowRightLeft, Link2, X } from 'lucide-react';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
-import type { Dependency, DependencyType, Issue, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, DependencyType, Issue, Project, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
 import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { ApiError } from '../lib/api';
@@ -17,11 +17,12 @@ export type RelatedIssueDirection = 'predecessor' | 'successor';
 export type DependencyRelationReview = { sourceIssueId: string; targetIssueId: string; mode: IssueRelationScheduleMode };
 
 type ScheduleReview = {
-  preview: (input: DependencyInput, rescheduleSuccessors: boolean) => Promise<SchedulePastePreview>;
+  preview: (input: DependencyInput, rescheduleSuccessors: boolean, includeTeamBlockers: boolean) => Promise<SchedulePastePreview>;
   apply: (previewId: string) => Promise<SchedulePasteApplyResult>;
   reflect: (result: SchedulePasteApplyResult) => Promise<void>;
   revision?: string;
   currentDependency?: Dependency;
+  projects?: readonly Pick<Project, 'id' | 'name'>[];
   remove?: boolean;
 };
 type Props = {
@@ -70,6 +71,7 @@ export function GanttDependencyModal({ issues, issueAliases, dependency, prefill
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
+  const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const [review, setReview] = useState<Reviewed | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [retryId, setRetryId] = useState<string | null>(null);
@@ -112,7 +114,7 @@ export function GanttDependencyModal({ issues, issueAliases, dependency, prefill
   const failure = retryId || applied ? error : staleMessage || error;
   const canSubmit = ready && !editLocked && !staleMessage && (!editing || edited || removing);
   const inputVersion = JSON.stringify([predecessorId, predecessor?.version, predecessor?.projectId,
-    successorId, successor?.version, successor?.projectId, type, lag, rescheduleSuccessors, scheduleReview?.revision]);
+    successorId, successor?.version, successor?.projectId, type, lag, rescheduleSuccessors, includeTeamBlockers, scheduleReview?.revision]);
   const expires = review?.result.expiresAt ? Date.parse(review.result.expiresAt) : NaN;
   const reviewStale = Boolean(review && (review.inputVersion !== inputVersion || staleMessage || expires <= clock));
   const applyId = canSubmit && !reviewStale && Number.isFinite(expires) && review?.result.previewId && !review.result.errors.length &&
@@ -192,7 +194,7 @@ export function GanttDependencyModal({ issues, issueAliases, dependency, prefill
       await runReviewRequest('preview', async () => {
         setReview(null);
         try {
-          const result = await scheduleReview.preview(input, rescheduleSuccessors);
+          const result = await scheduleReview.preview(input, rescheduleSuccessors, includeTeamBlockers);
           if (!mounted.current) return;
           setReview({ result, inputVersion });
           setClock(currentTime());
@@ -394,14 +396,21 @@ export function GanttDependencyModal({ issues, issueAliases, dependency, prefill
           </>}
           {scheduleReview && !removing && <label className="gantt-link-follow-up">
             <input type="checkbox" checked={rescheduleSuccessors} disabled={editLocked}
-              onChange={event => setRescheduleSuccessors(event.currentTarget.checked)} />후행 일정 함께 검토
+              onChange={event => {
+                setRescheduleSuccessors(event.currentTarget.checked);
+                if (!event.currentTarget.checked) setIncludeTeamBlockers(false);
+              }} />후행 일정 함께 검토
+          </label>}
+          {rescheduleSuccessors && !removing && (scheduleReview?.projects?.length ?? 0) > 1 && <label className="gantt-link-follow-up">
+            <input type="checkbox" checked={includeTeamBlockers} disabled={editLocked}
+              onChange={event => setIncludeTeamBlockers(event.currentTarget.checked)} />프로젝트 간 차단 포함
           </label>}
           {pending && <p className="gantt-link-help" role="status">{pendingLabels[pending]}</p>}
           {!running && failure &&
             <div ref={errorNotice} className="issue-form-error" role="alert" tabIndex={-1}>{failure}</div>}
         </div>
         {review && <DependencyReviewResult key={review.result.previewId ?? review.inputVersion}
-          result={review.result} headingRef={reviewHeading} stale={reviewStale && !retryId && !applied} />}
+          result={review.result} projects={scheduleReview?.projects} headingRef={reviewHeading} stale={reviewStale && !retryId && !applied} />}
         <footer>
           <button className="btn btn-ghost" type="button" disabled={running} onClick={close}>{applied ? '닫기' : '취소'}</button>
           {scheduleReview ? applied ? <button ref={recoveryButton} className="btn btn-primary" type="button"
@@ -422,13 +431,15 @@ export function GanttDependencyModal({ issues, issueAliases, dependency, prefill
   </div>;
 }
 
-function DependencyReviewResult({ result, headingRef, stale }: {
+function DependencyReviewResult({ result, projects, headingRef, stale }: {
   result: SchedulePastePreview;
+  projects?: ScheduleReview['projects'];
   headingRef: Ref<HTMLHeadingElement>;
   stale: boolean;
 }) {
   const headingId = useId();
   const followUps = new Set(result.followUpIssueIds);
+  const projectNames = new Map(projects?.filter(project => project.id !== result.projectId).map(project => [project.id, project.name]));
   const warnings = [...new Set([...result.warnings, ...(result.teamBlockerWarnings ?? [])])];
   return <section className="gantt-link-review" aria-labelledby={headingId}>
     <h3 id={headingId} ref={headingRef} tabIndex={-1}>업무 연결 미리보기</h3>
@@ -447,6 +458,7 @@ function DependencyReviewResult({ result, headingRef, stale }: {
       <ul className="gantt-link-review-list" aria-label="후행 일정 변경 목록" tabIndex={0}>
         {result.changes.map(change => <li key={change.id}>
           <strong>{change.key} · {change.title}</strong>
+          {change.projectId && projectNames.has(change.projectId) && <small>{projectNames.get(change.projectId)}</small>}
           {followUps.has(change.id) && <small>후행 조정</small>}
           <span>시작일 {change.fromStart ?? '미정'} → {change.toStart ?? '미정'}</span>
           <span>종료일 {change.fromEnd ?? '미정'} → {change.toEnd ?? '미정'}</span>

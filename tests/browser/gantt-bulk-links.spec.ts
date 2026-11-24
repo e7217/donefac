@@ -608,14 +608,18 @@ test('360px 간트에서 선택한 업무 순서를 지켜 선후행 연결을 �
   }
 });
 
-test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에 적용하고 되돌린다', async ({ page, request }) => {
-  const { projects: [project], users: [actor] } = await workspace(request);
+test('360px 간트에서 순차 연결과 프로젝트 간 후행 일정을 한 번에 적용하고 되돌린다', async ({ page, request }) => {
+  const { projects: [project, receiving], users: [actor] } = await workspace(request);
   const f = fixture(request);
   try {
     const first = await f.create(project.id, '연결 대상 준비', { startDate: '2030-01-07', endDate: '2030-01-08' });
     const second = await f.create(project.id, '연결 대상 검수', { startDate: '2030-01-09', endDate: '2030-01-10' });
     const third = await f.create(project.id, '연결 대상 배포', { startDate: '2030-01-11', endDate: '2030-01-11' });
     const hidden = await f.create(project.id, '검색에서 숨긴 후속 업무', { startDate: '2030-01-14', endDate: '2030-01-15' });
+    const remote = await f.create(receiving.id, '다른 프로젝트에서 차단된 업무', { startDate: '2030-01-16', endDate: '2030-01-17' });
+    await readJson(await request.post(`/api/issues/${hidden.id}/relations`, { data: {
+      type: 'blocks', direction: 'outgoing', otherIssueId: remote.id,
+    } }), 201);
     const originalLink = await readJson<Dependency>(await request.post('/api/dependencies', { data: {
       predecessorId: third.id, successorId: hidden.id, type: 'FS', lagDays: 0,
     } }), 201);
@@ -630,6 +634,7 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
       { issue: third, start: '2030-01-15', end: '2030-01-15' },
       { issue: hidden, start: '2030-01-16', end: '2030-01-17' },
     ];
+    const expectedAcrossProjects = [...expected, { issue: remote, start: '2030-01-18', end: '2030-01-21' }];
 
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
@@ -649,6 +654,7 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
 
     const dialog = page.getByRole('dialog', { name: dialogName, exact: true });
     const toggle = dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
+    const crossProject = dialog.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true });
     const previewButton = dialog.getByRole('button', { name: '연결 미리보기', exact: true });
     const apply = dialog.getByRole('button', { name: '날짜와 선후행 연결 적용', exact: true });
     const dateTable = dialog.getByRole('table', { name: /^선택 업무(?:와 후행 업무)? 날짜 변경 목록$/u });
@@ -685,7 +691,7 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
     const adjusted = await readJson<SchedulePastePreview>(adjustedResponse);
     expect(adjusted.previewId).toBeTruthy();
     expect(adjusted.errors).toEqual([]);
-    expect(adjusted.warnings).toEqual([]);
+    expect(adjusted.teamBlockerWarnings).toEqual([expect.stringContaining(remote.key)]);
     expect(adjusted.changes).toHaveLength(4);
     expect(adjusted.followUpIssueIds).toEqual(expect.arrayContaining([second.id, third.id, hidden.id]));
     expect(adjusted.followUpIssueIds).toHaveLength(3);
@@ -698,22 +704,39 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
       if (issue === first) await expect(row.getByText('후행 조정', { exact: true })).toHaveCount(0);
       else await expect(row.getByText('후행 조정', { exact: true })).toBeVisible();
     }
+    await expect(dateRow(remote)).toHaveCount(0);
+    await expect(crossProject).not.toBeChecked();
+    await crossProject.check();
+    await expect(apply).toBeDisabled();
+    const crossPreview = nextPost(page, previewPath);
+    await previewButton.click();
+    const response = await crossPreview;
+    expect(response.request().postDataJSON()).toEqual({ ...input, rescheduleSuccessors: true, includeTeamBlockers: true });
+    const combined = await readJson<SchedulePastePreview>(response);
+    expect(combined.previewId).toBeTruthy();
+    expect(combined.errors).toEqual([]);
+    expect(combined.changes).toHaveLength(5);
+    expect(combined.changes.find(change => change.id === remote.id)).toMatchObject({
+      projectId: receiving.id, toStart: expectedAcrossProjects[4].start, toEnd: expectedAcrossProjects[4].end,
+    });
+    await expect(dateRow(remote)).toContainText(receiving.name);
+    await expect(dialog.getByText('후행 일정 조정 4건', { exact: true })).toBeVisible();
     expect(await f.stored()).toEqual(originalIssues);
     expect(await currentLinks()).toEqual([originalLink]);
 
     const pendingApply = nextPost(page, applyPath);
     await apply.click();
     const applyResponse = await pendingApply;
-    expect(applyResponse.request().postDataJSON()).toEqual({ previewId: adjusted.previewId });
+    expect(applyResponse.request().postDataJSON()).toEqual({ previewId: combined.previewId });
     const applied = await readJson<SchedulePasteApplyResult>(applyResponse);
     expect(applied.dependencyChanges).toBe(2);
-    expect(applied.updated).toHaveLength(4);
+    expect(applied.updated).toHaveLength(5);
     await expect(dialog).toHaveCount(0);
     await expect(endDate(hidden)).toHaveCount(0);
     await expect(endDate(second)).toHaveValue(excludedEnd);
     await expect(secondSaveDate).toBeVisible();
     const savedIssues = await f.stored();
-    for (const { issue, start, end } of expected) {
+    for (const { issue, start, end } of expectedAcrossProjects) {
       expect(savedIssues.find(saved => saved.id === issue.id)).toMatchObject({
         startDate: start, endDate: end, version: issue.version + 1,
       });
@@ -729,7 +752,7 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
     expect(undoResponse.request().postDataJSON()).toEqual({ undoId: applied.undoId });
     expect(await readJson<SchedulePasteApplyResult>(undoResponse)).toMatchObject({ dependencyChanges: 2 });
     const restored = await f.stored();
-    for (const { issue } of expected) {
+    for (const { issue } of expectedAcrossProjects) {
       expect(restored.find(saved => saved.id === issue.id)).toMatchObject({
         startDate: issue.startDate, endDate: issue.endDate, version: issue.version + 2,
       });

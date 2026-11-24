@@ -1432,7 +1432,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       onClose={closeBlockedIssueCreation} refresh={refreshIssueRelations} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       initialDateDraft={rowScheduleEdit.initialDateDraft} datesFromGantt={Boolean(rowScheduleEdit.ganttDateDraft)}
-      issues={data.issues} issueAliases={data.issueAliases}
+      issues={data.issues} workspaceProjects={data.projects} issueAliases={data.issueAliases}
       incomingTeamBlockers={teamBlockers.incoming.get(rowScheduleEdit.issue.id)}
       outgoingTeamBlockers={teamBlockers.outgoing.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}

@@ -19,15 +19,15 @@ const original = { startDate: date(23), endDate: date(26), dueDate: date(30) };
 const revised = { startDate: date(24), endDate: date(27), dueDate: null };
 
 async function fixture(request: APIRequestContext) {
-  const { projects: [project], users: [actor, peer] } = await workspace(request);
+  const { projects: [project, receiving], users: [actor, peer] } = await workspace(request);
   const headers = { 'X-Actor-Id': actor.id };
   const suffix = randomUUID().slice(0, 8);
   const ids: string[] = [];
   return {
-    actor, peer,
-    async issue(title: string, schedule: Partial<ReturnType<typeof dates>>) {
+    actor, peer, receiving,
+    async issue(title: string, schedule: Partial<ReturnType<typeof dates>>, projectId = project.id) {
       const value = await json<Issue>(await request.post('/api/issues', {
-        headers, data: { projectId: project.id, title: `${title} ${suffix}`, ...schedule },
+        headers, data: { projectId, title: `${title} ${suffix}`, ...schedule },
       }), 201);
       ids.push(value.id);
       return value;
@@ -265,14 +265,18 @@ test('여러 연결 중 하나가 바뀌면 전체 적용을 멈추고 날짜와
   } finally { await f.close(); }
 });
 
-test('360px에서 새 연결을 기준으로 숨겨진 후행 일정까지 검토하고 날짜와 연결을 한 번에 되돌린다', async ({ page, request }) => {
+test('360px에서 날짜와 새 연결을 기준으로 프로젝트 간 후행 일정을 함께 검토하고 되돌린다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const f = await fixture(request);
   try {
     const anchor = await f.issue('연결과 후행 일정의 기준 업무', { startDate: date(23), endDate: date(24) });
     const successor = await f.issue('가려진 직접 후행 업무', { startDate: date(25), endDate: date(26) });
     const last = await f.issue('가려진 간접 후행 업무', { startDate: date(27), endDate: date(27) });
+    const remote = await f.issue('다른 프로젝트의 후행 업무', { startDate: date(30), endDate: date(30) }, f.receiving.id);
     const originalLink = await f.link(successor, last);
+    await json(await request.post(`/api/issues/${last.id}/relations`, { data: {
+      type: 'blocks', direction: 'outgoing', otherIssueId: remote.id,
+    } }), 201);
     const { dialog, opener } = await openRow(page, anchor, f.actor.id);
     for (const hidden of [successor, last]) await expect(page.locator(`[data-issue-id="${hidden.id}"]`)).toHaveCount(0);
     const cascade = dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
@@ -306,13 +310,25 @@ test('360px에서 새 연결을 기준으로 숨겨진 후행 일정까지 검�
       await expect(details.getByRole('heading', { name: `${issue.key} · ${issue.title}`, exact: true })).toBeVisible();
     }
     await expect(details.getByRole('heading', { name: `${anchor.key} → ${successor.key}`, exact: true })).toBeVisible();
+    const crossProject = dialog.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true });
+    await expect(crossProject).not.toBeChecked();
+    await crossProject.check();
+    await expect(apply).toBeDisabled();
+    const combined = await preview(page, dialog);
+    expect(combined.input).toEqual({ ...planned.input, includeTeamBlockers: true });
+    expect(combined.result.changes).toHaveLength(4);
+    expect(combined.result.changes.find(change => change.id === remote.id)).toMatchObject({
+      projectId: f.receiving.id, toStart: '2026-12-01', toEnd: '2026-12-01',
+    });
+    await expect(details.getByRole('heading', { name: `${remote.key} · ${remote.title}`, exact: true })).toBeVisible();
+    await expect(details.getByText(f.receiving.name, { exact: true })).toBeVisible();
     expect(await workspace(request)).toEqual(before);
 
     const applying = waitPost(page, applyPath);
     await apply.click();
     const applied = await json<SchedulePasteApplyResult>(await applying);
     expect(applied.dependencyChanges).toBe(1);
-    expect(applied.updated).toHaveLength(3);
+    expect(applied.updated).toHaveLength(4);
     await expect(dialog).toHaveCount(0);
     await expect(opener).toBeFocused();
     await expect(page.getByLabel(`${anchor.key} 종료일`, { exact: true })).toHaveValue(date(25));
@@ -325,7 +341,7 @@ test('360px에서 새 연결을 기준으로 숨겨진 후행 일정까지 검�
     const undone = await json<SchedulePasteApplyResult>(await undoing);
     expect(undone.dependencyChanges).toBe(1);
     expect(new Map(undone.updated.map(issue => [issue.id, dates(issue)])))
-      .toEqual(new Map([anchor, successor, last].map(issue => [issue.id, dates(issue)])));
+      .toEqual(new Map([anchor, successor, last, remote].map(issue => [issue.id, dates(issue)])));
     const restored = await workspace(request);
     expect(restored.dependencies.some(link => link.predecessorId === anchor.id && link.successorId === successor.id)).toBe(false);
     expect(restored.dependencies).toContainEqual(originalLink);
