@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Issue, JiraIssueStatusHistoryEntry, JiraIssueStatusHistoryPage, SourceImport, SourceReconciliationJiraFinding,
   SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusHistory, SourceRecordArchive } from '../shared/types.js';
+import { isJiraIssueKey } from '../shared/atlassian-links.js';
 import { countJiraStatusTransitions, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraStatusHistoryOwnerAliases,
   jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
@@ -21,6 +22,12 @@ interface SourceProof {
   stagingId: string;
   centuryReview: Set<string>;
   excluded: Set<string>;
+}
+interface RetainedOwner {
+  issueId: string;
+  projectId: string;
+  receipt: SourceImport;
+  proof: SourceProof;
 }
 interface ReceiptContext {
   receipt: SourceImport;
@@ -59,6 +66,7 @@ interface ReceiptHistoryVisitor {
 }
 
 const originalGroupId = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
+const jiraNumericIssueId = /^[1-9]\d{0,199}$/u;
 
 function originalText(value: unknown, max: number): string | null {
   return typeof value === 'string' && value.trim() && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value) ? value : null;
@@ -94,10 +102,11 @@ function receiptContext(receipt: SourceImport): ReceiptContext {
     notice?.code === 'DATE_TWO_DIGIT_CENTURY' && notice.recordId ? [notice.recordId] : [])) };
 }
 
-function receiptPackage(archive: SourceRecordArchive, receipt: SourceImport) {
-  return Array.isArray(receipt.packages) ? receipt.packages.find(item => item?.sha256 === archive.packageSha256 &&
-    item.source?.product === 'jira' && item.source.instanceKey === archive.source.instanceKey &&
-    item.source.format === archive.source.format) : undefined;
+function receiptPackage(archive: SourceRecordArchive, receipt: SourceImport, requireUnique = false) {
+  if (!Array.isArray(receipt.packages)) return;
+  const matches = receipt.packages.filter(item => item?.sha256 === archive.packageSha256 && item.source?.product === 'jira' &&
+    item.source.instanceKey === archive.source.instanceKey && item.source.format === archive.source.format);
+  return !requireUnique || matches.length === 1 ? matches[0] : undefined;
 }
 
 function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?: readonly string[]) {
@@ -120,6 +129,22 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
       AND json_type(history.json,'$.record.metadata.items')='array'
       AND CASE WHEN json_valid(receipt.json)
         THEN json_type(receipt.json,'$.configuration.appendTo.projectId')='text' ELSE 0 END
+    UNION ALL
+    SELECT ${candidateFields}
+    FROM source_bindings AS binding CROSS JOIN source_records AS snapshot INDEXED BY source_records_jira_unbound_issue_key
+      ON snapshot.source_instance=binding.source_instance AND json_extract(snapshot.json,'$.record.metadata.key')=+binding.source_alias
+    CROSS JOIN source_records AS history INDEXED BY source_records_jira_unowned_change_owner
+      ON history.source_instance=snapshot.source_instance AND json_extract(history.json,'$.record.containerId')=+snapshot.source_id
+    JOIN source_imports AS receipt ON receipt.id=history.import_id
+    WHERE binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue' AND binding.target_id=?
+      AND snapshot.product='jira' AND snapshot.kind='issue' AND snapshot.target_type IS NULL AND snapshot.target_id IS NULL
+      AND history.product='jira' AND history.kind='history' AND history.owner_type IS NULL AND history.owner_id IS NULL
+      AND history.import_id=snapshot.import_id AND json_extract(history.json,'$.packageSha256')=json_extract(snapshot.json,'$.packageSha256')
+      AND json_type(history.json,'$.record.metadata.items')='array'
+      AND CASE WHEN json_valid(receipt.json)
+        THEN json_type(receipt.json,'$.configuration.appendTo.projectId')='text' ELSE 0 END
+      AND NOT EXISTS (SELECT 1 FROM source_bindings AS direct WHERE direct.product='jira' AND direct.kind='issue'
+        AND direct.source_instance=snapshot.source_instance AND direct.source_alias=snapshot.source_id)
     ORDER BY ordinal`);
   const sourceIssues = store.db.prepare(`SELECT snapshot.json
     FROM source_bindings AS binding CROSS JOIN source_records AS snapshot
@@ -133,6 +158,20 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
       AND ((snapshot.target_type='issue' AND snapshot.target_id=? AND snapshot.owner_type='issue' AND snapshot.owner_id=?)
         OR (? AND snapshot.target_type IS NULL AND snapshot.target_id IS NULL AND snapshot.owner_type IS NULL
           AND snapshot.owner_id IS NULL AND project.target_id=?))`);
+  const retainedIssues = store.db.prepare(`SELECT id,owner_type,owner_id,target_type,target_id,json FROM source_records
+    WHERE import_id=? AND product='jira' AND source_instance=? AND kind='issue' AND source_id=?
+      AND CASE WHEN json_valid(json) THEN json_extract(json,'$.packageSha256')=? ELSE 0 END LIMIT 2`);
+  const issueAlias = store.db.prepare(`SELECT target_id FROM source_bindings WHERE product='jira' AND source_instance=?
+    AND kind='issue' AND source_alias=?`);
+  const projectAlias = store.db.prepare(`SELECT target_id FROM source_bindings WHERE product='jira' AND source_instance=?
+    AND kind='project' AND source_alias=? AND target_type='project'`);
+  const originalKeyIssues = store.db.prepare(`SELECT original.id,original.import_id AS importId,binding.target_id AS issueId,original.json
+    FROM source_bindings AS binding JOIN source_records AS original ON original.import_id=binding.import_id
+      AND original.product=binding.product AND original.source_instance=binding.source_instance AND original.kind=binding.kind
+      AND original.source_id=binding.source_alias AND original.owner_type='issue' AND original.owner_id=binding.target_id
+      AND original.target_type='issue' AND original.target_id=binding.target_id
+    WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
+      AND binding.source_alias=? LIMIT 2`);
   const sourceAuthor = store.db.prepare(`SELECT json FROM source_records
     WHERE import_id=? AND product='jira' AND source_instance=? AND kind='identity' AND source_id=?
       AND CASE WHEN json_valid(json) THEN json_extract(json,'$.packageSha256')=? AND json_extract(json,'$.excluded') IS NULL ELSE 0 END
@@ -140,9 +179,76 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
   const sourceReceipt = store.db.prepare('SELECT json FROM source_imports WHERE id=? AND json_valid(json)');
   const receipts = new Map<string, ReceiptContext | null>();
   if (auditedReceipt) receipts.set(auditedReceipt.id, receiptContext(auditedReceipt));
+  const retainedOwners = new Map<string, RetainedOwner | null>();
   const authors = new Map<string, string | null>();
   let history: IssueProjectHistory | undefined;
   const projectHistory = () => history ??= readIssueProjectHistory(store, issueIds);
+
+  function getReceipt(importId: string): ReceiptContext | null {
+    if (!receipts.has(importId)) {
+      const row = sourceReceipt.get(importId) as ArchiveRow | undefined;
+      const receipt = row ? JSON.parse(row.json) as SourceImport | null : null;
+      receipts.set(importId, receipt ? receiptContext(receipt) : null);
+    }
+    return receipts.get(importId) ?? null;
+  }
+
+  function reviewedRecord(archive: SourceRecordArchive, context: ReceiptContext, stagingId: string): boolean {
+    return !archive.excluded && !context.excluded.has(`${stagingId}/${archive.record.id}`);
+  }
+
+  function proveRetainedOwner(archive: SourceRecordArchive, numericId: string): RetainedOwner | null {
+    const { sourceImportId, source, packageSha256 } = archive;
+    const context = getReceipt(sourceImportId);
+    const pkg = context && receiptPackage(archive, context.receipt, true);
+    const projectId = context?.receipt.configuration?.appendTo?.projectId;
+    const timezone = context?.receipt.configuration?.timezone;
+    if (!context || !pkg || !projectId || typeof timezone !== 'string' || !Array.isArray(context.receipt.projectIds) ||
+        !context.receipt.projectIds.includes(projectId) ||
+        issueAlias.get(source.instanceKey, numericId)) return null;
+
+    const rows = retainedIssues.all(sourceImportId, source.instanceKey, numericId, packageSha256);
+    if (rows.length !== 1) return null;
+    const [row] = rows;
+    const snapshot = typeof row.json === 'string' && readArchive(row.json);
+    if (!snapshot || row.owner_type !== null || row.owner_id !== null || row.target_type !== null || row.target_id !== null ||
+        snapshot.id !== row.id || snapshot.sourceImportId !== sourceImportId || snapshot.source.instanceKey !== source.instanceKey ||
+        snapshot.source.format !== source.format || snapshot.packageSha256 !== packageSha256 || snapshot.record.kind !== 'issue' ||
+        snapshot.record.sourceId !== numericId || snapshot.ownerType !== null || snapshot.ownerId !== null ||
+        snapshot.targetType !== null || snapshot.targetId !== null || !reviewedRecord(snapshot, context, pkg.stagingId) ||
+        isRestrictedJiraHistoryOwner(snapshot.record)) return null;
+    const key = snapshot.record.metadata.key;
+    if (!isJiraIssueKey(key) || !snapshot.record.containerId ||
+        projectAlias.get(source.instanceKey, snapshot.record.containerId)?.target_id !== projectId) return null;
+
+    // Tie the durable key to the original key-only issue through its archived source.
+    const originals = originalKeyIssues.all(source.instanceKey, key);
+    if (originals.length !== 1) return null;
+    const [binding] = originals;
+    if (typeof binding.json !== 'string' || typeof binding.importId !== 'string' || typeof binding.issueId !== 'string') return null;
+    const original = readArchive(binding.json);
+    const prior = getReceipt(binding.importId);
+    const priorPkg = original && prior && receiptPackage(original, prior.receipt, true);
+    if (!original || !prior || !priorPkg || original.sourceImportId === sourceImportId || prior.receipt.createdAt > context.receipt.createdAt ||
+        original.id !== binding.id || original.sourceImportId !== binding.importId || original.source.instanceKey !== source.instanceKey ||
+        original.record.kind !== 'issue' || original.record.sourceId !== key || original.record.metadata.key !== key ||
+        original.ownerType !== 'issue' || original.ownerId !== binding.issueId || original.targetType !== 'issue' ||
+        original.targetId !== binding.issueId || original.targetProjectId !== projectId ||
+        !reviewedRecord(original, prior, priorPkg.stagingId) || isRestrictedJiraHistoryOwner(original.record)) return null;
+    return { issueId: binding.issueId, projectId, receipt: context.receipt,
+      proof: { stagingId: pkg.stagingId, timezone, centuryReview: context.centuryReview, excluded: context.excluded } };
+  }
+
+  function retainedOwner(archive: SourceRecordArchive): RetainedOwner | null {
+    const { record, source, sourceImportId, packageSha256 } = archive;
+    const numericId = record.containerId;
+    if (record.kind !== 'history' || source.format !== 'jira-json' || archive.excluded || archive.ownerType !== null || archive.ownerId !== null ||
+        archive.targetType !== null || archive.targetId !== null || typeof numericId !== 'string' || !jiraNumericIssueId.test(numericId)) return null;
+    const key = JSON.stringify([sourceImportId, source.instanceKey, packageSha256, numericId]);
+    if (!retainedOwners.has(key)) retainedOwners.set(key, proveRetainedOwner(archive, numericId));
+    const owner = retainedOwners.get(key);
+    return owner && !owner.proof.excluded.has(`${owner.proof.stagingId}/${record.id}`) ? owner : null;
+  }
 
   function observedInProject(issue: HistoryIssue, projectId: string, receipt: SourceImport): boolean {
     if (!Array.isArray(receipt.projectIds) || !receipt.projectIds.includes(projectId)) return false;
@@ -187,16 +293,15 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
       const fallback = archive.ownerId === null;
       const ownerAliases = jiraStatusHistoryOwnerAliases(record);
       const instanceAliases = aliases.get(source.instanceKey);
-      if (!instanceAliases || !ownerAliases?.every(alias => instanceAliases.has(alias))) return null;
+      if (!instanceAliases || !ownerAliases) return null;
+      if (!ownerAliases.every(alias => instanceAliases.has(alias))) {
+        const retained = fallback && ownerAliases.every(alias => alias === record.containerId || instanceAliases.has(alias)) && retainedOwner(archive);
+        return retained && retained.issueId === issue.id && observedInProject(issue, retained.projectId, retained.receipt) ? retained.proof : null;
+      }
 
       const proofKey = JSON.stringify([sourceImportId, source.instanceKey, source.format, packageSha256, fallback]);
       if (!proven.has(proofKey)) {
-        if (!receipts.has(sourceImportId)) {
-          const row = sourceReceipt.get(sourceImportId) as ArchiveRow | undefined;
-          const receipt = row ? JSON.parse(row.json) as SourceImport | null : null;
-          receipts.set(sourceImportId, receipt ? receiptContext(receipt) : null);
-        }
-        const context = receipts.get(sourceImportId);
+        const context = getReceipt(sourceImportId);
         const timezone = context?.receipt.configuration?.timezone;
         const sourcePackage = context && receiptPackage(archive, context.receipt);
         const appendProject = fallback && context?.receipt.configuration?.appendTo?.projectId;
@@ -226,7 +331,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
     const owner = prepareOwner(issue);
     if (!owner) return;
     const seen = new Set<string>();
-    for (const candidate of candidates.iterate(issue.id, issue.id) as unknown as Iterable<HistoryCandidate>) {
+    for (const candidate of candidates.iterate(issue.id, issue.id, issue.id) as unknown as Iterable<HistoryCandidate>) {
       const archive = readArchive(candidate.json);
       if (!archive || archive.id !== candidate.archiveId || archive.sourceImportId !== candidate.importId ||
           archive.ownerType !== candidate.ownerType || archive.ownerId !== candidate.ownerId ||
@@ -259,7 +364,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?:
     }
   }
 
-  return { project, withAuthor, prepareOwner, lastObservedProject, observedInProject };
+  return { project, withAuthor, prepareOwner, lastObservedProject, observedInProject, retainedOwner };
 }
 
 export function jiraIssueStatusHistory(store: Store, issue: Issue, offset: number, limit: number): JiraIssueStatusHistoryPage {
@@ -292,6 +397,24 @@ function inspectReceiptHistory(store: Store, receipt: SourceImport, visitor: Rec
   const { excluded } = receiptContext(receipt);
   const timeline = visitor.projected || visitor.duplicate || withTrash ? prepareTimeline(store, receipt) : null;
   const archiveOwners = new Map<string, ResolveSourceProof | null>();
+  const liveOwner = store.db.prepare('SELECT id,project_id AS projectId FROM issues WHERE id=?');
+  const trashedOwner = withTrash ? store.db.prepare("SELECT resource_id AS id,project_id AS projectId FROM trash_entries WHERE resource_type='issue' AND resource_id=?") : null;
+  const retainedTargets = new Map<string, Pick<ReceiptHistoryRow, 'boundIssueId' | 'issueId' | 'projectId' | 'trashIssueId' | 'trashProjectId'>>();
+
+  function targetForRetainedOwner(issueId: string) {
+    if (!retainedTargets.has(issueId)) {
+      const live = liveOwner.get(issueId);
+      const trash = !live && trashedOwner?.get(issueId);
+      retainedTargets.set(issueId, {
+        boundIssueId: issueId,
+        issueId: live ? issueId : null,
+        projectId: typeof live?.projectId === 'string' ? live.projectId : null,
+        trashIssueId: trash ? issueId : null,
+        trashProjectId: trash && typeof trash.projectId === 'string' ? trash.projectId : null,
+      });
+    }
+    return retainedTargets.get(issueId)!;
+  }
 
   function missingReason(row: ReceiptHistoryRow, archive: SourceRecordArchive, identityMatches: boolean): FindingReason {
     const projectId = row.ownerType === 'issue' ? archive.targetProjectId : appendProjectId;
@@ -308,16 +431,19 @@ function inspectReceiptHistory(store: Store, receipt: SourceImport, visitor: Rec
     return row.trashIssueId ? 'issue-in-trash' : 'issue-unavailable';
   }
 
-  for (const row of rows.iterate(receipt.id) as unknown as Iterable<ReceiptHistoryRow>) {
-    const archive = readArchive(row.json);
+  for (const stored of rows.iterate(receipt.id) as unknown as Iterable<ReceiptHistoryRow>) {
+    const archive = readArchive(stored.json);
     if (!archive) continue;
     const changeCount = countJiraStatusTransitions(archive.record);
     if (!changeCount) continue;
     const sourcePackage = receiptPackage(archive, receipt);
     const category = archive.excluded || (sourcePackage && excluded.has(`${sourcePackage.stagingId}/${archive.record.id}`))
       ? 'excluded' : isRestrictedJiraStatusHistory(archive.record) ? 'restricted' : 'candidate';
-    const identityMatches = archive.id === row.archiveId && archive.sourceImportId === receipt.id &&
-      archive.record.sourceId === row.sourceId && archive.source.instanceKey === row.sourceInstance;
+    const identityMatches = archive.id === stored.archiveId && archive.sourceImportId === receipt.id &&
+      archive.record.sourceId === stored.sourceId && archive.source.instanceKey === stored.sourceInstance;
+    const retained = !stored.boundIssueId && stored.ownerType === null && stored.ownerId === null &&
+      category === 'candidate' && identityMatches ? timeline?.retainedOwner(archive) : null;
+    const row = retained ? { ...stored, ...targetForRetainedOwner(retained.issueId) } : stored;
     visitor.archive({ sourceRecordId: row.archiveId, sourceId: row.sourceId, sourceInstance: row.sourceInstance,
       sourceIssueId: identityMatches ? originalText(archive.record.containerId, 500) : null,
       changeCount, reason: withTrash && category === 'candidate' ? missingReason(row, archive, identityMatches) : null }, category);

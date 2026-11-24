@@ -1190,6 +1190,8 @@ Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML�
 
 Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서 확인한 상태 변경 수 `sourceChanges`를 반환한다. 이 값은 활성 티켓에 표시되는 `projected.count`, 다른 원본 기록과 겹치는 `duplicate`, 명시적 제외 `excluded`, 접근 제한 `restricted`, 현재 업무 연결을 확인할 수 없는 `unavailable`의 합이다. `unresolvedTime`과 `unresolvedAuthor`는 표시된 항목에서 시각과 작성자를 확정하지 못한 건수다. `projected.sha256`으로 티켓 연결 및 표시 내용의 복원 전후 일치를 대조한다. Confluence만 있는 영수증에서는 `jiraStatusHistory`가 `null`이다. 집계 범위는 이관 영수증에 저장된 원본이다.
 
+원래 Jira 키만 이관한 업무는 이후 REST JSON 추가 이관에 보관된 숫자 ID의 상태 변경도 표시할 수 있다. 숫자 ID의 별도 연결이 없고 추가 이관 영수증의 같은 패키지에 해당 업무 원본이 하나 있을 때, 그 원본의 Jira 프로젝트와 키를 앞선 키 전용 이관의 연결 기록과 대조한다. 티켓 이력과 이관 검증은 조회할 때 같은 근거와 제외·접근 제한 조건을 적용한다.
+
 브라우저의 `GET /api/source-imports/:id/reconciliation/jira-status-findings`에는 `expectedVersion`과 `finding`을 지정한다. 선택값은 `unavailable`, `restricted`, `excluded`, `unresolved-time`, `unresolved-author`다. `offset`은 0~1,000,000이며 기본값은 0이다. `limit`은 1~100이며 기본값은 30이다. `total`은 원본 변경 그룹 수, `totalChanges`는 해당 조건에 맞는 개별 변경 수다. 각 행의 `sourceRecordId`로 같은 영수증에서 원문을 열 수 있다. `sourceInstance`, `sourceId`, `sourceIssueId`는 원본 인스턴스와 보관된 변경 그룹·업무 식별자다. `changeCount`는 그 행의 조건 일치 건수다. `unavailable` 행은 휴지통, 저장된 연결 대상 없음, 현재 업무 연결 근거 부족을 `reason`으로 구분한다.
 
 다음 페이지에서 첫 요청의 `fingerprint`를 `expectedFingerprint`로 보내면 같은 조건과 목록을 대조한다. 영수증 버전이나 목록이 달라지면 `409`를 반환한다. 상태·작성자·시각의 상세는 개별 원본 기록으로 확인한다.

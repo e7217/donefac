@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import fileSystem from 'node:fs/promises';
@@ -109,6 +110,115 @@ function restPackage(afterMove = false) {
   ] } }, { ...added, fields: { ...added.fields, attachment: [{ id: attachmentId, filename: 'evidence.bin', size: bytes.length, created }] } }] }));
   return zip([{ path: 'issues.json', bytes: entities }, { path: `attachments/${attachmentId}`, bytes }]);
 }
+
+test('Jira status history verifies a REST owner after an initial key-only CSV import', async t => {
+  const f = await fixture(t);
+  const original = await f.options('jira-key-only.csv', Buffer.from([
+    'Issue key,Project key,Summary,Description,Created,Updated,Status,Issue Type',
+    `JIRA-1,JIRA,${historicalTitle},원본 설명,${created},${created},Open,Task`,
+    `JIRA-2,JIRA,다른 기존 업무,원본 설명,${created},${created},Open,Task`,
+  ].join('\r\n')));
+  const [projectId] = (await f.apply({ ...original.defaultConfiguration, datePolicy: 'import-time' })).projectIds;
+  const workspace = await f.call<WorkspaceSnapshot>('/workspace');
+  const issue = workspace.issues.find(row => row.projectId === projectId && row.title === historicalTitle);
+  const other = workspace.issues.find(row => row.projectId === projectId && row.title === '다른 기존 업무');
+  assert.ok(issue && other);
+  const otherId = other.id;
+
+  const changedAt = '2025-01-05T09:00:00.000Z';
+  const later = await f.options('jira-numeric-follow-up.json', Buffer.from(JSON.stringify({
+    id: '4401', key: 'JIRA-1', self: 'https://jira.synthetic.test/rest/api/2/issue/4401', fields: {
+      project, summary: historicalTitle, created, updated: changedAt,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      comment: { total: 1, comments: [{ id: '8001', author: actor, created: changedAt, body: '후속 원본 댓글' }] },
+      worklog: { total: 1, worklogs: [{ id: '8002', author: actor, created: changedAt, started: changedAt,
+        timeSpentSeconds: 91, comment: '후속 원본 작업 시간' }] },
+    }, changelog: { total: 2, histories: [
+      { id: '8003', author: actor, created: changedAt, items: [restStatus('2', '진행 중', '1', '열림')] },
+      { id: '8004', author: actor, created: changedAt, visibility: { type: 'role', value: 'Private' },
+        items: [restStatus('1', '제한된 원본', '2', '숨김')] },
+    ] },
+  })));
+  const destination = later.appendTarget;
+  assert.equal(destination?.projectId, projectId);
+  assert.ok(destination);
+  const receipt = await f.apply({ ...later.defaultConfiguration, datePolicy: 'import-time', timezone: 'Asia/Seoul',
+    excludedRecords: [`${later.pkg.id}/history:8004`],
+    users: Object.fromEntries(later.identities.map(identity => [identity.id, 'user-seo'])),
+    appendTo: { projectId, refreshHistory: true,
+      statuses: Object.fromEntries(later.statuses.map(value => [value.id, destination.statuses.find(status => status.label === value.label)!.id])),
+      issueTypes: Object.fromEntries(later.issueTypes.map(value => [value.id, destination.issueTypes.find(type => type.name === value.label)!.id])),
+      fields: {},
+    },
+  });
+  assert.equal(receipt.counts.newJiraComments, 1);
+  assert.equal(receipt.counts.newJiraWorklogs, 1);
+  assert.equal(receipt.counts.issues, 0);
+  const page = (id = issue.id) => f.call<JiraIssueStatusHistoryPage>(`/issues/${id}/jira-status-history`);
+  const audit = (source = receipt) => f.call<SourceReconciliationAudit>(`/source-imports/${source.id}/reconciliation/audit?expectedVersion=${source.version}`);
+  const findings = (source = receipt) => f.call<SourceReconciliationJiraStatusFindingsPage>(
+    `/source-imports/${source.id}/reconciliation/jira-status-findings?expectedVersion=${source.version}&finding=unavailable`);
+  const before = await page();
+  assert.equal(before.total, 1, 'the REST status uses the exact retained row’s package-local numeric ID');
+  const [entry] = before.entries;
+  assert.equal(entry.sourceImportId, receipt.id);
+  assert.equal(entry.changedAt, changedAt);
+  assert.equal(entry.originalAuthorName, actor.displayName);
+  assert.deepEqual(entry.to, { id: '1', label: '열림' });
+  assert.equal((await page(otherId)).total, 0);
+  const preserved = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${entry.sourceRecordId}`);
+  assert.equal(preserved.record.sourceId, '8003');
+  assert.equal(preserved.ownerId, null);
+  const originalAudit = (await audit()).jiraStatusHistory;
+  assert.ok(originalAudit);
+  assert.deepEqual(originalAudit, {
+    sourceChanges: 2, duplicate: 0, excluded: 1, restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0,
+    projected: { count: 1, sha256: originalAudit.projected.sha256 },
+  });
+  assert.equal((await findings()).totalChanges, 0);
+
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    const aliased = db.prepare(`SELECT source_alias FROM source_bindings WHERE product='jira' AND source_instance=? AND kind='issue'
+      ORDER BY source_alias`).all(sourceInstance).map(row => row.source_alias);
+    assert.deepEqual(aliased, ['JIRA-1', 'JIRA-2'], 'projection results do not acquire new global aliases');
+    const retained = db.prepare(`SELECT id,json FROM source_records WHERE import_id=? AND kind='issue' AND source_id='4401'`).get(receipt.id);
+    assert.ok(typeof retained?.id === 'string' && typeof retained.json === 'string');
+    async function assertUnverified() {
+      assert.equal((await page()).total, 0);
+      assert.equal((await page(otherId)).total, 0);
+      assert.equal((await audit()).jiraStatusHistory?.unavailable, 1);
+      assert.deepEqual((await findings()).rows.map(row => [row.sourceId, row.reason]), [['8003', 'ownership-unverified']]);
+    }
+    const replace = db.prepare('UPDATE source_records SET json=? WHERE id=?');
+    const unsafe = JSON.parse(retained.json) as SourceRecordArchive;
+    unsafe.record.metadata.fields = { security: { id: 'private' } };
+    replace.run(JSON.stringify(unsafe), retained.id);
+    await assertUnverified();
+    replace.run(retained.json, retained.id);
+
+    const duplicate = randomUUID();
+    db.prepare(`INSERT INTO source_records(id,import_id,kind,source_instance,product,source_id,json)
+      SELECT ?,import_id,kind,source_instance,product,source_id,json_set(json,'$.id',?) FROM source_records WHERE id=?`)
+      .run(duplicate, duplicate, retained.id);
+    await assertUnverified();
+    db.prepare('DELETE FROM source_records WHERE id=?').run(duplicate);
+
+    db.prepare(`INSERT INTO source_bindings(product,source_instance,kind,source_alias,target_type,target_id,import_id)
+      SELECT product,source_instance,kind,'4401',target_type,target_id,import_id FROM source_bindings
+      WHERE product='jira' AND source_instance=? AND kind='issue' AND source_alias='JIRA-2'`).run(sourceInstance);
+    await assertUnverified();
+    db.prepare(`DELETE FROM source_bindings WHERE product='jira' AND source_instance=? AND kind='issue' AND source_alias='4401'`).run(sourceInstance);
+  } finally { db.close(); }
+
+  const backup = await f.call('/export');
+  await f.call('/import', 'POST', { data: backup });
+  const restored = (await f.call<SourceImport[]>('/source-imports')).find(value => value.id === receipt.id);
+  assert.ok(restored);
+  assert.deepEqual(await page(), before);
+  assert.deepEqual((await audit(restored)).jiraStatusHistory, originalAudit);
+  assert.equal((await findings(restored)).totalChanges, 0);
+});
 
 test('Jira status history reads preserved source transitions across initial migration and retained appends', async t => {
   const f = await fixture(t);
