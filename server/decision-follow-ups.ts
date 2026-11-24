@@ -17,7 +17,7 @@ const MAX_OFFSET = 1_000_000;
 const invalidControl = /[\u0000-\u001f\u007f]/u;
 export const DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['status', 'assigneeId', 'q', 'unscheduledOnly', 'offset'] as const;
 export const TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS = ['projectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS] as const;
-const draftFields = ['requestId', 'title', 'revision', 'destinationProjectId', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS];
+const draftFields = ['requestId', 'title', 'revision', 'destinationProjectId', 'linkIds', ...DECISION_FOLLOW_UP_QUERY_PARAMETERS];
 
 export class DecisionFollowUpError extends Error {
   constructor(readonly status: number, message: string, readonly details?: { reason: 'stale_report' | 'destination_unavailable' }) { super(message); }
@@ -79,6 +79,15 @@ function identifier(value: unknown, label: string): string {
     throw new DecisionFollowUpError(400, label);
   }
   return value;
+}
+
+function draftLinkIds(value: unknown): string[] | undefined {
+  if (value === undefined) return;
+  const message = `회의 초안에 담을 결정 근거를 1~${PAGE_SIZE}개 선택해 주세요.`;
+  if (!Array.isArray(value) || !value.length || value.length > PAGE_SIZE) throw new DecisionFollowUpError(400, message);
+  const ids = value.map(id => identifier(id, message));
+  if (new Set(ids).size !== ids.length) throw new DecisionFollowUpError(400, message);
+  return ids;
 }
 
 function searchable(value: string) {
@@ -281,7 +290,7 @@ function draftInput(request: Request, teamReport: boolean) {
       Object.keys(body).some(key => !draftFields.includes(key) && !(teamReport && key === 'projectId'))) {
     throw new DecisionFollowUpError(400, '결정 후속 업무 회의 초안의 입력을 확인해 주세요.');
   }
-  const { title: inputTitle, requestId, revision, destinationProjectId, projectId, status, assigneeId, q, unscheduledOnly, offset } = body as Record<string, unknown>;
+  const { title: inputTitle, requestId, revision, destinationProjectId, projectId, status, assigneeId, q, unscheduledOnly, offset, linkIds } = body as Record<string, unknown>;
   const title = typeof inputTitle === 'string' ? inputTitle.trim() : '';
   if (!title || title.length > 200 || !title.isWellFormed() || invalidControl.test(title)) {
     throw new DecisionFollowUpError(400, '회의 초안 제목을 1~200자로 입력해 주세요.');
@@ -298,6 +307,7 @@ function draftInput(request: Request, teamReport: boolean) {
   return { title, requestId, revision, destination: destinationProjectId === null ? null : projectIdentifier(destinationProjectId),
     reportProject: teamReport ? (projectId === undefined ? null : projectIdentifier(projectId)) : projectIdentifier(request.params.id),
     filters: parseQuery({ status, assigneeId, q, offset: String(offset ?? 0), ...(unscheduledOnly ? { unscheduledOnly: '1' } : {}) }),
+    linkIds: draftLinkIds(linkIds),
   };
 }
 
@@ -316,20 +326,26 @@ function reportHref(routeProject: string, reportProject: string | null, filters:
 }
 
 function createDraft(request: Request, dependencies: Dependencies, teamReport: boolean): DecisionFollowUpDraftResult {
-  const { title, requestId, revision, destination, reportProject, filters } = draftInput(request, teamReport);
+  const { title, requestId, revision, destination, reportProject, filters, linkIds } = draftInput(request, teamReport);
   const { store } = dependencies;
   const scope = dependencies.projectScope(request);
   const actorId = dependencies.actor(request);
-  return dependencies.documentCreation.create(actorId, { requestId, title, revision, projectId: destination, teamReport, reportProject, filters }, () => {
+  const input = { requestId, title, revision, projectId: destination, teamReport, reportProject, filters,
+    ...(linkIds ? { linkIds: linkIds.toSorted() } : {}),
+  };
+  return dependencies.documentCreation.create(actorId, input, () => {
     const { page, projectNames, assigneeNames } = listDecisions(dependencies, reportProject, scope, filters, teamReport);
     if (destination !== null) requireProject(store, destination, scope, 'destination');
     if (page.revision !== revision) {
       throw new DecisionFollowUpError(409, '조회 이후 결정 후속 업무 내용이 바뀌었습니다. 같은 조건으로 다시 조회해 주세요.', { reason: 'stale_report' });
     }
-    if (!page.items.length) throw new DecisionFollowUpError(422, '회의 초안에 담을 결정 후속 업무가 없습니다.');
+    const selected = linkIds ? new Set(linkIds) : undefined;
+    const items = selected ? page.items.filter(item => selected.has(item.linkId)) : page.items;
+    if (selected && items.length !== selected.size) throw new DecisionFollowUpError(422, '현재 보고서 페이지에서 결정 근거를 다시 선택해 주세요.');
+    if (!items.length) throw new DecisionFollowUpError(422, '회의 초안에 담을 결정 후속 업무가 없습니다.');
     const excerpts = new Map<string, string>();
     const revisions = new Map<string, DocRevision | null>();
-    for (const item of page.items) {
+    for (const item of items) {
       try {
         excerpts.set(item.linkId, readDecisionSource(dependencies, request, item.issue.projectId, item.linkId, scope, revisions).source.text);
       } catch (error) {
@@ -337,7 +353,7 @@ function createDraft(request: Request, dependencies: Dependencies, teamReport: b
       }
     }
     const routeProject = reportProject ?? destination ?? page.items[0].issue.projectId;
-    const { content, issueIds } = buildDecisionFollowUpDraftContent({ page, filters, projectNames, assigneeNames, excerpts,
+    const { content, issueIds } = buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, excerpts,
       href: reportHref(routeProject, reportProject, filters, teamReport),
     });
     return dependencies.createDocument(request, { documentId: randomUUID(), projectId: destination, title, actorId, createdAt: page.generatedAt }, content, issueIds);

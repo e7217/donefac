@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Response } from '@playwright/test';
 import { documentNodes } from '../../shared/document-references';
-import type { DecisionFollowUpPage, DocPage, DocumentIssueLinkResult, Issue, RichContent, WorkspaceSnapshot } from '../../shared/types';
-
-type DraftInput = { requestId: string; revision: string; title: string; destinationProjectId: string | null;
-  projectId?: string; status?: string; assigneeId?: string; q?: string; offset?: number };
-type DraftResult = { document: DocPage; duplicate: boolean };
+import type {
+  DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpPage, DocPage, DocumentIssueLinkResult,
+  Issue, RichContent, WorkspaceSnapshot,
+} from '../../shared/types';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -23,7 +22,7 @@ async function removeFixture(request: APIRequestContext, resource: 'issues' | 'd
   }
 }
 
-test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한 번 저장하고 같은 조건으로 돌아온다', async ({ page, request }) => {
+test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한 번 저장하고 같은 조건으로 돌아온다', async ({ page, request }) => {
   test.setTimeout(100_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const { projects: [destination, reportProject], users: [assignee] } = await workspace(request);
@@ -34,11 +33,12 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
   const secondText = `추가 회의에서 확정한 담당 범위 ${token}`;
   const amendedText = `원본 문서의 현재 문장 ${token}`;
   const oldPageText = `초안에 넣지 않을 이전 페이지 근거 ${token}`;
+  const excludedText = `선택에서 제외한 결정 근거 ${token}`;
   const resultPath = '/api/decision-follow-ups';
   const draftPath = `${resultPath}/meeting-draft`;
   const issued: Issue[] = [];
   const sourceDocuments: DocPage[] = [];
-  const attempts: DraftInput[] = [];
+  const attempts: DecisionFollowUpDraftRequest[] = [];
   let committed: DocPage | undefined;
 
   async function createIssue(name: string, dueDate: string) {
@@ -73,16 +73,19 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
   const meetingDocuments = async () => (await workspace(request)).documents.filter(document => document.title === title);
 
   try {
-    const [priorSource, firstSource, secondSource] = await Promise.all([
+    const [priorSource, firstSource, secondSource, excludedSource] = await Promise.all([
       createSource('이전 페이지 문서', oldPageText, reportProject.id),
       createSource('최초 결정 저장본', firstText, destination.id),
       createSource('팀 공통 결정 원본', secondText, null),
+      createSource('별도 안건 저장본', excludedText, reportProject.id),
     ]);
     for (let index = 0; index < 20; index += 1) {
       await cite(await createIssue(`이전 페이지 ${index + 1}`, '2030-03-01'), priorSource, oldPageText);
     }
     const issue = await createIssue('현재 페이지 결정 업무', '2030-03-10');
     const sources = await Promise.all([cite(issue, firstSource, firstText), cite(issue, secondSource, secondText)]);
+    const excluded = await createIssue('이번 회의에서 제외할 업무', '2030-03-20');
+    const excludedLink = await cite(excluded, excludedSource, excludedText);
     await json<DocPage>(await request.patch(`/api/documents/${firstSource.id}`, { data: {
       expectedVersion: firstSource.version, title: `${query} 편집된 파일`, content: paragraph(amendedText),
     } }));
@@ -90,13 +93,15 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     const filters = { status: 'all', assigneeId: assignee.id, q: query, scope: 'team', decisionProject: reportProject.id };
     const firstPage = waitForReport(0);
     await page.goto(`/#/${destination.id}/reports/decision-follow-ups?${new URLSearchParams(filters)}`, { waitUntil: 'domcontentloaded' });
-    expect((await json<DecisionFollowUpPage>(await firstPage)).total).toBe(22);
+    expect((await json<DecisionFollowUpPage>(await firstPage)).total).toBe(23);
     const report = page.getByRole('tabpanel', { name: '결정 후속 업무', exact: true });
     const nextPage = waitForReport(20);
     await report.getByRole('button', { name: '다음 페이지', exact: true }).click();
     const initial = await json<DecisionFollowUpPage>(await nextPage);
     expect(initial.offset).toBe(20);
-    expect(new Set(initial.items.map(item => item.linkId))).toEqual(new Set(sources.map(link => link.id)));
+    expect(new Set(initial.items.map(item => item.linkId))).toEqual(new Set([...sources, excludedLink].map(link => link.id)));
+    const selectedRows = (value: DecisionFollowUpPage) => value.items.filter(item => item.issue.id === issue.id);
+    const selectedLinkIds = (value: DecisionFollowUpPage) => selectedRows(value).map(item => item.linkId);
 
     const pageTwoHash = new URL(page.url()).hash;
     const liveSource = report.getByRole('link', { name: `현재 문서 열기 ${secondSource.title}`, exact: true });
@@ -116,20 +121,40 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     const titleInput = dialog.getByRole('textbox', { name: '회의 초안 제목', exact: true });
     const location = dialog.getByRole('combobox', { name: '저장 위치', exact: true });
     const submit = dialog.getByRole('button', { name: '회의 초안 저장', exact: true });
+    const selection = dialog.getByRole('group', { name: '회의에 담을 결정 근거', exact: true });
+    const checkboxes = selection.getByRole('checkbox');
+    const chooseIssue = ({ key, title }: Issue) => selection.getByRole('checkbox', { name: `${key} · ${title}`, exact: true });
     await expect(location).toHaveValue(reportProject.id);
     await location.selectOption(destination.id);
     await titleInput.fill(title);
     const bounds = await dialog.boundingBox();
     expect(bounds?.x).toBeGreaterThanOrEqual(0);
     expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(360);
+    await expect(checkboxes).toHaveCount(3);
+    await expect(selection.getByText('3건 선택', { exact: true })).toBeVisible();
+    await selection.getByRole('button', { name: '선택 모두 해제', exact: true }).click();
+    await expect(selection.getByText('0건 선택', { exact: true })).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await selection.getByRole('button', { name: '전체 선택', exact: true }).click();
+    await expect(submit).toBeEnabled();
+    await chooseIssue(excluded).uncheck();
+    await expect(selection.getByText('2건 선택', { exact: true })).toBeVisible();
+    const chosen = chooseIssue(issue);
+    await expect(chosen).toHaveCount(2);
+    for (const [index, { source, document }] of selectedRows(initial).entries()) {
+      const checkbox = chosen.nth(index);
+      await expect(checkbox).toBeChecked();
+      const space = document.projectId === null ? '팀 공통 문서' : destination.name;
+      await expect(checkbox).toHaveAccessibleDescription(`${source.title} · ${space} · 저장본 v${source.version}`);
+    }
 
     const changed = await json<Issue>(await request.patch(`/api/issues/${issue.id}`, { data: {
       expectedVersion: issue.version, dueDate: '2030-03-15', title: `${query} 다시 확인한 업무`,
     } }));
     await page.route(`**${draftPath}`, async route => {
-      attempts.push(route.request().postDataJSON() as DraftInput);
+      attempts.push(route.request().postDataJSON() as DecisionFollowUpDraftRequest);
       if (attempts.length !== 2) return route.continue();
-      committed = (await json<DraftResult>(await route.fetch(), 201)).document;
+      committed = (await json<DecisionFollowUpDraftResult>(await route.fetch(), 201)).document;
       await route.abort('failed');
     });
 
@@ -141,13 +166,23 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     await expect(titleInput).toHaveValue(title);
     await expect(location).toHaveValue(destination.id);
     expect(await meetingDocuments()).toEqual([]);
+    const newlyVisible = await createIssue('새로 불러온 뒤 표시되는 업무', '2030-03-18');
+    const newLink = await cite(newlyVisible, excludedSource, excludedText);
     const revisedPage = waitForReport(20);
     await reload.click();
     const reviewed = await json<DecisionFollowUpPage>(await revisedPage);
     expect(reviewed.revision).not.toBe(initial.revision);
-    expect(reviewed.items.every(item => item.issue.title === changed.title)).toBe(true);
+    expect(selectedRows(reviewed).map(item => item.issue.title)).toEqual([changed.title, changed.title]);
+    expect(reviewed.items.map(item => item.linkId)).toContain(newLink.id);
     await expect(titleInput).toHaveValue(title);
     await expect(location).toHaveValue(destination.id);
+    await expect(checkboxes).toHaveCount(4);
+    await expect(selection.getByText('2건 선택', { exact: true })).toBeVisible();
+    const reviewedChosen = chooseIssue(changed);
+    await expect(reviewedChosen).toHaveCount(2);
+    for (const checkbox of await reviewedChosen.all()) await expect(checkbox).toBeChecked();
+    await expect(chooseIssue(excluded)).not.toBeChecked();
+    await expect(chooseIssue(newlyVisible)).not.toBeChecked();
 
     await submit.click();
     const retry = dialog.getByRole('button', { name: '초안 저장 결과 다시 확인', exact: true });
@@ -155,20 +190,23 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     expect(await meetingDocuments()).toEqual([committed]);
     const response = waitForDraft();
     await retry.click();
-    const { document, duplicate } = await json<DraftResult>(await response);
+    const { document, duplicate } = await json<DecisionFollowUpDraftResult>(await response);
     expect(document).toEqual(committed);
     expect(duplicate).toBe(true);
     expect(attempts).toHaveLength(3);
     const expected = { projectId: reportProject.id, status: 'all', assigneeId: assignee.id, q: query,
       offset: 20, title, destinationProjectId: destination.id };
-    expect(attempts[0]).toMatchObject({ ...expected, revision: initial.revision });
-    expect(attempts[1]).toMatchObject({ ...expected, revision: reviewed.revision });
+    expect(attempts[0]).toMatchObject({ ...expected, revision: initial.revision, linkIds: selectedLinkIds(initial) });
+    expect(attempts[1]).toMatchObject({ ...expected, revision: reviewed.revision, linkIds: selectedLinkIds(reviewed) });
     expect(attempts[1].requestId).not.toBe(attempts[0].requestId);
     expect(attempts[2]).toEqual(attempts[1]);
     expect(document).toMatchObject({ projectId: destination.id, title, status: 'draft' });
     expect(document.plainText).toContain('2030-03-15');
     expect(document.plainText).not.toContain(amendedText);
     expect(document.plainText).not.toContain(oldPageText);
+    expect(document.plainText).not.toContain(excludedText);
+    expect(document.plainText).not.toContain(excluded.title);
+    expect(document.plainText).not.toContain(newlyVisible.title);
     const nodes = [...documentNodes(document.content)];
     expect(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId)).toEqual([issue.id]);
     expect(new Set(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId)))
@@ -183,6 +221,7 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     await expect(body.locator('blockquote')).toHaveCount(2);
     await expect(body.locator('blockquote', { hasText: firstText })).toBeVisible();
     await expect(body.locator('blockquote', { hasText: secondText })).toBeVisible();
+    await expect(body.getByText(excludedText, { exact: true })).toHaveCount(0);
     await body.getByRole('button', { name: new RegExp(`참조 업무 열기 ${issue.key}`) }).click();
     const detail = page.getByRole('dialog', { name: changed.title, exact: true });
     await expect(detail.getByRole('region', { name: '연결된 문서', exact: true }).getByRole('button', { name: title, exact: true })).toBeVisible();
@@ -198,11 +237,31 @@ test('360px 팀 결정 후속 업무의 검토한 페이지를 새 위치에 한
     const returned = waitForReport(20);
     await backlink.click();
     const live = await json<DecisionFollowUpPage>(await returned);
-    expect(live.total).toBe(22);
-    expect(live.items.every(item => item.issue.title === latest.title)).toBe(true);
+    expect(live.total).toBe(24);
+    expect(selectedRows(live).map(item => item.issue.title)).toEqual([latest.title, latest.title]);
+    expect(new Set(live.items.map(item => item.linkId))).toEqual(new Set([...sources, excludedLink, newLink].map(link => link.id)));
+    await expect(page).toHaveURL(url => url.hash === href);
     await expect(report.getByRole('article', { name: `${issue.key} 결정 후속 업무`, exact: true })).toHaveCount(2);
     await expect(report.getByRole('article').first()).toContainText(latest.title);
     expect(await meetingDocuments()).toEqual([document]);
+
+    await report.getByRole('button', { name: '회의 초안 만들기', exact: true }).click();
+    await selection.getByRole('button', { name: '선택 모두 해제', exact: true }).click();
+    await chooseIssue(newlyVisible).check();
+    await json<Issue>(await request.patch(`/api/issues/${newlyVisible.id}`, { data: {
+      expectedVersion: newlyVisible.version, dueDate: '2030-02-01',
+    } }));
+    const movedOffPage = waitForDraft();
+    await submit.click();
+    expect((await movedOffPage).status()).toBe(409);
+    const refreshedPage = waitForReport(20);
+    await reload.click();
+    const currentPage = await json<DecisionFollowUpPage>(await refreshedPage);
+    expect(currentPage.items.some(item => item.linkId === newLink.id)).toBe(false);
+    await expect(selection.getByText('0건 선택', { exact: true })).toBeVisible();
+    await expect(dialog.getByText('선택한 근거 중 1건이 현재 페이지에서 빠졌습니다.', { exact: false })).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await expect(selection.getByRole('button', { name: '전체 선택', exact: true })).toBeFocused();
   } finally {
     for (const document of await meetingDocuments()) await removeFixture(request, 'documents', document.id);
     for (const source of sourceDocuments) await removeFixture(request, 'documents', source.id);

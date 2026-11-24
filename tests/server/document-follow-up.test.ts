@@ -9,11 +9,12 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes.js';
+import { documentNodes } from '../../shared/document-references.js';
 import { documentChecklistItemSelection } from '../../shared/document-selection.js';
 import { createEditorSchema } from '../../shared/editor-schema.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Comment, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision, DocumentChecklistWork,
+import type { ApiKeyCreated, Comment, DecisionFollowUpDraftResult, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision, DocumentChecklistWork,
   DocumentCommentReplyResult, DocumentSelectionCommentResult, DocumentSourceSelection, Issue, Project, ResourceLink, RichContent,
   WorkspaceSnapshot } from '../../shared/types.js';
 
@@ -103,6 +104,70 @@ async function sentenceComment(call: Awaited<ReturnType<typeof fixture>>['call']
   assert.ok(comment.documentSource);
   return { comment, source: comment.documentSource };
 }
+
+test('meeting draft selection contains only approved decisions from the exact report page', async t => {
+  const { call } = await fixture(t);
+  const query = '선택할 회의 안건';
+  async function item(index: number) {
+    const excerpt = `회의에서 검토할 결정 ${index}`;
+    const source = await call<DocPage>('/documents', 'POST', { projectId, title: `회의 근거 문서 ${index}`, content: {
+      type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: excerpt }] }],
+    } }, 201);
+    const issue = await call<Issue>('/issues', 'POST', { projectId, title: `${query} ${index}`, dueDate: `2030-11-0${index}` }, 201);
+    const { link } = await call<Created>(decisionPathFor(source.id), 'POST', decisionLink(source, issue), 201);
+    return { issue, source, link, excerpt };
+  }
+  const offPage = await item(1), first = await item(2), excluded = await item(3), last = await item(4);
+  const path = `/projects/${projectId}/decision-follow-ups`;
+  const draftPath = `${path}/meeting-draft`;
+  const filters = { q: query, offset: 1 };
+  const read = () => call<DecisionFollowUpPage>(`${path}?${new URLSearchParams({ q: query, offset: '1' })}`);
+  const draftTitle = '고른 안건만 포함하는 회의록';
+  const requestId = randomUUID();
+  const original = await read();
+  assert.equal(original.total, 4);
+  assert.deepEqual(original.items.map(row => row.linkId), [first.link.id, excluded.link.id, last.link.id]);
+  const body = { ...filters, requestId, revision: original.revision, title: draftTitle, destinationProjectId: projectId };
+  for (const linkIds of [[], [null], [first.link.id, first.link.id], '/bad', ['/bad'], Array.from({ length: 21 }, () => randomUUID())]) {
+    await call(draftPath, 'POST', { ...body, linkIds }, 400);
+  }
+  const unavailable = await call<{ error: string }>(draftPath, 'POST', { ...body, linkIds: [offPage.link.id] }, 422);
+  assert.deepEqual(await call(draftPath, 'POST', { ...body, linkIds: [randomUUID()] }, 422), unavailable);
+
+  const changed = await call<Issue>(`/issues/${first.issue.id}`, 'PATCH', { expectedVersion: first.issue.version, title: `${first.issue.title} 최신` });
+  const stale = await call<{ details?: { reason?: string } }>(draftPath, 'POST', { ...body, linkIds: [offPage.link.id] }, 409);
+  assert.equal(stale.details?.reason, 'stale_report');
+  assert.ok(!(await call<WorkspaceSnapshot>('/workspace')).documents.some(document => document.title === draftTitle));
+
+  const reviewed = await read();
+  assert.notEqual(reviewed.revision, original.revision);
+  const input = { ...body, revision: reviewed.revision, linkIds: [last.link.id, first.link.id] };
+  const created = await call<DecisionFollowUpDraftResult>(draftPath, 'POST', input, 201);
+  const { document } = created;
+  const nodes = [...documentNodes(document.content)];
+  assert.deepEqual(nodes.filter(node => node.type === 'blockquote').map(node => node.content?.[0]?.content?.[0]?.text), [first.excerpt, last.excerpt]);
+  assert.deepEqual(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId), [first.source.id, last.source.id]);
+  assert.deepEqual(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), [first.issue.id, last.issue.id]);
+  assert.ok(document.plainText.includes(changed.title));
+  for (const omitted of [offPage, excluded]) {
+    assert.ok(!document.plainText.includes(omitted.excerpt));
+    assert.ok(!document.plainText.includes(omitted.issue.title));
+    assert.ok(!document.plainText.includes(omitted.source.title));
+  }
+  assert.match(document.plainText, /결정 근거 4건 중 현재 보고서 페이지에서 선택한 2건/u);
+  const reportLink = nodes.flatMap(node => node.marks ?? []).find(mark => mark.type === 'link')?.attrs?.href;
+  assert.equal(reportLink, `#/${projectId}/reports/decision-follow-ups?${new URLSearchParams({ q: query, offset: '1' })}`);
+  const after = await call<WorkspaceSnapshot>('/workspace');
+  const resultLinks = after.resourceLinks.filter(link => link.documentId === document.id);
+  assert.deepEqual(new Set(resultLinks.map(link => link.issueId)), new Set([first.issue.id, last.issue.id]));
+  assert.equal(resultLinks.length, 2);
+
+  assert.deepEqual(await call<DecisionFollowUpDraftResult>(draftPath, 'POST', { ...input, linkIds: [first.link.id, last.link.id] }),
+    { ...created, duplicate: true });
+  const conflict = await call<{ details?: { reason?: string } }>(draftPath, 'POST', { ...input, linkIds: [first.link.id] }, 409);
+  assert.equal(conflict.details?.reason, 'request_conflict');
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), after);
+});
 
 test('checklist work reads exact item evidence across metadata revisions and skips partial and archived links', async t => {
   const { call, directory, key, base } = await fixture(t);

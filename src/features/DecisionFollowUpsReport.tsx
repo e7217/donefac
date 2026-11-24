@@ -223,7 +223,7 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
   return <ReportMeetingDraftDialog {...actions} report={page} reloadReport={reloadReport} destinations={destinations}
     initialTitle={`결정 후속 업무 회의 · ${page.generatedAt.slice(0, 10)}`} initialDestinationId={page.projectId}
     savePath={`${reportPath}/meeting-draft`}
-    requestFields={(review, destinationProjectId): Omit<DecisionFollowUpDraftRequest, 'requestId' | 'title' | 'revision'> => ({
+    requestFields={(review, destinationProjectId, linkIds): Omit<DecisionFollowUpDraftRequest, 'requestId' | 'title' | 'revision'> => ({
       destinationProjectId,
       ...(typeof scope.projectId === 'string' ? { projectId: scope.projectId } : {}),
       ...(scope.status !== 'open' ? { status: scope.status } : {}),
@@ -231,8 +231,15 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
       ...(scope.unscheduledOnly ? { unscheduledOnly: true } : {}),
       ...(scope.q ? { q: scope.q } : {}),
       ...(review.offset ? { offset: review.offset } : {}),
+      ...(linkIds ? { linkIds } : {}),
     })}
     emptyNotice={() => '이 페이지에 표시할 결정 근거가 없습니다.'}
+    selectItems={{
+      legend: '회의에 담을 결정 근거',
+      id: item => item.linkId,
+      label: item => `${item.issue.key} · ${item.issue.title}`,
+      description: ({ source, document }) => `${source.title || document.title || '제목 없는 문서'} · ${document.projectId === null ? '팀 공통 문서' : projectName(document.projectId)} · 저장본 v${source.version}`,
+    }}
     renderReport={review => <>
       <dl aria-label="회의 초안 조건">
         <div><dt>보고서 범위</dt><dd>{projectName(review.projectId)}</dd></div>
@@ -242,14 +249,6 @@ function DecisionMeetingDraftDialog({ draft, data, projectId, reloadReport, ...a
         {scope.q && <div><dt>검색</dt><dd>{scope.q}</dd></div>}
         <div><dt>결정 근거</dt><dd>{review.items.length > 0 && `${numberLabel(review.offset + 1)}–${numberLabel(review.offset + review.items.length)} / `}{numberLabel(review.total)}건</dd></div>
       </dl>
-      <p>현재 페이지의 결정 근거와 업무 정보를 선택한 문서 공간에 저장합니다.</p>
-      {review.items.length > 0 && <details>
-        <summary>요약에 포함할 결정 근거 {numberLabel(review.items.length)}건</summary>
-        <ol>{review.items.map(item => <li key={item.linkId}>
-          <strong>{item.issue.key} · {item.issue.title}</strong>
-          <p>{item.source.title} · v{item.source.version}</p>
-        </li>)}</ol>
-      </details>}
     </>} />;
 }
 

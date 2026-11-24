@@ -2,6 +2,7 @@ import type { DecisionFollowUpDraftRequest, DecisionFollowUpPage, RichContent } 
 
 type DraftDetails = {
   page: DecisionFollowUpPage;
+  items: DecisionFollowUpPage['items'];
   filters: { status: NonNullable<DecisionFollowUpDraftRequest['status']>; assigneeId: string | null; searchTerm: string; unscheduledOnly?: boolean };
   projectNames: ReadonlyMap<string, string>;
   assigneeNames: ReadonlyMap<string, string>;
@@ -16,7 +17,7 @@ const paragraph = (value: string): RichContent => ({ type: 'paragraph', content:
 const heading = (value: string, level: 2 | 3 = 2): RichContent => ({ type: 'heading', attrs: { level }, content: [text(value)] });
 const documentLabel = (title: string) => title || '제목 없는 문서';
 
-export function buildDecisionFollowUpDraftContent({ page, filters, projectNames, assigneeNames, excerpts, href }: DraftDetails): {
+export function buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, excerpts, href }: DraftDetails): {
   content: RichContent; issueIds: string[];
 } {
   const issues = new Map<string, string>();
@@ -26,6 +27,9 @@ export function buildDecisionFollowUpDraftContent({ page, filters, projectNames,
   const scope = page.projectId === null ? '전체 프로젝트' : projectLabel(page.projectId);
   const assigneeFilter = filters.assigneeId === null ? '전체 담당자' : assigneeLabel(filters.assigneeId);
   const captured = page.generatedAt.replace('T', ' ').replace(/Z$/, ' UTC');
+  const recorded = items.length < page.items.length
+    ? `결정 근거 ${numberLabel(page.total)}건 중 현재 보고서 페이지에서 선택한 ${numberLabel(items.length)}건을 기록했습니다.`
+    : `결정 근거 ${numberLabel(page.total)}건 중 ${numberLabel(page.offset + 1)}–${numberLabel(page.offset + items.length)}번째 ${numberLabel(items.length)}건을 기록했습니다.`;
   const content: RichContent[] = [
     paragraph(`보고서 기준 시각 ${captured}`),
     paragraph(`프로젝트 ${scope} · 상태 ${statusLabels[filters.status]} · 담당자 ${assigneeFilter}`),
@@ -33,10 +37,10 @@ export function buildDecisionFollowUpDraftContent({ page, filters, projectNames,
     ...(filters.unscheduledOnly ? [paragraph('일정 미정만')] : []),
     { type: 'paragraph', content: [{ ...text('결정 후속 업무 보고서 열기'), marks: [{ type: 'link', attrs: { href, target: '_self' } }] }, text(' (현재 상태)')] },
     heading('결정 후속 업무'),
-    paragraph(`결정 근거 ${numberLabel(page.total)}건 중 ${numberLabel(page.offset + 1)}–${numberLabel(page.offset + page.items.length)}번째 ${numberLabel(page.items.length)}건을 기록했습니다.`),
+    paragraph(recorded),
   ];
 
-  for (const { linkId, issue, document, source } of page.items) {
+  for (const { linkId, issue, document, source } of items) {
     const deadlineLabel = issue.deadlineSource === 'endDate' ? '계획 종료일' : '목표 마감일';
     const space = document.projectId === null ? '팀 공통 문서' : projectLabel(document.projectId);
     const issueLabel = `${issue.key} · ${issue.title}`;

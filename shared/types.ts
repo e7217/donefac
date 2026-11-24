@@ -1295,6 +1295,7 @@ export interface DecisionFollowUpDraftRequest {
   q?: string;
   unscheduledOnly?: boolean;
   offset?: number;
+  linkIds?: string[];
 }
 
 export interface DecisionFollowUpDraftResult {

@@ -14,8 +14,14 @@ type Props<Report extends ReportPage> = Pick<FeatureProps, 'actorId' | 'refresh'
   initialDestinationId: string | null;
   destinations?: readonly { id: string | null; name: string }[];
   savePath: string;
-  requestFields: (report: Report, destinationId: string | null) => Record<string, unknown>;
+  requestFields: (report: Report, destinationId: string | null, selectedIds?: string[]) => Record<string, unknown>;
   renderReport: (report: Report) => ReactNode;
+  selectItems?: {
+    legend: string;
+    id: (item: Report['items'][number]) => string;
+    label: (item: Report['items'][number]) => string;
+    description: (item: Report['items'][number]) => string;
+  };
   emptyNotice: (report: Report) => string;
   reloadReport: () => Promise<Report | null>;
   onClose: () => void;
@@ -31,17 +37,20 @@ const UNKNOWN = '초안 저장 결과를 확인하지 못했습니다. 같은 �
 const errorMessage = (cause: unknown) => cause instanceof Error ? cause.message : '요청을 처리하지 못했습니다.';
 
 export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, initialTitle, initialDestinationId, destinations, savePath,
-  requestFields, renderReport, emptyNotice, actorId, refresh, notify, openDocument, reloadReport, onClose }: Props<Report>) {
+  requestFields, renderReport, selectItems, emptyNotice, actorId, refresh, notify, openDocument, reloadReport, onClose }: Props<Report>) {
   const titleId = useId();
   const destinationNoticeId = useId();
+  const itemDescriptionId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
   const primary = useRef<HTMLButtonElement>(null);
+  const selectAll = useRef<HTMLButtonElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
   const request = useRef<AbortController | null>(null);
   const [title, setTitle] = useState(initialTitle);
   const [destinationId, setDestinationId] = useState(initialDestinationId);
   const [scope, setScope] = useState(report);
+  const [selection, setSelection] = useState<Set<string> | null>(null);
   const [stage, setStage] = useState<Stage>({ kind: 'editing' });
   const [busy, setBusy] = useState<Operation | null>(null);
   const [error, setError] = useState('');
@@ -53,7 +62,12 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
   const titleChanged = title !== initialTitle;
   const destinationChanged = destinationId !== initialDestinationId;
   const destinationMissing = destinations?.some(destination => destination.id === destinationId) === false;
-  const dirty = editing && (titleChanged || destinationChanged);
+  const itemIds = selectItems ? scope.items.map(selectItems.id) : [];
+  const selectedIds = selection === null ? itemIds : itemIds.filter(id => selection.has(id));
+  const allSelected = selectedIds.length === itemIds.length;
+  const emptySelection = Boolean(selectItems && selectedIds.length === 0);
+  const selectionChanged = Boolean(selectItems && selection !== null && !allSelected);
+  const dirty = editing && (titleChanged || destinationChanged || selectionChanged);
 
   useEffect(() => {
     const element = dialog.current;
@@ -71,8 +85,8 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
 
   const canDiscard = useCallback(() => {
     if (stage.kind === 'recover') return window.confirm('초안이 저장됐을 수 있습니다. 새 초안을 만들기 전에 문서 목록에서 결과를 확인해 주세요. 계속할까요?');
-    return !dirty || window.confirm(destinationChanged ? '회의 초안에 입력한 내용을 버릴까요?' : '입력한 회의 초안 제목을 버릴까요?');
-  }, [destinationChanged, dirty, stage.kind]);
+    return !dirty || window.confirm(destinationChanged || selectionChanged ? '회의 초안에 입력한 내용을 버릴까요?' : '입력한 회의 초안 제목을 버릴까요?');
+  }, [destinationChanged, dirty, selectionChanged, stage.kind]);
 
   useEffect(() => {
     function guard(event: Event) {
@@ -102,7 +116,10 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
   useEffect(() => {
     if (busy) return;
     if (stage.kind === 'unavailable') errorNotice.current?.focus();
-    else if (stage.kind !== 'editing' || notice) primary.current?.focus();
+    else if (stage.kind !== 'editing' || notice) {
+      const action = primary.current?.disabled ? selectAll.current : primary.current;
+      action?.focus();
+    }
   }, [busy, notice, stage.kind]);
 
   function close() {
@@ -146,10 +163,11 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (stage.kind !== 'recover' && (stage.kind !== 'editing' || !trimmed || trimmed.length > TITLE_LIMIT ||
-      !scope.items.length || destinationMissing)) return;
+      !scope.items.length || destinationMissing || emptySelection)) return;
     void run('save', async signal => {
       const body = stage.kind === 'recover' ? stage.body : JSON.stringify({
-        ...requestFields(scope, destinationId), requestId: newRequestId(), revision: scope.revision, title: trimmed,
+        ...requestFields(scope, destinationId, selection === null ? undefined : selectedIds),
+        requestId: newRequestId(), revision: scope.revision, title: trimmed,
       });
       let savedDocument: DocPage;
       try {
@@ -202,6 +220,15 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
       }
       setScope(latest);
       setStage({ kind: 'editing' });
+      if (selectItems && selection !== null) {
+        const retained = latest.items.map(selectItems.id).filter(id => selection.has(id));
+        setSelection(new Set(retained));
+        const removed = selection.size - retained.length;
+        if (removed > 0 && latest.items.length) {
+          setNotice(`선택한 근거 중 ${removed.toLocaleString('ko-KR')}건이 현재 페이지에서 빠졌습니다. 다시 선택할 수 있습니다.`);
+          return;
+        }
+      }
       setNotice(latest.items.length ? '최신 보고서의 범위와 업무를 확인하고 저장해 주세요.' : emptyNotice(latest));
     });
   }
@@ -226,6 +253,29 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
           </label>}
           {destinationMissing && editing && <p className="reports-error" role="alert" id={destinationNoticeId}>저장할 문서 공간을 다시 선택해 주세요.</p>}
           {renderReport(scope)}
+          {selectItems && itemIds.length > 0 && <fieldset className="report-meeting-draft-selection" disabled={Boolean(busy) || stage.kind !== 'editing'}>
+            <legend>{selectItems.legend}</legend>
+            <div className="report-meeting-draft-selection-controls">
+              <p role="status">{selectedIds.length.toLocaleString('ko-KR')}건 선택</p>
+              <button ref={selectAll} type="button" className="btn" onClick={() => setSelection(new Set(allSelected ? [] : itemIds))}>
+                {allSelected ? '선택 모두 해제' : '전체 선택'}
+              </button>
+            </div>
+            <ul>{scope.items.map((item, index) => {
+              const id = itemIds[index];
+              const descriptionId = `${itemDescriptionId}-${index}`;
+              return <li key={id}>
+                <label><input type="checkbox" checked={selection === null || selection.has(id)} aria-describedby={descriptionId}
+                  onChange={event => {
+                    const next = new Set(selectedIds);
+                    if (event.currentTarget.checked) next.add(id);
+                    else next.delete(id);
+                    setSelection(next);
+                  }} />{selectItems.label(item)}</label>
+                <small id={descriptionId}>{selectItems.description(item)}</small>
+              </li>;
+            })}</ul>
+          </fieldset>}
         </>}
         {busy && <p role="status">{busy === 'save' ? '회의 초안을 확인하는 중입니다.' : '최신 목록을 불러오는 중입니다.'}</p>}
         {error && <p className="reports-error" role="alert" tabIndex={-1} ref={errorNotice}>{error}</p>}
@@ -238,7 +288,7 @@ export function ReportMeetingDraftDialog<Report extends ReportPage>({ report, in
             onClick={() => void run('refresh', signal => reflect(stage.document, signal))}>문서 목록 다시 불러오기</button>
           : needsReload ? <button ref={primary} type="button" className="btn btn-primary" disabled={Boolean(busy)} onClick={reload}>최신 보고서 불러오기</button>
           : stage.kind !== 'unavailable' && <button ref={primary} type="submit" className="btn btn-primary"
-            disabled={Boolean(busy) || !trimmed || trimmed.length > TITLE_LIMIT || (stage.kind !== 'recover' && destinationMissing)}>
+            disabled={Boolean(busy) || !trimmed || trimmed.length > TITLE_LIMIT || (stage.kind !== 'recover' && (destinationMissing || emptySelection))}>
             {stage.kind === 'recover' ? '초안 저장 결과 다시 확인' : '회의 초안 저장'}
           </button>}
       </footer>
