@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
 import type {
-  DeliveryBlockerDraftResult, DeliveryBlockerReport, Issue, PlanningItem, WorkspaceSnapshot,
+  DeliveryBlockerDraftResult, DeliveryBlockerReport, GitlabSettings, Issue, PlanningItem, SavedView, WorkspaceSnapshot,
 } from '../../shared/types';
 
 async function readJson<T>(response: Pick<APIResponse | Response, 'status' | 'json' | 'text'>, status = 200): Promise<T> {
@@ -19,11 +19,12 @@ async function removeFixture(request: APIRequestContext, resource: 'issues' | 'd
   }
 }
 
-function readReport(page: Page, path: string, releaseId: string, reason?: string) {
+function readReport(page: Page, path: string, releaseId: string | null, reason?: string, savedViewId?: string) {
   return page.waitForResponse(response => {
     const url = new URL(response.url());
     return response.request().method() === 'GET' && url.pathname === path &&
-      url.searchParams.get('releaseId') === releaseId && url.searchParams.get('reason') === (reason ?? null);
+      url.searchParams.get('releaseId') === releaseId && url.searchParams.get('reason') === (reason ?? null) &&
+      url.searchParams.get('savedViewId') === (savedViewId ?? null);
   });
 }
 
@@ -141,5 +142,133 @@ test('360px에서 선택한 릴리스의 준비 점검을 열고 업무와 회�
     }
     for (const value of issues) await removeFixture(request, 'issues', value.id);
     await request.delete(`/api/planning-items/${plan.id}?expectedVersion=${plan.version}`);
+  }
+});
+
+test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확인하고 회의 초안에 남긴다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project] } = await workspace(request);
+  const unique = randomUUID();
+  const prefix = `릴리스 GitLab 확인 ${unique.slice(0, 8)}`;
+  const draftTitle = `${prefix} 회의 문서`;
+  const gitlabPath = '/api/integrations/gitlab';
+  const settings = async () => readJson<GitlabSettings>(await request.get(gitlabPath));
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const baseUrl = 'https://gitlab-release-check.example.test';
+  const webhookSecret = `synthetic-release-manual-${unique}`;
+  const repositoryId = 42;
+  const reportPath = `/api/projects/${project.id}/delivery-blockers`;
+  const plan = await readJson<PlanningItem>(await request.post('/api/planning-items', { data: {
+    projectId: project.id, name: prefix, kind: 'release', targetDate: '2030-01-10',
+  } }), 201);
+  const reportHash = `#/${project.id}/reports/blockers?release=${plan.id}&reason=gitlab`;
+  let issue: Issue | undefined;
+  let savedView: SavedView | undefined;
+  let draftId: string | undefined;
+  const observedAt = Date.now() - 60_000;
+
+  async function pipeline(target: Issue, id: number, source: 'push' | 'schedule', status: 'manual' | 'success') {
+    const response = await readJson<{ linked: number }>(await request.post(`${gitlabPath}/webhook`, {
+      headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': webhookSecret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: `${baseUrl}/team/release` }, object_attributes: {
+        id, source, status, sha: 'a'.repeat(40), ref: `feature/${target.key}`, tag: false,
+        updated_at: new Date(observedAt + (id - 601) * 1000).toISOString(),
+      } },
+    }));
+    expect(response.linked).toBe(1);
+  }
+
+  try {
+    issue = await readJson<Issue>(await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${prefix} 검토 업무`, releaseId: plan.id, startDate: '2030-01-07', endDate: '2030-01-08',
+    } }), 201);
+    savedView = await readJson<SavedView>(await request.post('/api/views', { data: {
+      projectId: project.id, name: prefix, layout: 'list', filters: {
+        query: prefix, status: 'all', type: 'all', assigneeId: 'all', gitlab: 'manual_pipeline',
+      },
+    } }), 201);
+    await readJson(await request.patch(gitlabPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], webhookSecret,
+    } }));
+    await pipeline(issue, 601, 'push', 'manual');
+    await pipeline(issue, 602, 'push', 'manual');
+    await pipeline(issue, 603, 'schedule', 'manual');
+
+    const releaseRequest = readReport(page, reportPath, plan.id, 'gitlab');
+    await page.goto(`/${reportHash}`);
+    const release = await readJson<DeliveryBlockerReport>(await releaseRequest);
+    expect(release.total).toBe(1);
+    expect(release.counts).toMatchObject({ open: 1, affected: 1, reasons: {
+      gitlab: 1, issue_block: 0, schedule_conflict: 0, missing_schedule: 0, after_release_date: 0,
+    } });
+    expect(release.items).toMatchObject([{ issue: { id: issue.id }, gitlab: { blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 2 } }]);
+    const report = page.getByRole('tabpanel', { name: '진행 차단', exact: true });
+    const releaseCard = report.getByRole('article', { name: `준비 확인 업무 ${issue.key}`, exact: true });
+    await expect(releaseCard.getByText('수동 실행 대기 파이프라인 2건', { exact: true })).toBeVisible();
+    const openIssue = releaseCard.getByRole('button', { name: `${issue.key} ${issue.title} 업무 열기`, exact: true });
+    await openIssue.click();
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    await expect(ticket.getByRole('region', { name: '파이프라인', exact: true }).getByRole('listitem')
+      .filter({ hasText: '#602' }).getByText('수동 실행', { exact: true })).toBeVisible();
+    await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(openIssue).toBeFocused();
+
+    await report.getByRole('button', { name: '회의 초안 만들기', exact: true }).click();
+    const draft = page.getByRole('dialog', { name: '회의 초안 만들기', exact: true });
+    await draft.getByText('요약에 포함할 업무 1개', { exact: true }).click();
+    await expect(draft.getByText('수동 실행 대기 파이프라인 2건', { exact: true })).toBeVisible();
+    await draft.getByRole('textbox', { name: '회의 초안 제목', exact: true }).fill(draftTitle);
+    const capture = page.waitForResponse(response => new URL(response.url()).pathname === `${reportPath}/meeting-draft` &&
+      response.request().method() === 'POST');
+    await draft.getByRole('button', { name: '회의 초안 저장', exact: true }).click();
+    const response = await capture;
+    expect(response.request().postDataJSON()).toMatchObject({ releaseId: plan.id, revision: release.revision, reason: 'gitlab', title: draftTitle });
+    const { document } = await readJson<DeliveryBlockerDraftResult>(response, 201);
+    draftId = document.id;
+    expect(document.plainText).toContain('수동 실행 대기 파이프라인 2건');
+    await draft.getByRole('button', { name: '문서 열기', exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(draftTitle);
+    const documentUrl = page.url();
+    const backLink = page.locator('[aria-label="문서 본문"]').getByRole('link', { name: '진행 차단 보고서 열기', exact: true });
+    await expect(backLink).toHaveAttribute('href', reportHash);
+
+    await pipeline(issue, 604, 'push', 'success');
+    const liveRequest = readReport(page, reportPath, plan.id, 'gitlab');
+    await backLink.click();
+    const live = await readJson<DeliveryBlockerReport>(await liveRequest);
+    expect(live.revision).not.toBe(release.revision);
+    expect(live.counts.reasons.gitlab).toBe(1);
+    await expect(releaseCard.getByText('수동 실행 대기 파이프라인 1건', { exact: true })).toBeVisible();
+
+    const projectRequest = readReport(page, reportPath, null, 'gitlab', savedView.id);
+    await page.goto(`/#/${project.id}/reports/blockers?savedView=${savedView.id}&reason=gitlab`);
+    const projectReport = await readJson<DeliveryBlockerReport>(await projectRequest);
+    expect(projectReport.counts.reasons.gitlab).toBe(1);
+    const projectCard = report.getByRole('article', { name: `차단된 업무 ${issue.key}`, exact: true });
+    await expect(projectCard.getByText('수동 실행 대기 파이프라인 1건', { exact: true })).toBeVisible();
+
+    await pipeline(issue, 605, 'schedule', 'success');
+    const refreshed = readReport(page, reportPath, null, 'gitlab', savedView.id);
+    await report.getByRole('button', { name: '진행 차단 새로고침', exact: true }).click();
+    const clear = await readJson<DeliveryBlockerReport>(await refreshed);
+    expect(clear.revision).not.toBe(projectReport.revision);
+    expect(clear).toMatchObject({ counts: { affected: 0, reasons: { gitlab: 0 } }, total: 0, items: [] });
+    await expect(projectCard).toHaveCount(0);
+    const clearRelease = await readJson<DeliveryBlockerReport>(await request.get(`${reportPath}?releaseId=${plan.id}&reason=gitlab`));
+    expect(clearRelease).toMatchObject({ counts: { open: 1, affected: 0, reasons: { gitlab: 0 } }, total: 0, items: [] });
+
+    await page.goto(documentUrl);
+    await expect(page.locator('[aria-label="문서 본문"]')).toContainText('수동 실행 대기 파이프라인 2건');
+  } finally {
+    if (draftId) await removeFixture(request, 'documents', draftId);
+    if (savedView) await request.delete(`/api/views/${savedView.id}?expectedVersion=${savedView.version}`);
+    if (issue) await removeFixture(request, 'issues', issue.id);
+    await request.delete(`/api/planning-items/${plan.id}?expectedVersion=${plan.version}`);
+    const current = await settings();
+    if (current.baseUrl === baseUrl) await readJson(await request.patch(gitlabPath, { data: {
+      expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+    } }));
   }
 });

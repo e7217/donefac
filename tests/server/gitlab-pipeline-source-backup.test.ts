@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { DeliveryBlockerReport, GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { DeliveryBlockerDraftResult, DeliveryBlockerReport, GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 type Backup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
 
@@ -42,7 +42,7 @@ test('pipeline execution metadata survives native backup and archived issue rest
   await call(integration, 'PATCH', { expectedVersion: version, baseUrl, projectIds: [42], webhookSecret: secret });
   const { projects: [project] } = await call<WorkspaceSnapshot>('/workspace');
   const create = (title: string) => call<Issue>('/issues', 'POST', { projectId: project.id, title }, 201);
-  const active = await create('Active pipeline from two execution sources');
+  const active = await create('Active pipelines from distinct execution sources');
   const archived = await create('Archived pipeline using a tag');
   const observe = (issue: Issue, id: number, source: string, tag: boolean, status: string) =>
     call<{ linked: number }>(`${integration}/webhook`, 'POST', {
@@ -56,12 +56,22 @@ test('pipeline execution metadata survives native backup and archived issue rest
   assert.equal((await observe(active, 101, 'merge_request_event', false, 'failed')).linked, 1);
   assert.equal((await observe(active, 102, 'push', false, 'success')).linked, 1);
   assert.equal((await observe(archived, 103, 'push', true, 'failed')).linked, 1);
+  assert.equal((await observe(active, 104, 'schedule', false, 'manual')).linked, 1);
   const { trashEntryId } = await call<{ trashEntryId: string }>(`/issues/${archived.id}`, 'DELETE');
+
+  const reportPath = `/projects/${project.id}/delivery-blockers`;
+  const report = await call<DeliveryBlockerReport>(`${reportPath}?reason=gitlab`);
+  const activeCounts = { blockedMergeRequests: 0, failedPipelines: 1, manualPipelines: 1 };
+  assert.deepEqual(report.items.find(item => item.issue.id === active.id)?.gitlab, activeCounts);
+  const { document: meeting } = await call<DeliveryBlockerDraftResult>(`${reportPath}/meeting-draft`, 'POST', {
+    requestId: randomUUID(), revision: report.revision, title: '릴리스 파이프라인 점검', reason: 'gitlab',
+  }, 201);
+  assert.match(meeting.plainText, /수동 실행 대기 파이프라인 1건/u);
 
   const data = await call<Backup>('/export');
   assert.equal(data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const activeLinks = data.gitlabLinks.filter(link => link.issueId === active.id);
-  assert.deepEqual(activeLinks.map(link => [link.pipelineSource, link.pipelineTag]), [['merge_request_event', false], ['push', false]]);
+  assert.deepEqual(activeLinks.map(link => [link.pipelineSource, link.pipelineTag]), [['merge_request_event', false], ['push', false], ['schedule', false]]);
   const entry = data.trashEntries.find(item => item.id === trashEntryId);
   assert.ok(entry);
   const [archivedLink] = entry.gitlabLinks;
@@ -76,7 +86,7 @@ test('pipeline execution metadata survives native backup and archived issue rest
   ];
   for (const invalid of invalidActive) {
     const result = await call<{ error: string }>('/import', 'POST', {
-      data: { ...data, gitlabLinks: [invalid, activeLinks[1]] },
+      data: { ...data, gitlabLinks: [invalid, ...activeLinks.slice(1)] },
     }, 400);
     assert.match(result.error, /GitLab 연결/);
   }
@@ -88,12 +98,13 @@ test('pipeline execution metadata survives native backup and archived issue rest
   assert.deepEqual((await call<Backup>('/export')).gitlabLinks, data.gitlabLinks);
 
   await call('/import', 'POST', { data });
-  const report = await call<DeliveryBlockerReport>(`/projects/${project.id}/delivery-blockers?reason=gitlab`);
-  assert.equal(report.items.find(item => item.issue.id === active.id)?.gitlab.failedPipelines, 1);
+  const restoredReport = await call<DeliveryBlockerReport>(`${reportPath}?reason=gitlab`);
+  assert.deepEqual(restoredReport.items.find(item => item.issue.id === active.id)?.gitlab, activeCounts);
   await call(`/trash/${trashEntryId}/restore`, 'POST');
   const restored = await call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(restored.gitlabLinks.filter(link => link.issueId === active.id), activeLinks);
   assert.deepEqual(restored.gitlabLinks.find(link => link.issueId === archived.id), archivedLink);
+  assert.deepEqual(restored.documents.find(document => document.id === meeting.id)?.content, meeting.content);
 
   const legacy = structuredClone(data);
   legacy.schemaVersion = 100;
@@ -103,7 +114,10 @@ test('pipeline execution metadata survives native backup and archived issue rest
   }
   await call('/import', 'POST', { data: legacy });
   const exportedLegacy = await call<Backup>('/export');
-  assert.equal(exportedLegacy.gitlabLinks.filter(link => link.issueId === active.id).length, 2);
+  assert.equal(exportedLegacy.gitlabLinks.filter(link => link.issueId === active.id).length, 3);
   assert.ok([...exportedLegacy.gitlabLinks, ...exportedLegacy.trashEntries.flatMap(item => item.gitlabLinks)]
     .every(link => !Object.hasOwn(link, 'pipelineSource') && !Object.hasOwn(link, 'pipelineTag')));
+  const legacyReport = await call<DeliveryBlockerReport>(`${reportPath}?reason=gitlab`);
+  assert.deepEqual(legacyReport.items.find(item => item.issue.id === active.id)?.gitlab,
+    { blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 1 });
 });

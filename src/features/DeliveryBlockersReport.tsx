@@ -10,6 +10,7 @@ import { SCHEDULE_DATE_LABELS } from '../../shared/schedule-dependencies';
 import { api, ApiError } from '../lib/api';
 import { dependencyLabel } from './schedule-utils';
 import { DeliveryBlockerMeetingDraftDialog } from './DeliveryBlockerMeetingDraftDialog';
+import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import './delivery-blockers-report.css';
 
 type Scope = { savedViewId: string; reason: DeliveryBlockerReason | ''; releaseId: string };
@@ -299,6 +300,7 @@ function BlockerIssueButton({ issue, linkBusy, open }: IssueAction & { issue: De
 
 function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: DeliveryBlockerRow; affectedLabel: string }) {
   const { issue, deadline, blockers, scheduleConflicts, gitlab, releaseSchedule } = row;
+  const manualPipelines = gitlab.manualPipelines ?? 0;
   return <article className="card delivery-blockers-card" aria-label={`${affectedLabel} ${issue.key}`}>
     <h4><BlockerIssueButton issue={issue} {...action} /></h4>
     <dl className="delivery-blockers-properties">
@@ -334,11 +336,12 @@ function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: Del
         </li>)}</ul>
         {scheduleConflicts.total > scheduleConflicts.items.length && <p>앞 {numberLabel(scheduleConflicts.items.length)}건을 표시합니다.</p>}
       </section>}
-      {Boolean(gitlab.blockedMergeRequests || gitlab.failedPipelines) && <section>
+      {Boolean(gitlab.blockedMergeRequests || gitlab.failedPipelines || manualPipelines) && <section>
         <h5>{REASON_LABELS.gitlab}</h5>
         <ul>
           {gitlab.blockedMergeRequests > 0 && <li>병합 확인이 필요한 MR {numberLabel(gitlab.blockedMergeRequests)}건</li>}
           {gitlab.failedPipelines > 0 && <li>실패한 파이프라인 {numberLabel(gitlab.failedPipelines)}건</li>}
+          {manualPipelines > 0 && <li>{ISSUE_GITLAB_FILTER_LABELS.manual_pipeline} {numberLabel(manualPipelines)}건</li>}
         </ul>
       </section>}
     </div>

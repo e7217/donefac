@@ -81,6 +81,7 @@ test('delivery blockers aggregate only active targets and authorize sources inde
       link(target, { id: 'merged-mr', state: 'merged' }), link(closed), link(cancelled), link(hidden),
       pipeline(target, 10, 'feature/TEAM-7', 'failed'), pipeline(target, 11, 'feature/TEAM-7', 'success'),
       pipeline(target, 15, 'release', 'failed'), pipeline(target, 20, 'pending', 'running'),
+      pipeline(target, 21, 'manual', 'manual'), pipeline(target, 22, 'manual', 'manual'),
       pipeline(clear, 10, 'feature/TEAM-8', 'failed'), pipeline(clear, 11, 'feature/TEAM-8', 'success'),
     ],
     calendar: { ...defaultWorkCalendar(projectId), exceptions: [{ date: '2026-11-23', isWorking: false, label: '휴무' }] },
@@ -116,7 +117,7 @@ test('delivery blockers aggregate only active targets and authorize sources inde
       type: 'FS', lagDays: 0, endpoint: 'startDate', scheduledDate: '2026-11-23', requiredDate: '2026-11-24',
     }],
   });
-  assert.deepEqual(row.gitlab, { blockedMergeRequests: 2, failedPipelines: 1 });
+  assert.deepEqual(row.gitlab, { blockedMergeRequests: 2, failedPipelines: 1, manualPipelines: 1 });
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_|private@example|SECRET-1|https:\/\//);
 });
 

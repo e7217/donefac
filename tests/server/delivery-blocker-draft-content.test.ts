@@ -18,7 +18,7 @@ function issue(key: string, overrides: Partial<DeliveryBlockerIssue> = {}): Deli
 function row(target: DeliveryBlockerIssue, overrides: Partial<DeliveryBlockerRow> = {}): DeliveryBlockerRow {
   return {
     issue: target, priority: 'high', deadline: null, blockers: { total: 0, items: [] },
-    scheduleConflicts: { total: 0, items: [] }, gitlab: { blockedMergeRequests: 0, failedPipelines: 0 },
+    scheduleConflicts: { total: 0, items: [] }, gitlab: { blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 0 },
     ...overrides,
   };
 }
@@ -47,7 +47,7 @@ test('blocker draft preserves the reviewed scope, counts, display facts and caus
     items: [
       row(target, {
         deadline: { source: 'dueDate', value: '2026-11-30' }, blockers: { total: 6, items: causes },
-        scheduleConflicts: { total: 7, items: conflicts }, gitlab: { blockedMergeRequests: 2, failedPipelines: 1 },
+        scheduleConflicts: { total: 7, items: conflicts }, gitlab: { blockedMergeRequests: 2, failedPipelines: 1, manualPipelines: 3 },
       }),
       row(next, { deadline: { source: 'endDate', value: '2026-12-01' }, blockers: { total: 1, items: [causes[0]] } }),
     ],
@@ -68,7 +68,8 @@ test('blocker draft preserves the reviewed scope, counts, display facts and caus
   assert.match(prose, /TEAM-8 · 업무 TEAM-8\n상태 할 일 · 담당자 미지정 · 우선순위 높음 · 종료일 2026-12-01/);
   assert.match(prose, /업무 차단 6건[\s\S]*OTHER-2 · 업무 OTHER-2[^\n]*Jira 이관 관계[\s\S]*예시 외 3건/);
   assert.match(prose, /간트 일정 충돌 7건[\s\S]*완료 후 완료 \(FF\) · \+2근무일 · 종료일 2026-11-25 · 2026-11-28부터 가능[\s\S]*예시 외 4건/);
-  assert.match(prose, /GitLab 조치 · 병합 확인이 필요한 MR 2건 · 실패한 파이프라인 1건/);
+  assert.match(prose, /GitLab 조치 · 병합 확인이 필요한 MR 2건 · 실패한 파이프라인 1건 · 수동 실행 대기 파이프라인 3건/);
+  assert.doesNotMatch(prose, /수동 실행 대기 파이프라인 0건/);
   assert.doesNotMatch(prose, /OMITTED-|private-/);
   const sourceLink = nodes.find(node => node.text === '진행 차단 보고서 열기');
   assert.equal(sourceLink?.marks?.[0].attrs?.href, sourceHref);

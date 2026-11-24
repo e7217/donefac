@@ -165,6 +165,8 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `issue_block`은 직접 만든 차단 관계와 이관 원본으로 방향 및 연결 대상을 확인한 Jira 관계를 집계한다. 같은 방향의 같은 두 업무는 직접 만든 관계를 우선해 한 번 센다. 이관 관계가 집계 근거인 경우 해당 `blockers.items` 항목에 `origin: "jira"`가 포함된다.
 
+`gitlab` 원인은 각 업무의 `gitlab.blockedMergeRequests`, `gitlab.failedPipelines`, `gitlab.manualPipelines` 중 하나 이상이 양수일 때 한 번 집계한다. `manualPipelines`는 업무 보드와 같은 기준으로 확인한 최신 파이프라인 중 상태가 `manual`인 건수다. 식별할 수 있는 파이프라인은 GitLab 인스턴스·저장소·참조·실행 유형·태그 구분이 같은 실행끼리 묶는다. 같은 그룹에서 실행이 시작되거나 새 파이프라인이 성공하면 이전 대기 건수는 빠진다. 진행 차단과 릴리스 준비 점검의 회의 초안에는 조회 당시 건수를 기록한다.
+
 브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`releaseId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 릴리스 범위에서는 기준일과 일정 근거를 함께 기록하고 문서 링크로 같은 릴리스의 현재 보고서를 연다. 검토한 릴리스·연결 업무·결과가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
 
 ## 담당자 작업량

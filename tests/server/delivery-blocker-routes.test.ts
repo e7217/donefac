@@ -159,8 +159,76 @@ test('progress blocker report respects a saved GitLab filter and latest recorded
   const view = await makeView('빌드 확인', projectId, { gitlab: 'failed_pipeline' });
   const { result } = await request<DeliveryBlockerReport>(`${route()}?savedViewId=${view.id}&reason=gitlab`);
   assert.deepEqual(result.counts, { open: 1, affected: 1, reasons: { issue_block: 0, schedule_conflict: 0, gitlab: 1 } });
-  assert.deepEqual(result.items.map(row => [row.issue.id, row.gitlab]), [[recentFailure.id, { blockedMergeRequests: 0, failedPipelines: 1 }]]);
+  assert.deepEqual(result.items.map(row => [row.issue.id, row.gitlab]), [[recentFailure.id, {
+    blockedMergeRequests: 0, failedPipelines: 1, manualPipelines: 0,
+  }]]);
   assert.ok(!JSON.stringify(result).includes('hidden-log'));
+});
+
+test('reports a manual-only GitLab blocker in progress and release readiness until newer runs clear each group', async t => {
+  const { request, makeIssue, makeView, makeKey, makeRelease, database } = await fixture(t);
+  const release = await makeRelease('수동 배포 검토', { targetDate: '2030-01-11' });
+  const plan = { releaseId: release.id, startDate: '2030-01-07', endDate: '2030-01-11' };
+  const [target, done, outsideRelease] = await Promise.all([
+    makeIssue('수동 배포 대상', plan),
+    makeIssue('수동 배포 완료', { ...plan, status: 'done' }),
+    makeIssue('다른 범위의 수동 실행'),
+  ]);
+  const insert = database.prepare('INSERT INTO gitlab_links(id,issue_id,json) VALUES(?,?,?)');
+  function pipeline(issue: Issue, objectId: number, state: string, source: string, tag = false) {
+    const link: GitlabLink = {
+      id: `gitlab:123abc123abc:17:pipeline:${objectId}:${issue.id}`, issueId: issue.id, projectId: 17, iid: objectId,
+      kind: 'pipeline', title: '숨겨야 할 파이프라인 제목', webUrl: 'https://gitlab.example.test/hidden-manual-log',
+      state, sourceBranch: 'release', pipelineSource: source, pipelineTag: tag, updatedAt: '2026-11-20T00:00:00Z',
+    };
+    insert.run(link.id, link.issueId, JSON.stringify(link));
+  }
+  pipeline(target, 10, 'manual', 'merge_request_event');
+  pipeline(target, 11, 'manual', 'push', true);
+  pipeline(target, 12, 'success', 'push');
+  pipeline(done, 13, 'manual', 'merge_request_event');
+  pipeline(outsideRelease, 14, 'manual', 'merge_request_event');
+
+  const view = await makeView('수동 배포', projectId, { gitlab: 'manual_pipeline' });
+  const progressPath = `${route()}?savedViewId=${view.id}&reason=gitlab`;
+  const releasePath = `${progressPath}&releaseId=${release.id}`;
+  const progress = (await request<DeliveryBlockerReport>(progressPath)).result;
+  const readiness = (await request<DeliveryBlockerReport>(releasePath)).result;
+  const key = await makeKey([projectId]);
+  const scoped = (await request<DeliveryBlockerReport>(`/v1${releasePath}`, 200, { token: key.token })).result;
+  assert.equal(scoped.revision, readiness.revision);
+  assert.deepEqual(scoped.items, readiness.items);
+  for (const report of [progress, readiness]) {
+    assert.equal(report.counts.open, 1);
+    assert.equal(report.counts.affected, 1);
+    assert.equal(report.counts.reasons.gitlab, 1);
+    assert.equal(report.total, 1);
+    assert.deepEqual(report.items.map(row => [row.issue.id, row.gitlab]), [[target.id, {
+      blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 2,
+    }]]);
+    assert.doesNotMatch(JSON.stringify(report), /숨겨야 할 파이프라인 제목|hidden-manual-log/);
+  }
+
+  pipeline(target, 15, 'running', 'merge_request_event');
+  const stale = await request<Conflict>(`${releasePath}&revision=${readiness.revision}`, 409);
+  assert.equal(stale.result.details.reason, 'stale_report');
+  const stillWaiting = (await request<DeliveryBlockerReport>(releasePath)).result;
+  assert.equal(stillWaiting.total, 1);
+  assert.equal(stillWaiting.items[0].gitlab.manualPipelines, 1);
+
+  pipeline(target, 16, 'success', 'push', true);
+  await request(`${releasePath}&revision=${stillWaiting.revision}`, 409);
+  const cleared = (await request<DeliveryBlockerReport>(releasePath)).result;
+  assert.equal(cleared.counts.open, 0);
+  assert.equal(cleared.counts.affected, 0);
+  assert.equal(cleared.counts.reasons.gitlab, 0);
+  assert.equal(cleared.total, 0);
+  assert.deepEqual(cleared.items, []);
+
+  const releaseWithoutView = (await request<DeliveryBlockerReport>(`${route()}?releaseId=${release.id}&reason=gitlab`)).result;
+  assert.equal(releaseWithoutView.counts.open, 1);
+  assert.equal(releaseWithoutView.counts.reasons.gitlab, 0);
+  assert.deepEqual(releaseWithoutView.items, []);
 });
 
 test('release readiness scopes existing causes and checks planned dates against the configured cutoff', async t => {
@@ -212,7 +280,7 @@ test('release readiness scopes existing causes and checks planned dates against 
   });
   assert.equal(row(browser, externalOnly)?.releaseSchedule, undefined);
   assert.deepEqual(row(browser, late)?.scheduleConflicts.items.map(item => item.predecessor.id), [internal.id]);
-  assert.deepEqual(row(browser, late)?.gitlab, { blockedMergeRequests: 0, failedPipelines: 1 });
+  assert.deepEqual(row(browser, late)?.gitlab, { blockedMergeRequests: 0, failedPipelines: 1, manualPipelines: 0 });
   assert.ok(!JSON.stringify(browser).includes('hidden-release-log'));
 
   const scopedKey = await makeKey([projectId]);

@@ -39,6 +39,10 @@ function compareConflict(a: DeliveryScheduleConflict, b: DeliveryScheduleConflic
     a.endpoint.localeCompare(b.endpoint) || a.scheduledDate.localeCompare(b.scheduledDate) || a.requiredDate.localeCompare(b.requiredDate);
 }
 
+export function hasGitlabDeliveryBlocker({ blockedMergeRequests, failedPipelines, manualPipelines }: DeliveryBlockerRow['gitlab']): boolean {
+  return blockedMergeRequests > 0 || failedPipelines > 0 || manualPipelines > 0;
+}
+
 /** Sources can be outside the saved view. The caller supplies confirmed blockers and readable issues. */
 export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: DeliveryBlockerRow[]; counts: DeliveryBlockerCounts } {
   const { targets, sources, blockers, dependencies, gitlabLinks, calendar, release, data } = input;
@@ -75,7 +79,7 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
       row = {
         issue: summarize(issue), priority: issue.priority, deadline: issueDeadline(issue),
         blockers: { total: 0, items: [] }, scheduleConflicts: { total: 0, items: [] },
-        gitlab: { blockedMergeRequests: 0, failedPipelines: 0 },
+        gitlab: { blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 0 },
       };
       rowsById.set(issue.id, row);
     }
@@ -124,8 +128,9 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
   const gitlab = summarizeIssueGitlabLinks(gitlabLinks.filter(link => activeTargets.has(link.issueId)));
   for (const [id, issue] of activeTargets) {
     const summary = gitlab.get(id);
-    if (!summary || (!summary.blockedMergeRequests && !summary.failedPipelines)) continue;
-    rowFor(issue).gitlab = { blockedMergeRequests: summary.blockedMergeRequests, failedPipelines: summary.failedPipelines };
+    if (!summary || !hasGitlabDeliveryBlocker(summary)) continue;
+    const { blockedMergeRequests, failedPipelines, manualPipelines } = summary;
+    rowFor(issue).gitlab = { blockedMergeRequests, failedPipelines, manualPipelines };
   }
 
   const rows = [...rowsById.values()].sort(compareRow);
@@ -139,7 +144,7 @@ export function buildDeliveryBlockers(input: DeliveryBlockersInput): { rows: Del
     scheduleConflicts.items = scheduleConflicts.items.sort(compareConflict).slice(0, detailLimit);
     counts.reasons.issue_block += Number(blockers.total > 0);
     counts.reasons.schedule_conflict += Number(scheduleConflicts.total > 0);
-    counts.reasons.gitlab += Number(gitlab.blockedMergeRequests > 0 || gitlab.failedPipelines > 0);
+    counts.reasons.gitlab += Number(hasGitlabDeliveryBlocker(gitlab));
     if (releaseSchedule) {
       releaseCounts.missing_schedule += Number(releaseSchedule.missing.length > 0);
       releaseCounts.after_release_date += Number(releaseSchedule.afterDeadline);

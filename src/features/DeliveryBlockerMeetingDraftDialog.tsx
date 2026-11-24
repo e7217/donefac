@@ -1,6 +1,7 @@
 'use client';
 
 import type { DeliveryBlockerReport, FeatureProps } from '../../shared/types';
+import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { ReportMeetingDraftDialog } from './ReportMeetingDraftDialog';
 
 type Props = Pick<FeatureProps, 'actorId' | 'refresh' | 'notify' | 'openDocument'> & {
@@ -49,6 +50,7 @@ function DeliveryBlockerDraftPreview({ scope, reasonLabel }: { scope: DeliveryBl
           row.scheduleConflicts.total ? `간트 일정 충돌 ${row.scheduleConflicts.total}건` : '',
           row.gitlab.blockedMergeRequests ? `병합 확인이 필요한 MR ${row.gitlab.blockedMergeRequests}건` : '',
           row.gitlab.failedPipelines ? `실패한 파이프라인 ${row.gitlab.failedPipelines}건` : '',
+          row.gitlab.manualPipelines ? `${ISSUE_GITLAB_FILTER_LABELS.manual_pipeline} ${row.gitlab.manualPipelines.toLocaleString('ko-KR')}건` : '',
           row.releaseSchedule?.missing.includes('startDate') ? '시작일 미정' : '',
           row.releaseSchedule?.missing.includes('endDate') ? '종료일 미정' : '',
           row.releaseSchedule?.afterDeadline ? `릴리스 기한 초과 · 종료일 ${row.releaseSchedule.endDate}` : '',

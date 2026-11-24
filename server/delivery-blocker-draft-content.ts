@@ -88,6 +88,7 @@ export function buildDeliveryBlockerDraftContent(
     const gitlabActions: string[] = [];
     if (gitlab.blockedMergeRequests) gitlabActions.push(`병합 확인이 필요한 MR ${numberLabel(gitlab.blockedMergeRequests)}건`);
     if (gitlab.failedPipelines) gitlabActions.push(`실패한 파이프라인 ${numberLabel(gitlab.failedPipelines)}건`);
+    if (gitlab.manualPipelines) gitlabActions.push(`수동 실행 대기 파이프라인 ${numberLabel(gitlab.manualPipelines)}건`);
     if (gitlabActions.length) content.push(paragraph(`${REASON_LABELS.gitlab} · ${gitlabActions.join(' · ')}`));
     if (releaseSchedule) {
       content.push(paragraph(`계획 일정 · 시작일 ${releaseSchedule.startDate ?? '미정'} · 종료일 ${releaseSchedule.endDate ?? '미정'}`));

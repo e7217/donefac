@@ -8,7 +8,7 @@ import {
 import { isRelationId } from '../shared/issue-relations.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
 import type { CalendarService } from './calendars.js';
-import { buildDeliveryBlockers } from './delivery-blockers.js';
+import { buildDeliveryBlockers, hasGitlabDeliveryBlocker } from './delivery-blockers.js';
 import { buildDeliveryBlockerDraftContent } from './delivery-blocker-draft-content.js';
 import type { DocumentCreationService } from './document-creation.js';
 import type { IssueRelationsService } from './issue-relations.js';
@@ -67,7 +67,7 @@ function matchesReason(row: DeliveryBlockerRow, reason: DeliveryBlockerReason | 
   switch (reason) {
     case 'issue_block': return row.blockers.total > 0;
     case 'schedule_conflict': return row.scheduleConflicts.total > 0;
-    case 'gitlab': return row.gitlab.blockedMergeRequests > 0 || row.gitlab.failedPipelines > 0;
+    case 'gitlab': return hasGitlabDeliveryBlocker(row.gitlab);
     case 'missing_schedule': return Boolean(row.releaseSchedule?.missing.length);
     case 'after_release_date': return row.releaseSchedule?.afterDeadline === true;
     default: return true;

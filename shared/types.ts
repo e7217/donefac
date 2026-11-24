@@ -168,7 +168,7 @@ export interface DeliveryBlockerRow {
   deadline: { value: string; source: 'dueDate' | 'endDate' } | null;
   blockers: { total: number; items: DeliveryBlockerCause[] };
   scheduleConflicts: { total: number; items: DeliveryScheduleConflict[] };
-  gitlab: { blockedMergeRequests: number; failedPipelines: number };
+  gitlab: { blockedMergeRequests: number; failedPipelines: number; manualPipelines: number };
   releaseSchedule?: {
     startDate: string | null;
     endDate: string | null;
