@@ -1068,7 +1068,7 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. 배열 요청에서는 이 필드가 선택한 첫 관계를 가리키고, `relations`에 전체 선택의 `{relationId,expectedVersion,targetIssueId}`가 들어간다. `sourceSchedule`은 서버에 저장된 선행 업무의 `version`, `startDate`, `endDate`를 제공한다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 모든 선택 관계의 버전과 현재 대상, 관련 업무의 소속·버전, 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
 
-`POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다.
+`POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다. 원인 티켓에서는 `X-Teamspace-Schedule-Undo-Scope: issue:<원인 업무 ID>` 헤더로 적용과 되돌리기를 요청한다. 원인 날짜를 그대로 두고 후행만 변경해도 `GET /api/schedule/undo/latest?scope=issue&id=…`로 같은 티켓의 마지막 변경을 찾을 수 있다.
 
 ## 선택 업무의 날짜 일괄 편집
 

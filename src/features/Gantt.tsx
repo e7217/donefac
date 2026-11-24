@@ -55,6 +55,7 @@ import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDep
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
+import { findTeamBlockerChoices } from './team-follow-up-choices';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
@@ -135,22 +136,6 @@ type TeamFollowUpHandoff = {
   origin: TeamFollowUpOrigin;
   choices: readonly TeamFollowUpChoice[];
 };
-function findTeamBlockerChoices(data: FeatureProps['data'], projects: ReadonlyMap<string, Project>) {
-  const choices = new Map<string, TeamFollowUpChoice[]>();
-  if (!data.teamScheduleBlockers?.length) return choices;
-  const byId = new Map(data.issues.map(issue => [issue.id, issue]));
-  for (const relation of data.teamScheduleBlockers) {
-    const source = byId.get(relation.sourceIssueId), target = byId.get(relation.targetIssueId);
-    if (!source || !target || source.projectId === target.projectId ||
-        !projects.has(source.projectId) || !projects.has(target.projectId) ||
-        isTerminalStatus(data, source.projectId, source.status) || isTerminalStatus(data, target.projectId, target.status)) continue;
-    const current = choices.get(source.id);
-    if (current) current.push({ relation, target });
-    else choices.set(source.id, [{ relation, target }]);
-  }
-  for (const options of choices.values()) options.sort((a, b) => a.target.key.localeCompare(b.target.key, 'ko', { numeric: true }));
-  return choices;
-}
 type RowScheduleEdit = {
   issue: Issue;
   opener: HTMLButtonElement;

@@ -8,6 +8,7 @@ import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
 import { scheduleUndoHeaders } from './schedule-undo';
+import './gantt-team-blockers.css';
 
 export type CascadeAnchorChange = ScheduleAnchorChange;
 
@@ -26,6 +27,7 @@ type Props = {
   onClose: () => void;
   onApplied: (result: ScheduleApplyResult, unchangedSource?: SourceSchedule) => Promise<void> | void;
   onBusyChange: (value: boolean) => void;
+  onInputDirtyChange?: (dirty: boolean) => void;
   onOutcomeUnknownChange?: (unknown: boolean) => void;
 } & (
   | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never }
@@ -62,7 +64,8 @@ function currentSourceSchedule(cause: unknown): SourceSchedule | null {
 }
 
 export function GanttCascadeDialog({
-  projectId, anchorChange, teamFollowUp, projects, actorId, undoScope, onClose, onApplied, onBusyChange, onOutcomeUnknownChange,
+  projectId, anchorChange, teamFollowUp, projects, actorId, undoScope, onClose, onApplied, onBusyChange,
+  onInputDirtyChange, onOutcomeUnknownChange,
 }: Props) {
   const headingId = useId();
   const sourceDateErrorId = useId();
@@ -82,8 +85,10 @@ export function GanttCascadeDialog({
   const [handoffDates, setHandoffDates] = useState<SourceDates | null>(() => initialChange ? dateValues(initialChange) : null);
   const [reviewedSourceDates, setReviewedSourceDates] = useState<SourceDates | null>(null);
   const [staleSource, setStaleSource] = useState<SourceSchedule | null>(null);
+  const fromIssue = undoScope.kind === 'issue';
   const route = teamFollowUp ? '/schedule/team-follow-up' : '/schedule/auto';
   const sourceDatesDirty = sourceBaseline !== null && !datesMatch(sourceDates, sourceBaseline);
+  const inputDirty = !applied && (handoffDates ? !datesMatch(sourceDates, handoffDates) : sourceDatesDirty);
   const sourceDateOrderInvalid = Boolean(sourceDates.startDate && sourceDates.endDate && sourceDates.startDate > sourceDates.endDate);
   const sourceDatesNeedPreview = reviewedSourceDates !== null && !datesMatch(sourceDates, reviewedSourceDates);
   const needsPreview = freshPreviewNeeded || sourceDatesNeedPreview || staleSource !== null;
@@ -141,6 +146,10 @@ export function GanttCascadeDialog({
     const active = document.activeElement;
     if (!dialog.current?.contains(active) || active?.matches(':disabled')) dialog.current?.focus({ preventScroll: true });
   }, [pending, outcomeUnknown, needsPreview, sourceDatesDirty, staleSource, applied]);
+  useLayoutEffect(() => {
+    onInputDirtyChange?.(inputDirty);
+    return () => onInputDirtyChange?.(false);
+  }, [onInputDirtyChange, inputDirty]);
   useEffect(() => {
     const scheduled = window.setTimeout(() => void load(initialChange, initialChange), 0);
     return () => {
@@ -175,7 +184,7 @@ export function GanttCascadeDialog({
   async function reflect(result: ScheduleApplyResult) {
     setApplied(result);
     try { await onApplied(result, preview?.teamFollowUp?.sourceSchedule); }
-    catch { setError('일정이 저장되었습니다. 간트 화면을 다시 불러와 주세요.'); }
+    catch { setError(fromIssue ? '일정이 저장되었습니다. 업무를 다시 불러와 주세요.' : '일정이 저장되었습니다. 간트 화면을 다시 불러와 주세요.'); }
   }
 
   function updateOutcomeUnknown(unknown: boolean) {
@@ -229,11 +238,10 @@ export function GanttCascadeDialog({
 
   function close() {
     if (request.current) return;
-    const returnTarget = initialChange ? '이전 일정 화면으로' : teamFollowUp ? '차단 관계 목록으로' : '입력으로';
-    const editedHere = handoffDates ? !datesMatch(sourceDates, handoffDates) : sourceDatesDirty;
+    const returnTarget = fromIssue ? '업무 상세로' : initialChange ? '이전 일정 화면으로' : teamFollowUp ? '차단 관계 목록으로' : '입력으로';
     if (outcomeUnknown) {
       if (!window.confirm(`일정 적용 여부를 확인하지 못했습니다. ${returnTarget} 돌아갈까요?`)) return;
-    } else if (editedHere && !applied && !window.confirm(`여기서 수정한 선행 업무 일정을 버리고 ${returnTarget} 돌아갈까요?`)) return;
+    } else if (inputDirty && !window.confirm(`여기서 수정한 선행 업무 일정을 버리고 ${returnTarget} 돌아갈까요?`)) return;
     onClose();
   }
 
@@ -316,9 +324,9 @@ export function GanttCascadeDialog({
       </tr>)}</tbody></table>
       {!preview.changes.length && <p className="issue-empty">적용할 일정 변경이 없습니다.</p>}
     </div>}
-    <footer><span className="muted">함께 적용한 날짜는 간트에서 한 번에 되돌릴 수 있습니다.</span>
+    <footer><span className="muted">함께 적용한 날짜는 {fromIssue ? '업무 상세에서' : '간트에서'} 한 번에 되돌릴 수 있습니다.</span>
       <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>돌아가기</button>
-      {applied ? <button className="btn btn-primary" type="button" disabled={Boolean(pending)} onClick={() => void refreshApplied()}><RefreshCw size={15} />간트 다시 불러오기</button>
+      {applied ? <button className="btn btn-primary" type="button" disabled={Boolean(pending)} onClick={() => void refreshApplied()}><RefreshCw size={15} />{fromIssue ? '업무 다시 불러오기' : '간트 다시 불러오기'}</button>
         : outcomeUnknown ? <button className="btn btn-primary" type="button" disabled={Boolean(pending)} onClick={() => void apply(true)}><RefreshCw size={15} />적용 결과 다시 확인</button>
         : <>
           {needsPreview && !pending && !staleSource && <button className="btn" type="button" disabled={sourceDateOrderInvalid}

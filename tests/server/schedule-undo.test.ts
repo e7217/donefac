@@ -203,3 +203,59 @@ test('a fixed source project can recover undo when only its cross-project succes
   assert.equal(await f.latest('project', otherProject.id), null);
   assert.equal((await f.undo(result.undoId, 200, scope)).updated[0].startDate, target.startDate);
 });
+
+test('cross-project follow-up undo belongs to the source ticket and actor, with or without a source date change', async t => {
+  const f = await fixture(t);
+  const otherProject = await f.call<Project>('/projects', 201, 'POST', { key: 'UNDOT', name: '티켓 후행 일정' });
+  for (const changeSource of [false, true]) {
+    const source = await f.issue(changeSource ? '함께 변경할 선행 일정' : '변경하지 않을 선행 일정');
+    const target = await f.issue('다른 프로젝트의 후행 일정', otherProject.id);
+    const relation = await f.call<IssueRelation>(`/issues/${source.id}/relations`, 201, 'POST', {
+      otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+    });
+    const preview = await f.call<AutomaticSchedulePreview>('/schedule/team-follow-up-preview', 200, 'POST', {
+      relationId: relation.id, expectedVersion: relation.version,
+      ...(changeSource ? { anchorChange: { ...expected(source), startDate: source.startDate, endDate: '2026-11-23' } } : {}),
+    });
+    const toRestore = changeSource ? [source, target] : [target];
+    assert.deepEqual(preview.blocking, []);
+    assert.deepEqual(preview.changes.map(({ id }) => id).sort(), toRestore.map(({ id }) => id).sort());
+    const input = { previewId: preview.previewId };
+    const resultPath = `/schedule/team-follow-up-result/${preview.previewId}`;
+    const scope = `issue:${source.id}`;
+    const wrongScope = `issue:${target.id}`;
+    const applyPath = '/schedule/team-follow-up-apply';
+    const before = await f.workspace();
+    await f.call(applyPath, 400, 'POST', input, actor, wrongScope);
+    await f.call(applyPath, 409, 'POST', input, otherActor, scope);
+    assert.deepEqual(await f.workspace(), before);
+    assert.deepEqual(await f.call(resultPath, 200), { applied: false });
+
+    const applied = await f.call<SchedulePasteApplyResult>(applyPath, 200, 'POST', input, actor, scope);
+    assert.equal(applied.updated.find(({ id }) => id === target.id)?.startDate, changeSource ? '2026-11-24' : '2026-11-23');
+    assert.equal(applied.updated.find(({ id }) => id === source.id)?.endDate, changeSource ? '2026-11-23' : undefined);
+    assert.equal(await f.latest('issue', target.id), null);
+    assert.equal(await f.latest('issue', source.id, otherActor), null);
+    assert.equal(await f.latest('project', f.project.id), null);
+    assert.equal(await f.latest('team'), null);
+
+    if (!changeSource) await f.restart();
+    const latest = await f.latest('issue', source.id);
+    assert.equal(latest?.undoId, applied.undoId);
+    assert.equal(latest?.issueCount, toRestore.length);
+    await f.call(resultPath, 409, 'GET', undefined, otherActor);
+    assert.deepEqual(await f.call(resultPath, 200), applied);
+    await f.undo(applied.undoId, 409, wrongScope);
+    await f.undo(applied.undoId, 409, scope, otherActor);
+
+    const undone = await f.undo(applied.undoId, 200, scope);
+    const dates = ({ id, startDate, endDate, dueDate }: Issue) => [id, startDate, endDate, dueDate];
+    assert.deepEqual(undone.updated.map(dates).sort(), toRestore.map(dates).sort());
+    assert.equal(await f.latest('issue', source.id), null);
+    const restored = await f.workspace();
+    await f.undo(applied.undoId, 409, wrongScope, actor, true);
+    await f.undo(applied.undoId, 409, scope, otherActor, true);
+    assert.deepEqual(await f.undo(applied.undoId, 200, scope, actor, true), { ...undone, duplicate: true });
+    assert.deepEqual(await f.workspace(), restored);
+  }
+});

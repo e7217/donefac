@@ -293,3 +293,147 @@ test('360px에서는 간트의 날짜 초안과 고른 Jira 이관 관계를 함
     for (const pkg of packages) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`, { headers });
   }
 });
+
+test('360px 티켓에서 날짜 초안을 넘겨 여러 프로젝트의 후행을 검토하고 같은 티켓에서 되돌린다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const readWorkspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [sourceProject, standardProject], users: [actor, peer] } = await readWorkspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const suffix = randomUUID().slice(0, 7);
+  const prefix = `티켓 후행 일정 ${suffix}`;
+  const issueIds = new Set<string>();
+  const previewPath = '/api/schedule/team-follow-up-preview';
+  const applyPath = '/api/schedule/team-follow-up-apply';
+  const undoPath = '/api/schedule/undo';
+  async function createIssue(project: Project, title: string, startDate: string, endDate: string) {
+    const result = await json<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId: project.id, title: `${prefix} ${title}`, startDate, endDate },
+    }), 201);
+    issueIds.add(result.id);
+    return result;
+  }
+
+  try {
+    const holidayProject = await json<Project>(await request.post('/api/projects', {
+      headers, data: { key: `TH${suffix.toUpperCase()}`, name: `${prefix} 대상 휴무` },
+    }), 201);
+    const calendarPath = `/api/projects/${holidayProject.id}/calendar`;
+    const calendar = await json<WorkCalendar>(await request.get(calendarPath));
+    await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
+      expectedVersion: calendar.version, exceptions: [{ date: '2026-11-27', isWorking: false, label: '대상 휴무' }],
+    } }));
+    const source = await createIssue(sourceProject, '원인', '2026-11-23', '2026-11-24');
+    const standard = await createIssue(standardProject, '일반 달력의 후행', '2026-11-25', '2026-11-26');
+    const holiday = await createIssue(holidayProject, '휴일을 건너뛰는 후행', '2026-11-25', '2026-11-25');
+    for (const target of [standard, holiday]) {
+      await json<IssueRelation>(await request.post(`/api/issues/${source.id}/relations`, {
+        headers, data: { type: 'blocks', direction: 'outgoing', otherIssueId: target.id },
+      }), 201);
+    }
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${sourceProject.id}/issues?issue=${source.id}`);
+    const details = page.getByRole('dialog', { name: source.title, exact: true });
+    const panelStart = details.getByLabel('시작일', { exact: true });
+    const panelEnd = details.getByLabel('종료일', { exact: true });
+    const due = details.getByLabel('목표 마감일', { exact: true });
+    const description = details.getByRole('textbox', { name: '설명', exact: true });
+    const comment = details.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const launch = details.getByRole('button', { name: '프로젝트 간 일정 검토', exact: true });
+    const chooser = page.getByRole('dialog', { name: '후행 업무 선택', exact: true });
+    const review = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    await panelEnd.fill('2026-11-26');
+    await due.fill('2026-12-10');
+    await description.fill('아직 저장하지 않은 원인 설명');
+    await comment.fill('아직 게시하지 않은 댓글');
+    await launch.click();
+    await chooser.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(launch).toBeFocused();
+    await expect(panelEnd).toHaveValue('2026-11-26');
+    await expect(due).toHaveValue('2026-12-10');
+
+    await launch.click();
+    for (const target of [standard, holiday]) {
+      await chooser.getByRole('checkbox', { name: `${target.key} 함께 검토`, exact: true }).check();
+    }
+    const opening = scheduleResponse(page, previewPath);
+    await chooser.getByRole('button', { name: '선택한 후행 일정 검토', exact: true }).click();
+    const originalPreview = await opening;
+    expect(originalPreview.request().postDataJSON().anchorChange).toEqual({
+      id: source.id, expectedVersion: source.version, startDate: source.startDate, endDate: '2026-11-26',
+    });
+    const comparison = review.getByRole('table', { name: '검토할 업무 일정', exact: true });
+    await expect(comparison.getByRole('row').filter({ hasText: standard.title })).toContainText(standardProject.name);
+    await expect(comparison.getByRole('row').filter({ hasText: holiday.title })).toContainText(holidayProject.name);
+    const bounds = (await review.boundingBox())!;
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(360);
+
+    const peerSaved = await json<Issue>(await request.patch(`/api/issues/${source.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: source.version, startDate: '2026-11-24', dueDate: '2026-12-15' },
+    }));
+    const apply = review.getByRole('button', { name: '함께 적용', exact: true });
+    const stale = scheduleResponse(page, applyPath);
+    await apply.click();
+    expect((await stale).status()).toBe(409);
+    await review.getByRole('button', { name: '최신 일정 기준으로 다시 검토', exact: true }).click();
+    await expect(review.getByLabel('선행 업무 시작일', { exact: true })).toHaveValue(peerSaved.startDate!);
+    await expect(review.getByLabel('선행 업무 종료일', { exact: true })).toHaveValue('2026-11-26');
+    const recalculating = scheduleResponse(page, previewPath);
+    await review.getByRole('button', { name: '미리보기 다시 계산', exact: true }).click();
+    const retryPreview = await recalculating;
+    expect(retryPreview.request().postDataJSON().anchorChange).toEqual({
+      id: source.id, expectedVersion: peerSaved.version, startDate: '2026-11-24', endDate: '2026-11-26',
+    });
+    const reviewed = await json<AutomaticSchedulePreview>(retryPreview);
+    expect(reviewed.blocking).toEqual([]);
+    expect(reviewed.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual(expect.arrayContaining([
+      [standard.id, '2026-11-27', '2026-11-30'], [holiday.id, '2026-11-30', '2026-11-30'],
+    ]));
+
+    let applied: SchedulePasteApplyResult | undefined;
+    await page.route(url => url.pathname === applyPath, async route => {
+      expect(route.request().headers()['x-teamspace-schedule-undo-scope']).toBe(`issue:${source.id}`);
+      applied = await json<SchedulePasteApplyResult>(await route.fetch());
+      await route.fulfill({ status: 408, json: { error: '합성 응답 유실' } });
+    }, { times: 1 });
+    await apply.click();
+    const retry = review.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    const recovery = scheduleResponse(page, `/api/schedule/team-follow-up-result/${reviewed.previewId}`, 'GET');
+    await retry.click();
+    expect(await json<SchedulePasteApplyResult>(await recovery)).toEqual(applied);
+    await expect(review).toHaveCount(0);
+    await expect(launch).toBeFocused();
+    await expect(panelStart).toHaveValue('2026-11-24');
+    await expect(panelEnd).toHaveValue('2026-11-26');
+    await expect(due).toHaveValue('2026-12-10');
+    await expect(description).toHaveValue('아직 저장하지 않은 원인 설명');
+    await expect(comment).toHaveValue('아직 게시하지 않은 댓글');
+    await expect(details.getByText('다른 변경사항이 있습니다', { exact: true })).toBeVisible();
+    expect((await readWorkspace()).issues.find(issue => issue.id === source.id)).toMatchObject({
+      version: peerSaved.version + 1, dueDate: peerSaved.dueDate, description: source.description,
+    });
+
+    const undoing = scheduleResponse(page, undoPath);
+    await details.getByRole('button', { name: '일정과 연결 되돌리기', exact: true }).click();
+    const undoResponse = await undoing;
+    expect(undoResponse.request().postDataJSON()).toEqual({ undoId: applied!.undoId });
+    const undone = await json<SchedulePasteApplyResult>(undoResponse);
+    expect(undone.updated.map(issue => issue.id).sort()).toEqual([source.id, standard.id, holiday.id].sort());
+    await expect(panelStart).toHaveValue(peerSaved.startDate!);
+    await expect(panelEnd).toHaveValue(source.endDate!);
+    await expect(due).toHaveValue('2026-12-10');
+    await expect(description).toHaveValue('아직 저장하지 않은 원인 설명');
+    await expect(comment).toHaveValue('아직 게시하지 않은 댓글');
+    await expect(details.getByText('다른 변경사항이 있습니다', { exact: true })).toBeVisible();
+    const restored = await readWorkspace();
+    expect(restored.issues.find(issue => issue.id === source.id)?.dueDate).toBe(peerSaved.dueDate);
+    for (const target of [standard, holiday]) expect(restored.issues.find(issue => issue.id === target.id)).toMatchObject({
+      startDate: target.startDate, endDate: target.endDate,
+    });
+    await expect(page).toHaveURL(url => url.hash === `#/${sourceProject.id}/issues?issue=${source.id}`);
+  } finally {
+    await removeIssues(request, issueIds, headers);
+  }
+});

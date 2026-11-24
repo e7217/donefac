@@ -694,7 +694,7 @@ export class AutomaticScheduleService{
       const projectId = sourceIssueId ? this.store.get<Issue>('issues', sourceIssueId)?.projectId
         : 'projectId' in proposal ? proposal.projectId : undefined;
       const committed = hooks.commitChanges(request, proposal.preview.changes.map(toMutation), {
-        projectId, selectableProject: scope === 'automatic' || scope === 'team-workload',
+        projectId, issueId: sourceIssueId, selectableProject: scope === 'automatic' || scope === 'team-workload',
       });
       const result = scope === 'team-follow-up' ? { ...committed,
         warnings: [...new Set([...proposal.preview.warnings, ...(committed.warnings ?? [])])] } : committed;

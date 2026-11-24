@@ -43,6 +43,10 @@ import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
+import { GanttCascadeDialog, type TeamFollowUpSelection } from './GanttCascadeDialog';
+import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
+import { findTeamBlockerChoices } from './team-follow-up-choices';
+import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import './issues.css';
 import './issue-decision-source.css';
 import './issue-review.css';
@@ -55,6 +59,8 @@ type IssueDependencyEditor =
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
 type IssueEditError = { message: string; openBlockers?: boolean };
 const scheduleDateFields = ['startDate', 'endDate', 'dueDate'] as const;
+type ScheduleDraftFields = 'none' | 'due-date' | 'all';
+type TicketTeamFollowUp = Omit<TeamFollowUpSelection, 'source'> & { source: Issue; choosing: boolean };
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
@@ -228,16 +234,21 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [rowScheduleEdit, setRowScheduleEdit] = useState<{
     issue: Issue; initialDates: ScheduleBulkDateChanges; initialDateDraft?: Issue;
   } | null>(null);
-  const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; keepDateDraft: boolean } | null>(null);
+  const [teamFollowUp, setTeamFollowUp] = useState<TicketTeamFollowUp | null>(null);
+  const teamFollowUpChoices = useMemo(() => findTeamBlockerChoices(data,
+    new Map(data.projects.map(project => [project.id, project]))).get(issueId) ?? [], [data, issueId]);
+  const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; draftFields: ScheduleDraftFields } | null>(null);
   const scheduleUndoScope: ScheduleUndoScope | null = issue ? { kind: 'issue', id: issue.id } : null;
   const { undoId: scheduleUndoId, remember: rememberScheduleUndo, undo: undoSchedule } = useScheduleUndo(
     scheduleUndoScope, props.actorId, data.restoreGeneration,
   );
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const rowScheduleOpener = useRef<HTMLButtonElement>(null);
+  const teamFollowUpOpener = useRef<HTMLButtonElement>(null);
   const rowScheduleUndoButton = useRef<HTMLButtonElement>(null);
-  const scheduleReturnFocus = useRef<'edit' | 'undo' | null>(null);
+  const scheduleReturnFocus = useRef<'edit' | 'undo' | 'team-follow-up' | null>(null);
   const rowScheduleGuard = useRef({ dirty: false, pending: false });
+  const teamFollowUpGuard = useRef({ dirty: false, pending: false, outcomeUnknown: false });
   const trackRowScheduleDraft = useCallback((_id: string, dirty: boolean, pending = false) => {
     rowScheduleGuard.current = { dirty, pending };
   }, []);
@@ -246,6 +257,22 @@ function IssuePanelContent(props: IssuePanelProps) {
     scheduleReturnFocus.current = restoreFocus ? 'edit' : null;
     setRowScheduleEdit(null);
   }, []);
+  const trackTeamFollowUpBusy = useCallback((pending: boolean) => {
+    teamFollowUpGuard.current.pending = pending;
+  }, []);
+  const trackTeamFollowUpDirty = useCallback((dirty: boolean) => {
+    teamFollowUpGuard.current.dirty = dirty;
+  }, []);
+  const trackTeamFollowUpOutcome = useCallback((outcomeUnknown: boolean) => {
+    teamFollowUpGuard.current.outcomeUnknown = outcomeUnknown;
+  }, []);
+  const closeTeamFollowUp = useCallback((restoreFocus = true) => {
+    const outcomeUnknown = teamFollowUpGuard.current.outcomeUnknown;
+    teamFollowUpGuard.current = { dirty: false, pending: false, outcomeUnknown: false };
+    scheduleReturnFocus.current = restoreFocus ? 'team-follow-up' : null;
+    setTeamFollowUp(null);
+    if (restoreFocus && outcomeUnknown) void refresh().catch(cause => notify(errorMessage(cause), 'error'));
+  }, [refresh, notify]);
   const [projectMove, setProjectMove] = useState<{ draftMessage: string | null } | null>(null);
   const projectMoveTrigger = useRef<HTMLButtonElement>(null);
   const projectMoveGuard = useRef({ dirty: false, pending: false, uncertain: false });
@@ -266,7 +293,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLinkedDocumentCreation(false);
     if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
   }, [trackLinkedDocumentDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || teamFollowUp || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const [jiraDeadlinePending, setJiraDeadlinePending] = useState(false);
   const jiraDeadlinePendingRef = useRef(false);
@@ -277,9 +304,10 @@ function IssuePanelContent(props: IssuePanelProps) {
   // Restore focus after the nested dialog is removed and the ticket becomes interactive.
   useLayoutEffect(() => {
     if (dependencyBusy || nestedModalOpen || previewDocumentId || !scheduleReturnFocus.current) return;
-    const retryButton = scheduleReturnFocus.current === 'undo' ? rowScheduleUndoButton.current : null;
+    const returnButton = scheduleReturnFocus.current === 'undo' ? rowScheduleUndoButton.current
+      : scheduleReturnFocus.current === 'team-follow-up' ? teamFollowUpOpener.current : null;
     scheduleReturnFocus.current = null;
-    const target = retryButton ?? rowScheduleOpener.current;
+    const target = returnButton ?? rowScheduleOpener.current;
     if (target && !target.disabled && !target.closest('[inert]')) target.focus({ preventScroll: true });
   }, [dependencyBusy, nestedModalOpen, previewDocumentId]);
   const statusField = useRef<HTMLSelectElement>(null);
@@ -347,16 +375,24 @@ function IssuePanelContent(props: IssuePanelProps) {
   if (scheduleReflection) {
     setScheduleReflection(null);
     if (issue && draft && baseDraft && issue.projectId === baseDraft.projectId && draft.version === baseDraft.version) {
-      const { anchorVersion, keepDateDraft } = scheduleReflection;
+      const { anchorVersion, draftFields } = scheduleReflection;
       // The receipt proves the saved anchor version. Leave newer workspace changes for an explicit review.
       if (issue.version >= baseDraft.version && issue.version === (anchorVersion ?? baseDraft.version)) {
-        const merged = mergeIssueFieldsAfterSchedule(baseDraft, draft, labels, issue);
+        const previousDue = baseDraft.dueDate ?? null;
+        const localDue = draft.dueDate ?? null;
+        const savedDue = issue.dueDate ?? null;
+        // A later undo must not clear a known due-date conflict from the follow-up apply.
+        const reviewLocalDue = draftFields === 'due-date' || (draftFields === 'all' && conflict);
+        const dueDateConflict = reviewLocalDue && localDue !== previousDue && savedDue !== previousDue && localDue !== savedDue;
+        const merged = dueDateConflict ? null : mergeIssueFieldsAfterSchedule(baseDraft, draft, labels, issue);
         const nextDraft = merged?.draft ?? { ...draft };
         for (const field of scheduleDateFields) {
-          nextDraft[field] = keepDateDraft && draft[field] !== baseDraft[field] ? draft[field] : issue[field];
+          const keepLocal = draftFields === 'all' || (draftFields === 'due-date' && field === 'dueDate');
+          nextDraft[field] = keepLocal && draft[field] !== baseDraft[field] ? draft[field] : issue[field];
         }
         setDraft(nextDraft);
-        setBaseDraft(merged ? issue : { ...baseDraft, startDate: issue.startDate, endDate: issue.endDate, dueDate: issue.dueDate });
+        setBaseDraft(merged ? issue : { ...baseDraft, startDate: issue.startDate, endDate: issue.endDate,
+          dueDate: dueDateConflict ? baseDraft.dueDate : issue.dueDate });
         if (merged) {
           setLabels(merged.labels);
           setConflict(false);
@@ -380,9 +416,10 @@ function IssuePanelContent(props: IssuePanelProps) {
       if (event.defaultPrevented) return;
       const childDrafts = [childDraft.current, gitlabDraft.current];
       const documentGuard = linkedDocumentGuard.current;
+      const followUpGuard = teamFollowUpGuard.current;
       if (savingRef.current || commentingRef.current || linkingRef.current || isCommentEditPending() ||
           childDrafts.some(value => value?.pending) || dependencyBusyRef.current || rowScheduleGuard.current.pending ||
-          projectMoveGuard.current.pending || documentGuard.pending || jiraDeadlinePendingRef.current) {
+          followUpGuard.pending || projectMoveGuard.current.pending || documentGuard.pending || jiraDeadlinePendingRef.current) {
         event.preventDefault();
         notify('저장이 끝난 후 이동해주세요.', 'error');
         return;
@@ -390,6 +427,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       const childNames = childDrafts.flatMap(value => value?.dirty ? [value.label ?? (tab === 'reservations' ? '시간 배정 입력' : '작업 시간 기록')] : []);
       if (dependencyDraftRef.current) childNames.push('업무 연결 입력');
       if (rowScheduleGuard.current.dirty) childNames.push('일정과 연결 입력');
+      if (followUpGuard.dirty) childNames.push('프로젝트 간 일정 입력');
       if (documentGuard.dirty && !documentGuard.uncertain) childNames.push('연결 문서 입력');
       if (hasCommentEditDraft()) childNames.push('댓글 수정 입력');
       const moveGuard = projectMoveGuard.current;
@@ -399,13 +437,13 @@ function IssuePanelContent(props: IssuePanelProps) {
         return;
       }
       if (moveGuard.dirty && (dirtyRef.current || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
-      if (dirtyRef.current || childNames.length || documentGuard.uncertain) {
+      if (dirtyRef.current || childNames.length || documentGuard.uncertain || followUpGuard.outcomeUnknown) {
         const hasUnsavedInput = dirtyRef.current || childNames.length > 0;
         const draftMessage = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
           : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
-        const message = documentGuard.uncertain
-          ? `연결 문서가 이미 저장됐을 수 있습니다. ${hasUnsavedInput ? draftMessage : '저장 결과 확인을 닫고 이동할까요?'}`
-          : draftMessage;
+        const unconfirmedSave = documentGuard.uncertain ? '연결 문서가 이미 저장됐을 수 있습니다.'
+          : followUpGuard.outcomeUnknown ? '프로젝트 간 일정이 이미 저장됐을 수 있습니다.' : '';
+        const message = unconfirmedSave ? `${unconfirmedSave} ${hasUnsavedInput ? draftMessage : '저장 결과 확인을 닫고 이동할까요?'}` : draftMessage;
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
           for (const value of childDrafts) value?.discard();
@@ -416,6 +454,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         });
       }
       if (rowScheduleEdit) afterAcceptedNavigation(event, () => closeRowScheduleEdit(false));
+      if (teamFollowUp) afterAcceptedNavigation(event, () => closeTeamFollowUp(false));
       if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
       if (linkedDocumentCreation) afterAcceptedNavigation(event, () => closeLinkedDocumentCreation(false));
       afterAcceptedNavigation(event, discardCommentEdit);
@@ -423,13 +462,15 @@ function IssuePanelContent(props: IssuePanelProps) {
     const leave = (event: BeforeUnloadEvent) => {
       if (!dirtyRef.current && !savingRef.current && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
           !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
-          !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
+          !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !teamFollowUpGuard.current.dirty && !teamFollowUpGuard.current.pending &&
+          !teamFollowUpGuard.current.outcomeUnknown && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
           !linkedDocumentGuard.current.dirty && !linkedDocumentGuard.current.pending && !linkedDocumentGuard.current.uncertain) return;
       event.preventDefault(); event.returnValue = '';
     };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
-  }, [issue, notify, tab, projectMove, rowScheduleEdit, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeLinkedDocumentCreation, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
+  }, [issue, notify, tab, projectMove, rowScheduleEdit, teamFollowUp, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeTeamFollowUp,
+    closeLinkedDocumentCreation, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -563,22 +604,48 @@ function IssuePanelContent(props: IssuePanelProps) {
     setRowScheduleEdit({ issue: savedRelationIssue, initialDates,
       initialDateDraft: Object.keys(initialDates).length ? baseDraft : undefined });
   }
-  async function reflectIssueSchedule(anchorVersion: number | null, keepDateDraft: boolean) {
-    await refresh();
-    setScheduleReflection({ anchorVersion, keepDateDraft });
+  function openTeamFollowUp() {
+    if (!issue || !draft || !baseDraft || !teamFollowUpChoices.length) return;
+    if (savingRef.current || commentingRef.current || linkingRef.current || dependencyBusyRef.current || isCommentEditPending() ||
+        childDraft.current?.pending || gitlabDraft.current?.pending || jiraDeadlinePendingRef.current) {
+      notify('현재 요청이 끝난 뒤 프로젝트 간 일정을 검토해 주세요.', 'error');
+      return;
+    }
+    if (baseDraft.projectId !== issue.projectId) {
+      notify('업무가 다른 프로젝트로 이동했습니다. 최신 업무를 확인한 뒤 일정을 편집해 주세요.', 'error');
+      return;
+    }
+    const hasDateDraft = draft.startDate !== baseDraft.startDate || draft.endDate !== baseDraft.endDate;
+    // The original dates let the review retain just the edited endpoint if the other endpoint changed on the server.
+    const source = hasDateDraft ? baseDraft : savedRelationIssue;
+    const initialChange = hasDateDraft ? { id: source.id, expectedVersion: source.version, startDate: draft.startDate, endDate: draft.endDate } : undefined;
+    setTeamFollowUp({ source, initialChange, choices: teamFollowUpChoices, choosing: teamFollowUpChoices.length > 1 });
   }
-  async function reflectScheduleChange(result: Pick<SchedulePasteApplyResult, 'updated' | 'warnings'>, keepDateDraft: boolean, reviewedAnchorVersion?: number) {
-    await reflectIssueSchedule(result.updated.find(value => value.id === issueId)?.version ?? reviewedAnchorVersion ?? null, keepDateDraft);
-    setScheduleWarnings(result.warnings);
+  function chooseTeamFollowUps(choices: readonly TeamFollowUpChoice[]) {
+    setTeamFollowUp(current => current && { ...current, choices, choosing: false });
+  }
+  async function reflectIssueSchedule(anchorVersion: number | null, draftFields: ScheduleDraftFields) {
+    await refresh();
+    setScheduleReflection({ anchorVersion, draftFields });
+  }
+  async function reflectScheduleChange(result: Pick<ScheduleApplyResult, 'updated' | 'warnings'>, draftFields: ScheduleDraftFields, reviewedAnchorVersion?: number) {
+    await reflectIssueSchedule(result.updated.find(value => value.id === issueId)?.version ?? reviewedAnchorVersion ?? null, draftFields);
+    setScheduleWarnings(result.warnings ?? []);
   }
   async function reflectRowScheduleEdit(result: SchedulePasteApplyResult, reviewedAnchorVersion: number) {
     rememberScheduleUndo(result.undoId);
-    await reflectScheduleChange(result, false, reviewedAnchorVersion);
+    await reflectScheduleChange(result, 'none', reviewedAnchorVersion);
     closeRowScheduleEdit();
     const datesChanged = result.updated.length > 0;
     const linksChanged = Boolean(result.dependencyChanges);
     notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
       : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
+  }
+  async function reflectTeamFollowUp(result: ScheduleApplyResult, reviewedSource?: Pick<Issue, 'version'>) {
+    rememberScheduleUndo(result.undoId);
+    await reflectScheduleChange(result, 'due-date', reviewedSource?.version);
+    closeTeamFollowUp();
+    notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);
   }
   async function undoRowScheduleEdit() {
     if (!scheduleUndoId || dependencyBusyRef.current || savingRef.current || rowScheduleGuard.current.pending) return;
@@ -588,7 +655,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       const result = await undoSchedule();
       if (!result) return;
       try {
-        await reflectScheduleChange(result, true);
+        await reflectScheduleChange(result, 'all');
         notify('일정과 연결 변경을 되돌렸습니다.');
       } catch (cause) {
         notify(`일정과 연결 변경을 되돌렸습니다. 최신 업무를 불러오지 못했습니다. ${errorMessage(cause)}`, 'error');
@@ -993,6 +1060,8 @@ function IssuePanelContent(props: IssuePanelProps) {
           <div className="issue-grid-wide issue-date-actions">
             <button ref={rowScheduleOpener} className="btn" type="button" aria-haspopup="dialog" disabled={dependencyBusy || commenting}
               onClick={openRowScheduleEdit}><CalendarRange size={15} aria-hidden="true" />일정과 연결 편집</button>
+            {teamFollowUpChoices.length > 0 && <button ref={teamFollowUpOpener} className="btn" type="button" aria-haspopup="dialog"
+              disabled={reviewBusy} onClick={openTeamFollowUp}><CalendarRange size={15} aria-hidden="true" />프로젝트 간 일정 검토</button>}
             <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
               onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button>
             {scheduleUndoId && <button ref={rowScheduleUndoButton} className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
@@ -1152,7 +1221,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     : tab === 'source' ? <>
       <JiraDeadlineRecovery issueId={issue.id} issueVersion={issue.version} actorId={props.actorId}
         blockedReason={deadlineRecoveryBlocked} onPendingChange={trackJiraDeadlinePending}
-        onObserved={version => reflectIssueSchedule(version, true)} />
+        onObserved={version => reflectIssueSchedule(version, 'all')} />
       <SourceOrigins resourceType="issue" resourceId={issue.id} />
     </> : <>
       <IssueChangeHistory issueId={issue.id} issueVersion={issue.version} />
@@ -1191,6 +1260,11 @@ function IssuePanelContent(props: IssuePanelProps) {
       dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} undoScope={scheduleUndoScope ?? undefined} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
+    {teamFollowUp && (teamFollowUp.choosing ? <GanttTeamFollowUpChooser source={teamFollowUp.source} choices={teamFollowUp.choices}
+      projects={data.projects} onChoose={chooseTeamFollowUps} onClose={closeTeamFollowUp} />
+      : scheduleUndoScope && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} actorId={props.actorId} undoScope={scheduleUndoScope}
+        onClose={closeTeamFollowUp} onApplied={reflectTeamFollowUp} onBusyChange={trackTeamFollowUpBusy}
+        onInputDirtyChange={trackTeamFollowUpDirty} onOutcomeUnknownChange={trackTeamFollowUpOutcome} />)}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} issueAliases={data.issueAliases} dependency={editingDependency}
       anchor={dependencyEditor.otherRole ? { issueId, otherRole: dependencyEditor.otherRole } : undefined}
       relationReview={relationScheduleReview && { sourceIssueId: relationScheduleReview.relation.sourceIssueId,
