@@ -163,6 +163,140 @@ test('a newer synced reopened MR prevents delayed close automation without suppr
     [ignoredRun.id, changedRun.id].sort());
 });
 
+test('a newer REST-confirmed pipeline protects automation while an older compatible run remains in history', async t => {
+  const mock = createServer();
+  mock.listen(0, '127.0.0.1');
+  t.after(() => new Promise<void>(resolve => mock.close(() => resolve())));
+  await once(mock, 'listening');
+  const address = mock.address();
+  assert.ok(address && typeof address !== 'string');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const repoUrl = `${baseUrl}/team/repo`;
+  const f = await fixture();
+  t.after(f.close);
+  const configured = await f.call<GitlabSettings>('/integrations/gitlab', 'PATCH', {
+    expectedVersion: 1, baseUrl, projectIds: [42], webhookSecret: 'integration-secret',
+  });
+  assert.equal(configured.status, 200);
+  async function createIssue(title: string) {
+    const created = await f.call<Issue>('/issues', 'POST', { projectId: 'project-neo', title });
+    assert.equal(created.status, 201);
+    return created.data;
+  }
+  const issue = await createIssue('REST-confirmed pipeline');
+  const sibling = await createIssue('Another ticket for the same GitLab execution');
+  await endpoint(f);
+  await rule(f, { name: 'Pipeline failed', trigger: 'pipeline.failed', fromStatuses: [issue.status] });
+  const successRule = await rule(f, { name: 'Pipeline succeeded', trigger: 'pipeline.succeeded', fromStatuses: [issue.status] });
+  assert.ok(successRule.enabledAt);
+  const activation = Date.parse(successRule.enabledAt);
+  const branch = 'feature/ci-lane';
+  const oldTime = new Date(activation).toISOString();
+  const latestTime = new Date(activation + 1).toISOString();
+  const latest = {
+    id: 502, iid: 52, project_id: 42, ref: branch, sha: 'b'.repeat(40), status: 'success', source: 'push', tag: false,
+    title: `${issue.key} synthetic pipeline`, web_url: `${repoUrl}/-/pipelines/502`, updated_at: latestTime, finished_at: latestTime,
+  };
+  const listOnly = { ...latest, id: 503, iid: 53, web_url: `${repoUrl}/-/pipelines/503` };
+  const requests: string[] = [];
+  mock.on('request', (request, response) => {
+    const { pathname } = new URL(request.url ?? '/', baseUrl);
+    requests.push(`${request.method} ${pathname}`);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.method !== 'GET') response.writeHead(405).end('{}');
+    else if (pathname === '/api/v4/projects/42/merge_requests') response.end('[]');
+    else if (pathname === '/api/v4/projects/42/pipelines') response.end(JSON.stringify([listOnly, latest]));
+    else if (pathname === '/api/v4/projects/42') response.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo', web_url: repoUrl }));
+    else if (pathname === '/api/v4/projects/42/pipelines/502') response.end(JSON.stringify(latest));
+    else response.writeHead(404).end('{}');
+  });
+
+  const synced = await f.call<GitlabSyncResult>('/integrations/gitlab/sync', 'POST', { expectedVersion: configured.data.version });
+  assert.equal(synced.status, 200, JSON.stringify(synced.data));
+  assert.equal(synced.data.linked, 2);
+  const links = f.observer.all<GitlabLink>('gitlab_links').filter(link => link.issueId === issue.id);
+  const stored = links.find(link => link.iid === 52);
+  assert.ok(stored);
+  assert.equal(stored.pipelineTag, undefined);
+  const unconfirmed = links.find(link => link.iid === 53);
+  assert.equal(unconfirmed?.pipelineObservedAt, latestTime);
+  assert.equal(unconfirmed?.pipelineTag, undefined);
+  const currentIssue = () => f.observer.get<Issue>('issues', issue.id);
+  assert.deepEqual(currentIssue(), issue);
+  const refreshed = await f.call<GitlabIssueRefreshResult>(`/issues/${issue.id}/gitlab-links/${encodeURIComponent(stored.id)}/refresh`, 'POST', {});
+  assert.equal(refreshed.status, 200, JSON.stringify(refreshed.data));
+  assert.deepEqual(refreshed.data.failures, []);
+  assert.deepEqual(refreshed.data.links, [{ ...stored, pipelineObservedAt: latestTime, pipelineSource: 'push', pipelineTag: false }]);
+  const latestCursorId = stored.id.slice('gitlab:'.length, -`:${issue.id}`.length);
+  assert.equal(f.observer.get('gitlab_object_cursors', latestCursorId), undefined);
+  assert.deepEqual(currentIssue(), issue);
+
+  const older = (id: number, source = 'push', tag = false, ref = branch) => ({
+    ...latest, id, iid: id - 450, source, tag, ref, sha: 'a'.repeat(40), status: 'failed', title: 'Synthetic older run',
+    web_url: `${repoUrl}/-/pipelines/${id}`, finished_at: oldTime, updated_at: oldTime,
+  });
+  const webhook = (attributes: typeof latest, key: string, deliveryId = randomUUID()) => f.call<{
+    duplicate: boolean; linked: number; runs: AutomationRun[];
+  }>('/integrations/gitlab/webhook', 'POST', {
+    object_kind: 'pipeline', project: { id: 42, web_url: repoUrl }, object_attributes: attributes,
+    commit: { id: attributes.sha, message: `${key} pipeline` },
+  }, { 'X-Gitlab-Token': 'integration-secret', 'webhook-id': deliveryId });
+  const delayedId = randomUUID();
+  const delayed = await webhook(older(500), issue.key, delayedId);
+  assert.equal(delayed.status, 200, JSON.stringify(delayed.data));
+  assert.equal(delayed.data.duplicate, false);
+  assert.equal(delayed.data.linked, 1);
+  assert.equal(delayed.data.runs.length, 1);
+  const [ignored] = delayed.data.runs;
+  assert.equal(ignored.outcome, 'ignored');
+  assert.match(ignored.reason, /더 최신 GitLab 조회.*파이프라인/u);
+  assert.equal(ignored.occurredAt, oldTime);
+  assert.equal(ignored.context?.objectId, '500');
+  assert.equal(ignored.context?.pipelineSource, 'push');
+  assert.equal(ignored.context?.pipelineTag, false);
+  assert.deepEqual(currentIssue(), issue);
+  const olderLink = f.observer.all<GitlabLink>('gitlab_links').find(link => link.issueId === issue.id && link.iid === 50);
+  assert.equal(olderLink?.state, 'failed');
+  assert.equal(olderLink?.pipelineObservedAt, oldTime);
+  const duplicate = await webhook(older(500), issue.key, delayedId);
+  assert.equal(duplicate.data.duplicate, true);
+  assert.deepEqual(duplicate.data.runs, []);
+
+  const sharedRef = await webhook(older(501), sibling.key);
+  assert.equal(sharedRef.status, 200, JSON.stringify(sharedRef.data));
+  assert.equal(sharedRef.data.runs[0]?.outcome, 'ignored');
+  assert.match(sharedRef.data.runs[0]?.reason, /더 최신 GitLab 조회.*파이프라인/u);
+  assert.deepEqual(f.observer.get('issues', sibling.id), sibling);
+  assert.deepEqual((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data, []);
+  assert.equal(f.observer.get('gitlab_object_cursors', latestCursorId), undefined);
+
+  // The exact read is not a receipt. The higher list-only run hasn't confirmed its ref kind.
+  const fresh = await webhook(latest, issue.key);
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.data));
+  assert.equal(fresh.data.runs.length, 1);
+  assert.equal(fresh.data.runs[0].outcome, 'changed');
+  assert.equal(currentIssue()?.status, 'done');
+  assert.equal(currentIssue()?.version, issue.version + 1);
+  assert.ok(f.observer.get('gitlab_object_cursors', latestCursorId));
+
+  for (const [description, attributes] of [
+    ['different source', older(499, 'schedule')],
+    ['same name, but a tag', older(498, 'push', true)],
+    ['different ref', older(497, 'push', false, 'feature/independent')],
+  ] as const) {
+    const independent = await createIssue(description);
+    const delivery = await webhook(attributes, independent.key);
+    assert.equal(delivery.status, 200, JSON.stringify(delivery.data));
+    assert.equal(delivery.data.runs.length, 1);
+    assert.equal(delivery.data.runs[0].outcome, 'changed', description);
+    assert.equal(f.observer.get<Issue>('issues', independent.id)?.status, 'done');
+  }
+  assert.equal((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data.length, 4);
+  assert.deepEqual(requests.sort(), [
+    'GET /api/v4/projects/42', 'GET /api/v4/projects/42/merge_requests', 'GET /api/v4/projects/42/pipelines', 'GET /api/v4/projects/42/pipelines/502',
+  ]);
+});
+
 test('pipeline automation and the direct-review token distinguish compatible runs on the same ref', async t => {
   const branch = 'feature/pipeline-scope';
   const sha = 'a'.repeat(40);

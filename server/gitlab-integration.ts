@@ -625,6 +625,7 @@ export class GitlabIntegrationService{
   private readonly manualLinkRows:StatementSync;
   private readonly linkedActivityRows:StatementSync;
   private readonly compatiblePipelineCursor: StatementSync;
+  private readonly compatibleObservedPipelineLinks: StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
   private readonly webhookReceipts: GitlabWebhookReceipts;
   private readonly issueBranches: GitlabIssueBranchCreation;
@@ -653,6 +654,10 @@ export class GitlabIntegrationService{
       AND (? IS NULL OR json_extract(json,'$.pipeline.pipelineSource') IS NULL OR json_extract(json,'$.pipeline.pipelineSource')=?)
       AND (? IS NULL OR json_extract(json,'$.pipeline.pipelineTag') IS NULL OR json_extract(json,'$.pipeline.pipelineTag')=?)
       ORDER BY json_extract(json,'$.pipeline.objectId') DESC LIMIT 1`);
+    this.compatibleObservedPipelineLinks = store.db.prepare(`SELECT json FROM gitlab_links WHERE id>=? AND id<?
+      AND json_extract(json,'$.kind')='pipeline' AND json_extract(json,'$.sourceBranch')=?
+      AND json_extract(json,'$.pipelineSource')=? AND json_type(json,'$.pipelineTag')=?
+      AND json_type(json,'$.pipelineObservedAt')='text'`);
     this.projectWebhooks = new GitlabProjectWebhookSetup(store, () => {
       const saved = this.raw();
       const authMode = saved.signingToken ? 'signature' : saved.webhookSecret ? 'secret' : null;
@@ -1206,6 +1211,22 @@ export class GitlabIntegrationService{
     const identity = gitlabPipelineLinkIdentity(link);
     if (!identity) return null;
     return this.latestCompatiblePipelineId(identity.instance, link.projectId, link.sourceBranch, link);
+  }
+
+  private hasNewerObservedPipelineLink(instance: string, repositoryId: number, ref: string, objectId: number,
+    classification: PipelineClassification | undefined): boolean {
+    const source = gitlabPipelineSource(classification?.pipelineSource);
+    const tag = classification?.pipelineTag;
+    if (!source || typeof tag !== 'boolean' || !isGitlabBranchName(ref)) return false;
+    const prefix = `gitlab:${instance}:${repositoryId}:pipeline`;
+    const rows = this.compatibleObservedPipelineLinks.iterate(`${prefix}:`, `${prefix};`, ref, source, tag ? 'true' : 'false') as Iterable<{ json: string }>;
+    for (const { json } of rows) {
+      const link = JSON.parse(json) as GitlabLink;
+      const identity = gitlabPipelineLinkIdentity(link);
+      if (link.projectId === repositoryId && identity?.instance === instance && identity.objectId > objectId &&
+          link.pipelineObservedAt && link.pipelineObservedAt === link.updatedAt && occurredAt(link.pipelineObservedAt) === link.pipelineObservedAt) return true;
+    }
+    return false;
   }
 
   private latestNewerLinkedPipelineId(link: GitlabLink): number | null {
@@ -1924,6 +1945,13 @@ export class GitlabIntegrationService{
       }
       const issueIds=matches.map(match=>match.issue.id);
       const trigger=kind==='merge_request'?lifecycle?.trigger:({success:'pipeline.succeeded',failed:'pipeline.failed'} as Record<string,AutomationEvent['trigger']>)[state];
+      // A read can establish a newer execution without creating an authenticated webhook receipt.
+      // The older object's own observation still belongs in history.
+      if (trigger && issueIds.length && exactPipelineId && disposition === 'fresh' &&
+          this.hasNewerObservedPipelineLink(instance, projectId, branch, Number(id), verifiedClassification)) {
+        disposition = 'stale';
+        reason = '더 최신 GitLab 조회에서 같은 실행의 파이프라인을 확인해 이전 결과를 적용하지 않았습니다.';
+      }
       const pipelineEvidence = !pipelineIncompatible && objectDisposition === 'fresh' ? verifiedClassification : undefined;
       const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,
         ...pipelineEvidence,...(draft.targetBranch?{targetBranch:draft.targetBranch}:{}),issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
