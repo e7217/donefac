@@ -42,11 +42,16 @@ const jiraRefreshCountLabels = {
   newJiraAttachments: '기존 업무의 새 첨부파일', newJiraRelations: '기존 업무 사이의 새 Jira 관계',
   skippedJiraRelations: 'Jira 관계 원본 보관',
 };
+const confluenceInlineCommentCountLabels = {
+  confluenceInlineCommentsAnchored: '원문 위치를 연결한 문장 댓글',
+  confluenceInlineCommentsUnresolved: '일반 댓글로 옮긴 위치 미확인 댓글',
+};
 const confluenceRefreshCountLabels = {
   updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',
   newConfluenceAttachments: '기존 문서의 새 첨부', newConfluenceAttachmentVersions: '기존 첨부의 새 버전',
   reusedConfluenceAttachmentVersions: '재사용한 첨부 버전', skippedConfluenceAttachments: '변경을 건너뛴 첨부',
   newConfluenceComments: '기존 문서의 새 댓글', newConfluenceRevisions: '기존 문서의 새 원본 버전',
+  ...confluenceInlineCommentCountLabels,
 };
 const documentOrderCountLabels = {
   confluenceOrderedSiblingGroups: '원본 순서를 적용할 문서 그룹',
@@ -456,7 +461,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const receiptProduct = refreshProduct(receipt?.configuration);
   const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
   const receiptDetailCounts = receiptMode === 'new' && receipt ? Object.entries(receipt.counts).filter(([key]) =>
-    Object.hasOwn(jiraPlanningCountLabels, key) || Object.hasOwn(documentOrderCountLabels, key)) : [];
+    Object.hasOwn(jiraPlanningCountLabels, key) || Object.hasOwn(documentOrderCountLabels, key) || Object.hasOwn(confluenceInlineCommentCountLabels, key)) : [];
   return <section className="card migration-apply" aria-label="실제 데이터 이관">
     <header className="migration-heading"><div><h2 ref={migrationHeading} tabIndex={-1}><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>

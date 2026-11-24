@@ -7,6 +7,8 @@ import { addRecord,diagnostic,emptyDataset,LEGACY_MAX_TEXT_BYTES,LegacyImportErr
 type XmlObject={node:LegacyXmlNode;type:string;id:string};
 const CONTENT_TYPES=new Set(['Page','BlogPost','Comment','Attachment','UserInfo','SpaceDescription']);
 const RELATION_TYPES=new Set(['ContentPermissionSet','ContentPermission','SpacePermission','Labelling','ContentLabel','OutgoingLink','ReferralLink','ContentRelation','Relation']);
+const inlineCommentPropertyNames = ['inline-comment', 'inline-marker-ref', 'inline-original-selection'] as const;
+type InlineCommentPropertyName = typeof inlineCommentPropertyNames[number];
 const KNOWN_MACROS=new Set(['include','excerpt-include','excerpt','jira','jiraissues','toc','anchor','children','contentbylabel','code','noformat','info','note','warning','tip','panel','expand','details','status','tasklist','section','column','html','widget','attachments','gallery','recently-updated','pagetree','page-properties','page-properties-report','viewpdf','viewdoc','viewxls','viewppt']);
 const scalar=(node:LegacyXmlNode|undefined):string=>node?.text??'';
 const child=(node:LegacyXmlNode,name:string,attribute?:string,value?:string)=>node.children.find(item=>item.name===name&&(attribute===undefined||item.attributes[attribute]===value));
@@ -48,9 +50,11 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
   const xmlPath=primary[0],prefix=xmlPath.slice(0,-'entities.xml'.length),descriptor=exportProperties(files,prefix);
   const data=emptyDataset({product:'confluence',format:'confluence-xml',instanceKey,declaredVersion:descriptor.get('confluence.version')??descriptor.get('version')??null,timezone:descriptor.get('timezone')??descriptor.get('timeZone')??descriptor.get('serverTimeZone')??null});
   const parsed=parseLegacyXml(decodeLegacyText(files.get(xmlPath)!));
+  const rawObjects=xmlObjects(parsed);
   const objects:XmlObject[]=[],objectIndex=new Map<string,XmlObject>(),byType=new Map<string,XmlObject[]>(),unsupported=new Map<string,number>();
-  for(const node of xmlObjects(parsed)){
+  for(const node of rawObjects){
     const type=objectClass(node)||'(missing class)',id=idOf(node);
+    if(type==='ContentProperty'&&inlineCommentProperties(node).length)continue;
     if(type!=='ConfluenceUserImpl'&&type!=='Space'&&type!=='BodyContent'&&type!=='Label'&&!CONTENT_TYPES.has(type)&&!RELATION_TYPES.has(type)){unsupported.set(type,(unsupported.get(type)??0)+1);continue;}
     if(!id){diagnostic(data,{severity:'error',code:'CONFLUENCE_OBJECT_ID_MISSING',message:`${type} 객체의 원본 ID가 없습니다.`,path:xmlPath});continue;}
     const names=new Set<string>();for(const item of node.children){if(!['id','property','collection'].includes(item.name))continue;const name=`${item.name}:${item.attributes.name??''}`;if(names.has(name))throw new LegacyImportError(400,'Confluence 객체에 같은 이름의 속성이 중복되었습니다.');names.add(name);}
@@ -104,6 +108,7 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
   }
   // The remainder resolves content bodies, labels, permissions, links and binary package paths.
   attachBodies(data,byType,rows,objectIndex,xmlPath);
+  attachInlineCommentProperties(data,rawObjects,rows,xmlPath);
   attachLabels(data,byType,rows,objectIndex,xmlPath);
   attachRelations(data,byType,rows,objectIndex,kindFor,sourceIdFor,xmlPath);
   attachBinaries(data,files,prefix,byType,rows,currentByHistory,xmlPath);
@@ -154,7 +159,7 @@ function exactNamedId(id: LegacyXmlNode | undefined): string {
   return id?.name === 'id' && id.attributes.name === 'id' && Object.keys(id.attributes).length === 1 && !id.children.length ? id.text.trim() : '';
 }
 
-function exactLabelObjectId(node: LegacyXmlNode): string {
+function exactObjectId(node: LegacyXmlNode): string {
   const ids = node.children.filter(item => item.name === 'id');
   return ids.length === 1 ? exactNamedId(ids[0]) : '';
 }
@@ -168,11 +173,156 @@ function exactReferenceId(node: LegacyXmlNode | undefined): string {
 const confluenceNumericId = /^[1-9]\d{0,18}$/u;
 const confluenceCollectionClasses = new Set(['java.util.List', 'java.util.Collection', 'java.util.Set']);
 
-function exactHierarchyReference(node: LegacyXmlNode | undefined, type: 'Page' | 'Space'): string | undefined {
-  if (!node) return;
-  const expectedPackage = type === 'Page' ? 'com.atlassian.confluence.pages' : 'com.atlassian.confluence.spaces';
+function inlineCommentProperties(node: LegacyXmlNode): InlineCommentPropertyName[] {
+  return node.children.flatMap(child => {
+    if (child.name !== 'property' || child.attributes.name !== 'name') return [];
+    return inlineCommentPropertyNames.filter(name => name === child.text.trim());
+  });
+}
+
+const confluenceClassPackages = {
+  BlogPost: 'com.atlassian.confluence.pages', Comment: 'com.atlassian.confluence.pages', Page: 'com.atlassian.confluence.pages',
+  ContentProperty: 'com.atlassian.confluence.content', Space: 'com.atlassian.confluence.spaces',
+};
+
+function exactClass(node: LegacyXmlNode, type: keyof typeof confluenceClassPackages): boolean {
+  const expectedPackage = confluenceClassPackages[type];
   const { class: sourceClass, package: sourcePackage } = node.attributes;
-  if (sourceClass !== type && sourceClass !== `${expectedPackage}.${type}` || sourcePackage !== undefined && sourcePackage !== expectedPackage) return;
+  return (sourceClass === type || sourceClass === `${expectedPackage}.${type}`) &&
+    (sourcePackage === undefined || sourcePackage === expectedPackage);
+}
+
+function exactInlineCommentContainer(comment: LegacyXmlNode): boolean {
+  const containers = comment.children.filter(child => child.name === 'property' &&
+    ['containerContent', 'content', 'page'].includes(child.attributes.name));
+  const owner = containers[0];
+  if (!owner) return false;
+  const type = objectClass(owner), id = exactReferenceId(owner);
+  return (type === 'Page' || type === 'BlogPost') && confluenceNumericId.test(id) &&
+    containers.every(container => exactClass(container, type) && exactReferenceId(container) === id);
+}
+
+function scalarInlineProperty(node: LegacyXmlNode, name: string): string | undefined | null {
+  const values = node.children.filter(child => child.name === 'property' && child.attributes.name === name);
+  if (!values.length) return undefined;
+  const [value] = values;
+  return values.length === 1 && !value.children.length && Object.keys(value.attributes).length === 1 ? value.text : null;
+}
+
+function inlineCommentPropertyValue(node: LegacyXmlNode, name: InlineCommentPropertyName): string | null {
+  if (scalarInlineProperty(node, 'name') !== name) return null;
+  const stringValue = scalarInlineProperty(node, 'stringValue');
+  const longValue = scalarInlineProperty(node, 'longValue');
+  if (stringValue === null || longValue === null) return null;
+  if (name === 'inline-comment') {
+    const status = (value: string) => ['1', 'true', 'inline'].includes(value.toLowerCase()) ? 'true'
+      : ['0', 'false', 'footer'].includes(value.toLowerCase()) ? 'false' : null;
+    const values = [stringValue, longValue].filter((value): value is string => Boolean(value)).map(status);
+    return values.length && values.every(value => value === values[0]) ? values[0] : null;
+  }
+  if (!stringValue?.trim() || !stringValue.isWellFormed() || longValue) return null;
+  if (name === 'inline-marker-ref') return stringValue.length <= 200 && !/[\s\p{Cc}\p{Cf}]/u.test(stringValue) ? stringValue : null;
+  return stringValue.length <= 2_000 ? stringValue : null;
+}
+
+function attachInlineCommentProperties(data: LegacyDataset, objects: LegacyXmlNode[], rows: Map<string, LegacyRecord>, path: string): void {
+  type Claim = { ownerKey: string; exact: boolean };
+  const properties = new Map<string, LegacyXmlNode[]>();
+  for (const node of objects) if (objectClass(node) === 'ContentProperty') {
+    const id = idOf(node);
+    const matches = properties.get(id) ?? [];
+    matches.push(node);
+    properties.set(id, matches);
+  }
+  const relevantIds = new Set([...properties].filter(([, nodes]) => nodes.some(node => inlineCommentProperties(node).length)).map(([id]) => id));
+  if (!relevantIds.size) return;
+
+  // Other content types can claim the same property ID. Include them in the ownership check.
+  const claims = new Map<string, Claim[]>(), exactComments = new Set<string>();
+  for (const owner of objects) {
+    const collections = owner.children.filter(child => child.name === 'collection' && child.attributes.name === 'contentProperties');
+    const ownerType = objectClass(owner);
+    if (!collections.length && ownerType !== 'Comment') continue;
+    const ownerId = idOf(owner);
+    const ownerKey = `${ownerType}:${ownerId}`;
+    const exactOwner = confluenceNumericId.test(ownerId) && exactObjectId(owner) === ownerId;
+    if (ownerType === 'Comment' && exactOwner && exactClass(owner, 'Comment') && exactInlineCommentContainer(owner)) exactComments.add(ownerId);
+    for (const declared of collections) {
+      const exactCollection = collections.length === 1 && !declared.text.trim() && !property(owner, 'contentProperties') &&
+        Object.keys(declared.attributes).every(name => name === 'class' || name === 'name') &&
+        (!declared.attributes.class || confluenceCollectionClasses.has(declared.attributes.class));
+      for (const element of declared.children) {
+        const propertyId = idOf(element);
+        if (!relevantIds.has(propertyId)) continue;
+        const exact = exactCollection && exactOwner && element.name === 'element' &&
+          exactClass(element, 'ContentProperty') && exactReferenceId(element) === propertyId;
+        const references = claims.get(propertyId) ?? [];
+        references.push({ ownerKey, exact });
+        claims.set(propertyId, references);
+      }
+    }
+  }
+
+  const evidence = new Map<LegacyRecord, Map<InlineCommentPropertyName, (string | null)[]>>();
+  const unresolved = (row: LegacyRecord | undefined) => diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_INLINE_COMMENT_EVIDENCE_UNRESOLVED',
+    message: '문장 댓글의 원본 속성 또는 소유 관계를 확인할 수 없어 확인된 정보만 이관합니다.', recordId: row?.id, path });
+  for (const id of relevantIds) {
+    const nodes = properties.get(id)!;
+    const forward = claims.get(id) ?? [];
+    for (const node of nodes) {
+      const names = inlineCommentProperties(node);
+      if (!names.length) continue;
+      const reverseNodes = node.children.filter(child => child.name === 'property' &&
+        (child.attributes.name === 'contentEntity' || child.attributes.name === 'content'));
+      const reverse = reverseNodes.map(child => {
+        const ownerId = idOf(child);
+        return { ownerKey: `${objectClass(child)}:${ownerId}`, exact: exactClass(child, 'Comment') &&
+          confluenceNumericId.test(ownerId) && exactReferenceId(child) === ownerId };
+      });
+      const owners = new Set([...forward, ...reverse].map(claim => claim.ownerKey));
+      const rowsClaimed = [...owners].filter(key => key.startsWith('Comment:')).flatMap(key => {
+        const row = rows.get(key);
+        return row ? [row] : [];
+      });
+      const exact = confluenceNumericId.test(id) && exactObjectId(node) === id && exactClass(node, 'ContentProperty') &&
+        nodes.length === 1 && names.length === 1 && owners.size === 1 && forward.length <= 1 &&
+        [...forward, ...reverse].every(claim => claim.exact) && new Set(reverseNodes.map(child => child.attributes.name)).size === reverseNodes.length;
+      if (!rowsClaimed.length) {
+        unresolved(undefined);
+        continue;
+      }
+      for (const row of rowsClaimed) {
+        const fields = evidence.get(row) ?? new Map<InlineCommentPropertyName, (string | null)[]>();
+        for (const name of names) {
+          const values = fields.get(name) ?? [];
+          values.push(exact && exactComments.has(row.sourceId) ? inlineCommentPropertyValue(node, name) : null);
+          fields.set(name, values);
+        }
+        evidence.set(row, fields);
+      }
+    }
+  }
+
+  for (const [row, fields] of evidence) {
+    const value = (name: InlineCommentPropertyName) => {
+      const values = fields.get(name);
+      return values?.length === 1 ? values[0] : null;
+    };
+    const marker = value('inline-marker-ref');
+    const inline = value('inline-comment');
+    if (!marker || (fields.has('inline-comment') && inline !== 'true')) {
+      if (inline !== 'false' || fields.has('inline-marker-ref') || fields.has('inline-original-selection')) unresolved(row);
+      continue;
+    }
+    row.metadata.confluenceInlineMarkerRef = marker;
+    const originalSelection = value('inline-original-selection');
+    if (originalSelection !== null) row.metadata.confluenceInlineOriginalSelection = originalSelection;
+    else if (fields.has('inline-original-selection')) unresolved(row);
+  }
+}
+
+function exactHierarchyReference(node: LegacyXmlNode | undefined, type: 'Page' | 'Space'): string | undefined {
+  if (!node || !exactClass(node, type)) return;
   const id = exactReferenceId(node);
   return confluenceNumericId.test(id) ? id : undefined;
 }
@@ -235,7 +385,7 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     });
     addRecord(data, row);
     labels.set(item.id, row);
-    if (exactLabelObjectId(item.node) === item.id) exactLabelObjects.add(item.id);
+    if (exactObjectId(item.node) === item.id) exactLabelObjects.add(item.id);
   }
   const apply = (owner: LegacyRecord, labelId: string) => {
     addReference(owner, 'option', labelId, 'label');
@@ -263,7 +413,7 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     else diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_LABEL_RELATION_UNRESOLVED',
       message: '레이블과 콘텐츠의 연결을 확정할 수 없습니다.', recordId: `relation:${item.type}:${item.id}`, path });
 
-    if (ownerKey && owner && exactLabelObjectId(item.node) === item.id && labelNode && objectClass(labelNode) === 'Label' &&
+    if (ownerKey && owner && exactObjectId(item.node) === item.id && labelNode && objectClass(labelNode) === 'Label' &&
         exactLabelObjects.has(exactReferenceId(labelNode)) &&
         contents.every(node => `${objectClass(node)}:${exactReferenceId(node)}` === ownerKey)) {
       const links = associations.get(ownerKey) ?? new Map<string, string>();
@@ -288,7 +438,7 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
     const indirect = collection(object.node, 'labellings');
     const status = property(object.node, 'contentStatus');
     if (object.type !== 'Page' || row.kind !== 'page' || status && (status.children.length || status.text.trim() !== 'current') ||
-        exactLabelObjectId(object.node) !== object.id) continue;
+        exactObjectId(object.node) !== object.id) continue;
     const proven = associations.get(key) ?? new Map<string, string>();
     const directIds = direct && labelCollectionKeys(direct, element => {
       const id = exactReferenceId(element);

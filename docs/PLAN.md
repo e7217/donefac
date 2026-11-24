@@ -493,7 +493,7 @@ Confluence Server에서는 이관 전 현재 계정이 읽을 수 있는 페이�
 
 Confluence 체크리스트는 항목 순서와 완료 여부를 편집 가능한 목록으로 옮긴다. 항목의 원본 담당자와 기한은 본문 텍스트로 보존한다. 일부 항목의 원본 구조를 변환할 수 없으면 해당 구조의 위치에 원문을 남긴다. 이전 이관에서 체크리스트가 포함된 본문 전체를 원문 코드 블록에 보관한 문서는 같은 원본 버전으로도 변경분 미리보기에서 복구를 검토할 수 있다. 저장 본문과 보관 원본을 비교해 팀 편집을 보존한다. [Confluence 체크리스트와 사용자 참조 형식](https://confluence.atlassian.com/doc/confluence-storage-format-790796544.html)
 
-Confluence 문장 댓글이 달렸던 본문과 이력은 표시 텍스트·서식·링크를 원래 문단이나 표 셀에 옮긴다. 댓글의 원래 위치 표시자는 보존 원본과 이관 진단에서 확인한다. 현재 문서의 원본 버전이 올라오면 기존 본문 변경분 검토를 적용하고 팀 편집과 겹치는 변경을 보류한다. [Confluence 문장 댓글 표시자](https://support.atlassian.com/confluence/kb/keep-inline-comments-while-editing-confluence-pages/)
+Confluence 문장 댓글의 위치 표식과 표시 텍스트·서식·링크를 보존한다. 처음 옮기거나 변경분에서 새로 추가하는 댓글은 같은 XML 패키지의 댓글 속성, 원래 페이지, 하나로 확인된 위치 표식을 대조한다. 발췌 범위가 적용할 Teamspace 본문과 일치하면 문장 댓글의 원문 저장본을 고정한다. 같은 문장이 반복돼도 표식 범위에서 열고, 문서 편집 뒤에도 내보낸 원문의 위치를 읽는다. 표식이 없거나 중복된 경우, 팀에서 편집한 본문과 일치하지 않는 경우에는 일반 댓글로 보존하고 미리보기에서 확인한다. [Confluence 문장 댓글 속성](https://docs.atlassian.com/ConfluenceServer/javadoc/6.9.1/constant-values.html#com.atlassian.confluence.pages.Comment.MARKER_REF_PROP) · [Confluence 원문 위치 표식](https://support.atlassian.com/confluence/kb/keep-inline-comments-while-editing-confluence-pages/)
 
 병행 기간에는 업무와 문서에 Jira 티켓 및 Confluence 페이지 주소를 연결한다. 조회 버튼을 누르면 설정한 각 서버의 읽기 API에서 제목·상태·식별자와 수정 시각을 가져온다. 팀에서 사용할 연결의 자격 증명은 서버의 별도 파일에 둔다. 연결 주소는 전체 백업에서 보존하며, 원본 조회는 GET 요청으로 처리한다. [Jira 이슈 읽기 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/), [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/)
 

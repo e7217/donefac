@@ -1,5 +1,5 @@
 import { createHash,randomUUID } from 'node:crypto';
-import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueSourceFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
+import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,DocumentSourceSelection,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueSourceFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,MIGRATION_AUTHOR_KINDS,PRIORITY } from '../shared/types.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
@@ -9,6 +9,7 @@ import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { isJiraIssueKey } from '../shared/atlassian-links.js';
+import { readDocumentSelection } from './document-content.js';
 import { convertLegacyContent } from './migration-content.js';
 import { confluenceParentEvidence, confluencePositionEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
@@ -185,7 +186,7 @@ function sameConfluencePageRevision(next: LegacyRecord, previous: LegacyRecord, 
   return nextTime !== null && previousTime !== null && nextTime >= previousTime;
 }
 
-function confluencePageFieldDigest(field: ConfluenceMigrationDocumentField, value: DocPage[ConfluenceMigrationDocumentField]): string {
+export function confluencePageFieldDigest(field: ConfluenceMigrationDocumentField, value: DocPage[ConfluenceMigrationDocumentField]): string {
   return hash(field, JSON.stringify(field === 'labels' ? value ?? [] : value));
 }
 
@@ -245,6 +246,18 @@ function formerConfluenceHeadingDepthDigest(record: LegacyRecord, context: Migra
 
 function hasConfluenceBody(record: LegacyRecord): boolean {
   return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
+}
+
+export function confluenceInlineCommentPageId(record: LegacyRecord): string | undefined {
+  const { metadata, references } = record;
+  if (record.kind !== 'comment' || metadata.sourceClass !== 'Comment' || typeof metadata.confluenceInlineMarkerRef !== 'string' ||
+      !metadata.confluenceInlineMarkerRef || record.parentId || metadata.currentVersionId || metadata.orphan === true || metadata.bodyVariant === true ||
+      (metadata.originalVersionId && metadata.originalVersionId !== record.sourceId) ||
+      !['', 'current'].includes(string(metadata.contentStatus).trim().toLowerCase()) ||
+      references.some(ref => ref.kind === 'comment' && (ref.relation === 'parent' ||
+        ref.sourceId !== record.sourceId && ['current-version', 'original-version'].includes(ref.relation)))) return;
+  const owners = references.filter(ref => ref.relation === 'container-content');
+  if (owners.length === 1 && owners[0].kind === 'page' && owners[0].sourceId === record.containerId) return owners[0].sourceId;
 }
 
 function hasConfluenceHeadingDepth(record: LegacyRecord): boolean {
@@ -539,6 +552,10 @@ class Planner{
   private confluenceBodySourceHashes = new Map<string, string>();
   private confluenceBodyReviews = new Map<string, ReturnType<typeof reviewNewerConfluenceBody>>();
   private confluenceHistoryOwners = new Map<string, AttachmentOwner>();
+  private confluenceInlineClaims = new Map<string, Map<string, Entry | null>>();
+  private confluenceInlineSourceErrors = new Set<string>();
+  private confluenceInlineProjections = new Map<string, { bodyHash: string; anchors: ReadonlyMap<string, DocumentSourceSelection> } | null>();
+  private confluenceInlineRefreshedBodyHashes = new Map<string, string>();
   private deferredPrimaryNotices: { message: string; entry?: Entry }[] = [];
   private boundIssues = new Map<string, KnownIssue>();
   private retainedIssuesByJiraKey = new Map<string, KnownIssue | null>();
@@ -1221,13 +1238,7 @@ class Planner{
       const bodyReview = this.confluenceBodyReviews.get(entry.key);
       let acceptedBody = bodyReview?.acceptedSourceHash ?? previous.confluencePageBodySourceHash;
       const incomingBody = confluencePageBodySourceHash(row);
-      const contentContext: MigrationContentContext = {
-        resolveReference: request => this.resolve(entry, request),
-        confluenceOrigin: this.originBases.get(entry.pkg.summary.id),
-        sectionLinks: this.confluenceSectionLinks(entry, document.id),
-        resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, append.project.id),
-        resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, append.project.id),
-      };
+      const contentContext = this.confluencePageContentContext(entry, document.id, append.project.id);
       let childListBaseline: string | undefined;
       let headingDepthBaseline: string | undefined;
       const canCheckFormerBody = (newer || sameSourceRevision) && !sourceBodyErrors.has(entry.key) &&
@@ -1383,6 +1394,9 @@ class Planner{
       }
       if (fields.length) review.push({ documentId: document.id, title: document.title, sourceId: row.sourceId, recordId: entry.key, fields });
       if (Object.keys(accepted).length) updates.push({ documentId: document.id, expectedVersion: document.version, changes: accepted });
+      if (accepted.content && this.confluenceInlineClaims.has(entry.key)) {
+        this.confluenceInlineRefreshedBodyHashes.set(document.id, confluencePageFieldDigest('content', accepted.content));
+      }
       if (checkpoint) {
         this.confluenceRefreshCheckpoints.set(entry.key, { document, hashes });
         if (acceptedBody) this.confluenceBodySourceHashes.set(entry.key, acceptedBody);
@@ -1539,7 +1553,7 @@ class Planner{
   }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
     const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
@@ -3210,6 +3224,76 @@ class Planner{
     }
     return candidates.length===1?this.resolvedReference(candidates[0]):null;
   }
+  private confluencePageContentContext(entry: Entry, documentId: string, projectId: string | undefined): MigrationContentContext {
+    return {
+      resolveReference: request => this.resolve(entry, request),
+      confluenceOrigin: this.originBases.get(entry.pkg.summary.id),
+      sectionLinks: this.confluenceSectionLinks(entry, documentId),
+      resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, projectId),
+      resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, projectId),
+    };
+  }
+
+  private indexConfluenceInlineComments(): void {
+    for (const entry of this.entries) {
+      if (entry.pkg.dataset.source.product !== 'confluence') continue;
+      const pageId = confluenceInlineCommentPageId(entry.row);
+      const page = pageId && this.sourceEntry(entry, 'page', pageId);
+      if (!page) continue;
+      const marker = entry.row.metadata.confluenceInlineMarkerRef as string;
+      const claims = this.confluenceInlineClaims.get(page.key) ?? new Map<string, Entry | null>();
+      claims.set(marker, claims.has(marker) ? null : entry);
+      this.confluenceInlineClaims.set(page.key, claims);
+    }
+    if (!this.confluenceInlineClaims.size) return;
+    for (const pkg of this.input.packages) for (const diagnostic of pkg.dataset.diagnostics) {
+      if (diagnostic.severity === 'error' && diagnostic.recordId) this.confluenceInlineSourceErrors.add(pkg.summary.id + '/' + diagnostic.recordId);
+    }
+  }
+
+  private rememberConfluenceInlineProjection(entry: Entry, converted: ReturnType<typeof convertLegacyContent>): void {
+    if (!this.confluenceInlineClaims.has(entry.key)) return;
+    const anchors = new Map<string, DocumentSourceSelection>();
+    if (!converted.diagnostics.some(item => item.severity === 'error')) {
+      for (const [marker, selection] of converted.inlineCommentAnchors ?? []) {
+        if (this.confluenceInlineClaims.get(entry.key)?.get(marker) &&
+            readDocumentSelection(converted.content, selection.from, selection.to) === selection.text) anchors.set(marker, selection);
+      }
+    }
+    this.confluenceInlineProjections.set(entry.key, anchors.size ? { bodyHash: confluencePageFieldDigest('content', converted.content), anchors } : null);
+  }
+
+  private planConfluenceInlineComment(entry: Entry, documentId: string, commentId: string): void {
+    const { row } = entry;
+    const marker = row.metadata.confluenceInlineMarkerRef;
+    if (entry.pkg.dataset.source.product !== 'confluence' || typeof marker !== 'string') return;
+    const pageId = confluenceInlineCommentPageId(row);
+    const page = pageId && this.sourceEntry(entry, 'page', pageId);
+    const target = page ? this.bindings.get(page.key) : undefined;
+    const existing = pageId ? this.originalPage(pageId) : undefined;
+    if (page && (target?.type === 'document' && target.id === documentId || existing?.documentId === documentId) &&
+        this.confluenceInlineClaims.get(page.key)?.get(marker) === entry && !this.excluded.has(page.key) &&
+        !this.restrictedSourcePages.has(page.row.sourceId) && !this.restricted(page) && !this.restricted(entry) &&
+        !this.confluenceInlineSourceErrors.has(entry.key) && !this.confluenceInlineSourceErrors.has(page.key) &&
+        hasConfluenceBody(page.row) && ['', 'current'].includes(string(page.row.metadata.contentStatus).trim().toLowerCase())) {
+      if (!this.confluenceInlineProjections.has(page.key) && existing) {
+        const context = this.confluencePageContentContext(page, documentId, existing.projectId ?? undefined);
+        this.rememberConfluenceInlineProjection(page, convertLegacyContent(page.row, { ...context, captureInlineCommentAnchors: true }));
+      }
+      const projection = this.confluenceInlineProjections.get(page.key);
+      const selection = projection?.anchors.get(marker);
+      const plannedBodyHash = existing ? this.confluenceInlineRefreshedBodyHashes.get(documentId) ??
+        this.input.appendPages?.inlineCommentBodyHashes?.[documentId] : projection?.bodyHash;
+      if (projection && selection && projection.bodyHash === plannedBodyHash) {
+        (this.result.confluenceCommentAnchors ??= []).push({ commentId, bodyHash: projection.bodyHash, selection });
+        this.result.preview.counts.confluenceInlineCommentsAnchored = this.result.confluenceCommentAnchors.length;
+        return;
+      }
+    }
+    this.result.preview.counts.confluenceInlineCommentsUnresolved = (this.result.preview.counts.confluenceInlineCommentsUnresolved ?? 0) + 1;
+    this.notice('CONFLUENCE_INLINE_COMMENT_ANCHOR_UNRESOLVED', '현재 문서의 정확한 원문 위치를 확인할 수 없어 댓글을 문서 댓글로 옮깁니다.', 'warning', entry, true);
+  }
+
   converted(entry: Entry, { legacyAnnotations = false, documentId }: { legacyAnnotations?: boolean; documentId?: string } = {}) {
     const result = convertLegacyContent(entry.row, {
       resolveReference: request => this.resolve(entry, request), legacyAnnotations,
@@ -3217,7 +3301,9 @@ class Planner{
       sectionLinks: documentId && entry.pkg.dataset.source.product === 'confluence' ? this.confluenceSectionLinks(entry, documentId) : undefined,
       resolveLabelListProject: space => this.confluenceLabelListProject(entry, space, this.project(entry)?.id),
       resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, this.project(entry)?.id),
+      captureInlineCommentAnchors: Boolean(documentId && this.confluenceInlineClaims.has(entry.key)),
     });
+    if (documentId) this.rememberConfluenceInlineProjection(entry, result);
     for (const diagnostic of result.diagnostics) this.notice(diagnostic.code, diagnostic.message, diagnostic.severity, entry, diagnostic.severity === 'warning');
     return result;
   }
@@ -3369,6 +3455,7 @@ class Planner{
         this.result.comments.push({ id, resourceType: owner.type as 'issue' | 'document', resourceId: owner.id,
           authorId: this.author(entry), body, createdAt: this.time(entry.row.createdAt, entry)! });
         this.bindings.set(entry.key, { type: 'comment', id, projectId: owner.projectId });
+        if (owner.type === 'document') this.planConfluenceInlineComment(entry, owner.id, id);
       }
     }
     for(const document of this.result.documents){const current=this.primaryById.get(document.id)!,entries=(revisions.get(document.id)||[]).sort((a,b)=>Number(a.row.metadata.version||0)-Number(b.row.metadata.version||0)||string(a.row.createdAt).localeCompare(string(b.row.createdAt))||a.key.localeCompare(b.key));let highest=0;
@@ -3516,6 +3603,7 @@ class Planner{
         if (row.textFormat !== 'plain') this.notice('COMMENT_FORMAT_PLAIN_TEXT', '댓글은 일반 텍스트로 변환하며 원래 서식과 작성자·변경 시각은 원본 보관함에 유지합니다.', 'warning', entry, true);
         this.result.comments.push({ id, resourceType: 'document', resourceId: owner.documentId, authorId, body: converted.plainText, createdAt: timestamp });
         this.bindings.set(entry.key, { type: 'comment', id, projectId });
+        this.planConfluenceInlineComment(entry, owner.documentId, id);
         newConfluenceComments++;
       } else {
         this.result.revisions.push({ id, documentId: owner.documentId, version, confluenceSourceVersion: version,

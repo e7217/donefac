@@ -3,7 +3,8 @@ import test from 'node:test';
 import type { LegacyRecord, RichContent } from '../../shared/types.js';
 import { contentReferences, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
-import { normalizeDocumentContent } from '../../server/document-content.js';
+import { locateDocumentSelection } from '../../shared/document-selection-highlight.js';
+import { normalizeDocumentContent, readDocumentSelection } from '../../server/document-content.js';
 import { convertLegacyContent, extractJiraOriginalCommentLinks, MAX_JIRA_ORIGINAL_COMMENT_LINKS, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
 const source = (textFormat: LegacyRecord['textFormat'], text: string): LegacyRecord => ({ id: 'page:old-page', kind: 'page', sourceId: 'old-page', title: '합성 원본', containerId: 'old-space', parentId: null, authorId: null, createdAt: null, updatedAt: null, text, textFormat, metadata: {}, references: [] });
@@ -134,6 +135,37 @@ test('Confluence inline comment markers preserve body text, inline marks and lin
     assert.equal(result.diagnostics.filter(item => item.code === 'INLINE_COMMENT_ANCHOR_ARCHIVED').length, 1);
     assert.equal(record.text, xml);
   }
+});
+
+test('Confluence marker positions survive adjacent text merges, nested formatting and table nesting', () => {
+  const marker = (ref: string, content: string) => `<ac:inline-comment-marker ac:ref="${ref}">${content}</ac:inline-comment-marker>`;
+  const word = '배포 승인 🧪';
+  const prefix = `${word}와 `;
+  const xml = `<p>${prefix}${marker('repeat', word)} 뒤</p><table><tr><td><p>` +
+    `${marker('cell', `<strong>이관 ${marker('nested', '<em>확인</em>')}</strong><br/>또 확인`)}</p></td></tr></table>`;
+  const input = source('confluence-storage', xml);
+  const result = convertLegacyContent(input, { ...resolver(), captureInlineCommentAnchors: true });
+  canonical(result);
+  assert.deepEqual(result.content, convertLegacyContent(input, resolver()).content);
+  const anchors = result.inlineCommentAnchors!;
+  assert.deepEqual(anchors.get('repeat'), { from: 1 + prefix.length, to: 1 + prefix.length + word.length, text: word });
+  assert.equal(anchors.get('cell')?.text, '이관 확인\n또 확인');
+  assert.equal(anchors.get('nested')?.text, '확인');
+  for (const { from, to, text } of anchors.values()) assert.equal(readDocumentSelection(result.content, from, to), text);
+  assert.deepEqual([...locateDocumentSelection(result.content, anchors.get('repeat')!)!.marks.values()],
+    [{ kind: 'text', from: prefix.length, to: prefix.length + word.length }]);
+});
+
+test('Confluence marker positions omit duplicates, including a marker projected inside a code block, and unsupported selections', () => {
+  const marker = (ref: string, content: string) => `<ac:inline-comment-marker ac:ref="${ref}">${content}</ac:inline-comment-marker>`;
+  const xml = `<p>${marker('dup', '이곳')} ${marker('kept', '한 군데')}</p>` +
+    `<pre>${marker('dup', '중복 위치')}</pre><p>${marker('space', ' ')}</p>` +
+    `<p>${marker('long', '긴'.repeat(2001))}</p>${marker('block', '<p>블록 전체</p>')}`;
+  const result = convertLegacyContent(source('confluence-storage', xml), { ...resolver(), captureInlineCommentAnchors: true });
+  canonical(result);
+  assert.deepEqual([...result.inlineCommentAnchors!.keys()], ['kept']);
+  assert.match(result.plainText, /중복 위치/u);
+  assert.match(result.plainText, /블록 전체/u);
 });
 
 test('Confluence checklist assignees and valid dates stay readable inside editable task items', () => {

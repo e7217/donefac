@@ -1,4 +1,4 @@
-import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,DocumentSiblingOrder,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,LegacyRecord,MigrationConfiguration,MigrationPreview,PlanningItem,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
+import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,DocumentSiblingOrder,DocumentSourceSelection,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,LegacyRecord,MigrationConfiguration,MigrationPreview,PlanningItem,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
@@ -82,6 +82,7 @@ export interface MigrationPageAppendContext {
   hierarchyDocuments?: Pick<DocPage, 'id' | 'parentId' | 'title' | 'version'>[];
   knownAttachments?: MigrationConfluenceKnownAttachment[];
   knownHistory?: MigrationConfluenceKnownHistory[];
+  inlineCommentBodyHashes?: Record<string, string>;
 }
 export interface MigrationPlanningInput {
   id:string;configuration:MigrationConfiguration;actorId:string;users:User[];existingProjectKeys:string[];
@@ -108,5 +109,6 @@ export interface PreparedMigration {
   documentUpdates?: MigrationConfluenceDocumentUpdate[];
   confluenceAttachmentOwners?: string[];
   confluenceHistoryOwners?: string[];
+  confluenceCommentAnchors?: { commentId: string; bodyHash: string; selection: DocumentSourceSelection }[];
   reusedAttachmentVersions?: AttachmentVersion[];
 }

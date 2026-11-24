@@ -19,6 +19,77 @@ const refHas=(row:LegacyRecord,kind:string,sourceId:string,relation:string)=>row
 const page=(id:string,title:string,extra='')=>object('Page',id,p('title',title)+p('version','1')+p('contentStatus','current')+r('space','Space','42')+extra);
 const space=object('Space','42',p('key','TEAM')+p('name','합성 공간'));
 
+const inlineProperty = (id: string, name: string, value: string, owner = '', valueName = 'stringValue') =>
+  `<object class="ContentProperty" package="com.atlassian.confluence.content"><id name="id">${id}</id>` +
+  p('name', name) + p(valueName, value) + owner + '</object>';
+const authenticComment = (id: string, fields: string) =>
+  `<object class="Comment" package="com.atlassian.confluence.pages"><id name="id">${id}</id>${fields}</object>`;
+
+test('Confluence inline comment evidence follows exact collection, reverse and agreeing bidirectional property ownership', () => {
+  const comment = (id: string, extra = '') => authenticComment(id, r('containerContent', 'Page', '100') + extra);
+  const data = parseConfluence(files([
+    space, page('100', '원본 문서'), body('200', 'Page', '100', '<p>원본 문서</p>'),
+    comment('300', list('contentProperties', 'ContentProperty', ['501', '502', '503', '509'])),
+    comment('301'), comment('302'),
+    comment('303', p('inline-marker-ref', 'unsupported-direct-field')),
+    body('400', 'Comment', '300', '<p>첫 번째 본문</p>'), body('401', 'Comment', '301', '<p>두 번째 본문</p>'),
+    body('402', 'Comment', '302', '<p>세 번째 본문</p>'), body('403', 'Comment', '303', '<p>일반 댓글</p>'),
+    inlineProperty('501', 'inline-marker-ref', 'selection-1', r('contentEntity', 'Comment', '300')),
+    inlineProperty('502', 'inline-original-selection', '  한국어 발췌 🎯'),
+    inlineProperty('503', 'inline-comment', '1', '', 'longValue'),
+    inlineProperty('504', 'inline-marker-ref', 'selection-2', r('content', 'com.atlassian.confluence.pages.Comment', '301')),
+    inlineProperty('505', 'inline-comment', 'false', r('contentEntity', 'Comment', '302')),
+    inlineProperty('509', 'unrelated-secret-property', 'must-not-copy-to-archived-record'),
+  ]), 'synthetic-inline-property-ownership');
+
+  assert.equal(find(data, 'comment', '300').metadata.confluenceInlineMarkerRef, 'selection-1');
+  assert.equal(find(data, 'comment', '300').metadata.confluenceInlineOriginalSelection, '  한국어 발췌 🎯');
+  assert.equal(find(data, 'comment', '301').metadata.confluenceInlineMarkerRef, 'selection-2');
+  assert.equal(find(data, 'comment', '301').metadata.confluenceInlineOriginalSelection, undefined);
+  assert.equal(find(data, 'comment', '302').metadata.confluenceInlineMarkerRef, undefined);
+  assert.equal(find(data, 'comment', '303').metadata.confluenceInlineMarkerRef, undefined);
+  assert.doesNotMatch(JSON.stringify(data.records), /must-not-copy-to-archived-record|unsupported-direct-field/);
+  assert.ok(!codes(data).includes('CONFLUENCE_INLINE_COMMENT_EVIDENCE_UNRESOLVED'));
+});
+
+test('Confluence inline comments retain their text when property ownership or marker evidence is ambiguous', () => {
+  const comment = (id: string, propertyIds: string[]) => authenticComment(id,
+    r('containerContent', 'Page', '100') + list('contentProperties', 'ContentProperty', propertyIds));
+  const affected = ['300', '301', '302', '303', '304', '305', '306', '307', '308', '309', '310', '311'];
+  const data = parseConfluence(files([
+    space, page('100', '원본 문서'), page('101', '다른 문서'), body('200', 'Page', '100', '<p>원본 문서</p>'),
+    comment('300', ['500']), comment('301', ['501']), comment('302', ['502', '502']),
+    comment('303', ['503']), comment('304', ['504', '514']), comment('305', ['505', '515']),
+    comment('306', ['506']), comment('307', ['507']), comment('308', ['508']),
+    authenticComment('309', r('containerContent', 'Page', '100') + r('content', 'Page', '101')),
+    authenticComment('310', '<property name="containerContent"><id name="id">100</id></property>'),
+    object('example.external.Comment', '311', r('containerContent', 'Page', '100')),
+    object('CustomContentEntityObject', '999', list('contentProperties', 'ContentProperty', ['501'])),
+    ...affected.map((id, index) => body(String(index + 400), 'Comment', id, `<p>댓글 원문 ${id}</p>`)),
+    inlineProperty('500', 'inline-marker-ref', 'wrong-owner', r('contentEntity', 'Comment', '301')),
+    inlineProperty('501', 'inline-marker-ref', 'reused-property'),
+    inlineProperty('502', 'inline-marker-ref', 'duplicate-claim'),
+    inlineProperty('503', 'inline-marker-ref', 'duplicate-object'), inlineProperty('503', 'other-property', 'different-object'),
+    inlineProperty('504', 'inline-marker-ref', 'same-owner-conflict-1'), inlineProperty('514', 'inline-marker-ref', 'same-owner-conflict-2'),
+    inlineProperty('505', 'inline-marker-ref', 'explicitly-not-inline'), inlineProperty('515', 'inline-comment', 'false'),
+    inlineProperty('506', 'inline-marker-ref', 'has spaces'),
+    inlineProperty('507', 'inline-marker-ref', 'x'.repeat(201)),
+    inlineProperty('508', 'inline-marker-ref', 'wrong-type', r('contentEntity', 'Page', '308')),
+    inlineProperty('509', 'inline-marker-ref', 'contradictory-page', r('contentEntity', 'Comment', '309')),
+    inlineProperty('510', 'inline-marker-ref', 'untyped-page', r('contentEntity', 'Comment', '310')),
+    inlineProperty('511', 'inline-marker-ref', 'unverified-comment-class', r('contentEntity', 'Comment', '311')),
+  ]), 'synthetic-inline-property-conflicts');
+
+  for (const id of affected) {
+    const row = find(data, 'comment', id);
+    assert.equal(row.metadata.confluenceInlineMarkerRef, undefined, id);
+    assert.equal(row.text, `<p>댓글 원문 ${id}</p>`);
+    assert.ok(data.diagnostics.some(item => item.recordId === row.id && item.code === 'CONFLUENCE_INLINE_COMMENT_EVIDENCE_UNRESOLVED' &&
+      item.severity === 'warning'), id);
+  }
+  assert.ok(!data.diagnostics.some(item => item.severity === 'error'));
+});
+
 test('current-page hierarchy evidence distinguishes explicit roots from missing or contradictory XML', () => {
   const emptyParent = '<property name="parent"/>';
   const explicitNull = '<property name="parent"><null/></property>';

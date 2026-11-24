@@ -1070,6 +1070,8 @@ Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있�
 
 미리보기와 영수증의 `newConfluenceComments`, `newConfluenceRevisions`에 추가 건수가 들어간다. 문서 이력과 고정 저장본 목록에서 과거 원본 저장본의 `confluenceSourceVersion`을 읽을 수 있다. 원본 저장본에서 복구하면 새 Teamspace 문서 버전이 생성된다. 형식 42 자체 백업은 추가 이관 설정과 원본 버전 표시를 보존한다.
 
+처음 이관하거나 기존 문서에 추가할 새 댓글의 원문 위치는 같은 XML 패키지의 댓글 속성과 소유 페이지에 있는 `ac:inline-comment-marker`로 확인한다. `confluenceInlineCommentsAnchored`에는 Teamspace 문장 댓글로 옮길 수량이, `confluenceInlineCommentsUnresolved`에는 위치 속성을 읽었으나 하나의 정확한 본문 범위를 확정하지 못해 일반 댓글로 옮길 수량이 들어간다. 원본 댓글 속성의 소유권이나 값이 불명확한 경우는 분석 진단에서 확인한다. 변경분에서는 현재 저장 본문 또는 같은 적용에서 반영할 본문과 대조하고, 적용 전 본문이 달라지면 `409`를 반환한다. 연결된 댓글의 `documentSource`는 일반 문장 댓글 조회와 자체 백업에서 읽을 수 있다.
+
 ### 적용 후 대조
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.

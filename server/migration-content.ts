@@ -6,7 +6,7 @@ import {
   documentPlainText, isCalloutVariant, MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_TABLE_SPAN, MAX_STATUS_BADGE_LABEL_LENGTH,
   type CalloutVariant, type StatusBadgeTone,
 } from '../shared/document-nodes.js';
-import type { LegacyRecord, RichContent } from '../shared/types.js';
+import type { DocumentSourceSelection, LegacyRecord, RichContent } from '../shared/types.js';
 import { MAX_DOCUMENT_CHILD_LIST_DEPTH, MAX_DOCUMENT_CHILD_LIST_FIRST, normalizeDocumentChildListOptions } from '../shared/document-child-list.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
@@ -16,6 +16,7 @@ import { safeFilename } from './attachments.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
 import { parseConfluenceLabelList } from './migration-confluence-label-list.js';
+import { ConfluenceInlineAnchors } from './migration-confluence-inline-anchors.js';
 import { parseConfluenceColumnLayout } from './migration-confluence-layout.js';
 import {
   confluencePropertyReportMacros, parseConfluenceDocumentProperties, parseConfluenceDocumentPropertyReport,
@@ -38,6 +39,7 @@ export interface MigrationReferenceInput extends MigrationPageIdentity {
 export interface MigrationContentContext {
   resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
   confluenceOrigin?: MigrationOriginBase;
+  captureInlineCommentAnchors?: boolean;
   // Text-only fields and older migration checkpoints used explicit annotation labels.
   legacyAnnotations?: boolean;
   preserveCommentWebLinks?: boolean;
@@ -62,6 +64,7 @@ export interface MigrationContentDiagnostic { severity: 'warning' | 'error'; cod
 export interface MigrationContentResult {
   content: RichContent; plainText: string; diagnostics: MigrationContentDiagnostic[];
   sectionTargets?: ReadonlyMap<string, string>;
+  inlineCommentAnchors?: ReadonlyMap<string, DocumentSourceSelection>;
 }
 const MAX_SOURCE_BYTES = 16 * 1024 * 1024, MAX_NODES = 30000, MAX_DEPTH = 50, MAX_WORK = 100000, MAX_MS = 2500;
 const sourceStatusTones = new Map<string, StatusBadgeTone>([
@@ -316,6 +319,7 @@ class Converter {
   private projectedProperties = 0;
   private firstSourceExcerpt?: XmlNode;
   private convertedFirstExcerpt = false;
+  inlineCommentAnchors?: ConfluenceInlineAnchors;
   constructor(readonly source: string, readonly context: MigrationContentContext, private readonly captureCommentLinks = false) {}
   sectionTargets(content: RichContent): ReadonlyMap<string, string> | undefined {
     if (!this.sections?.targets.size) return undefined;
@@ -591,8 +595,10 @@ class Converter {
       case 'ac:layout': return this.richDocument ? this.columnLayout(node, depth) : this.fallback(`XML ${type}`, serializeXml(node));
       case 'p': return flow(children());
       case 'ac:inline-comment-marker': {
-        this.warn('INLINE_COMMENT_ANCHOR_ARCHIVED', 'Confluence 문장 댓글의 위치 정보는 보존 원문에서 확인할 수 있습니다. 댓글이 붙은 본문 텍스트와 서식을 옮겼습니다.');
-        return children();
+        this.warn('INLINE_COMMENT_ANCHOR_ARCHIVED', 'Confluence 문장 댓글의 원본 위치 표식을 보관하고 본문 텍스트와 서식을 옮겼습니다.');
+        const nodes = children();
+        this.inlineCommentAnchors?.capture(node.attrs['ac:ref'], nodes);
+        return nodes;
       }
       case 'span': {
         let nodes = children(); const style = node.attrs.style || '';
@@ -1121,6 +1127,7 @@ class Converter {
           this.legacySourceHeadingMaximum = Math.max(this.legacySourceHeadingMaximum, Number(name[1]));
         }
         const node: XmlNode = { name, attrs: Object.fromEntries(Object.entries(object(item[':@'])).map(([key, value]) => [key, decodeXml(string(value))])), children: [] };
+        if (name === 'ac:inline-comment-marker') this.inlineCommentAnchors?.observe(node.attrs['ac:ref']);
         if (this.richDocument && !this.context.legacyDocumentExcerpt && !this.firstSourceExcerpt &&
             (name === 'ac:structured-macro' || name === 'ac:macro') && node.attrs['ac:name'] === 'excerpt') this.firstSourceExcerpt = node;
         node.children = build(item[name], depth + 1);
@@ -1231,6 +1238,7 @@ class Converter {
     if (record.textFormat === 'adf') { const parsed = object(JSON.parse(this.source)); if (parsed.type !== 'doc' || parsed.version !== 1 || !Array.isArray(parsed.content)) throw new Error('ADF 루트 또는 버전이 올바르지 않습니다.'); return this.adf(parsed); }
     if (record.textFormat === 'confluence-storage') {
       this.richDocument = record.kind === 'page' || record.kind === 'revision';
+      if (this.richDocument && this.context.captureInlineCommentAnchors) this.inlineCommentAnchors = new ConfluenceInlineAnchors();
       return this.storage(record.title);
     }
     if (record.textFormat === 'jira-wiki') return this.wiki();
@@ -1256,7 +1264,9 @@ function convertContent(record: LegacyRecord, context: MigrationContentContext, 
     while (stack.length) { const { node, depth } = stack.pop()!; converter.tick(depth); if (++count > MAX_NODES) throw new ConversionLimit('변환 문서 노드 수를 초과했습니다.'); for (const child of node.content || []) stack.push({ node: child, depth: depth + 1 }); }
     const normalized = normalizeDocumentContent(content);
     const sectionTargets = converter.sectionTargets(normalized.content);
-    return { ...normalized, diagnostics: converter.diagnostics, ...(sectionTargets ? { sectionTargets } : {}) };
+    const inlineCommentAnchors = converter.inlineCommentAnchors?.selections(content);
+    return { ...normalized, diagnostics: converter.diagnostics, ...(sectionTargets ? { sectionTargets } : {}),
+      ...(inlineCommentAnchors ? { inlineCommentAnchors } : {}) };
   } catch (cause) {
     if (cause instanceof ConversionLimit) converter.warn('CONVERSION_LIMIT_EXCEEDED', '원본 본문이 변환 크기·구조·작업 한도를 초과했습니다. 원본 보관 자료를 분할하거나 별도 검토해야 합니다.', 'error');
     else {

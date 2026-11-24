@@ -8,7 +8,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { projectJiraComponents } from './legacy-import-jira-components.js';
-import { buildMigrationOptions } from './migration-planner.js';
+import { buildMigrationOptions, confluenceInlineCommentPageId, confluencePageFieldDigest } from './migration-planner.js';
 import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
 import { hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
@@ -31,7 +31,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 13;
+const conversionVersion = 14;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -696,12 +696,36 @@ export class MigrationService {
     const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, attachmentDigest);
     const knownHistory = configuration.appendPagesTo.refreshHistory
       ? this.confluenceKnownHistory(packages, knownPages, destination, digest) : undefined;
+    const inlineCommentBodyHashes = !applying && configuration.appendPagesTo.refreshHistory
+      ? this.confluenceInlineCommentBodyHashes(packages, knownPages, destination) : undefined;
     const refreshContext = configuration.appendPagesTo.refreshExisting
       ? this.confluenceRefreshDocuments(packages, configuration, knownPages, destination, digest) : undefined;
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
       ...(labelListScope ? { labelListScope } : {}),
       ...(hasSectionLinks ? { sectionInventory: true } : {}),
-      ...refreshContext, ...(knownHistory ? { knownHistory } : {}) };
+      ...refreshContext, ...(knownHistory ? { knownHistory } : {}), ...(inlineCommentBodyHashes ? { inlineCommentBodyHashes } : {}) };
+  }
+  private confluenceInlineCommentBodyHashes(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
+    { project, sourceSpaceId }: PageAppendDestination): Record<string, string> | undefined {
+    const sourcePages = new Set<string>();
+    for (const pkg of packages) {
+      if (pkg.dataset.source.product !== 'confluence') continue;
+      const pageIds = new Set(pkg.dataset.records.filter(record => record.kind === 'page').map(page => page.sourceId));
+      for (const row of pkg.dataset.records) {
+        const pageId = confluenceInlineCommentPageId(row);
+        if (pageId && pageIds.has(pageId)) sourcePages.add(pageId);
+      }
+    }
+    const ids = [...new Set(knownPages.filter(page => page.projectId === project.id && page.sourceSpaceId === sourceSpaceId &&
+      sourcePages.has(page.sourceId)).map(page => page.documentId))];
+    if (!ids.length) return;
+    const documents = this.store.db.prepare('SELECT json FROM documents WHERE project_id=? AND id IN (SELECT value FROM json_each(?))');
+    const hashes: Record<string, string> = {};
+    for (const row of documents.iterate(project.id, JSON.stringify(ids)) as Iterable<{ json: string }>) {
+      const document = JSON.parse(row.json) as DocPage;
+      hashes[document.id] = confluencePageFieldDigest('content', document.content);
+    }
+    return hashes;
   }
   private confluenceKnownHistory(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
     { project, instanceKey, sourceSpaceId }: PageAppendDestination, digest: ReturnType<typeof createHash>):

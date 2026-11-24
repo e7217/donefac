@@ -63,6 +63,7 @@ import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
+import { confluencePageFieldDigest } from './migration-planner.js';
 import type { PilotConfluenceReview } from './pilot-confluence-review.js';
 import type { MigrationConfluenceReviewCoverage } from '../shared/types.js';
 import { readJiraDeadlineRecovery } from './jira-deadline-recovery.js';
@@ -1064,8 +1065,33 @@ export function createApp(options: {
         return { ...worklog, issueKey: key, issueTitle: title };
       });
       worklogs.persistMigrated(worklogRows, value.sourceRecords);
-      for (const comment of value.comments) store.put('comments', comment);
       for (const revision of value.revisions) store.put('revisions', revision);
+      const plannedAnchors = new Map(value.confluenceCommentAnchors?.map(anchor => [anchor.commentId, anchor]));
+      const anchorDocuments = new Map<string, { document: DocPage; bodyHash: string }>();
+      const incomingSourceRevisions = new Set(plannedAnchors.size ? value.sourceRecords.filter(record =>
+        record.source.product === 'confluence' && record.targetType === 'revision').map(record => record.targetId) : []);
+      const archivedSourceRevision = plannedAnchors.size ? store.db.prepare(
+        "SELECT 1 FROM source_records WHERE product='confluence' AND target_type='revision' AND target_id=? LIMIT 1"
+      ) : null;
+      for (const comment of value.comments) {
+        const anchor = plannedAnchors.get(comment.id);
+        if (!anchor) {
+          store.put('comments', comment);
+          continue;
+        }
+        let current = anchorDocuments.get(comment.resourceId);
+        if (!current) {
+          const document = collaboration.deriveSnapshot(get<DocPage>('documents', comment.resourceId));
+          current = { document, bodyHash: confluencePageFieldDigest('content', document.content) };
+          anchorDocuments.set(comment.resourceId, current);
+        }
+        if (comment.resourceType !== 'document' || current.bodyHash !== anchor.bodyHash) {
+          fail('문장 댓글의 원문을 검토하는 동안 문서 본문이 변경되었습니다. 미리보기를 다시 만들어 주세요.', 409);
+        }
+        const documentSource = resolveDocumentDecisionSource(store, current.document, comment.authorId, anchor.selection,
+          'Confluence 문장 댓글 원문 저장', revision => !incomingSourceRevisions.has(revision.id) && !archivedSourceRevision?.get(revision.id));
+        store.put('comments', { ...comment, documentSource });
+      }
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);
       for (const link of value.atlassianLinks??[]) atlassianLinks.create(link);
