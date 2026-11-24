@@ -17,7 +17,8 @@ const pipelineSha = 'a'.repeat(40);
 const pipelineRef = `refs/merge-requests/${mrIid}/merge`;
 const upstreamRepo = `/forge/api/v4/projects/${repositoryId}`;
 const upstreamMr = `${upstreamRepo}/merge_requests/${mrIid}`;
-const upstreamPipeline = `${upstreamRepo}/pipelines/${pipelineId}`;
+const upstreamPipelineList = `${upstreamRepo}/pipelines`;
+const upstreamPipeline = `${upstreamPipelineList}/${pipelineId}`;
 const upstreamJobs = `${upstreamPipeline}/jobs`;
 const upstreamTriggerJobs = `${upstreamPipeline}/trigger_jobs`;
 const upstreamBridges = `${upstreamPipeline}/bridges`;
@@ -74,7 +75,8 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     source: 'merge_request_event', tag: false, sha: pipelineSha, created_at: at, updated_at: pipelineUpdatedAt,
     finished_at: pipelineUpdatedAt, web_url: includeCanonicalPipelineUrl ? pipelineUrl() : unrelatedUrl });
   const remote = createServer((incoming, response) => {
-    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    const path = url.pathname;
     calls.push({ path, method: incoming.method, token: incoming.headers['private-token'] });
     response.setHeader('Content-Type', 'application/json');
     if (path === upstreamRepo) response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: repoUrl() }));
@@ -87,7 +89,9 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
         moveHeadDuringNextRead = false;
       }
       response.end(JSON.stringify(pipeline()));
-    } else if (path === upstreamJobs) response.end(JSON.stringify([{
+    } else if (path === upstreamPipelineList && url.searchParams.get('ref') === pipelineRef &&
+        url.searchParams.get('source') === 'merge_request_event') response.end(JSON.stringify([pipeline()]));
+    else if (path === upstreamJobs) response.end(JSON.stringify([{
       id: jobId, name: '실패한 MR 통합 검사', stage: 'integration', status: 'failed', allow_failure: false,
       failure_reason: 'script_failure', pipeline: pipeline(), web_url: jobUrl(),
     }]));
@@ -249,9 +253,11 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(attachedWorkspace.issues.find(item => item.id === issue.id)).toEqual(issue);
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
 
+    const readsBeforeReview = calls.length;
     const reviewing = postTo(`/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(savedLink.id)}/status-review`);
     await review.click();
     const result = await json<GitlabIssueRefreshResult>(await reviewing);
+    expect(calls.slice(readsBeforeReview).map(call => call.path)).toEqual([upstreamRepo, upstreamPipeline, upstreamPipelineList]);
     expect(result.failures).toEqual([]);
     expect(result.statusReview).toMatchObject({ kind: 'suggestion', suggestion: { issueId: issue.id, toStatus: 'done', rule: { id: rule.id },
       evidence: { link: { id: savedLink.id }, trigger: 'pipeline.failed' } } });
@@ -268,7 +274,8 @@ test('360px에서 MR 최신 파이프라인을 확인하고 티켓에 연결해 
     expect(await json<Issue>(await applying)).toMatchObject({ title: '저장하지 않은 업무 제목', status: 'done' });
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
     expect(calls.every(call => call.method === 'GET' && call.token === token)).toBe(true);
-    expect(calls.every(call => [upstreamRepo, upstreamMr, upstreamPipeline, upstreamJobs, upstreamTriggerJobs, upstreamBridges].includes(call.path))).toBe(true);
+    expect(calls.every(call => [upstreamRepo, upstreamMr, upstreamPipeline, upstreamPipelineList, upstreamJobs, upstreamTriggerJobs, upstreamBridges]
+      .includes(call.path))).toBe(true);
   } finally {
     try {
       if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);

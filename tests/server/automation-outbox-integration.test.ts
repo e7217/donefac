@@ -47,14 +47,27 @@ test('pipeline automation and the direct-review token distinguish compatible run
   const checkedId = 500;
   let finishedAt = '';
   let repositoryUrl = '';
+  const otherPipelines = new Map<number, { source: string; tag: boolean; status: string; updated_at: string }>();
+  const pipeline = (id: number) => {
+    const details = id === checkedId ? { status: 'success', source: 'push', tag: false, finished_at: finishedAt, updated_at: finishedAt }
+      : otherPipelines.get(id);
+    assert.ok(details);
+    return { id, iid: id, project_id: 42, ref: branch, sha, web_url: `${repositoryUrl}/-/pipelines/${id}`, ...details };
+  };
   const mock = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    if (req.url === '/api/v4/projects/42') {
+    const url = new URL(req.url ?? '/', 'http://fixture.test');
+    if (url.pathname === '/api/v4/projects/42') {
       res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo', web_url: repositoryUrl }));
-    } else if (req.url === `/api/v4/projects/42/pipelines/${checkedId}`) {
-      res.end(JSON.stringify({ id: checkedId, iid: checkedId, project_id: 42, ref: branch, sha, status: 'success',
-        source: 'push', tag: false, finished_at: finishedAt, updated_at: finishedAt, web_url: `${repositoryUrl}/-/pipelines/${checkedId}` }));
-    } else res.writeHead(404).end('{}');
+    } else if (url.pathname === '/api/v4/projects/42/pipelines' && url.searchParams.get('ref') === branch) {
+      const rows = [checkedId, ...otherPipelines.keys()].sort((a, b) => b - a).map(pipeline)
+        .filter(row => row.source === url.searchParams.get('source'));
+      res.end(JSON.stringify(rows));
+    } else {
+      const id = Number(/^\/api\/v4\/projects\/42\/pipelines\/(\d+)$/u.exec(url.pathname)?.[1]);
+      if (id === checkedId || otherPipelines.has(id)) res.end(JSON.stringify(pipeline(id)));
+      else res.writeHead(404).end('{}');
+    }
   });
   mock.listen(0, '127.0.0.1');
   t.after(() => new Promise<void>(resolve => mock.close(() => resolve())));
@@ -74,6 +87,7 @@ test('pipeline automation and the direct-review token distinguish compatible run
   const before = f.observer.get<Issue>('issues', 'issue-1')!;
   const deliver = async (id: number, source: string, tag: boolean, status: 'running' | 'success', keyed = false) => {
     const time = new Date().toISOString();
+    if (id !== checkedId) otherPipelines.set(id, { source, tag, status, updated_at: time });
     const response = await f.call('/integrations/gitlab/webhook', 'POST', {
       object_kind: 'pipeline', project: { id: 42, web_url: repositoryUrl },
       object_attributes: { id, ref: branch, sha, source, tag, status, updated_at: time, ...(status === 'success' ? { finished_at: time } : {}) },

@@ -3,14 +3,15 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
 const rulesPath = '/api/automation-rules';
 const repositoryId = 42;
 const repository = 'team/triage';
 const projectRead = `/forge/api/v4/projects/${repositoryId}`;
-const pipelineRead = (id: number) => `${projectRead}/pipelines/${id}`;
+const pipelineListRead = `${projectRead}/pipelines`;
+const pipelineRead = (id: number) => `${pipelineListRead}/${id}`;
 const oldPipelineId = 701;
 const button = (container: Locator, name: string) => container.getByRole('button', { name, exact: true });
 const exactAction = '이 GitLab 활동 상태 확인';
@@ -62,11 +63,17 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
   const repositoryUrl = () => `${baseUrl}/${repository}`;
   const calls: { path: string; method?: string; credential?: string | string[] }[] = [];
   const remote = createServer((incoming, response) => {
-    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    const path = url.pathname;
     calls.push({ path, method: incoming.method, credential: incoming.headers['private-token'] });
     response.setHeader('Content-Type', 'application/json');
     if (path === projectRead) {
       response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repository, web_url: repositoryUrl() }));
+      return;
+    }
+    if (path === pipelineListRead) {
+      const candidates = [remoteOld, ...newer].filter(run => run.ref === url.searchParams.get('ref') && run.source === url.searchParams.get('source'));
+      response.end(JSON.stringify(candidates.map(run => ({ ...run, web_url: `${repositoryUrl()}/-/pipelines/${run.id}` }))));
       return;
     }
     const id = path.startsWith(`${projectRead}/pipelines/`) ? Number(path.slice(`${projectRead}/pipelines/`.length)) : NaN;
@@ -206,7 +213,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     remoteOld = { ...remoteOld, updated_at: completedAt, finished_at: completedAt };
     const readsBeforeReview = calls.length;
     const selected = await refreshActivity(page, selectedReview, selectedReviewPath);
-    expect(calls.slice(readsBeforeReview).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
+    expect(calls.slice(readsBeforeReview).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId), pipelineListRead]);
     expect(selected).toMatchObject({ links: [expect.objectContaining({ id: oldLink.id, state: 'success' })], failures: [], skipped: 0 });
     if (selected.statusReview?.kind !== 'suggestion') throw new Error('선택한 GitLab 활동의 상태 제안이 없습니다.');
     const { suggestion } = selected.statusReview;
@@ -229,6 +236,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     await expect(title).toHaveValue('저장하지 않은 티켓 제목');
     await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
     expect((await workspace()).issues.find(value => value.id === issue.id)).toEqual(issue);
+    const readsBeforeSave = calls.length;
     const savedResponse = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
     await save.click();
     const saved = await savedResponse;
@@ -236,6 +244,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
       expectedVersion: issue.version, title: '저장하지 않은 티켓 제목', status: 'done', gitlabStatusSuggestionToken: suggestion.token,
     });
     expect(await json<Issue>(saved)).toMatchObject({ status: 'done', title: '저장하지 않은 티켓 제목', version: issue.version + 1 });
+    expect(calls.slice(readsBeforeSave).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId), pipelineListRead]);
     const savedTicket = page.getByRole('dialog', { name: '저장하지 않은 티켓 제목', exact: true });
     await expect(savedTicket.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue('전송하지 않은 티켓 댓글');
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
@@ -255,6 +264,158 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     } finally {
       remote.closeAllConnections();
       await new Promise<void>((resolve, reject) => remote.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});
+
+test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고 이전 상태 제안을 보류한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const suffix = randomUUID().slice(0, 8);
+  const token = `synthetic-latest-run-${randomUUID()}`;
+  const secret = `synthetic-latest-hook-${randomUUID()}`;
+  const workspace = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
+  const settings = () => request.get(settingsPath).then(response => json<GitlabSettings>(response));
+  const initial = await settings();
+  expect(initial.baseUrl).toBe('');
+  const { projects: [project] } = await workspace();
+  const issue = await json<Issue>(await request.post('/api/issues', { data: {
+    projectId: project.id, title: `최신 파이프라인 검토 ${suffix}`, status: 'todo',
+  } }), 201);
+  const issuePath = `/api/issues/${issue.id}`;
+  const runsPath = `${issuePath}/automation-runs`;
+  const branchPrefix = `release/synthetic-${suffix}`;
+  const blockedRef = `${branchPrefix}/blocked`;
+  const readyRef = `${branchPrefix}/ready`;
+  const blockedId = 741, readyId = 742, blockedById = 842, taggedId = 843, otherSourceId = 844, newRunId = 845;
+  const startedAt = new Date(Date.now() - 60_000).toISOString();
+  let baseUrl = '';
+  let finishedAt: string | undefined;
+  let newRun = false;
+  const repoUrl = () => `${baseUrl}/${repository}`;
+  const pipelineUrl = (id: number) => `${repoUrl()}/-/pipelines/${id}`;
+  const pipeline = (id: number, ref: string, status: 'running' | 'success', source = 'push', tag = false) => ({
+    id, iid: id, project_id: repositoryId, ref, status, source, tag, sha: id < 800 ? 'b'.repeat(40) : 'c'.repeat(40),
+    updated_at: finishedAt ?? startedAt, ...(status === 'success' ? { finished_at: finishedAt } : {}), web_url: pipelineUrl(id),
+  });
+  const runs = () => [
+    pipeline(blockedId, blockedRef, finishedAt ? 'success' : 'running'),
+    pipeline(readyId, readyRef, finishedAt ? 'success' : 'running'),
+    pipeline(blockedById, blockedRef, 'running'),
+    pipeline(taggedId, readyRef, 'running', 'push', true),
+    pipeline(otherSourceId, readyRef, 'running', 'schedule'),
+    ...(newRun ? [pipeline(newRunId, readyRef, 'running')] : []),
+  ];
+  const calls: URL[] = [];
+  const upstream = createServer((incoming, response) => {
+    const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    calls.push(url);
+    response.setHeader('Content-Type', 'application/json');
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end('{}');
+    if (url.pathname === projectRead) return response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repository, web_url: repoUrl() }));
+    if (url.pathname === pipelineListRead) {
+      const selected = runs().filter(run => run.ref === url.searchParams.get('ref'))
+        .sort((a, b) => b.id - a.id)
+        .map(({ tag, ...run }) => run.id === taggedId ? run : { ...run, tag });
+      return response.end(JSON.stringify(selected));
+    }
+    const run = runs().find(value => pipelineRead(value.id) === url.pathname);
+    return run ? response.end(JSON.stringify(run)) : response.writeHead(404).end('{}');
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  baseUrl = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/forge`;
+
+  function reviewedQueries(id: number, ref: string) {
+    const reads = calls.splice(0);
+    expect(reads.slice(0, 3).map(url => url.pathname)).toEqual([projectRead, pipelineRead(id), pipelineListRead]);
+    expect(Object.fromEntries(reads[2].searchParams)).toEqual({ ref, source: 'push', order_by: 'id', sort: 'desc', page: '1', per_page: '20' });
+    return reads.slice(3).map(url => url.pathname);
+  }
+
+  let rule: AutomationRule | undefined;
+  try {
+    const configured = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
+      expectedVersion: initial.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    rule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `최신 파이프라인만 검토 ${suffix}`, enabled: true, trigger: 'pipeline.succeeded',
+      gitlabProjectIds: [repositoryId], branchPattern: `${branchPrefix}/*`, issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    } }), 201);
+    const attach = async (id: number) => json<GitlabLink>(await request.post(`${issuePath}/gitlab-links`, { data: {
+      repositoryId, url: pipelineUrl(id), expectedSettingsVersion: configured.version,
+    } }), 201);
+    const blocked = await attach(blockedId);
+    const ready = await attach(readyId);
+    expect(calls.splice(0).map(url => url.pathname)).toEqual([projectRead, pipelineRead(blockedId), projectRead, pipelineRead(readyId)]);
+    const beforeRuns = await json(await request.get(runsPath));
+    finishedAt = new Date().toISOString();
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    const gitlab = ticket.getByRole('region', { name: 'GitLab', exact: true });
+    const row = (id: number) => gitlab.locator('.gitlab-activity-row').filter({ has: page.getByText(`#${id}`, { exact: true }) });
+    const title = ticket.getByRole('textbox', { name: '제목', exact: true });
+    const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const status = ticket.getByRole('combobox', { name: '상태', exact: true });
+    const outcome = gitlab.getByRole('group', { name: 'GitLab 상태 확인 결과', exact: true });
+    const proposal = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    await title.fill('아직 저장하지 않은 최신 파이프라인 검토 제목');
+    await comment.fill('보내지 않은 파이프라인 검토 댓글');
+    const reviewPath = (link: GitlabLink) => `${issuePath}/gitlab-links/${encodeURIComponent(link.id)}/status-review`;
+
+    await expect(row(blockedId)).toHaveAttribute('data-gitlab-state', 'running');
+    const older = await refreshActivity(page, button(row(blockedId), selectedReviewAction), reviewPath(blocked));
+    expect(older).toMatchObject({ links: [{ id: blocked.id, state: 'success' }], failures: [], skipped: 0,
+      pipelineReview: { superseded: 1, unverified: 0 },
+    });
+    expect(older.statusReview).toBeUndefined();
+    expect(reviewedQueries(blockedId, blockedRef)).toEqual([pipelineRead(blockedById)]);
+    await expect(row(blockedId)).toHaveAttribute('data-gitlab-state', 'success');
+    await expect(outcome.getByText('같은 실행 계열에 더 최신 GitLab 파이프라인이 있습니다. 최신 실행에서 상태를 다시 검토해 주세요.', { exact: true })).toBeVisible();
+    await expect(outcome).toBeFocused();
+    await expect(proposal).toHaveCount(0);
+
+    const latest = await refreshActivity(page, button(row(readyId), selectedReviewAction), reviewPath(ready));
+    expect(reviewedQueries(readyId, readyRef)).toEqual([pipelineRead(taggedId)]);
+    if (latest.statusReview?.kind !== 'suggestion') throw new Error('최신 계열 파이프라인의 상태 변경 제안이 없습니다.');
+    const { suggestion } = latest.statusReview;
+    expect(suggestion).toMatchObject({ issueId: issue.id, toStatus: 'done', rule: { id: rule.id },
+      evidence: { link: { id: ready.id, pipelineSource: 'push', pipelineTag: false } },
+    });
+    await expect(proposal).toContainText(rule.name);
+    await expect(status).toHaveValue(issue.status);
+    await button(proposal, '목표 상태로 편집').click();
+    await expect(status).toHaveValue('done');
+    expect((await workspace()).issues.find(row => row.id === issue.id)).toEqual(issue);
+
+    newRun = true;
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
+    await button(ticket, '변경사항 저장').click();
+    const rejected = await saving;
+    expect(rejected.request().postDataJSON()).toMatchObject({ gitlabStatusSuggestionToken: suggestion.token, status: 'done' });
+    expect(await json(rejected, 409)).toMatchObject({ details: { reason: 'gitlab_status_suggestion_stale' } });
+    expect(reviewedQueries(readyId, readyRef)).toEqual([pipelineRead(newRunId)]);
+    await expect(ticket.locator('form.issue-detail-form').getByRole('alert')).toContainText('다시 확인');
+    await expect(status).toHaveValue(issue.status);
+    await expect(title).toHaveValue('아직 저장하지 않은 최신 파이프라인 검토 제목');
+    await expect(comment).toHaveValue('보내지 않은 파이프라인 검토 댓글');
+    const after = await workspace();
+    expect(after.issues.find(row => row.id === issue.id)).toEqual(issue);
+    expect(after.gitlabLinks.filter(row => row.issueId === issue.id).map(link => link.iid).sort()).toEqual([blockedId, readyId]);
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
+      const deleted = await request.delete(issuePath);
+      if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
+    } finally {
+      upstream.closeAllConnections();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
     }
   }
 });

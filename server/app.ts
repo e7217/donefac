@@ -787,6 +787,7 @@ export function createApp(options: {
   const gitlab:GitlabIntegrationService=new GitlabIntegrationService(store,{
     processEvent:event=>automation.processEvent(event),
     manualStatusReview:(issue,observations,actorId,version)=>automation.manualStatusReview(issue,observations,actorId,version),
+    requiresManualPipelineVerification:(issue,candidate)=>automation.requiresManualPipelineVerification(issue,candidate),
     onConnectionChanged:(previous,next)=>automation.onConnectionChanged(previous,next),
     findArchivedBranchLink:cursorId=>trash.findGitlabBranchLink(cursorId),
     jiraSources:()=>gitlabJiraSources(store),
@@ -2022,24 +2023,28 @@ export function createApp(options: {
     const hasGitlabSuggestion = Object.hasOwn(req.body, 'gitlabStatusSuggestionToken');
     const verifySuggestion = (issue: Issue) => automation.verifyManualStatusSuggestion(issue, req.body.status, req.body.type,
       req.body.gitlabStatusSuggestionToken, actor(req), gitlab.settings().version);
-    let confirmedOpen = false;
+    let verified = false;
     if (hasGitlabSuggestion) {
       const issue = get<Issue>('issues', req.params.id);
-      const opened = verifySuggestion(issue);
-      if (opened) {
+      const binding = verifySuggestion(issue);
+      if (binding) {
         checkVersion(issue, req.body.expectedVersion);
         const controller = new AbortController();
         const abort = () => controller.abort();
         res.once('close', abort);
-        try { confirmedOpen = await gitlab.verifyManualOpenedMergeRequest(issue.id, opened, controller.signal); }
+        try {
+          verified = binding.kind === 'opened'
+            ? await gitlab.verifyManualOpenedMergeRequest(issue.id, binding.proof, controller.signal)
+            : await gitlab.verifyManualPipelineStatus(issue.id, binding.proof, controller.signal);
+        }
         finally { res.off('close', abort); }
         if (controller.signal.aborted) return;
-        if (!confirmedOpen) return staleManualStatusSuggestion();
+        if (!verified) return staleManualStatusSuggestion();
       }
     }
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);
-      if (hasGitlabSuggestion && verifySuggestion(old) && !confirmedOpen) return staleManualStatusSuggestion();
+      if (hasGitlabSuggestion && verifySuggestion(old) && !verified) return staleManualStatusSuggestion();
       const prepared = prepareVersionedIssueUpdate(old, req.body);
       if (Object.hasOwn(req.body, 'schedulePreviewId')) {
         schedulePaste.consumeIssueSavePreview(req.body.schedulePreviewId, actor(req), old, prepared.issue, scheduleReviewHooks);

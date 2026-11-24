@@ -34,6 +34,7 @@ type Options = { method?: string; body?: unknown; headers?: Record<string, strin
 async function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-manual-gitlab-'));
   const calls: { method: string | undefined; path: string; credential: string | string[] | undefined }[] = [];
+  const pipelineListQueries: Record<string, string>[] = [];
   const time = Date.now() - 60_000;
   const instant = (offset = 0) => new Date(time + 1000 * offset).toISOString();
   let baseUrl = '';
@@ -41,6 +42,7 @@ async function fixture(t: TestContext) {
   let branchGate: (() => Promise<void>) | undefined;
   let projectRead = { id: repositoryId, status: 200 };
   let pipelineReadStatus = 200;
+  let pipelineListRead = { status: 200, selectedRow: {} as Record<string, unknown> };
   let branchReadStatus = 200;
   let branchProof: Record<string, unknown> = {};
   let branchHead = sha;
@@ -62,7 +64,7 @@ async function fixture(t: TestContext) {
   const newerPipelineUrl = () => `${projectUrl()}/-/pipelines/${newerPipelineId}`;
   let newerPipeline: typeof pipeline | undefined;
   const mock = createServer(async (req, res) => {
-    const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
+    const { pathname: path, searchParams } = new URL(req.url ?? '/', 'http://fixture.test');
     calls.push({ method: req.method, path, credential: req.headers['private-token'] });
     res.setHeader('Content-Type', 'application/json');
     const mergeRequest = { ...mr, web_url: mrUrl() };
@@ -83,7 +85,18 @@ async function fixture(t: TestContext) {
       res.end(JSON.stringify(pipelineReadStatus === 200 ? pipelineObject : { message: `fixture ${token}` }));
     } else if (newerPipeline && path === `${projectPath}/pipelines/${newerPipelineId}`) res.end(JSON.stringify({ ...newerPipeline, web_url: newerPipelineUrl() }));
     else if (path === `${projectPath}/merge_requests`) res.end(JSON.stringify([mergeRequest]));
-    else if (path === `${projectPath}/pipelines`) res.end(JSON.stringify([pipelineObject]));
+    else if (path === `${projectPath}/pipelines`) {
+      const ref = searchParams.get('ref'), source = searchParams.get('source');
+      if (!ref && !source) return res.end(JSON.stringify([pipelineObject]));
+      pipelineListQueries.push(Object.fromEntries(searchParams));
+      res.statusCode = pipelineListRead.status;
+      if (res.statusCode !== 200) return res.end(JSON.stringify({ message: `fixture ${token}` }));
+      const latest = newerPipeline ? [{ ...newerPipeline, web_url: newerPipelineUrl() }, pipelineObject] : [pipelineObject];
+      const rows = latest.filter(row => row.ref === ref && row.source === source).map(row => ({
+        ...row, tag: undefined, ...(row.id === pipelineId ? pipelineListRead.selectedRow : {}),
+      }));
+      res.end(JSON.stringify(rows));
+    }
     else if (path === branchPath) {
       const status = branchReadStatus;
       await branchGate?.();
@@ -141,12 +154,13 @@ async function fixture(t: TestContext) {
       object_kind: 'push', project_id: repositoryId, ref: `refs/heads/${branch}`, before, after, commits,
       project: { id: repositoryId, web_url: projectUrl(), path_with_namespace: 'team/subgroup/product' },
     } });
-  return { call, request, issue, attach, configure, links, webhook, push, instant, calls, projectPath, branchPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
+  return { call, request, issue, attach, configure, links, webhook, push, instant, calls, pipelineListQueries, projectPath, branchPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
     branchUrl: branchUrl(), secondaryBranchUrl: secondaryBranchUrl(), commitUrl: commitUrl(), setBranchHead(value: string) { branchHead = value; },
     holdBranchRead(gate?: () => Promise<void>) { branchGate = gate; },
     setProjectRead(patch: Partial<typeof projectRead>) { projectRead = { ...projectRead, ...patch }; },
     setBranchRead(status: number, proof: Record<string, unknown> = {}) { branchReadStatus = status; branchProof = proof; },
     setPipelineReadStatus(status: number) { pipelineReadStatus = status; },
+    setPipelineListRead(status: number, selectedRow: Record<string, unknown> = {}) { pipelineListRead = { status, selectedRow }; },
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     newerPipelineUrl: newerPipelineUrl(), setNewerPipeline(patch: Partial<typeof pipeline>) {
       newerPipeline = { ...pipeline, ...newerPipeline, id: newerPipelineId, iid: 13, ...patch };
@@ -297,7 +311,7 @@ test('a verified pipeline observation proposes a manual transition and preserves
   const runsBefore = await history();
 
   const finishedAt = new Date().toISOString();
-  f.setPipeline({ status: 'success', finished_at: finishedAt, updated_at: finishedAt });
+  f.setPipeline({ status: 'success', finished_at: finishedAt, updated_at: finishedAt, source: 'push', tag: false });
   const single = await f.call<GitlabIssueRefreshResult>(exactRefreshPath(f.issue.id, attached.id), { method: 'POST', body: {} });
   assert.equal(single.links[0]?.state, 'success');
   assert.equal(Object.hasOwn(single, 'statusReview'), false);
@@ -354,6 +368,7 @@ test('manual GitLab suggestions reject unverified results and changed evidence, 
   }, 201);
   const successRule = await createRule('pipeline.succeeded', 'done');
   f.setMr({ source_branch: 'feature/independent-review' });
+  f.setPipeline({ source: 'push', tag: false });
   const [attachedPipeline, attachedMr] = await Promise.all([
     f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201),
     f.call<GitlabLink>(path, f.attach(f.mrUrl), 201),
@@ -588,7 +603,7 @@ test('incomplete or predating opened-MR evidence leaves an independently verifie
     branchPattern: 'feature/*', issueTypes: [], fromStatuses: [f.issue.status], toStatusId: 'done',
   } }, 201);
   f.setMr({ title: `${f.issue.key} Opened merge request`, target_branch: 'main' });
-  f.setPipeline({ ref: 'feature/independent-ci' });
+  f.setPipeline({ ref: 'feature/independent-ci', source: 'push', tag: false });
   await f.call('/integrations/gitlab/sync', { method: 'POST', body: {} });
   const [linkedMr] = await f.links();
   assert.equal(linkedMr.kind, 'merge_request');
@@ -632,7 +647,7 @@ test('a newer running pipeline suppresses an older confirmed failure on the same
   } }, 201);
   await f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201);
   const oldFailure = new Date().toISOString();
-  f.setPipeline({ status: 'failed', finished_at: oldFailure, updated_at: oldFailure });
+  f.setPipeline({ status: 'failed', finished_at: oldFailure, updated_at: oldFailure, source: 'push', tag: false });
   const refresh = () => f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
   const older = (await refresh()).statusReview;
   assert.ok(older?.kind === 'suggestion');
@@ -655,6 +670,102 @@ test('a newer running pipeline suppresses an older confirmed failure on the same
   assert.deepEqual(observed.failures, []);
   assert.equal(observed.links.find(link => link.id === current.id)?.state, 'running');
   assert.equal(observed.statusReview, undefined);
+});
+
+test('manual pipeline status review and save reject a newer upstream execution even without a webhook', async t => {
+  const f = await fixture(t);
+  const issuePath = `/issues/${f.issue.id}`;
+  const linkPath = pathFor(f.issue.id);
+  const workspace = () => f.call<WorkspaceSnapshot>('/workspace');
+  const runs = () => f.call<IssueAutomationRunPage>(`${issuePath}/automation-runs`);
+  await f.call<AutomationRule>('/automation-rules', { method: 'POST', body: {
+    projectId, name: 'Review the latest failed execution', enabled: true, trigger: 'pipeline.failed', gitlabProjectIds: [repositoryId],
+    branchPattern: sourceBranch, issueTypes: [], fromStatuses: [f.issue.status], toStatusId: 'review',
+  } }, 201);
+  const link = await f.call<GitlabLink>(linkPath, f.attach(f.pipelineUrl), 201);
+  const selectedReview = activityStatusReviewPath(f.issue.id, link.id);
+  const aggregateReview = `${linkPath}/refresh`;
+  const listPath = `${f.projectPath}/pipelines`;
+  const exactPaths = [f.projectPath, `${listPath}/${pipelineId}`];
+  const finishedAt = new Date().toISOString();
+  f.setPipeline({ status: 'failed', finished_at: finishedAt, updated_at: finishedAt, source: 'push', tag: undefined });
+  const resetReads = () => { f.calls.length = 0; f.pipelineListQueries.length = 0; };
+  const expectLatestRead = (expectedPaths: string[]) => {
+    assert.deepEqual(f.calls.map(({ method, path, credential }) => [method, path, credential]),
+      expectedPaths.map(path => ['GET', path, token]));
+    assert.deepEqual(f.pipelineListQueries, [{ ref: sourceBranch, source: 'push', order_by: 'id', sort: 'desc', page: '1', per_page: '20' }]);
+  };
+  const review = (path = selectedReview) => f.call<GitlabIssueRefreshResult>(path, { method: 'POST', body: {} });
+
+  resetReads();
+  const missingTag = await review();
+  assert.equal(missingTag.links[0]?.state, 'failed');
+  assert.equal(missingTag.statusReview, undefined);
+  assert.deepEqual(missingTag.pipelineReview, { unverified: 1, superseded: 0 });
+  assert.deepEqual(f.calls.map(call => call.path), exactPaths);
+  assert.deepEqual(f.pipelineListQueries, []);
+
+  f.setPipeline({ tag: false });
+  f.setNewerPipeline({ source: 'push', tag: false, status: 'running', sha: commitSha, finished_at: undefined });
+  for (const path of [selectedReview, aggregateReview]) {
+    resetReads();
+    const hidden = await review(path);
+    assert.equal(hidden.links[0]?.state, 'failed');
+    assert.equal(hidden.statusReview, undefined);
+    assert.deepEqual(hidden.pipelineReview, { unverified: 0, superseded: 1 });
+    expectLatestRead([...exactPaths, listPath, `${listPath}/${pipelineId + 1}`]);
+  }
+  assert.deepEqual((await f.links()).map(({ id }) => id), [link.id]);
+
+  f.setNewerPipeline({ source: 'push', tag: true });
+  resetReads();
+  const latest = await review();
+  expectLatestRead([...exactPaths, listPath, `${listPath}/${pipelineId + 1}`]);
+  assert.ok(latest.statusReview?.kind === 'suggestion');
+  assert.equal(latest.statusReview.suggestion.evidence.occurredAt, finishedAt);
+  assert.equal(latest.statusReview.suggestion.evidence.link.id, link.id);
+  const edit = { expectedVersion: f.issue.version, status: 'review', title: 'Reviewed the latest failure',
+    gitlabStatusSuggestionToken: latest.statusReview.suggestion.token };
+  const before = await workspace();
+  const history = await runs();
+  const unchanged = async () => {
+    assert.deepEqual(await workspace(), before);
+    assert.deepEqual(await runs(), history);
+  };
+  const rejectSave = async (expectedPaths: string[]) => {
+    resetReads();
+    const result = await f.call<{ details?: { reason?: string } }>(issuePath, { method: 'PATCH', body: edit }, 409);
+    assert.equal(result.details?.reason, 'gitlab_status_suggestion_stale');
+    expectLatestRead(expectedPaths);
+    await unchanged();
+  };
+
+  f.setNewerPipeline({ source: 'schedule', tag: false });
+  for (const [status, row] of [[403, {}], [200, { sha: commitSha }]] as const) {
+    f.setPipelineListRead(status, row);
+    const unverified = await review();
+    assert.equal(unverified.links[0]?.state, 'failed');
+    assert.equal(unverified.statusReview, undefined);
+    assert.deepEqual(unverified.pipelineReview, { unverified: 1, superseded: 0 });
+    await rejectSave([...exactPaths, listPath]);
+  }
+  f.setPipelineListRead(200);
+  f.setNewerPipeline({ source: 'push', tag: false });
+  await rejectSave([...exactPaths, listPath, `${listPath}/${pipelineId + 1}`]);
+
+  f.setNewerPipeline({ source: 'schedule', tag: false });
+  resetReads();
+  const fresh = await review();
+  expectLatestRead([...exactPaths, listPath]);
+  assert.ok(fresh.statusReview?.kind === 'suggestion');
+  resetReads();
+  const saved = await f.call<Issue>(issuePath, { method: 'PATCH', body: { ...edit, gitlabStatusSuggestionToken: fresh.statusReview.suggestion.token } });
+  expectLatestRead([...exactPaths, listPath]);
+  assert.equal(saved.status, 'review');
+  assert.equal(saved.title, edit.title);
+  assert.equal(saved.version, f.issue.version + 1);
+  assert.deepEqual((await runs()).items, history.items);
+  assert.deepEqual(await f.links(), before.gitlabLinks.filter(candidate => candidate.issueId === f.issue.id));
 });
 
 test('ticket GitLab refresh retains a newer webhook and rejects an in-flight connection change before saving', async t => {
@@ -893,7 +1004,7 @@ test('ticket GitLab refresh limits bulk reads to 20 and can review one selected 
   const workspace = () => f.call<WorkspaceSnapshot>('/workspace');
   const beforeReview = await workspace();
   const finishedAt = new Date().toISOString();
-  f.setPipeline({ finished_at: finishedAt, updated_at: finishedAt });
+  f.setPipeline({ finished_at: finishedAt, updated_at: finishedAt, source: 'push', tag: false });
   f.calls.length = 0;
   const checked = await f.request<GitlabIssueRefreshResult>(activityStatusReviewPath(f.issue.id, selected.id), { method: 'POST', body: {} });
   assert.equal(checked.status, 200);
@@ -902,7 +1013,7 @@ test('ticket GitLab refresh limits bulk reads to 20 and can review one selected 
   assert.deepEqual(checked.data.failures, []);
   assert.equal(checked.data.links.length, 1);
   assert.equal(checked.data.links[0].id, selected.id);
-  assert.deepEqual(f.calls.map(call => call.path), [f.projectPath, `${f.projectPath}/pipelines/${pipelineId}`]);
+  assert.deepEqual(f.calls.map(call => call.path), [f.projectPath, `${f.projectPath}/pipelines/${pipelineId}`, `${f.projectPath}/pipelines`]);
   assert.ok(checked.data.statusReview?.kind === 'suggestion');
   const { suggestion } = checked.data.statusReview;
   assert.deepEqual(suggestion.evidence, { link: checked.data.links[0], trigger: 'pipeline.succeeded', occurredAt: finishedAt });
@@ -928,7 +1039,7 @@ test('selected GitLab review rejects mismatched reads and accounts for newer com
   f.setPipeline({ source: 'push', tag: false });
   const selected = await f.call<GitlabLink>(path, f.attach(f.pipelineUrl), 201);
   const review = () => f.call<GitlabIssueRefreshResult>(activityStatusReviewPath(f.issue.id, selected.id), { method: 'POST', body: {} });
-  const exactPaths = [f.projectPath, `${f.projectPath}/pipelines/${pipelineId}`];
+  const reviewPaths = [f.projectPath, `${f.projectPath}/pipelines/${pipelineId}`, `${f.projectPath}/pipelines`];
   const finishedAt = new Date().toISOString();
   f.setPipeline({ id: pipelineId + 1, status: 'failed', finished_at: finishedAt, updated_at: finishedAt });
   const mismatched = await review();
@@ -943,7 +1054,8 @@ test('selected GitLab review rejects mismatched reads and accounts for newer com
     const otherExecution = await f.call<GitlabLink>(path, f.attach(f.newerPipelineUrl), 201);
     f.calls.length = 0;
     assert.equal((await review()).statusReview?.kind, 'suggestion');
-    assert.deepEqual(f.calls.map(call => call.path), exactPaths);
+    assert.deepEqual(f.calls.map(call => call.path), classification.source === 'push'
+      ? [...reviewPaths, `${f.projectPath}/pipelines/${pipelineId + 1}`] : reviewPaths);
     await f.call(deletePath(f.issue.id, otherExecution), { method: 'DELETE' });
   }
 

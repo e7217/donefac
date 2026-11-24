@@ -1478,6 +1478,7 @@ export interface GitlabIssueRefreshResult {
   failures: { linkId: string; message: string }[];
   skipped: number;
   statusReview?: GitlabStatusReview;
+  pipelineReview?: { superseded: number; unverified: number };
 }
 export type GitlabWorkflowStatusSuggestionTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
 export type GitlabStatusSuggestionTrigger = GitlabWorkflowStatusSuggestionTrigger | 'deployment.succeeded';
@@ -1486,6 +1487,7 @@ export interface GitlabOpenedMergeRequestStatusBinding {
   occurredAt: string;
   sourceProjectId: number;
 }
+export type GitlabPipelineStatusBinding = Pick<GitlabOpenedMergeRequestStatusBinding, 'linkId' | 'occurredAt'>;
 export type GitlabStatusObservation = {
   link: GitlabLink;
   occurredAt: string;

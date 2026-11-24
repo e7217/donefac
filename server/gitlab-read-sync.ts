@@ -1,5 +1,6 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
+import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
 import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts, GitlabUnresolvedDiscussion } from '../shared/types.js';
@@ -713,23 +714,45 @@ async function readExactWorkflowObject(
 
 export function gitlabLinkedActivityReader(connection: Connection, signal?: AbortSignal) {
   const projects = new Map<number, ReturnType<typeof readVerifiedProject>>();
-  function projectFor(projectId: number) {
+  const requestSignal = (scoped?: AbortSignal) => scoped && signal ? AbortSignal.any([scoped, signal]) : scoped ?? signal;
+  function projectFor(projectId: number, scopedSignal?: AbortSignal) {
     let project = projects.get(projectId);
     if (!project) {
-      project = readVerifiedProject(connection, projectId, signal);
+      project = readVerifiedProject(connection, projectId, requestSignal(scopedSignal));
       projects.set(projectId, project);
     }
     return project;
   }
   return {
     projectFor,
-    async workflow(projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number) {
-      const context = await projectFor(projectId);
-      const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, signal);
+    async workflow(projectId: number, kind: WorkflowPage['kind'], id: number, expectedObjectId: number, scopedSignal?: AbortSignal) {
+      const context = await projectFor(projectId, scopedSignal);
+      const verified = await readExactWorkflowObject(context, projectId, { repositoryPath: context.repositoryPath, kind, id }, requestSignal(scopedSignal));
       if (verified.object.id !== expectedObjectId || includesGitlabCredential(connection.token, [verified.webUrl])) {
         throw new GitlabReadError(kind === 'merge_request' ? 'merge-requests' : 'pipelines', 'invalid-response');
       }
       return verified;
+    },
+    async workflowPipelines(projectId: number, { ref, source, page, perPage }: { ref: string; source: string; page: number; perPage: number },
+      scopedSignal?: AbortSignal) {
+      const invalid = () => new GitlabReadError('pipelines', 'invalid-response');
+      if (!isGitlabBranchName(ref) || !gitlabPipelineSource(source) || includesGitlabCredential(connection.token, [ref, source]) ||
+          !positiveId(page) || !positiveId(perPage) || perPage > PIPELINE_PAGE_SIZE) throw invalid();
+      const { base, headers, projectUrl, repositoryPath } = await projectFor(projectId, scopedSignal);
+      const url = new URL(projectUrl);
+      url.pathname += '/pipelines';
+      url.search = new URLSearchParams({ ref, source, order_by: 'id', sort: 'desc', page: String(page), per_page: String(perPage) }).toString();
+      let responseHeaders = new Headers();
+      const rows = await readPage(url, headers, 'pipelines', perPage, requestSignal(scopedSignal), value => { responseHeaders = value; });
+      const hasNextPage = gitlabNextPage(responseHeaders, url, page, rows.length, perPage, 'pipelines');
+      for (const row of rows) {
+        const verified = manualPage(row.web_url, base, false);
+        if (row.project_id !== projectId || !positiveId(row.id) || verified?.repositoryPath !== repositoryPath ||
+            verified.kind !== 'pipeline' || verified.id !== row.id || includesGitlabCredential(connection.token, [String(row.web_url)])) {
+          throw invalid();
+        }
+      }
+      return { rows, hasNextPage };
     },
     async branch(projectId: number, name: string) {
       if (!isGitlabBranchName(name) || includesGitlabCredential(connection.token, [name])) {
@@ -935,7 +958,7 @@ function invalidPipelineJobs(): never {
 }
 
 function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number | undefined,
-  stage: 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage): boolean {
+  stage: 'pipelines' | 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage): boolean {
   const invalid = () => { throw new GitlabReadError(stage, 'invalid-response'); };
   const next = headers.get('x-next-page');
   if (next !== null && next !== '' && next !== String(page + 1)) invalid();
@@ -952,6 +975,13 @@ function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: numb
     const pages = target.searchParams.getAll('page');
     if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
       pages.length !== 1 || pages[0] !== String(page + 1)) invalid();
+    if (stage === 'pipelines') {
+      const filters = (value: URL) => new URLSearchParams([...value.searchParams].filter(([name]) => name !== 'page'));
+      const expected = filters(url), reported = filters(target);
+      expected.sort();
+      reported.sort();
+      if (reported.toString() !== expected.toString()) invalid();
+    }
     nextLink = true;
   }
   const reportedNext = next !== null ? next !== '' : links !== null ? nextLink : rowCount === pageSize;

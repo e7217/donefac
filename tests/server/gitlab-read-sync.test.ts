@@ -4,8 +4,9 @@ import { once } from 'node:events';
 import { createServer, type RequestListener } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { gzipSync } from 'node:zlib';
-import { GitlabManualUrlError, GitlabReadError, readGitlabManualObject, readGitlabProjectWebhookHistory, readGitlabSyncProject } from '../../server/gitlab-read-sync.js';
+import { GitlabManualUrlError, GitlabReadError, gitlabLinkedActivityReader, readGitlabManualObject, readGitlabProjectWebhookHistory, readGitlabSyncProject, type GitlabReadObject } from '../../server/gitlab-read-sync.js';
 import { gitlabWebhookMessageDigest } from '../../server/gitlab-webhook-message.js';
+import { readGitlabWorkflowPipelineFreshness } from '../../server/gitlab-workflow-pipeline-freshness.js';
 
 async function upstream(t: TestContext, listener: RequestListener) {
   const server = createServer(listener);
@@ -141,6 +142,83 @@ test('GitLab read scans preserve a configured subpath and cap MR pages and pipel
   assert.deepEqual(result.mergeRequests.at(-1), { id: 1_000 });
   assert.equal(result.pipelines.length, 50);
   assert.equal(Object.hasOwn(result, 'history'), false);
+});
+
+test('GitLab pipeline freshness requires ordered, exact and bounded evidence across repository pages', async t => {
+  const repositoryId = 42;
+  const projectPath = `/gitlab/api/v4/projects/${repositoryId}`;
+  const pipelinesPath = `${projectPath}/pipelines`;
+  const ref = 'feature/review-current';
+  const sha = 'a'.repeat(40);
+  const token = 'synthetic-pipeline-workflow-token';
+  const requests: URL[] = [];
+  let pages: GitlabReadObject[][] = [];
+  let details = new Map<number, GitlabReadObject>();
+  let changeNextLink: ((url: URL) => void) | undefined;
+  const origin = await upstream(t, (request, response) => {
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], token);
+    const url = new URL(request.url!, origin);
+    requests.push(url);
+    response.setHeader('Content-Type', 'application/json');
+    if (url.pathname === projectPath) {
+      response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/repository', web_url: `${origin}/gitlab/team/repository` }));
+    } else if (url.pathname === pipelinesPath) {
+      const page = Number(url.searchParams.get('page'));
+      if (page < pages.length) {
+        const next = new URL(url);
+        next.searchParams.set('page', String(page + 1));
+        changeNextLink?.(next);
+        response.setHeader('Link', `<${next.href}>; rel="next"`);
+      }
+      response.end(JSON.stringify(pages[page - 1]));
+    } else {
+      const detail = details.get(Number(url.pathname.slice(pipelinesPath.length + 1)));
+      if (!detail || !url.pathname.startsWith(`${pipelinesPath}/`)) response.statusCode = 404;
+      response.end(JSON.stringify(detail ?? {}));
+    }
+  });
+  const pipeline = (id: number, overrides: GitlabReadObject = {}) => ({
+    id, project_id: repositoryId, ref, sha, source: 'push', status: 'success', updated_at: '2026-01-22T18:20:30Z',
+    web_url: `${origin}/gitlab/team/repository/-/pipelines/${id}`, ...overrides,
+  });
+  const selected = pipeline(11, { tag: false });
+  const read = (rows: GitlabReadObject[][], exact: GitlabReadObject[] = [], changeLink?: (url: URL) => void) => {
+    pages = rows;
+    details = new Map(exact.map(row => [Number(row.id), row]));
+    changeNextLink = changeLink;
+    requests.length = 0;
+    const reader = gitlabLinkedActivityReader({ baseUrl: `${origin}/gitlab/`, token });
+    return readGitlabWorkflowPipelineFreshness(reader, repositoryId, selected);
+  };
+  const listQueries = () => requests.filter(url => url.pathname === pipelinesPath).map(url => Object.fromEntries(url.searchParams));
+  const query = { ref, source: 'push', sort: 'desc', order_by: 'id', per_page: '20' };
+  const firstPage = [pipeline(52), ...Array.from({ length: 19 }, (_, index) => pipeline(51 - index, { source: 'schedule' }))];
+  const newerTag = pipeline(52, { tag: true });
+  const selectedRow = pipeline(11);
+
+  assert.equal(await read([firstPage, [selectedRow]], [newerTag]), 'latest');
+  assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath, `${pipelinesPath}/52`, pipelinesPath]);
+  assert.deepEqual(listQueries(), [{ ...query, page: '1' }, { ...query, page: '2' }]);
+
+  assert.equal(await read([firstPage, [selectedRow]], [newerTag], next => { next.searchParams.set('source', 'schedule'); }), 'unverified');
+  assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath]);
+
+  const repeatedId = pipeline(33, { source: 'schedule' });
+  assert.equal(await read([firstPage, [repeatedId, selectedRow]], [newerTag]), 'unverified');
+  assert.deepEqual(listQueries().map(({ page }) => page), ['1', '2']);
+
+  const secondPage = Array.from({ length: 20 }, (_, index) => pipeline(32 - index, { source: 'schedule' }));
+  assert.equal(await read([firstPage, secondPage, [selectedRow]], [newerTag]), 'unverified');
+  assert.deepEqual(listQueries().map(({ page }) => page), ['1', '2']);
+
+  const newerRows = Array.from({ length: 11 }, (_, index) => pipeline(22 - index));
+  assert.equal(await read([[...newerRows, selectedRow]], newerRows.map(row => ({ ...row, tag: true }))), 'unverified');
+  assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath,
+    ...newerRows.slice(0, 10).map(row => `${pipelinesPath}/${row.id}`)]);
+
+  assert.equal(await read([[pipeline(11, { status: undefined })]]), 'unverified');
+  assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath]);
 });
 
 test('optional repository history uses bounded numeric project paths and never follows remote pagination links', async t => {

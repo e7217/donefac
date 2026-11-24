@@ -252,16 +252,21 @@ test('360px 티켓의 GitLab 상태 제안을 검토하고 초안과 워크플�
   let baseUrl = '';
   const repositoryUrl = () => `${baseUrl}/${repositoryPath}`;
   const pipelineUrl = () => `${repositoryUrl()}/-/pipelines/${pipelineId}`;
+  const pipeline = () => ({ id: pipelineId, project_id: repositoryId, status: finishedAt ? 'success' : 'running',
+    ref: branch, sha, source: 'push', tag: false, updated_at: finishedAt ?? originalReadAt,
+    finished_at: finishedAt, web_url: pipelineUrl() });
   const mock = createServer((incoming, response) => {
-    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    const path = url.pathname;
     response.setHeader('Content-Type', 'application/json');
     if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) {
       response.writeHead(401).end('{}');
     } else if (path === endpoint) {
       response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repositoryPath, web_url: repositoryUrl() }));
     } else if (path === `${endpoint}/pipelines/${pipelineId}`) {
-      response.end(JSON.stringify({ id: pipelineId, project_id: repositoryId, status: finishedAt ? 'success' : 'running',
-        ref: branch, sha, updated_at: finishedAt ?? originalReadAt, finished_at: finishedAt, web_url: pipelineUrl() }));
+      response.end(JSON.stringify(pipeline()));
+    } else if (path === `${endpoint}/pipelines` && url.searchParams.get('ref') === branch && url.searchParams.get('source') === 'push') {
+      response.end(JSON.stringify([pipeline()]));
     } else response.writeHead(404).end('{}');
   });
   mock.listen(0, '127.0.0.1');

@@ -18,7 +18,9 @@ import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-bran
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory, readGitlabDeploymentStatus } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
-import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabOpenedMergeRequestStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
+import { readGitlabWorkflowPipelineFreshness, type GitlabWorkflowPipelineFreshness } from './gitlab-workflow-pipeline-freshness.js';
+import type { ManualPipelineStatusCandidate } from './automation.js';
+import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabOpenedMergeRequestStatusBinding, GitlabPipelineStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -48,6 +50,7 @@ type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl
 type Hooks={
   processEvent:(event:AutomationEvent)=>AutomationRun[];
   manualStatusReview?:(issue:Issue, observations:readonly GitlabStatusObservation[], actorId:string, settingsVersion:number)=>GitlabStatusReview|undefined;
+  requiresManualPipelineVerification?:(issue: Issue, candidate: ManualPipelineStatusCandidate) => boolean;
   onConnectionChanged:(previous:GitlabSettings,next:GitlabSettings)=>number;
   findArchivedBranchLink?:(cursorId:string)=>GitlabLink|undefined;
   jiraSources?:()=>GitlabJiraSource[];
@@ -871,6 +874,29 @@ export class GitlabIntegrationService{
       throw error;
     }
   }
+  async verifyManualPipelineStatus(issueId: string, proof: GitlabPipelineStatusBinding, signal: AbortSignal): Promise<boolean> {
+    const link = this.store.get<GitlabLink>('gitlab_links', proof.linkId);
+    if (!link || link.issueId !== issueId || link.kind !== 'pipeline' || !link.pipelineSource || typeof link.pipelineTag !== 'boolean') return false;
+    try {
+      const result = await this.readLinkedPipeline(issueId, proof.linkId, signal, 'GitLab 파이프라인 상태',
+        async (connection, repositoryId, pipelineId, _expectedSha, readSignal) => {
+          const read = gitlabLinkedActivityReader(connection, readSignal);
+          const { object } = await read.workflow(repositoryId, 'pipeline', pipelineId, pipelineId);
+          const status = workflowStatusRead('pipeline', object, undefined);
+          const classification = readPipelineClassification(object, true, connection.token);
+          const draft = readLink('pipeline', object, [], keys, undefined, classification);
+          if (!status || status.occurredAt !== proof.occurredAt || !confirmWorkflowRead(link, draft, status, [])?.observation ||
+              classification.pipelineSource !== link.pipelineSource || classification.pipelineTag !== link.pipelineTag) return { latest: false };
+          const freshness = await readGitlabWorkflowPipelineFreshness(read, repositoryId, object, readSignal);
+          return { latest: freshness === 'latest' };
+        });
+      const newest = this.latestVerifiedPipelineId(link);
+      return result.latest && (newest === null || newest <= result.pipelineId) && !this.hasNewerLinkedPipeline(link);
+    } catch (error) {
+      if (signal.aborted || error instanceof GitlabIntegrationError) return false;
+      throw error;
+    }
+  }
   async mergeRequestDiscussions(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestDiscussions> {
     const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 토론', readGitlabMergeRequestDiscussions);
     return { ...result, ...response };
@@ -1169,7 +1195,7 @@ export class GitlabIntegrationService{
     const token = captured.token ? this.store.unseal(captured.token) : null;
     const startedAt = now();
     const read = gitlabLinkedActivityReader({ baseUrl:captured.baseUrl, token }, signal);
-    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; status:WorkflowStatusRead|null } |
+    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; status:WorkflowStatusRead|null; freshness?: GitlabWorkflowPipelineFreshness } |
       { link:GitlabLink; kind:'branch'; branch:string; cursorId:string; cursor:PushObservation|undefined; aliases:GitlabLink[]; sourceSha:string; webUrl:string } |
       { link:GitlabLink; message:string };
     const readLinkRow = async (link:GitlabLink):Promise<ReadOutcome> => {
@@ -1193,7 +1219,17 @@ export class GitlabIntegrationService{
         const targetBranch = target.kind === 'merge_request' ? readMergeTargetBranch(object, link.projectId, token, ...this.webhookCredentials(captured)) : undefined;
         const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId, targetBranch },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
-        return { link, kind:target.kind, draft, status:reviewActorId && this.hooks.manualStatusReview ? workflowStatusRead(target.kind,object,targetBranch) : null };
+        const status = reviewActorId && this.hooks.manualStatusReview ? workflowStatusRead(target.kind,object,targetBranch) : null;
+        let freshness: GitlabWorkflowPipelineFreshness | undefined;
+        if (target.kind === 'pipeline' && samePipelineRevision(link, draft) &&
+            (status?.trigger === 'pipeline.succeeded' || status?.trigger === 'pipeline.failed') && status.occurredAt &&
+            this.hooks.requiresManualPipelineVerification?.(issue, { trigger: status.trigger, occurredAt: status.occurredAt,
+              gitlabProjectId: link.projectId, branch: draft.sourceBranch,
+              pipelineSource: draft.pipelineClassification.pipelineSource ?? link.pipelineSource,
+              pipelineTag: draft.pipelineClassification.pipelineTag ?? link.pipelineTag }) !== false) {
+          freshness = await readGitlabWorkflowPipelineFreshness(read, link.projectId, object, signal);
+        }
+        return { link, kind:target.kind, draft, status, freshness };
       } catch (error) {
         signal?.throwIfAborted();
         if (!(error instanceof GitlabReadError)) throw error;
@@ -1218,6 +1254,7 @@ export class GitlabIntegrationService{
       const latestIssue = this.requireIssue(issueId);
       if (latestIssue.projectId !== issue.projectId || latestIssue.key !== issue.key) fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 확인해 주세요.',409);
       const checked: ConfirmedWorkflowRead[] = [];
+      const freshnessByLink = new Map<string, GitlabWorkflowPipelineFreshness>();
       for (const outcome of outcomes) {
         const { link } = outcome;
         if ('message' in outcome) {
@@ -1284,6 +1321,7 @@ export class GitlabIntegrationService{
             this.hasConflictingOpenedMergeRequestCursor(instance, link.projectId, draft, startedAt) ? null : outcome.status;
           const confirmation = confirmWorkflowRead(updated,draft,status,aliases);
           if (confirmation) checked.push(confirmation);
+          if (outcome.freshness) freshnessByLink.set(link.id, outcome.freshness);
         }
       }
       if (reviewActorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.observation)) {
@@ -1296,7 +1334,15 @@ export class GitlabIntegrationService{
         }
         const observations = currentWorkflowObservations(checked, link => this.latestVerifiedPipelineId(link))
           .filter(({ link }) => !reviewSelected || !this.hasNewerLinkedPipeline(link));
-        const review = this.hooks.manualStatusReview(latestIssue,observations,reviewActorId,captured.version);
+        const pipelineReview = { superseded: 0, unverified: 0 };
+        const verified = observations.filter(({ link }) => {
+          if (link.kind !== 'pipeline') return true;
+          const freshness = freshnessByLink.get(link.id);
+          if (freshness === 'superseded' || freshness === 'unverified') pipelineReview[freshness]++;
+          return freshness === 'latest';
+        });
+        if (pipelineReview.superseded || pipelineReview.unverified) result.pipelineReview = pipelineReview;
+        const review = this.hooks.manualStatusReview(latestIssue,verified,reviewActorId,captured.version);
         if (review) result.statusReview = review;
       }
       return result;

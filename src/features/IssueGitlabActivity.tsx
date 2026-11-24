@@ -36,6 +36,7 @@ type RefreshFeedback = CheckingFeedback | { kind: 'failed'; message: string } | 
   kind: 'finished'; checked: number; skipped: number; failures: RefreshFailure[]; workspaceRefreshFailed: boolean;
   issueVersion: number;
   statusReview?: GitlabIssueRefreshResult['statusReview'];
+  pipelineReview?: GitlabIssueRefreshResult['pipelineReview'];
   selectedReview?: 'reviewed' | 'no-proposal';
   verifiedState?: { label: string; state: string };
   deploymentReview?: GitlabDeploymentReviewResult['state'];
@@ -409,6 +410,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       if (!controller.signal.aborted) setRefreshFeedback({ kind: 'finished', checked: result.links.length,
         skipped: result.skipped, failures, workspaceRefreshFailed, issueVersion,
         statusReview: !selectedLink || reviewSelected ? result.statusReview : undefined,
+        pipelineReview: result.pipelineReview,
         selectedReview: reviewSelected && verified ? result.statusReview ? 'reviewed' : 'no-proposal' : undefined,
         verifiedState: verified ? { label: gitlabLinkLabel(verified), state: gitlabActivityStateLabel(verified.state) } : undefined });
     });
@@ -458,7 +460,13 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       {statusReview?.kind === 'ambiguous' && <p className="gitlab-activity-hint" role="status">
         확인한 GitLab 규칙의 목표 상태가 서로 다릅니다. 티켓에서 상태를 선택해 주세요.
       </p>}
-      {currentFeedback?.selectedReview === 'no-proposal' && <p className="gitlab-activity-hint" role="status">
+      {Boolean(currentFeedback?.pipelineReview?.superseded) && <p className="gitlab-activity-hint" role="status">
+        같은 실행 계열에 더 최신 GitLab 파이프라인이 있습니다. 최신 실행에서 상태를 다시 검토해 주세요.
+      </p>}
+      {Boolean(currentFeedback?.pipelineReview?.unverified) && <p className="gitlab-activity-hint" role="status">
+        GitLab에서 같은 실행 계열의 최신 파이프라인을 확인할 수 없습니다. GitLab 상태를 다시 확인해 주세요.
+      </p>}
+      {currentFeedback?.selectedReview === 'no-proposal' && !currentFeedback.pipelineReview && <p className="gitlab-activity-hint" role="status">
         이 활동으로 제안할 상태 변경이 없습니다.
       </p>}
       {suggestion && isCurrentStatusSuggestion(suggestion) && <GitlabStatusSuggestionCard suggestion={suggestion}

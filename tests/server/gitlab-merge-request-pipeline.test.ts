@@ -45,8 +45,10 @@ async function fixture(t: TestContext, configuredRepositories = [targetRepositor
   let remotePipelineSource: string | undefined = 'merge_request_event';
   let currentHead = sourceHead;
   let duringPipeline: (() => Promise<void> | void) | undefined;
+  const remotePipeline = (id: number) => ({ id, project_id: sourceRepository, sha: remotePipelineSha, status: 'failed',
+    updated_at: remotePipelineAt, finished_at: remotePipelineAt, ref: pipelineRef, source: remotePipelineSource, web_url: pipelineUrl(id) });
   const mock = createServer(async (req, res) => {
-    const path = new URL(req.url ?? '/', 'http://fixture.test').pathname;
+    const { pathname: path, searchParams } = new URL(req.url ?? '/', 'http://fixture.test');
     calls.push({ method: req.method ?? '', path, credential: req.headers['private-token'] });
     let body: unknown;
     if (path === repositoryPath(targetRepository)) {
@@ -60,8 +62,9 @@ async function fixture(t: TestContext, configuredRepositories = [targetRepositor
     } else if (path === pipelinePath || path === repositoryPath(sourceRepository) + '/pipelines/' + (pipelineId + 1)) {
       await duringPipeline?.();
       const id = Number(path.split('/').at(-1));
-      body = { id, project_id: sourceRepository, sha: remotePipelineSha, status: 'failed', updated_at: remotePipelineAt, finished_at: remotePipelineAt,
-        ref: pipelineRef, source: remotePipelineSource, web_url: pipelineUrl(id) };
+      body = { ...remotePipeline(id), tag: false };
+    } else if (path === repositoryPath(sourceRepository) + '/pipelines') {
+      body = searchParams.get('ref') === pipelineRef && searchParams.get('source') === remotePipelineSource ? [remotePipeline(pipelineId)] : [];
     } else if (path === pipelinePath + '/jobs') {
       body = [{ id: 509, name: 'ci-test', stage: 'test', status: 'failed', allow_failure: false,
         failure_reason: 'script_failure', web_url: sourceUrl() + '/-/jobs/509',
@@ -249,10 +252,16 @@ test('attaches a fork MR merged-result pipeline once and supports the normal lin
   assert.deepEqual(attachActivities(before), []);
   assert.equal(attachActivities(after).length, 1);
 
-  // The next read can verify the terminal status using source classification already established by the attachment.
+  // An earlier classification remains visible when the exact detail omits source.
   f.setPipelineSource(undefined);
-  const status = await f.call<GitlabIssueRefreshResult>(`${issuePath}/gitlab-links/${encodeURIComponent(link.id)}/status-review`,
-    { method: 'POST', body: {} });
+  const reviewPath = `${issuePath}/gitlab-links/${encodeURIComponent(link.id)}/status-review`;
+  const readReview = () => f.call<GitlabIssueRefreshResult>(reviewPath, { method: 'POST', body: {} });
+  const unclassified = await readReview();
+  assert.deepEqual(unclassified.failures, []);
+  assert.equal(unclassified.links[0]?.pipelineSource, 'merge_request_event');
+  assert.equal(unclassified.statusReview, undefined);
+  f.setPipelineSource('merge_request_event');
+  const status = await readReview();
   assert.deepEqual(status.failures, []);
   assert.equal(status.links[0]?.pipelineSource, 'merge_request_event');
   assert.equal(status.statusReview?.kind, 'suggestion');
