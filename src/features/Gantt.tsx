@@ -719,7 +719,7 @@ function ProjectGantt(props: GanttProps) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
         [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
     const sourceDraft = chartDateDraft(source), targetDraft = chartDateDraft(target);
-    if (sourceDraft || targetDraft) setTeamBlockerEdit({ source, target, opener, sourceDraft, targetDraft });
+    setTeamBlockerEdit({ source, target, opener, sourceDraft, targetDraft });
   }
   function closeTeamBlockerEdit() {
     const opener = teamBlockerEdit?.opener;
@@ -731,7 +731,9 @@ function ProjectGantt(props: GanttProps) {
   async function applyTeamBlockerEdit(result: ScheduleTeamBlockerApplyResult) {
     rememberUndo(result.undoId);
     setScheduleWarnings(result.warnings);
+    const adjusted = new Set(result.followUpIssueIds);
     for (const saved of result.updated) {
+      if (adjusted.has(saved.id)) continue;
       const selected = [teamBlockerEdit?.sourceDraft, teamBlockerEdit?.targetDraft].find(draft => draft?.source.id === saved.id);
       acceptChartDateDraft(saved, selected);
     }
@@ -1218,6 +1220,9 @@ function ProjectGantt(props: GanttProps) {
     }
   }
   const hasCrossProjectPair = openLinkProjects.size > 1;
+  const selectedTeamBlockerPair = hasCrossProjectPair && selectedIssues.length === 2 &&
+    selectedIssues[0].projectId !== selectedIssues[1].projectId &&
+    selectedIssues.every(issue => openLinkIssues.has(issue.id) && visibleIssues.includes(issue)) ? selectedIssues : undefined;
   const hasLinkPair = (id: string) => (visibleProjectCounts.get(id) ?? 0) >= 2;
   const hasOtherProjectTarget = (issue: Issue) => hasCrossProjectPair && openLinkIssues.has(issue.id);
   const canStartLink = (issue: Issue, endpoint: GanttLinkEndpoint) =>
@@ -1984,6 +1989,14 @@ function ProjectGantt(props: GanttProps) {
       setLinkPicker({ source: null });
     });
   }
+  function openTeamBlockerPair(sourceId: string, targetId: string, opener: HTMLButtonElement, fromLinkPicker = false) {
+    if (!canKeepLinkDateDrafts(fromLinkPicker) && !canLeave()) return;
+    queueMicrotask(() => {
+      setLinkPicker(null);
+      setTeamBlockerChartPair({ sourceId, targetId, opener });
+      setTeamBlockersOpen(true);
+    });
+  }
   function pickLink(issueId: string, endpoint: GanttLinkEndpoint, explicit: boolean) {
     const target = issueRows.get(issueId)?.issue;
     if (!linkPicker || !target || !canPickLinkEndpoint(target, endpoint)) return;
@@ -2001,12 +2014,7 @@ function ProjectGantt(props: GanttProps) {
     if (!opener || !sourceRow) return;
     const predecessorId = pickedSource.issueId;
     if (target.projectId !== sourceRow.issue.projectId) {
-      if (!canKeepLinkDateDrafts(true) && !canLeave()) return;
-      queueMicrotask(() => {
-        setLinkPicker(null);
-        setTeamBlockerChartPair({ sourceId: predecessorId, targetId: issueId, opener });
-        setTeamBlockersOpen(true);
-      });
+      openTeamBlockerPair(predecessorId, issueId, opener, true);
       return;
     }
     const dependency = data.dependencies.find(link => link.predecessorId === predecessorId && link.successorId === issueId);
@@ -2442,6 +2450,11 @@ function ProjectGantt(props: GanttProps) {
         { anchor: { issueId: linkAnchor.id, otherRole: 'successor' } })}>
         <Link2 size={15} aria-hidden="true" />선택 업무에서 연결
       </button>}
+      {selectedTeamBlockerPair && <button className="btn" type="button" data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
+        disabled={busy || scheduleEditorOpen || Boolean(activeDatePicker || issueOverlayOpen)}
+        onClick={event => openTeamBlockerPair(selectedTeamBlockerPair[0].id, selectedTeamBlockerPair[1].id, event.currentTarget)}>
+        <Link2 size={15} aria-hidden="true" />선택 업무 간 차단 연결
+      </button>}
       {sheetScope && <button ref={blockerLinksTrigger} className="btn" type="button"
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={openBlockerLinks}
         disabled={busy || scheduleEditorOpen || issueOverlayOpen}>
@@ -2516,6 +2529,7 @@ function ProjectGantt(props: GanttProps) {
     {teamBlockerEdit && <GanttTeamBlockerEdit
       source={data.issues.find(issue => issue.id === teamBlockerEdit.source.id) ?? teamBlockerEdit.source}
       target={data.issues.find(issue => issue.id === teamBlockerEdit.target.id) ?? teamBlockerEdit.target}
+      projects={data.projects}
       sourceDraft={teamBlockerEdit.sourceDraft} targetDraft={teamBlockerEdit.targetDraft}
       actorId={props.actorId} undoScope={undoScope} refresh={refresh} onDraftChange={trackTeamBlockerEdit}
       onClose={closeTeamBlockerEdit} onApplied={applyTeamBlockerEdit} />}

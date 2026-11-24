@@ -141,6 +141,112 @@ test('date edits and a cross-project blocker share guarded apply, rollback, rest
   assert.deepEqual(replay, { ...undone, duplicate: true });
 });
 
+test('a new cross-project blocker can reschedule indirect work in one guarded apply and undo', async t => {
+  const f = await fixture(t);
+  const receiving = await f.call<Project>('/projects', 201, 'POST', { key: 'HANDOFF', name: '차단 대상 달력' });
+  const remote = await f.call<Project>('/projects', 201, 'POST', { key: 'HANDOFFNEXT', name: '다음 인계 달력' });
+  const source = await f.issue('차단 관계의 새 선행 업무');
+  const dueDate = '2026-12-15';
+  const target = await f.issue('새로 연결할 첫 번째 후행 업무', { startDate: '2026-11-23', endDate: '2026-11-26', dueDate }, receiving.id);
+  const local = await f.issue('같은 프로젝트의 간접 후행 업무', { startDate: '2026-11-27', endDate: '2026-11-30', dueDate }, receiving.id);
+  const indirect = await f.issue('다른 프로젝트의 간접 후행 업무', { startDate: '2026-11-30', endDate: '2026-12-01', dueDate }, remote.id);
+  const unchanged = await f.issue('변경 이후에도 움직이지 않는 업무', { startDate: '2026-12-08', endDate: '2026-12-09', dueDate }, remote.id);
+  await f.link(target, local);
+  await f.call('/schedule/team-blockers', 201, 'POST', {
+    sourceIssueId: local.id, expectedSourceVersion: local.version, targetIssueId: indirect.id, expectedTargetVersion: indirect.version,
+  });
+  const setHoliday = async (projectId: string, date: string) => {
+    const path = `/projects/${projectId}/calendar`;
+    const calendar = await f.call<WorkCalendar>(path, 200);
+    await f.call(path, 200, 'PATCH', { expectedVersion: calendar.version,
+      exceptions: [{ date, isWorking: false, label: '인계 프로젝트 휴무' }] }, otherActor);
+  };
+  await setHoliday(remote.id, '2026-12-02');
+
+  const endpoint = ({ id, version }: Issue) => ({ id, expectedVersion: version });
+  const input = { source: { ...endpoint(source), dates: { endDate: '2026-11-23' } }, target: endpoint(target), rescheduleSuccessors: true };
+  const scope = { 'X-Teamspace-Schedule-Undo-Scope': 'team' };
+  const preview = (body: unknown, status = 200) => f.call<ScheduleTeamBlockerPreview>('/schedule/team-blocker-edit/preview', status, 'POST', body);
+  const apply = (previewId: string, status = 200) => f.call<ScheduleTeamBlockerApplyResult>('/schedule/team-blocker-edit/apply', status, 'POST', { previewId }, actor, scope);
+  const links = () => f.call<IssueRelation[]>(`/issues/${source.id}/relations`, 200);
+  const ranges = (review: ScheduleTeamBlockerPreview) => new Map(review.changes.map(({ id, toStart, toEnd }) => [id, [toStart, toEnd]]));
+
+  await preview({ ...input, rescheduleSuccessors: 'true' }, 400);
+  const savedDates = await preview({ ...input, source: endpoint(source) });
+  assert.ok(savedDates.previewId);
+  assert.deepEqual(savedDates.followUpIssueIds, [indirect.id]);
+  assert.deepEqual(ranges(savedDates), new Map([[indirect.id, ['2026-12-01', '2026-12-03']]]));
+  const old = await preview(input);
+  assert.ok(old.previewId);
+  assert.deepEqual(ranges(old).get(target.id), ['2026-11-24', '2026-11-27']);
+  assert.deepEqual(await links(), []);
+
+  await setHoliday(receiving.id, '2026-11-24');
+  const withHoliday = await f.state();
+  await apply(old.previewId, 409);
+  assert.deepEqual(await f.state(), withHoliday);
+  const fixedConflict = { ...input, target: { ...input.target, dates: { startDate: '2026-11-24' } } };
+  const blocked = await preview(fixedConflict);
+  assert.equal(blocked.previewId, null);
+  assert.equal(blocked.expiresAt, null);
+  assert.ok(blocked.errors?.some(error => error.message.includes(target.key) && error.message.includes('2026-11-25')));
+  const advisory = await preview({ ...fixedConflict, rescheduleSuccessors: false });
+  assert.ok(advisory.previewId);
+  assert.deepEqual(new Set(ranges(advisory).keys()), new Set([source.id, target.id]));
+  assert.equal(advisory.followUpIssueIds, undefined);
+  assert.ok(advisory.warnings.some(warning => warning.includes(`${source.key} → ${target.key}`) && warning.includes('2026-11-25')));
+  const fixed = await preview({ ...input, target: { ...input.target, dates: { startDate: '2026-11-25', endDate: '2026-11-27' } } });
+  assert.ok(fixed.previewId);
+  assert.deepEqual(new Set(fixed.followUpIssueIds), new Set([local.id, indirect.id]));
+  assert.deepEqual(ranges(fixed).get(target.id), ['2026-11-25', '2026-11-27']);
+
+  const oldGraph = await preview(input);
+  assert.ok(oldGraph.previewId);
+  const expected = new Map([
+    [source.id, ['2026-11-20', '2026-11-23']], [target.id, ['2026-11-25', '2026-11-27']],
+    [local.id, ['2026-11-30', '2026-12-01']], [indirect.id, ['2026-12-03', '2026-12-04']],
+  ]);
+  assert.deepEqual(ranges(oldGraph), expected);
+  assert.deepEqual(await f.state(), withHoliday);
+  await f.call<Dependency>('/dependencies', 201, 'POST', {
+    predecessorId: indirect.id, successorId: unchanged.id, type: 'FS', lagDays: 0,
+  }, otherActor);
+  const withGraphChange = await f.state();
+  await apply(oldGraph.previewId, 409);
+  assert.deepEqual(await f.state(), withGraphChange);
+  assert.deepEqual(await links(), []);
+
+  const reviewed = await preview(input);
+  assert.ok(reviewed.previewId);
+  assert.deepEqual(ranges(reviewed), expected);
+  const automatic = new Set([target.id, local.id, indirect.id]);
+  assert.deepEqual(new Set(reviewed.followUpIssueIds), automatic);
+  assert.equal(reviewed.changes.find(change => change.id === indirect.id)?.projectId, remote.id);
+  const result = await apply(reviewed.previewId);
+  assert.deepEqual(new Set(result.followUpIssueIds), automatic);
+  assert.deepEqual(new Map(result.updated.map(issue => [issue.id, [issue.startDate, issue.endDate]])), expected);
+  assert.deepEqual(new Map(result.updated.map(issue => [issue.id, issue.dueDate])),
+    new Map([source, target, local, indirect].map(issue => [issue.id, issue.dueDate])));
+  assert.deepEqual(await links(), [result.relation]);
+  assert.equal(result.relation.type, 'blocks');
+  assert.equal(result.relation.targetIssueId, target.id);
+  assert.deepEqual((await f.state()).dependencies, withGraphChange.dependencies);
+  await f.restart();
+  assert.deepEqual(await apply(reviewed.previewId), result);
+  assert.deepEqual(await links(), [result.relation]);
+
+  const { undo } = await f.call<{ undo: ScheduleUndoInfo }>('/schedule/undo/latest?scope=team', 200);
+  assert.equal(undo.undoId, result.undoId);
+  assert.equal(undo.relationChanges, 1);
+  assert.equal(undo.issueCount, 4);
+  const undone = await f.call<ScheduleUndoResult>('/schedule/undo', 200, 'POST', { undoId: result.undoId }, actor, scope);
+  assert.equal(undone.relationChanges, 1);
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])),
+    new Map([source, target, local, indirect].map(issue => [issue.id, dates(issue)])));
+  assert.deepEqual(await links(), []);
+  assert.deepEqual((await f.state()).dependencies, withGraphChange.dependencies);
+});
+
 test('manual shift rejects a changed unselected predecessor or incident dependency before writing', async t => {
   const f = await fixture(t);
   const predecessor = await f.issue('먼저 끝날 업무', { startDate: '2026-11-16', endDate: '2026-11-17' });

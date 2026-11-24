@@ -87,6 +87,10 @@
   list-style: none;
 }
 
+.gantt-team-blocker-edit-preview > li > small {
+  display: block;
+}
+
 @media (max-width: 480px) {
   .gantt-team-blocker-edit-rows {
     grid-template-columns: minmax(0, 1fr);

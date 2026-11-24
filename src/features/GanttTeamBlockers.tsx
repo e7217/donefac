@@ -326,13 +326,17 @@ export function GanttTeamBlockers({
       {duplicate && <p role="status">이미 같은 방향의 차단 관계가 있습니다.</p>}
       {saveError && <p role="alert">{saveError}</p>}
       <div className="gantt-team-blockers-actions">
-        {datesToReview && source && target &&
-          <button type="button" className="btn btn-primary" aria-haspopup="dialog"
-            disabled={disabled || loading || refreshing || invalidPair || Boolean(duplicateForDates)}
+        {source && target && !invalidPair &&
+          <button type="button" className={datesToReview ? 'btn btn-primary' : 'btn'} aria-haspopup="dialog"
+            disabled={disabled || loading || refreshing || Boolean(duplicateForDates)}
             onClick={event => onReviewDates(source, target, event.currentTarget)}>날짜와 차단 관계 검토</button>}
         <button type="submit" className={datesToReview ? 'btn' : 'btn btn-primary'} disabled={disabled || loading || refreshing || !source || !target || invalidPair || duplicate}>
           {saving ? '차단 관계 저장 중' : '차단 관계 저장'}
         </button>
+        {source && target && !invalidPair && <button type="button" className="btn" disabled={disabled || refreshing}
+          onClick={() => changeDraft({ sourceId: target.id, targetId: source.id, sourceQuery: '', targetQuery: '' })}>
+          차단 방향 바꾸기
+        </button>}
         {source && <button type="button" className="btn" aria-haspopup="dialog" disabled={disabled || refreshing}
           data-gantt-focus-control="" onPointerDown={onPointerDown}
           onClick={event => onCreateBlockedIssue(source, event.currentTarget)}>

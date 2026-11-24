@@ -4,7 +4,7 @@ import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState } f
 import { Check, Link2, Loader2, RefreshCw, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import type {
-  Issue, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerInput, ScheduleTeamBlockerPreview, ScheduleUndoScope,
+  Issue, Project, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerInput, ScheduleTeamBlockerPreview, ScheduleUndoScope,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { isUncertainScheduleResponse, scheduleUndoHeaders } from './schedule-undo';
@@ -21,6 +21,7 @@ export type TeamBlockerDateDraft = {
 type Props = {
   source: Issue;
   target: Issue;
+  projects: readonly Pick<Project, 'id' | 'name'>[];
   sourceDraft?: TeamBlockerDateDraft;
   targetDraft?: TeamBlockerDateDraft;
   actorId: string;
@@ -69,12 +70,14 @@ function dateProblem(issue: Issue, changes: Partial<Dates>) {
 }
 
 export function GanttTeamBlockerEdit({
-  source, target, sourceDraft, targetDraft, actorId, undoScope, refresh, onDraftChange, onClose, onApplied,
+  source, target, projects, sourceDraft, targetDraft, actorId, undoScope, refresh, onDraftChange, onClose, onApplied,
 }: Props) {
   const titleId = useId();
   const reviewId = useId();
+  const followUpHelpId = useId();
   const [includeSource, setIncludeSource] = useState(true);
   const [includeTarget, setIncludeTarget] = useState(true);
+  const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [retryId, setRetryId] = useState<string | null>(null);
@@ -94,15 +97,21 @@ export function GanttTeamBlockerEdit({
 
   const sourceDates = dateChange(source, sourceDraft, includeSource);
   const targetDates = dateChange(target, targetDraft, includeTarget);
-  const input: ScheduleTeamBlockerInput = { source: versionedIssue(source, sourceDates), target: versionedIssue(target, targetDates) };
+  const input: ScheduleTeamBlockerInput = {
+    source: versionedIssue(source, sourceDates), target: versionedIssue(target, targetDates),
+    ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}),
+  };
   const key = JSON.stringify([source.projectId, target.projectId, input]);
   const problem = source.projectId === target.projectId ? '서로 다른 프로젝트의 업무를 선택해 주세요.'
     : dateProblem(source, sourceDates) || dateProblem(target, targetDates);
+  const projectNames = new Map(projects.map(project => [project.id, project.name]));
+  const followUpIssueIds = new Set(review?.result.followUpIssueIds);
+  const reviewErrors = review?.result.errors ?? [];
   const expiresAt = review?.result.expiresAt;
   const expiry = expiresAt ? Date.parse(expiresAt) : NaN;
   const locked = Boolean(pending || retryId || receipt);
   const canPreview = Boolean(actorId && !locked && !problem && !reloadNeeded);
-  const applyId = canPreview && review?.key === key && expiry > clock ? review.result.previewId : null;
+  const applyId = canPreview && review?.key === key && !reviewErrors.length && expiry > clock ? review.result.previewId : null;
 
   const reportDraft = useEffectEvent(onDraftChange);
   useLayoutEffect(() => {
@@ -163,9 +172,7 @@ export function GanttTeamBlockerEdit({
     onClose();
   }
 
-  function changeIncluded(row: 'source' | 'target', value: boolean) {
-    if (row === 'source') setIncludeSource(value);
-    else setIncludeTarget(value);
+  function resetReview() {
     setReview(null);
     setError('');
     setNotice('');
@@ -182,7 +189,11 @@ export function GanttTeamBlockerEdit({
       });
       if (controller.signal.aborted) return;
       if (result?.sourceId !== input.source.id || result.targetId !== input.target.id ||
-          !Array.isArray(result.changes) || !Array.isArray(result.warnings)) throw new Error('검토할 날짜와 차단 관계를 확인하지 못했습니다.');
+          !Array.isArray(result.changes) || !Array.isArray(result.warnings) ||
+          result.errors !== undefined && !Array.isArray(result.errors) ||
+          result.followUpIssueIds !== undefined && !Array.isArray(result.followUpIssueIds)) {
+        throw new Error('검토할 날짜와 차단 관계를 확인하지 못했습니다.');
+      }
       setClock(Date.now());
       setReview({ key, result });
       focusAfter.current = 'review';
@@ -234,6 +245,7 @@ export function GanttTeamBlockerEdit({
       });
       if (controller.signal.aborted) return;
       if (!result?.undoId || !Array.isArray(result.updated) || !Array.isArray(result.warnings) ||
+          JSON.stringify(result.followUpIssueIds ?? []) !== JSON.stringify(review.result.followUpIssueIds ?? []) ||
           result.relation?.sourceIssueId !== review.result.sourceId || result.relation.targetIssueId !== review.result.targetId ||
           result.relation.type !== 'blocks') throw new Error('적용 결과를 확인하지 못했습니다.');
       setReceipt(result);
@@ -276,10 +288,15 @@ export function GanttTeamBlockerEdit({
     <div className="schedule-paste-input">
       <fieldset disabled={locked}>
         <div className="gantt-team-blocker-edit-rows">
-          <PairDates label="차단하는 업무" issue={source} draft={sourceDraft} included={includeSource}
-            onInclude={value => changeIncluded('source', value)} />
-          <PairDates label="차단되는 업무" issue={target} draft={targetDraft} included={includeTarget}
-            onInclude={value => changeIncluded('target', value)} />
+          <PairDates label="차단하는 업무" issue={source} projectName={projectNames.get(source.projectId)} draft={sourceDraft} included={includeSource}
+            onInclude={value => { setIncludeSource(value); resetReview(); }} />
+          <PairDates label="차단되는 업무" issue={target} projectName={projectNames.get(target.projectId)} draft={targetDraft} included={includeTarget}
+            onInclude={value => { setIncludeTarget(value); resetReview(); }} />
+        </div>
+        <div className="schedule-paste-follow-up">
+          <label><input type="checkbox" checked={rescheduleSuccessors} aria-describedby={followUpHelpId}
+            onChange={event => { setRescheduleSuccessors(event.currentTarget.checked); resetReview(); }} />후행 일정 함께 검토</label>
+          <p id={followUpHelpId}>이 차단 관계로 이어진 후행 업무도 각 프로젝트의 근무일을 기준으로 검토합니다.</p>
         </div>
         {problem && <p className="schedule-paste-error" role="alert">{problem}</p>}
         <div className="gantt-team-blocker-edit-actions">
@@ -301,17 +318,23 @@ export function GanttTeamBlockerEdit({
       {review && <section aria-labelledby={reviewId}>
         <h3 id={reviewId} ref={reviewHeading} tabIndex={-1}>날짜와 차단 관계 미리보기</h3>
         <p>{source.key} → {target.key} 차단 관계 추가</p>
-        {!pending && !retryId && !receipt && !applyId &&
+        {!pending && !retryId && !receipt && !applyId && !reviewErrors.length &&
           <p className="schedule-paste-stale">현재 업무 기준으로 다시 미리보기를 만들어 주세요.</p>}
-        {review.result.changes.length > 0 && <ul className="gantt-team-blocker-edit-preview">
+        {review.result.changes.length > 0 ? <ul className="gantt-team-blocker-edit-preview" aria-label="일정 변경 목록">
           {review.result.changes.map(change => <li key={change.id}>
             <strong>{change.key} · {change.title}</strong>
+            {change.projectId && projectNames.has(change.projectId) && <small>{projectNames.get(change.projectId)}</small>}
+            {followUpIssueIds.has(change.id) && <small>후행 조정</small>}
             <dl>
               <DateComparison label="시작일" before={change.fromStart} after={change.toStart} />
               <DateComparison label="종료일" before={change.fromEnd} after={change.toEnd} />
             </dl>
           </li>)}
-        </ul>}
+        </ul> : !reviewErrors.length && <p>변경되는 일정이 없습니다.</p>}
+        {reviewErrors.length > 0 && <section className="schedule-paste-rejected" aria-label="일정 검토 오류">
+          <h4>일정 검토 오류</h4>
+          <ul role="alert">{reviewErrors.map(({ key, message }, index) => <li key={index}>{key ? `${key} · ${message}` : message}</li>)}</ul>
+        </section>}
         {review.result.warnings.length > 0 && <section className="schedule-paste-warnings" aria-label="일정 검토 경고">
           <h4>일정 검토 경고</h4>
           <ul>{review.result.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
@@ -333,8 +356,8 @@ export function GanttTeamBlockerEdit({
   </dialog>;
 }
 
-function PairDates({ label, issue, draft, included, onInclude }: {
-  label: string; issue: Issue; draft?: TeamBlockerDateDraft; included: boolean; onInclude: (value: boolean) => void;
+function PairDates({ label, issue, projectName, draft, included, onInclude }: {
+  label: string; issue: Issue; projectName?: string; draft?: TeamBlockerDateDraft; included: boolean; onInclude: (value: boolean) => void;
 }) {
   const headingId = useId();
   const currentDraft = draft?.source.id === issue.id ? draft : undefined;
@@ -346,6 +369,7 @@ function PairDates({ label, issue, draft, included, onInclude }: {
   return <section className="gantt-team-blocker-edit-row" aria-labelledby={headingId}>
     <h3 id={headingId}>{label}</h3>
     <p><strong>{issue.key}</strong> {issue.title}</p>
+    {projectName && <small>{projectName}</small>}
     <dl>{fields.map(({ field, label: fieldLabel }) => {
       const next = included ? currentDraft?.changes[field] : undefined;
       return <DateComparison key={field} label={fieldLabel} before={issue[field]} after={next} />;

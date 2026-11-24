@@ -1263,9 +1263,11 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ### 프로젝트 간 날짜와 차단 관계 함께 적용
 
-`POST /api/schedule/team-blocker-edit/preview`에 `{source:{id,expectedVersion,dates?},target:{id,expectedVersion,dates?}}`를 보낸다. `dates`에 바꿀 `startDate`와 `endDate`만 넣는다. 날짜는 `YYYY-MM-DD` 또는 `null`이며 빠진 칸은 현재 값을 쓴다. 서로 다른 프로젝트의 열린 업무를 검토하며, 같은 방향의 기존 Teamspace 관계나 확인된 Jira 차단이 있으면 `409`를 반환한다. `changes`와 `warnings`에 변경 날짜와 대상 달력의 FS·0근무일 조건, 관련 연결의 경고를 반환한다.
+`POST /api/schedule/team-blocker-edit/preview`에 `{source:{id,expectedVersion,dates?},target:{id,expectedVersion,dates?},rescheduleSuccessors?}`를 보낸다. `dates`에 바꿀 `startDate`와 `endDate`만 넣는다. 날짜는 `YYYY-MM-DD` 또는 `null`이며 빠진 칸은 현재 값을 쓴다. 서로 다른 프로젝트의 열린 업무를 검토하며, 같은 방향의 기존 Teamspace 관계나 확인된 Jira 차단이 있으면 `409`를 반환한다. `changes`와 `warnings`에 변경 날짜와 대상 달력의 FS·0근무일 조건, 관련 연결의 경고를 반환한다.
 
-`POST /api/schedule/team-blocker-edit/apply`에 `{previewId}`와 팀 간트의 되돌리기 범위를 보낸다. 작업자와 두 업무·달력·워크플로·관련 업무 및 연결을 대조한 뒤 새 관계, 날짜와 적용 결과를 함께 저장한다. 적용 시 검토 조건이 달라졌으면 `409`를 반환한다. 결과는 `{undoId,updated,warnings,relation}`이다. 미리보기는 30분 동안 유효하고, 적용 결과는 같은 미리보기로 7일 안에 다시 확인할 수 있다. 되돌리기 결과의 `relationChanges`는 제거한 새 차단 관계의 수다.
+`rescheduleSuccessors: true`는 새 차단 대상을 시작으로 프로젝트 내부 연결과 열린 프로젝트 간 차단을 따라 후행 날짜를 검토한다. 제안한 관계를 FS·0근무일로 계산하고, 바꿀 날짜를 직접 지정한 업무는 고정한다. 자동 조정한 후행 업무의 ID는 `followUpIssueIds`에 들어 있다. 순환이나 필수 날짜 누락, 고정 일정 충돌 또는 계산 범위 초과는 `errors`에 반환하며 적용 ID를 발급하지 않는다. 옵션을 생략하거나 `false`로 보내면 두 업무의 날짜와 차단 관계를 검토한다.
+
+`POST /api/schedule/team-blocker-edit/apply`에 `{previewId}`와 팀 간트의 되돌리기 범위를 보낸다. 작업자와 두 업무·달력·워크플로·관련 업무 및 연결을 대조한 뒤 새 관계, 날짜와 적용 결과를 함께 저장한다. 후행 검토를 포함하면 도달한 업무와 들어오는 관계, 해당 프로젝트 규칙도 대조한다. 적용 시 검토 조건이 달라졌으면 `409`를 반환한다. 결과는 `{undoId,updated,warnings,relation,followUpIssueIds?}`이다. 미리보기는 30분 동안 유효하고, 적용 결과는 같은 미리보기로 7일 안에 다시 확인할 수 있다. 되돌리기 결과의 `relationChanges`는 제거한 새 차단 관계의 수다.
 
 ## 마지막 일정 변경 되돌리기
 

@@ -2306,16 +2306,22 @@ export interface SchedulePasteApplyResult { undoId: string; updated: Issue[]; wa
 export interface ScheduleTeamBlockerInput {
   source: { id: string; expectedVersion: number; dates?: Partial<Pick<Issue, 'startDate' | 'endDate'>> };
   target: ScheduleTeamBlockerInput['source'];
+  rescheduleSuccessors?: boolean;
 }
 export interface ScheduleTeamBlockerPreview {
   previewId: string | null;
   expiresAt: string | null;
   changes: ScheduleChange[];
   warnings: string[];
+  errors?: SchedulePasteDiagnostic[];
+  followUpIssueIds?: string[];
   sourceId: string;
   targetId: string;
 }
-export interface ScheduleTeamBlockerApplyResult extends SchedulePasteApplyResult { relation: IssueRelation }
+export interface ScheduleTeamBlockerApplyResult extends SchedulePasteApplyResult {
+  relation: IssueRelation;
+  followUpIssueIds?: string[];
+}
 export type ScheduleUndoScope = { kind: 'team' } | { kind: 'project' | 'issue'; id: string };
 export interface ScheduleUndoInfo {
   undoId: string;

@@ -28,6 +28,7 @@ interface ScheduleVersions {
 
 export type ScheduleDateMutation = AutomaticScheduleMutation & Partial<Pick<Issue, 'dueDate'>>;
 type TeamBlockerPair = Pick<ScheduleTeamBlockerInput, 'source' | 'target'>;
+type TeamFollowUpReview = Pick<SchedulePastePreview, 'changes' | 'errors' | 'followUpIssueIds'>;
 
 interface ScheduleReviewHooks {
   versions(projectId: string): ScheduleVersions;
@@ -70,6 +71,7 @@ interface PasteProposal extends ScheduleScope {
   guard: string;
   changes: ScheduleDateMutation[];
   linkChanges?: ScheduleDependencyMutation[];
+  followUpIssueIds?: string[];
   followUpWarnings?: string[];
   missingDateWarnings?: string[];
   blockerRelations?: ScheduleBlockerLinkCandidate[];
@@ -84,7 +86,8 @@ interface PasteProposal extends ScheduleScope {
 }
 
 type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'resolvedKeyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
-  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard' | 'teamBlocker' | 'issueSaveStatus' | 'teamFollowUp'>;
+  'changes' | 'linkChanges' | 'kind' | 'followUpIssueIds' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' |
+  'incomingTeamBlockerGuard' | 'teamBlocker' | 'issueSaveStatus' | 'teamFollowUp'>;
 
 type DependencyCandidate = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
 type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
@@ -141,9 +144,10 @@ function parseDateChanges(raw: unknown, allowEmpty = false): ScheduleBulkDateCha
   return changes;
 }
 
-function parseTeamBlockerInput(raw: unknown): TeamBlockerPair {
+function parseTeamBlockerInput(raw: unknown): ScheduleTeamBlockerInput {
   const invalid = () => new SchedulePasteError(400, '차단 관계의 두 업무와 검토할 날짜를 확인해 주세요.');
-  if (!isRecord(raw) || Object.keys(raw).length !== 2) throw invalid();
+  if (!isRecord(raw) || Object.keys(raw).some(key => key !== 'source' && key !== 'target' && key !== 'rescheduleSuccessors') ||
+      (Object.hasOwn(raw, 'rescheduleSuccessors') && typeof raw.rescheduleSuccessors !== 'boolean')) throw invalid();
   const endpoint = (value: unknown): TeamBlockerPair['source'] => {
     if (!isRecord(value) || !isRelationId(value.id) || !isVersion(value.expectedVersion) ||
         Object.keys(value).some(key => key !== 'id' && key !== 'expectedVersion' && key !== 'dates')) throw invalid();
@@ -154,7 +158,7 @@ function parseTeamBlockerInput(raw: unknown): TeamBlockerPair {
   };
   const source = endpoint(raw.source), target = endpoint(raw.target);
   if (source.id === target.id) throw invalid();
-  return { source, target };
+  return { source, target, ...(raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {}) };
 }
 
 function parseBulkDateInput(raw: unknown): ScheduleBulkDateInput {
@@ -624,8 +628,8 @@ export class SchedulePasteService {
   }
 
   private teamFollowUpContext(anchors: ScheduleAnchorChange[], hooks: ScheduleReviewHooks,
-    { applying = false, linkChanges = [], successorIds = [] }: {
-      applying?: boolean; linkChanges?: ScheduleDependencyMutation[]; successorIds?: string[];
+    { applying = false, linkChanges = [], successorIds = [], proposedBlocker }: {
+      applying?: boolean; linkChanges?: ScheduleDependencyMutation[]; successorIds?: string[]; proposedBlocker?: TeamBlockerPair;
     } = {}) {
     const error = (status: number, message: string) => new SchedulePasteError(applying ? 409 : status, message);
     const limit = () => error(422, '프로젝트 간 후행 일정은 전체 업무 10,000개와 연결 50,000개 이하에서 검토할 수 있습니다.');
@@ -654,6 +658,12 @@ export class SchedulePasteService {
         ...TEAM_BLOCKER_SCHEDULE_RULE, version });
       if (projectedLinks.length + blockers.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) throw limit();
     }
+    if (proposedBlocker) {
+      const predecessorId = proposedBlocker.source.id, successorId = proposedBlocker.target.id;
+      blockers.push({ id: `proposed-team-blocker:${JSON.stringify([predecessorId, successorId])}`, predecessorId, successorId,
+        ...TEAM_BLOCKER_SCHEDULE_RULE });
+      if (projectedLinks.length + blockers.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) throw limit();
+    }
     let graph: ReturnType<typeof teamBatchFollowUpScope>;
     try { graph = teamBatchFollowUpScope(anchors, issues, [...projectedLinks, ...blockers], successorIds); }
     catch (cause) {
@@ -671,15 +681,17 @@ export class SchedulePasteService {
     return { graph, terminal, guard, state: { issues: graph.issues, dependencies: localLinks.filter(link => linkIds.has(link.id)) } };
   }
 
-  private reviewTeamScheduleFollowUps(preview: SchedulePastePreview, issues: ReadonlyMap<string, Issue>,
-    changes: Map<string, ScheduleDateMutation>, linkChanges: ScheduleDependencyMutation[], hooks: PasteHooks, includeUnchangedDueDates = false) {
+  private reviewTeamScheduleFollowUps(preview: TeamFollowUpReview, issues: ReadonlyMap<string, Issue>,
+    changes: Map<string, ScheduleDateMutation>, linkChanges: ScheduleDependencyMutation[], hooks: PasteHooks,
+    { includeUnchangedDueDates = false, proposedBlocker }: { includeUnchangedDueDates?: boolean; proposedBlocker?: TeamBlockerPair } = {}) {
     const anchors = fixedScheduleDates(changes, issues).map(({ id, expectedVersion, startDate, endDate }) =>
       ({ id, expectedVersion, startDate, endDate }));
     const successorIds = [...new Set(linkChanges.flatMap(({ after }) => after ? [after.successorId] : []))];
+    if (proposedBlocker) successorIds.push(proposedBlocker.target.id);
     if (!anchors.length && !successorIds.length) return null;
 
     let context: ReturnType<SchedulePasteService['teamFollowUpContext']>;
-    try { context = this.teamFollowUpContext(anchors, hooks, { linkChanges, successorIds }); }
+    try { context = this.teamFollowUpContext(anchors, hooks, { linkChanges, successorIds, proposedBlocker }); }
     catch (error) {
       if (!(error instanceof SchedulePasteError) || error.status !== 422) throw error;
       preview.errors.push({ line: null, message: error.message });
@@ -1330,7 +1342,7 @@ export class SchedulePasteService {
       }
       const targetIds = new Set(selectedIds);
       const teamFollowUp = includeTeamBlockers && !preview.errors.length
-        ? this.reviewTeamScheduleFollowUps(preview, byId, changes, [], hooks, true) : null;
+        ? this.reviewTeamScheduleFollowUps(preview, byId, changes, [], hooks, { includeUnchangedDueDates: true }) : null;
       const followUpWarnings = teamFollowUp?.warnings ?? (rescheduleSuccessors && !includeTeamBlockers && !preview.errors.length
         ? reviewScheduleFollowUps(preview, byId, state.dependencies, changes, [], targetIds, hooks, { includeUnchangedDueDates: true }) : []);
       const reviewState = teamFollowUp ? mergeScheduleState(state, teamFollowUp.state) : state;
@@ -1459,7 +1471,7 @@ export class SchedulePasteService {
           linkError(null, '적용할 업무 연결에 순환 관계가 있습니다. 연결 방향을 확인해 주세요.');
         }
         if (includeTeamBlockers && !preview.errors.length) {
-          teamFollowUp = this.reviewTeamScheduleFollowUps(preview, issuesById, changes, linkChanges, hooks, true);
+          teamFollowUp = this.reviewTeamScheduleFollowUps(preview, issuesById, changes, linkChanges, hooks, { includeUnchangedDueDates: true });
           if (teamFollowUp) {
             reviewState = mergeScheduleState(state, teamFollowUp.state);
             followUpWarnings.push(...teamFollowUp.warnings);
@@ -1596,15 +1608,15 @@ export class SchedulePasteService {
   }
 
   private previewTeamBlockerEdit(raw: unknown, actorId: string, hooks: PasteHooks): ScheduleTeamBlockerPreview {
-    const pair = parseTeamBlockerInput(raw);
+    const { rescheduleSuccessors, ...pair } = parseTeamBlockerInput(raw);
     return this.store.transaction(() => {
       this.prune();
       const { source, target } = this.requireTeamBlockerPair(pair, hooks, false);
       const issueIds = [source.id, target.id];
       const scope = this.scopeForIssues(issueIds);
       const state = this.scopeState(scope);
-      const changes: ScheduleDateMutation[] = [];
-      const summaries: ScheduleChange[] = [];
+      const changes = new Map<string, ScheduleDateMutation>();
+      const review: TeamFollowUpReview = { changes: [], errors: [] };
       for (const [issue, endpoint] of [[source, pair.source], [target, pair.target]] as const) {
         const edit = proposeDateEdit(issue, endpoint.dates ?? {});
         if (!edit) continue;
@@ -1613,20 +1625,32 @@ export class SchedulePasteService {
         const error = startDate && endDate && startDate > endDate ? '종료일을 시작일 이후로 지정해 주세요.'
           : hooks.validateChange(issue, change);
         if (error) throw new SchedulePasteError(422, `${issue.key}: ${error}`);
-        changes.push(change);
-        summaries.push(omitUnchangedDueDate({ ...summary, projectId: issue.projectId }));
+        changes.set(issue.id, change);
+        review.changes.push(omitUnchangedDueDate({ ...summary, projectId: issue.projectId }));
       }
-      const changedDates = new Map(changes.map(({ id, startDate, endDate }) => [id, { startDate, endDate }]));
-      const projected = state.issues.map(issue => {
-        const dates = changedDates.get(issue.id);
-        return dates ? { ...issue, ...dates } : issue;
+      const followUp = rescheduleSuccessors
+        ? this.reviewTeamScheduleFollowUps(review, new Map([[source.id, source], [target.id, target]]), changes, [], hooks, { proposedBlocker: pair })
+        : null;
+      const reviewState = followUp ? mergeScheduleState(state, followUp.state) : state;
+      const edits = [...changes.values()];
+      const projected = reviewState.issues.map(issue => {
+        const edit = changes.get(issue.id);
+        return edit ? { ...issue, startDate: edit.startDate, endDate: edit.endDate } : issue;
       });
-      const warnings = hooks.warnings(projected, incidentLinks(state.dependencies, issueIds));
+      const warnings = [...hooks.warnings(projected, incidentLinks(reviewState.dependencies, [...issueIds, ...changes.keys()])),
+        ...(followUp?.warnings ?? [])];
+      const { followUpIssueIds } = review;
+      const result = { changes: review.changes, sourceId: source.id, targetId: target.id, ...(followUpIssueIds ? { followUpIssueIds } : {}) };
+      if (review.errors.length) {
+        const team = this.reviewTeamBlockerDates(reviewState.issues, edits, hooks, { teamBlocker: pair });
+        return { ...result, previewId: null, expiresAt: null, errors: review.errors,
+          warnings: [...new Set([...warnings, ...(team?.warnings ?? [])])] };
+      }
       const saved = this.saveProposal(scope, state, {
-        actorId, issueIds, changes, kind: 'team-blocker-edit', teamBlocker: pair,
-      }, hooks, warnings);
-      return { previewId: saved.previewId, expiresAt: saved.expiresAt, changes: summaries, warnings: saved.warnings ?? warnings,
-        sourceId: source.id, targetId: target.id };
+        actorId, issueIds, changes: edits, kind: 'team-blocker-edit', teamBlocker: pair,
+        ...(followUp ? { teamFollowUp: followUp.proposal } : {}), ...(followUpIssueIds ? { followUpIssueIds } : {}),
+      }, hooks, warnings, reviewState.issues);
+      return { ...result, previewId: saved.previewId, expiresAt: saved.expiresAt, warnings: saved.warnings ?? warnings };
     });
   }
 
@@ -1739,7 +1763,7 @@ export class SchedulePasteService {
       const state = this.scopeState(proposal);
       const linkChanges = proposal.linkChanges ?? [];
       const teamFollowUp = proposal.teamFollowUp && this.teamFollowUpContext(proposal.teamFollowUp.anchors, hooks, {
-        applying: true, linkChanges, successorIds: proposal.teamFollowUp.successorIds,
+        applying: true, linkChanges, successorIds: proposal.teamFollowUp.successorIds, proposedBlocker: teamBlocker,
       });
       if (teamFollowUp && teamFollowUp.guard !== proposal.teamFollowUp?.guard) {
         throw new SchedulePasteError(409, '프로젝트 간 후행 업무, 연결 또는 프로젝트 규칙이 변경되었습니다. 다시 미리 확인해 주세요.');
@@ -1789,8 +1813,10 @@ export class SchedulePasteService {
       if (linkChanges.some(addsScheduleDependencyPair) && hasScheduleDependencyCycle(projectedLinks)) {
         throw new SchedulePasteError(409, '업무 연결이 변경되어 순환 관계가 생깁니다. 다시 미리 확인해 주세요.');
       }
-      const links = affectedLinks(projectedLinks, teamBlocker ? proposal.issueIds : proposal.changes.map(change => change.id), linkChanges);
-      const result = teamBlocker ? hooks.commitTeamBlocker(request, teamBlocker, proposal.changes, links)
+      const changedIds = proposal.changes.map(change => change.id);
+      const links = affectedLinks(projectedLinks, teamBlocker ? [...proposal.issueIds, ...changedIds] : changedIds, linkChanges);
+      const result = teamBlocker ? { ...hooks.commitTeamBlocker(request, teamBlocker, proposal.changes, links),
+        ...(proposal.followUpIssueIds ? { followUpIssueIds: proposal.followUpIssueIds } : {}) }
         : hooks.commitChanges(request, proposal.changes, links, linkChanges, {
         projectId: proposal.projectId ?? (teamFollowUp && proposal.projectIds?.length === 1 ? proposal.projectIds[0] : undefined),
         // The selected row heads the guarded read set even when only successors or links change.

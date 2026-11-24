@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Route } from '@playwright/test';
-import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerPreview, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 import { applyGanttLink, reviewGanttLink } from './gantt-link-review';
 
 const title = '프로젝트 간 차단';
@@ -179,6 +179,128 @@ test('360px 전체 간트에서 두 프로젝트의 보이는 행을 골라 차�
     expect(dependencyWrites).toEqual([]);
   } finally {
     await f.close();
+  }
+});
+
+test('360px에서 체크한 두 업무를 연결하고 가려진 후행 일정까지 한 번에 적용한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  const f = await fixture(request);
+  const headers = { 'X-Actor-Id': f.actor.id };
+  const calendarPath = `/api/projects/${f.second.id}/calendar`;
+  const originalCalendar = await json<WorkCalendar>(await request.get(calendarPath));
+  let modifiedCalendar: WorkCalendar | undefined;
+  try {
+    modifiedCalendar = await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
+      ...originalCalendar, expectedVersion: originalCalendar.version, workingWeekdays: [1, 2, 3, 4, 5],
+      exceptions: [{ date: '2026-11-24', isWorking: false, label: '후행 프로젝트 휴무' }],
+    } }));
+    const source = await f.issue(f.first, '선택 연결 원인', { startDate: '2026-11-19', endDate: '2026-11-23' });
+    const target = await f.issue(f.second, '선택 연결 대상');
+    const child = await f.issue(f.second, '가려진 후행', { startDate: '2026-11-27', endDate: '2026-11-30' });
+    await f.dependency(target, child);
+    const before = await f.schedule();
+    const query = `${f.prefix} 선택 연결`;
+    const hash = ganttSearch(gantt(f.first), query);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/${hash}`);
+    const selection = (issue: Issue) => row(page, issue).getByRole('checkbox', { name: `${issue.key} 선택`, exact: true });
+    const shortcut = button(page, '선택 업무 간 차단 연결');
+    await selection(source).check();
+    await expect(shortcut).toHaveCount(0);
+    await selection(target).check();
+    await expect(shortcut).toBeEnabled();
+    await expect(row(page, child)).toHaveCount(0);
+    await shortcut.click();
+
+    const panel = blockerPanel(page);
+    const form = panel.getByRole('form', { name: '프로젝트 간 차단 관계 추가', exact: true });
+    const cause = form.getByRole('combobox', { name: '차단하는 업무', exact: true });
+    const blocked = form.getByRole('combobox', { name: '차단되는 업무', exact: true });
+    await expect(form.getByRole('heading')).toBeFocused();
+    const originalCause = await cause.inputValue();
+    const originalTarget = await blocked.inputValue();
+    expect(new Set([originalCause, originalTarget])).toEqual(new Set([source.id, target.id]));
+    const reverse = button(form, '차단 방향 바꾸기');
+    await reverse.click();
+    await expect(cause).toHaveValue(originalTarget);
+    await expect(blocked).toHaveValue(originalCause);
+    if (originalCause === source.id) await reverse.click();
+    await expect(cause).toHaveValue(source.id);
+    await expect(blocked).toHaveValue(target.id);
+
+    const openReview = button(form, '날짜와 차단 관계 검토');
+    const modal = page.getByRole('dialog', { name: '프로젝트 간 날짜와 차단 관계 검토', exact: true });
+    const previewPath = '/api/schedule/team-blocker-edit/preview';
+    const followUp = modal.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
+    const targetInput = row(page, target).getByLabel(`${target.key} 시작일`, { exact: true });
+    const includeTarget = modal.getByRole('checkbox', { name: `${target.key} 날짜 입력 포함`, exact: true });
+    const apply = button(modal, '날짜와 차단 관계 적용');
+    async function preview() {
+      const pending = waitMutation(page, previewPath);
+      await button(modal, '날짜와 차단 관계 미리보기').click();
+      return json<ScheduleTeamBlockerPreview>(await pending);
+    }
+    await openReview.click();
+    await expect(followUp).not.toBeChecked();
+    await expect(includeTarget).toHaveCount(0);
+    await followUp.check();
+    const reviewed = await preview();
+    expect(reviewed.previewId).toBeTruthy();
+    expect(reviewed.followUpIssueIds).toEqual(expect.arrayContaining([target.id, child.id]));
+    expect(reviewed.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: target.id, projectId: f.second.id, toStart: '2026-11-25', toEnd: '2026-11-27' }),
+      expect.objectContaining({ id: child.id, projectId: f.second.id, toStart: '2026-11-30', toEnd: '2026-12-01' }),
+    ]));
+    const schedule = modal.getByRole('list', { name: '일정 변경 목록', exact: true });
+    const childRow = schedule.getByRole('listitem').filter({ hasText: child.key });
+    await expect(childRow).toContainText(f.second.name);
+    await expect(childRow).toContainText('후행 조정');
+    await button(modal, '닫기').click();
+    await expect(openReview).toBeFocused();
+    expect(await f.schedule()).toEqual(before);
+    expect((await teamBlockers(request)).some(relation => relation.sourceIssueId === source.id)).toBe(false);
+
+    await targetInput.fill('2026-11-24');
+    await openReview.click();
+    await followUp.check();
+    expect((await preview()).previewId).toBeNull();
+    await expect(modal.getByRole('region', { name: '일정 검토 오류', exact: true })).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await includeTarget.uncheck();
+    expect((await preview()).previewId).toBeTruthy();
+    expect(await f.schedule()).toEqual(before);
+    const applying = waitMutation(page, '/api/schedule/team-blocker-edit/apply');
+    await apply.click();
+    const applied = await json<ScheduleTeamBlockerApplyResult>(await applying);
+    expect(applied.relation).toMatchObject({ sourceIssueId: source.id, targetIssueId: target.id, type: 'blocks' });
+    expect(applied.followUpIssueIds).toEqual(expect.arrayContaining([target.id, child.id]));
+    await expect(modal).toHaveCount(0);
+    await expect(shortcut).toBeFocused();
+    await expect(selection(source)).toBeChecked();
+    await expect(selection(target)).toBeChecked();
+    await expect(targetInput).toHaveValue('2026-11-24');
+    await expect(page).toHaveURL(url => url.hash === hash);
+    await expect(row(page, child)).toHaveCount(0);
+    const stored = await f.schedule();
+    expect(stored.dependencies).toEqual(before.dependencies);
+    expect(stored.dates[child.id]).toMatchObject({ startDate: '2026-11-30', endDate: '2026-12-01' });
+
+    const undoing = waitMutation(page, '/api/schedule/undo');
+    await button(page, '되돌리기').click();
+    const undone = await undoing;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    await json(undone);
+    expect(await f.schedule()).toEqual(before);
+    expect((await teamBlockers(request)).some(relation => relation.id === applied.relation.id)).toBe(false);
+    await expect(targetInput).toHaveValue('2026-11-24');
+  } finally {
+    await f.close();
+    if (modifiedCalendar) {
+      await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
+        ...originalCalendar, expectedVersion: modifiedCalendar.version,
+      } }));
+    }
   }
 });
 
