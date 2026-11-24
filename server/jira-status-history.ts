@@ -4,6 +4,7 @@ import type { Issue, JiraIssueStatusHistoryEntry, JiraIssueStatusHistoryPage, So
 import { countJiraStatusTransitions, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraStatusHistoryOwnerAliases,
   jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
+import { hasIssueProjectMove, issueProjectAt, readIssueProjectHistory, type IssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
 
 interface ArchiveRow { json: string }
@@ -99,7 +100,7 @@ function receiptPackage(archive: SourceRecordArchive, receipt: SourceImport) {
     item.source.format === archive.source.format) : undefined;
 }
 
-function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
+function prepareTimeline(store: Store, auditedReceipt?: SourceImport, issueIds?: readonly string[]) {
   const issueBindings = store.db.prepare(`SELECT source_instance AS instance,source_alias AS alias FROM source_bindings
     WHERE product='jira' AND kind='issue' AND target_type='issue' AND target_id=?`);
 
@@ -117,7 +118,8 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
     WHERE binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue' AND binding.target_id=?
       AND history.product='jira' AND history.kind='history' AND history.owner_type IS NULL AND history.owner_id IS NULL
       AND json_type(history.json,'$.record.metadata.items')='array'
-      AND CASE WHEN json_valid(receipt.json) THEN json_extract(receipt.json,'$.configuration.appendTo.projectId')=? ELSE 0 END
+      AND CASE WHEN json_valid(receipt.json)
+        THEN json_type(receipt.json,'$.configuration.appendTo.projectId')='text' ELSE 0 END
     ORDER BY ordinal`);
   const sourceIssues = store.db.prepare(`SELECT snapshot.json
     FROM source_bindings AS binding CROSS JOIN source_records AS snapshot
@@ -139,6 +141,20 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
   const receipts = new Map<string, ReceiptContext | null>();
   if (auditedReceipt) receipts.set(auditedReceipt.id, receiptContext(auditedReceipt));
   const authors = new Map<string, string | null>();
+  let history: IssueProjectHistory | undefined;
+  const projectHistory = () => history ??= readIssueProjectHistory(store, issueIds);
+
+  function observedInProject(issue: HistoryIssue, projectId: string, receipt: SourceImport): boolean {
+    if (!Array.isArray(receipt.projectIds) || !receipt.projectIds.includes(projectId)) return false;
+    const moves = projectHistory();
+    if (issueProjectAt(moves, issue.id, issue.projectId, receipt.createdAt) === projectId) return true;
+    // The receipt and its following move can share the same millisecond.
+    if (Array.isArray(receipt.notices) && receipt.notices.some(notice => notice?.code === 'JIRA_MOVED_ISSUES_ARCHIVED')) return false;
+    return moves.get(issue.id)?.some(move => move.occurredAt === receipt.createdAt && move.fromProjectId === projectId) === true &&
+      hasIssueProjectMove(moves, issue.id, projectId, issue.projectId, receipt.createdAt);
+  }
+
+  const lastObservedProject = (issueId: string): string | undefined => projectHistory().get(issueId)?.at(-1)?.toProjectId;
 
   function withAuthor({ authorId, sourceInstance, packageSha256, entry }: TimelineEvent): JiraIssueStatusHistoryEntry {
     if (!authorId) return entry;
@@ -183,10 +199,12 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
         const context = receipts.get(sourceImportId);
         const timezone = context?.receipt.configuration?.timezone;
         const sourcePackage = context && receiptPackage(archive, context.receipt);
+        const appendProject = fallback && context?.receipt.configuration?.appendTo?.projectId;
         let proof: SourceProof | null = null;
-        if (context && sourcePackage && typeof timezone === 'string') {
+        if (context && sourcePackage && typeof timezone === 'string' &&
+            (!fallback || typeof appendProject === 'string' && observedInProject(issue, appendProject, context.receipt))) {
           const snapshots = sourceIssues.all(issue.id, sourceImportId, source.instanceKey, packageSha256,
-            issue.id, issue.id, Number(fallback), issue.projectId) as unknown as ArchiveRow[];
+            issue.id, issue.id, Number(fallback), appendProject || issue.projectId) as unknown as ArchiveRow[];
           // A standalone archive row cannot establish that the Jira issue was adopted into this Teamspace issue.
           const ownerVerified = snapshots.length > 0 && snapshots.every(({ json }) => {
             const snapshot = readArchive(json);
@@ -208,7 +226,7 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
     const owner = prepareOwner(issue);
     if (!owner) return;
     const seen = new Set<string>();
-    for (const candidate of candidates.iterate(issue.id, issue.id, issue.projectId) as unknown as Iterable<HistoryCandidate>) {
+    for (const candidate of candidates.iterate(issue.id, issue.id) as unknown as Iterable<HistoryCandidate>) {
       const archive = readArchive(candidate.json);
       if (!archive || archive.id !== candidate.archiveId || archive.sourceImportId !== candidate.importId ||
           archive.ownerType !== candidate.ownerType || archive.ownerId !== candidate.ownerId ||
@@ -241,11 +259,11 @@ function prepareTimeline(store: Store, auditedReceipt?: SourceImport) {
     }
   }
 
-  return { project, withAuthor, prepareOwner };
+  return { project, withAuthor, prepareOwner, lastObservedProject, observedInProject };
 }
 
 export function jiraIssueStatusHistory(store: Store, issue: Issue, offset: number, limit: number): JiraIssueStatusHistoryPage {
-  const timeline = prepareTimeline(store);
+  const timeline = prepareTimeline(store, undefined, [issue.id]);
   const events: TimelineEvent[] = [];
   timeline.project(issue, event => events.push(event));
   events.sort(timelineOrder);
@@ -278,12 +296,14 @@ function inspectReceiptHistory(store: Store, receipt: SourceImport, visitor: Rec
   function missingReason(row: ReceiptHistoryRow, archive: SourceRecordArchive, identityMatches: boolean): FindingReason {
     const projectId = row.ownerType === 'issue' ? archive.targetProjectId : appendProjectId;
     if (row.issueId || !timeline || !row.boundIssueId || !projectId || !receipt.projectIds.includes(projectId) ||
-        (row.trashIssueId && row.trashProjectId !== projectId) ||
+        (row.trashIssueId && !row.trashProjectId) ||
         !identityMatches || archive.ownerId !== row.ownerId || archive.ownerType !== row.ownerType) {
       return 'ownership-unverified';
     }
-    const key = JSON.stringify([row.boundIssueId, projectId]);
-    if (!archiveOwners.has(key)) archiveOwners.set(key, timeline.prepareOwner({ id: row.boundIssueId, projectId }));
+    const issue = { id: row.boundIssueId, projectId: row.trashProjectId ?? timeline.lastObservedProject(row.boundIssueId) ?? projectId };
+    if (!timeline.observedInProject(issue, projectId, receipt)) return 'ownership-unverified';
+    const key = JSON.stringify([issue.id, issue.projectId]);
+    if (!archiveOwners.has(key)) archiveOwners.set(key, timeline.prepareOwner(issue));
     if (!archiveOwners.get(key)?.(archive)) return 'ownership-unverified';
     return row.trashIssueId ? 'issue-in-trash' : 'issue-unavailable';
   }
@@ -301,7 +321,7 @@ function inspectReceiptHistory(store: Store, receipt: SourceImport, visitor: Rec
     visitor.archive({ sourceRecordId: row.archiveId, sourceId: row.sourceId, sourceInstance: row.sourceInstance,
       sourceIssueId: identityMatches ? originalText(archive.record.containerId, 500) : null,
       changeCount, reason: withTrash && category === 'candidate' ? missingReason(row, archive, identityMatches) : null }, category);
-    if (timeline && category === 'candidate' && row.issueId && row.projectId && (row.ownerType === 'issue' || row.projectId === appendProjectId) &&
+    if (timeline && category === 'candidate' && row.issueId && row.projectId && (row.ownerType === 'issue' || appendProjectId) &&
         archive.id === row.archiveId && archive.sourceImportId === receipt.id) {
       issueProjects.set(row.issueId, row.projectId);
       candidateIds.add(row.archiveId);

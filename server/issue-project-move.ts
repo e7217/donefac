@@ -161,7 +161,7 @@ export class IssueProjectMoveService {
     return { issues, edges };
   }
 
-  private historicalBlockers(projectId: string, ids: string[], jiraWorklogIssueIds: ReadonlySet<string>, blockers: IssueProjectMoveNotice[]) {
+  private historicalBlockers(projectId: string, ids: string[], blockers: IssueProjectMoveNotice[]) {
     const selected = JSON.stringify(ids);
     const record = (code: string, message: string, query: string, ...parameters: (string | number)[]) => {
       const sql = `WITH selected(id) AS (SELECT value FROM json_each(?)) SELECT DISTINCT id FROM (${query}) ORDER BY id`;
@@ -181,10 +181,6 @@ export class IssueProjectMoveService {
       `SELECT selected.id FROM trash_entries, json_each(trash_entries.json, '$.dependencies') edge
        JOIN selected ON selected.id IN (json_extract(edge.value,'$.predecessorId'),json_extract(edge.value,'$.successorId'))
        WHERE trash_entries.resource_type='issue' AND trash_entries.project_id=?`, projectId);
-    record('jira_origin', 'Jira에서 이관한 업무의 원본 연결은 현재 프로젝트에 유지해야 합니다.',
-      `SELECT selected.id FROM source_bindings JOIN selected ON selected.id=source_bindings.target_id
-       WHERE product='jira' AND kind='issue' AND target_type='issue' UNION ALL SELECT value AS id FROM json_each(?)`,
-      JSON.stringify([...jiraWorklogIssueIds]));
   }
 
   private plan(id: string, actorId: string, request: IssueProjectMoveInput, applying: boolean): MovePlan {
@@ -208,7 +204,12 @@ export class IssueProjectMoveService {
     const sourceCalendar = this.hooks.calendar(root.projectId), targetCalendar = this.hooks.calendar(project.id);
     const plans = this.hooks.plans(project.id);
     const worklogs = this.hooks.worklogEvidence(ids);
-    this.historicalBlockers(root.projectId, ids, worklogs.sourceIssueIds, blockers);
+    const jiraIssues = new Set(worklogs.sourceIssueIds);
+    const jiraBindings = this.store.db.prepare(`SELECT DISTINCT binding.target_id AS id FROM json_each(?) AS selected
+      JOIN source_bindings AS binding ON binding.target_id=selected.value
+      WHERE binding.product='jira' AND binding.kind='issue' AND binding.target_type='issue'`).all(JSON.stringify(ids)) as { id: string }[];
+    for (const { id } of jiraBindings) jiraIssues.add(id);
+    this.historicalBlockers(root.projectId, ids, blockers);
     const sequence = this.store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(project.id) as { next_number: number } | undefined;
     const nextNumber = sequence?.next_number ?? 1;
     if (!Number.isSafeInteger(nextNumber) || nextNumber < 1 || !Number.isSafeInteger(nextNumber + ids.length)) {
@@ -232,6 +233,8 @@ export class IssueProjectMoveService {
       const worklogCount = worklogs.activeCounts[issueId] ?? 0;
       if (worklogCount > 0) warnings.push({ code: 'worklogs_transferred', issueId,
         message: `업무를 옮기면 작업 시간 기록 ${worklogCount}건이 대상 프로젝트 보고서에 집계됩니다.` });
+      if (jiraIssues.has(issueId)) warnings.push({ code: 'jira_origin_preserved', issueId,
+        message: 'Jira 원본 링크와 이관 기록을 유지합니다. 출발 프로젝트에서 옮긴 업무의 후속 자료는 원본으로 보관합니다.' });
       const requested = input.get(issueId) ?? { issueId };
       const oldStatus = sourceWorkflow.statuses.find(status => status.id === issue.status);
       const activeTypes = targetSchema.issueTypes.filter(type => !type.archived);

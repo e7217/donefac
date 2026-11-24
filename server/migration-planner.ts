@@ -508,6 +508,7 @@ class Planner{
   private borrowedAttachmentVersions = new Map<string, AttachmentVersion>();
   private confluenceSpacesByKey = new Map<string, Entry[]>();
   private retainedEntries = new Set<string>();
+  private movedOutEntries = new Set<string>();
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes;
     sourceHashes?: JiraMigrationIssueSourceFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
   private jiraHistoryOwners = new Map<string, JiraHistoryIssue>();
@@ -559,6 +560,7 @@ class Planner{
       if (container.issueCount) this.projectsByContainer.set(container.id, append.project);
     }
     const retainedAliases = new Map<string, KnownIssue>();
+    const movedOutAliases = new Set(append.movedOutIssueAliases);
     const newRows: Entry[] = [];
     for (const entry of this.entries) {
       if (entry.row.kind !== 'issue' || this.excluded.has(entry.key)) continue;
@@ -568,8 +570,12 @@ class Planner{
       if (byId && byKey && byId.issueId !== byKey.issueId) {
         this.notice('SOURCE_BINDING_AMBIGUOUS', 'Jira 원본 ID와 키가 서로 다른 업무에 연결되어 있습니다.', 'error', entry);
       }
-      if ([byId, byKey].some(issue => issue?.projectId && issue.projectId !== append.project.id)) {
+      const elsewhere = ([[entry.row.sourceId, byId], [key, byKey]] as const)
+        .filter(([, issue]) => issue?.projectId && issue.projectId !== append.project.id);
+      if (elsewhere.some(([alias]) => !movedOutAliases.has(alias))) {
         this.notice('SOURCE_BINDING_CONFLICT', 'Jira 원본 업무가 다른 팀 프로젝트에 연결되어 있습니다.', 'error', entry);
+      } else if (elsewhere.length) {
+        this.movedOutEntries.add(entry.key);
       }
       const known = byId ?? byKey;
       if (!known) {
@@ -627,6 +633,8 @@ class Planner{
     this.result.preview.counts.retainedIssues = retainedIssues;
     this.result.preview.counts.retainedRecords = this.retainedEntries.size;
     if (retainedIssues) this.notice('APPEND_PRIOR_ISSUES_RETAINED', `이미 이관한 업무 ${retainedIssues}개와 해당 내보내기 원본을 보존합니다.`, 'info');
+    if (this.movedOutEntries.size) this.notice('JIRA_MOVED_ISSUES_ARCHIVED',
+      `다른 프로젝트로 이동한 업무의 원본 기록 ${this.movedOutEntries.size}건을 보관합니다. 이동한 업무의 필드와 댓글·작업 시간·첨부·관계는 현재 프로젝트에 유지합니다.`, 'warning', undefined, true);
   }
   private hasRetainedOwner(entry: Entry): boolean {
     const { row } = entry;
@@ -1007,6 +1015,7 @@ class Planner{
     let updatedFields = 0, conflictingFields = 0, updatedCustomFields = 0, conflictingCustomFields = 0, skippedIssueUpdates = 0;
     for (const entry of this.entries) {
       if (entry.row.kind !== 'issue' || !this.retainedEntries.has(entry.key)) continue;
+      if (this.movedOutEntries.has(entry.key)) { skippedIssueUpdates++; continue; }
       const sourceKey = string(entry.row.metadata.key) || entry.row.sourceId;
       const binding = this.originalIssue(entry.row.sourceId) ?? this.originalIssue(sourceKey);
       const candidate = binding && candidates.get(binding.id);

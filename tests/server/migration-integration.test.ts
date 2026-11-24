@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
 import { MAX_DOCUMENT_LABEL_LENGTH, MAX_DOCUMENT_LABELS } from '../../shared/document-labels.js';
@@ -47,6 +48,86 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('Jira follow-up archives moved source rows while applying new tickets in the original project', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instance = 'synthetic-jira-follow-up-move';
+  const oldProject = { id: '42', key: 'OLD', name: '원래 Jira 프로젝트' };
+  const anotherProject = { id: '84', key: 'OTHER', name: '다른 Jira 프로젝트' };
+  const author = { key: 'jira-follow-up-author', name: 'jira-follow-up-author', displayName: 'Jira 작성자' };
+  const later = '2020-02-03T00:00:00.000Z';
+  function row(id: number, key: string, project: typeof oldProject, summary: string, withHistory = false) {
+    return { id: String(id), key, fields: {
+      project, summary, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      created: '2020-01-01T00:00:00.000Z', updated: withHistory ? later : '2020-02-01T00:00:00.000Z',
+      ...(withHistory ? {
+        comment: { comments: [{ id: '2901', body: '이동 후 원본 댓글', author, created: later }] },
+        worklog: { worklogs: [{ id: '2902', issueId: String(id), author, comment: '이동 후 원본 작업 기록',
+          created: later, started: later, timeSpentSeconds: 91 }] },
+      } : {}),
+    } };
+  }
+  const upload = (filename: string, issues: ReturnType<typeof row>[]) => f.upload(Buffer.from(JSON.stringify({ issues })), filename, 'jira', instance);
+  const applyFirst = async (filename: string, rows: ReturnType<typeof row>[], key: string) => {
+    const pkg = await upload(filename, rows);
+    const applied = await f.apply(await f.preview(await f.configuration(pkg, key)));
+    assert.equal(applied.status, 201, JSON.stringify(applied.data));
+    return applied.data.import.projectIds[0];
+  };
+  const appendConfig = async (pkg: LegacyPackageSummary, projectId: string): Promise<MigrationConfiguration> => {
+    const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`);
+    const target = options.appendTarget;
+    assert.equal(target?.projectId, projectId);
+    const configuration = await f.configuration(pkg);
+    return { ...configuration, appendTo: { projectId, refreshExisting: true, refreshHistory: true,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target!.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target!.issueTypes.find(type => type.name === option.label)!.id])),
+      fields: {},
+    } };
+  };
+  const originalId = await applyFirst('initial-old.json', [row(100, 'OLD-1', oldProject, '이동할 원래 업무')], 'MOVEDOLD');
+  const snapshot = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const issue = snapshot.issues.find(item => item.projectId === originalId)!;
+  const destination = snapshot.issues.find(item => item.projectId !== originalId)!;
+  const movePath = `/issues/${issue.id}/project-move`;
+  const request = { expectedVersion: issue.version, projectId: destination.projectId, includeConnected: false,
+    mappings: [{ issueId: issue.id, status: destination.status, type: destination.type }] };
+  const { data: moving } = await f.call<IssueProjectMovePreview>(`${movePath}/preview`, 'POST', request);
+  assert.ok(moving.token, JSON.stringify(moving.blockers));
+  const applied = await f.call<IssueProjectMoveResult>(`${movePath}/apply`, 'POST', { ...request, token: moving.token });
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  const edit = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: applied.data.issues[0].version, title: '현재 팀이 편집한 제목' });
+  assert.equal(edit.status, 200, JSON.stringify(edit.data));
+
+  const followup = await upload('followup.json', [row(100, 'OLD-1', oldProject, '나중 Jira에서 바꾼 원본 제목', true),
+    row(101, 'OLD-2', oldProject, '같은 원본의 새 업무')]);
+  const review = await f.preview(await appendConfig(followup, originalId));
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  assert.ok(review.requiredAcknowledgements.includes('JIRA_MOVED_ISSUES_ARCHIVED'));
+  assert.equal(review.counts.issues, 1);
+  assert.equal(review.counts.newJiraComments, 0);
+  assert.equal(review.counts.newJiraWorklogs, 0);
+  assert.ok(!review.issueRefresh?.some(item => item.issueId === issue.id));
+  const related = await f.apply(review);
+  assert.equal(related.status, 201, JSON.stringify(related.data));
+  const backup = (await f.call<WorkspaceSnapshot & { sourceRecords: SourceRecordArchive[] }>('/export')).data;
+  assert.deepEqual(backup.issues.find(item => item.id === issue.id), edit.data);
+  assert.deepEqual(backup.issues.filter(item => item.projectId === originalId).map(item => item.title), ['같은 원본의 새 업무']);
+  const earlier = backup.sourceRecords.find(item => item.record.kind === 'issue' && item.targetId === issue.id);
+  assert.equal(earlier?.targetProjectId, originalId);
+  assert.equal(earlier?.record.title, issue.title);
+  const retained = backup.sourceRecords.filter(item => item.sourceImportId === related.data.import.id && ['100', '2901', 'worklog:2902'].includes(item.record.sourceId));
+  assert.equal(retained.length, 3, JSON.stringify(retained.map(item => item.record.id)));
+  assert.ok(retained.every(item => item.targetId === null && item.targetProjectId === null && item.ownerId === null));
+
+  const unrelatedId = await applyFirst('another-project.json', [row(200, 'OTHER-1', anotherProject, '별도 Jira 업무')], 'UNRELATED');
+  const conflict = await upload('incorrect-other.json', [row(100, 'OTHER-2', anotherProject, '다른 원본 프로젝트가 주장한 기존 ID')]);
+  const blocked = await f.preview(await appendConfig(conflict, unrelatedId));
+  assert.equal(blocked.canApply, false);
+  assert.ok(blocked.notices.some(item => item.code === 'SOURCE_BINDING_CONFLICT'));
+  assert.ok(!blocked.notices.some(item => item.code === 'JIRA_MOVED_ISSUES_ARCHIVED'));
+});
 
 test('Jira rich descriptions survive initial HTTP apply and an accepted plain source refresh clears the format', async t => {
   const f = await fixture();

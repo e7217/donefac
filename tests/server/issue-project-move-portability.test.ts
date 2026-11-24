@@ -6,11 +6,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import type { AtlassianLink } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
-  ApiKeyCreated, GitlabSettings, Issue, IssueReportEvent, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
-  Project, SourceRecordArchive, WorkspaceSnapshot,
+  ApiKeyCreated, GitlabSettings, Issue, IssueReportEvent, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult,
+  MigrationOptions, MigrationPreview, Project, ProjectIssueSchema, ProjectWorklogReport, ReportingLedgerData, SourceImport, SourceRecordArchive,
+  WorklogEntry, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const integration = '/integrations/gitlab';
@@ -59,19 +61,34 @@ function mr(request: Awaited<ReturnType<typeof open>>, oldKey: string, id: numbe
   }, { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() });
 }
 
-async function importJiraProject(call: Awaited<ReturnType<typeof open>>, instanceKey: string, key: string) {
+async function importJiraProject(call: Awaited<ReturnType<typeof open>>, instanceKey: string, key: string, withWorklogs = false) {
   const jiraKey = 'ORIG-1';
   const title = '이동을 검토할 Jira 원본 업무';
+  const author = { accountId: 'original-developer', displayName: 'Jira 작업자' };
+  const date = '2020-01-02T00:00:00Z';
   const csv = [
     'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type',
     `100,${jiraKey},ORIG,${title},2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task`,
   ].join('\r\n');
-  const query = new URLSearchParams({ filename: `${instanceKey}.csv`, product: 'jira', instanceKey });
-  const staged = await call<LegacyPackageSummary>(`/legacy-import/packages?${query}`, 201, 'POST', csv, {
+  const rest = JSON.stringify({ startAt: 0, total: 1, issues: [{ id: '100', key: jiraKey, fields: {
+    project: { id: '20', key: 'ORIG', name: 'Jira 원본 프로젝트' }, summary: title, reporter: author,
+    status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' }, created: date, updated: date,
+    worklog: { startAt: 0, total: 2, worklogs: [91, 42].map((seconds, index) => ({
+      id: String(610 + index), author, timeSpentSeconds: seconds, comment: `이관 작업 시간 ${seconds}초`, started: date, created: date, updated: date,
+    })) },
+  } }] });
+  const query = new URLSearchParams({ filename: `${instanceKey}.${withWorklogs ? 'json' : 'csv'}`, product: 'jira', instanceKey });
+  const staged = await call<LegacyPackageSummary>(`/legacy-import/packages?${query}`, 201, 'POST', withWorklogs ? rest : csv, {
     'Content-Type': 'application/octet-stream',
   });
-  const { defaultConfiguration: configuration } = await call<MigrationOptions>(`/migrations/options?packageId=${staged.id}`);
+  const { defaultConfiguration: configuration, identities } = await call<MigrationOptions>(`/migrations/options?packageId=${staged.id}`);
   configuration.projects = configuration.projects.map(project => ({ ...project, key }));
+  if (withWorklogs) {
+    const identity = identities.find(value => value.sourceValue === author.accountId);
+    assert.ok(identity);
+    configuration.users[identity.id] = 'user-seo';
+    configuration.sourceBaseUrls = { [staged.id]: 'https://jira.example.test/legacy' };
+  }
   const preview = await call<MigrationPreview>('/migrations/preview', 201, 'POST', { configuration });
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
   const { import: imported } = await call<MigrationApplyResult>(`/migrations/previews/${preview.id}/apply`, 201, 'POST', {
@@ -83,7 +100,7 @@ async function importJiraProject(call: Awaited<ReturnType<typeof open>>, instanc
   const issue = workspace.issues.find(value => value.projectId === projectId && value.title === title);
   assert.ok(project);
   assert.ok(issue);
-  return { project, issue, jiraKey, workspace };
+  return { project, issue, jiraKey, imported };
 }
 
 test('portable backup keeps moved issue identity, both ledger scopes, permissions, and new GitLab matches by the previous native key', async t => {
@@ -172,16 +189,30 @@ test('portable backup keeps moved issue identity, both ledger scopes, permission
   assert.equal((await mr(to, moved.key, 5004)).linked, 0);
 });
 
-test('Jira origin and its routed GitLab links remain intact when a project move is blocked', async t => {
+test('a moved Jira ticket keeps immutable origins, routed GitLab links and second-level worklogs through native backup', async t => {
   const call = await open(t);
+  const restore = await open(t);
   const instanceKey = 'move-portability-jira';
-  const { project: { id: projectId }, issue, jiraKey, workspace } = await importJiraProject(call, instanceKey, 'IMVJIRA');
-  const target = workspace.projects.find(project => project.id !== projectId)!;
-  const history = async () => call<{ sourceRecords: SourceRecordArchive[] }>('/export');
-  const origin = (await history()).sourceRecords.find(record => record.targetId === issue.id && record.record.kind === 'issue');
+  const { project: { id: projectId }, issue, jiraKey, imported } = await importJiraProject(call, instanceKey, 'IMVJIRA', true);
+  const target = await call<Project>('/projects', 201, 'POST', { key: 'MOVED', name: '이관 업무의 도착 프로젝트' });
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; reportingLedger: ReportingLedgerData; sourceRecords: SourceRecordArchive[];
+    sourceImports: SourceImport[]; worklogs: (WorklogEntry & { deletedAt: string | null; createHash: string })[] };
+  const archive = () => call<Backup>('/export');
+  const worklogPath = `/issues/${issue.id}/worklogs`;
+  const report = (id: string) => `/projects/${id}/worklog-report?startDate=2020-01-02&endDate=2020-01-02`;
+  const sourceLinks = `/atlassian-links?targetType=issue&targetId=${issue.id}`;
+  const logs = await call<IssueWorklogPage>(worklogPath);
+  const live = logs.entries.find(entry => entry.durationSeconds === 91), deleted = logs.entries.find(entry => entry.durationSeconds === 42);
+  assert.ok(live && deleted && live.sourceRecordId && deleted.sourceRecordId);
+  await call(`${worklogPath}/${deleted.id}`, 200, 'DELETE', { expectedVersion: deleted.version }, { 'X-Actor-Id': 'user-seo' });
+  const before = await archive();
+  const origin = before.sourceRecords.find(record => record.targetId === issue.id && record.record.kind === 'issue');
   assert.ok(origin);
   assert.equal(origin.record.metadata.key, jiraKey);
   assert.equal(origin.targetProjectId, projectId);
+  assert.equal(before.sourceRecords.find(record => record.id === live.sourceRecordId)?.targetProjectId, projectId);
+  const originLinks = await call<AtlassianLink[]>(sourceLinks);
+  assert.equal(originLinks[0].url, `https://jira.example.test/legacy/browse/${jiraKey}`);
 
   const jiraRoutes = [{ repositoryId: repository, projectId, jiraInstanceKey: instanceKey }];
   await configureGitlab(call, jiraRoutes);
@@ -192,14 +223,41 @@ test('Jira origin and its routed GitLab links remain intact when a project move 
   assert.equal(link.originalJiraKey, jiraKey);
 
   const route = `/issues/${issue.id}/project-move`;
-  const input: IssueProjectMoveInput = { expectedVersion: issue.version, projectId: target.id, includeConnected: false, mappings: [] };
-  const blocked = await call<IssueProjectMovePreview>(`${route}/preview`, 200, 'POST', input);
-  assert.equal(blocked.token, null);
-  assert.ok(blocked.blockers.some(value => value.code === 'jira_origin' && value.issueId === issue.id));
-  await call(`${route}/apply`, 409, 'POST', { ...input, token: 'a'.repeat(64) });
+  const targetSchema = await call<ProjectIssueSchema>(`/projects/${target.id}/issue-schema`);
+  const input: IssueProjectMoveInput = { expectedVersion: issue.version, projectId: target.id, includeConnected: false,
+    mappings: [{ issueId: issue.id, status: 'review', type: targetSchema.issueTypes.find(value => !value.archived)!.id }] };
+  const preview = await call<IssueProjectMovePreview>(`${route}/preview`, 200, 'POST', input);
+  assert.ok(preview.token, JSON.stringify(preview.blockers));
+  assert.ok(preview.warnings.some(value => value.code === 'jira_origin_preserved' && value.issueId === issue.id));
+  assert.ok(preview.warnings.some(value => value.code === 'worklogs_transferred' && value.issueId === issue.id));
+  const { issues: [moved] } = await call<IssueProjectMoveResult>(`${route}/apply`, 200, 'POST', { ...input, token: preview.token });
   const latest = await call<WorkspaceSnapshot>('/workspace');
-  assert.deepEqual(latest.issues.find(value => value.id === issue.id), issue);
+  assert.deepEqual(latest.issues.find(value => value.id === issue.id), moved);
   assert.deepEqual(latest.gitlabLinks.find(value => value.id === link.id), link);
-  assert.deepEqual((await history()).sourceRecords.find(record => record.id === origin.id), origin);
+  assert.deepEqual(await call(sourceLinks), originLinks);
   assert.deepEqual((await call<GitlabSettings>(integration)).jiraRoutes, jiraRoutes);
+  assert.equal((await mr(call, jiraKey, 5033)).linked, 1);
+  assert.equal((await call<ProjectWorklogReport>(report(projectId))).minutes, 0);
+  const movedReport = await call<ProjectWorklogReport>(report(target.id));
+  assert.equal(movedReport.minutes, 91 / 60);
+  assert.equal(movedReport.byIssue[0].key, moved.key);
+  const currentWorklog = { ...live, projectId: target.id, issueKey: moved.key, issueTitle: moved.title };
+  assert.deepEqual(await call(worklogPath), { entries: [currentWorklog], totalMinutes: 91 / 60, totalEntries: 1 });
+
+  const backup = await archive();
+  assert.equal(backup.schemaVersion, 109);
+  assert.deepEqual(backup.sourceRecords, before.sourceRecords);
+  assert.deepEqual(backup.sourceImports.find(receipt => receipt.id === imported.id), imported);
+  assert.deepEqual(backup.worklogs, before.worklogs.map(entry => entry.issueId === issue.id
+    ? { ...entry, projectId: target.id, issueKey: moved.key, issueTitle: moved.title } : entry));
+  await restore('/import', 400, 'POST', { data: { ...backup, schemaVersion: 108 } });
+  await restore('/import', 400, 'POST', { data: { ...backup, reportingLedger: { ...backup.reportingLedger, events: [] } } });
+  await restore('/import', 200, 'POST', { data: backup });
+  assert.deepEqual(await restore(worklogPath), { entries: [currentWorklog], totalMinutes: 91 / 60, totalEntries: 1 });
+  assert.deepEqual(await restore(report(target.id)), movedReport);
+  assert.deepEqual(await restore(sourceLinks), originLinks);
+  await configureGitlab(restore, jiraRoutes);
+  assert.equal((await mr(restore, jiraKey, 5034)).linked, 1);
+  assert.ok((await restore<WorkspaceSnapshot>('/workspace')).gitlabLinks.some(value =>
+    value.iid === 5034 && value.issueId === issue.id && value.originalJiraKey === jiraKey));
 });

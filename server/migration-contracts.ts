@@ -53,6 +53,7 @@ export interface MigrationAppendContext {
   cyclePlanningItems?: PlanningItem[];
   cyclePlanningToken?: string;
   knownIssues: { alias: string; issueId: string; projectId: string | null }[];
+  movedOutIssueAliases?: string[];
   refreshIssues?: MigrationJiraRefreshCandidate[];
   hierarchyIssues?: Pick<Issue, 'id' | 'projectId' | 'parentId' | 'key' | 'title' | 'version'>[];
   hierarchyIssueAliases?: { alias: string; issueId: string }[];

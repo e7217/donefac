@@ -17,6 +17,7 @@ interface Hooks {
   activity(request: Request, resourceType: string, resourceId: string, action: string, detail?: string): void;
 }
 type Fields = Pick<WorklogEntry, 'workDate' | 'minutes' | 'note'>;
+type WorklogMoveProof = (issueId: string, sourceProjectId: string, projectId: string, sourceImportId: string) => boolean;
 
 const pageSize = 50;
 const maxNoteLength = 2000;
@@ -53,10 +54,13 @@ function sourceFields(value: Record<string, unknown>, durationSeconds: number): 
   return {...datedNote(value),minutes:durationSeconds / 60};
 }
 
-function sourceBinding(value: Pick<WorklogEntry, 'sourceRecordId' | 'durationSeconds' | 'issueId' | 'projectId'>, sources: Map<string, SourceRecordArchive>): string {
+function sourceBinding(value: Pick<WorklogEntry, 'sourceRecordId' | 'durationSeconds' | 'issueId' | 'projectId'>, sources: Map<string, SourceRecordArchive>,
+  moved?: WorklogMoveProof): string {
   if (typeof value.sourceRecordId !== 'string' || !uuid.test(value.sourceRecordId)) fail(400, '이관 작업 시간의 원본 기록 ID를 확인해 주세요.');
   const source = sources.get(value.sourceRecordId);
-  if (!source || source.source?.product !== 'jira' || source.record?.kind !== 'history' || source.record.metadata?.kind !== 'worklog' || source.ownerType !== 'issue' || source.ownerId !== value.issueId || source.targetProjectId !== value.projectId) {
+  if (!source || source.source?.product !== 'jira' || source.record?.kind !== 'history' || source.record.metadata?.kind !== 'worklog' ||
+      source.ownerType !== 'issue' || source.ownerId !== value.issueId || !source.targetProjectId ||
+      (source.targetProjectId !== value.projectId && !moved?.(value.issueId, source.targetProjectId, value.projectId, source.sourceImportId))) {
     fail(400, '이관 작업 시간의 Jira 원본과 업무·프로젝트 연결이 일치하지 않습니다.');
   }
   if (isRestrictedJiraWorklog(source.record)) fail(400, '열람이 제한된 Jira 작업 시간은 현재 시간 기록으로 이관할 수 없습니다.');
@@ -144,11 +148,10 @@ export class WorklogService {
     const mismatch = this.store.db.prepare(`
       SELECT 1 FROM worklogs WHERE issue_id=? AND (project_id IS NOT ? OR
         CASE WHEN json_valid(json) THEN json_extract(json,'$.id') IS NOT id OR
-          json_extract(json,'$.issueId') IS NOT issue_id OR json_extract(json,'$.projectId') IS NOT project_id OR
-          json_extract(json,'$.sourceRecordId') IS NOT NULL
+          json_extract(json,'$.issueId') IS NOT issue_id OR json_extract(json,'$.projectId') IS NOT project_id
         ELSE 1 END) LIMIT 1
     `).get(before.id, before.projectId);
-    if (mismatch) fail(409, '이동할 업무의 작업 시간 기록과 프로젝트·원본 연결을 확인해 주세요.');
+    if (mismatch) fail(409, '이동할 업무의 작업 시간 기록과 프로젝트 연결을 확인해 주세요.');
     this.store.db.prepare(`
       UPDATE worklogs SET project_id=?, json=json_set(json,'$.projectId',?,'$.issueKey',?,'$.issueTitle',?)
       WHERE issue_id=?
@@ -327,7 +330,8 @@ export class WorklogService {
     };
   }
 
-  validateRestore(raw: unknown, projects: Project[], issues: Issue[], users: User[], exportedAt: string, sourceRecords: SourceRecordArchive[] = []): WorklogRecord[] {
+  validateRestore(raw: unknown, projects: Project[], issues: Issue[], users: User[], exportedAt: string, sourceRecords: SourceRecordArchive[] = [],
+    moved?: WorklogMoveProof): WorklogRecord[] {
     if (!Array.isArray(raw)) fail(400,'백업의 작업 시간 기록 목록이 필요합니다.');
     const projectIds = new Set(projects.map(project => project.id));
     const userIds = new Set(users.map(user => user.id));
@@ -352,7 +356,7 @@ export class WorklogService {
       if (hasSource !== hasSeconds) fail(400, '이관 작업 시간의 원본 ID와 초 단위 값은 함께 있어야 합니다.');
       let input: Fields;
       if (hasSource) {
-        const identity = sourceBinding({sourceRecordId,durationSeconds,issueId,projectId}, sources);
+        const identity = sourceBinding({sourceRecordId,durationSeconds,issueId,projectId}, sources, moved);
         if (sourceIds.has(sourceRecordId!) || sourceIdentities.has(identity)) fail(400, '같은 Jira 원본 작업 시간이 중복되었습니다.');
         sourceIds.add(sourceRecordId!);
         sourceIdentities.add(identity);

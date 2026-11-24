@@ -8,11 +8,17 @@ import { jiraIssueStatusHistory } from './jira-status-history.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints } from './migration-jira-relations.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
+import { issueProjectAt, readIssueProjectHistory, type IssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
 
 export class SourcePreservationError extends Error { constructor(public status: number, message: string, public details?: unknown) { super(message); } }
 export interface SourcePreservationData { imports: SourceImport[]; records: SourceRecordArchive[]; versions: AttachmentVersion[]; relations: IssueRelation[] }
-export interface SourcePreservationContext { users: User[]; projects: Project[]; issues: Issue[]; documents: DocPage[]; comments: Comment[]; revisions: DocRevision[]; attachments: Attachment[] }
+export interface SourcePreservationContext {
+  users: User[]; projects: Project[]; issues: Issue[]; documents: DocPage[]; comments: Comment[]; revisions: DocRevision[]; attachments: Attachment[];
+  issueProjectHistory?: IssueProjectHistory;
+  archivedIssues?: readonly Issue[];
+  archivedIssueRelations?: readonly IssueRelation[];
+}
 const kinds: LegacyRecordKind[] = ['identity', 'project', 'issue', 'page', 'comment', 'revision', 'history', 'attachment', 'relation', 'field', 'option', 'workflow'];
 export function isLegacyRecordKind(value: unknown): value is LegacyRecordKind {
   return typeof value === 'string' && kinds.includes(value as LegacyRecordKind);
@@ -404,6 +410,38 @@ type JiraRelationPackageAlias = JiraRelationAlias & { importId: string; packageS
 const jiraRelationAliasKey = ({ instanceKey, alias }: JiraRelationAlias) => JSON.stringify([instanceKey, alias]);
 const jiraRelationPackageAliasKey = ({ instanceKey, importId, packageSha256, alias }: JiraRelationPackageAlias) =>
   JSON.stringify([instanceKey, importId, packageSha256, alias]);
+type JiraRelationProjectScope = { projectIds: readonly string[]; createdAt: string; anchor?: string };
+type JiraRelationEndpoint = { issueId: string; projectId: string };
+
+function jiraRelationProjectsAtReceipt(scope: JiraRelationProjectScope, source: JiraRelationEndpoint, target: JiraRelationEndpoint,
+  history?: IssueProjectHistory): readonly [string, string] | undefined {
+  const checkTime = Date.parse(scope.createdAt);
+  if (!Number.isFinite(checkTime)) return;
+  const receiptTime = new Date(checkTime).toISOString();
+  const projectOptions = ({ issueId, projectId }: JiraRelationEndpoint): string[] => {
+    if (!history) return [projectId];
+    const current = issueProjectAt(history, issueId, projectId, receiptTime);
+    if (!current) return [];
+    // A receipt and a move may share a timestamp. Only consider earlier
+    // projects reached by a contiguous path at that exact timestamp.
+    const equal = (history.get(issueId) ?? []).filter(move => Date.parse(move.occurredAt) === checkTime);
+    const options = [current];
+    let prior = current;
+    for (const move of equal.reverse()) {
+      if (move.toProjectId !== prior) break;
+      prior = move.fromProjectId;
+      options.push(prior);
+    }
+    return options.reverse();
+  };
+  const sourceOptions = projectOptions(source).filter(project => scope.projectIds.includes(project));
+  const targetOptions = projectOptions(target).filter(project => scope.projectIds.includes(project));
+  if (!sourceOptions.length || !targetOptions.length) return;
+  const [sourceProject] = sourceOptions, [targetProject] = targetOptions;
+  if (!scope.anchor || sourceProject === scope.anchor) return [sourceProject, targetProject];
+  if (targetOptions.includes(scope.anchor)) return [sourceProject, scope.anchor];
+  if (sourceOptions.includes(scope.anchor)) return [scope.anchor, targetProject];
+}
 interface JiraHistoryArchive { kind: 'comment' | 'worklog'; sourceId: string; issueId: string; archiveId: string }
 interface JiraAttachmentArchive { sourceId: string; issueId: string; archiveId: string }
 function jiraIssueAliases(record: LegacyRecord): string[] {
@@ -527,7 +565,9 @@ export class SourcePreservationService {
       archive.source_instance AS instanceKey, archive.import_id AS importId, archive.json AS archiveJson,
       CASE WHEN json_valid(receipt.json) THEN
         CASE WHEN json_type(receipt.json,'$.projectIds')='array' THEN json_extract(receipt.json,'$.projectIds') END
-      END AS receiptProjects
+      END AS receiptProjects,
+      CASE WHEN json_valid(receipt.json) THEN json_extract(receipt.json,'$.createdAt') END AS receiptCreatedAt,
+      CASE WHEN json_valid(receipt.json) THEN json_extract(receipt.json,'$.configuration.appendTo.projectId') END AS receiptAnchor
       FROM ${relationSql}
       JOIN source_records archive ON json_extract(archive.json,'$.jiraRelationId')=relation.id
       JOIN issues source ON source.id=relation.source_issue_id
@@ -541,26 +581,31 @@ export class SourcePreservationService {
       ORDER BY relation.id, archive.id`).all(...(issueIds ? [JSON.stringify(issueIds)] : []),
         Number(crossProjectOnly), Number(sameProjectOnly), scope, scope, scope) as (Omit<TeamScheduleBlocker, 'origin'> & {
         type: string; sourceProjectId: string; targetProjectId: string; instanceKey: string; importId: string;
-        archiveJson: string; receiptProjects: string | null;
+        archiveJson: string; receiptProjects: string | null; receiptCreatedAt: unknown; receiptAnchor: unknown;
       })[];
     const candidates = [];
     for (const duplicates of Map.groupBy(rows, row => row.id).values()) {
       if (duplicates.length !== 1) continue;
-      const { id, sourceIssueId, targetIssueId, version, type, sourceProjectId, targetProjectId, instanceKey, importId, archiveJson, receiptProjects } = duplicates[0];
+      const { id, sourceIssueId, targetIssueId, version, type, sourceProjectId, targetProjectId, instanceKey, importId,
+        archiveJson, receiptProjects, receiptCreatedAt, receiptAnchor } = duplicates[0];
       const archive = JSON.parse(archiveJson) as SourceRecordArchive;
-      if (!receiptProjects || archive.excluded || archive.source?.product !== 'jira' || archive.source.instanceKey !== instanceKey ||
+      if (!receiptProjects || typeof receiptCreatedAt !== 'string' || archive.excluded || archive.source?.product !== 'jira' || archive.source.instanceKey !== instanceKey ||
           archive.sourceImportId !== importId || !archive.record?.metadata || typeof archive.record.title !== 'string' ||
           !Array.isArray(archive.record.references) || archive.record.references.some(ref => !ref || typeof ref.sourceId !== 'string')) continue;
       const link = jiraIssueRelationSource(archive.record);
       if (link?.nativeType !== 'blocks' || type !== link.typeName) continue;
-      const projects: unknown = JSON.parse(receiptProjects);
-      if (!Array.isArray(projects) || !projects.includes(sourceProjectId) || !projects.includes(targetProjectId)) continue;
+      const projectIds: unknown = JSON.parse(receiptProjects);
+      if (!Array.isArray(projectIds) || !projectIds.every(projectId => typeof projectId === 'string')) continue;
+      const receiptScope: JiraRelationProjectScope = {
+        projectIds, createdAt: receiptCreatedAt, ...(typeof receiptAnchor === 'string' ? { anchor: receiptAnchor } : {}),
+      };
       const scope = { instanceKey, importId, packageSha256: archive.packageSha256 };
-      candidates.push({ id, sourceIssueId, targetIssueId, version,
+      candidates.push({ id, sourceIssueId, targetIssueId, version, sourceProjectId, targetProjectId, receiptScope,
         source: { ...scope, alias: link.sourceAlias }, target: { ...scope, alias: link.targetAlias } });
     }
     if (!candidates.length) return [];
 
+    const history = readIssueProjectHistory(this.store, [...new Set(candidates.flatMap(({ sourceIssueId, targetIssueId }) => [sourceIssueId, targetIssueId]))]);
     const aliases = candidates.flatMap(({ source, target }) => [source, target]);
     const retained = this.jiraRelationPackageAliases(aliases);
     const packagedAliases = retained.flatMap(({ instanceKey, sourceAlias, keyAlias }) => [
@@ -579,14 +624,14 @@ export class SourcePreservationService {
       if (known) targets.add(known);
       if (targets.size === 1) return [...targets][0];
     };
-    return candidates.flatMap(({ id, sourceIssueId, targetIssueId, version, source, target }) => {
+    return candidates.flatMap(({ id, sourceIssueId, targetIssueId, version, source, target, sourceProjectId, targetProjectId, receiptScope }) => {
       const first = resolve(source), second = resolve(target);
       // An older backup may retain the original storage direction. The Jira
       // aliases confirm orientation without rewriting the archived relation.
-      if ((first === sourceIssueId && second === targetIssueId) || (first === targetIssueId && second === sourceIssueId)) {
-        return [{ id, sourceIssueId: first, targetIssueId: second, version, origin: 'jira' as const }];
-      }
-      return [];
+      if (!(first === sourceIssueId && second === targetIssueId || first === targetIssueId && second === sourceIssueId)) return [];
+      if (!jiraRelationProjectsAtReceipt(receiptScope,
+        { issueId: sourceIssueId, projectId: sourceProjectId }, { issueId: targetIssueId, projectId: targetProjectId }, history)) return [];
+      return [{ id, sourceIssueId: first, targetIssueId: second, version, origin: 'jira' as const }];
     });
   }
 
@@ -821,11 +866,11 @@ export class SourcePreservationService {
     });
     const relationById = unique(relations, '업무 관계');
     const bindings = this.bindings(records);
-    this.validateJiraRelations(records, byImport, relationById, issues, bindings, Boolean(appliedJiraChildren));
+    this.validateJiraRelations(records, byImport, relationById, issues, bindings, Boolean(appliedJiraChildren), context);
     return { imports, records, versions, relations };
   }
   private validateJiraRelations(records: SourceRecordArchive[], receipts: Map<string, SourceImport>, relations: Map<string, IssueRelation>,
-    issues: Map<string, Issue>, bindings: Binding[], applying: boolean): void {
+    issues: Map<string, Issue>, bindings: Binding[], applying: boolean, context: SourcePreservationContext): void {
     const marked = records.filter(record => record.jiraRelationId);
     const appendProjectScopes = new Map<string, { anchor: string; evidenced: Set<string> }>();
     for (const receipt of receipts.values()) {
@@ -834,8 +879,11 @@ export class SourcePreservationService {
     }
     if (!marked.length && !appendProjectScopes.size) return;
     const key = (instance: string, alias: string) => JSON.stringify([instance, alias]);
+    const history = applying ? undefined : context.issueProjectHistory;
+    const archivedIssues = new Map((context.archivedIssues ?? []).map(issue => [issue.id, issue]));
+    const archivedRelations = new Map((context.archivedIssueRelations ?? []).map(relation => [relation.id, relation]));
     const archivedIssueProjects = new Map<string, Set<string>>();
-    if (!applying && appendProjectScopes.size) {
+    if (!applying && (appendProjectScopes.size || archivedRelations.size)) {
       for (const { source, record, targetType, targetId, targetProjectId, excluded } of records) {
         if (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' || !targetId || !targetProjectId ||
             excluded || isRestrictedJiraHistoryOwner(record)) continue;
@@ -845,6 +893,18 @@ export class SourcePreservationService {
         archivedIssueProjects.set(identity, projects);
       }
     }
+    const activeProject = (issueId: string) => (issues.get(issueId) ?? archivedIssues.get(issueId))?.projectId;
+    const endpoint = (instance: string, issueId: string): JiraRelationEndpoint | undefined => {
+      let projectId = activeProject(issueId);
+      // Permanently deleted endpoints can still be proven by an immutable
+      // binding and the last recorded move, or the unique original scope.
+      if (!projectId && !applying) {
+        const recorded = history?.get(issueId)?.at(-1)?.toProjectId;
+        const archived = archivedIssueProjects.get(key(instance, issueId));
+        projectId = recorded ?? (archived?.size === 1 ? [...archived][0] : undefined);
+      }
+      return projectId ? { issueId, projectId } : undefined;
+    };
     const needed = new Set<string>();
     for (const archive of marked) {
       const source = jiraIssueRelationSource(archive.record)!;
@@ -883,21 +943,25 @@ export class SourcePreservationService {
       const relationId = archive.jiraRelationId!;
       if (seen.has(relationId)) fail(400, 'Jira 원본과 적용한 업무 관계가 중복됩니다.');
       seen.add(relationId);
-      const relation = relations.get(relationId);
+      const liveRelation = relations.get(relationId);
+      const relation = liveRelation ?? archivedRelations.get(relationId);
       const source = jiraIssueRelationSource(archive.record)!;
       const receipt = receipts.get(archive.sourceImportId)!;
       const first = resolved(archive.source.instanceKey, source.sourceAlias);
       const second = resolved(archive.source.instanceKey, source.targetAlias);
       const scope = appendProjectScopes.get(receipt.id);
+      const receiptScope: JiraRelationProjectScope = { projectIds: receipt.projectIds, createdAt: receipt.createdAt,
+        ...(scope ? { anchor: scope.anchor } : {}) };
+      const projectsAtReceipt = (sourceIssueId: string, targetIssueId: string) => {
+        const sourceEndpoint = endpoint(archive.source.instanceKey, sourceIssueId);
+        const targetEndpoint = endpoint(archive.source.instanceKey, targetIssueId);
+        return sourceEndpoint && targetEndpoint ? jiraRelationProjectsAtReceipt(receiptScope, sourceEndpoint, targetEndpoint, history) : undefined;
+      };
       if (!relation) {
         // An archived receipt survives ticket removal through the original issue bindings.
         if (scope && first && second) {
-          const sourceProjects = archivedIssueProjects.get(key(archive.source.instanceKey, first));
-          const targetProjects = archivedIssueProjects.get(key(archive.source.instanceKey, second));
-          if (sourceProjects?.size === 1 && targetProjects?.size === 1 &&
-              (sourceProjects.has(scope.anchor) || targetProjects.has(scope.anchor))) {
-            for (const projectId of [...sourceProjects, ...targetProjects]) scope.evidenced.add(projectId);
-          }
+          const projects = projectsAtReceipt(first, second);
+          for (const projectId of projects ?? []) scope.evidenced.add(projectId);
         }
         continue;
       }
@@ -906,17 +970,12 @@ export class SourcePreservationService {
       // Initial/default import keeps the original row order. Follow-up relations between existing issues use canonical direction.
       const matchesEndpoints = Boolean(canonical) && [canonical, original].some(endpoints => endpoints &&
         relation.sourceIssueId === endpoints[0] && relation.targetIssueId === endpoints[1]);
-      const sourceProject = issues.get(relation.sourceIssueId)?.projectId;
-      const targetProject = issues.get(relation.targetIssueId)?.projectId;
-      if (relation.origin || relation.type !== source.typeName || !matchesEndpoints ||
-          !sourceProject || !targetProject || !receipt.projectIds.includes(sourceProject) || !receipt.projectIds.includes(targetProject)) {
+      const projects = projectsAtReceipt(relation.sourceIssueId, relation.targetIssueId);
+      const bothPresent = activeProject(relation.sourceIssueId) && activeProject(relation.targetIssueId);
+      if (relation.origin || relation.type !== source.typeName || !matchesEndpoints || (!projects && (liveRelation || bothPresent))) {
         fail(400, 'Jira 업무 관계의 원본·업무 대상·프로젝트가 일치하지 않습니다.');
       }
-      if (scope) {
-        if (sourceProject !== scope.anchor && targetProject !== scope.anchor) fail(400, 'Jira 업무 관계에 선택한 이관 프로젝트가 없습니다.');
-        scope.evidenced.add(sourceProject);
-        scope.evidenced.add(targetProject);
-      }
+      if (scope) for (const projectId of projects ?? []) scope.evidenced.add(projectId);
     }
     for (const [receiptId, { evidenced }] of appendProjectScopes) {
       const projectIds = receipts.get(receiptId)!.projectIds;

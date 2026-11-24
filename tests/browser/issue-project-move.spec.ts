@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
 import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
-import type { Comment, Dependency, DocPage, GitlabSettings, Issue, IssueWorklogPage, ResourceLink, WorklogEntry, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, Dependency, DocPage, GitlabSettings, Issue, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult,
+  MigrationOptions, MigrationPreview, ResourceLink, WorklogEntry, WorkspaceSnapshot } from '../../shared/types';
 
 const gitlabPath = '/api/integrations/gitlab';
 const button = (within: Locator | Page, name: string) => within.getByRole('button', { name, exact: true });
@@ -291,5 +292,89 @@ test('360px에서 작업 기록이 있는 업무를 옮기고 대상 프로젝�
     }
     const { trashEntryId } = await json<{ trashEntryId: string }>(await request.delete(`/api/issues/${issue.id}`, { headers }), 200);
     expect((await request.delete(`/api/trash/${trashEntryId}`, { headers })).ok()).toBeTruthy();
+  }
+});
+
+test('360px에서 Jira 이관 업무를 다른 프로젝트로 이동하고 원본 링크를 다시 확인한다', async ({ page, request }) => {
+  const readWorkspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'), 200);
+  const { projects: [target], users: [actor] } = await readWorkspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const originalProjectKey = `J${suffix}`, originalKey = `${originalProjectKey}-1`;
+  const title = `프로젝트를 옮길 Jira 이관 업무 ${suffix}`;
+  const sourceBase = 'https://jira-move.example.invalid/jira';
+  const sourceUrl = `${sourceBase}/browse/${originalKey}`;
+  const csv = [
+    'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type',
+    `100,${originalKey},${originalProjectKey},${title},2020-01-01T00:00:00Z,2020-01-02T00:00:00Z,Open,Task`,
+  ].join('\r\n');
+  const params = new URLSearchParams({ filename: `jira-move-${suffix}.csv`, product: 'jira', instanceKey: `jira-move-${suffix}` });
+  const staged = await json<LegacyPackageSummary>(await request.post(`/api/legacy-import/packages?${params}`, {
+    headers: { ...headers, 'Content-Type': 'application/octet-stream' }, data: csv,
+  }), 201);
+  let issue: Issue | undefined;
+  try {
+    const { defaultConfiguration } = await json<MigrationOptions>(await request.get('/api/migrations/options', {
+      headers, params: { packageId: staged.id },
+    }), 200);
+    const migration = await json<MigrationPreview>(await request.post('/api/migrations/preview', { headers, data: { configuration: {
+      ...defaultConfiguration, sourceBaseUrls: { ...defaultConfiguration.sourceBaseUrls, [staged.id]: sourceBase },
+    } } }), 201);
+    expect(migration.canApply, JSON.stringify(migration.notices)).toBe(true);
+    const { import: receipt } = await json<MigrationApplyResult>(
+      await request.post(`/api/migrations/previews/${migration.id}/apply`, {
+        headers, data: { expectedVersion: migration.version, acknowledgements: migration.requiredAcknowledgements },
+      }), 201);
+    issue = (await readWorkspace()).issues.find(value => value.projectId === receipt.projectIds[0] && value.title === title);
+    if (!issue) throw new Error('The Jira migration test issue was not imported.');
+
+    const id = issue.id;
+    const originalHash = `#/${issue.projectId}/issues?issue=${id}`;
+    const targetHash = `#/${target.id}/issues?issue=${id}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), actor.id);
+    await page.goto(`/${originalHash}`);
+    const panel = page.getByRole('dialog', { name: title, exact: true });
+    const originalLink = panel.getByRole('region', { name: '기존 도구 연결', exact: true })
+      .getByRole('link', { name: '원본 열기', exact: true });
+    await expect(originalLink).toHaveAttribute('href', sourceUrl);
+
+    await button(panel, '프로젝트 이동').click();
+    const move = page.getByRole('dialog', { name: '프로젝트 이동', exact: true });
+    await move.getByRole('combobox', { name: '대상 프로젝트', exact: true }).selectOption(target.id);
+    const posted = (operation: 'preview' | 'apply') => page.waitForResponse(response =>
+      new URL(response.url()).pathname === `/api/issues/${id}/project-move/${operation}` && response.request().method() === 'POST');
+    async function preview() {
+      const response = posted('preview');
+      await button(move, '이동 미리보기').click();
+      return json<IssueProjectMovePreview>(await response, 200);
+    }
+    await preview();
+    const row = move.locator(`[data-move-issue-id="${id}"]`);
+    await row.getByRole('combobox', { name: `${issue.key} 대상 유형`, exact: true }).selectOption('작업');
+    await row.getByRole('combobox', { name: `${issue.key} 대상 상태`, exact: true }).selectOption('todo');
+    const ready = await preview();
+    expect(ready.token).toBeTruthy();
+    expect(ready.blockers).toEqual([]);
+    expect(ready.warnings).toContainEqual(expect.objectContaining({ code: 'jira_origin_preserved', issueId: id }));
+    await expect(move.getByRole('region', { name: '이동 시 바뀌는 항목', exact: true })).toContainText('Jira 원본 링크와 이관 기록을 유지합니다.');
+    await button(move, '이동 적용').click();
+    const applied = posted('apply');
+    await button(move, '이동 확정').click();
+    const { issues: [moved] } = await json<IssueProjectMoveResult>(await applied, 200);
+    expect(moved).toMatchObject({ id, projectId: target.id, key: ready.issues[0].targetKey, type: '작업', status: 'todo' });
+    await expect(move.getByRole('heading', { name: '프로젝트 이동 완료', exact: true })).toBeVisible();
+    await button(move, '이동한 업무 보기').click();
+    await expect(panel.locator('.issue-panel-breadcrumb')).toContainText(moved.key);
+    await page.goto(`/${originalHash}`);
+    await expect(page).toHaveURL(url => url.hash === targetHash);
+    await expect(panel.locator('.issue-panel-breadcrumb')).toContainText(target.name);
+    await expect(originalLink).toHaveAttribute('href', sourceUrl);
+  } finally {
+    if (issue) {
+      const { trashEntryId } = await json<{ trashEntryId: string }>(await request.delete(`/api/issues/${issue.id}`, { headers }), 200);
+      expect((await request.delete(`/api/trash/${trashEntryId}`, { headers })).ok()).toBeTruthy();
+    }
+    await request.delete(`/api/legacy-import/packages/${staged.id}?expectedVersion=${staged.version}`, { headers });
   }
 });

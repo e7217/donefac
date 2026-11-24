@@ -8,9 +8,10 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { createApp } from '../../server/app.js';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
-  IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem,
+  IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem, Project,
   ProjectWorkflow, ScheduleAnchorChange, ScheduleBlockerLinkPage, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
   SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
@@ -803,6 +804,79 @@ test('proven Jira blockers keep canonical direction in reports, release readines
   assert.equal((await close(current(assigned))).status, completed.id);
   const after = await f.backup();
   assert.deepEqual(after.issueRelations, beforeRestore.issueRelations);
+});
+
+test('a moved Jira issue keeps an immutable cross-project blocker receipt through backup and trash restore', async t => {
+  const f = await fixture(t);
+  await f.importInitial([sourceIssue('100')], 'ALPHA');
+  await f.importInitial([sourceIssue('200', [], 'OTHER')], 'BRAVO');
+  const delta = await f.upload('moved-issue-relation', [sourceIssue('200', [link('902', '100', 'inward')], 'OTHER')]);
+  const config = await f.appendConfiguration(delta);
+  config.appendTo!.refreshRelations = true;
+  const applied = await f.apply(await f.preview(config));
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const receipt = applied.data.import;
+  const workspace = await f.workspace();
+  const blocker = original(workspace, '100');
+  const blocked = original(workspace, '200', 'OTHER');
+  const [relation] = await f.relations(blocked);
+  assert.ok(relation);
+  assert.ok(receipt.projectIds.includes(blocker.projectId) && receipt.projectIds.includes(blocked.projectId));
+  const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === relation.id);
+  assert.ok(proof);
+
+  async function move(issue: Issue, key: string) {
+    const destination = await f.call<Project>('/projects', 'POST', { key, name: `${key} destination` }, 201);
+    const sample = await f.call<Issue>('/issues', 'POST', { projectId: destination.id, title: `${key} default issue` }, 201);
+    const input: IssueProjectMoveInput = { projectId: destination.id, expectedVersion: issue.version, includeConnected: false,
+      mappings: [{ issueId: issue.id, status: sample.status, type: sample.type }] };
+    const path = `/issues/${issue.id}/project-move`;
+    const preview = await f.call<IssueProjectMovePreview>(`${path}/preview`, 'POST', input);
+    assert.ok(preview.token, JSON.stringify(preview.blockers));
+    const result = await f.call<IssueProjectMoveResult>(`${path}/apply`, 'POST', { ...input, token: preview.token });
+    return result.issues[0];
+  }
+  const moved = await move(await move(blocker, 'CHARLIE'), 'DELTA');
+  assert.equal(moved.id, blocker.id);
+  assert.ok(!receipt.projectIds.includes(moved.projectId));
+  const path = `/issues/${blocked.id}/relations`;
+  const expected = [{ ...relation, verifiedBlockerDirection: 'incoming' }];
+  assert.deepEqual(await f.call<IssueRelationView[]>(path), expected);
+  const key = async (projectIds: string[]) => (await f.call<ApiKeyCreated>('/api-keys', 'POST', {
+    name: `이관 관계 검증 ${projectIds.join(' ')}`, access: 'read', projectIds,
+  }, 201)).token;
+  const oldScope = await key(receipt.projectIds);
+  const currentScope = await key([moved.projectId, blocked.projectId]);
+  assert.deepEqual((await f.request<IssueRelationView[]>(`/v1${path}`, 'GET', undefined, ACTOR, oldScope)).data, []);
+  assert.deepEqual((await f.request<IssueRelationView[]>(`/v1${path}`, 'GET', undefined, ACTOR, currentScope)).data, expected);
+  const reportPath = `/v1/projects/${blocked.projectId}/delivery-blockers?reason=issue_block`;
+  const oldReport = await f.request<DeliveryBlockerReport>(reportPath, 'GET', undefined, ACTOR, oldScope);
+  assert.equal(oldReport.status, 200);
+  assert.equal(oldReport.data.total, 0);
+  const currentReport = await f.request<DeliveryBlockerReport>(reportPath, 'GET', undefined, ACTOR, currentScope);
+  assert.equal(currentReport.status, 200);
+  assert.deepEqual(currentReport.data.items.find(row => row.issue.id === blocked.id)?.blockers.items.map(({ id, key, origin }) => [id, key, origin]),
+    [[moved.id, moved.key, 'jira']]);
+
+  const portable = await f.backup();
+  assert.deepEqual(portable.sourceRecords.find(row => row.id === proof.id), proof);
+  assert.deepEqual(portable.sourceImports.find(row => row.id === receipt.id), receipt);
+  const snapshot = await f.workspace();
+  const unproven = await f.request<{ error: string }>('/import', 'POST', {
+    data: { ...portable, reportingLedger: { coverage: [], events: [] } },
+  });
+  assert.equal(unproven.status, 400);
+  assert.match(unproven.data.error, /Jira 업무 관계/);
+  assert.deepEqual(await f.workspace(), snapshot);
+  await f.call('/import', 'POST', { data: portable });
+  assert.deepEqual(await f.call<IssueRelationView[]>(path), expected);
+
+  const current = (await f.workspace()).issues.find(issue => issue.id === moved.id)!;
+  const trash = await f.call<{ trashEntryId: string }>(`/issues/${moved.id}`, 'DELETE', { expectedVersion: current.version });
+  assert.deepEqual(await f.call<IssueRelationView[]>(path), []);
+  await f.call('/import', 'POST', { data: await f.backup() });
+  await f.call(`/trash/${trash.trashEntryId}/restore`, 'POST', {});
+  assert.deepEqual(await f.call<IssueRelationView[]>(path), expected);
 });
 
 test('relation-only Jira administrator XML needs a proven project to anchor a cross-project review', async t => {

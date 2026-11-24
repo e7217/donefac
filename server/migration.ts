@@ -20,6 +20,7 @@ import { AttachmentFiles } from './attachments.js';
 import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
+import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
 import type { PilotConfluenceReview } from './pilot-confluence-review.js';
@@ -228,6 +229,7 @@ export class MigrationService {
       FROM source_bindings AS binding LEFT JOIN issues AS issue ON issue.id=binding.target_id
       WHERE binding.product='jira' AND binding.source_instance=? AND binding.kind='issue' AND binding.target_type='issue'
       ORDER BY binding.source_alias`).all(instanceKey) as MigrationAppendContext['knownIssues'];
+    const movedOutIssueAliases = this.movedJiraIssueAliases(configuration, packages, knownIssues, destination);
     const planRows = this.store.db.prepare("SELECT json FROM planning_items WHERE project_id=? AND kind IN ('release', 'cycle') ORDER BY id ASC")
       .all(project.id) as { json: string }[];
     const plans = planRows.map(row => JSON.parse(row.json) as PlanningItem);
@@ -236,6 +238,7 @@ export class MigrationService {
     const planningToken = createHash('sha256').update(JSON.stringify(planningItems)).digest('hex');
     const cyclePlanningToken = createHash('sha256').update(JSON.stringify(cyclePlanningItems)).digest('hex');
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
+    if (movedOutIssueAliases.length) digest.update('\njira-moved-issues\n').update(JSON.stringify(movedOutIssueAliases));
     const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, destination, digest)
       : undefined;
@@ -244,7 +247,36 @@ export class MigrationService {
     const relationRefresh = mapping.refreshRelations ? this.jiraRelationContext(packages, configuration, knownIssues, destination, digest) : undefined;
     return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues,
       planningItems, planningToken, cyclePlanningItems, cyclePlanningToken,
+      ...(movedOutIssueAliases.length ? { movedOutIssueAliases } : {}),
       ...refreshContext, ...(relationRefresh ? { relationRefresh } : {}), ...history, ...attachments };
+  }
+  private movedJiraIssueAliases(configuration: MigrationConfiguration, packages: MigrationPackage[],
+    knownIssues: MigrationAppendContext['knownIssues'], destination: AppendDestination): string[] {
+    const staged = new Set<string>(), excluded = new Set(configuration.excludedRecords);
+    for (const { summary, dataset } of packages) for (const row of dataset.records) {
+      if (row.kind !== 'issue' || excluded.has(`${summary.id}/${row.id}`)) continue;
+      staged.add(row.sourceId);
+      if (typeof row.metadata.key === 'string') staged.add(row.metadata.key);
+    }
+    const foreign = new Map(knownIssues.flatMap(({ alias, issueId, projectId }) =>
+      staged.has(alias) && projectId && projectId !== destination.project.id ? [[alias, { issueId, projectId }] as const] : []));
+    if (!foreign.size) return [];
+    const sourceProjects = this.jiraHierarchySourceProjects(packages, destination);
+    const { project, instanceKey } = destination;
+    const origins = Map.groupBy(this.sources.jiraIssueOrigins(instanceKey, [...foreign.keys()], 'alias'), origin => origin.alias);
+    const history = readIssueProjectHistory(this.store, [...new Set([...foreign.values()].map(issue => issue.issueId))]);
+    const receipt = this.store.db.prepare(`SELECT json_extract(receipt.json,'$.createdAt') AS createdAt
+      FROM source_records record JOIN source_imports receipt ON receipt.id=record.import_id WHERE record.id=?`);
+    return [...foreign].flatMap(([alias, { issueId, projectId }]) => {
+      const matches = origins.get(alias);
+      if (!matches?.length || matches.some(origin => origin.issueId !== issueId || origin.projectId !== project.id ||
+          !sourceProjects.has(origin.sourceProjectId))) return [];
+      const proven = matches.every(({ archiveId }) => {
+        const row = receipt.get(archiveId) as { createdAt: unknown } | undefined;
+        return typeof row?.createdAt === 'string' && hasIssueProjectMove(history, issueId, project.id, projectId, row.createdAt);
+      });
+      return proven ? [alias] : [];
+    });
   }
   private jiraChildIssueCandidates(packages: MigrationPackage[], configuration: MigrationConfiguration, live: ReadonlyMap<string, string>,
     select: (row: LegacyRecord) => string[] | null) {

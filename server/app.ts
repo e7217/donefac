@@ -71,6 +71,7 @@ import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVer
 import { registerSourceReconciliationRoutes } from './source-reconciliation.js';
 import { LegacyArchiveError } from './legacy-import-archive.js';
 import { ReportingLedger, ReportingLedgerError, previousIssueKeys } from './reporting-ledger.js';
+import { hasIssueProjectMove, issueProjectHistoryFromEvents } from './issue-project-history.js';
 import { IssueKeyLookupError, readIssueKeyMatches, readIssueSearchAliases } from './issue-search-aliases.js';
 import { ReportingMetricsError } from './reporting-metrics.js';
 import { ReportingService, ReportingError } from './reporting.js';
@@ -3027,6 +3028,7 @@ export function createApp(options: {
     const restoreAt=now();
     const importedReportLedger=data.schemaVersion>=10?reportLedger.validateRestore(data.reportingLedger,data.exportedAt,restoreAt,data.projects):{coverage:[],events:[]};
     if(data.schemaVersion<83&&importedReportLedger.events.some(event=>event.kind==='moved_out'||event.kind==='moved_in'))fail('업무 프로젝트 이동 이력이 있는 백업에는 schemaVersion 83이 필요합니다.');
+    const importedIssueProjectHistory = issueProjectHistoryFromEvents(importedReportLedger.events);
     if(data.schemaVersion<55&&Array.isArray(data.reportSnapshots)&&data.reportSnapshots.some((snapshot:ReportSnapshot|null)=>
       snapshot?.report?.definitionVersion===2||snapshot?.report?.statusDuration!==undefined
     ))fail('상태 체류 시간이 있는 보고서 보관본에는 schemaVersion 55 백업이 필요합니다.');
@@ -3161,7 +3163,21 @@ export function createApp(options: {
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
-    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments]});
+    }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments],
+      issueProjectHistory:importedIssueProjectHistory,archivedIssues,archivedIssueRelations:importedTrash.flatMap(entry=>entry.issueRelations)});
+    const sourceImportTimes = new Map(importedSources.imports.map(receipt => [receipt.id, receipt.createdAt]));
+    const proveJiraProjectMove = (issueId: string, sourceProjectId: string, currentProjectId: string, receiptId: string) => {
+      const since = sourceImportTimes.get(receiptId);
+      return since !== undefined && hasIssueProjectMove(importedIssueProjectHistory, issueId, sourceProjectId, currentProjectId, since);
+    };
+    if (data.schemaVersion < 109 && importedIssueProjectHistory.size) {
+      const currentProjects = new Map(allImportedIssues.map(issue => [issue.id, issue.projectId]));
+      if (importedSources.records.some(({ source, record, targetType, targetId, targetProjectId, sourceImportId }) => {
+        if (source.product !== 'jira' || record.kind !== 'issue' || targetType !== 'issue' || !targetId || !targetProjectId) return false;
+        const currentProjectId = currentProjects.get(targetId) ?? importedIssueProjectHistory.get(targetId)?.at(-1)?.toProjectId;
+        return currentProjectId && currentProjectId !== targetProjectId && proveJiraProjectMove(targetId, targetProjectId, currentProjectId, sourceImportId);
+      })) fail('프로젝트를 이동한 Jira 이관 업무를 포함한 백업은 schemaVersion 109가 필요합니다.');
+    }
     if (data.schemaVersion < 61 && importedSources.records.some(row => row.confluencePageFieldHashes?.labels !== undefined)) {
       fail('Confluence 문서 라벨의 비교 기준을 포함한 백업은 schemaVersion 61이 필요합니다.');
     }
@@ -3234,7 +3250,8 @@ export function createApp(options: {
       );
     }
     const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(
-      data.worklogs,data.projects,data.issues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],
+      data.worklogs,data.projects,allImportedIssues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],
+      data.schemaVersion>=109?proveJiraProjectMove:undefined,
     ):[];
     if(data.schemaVersion<14&&Array.isArray(data.documentPublications)&&data.documentPublications.length)fail('문서 검토·발행 기록을 포함한 백업은 schemaVersion 14가 필요합니다.');
     const importedPublications=data.schemaVersion>=14?documentPublication.validateRestore(

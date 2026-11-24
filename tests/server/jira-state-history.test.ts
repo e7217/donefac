@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
+import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type { ApiKeyCreated, JiraIssueStatusHistoryPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
   MigrationOptions, MigrationPreview, SourceImport, SourceReconciliationAudit, SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFindingsPage,
   SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
@@ -93,18 +94,20 @@ function adminPackage() {
 const restStatus = (from: string, fromString: string, to: string, toString: string) =>
   ({ fieldId: 'status', field: '상태', fieldtype: 'jira', from, fromString, to, toString });
 
-function restPackage() {
+function restPackage(afterMove = false) {
   const bytes = Buffer.from('Synthetic attachment for the asynchronous audit');
+  const attachmentId = afterMove ? '681' : '680';
   const task = (id: string, number: number, summary: string) => ({ id, key: `${project.key}-${number}`,
     fields: { project, summary, created, updated: created, status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' } } });
-  const added = task('4403', 3, '함께 추가하는 업무');
+  const added = afterMove ? task('4404', 4, '이동 후 함께 추가하는 업무') : task('4403', 3, '함께 추가하는 업무');
   const entities = Buffer.from(JSON.stringify({ issues: [{ ...task('4401', 1, historicalTitle), changelog: { histories: [
     { id: '501', author: actor, created: '2025-01-03T04:20:00Z', items: [restStatus('1', '보관된 상태 이름', '2', '보관된 다음 상태')] },
-    { id: '601', author: actor, created: '2025-01-05T18:00:00+0900', items: [restStatus('2', '작업 중 기록', '3', '종료 기록')] },
+    { id: afterMove ? '603' : '601', author: actor, created: '2025-01-05T18:00:00+0900',
+      items: [restStatus('2', '작업 중 기록', '3', afterMove ? '이동 뒤 원본에만 보관한 기록' : '종료 기록')] },
     { id: '602', author: actor, created: '2025-01-05T22:00:00+0900', visibility: { type: 'role', value: 'Jira Team' },
       items: [restStatus('2', '제한된 REST 이력', '3', '숨김')] },
-  ] } }, { ...added, fields: { ...added.fields, attachment: [{ id: '680', filename: 'evidence.bin', size: bytes.length, created }] } }] }));
-  return zip([{ path: 'issues.json', bytes: entities }, { path: 'attachments/680', bytes }]);
+  ] } }, { ...added, fields: { ...added.fields, attachment: [{ id: attachmentId, filename: 'evidence.bin', size: bytes.length, created }] } }] }));
+  return zip([{ path: 'issues.json', bytes: entities }, { path: `attachments/${attachmentId}`, bytes }]);
 }
 
 test('Jira status history reads preserved source transitions across initial migration and retained appends', async t => {
@@ -342,17 +345,52 @@ test('Jira status history reads preserved source transitions across initial migr
     assert.equal(updates.prepare('UPDATE source_records SET json=? WHERE id=?').run(originalJson, entry.sourceRecordId).changes, 1);
   } finally { updates.close(); }
 
+  const beforeMove = await workspace();
+  const moveTarget = beforeMove.projects.find(value => value.id !== projectId)!;
+  const moveInput = { expectedVersion: beforeMove.issues.find(value => value.id === issue.id)!.version,
+    projectId: moveTarget.id, includeConnected: false, mappings: [{ issueId: issue.id, type: '작업', status: 'todo' }] };
+  const movePath = `/issues/${issue.id}/project-move`;
+  const movePreview = await f.call<IssueProjectMovePreview>(`${movePath}/preview`, 'POST', moveInput);
+  assert.ok(movePreview.token, JSON.stringify(movePreview.blockers));
+  const move = await f.call<IssueProjectMoveResult>(`${movePath}/apply`, 'POST', { ...moveInput, token: movePreview.token });
+  assert.deepEqual(move.issues.map(({ id, projectId }) => [id, projectId]), [[issue.id, moveTarget.id]]);
+  assert.deepEqual(await page(), combined);
+  assert.deepEqual((await audit(receipt)).jiraStatusHistory, initialSummary);
+  assert.deepEqual((await audit(append)).jiraStatusHistory, appendedSummary);
+
+  const postMove = await f.options('jira-rest-after-move.zip', restPackage(true));
+  assert.equal(postMove.appendTarget?.projectId, projectId);
+  const ignored = await f.apply({ ...postMove.defaultConfiguration, timezone: 'Asia/Seoul',
+    excludedRecords: [`${postMove.pkg.id}/history:602`], appendTo: { projectId,
+      statuses: Object.fromEntries(postMove.statuses.map(value => [value.id, target.statuses.find(state => state.label === value.label)!.id])),
+      issueTypes: Object.fromEntries(postMove.issueTypes.map(value => [value.id, target.issueTypes.find(type => type.name === value.label)!.id])),
+      fields: {},
+    } });
+  assert.deepEqual(await page(), combined);
+  const ignoredFindings = await f.call<SourceReconciliationJiraStatusFindingsPage>(
+    `/source-imports/${ignored.id}/reconciliation/jira-status-findings?expectedVersion=${ignored.version}&finding=unavailable`);
+  assert.ok(ignoredFindings.rows.some(row => row.sourceId === '603' && row.reason === 'ownership-unverified'));
+
   const backup = await f.call('/export');
   await f.call('/import', 'POST', { data: backup });
   const receipts = await f.call<SourceImport[]>('/source-imports');
   const restoredReceipt = receipts.find(value => value.id === receipt.id)!;
+  assert.deepEqual(await page(), combined);
   assert.deepEqual((await audit(restoredReceipt)).jiraStatusHistory, initialSummary);
   assert.deepEqual((await audit(receipts.find(value => value.id === append.id)!)).jiraStatusHistory, appendedSummary);
   const currentIssue = (await workspace()).issues.find(value => value.id === issue.id)!;
   const removed = await f.call<{ trashEntryId: string }>(`/issues/${issue.id}`, 'DELETE', { expectedVersion: currentIssue.version });
+  const restoredAppend = receipts.find(value => value.id === append.id)!;
+  const appendedFindingsPath = `/source-imports/${append.id}/reconciliation/jira-status-findings?expectedVersion=${restoredAppend.version}&finding=unavailable`;
+  const afterMoveTrash = await f.call<SourceReconciliationJiraStatusFindingsPage>(appendedFindingsPath);
+  assert.equal(afterMoveTrash.totalChanges, 2);
+  assert.deepEqual(afterMoveTrash.rows.map(row => row.reason), ['issue-in-trash', 'issue-in-trash']);
   await f.call(`/trash/${removed.trashEntryId}`, 'DELETE');
   const unavailable = await f.call<SourceReconciliationJiraStatusFindingsPage>(
     `${findingsPath}?expectedVersion=${restoredReceipt.version}&finding=unavailable`);
   assert.equal(unavailable.totalChanges, 2);
   assert.deepEqual(unavailable.rows.map(row => row.reason), ['issue-unavailable', 'issue-unavailable']);
+  const afterMovePurge = await f.call<SourceReconciliationJiraStatusFindingsPage>(appendedFindingsPath);
+  assert.equal(afterMovePurge.totalChanges, 2);
+  assert.deepEqual(afterMovePurge.rows.map(row => row.reason), ['issue-unavailable', 'issue-unavailable']);
 });
