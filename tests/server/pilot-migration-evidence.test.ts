@@ -29,6 +29,7 @@ const targetDigests = {
 };
 const statusHistory = { sourceChanges: 2, projected: { count: 1, sha256: '5'.repeat(64) }, duplicate: 1, excluded: 0,
   restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0 };
+const authorCounts = { mapped: 1, 'unmapped-fallback': 0, 'missing-fallback': 0, retained: 0, unavailable: 0, mismatch: 0 };
 
 interface ReceiptNotice {
   code: string;
@@ -43,12 +44,13 @@ const warning: ReceiptNotice = {
 const info: ReceiptNotice = { ...warning, severity: 'info', code: 'SOURCE_DETAIL' };
 
 function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false,
-  notices = [] as ReceiptNotice[] | null, wikiOnly = false } = {}) {
+  notices = [] as ReceiptNotice[] | null, wikiOnly = false, legacyAuthors = false } = {}) {
   const packages: Parameters<typeof collectMigrationEvidence>[1] = wikiOnly ? [wiki] : [jira, wiki];
   const receipt = {
     id: receiptId, version, projectIds: ['project-synthetic'], configuration: { users: { original: changedOwner ? 'team-2' : 'team-1' } },
     packages: packages.map(({ packageId, sha256, product, instanceKey, format }) => ({ stagingId: packageId,
       sha256, source: { product, instanceKey, format }, filename: '/private/never-emit-export.zip' })),
+    ...(!legacyAuthors ? { authorAttributionVersion: 1 } : {}),
     ...(notices === null ? {} : { notices }),
   };
   const observations = {
@@ -71,6 +73,9 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
       documentHistory: 'never-emit-unexpected-target-section' },
     jiraStatusHistory: wikiOnly ? null : { ...statusHistory,
       projected: { ...statusHistory.projected, author: 'never-emit-jira-history-author' }, originalLabel: 'never-emit-jira-history-status' },
+    authorAttribution: legacyAuthors ? null : { version: 1, fingerprint: '6'.repeat(64), packages: packages.map(({ packageId, product }) => ({
+      packageId, kinds: [{ kind: product === 'jira' ? 'comment' : 'document', counts: { ...authorCounts }, expectedAuthorId: 'never-emit-author-id' }],
+    })) },
   };
   const workspace = {
     projects: [{ id: 'project-synthetic', name: 'never-emit-private-project-name' }],
@@ -93,6 +98,32 @@ function evidence(input: ReturnType<typeof sample>, observations: unknown = inpu
     return observations;
   }, input.packages, [completeWikiReview]);
 }
+
+test('offline author evidence distinguishes fallback, unavailable, mismatch and historical receipts', async () => {
+  const verified = await evidence(sample());
+  assert.equal(verified.status, 'verified');
+  assert.doesNotMatch(JSON.stringify(verified), /never-emit-author-id/);
+  const legacy = await evidence(sample({ legacyAuthors: true }));
+  assert.equal(legacy.status, 'review');
+  assert.equal(legacy.checks.receiptsWithoutAuthorEvidence, 1);
+  assert.equal(legacy.receipts[0].authorAttribution, null);
+  for (const disposition of ['unmapped-fallback', 'missing-fallback', 'unavailable', 'mismatch'] as const) {
+    const input = sample();
+    const report = input.observations.authorAttribution!;
+    report.packages[0].kinds[0].counts = { ...authorCounts, mapped: 0, [disposition]: 1 };
+    const result = await evidence(input);
+    assert.equal(result.status, disposition === 'mismatch' ? 'failed' : 'review');
+    assert.equal(result.checks.receiptsWithAuthorReview, disposition === 'mismatch' ? 0 : 1);
+    assert.equal(result.checks.receiptsWithAuthorMismatches, disposition === 'mismatch' ? 1 : 0);
+  }
+  const changed = sample();
+  changed.observations.authorAttribution!.fingerprint = '7'.repeat(64);
+  assert.deepEqual(compareMigrationEvidence(verified, await evidence(changed)).changedReceiptIds, [receiptId]);
+  const invalid = sample();
+  invalid.observations.authorAttribution!.packages[0].kinds[0].counts.mapped = 1000;
+  await assert.rejects(evidence(invalid), /작성자 검증/u);
+  await assert.rejects(evidence(sample(), { ...sample().observations, authorAttribution: null }), /작성자 검증/u);
+});
 
 test('migration rehearsal proves package coverage and matching cold-restore evidence without emitting contents', async () => {
   const before = await evidence(sample({ notices: [info] }));

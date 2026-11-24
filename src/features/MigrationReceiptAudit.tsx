@@ -5,9 +5,10 @@ import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
 import type {
   SourceImport, SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusFindingsPage,
-  SourceReconciliationJiraStatusHistory, SourceReconciliationPrimaryRecords, SourceReconciliationStatus,
+  SourceReconciliationJiraStatusHistory, SourceReconciliationPrimaryRecords, SourceReconciliationStatus, User,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
+import { MigrationAuthorAudit } from './MigrationAuthorReview';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
 
@@ -51,7 +52,7 @@ const jiraUnavailableLabels: Record<NonNullable<SourceReconciliationJiraStatusFi
 
 type Filter = 'all' | 'findings' | SourceReconciliationAuditStatus;
 type AuditState = { kind: 'idle' | 'pending' | 'cancelled' } | { kind: 'complete'; result: SourceReconciliationAudit } | { kind: 'error'; message: string };
-type AuditDetail = {
+export type AuditDetail = {
   openId: string | null;
   content: ReactNode;
   onToggle: (id: string, trigger: HTMLButtonElement) => void;
@@ -71,15 +72,17 @@ type AuditProps = {
   canStart: boolean;
   recordLabels: Record<SourceReconciliationStatus, string>;
   packages: SourceImport['packages'];
+  users: readonly User[];
   primaryListId: string;
   onPrimaryDrill: (drill: PrimaryRecordDrill) => void;
   onStale: () => void;
   detail: AuditDetail;
   jiraDetail: AuditDetail;
+  authorDetail: AuditDetail;
 };
 
-export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, packages, primaryListId, onPrimaryDrill,
-  onStale, detail, jiraDetail }: AuditProps) {
+export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, packages, users, primaryListId, onPrimaryDrill,
+  onStale, detail, jiraDetail, authorDetail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -102,6 +105,7 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
     request.current = abort;
     detail.onClose();
     jiraDetail.onClose();
+    authorDetail.onClose();
     setState({ kind: 'pending' });
     try {
       const next = await api<SourceReconciliationAudit>(`${base}/reconciliation/audit?expectedVersion=${receiptVersion}`, { signal: abort.signal, cache: 'no-store' });
@@ -160,6 +164,11 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
         <ReceiptIntegrity integrity={report.integrity} />
         <PrimaryRecordCoverage records={report.primaryRecords} packages={packages} integrityPackages={report.integrity.packages}
           recordLabels={recordLabels} primaryListId={primaryListId} onDrill={onPrimaryDrill} />
+        <MigrationAuthorAudit report={report.authorAttribution ?? null} base={base} receiptVersion={report.receiptVersion}
+          packages={packages} users={users} detail={authorDetail} onRestart={() => {
+            startButton.current?.focus();
+            void start();
+          }} />
         {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
           base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
         <h5>원본 객체 상태</h5>
@@ -341,7 +350,7 @@ function JiraStatusHistoryFindings({ id, base, receiptVersion, initialFinding, r
     load({ finding: query.finding, offset, expectedFingerprint: fingerprint });
   }
 
-  return <section id={id} className="migration-jira-findings" aria-labelledby={headingId}>
+  return <section id={id} className="migration-audit-findings" aria-labelledby={headingId}>
     <div className="migration-audit-heading">
       <h6 id={headingId} ref={heading} tabIndex={-1}>확인할 Jira 변경</h6>
       <button type="button" className="btn btn-ghost" onClick={onClose}>확인 목록 닫기</button>

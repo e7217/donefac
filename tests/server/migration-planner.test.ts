@@ -23,6 +23,56 @@ const notices=(plan:ReturnType<typeof buildMigrationPlan>)=>new Set(plan.preview
 const adfStatus = (label: string) => ({ type: 'status', attrs: { text: label, color: 'yellow' } });
 const storageStatus = (label: string) => `<ac:structured-macro ac:name="status"><ac:parameter ac:name="title">${label}</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter></ac:structured-macro>`;
 
+test('author review proves planned target assignments by package and keeps archive-only rows outside the counts', () => {
+  const jiraSource = jira(), wikiSource = confluence();
+  const member: User = { ...actor, id: 'mapped-member', email: 'member@example.test' };
+  const sha = createHash('sha256').update('file').digest('hex');
+  const worklog = (id: string, authorId: string | null) => record('history', `worklog:${id}`, {
+    containerId: '1', authorId, createdAt: created, textFormat: 'plain',
+    metadata: { kind: 'worklog', started: created, timeSpentSeconds: 61 },
+    references: [{ kind: 'issue', sourceId: '1', relation: 'worklogOf' }],
+  });
+  jiraSource.dataset.records.push(worklog('501', 'alice'), worklog('502', 'unmapped'));
+  const wikiComment = wikiSource.dataset.records.find(row => row.id === 'comment:wc')!;
+  wikiComment.authorId = 'unmapped';
+  wikiSource.dataset.records.find(row => row.kind === 'revision')!.authorId = null;
+  wikiSource.dataset.records.push({ ...wikiComment, id: 'comment:excluded', sourceId: 'excluded' });
+  const attachment = (id: string, bytes?: boolean) => record('attachment', id, {
+    title: `${id}.txt`, containerId: '10', authorId: 'bob', createdAt: created,
+    metadata: bytes ? { version: '1', packagePath: 'attachments/file', sha256: sha, size: 4 } : { version: '1' },
+    references: [{ kind: 'page', sourceId: '10', relation: 'container-content' }],
+  });
+  wikiSource.dataset.records.push(attachment('available', true), attachment('missing'));
+  const request = input([jiraSource, wikiSource]);
+  request.users.push(member);
+  request.fileInfo = { wiki: { 'attachments/file': { size: 4, sha256: sha, mimeType: 'text/plain' } } };
+  request.configuration.excludedRecords.push('wiki/comment:excluded');
+  for (const option of buildMigrationOptions(request.packages).identities) {
+    request.configuration.users[option.id] = ['alice', 'bob'].includes(option.sourceValue) ? member.id : null;
+  }
+
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.sourceImport.authorAttributionVersion, 1);
+  const proven = Object.fromEntries(plan.sourceRecords.flatMap(({ record, authorAttribution }) => authorAttribution
+    ? [[record.sourceId, authorAttribution]] : []));
+  assert.deepEqual(Object.keys(proven).sort(), ['10', 'available', 'jc', 'old10', 'wc', 'worklog:501']);
+  assert.deepEqual(proven['10'], { kind: 'document', targetId: plan.documents[0].id, disposition: 'mapped', expectedAuthorId: member.id });
+  assert.deepEqual(proven['worklog:501'], { kind: 'worklog', targetId: plan.worklogs[0].id, disposition: 'mapped', expectedAuthorId: member.id });
+  assert.equal(plan.sourceRecords.find(row => row.id === plan.worklogs[0].sourceRecordId)?.targetType, null);
+  assert.equal(proven.jc.expectedAuthorId, plan.comments.find(comment => comment.id === proven.jc.targetId)?.authorId);
+  assert.equal(proven.wc.disposition, 'unmapped-fallback');
+  assert.equal(proven.wc.expectedAuthorId, actor.id);
+  assert.equal(proven.old10.disposition, 'missing-fallback');
+  assert.equal(proven.old10.expectedAuthorId, plan.revisions.find(revision => revision.id === proven.old10.targetId)?.authorId);
+  assert.equal(proven.available.targetId, plan.attachmentVersions[0].id);
+  assert.deepEqual(plan.preview.authorAttribution?.map(({ packageId, kinds }) => [packageId, kinds.map(({ kind, counts }) =>
+    [kind, ...Object.entries(counts).filter(([, count]) => count).map(([status, count]) => [status, count])])]), [
+    ['jira', [['comment', ['mapped', 1]], ['worklog', ['mapped', 1]]]],
+    ['wiki', [['document', ['mapped', 1]], ['comment', ['unmapped-fallback', 1]], ['revision', ['missing-fallback', 1]], ['attachment', ['mapped', 1]]]],
+  ]);
+});
+
 test('new Jira comments keep web links in the plain body and leave source records and other products untouched', () => {
   const url = 'https://ci.example.test/artifacts?artifact=release.';
   const issueUrl = 'https://jira.example.test/jira/browse/OLD-2';
@@ -750,7 +800,7 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
     return buildMigrationPlan(request);
   };
   const next = (options: Partial<LegacyRecord> = {}) => page('10', { authorId: null, metadata: { version: '4' }, ...options });
-  const previousWithoutHashes = refresh([next({ title: '새 원본 제목', text: '<p><strong>현재 본문</strong></p>' })],
+  const previousWithoutHashes = refresh([next({ title: '새 원본 제목', text: '<p><strong>현재 본문</strong></p>', authorId: 'upstream-writer' })],
     { ...canonical, version: 14, title: '팀이 바꾼 제목' }, olderArchive);
   assert.equal(previousWithoutHashes.preview.canApply, true, JSON.stringify(previousWithoutHashes.preview.notices));
   assert.deepEqual(previousWithoutHashes.preview.documentRefresh?.[0].fields.map(field => [field.field, field.decision, field.formatOnly]),
@@ -761,6 +811,10 @@ test('Confluence refresh preserves omitted and unsafe bodies, reviews formatting
   const checkpoint = previousWithoutHashes.sourceRecords.find(row => row.targetId === canonical.id)!;
   assert.equal(checkpoint.confluencePageFieldHashes?.title, archive.confluencePageFieldHashes.title);
   assert.notEqual(checkpoint.confluencePageFieldHashes?.content, archive.confluencePageFieldHashes.content);
+  assert.equal(checkpoint.record.authorId, 'upstream-writer');
+  assert.deepEqual(checkpoint.authorAttribution, { kind: 'document', targetId: canonical.id,
+    disposition: 'retained', expectedAuthorId: canonical.authorId });
+  assert.equal(previousWithoutHashes.preview.authorAttribution?.[0].kinds[0].counts.retained, 1);
 
   const parsedPage = (title: string, body: string) => {
     const xml = `<hibernate-generic><object class="Page"><id name="id">10</id><property name="title">${title}</property><property name="version">4</property><property name="space" class="Space"><id name="id">s</id></property></object>${body}</hibernate-generic>`;

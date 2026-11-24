@@ -562,6 +562,20 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.deepEqual(Object.keys(targetContent[section]).sort(), ['count', 'sha256']);
   }
   assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
+  const { authorAttribution } = receipt;
+  assert.equal(authorAttribution.version, 1);
+  assert.match(authorAttribution.fingerprint, /^[a-f0-9]{64}$/);
+  const authorsByProduct = Object.fromEntries(authorAttribution.packages.map(({ packageId, kinds }) => [
+    staged.packages.find(pkg => pkg.packageId === packageId).product,
+    Object.fromEntries(kinds.map(({ kind, counts }) => [kind, [counts.mapped, counts['missing-fallback']]])),
+  ]));
+  assert.deepEqual(authorsByProduct, {
+    jira: { attachment: [0, 1], comment: [1, 0], worklog: [1, 0] },
+    confluence: { comment: [1, 0], document: [1, 0], revision: [1, 0] },
+  });
+  assert.equal(report.source.evidence.checks.receiptsWithAuthorReview, 1);
+  assert.equal(report.source.evidence.checks.receiptsWithAuthorMismatches, 0);
+  assert.deepEqual(report.restore.evidence.receipts[0].authorAttribution, authorAttribution);
   const { jiraStatusHistory } = receipt;
   assert.match(jiraStatusHistory.projected.sha256, /^[a-f0-9]{64}$/);
   assert.deepEqual(jiraStatusHistory, {

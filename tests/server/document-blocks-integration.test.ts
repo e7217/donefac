@@ -378,7 +378,7 @@ test('heading levels 4 through 6 require content schema 16 and backup format 110
       assert.match(denied.data.error, pattern);
     };
     const { data: activeBackup } = await f.call<Backup>('/export');
-    assert.equal(activeBackup.schemaVersion, 110);
+    assert.equal(activeBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     await rejectOldBackup(activeBackup);
     const edited = await f.call<DocPage>(path, 'PATCH', {
       expectedVersion: original.version, contentSchemaVersion: 16, content: shallow,

@@ -440,6 +440,22 @@ export interface MigrationMappingRestore {
   configuration: MigrationConfiguration;
 }
 export interface MigrationNotice { severity:'error'|'warning'|'info';code:string;message:string;recordId:string|null;requiresAcknowledgement:boolean }
+export const MIGRATION_AUTHOR_KINDS = ['document', 'comment', 'revision', 'attachment', 'worklog'] as const;
+export type MigrationAuthorKind = typeof MIGRATION_AUTHOR_KINDS[number];
+export const MIGRATION_AUTHOR_DISPOSITIONS = ['mapped', 'unmapped-fallback', 'missing-fallback', 'retained'] as const;
+export type MigrationAuthorDisposition = typeof MIGRATION_AUTHOR_DISPOSITIONS[number];
+export const MIGRATION_AUTHOR_STATUSES = [...MIGRATION_AUTHOR_DISPOSITIONS, 'unavailable', 'mismatch'] as const;
+export type MigrationAuthorStatus = typeof MIGRATION_AUTHOR_STATUSES[number];
+export interface MigrationAuthorExpectation {
+  kind: MigrationAuthorKind;
+  targetId: string;
+  disposition: MigrationAuthorDisposition;
+  expectedAuthorId: string;
+}
+export interface MigrationAuthorPackageReview {
+  packageId: string;
+  kinds: { kind: MigrationAuthorKind; counts: Record<MigrationAuthorStatus, number> }[];
+}
 export interface MigrationJiraPlanningChoice {
   recordId: string; sourceKey: string; title: string;
   candidates: { sourceId: string; name: string }[]; selected: string | null;
@@ -457,12 +473,14 @@ export interface MigrationPreview {
   documentRefresh?: ConfluenceMigrationDocumentReview[];
   jiraReleaseChoices?: MigrationJiraPlanningChoice[];
   jiraSprintChoices?: MigrationJiraPlanningChoice[];
+  authorAttribution?: MigrationAuthorPackageReview[];
 }
 export interface SourceImport {
   id:string;version:number;createdAt:string;actorId:string;projectIds:string[];configuration:MigrationConfiguration;
   packages:{stagingId:string;filename:string;sha256:string;source:LegacySource}[];counts:Record<string,number>;
   notices?:MigrationNotice[];
   integrity?:SourceImportIntegrity;
+  authorAttributionVersion?: 1;
 }
 export interface SourceImportIntegrityPackage {
   stagingId: string;
@@ -487,6 +505,7 @@ export interface SourceRecordArchive {
   jiraRelationId?: string;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;
   confluencePageBodySourceHash?: string;
+  authorAttribution?: MigrationAuthorExpectation;
 }
 export interface AttachmentVersion extends Attachment { attachmentId:string;versionLabel:string;sourceImportId:string|null;sourceRecordId:string|null;localRevision?:number;sourceRevision?:number }
 export type IssueRelationType = 'related' | 'blocks' | 'duplicates';
@@ -619,6 +638,32 @@ export interface SourceReconciliationJiraStatusFindingsPage {
   limit: number;
   fingerprint: string;
 }
+export interface SourceReconciliationAuthorAudit {
+  version: 1;
+  packages: MigrationAuthorPackageReview[];
+  fingerprint: string;
+}
+export interface SourceReconciliationAuthorRow {
+  sourceRecordId: string;
+  sourceId: string;
+  kind: MigrationAuthorKind;
+  status: MigrationAuthorStatus;
+  targetId: string;
+  expectedAuthorId: string;
+  actualAuthorId: string | null;
+}
+export interface SourceReconciliationAuthorFindingsPage {
+  importId: string;
+  receiptVersion: number;
+  packageId: string;
+  kind: MigrationAuthorKind;
+  status: MigrationAuthorStatus;
+  rows: SourceReconciliationAuthorRow[];
+  total: number;
+  offset: number;
+  limit: number;
+  fingerprint: string;
+}
 export interface SourceReconciliationAudit {
   importId: string;
   receiptVersion: number;
@@ -629,6 +674,7 @@ export interface SourceReconciliationAudit {
   primaryRecords: SourceReconciliationPrimaryRecords[];
   targetContent: SourceReconciliationTargetContent;
   jiraStatusHistory: SourceReconciliationJiraStatusHistory | null;
+  authorAttribution?: SourceReconciliationAuthorAudit | null;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];
 }

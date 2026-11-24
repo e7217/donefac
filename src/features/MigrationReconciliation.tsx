@@ -31,7 +31,7 @@ type Destination = NonNullable<SourceReconciliationTarget['owner']>;
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'openDocument' | 'refresh' | 'notify'> & {
   sourceImportId: string; packages: SourceImport['packages'];
 };
-type RecordArea = 'list' | 'audit' | 'jira-audit';
+type RecordArea = 'list' | 'audit' | 'jira-audit' | 'author-audit';
 type RecordLoad = { sourceRecordId: string; area: RecordArea } & ({ pending: true } | { archive: SourceRecordArchive } | { error: string });
 
 export function MigrationReconciliation(props: Props) {
@@ -63,6 +63,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
   const loading = load?.filters !== filters;
   const auditRecord = record?.area === 'audit' ? record : null;
   const jiraRecord = record?.area === 'jira-audit' ? record : null;
+  const authorRecord = record?.area === 'author-audit' ? record : null;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -143,7 +144,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
     </header>
 
     <MigrationReceiptAudit key={`${base}:${receiptVersion ?? ''}`} base={base} receiptVersion={receiptVersion}
-      canStart={Boolean(result)} recordLabels={statusLabels} packages={packages} primaryListId={listId} onPrimaryDrill={drill}
+      canStart={Boolean(result)} recordLabels={statusLabels} packages={packages} users={data.users} primaryListId={listId} onPrimaryDrill={drill}
       onStale={() => updateFilters()}
       detail={{
         openId: auditRecord?.sourceRecordId ?? null,
@@ -155,6 +156,11 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
         onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'jira-audit', trigger),
         onClose: () => { if (jiraRecord) closeRecord(); },
         content: jiraRecord && <ReconciliationRecordDetail state={jiraRecord} onClose={() => closeRecord(true)} />,
+      }} authorDetail={{
+        openId: authorRecord?.sourceRecordId ?? null,
+        onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'author-audit', trigger),
+        onClose: () => { if (authorRecord) closeRecord(); },
+        content: authorRecord && <ReconciliationRecordDetail state={authorRecord} onClose={() => closeRecord(true)} />,
       }} />
 
     <section id={listId} aria-labelledby={`${listId}-heading`}>

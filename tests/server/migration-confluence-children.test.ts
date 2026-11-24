@@ -16,6 +16,7 @@ import type {
   MigrationPreview, SourceImport, SourceRecordArchive, WorkspaceSnapshot,
 } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import { historicalMigrationBackup } from '../fixtures/historical-migration-backup.js';
 
 const macro = (options: Record<string, string> = {}) => `<ac:structured-macro ac:name="children">${Object.entries(options)
   .map(([name, value]) => `<ac:parameter ac:name="${name}">${value}</ac:parameter>`).join('')}</ac:structured-macro>`;
@@ -180,8 +181,7 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
   const first = await initial.upload(instance, 'old', archive(pages));
   const receipt = await initial.apply(await initial.preview(first));
   const [projectId] = receipt.import.projectIds;
-  const backup = await initial.call<Backup>('/export');
-  backup.schemaVersion = 67;
+  const backup = historicalMigrationBackup(await initial.call<Backup>('/export'), 67);
   for (const value of backup.sourceImports) delete value.integrity;
   for (const value of backup.sourceRecords) {
     delete value.confluencePageFieldHashes;

@@ -94,3 +94,20 @@ test('migration preflight distinguishes planner warnings, acknowledgements and m
   assert.equal(missingSummary.status, 'review');
   assert.equal(missingSummary.missingPackageSummaryCount, 1);
 });
+
+test('migration preflight shares only package-level planned author counts and marks fallbacks for review', () => {
+  const fallback = { mapped: 2, 'unmapped-fallback': 1, 'missing-fallback': 1, retained: 0,
+    unavailable: 1, mismatch: 1, 'never-emit-unknown-status': 3 };
+  const kinds = [{ kind: 'comment' as const, counts: fallback, expectedAuthorId: 'never-emit-expected-author' }];
+  const preview = makePreview({ canApply: true, notices: [], requiredAcknowledgements: [], authorAttribution: [
+    { packageId, kinds }, { packageId: unrelatedPackageId, kinds },
+  ] });
+  const report = buildMigrationPreflightReport(preview, [jira]);
+  assert.equal(report.status, 'review');
+  assert.equal(report.preview.canApply, true);
+  assert.deepEqual(report.requiredAcknowledgements, []);
+  assert.deepEqual(report.authorAttribution, [{ packageId, kinds: [
+    { kind: 'comment', counts: { mapped: 2, 'unmapped-fallback': 1, 'missing-fallback': 1, retained: 0 } },
+  ] }]);
+  assert.doesNotMatch(JSON.stringify(report), /never-emit|NEVER_EMIT|expectedAuthorId/);
+});

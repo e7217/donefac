@@ -1,6 +1,6 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueSourceFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
-import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,PRIORITY } from '../shared/types.js';
+import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,MIGRATION_AUTHOR_KINDS,PRIORITY } from '../shared/types.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
@@ -31,13 +31,13 @@ import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './mi
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey, jiraStatusHistoryOwnerAliases, jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
-import type { LegacySource, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
+import { migrationOptionId as optionId } from './migration-option-id.js';
+import type { LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
-const optionId=(packageId:string,kind:string,value:string)=>`option_${hash(packageId,kind,value).slice(0,40)}`;
 export const importedStatusId = (source: LegacySource, value: string) => `s_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
 export const importedIssueTypeId = (source: LegacySource, value: string) => `t_${hash(source.product, source.instanceKey, value).slice(0, 24)}`;
 export { optionId as migrationOptionId };
@@ -3910,7 +3910,22 @@ class Planner{
     this.result.jiraHistoryOwners = [...new Set([...this.jiraHistoryOwners.values()].map(issue => issue.id))];
     Object.assign(this.result.preview.counts, { newJiraComments, newJiraWorklogs, retainedRecords: this.retainedEntries.size });
   }
+  private authorExpectation(entry: Entry, binding: Binding | undefined, worklogId: string | undefined): MigrationAuthorExpectation | undefined {
+    const retainedPage = this.confluenceRefreshCheckpoints.get(entry.key);
+    if (retainedPage) return { kind: 'document', targetId: retainedPage.document.id,
+      expectedAuthorId: retainedPage.document.authorId, disposition: 'retained' };
+
+    const kind = worklogId ? 'worklog' : binding?.type;
+    const targetId = worklogId ?? binding?.id;
+    if (!targetId || !kind || kind === 'project' || kind === 'issue') return;
+    const mapped = this.mappedAuthor(entry);
+    return { kind, targetId, expectedAuthorId: mapped ?? this.input.actorId,
+      disposition: mapped !== null ? 'mapped' : entry.row.authorId ? 'unmapped-fallback' : 'missing-fallback' };
+  }
+
   archive():void{
+    const packages = new Map<string, Map<MigrationAuthorKind, Record<MigrationAuthorStatus, number>>>();
+    const worklogs = new Map(this.result.worklogs.map(value => [value.sourceRecordId, value.id]));
     for (const entry of this.entries) {
       const excluded = this.excluded.has(entry.key);
       const issueCheckpoint = this.jiraRefreshCheckpoints.get(entry.key);
@@ -3935,8 +3950,21 @@ class Planner{
       const pageHashes = pageCheckpoint?.hashes ??
         (createdPage && entry.pkg.dataset.source.product === 'confluence' ? confluencePageFieldDigests({ ...createdPage, labels: createdPage.labels ?? [] }) : undefined);
       const pageBodySourceHash = this.confluenceBodySourceHashes.get(entry.key);
+      const id = this.archiveIds.get(entry.key) || randomUUID();
+      const authorAttribution = excluded ? undefined : this.authorExpectation(entry, binding, worklogs.get(id));
+      if (authorAttribution) {
+        const packageId = entry.pkg.summary.id;
+        let kinds = packages.get(packageId);
+        if (!kinds) packages.set(packageId, kinds = new Map());
+        let counts = kinds.get(authorAttribution.kind);
+        if (!counts) {
+          counts = { mapped: 0, 'unmapped-fallback': 0, 'missing-fallback': 0, retained: 0, unavailable: 0, mismatch: 0 };
+          kinds.set(authorAttribution.kind, counts);
+        }
+        counts[authorAttribution.disposition]++;
+      }
       const value: SourceRecordArchive = {
-        id: this.archiveIds.get(entry.key) || randomUUID(), sourceImportId: this.input.id,
+        id, sourceImportId: this.input.id,
         packageSha256: entry.pkg.summary.sha256, source: structuredClone(entry.pkg.dataset.source), record: structuredClone(entry.row),
         targetType: binding?.type ?? null, targetId: binding?.id ?? null, targetProjectId: binding?.projectId ?? owner?.projectId ?? null,
         ownerType, ownerId: ownerType ? owner!.id : null,
@@ -3949,6 +3977,7 @@ class Planner{
         ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
         ...(pageBodySourceHash ? { confluencePageBodySourceHash: pageBodySourceHash } : {}),
+        ...(authorAttribution ? { authorAttribution } : {}),
       };
       if (entry.row.kind === 'project' || entry.row.kind === 'identity') {
         value.ownerType = null;
@@ -3956,6 +3985,16 @@ class Planner{
       }
       this.result.sourceRecords.push(value);
     }
+    this.result.sourceImport.authorAttributionVersion = 1;
+    this.result.preview.authorAttribution = this.input.packages.flatMap(({ summary }) => {
+      const grouped = packages.get(summary.id);
+      if (!grouped) return [];
+      const kinds = MIGRATION_AUTHOR_KINDS.flatMap(kind => {
+        const counts = grouped.get(kind);
+        return counts ? [{ kind, counts }] : [];
+      });
+      return [{ packageId: summary.id, kinds }];
+    });
   }
   private collectReusedAttachmentVersions(): void {
     if (!this.input.appendPages) return;

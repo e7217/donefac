@@ -6,6 +6,8 @@ const sha = /^[a-f0-9]{64}$/;
 const sourceFormats = new Set(['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json', 'confluence-xml']);
 const recordStatuses = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
 const attachmentStatuses = ['verified', 'missing', 'corrupt', 'unbound', 'excluded', 'unreadable'];
+const authorKinds = ['document', 'comment', 'revision', 'attachment', 'worklog'];
+const authorStatuses = ['mapped', 'unmapped-fallback', 'missing-fallback', 'retained', 'unavailable', 'mismatch'];
 const workspaceSections = ['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas', 'dependencies', 'resourceLinks', 'planningItems'];
 const sourceRecordPageSize = 100;
 const sourceRecordMaxOffset = 1_000_000;
@@ -151,6 +153,42 @@ function jiraStatusHistoryEvidence(raw, hasJira) {
     unavailable, unresolvedTime, unresolvedAuthor };
 }
 
+function authorAttributionEvidence(raw, version, integrity) {
+  const message = '이관 작성자 검증의 패키지, 건수 또는 해시가 올바르지 않습니다.';
+  if (version === undefined) {
+    requireEvidence(raw === undefined || raw === null, message);
+    return null;
+  }
+  const archived = new Map(integrity.packages.map(pkg => [pkg.packageId, pkg.records.observed]));
+  requireEvidence(version === 1 && isObject(raw) && raw.version === version && hex(raw.fingerprint) &&
+    Array.isArray(raw.packages) && raw.packages.length === archived.size, message);
+  const seen = new Set();
+  const packages = raw.packages.map(entry => {
+    const { packageId, kinds } = entry ?? {};
+    requireEvidence(archived.has(packageId) && !seen.has(packageId) && Array.isArray(kinds) && kinds.length <= authorKinds.length, message);
+    seen.add(packageId);
+    const seenKinds = new Set();
+    let records = 0;
+    const reviewed = kinds.map(value => {
+      const kind = value?.kind;
+      requireEvidence(authorKinds.includes(kind) && !seenKinds.has(kind), message);
+      seenKinds.add(kind);
+      const result = counts(value.counts, authorStatuses);
+      const total = sum(Object.values(result));
+      requireEvidence(Number.isSafeInteger(total) && total > 0, message);
+      records += total;
+      return { kind, counts: result };
+    });
+    requireEvidence(records <= archived.get(packageId), message);
+    return { packageId, kinds: reviewed.sort((a, b) => a.kind.localeCompare(b.kind)) };
+  });
+  return { version, fingerprint: raw.fingerprint, packages: packages.sort((a, b) => a.packageId.localeCompare(b.packageId)) };
+}
+
+function hasAuthorFinding(authorAttribution, statuses) {
+  return authorAttribution?.packages.some(({ kinds }) => kinds.some(({ counts }) => statuses.some(status => counts[status] > 0))) ?? false;
+}
+
 function noticeCounts(notices) {
   const counts = new Map();
   for (const notice of notices ?? []) {
@@ -176,8 +214,10 @@ async function auditReceipt(call, receipt, matches, receiptKeys) {
   const attachmentsSha256 = attachmentEvidence(raw.attachments, receiptKeys, attachmentCounts);
   const targetContent = targetContentEvidence(raw.targetContent);
   const jiraStatusHistory = jiraStatusHistoryEvidence(raw.jiraStatusHistory, receipt.packages.some(pkg => pkg.source.product === 'jira'));
+  const authorAttribution = authorAttributionEvidence(raw.authorAttribution, receipt.authorAttributionVersion, integrity);
   return { id: receipt.id, version: receipt.version, packageIds: [...matches.keys()].sort(),
     projectCount: receipt.projectIds.length, integrity, recordCounts, primaryRecords, attachmentCounts, attachmentsSha256, targetContent, jiraStatusHistory,
+    authorAttribution,
     configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]),
     noticesAvailable, notices: noticeCounts(receipt.notices) };
 }
@@ -325,13 +365,13 @@ function workspaceEvidence(workspace) {
   return { counts, sha256: digest.digest('hex') };
 }
 
-function failedAudit({ integrity, recordCounts, attachmentCounts, notices }) {
+function failedAudit({ integrity, recordCounts, attachmentCounts, notices, authorAttribution }) {
   return integrity.status !== 'verified' || integrity.unmatchedRecords > 0 || integrity.columnMismatches > 0 ||
     integrity.records.expected !== integrity.records.observed || integrity.boundAttachments.expected !== integrity.boundAttachments.observed ||
     integrity.packages.some(pkg => pkg.status !== 'verified' || pkg.records.expected !== pkg.records.observed ||
       pkg.boundAttachments.expected !== pkg.boundAttachments.observed || pkg.recordsSha256.expected !== pkg.recordsSha256.observed) ||
     recordCounts.missing > 0 || attachmentCounts.missing > 0 || attachmentCounts.corrupt > 0 || attachmentCounts.unreadable > 0 ||
-    notices.some(notice => notice.severity === 'error');
+    notices.some(notice => notice.severity === 'error') || hasAuthorFinding(authorAttribution, ['mismatch']);
 }
 
 /** Read whole source audits and return only counts, generated IDs, and fingerprints.
@@ -358,6 +398,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   }
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
     receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
+    receiptsWithoutAuthorEvidence: 0, receiptsWithAuthorReview: 0, receiptsWithAuthorMismatches: 0,
     receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
     receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0,
     confluencePackagesWithoutFullPageCoverage: withoutFullCoverage.size };
@@ -407,6 +448,10 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   checks.receiptsWithoutNotices = receipts.filter(receipt => !receipt.noticesAvailable).length;
   checks.receiptsWithJiraHistoryReview = receipts.filter(({ jiraStatusHistory }) => jiraStatusHistory &&
     (jiraStatusHistory.unavailable > 0 || jiraStatusHistory.restricted > 0 || jiraStatusHistory.unresolvedTime > 0 || jiraStatusHistory.unresolvedAuthor > 0)).length;
+  checks.receiptsWithoutAuthorEvidence = receipts.filter(({ authorAttribution }) => authorAttribution === null).length;
+  checks.receiptsWithAuthorReview = receipts.filter(({ authorAttribution }) =>
+    hasAuthorFinding(authorAttribution, ['unmapped-fallback', 'missing-fallback', 'unavailable'])).length;
+  checks.receiptsWithAuthorMismatches = receipts.filter(({ authorAttribution }) => hasAuthorFinding(authorAttribution, ['mismatch'])).length;
   for (const { primaryRecords } of receipts) {
     if (primaryRecords.some(({ records }) => records.expected !== null && records.expected !== records.observed)) checks.receiptsWithPrimaryRecordCountMismatches++;
     if (primaryRecords.some(record => record.invalidTargets > 0)) checks.receiptsWithInvalidPrimaryTargets++;

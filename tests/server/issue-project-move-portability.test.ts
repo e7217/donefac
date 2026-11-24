@@ -5,6 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { historicalMigrationBackup } from '../fixtures/historical-migration-backup.js';
 import { createApp } from '../../server/app.js';
 import type { AtlassianLink } from '../../shared/atlassian-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
@@ -245,12 +246,12 @@ test('a moved Jira ticket keeps immutable origins, routed GitLab links and secon
   assert.deepEqual(await call(worklogPath), { entries: [currentWorklog], totalMinutes: 91 / 60, totalEntries: 1 });
 
   const backup = await archive();
-  assert.equal(backup.schemaVersion, 109);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.sourceRecords, before.sourceRecords);
   assert.deepEqual(backup.sourceImports.find(receipt => receipt.id === imported.id), imported);
   assert.deepEqual(backup.worklogs, before.worklogs.map(entry => entry.issueId === issue.id
     ? { ...entry, projectId: target.id, issueKey: moved.key, issueTitle: moved.title } : entry));
-  await restore('/import', 400, 'POST', { data: { ...backup, schemaVersion: 108 } });
+  await restore('/import', 400, 'POST', { data: historicalMigrationBackup(backup, 108) });
   await restore('/import', 400, 'POST', { data: { ...backup, reportingLedger: { ...backup.reportingLedger, events: [] } } });
   await restore('/import', 200, 'POST', { data: backup });
   assert.deepEqual(await restore(worklogPath), { entries: [currentWorklog], totalMinutes: 91 / 60, totalEntries: 1 });

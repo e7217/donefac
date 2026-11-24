@@ -1,9 +1,12 @@
 import type { Express, Request } from 'express';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, STATUS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationJiraWorkflow, type MigrationJiraWorkflowStatus, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
+import { MIGRATION_AUTHOR_DISPOSITIONS, MIGRATION_AUTHOR_KINDS } from '../shared/types.js';
 import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
 import type { PreparedMigration } from './migration-contracts.js';
+import { migrationOptionId } from './migration-option-id.js';
+import { isJiraWorklog } from './migration-worklog.js';
 import { jiraIssueStatusHistory } from './jira-status-history.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints } from './migration-jira-relations.js';
@@ -301,8 +304,46 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
     return { severity: item.severity, code: string(item.code, '이관 안내 코드', 100), message: item.message, recordId: nullable(item.recordId, '이관 안내 원본', 1200), requiresAcknowledgement: item.requiresAcknowledgement } as MigrationNotice;
   });
   const integrity = parseIntegrity(value.integrity, packages);
-  return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}), ...(integrity ? { integrity } : {}) };
+  if (value.authorAttributionVersion !== undefined && value.authorAttributionVersion !== 1) fail(400, '이관 작성자 대조 기록 형식을 확인해 주세요.');
+  return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}), ...(integrity ? { integrity } : {}),
+    ...(value.authorAttributionVersion === 1 ? { authorAttributionVersion: 1 } : {}) };
 }
+
+function parseAuthorAttribution(raw: unknown, archive: SourceRecordArchive, receipt: SourceImport, stagingId: string,
+  users: Set<string>): SourceRecordArchive['authorAttribution'] {
+  if (raw === undefined) {
+    if (receipt.authorAttributionVersion && MIGRATION_AUTHOR_KINDS.some(kind => kind === archive.targetType)) {
+      fail(400, '원본에 연결된 적용 대상의 작성자 대조 기록이 없습니다.');
+    }
+    return;
+  }
+  const value = object(raw, '이관 작성자 대조 기록');
+  const kind = MIGRATION_AUTHOR_KINDS.find(kind => kind === value.kind);
+  const disposition = MIGRATION_AUTHOR_DISPOSITIONS.find(disposition => disposition === value.disposition);
+  const targetId = string(value.targetId, '작성자 대조 대상', 200);
+  const expectedAuthorId = string(value.expectedAuthorId, '작성자 대조 팀원', 200);
+  const matchesTarget = kind === 'worklog'
+    ? archive.source.product === 'jira' && isJiraWorklog(archive.record) && archive.ownerType === 'issue' && archive.targetType === null
+    : kind === archive.targetType && targetId === archive.targetId;
+  if (!receipt.authorAttributionVersion || archive.excluded || Object.keys(value).length !== 4 ||
+      !kind || !disposition || !matchesTarget || !users.has(expectedAuthorId)) {
+    fail(400, '이관 작성자 대조 기록의 팀원과 원본 대상을 확인해 주세요.');
+  }
+  if (disposition === 'retained') {
+    if (kind !== 'document' || archive.source.product !== 'confluence' || !receipt.configuration.appendPagesTo?.refreshExisting) {
+      fail(400, '기존 작성자 유지 기록은 변경분을 반영한 Confluence 문서에만 적용할 수 있습니다.');
+    }
+  } else {
+    const sourceId = archive.record.authorId;
+    const mapped = sourceId ? receipt.configuration.users[migrationOptionId(stagingId, 'identity', sourceId)] : null;
+    const expectedDisposition = mapped ? 'mapped' : sourceId ? 'unmapped-fallback' : 'missing-fallback';
+    if (disposition !== expectedDisposition || expectedAuthorId !== (mapped ?? receipt.actorId) || kind === 'worklog' && disposition !== 'mapped') {
+      fail(400, '이관 작성자 대조 기록이 보존 원본 또는 팀원 매핑과 다릅니다.');
+    }
+  }
+  return { kind, targetId, disposition, expectedAuthorId };
+}
+
 const baseAttachment = (value: Attachment): Attachment => ({ id: value.id, resourceType: value.resourceType, resourceId: value.resourceId, filename: value.filename, mimeType: value.mimeType, size: value.size, sha256: value.sha256, authorId: value.authorId, createdAt: value.createdAt });
 type ConfluenceArchiveKind = 'attachment' | 'page' | 'revision' | 'comment';
 export function confluenceHistoryVersion(value: unknown): number | null {
@@ -748,7 +789,9 @@ export class SourcePreservationService {
     const datasets = new Map<string, ReturnType<typeof emptyDataset>>(), packages = new Map(imports.map(value => [value.id, new Map(value.packages.map(pkg => [stable([pkg.sha256, pkg.source]), pkg]))]));
     const records = list(input.records, '보존 원본').map(raw => {
       const value = object(raw, '보존 원본'), sourceImportId = string(value.sourceImportId, '이관 ID', 200), owner = byImport.get(sourceImportId); if (!owner) fail(400, '보존 원본의 이관 영수증이 없습니다.');
-      const source = legacySource(value.source), packageSha256 = sha(value.packageSha256), namespace = stable([packageSha256, source]); if (!packages.get(sourceImportId)!.has(namespace)) fail(400, '보존 원본의 패키지 출처·SHA가 영수증과 다릅니다.');
+      const source = legacySource(value.source), packageSha256 = sha(value.packageSha256), namespace = stable([packageSha256, source]);
+      const sourcePackage = packages.get(sourceImportId)!.get(namespace);
+      if (!sourcePackage) fail(400, '보존 원본의 패키지 출처·SHA가 영수증과 다릅니다.');
       const record = structuredClone(object(value.record, '원본 객체')) as unknown as LegacyRecord;
       if (!['none', 'plain', 'jira-wiki', 'confluence-storage', 'adf', 'json'].includes(record.textFormat)) fail(400, '원본 본문 형식을 확인해 주세요.');
       const datasetKey = stable([sourceImportId, namespace]); let dataset = datasets.get(datasetKey); if (!dataset) { dataset = emptyDataset(source); datasets.set(datasetKey, dataset); }
@@ -793,7 +836,7 @@ export class SourcePreservationService {
       if (jiraRelationId && (source.product !== 'jira' || targetType !== null || value.excluded === true || !jiraIssueRelationSource(record))) {
         fail(400, 'Jira 업무 관계의 원본과 적용 ID를 확인해 주세요.');
       }
-      return { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
+      const archive = { id: uuid(value.id), sourceImportId, packageSha256, source, record, targetType, targetId, targetProjectId, ownerType, ownerId,
         ...(value.excluded === true ? { excluded: true } : {}), ...(jiraIssueFieldHashes ? { jiraIssueFieldHashes } : {}),
         ...(jiraIssueSourceFieldHashes ? { jiraIssueSourceFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
@@ -802,6 +845,9 @@ export class SourcePreservationService {
         ...(jiraRelationId ? { jiraRelationId } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}),
         ...(confluencePageBodySourceHash ? { confluencePageBodySourceHash } : {}) } as SourceRecordArchive;
+      const attribution = parseAuthorAttribution(value.authorAttribution, archive, owner, sourcePackage.stagingId, users);
+      if (attribution) archive.authorAttribution = attribution;
+      return archive;
     });
     const byRecord = unique(records, '보존 원본'), attachments = new Map(context.attachments.map(value => [value.id, value]));
     validateArchiveManifests(imports, records);
@@ -1280,6 +1326,9 @@ export class SourcePreservationService {
       if (!value.targetType) continue;
       const target = targets[value.targetType].get(value.targetId!); if (!target) { if (Object.entries(targets).some(([type, rows]) => type !== value.targetType && rows.has(value.targetId!))) fail(400, '현재 존재하는 원본 적용 대상의 종류가 다릅니다.'); if (requireCurrent) fail(400, '이관 원본의 적용 대상이 없습니다.'); continue; }
       if (value.targetType === 'attachment' && versions.get(target.id)?.localRevision !== undefined) fail(400, '직접 추가한 첨부 버전은 이관 원본의 대상이 될 수 없습니다.');
+      if (requireCurrent && value.authorAttribution && (!('authorId' in target) || target.authorId !== value.authorAttribution.expectedAuthorId)) {
+        fail(400, '작성자 대조 기록이 적용 대상의 작성자와 다릅니다.');
+      }
       let owner: { type: 'issue' | 'document'; id: string } | undefined;
       if (value.targetType === 'issue' || value.targetType === 'document') owner = { type: value.targetType, id: target.id };
       else if (value.targetType === 'comment' || value.targetType === 'attachment') { const resource = target as Comment | Attachment; owner = { type: resource.resourceType, id: resource.resourceId }; }
@@ -1338,6 +1387,16 @@ export class SourcePreservationService {
       context, earlier, appliedHistory, appliedJiraChildren);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];
+    if (receipt.authorAttributionVersion) {
+      const byId = new Map(data.records.map(record => [record.id, record]));
+      const worklogs = prepared.worklogs ?? [];
+      const worklogProofs = data.records.filter(record => record.authorAttribution?.kind === 'worklog');
+      if (worklogProofs.length !== worklogs.length || worklogs.some(worklog => {
+        const record = worklog.sourceRecordId && byId.get(worklog.sourceRecordId);
+        return !record || record.ownerId !== worklog.issueId || record.authorAttribution?.kind !== 'worklog' ||
+          record.authorAttribution.targetId !== worklog.id || record.authorAttribution.expectedAuthorId !== worklog.authorId;
+      })) fail(400, '이관 작업 시간의 원본과 작성자 대조 기록이 다릅니다.');
+    }
     if (receipt.projectIds.some(id => !context.projects.some(project => project.id === id))) fail(400, '적용할 현재 프로젝트가 없습니다.');
     const appendTo = receipt.configuration.appendTo;
     const newIssueIds = new Set(prepared.issues.map(issue => issue.id));

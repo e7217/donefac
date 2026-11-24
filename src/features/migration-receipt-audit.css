@@ -41,8 +41,10 @@
 .migration-audit-count-drill { min-width: 2rem; min-height: 1.85rem; padding: .15rem .35rem; background: transparent; color: #176355; font-size: inherit; font-weight: 650; text-align: left; }
 .migration-audit-integrity details { margin-top: .65rem; }
 .migration-audit-integrity summary { cursor: pointer; font-weight: 600; }
-.migration-jira-findings { border-top: 1px solid #d5e3df; margin-top: .65rem; padding-top: .65rem; }
-.migration-jira-findings h6 { margin: .15rem 0; font-size: .875rem; }
+.migration-audit-findings { border-top: 1px solid #d5e3df; margin-top: .65rem; padding-top: .65rem; }
+.migration-audit-findings h6 { margin: .15rem 0; font-size: .875rem; }
+.migration-author-kind { margin-top: .5rem; }
+.migration-author-kind .migration-reconciliation-counts { margin: .2rem 0 0; }
 
 @media (max-width: 640px) {
   .migration-audit { padding: .6rem; }

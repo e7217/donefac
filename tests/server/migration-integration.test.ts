@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import { historicalMigrationBackup } from '../fixtures/historical-migration-backup.js';
 import type { IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import type { AtlassianLink, AtlassianLinkTarget } from '../../shared/atlassian-links.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
@@ -288,14 +289,14 @@ test('Jira parent refresh restores format 99 safely across packages and uses the
   const child = issue(backup, 30), locallyMoved = issue(backup, 33);
   assert.equal(child.parentId, originalParent.id);
   assert.equal(locallyMoved.parentId, null);
-  backup.schemaVersion = 99;
-  for (const receipt of backup.sourceImports) delete receipt.integrity;
-  for (const record of backup.sourceRecords) {
+  const older = historicalMigrationBackup(backup, 99);
+  for (const receipt of older.sourceImports) delete receipt.integrity;
+  for (const record of older.sourceRecords) {
     if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
     delete record.record.metadata.jiraParentSourceId;
     delete record.record.metadata.jiraParentSourceKey;
   }
-  const restored = await target.call('/import', 'POST', { data: backup });
+  const restored = await target.call('/import', 'POST', { data: older });
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   assert.equal((await target.call(`/issues/${locallyMoved.id}`, 'PATCH', { expectedVersion: locallyMoved.version, parentId: separateParent.id })).status, 200);
 
@@ -412,7 +413,7 @@ test('incremental Jira imports append only new issues to the bound project and r
   assert.equal(backup.data.comments.some(comment=>comment.body==='기존 업무의 새 원본 댓글'),false);
   assert.equal(backup.data.schemaVersion,NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.issueRelations.some(relation=>relation.sourceIssueId===child.id&&relation.targetIssueId===first.id));
-  assert.equal((await f.call('/import','POST',{data:{...backup.data,schemaVersion:36}})).status,400);
+  assert.equal((await f.call('/import','POST',{data:historicalMigrationBackup(backup.data, 36)})).status,400);
   assert.equal((await f.call('/import','POST',{data:backup.data})).status,200);
   const receipts = (await f.call<SourceImport[]>('/source-imports')).data;
   assert.deepEqual(receipts.find(value=>value.id===applied.data.import.id)?.configuration.appendTo,config.appendTo);
@@ -443,8 +444,7 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   const [projectId] = first.data.import.projectIds;
   type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[]; reportingLedger: ReportingLedgerData };
   // Exercise a real upgrade with no refresh checkpoints or staging files available on the destination.
-  const previous = (await initial.call<Backup>('/export')).data;
-  previous.schemaVersion = 38;
+  const previous = historicalMigrationBackup((await initial.call<Backup>('/export')).data, 38);
   for (const receipt of previous.sourceImports) delete receipt.integrity;
   for (const record of previous.sourceRecords) delete record.jiraIssueFieldHashes;
   const oldTicket = previous.issues.find(issue => issue.key === 'SYNC-1');
@@ -543,8 +543,8 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
   assert.ok(checkpoint.jiraIssueFieldHashes.title);
   assert.ok(checkpoint.jiraIssueSourceFieldHashes?.title);
   assert.ok(checkpoint.jiraIssueSourceFieldHashes.status);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 38 } })).status, 400);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 97 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 38) })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 97) })).status, 400);
   const malformedCheckpoint = { ...checkpoint, jiraIssueSourceFieldHashes: { title: ['a'.repeat(64), 'b'.repeat(64)] } };
   const malformed = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup,
     sourceRecords: backup.sourceRecords.map(record => record.id === checkpoint.id ? malformedCheckpoint : record),
@@ -559,8 +559,7 @@ test('reviewed Jira deltas preserve conflicting team edits, honor workflow rules
     row('100', 'HIST-1', '2020-01-04T00:00:00Z', 'Jira에서 변경한 제목', { priority: { name: 'Low' } }),
     row('300', 'HIST-3', '2020-01-04T00:00:00Z', '함께 이관하는 새 Jira 업무', { status: open }),
   ];
-  const legacy = structuredClone(backup);
-  legacy.schemaVersion = 97;
+  const legacy = historicalMigrationBackup(backup, 97);
   for (const record of legacy.sourceRecords) {
     delete record.jiraIssueSourceFieldHashes;
     if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
@@ -648,10 +647,9 @@ test('Jira custom field refresh survives a legacy restore and advances independe
   assert.equal(first.status, 201, JSON.stringify(first.data));
   const [projectId] = first.data.import.projectIds;
   type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[]; sourceImports: SourceImport[] };
-  const old = (await origin.call<Backup>('/export')).data;
+  const old = historicalMigrationBackup((await origin.call<Backup>('/export')).data, 42);
   const seeded = old.sourceRecords.find(row => row.record.kind === 'issue' && row.targetType === 'issue');
   assert.equal(Object.keys(seeded?.jiraCustomFieldHashes ?? {}).length, 5);
-  old.schemaVersion = 42;
   for (const row of old.sourceRecords) {
     delete row.jiraCustomFieldHashes;
     if (row.jiraIssueFieldHashes) delete row.jiraIssueFieldHashes.parentId;
@@ -724,7 +722,7 @@ test('Jira custom field refresh survives a legacy restore and advances independe
   const checkpoint = backup.sourceRecords.find(row => row.sourceImportId === applied.data.import.id && row.targetType === 'issue');
   assert.ok(checkpoint?.jiraCustomFieldHashes?.[score]);
   assert.equal(checkpoint.jiraIssueFieldHashes, undefined);
-  assert.equal((await target.call('/import', 'POST', { data: { ...backup, schemaVersion: 42 } })).status, 400);
+  assert.equal((await target.call('/import', 'POST', { data: historicalMigrationBackup(backup, 42) })).status, 400);
   assert.equal((await target.call('/import', 'POST', { data: backup })).status, 200);
   assert.equal((await target.preview(customConfig)).canApply, false);
 
@@ -922,7 +920,7 @@ test('Jira history append preserves local and deleted records and restores exact
   const storedComment = backup.comments.find(row => row.id === addedComment.id)!;
   assert.equal(storedComment.body, addedComment.body);
   assert.equal(Object.hasOwn(storedComment, 'jiraOriginalLinksAvailable'), false);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 43 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 43) })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
   assert.deepEqual(await readComments(), comments);
   assert.deepEqual(await originalLinks(addedComment.id, 200), expectedLinks);
@@ -1055,7 +1053,7 @@ test('Jira attachment append adds exact new source bytes while preserving team v
   const backup = (await f.call<Backup>('/export')).data;
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.sourceRecords.filter(row => row.jiraAttachmentAppend).map(row => row.record.sourceId), ['701']);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 44 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 44) })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
   assert.equal((await f.preview(config)).canApply, false);
   assert.equal((await f.call(`/trash/items/${archived.data.trashItemId}/restore`, 'POST', undefined, added.authorId)).status, 200);
@@ -1339,8 +1337,7 @@ test('explicit repository routes match imported Jira keys only for their selecte
   assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.ok(backup.data.gitlabLinks.some(link => link.iid === 601 && link.issueId === targetB.id && link.originalJiraKey === 'OLD-1'));
   assert.equal(Object.hasOwn(backup.data, 'jiraRoutes'), false, 'The mapping is local GitLab connection configuration.');
-  const legacy = { ...structuredClone(backup.data), issueChangeHistory: undefined };
-  legacy.schemaVersion = 34;
+  const legacy = { ...historicalMigrationBackup(backup.data, 34), issueChangeHistory: undefined };
   delete legacy.automationRuns;
   for (const record of legacy.sourceRecords) if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
   for (const receipt of legacy.sourceImports) delete receipt.integrity;
@@ -1575,7 +1572,7 @@ test('Confluence label-only refresh keeps active collaborators and restores the 
   assert.match(archive?.confluencePageFieldHashes?.labels ?? '', /^[a-f\d]{64}$/);
   const version = backup.revisions.find(item => item.documentId === document.id && item.version === message.document.version);
   assert.deepEqual(version?.content, enabled.data.document.content);
-  const old = await copy.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 60 } });
+  const old = await copy.call<{ error: string }>('/import', 'POST', { data: historicalMigrationBackup(backup, 60) });
   assert.equal(old.status, 400);
   assert.match(old.data.error, /schemaVersion 61/);
   const restored = await copy.call('/import', 'POST', { data: backup });
@@ -1742,7 +1739,7 @@ test('incremental Confluence imports reuse live parents and references while pre
 
   const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[] }>('/export');
   assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 37 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup.data, 37) })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
   const restored = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents.find(document => document.id === child.id);
   assert.equal(restored?.parentId, parent.id);
@@ -1791,7 +1788,7 @@ test('Confluence parent refresh proves the original placement after format 98 re
   const locallyMoved = initialDocuments.find(document => document.title === '팀에서 옮긴 문서')!;
   assert.equal(subject.parentId, originalParent.id);
   assert.equal(locallyMoved.parentId, null);
-  const old = { ...backup, schemaVersion: 98 };
+  const old = historicalMigrationBackup(backup, 98);
   assert.equal((await target.call('/import', 'POST', { data: old })).status, 400);
   for (const receipt of old.sourceImports) delete receipt.integrity;
   for (const record of old.sourceRecords) if (record.confluencePageFieldHashes) delete record.confluencePageFieldHashes.parentId;
@@ -1875,8 +1872,7 @@ test('reviewed Confluence deltas preserve local edits, guard collaborative sessi
   assert.equal(first.status, 201, JSON.stringify(first.data));
   const [projectId] = first.data.import.projectIds;
   type Backup = WorkspaceSnapshot & {schemaVersion: number; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[]; revisions: DocRevision[]};
-  const previous = (await initial.call<Backup>('/export')).data;
-  previous.schemaVersion = 39;
+  const previous = historicalMigrationBackup((await initial.call<Backup>('/export')).data, 39);
   for (const receipt of previous.sourceImports) delete receipt.integrity;
   for (const record of previous.sourceRecords) {
     delete record.confluencePageFieldHashes;
@@ -1973,7 +1969,7 @@ test('reviewed Confluence deltas preserve local edits, guard collaborative sessi
   assert.ok(revisions.some(revision => revision.plainText === '이전 본문'));
   assert.equal(revisions.filter(revision => revision.version === applied.document.version).length, 1);
   assert.ok(backup.sourceRecords.find(record => record.sourceImportId === result.data.import.id && record.targetId === document.id)?.confluencePageFieldHashes?.content);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 39 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 39) })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
   assert.equal((await f.preview(config)).canApply, false);
 
@@ -2061,8 +2057,7 @@ test('Confluence refresh replaces an exact legacy table of contents and preserve
   assert.equal(applied.status, 201, JSON.stringify(applied.data));
   const [projectId] = applied.data.import.projectIds;
   type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
-  const backup = (await initial.call<Backup>('/export')).data;
-  backup.schemaVersion = 39;
+  const backup = historicalMigrationBackup((await initial.call<Backup>('/export')).data, 39);
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
     delete record.confluencePageFieldHashes;
@@ -2242,11 +2237,10 @@ test('Confluence retained title and body changes survive partial receipts and po
   assert.equal(latestSource(b).record.text, secondPages[1].body);
   assert.equal(latestSource(b).confluencePageBodySourceHash, initialSource(b).confluencePageBodySourceHash);
   assert.equal(latestSource(linked).confluencePageBodySourceHash, initialSource(linked).confluencePageBodySourceHash);
-  assert.equal((await restored.call('/import', 'POST', { data: { ...backup, schemaVersion: 97 } })).status, 400);
+  assert.equal((await restored.call('/import', 'POST', { data: historicalMigrationBackup(backup, 97) })).status, 400);
   const restore = await restored.call('/import', 'POST', { data: backup });
   assert.equal(restore.status, 200, JSON.stringify(restore.data));
-  const oldBackup = structuredClone(backup);
-  oldBackup.schemaVersion = 97;
+  const oldBackup = historicalMigrationBackup(backup, 97);
   for (const receipt of oldBackup.sourceImports) delete receipt.integrity;
   for (const row of oldBackup.sourceRecords) {
     delete row.confluencePageBodySourceHash;
@@ -2311,7 +2305,7 @@ test('Confluence layouts migrate through HTTP and upgrade exact former projectio
   type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
   const exported = await initial.call<Backup>('/export');
   assert.equal(exported.status, 200);
-  const backup = exported.data;
+  const backup = historicalMigrationBackup(exported.data, 78);
   const documents = rows.map(row => backup.documents.find(document => document.projectId === projectId && document.title === row.title)!);
   assert.equal(documents.length, 3);
   for (const document of documents) {
@@ -2334,7 +2328,6 @@ test('Confluence layouts migrate through HTTP and upgrade exact former projectio
   const previous = new Map(documents.map(document => [document.id, makePrior(document, false)]));
   const edited = documents[2];
   const locallyChanged = makePrior(edited, true);
-  backup.schemaVersion = 78;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
     delete record.confluencePageBodySourceHash;
@@ -2390,8 +2383,9 @@ test('Confluence excerpt migration upgrades verified older projections while pre
   const [projectId] = applied.data.import.projectIds;
 
   type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
-  const backup = (await initial.call<Backup>('/export')).data;
-  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const currentBackup = (await initial.call<Backup>('/export')).data;
+  assert.equal(currentBackup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const backup = historicalMigrationBackup(currentBackup, 68);
   const documents = backup.documents.filter(document => document.projectId === projectId);
   const source = documents.find(document => document.title === sourceTitle)!;
   assert.ok(source);
@@ -2418,7 +2412,6 @@ test('Confluence excerpt migration upgrades verified older projections while pre
   ] });
   const documentIds = new Set(documents.map(document => document.id));
   const stored = documents.find(document => document.title === rows[1].title)!;
-  backup.schemaVersion = 68;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
     delete record.confluencePageBodySourceHash;
@@ -2470,7 +2463,7 @@ test('Confluence label-list XML migrates into a proven project and refreshes exa
   assert.equal(applied.status, 201, JSON.stringify(applied.data));
   const [projectId] = applied.data.import.projectIds;
   type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
-  const backup = (await initial.call<Backup>('/export')).data;
+  const backup = historicalMigrationBackup((await initial.call<Backup>('/export')).data, 58);
   const docs = backup.documents.filter(doc => doc.projectId === projectId);
   assert.equal(docs.length, 2);
   for (const doc of docs) assert.deepEqual(doc.content.content?.[0].attrs, {
@@ -2480,7 +2473,6 @@ test('Confluence label-list XML migrates into a proven project and refreshes exa
   assert.ok(backup.sourceRecords.some(archive => archive.record.sourceId === '100' && archive.record.text === confluenceLegacyList));
 
   // Reproduce a prior export in which the unsupported macro remained as an exact code block.
-  backup.schemaVersion = 58;
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const record of backup.sourceRecords) {
     delete record.confluencePageFieldHashes;
@@ -2718,7 +2710,7 @@ test('Confluence attachment refresh reuses pinned bytes, adds immutable versions
   type Backup = WorkspaceSnapshot & {schemaVersion: number};
   const backup = (await f.call<Backup>('/export')).data;
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 40 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 40) })).status, 400);
   const restored = await f.call('/import', 'POST', { data: backup });
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   assert.equal((await f.call(`/trash/items/${archived.data.trashItemId}/restore`, 'POST')).status, 200);
@@ -2819,7 +2811,7 @@ test('Confluence history append preserves the current draft and deleted comments
   assert.equal(archived.status, 200);
   const backup = (await f.call<WorkspaceSnapshot & {schemaVersion: number}>('/export')).data;
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  assert.equal((await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 41 } })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: historicalMigrationBackup(backup, 41) })).status, 400);
   const restored = await f.call('/import', 'POST', { data: backup });
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST')).status, 200);
@@ -2918,7 +2910,7 @@ test('Confluence panels and status badges survive import, collaborative snapshot
   const { data: backup, status: exported } = await f.call<Backup>('/export');
   assert.equal(exported, 200);
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
-  const oldEnvelope = await f.call<{error: string}>('/import', 'POST', {data: {...backup, schemaVersion: 45}});
+  const oldEnvelope = await f.call<{error: string}>('/import', 'POST', {data: historicalMigrationBackup(backup, 45)});
   assert.equal(oldEnvelope.status, 400);
   assert.match(oldEnvelope.data.error, /schemaVersion 46/u);
   const oldState = structuredClone(backup);
@@ -2940,7 +2932,7 @@ test('Confluence panels and status badges survive import, collaborative snapshot
   assert.equal(archived.status, 200);
   const {data: archivedBackup} = await f.call<Backup>('/export');
   assert.ok(!archivedBackup.documents.some(doc => doc.id === document.id));
-  assert.equal((await f.call('/import', 'POST', {data: {...archivedBackup, schemaVersion: 45}})).status, 400);
+  assert.equal((await f.call('/import', 'POST', {data: historicalMigrationBackup(archivedBackup, 45)})).status, 400);
   assert.equal((await f.call('/import', 'POST', {data: archivedBackup})).status, 200);
   assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
   const restoredArchive = await f.call<CollaborationSession>(`${path}/collaboration`);
@@ -3200,6 +3192,11 @@ test('Confluence XML worker imports remote page attachments by original owner an
   configuration.sourceBaseUrls[pack.id] = sourceBase;
   const previous = await f.preview(configuration);
   assert.equal(previous.canApply, true, JSON.stringify(previous.notices));
+  f.db.prepare("UPDATE migration_previews SET json=json_set(json,'$.conversionVersion',12) WHERE id=?").run(previous.id);
+  const oldReview = await f.call<{ error: string }>(`/migrations/previews/${previous.id}`);
+  assert.equal(oldReview.status, 409);
+  assert.match(oldReview.data.error, /새 미리보기/u);
+  assert.equal((await f.apply(previous)).status, 409);
   f.db.prepare("UPDATE migration_previews SET json=json_remove(json,'$.conversionVersion') WHERE id=?").run(previous.id);
   assert.equal((await f.apply(previous)).status, 409);
   const preview = await f.preview(configuration);
@@ -3962,8 +3959,7 @@ test('retained source verification distinguishes archival loss from deleted live
 
   const legacy = await fixture();
   t.after(() => legacy.close());
-  const oldBackup = structuredClone(backup.data);
-  oldBackup.schemaVersion = 32;
+  const oldBackup = historicalMigrationBackup(backup.data, 32);
   for (const original of oldBackup.sourceImports) delete original.integrity;
   for (const original of oldBackup.sourceRecords) {
     delete original.excluded;

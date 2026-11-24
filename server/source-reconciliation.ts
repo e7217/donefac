@@ -2,8 +2,9 @@ import { createHash, type Hash } from 'node:crypto';
 import { constants, statSync } from 'node:fs';
 import fileSystem from 'node:fs/promises';
 import type { Express } from 'express';
+import { MIGRATION_AUTHOR_KINDS, MIGRATION_AUTHOR_STATUSES } from '../shared/types.js';
 import type {
-  Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment,
+  Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment, SourceReconciliationAuthorFindingsPage,
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
   SourceReconciliationPage, SourceReconciliationPrimaryRecords, SourceReconciliationRow, SourceReconciliationStatus,
@@ -11,6 +12,7 @@ import type {
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
 import { auditJiraStatusHistory, jiraStatusHistoryFindings } from './jira-status-history.js';
+import { auditSourceAuthors } from './migration-author-audit.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import type { TrashArchive, TrashService } from './trash.js';
@@ -45,6 +47,7 @@ const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'm
 const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding']);
 const jiraFindings: readonly SourceReconciliationJiraFinding[] = ['unavailable', 'restricted', 'excluded', 'unresolved-time', 'unresolved-author'];
 const jiraFindingKeys = new Set(['expectedVersion', 'finding', 'offset', 'limit', 'expectedFingerprint']);
+const authorFindingKeys = new Set(['expectedVersion', 'packageId', 'kind', 'status', 'offset', 'limit', 'expectedFingerprint']);
 const casefold = (value: string) => value.normalize('NFC').toLocaleLowerCase('ko-KR');
 
 function failure(status: number, message: string): never { throw new SourcePreservationError(status, message); }
@@ -515,12 +518,13 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const jiraStatusHistory = receipt.packages.some(packageInfo => packageInfo.source.product === 'jira')
     ? auditJiraStatusHistory(dependencies.store, receipt)
     : null;
+  const authorAttribution = auditSourceAuthors(dependencies.store, dependencies.trash, receipt)?.audit ?? null;
   const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash }]) => ({
     packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'),
   }));
-  fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory]));
+  fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory, authorAttribution]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, primaryRecords, integrity, targetContent, jiraStatusHistory };
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, primaryRecords, integrity, targetContent, jiraStatusHistory, authorAttribution };
 }
 
 function errorCode(error: unknown): unknown {
@@ -596,6 +600,32 @@ function jiraFindingsPage(store: Store, importId: string, query: Record<string, 
   return { importId, receiptVersion: receipt.version, finding, offset, limit, ...page };
 }
 
+function authorFindingsPage({ store, trash }: Dependencies, importId: string, query: Record<string, unknown>): SourceReconciliationAuthorFindingsPage {
+  if (Object.keys(query).some(key => !authorFindingKeys.has(key))) failure(400, '지원하지 않는 이관 작성자 조회 조건입니다.');
+  const { packageId, expectedFingerprint } = query;
+  if (typeof packageId !== 'string' || !packageId.trim() || packageId.length > 200 || /[\x00-\x1f\x7f]/u.test(packageId)) {
+    return failure(400, '이관 작성자를 확인할 원본 패키지를 선택해 주세요.');
+  }
+  const kind = MIGRATION_AUTHOR_KINDS.find(value => value === query.kind) ?? failure(400, '이관 작성자를 확인할 객체 종류를 선택해 주세요.');
+  const status = MIGRATION_AUTHOR_STATUSES.find(value => value === query.status) ?? failure(400, '이관 작성자의 확인 상태를 선택해 주세요.');
+  if (expectedFingerprint !== undefined && (typeof expectedFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(expectedFingerprint))) {
+    return failure(400, '이관 작성자 목록의 검증값을 확인해 주세요.');
+  }
+  const expectedVersion = receiptVersion(query.expectedVersion, '이관 작성자 조회에 사용할 영수증 버전을 확인해 주세요.');
+  const offset = pageInteger(query.offset, 0, 0, 1_000_000);
+  const limit = pageInteger(query.limit, 30, 1, 100);
+  const receipt = store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+  if (receipt.version !== expectedVersion) return failure(409, '이관 영수증이 변경되었습니다. 새로고침하고 다시 확인해 주세요.');
+  if (!receipt.packages.some(packageInfo => packageInfo.stagingId === packageId)) return failure(404, '이관 영수증에서 원본 패키지를 찾을 수 없습니다.');
+  const findings = auditSourceAuthors(store, trash, receipt, { packageId, kind, status, offset, limit });
+  if (!findings) return failure(404, '이관 당시의 작성자 대조 기준이 없습니다.');
+  const { audit: { fingerprint }, rows, total } = findings;
+  if (expectedFingerprint !== undefined && expectedFingerprint !== fingerprint) {
+    return failure(409, '이관 작성자 목록이 변경되었습니다. 전체 이관 검증을 다시 실행해 주세요.');
+  }
+  return { importId, receiptVersion: receipt.version, packageId, kind, status, offset, limit, total, fingerprint, rows };
+}
+
 async function auditReceipt(dependencies: Dependencies, importId: string, expectedVersion: number, signal: AbortSignal): Promise<SourceReconciliationAudit> {
   const { store, files } = dependencies;
   const receipt = store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
@@ -620,7 +650,7 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
     integrity: before.integrity, recordCounts: before.recordCounts, primaryRecords: before.primaryRecords, targetContent: before.targetContent,
-    jiraStatusHistory: before.jiraStatusHistory, attachmentCounts, attachments,
+    jiraStatusHistory: before.jiraStatusHistory, authorAttribution: before.authorAttribution, attachmentCounts, attachments,
   };
 }
 
@@ -631,6 +661,9 @@ export function registerSourceReconciliationRoutes(app: Express, dependencies: D
   });
   app.get('/api/source-imports/:id/reconciliation/jira-status-findings', (request, response) => {
     response.set('Cache-Control', 'no-store').json(jiraFindingsPage(dependencies.store, String(request.params.id), request.query));
+  });
+  app.get('/api/source-imports/:id/reconciliation/author-findings', (request, response) => {
+    response.set('Cache-Control', 'no-store').json(authorFindingsPage(dependencies, String(request.params.id), request.query));
   });
   app.get('/api/source-imports/:id/records/:recordId/check-file', (request, response) => {
     if (Object.keys(request.query).length) failure(400, '지원하지 않는 파일 확인 조건입니다.');

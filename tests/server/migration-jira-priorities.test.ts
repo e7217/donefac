@@ -10,6 +10,7 @@ import type {
   SourceImport, SourceRecordArchive, WorkspaceSnapshot,
 } from '../../shared/types.js';
 import { jiraFieldDigest } from '../../server/migration-planner.js';
+import { historicalMigrationBackup } from '../fixtures/historical-migration-backup.js';
 
 const priorityRows = `
   <Priority id="11" pname="Highest"/><Priority id="22" pname="High"/>
@@ -125,8 +126,7 @@ test('new appended Jira issues get mapped priority and old receipts keep their h
   const projectId = await initial.apply(await initial.review(adminXml([
     [1, '수정하지 않은 이전 업무', 11], [2, '팀에서 수정한 이전 업무', 22], [3, '원본 값이 그대로인 업무', 11],
   ])));
-  const backup = await initial.call<Backup>('/export');
-  backup.schemaVersion = 38;
+  const backup = historicalMigrationBackup(await initial.call<Backup>('/export'), 38);
   for (const receipt of backup.sourceImports) delete receipt.integrity;
   for (const source of backup.sourceRecords) delete source.jiraIssueFieldHashes;
   for (const issue of backup.issues) if (issue.projectId === projectId) issue.priority = 'medium';

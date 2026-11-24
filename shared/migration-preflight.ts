@@ -1,4 +1,5 @@
-import type { LegacyPackageSummary, MigrationNotice, MigrationPreview } from './types.js';
+import { MIGRATION_AUTHOR_DISPOSITIONS, MIGRATION_AUTHOR_KINDS,
+  type LegacyPackageSummary, type MigrationAuthorDisposition, type MigrationNotice, type MigrationPreview } from './types.js';
 
 const countKeys = [
   'sourceRecords', 'excludedRecords', 'explicitExcludedRecords', 'excludedDescendants', 'projects', 'issues', 'documents',
@@ -49,8 +50,24 @@ export function buildMigrationPreflightReport(preview: MigrationPreview, package
   }
   const diagnostics = [...groups.values()].sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity] || a.code.localeCompare(b.code));
   const requiredAcknowledgements = [...new Set(preview.requiredAcknowledgements.map(diagnosticCode))].sort();
+  const authorGroups = new Map(preview.authorAttribution?.map(group => [group.packageId, group.kinds]));
+  const authorAttribution = selectedPackages.flatMap(({ id: packageId }) => {
+    const group = authorGroups.get(packageId);
+    if (!group) return [];
+    const kinds = MIGRATION_AUTHOR_KINDS.flatMap(kind => {
+      const item = group.find(item => item.kind === kind);
+      if (!item) return [];
+      const counts = Object.fromEntries(MIGRATION_AUTHOR_DISPOSITIONS.map(status => {
+        const value = item.counts[status];
+        return [status, Number.isSafeInteger(value) && value >= 0 ? value : 0];
+      })) as Record<MigrationAuthorDisposition, number>;
+      return Object.values(counts).some(value => value > 0) ? [{ kind, counts }] : [];
+    });
+    return kinds.length ? [{ packageId, kinds }] : [];
+  });
   const needsReview = missingPackageSummaryCount > 0 || requiredAcknowledgements.length > 0 ||
-    diagnostics.some(entry => entry.severity === 'warning');
+    diagnostics.some(entry => entry.severity === 'warning') || authorAttribution.some(({ kinds }) =>
+      kinds.some(({ counts }) => counts['unmapped-fallback'] > 0 || counts['missing-fallback'] > 0));
   const status = !canApply ? 'blocked' : needsReview ? 'review' : 'ready';
 
   const configuredUsers = Object.values(configuration.users);
@@ -66,6 +83,7 @@ export function buildMigrationPreflightReport(preview: MigrationPreview, package
     counts,
     diagnostics,
     requiredAcknowledgements,
+    ...(authorAttribution.length ? { authorAttribution } : {}),
     mapping: { users: { mapped, unmapped: configuredUsers.length - mapped }, explicitExclusions: counts.explicitExcludedRecords ?? 0 },
   };
 }

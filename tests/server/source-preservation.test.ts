@@ -9,6 +9,7 @@ import express, { type ErrorRequestHandler } from 'express';
 import type { Attachment, AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyRecord, LegacySource, Project, SourceImport, SourceRecordArchive, SourceRecordPage, User } from '../../shared/types.js';
 import { Store } from '../../server/store.js';
 import type { PreparedMigration } from '../../server/migration-contracts.js';
+import { migrationOptionId } from '../../server/migration-option-id.js';
 import { AttachmentVersionsService } from '../../server/attachment-versions.js';
 import { SourcePreservationError, SourcePreservationService, type SourcePreservationContext } from '../../server/source-preservation.js';
 import { WorklogService } from '../../server/worklogs.js';
@@ -57,6 +58,51 @@ test('prepared preservation requires the caller transaction, rolls back with can
     assert.equal(f.service.hasImport(f.prepared.sourceImport.id), false); assert.deepEqual(data(f), { imports: [], records: [], versions: [], relations: [] }); assert.deepEqual(f.store.get('issues', before.id), before);
     persist(f); persist(f); assert.equal(f.service.allImports().length, 1); assert.equal(f.service.allRecords().length, f.prepared.sourceRecords.length); assert.deepEqual(f.service.allVersions(), f.prepared.attachmentVersions); assert.deepEqual(f.service.allRelations(), f.prepared.issueRelations);
     const changed = structuredClone(f.prepared); changed.sourceRecords[2].record.text = '원문 변조'; assert.throws(() => f.store.transaction(() => f.service.persistPrepared(changed)), isError(409)); assert.equal(f.service.record(f.prepared.sourceImport.id, f.originalIssue.id).record.text, f.originalIssue.record.text);
+  } finally { f.close(); }
+});
+
+test('archive author evidence is tied to package mappings, exact bindings and the applied author', () => {
+  const f = fixture();
+  try {
+    const prepared = structuredClone(f.prepared);
+    const receipt = prepared.sourceImport;
+    receipt.authorAttributionVersion = 1;
+    for (const { stagingId } of receipt.packages) {
+      receipt.configuration.users[migrationOptionId(stagingId, 'identity', 'old-user')] = 'mapped';
+    }
+    const bound = prepared.sourceRecords.filter(record => record.targetType &&
+      ['document', 'comment', 'revision', 'attachment'].includes(record.targetType));
+    for (const record of bound) {
+      const kind = record.targetType as 'document' | 'comment' | 'revision' | 'attachment';
+      const olderFile = record.record.sourceId === 'file-old';
+      if (olderFile) record.record.authorId = null;
+      record.authorAttribution = { kind, targetId: record.targetId!, disposition: olderFile ? 'missing-fallback' : 'mapped',
+        expectedAuthorId: olderFile ? 'actor' : 'mapped' };
+    }
+    const commit = (value: typeof prepared) => f.store.transaction(() => f.service.persistPrepared(value));
+    for (const tamper of [
+      (value: typeof prepared) => { delete value.sourceImport.authorAttributionVersion; },
+      (value: typeof prepared) => { delete value.sourceRecords.find(row => row.id === f.page.id)!.authorAttribution; },
+      (value: typeof prepared) => { value.sourceRecords.find(row => row.id === f.page.id)!.authorAttribution!.targetId = 'another-document'; },
+      (value: typeof prepared) => { value.sourceRecords.find(row => row.id === f.page.id)!.authorAttribution!.disposition = 'retained'; },
+      (value: typeof prepared) => { value.sourceRecords.find(row => row.id === f.page.id)!.authorAttribution!.expectedAuthorId = 'actor'; },
+    ]) {
+      const invalid = structuredClone(prepared);
+      tamper(invalid);
+      assert.throws(() => commit(invalid), isError());
+      assert.equal(f.service.hasImport(receipt.id), false);
+    }
+    const document = f.store.get<DocPage>('documents', f.page.targetId!)!;
+    f.store.transaction(() => f.store.put('documents', { ...document, authorId: 'actor' }));
+    assert.throws(() => commit(prepared), /적용 대상의 작성자/u);
+    f.store.transaction(() => f.store.put('documents', document));
+    commit(prepared);
+    assert.equal(f.service.allImports()[0].authorAttributionVersion, 1);
+    const restored = f.service.validateImport(data(f), f.context());
+    assert.equal(restored.records.filter(record => record.authorAttribution).length, bound.length);
+    const modified = data(f);
+    modified.records.find(record => record.id === f.page.id)!.record.title = 'altered source record';
+    assert.throws(() => f.service.validateImport(modified, f.context()), isError());
   } finally { f.close(); }
 });
 

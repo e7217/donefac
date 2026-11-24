@@ -8,6 +8,7 @@ import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigration
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
+import { MigrationAuthorPreview } from './MigrationAuthorReview';
 import { ConfluenceSourceReview } from './MigrationConfluenceReview';
 import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
@@ -608,6 +609,7 @@ function ActorMigration(props: MigrationApplyProps) {
         </div>
         <small role="status">새 미리보기에서 사이클과 릴리스 연결을 함께 확인한 후 적용하세요.</small>
       </fieldset>}
+      {preview.authorAttribution && preview.authorAttribution.length > 0 && <MigrationAuthorPreview groups={preview.authorAttribution} packages={options?.packages ?? packages} />}
       <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending) || hasReviewChanges} onExclude={stageExclusions} />
       <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
         <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>

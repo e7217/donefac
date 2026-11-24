@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { contentReferences } from '../../shared/document-nodes';
-import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -2207,6 +2207,135 @@ test('Confluence 문서·이력을 적용하고 원본 작성자와 긴 storage 
     await attachmentPanel.getByRole('button', { name: `${attachmentName} 버전`, exact: true }).click(); await attachmentPanel.getByRole('button', { name: `${attachmentName} 버전`, exact: true }).click(); await expect(versions).toBeVisible(); expect(versionRequests).toBe(1);
     await attachmentPanel.getByLabel('첨부할 파일 선택', { exact: true }).setInputFiles({ name: 'standalone.txt', mimeType: 'text/plain', buffer: Buffer.from('이관 이후 일반 첨부') }); await expect(attachmentPanel.getByRole('link', { name: 'standalone.txt', exact: true })).toBeVisible(); await expect(attachmentPanel.getByRole('button', { name: 'standalone.txt 버전', exact: true })).toHaveCount(0);
   } finally { await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`); }
+});
+
+test('360px에서 이관 작성자 매핑과 대체 기록을 확인하고 보존 원본과 다시 대조한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const unique = suffix(), filename = `authors-${unique}.zip`, space = `작성자 검증 공간 ${unique}`;
+  const sourceAuthor = 'private-source-author-mapped', fallbackAuthor = 'private-source-author-unmapped';
+  const prop = (name: string, value: string) => `<property name="${name}">${value}</property>`;
+  const ref = (name: string, type: string, id: string) => `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`;
+  const object = (type: string, id: number | string, data: string) => `<object class="${type}"><id name="${type === 'ConfluenceUserImpl' ? 'key' : 'id'}">${id}</id>${data}</object>`;
+  const createPage = (id: number, title: string, author?: string) => [
+    object('Page', id, prop('title', title) + prop('version', '1') + ref('space', 'Space', '42') +
+      prop('creationDate', '2020-01-02T00:00:00Z') + (author ? ref('creator', 'ConfluenceUserImpl', author) : '')),
+    object('BodyContent', id + 1000, prop('body', '<![CDATA[<p>private-source-document-body</p>]]>') + ref('content', 'Page', String(id))),
+  ].join('');
+  const mappedTitle = `매핑한 작성자의 문서 ${unique}`, missingTitle = `작성자가 없는 원본 문서 ${unique}`;
+  const xml = `<hibernate-generic>${object('Space', 42, prop('name', space) + prop('key', `AT${unique}`))}
+    ${object('ConfluenceUserImpl', 'source-mapped', prop('name', sourceAuthor))}
+    ${object('ConfluenceUserImpl', 'source-unmapped', prop('name', fallbackAuthor))}
+    ${createPage(100, mappedTitle, 'source-mapped')}${createPage(101, missingTitle)}
+    ${Array.from({ length: 21 }, (_, index) => createPage(200 + index, `대체 작성자 문서 ${unique}-${index}`, 'source-unmapped')).join('')}
+  </hibernate-generic>`;
+  const pkg = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `author-audit-${unique}`);
+  const created: DocPage[] = [];
+  try {
+    const { settings, workspace } = await open(page, request);
+    const actorId = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
+    const mappedUser = workspace.users.find(user => user.id !== actorId)!;
+    const actor = workspace.users.find(user => user.id === actorId)!;
+    expect(mappedUser).toBeTruthy();
+    expect(actor).toBeTruthy();
+    await selectPackage(settings, filename);
+    const before = await preview(page, settings);
+    expect(before.authorAttribution?.find(group => group.packageId === pkg.id)?.kinds).toMatchObject([
+      { kind: 'document', counts: { 'unmapped-fallback': 22, 'missing-fallback': 1 } },
+    ]);
+    const guidance = settings.getByRole('region', { name: '작성자 매핑 미리보기', exact: true });
+    const counts = guidance.getByLabel('문서 작성자 건수', { exact: true });
+    await expect(counts.getByText('매핑 없음 · 이관 작업자로 기록', { exact: true }).locator('..').locator('dd')).toHaveText('22');
+
+    await settings.getByText('사용자 매핑', { exact: true }).click();
+    await settings.getByLabel(`사용자 매핑 ${sourceAuthor}`, { exact: true }).selectOption(mappedUser.id);
+    await expect(guidance).toBeHidden();
+    const plan = await preview(page, settings);
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    await expect(guidance.getByText(filename, { exact: true })).toBeVisible();
+    await expect(counts.getByText('팀원 매핑', { exact: true }).locator('..').locator('dd')).toHaveText('1');
+    await expect(counts.getByText('매핑 없음 · 이관 작업자로 기록', { exact: true }).locator('..').locator('dd')).toHaveText('21');
+    await expect(counts.getByText('원본 작성자 없음 · 이관 작업자로 기록', { exact: true }).locator('..').locator('dd')).toHaveText('1');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const download = page.waitForEvent('download');
+    await settings.getByRole('button', { name: '이관 사전 검토 JSON 내보내기', exact: true }).click();
+    const preflight = JSON.parse(await readFile(await (await download).path(), 'utf8'));
+    expect(preflight.status).toBe('review');
+    expect(preflight.authorAttribution).toEqual([{ packageId: pkg.id, kinds: [{ kind: 'document',
+      counts: { mapped: 1, 'unmapped-fallback': 21, 'missing-fallback': 1, retained: 0 } }] }]);
+    expect(JSON.stringify(preflight)).not.toMatch(/private-source|authorId/);
+
+    await acknowledge(settings, plan);
+    const applied = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await settings.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const appliedResponse = await applied;
+    expect(appliedResponse.status(), await appliedResponse.text()).toBe(201);
+    const { import: receipt } = await appliedResponse.json() as MigrationApplyResult;
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    created.push(...snapshot.documents.filter(document => receipt.projectIds.includes(document.projectId ?? '')));
+    expect(created.find(document => document.title === mappedTitle)?.authorId).toBe(mappedUser.id);
+    const missing = created.find(document => document.title === missingTitle)!;
+    expect(missing.authorId).toBe(actorId);
+
+    const reconciliation = await openReconciliation(settings);
+    const report = reconciliation.getByRole('region', { name: '이관 작성자 검증', exact: true });
+    const coverage = () => page.waitForResponse(response => new URL(response.url()).pathname === `/api/source-imports/${receipt.id}/reconciliation/audit`);
+    const details = () => page.waitForResponse(response => new URL(response.url()).pathname === `/api/source-imports/${receipt.id}/reconciliation/author-findings`);
+    const firstAudit = coverage();
+    await reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true }).click();
+    const auditResponse = await firstAudit;
+    expect(auditResponse.ok(), await auditResponse.text()).toBe(true);
+    const audit = await auditResponse.json() as SourceReconciliationAudit;
+    const mapped = report.getByRole('button', { name: '문서 팀원 매핑 1건 보기', exact: true });
+    const mappedDetails = details();
+    await mapped.click();
+    const pageResponse = await mappedDetails;
+    expect(pageResponse.ok(), await pageResponse.text()).toBe(true);
+    expect(new URL(pageResponse.url()).searchParams.get('expectedFingerprint')).toBe(audit.authorAttribution?.fingerprint);
+    const mappedPage = await pageResponse.json() as SourceReconciliationAuthorFindingsPage;
+    expect(mappedPage.rows).toMatchObject([{ sourceId: '100', expectedAuthorId: mappedUser.id, actualAuthorId: mappedUser.id }]);
+    const list = report.getByRole('list', { name: '작성자 대조 원본 목록', exact: true });
+    await expect(list).toContainText(`이관 시 작성자 ${mappedUser.name}`);
+    const archiveButton = list.getByRole('button', { name: '작성자 원본 100 열기', exact: true });
+    await archiveButton.click();
+    const archive = list.getByRole('region', { name: '보존한 원본 기록 상세', exact: true });
+    await expect(archive).toContainText(mappedTitle);
+    await expect(archive.getByLabel('보존한 원본 본문', { exact: true })).toContainText('private-source-document-body');
+    await report.getByRole('button', { name: '작성자 목록 닫기', exact: true }).click();
+    await expect(mapped).toBeFocused();
+
+    await report.getByRole('button', { name: '문서 매핑 없음 · 이관 작업자로 기록 21건 보기', exact: true }).click();
+    await expect(list.getByRole('listitem')).toHaveCount(20);
+    const next = details();
+    await report.getByRole('button', { name: '작성자 목록 다음 페이지', exact: true }).click();
+    const nextResponse = await next;
+    expect(nextResponse.ok(), await nextResponse.text()).toBe(true);
+    expect(new URL(nextResponse.url()).searchParams.get('offset')).toBe('20');
+    await expect(list.getByRole('listitem')).toHaveCount(1);
+    await expect(list).toContainText(`현재 작성자 ${actor.name}`);
+    await report.getByRole('button', { name: '작성자 목록 닫기', exact: true }).click();
+
+    const deleted = await request.delete(`/api/documents/${missing.id}?expectedVersion=${missing.version}`);
+    expect(deleted.ok(), await deleted.text()).toBe(true);
+    const { trashEntryId } = await deleted.json();
+    const purged = await request.delete(`/api/trash/${trashEntryId}`);
+    expect(purged.ok(), await purged.text()).toBe(true);
+    const stale = details();
+    await report.getByRole('button', { name: '문서 원본 작성자 없음 · 이관 작업자로 기록 1건 보기', exact: true }).click();
+    expect((await stale).status()).toBe(409);
+    await expect(report.getByRole('alert')).toHaveText('작성자 대조 결과가 바뀌었습니다. 전체 이관 검증을 다시 실행해 주세요.');
+    const refreshed = coverage();
+    await report.getByRole('button', { name: '전체 이관 검증 다시 실행', exact: true }).click();
+    expect((await refreshed).ok()).toBe(true);
+    await expect(report.getByRole('button', { name: '문서 현재 대상 확인 불가 1건 보기', exact: true })).toBeVisible();
+    await expect(report.getByRole('button', { name: '문서 원본 작성자 없음 · 이관 작업자로 기록 1건 보기', exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  } finally {
+    await Promise.all(created.map(document => request.delete(`/api/documents/${document.id}`)));
+    await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
 });
 
 test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버전을 검사하고 누락 결과를 내려받는다', async ({ page, request }) => {
