@@ -16,9 +16,9 @@ import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 import { GitlabWebhookReceipts } from './gitlab-webhook-receipts.js';
 import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-branch-creation.js';
 import { GitlabDeployments } from './gitlab-deployments.js';
-import { readGitlabDeploymentHistory } from './gitlab-deployment-read.js';
+import { readGitlabDeploymentHistory, readGitlabDeploymentStatus } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
-import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabStatusObservation, GitlabStatusReview, GitlabStatusSuggestionTrigger, GitlabSyncStatus } from '../shared/types.js';
+import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -177,12 +177,12 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
   };
 }
 type LinkDraft=ReturnType<typeof readLink>;
-type TerminalStatusRead = Pick<GitlabStatusObservation, 'trigger'> & { occurredAt: string | null };
+type TerminalStatusRead = { trigger: GitlabWorkflowStatusSuggestionTrigger; occurredAt: string | null };
 type ConfirmedWorkflowRead = { link: GitlabLink; terminal: GitlabStatusObservation | null };
 type IssueGitlabRefreshMode = 'all' | 'exact' | 'status-review';
 
 function terminalStatusRead(kind: WorkflowGitlabKind, object: Obj): TerminalStatusRead | null {
-  let trigger: GitlabStatusSuggestionTrigger;
+  let trigger: GitlabWorkflowStatusSuggestionTrigger;
   let timestamp: unknown;
   if (kind === 'pipeline' && (object.status === 'success' || object.status === 'failed')) {
     trigger = object.status === 'success' ? 'pipeline.succeeded' : 'pipeline.failed';
@@ -1851,6 +1851,75 @@ export class GitlabIntegrationService{
       associationUnavailable, associationLimited, associationDenied, associationRateLimited };
   }
 
+  deploymentStatusProof(issueId: string, binding: GitlabDeploymentStatusBinding): string | null {
+    const settings = this.raw();
+    if (!settings.baseUrl || this.instance(settings) !== binding.instance || !settings.projectIds.includes(binding.repositoryId)) return null;
+    return this.deployments.statusReviewProof(issueId, binding);
+  }
+
+  async reviewDeploymentStatus(issueId: string, instance: string, repositoryId: number, deploymentId: number,
+    value: unknown, actorId: string, signal: AbortSignal): Promise<GitlabDeploymentReviewResult> {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length ||
+        !/^[a-f0-9]{12}$/u.test(instance) || !numericObjectId(repositoryId) || !numericObjectId(deploymentId)) {
+      fail('업무의 GitLab 배포 상태 검토 요청을 확인해 주세요.');
+    }
+    const issue = this.requireIssue(issueId);
+    const settings = this.raw();
+    if (!settings.baseUrl || this.instance(settings) !== instance || !settings.projectIds.includes(repositoryId)) {
+      fail('현재 GitLab 연결에 이 저장소가 없습니다.', 403);
+    }
+    const identity = { instance, repositoryId, deploymentId };
+    const target = this.deployments.issueReviewTarget(issueId, identity);
+    if (!target) fail('업무에 연결된 GitLab 배포를 찾을 수 없습니다.', 404);
+
+    const workspaceGeneration = this.store.setting('attachmentImportGeneration');
+    const token = settings.token ? this.store.unseal(settings.token) : null;
+    const capturedAt = Date.now();
+    const assertCurrent = () => {
+      signal.throwIfAborted();
+      assertSettingsVersion(settings.version, this.raw().version);
+      if (this.store.setting('attachmentImportGeneration') !== workspaceGeneration) fail('워크스페이스가 복원되었습니다. 업무를 다시 열어 주세요.', 409);
+      const latestIssue = this.store.get<Issue>('issues', issueId);
+      const latestTarget = this.deployments.issueReviewTarget(issueId, identity);
+      if (!latestIssue || latestIssue.version !== issue.version || latestIssue.projectId !== issue.projectId || latestIssue.key !== issue.key ||
+          latestTarget?.fence !== target.fence) fail('업무 또는 배포 연결이 변경되었습니다. 최신 업무에서 다시 확인해 주세요.', 409);
+      return { latestIssue, latestTarget };
+    };
+    signal.throwIfAborted();
+    const deadline = AbortSignal.timeout(25_000);
+    let read: Awaited<ReturnType<typeof readGitlabDeploymentStatus>>;
+    try {
+      read = await readGitlabDeploymentStatus({ baseUrl: settings.baseUrl, token }, target.deployment, AbortSignal.any([signal, deadline]));
+    } catch (error) {
+      assertCurrent();
+      if (deadline.aborted) fail('GitLab 배포 상태 조회 시간이 초과되었습니다.', 504);
+      if (error instanceof GitlabReadError) failGitlabWorkflowRead(error);
+      throw error;
+    }
+
+    return this.store.transaction(() => {
+      const { latestIssue, latestTarget } = assertCurrent();
+      this.deployments.recordSync(instance, repositoryId, [read.deployment], capturedAt);
+      const deployment = this.deployments.deployment(identity);
+      if (!deployment || deployment.status !== read.deployment.status || deployment.environment !== read.deployment.environment ||
+          deployment.sha !== read.deployment.sha || deployment.source === 'sync' && deployment.changedAt > read.deployment.changedAt) {
+        fail('배포 상태가 변경되었습니다. 최신 업무에서 다시 확인해 주세요.', 409);
+      }
+      const { finishedAt } = read;
+      const state = read.state !== 'ready' ? read.state : !finishedAt ? 'completion-unverified' :
+        this.deployments.hasCompetingSuccess(deployment, finishedAt) ? 'superseded' : 'ready';
+      const exact = { instance, ...read.deployment };
+      this.deployments.recordReviewEvidence(exact, state === 'ready' ? finishedAt : null);
+      if (state !== 'ready' || !finishedAt) return { deployment, state };
+      const link = this.deployments.reviewLink(latestTarget.links, exact);
+      const binding = link && { ...identity, linkId: link.id, occurredAt: finishedAt };
+      if (!link || !binding || !this.deploymentStatusProof(issueId, binding)) return { deployment, state: 'link-unverified' };
+      const statusReview = this.hooks.manualStatusReview?.(latestIssue,
+        [{ trigger: 'deployment.succeeded', link, occurredAt: finishedAt, deployment }], actorId, settings.version);
+      return statusReview ? { deployment, state: 'ready', statusReview } : { deployment, state: 'no-rule' };
+    });
+  }
+
   async syncDeployments(value: unknown, signal?: AbortSignal, afterSave?: (result: GitlabDeploymentSyncResult) => void): Promise<GitlabDeploymentSyncResult> {
     const input = record(value);
     if (Object.keys(input).length !== 2 || !Object.hasOwn(input, 'repositoryId') || !Object.hasOwn(input, 'expectedVersion')) {
@@ -2066,6 +2135,20 @@ export class GitlabIntegrationService{
       if(Object.keys(req.query).some(key=>key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');
       const issue=this.requireIssue(String(req.params.id));
       res.set('Cache-Control','no-store').json(this.deployments.issuePage(issue.id,deploymentOffset(req)));
+    });
+    app.post('/api/issues/:id/gitlab-deployments/:instance/:repositoryId/:deploymentId/status-review', async (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      if (Object.keys(req.query).length) fail('업무의 GitLab 배포 상태 검토 요청을 확인해 주세요.');
+      const actorId = hooks.actor(req);
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.reviewDeploymentStatus(String(req.params.id), String(req.params.instance),
+          Number(numericObjectId(req.params.repositoryId)), Number(numericObjectId(req.params.deploymentId)), req.body, actorId, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
     });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
     app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));

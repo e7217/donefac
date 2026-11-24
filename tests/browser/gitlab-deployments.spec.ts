@@ -2,15 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test, type APIResponse } from '@playwright/test';
-import type { GitlabDeploymentPage, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIResponse, type Locator, type Response } from '@playwright/test';
+import type { AutomationRule, GitlabDeploymentPage, GitlabDeploymentReviewResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const integration = '/api/integrations/gitlab';
 const sha = 'ab'.repeat(20);
 const head = 'cd'.repeat(20);
 const timestamp = (seconds: number) => new Date(Date.UTC(2024, 7, 21, 8, 0, seconds)).toISOString();
 
-async function json<T>(response: APIResponse, status = 200): Promise<T> {
+async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
   return response.json();
 }
@@ -74,6 +74,7 @@ test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 �
     const records = history.getByRole('list', { name: 'GitLab 배포 목록', exact: true });
     await expect(repos).toHaveValue('42', { timeout: 30_000 });
     await expect(records.getByRole('listitem')).toHaveCount(2);
+    await expect(records.getByRole('button', { name: '이 배포로 상태 검토', exact: true })).toHaveCount(0);
     await repos.selectOption('43');
     await expect(records.getByRole('listitem')).toHaveCount(1);
     await expect(records.getByRole('link', { name: 'GitLab 작업 열기', exact: true })).toHaveAttribute('href', `${repoUrl(43)}/-/jobs/710`);
@@ -121,6 +122,182 @@ test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 �
       await json<GitlabSettings>(await request.patch(integration, { headers, data: { expectedVersion: current.version,
         baseUrl: original.baseUrl, projectIds: original.projectIds, webhookSecret: '', token: '', signingToken: '', jiraRoutes: original.jiraRoutes ?? [] },
       }));
+    }
+  }
+});
+
+test('360px 티켓에서 완료 웹훅을 받지 못한 배포를 확인해 일반 티켓 편집으로 상태를 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const workspace = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
+  const { projects: [project], users: [author] } = await workspace();
+  const original = await json<GitlabSettings>(await request.get(integration));
+  expect(original.baseUrl).toBe('');
+  const suffix = randomUUID();
+  const token = `synthetic-review-read-${suffix}`;
+  const secret = `synthetic-review-hook-${suffix}`;
+  const headers = { 'X-Actor-Id': author.id };
+  const repositoryId = 42;
+  const deploymentId = 781;
+  const jobId = 1241;
+  const environment = 'production';
+  const repoPath = `/gitlab/api/v4/projects/${repositoryId}`;
+  const deploymentsPath = `${repoPath}/deployments`;
+  const exactPath = `${deploymentsPath}/${deploymentId}`;
+  const rulesPath = '/api/automation-rules';
+  const runsPath = `/api/automation-runs?projectId=${encodeURIComponent(project.id)}`;
+  const readUrls: URL[] = [];
+  let configured = false;
+  let issue: Issue | undefined;
+  let rule: AutomationRule | undefined;
+  let finishedAt: string | null = null;
+  let laterFinishedAt: string | null = null;
+
+  const mock = createServer((incoming, response) => {
+    const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end();
+    readUrls.push(url);
+    response.setHeader('Content-Type', 'application/json');
+    if (url.pathname === repoPath) return response.end(JSON.stringify({ id: repositoryId, web_url: projectUrl, path_with_namespace: 'team/product' }));
+    const deployment = (id: number, job: number, completed: string | null) => ({
+      id, sha, status: 'success', updated_at: finishedAt ?? startedAt, environment: { name: environment },
+      deployable: { id: job, status: 'success', finished_at: completed, web_url: `${projectUrl}/-/jobs/${job}` },
+    });
+    const selected = deployment(deploymentId, jobId, finishedAt);
+    if (url.pathname === exactPath) return response.end(JSON.stringify(selected));
+    if (url.pathname === deploymentsPath) return response.end(JSON.stringify(laterFinishedAt
+      ? [{ ...deployment(deploymentId + 1, jobId + 1, laterFinishedAt), updated_at: laterFinishedAt }, selected] : [selected]));
+    if (url.pathname === `${exactPath}/merge_requests`) return response.end('[]');
+    return response.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/gitlab`;
+  const projectUrl = `${baseUrl}/team/product`;
+  const startedAt = new Date(Date.now() - 60_000).toISOString();
+  const publish = (event: string, data: object) => request.post(`${integration}/webhook`, {
+    headers: { 'X-Gitlab-Event': event, 'X-Gitlab-Token': secret, 'X-Gitlab-Event-UUID': randomUUID() }, data,
+  }).then(response => json<{ linked: number; deploymentUpdated?: true }>(response));
+
+  try {
+    await json<GitlabSettings>(await request.patch(integration, { headers,
+      data: { expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret },
+    }));
+    configured = true;
+    issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
+      projectId: project.id, title: `배포 상태 검토 ${suffix.slice(0, 8)}`,
+    } }), 201);
+    rule = await json<AutomationRule>(await request.post(rulesPath, { headers, data: {
+      projectId: project.id, name: `production 확인 ${suffix.slice(0, 8)}`, enabled: true, trigger: 'deployment.succeeded',
+      gitlabProjectIds: [repositoryId], environment, branchPattern: '', issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    } }), 201);
+    const repo = { id: repositoryId, web_url: projectUrl, path_with_namespace: 'team/product' };
+    expect((await publish('Merge Request Hook', { object_kind: 'merge_request', project: repo, object_attributes: {
+      id: 387, iid: 14, target_project_id: repositoryId, title: `${issue.key} 병합`, action: 'merge', state: 'merged',
+      updated_at: startedAt, source_branch: `feature/${issue.key}`, sha: head, merge_commit_sha: sha, url: `${projectUrl}/-/merge_requests/14`,
+    } })).linked).toBe(1);
+    expect((await publish('Deployment Hook', {
+      object_kind: 'deployment', deployment_id: deploymentId, environment, environment_tier: environment,
+      status: 'running', status_changed_at: startedAt, short_sha: sha.slice(0, 8), commit_url: `${projectUrl}/-/commit/${sha}`,
+      project: repo, deployable_id: jobId, deployable_url: `${projectUrl}/-/jobs/${jobId}`,
+    })).deploymentUpdated).toBe(true);
+    const issuePath = `/api/issues/${issue.id}`;
+    const stored = await json<GitlabDeploymentPage>(await request.get(`${issuePath}/gitlab-deployments`));
+    expect(stored.items).toEqual([expect.objectContaining({ deploymentId, status: 'running' })]);
+    const reviewPath = `${issuePath}/gitlab-deployments/${stored.items[0].instance}/${repositoryId}/${deploymentId}/status-review`;
+    const previousRuns = await json(await request.get(runsPath));
+
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+    const row = panel.getByRole('region', { name: '연결된 GitLab 배포', exact: true }).getByRole('listitem');
+    const trigger = row.getByRole('button', { name: '이 배포로 상태 검토', exact: true });
+    const feedback = panel.getByRole('group', { name: 'GitLab 상태 확인 결과', exact: true });
+    const suggestion = feedback.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const issueForm = panel.locator('form.issue-detail-form');
+    const status = issueForm.getByRole('combobox', { name: '상태', exact: true });
+    const title = issueForm.getByRole('textbox', { name: '제목', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    await expect(row).toHaveAttribute('data-deployment-status', 'running', { timeout: 30_000 });
+    await expect(suggestion).toHaveCount(0);
+    const titleDraft = `${issue.title} 편집 초안`;
+    const commentDraft = '전송하지 않은 배포 댓글';
+    await title.fill(titleDraft);
+    await comment.fill(commentDraft);
+
+    async function review(button: Locator) {
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === reviewPath && value.request().method() === 'POST');
+      await button.press('Enter');
+      const received = await response;
+      expect(received.request().postDataJSON()).toEqual({});
+      expect(received.headers()['cache-control']).toBe('no-store');
+      return json<GitlabDeploymentReviewResult>(received);
+    }
+
+    finishedAt = new Date().toISOString();
+    const checked = await review(trigger);
+    expect(readUrls.map(url => url.pathname)).toEqual([repoPath, exactPath, deploymentsPath, `${exactPath}/merge_requests`]);
+    expect(Object.fromEntries(readUrls[2].searchParams)).toMatchObject({ environment, status: 'success', order_by: 'finished_at', sort: 'desc', per_page: '2' });
+    expect(checked).toMatchObject({ state: 'ready', deployment: { deploymentId, environment, status: 'success' } });
+    if (checked.statusReview?.kind !== 'suggestion') throw new Error('선택한 GitLab 배포의 상태 제안이 없습니다.');
+    const proposal = checked.statusReview.suggestion;
+    expect(proposal).toMatchObject({ issueId: issue.id, issueVersion: issue.version, fromStatus: issue.status, toStatus: 'done',
+      rule: { id: rule.id }, evidence: { trigger: 'deployment.succeeded', occurredAt: finishedAt, deployment: { deploymentId, sha } } });
+    await expect(feedback).toBeFocused();
+    await expect(feedback.getByText(`${environment} 배포 #${deploymentId} · 확인한 상태`)).toContainText('성공');
+    await expect(row).toHaveAttribute('data-deployment-status', 'success');
+    await expect(suggestion.getByText('선택한 GitLab 배포 기준', { exact: true })).toBeVisible();
+    await expect(suggestion).toContainText(`${environment} 배포 #${deploymentId}`);
+    await expect(suggestion.getByRole('link', { name: 'GitLab 원본 열기', exact: true })).toHaveAttribute('href', `${projectUrl}/-/jobs/${jobId}`);
+    await expect(status).toHaveValue(issue.status);
+    await expect(title).toHaveValue(titleDraft);
+    await expect(comment).toHaveValue(commentDraft);
+    expect((await workspace()).issues.find(value => value.id === issue?.id)).toEqual(issue);
+
+    await suggestion.getByRole('button', { name: '목표 상태로 편집', exact: true }).click();
+    await expect(status).toHaveValue('done');
+    await expect(status).toBeFocused();
+    await expect(title).toHaveValue(titleDraft);
+    await expect(comment).toHaveValue(commentDraft);
+    expect((await workspace()).issues.find(value => value.id === issue?.id)).toEqual(issue);
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
+    await issueForm.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    const saved = await saving;
+    expect(saved.request().postDataJSON()).toMatchObject({
+      expectedVersion: issue.version, title: titleDraft, status: 'done', gitlabStatusSuggestionToken: proposal.token,
+    });
+    expect(await json<Issue>(saved)).toMatchObject({ status: 'done', title: titleDraft, version: issue.version + 1 });
+    const savedPanel = page.getByRole('dialog', { name: titleDraft, exact: true });
+    await expect(savedPanel.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue(commentDraft);
+
+    laterFinishedAt = new Date().toISOString();
+    const previousReads = readUrls.length;
+    const superseded = await review(savedPanel.getByRole('button', { name: '이 배포로 상태 검토', exact: true }));
+    expect(readUrls.slice(previousReads).map(url => url.pathname)).toEqual([repoPath, exactPath, deploymentsPath]);
+    expect(superseded).toMatchObject({ state: 'superseded', deployment: { deploymentId, environment, status: 'success' } });
+    expect(superseded.statusReview).toBeUndefined();
+    const savedFeedback = savedPanel.getByRole('group', { name: 'GitLab 상태 확인 결과', exact: true });
+    await expect(savedFeedback).toContainText('같은 환경에 더 최근에 완료된 성공 배포가 있습니다.');
+    await expect(savedFeedback.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true })).toHaveCount(0);
+    expect(await json(await request.get(runsPath))).toEqual(previousRuns);
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`, { headers });
+      if (issue) {
+        const deleted = await request.delete(`/api/issues/${issue.id}`, { headers });
+        if (deleted.ok()) {
+          const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+          await request.delete(`/api/trash/${trashEntryId}`, { headers });
+        }
+      }
+      if (configured) {
+        const current = await json<GitlabSettings>(await request.get(integration));
+        await json<GitlabSettings>(await request.patch(integration, { headers,
+          data: { expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '' },
+        }));
+      }
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
     }
   }
 });

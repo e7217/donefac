@@ -5,6 +5,7 @@ import { gitlabScopedPushUrl } from './gitlab-push.js';
 import { createGitlabDeploymentReader, GitlabReadError, type GitlabReadObject } from './gitlab-read-sync.js';
 
 const DEPLOYMENT_LIMIT = 50;
+const LATEST_SUCCESS_LIMIT = 2;
 const MERGE_REQUEST_PAGE_SIZE = 100;
 const MERGE_REQUEST_PAGE_LIMIT = 2;
 const MERGE_REQUEST_CONCURRENCY = 4;
@@ -32,6 +33,12 @@ export interface GitlabDeploymentHistory {
   associationRateLimited: number;
 }
 
+export interface GitlabDeploymentStatusRead {
+  deployment: Deployment;
+  state: 'ready' | 'not-success' | 'completion-unverified' | 'superseded' | 'latest-unverified';
+  finishedAt: string | null;
+}
+
 function positiveId(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
@@ -46,7 +53,7 @@ function object(value: unknown): GitlabReadObject | undefined {
 }
 
 function includesCredential(value: string, token?: string | null): boolean {
-  return Boolean(token && (value.includes(token) || value.includes(encodeURIComponent(token))));
+  return Boolean(token && (!token.isWellFormed() || value.includes(token) || value.includes(encodeURIComponent(token))));
 }
 
 function canonicalJobUrl(raw: unknown, repoUrl: string, repositoryId: number, connection: Connection): string | undefined {
@@ -74,6 +81,14 @@ function parseDeployment(row: GitlabReadObject, repositoryId: number, projectUrl
   const jobUrl = canonicalJobUrl(row.deployable, projectUrl, repositoryId, connection);
   return { repositoryId, deploymentId: id, environment, sha, status: status as GitlabDeploymentState, changedAt,
     projectUrl, source: 'sync', ...(environmentTier === undefined ? {} : { environmentTier }), ...(jobUrl ? { jobUrl } : {}) };
+}
+
+function verifiedCompletion(row: GitlabReadObject, deployment: Deployment): string | null {
+  const job = object(row.deployable);
+  if (deployment.status !== 'success' || !deployment.jobUrl || job?.status !== 'success') return null;
+  const shas = [job.sha, object(job.commit)?.id, object(job.pipeline)?.sha];
+  if (shas.some(sha => sha != null && gitlabObjectSha(sha) !== deployment.sha)) return null;
+  return gitlabDeploymentTime(job.finished_at) ?? null;
 }
 
 function hasNextPage(pagination: Headers, page: number, size: number, count: number, stage: 'deployments' | 'deployment-merge-requests') {
@@ -136,6 +151,76 @@ async function associatedMergeRequests(reader: Reader, deployment: Deployment, s
   }
   const { mergeRequests, ambiguous } = uniqueMergeRequests(pairs);
   return { mergeRequests, unavailable: unavailable || ambiguous, limited: more, denied, rateLimited };
+}
+
+async function latestSuccess(
+  reader: Reader, deployment: Deployment, finishedAt: string, connection: Connection, parentSignal?: AbortSignal,
+): Promise<'ready' | 'superseded' | 'latest-unverified'> {
+  try {
+    const { rows, pagination } = await reader.latestSuccessfulDeployments(deployment.environment, LATEST_SUCCESS_LIMIT);
+    parentSignal?.throwIfAborted();
+    if (hasNextPage(pagination, 1, LATEST_SUCCESS_LIMIT, rows.length, 'deployments') && rows.length < LATEST_SUCCESS_LIMIT) {
+      return 'latest-unverified';
+    }
+    const candidates = rows.map(row => {
+      const candidate = parseDeployment(row, deployment.repositoryId, deployment.projectUrl, connection);
+      if (candidate.environment !== deployment.environment) throw new GitlabReadError('deployments', 'invalid-response');
+      return { deployment: candidate, finishedAt: verifiedCompletion(row, candidate) };
+    });
+    const [latest, next] = candidates;
+    if (!latest?.finishedAt || (next && (!next.finishedAt || next.finishedAt >= latest.finishedAt ||
+      next.deployment.deploymentId === latest.deployment.deploymentId))) return 'latest-unverified';
+
+    const selected = candidates.find(({ deployment: candidate }) => candidate.deploymentId === deployment.deploymentId);
+    if (selected && (selected.finishedAt !== finishedAt || selected.deployment.sha !== deployment.sha ||
+      selected.deployment.jobUrl !== deployment.jobUrl)) return 'latest-unverified';
+    if (selected === latest) return 'ready';
+    return latest.finishedAt > finishedAt ? 'superseded' : 'latest-unverified';
+  } catch (error) {
+    parentSignal?.throwIfAborted();
+    if (!(error instanceof GitlabReadError)) throw error;
+    return 'latest-unverified';
+  }
+}
+
+export async function readGitlabDeploymentStatus(
+  connection: Connection, selected: Pick<GitlabDeployment, 'repositoryId' | 'deploymentId' | 'environment' | 'sha'>,
+  parentSignal?: AbortSignal,
+): Promise<GitlabDeploymentStatusRead> {
+  parentSignal?.throwIfAborted();
+  const { repositoryId, deploymentId, environment } = selected;
+  const sha = gitlabObjectSha(selected.sha);
+  if (!positiveId(deploymentId) || !label(environment, 255) || !sha || /^0+$/u.test(sha)) {
+    throw new GitlabReadError('deployments', 'invalid-response');
+  }
+  const budget = AbortSignal.timeout(READ_BUDGET_MS);
+  const signal = parentSignal ? AbortSignal.any([parentSignal, budget]) : budget;
+  const reader = createGitlabDeploymentReader(connection, repositoryId, signal);
+  try {
+    const repository = await reader.repository();
+    if (repository.href.length > 4_000 || includesCredential(repository.href, connection.token)) {
+      throw new GitlabReadError('project', 'invalid-response');
+    }
+    const row = await reader.deployment(deploymentId);
+    parentSignal?.throwIfAborted();
+    const deployment = parseDeployment(row, repositoryId, repository.href, connection);
+    if (deployment.deploymentId !== deploymentId || deployment.environment !== environment || deployment.sha !== sha) {
+      throw new GitlabReadError('deployments', 'invalid-response');
+    }
+    if (deployment.status !== 'success') return { deployment, state: 'not-success', finishedAt: null };
+    const finishedAt = verifiedCompletion(row, deployment);
+    if (!finishedAt) return { deployment, state: 'completion-unverified', finishedAt: null };
+    const state = await latestSuccess(reader, deployment, finishedAt, connection, parentSignal);
+    if (state === 'ready') {
+      const { mergeRequests } = await associatedMergeRequests(reader, deployment, signal, parentSignal);
+      if (mergeRequests.length) deployment.mergeRequests = mergeRequests;
+    }
+    parentSignal?.throwIfAborted();
+    return { deployment, state, finishedAt };
+  } catch (error) {
+    parentSignal?.throwIfAborted();
+    throw error;
+  }
 }
 
 export async function readGitlabDeploymentHistory(connection: Connection, repositoryId: number, parentSignal?: AbortSignal): Promise<GitlabDeploymentHistory> {

@@ -1429,12 +1429,15 @@ export interface GitlabIssueRefreshResult {
   skipped: number;
   statusReview?: GitlabStatusReview;
 }
-export type GitlabStatusSuggestionTrigger = 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
-export interface GitlabStatusObservation {
+export type GitlabWorkflowStatusSuggestionTrigger = 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
+export type GitlabStatusSuggestionTrigger = GitlabWorkflowStatusSuggestionTrigger | 'deployment.succeeded';
+export type GitlabStatusObservation = {
   link: GitlabLink;
-  trigger: GitlabStatusSuggestionTrigger;
   occurredAt: string;
-}
+} & (
+  { trigger: GitlabWorkflowStatusSuggestionTrigger } |
+  { trigger: 'deployment.succeeded'; deployment: GitlabDeployment }
+);
 export interface GitlabStatusSuggestion {
   issueId: string;
   projectId: string;
@@ -1625,6 +1628,18 @@ export interface GitlabDeployment {
   jobUrl?: string;
   source?: 'sync';
   mergeRequests?: GitlabDeploymentMergeRequest[];
+}
+export interface GitlabDeploymentStatusBinding {
+  instance: string;
+  repositoryId: number;
+  deploymentId: number;
+  linkId: string;
+  occurredAt: string;
+}
+export interface GitlabDeploymentReviewResult {
+  deployment: GitlabDeployment;
+  state: 'ready' | 'not-success' | 'completion-unverified' | 'superseded' | 'latest-unverified' | 'link-unverified' | 'no-rule';
+  statusReview?: GitlabStatusReview;
 }
 export interface GitlabDeploymentPage { items: GitlabDeployment[]; total: number; offset: number; limit: number }
 export interface GitlabDeploymentPreviewResult {

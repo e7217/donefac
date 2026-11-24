@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentPreviewResult, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationPreview, AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, Project, WorkspaceSnapshot } from '../../shared/types.js';
 
 const integrationPath = '/api/integrations/gitlab';
 const baseUrl = 'https://git.example.test/gitlab';
@@ -378,6 +378,167 @@ test('live deployment rules require exact environment and established SHA proof,
   assert.deepEqual(restored && [restored.environment, restored.enabled, restored.enabledAt], [environment, false, null]);
   const restoredRun = (await f.json<AutomationRun[]>(runsPath)).find(row => row.id === run.id);
   assert.deepEqual(restoredRun?.context, run.context);
+});
+
+test('exact deployment status review verifies membership before reading and fences manual status changes', async t => {
+  const id = 471;
+  const environment = 'production/eu';
+  const readToken = 'synthetic-exact-deployment-read';
+  const list = deploymentListPath(repositoryId);
+  let finish = '';
+  let latestUnavailable = false;
+  let holdExactRead: ((reply: () => void) => void) | undefined;
+  const exact = () => ({ id, sha: mergeSha, status: 'success', updated_at: finish,
+    environment: { name: environment }, deployable: { id: id + 800, status: 'success', finished_at: finish } });
+  const remote = await mockGitlab(t, (path, response) => {
+    if (path === `${list}/${id}`) {
+      const reply = () => response.end(JSON.stringify(exact()));
+      if (holdExactRead) holdExactRead(reply);
+      else reply();
+    } else if (path === list) response.end(JSON.stringify(latestUnavailable ? [] : [exact()]));
+    else if (path === `${list}/${id}/merge_requests`) response.writeHead(403).end('{}');
+    else response.writeHead(404).end('{}');
+  });
+  const f = await fixture(t, { baseUrl: remote.root, token: readToken });
+  const { projects: [project], users: [user] } = await f.json<WorkspaceSnapshot>('/api/workspace');
+  const headers = { 'X-Actor-Id': user.id };
+  const issue = await f.json<Issue>('/api/issues', 'POST', { projectId: project.id, title: 'Review production rollout', description: 'Deployment checklist' }, headers, 201);
+  const unrelated = await f.json<Issue>('/api/issues', 'POST', { projectId: project.id, title: 'Unrelated work' }, headers, 201);
+  const issuePath = `/api/issues/${issue.id}`;
+  const rulePath = '/api/automation-rules';
+  const runsPath = `/api/automation-runs?projectId=${project.id}`;
+  const mr = mergeRequest(issue.key);
+  mr.project.web_url = remote.remoteProject;
+  mr.object_attributes.url = `${remote.remoteProject}/-/merge_requests/1`;
+  assert.equal((await f.send(mr, 'Merge Request Hook')).status, 200);
+  function hooked(deploymentId: number, sha: string, status: string, changedAt: string) {
+    const body = deployment(deploymentId, sha, status, 0, environment);
+    return { ...body, status_changed_at: changedAt, environment_tier: 'production',
+      project: { ...body.project, web_url: remote.remoteProject },
+      commit_url: `${remote.remoteProject}/-/commit/${sha}`, deployable_url: `${remote.remoteProject}/-/jobs/${body.deployable_id}` };
+  }
+  assert.equal((await f.send(hooked(id, mergeSha, 'running', timestamp()))).status, 200);
+  const { items: [selected] } = await f.deployments(issue.id);
+  assert.equal(selected?.deploymentId, id);
+  const path = (issueId: string, instance = selected.instance, repo = repositoryId, deploymentId = id) =>
+    `/api/issues/${issueId}/gitlab-deployments/${instance}/${repo}/${deploymentId}/status-review`;
+  for (const [url, value, expected] of [
+    [path(unrelated.id), {}, 404], [path(issue.id, '0'.repeat(12)), {}, 403], [path(issue.id, selected.instance, 43), {}, 403],
+    [path(issue.id, selected.instance, repositoryId, id + 1), {}, 404], [path(issue.id), { issueId: unrelated.id }, 400],
+    [`${path(issue.id)}?x=1`, {}, 400],
+  ] as const) {
+    const rejected = await f.request(url, 'POST', value, headers);
+    assert.equal(rejected.status, expected);
+    assert.equal(rejected.headers.get('cache-control'), 'no-store');
+  }
+  const { token: apiKey } = await f.json<{ token: string }>('/api/api-keys', 'POST', {
+    name: 'Exact deployment review route guard', access: 'write', projectIds: [project.id], expiresAt: null,
+  }, headers, 201);
+  assert.equal((await f.request(path(issue.id).replace('/api/', '/api/v1/'), 'POST', {}, { Authorization: `Bearer ${apiKey}` })).status, 403);
+  assert.equal(remote.requests.length, 0);
+
+  await f.json<AutomationRule>(rulePath, 'POST', { projectId: project.id, name: 'Production rollout rule', enabled: true,
+    trigger: 'deployment.succeeded', gitlabProjectIds: [repositoryId], environment, issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    actorId: user.id }, headers, 201);
+  finish = new Date().toISOString();
+  const review = () => f.json<GitlabDeploymentReviewResult>(path(issue.id), 'POST', {}, headers);
+  const workspace = () => f.json<WorkspaceSnapshot>('/api/workspace');
+  const before = await workspace();
+  const first = await review();
+  assert.equal(first.state, 'ready');
+  assert.equal(first.deployment.status, 'success');
+  assert.equal(first.statusReview?.kind, 'suggestion');
+  assert.ok(first.statusReview.kind === 'suggestion');
+  const { suggestion } = first.statusReview;
+  assert.equal(suggestion.evidence.trigger, 'deployment.succeeded');
+  assert.equal(suggestion.evidence.occurredAt, finish);
+  assert.ok(suggestion.evidence.trigger === 'deployment.succeeded');
+  assert.deepEqual(suggestion.evidence.deployment, first.deployment);
+  const after = await workspace();
+  assert.deepEqual(after.issues, before.issues);
+  assert.deepEqual(after.activities, before.activities);
+  assert.deepEqual(await f.json(runsPath), []);
+  assert.equal((await f.deployments(issue.id)).items[0].status, 'success');
+
+  const change = (token: string, status: number, expectedVersion = issue.version) => f.json<Issue>(issuePath, 'PATCH', {
+    expectedVersion, status: 'done', gitlabStatusSuggestionToken: token,
+  }, headers, status);
+  latestUnavailable = true;
+  assert.equal((await review()).state, 'latest-unverified');
+  await change(suggestion.token, 409);
+  latestUnavailable = false;
+  const next = await review();
+  assert.ok(next.statusReview?.kind === 'suggestion');
+  const competingAt = new Date().toISOString();
+  assert.ok(competingAt > finish);
+  assert.equal((await f.send(hooked(id + 1, branchSha, 'success', competingAt))).status, 200);
+  await change(next.statusReview.suggestion.token, 409);
+  assert.equal((await review()).state, 'superseded');
+
+  finish = new Date().toISOString();
+  assert.ok(finish > competingAt);
+  let respond!: () => void;
+  const pendingRead = new Promise<void>(resolve => { holdExactRead = reply => { respond = reply; resolve(); }; });
+  const pendingReview = f.request(path(issue.id), 'POST', {}, headers);
+  await Promise.race([pendingRead, pendingReview.then(result => assert.fail(`Deployment read did not reach mock (${result.status})`))]);
+  const updated = await f.json<Issue>(issuePath, 'PATCH', { expectedVersion: issue.version, title: 'Review production after a concurrent edit' }, headers);
+  holdExactRead = undefined;
+  respond();
+  assert.equal((await pendingReview).status, 409);
+  assert.equal((await f.deployments(issue.id)).items[0].changedAt, first.deployment.changedAt);
+
+  const current = await review();
+  assert.ok(current.statusReview?.kind === 'suggestion');
+  const applied = await change(current.statusReview.suggestion.token, 200, updated.version);
+  assert.equal(applied.status, 'done');
+  assert.equal(applied.version, updated.version + 1);
+  assert.deepEqual(await f.json(runsPath), []);
+  assert.ok(remote.requests.every(request => request.method === 'GET' && request.token === readToken));
+});
+
+test('an association-only deployment review requires the exact current included MR ID and IID', async t => {
+  const id = 475;
+  const sha = 'd'.repeat(40);
+  const list = deploymentListPath(repositoryId);
+  let finish = '';
+  let associated: unknown = [{ id: 101, iid: 1, state: 'merged', target_project_id: repositoryId }];
+  const exact = () => ({ id, sha, status: 'success', updated_at: finish,
+    environment: { name: 'production' }, deployable: { id: 20, status: 'success', finished_at: finish } });
+  const remote = await mockGitlab(t, (path, response) => {
+    if (path === list) response.end(JSON.stringify([exact()]));
+    else if (path === `${list}/${id}`) response.end(JSON.stringify(exact()));
+    else if (path === `${list}/${id}/merge_requests` && associated) response.end(JSON.stringify(associated));
+    else response.writeHead(403).end('{}');
+  });
+  const f = await fixture(t, { baseUrl: remote.root, token: 'synthetic-exact-association-token' });
+  const { projects: [project], users: [user] } = await f.json<WorkspaceSnapshot>('/api/workspace');
+  const headers = { 'X-Actor-Id': user.id };
+  const issue = await f.json<Issue>('/api/issues', 'POST', { projectId: project.id, title: 'Review an included merge request' }, headers, 201);
+  const mr = mergeRequest(issue.key);
+  mr.project.web_url = remote.remoteProject;
+  mr.object_attributes.url = `${remote.remoteProject}/-/merge_requests/1`;
+  assert.equal((await f.send(mr, 'Merge Request Hook')).status, 200);
+  await f.json<AutomationRule>('/api/automation-rules', 'POST', { projectId: project.id, name: 'Production rollout rule', enabled: true,
+    trigger: 'deployment.succeeded', gitlabProjectIds: [repositoryId], environment: 'production', issueTypes: [], fromStatuses: [issue.status],
+    toStatusId: 'done', actorId: user.id }, headers, 201);
+  finish = new Date().toISOString();
+  const { version: expectedVersion } = await f.json<GitlabSettings>(integrationPath);
+  await f.json<GitlabDeploymentSyncResult>(`${integrationPath}/deployments/sync`, 'POST', { repositoryId, expectedVersion }, headers);
+  const { items: [selected] } = await f.deployments(issue.id);
+  assert.deepEqual(selected?.mergeRequests, [{ id: 101, iid: 1 }]);
+  const issuePath = `/api/issues/${issue.id}`;
+  const path = `${issuePath}/gitlab-deployments/${selected.instance}/${repositoryId}/${id}/status-review`;
+  const review = () => f.json<GitlabDeploymentReviewResult>(path, 'POST', {}, headers);
+
+  const ready = await review();
+  assert.ok(ready.statusReview?.kind === 'suggestion');
+  assert.equal(ready.statusReview.suggestion.evidence.link.iid, 1);
+  associated = [{ id: 101, iid: 2, state: 'merged', target_project_id: repositoryId }];
+  assert.equal((await review()).state, 'link-unverified');
+  await f.json(issuePath, 'PATCH', { expectedVersion: issue.version, status: 'done', gitlabStatusSuggestionToken: ready.statusReview.suggestion.token }, headers, 409);
+  associated = null;
+  assert.equal((await review()).state, 'link-unverified');
+  assert.deepEqual((await f.deployments(issue.id)).items[0].mergeRequests, [{ id: 101, iid: 1 }]);
 });
 
 test('REST backfill links every confirmed batched merge request and preserves both old backups and partial proof', async t => {

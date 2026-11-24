@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
-import type { GitlabLink, GitlabStatusObservation, GitlabStatusReview, GitlabStatusSuggestionTrigger } from '../shared/types.js';
+import type { GitlabDeploymentStatusBinding, GitlabLink, GitlabStatusObservation, GitlabStatusReview, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,isPipelineAutomationTrigger,sortedAutomationRules } from '../shared/automation.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
@@ -13,7 +13,7 @@ const MANUAL_STATUS_TOKEN_DOMAIN = 'teamspace.gitlab-status-suggestion.v1';
 const MANUAL_STATUS_TOKEN_TTL = 5 * 60 * 1_000;
 const MAX_MANUAL_STATUS_TOKEN_LENGTH = 32 * 1024;
 const MANUAL_STATUS_TOKEN = /^[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9+/]+={0,2}$/u;
-const MANUAL_STATUS_SOURCES: Record<GitlabStatusSuggestionTrigger, { kind: GitlabLink['kind']; state: string }> = {
+const MANUAL_STATUS_SOURCES: Record<GitlabWorkflowStatusSuggestionTrigger, { kind: GitlabLink['kind']; state: string }> = {
   'pipeline.succeeded': { kind: 'pipeline', state: 'success' },
   'pipeline.failed': { kind: 'pipeline', state: 'failed' },
   'merge_request.merged': { kind: 'merge_request', state: 'merged' },
@@ -25,11 +25,13 @@ function fail(message:string,status=400,details?:unknown):never{throw new Automa
 type Connection=Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'|'jiraRoutes'>;
 type PipelineEvidence = Pick<AutomationEvent, 'pipelineSource' | 'pipelineTag'>;
 type MatchEvent = Pick<AutomationEvent, 'trigger' | 'gitlabProjectId' | 'branch' | 'environment'> & PipelineEvidence;
+type ManualDeploymentProof = { binding: GitlabDeploymentStatusBinding; digest: string };
 type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
 type PreparedChange={outcome:AutomationOutcome;next?:Issue;afterStatusChange?:AfterStatusChange};
 export interface AutomationHooks{
   getGitlabSettings:()=>Connection;
   latestVerifiedPipelineId?:(link:GitlabLink)=>number|null;
+  deploymentStatusProof?:(issueId:string,binding:GitlabDeploymentStatusBinding)=>string|null;
   prepareChange:(before:Issue,status:string,afterStatusChange:(effect:AfterStatusChange)=>void)=>Issue;
   commitChange:(rule:AutomationRule,before:Issue,next:Issue,event:AutomationEvent)=>void;
 }
@@ -41,6 +43,15 @@ function repoIds(value:unknown):number[]{if(!Array.isArray(value)||!value.length
 function validTime(value:unknown):value is string{return typeof value==='string'&&Number.isFinite(Date.parse(value));}
 function normalizeBase(value:unknown):string{if(typeof value!=='string'||!value)return'';let url:URL;try{url=new URL(value);}catch{fail('GitLab 주소를 확인해 주세요.');}if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)fail('인증 정보가 없는 GitLab http(s) 주소가 필요합니다.');return url.toString().replace(/\/+$/,'');}
 function version(value:unknown,current:number){if(!Number.isSafeInteger(value)||Number(value)<1)fail('expectedVersion이 필요합니다.');if(value!==current)fail('자동화 규칙이 변경되었습니다. 최신 설정을 확인해 주세요.',409,{currentVersion:current});}
+
+function isDeploymentStatusBinding(value: unknown): value is GitlabDeploymentStatusBinding {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { instance, repositoryId, deploymentId, linkId, occurredAt } = value as Partial<GitlabDeploymentStatusBinding>;
+  return typeof instance === 'string' && /^[a-f0-9]{12}$/u.test(instance) &&
+    typeof repositoryId === 'number' && Number.isSafeInteger(repositoryId) && repositoryId > 0 &&
+    typeof deploymentId === 'number' && Number.isSafeInteger(deploymentId) && deploymentId > 0 &&
+    typeof linkId === 'string' && linkId.length > 0 && linkId.length <= 500 && validTime(occurredAt);
+}
 
 export function isDeploymentAutomationContext(value: { objectKind?: unknown; objectId?: unknown; branch?: unknown; environment?: unknown }): boolean {
   const { objectKind, objectId, branch, environment } = value;
@@ -207,21 +218,24 @@ export class AutomationService{
       .get(issueId) as { json: string } | undefined;
     return row ? JSON.parse(row.json) as AutomationRun : undefined;
   }
-  private manualStatusContext(issue: Issue) {
+  private manualStatusContext(issue: Issue, deployment: boolean) {
     const settings = this.hooks.getGitlabSettings();
     const base = normalizeBase(settings.baseUrl);
     const routedProjects = new Map((settings.jiraRoutes ?? []).map(route => [route.repositoryId, route.projectId]));
     const repositories = new Set(settings.projectIds.filter(id => !routedProjects.has(id) || routedProjects.get(id) === issue.projectId));
     const rules = base && (settings.webhookSecretConfigured || settings.signingTokenConfigured) ? this.all().filter(rule =>
-      rule.enabled && rule.projectId === issue.projectId && rule.gitlabBaseUrl === base && Object.hasOwn(MANUAL_STATUS_SOURCES, rule.trigger) &&
+      rule.enabled && rule.projectId === issue.projectId && rule.gitlabBaseUrl === base &&
+      (deployment ? rule.trigger === 'deployment.succeeded' : Object.hasOwn(MANUAL_STATUS_SOURCES, rule.trigger)) &&
       rule.gitlabProjectIds.some(id => repositories.has(id))) : [];
     return { repositories, rules, workflow: this.workflow(issue.projectId), latestRun: this.latestAppliedRun(issue.id) };
   }
-  private manualStatusFence(issue: Issue, settingsVersion: number, { workflow, repositories, rules, latestRun }: ReturnType<AutomationService['manualStatusContext']>) {
+  private manualStatusFence(issue: Issue, settingsVersion: number, { workflow, repositories, rules, latestRun }: ReturnType<AutomationService['manualStatusContext']>,
+    deploymentProof?: string) {
     const digest = createHash('sha256').update(JSON.stringify([
       this.store.setting('attachmentImportGeneration'), settingsVersion, issue.id, issue.projectId, issue.version, issue.status, issue.type,
       workflow.version, this.schema(issue.projectId).version, [...repositories], rules.map(({ id, version }) => [id, version]), latestRun?.id ?? null,
     ]));
+    if (deploymentProof) digest.update('\n').update(deploymentProof);
     for (const row of this.store.db.prepare(`SELECT id,json FROM gitlab_links WHERE issue_id=?
       AND json_extract(json,'$.kind') IN ('merge_request','pipeline') ORDER BY id`).iterate(issue.id)) {
       const cursor = this.hooks.latestVerifiedPipelineId?.(JSON.parse(String(row.json)) as GitlabLink) ?? null;
@@ -229,28 +243,44 @@ export class AutomationService{
     }
     return digest.digest('hex');
   }
+  private manualDeploymentProof(issue: Issue, { deployment, link, occurredAt }: Extract<GitlabStatusObservation, { trigger: 'deployment.succeeded' }>): ManualDeploymentProof | null {
+    if (deployment.status !== 'success' || deployment.repositoryId !== link.projectId || !isGitlabDeploymentEnvironment(deployment.environment)) return null;
+    const { instance, repositoryId, deploymentId } = deployment;
+    const binding = { instance, repositoryId, deploymentId, linkId: link.id, occurredAt };
+    const digest = this.hooks.deploymentStatusProof?.(issue.id, binding);
+    return digest ? { binding, digest } : null;
+  }
   manualStatusReview(issue: Issue, observations: readonly GitlabStatusObservation[], actorId: string, settingsVersion: number): GitlabStatusReview | undefined {
     if (!observations.length) return;
-    const context = this.manualStatusContext(issue);
+    const deployment = observations[0].trigger === 'deployment.succeeded';
+    const context = this.manualStatusContext(issue, deployment);
     const { repositories, rules, workflow, latestRun } = context;
     if (!rules.length) return;
     const reachable = new Map(allowedNextStatuses({ workflows: [workflow] }, issue).map(status => [status.id, status]));
     const appliedAt = latestRun?.occurredAt ? Date.parse(latestRun.occurredAt) : -Infinity;
     const checkedAt = Date.now();
-    let selected: { rule: AutomationRule; evidence: GitlabStatusObservation } | undefined;
+    let selected: { rule: AutomationRule; evidence: GitlabStatusObservation; deploymentProof?: ManualDeploymentProof } | undefined;
     for (const evidence of observations) {
       const { link, trigger, occurredAt } = evidence;
-      const source = MANUAL_STATUS_SOURCES[trigger];
       const occurred = Date.parse(occurredAt);
-      if (!source || link.issueId !== issue.id || link.kind !== source.kind || link.state !== source.state || !repositories.has(link.projectId) ||
+      if (deployment !== (trigger === 'deployment.succeeded') || link.issueId !== issue.id || !repositories.has(link.projectId) ||
         !Number.isFinite(occurred) || occurred > checkedAt || occurred <= appliedAt) continue;
       const saved = this.store.get<GitlabLink>('gitlab_links', link.id);
       if (!saved || JSON.stringify(saved) !== JSON.stringify(link)) continue;
-      const { pipelineSource, pipelineTag } = link;
-      const sample = {
-        trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '',
-        ...(link.kind === 'pipeline' && link.pipelineObservedAt === occurredAt ? { pipelineSource, pipelineTag } : {}),
-      };
+      let deploymentProof: ManualDeploymentProof | undefined;
+      let sample: MatchEvent;
+      if (trigger === 'deployment.succeeded') {
+        const proof = this.manualDeploymentProof(issue, evidence);
+        if (!proof) continue;
+        deploymentProof = proof;
+        sample = { trigger, gitlabProjectId: link.projectId, branch: '', environment: evidence.deployment.environment };
+      } else {
+        const source = MANUAL_STATUS_SOURCES[trigger];
+        if (!source || link.kind !== source.kind || link.state !== source.state) continue;
+        const { pipelineSource, pipelineTag } = link;
+        sample = { trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '',
+          ...(link.kind === 'pipeline' && link.pipelineObservedAt === occurredAt ? { pipelineSource, pipelineTag } : {}) };
+      }
       const matches = rules.filter(rule => this.matchReason(rule, issue, sample) === null);
       const [rule] = matches;
       if (!rule || !validTime(rule.enabledAt) || occurred < Date.parse(rule.enabledAt)) continue;
@@ -259,14 +289,15 @@ export class AutomationService{
       if (rule.toStatusId === issue.status || !reachable.has(rule.toStatusId)) continue;
       if (selected && selected.rule.toStatusId !== rule.toStatusId) return { kind: 'ambiguous' };
       if (!selected || occurred > Date.parse(selected.evidence.occurredAt) ||
-        occurred === Date.parse(selected.evidence.occurredAt) && link.id < selected.evidence.link.id) selected = { rule, evidence };
+        occurred === Date.parse(selected.evidence.occurredAt) && link.id < selected.evidence.link.id) selected = { rule, evidence, deploymentProof };
     }
     if (!selected) return;
-    const { rule, evidence } = selected;
+    const { rule, evidence, deploymentProof } = selected;
     const prepared = this.prepare(rule, issue).outcome;
     const expiresAt = checkedAt + MANUAL_STATUS_TOKEN_TTL;
     const token = this.store.seal(JSON.stringify({ domain: MANUAL_STATUS_TOKEN_DOMAIN, actorId, expiresAt, toStatus: rule.toStatusId,
-      fence: this.manualStatusFence(issue, settingsVersion, context) }));
+      fence: this.manualStatusFence(issue, settingsVersion, context, deploymentProof?.digest),
+      ...(deploymentProof ? { deployment: deploymentProof.binding } : {}) }));
     return { kind: 'suggestion', suggestion: {
       issueId: issue.id, projectId: issue.projectId, issueVersion: issue.version, workflowVersion: workflow.version,
       fromStatus: issue.status, toStatus: rule.toStatusId,
@@ -285,8 +316,15 @@ export class AutomationService{
     try { proof = JSON.parse(this.store.unseal(token)); } catch { return stale(); }
     if (proof?.domain !== MANUAL_STATUS_TOKEN_DOMAIN || proof.actorId !== actorId || proof.toStatus !== proposedStatus ||
       typeof proof.expiresAt !== 'number' || !Number.isSafeInteger(proof.expiresAt) || Date.now() >= proof.expiresAt) return stale();
-    const context = this.manualStatusContext(issue);
-    if (proof.fence !== this.manualStatusFence(issue, settingsVersion, context)) return stale();
+    let deploymentDigest: string | undefined;
+    if (proof.deployment !== undefined) {
+      if (!isDeploymentStatusBinding(proof.deployment)) return stale();
+      const current = this.hooks.deploymentStatusProof?.(issue.id, proof.deployment);
+      if (!current) return stale();
+      deploymentDigest = current;
+    }
+    const context = this.manualStatusContext(issue, deploymentDigest !== undefined);
+    if (proof.fence !== this.manualStatusFence(issue, settingsVersion, context, deploymentDigest)) return stale();
   }
   processEvent(event:AutomationEvent):AutomationRun[]{
     if(typeof event.id!=='string'||!event.id||event.id.length>300||!AUTOMATION_TRIGGERS.includes(event.trigger)||!Number.isSafeInteger(event.gitlabProjectId)||event.gitlabProjectId<1||typeof event.branch!=='string'||event.branch.length>512||!Array.isArray(event.issueIds)||event.issueIds.length>10000||event.issueIds.some(id=>typeof id!=='string'||id.length>200)||!validTime(event.receivedAt))fail('정규화된 GitLab 이벤트를 확인해 주세요.');

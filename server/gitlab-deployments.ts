@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha } from '../shared/gitlab-links.js';
-import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabLink } from '../shared/types.js';
+import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabDeploymentStatusBinding, type GitlabLink } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl } from './gitlab-push.js';
 import type { Store } from './store.js';
 
@@ -29,6 +29,7 @@ const write = `INSERT INTO gitlab_deployments(instance,repository_id,deployment_
     environment_tier=COALESCE(excluded.environment_tier,gitlab_deployments.environment_tier),
     status=excluded.status, changed_at=excluded.changed_at, project_url=excluded.project_url,
     source=excluded.source, webhook_received_at=COALESCE(excluded.webhook_received_at,gitlab_deployments.webhook_received_at),
+    status_review_evidence=NULL,
     job_url=CASE WHEN excluded.project_url=gitlab_deployments.project_url
       THEN COALESCE(excluded.job_url,gitlab_deployments.job_url) ELSE excluded.job_url END
   WHERE excluded.sha=gitlab_deployments.sha AND excluded.environment=gitlab_deployments.environment
@@ -40,7 +41,9 @@ const write = `INSERT INTO gitlab_deployments(instance,repository_id,deployment_
 type StoredDeployment = Omit<GitlabDeployment, 'environmentTier' | 'jobUrl' | 'source' | 'mergeRequests'> & {
   environmentTier: string | null; jobUrl: string | null; source: 'sync' | null; mergeRequests: string;
 };
+type ReviewDeployment = StoredDeployment & { webhookReceivedAt: number | null; statusReviewEvidence: string | null };
 type DeploymentScope = Pick<GitlabDeployment, 'instance' | 'repositoryId'>;
+type DeploymentIdentity = DeploymentScope & Pick<GitlabDeployment, 'deploymentId'>;
 type ShaEvidence = DeploymentScope & Pick<GitlabDeployment, 'sha'>;
 type MergeRequestEvidence = DeploymentScope & GitlabDeploymentMergeRequest;
 type LinkScope = DeploymentScope & { objectId: string };
@@ -94,10 +97,12 @@ function fingerprint(baseUrl: string): string {
   return createHash('sha256').update(baseUrl).digest('hex').slice(0, 12);
 }
 
-function publicRow({ environmentTier, jobUrl, source, mergeRequests, ...record }: StoredDeployment, exporting = false): GitlabDeployment {
-  return { ...record, ...(environmentTier === null ? {} : { environmentTier }), ...(jobUrl === null ? {} : { jobUrl }),
+function publicRow(row: StoredDeployment, exporting = false): GitlabDeployment {
+  const { instance, repositoryId, deploymentId, environment, environmentTier, sha, status, changedAt, projectUrl, jobUrl, source, mergeRequests } = row;
+  return { instance, repositoryId, deploymentId, environment, sha, status, changedAt, projectUrl,
+    ...(environmentTier === null ? {} : { environmentTier }), ...(jobUrl === null ? {} : { jobUrl }),
     ...(source === null ? {} : { source }),
-    ...(mergeRequests !== '[]' && (exporting || record.status === 'success') ? { mergeRequests: JSON.parse(mergeRequests) as GitlabDeploymentMergeRequest[] } : {}) };
+    ...(mergeRequests !== '[]' && (exporting || status === 'success') ? { mergeRequests: JSON.parse(mergeRequests) as GitlabDeploymentMergeRequest[] } : {}) };
 }
 
 function jobAddress(projectUrl: string, jobId: number): string {
@@ -222,12 +227,22 @@ function mergeRequestLinkEvidence(link: GitlabLink, { instance, repositoryId, ob
   }
 }
 
+function matchesDeploymentLink(link: GitlabLink, deployment: GitlabDeployment): boolean {
+  const scope = linkScope(link);
+  if (!scope || scope.instance !== deployment.instance || scope.repositoryId !== deployment.repositoryId) return false;
+  if (linkEvidence(link, scope).some(({ sha }) => sha === deployment.sha)) return true;
+  const mergeRequest = mergeRequestLinkEvidence(link, scope);
+  return deployment.status === 'success' && !!mergeRequest &&
+    !!deployment.mergeRequests?.some(({ id, iid }) => id === mergeRequest.id && iid === mergeRequest.iid);
+}
+
 export class GitlabDeployments {
   constructor(private readonly store: Store) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_deployments (
       instance TEXT NOT NULL, repository_id INTEGER NOT NULL, deployment_id INTEGER NOT NULL,
       environment TEXT NOT NULL, environment_tier TEXT, sha TEXT NOT NULL, status TEXT NOT NULL,
       changed_at TEXT NOT NULL, project_url TEXT NOT NULL, job_url TEXT, source TEXT, webhook_received_at INTEGER,
+      status_review_evidence TEXT,
       PRIMARY KEY(instance, repository_id, deployment_id)
     ) STRICT;
     CREATE INDEX IF NOT EXISTS gitlab_deployments_revision ON gitlab_deployments(instance,repository_id,sha);
@@ -248,6 +263,7 @@ export class GitlabDeployments {
     const columns = new Set(store.db.prepare('PRAGMA table_info(gitlab_deployments)').all().map(row => row.name));
     if (!columns.has('source')) store.db.exec('ALTER TABLE gitlab_deployments ADD COLUMN source TEXT');
     if (!columns.has('webhook_received_at')) store.db.exec('ALTER TABLE gitlab_deployments ADD COLUMN webhook_received_at INTEGER');
+    if (!columns.has('status_review_evidence')) store.db.exec('ALTER TABLE gitlab_deployments ADD COLUMN status_review_evidence TEXT');
   }
 
   /** The webhook caller saves this observation with its receipt and any status changes. */
@@ -286,6 +302,82 @@ export class GitlabDeployments {
       if (deployment.status === 'success') mergeRequestsStored += this.saveMergeRequests(deployment);
     }
     return { stored: stored.size, mergeRequestsStored };
+  }
+
+  private scopedRow({ instance, repositoryId, deploymentId }: DeploymentIdentity): ReviewDeployment | undefined {
+    return this.store.db.prepare(`SELECT ${select}, d.webhook_received_at AS webhookReceivedAt, d.status_review_evidence AS statusReviewEvidence
+      FROM gitlab_deployments d
+      WHERE d.instance=? AND d.repository_id=? AND d.deployment_id=?`).get(instance, repositoryId, deploymentId) as ReviewDeployment | undefined;
+  }
+
+  deployment(identity: DeploymentIdentity): GitlabDeployment | undefined {
+    const row = this.scopedRow(identity);
+    if (row) return publicRow(row);
+  }
+
+  issueReviewTarget(issueId: string, identity: DeploymentIdentity) {
+    const row = this.scopedRow(identity);
+    if (!row) return;
+    const deployment = publicRow(row);
+    const prefix = `gitlab:${identity.instance}:${identity.repositoryId}`;
+    const rows = this.store.db.prepare(`SELECT json FROM gitlab_links WHERE issue_id=? AND id>=? AND id<? ORDER BY id`)
+      .all(issueId, `${prefix}:`, `${prefix};`) as { json: string }[];
+    const links = rows.map(({ json }) => JSON.parse(json) as GitlabLink);
+    if (links.some(link => matchesDeploymentLink(link, deployment))) {
+      return { deployment, links, fence: JSON.stringify([row, rows, this.competingSuccesses(deployment)]) };
+    }
+  }
+
+  reviewLink(links: readonly GitlabLink[], freshlyRead: GitlabDeployment): GitlabLink | undefined {
+    return links.find(link => !link.manualLinkId && matchesDeploymentLink(link, freshlyRead));
+  }
+
+  private latestOtherSuccess(deployment: GitlabDeployment, webhook: boolean) {
+    const { instance, repositoryId, environment, deploymentId } = deployment;
+    return this.store.db.prepare(`SELECT deployment_id AS deploymentId, sha, changed_at AS changedAt, source,
+      webhook_received_at AS webhookReceivedAt FROM gitlab_deployments
+      WHERE instance=? AND repository_id=? AND environment=? AND status='success' AND deployment_id<>?
+        AND (source IS NULL)=?
+      ORDER BY changed_at DESC, deployment_id DESC LIMIT 1`).get(instance, repositoryId, environment, deploymentId, Number(webhook)) as
+        { deploymentId: number; sha: string; changedAt: string; source: string | null; webhookReceivedAt: number | null } | undefined;
+  }
+
+  private competingSuccesses(deployment: GitlabDeployment) {
+    const { instance, repositoryId, environment, deploymentId } = deployment;
+    const reviewed = this.store.db.prepare(`SELECT deployment_id AS deploymentId, sha,
+      json_extract(status_review_evidence,'$.finishedAt') AS finishedAt FROM gitlab_deployments
+      WHERE instance=? AND repository_id=? AND environment=? AND status='success' AND deployment_id<>?
+        AND status_review_evidence IS NOT NULL
+      ORDER BY finishedAt DESC, deployment_id DESC LIMIT 1`).get(instance, repositoryId, environment, deploymentId) as
+        { deploymentId: number; sha: string; finishedAt: string } | undefined;
+    return { webhook: this.latestOtherSuccess(deployment, true), sync: this.latestOtherSuccess(deployment, false), reviewed };
+  }
+
+  hasCompetingSuccess(deployment: GitlabDeployment, occurredAt: string): boolean {
+    const { webhook, reviewed } = this.competingSuccesses(deployment);
+    return !!webhook && webhook.changedAt >= occurredAt || !!reviewed && reviewed.finishedAt >= occurredAt;
+  }
+
+  // Exact review evidence is refreshed independently of the associations accumulated for deployment history.
+  recordReviewEvidence({ instance, repositoryId, deploymentId, mergeRequests }: GitlabDeployment, finishedAt: string | null): void {
+    const proof = finishedAt ? JSON.stringify({ finishedAt, mergeRequests: [...(mergeRequests ?? [])].sort((a, b) => a.id - b.id) }) : null;
+    this.store.db.prepare(`UPDATE gitlab_deployments SET status_review_evidence=? WHERE instance=? AND repository_id=? AND deployment_id=?`)
+      .run(proof, instance, repositoryId, deploymentId);
+  }
+
+  statusReviewProof(issueId: string, binding: GitlabDeploymentStatusBinding): string | null {
+    const { linkId, occurredAt } = binding;
+    if (gitlabDeploymentTime(occurredAt) !== occurredAt) return null;
+    const row = this.scopedRow(binding);
+    if (row?.status !== 'success' || !row.statusReviewEvidence) return null;
+    const deployment = publicRow(row);
+    const { finishedAt, mergeRequests } = JSON.parse(row.statusReviewEvidence) as { finishedAt: string; mergeRequests: GitlabDeploymentMergeRequest[] };
+    const link = this.store.get<GitlabLink>('gitlab_links', linkId);
+    if (finishedAt !== occurredAt || !link || link.issueId !== issueId || link.manualLinkId ||
+        !matchesDeploymentLink(link, { ...deployment, mergeRequests }) || !matchesDeploymentLink(link, deployment)) return null;
+    const competing = this.competingSuccesses(deployment);
+    if (competing.webhook && competing.webhook.changedAt >= occurredAt || competing.reviewed && competing.reviewed.finishedAt >= occurredAt) return null;
+    return createHash('sha256').update(JSON.stringify([row, link, competing])).digest('hex');
   }
 
   matchingAutomaticLinks({ instance, repositoryId, deploymentId, sha }: GitlabDeployment): GitlabLink[] {

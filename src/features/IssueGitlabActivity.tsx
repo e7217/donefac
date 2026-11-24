@@ -3,14 +3,15 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
 import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
-import type { FeatureProps, GitlabBranchMergeRequestAttachment, GitlabIssueRefreshResult, GitlabLink, GitlabSettings,
-  GitlabStatusSuggestion } from '../../shared/types';
+import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
+  type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabSettings,
+  type GitlabStatusSuggestion } from '../../shared/types';
 import { api, ApiError, post, remove } from '../lib/api';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList,
   GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, isGitlabLinkedStatusRefreshResult, matchesBranchMergeRequestLink,
   type BranchMergeRequest, type GitlabLinkedStatusAction } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
-import { IssueGitlabDeployments } from './GitlabDeployments';
+import { deploymentSource, gitlabDeploymentKey, gitlabDeploymentStatusLabels, IssueGitlabDeployments } from './GitlabDeployments';
 
 type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   issueId: string;
@@ -26,12 +27,23 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
 type Draft = { repositoryId: string; url: string; existing?: GitlabLink };
 type LinkView = { source: readonly GitlabLink[]; rows: readonly GitlabLink[] };
 type RefreshFailure = GitlabIssueRefreshResult['failures'][number] & { label: string };
-type RefreshFeedback = { kind: 'checking'; linkId?: string; action: GitlabLinkedStatusAction } | { kind: 'failed'; message: string } | {
+type CheckingFeedback = { kind: 'checking'; linkId?: string; deploymentKey?: string; action: GitlabLinkedStatusAction };
+type RefreshFeedback = CheckingFeedback | { kind: 'failed'; message: string } | {
   kind: 'finished'; checked: number; skipped: number; failures: RefreshFailure[]; workspaceRefreshFailed: boolean;
   issueVersion: number;
   statusReview?: GitlabIssueRefreshResult['statusReview'];
   selectedReview?: 'reviewed' | 'no-proposal';
   verifiedState?: { label: string; state: string };
+  deploymentReview?: GitlabDeploymentReviewResult['state'];
+};
+
+const deploymentReviewMessages: Record<Exclude<GitlabDeploymentReviewResult['state'], 'ready'>, string> = {
+  'not-success': '이 배포가 성공하면 상태 변경을 검토할 수 있습니다.',
+  'completion-unverified': 'GitLab에서 이 배포 작업의 완료 시각을 확인할 수 없습니다.',
+  superseded: '같은 환경에 더 최근에 완료된 성공 배포가 있습니다.',
+  'latest-unverified': '이 배포가 같은 환경의 최신 성공 배포인지 확인할 수 없습니다.',
+  'link-unverified': '이 배포와 티켓의 자동 연결을 확인할 수 없습니다.',
+  'no-rule': '이 배포로 제안할 상태 변경이 없습니다.',
 };
 
 function errorMessage(cause: unknown) {
@@ -42,6 +54,25 @@ function gitlabLinkLabel(link: GitlabLink) {
   const kind = gitlabActivityKindLabel(link.kind);
   return link.kind === 'branch' ? `${kind} ${link.sourceBranch || link.title}`
     : `${kind} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid} ${link.title}`;
+}
+
+function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected: GitlabDeployment, issueId: string) {
+  const deployment = result?.deployment;
+  if (!deployment || gitlabDeploymentKey(deployment) !== gitlabDeploymentKey(selected) ||
+      deployment.environment !== selected.environment || deployment.sha !== selected.sha ||
+      !GITLAB_DEPLOYMENT_STATES.includes(deployment.status) || !Number.isFinite(Date.parse(deployment.changedAt))) return false;
+  const { state, statusReview } = result;
+  if (state !== 'ready') return Object.hasOwn(deploymentReviewMessages, state) && !statusReview;
+  if (deployment.status !== 'success' || !statusReview) return false;
+  if (statusReview.kind === 'ambiguous') return true;
+  const { suggestion } = statusReview;
+  const evidence = suggestion?.evidence;
+  return suggestion?.issueId === issueId && typeof suggestion.token === 'string' && Number.isFinite(Date.parse(suggestion.expiresAt)) &&
+    evidence?.trigger === 'deployment.succeeded' && evidence.link?.issueId === issueId && evidence.link.projectId === selected.repositoryId &&
+    Number.isFinite(Date.parse(evidence.occurredAt)) && evidence.deployment?.status === 'success' &&
+    gitlabDeploymentKey(evidence.deployment) === gitlabDeploymentKey(deployment) && evidence.deployment.environment === deployment.environment &&
+    evidence.deployment.sha === deployment.sha && evidence.deployment.changedAt === deployment.changedAt &&
+    evidence.deployment.projectUrl === deployment.projectUrl && evidence.deployment.jobUrl === deployment.jobUrl;
 }
 
 export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, refresh, notify, disabled, onDraftChange,
@@ -279,16 +310,38 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
     }
   }
 
-  async function checkGitlabStatus(trigger: HTMLButtonElement, selectedLink?: GitlabLink, action: GitlabLinkedStatusAction = 'refresh') {
+  async function runStatusCheck(trigger: HTMLButtonElement, check: CheckingFeedback, run: (controller: AbortController) => Promise<void>) {
     if (controlsDisabled || actionOpen || pending.current) return;
-    const reviewSelected = action === 'status-review';
     const hadFocus = document.activeElement === trigger;
     const controller = new AbortController();
     refreshRequest.current = controller;
     pending.current = true;
     setBusy(true);
-    setRefreshFeedback({ kind: 'checking', linkId: selectedLink?.id, action });
+    setRefreshFeedback(check);
     try {
+      await run(controller);
+    } catch (cause) {
+      if (!controller.signal.aborted) {
+        setRefreshFeedback({ kind: 'failed', message: errorMessage(cause) });
+        if ((check.linkId || check.deploymentKey) && cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
+          await refresh().catch(() => undefined);
+        }
+      }
+    } finally {
+      refreshRequest.current = null;
+      pending.current = false;
+      if (!controller.signal.aborted) {
+        if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
+          focusAfterClose.current = { target: trigger, revealStatusReview: check.action === 'status-review' };
+        }
+        setBusy(false);
+      }
+    }
+  }
+
+  function checkGitlabStatus(trigger: HTMLButtonElement, selectedLink?: GitlabLink, action: GitlabLinkedStatusAction = 'refresh') {
+    const reviewSelected = action === 'status-review';
+    return runStatusCheck(trigger, { kind: 'checking', linkId: selectedLink?.id, action }, async controller => {
       const refreshPath = selectedLink ? gitlabLinkedStatusRefreshPath(issueId, selectedLink.id, action) : `${path}/refresh`;
       const result = await api<GitlabIssueRefreshResult>(refreshPath, { method: 'POST', body: '{}', signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -324,21 +377,26 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
         statusReview: !selectedLink || reviewSelected ? result.statusReview : undefined,
         selectedReview: reviewSelected && verified ? result.statusReview ? 'reviewed' : 'no-proposal' : undefined,
         verifiedState: verified ? { label: gitlabLinkLabel(verified), state: gitlabActivityStateLabel(verified.state) } : undefined });
-    } catch (cause) {
-      if (!controller.signal.aborted) {
-        setRefreshFeedback({ kind: 'failed', message: errorMessage(cause) });
-        if (selectedLink && cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) await refresh().catch(() => undefined);
+    });
+  }
+
+  function checkDeploymentStatus(deployment: GitlabDeployment, trigger: HTMLButtonElement, refreshPage: () => void) {
+    const deploymentKey = gitlabDeploymentKey(deployment);
+    return runStatusCheck(trigger, { kind: 'checking', deploymentKey, action: 'status-review' }, async controller => {
+      const reviewPath = `/issues/${encodeURIComponent(issueId)}/gitlab-deployments/${encodeURIComponent(deployment.instance)}` +
+        `/${deployment.repositoryId}/${deployment.deploymentId}/status-review`;
+      const result = await api<GitlabDeploymentReviewResult>(reviewPath, { method: 'POST', body: '{}', signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!matchesDeploymentReview(result, deployment, issueId)) {
+        throw new Error('선택한 GitLab 배포의 상태 확인 응답을 확인할 수 없습니다.');
       }
-    } finally {
-      refreshRequest.current = null;
-      pending.current = false;
-      if (!controller.signal.aborted) {
-        if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
-          focusAfterClose.current = { target: trigger, revealStatusReview: reviewSelected };
-        }
-        setBusy(false);
-      }
-    }
+      refreshPage();
+      const workspaceRefreshFailed = await refresh().then(() => false, () => true);
+      if (!controller.signal.aborted) setRefreshFeedback({ kind: 'finished', checked: 1, skipped: 0, failures: [], workspaceRefreshFailed,
+        issueVersion, statusReview: result.statusReview, deploymentReview: result.state,
+        verifiedState: { label: `${deployment.environment} 배포 #${deployment.deploymentId}`,
+          state: gitlabDeploymentStatusLabels[result.deployment.status] } });
+    });
   }
 
   return <section className="issue-related-section" aria-label="GitLab">
@@ -348,7 +406,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
         {canCheckStatus && <button className="btn" type="button" aria-label="GitLab에서 상태 확인"
           title="이 업무에 연결된 브랜치의 HEAD와 MR·파이프라인 상태를 확인합니다."
           disabled={controlsDisabled || actionOpen} onClick={event => void checkGitlabStatus(event.currentTarget)}>
-          <RefreshCw aria-hidden="true" size={15} />{refreshFeedback?.kind === 'checking' && !refreshFeedback.linkId ? '확인 중…' : 'GitLab에서 상태 확인'}
+          <RefreshCw aria-hidden="true" size={15} />{refreshFeedback?.kind === 'checking' && !refreshFeedback.linkId && !refreshFeedback.deploymentKey
+            ? '확인 중…' : 'GitLab에서 상태 확인'}
         </button>}
         <button ref={addButton} className="btn" type="button" disabled={controlsDisabled || actionOpen}
           onClick={event => showEditor(event.currentTarget)}><Link2 aria-hidden="true" size={15} />GitLab 링크 추가</button>
@@ -420,7 +479,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
         hasMergeRequest: (branch, mr) => visibleLinks.some(link => matchesBranchMergeRequestLink(link, branch, mr)),
         attachMergeRequest: attachBranchMergeRequest }} />
       : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
-    <IssueGitlabDeployments issueId={issueId} links={links} />
+    <IssueGitlabDeployments issueId={issueId} links={links} review={{ disabled: controlsDisabled || actionOpen,
+      pendingKey: refreshFeedback?.kind === 'checking' ? refreshFeedback.deploymentKey : undefined,
+      check: (deployment, trigger, refreshPage) => void checkDeploymentStatus(deployment, trigger, refreshPage) }} />
   </section>;
 }
 
@@ -431,15 +492,19 @@ function GitlabStatusSuggestionCard({ suggestion, selected, canPrepare, disabled
   disabled: boolean;
   onPrepare: () => void;
 }) {
-  const { link, trigger, occurredAt } = suggestion.evidence;
-  const url = gitlabActivityUrl(link.webUrl, link.kind);
+  const { evidence } = suggestion;
+  const { link, trigger, occurredAt } = evidence;
+  const deployment = trigger === 'deployment.succeeded' ? evidence.deployment : undefined;
+  const url = deployment ? deploymentSource(deployment) : gitlabActivityUrl(link.webUrl, link.kind);
   const reference = `${gitlabActivityKindLabel(link.kind)} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid}`;
   return <section className="gitlab-activity-editor" aria-label="GitLab 상태 변경 제안">
     <h4>GitLab 상태 변경 제안</h4>
-    {selected && <p className="gitlab-activity-hint">선택한 GitLab 활동 기준</p>}
+    {deployment ? <p className="gitlab-activity-hint">선택한 GitLab 배포 기준</p>
+      : selected && <p className="gitlab-activity-hint">선택한 GitLab 활동 기준</p>}
     <p><strong>{suggestion.fromStatusLabel} <span aria-label="에서">→</span> {suggestion.toStatusLabel}</strong></p>
     <p className="gitlab-activity-hint">{suggestion.rule.name} · {AUTOMATION_TRIGGER_LABELS[trigger]}</p>
-    <p className="gitlab-activity-hint">저장소 #{link.projectId} · {reference}{link.sourceBranch && ` · ${link.sourceBranch}`}
+    <p className="gitlab-activity-hint">저장소 #{link.projectId} · {deployment
+      ? `${deployment.environment} 배포 #${deployment.deploymentId}` : `${reference}${link.sourceBranch ? ` · ${link.sourceBranch}` : ''}`}
       {' · '}<time dateTime={occurredAt}>{new Date(occurredAt).toLocaleString('ko-KR')}</time></p>
     {suggestion.blockReason && <p className="gitlab-activity-hint">확인 당시 {suggestion.blockReason}</p>}
     {(url || canPrepare) && <div className="gitlab-activity-actions">
@@ -458,17 +523,21 @@ function GitlabStatusSuggestionCard({ suggestion, selected, canPrepare, disabled
 function GitlabStatusFeedback({ feedback }: { feedback: RefreshFeedback | null }) {
   if (!feedback) return null;
   return <div className="gitlab-activity-feedback">
-    {feedback.kind === 'checking' && <p className="gitlab-activity-hint" role="status">{feedback.action === 'status-review'
+    {feedback.kind === 'checking' && <p className="gitlab-activity-hint" role="status">{feedback.deploymentKey
+      ? '선택한 GitLab 배포로 상태 변경을 검토하고 있습니다.' : feedback.action === 'status-review'
       ? '선택한 GitLab 활동으로 상태 변경을 검토하고 있습니다.' : 'GitLab에서 상태를 확인하고 있습니다.'}</p>}
     {feedback.kind === 'failed' && <p className="issue-form-error" role="alert">{feedback.message}</p>}
     {feedback.kind === 'finished' && <>
-      <p className="gitlab-activity-hint" role="status">{feedback.failures.length
+      {!feedback.deploymentReview && <p className="gitlab-activity-hint" role="status">{feedback.failures.length
         ? feedback.checked ? `GitLab 활동 ${feedback.checked}건의 상태를 확인했고 ${feedback.failures.length}건은 확인하지 못했습니다.`
           : `GitLab 활동 ${feedback.failures.length}건의 상태를 확인하지 못했습니다.`
         : feedback.checked ? `GitLab 활동 ${feedback.checked}건의 상태를 확인했습니다.` : '확인할 브랜치, MR 또는 파이프라인이 없습니다.'}
-        {feedback.skipped > 0 && ` 이전 활동 ${feedback.skipped}건은 이번 확인 범위를 벗어났습니다.`}</p>
+        {feedback.skipped > 0 && ` 이전 활동 ${feedback.skipped}건은 이번 확인 범위를 벗어났습니다.`}</p>}
       {feedback.verifiedState && <p className="gitlab-activity-hint" role="status">
         {feedback.verifiedState.label} · 확인한 상태 <strong>{feedback.verifiedState.state}</strong>
+      </p>}
+      {feedback.deploymentReview && feedback.deploymentReview !== 'ready' && <p className="gitlab-activity-hint" role="status">
+        {deploymentReviewMessages[feedback.deploymentReview]}
       </p>}
       {feedback.failures.length > 0 && <ul className="issue-form-error" aria-label="확인하지 못한 활동">
         {feedback.failures.map(failure => <li key={failure.linkId}><strong>{failure.label}</strong> · {failure.message}</li>)}

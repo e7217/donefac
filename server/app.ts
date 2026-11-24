@@ -733,6 +733,7 @@ export function createApp(options: {
   const automation=new AutomationService(store,{
     getGitlabSettings:()=>gitlab.settings(),
     latestVerifiedPipelineId:link=>gitlab.latestVerifiedPipelineId(link),
+    deploymentStatusProof:(issueId,binding)=>gitlab.deploymentStatusProof(issueId,binding),
     prepareChange:(before,status,onStatusChange)=>{
       const {issue,decision,automaticDueDate}=prepareIssueChange(before,{...before,status,version:before.version+1,updatedAt:now()});
       if(decision || automaticDueDate)onStatusChange((rule,event)=>{

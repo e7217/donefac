@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer, type RequestListener, type ServerResponse } from 'node:http';
 import test, { type TestContext } from 'node:test';
 import { setTimeout } from 'node:timers/promises';
-import { readGitlabDeploymentHistory } from '../../server/gitlab-deployment-read.js';
+import { readGitlabDeploymentHistory, readGitlabDeploymentStatus } from '../../server/gitlab-deployment-read.js';
 import { GitlabReadError } from '../../server/gitlab-read-sync.js';
 
 const repositoryId = 42;
@@ -38,6 +38,145 @@ function deployment(id: number, status = 'success', fields: Record<string, unkno
 function mergeRequest(id: number, iid = id, fields: Record<string, unknown> = {}) {
   return { id, iid, state: 'merged', target_project_id: repositoryId, ...fields };
 }
+
+const selected = { repositoryId, deploymentId: 8, environment: 'production/app', sha };
+const finishedAt = '2025-02-03T14:14:00+09:00';
+const finishedTime = '2025-02-03T05:14:00.000Z';
+
+function completedDeployment(id: number, time = finishedAt, fields: Record<string, unknown> = {}) {
+  return deployment(id, 'success', {
+    project_id: repositoryId, deployable: { id: id * 100, status: 'success', finished_at: time, commit: { id: sha } }, ...fields,
+  });
+}
+
+test('exact deployment review confirms one selected success and the latest environment before reading fresh merged MR evidence', async t => {
+  const calls: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    const url = new URL(request.url!, 'http://fixture.test');
+    calls.push(url.pathname);
+    assert.equal(request.method, 'GET');
+    assert.equal(request.headers['private-token'], token);
+    if (url.pathname === path) {
+      json(response, { id: repositoryId, web_url: `${origin}/gitlab/group/repo` });
+    } else if (url.pathname === `${path}/deployments/8`) {
+      assert.equal(url.search, '');
+      json(response, completedDeployment(8));
+    } else if (url.pathname === `${path}/deployments`) {
+      assert.deepEqual(Object.fromEntries(url.searchParams), {
+        environment: selected.environment, status: 'success', order_by: 'finished_at', sort: 'desc', per_page: '2', page: '1',
+      });
+      response.setHeader('X-Next-Page', '2');
+      json(response, [completedDeployment(8), completedDeployment(9, '2025-02-03T14:13:00+09:00')]);
+    } else if (url.pathname === `${path}/deployments/8/merge_requests`) {
+      assert.deepEqual(Object.fromEntries(url.searchParams), { scope: 'all', state: 'merged', per_page: '100', page: '1' });
+      json(response, [mergeRequest(301, 12), mergeRequest(302, 13, { target_project_id: 43 }),
+        mergeRequest(303, 14, { state: 'opened' })]);
+    } else assert.fail(`Unexpected GitLab request ${request.url}`);
+  });
+  const review = await readGitlabDeploymentStatus({ baseUrl: `${origin}/gitlab/`, token }, selected);
+  assert.deepEqual(review, {
+    state: 'ready', finishedAt: finishedTime,
+    deployment: { ...selected, status: 'success', changedAt: '2025-02-03T05:15:16.000Z', source: 'sync',
+      projectUrl: `${origin}/gitlab/group/repo`, jobUrl: `${origin}/gitlab/group/repo/-/jobs/800`,
+      mergeRequests: [{ id: 301, iid: 12 }] },
+  });
+  assert.deepEqual(calls, [path, `${path}/deployments/8`, `${path}/deployments`, `${path}/deployments/8/merge_requests`]);
+  assert.ok(!JSON.stringify(review).includes(token));
+});
+
+test('exact deployment review rejects mismatched identities and needs a successful job completion instead of an update time', async t => {
+  let exact = completedDeployment(8);
+  let deploymentCalls = 0;
+  const origin = await upstream(t, (request, response) => {
+    if (request.url === path) json(response, { id: repositoryId, web_url: `${origin}/gitlab/team/repo` });
+    else if (request.url === `${path}/deployments/8`) { deploymentCalls++; json(response, exact); }
+    else assert.fail(`Unexpected GitLab request ${request.url}`);
+  });
+  const connection = { baseUrl: `${origin}/gitlab`, token };
+  for (const fields of [{ id: 9 }, { project_id: 43 }, { sha: 'ac'.repeat(20) }, { environment: { name: 'Production/app' } }]) {
+    exact = completedDeployment(8, finishedAt, fields);
+    await assert.rejects(readGitlabDeploymentStatus(connection, selected), (error: unknown) => {
+      assert.ok(error instanceof GitlabReadError);
+      assert.equal(error.stage, 'deployments');
+      assert.equal(error.code, 'invalid-response');
+      return true;
+    });
+  }
+  for (const fields of [
+    { deployable: null, finished_at: finishedAt },
+    { deployable: { id: 800, status: 'success' } },
+    { deployable: { id: 800, status: 'running', finished_at: finishedAt } },
+    { deployable: { id: 800, status: 'success', finished_at: '9999-02-03T12:00:00Z' } },
+    { deployable: { id: 800, project_id: 43, status: 'success', finished_at: finishedAt } },
+    { deployable: { id: 800, status: 'success', finished_at: finishedAt, commit: { id: 'ba'.repeat(20) } } },
+  ]) {
+    exact = completedDeployment(8, finishedAt, fields);
+    const result = await readGitlabDeploymentStatus(connection, selected);
+    assert.equal(result.state, 'completion-unverified');
+    assert.equal(result.finishedAt, null);
+    assert.equal(result.deployment.status, 'success');
+  }
+  exact = completedDeployment(8, finishedAt, { status: 'running' });
+  const running = await readGitlabDeploymentStatus(connection, selected);
+  assert.equal(running.state, 'not-success');
+  assert.equal(running.finishedAt, null);
+  assert.equal(running.deployment.status, 'running');
+  assert.equal(deploymentCalls, 11);
+});
+
+test('exact deployment review withholds a proposal for newer, tied, partial, wrong-environment or unverified latest results', async t => {
+  const exact = completedDeployment(8);
+  const newer = completedDeployment(9, '2025-02-03T14:15:00+09:00');
+  const older = completedDeployment(9, '2025-02-03T14:13:00+09:00');
+  let latest: unknown = [];
+  let latestStatus = 200;
+  let nextPage = '';
+  let associationCalls = 0;
+  const origin = await upstream(t, (request, response) => {
+    const url = new URL(request.url!, 'http://fixture.test');
+    if (url.pathname === path) {
+      json(response, { id: repositoryId, web_url: `${origin}/gitlab/team/repo` });
+    } else if (url.pathname === `${path}/deployments/8`) {
+      json(response, exact);
+    } else if (url.pathname === `${path}/deployments`) {
+      response.statusCode = latestStatus;
+      response.setHeader('X-Next-Page', nextPage);
+      json(response, latest);
+    } else if (url.pathname === `${path}/deployments/8/merge_requests`) {
+      associationCalls++;
+      response.writeHead(403).end('association access denied');
+    } else assert.fail(`Unexpected GitLab request ${request.url}`);
+  });
+  const connection = { baseUrl: `${origin}/gitlab`, token };
+  latest = [newer, exact];
+  assert.equal((await readGitlabDeploymentStatus(connection, selected)).state, 'superseded');
+  for (const rows of [
+    [], [exact, exact], [exact, newer], [exact, completedDeployment(9)], [older], [exact, deployment(9)],
+    [completedDeployment(8, finishedAt, { sha: 'ba'.repeat(20) })],
+    [completedDeployment(8, finishedAt, { deployable: { id: 801, status: 'success', finished_at: finishedAt } })],
+    [completedDeployment(8, finishedAt, { environment: { name: 'Production/app' } })],
+  ]) {
+    latest = rows;
+    const result = await readGitlabDeploymentStatus(connection, selected);
+    assert.equal(result.state, 'latest-unverified');
+    assert.equal(result.finishedAt, finishedTime);
+    assert.equal(result.deployment.status, 'success');
+  }
+  latest = [exact];
+  nextPage = '2';
+  assert.equal((await readGitlabDeploymentStatus(connection, selected)).state, 'latest-unverified');
+  latestStatus = 404;
+  nextPage = '';
+  assert.equal((await readGitlabDeploymentStatus(connection, selected)).state, 'latest-unverified');
+  assert.equal(associationCalls, 0);
+
+  latestStatus = 200;
+  latest = [exact, older];
+  const ready = await readGitlabDeploymentStatus(connection, selected);
+  assert.equal(ready.state, 'ready');
+  assert.equal(ready.deployment.mergeRequests, undefined);
+  assert.equal(associationCalls, 1);
+});
 
 test('deployment REST reads normalize scoped URLs and retain only verified merged MR proof alongside partial failures', async t => {
   let foreignRequests = 0;

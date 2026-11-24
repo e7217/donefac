@@ -8,7 +8,7 @@ import { api, ApiError } from '../lib/api';
 import { gitlabActivityUrl } from './GitlabActivity';
 import './gitlab-deployments.css';
 
-const statusLabels: Record<GitlabDeployment['status'], string> = {
+export const gitlabDeploymentStatusLabels: Record<GitlabDeployment['status'], string> = {
   blocked: '차단됨',
   created: '대기 중',
   running: '실행 중',
@@ -26,8 +26,17 @@ type DeploymentRequest = { scope: string; offset: number };
 type DeploymentResponse = { scope: string; request: DeploymentRequest; links?: readonly GitlabLink[] } &
   ({ page: GitlabDeploymentPage } | { error: string });
 type SyncState = { pending: boolean; receipt?: GitlabDeploymentSyncResult; previousCompletedAt?: string; error?: string };
+type DeploymentReviewAction = {
+  disabled: boolean;
+  pendingKey?: string;
+  check: (deployment: GitlabDeployment, trigger: HTMLButtonElement, refreshPage: () => void) => void;
+};
 
-function deploymentSource({ jobUrl, projectUrl, sha }: GitlabDeployment) {
+export function gitlabDeploymentKey({ instance, repositoryId, deploymentId }: GitlabDeployment) {
+  return `${instance}:${repositoryId}:${deploymentId}`;
+}
+
+export function deploymentSource({ jobUrl, projectUrl, sha }: GitlabDeployment) {
   const project = gitlabActivityUrl(projectUrl, 'commit');
   if (!project || project.search || project.hash) return null;
   const repositoryPath = project.pathname.replace(/\/+$/u, '');
@@ -43,7 +52,12 @@ function deploymentSource({ jobUrl, projectUrl, sha }: GitlabDeployment) {
   return { href: project.href, label: 'GitLab 커밋 열기' };
 }
 
-function DeploymentRow({ deployment, showRepository }: { deployment: GitlabDeployment; showRepository: boolean }) {
+function DeploymentRow({ deployment, showRepository, review, refreshPage }: {
+  deployment: GitlabDeployment;
+  showRepository: boolean;
+  review?: DeploymentReviewAction;
+  refreshPage: () => void;
+}) {
   const source = deploymentSource(deployment);
   const { deploymentId, environment, environmentTier, repositoryId, status, changedAt, sha, mergeRequests } = deployment;
   const tier = environmentTier && environmentTier !== environment.toLowerCase() ? tierLabels.get(environmentTier) : undefined;
@@ -51,7 +65,7 @@ function DeploymentRow({ deployment, showRepository }: { deployment: GitlabDeplo
     <div className="gitlab-deployment-title">
       <strong>{environment}</strong>
       {tier && <span className="gitlab-deployment-tier">{tier}</span>}
-      <span className="gitlab-deployment-status">{statusLabels[status]}</span>
+      <span className="gitlab-deployment-status">{gitlabDeploymentStatusLabels[status]}</span>
     </div>
     <div className="gitlab-deployment-meta">
       {showRepository && <span>저장소 #{repositoryId}</span>}
@@ -63,6 +77,10 @@ function DeploymentRow({ deployment, showRepository }: { deployment: GitlabDeplo
     {source && <a className="gitlab-deployment-source" href={source.href} target="_blank" rel="noopener noreferrer">
       {source.label}<ExternalLink size={13} aria-hidden="true" />
     </a>}
+    {review && <button className="btn gitlab-deployment-review" type="button" aria-disabled={review.disabled}
+      onClick={event => { if (!review.disabled) review.check(deployment, event.currentTarget, refreshPage); }}>
+      {review.pendingKey === gitlabDeploymentKey(deployment) ? '배포 확인 중…' : '이 배포로 상태 검토'}
+    </button>}
   </li>;
 }
 
@@ -165,7 +183,7 @@ function DeploymentSync({ repositoryId, settingsVersion, attempt, statusAvailabl
   </div>;
 }
 
-function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, onRefresh, renderSyncControl }: {
+function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, onRefresh, renderSyncControl, review }: {
   path: string;
   repositoryId?: number;
   settingsVersion?: number;
@@ -175,6 +193,7 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   empty: string;
   onRefresh?: () => void;
   renderSyncControl?: (refreshPage: () => void) => ReactNode;
+  review?: DeploymentReviewAction;
 }) {
   const scope = JSON.stringify([path, repositoryId, settingsVersion]);
   const [request, setRequest] = useState<DeploymentRequest>({ scope, offset: 0 });
@@ -226,8 +245,8 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
     <div className="gitlab-deployment-results" aria-busy={pending}>
       {error && <p className="error-text" role="alert">{error}</p>}
       {page && page.items.length > 0 && <ul className="gitlab-deployment-list" role="list" aria-label="GitLab 배포 목록">
-        {page.items.map(deployment => <DeploymentRow key={`${deployment.instance}:${deployment.repositoryId}:${deployment.deploymentId}`}
-          deployment={deployment} showRepository={repositoryId === undefined} />)}
+        {page.items.map(deployment => <DeploymentRow key={gitlabDeploymentKey(deployment)}
+          deployment={deployment} showRepository={repositoryId === undefined} review={review} refreshPage={refreshPage} />)}
       </ul>}
       {!pending && page && page.items.length === 0 && <p className="gitlab-deployment-hint">{empty}</p>}
       {page && (previousAvailable || nextAvailable) && <nav className="gitlab-deployment-pages" aria-label="GitLab 배포 페이지">
@@ -239,13 +258,17 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   </>;
 }
 
-export function IssueGitlabDeployments({ issueId, links }: { issueId: string; links: readonly GitlabLink[] }) {
+export function IssueGitlabDeployments({ issueId, links, review }: {
+  issueId: string;
+  links: readonly GitlabLink[];
+  review: DeploymentReviewAction;
+}) {
   const headingId = useId();
   return <section className="gitlab-deployments gitlab-deployments-issue" aria-labelledby={headingId}>
     <DeploymentHistory key={issueId} path={`/issues/${encodeURIComponent(issueId)}/gitlab-deployments`} links={links}
       heading={<h4 id={headingId}><Rocket size={16} aria-hidden="true" />연결된 GitLab 배포</h4>}
       description="업무에 연결된 커밋 또는 GitLab이 배포에 포함됐다고 확인한 MR의 기록입니다."
-      empty="이 업무에서 확인된 GitLab 배포가 없습니다." />
+      empty="이 업무에서 확인된 GitLab 배포가 없습니다." review={review} />
   </section>;
 }
 

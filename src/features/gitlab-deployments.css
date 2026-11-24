@@ -159,6 +159,10 @@
   text-decoration: underline;
 }
 
+.gitlab-deployment-review {
+  justify-self: start;
+}
+
 .gitlab-deployment-pages {
   display: flex;
   align-items: center;
@@ -179,6 +183,7 @@
   .gitlab-deployment-sync button,
   .gitlab-deployment-repository select,
   .gitlab-deployment-source,
+  .gitlab-deployment-review,
   .gitlab-deployment-pages button {
     min-height: 44px;
   }

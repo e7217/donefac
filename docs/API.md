@@ -742,6 +742,12 @@ GitLab 인스턴스·저장소·이벤트·수신 주소 범위에서 `webhook-i
 
 동기화 응답에는 `repositoryId`, `settingsVersion`, `deploymentsRead`, `deploymentsStored`, `mergeRequestsStored`, `associationUnavailable`, `associationLimited`, `deploymentLimitReached`가 들어간다. 확인한 MR은 일부 페이지를 읽지 못해도 저장하고 기존 근거는 유지한다. 같은 저장소에서 동기화가 이미 진행 중이거나 읽는 동안 연결 설정이 변경되면 `409`를 반환한다. 새로 수신한 웹훅의 배포 상태를 우선하며, 별도로 검증한 MR 정보는 기록할 수 있다. 자체 백업 형식 74부터 배포의 `source`와 `mergeRequests`를 보존한다.
 
+### 선택한 배포로 상태 변경 검토
+
+브라우저의 `POST /api/issues/:id/gitlab-deployments/:instance/:repositoryId/:deploymentId/status-review`에 빈 객체를 보낸다. 현재 GitLab 연결의 티켓 배포 한 건에서 저장소·원본 배포 ID·환경 이름·전체 SHA를 대조하고 현재 상태를 `deployment`로 반환한다. 성공한 배포는 CI 작업의 완료 시각과 같은 환경의 최신 성공 목록을 확인한다. 작업 완료를 확인할 수 없거나 다른 성공 배포가 최신이면 현재 배포 상태를 돌려주고 상태 변경 제안을 보류한다. [GitLab 배포 단건 조회](https://docs.gitlab.com/api/deployments/#retrieve-a-deployment) · [GitLab 프로젝트 배포 조회](https://docs.gitlab.com/api/deployments/#list-all-project-deployments)
+
+`state`는 `not-success`, `completion-unverified`, `superseded`, `latest-unverified`, `link-unverified`, `no-rule`, `ready` 중 하나다. `ready`는 확인한 성공에 적용할 규칙이 있어 `statusReview`를 제공한 경우다. 제안 근거에는 이번 조회에서 확인한 배포·완료 시각과 티켓 자동 연결이 들어간다. 같은 저장소에서 연결한 전체 커밋 SHA·병합 SHA 또는 이번 조회에서 확인한 포함 MR의 ID와 IID를 적용한다. 조회와 제안은 티켓 상태를 바꾸지 않는다. 일반 티켓 저장에서 제안 토큰과 업무·규칙·연결·배포의 현재 근거를 다시 검사한다. [GitLab 배포에 포함된 MR 조회](https://docs.gitlab.com/api/deployments/#list-all-merge-requests-associated-with-a-deployment)
+
 ### 이관한 Jira 키로 연결
 
 `jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Teamspace 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Teamspace 키로 연결한다.

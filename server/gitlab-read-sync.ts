@@ -556,6 +556,19 @@ export function createGitlabDeploymentReader(connection: Connection, projectId: 
       return list('/deployments', new URLSearchParams({ order_by: 'id', sort: 'desc', per_page: String(pageSize), page: '1' }),
         'deployments', pageSize);
     },
+    async deployment(deploymentId: number) {
+      if (!Number.isSafeInteger(deploymentId) || deploymentId < 1) throw new GitlabReadError('deployments', 'invalid-response');
+      const url = new URL(projectUrl);
+      url.pathname += `/deployments/${deploymentId}`;
+      const row = await readJson(url, headers, 'deployments', signal);
+      if (!isReadObject(row)) throw new GitlabReadError('deployments', 'invalid-response');
+      return row;
+    },
+    latestSuccessfulDeployments(environment: string, pageSize: number) {
+      return list('/deployments', new URLSearchParams({
+        environment, status: 'success', order_by: 'finished_at', sort: 'desc', per_page: String(pageSize), page: '1',
+      }), 'deployments', pageSize);
+    },
     mergeRequests(deploymentId: number, pageSize: number, page: number) {
       if (!Number.isSafeInteger(deploymentId) || deploymentId < 1) throw new GitlabReadError('deployment-merge-requests', 'invalid-response');
       return list(`/deployments/${deploymentId}/merge_requests`,
