@@ -375,7 +375,24 @@ test('a selected proven Jira blocker schedules across project calendars without 
   const plannedDates = (proposal: AutomaticSchedulePreview) => proposal.changes.map(row => [row.id, row.toStart, row.toEnd]);
   const expected = [[target.id, '2026-11-21', '2026-11-24'], [successor.id, '2026-11-25', '2026-11-25']];
 
+  const rowInput = (issue: Issue, startDate: string, endDate: string) => ({ projectId: issue.projectId,
+    issue: { id: issue.id, expectedVersion: issue.version }, changes: { startDate, endDate }, reviewIncomingTeamBlockers: true,
+  });
+  const currentIssues = (await f.workspace()).issues;
+  const targetInput = currentIssues.find(issue => issue.id === target.id)!;
+  const premature = await f.call<SchedulePastePreview>('/schedule/row-edit/preview', 'POST', rowInput(targetInput, '2026-11-20', '2026-11-24'));
+  assert.equal(premature.previewId, null);
+  assert.equal(premature.errors.length, 2);
+  assert.ok(premature.errors.some(({ message }) => message.includes(source.key) && message.includes('2026-11-21 이후')));
+  assert.ok(premature.errors.some(({ message }) => message.includes(later.key) && message.includes('2026-11-30 이후')));
+  const valid = await f.call<SchedulePastePreview>('/schedule/row-edit/preview', 'POST', rowInput(targetInput, '2026-11-30', '2026-12-01'));
+  assert.ok(valid.previewId);
+  const currentSuccessor = currentIssues.find(issue => issue.id === successor.id)!;
+  const unproved = await f.call<SchedulePastePreview>('/schedule/row-edit/preview', 'POST', rowInput(currentSuccessor, '2026-11-18', '2026-11-18'));
+  assert.ok(unproved.previewId);
+
   const native = await f.call<IssueRelation>(relationPath, 'POST', { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }, 201);
+  await f.call('/schedule/row-edit/apply', 'POST', { previewId: valid.previewId }, 409);
   const preferred = (await blockers()).filter(row => row.sourceIssueId === source.id && row.targetIssueId === target.id);
   assert.deepEqual(preferred, [{ id: native.id, sourceIssueId: source.id, targetIssueId: target.id, version: native.version }]);
   assert.deepEqual(plannedDates(await preview(native)), expected);

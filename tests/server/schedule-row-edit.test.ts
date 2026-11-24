@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  Dependency, Issue, Project, SchedulePasteApplyResult, SchedulePastePreview, ScheduleRowEditInput, WorkCalendar, WorkspaceSnapshot,
+  Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, SchedulePastePreview, ScheduleRowEditInput, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const reviewPath = '/schedule/row-edit/preview';
@@ -60,6 +60,9 @@ async function fixture(t: TestContext) {
     },
     link(predecessor: Issue, successor: Issue) {
       return call<Dependency>('/dependencies', 201, 'POST', { predecessorId: predecessor.id, successorId: successor.id });
+    },
+    blocker(source: Issue, target: Issue, actorId = actor) {
+      return call<IssueRelation>(`/issues/${source.id}/relations`, 201, 'POST', { type: 'blocks', direction: 'outgoing', otherIssueId: target.id }, actorId);
     },
     workspace: () => call<WorkspaceSnapshot>('/workspace'),
     review: (body: unknown, status = 200) => call<SchedulePastePreview>(reviewPath, status, 'POST', body),
@@ -216,6 +219,79 @@ test('row edit rejects apply after anchor, related issue, link or calendar chang
     await f.apply(previewId, 409);
     assert.deepEqual(await f.workspace(), before, scenario);
   }
+});
+
+test('row edit checks open incoming cross-project blockers with the receiving calendar and preserves missing-date warnings', async t => {
+  const f = await fixture(t);
+  const target = await f.issue('검토할 후행 업무', { startDate: null, endDate: null });
+  const source = await f.issue('다른 프로젝트 선행 업무', { projectId: 'project-neo', endDate: '2026-11-26' });
+  const unknown = await f.issue('종료일이 미정인 선행 업무', { projectId: source.projectId, startDate: null, endDate: null });
+  const local = await f.issue('프로젝트 내 차단', { endDate: '2027-01-26' });
+  const outgoing = await f.issue('프로젝트 간 후행', { projectId: source.projectId, endDate: '2027-01-26' });
+  const closed = await f.issue('종료한 선행 업무', { projectId: source.projectId, endDate: '2027-01-26' });
+  await f.call(`/issues/${closed.id}`, 200, 'PATCH', { expectedVersion: closed.version, status: 'done' });
+  for (const predecessor of [source, unknown, local, closed]) await f.blocker(predecessor, target);
+  await f.blocker(target, outgoing);
+  const calendarPath = `/projects/${target.projectId}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { ...calendar, expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-27', isWorking: false, label: '후행 프로젝트 휴무' }],
+  });
+  const premature = { projectId: target.projectId, issue: versionOf(target), changes: { startDate: '2026-11-27', endDate: '2026-11-30' } };
+  await f.review({ ...premature, reviewIncomingTeamBlockers: 'true' }, 400);
+  const before = await f.workspace();
+  const manual = await f.review({ ...premature, reviewIncomingTeamBlockers: false });
+  assert.ok(reviewId(manual));
+  assert.deepEqual(manual.warnings, []);
+  const conflict = await f.review({ ...premature, reviewIncomingTeamBlockers: true });
+  assert.equal(conflict.previewId, null);
+  assert.deepEqual(conflict.errors, [{ line: null, issueId: target.id, key: target.key,
+    message: `프로젝트 간 선행 업무 ${source.key}의 종료일 2026-11-26에 따라 시작일은 2026-11-30 이후여야 합니다.`,
+  }]);
+  assert.deepEqual(await f.workspace(), before);
+
+  const corrected = await f.review({ ...premature, changes: { startDate: '2026-11-30', endDate: '2026-12-01' }, reviewIncomingTeamBlockers: true });
+  assert.deepEqual(corrected.warnings, [`프로젝트 간 차단 관계 ${unknown.key} → ${target.key} · ${unknown.key}의 종료일을 확인해 주세요.`]);
+  const previewId = reviewId(corrected);
+  const applied = await f.apply(previewId);
+  assert.deepEqual(applied.warnings, corrected.warnings);
+  assert.deepEqual(applied.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), [[target.id, '2026-11-30', '2026-12-01']]);
+  assert.deepEqual(await f.apply(previewId), applied);
+  const committed = await f.workspace();
+  assert.deepEqual(committed.teamScheduleBlockers, before.teamScheduleBlockers);
+  assert.deepEqual(committed.dependencies, before.dependencies);
+  const undone = await f.undo(applied.undoId);
+  assert.deepEqual(dates(undone.updated[0]), dates(target));
+});
+
+test('row edit invalidates reviewed incoming blockers after additions, source changes and removals', async t => {
+  const f = await fixture(t);
+  const target = await f.issue('후행 일정 미정', { startDate: null, endDate: null });
+  const source = await f.issue('선행 종료 미정', { projectId: 'project-neo', endDate: null });
+  const input: ScheduleRowEditInput = { projectId: target.projectId, issue: versionOf(target),
+    changes: { startDate: '2026-11-30', endDate: '2026-12-01' }, reviewIncomingTeamBlockers: true,
+  };
+  const expectStale = async (previewId: string) => {
+    const before = await f.workspace();
+    const rejection = await f.call<{ error: string }>(applyPath, 409, 'POST', { previewId });
+    assert.match(rejection.error, /프로젝트 간 선행 업무 또는 차단 관계가 변경되었습니다/u);
+    assert.deepEqual(await f.workspace(), before);
+  };
+  const originallyEmpty = reviewId(await f.review(input));
+  const relation = await f.blocker(source, target, otherActor);
+  await expectStale(originallyEmpty);
+
+  const withUnknownDate = await f.review(input);
+  assert.ok(withUnknownDate.warnings.some(warning => warning.includes(source.key)));
+  await f.call(`/issues/${source.id}`, 200, 'PATCH', { expectedVersion: source.version, endDate: '2026-11-26' }, otherActor);
+  await expectStale(reviewId(withUnknownDate));
+
+  const withFinishedSource = reviewId(await f.review(input));
+  await f.call(`/issues/${source.id}/relations/${relation.id}?expectedVersion=${relation.version}`, 200, 'DELETE', undefined, otherActor);
+  await expectStale(withFinishedSource);
+
+  const refreshed = await f.apply(reviewId(await f.review(input)));
+  assert.deepEqual(refreshed.updated.map(({ id }) => id), [target.id]);
 });
 
 test('row edit preview cannot authorize invalid dates, self links, cycles, duplicate pairs or foreign references', async t => {

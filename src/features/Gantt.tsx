@@ -55,7 +55,7 @@ import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDep
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
-import { findTeamBlockerChoices } from './team-follow-up-choices';
+import { groupActiveTeamBlockers } from './team-follow-up-choices';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
 import { GanttDateRangeLane, GanttDateRangePrompt, type FixedDateEdge } from './GanttDateRangePicker';
 import { NewIssueModal, type ScheduleIssueLink } from './NewIssueModal';
@@ -733,7 +733,7 @@ function ProjectGantt(props: GanttProps) {
   }
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
   const teamGitlabSummaries = useMemo(() => allProjects ? summarizeIssueGitlabLinks(data.gitlabLinks) : null, [allProjects, data.gitlabLinks]);
-  const teamBlockerChoices = findTeamBlockerChoices(data, projectsById);
+  const { outgoing: teamBlockerChoices, incoming: incomingTeamBlockers } = useMemo(() => groupActiveTeamBlockers(data, projectsById), [data, projectsById]);
   const projectIssues = useMemo(() => {
     if (!allProjects) return data.issues.filter(issue => issue.projectId === projectId);
     const byProject = new Map(data.projects.map(project => [project.id, [] as Issue[]]));
@@ -2382,7 +2382,7 @@ function ProjectGantt(props: GanttProps) {
       <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
         disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
       <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
-      {linkedIssueIds.has(issue.id)
+      {(linkedIssueIds.has(issue.id) || incomingTeamBlockers.has(issue.id))
         ? <button type="button" className="btn gantt-missing-date-action" disabled={busy || Boolean(linkPicker || activeDatePicker)}
           onClick={event => openRowScheduleEdit(issue, event.currentTarget)}><CalendarRange size={13} aria-hidden="true" />연결 기준으로 일정 제안</button>
         : <button type="button" className="btn btn-ghost" disabled={busy || Boolean(activeDatePicker)}
@@ -2541,6 +2541,7 @@ function ProjectGantt(props: GanttProps) {
   </div>
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} issueAliases={data.issueAliases}
+      incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
       initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}

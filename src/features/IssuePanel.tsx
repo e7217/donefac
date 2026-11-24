@@ -45,7 +45,7 @@ import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection 
 import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
 import { GanttCascadeDialog, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
-import { findTeamBlockerChoices } from './team-follow-up-choices';
+import { groupActiveTeamBlockers } from './team-follow-up-choices';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
 import './issues.css';
 import './issue-decision-source.css';
@@ -235,8 +235,9 @@ function IssuePanelContent(props: IssuePanelProps) {
     issue: Issue; initialDates: ScheduleBulkDateChanges; initialDateDraft?: Issue;
   } | null>(null);
   const [teamFollowUp, setTeamFollowUp] = useState<TicketTeamFollowUp | null>(null);
-  const teamFollowUpChoices = useMemo(() => findTeamBlockerChoices(data,
-    new Map(data.projects.map(project => [project.id, project]))).get(issueId) ?? [], [data, issueId]);
+  const teamBlockers = useMemo(() => groupActiveTeamBlockers(data,
+    new Map(data.projects.map(project => [project.id, project]))), [data]);
+  const teamFollowUpChoices = teamBlockers.outgoing.get(issueId) ?? [];
   const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; draftFields: ScheduleDraftFields } | null>(null);
   const scheduleUndoScope: ScheduleUndoScope | null = issue ? { kind: 'issue', id: issue.id } : null;
   const { undoId: scheduleUndoId, remember: rememberScheduleUndo, undo: undoSchedule } = useScheduleUndo(
@@ -1257,6 +1258,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       initialDateDraft={rowScheduleEdit.initialDateDraft}
       issues={data.issues} issueAliases={data.issueAliases}
+      incomingTeamBlockers={teamBlockers.incoming.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} undoScope={scheduleUndoScope ?? undefined} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}

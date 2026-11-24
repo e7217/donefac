@@ -18,6 +18,7 @@ import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/works
 import { ApiError, api } from '../lib/api';
 import { scheduleUndoHeaders } from './schedule-undo';
 import { errorMessage, todayDate } from './schedule-utils';
+import type { TeamIncomingBlocker } from './team-follow-up-choices';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import './schedule-paste.css';
 import './gantt-row-schedule-edit.css';
@@ -27,6 +28,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issues: readonly Issue[];
   issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
+  incomingTeamBlockers?: readonly TeamIncomingBlocker[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
@@ -71,6 +73,7 @@ const dates = [
   { field: 'endDate', label: '종료일', from: 'fromEnd', to: 'toEnd' },
   { field: 'dueDate', label: '목표 마감일', from: 'fromDue', to: 'toDue' },
 ] as const;
+const scheduleEndpoints = ['startDate', 'endDate'] as const;
 const pendingLabels: Record<Pending, string> = {
   preview: '일정과 연결을 검토하는 중입니다.',
   apply: '검토한 변경을 적용하는 중입니다.',
@@ -144,11 +147,13 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, issueAliases, dependencies, calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
   notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
+  const [suggestionOverrides, setSuggestionOverrides] = useState<ScheduleBulkDateChanges>({});
+  const [suggestionDuration, setSuggestionDuration] = useState('3');
   const [drafts, setDrafts] = useState(() => [linkDraft(1)]);
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const nextDraftId = useRef(2);
@@ -162,6 +167,7 @@ export function GanttRowScheduleEdit({
   const [clock, setClock] = useState(currentTime);
   const modal = useRef<HTMLElement>(null);
   const initialDateInput = useRef<HTMLInputElement>(null);
+  const suggestionDurationInput = useRef<HTMLInputElement>(null);
   const previewButton = useRef<HTMLButtonElement>(null);
   const reviewHeading = useRef<HTMLHeadingElement>(null);
   const errorNotice = useRef<HTMLParagraphElement>(null);
@@ -202,12 +208,16 @@ export function GanttRowScheduleEdit({
     if (edit) { edits.push(edit); editGroups.push(index + 1); }
   }
   const duplicateDraft = ({ target }: DraftResolution) => target !== undefined && (targetCounts.get(target) ?? 0) > 1;
+  const suggestionApplied = Object.keys(suggestionOverrides).length > 0;
   const payload: ScheduleRowEditInput = { projectId: issue.projectId, issue: versionedIssue(anchor), changes,
     ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}),
-    ...(rescheduleSuccessors ? { rescheduleSuccessors } : {}) };
+    ...(rescheduleSuccessors ? { rescheduleSuccessors } : {}),
+    ...(suggestionApplied ? { reviewIncomingTeamBlockers: true } : {}) };
   const input = JSON.stringify({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
+    incoming: suggestionApplied ? incomingTeamBlockers.map(({ relation, source }) =>
+      [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate]) : undefined,
   });
   const linksValid = resolvedDrafts.every(draft => draft.valid && !duplicateDraft(draft));
   const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length) &&
@@ -224,7 +234,7 @@ export function GanttRowScheduleEdit({
 
   const calendarMath = useMemo(() => createCalendarMath(calendar ?? defaultWorkCalendar(issue.projectId)), [calendar, issue.projectId]);
   const showMissingDateSuggestion = (!nextDates.startDate || !nextDates.endDate) &&
-    (links.length > 0 || resolvedDrafts.some(({ edit }) => edit?.action === 'add'));
+    (links.length > 0 || incomingTeamBlockers.length > 0 || resolvedDrafts.some(({ edit }) => edit?.action === 'add'));
   const earliestDates: Partial<Record<keyof typeof SCHEDULE_DATE_LABELS, string>> = {};
   for (const [index, resolved] of resolvedDrafts.entries()) {
     if (!resolved.predecessor || duplicateDraft(resolved)) continue;
@@ -304,7 +314,17 @@ export function GanttRowScheduleEdit({
 
   function changeDate(field: DateField, value: string) {
     setEditedDates(previous => ({ ...previous, [field]: value || null }));
+    releaseSuggestedDate(field);
     invalidate();
+  }
+
+  function releaseSuggestedDate(field: DateField) {
+    setSuggestionOverrides(previous => {
+      if (!Object.hasOwn(previous, field)) return previous;
+      const next = { ...previous };
+      delete next[field];
+      return next;
+    });
   }
 
   function adoptSavedDate(field: DateField) {
@@ -314,7 +334,36 @@ export function GanttRowScheduleEdit({
       delete next[field];
       return next;
     });
+    releaseSuggestedDate(field);
     invalidate();
+  }
+
+  function useSuggestedDates(range: { startDate: string; endDate: string }) {
+    const next = { ...editedDates };
+    const overrides = { ...suggestionOverrides };
+    for (const field of scheduleEndpoints) {
+      if (nextDates[field]) continue;
+      overrides[field] = editedDates[field];
+      next[field] = range[field];
+    }
+    setSuggestionOverrides(overrides);
+    setEditedDates(next);
+    invalidate();
+    requestAnimationFrame(() => previewButton.current?.focus());
+  }
+
+  function recalculateSuggestedDates() {
+    const next = { ...editedDates };
+    for (const field of scheduleEndpoints) {
+      if (!Object.hasOwn(suggestionOverrides, field)) continue;
+      const previous = suggestionOverrides[field];
+      if (previous === undefined) delete next[field];
+      else next[field] = previous;
+    }
+    setEditedDates(next);
+    setSuggestionOverrides({});
+    invalidate();
+    requestAnimationFrame(() => (suggestionDurationInput.current ?? initialDateInput.current)?.focus());
   }
 
   function changeDraft(id: number, changes: LinkDraftChanges) {
@@ -491,21 +540,28 @@ export function GanttRowScheduleEdit({
               </div>;
             })}
           </div>
+          {incomingTeamBlockers.length > 0 && <details className="gantt-row-edit-existing">
+            <summary>프로젝트 간 선행 업무 {incomingTeamBlockers.length}개</summary>
+            <ul>{incomingTeamBlockers.map(({ relation, source }) => <li key={relation.id}>
+              <strong>{issueText(source)}</strong>
+              <span>종료일 {source.endDate ?? '미정'} · {ruleText({ type: 'FS', lagDays: 0 })}{relation.origin === 'jira' && ' · Jira 이관 관계'}</span>
+            </li>)}</ul>
+          </details>}
           {showMissingDateSuggestion && <MissingDateSuggestion
             startDate={nextDates.startDate} endDate={nextDates.endDate} calendarMath={calendarMath}
-            links={linksValid ? linksForDateSuggestion(links, edits, projectIssues) : null}
-            disabled={editLocked || !currentIssue || reloadNeeded} onUse={range => {
-              setEditedDates(previous => ({
-                ...previous,
-                ...(!nextDates.startDate ? { startDate: range.startDate } : {}),
-                ...(!nextDates.endDate ? { endDate: range.endDate } : {}),
-              }));
-              invalidate();
-              requestAnimationFrame(() => previewButton.current?.focus());
-            }} />}
+            links={linksValid ? [
+              ...linksForDateSuggestion(links, edits, projectIssues),
+              ...incomingTeamBlockers.map(({ source }): MissingScheduleLink => ({ role: 'predecessor', type: 'FS', lagDays: 0, other: source })),
+            ] : null}
+            duration={suggestionDuration} durationInput={suggestionDurationInput} onDurationChange={setSuggestionDuration}
+            disabled={editLocked || !currentIssue || reloadNeeded} onUse={useSuggestedDates} />}
+          {suggestionApplied && <div className="gantt-row-edit-actions">
+            <button className="btn" type="button" disabled={reloadNeeded} onClick={recalculateSuggestedDates}>제안 날짜 다시 계산</button>
+          </div>}
           <WorkingDayRangePicker calendarMath={calendarMath} startDate={nextDates.startDate ?? null} endDate={nextDates.endDate ?? null}
             disabled={editLocked || !currentIssue} onApply={range => {
               setEditedDates(previous => ({ ...previous, ...range }));
+              setSuggestionOverrides({});
               invalidate();
             }} />
         </fieldset>
@@ -527,7 +583,7 @@ export function GanttRowScheduleEdit({
             <Plus size={15} aria-hidden="true" />연결 변경 추가
           </button>
           {drafts.length >= MAX_SCHEDULE_ROW_DEPENDENCY_EDITS && <p className="gantt-row-edit-hint">한 번에 연결 변경 {MAX_SCHEDULE_ROW_DEPENDENCY_EDITS}개까지 검토할 수 있습니다.</p>}
-          {(['startDate', 'endDate'] as const).map(endpoint => {
+          {scheduleEndpoints.map(endpoint => {
             const date = earliestDates[endpoint];
             if (!date) return null;
             return <div key={endpoint} className="gantt-row-edit-suggestion">
@@ -602,16 +658,18 @@ export function GanttRowScheduleEdit({
   </div>;
 }
 
-function MissingDateSuggestion({ startDate, endDate, calendarMath, links, disabled, onUse }: {
+function MissingDateSuggestion({ startDate, endDate, calendarMath, links, duration, durationInput, onDurationChange, disabled, onUse }: {
   startDate: string | null;
   endDate: string | null;
   calendarMath: ReturnType<typeof createCalendarMath>;
   links: MissingScheduleLink[] | null;
+  duration: string;
+  durationInput: React.Ref<HTMLInputElement>;
+  onDurationChange: (value: string) => void;
   disabled: boolean;
   onUse: (dates: { startDate: string; endDate: string }) => void;
 }) {
   const uid = useId();
-  const [duration, setDuration] = useState('3');
   const workingDays = /^\d+$/u.test(duration.trim()) ? Number(duration) : NaN;
   const validDuration = Number.isSafeInteger(workingDays) && workingDays >= 1 && workingDays <= MAX_WORKING_DURATION_DAYS;
   const suggestion = links && validDuration
@@ -621,8 +679,8 @@ function MissingDateSuggestion({ startDate, endDate, calendarMath, links, disabl
   return <section className="gantt-missing-date-suggestion" aria-labelledby={`${uid}-heading`}>
     <h3 id={`${uid}-heading`}>선후행 연결로 날짜 제안</h3>
     <div className="gantt-missing-date-suggestion-controls">
-      <label>제안 근무일 수<input className="field" type="text" inputMode="numeric" value={duration}
-        disabled={disabled} aria-invalid={!validDuration || undefined} onChange={event => setDuration(event.currentTarget.value)}
+      <label>제안 근무일 수<input ref={durationInput} className="field" type="text" inputMode="numeric" value={duration}
+        disabled={disabled} aria-invalid={!validDuration || undefined} onChange={event => onDurationChange(event.currentTarget.value)}
         onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault(); }} /></label>
       <button className="btn" type="button" disabled={disabled || !range} onClick={() => { if (range) onUse(range); }}>
         제안 날짜 입력

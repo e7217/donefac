@@ -6,7 +6,7 @@ import { isRelationId } from '../shared/issue-relations.js';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkInput,
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
-import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, checkDependencySchedule, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
@@ -33,6 +33,8 @@ interface PasteHooks {
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
   projectBlockers(projectIds: readonly string[] | null): TeamScheduleBlocker[];
+  directBlockers(targetId: string): TeamScheduleBlocker[];
+  isTerminal(issue: Issue): boolean;
   commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[],
     origin: ScheduleUndoOrigin): SchedulePasteApplyResult;
 }
@@ -62,20 +64,29 @@ interface PasteProposal extends ScheduleScope {
   followUpWarnings?: string[];
   missingDateWarnings?: string[];
   blockerRelations?: ScheduleBlockerLinkCandidate[];
+  incomingTeamBlockerGuard?: string;
   kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit';
   result?: SchedulePasteApplyResult;
 }
 
 type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'resolvedKeyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
-  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations'>;
+  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard'>;
 
 type DependencyAddition = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
 type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
+type IncomingTeamBlocker = { relation: TeamScheduleBlocker; source: Issue };
 
 const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
 const dateKeys = ['startDate', 'endDate', 'dueDate'] as const;
+const teamBlockerScheduleRule = { type: 'FS', lagDays: 0 } as const;
+
+function incomingTeamBlockerGuard(blockers: IncomingTeamBlocker[]): string {
+  const fields = blockers.map(({ relation, source }) => [relation.id, relation.sourceIssueId, relation.targetIssueId,
+    relation.version, relation.origin ?? 'teamspace', source.projectId, source.version, source.status, source.endDate]);
+  return createHash('sha256').update(JSON.stringify(fields)).digest('hex');
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -238,10 +249,12 @@ function parseRowDependencyEdit(raw: unknown): ScheduleRowDependencyEdit {
 function parseRowEditInput(raw: unknown): Pick<ScheduleRowEditInput, 'projectId' | 'issue' | 'changes'> & {
   linkEdits: { line: number | null; input: ScheduleRowDependencyEdit }[];
   rescheduleSuccessors: boolean;
+  reviewIncomingTeamBlockers: boolean;
 } {
   if (!isRecord(raw) || !isId(raw.projectId) ||
-    Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency', 'dependencies', 'rescheduleSuccessors'].includes(key)) ||
+    Object.keys(raw).some(key => !['projectId', 'issue', 'changes', 'dependency', 'dependencies', 'rescheduleSuccessors', 'reviewIncomingTeamBlockers'].includes(key)) ||
     (Object.hasOwn(raw, 'rescheduleSuccessors') && typeof raw.rescheduleSuccessors !== 'boolean') ||
+    (Object.hasOwn(raw, 'reviewIncomingTeamBlockers') && typeof raw.reviewIncomingTeamBlockers !== 'boolean') ||
     (Object.hasOwn(raw, 'dependency') && Object.hasOwn(raw, 'dependencies'))) {
     throw new SchedulePasteError(400, '프로젝트와 업무 일정 변경 항목을 확인해 주세요.');
   }
@@ -260,6 +273,7 @@ function parseRowEditInput(raw: unknown): Pick<ScheduleRowEditInput, 'projectId'
     changes: raw.changes === undefined ? {} : parseDateChanges(raw.changes, true),
     linkEdits,
     rescheduleSuccessors: raw.rescheduleSuccessors === true,
+    reviewIncomingTeamBlockers: raw.reviewIncomingTeamBlockers === true,
   };
 }
 
@@ -447,6 +461,14 @@ export class SchedulePasteService {
     if (scope.projectId !== null) return this.projectState(scope.projectId);
     const groups = (scope.projectIds ?? []).map(id => this.projectState(id));
     return { issues: groups.flatMap(group => group.issues), dependencies: groups.flatMap(group => group.dependencies) };
+  }
+
+  private incomingTeamBlockers(target: Issue, hooks: PasteHooks): IncomingTeamBlocker[] {
+    if (hooks.isTerminal(target)) return [];
+    return hooks.directBlockers(target.id).flatMap(relation => {
+      const source = this.store.get<Issue>('issues', relation.sourceIssueId);
+      return source && source.projectId !== target.projectId && !hooks.isTerminal(source) ? [{ relation, source }] : [];
+    }).sort((left, right) => left.relation.id.localeCompare(right.relation.id));
   }
 
   private scopeForIssues(issueIds: string[]): ScheduleScope {
@@ -890,7 +912,7 @@ export class SchedulePasteService {
   }
 
   private previewRowEdit(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePastePreview {
-    const { projectId, issue: selected, changes: requested, linkEdits, rescheduleSuccessors } = parseRowEditInput(raw);
+    const { projectId, issue: selected, changes: requested, linkEdits, rescheduleSuccessors, reviewIncomingTeamBlockers } = parseRowEditInput(raw);
     return this.store.transaction(() => {
       if (!this.store.get('projects', projectId)) throw new SchedulePasteError(404, '프로젝트를 찾을 수 없습니다.');
       this.prune();
@@ -905,12 +927,34 @@ export class SchedulePasteService {
       const issueIds = new Set([issue.id]);
       const changes: ScheduleDateMutation[] = [];
       const dates = proposeDateEdit(issue, requested);
+      const missingDateWarnings: string[] = [];
+      let teamBlockerGuard: string | undefined;
       if (dates) {
         const error = hooks.validateChange(issue, dates.change);
         if (error) preview.errors.push({ line: null, issueId: issue.id, key: issue.key, message: error });
         else {
           changes.push(dates.change);
           preview.changes.push(dates.summary);
+        }
+      }
+      const targetDates = changes[0];
+      if (reviewIncomingTeamBlockers && targetDates && (targetDates.startDate !== issue.startDate || targetDates.endDate !== issue.endDate)) {
+        const blockers = this.incomingTeamBlockers(issue, hooks);
+        teamBlockerGuard = incomingTeamBlockerGuard(blockers);
+        if (blockers.length) {
+          const math = createCalendarMath(hooks.calendar(projectId));
+          for (const { source } of blockers) {
+            const check = checkDependencySchedule(teamBlockerScheduleRule, source, targetDates, math);
+            if (check.kind === 'missing') {
+              const pending = !check.predecessorDate ? `${source.key}의 종료일` : `${issue.key}의 시작일`;
+              missingDateWarnings.push(`프로젝트 간 차단 관계 ${source.key} → ${issue.key} · ${pending}을 확인해 주세요.`);
+            } else if (check.kind === 'conflict' || check.kind === 'invalid') {
+              const message = check.kind === 'conflict'
+                ? `프로젝트 간 선행 업무 ${source.key}의 종료일 ${check.predecessorDate}에 따라 시작일은 ${check.requiredDate} 이후여야 합니다.`
+                : `프로젝트 간 선행 업무 ${source.key} · ${check.reason}`;
+              preview.errors.push({ line: null, issueId: issue.id, key: issue.key, message });
+            }
+          }
         }
       }
 
@@ -982,10 +1026,13 @@ export class SchedulePasteService {
           const change = changeById.get(value.id);
           return change ? { ...value, startDate: change.startDate, endDate: change.endDate } : value;
         });
-        preview.warnings = [...new Set([...followUpWarnings, ...hooks.warnings(projectedIssues, affectedLinks(projectedLinks, changeById.keys(), linkChanges))])];
+        preview.warnings = [...new Set([...followUpWarnings, ...missingDateWarnings,
+          ...hooks.warnings(projectedIssues, affectedLinks(projectedLinks, changeById.keys(), linkChanges))])];
       }
       return this.savePreview(preview, state, { actorId, issueIds: [...issueIds], changes, linkChanges, kind: 'row-edit',
         ...(followUpWarnings.length ? { followUpWarnings } : {}),
+        ...(missingDateWarnings.length ? { missingDateWarnings } : {}),
+        ...(teamBlockerGuard ? { incomingTeamBlockerGuard: teamBlockerGuard } : {}),
       }, hooks);
     });
   }
@@ -1133,6 +1180,12 @@ export class SchedulePasteService {
         })) throw new SchedulePasteError(409, '업무 키 또는 업무의 프로젝트가 변경되었습니다. 다시 미리 확인해 주세요.');
       }
       const state = this.scopeState(proposal);
+      if (proposal.incomingTeamBlockerGuard) {
+        const target = state.issues.find(issue => issue.id === proposal.issueIds[0]);
+        if (!target || incomingTeamBlockerGuard(this.incomingTeamBlockers(target, hooks)) !== proposal.incomingTeamBlockerGuard) {
+          throw new SchedulePasteError(409, '프로젝트 간 선행 업무 또는 차단 관계가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.');
+        }
+      }
       if (kind === 'blocker-links') {
         const reviewed = proposal.blockerRelations ?? [];
         const projectIds = proposal.projectId === null ? proposal.projectIds ?? [] : [proposal.projectId];

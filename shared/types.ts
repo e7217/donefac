@@ -1980,6 +1980,7 @@ export interface ScheduleRowEditInput {
   dependency?: ScheduleRowDependencyEdit;
   dependencies?: readonly ScheduleRowDependencyEdit[];
   rescheduleSuccessors?: boolean;
+  reviewIncomingTeamBlockers?: boolean;
 }
 export type PlanScheduleDates = Pick<PlanningItem, 'startDate' | 'endDate' | 'targetDate'>;
 export interface PlanScheduleShiftPreview {

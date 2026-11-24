@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { Dependency, DependencyType, Issue, SchedulePasteApplyResult, SchedulePastePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, DependencyType, Issue, IssueRelation, SchedulePasteApplyResult, SchedulePastePreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const previewPath = '/api/schedule/row-edit/preview';
 const applyPath = '/api/schedule/row-edit/apply';
@@ -19,8 +19,8 @@ function waitPost(page: Page, path: string) {
   return page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
 }
 
-async function fixture(request: APIRequestContext) {
-  const { projects: [project], users: [actor, peer] } = await workspace(request);
+async function fixture(request: APIRequestContext, holiday = day(23)) {
+  const { projects: [project, otherProject], users: [actor, peer] } = await workspace(request);
   const headers = { 'X-Actor-Id': actor.id };
   const suffix = randomUUID().slice(0, 8);
   const ids: string[] = [];
@@ -28,14 +28,14 @@ async function fixture(request: APIRequestContext) {
   const originalCalendar = await json<WorkCalendar>(await request.get(calendarPath));
   const calendar = await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
     ...originalCalendar, expectedVersion: originalCalendar.version, workingWeekdays: [1, 2, 3, 4, 5],
-    exceptions: [{ date: day(23), isWorking: false, label: '합성 월요일 휴무' }],
+    exceptions: [{ date: holiday, isWorking: false, label: '합성 월요일 휴무' }],
   } }));
 
   return {
-    actor, peer,
-    async issue(title: string, dates: Partial<ReturnType<typeof issueDates>> = {}) {
+    actor, peer, otherProject,
+    async issue(title: string, dates: Partial<ReturnType<typeof issueDates>> = {}, projectId = project.id) {
       const issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
-        projectId: project.id, title: `${title} ${suffix}`, ...dates,
+        projectId, title: `${title} ${suffix}`, ...dates,
       } }), 201);
       ids.push(issue.id);
       return issue;
@@ -65,10 +65,11 @@ async function fixture(request: APIRequestContext) {
   };
 }
 
-async function openProposal(page: Page, issue: Issue, actorId: string) {
+async function openProposal(page: Page, issue: Issue, actorId: string, team = false) {
   await page.setViewportSize({ width: 360, height: 820 });
   await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actorId);
-  await page.goto(`/#/${issue.projectId}/gantt`);
+  const query = team ? `?${new URLSearchParams({ scope: 'team', ganttProject: issue.projectId })}` : '';
+  await page.goto(`/#/${issue.projectId}/gantt${query}`);
   const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
   await expect(search).toBeVisible({ timeout: 35_000 });
   await search.fill(issue.title);
@@ -81,6 +82,117 @@ async function openProposal(page: Page, issue: Issue, actorId: string) {
   const length = dialog.getByLabel('제안 근무일 수', { exact: true });
   return { search, row, dialog, proposal, length };
 }
+
+async function openTicketScheduleEditor(page: Page, issue: Issue) {
+  const search = new URLSearchParams({ boardQuery: issue.title });
+  await page.goto(`/#/${issue.projectId}/teamboard?${search}`);
+  const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
+  const opener = button(board, `${issue.key} 업무 열기`);
+  await expect(opener).toBeVisible({ timeout: 35_000 });
+  await opener.click();
+  const detail = page.getByRole('dialog', { name: issue.title, exact: true });
+  await button(detail, '일정과 연결 편집').click();
+  return { detail, editor: page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true }) };
+}
+
+test('360px 팀 간트에서 다른 프로젝트의 숨은 차단 업무와 후행 달력에 맞춰 빈 날짜를 다시 계산한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request, '2027-11-22');
+  try {
+    const source = await f.issue('팀 간트 검색에서 가려질 다른 프로젝트 차단 업무', {
+      startDate: '2027-11-18', endDate: '2027-11-19',
+    }, f.otherProject.id);
+    const target = await f.issue('종료일을 유지하는 프로젝트 간 차단 대상', { endDate: '2027-11-26', dueDate: '2027-11-29' });
+    const relation = await json<IssueRelation>(await request.post(`/api/issues/${source.id}/relations`, {
+      headers: { 'X-Actor-Id': f.actor.id }, data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' },
+    }), 201);
+    const { search, row, dialog, proposal, length } = await openProposal(page, target, f.actor.id, true);
+    await expect(page.locator(`[data-issue-id="${source.id}"]`)).toHaveCount(0);
+    const start = dialog.getByLabel('시작일', { exact: true });
+    const end = dialog.getByLabel('종료일', { exact: true });
+    const due = dialog.getByLabel('목표 마감일', { exact: true });
+    const useDates = button(dialog, '제안 날짜 입력');
+    const review = button(dialog, '변경 미리보기');
+    const apply = button(dialog, '일정과 연결 적용');
+
+    await length.fill('5');
+    await expect(dialog.getByText(`${source.key} 선행 조건에 따라 시작일은 2027-11-23 이후여야 합니다.`, { exact: true })).toBeVisible();
+    await expect(useDates).toBeDisabled();
+    await length.fill('4');
+    await expect(proposal).toHaveText('2027-11-23 ~ 2027-11-26');
+    await useDates.click();
+    await expect(start).toHaveValue('2027-11-23');
+    await expect(end).toHaveValue('2027-11-26');
+    await expect(due).toHaveValue('2027-11-29');
+    await due.fill('2027-11-30');
+
+    const pendingPreview = waitPost(page, previewPath);
+    await review.click();
+    const response = await pendingPreview;
+    expect(response.request().postDataJSON()).toMatchObject({
+      issue: { id: target.id, expectedVersion: target.version }, changes: { startDate: '2027-11-23', dueDate: '2027-11-30' },
+      reviewIncomingTeamBlockers: true,
+    });
+    expect(await json<SchedulePastePreview>(response)).toMatchObject({ previewId: expect.any(String), errors: [] });
+    expect(issueDates((await f.current(target)).issue)).toEqual(issueDates(target));
+
+    const changedSource = await json<Issue>(await request.patch(`/api/issues/${source.id}`, {
+      headers: { 'X-Actor-Id': f.peer.id }, data: { expectedVersion: source.version, endDate: '2027-11-24' },
+    }));
+    const pendingConflict = waitPost(page, applyPath);
+    await apply.click();
+    expect((await pendingConflict).status()).toBe(409);
+    await expect(dialog.getByRole('alert')).toContainText('날짜와 연결 입력을 유지했습니다.');
+    await expect(start).toHaveValue('2027-11-23');
+    await expect(end).toHaveValue('2027-11-26');
+    await expect(due).toHaveValue('2027-11-30');
+    expect(issueDates((await f.current(target)).issue)).toEqual(issueDates(target));
+
+    await button(dialog, '최신 업무 불러오기').click();
+    await button(dialog, '제안 날짜 다시 계산').click();
+    await expect(start).toHaveValue('');
+    await expect(end).toHaveValue('2027-11-26');
+    await expect(length).toHaveValue('4');
+    await expect(due).toHaveValue('2027-11-30');
+    await length.fill('3');
+    await expect(dialog.getByText(`${source.key} 선행 조건에 따라 시작일은 2027-11-25 이후여야 합니다.`, { exact: true })).toBeVisible();
+    await expect(useDates).toBeDisabled();
+    await length.fill('2');
+    await expect(proposal).toHaveText('2027-11-25 ~ 2027-11-26');
+    await useDates.click();
+
+    const pendingNewPreview = waitPost(page, previewPath);
+    await review.click();
+    const latest = await pendingNewPreview;
+    expect(latest.request().postDataJSON()).toMatchObject({
+      changes: { startDate: '2027-11-25', dueDate: '2027-11-30' }, reviewIncomingTeamBlockers: true,
+    });
+    expect(await json<SchedulePastePreview>(latest)).toMatchObject({ previewId: expect.any(String), errors: [] });
+    const pendingApply = waitPost(page, applyPath);
+    await apply.click();
+    expect((await json<SchedulePasteApplyResult>(await pendingApply)).updated.map(issue => issue.id)).toEqual([target.id]);
+    await expect(dialog).toHaveCount(0);
+    await expect(row).toHaveCount(0);
+    await expect(search).toHaveValue(target.title);
+    expect(await f.current(target)).toMatchObject({ issue: { startDate: '2027-11-25', endDate: target.endDate, dueDate: '2027-11-30' }, links: [] });
+    expect((await f.current(source)).issue).toEqual(changedSource);
+    expect(await json<IssueRelation[]>(await request.get(`/api/issues/${target.id}/relations`))).toEqual(expect.arrayContaining([expect.objectContaining({ id: relation.id })]));
+
+    const pendingUndo = waitPost(page, '/api/schedule/undo');
+    await button(page, '되돌리기').click();
+    await json<SchedulePasteApplyResult>(await pendingUndo);
+    await expect(button(row, '연결 기준으로 일정 제안')).toBeVisible();
+    expect(issueDates((await f.current(target)).issue)).toEqual(issueDates(target));
+
+    const { editor } = await openTicketScheduleEditor(page, target);
+    const suggestion = editor.getByRole('region', { name: '선후행 연결로 날짜 제안', exact: true });
+    await expect(suggestion).toContainText(`${source.key} 선행 조건에 따라 시작일은 2027-11-25 이후여야 합니다.`);
+    await suggestion.getByLabel('제안 근무일 수', { exact: true }).fill('2');
+    await expect(suggestion.getByLabel('제안 날짜 범위', { exact: true })).toHaveText('2027-11-25 ~ 2027-11-26');
+  } finally {
+    await f.clean();
+  }
+});
 
 test('360px에서 숨은 선행 업무와 휴무일을 반영해 빈 날짜만 제안하고 재검토와 되돌리기를 지원한다', async ({ page, request }) => {
   test.setTimeout(85_000);
@@ -123,6 +235,7 @@ test('360px에서 숨은 선행 업무와 휴무일을 반영해 빈 날짜만 �
     const firstResponse = await pendingFirst;
     expect(firstResponse.request().postDataJSON()).toEqual({
       projectId: anchor.projectId, issue: { id: anchor.id, expectedVersion: anchor.version }, changes: { startDate: day(24) },
+      reviewIncomingTeamBlockers: true,
     });
     const first = await json<SchedulePastePreview>(firstResponse);
     expect(first).toMatchObject({ previewId: expect.any(String), warnings: [], errors: [] });
@@ -218,16 +331,7 @@ test('티켓 상세에서 연결 해제와 변경 초안을 날짜 제안에 반
     const updated = await f.link(revised, anchor, 'FF', 2);
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
-    const search = new URLSearchParams({ boardQuery: anchor.title });
-    await page.goto(`/#/${anchor.projectId}/teamboard?${search}`);
-    const board = page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
-    const opener = button(board, `${anchor.key} 업무 열기`);
-    await expect(opener).toBeVisible({ timeout: 35_000 });
-    await opener.click();
-    const detail = page.getByRole('dialog', { name: anchor.title, exact: true });
-    const scheduleButton = button(detail, '일정과 연결 편집');
-    await scheduleButton.click();
-    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const { detail, editor } = await openTicketScheduleEditor(page, anchor);
     const suggestion = editor.getByRole('region', { name: '선후행 연결로 날짜 제안', exact: true });
     const range = suggestion.getByLabel('제안 날짜 범위', { exact: true });
     const count = suggestion.getByLabel('제안 근무일 수', { exact: true });
