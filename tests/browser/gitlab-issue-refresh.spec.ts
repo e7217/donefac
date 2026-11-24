@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { expect, test, type APIResponse, type Response } from '@playwright/test';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, Issue, IssueAutomationRunPage, Project, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueAutomationRunPage, Project, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types';
 
 const settingsPath = '/api/integrations/gitlab';
 const rulesPath = '/api/automation-rules';
@@ -381,6 +381,177 @@ test('360px 티켓의 GitLab 상태 제안을 검토하고 초안과 워크플�
         const { trashEntryId } = await removed.json() as { trashEntryId: string };
         await request.delete(`/api/trash/${trashEntryId}`);
       }
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
+    }
+  }
+});
+
+test('360px 티켓에서 동기화한 열린 MR로 상태를 검토하고 저장 직전에 다시 확인한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const suffix = randomUUID().slice(0, 8);
+  const token = `synthetic-open-review-${randomUUID()}`;
+  const secret = `synthetic-open-review-hook-${randomUUID()}`;
+  const repositoryId = 42;
+  const repositoryPath = 'team/review/historical-open';
+  const repoRead = `/forge/api/v4/projects/${repositoryId}`;
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
+  const { projects: [project], users: [editor, automationActor] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  const branchPrefix = `feature/open-review-${suffix}/`;
+  const targetBranch = 'main';
+  const cases: { issue: Issue; iid: number; sha: string }[] = [];
+  let baseUrl = '';
+  let createdAt = '';
+  let updatedAt = '';
+  let closedIid: number | null = null;
+  const calls: string[] = [];
+  const repoUrl = () => `${baseUrl}/${repositoryPath}`;
+  const mrUrl = (iid: number) => `${repoUrl()}/-/merge_requests/${iid}`;
+  const mrRead = (iid: number) => `${repoRead}/merge_requests/${iid}`;
+  function mergeRequest({ issue, iid, sha }: typeof cases[number]) {
+    const closed = iid === closedIid;
+    return { id: 7000 + iid, iid, project_id: repositoryId, source_project_id: repositoryId, target_project_id: repositoryId,
+      title: `${issue.key} 동기화된 MR`, state: closed ? 'closed' : 'opened', source_branch: branchPrefix + issue.key,
+      target_branch: targetBranch, sha, created_at: createdAt, updated_at: updatedAt,
+      ...(closed ? { closed_at: updatedAt } : {}), web_url: mrUrl(iid) };
+  }
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    calls.push(path);
+    response.setHeader('Content-Type', 'application/json');
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end('{}');
+    if (path === repoRead) return response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repositoryPath, web_url: repoUrl() }));
+    if (path === `${repoRead}/merge_requests`) return response.end(JSON.stringify(cases.map(mergeRequest)));
+    if (path === `${repoRead}/pipelines`) return response.end('[]');
+    const exact = cases.find(value => mrRead(value.iid) === path);
+    return exact ? response.end(JSON.stringify(mergeRequest(exact))) : response.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/forge`;
+  let rule: AutomationRule | undefined;
+  try {
+    const connected = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    for (const [iid, sha] of [[21, 'a'], [22, 'b']] as const) {
+      const issue = await json<Issue>(await request.post('/api/issues', {
+        data: { projectId: project.id, title: `열린 MR 검토 ${iid} ${suffix}`, status: 'todo' },
+      }), 201);
+      cases.push({ issue, iid, sha: sha.repeat(40) });
+    }
+    rule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `열린 MR 상태 검토 ${suffix}`, enabled: true, trigger: 'merge_request.opened',
+      gitlabProjectIds: [repositoryId], branchPattern: `${branchPrefix}*`, targetBranchPattern: targetBranch,
+      issueTypes: [], fromStatuses: ['todo'], toStatusId: 'review', actorId: automationActor.id,
+    } }), 201);
+    expect(rule.enabled).toBe(true);
+    createdAt = new Date().toISOString();
+    updatedAt = createdAt;
+    const sync = await json<GitlabSyncResult>(await request.post(`${settingsPath}/sync`, { data: { expectedVersion: connected.version } }));
+    expect(sync).toMatchObject({ linked: 2, partial: false });
+    expect(calls.splice(0).sort()).toEqual([`${repoRead}/merge_requests`, `${repoRead}/pipelines`]);
+    updatedAt = new Date().toISOString();
+    const synchronized = await workspace();
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+
+    for (const { issue, iid } of cases) {
+      const issuePath = `/api/issues/${issue.id}`;
+      const historyPath = `${issuePath}/automation-runs`;
+      const link = synchronized.gitlabLinks.find(row => row.issueId === issue.id && row.kind === 'merge_request' && row.iid === iid);
+      if (!link) throw new Error(`동기화된 MR !${iid} 연결이 없습니다.`);
+      expect(link).toMatchObject({ state: 'opened', webUrl: mrUrl(iid), targetBranch });
+      expect(link.manualLinkId).toBeUndefined();
+      expect(synchronized.issues.find(row => row.id === issue.id)).toEqual(issue);
+      expect((await json<IssueAutomationRunPage>(await request.get(historyPath))).items).toEqual([]);
+
+      await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+      const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+      const gitlab = panel.getByRole('region', { name: 'GitLab', exact: true });
+      const mr = gitlab.getByRole('region', { name: 'MR', exact: true }).getByRole('listitem');
+      const form = panel.locator('form.issue-detail-form');
+      const status = form.getByRole('combobox', { name: '상태', exact: true });
+      const title = form.getByRole('textbox', { name: '제목', exact: true });
+      const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+      const draftTitle = `열린 MR 검토 중인 제목 ${iid}`;
+      const draftComment = `아직 보내지 않은 검토 댓글 ${iid}`;
+      await expect(mr).toHaveAttribute('data-gitlab-state', 'opened');
+      await title.fill(draftTitle);
+      await comment.fill(draftComment);
+      expect(calls).toEqual([]);
+
+      const reviewPath = `${issuePath}/gitlab-links/${encodeURIComponent(link.id)}/status-review`;
+      const reading = page.waitForResponse(response => new URL(response.url()).pathname === reviewPath && response.request().method() === 'POST');
+      await mr.getByRole('button', { name: '이 활동으로 상태 검토', exact: true }).click();
+      const checked = await json<GitlabIssueRefreshResult>(await reading);
+      expect(calls.splice(0)).toEqual([repoRead, mrRead(iid)]);
+      expect(checked).toMatchObject({ links: [{ id: link.id, state: 'opened' }], failures: [], skipped: 0 });
+      if (checked.statusReview?.kind !== 'suggestion') throw new Error('열린 MR의 상태 변경 제안이 없습니다.');
+      const { suggestion } = checked.statusReview;
+      expect(suggestion).toMatchObject({ issueId: issue.id, issueVersion: issue.version, fromStatus: 'todo', toStatus: 'review',
+        rule: { id: rule.id }, evidence: { trigger: 'merge_request.opened', occurredAt: createdAt, targetBranch, sourceProjectId: repositoryId,
+          link: { id: link.id, iid, state: 'opened' } },
+      });
+      const proposal = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+      await expect(proposal).toContainText('Merge Request 열림');
+      await expect(proposal).toContainText(`MR !${iid}`);
+      await expect(proposal.locator('time')).toHaveAttribute('datetime', createdAt);
+      await expect(status).toHaveValue('todo');
+      await expect(title).toHaveValue(draftTitle);
+      await expect(comment).toHaveValue(draftComment);
+      expect((await workspace()).issues.find(row => row.id === issue.id)).toEqual(issue);
+
+      await proposal.getByRole('button', { name: '목표 상태로 편집', exact: true }).click();
+      await expect(status).toHaveValue('review');
+      await expect(status).toBeFocused();
+      if (iid === cases[1].iid) {
+        closedIid = iid;
+        updatedAt = new Date().toISOString();
+        expect((await workspace()).gitlabLinks.find(row => row.id === link.id)?.state).toBe('opened');
+      }
+      const saving = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
+      await form.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+      const saved = await saving;
+      expect(saved.request().postDataJSON()).toMatchObject({ status: 'review', title: draftTitle, gitlabStatusSuggestionToken: suggestion.token });
+      expect(calls.splice(0)).toEqual([repoRead, mrRead(iid)]);
+      if (closedIid === iid) {
+        expect(await json(saved, 409)).toMatchObject({ details: { reason: 'gitlab_status_suggestion_stale' } });
+        await expect(form.getByRole('alert')).toContainText('다시 확인');
+        await expect(status).toHaveValue('todo');
+        await expect(title).toHaveValue(draftTitle);
+        await expect(comment).toHaveValue(draftComment);
+        expect((await workspace()).issues.find(row => row.id === issue.id)).toEqual(issue);
+      } else {
+        expect(await json<Issue>(saved)).toMatchObject({ id: issue.id, status: 'review', title: draftTitle, version: issue.version + 1 });
+        const savedPanel = page.getByRole('dialog', { name: draftTitle, exact: true });
+        const unsent = savedPanel.getByRole('textbox', { name: '댓글 내용', exact: true });
+        await expect(savedPanel.getByRole('button', { name: '변경사항 저장', exact: true })).toBeDisabled();
+        await expect(unsent).toHaveValue(draftComment);
+        const current = await workspace();
+        expect(current.activities.filter(activity => activity.resourceId === issue.id).at(-1)?.actorId).toBe(editor.id);
+        await unsent.fill('');
+      }
+      expect((await json<IssueAutomationRunPage>(await request.get(historyPath))).items).toEqual([]);
+    }
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
+      for (const { issue } of cases) {
+        const removed = await request.delete(`/api/issues/${issue.id}`);
+        if (removed.ok()) {
+          const { trashEntryId } = await removed.json() as { trashEntryId: string };
+          await request.delete(`/api/trash/${trashEntryId}`);
+        }
+      }
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
     } finally {
       mock.closeAllConnections();
       await new Promise<void>(resolve => mock.close(() => resolve()));

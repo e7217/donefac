@@ -18,7 +18,7 @@ import { GitlabIssueBranchCreation, GitlabIssueBranchError } from './gitlab-bran
 import { GitlabDeployments } from './gitlab-deployments.js';
 import { readGitlabDeploymentHistory, readGitlabDeploymentStatus } from './gitlab-deployment-read.js';
 import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
-import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
+import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabOpenedMergeRequestStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -185,12 +185,24 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
   };
 }
 type LinkDraft=ReturnType<typeof readLink>;
-type TerminalStatusRead = { trigger: GitlabWorkflowStatusSuggestionTrigger; occurredAt: string | null };
-type ConfirmedWorkflowRead = { link: GitlabLink; terminal: GitlabStatusObservation | null };
+type OpenedMergeRequestStatusRead = { trigger: 'merge_request.opened'; occurredAt: string; sourceProjectId: number };
+type WorkflowStatusRead = OpenedMergeRequestStatusRead |
+  { trigger: Exclude<GitlabWorkflowStatusSuggestionTrigger, 'merge_request.opened'>; occurredAt: string | null };
+type ConfirmedWorkflowRead = { link: GitlabLink; observation: GitlabStatusObservation | null };
 type IssueGitlabRefreshMode = 'all' | 'exact' | 'status-review';
 
-function terminalStatusRead(kind: WorkflowGitlabKind, object: Obj): TerminalStatusRead | null {
-  let trigger: GitlabWorkflowStatusSuggestionTrigger;
+function openedMergeRequestStatusRead(object: Obj, targetBranch: string | null | undefined): OpenedMergeRequestStatusRead | null {
+  if (object.state !== 'opened' || !targetBranch || !isGitlabBranchName(object.source_branch) || !gitlabObjectSha(object.sha)) return null;
+  const createdAt = occurredAt(object.created_at);
+  const updatedAt = occurredAt(object.updated_at);
+  const sourceProjectId = object.source_project_id;
+  return createdAt && updatedAt && createdAt <= updatedAt && typeof sourceProjectId === 'number' && Number.isSafeInteger(sourceProjectId) && sourceProjectId > 0
+    ? { trigger: 'merge_request.opened', occurredAt: createdAt, sourceProjectId } : null;
+}
+
+function workflowStatusRead(kind: WorkflowGitlabKind, object: Obj, targetBranch: string | null | undefined): WorkflowStatusRead | null {
+  if (kind === 'merge_request' && object.state === 'opened') return openedMergeRequestStatusRead(object, targetBranch);
+  let trigger: Exclude<GitlabWorkflowStatusSuggestionTrigger, 'merge_request.opened'>;
   let timestamp: unknown;
   if (kind === 'pipeline' && (object.status === 'success' || object.status === 'failed')) {
     trigger = object.status === 'success' ? 'pipeline.succeeded' : 'pipeline.failed';
@@ -202,7 +214,7 @@ function terminalStatusRead(kind: WorkflowGitlabKind, object: Obj): TerminalStat
   return { trigger, occurredAt: occurredAt(timestamp) };
 }
 
-function confirmWorkflowRead(link: GitlabLink, draft: LinkDraft, terminal: TerminalStatusRead | null,
+function confirmWorkflowRead(link: GitlabLink, draft: LinkDraft, status: WorkflowStatusRead | null,
   aliases: readonly GitlabLink[]): ConfirmedWorkflowRead | null {
   const timestamp = draft.incomingTime;
   const sha = gitlabObjectSha(draft.sourceSha);
@@ -210,18 +222,30 @@ function confirmWorkflowRead(link: GitlabLink, draft: LinkDraft, terminal: Termi
       !isGitlabBranchName(draft.sourceBranch) || link.sourceBranch !== draft.sourceBranch ||
       !sha || /^0+$/u.test(sha) || gitlabObjectSha(link.sourceSha) !== sha ||
       (link.kind === 'pipeline' && link.pipelineObservedAt !== timestamp)) return null;
-  if (terminal && !terminal.occurredAt) return null;
+  if (status && !status.occurredAt) return null;
   const checkedAt = Date.parse(timestamp);
   if (aliases.some(alias => alias.id !== link.id && alias.pipelineObservedAt !== null &&
       (Date.parse(alias.updatedAt) > checkedAt || Date.parse(alias.updatedAt) === checkedAt && alias.state !== link.state))) return null;
-  if (!terminal?.occurredAt) return { link, terminal: null };
-  const evidence = { link, occurredAt: terminal.occurredAt };
-  if (terminal.trigger === 'merge_request.merged' || terminal.trigger === 'merge_request.closed') {
+  if (!status?.occurredAt) return { link, observation: null };
+  const evidence = { link, occurredAt: status.occurredAt };
+  if (status.trigger === 'merge_request.opened') {
+    const targetBranch = draft.targetBranch;
+    const conflictingHead = aliases.some(alias => {
+      if (alias.id === link.id || alias.iid !== draft.reportedIid || alias.updatedAt !== timestamp) return false;
+      const aliasSha = gitlabObjectSha(alias.sourceSha);
+      return Boolean((alias.sourceBranch && alias.sourceBranch !== draft.sourceBranch) || (aliasSha && aliasSha !== sha));
+    });
+    const observation = targetBranch && targetBranch === link.targetBranch && !conflictingHead &&
+      !hasConflictingMergeTarget(draft, aliases, link.id)
+      ? { ...evidence, trigger: status.trigger, targetBranch, sourceProjectId: status.sourceProjectId } : null;
+    return { link, observation };
+  }
+  if (status.trigger === 'merge_request.merged' || status.trigger === 'merge_request.closed') {
     const targetBranch = draft.targetBranch && draft.targetBranch === link.targetBranch &&
       !hasConflictingMergeTarget(draft, aliases, link.id) ? draft.targetBranch : undefined;
-    return { link, terminal: { ...evidence, trigger: terminal.trigger, ...(targetBranch ? { targetBranch } : {}) } };
+    return { link, observation: { ...evidence, trigger: status.trigger, ...(targetBranch ? { targetBranch } : {}) } };
   }
-  return { link, terminal: { ...evidence, trigger: terminal.trigger } };
+  return { link, observation: { ...evidence, trigger: status.trigger } };
 }
 
 function hasConflictingMergeTarget(draft: LinkDraft, aliases: readonly GitlabLink[], exceptId?: string): boolean {
@@ -231,19 +255,19 @@ function hasConflictingMergeTarget(draft: LinkDraft, aliases: readonly GitlabLin
       (alias.state !== draft.state || alias.targetBranch !== undefined && alias.targetBranch !== draft.targetBranch)));
 }
 
-function currentTerminalObservations(checked: readonly ConfirmedWorkflowRead[], latestVerifiedPipelineId: (link: GitlabLink) => number | null): GitlabStatusObservation[] {
+function currentWorkflowObservations(checked: readonly ConfirmedWorkflowRead[], latestVerifiedPipelineId: (link: GitlabLink) => number | null): GitlabStatusObservation[] {
   const latestPipelineIds = new Map<string, number>();
   for (const { link } of checked) {
     if (link.kind !== 'pipeline') continue;
     const group = gitlabPipelineGroup(link);
     if (group && group.id > (latestPipelineIds.get(group.key) ?? 0)) latestPipelineIds.set(group.key,group.id);
   }
-  return checked.flatMap(({ link, terminal }) => {
-    if (!terminal) return [];
-    if (link.kind !== 'pipeline') return [terminal];
+  return checked.flatMap(({ link, observation }) => {
+    if (!observation) return [];
+    if (link.kind !== 'pipeline') return [observation];
     const group = gitlabPipelineGroup(link);
     const newestWebhookId = latestVerifiedPipelineId(link);
-    return group && latestPipelineIds.get(group.key) === group.id && (newestWebhookId === null || group.id >= newestWebhookId) ? [terminal] : [];
+    return group && latestPipelineIds.get(group.key) === group.id && (newestWebhookId === null || group.id >= newestWebhookId) ? [observation] : [];
   });
 }
 
@@ -769,6 +793,12 @@ export class GitlabIntegrationService{
     };
     return verified.webUrl===snapshot.webUrl?verified:{...verified,webUrl:snapshot.webUrl};
   }
+  private hasConflictingOpenedMergeRequestCursor(instance: string, repositoryId: number, draft: LinkDraft, startedAt: string): boolean {
+    const cursor = this.store.get<ObjectCursor>('gitlab_object_cursors', `${instance}:${repositoryId}:merge_request:${draft.id}`);
+    if (!cursor) return false;
+    const difference = Date.parse(cursor.occurredAt ?? '') - Date.parse(draft.incomingTime ?? '');
+    return Date.parse(cursor.receivedAt ?? '') >= Date.parse(startedAt) || difference > 0 || difference === 0 && cursor.state !== 'opened';
+  }
   async pipelineJobs(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabPipelineJobs> {
     return this.readLinkedPipeline(issueId, linkId, signal, 'GitLab CI 작업', readGitlabPipelineJobs);
   }
@@ -820,6 +850,26 @@ export class GitlabIntegrationService{
   async mergeRequestReview(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestReview> {
     const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 검토 정보', readGitlabMergeRequestReview);
     return { ...result, ...response };
+  }
+  async verifyManualOpenedMergeRequest(issueId: string, proof: GitlabOpenedMergeRequestStatusBinding,
+    signal: AbortSignal = new AbortController().signal): Promise<boolean> {
+    const startedAt = now();
+    try {
+      const { context: { link, captured, token }, result: { object } } = await this.readLinkedMergeRequest(
+        issueId, proof.linkId, signal, 'GitLab MR 상태', (connection, repositoryId, iid, objectId, readSignal) =>
+          gitlabLinkedActivityReader(connection, readSignal).workflow(repositoryId, 'merge_request', iid, objectId));
+      const targetBranch = readMergeTargetBranch(object, link.projectId, token, ...this.webhookCredentials(captured));
+      const status = openedMergeRequestStatusRead(object, targetBranch);
+      if (!status || status.occurredAt !== proof.occurredAt || status.sourceProjectId !== proof.sourceProjectId) return false;
+      const draft = readLink('merge_request', object, [], keys, { source: 'read', observedAt: startedAt, repositoryId: link.projectId, targetBranch });
+      const instance = this.instance(captured);
+      if (this.hasConflictingOpenedMergeRequestCursor(instance, link.projectId, draft, startedAt)) return false;
+      const aliases = this.workflowLinksForObject(instance, link.projectId, 'merge_request', draft.id);
+      return confirmWorkflowRead(link, draft, status, aliases)?.observation?.trigger === 'merge_request.opened';
+    } catch (error) {
+      if (signal.aborted || error instanceof GitlabIntegrationError) return false;
+      throw error;
+    }
   }
   async mergeRequestDiscussions(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestDiscussions> {
     const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 토론', readGitlabMergeRequestDiscussions);
@@ -1119,7 +1169,7 @@ export class GitlabIntegrationService{
     const token = captured.token ? this.store.unseal(captured.token) : null;
     const startedAt = now();
     const read = gitlabLinkedActivityReader({ baseUrl:captured.baseUrl, token }, signal);
-    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; terminal:TerminalStatusRead|null } |
+    type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; status:WorkflowStatusRead|null } |
       { link:GitlabLink; kind:'branch'; branch:string; cursorId:string; cursor:PushObservation|undefined; aliases:GitlabLink[]; sourceSha:string; webUrl:string } |
       { link:GitlabLink; message:string };
     const readLinkRow = async (link:GitlabLink):Promise<ReadOutcome> => {
@@ -1143,7 +1193,7 @@ export class GitlabIntegrationService{
         const targetBranch = target.kind === 'merge_request' ? readMergeTargetBranch(object, link.projectId, token, ...this.webhookCredentials(captured)) : undefined;
         const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId, targetBranch },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
-        return { link, kind:target.kind, draft, terminal:reviewActorId && this.hooks.manualStatusReview ? terminalStatusRead(target.kind,object) : null };
+        return { link, kind:target.kind, draft, status:reviewActorId && this.hooks.manualStatusReview ? workflowStatusRead(target.kind,object,targetBranch) : null };
       } catch (error) {
         signal?.throwIfAborted();
         if (!(error instanceof GitlabReadError)) throw error;
@@ -1230,11 +1280,13 @@ export class GitlabIntegrationService{
         if (updated !== latest) this.store.put('gitlab_links',updated);
         result.links.push(updated);
         if (reviewActorId && this.hooks.manualStatusReview) {
-          const confirmation = confirmWorkflowRead(updated,draft,outcome.terminal,aliases);
+          const status = outcome.status?.trigger === 'merge_request.opened' &&
+            this.hasConflictingOpenedMergeRequestCursor(instance, link.projectId, draft, startedAt) ? null : outcome.status;
+          const confirmation = confirmWorkflowRead(updated,draft,status,aliases);
           if (confirmation) checked.push(confirmation);
         }
       }
-      if (reviewActorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.terminal)) {
+      if (reviewActorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.observation)) {
         if (!reviewSelected) {
           const current = this.store.db.prepare(`SELECT id FROM gitlab_links WHERE issue_id=?
             AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline') LIMIT ?`)
@@ -1242,7 +1294,7 @@ export class GitlabIntegrationService{
           const checkedIds = new Set(checked.map(({ link }) => link.id));
           if (current.length !== checkedIds.size || current.some(({ id }) => !checkedIds.has(id))) return result;
         }
-        const observations = currentTerminalObservations(checked, link => this.latestVerifiedPipelineId(link))
+        const observations = currentWorkflowObservations(checked, link => this.latestVerifiedPipelineId(link))
           .filter(({ link }) => !reviewSelected || !this.hasNewerLinkedPipeline(link));
         const review = this.hooks.manualStatusReview(latestIssue,observations,reviewActorId,captured.version);
         if (review) result.statusReview = review;

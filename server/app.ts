@@ -52,7 +52,7 @@ import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artif
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
 import { IssueOrderError, IssueOrderService, parseCycleBoardDestination, readCycleBoardDestination } from './issue-order.js';
 import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
-import { AutomationService, AutomationError } from './automation.js';
+import { AutomationService, AutomationError, staleManualStatusSuggestion } from './automation.js';
 import { exportAutomationRunHistory, restoreAutomationRunHistory, validateAutomationRunHistory } from './automation-run-backup.js';
 import { IssueAssignmentRulesService, IssueAssignmentRulesError, type IssueAssignmentDecision } from './issue-assignment-rules.js';
 import { OutboundWebhookService, OutboundWebhookError } from './outbound-webhooks.js';
@@ -2018,12 +2018,28 @@ export function createApp(options: {
     });
     res.set('Cache-Control', 'no-store').json(result);
   });
-  app.patch('/api/issues/:id',(req,res)=>{
+  app.patch('/api/issues/:id',async(req,res)=>{
+    const hasGitlabSuggestion = Object.hasOwn(req.body, 'gitlabStatusSuggestionToken');
+    const verifySuggestion = (issue: Issue) => automation.verifyManualStatusSuggestion(issue, req.body.status, req.body.type,
+      req.body.gitlabStatusSuggestionToken, actor(req), gitlab.settings().version);
+    let confirmedOpen = false;
+    if (hasGitlabSuggestion) {
+      const issue = get<Issue>('issues', req.params.id);
+      const opened = verifySuggestion(issue);
+      if (opened) {
+        checkVersion(issue, req.body.expectedVersion);
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        res.once('close', abort);
+        try { confirmedOpen = await gitlab.verifyManualOpenedMergeRequest(issue.id, opened, controller.signal); }
+        finally { res.off('close', abort); }
+        if (controller.signal.aborted) return;
+        if (!confirmedOpen) return staleManualStatusSuggestion();
+      }
+    }
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);
-      if (Object.hasOwn(req.body, 'gitlabStatusSuggestionToken')) {
-        automation.verifyManualStatusSuggestion(old,req.body.status,req.body.type,req.body.gitlabStatusSuggestionToken,actor(req),gitlab.settings().version);
-      }
+      if (hasGitlabSuggestion && verifySuggestion(old) && !confirmedOpen) return staleManualStatusSuggestion();
       const prepared = prepareVersionedIssueUpdate(old, req.body);
       if (Object.hasOwn(req.body, 'schedulePreviewId')) {
         schedulePaste.consumeIssueSavePreview(req.body.schedulePreviewId, actor(req), old, prepared.issue, scheduleReviewHooks);

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
-import type { GitlabDeploymentStatusBinding, GitlabLink, GitlabStatusObservation, GitlabStatusReview, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
+import type { GitlabDeploymentStatusBinding, GitlabLink, GitlabOpenedMergeRequestStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,isMergeRequestAutomationTrigger,isPipelineAutomationTrigger,sortedAutomationRules } from '../shared/automation.js';
 import { isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
@@ -17,6 +17,7 @@ const MANUAL_STATUS_TOKEN = /^[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9
 const MANUAL_STATUS_SOURCES: Record<GitlabWorkflowStatusSuggestionTrigger, { kind: GitlabLink['kind']; state: string }> = {
   'pipeline.succeeded': { kind: 'pipeline', state: 'success' },
   'pipeline.failed': { kind: 'pipeline', state: 'failed' },
+  'merge_request.opened': { kind: 'merge_request', state: 'opened' },
   'merge_request.merged': { kind: 'merge_request', state: 'merged' },
   'merge_request.closed': { kind: 'merge_request', state: 'closed' },
 };
@@ -44,6 +45,18 @@ function repoIds(value:unknown):number[]{if(!Array.isArray(value)||!value.length
 function validTime(value:unknown):value is string{return typeof value==='string'&&Number.isFinite(Date.parse(value));}
 function normalizeBase(value:unknown):string{if(typeof value!=='string'||!value)return'';let url:URL;try{url=new URL(value);}catch{fail('GitLab 주소를 확인해 주세요.');}if(!['http:','https:'].includes(url.protocol)||url.username||url.password||url.search||url.hash)fail('인증 정보가 없는 GitLab http(s) 주소가 필요합니다.');return url.toString().replace(/\/+$/,'');}
 function version(value:unknown,current:number){if(!Number.isSafeInteger(value)||Number(value)<1)fail('expectedVersion이 필요합니다.');if(value!==current)fail('자동화 규칙이 변경되었습니다. 최신 설정을 확인해 주세요.',409,{currentVersion:current});}
+
+export function staleManualStatusSuggestion(): never {
+  return fail('업무, 규칙 또는 GitLab 활동이 변경되었습니다. GitLab에서 상태를 다시 확인해 주세요.', 409,
+    { reason: 'gitlab_status_suggestion_stale' });
+}
+
+function isOpenedStatusBinding(value: unknown): value is GitlabOpenedMergeRequestStatusBinding {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const { linkId, occurredAt, sourceProjectId } = value as Partial<GitlabOpenedMergeRequestStatusBinding>;
+  return typeof linkId === 'string' && linkId.length > 0 && linkId.length <= 500 && validTime(occurredAt) &&
+    typeof sourceProjectId === 'number' && Number.isSafeInteger(sourceProjectId) && sourceProjectId > 0;
+}
 
 function isDeploymentStatusBinding(value: unknown): value is GitlabDeploymentStatusBinding {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -303,6 +316,8 @@ export class AutomationService{
         if (!source || link.kind !== source.kind || link.state !== source.state) continue;
         const { pipelineSource, pipelineTag } = link;
         const targetBranch = 'targetBranch' in evidence && evidence.targetBranch === link.targetBranch ? evidence.targetBranch : undefined;
+        if (trigger === 'merge_request.opened' && (!isGitlabBranchName(targetBranch) ||
+          !isOpenedStatusBinding({ linkId: link.id, occurredAt, sourceProjectId: evidence.sourceProjectId }))) continue;
         sample = { trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '', targetBranch,
           ...(link.kind === 'pipeline' && link.pipelineObservedAt === occurredAt ? { pipelineSource, pipelineTag } : {}) };
       }
@@ -320,9 +335,12 @@ export class AutomationService{
     const { rule, evidence, deploymentProof } = selected;
     const prepared = this.prepare(rule, issue).outcome;
     const expiresAt = checkedAt + MANUAL_STATUS_TOKEN_TTL;
+    const opened = evidence.trigger === 'merge_request.opened' ? {
+      linkId: evidence.link.id, occurredAt: evidence.occurredAt, sourceProjectId: evidence.sourceProjectId,
+    } : undefined;
     const token = this.store.seal(JSON.stringify({ domain: MANUAL_STATUS_TOKEN_DOMAIN, actorId, expiresAt, toStatus: rule.toStatusId,
       fence: this.manualStatusFence(issue, settingsVersion, context, deploymentProof?.digest),
-      ...(deploymentProof ? { deployment: deploymentProof.binding } : {}) }));
+      ...(deploymentProof ? { deployment: deploymentProof.binding } : {}), ...(opened ? { opened } : {}) }));
     return { kind: 'suggestion', suggestion: {
       issueId: issue.id, projectId: issue.projectId, issueVersion: issue.version, workflowVersion: workflow.version,
       fromStatus: issue.status, toStatus: rule.toStatusId,
@@ -332,9 +350,9 @@ export class AutomationService{
       blockReason: prepared.outcome === 'blocked' ? prepared.reason : null, token, expiresAt: new Date(expiresAt).toISOString(),
     } };
   }
-  verifyManualStatusSuggestion(issue: Issue, proposedStatus: unknown, proposedType: unknown, token: unknown, actorId: string, settingsVersion: number): void {
-    const stale = () => fail('업무, 규칙 또는 GitLab 활동이 변경되었습니다. GitLab에서 상태를 다시 확인해 주세요.', 409,
-      { reason: 'gitlab_status_suggestion_stale' });
+  verifyManualStatusSuggestion(issue: Issue, proposedStatus: unknown, proposedType: unknown, token: unknown, actorId: string,
+    settingsVersion: number): GitlabOpenedMergeRequestStatusBinding | undefined {
+    const stale = staleManualStatusSuggestion;
     if (typeof token !== 'string' || token.length > MAX_MANUAL_STATUS_TOKEN_LENGTH || !MANUAL_STATUS_TOKEN.test(token) ||
       typeof proposedStatus !== 'string' || proposedStatus === issue.status || (proposedType !== undefined && proposedType !== issue.type)) return stale();
     let proof: Record<string, unknown>;
@@ -348,8 +366,11 @@ export class AutomationService{
       if (!current) return stale();
       deploymentDigest = current;
     }
+    const opened = proof.opened;
+    if (opened !== undefined && (deploymentDigest !== undefined || !isOpenedStatusBinding(opened))) return stale();
     const context = this.manualStatusContext(issue, deploymentDigest !== undefined);
     if (proof.fence !== this.manualStatusFence(issue, settingsVersion, context, deploymentDigest)) return stale();
+    return opened;
   }
   processEvent(event:AutomationEvent):AutomationRun[]{
     if(typeof event.id!=='string'||!event.id||event.id.length>300||!AUTOMATION_TRIGGERS.includes(event.trigger)||!Number.isSafeInteger(event.gitlabProjectId)||event.gitlabProjectId<1||typeof event.branch!=='string'||event.branch.length>512||!Array.isArray(event.issueIds)||event.issueIds.length>10000||event.issueIds.some(id=>typeof id!=='string'||id.length>200)||!validTime(event.receivedAt))fail('정규화된 GitLab 이벤트를 확인해 주세요.');
