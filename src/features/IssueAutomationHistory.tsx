@@ -110,7 +110,10 @@ export function IssueAutomationHistory({ issueId, issueVersion, links, users, re
             <span>{context.ruleName} · {AUTOMATION_TRIGGER_LABELS[context.trigger]}</span>
             <span>저장소 #{context.gitlabProjectId}{context.objectKind === 'deployment'
               ? <> · 배포 #{context.objectId} · 환경 <code>{context.environment}</code></>
-              : <>{context.objectId && ` · 객체 #${context.objectId}`}{context.branch && <> · <code>{context.branch}</code></>}</>}</span>
+              : <>{context.objectId && ` · 객체 #${context.objectId}`}
+                {context.branch && <> · {context.objectKind === 'merge_request' && '소스 브랜치 '}<code>{context.branch}</code></>}
+              </>}</span>
+            {context.objectKind === 'merge_request' && context.targetBranch && <span>대상 브랜치 <code>{context.targetBranch}</code></span>}
             {pipeline && <span>{pipeline}</span>}
           </div>}
           <div className="issue-automation-meta">

@@ -536,6 +536,7 @@ function GitlabStatusSuggestionCard({ suggestion, selected, canPrepare, disabled
   const { evidence } = suggestion;
   const { link, trigger, occurredAt } = evidence;
   const deployment = trigger === 'deployment.succeeded' ? evidence.deployment : undefined;
+  const targetBranch = 'targetBranch' in evidence ? evidence.targetBranch : undefined;
   const url = deployment ? deploymentSource(deployment) : gitlabActivityUrl(link.webUrl, link.kind);
   const reference = `${gitlabActivityKindLabel(link.kind)} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid}`;
   return <section className="gitlab-activity-editor" aria-label="GitLab 상태 변경 제안">
@@ -545,8 +546,10 @@ function GitlabStatusSuggestionCard({ suggestion, selected, canPrepare, disabled
     <p><strong>{suggestion.fromStatusLabel} <span aria-label="에서">→</span> {suggestion.toStatusLabel}</strong></p>
     <p className="gitlab-activity-hint">{suggestion.rule.name} · {AUTOMATION_TRIGGER_LABELS[trigger]}</p>
     <p className="gitlab-activity-hint">저장소 #{link.projectId} · {deployment
-      ? `${deployment.environment} 배포 #${deployment.deploymentId}` : `${reference}${link.sourceBranch ? ` · ${link.sourceBranch}` : ''}`}
+      ? `${deployment.environment} 배포 #${deployment.deploymentId}`
+      : <>{reference}{link.sourceBranch && <> · {link.kind === 'merge_request' && '소스 브랜치 '}{link.sourceBranch}</>}</>}
       {' · '}<time dateTime={occurredAt}>{new Date(occurredAt).toLocaleString('ko-KR')}</time></p>
+    {link.kind === 'merge_request' && targetBranch && <p className="gitlab-activity-hint">대상 브랜치 <code>{targetBranch}</code></p>}
     {suggestion.blockReason && <p className="gitlab-activity-hint">확인 당시 {suggestion.blockReason}</p>}
     {(url || canPrepare) && <div className="gitlab-activity-actions">
       {url && <a className="btn btn-ghost" href={url.href} target="_blank" rel="noopener noreferrer">

@@ -1441,7 +1441,7 @@ export interface GitlabLink {
   id: string; issueId: string; projectId: number; iid: number;
   kind: 'merge_request' | 'commit' | 'pipeline' | 'branch';
   title: string; webUrl: string; state: string; updatedAt: string;
-  sourceBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' | 'read';
+  sourceBranch?: string; targetBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' | 'read';
   originalJiraKey?: string; manualLinkId?: string;
   mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[];
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
@@ -1458,7 +1458,8 @@ export type GitlabStatusObservation = {
   link: GitlabLink;
   occurredAt: string;
 } & (
-  { trigger: GitlabWorkflowStatusSuggestionTrigger } |
+  { trigger: Extract<GitlabWorkflowStatusSuggestionTrigger, `merge_request.${string}`>; targetBranch?: string } |
+  { trigger: Extract<GitlabWorkflowStatusSuggestionTrigger, `pipeline.${string}`> } |
   { trigger: 'deployment.succeeded'; deployment: GitlabDeployment }
 );
 export interface GitlabStatusSuggestion {
@@ -1772,13 +1773,13 @@ export type GitlabPipelineRefKind = 'branch' | 'tag';
 export interface AutomationRule {
   id: string; projectId: string; name: string; enabled: boolean; trigger: GitlabAutomationTrigger;
   gitlabProjectIds: number[]; branchPattern: string; environment?: string; issueTypes: string[]; fromStatuses: string[]; toStatusId: string;
-  pipelineSources?: string[]; pipelineRefKind?: GitlabPipelineRefKind;
+  targetBranchPattern?: string; pipelineSources?: string[]; pipelineRefKind?: GitlabPipelineRefKind;
   actorId: string; priority: number; gitlabBaseUrl: string; enabledAt: string | null;
   version: number; createdAt: string; updatedAt: string;
 }
 export interface AutomationEvent {
   id: string; trigger: GitlabAutomationTrigger; gitlabProjectId: number; objectKind: 'merge_request' | 'pipeline' | 'deployment'; objectId: string;
-  branch: string; environment?: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
+  branch: string; targetBranch?: string; environment?: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
   pipelineSource?: string; pipelineTag?: boolean;
   disposition: 'fresh' | 'stale' | 'ambiguous' | 'unverified'; reason: string;
 }
@@ -1788,7 +1789,7 @@ export interface AutomationOutcome {
 }
 export interface AutomationRunContext {
   ruleName: string; trigger: GitlabAutomationTrigger; gitlabBaseUrl: string; gitlabProjectId: number;
-  objectKind: AutomationEvent['objectKind']; objectId: string; branch: string; environment?: string;
+  objectKind: AutomationEvent['objectKind']; objectId: string; branch: string; targetBranch?: string; environment?: string;
   pipelineSource?: string; pipelineTag?: boolean;
   fromStatusLabel: string; toStatusLabel: string;
 }

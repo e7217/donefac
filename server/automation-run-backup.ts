@@ -1,4 +1,5 @@
 import { AUTOMATION_TRIGGERS } from '../shared/automation.js';
+import { isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import type { AutomationRun, AutomationRunContext, Project, User } from '../shared/types.js';
 import { AutomationError, isDeploymentAutomationContext } from './automation.js';
@@ -9,7 +10,7 @@ const TRIGGERS: ReadonlySet<unknown> = new Set(AUTOMATION_TRIGGERS);
 const RUN_FIELDS = new Set(['id', 'eventId', 'issueId', 'projectId', 'actorId', 'ruleId', 'key', 'title', 'fromStatus', 'toStatus',
   'outcome', 'reason', 'createdAt', 'occurredAt', 'context']);
 const CONTEXT_FIELDS = new Set(['ruleName', 'trigger', 'gitlabBaseUrl', 'gitlabProjectId', 'objectKind', 'objectId', 'branch',
-  'fromStatusLabel', 'toStatusLabel', 'environment', 'pipelineSource', 'pipelineTag']);
+  'fromStatusLabel', 'toStatusLabel', 'environment', 'targetBranch', 'pipelineSource', 'pipelineTag']);
 
 function invalidHistory(): never {
   throw new AutomationError(400, '백업의 GitLab 상태 자동화 실행 기록을 확인해 주세요.');
@@ -56,6 +57,7 @@ function validateContext(value: unknown): AutomationRunContext {
   const hasTag = Object.hasOwn(context, 'pipelineTag');
   if ((hasSource || hasTag) && (objectKind !== 'pipeline' || (hasSource && !gitlabPipelineSource(context.pipelineSource)) ||
       (hasTag && typeof context.pipelineTag !== 'boolean'))) return invalidHistory();
+  if (Object.hasOwn(context, 'targetBranch') && (objectKind !== 'merge_request' || !isGitlabBranchName(context.targetBranch))) return invalidHistory();
   return context as unknown as AutomationRunContext;
 }
 

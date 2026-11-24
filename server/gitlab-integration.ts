@@ -10,7 +10,7 @@ import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 import { GitlabWebhookReceipts } from './gitlab-webhook-receipts.js';
@@ -56,7 +56,8 @@ type Hooks={
   onIssueBranchAttached?: (actorId: string, issueId: string, link: GitlabLink) => void;
 };
 type RouteHooks={actor:(request:Request)=>string;activity:(request:Request,resourceType:string,resourceId:string,action:string,detail?:string)=>unknown};
-type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number};
+type SyncConnection={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute[];token:string|null;version:number;
+  webhookCredentials:readonly (string | null)[]};
 type ReadOptions={signal?:AbortSignal;includeHistory?:boolean};
 type SyncOptions=Pick<ReadOptions,'includeHistory'> & { expectedVersion?: unknown; repositoryIds?: unknown };
 type SyncKind=GitlabSyncPreviewCandidate['kind'];
@@ -71,7 +72,7 @@ type JiraKeyBinding={issueId:string;originalJiraKey:string};
 type TicketMatch={issue:IssueMatch;originalJiraKey?:string};
 type KeyReader=(...values:unknown[])=>string[];
 type TicketMatcher={match:(keys:string[],inherited?:TicketMatch[])=>TicketMatch[];inherit:(link:GitlabLink)=>TicketMatch|undefined;ambiguousKeys:Set<string>};
-type MergeObservation=Pick<GitlabMergeReadiness,'source'|'observedAt'>&{invalidate?:boolean; repositoryId?:number};
+type MergeObservation=Pick<GitlabMergeReadiness,'source'|'observedAt'>&{invalidate?:boolean; repositoryId?:number; targetBranch?:string|null};
 type PipelineClassification = Pick<GitlabLink, 'pipelineSource' | 'pipelineTag'>;
 const approvalActions=new Set(['approval','approved','unapproval','unapproved']);
 const PREVIEW_CANDIDATE_LIMIT=100;
@@ -153,6 +154,12 @@ function readPipelineClassification(object: Obj, readTag: boolean, ...secrets: (
     ...(readTag && typeof object.tag === 'boolean' ? { pipelineTag: object.tag } : {}),
   };
 }
+function readMergeTargetBranch(object: Obj, repositoryId: number, ...secrets: (string | null)[]): string | null | undefined {
+  const { target_branch: branch, target_project_id: target } = object;
+  if (!numericObjectId(object.id) || !numericObjectId(object.iid) || (target !== undefined && target !== repositoryId)) return;
+  // A scoped observation can clear a cached target when its branch is unusable.
+  return isGitlabBranchName(branch) && !secrets.some(secret => secret && branch.includes(secret)) ? branch : null;
+}
 function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readKeys:KeyReader=keys,observation?:MergeObservation,
   pipelineClassification:PipelineClassification={}){
   const id=objectId(object);
@@ -171,6 +178,7 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
     webUrl:validWebUrl(object.web_url||object.url),iid:kind==='commit'?0:Number(object.iid||object.id)||0,reportedIid:Number(numericObjectId(object.iid))||0,
     reportedProjectId:object.project_id===undefined?undefined:numericObjectId(object.project_id),
     state,incomingTime,mergeCommitShas,pipelineClassification,
+    targetBranch:kind==='merge_request'&&incomingTime?observation?.targetBranch:undefined,
     sourceBranch:bound(kind==='pipeline'?object.ref:object.source_branch||object.ref,512),sourceSha:bound(object.sha||record(object.last_commit).id,128),
     mergeObservation:kind==='merge_request'&&object.state==='opened'&&observation
       ?{...observation,evidence:parseGitlabMergeReadiness(object,observation.observedAt,observation.source)}:undefined,
@@ -206,7 +214,21 @@ function confirmWorkflowRead(link: GitlabLink, draft: LinkDraft, terminal: Termi
   const checkedAt = Date.parse(timestamp);
   if (aliases.some(alias => alias.id !== link.id && alias.pipelineObservedAt !== null &&
       (Date.parse(alias.updatedAt) > checkedAt || Date.parse(alias.updatedAt) === checkedAt && alias.state !== link.state))) return null;
-  return { link, terminal: terminal?.occurredAt ? { link, trigger: terminal.trigger, occurredAt: terminal.occurredAt } : null };
+  if (!terminal?.occurredAt) return { link, terminal: null };
+  const evidence = { link, occurredAt: terminal.occurredAt };
+  if (terminal.trigger === 'merge_request.merged' || terminal.trigger === 'merge_request.closed') {
+    const targetBranch = draft.targetBranch && draft.targetBranch === link.targetBranch &&
+      !hasConflictingMergeTarget(draft, aliases, link.id) ? draft.targetBranch : undefined;
+    return { link, terminal: { ...evidence, trigger: terminal.trigger, ...(targetBranch ? { targetBranch } : {}) } };
+  }
+  return { link, terminal: { ...evidence, trigger: terminal.trigger } };
+}
+
+function hasConflictingMergeTarget(draft: LinkDraft, aliases: readonly GitlabLink[], exceptId?: string): boolean {
+  const timestamp = Date.parse(draft.incomingTime ?? '');
+  return aliases.some(alias => alias.id !== exceptId && alias.iid === draft.reportedIid &&
+    (Date.parse(alias.updatedAt) > timestamp || Date.parse(alias.updatedAt) === timestamp &&
+      (alias.state !== draft.state || alias.targetBranch !== undefined && alias.targetBranch !== draft.targetBranch)));
 }
 
 function currentTerminalObservations(checked: readonly ConfirmedWorkflowRead[], latestVerifiedPipelineId: (link: GitlabLink) => number | null): GitlabStatusObservation[] {
@@ -244,9 +266,9 @@ function linkedWorkflowTarget(link:GitlabLink, issueId:string, instance:string){
   return {kind,id:kind==='merge_request'?iid:objectId,objectId};
 }
 function linkForIssue(instance:string,projectId:number,kind:GitlabLink['kind'],match:TicketMatch,draft:LinkDraft):GitlabLink{
-  const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha,mergeCommitShas }=draft;
+  const { id,title,iid,webUrl,state,incomingTime,sourceBranch,sourceSha,mergeCommitShas,targetBranch }=draft;
   const {issue:{id:issueId},originalJiraKey}=match;
-  return {id:`${gitlabLinkObjectKey(instance,projectId,kind,id)}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(kind==='pipeline'?{pipelineObservedAt:pipelineObservedAt(draft),...draft.pipelineClassification}:{}),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{}),...(originalJiraKey?{originalJiraKey}:{}),...(draft.mergeObservation?.evidence?{mergeReadiness:draft.mergeObservation.evidence}:{}),...(mergeCommitShas.length?{mergeCommitShas}:{})};
+  return {id:`${gitlabLinkObjectKey(instance,projectId,kind,id)}:${issueId}`,issueId,projectId,iid,kind,title,webUrl,state,updatedAt:incomingTime||now(),...(kind==='pipeline'?{pipelineObservedAt:pipelineObservedAt(draft),...draft.pipelineClassification}:{}),...(sourceBranch?{sourceBranch}:{}),...(sourceSha?{sourceSha}:{}),...(targetBranch?{targetBranch}:{}),...(originalJiraKey?{originalJiraKey}:{}),...(draft.mergeObservation?.evidence?{mergeReadiness:draft.mergeObservation.evidence}:{}),...(mergeCommitShas.length?{mergeCommitShas}:{})};
 }
 function retainOriginalJiraKey(link:GitlabLink,existing?:GitlabLink):GitlabLink{
   return !link.originalJiraKey&&existing?.originalJiraKey?{...link,originalJiraKey:existing.originalJiraKey}:link;
@@ -385,12 +407,16 @@ function applyMergeObservation(link:GitlabLink,existing:GitlabLink,draft:LinkDra
       draft.mergeCommitShas.length>(priorMergeShas?.length??0) && (priorMergeShas??[]).every(sha=>draft.mergeCommitShas.includes(sha))){
     mergeCommitShas=draft.mergeCommitShas;
   }
-  if(evidence===link.mergeReadiness&&mergeCommitShas===link.mergeCommitShas)return link;
+  const targetBranch=draft.targetBranch!==undefined&&draft.incomingTime===link.updatedAt&&draft.state===link.state&&sameMergeHead(link,draft)
+    ?draft.targetBranch??undefined:existing.targetBranch;
+  if(evidence===link.mergeReadiness&&mergeCommitShas===link.mergeCommitShas&&targetBranch===link.targetBranch)return link;
   const next={...link};
   if(evidence)next.mergeReadiness=evidence;
   else delete next.mergeReadiness;
   if(mergeCommitShas)next.mergeCommitShas=mergeCommitShas;
   else delete next.mergeCommitShas;
+  if(targetBranch)next.targetBranch=targetBranch;
+  else delete next.targetBranch;
   return next;
 }
 function matchesManualLink(existing:GitlabLink,draft:LinkDraft):boolean{
@@ -505,8 +531,13 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
   const observation={source:'read',observedAt:now(),repositoryId:projectId} as const;
   const scan=await readGitlabSyncProject(connection,projectId,options);
   const readKeys=connection.jiraRoutes?.some(route=>route.repositoryId===projectId)?routedKeys:keys;
-  const mergeRequests=scan.mergeRequests.map(object=>readLink('merge_request',object,[],readKeys,
-    object.target_project_id===undefined||numericObjectId(object.target_project_id)===String(projectId)?observation:undefined));
+  const mergeRequests=scan.mergeRequests.map(object=>{
+    const scoped=(object.project_id===projectId||object.project_id===undefined&&object.target_project_id===projectId)&&
+      isGitlabMergeRequestUrl(object.web_url,connection.baseUrl,Number(numericObjectId(object.iid)));
+    const targetBranch=scoped?readMergeTargetBranch(object,projectId,connection.token,...connection.webhookCredentials):undefined;
+    return readLink('merge_request',object,[],readKeys,
+      object.target_project_id===undefined||numericObjectId(object.target_project_id)===String(projectId)?{...observation,targetBranch}:undefined);
+  });
   const keysByHead=new Map<string,Set<string>>();
   for(const mr of mergeRequests){
     const head=branchHead(mr.sourceBranch,mr.sourceSha);
@@ -606,6 +637,9 @@ export class GitlabIntegrationService{
     return address===old.baseUrl?(old.jiraRoutes??[]).filter(route=>repositories.includes(route.repositoryId)):[];
   }
   private instance(raw:Pick<RawSettings,'baseUrl'>=this.raw()):string{return createHash('sha256').update(raw.baseUrl).digest('hex').slice(0,12);}
+  private webhookCredentials(raw:RawSettings):(string|null)[]{
+    return [raw.webhookSecret,raw.signingToken].map(value=>value?this.store.unseal(value):null);
+  }
   private requireIssue(issueId:string):Issue{
     return this.store.get<Issue>('issues',issueId)??fail('업무를 찾을 수 없습니다.',404);
   }
@@ -671,9 +705,10 @@ export class GitlabIntegrationService{
     const {kind,object,webUrl}=verified;
     if(token&&webUrl.includes(token))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
     const data={...object,web_url:webUrl};
+    const targetBranch=kind==='merge_request'?readMergeTargetBranch(object,repositoryId,token,...this.webhookCredentials(captured)):undefined;
     const observedDraft=kind==='branch'?repositoryBranchDraft(data,keys):kind==='commit'?repositoryCommitDraft(data,keys):readLink(kind,{
       ...data,iid:kind==='merge_request'?object.iid:Number(numericObjectId(object.iid)||numericObjectId(object.id)),
-    },[],keys,{source:'read',observedAt:startedAt,repositoryId},kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
+    },[],keys,{source:'read',observedAt:startedAt,repositoryId,targetBranch},kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
     if(!observedDraft.id||!observedDraft.webUrl)fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.',502);
     return this.store.transaction(()=>{
       branchAttachment?.assertCurrent();
@@ -1105,7 +1140,8 @@ export class GitlabIntegrationService{
         const target = linkedWorkflowTarget(link, issueId, instance);
         if (!target) return { link, message:'현재 GitLab 연결에서 이 활동의 식별자를 확인할 수 없습니다.' };
         const { object } = await read.workflow(link.projectId, target.kind, target.id, target.objectId);
-        const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId },
+        const targetBranch = target.kind === 'merge_request' ? readMergeTargetBranch(object, link.projectId, token, ...this.webhookCredentials(captured)) : undefined;
+        const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId, targetBranch },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
         return { link, kind:target.kind, draft, terminal:reviewActorId && this.hooks.manualStatusReview ? terminalStatusRead(target.kind,object) : null };
       } catch (error) {
@@ -1552,7 +1588,8 @@ export class GitlabIntegrationService{
       if(kind!=='merge_request'&&kind!=='pipeline')return{ok:true,duplicate:false,linked:0,runs:[]};
       const id=objectId(attributes),state=string(attributes.state)||string(attributes.status)||'unknown',branch=bound(kind==='merge_request'?attributes.source_branch:attributes.ref,512),sha=bound(attributes.sha||record(attributes.last_commit).id||record(body.commit).id,128);
       const action=string(attributes.action);
-      const mergeRepositoryMatches=kind==='merge_request'&&(attributes.target_project_id===undefined||numericObjectId(attributes.target_project_id)===String(projectId));
+      const mergeRepositoryMismatch=kind==='merge_request'&&attributes.target_project_id!==undefined&&attributes.target_project_id!==projectId;
+      const mergeRepositoryMatches=kind==='merge_request'&&!mergeRepositoryMismatch;
       const time=kind==='pipeline'?pipelineTime(attributes,state):occurredAt(attributes.actioned_at||attributes.updated_at);
       const cursorId=`${instance}:${projectId}:${kind}:${id}`,prior=id?this.store.get<ObjectCursor>('gitlab_object_cursors',cursorId):undefined;let disposition:AutomationEvent['disposition']='fresh',reason='';
       const pipelineLinks=kind==='pipeline'?this.workflowLinksForObject(instance,projectId,kind,id):[];
@@ -1569,7 +1606,8 @@ export class GitlabIntegrationService{
         (priorPipeline&&!samePipelineRevision(priorPipeline,{sourceBranch:branch,sourceSha:sha}))||
         pipelineLinks.some(link=>!samePipelineRevision(link,{sourceBranch:branch,sourceSha:sha}))
       );
-      if(pipelineIdentityMismatch){disposition='unverified';reason='파이프라인의 저장소, 브랜치 또는 커밋이 기존 연결과 다릅니다.';}
+      if(mergeRepositoryMismatch){disposition='unverified';reason='MR 대상 저장소가 webhook의 저장소와 일치하지 않습니다.';}
+      else if(pipelineIdentityMismatch){disposition='unverified';reason='파이프라인의 저장소, 브랜치 또는 커밋이 기존 연결과 다릅니다.';}
       else if(unverifiedPipelineId){disposition='unverified';reason='기존 관측의 정확한 파이프라인 ID를 확인할 수 없습니다.';}
       else if(!id||!time||kind==='pipeline'&&!numericObjectId(id)){disposition='unverified';reason='이벤트 식별자 또는 유효한 과거 발생 시각을 확인할 수 없습니다.';}
       else if(prior?.occurredAt){const difference=Date.parse(time)-Date.parse(prior.occurredAt);if(difference<0){disposition='stale';reason='이 객체의 최신 수신 이벤트보다 오래된 이벤트입니다.';}else if(difference===0){disposition=state===prior.state?'stale':'ambiguous';reason=state===prior.state?'같은 발생 시각·상태의 이벤트를 이미 반영했습니다.':'같은 발생 시각의 상태가 서로 달라 적용하지 않았습니다.';}}
@@ -1590,7 +1628,7 @@ export class GitlabIntegrationService{
       const pipelineIncompatible=pipelineIdentityMismatch||pipelineClassificationMismatch||unverifiedPipelineId;
       const confirmsLegacyPipeline = exactPipelineId && !priorPipeline && Boolean(branch && time && prior &&
         time === prior.occurredAt && state === prior.state) && !pipelineIncompatible;
-      if(id&&!pipelineIncompatible&&(disposition==='fresh'||disposition==='unverified'&&!prior)){
+      if(id&&!mergeRepositoryMismatch&&!pipelineIncompatible&&(disposition==='fresh'||disposition==='unverified'&&!prior)){
         const updatedAt=occurredAt(attributes.updated_at),head=gitlabObjectSha(attributes.sha||record(attributes.last_commit).id);
         const approvalRevision=mergeRepositoryMatches&&state==='opened'&&approvalActions.has(action)&&time&&updatedAt&&updatedAt<time&&head
           ?{updatedAt,head}:undefined;
@@ -1619,10 +1657,17 @@ export class GitlabIntegrationService{
       const inherited=kind==='pipeline'?this.inheritedMatches(projectId,branch,sha,instance,matcher):[];
       const object={...attributes,...(time?{updated_at:time}:{}),...(branch?{source_branch:branch}:{}),...(sha?{sha}:{}),web_url:attributes.web_url||attributes.url||(kind==='pipeline'&&project.web_url?`${project.web_url}/-/pipelines/${id}`:'')};
       const invalidate=Boolean(attributes.oldrev)||action==='reopen'||approvalActions.has(action);
-      const observation:MergeObservation|undefined=mergeRepositoryMatches&&objectDisposition==='fresh'&&time?{source:'webhook',observedAt:time,invalidate,repositoryId:projectId}:undefined;
+      const targetBranch=mergeRepositoryMatches&&objectDisposition==='fresh'&&project.id===projectId&&
+        (attributes.target_project_id===projectId||isGitlabMergeRequestUrl(object.web_url,raw.baseUrl,Number(numericObjectId(attributes.iid))))
+        ?readMergeTargetBranch(attributes,projectId,raw.token?this.store.unseal(raw.token):null,...this.webhookCredentials(raw)):undefined;
+      const observation:MergeObservation|undefined=mergeRepositoryMatches&&objectDisposition==='fresh'&&time
+        ?{source:'webhook',observedAt:time,invalidate,repositoryId:projectId,targetBranch}:undefined;
       const observedDraft=readLink(kind,object,extra,readKeys,observation,verifiedClassification);
-      const draft=exactPipelineId?classifyPipelineDraft(observedDraft,pipelineLinks,priorPipeline,objectDisposition==='fresh')??observedDraft:observedDraft;
-      const canUpsert=!pipelineIncompatible&&(objectDisposition==='fresh'||objectDisposition==='unverified');
+      const mergeTargetConflict=observedDraft.targetBranch&&
+        hasConflictingMergeTarget(observedDraft,this.workflowLinksForObject(instance,projectId,'merge_request',id));
+      const draft=exactPipelineId?classifyPipelineDraft(observedDraft,pipelineLinks,priorPipeline,objectDisposition==='fresh')??observedDraft
+        :mergeTargetConflict?{...observedDraft,targetBranch:undefined}:observedDraft;
+      const canUpsert=!mergeRepositoryMismatch&&!pipelineIncompatible&&(objectDisposition==='fresh'||objectDisposition==='unverified');
       const direct=canUpsert?draft.matchedKeys:readKeys(attributes.title,attributes.description,branch,attributes.ref,...extra);
       const byMatchId=new Map((id?matcher.match(direct,inherited):[]).map(match=>[match.issue.id,match]));
       const matches=issues.flatMap(issue=>{const match=byMatchId.get(issue.id);return match?[match]:[];});
@@ -1651,7 +1696,7 @@ export class GitlabIntegrationService{
       const trigger=kind==='merge_request'?({open:'merge_request.opened',reopen:'merge_request.opened',merge:'merge_request.merged',close:'merge_request.closed'} as Record<string,AutomationEvent['trigger']>)[action]:({success:'pipeline.succeeded',failed:'pipeline.failed'} as Record<string,AutomationEvent['trigger']>)[state];
       const pipelineEvidence = !pipelineIncompatible && objectDisposition === 'fresh' ? verifiedClassification : undefined;
       const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,
-        ...pipelineEvidence,issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
+        ...pipelineEvidence,...(draft.targetBranch?{targetBranch:draft.targetBranch}:{}),issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
       return{ok:true,duplicate:false,linked,runs};
     };
     return this.store.transaction(() => {
@@ -2062,7 +2107,7 @@ export class GitlabIntegrationService{
     if(!address||!repositories.length)fail('GitLab 주소와 저장소 ID를 입력해 주세요.');
     const jiraRoutes=this.submittedJiraRoutes(input,saved,address,repositories);
     const token=this.draftReadToken(input,address,saved);
-    const connection={baseUrl:address,projectIds:repositories,jiraRoutes,token,version:saved.version};
+    const connection={baseUrl:address,projectIds:repositories,jiraRoutes,token,version:saved.version,webhookCredentials:this.webhookCredentials(saved)};
     const reads=await this.readRepositories(connection,{signal,includeHistory});
     const candidates:GitlabSyncPreviewCandidate[]=[],counts=emptyCounts(includeHistory),issues=this.syncIssues(),instance=this.instance(connection);
     const outcomes:GitlabSyncPreview['repositories']=reads.map(read=>{
@@ -2093,7 +2138,8 @@ export class GitlabIntegrationService{
     let readOutcomes: ProjectReadOutcome[] | undefined;
     if(includeHistory)this.historySyncActive=true;
     try{
-      const connection={...captured,projectIds:selected,token:captured.token?this.store.unseal(captured.token):null};
+      const connection={...captured,projectIds:selected,token:captured.token?this.store.unseal(captured.token):null,
+        webhookCredentials:this.webhookCredentials(captured)};
       const reads=await this.readRepositories(connection,{includeHistory});
       readOutcomes = reads;
       const failures=reads.flatMap(read=>'failure'in read?[read.failure]:[]);

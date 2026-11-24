@@ -16,6 +16,10 @@ export function isPipelineAutomationTrigger(trigger: unknown): trigger is 'pipel
   return trigger === 'pipeline.succeeded' || trigger === 'pipeline.failed';
 }
 
+export function isMergeRequestAutomationTrigger(trigger: unknown): trigger is Extract<GitlabAutomationTrigger, `merge_request.${string}`> {
+  return trigger === 'merge_request.opened' || trigger === 'merge_request.merged' || trigger === 'merge_request.closed';
+}
+
 export function automationPipelineContextLabel(source?: string, tag?: boolean): string | undefined {
   if (source === undefined && tag === undefined) return;
   const refKind = tag === undefined ? '참조 유형 미확인' : PIPELINE_REF_KIND_LABELS[tag ? 'tag' : 'branch'];

@@ -679,6 +679,12 @@ export function isExactGitlabPipelineListRow(object: GitlabReadObject, projectId
   return page?.kind === 'pipeline' && page.id === object.id;
 }
 
+export function isGitlabMergeRequestUrl(value: unknown, baseUrl: string, iid: number): boolean {
+  if (!baseUrl || !positiveId(iid)) return false;
+  const page = manualPage(value, new URL(baseUrl), false);
+  return page?.kind === 'merge_request' && page.id === iid;
+}
+
 async function readExactWorkflowObject(
   { base, headers, projectUrl }: ReturnType<typeof projectReadRequest>, projectId: number,
   { repositoryPath, kind, id }: WorkflowPage, signal?: AbortSignal, derivePipelineAddress = false,

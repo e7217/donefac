@@ -32,6 +32,129 @@ test('자동화 미리보기는 업무를 유지하고 명시적으로 활성화
   }
 });
 
+test('360px MR 자동화에서 소스와 대상 브랜치를 따로 시험하고 배포 브랜치 병합만 적용한다', async ({ page, request }) => {
+  const settingsPath = '/api/integrations/gitlab';
+  const rulesPath = '/api/automation-rules';
+  const workspace = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const connection = async () => await (await request.get(settingsPath)).json() as GitlabSettings;
+  const project = (await workspace()).projects[0];
+  const initial = await connection();
+  expect(initial.baseUrl).toBe('');
+  const secret = `synthetic-mr-target-${randomUUID()}`;
+  const mock = createServer((_incoming, response) => {
+    remoteReads++;
+    response.writeHead(503).end();
+  });
+  let remoteReads = 0;
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const baseUrl = `http://127.0.0.1:${(mock.address() as { port: number }).port}`;
+  const remoteProject = `${baseUrl}/team/app`;
+  let issue: Issue | undefined;
+  let rule: AutomationRule | undefined;
+  try {
+    const createdIssue = await request.post('/api/issues', { data: { projectId: project.id, title: `배포 MR 검증 ${randomUUID()}` } });
+    expect(createdIssue.status()).toBe(201);
+    const ticket = await createdIssue.json() as Issue;
+    issue = ticket;
+    const configured = await request.patch(settingsPath, { data: {
+      expectedVersion: initial.version, baseUrl, projectIds: [42], webhookSecret: secret,
+    } });
+    expect(configured.ok(), await configured.text()).toBe(true);
+    const settings = page.getByRole('region', { name: 'GitLab 상태 자동화 설정', exact: true });
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/development`);
+    await settings.getByRole('button', { name: '규칙 만들기', exact: true }).click();
+    const editor = settings.getByRole('region', { name: '자동화 규칙 편집', exact: true });
+    const name = `배포 브랜치 병합 완료 ${ticket.key}`;
+    const targetPattern = editor.getByLabel('자동화 대상 브랜치 패턴', { exact: true });
+    const sampleTarget = editor.getByLabel('표본 대상 브랜치', { exact: true });
+    const sourceBranch = `feature/${ticket.key}`;
+    await editor.getByLabel('자동화 규칙 이름', { exact: true }).fill(name);
+    await editor.getByLabel('자동화 브랜치 패턴', { exact: true }).fill('feature/*');
+    await targetPattern.fill('release/*');
+    await editor.getByLabel('자동화 저장소 42', { exact: true }).check();
+    await editor.getByLabel('자동화 출발 상태 할 일', { exact: true }).check();
+    await editor.getByLabel('자동화 도착 상태', { exact: true }).selectOption('done');
+    await editor.getByLabel('미리보기 브랜치', { exact: true }).fill(sourceBranch);
+    await editor.getByLabel(`${ticket.key} 자동화 미리보기 선택`, { exact: true }).check();
+    const preview = editor.getByRole('button', { name: '변경 없이 미리보기', exact: true });
+    const outcome = editor.locator('.automation-preview-outcome');
+    await preview.click();
+    await expect(outcome).toContainText('MR의 대상 브랜치를 확인할 수 없습니다.');
+    await sampleTarget.fill('develop');
+    await preview.click();
+    await expect(outcome).toContainText('대상 브랜치 패턴이 일치하지 않습니다.');
+    await sampleTarget.fill('release/2026');
+    await preview.click();
+    await expect(outcome).toContainText('변경 예정');
+    expect((await workspace()).issues.find(value => value.id === ticket.id)).toEqual(ticket);
+    const saveRule = editor.getByRole('button', { name: '규칙 저장', exact: true });
+    const created = page.waitForResponse(response => new URL(response.url()).pathname === rulesPath && response.request().method() === 'POST');
+    await saveRule.click();
+    const saved = await created;
+    expect(saved.status(), await saved.text()).toBe(201);
+    rule = await saved.json() as AutomationRule;
+    expect(rule).toMatchObject({ enabled: false, branchPattern: 'feature/*', targetBranchPattern: 'release/*' });
+    const rulePath = `${rulesPath}/${rule.id}`;
+    const ruleUpdate = () => page.waitForResponse(response => new URL(response.url()).pathname === rulePath && response.request().method() === 'PATCH');
+    await editor.getByLabel('자동화 규칙 활성화', { exact: true }).check();
+    const enabling = ruleUpdate();
+    await saveRule.click();
+    expect(await (await enabling).json()).toMatchObject({ enabled: true, targetBranchPattern: 'release/*' });
+    await expect(saveRule).toBeDisabled();
+
+    async function merge(id: number, targetBranch: string) {
+      const response = await request.post(`${settingsPath}/webhook`, {
+        headers: { 'X-Gitlab-Event': 'Merge Request Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+        data: { object_kind: 'merge_request', project: { id: 42, web_url: remoteProject }, object_attributes: {
+          id, iid: id, action: 'merge', state: 'merged', title: `${ticket.key} 합성 MR`, source_branch: sourceBranch,
+          target_project_id: 42, target_branch: targetBranch, url: `${remoteProject}/-/merge_requests/${id}`, updated_at: new Date().toISOString(),
+        } },
+      });
+      expect(response.ok(), await response.text()).toBe(true);
+    }
+    await merge(9191, 'develop');
+    expect((await workspace()).issues.find(value => value.id === ticket.id)).toEqual(ticket);
+    await merge(9192, 'release/2026');
+    expect((await workspace()).issues.find(value => value.id === ticket.id)).toMatchObject({ status: 'done', version: ticket.version + 1 });
+    await settings.getByRole('button', { name: '자동화 설정 새로고침', exact: true }).click();
+    const history = settings.getByRole('region', { name: '자동화 실행 기록', exact: true });
+    const development = history.getByRole('row').filter({ hasText: '대상 브랜치 develop' });
+    const release = history.getByRole('row').filter({ hasText: '대상 브랜치 release/2026' });
+    await expect(development).toContainText('대상 브랜치 패턴이 일치하지 않습니다.');
+    await expect(release).toContainText('변경됨');
+    expect(remoteReads).toBe(0);
+
+    await targetPattern.fill('');
+    const clearing = ruleUpdate();
+    await saveRule.click();
+    const cleared = await clearing;
+    expect(cleared.request().postDataJSON()).toMatchObject({ targetBranchPattern: null });
+    expect(cleared.status(), await cleared.text()).toBe(200);
+    expect(await cleared.json()).not.toHaveProperty('targetBranchPattern');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  } finally {
+    try {
+      if (rule) {
+        const current = ((await (await request.get(rulesPath)).json()) as AutomationRule[]).find(item => item.id === rule?.id);
+        if (current) await request.delete(`${rulesPath}/${current.id}?expectedVersion=${current.version}`);
+      }
+      if (issue) {
+        const deleted = await request.delete(`/api/issues/${issue.id}`);
+        if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
+      }
+      const current = await connection();
+      if (current.baseUrl === baseUrl) await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], webhookSecret: '', signingToken: '', token: '',
+      } });
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>((resolve, reject) => mock.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});
+
 test('저장 전 GitLab 연결을 확인하고 접근 가능한 저장소를 동기화한 뒤 실패한 저장소만 다시 조회한다',async({page,request})=>{
   const workspace = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
   const before = await workspace();

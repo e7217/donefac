@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ChevronDown, FlaskConical, Plus, RefreshCw, Save, Trash2, Workflow, X } from 'lucide-react';
 import type { AutomationPreview, AutomationRule, AutomationRun, FeatureProps, GitlabAutomationTrigger, GitlabPipelineRefKind, GitlabSettings } from '../../shared/types';
-import { AUTOMATION_TRIGGER_LABELS, AUTOMATION_TRIGGERS, PIPELINE_REF_KIND_LABELS, automationPipelineContextLabel, isPipelineAutomationTrigger, sortedAutomationRules } from '../../shared/automation';
+import { AUTOMATION_TRIGGER_LABELS, AUTOMATION_TRIGGERS, PIPELINE_REF_KIND_LABELS, automationPipelineContextLabel, isMergeRequestAutomationTrigger, isPipelineAutomationTrigger, sortedAutomationRules } from '../../shared/automation';
 import { GITLAB_PIPELINE_SOURCE_OPTIONS, gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import { projectIssueTypes } from '../../shared/issue-schema';
 import { projectStatuses, statusMeta } from '../../shared/workflow-helpers';
@@ -13,18 +13,20 @@ import { errorMessage } from './schedule-utils';
 import './automation-settings.css';
 
 type RuleDraft = Pick<AutomationRule, 'name' | 'enabled' | 'trigger' | 'gitlabProjectIds' | 'branchPattern' | 'issueTypes' | 'fromStatuses' | 'toStatusId' | 'actorId' | 'priority'> & {
+  targetBranchPattern: string;
   environment: string;
   pipelineSources: string[];
   pipelineRefKind: GitlabPipelineRefKind | '';
 };
 const draftOf = (rule: AutomationRule): RuleDraft => ({
   name: rule.name, enabled: rule.enabled, trigger: rule.trigger, gitlabProjectIds: [...rule.gitlabProjectIds],
-  branchPattern: rule.branchPattern, environment: rule.environment ?? '', pipelineSources: [...(rule.pipelineSources ?? [])],
+  branchPattern: rule.branchPattern, targetBranchPattern: rule.targetBranchPattern ?? '',
+  environment: rule.environment ?? '', pipelineSources: [...(rule.pipelineSources ?? [])],
   pipelineRefKind: rule.pipelineRefKind ?? '', issueTypes: [...rule.issueTypes], fromStatuses: [...rule.fromStatuses],
   toStatusId: rule.toStatusId, actorId: rule.actorId, priority: rule.priority,
 });
 const emptyDraft = (actorId: string): RuleDraft => ({
-  name: '', enabled: false, trigger: 'merge_request.merged', gitlabProjectIds: [], branchPattern: '*',
+  name: '', enabled: false, trigger: 'merge_request.merged', gitlabProjectIds: [], branchPattern: '*', targetBranchPattern: '',
   environment: '', pipelineSources: [], pipelineRefKind: '', issueTypes: [], fromStatuses: [], toStatusId: '', actorId, priority: 100,
 });
 const sourceLabel = (source: string) => GITLAB_PIPELINE_SOURCE_OPTIONS.includes(source) ? gitlabPipelineSourceLabel(source) : source;
@@ -56,11 +58,15 @@ function ProjectAutomation(props: FeatureProps) {
     {loading && <p>자동화 설정을 불러오는 중입니다.</p>}
     <div className="automation-rule-list">{rules.map(rule => {
       const enabled = rule.enabled && ready(connection) && rule.gitlabBaseUrl === connection?.baseUrl && rule.gitlabProjectIds.every(id => connection?.projectIds.includes(id));
+      const mergeRequest = isMergeRequestAutomationTrigger(rule.trigger);
+      const reference = rule.trigger === 'deployment.succeeded' ? `환경 ${rule.environment}`
+        : mergeRequest ? `소스 브랜치 ${rule.branchPattern}` : rule.branchPattern;
       const scope = [rule.pipelineRefKind && PIPELINE_REF_KIND_LABELS[rule.pipelineRefKind], rule.pipelineSources?.map(sourceLabel).join(', ')].filter(Boolean).join(' · ');
       return <button type="button" key={rule.id} className={`automation-rule-card ${selectedId === rule.id && !creating ? 'is-selected' : ''}`} onClick={() => { if (selectedId === rule.id && !creating || canLeave()) { setCreating(false); setSelectedId(rule.id); } }}>
         <span className="automation-rule-order">우선순위 {rule.priority}</span><strong>{rule.name}</strong>
         <span className={`automation-state ${enabled ? 'is-enabled' : ''}`}>{enabled ? '활성' : rule.enabled ? '연결 확인 필요' : '비활성'}</span>
-        <span>{AUTOMATION_TRIGGER_LABELS[rule.trigger]} · {rule.trigger === 'deployment.succeeded' ? `환경 ${rule.environment}` : rule.branchPattern}</span>
+        <span>{AUTOMATION_TRIGGER_LABELS[rule.trigger]} · {reference}</span>
+        {mergeRequest && rule.targetBranchPattern && <span>대상 브랜치 {rule.targetBranchPattern}</span>}
         {scope && <span>{scope}</span>}
         <small>저장소 {rule.gitlabProjectIds.join(', ')} · 버전 {rule.version}</small>
       </button>;
@@ -68,6 +74,10 @@ function ProjectAutomation(props: FeatureProps) {
     {(creating || selectedId) && <RuleEditor key={`${creating ? 'new' : selectedId}:${actorId}`} {...props} rule={current} creating={creating} connection={connection} onClose={() => { if (canLeave()) { setSelectedId(null); setCreating(false); } }} onSaved={async rule => { setRules(previous => sortedAutomationRules([rule, ...previous.filter(value => value.id !== rule.id)])); setCreating(false); setSelectedId(rule.id); await load(); }} onDeleted={async () => { setSelectedId(null); setCreating(false); await load(); }} />}
     <section className="automation-runs" aria-label="자동화 실행 기록"><div><h3>최근 실행 기록</h3><span>최대 50건 · 차단 이유도 기록합니다.</span></div>{!runs.length ? <p className="automation-empty">아직 처리한 이벤트가 없습니다.</p> : <div className="automation-log-scroll"><table><thead><tr><th>업무</th><th>규칙</th><th>처리 결과</th><th>이유</th><th>시각</th></tr></thead><tbody>{runs.map(run => <tr key={run.id}><td><button className="automation-issue-link" onClick={() => props.openIssue(run.issueId)}>{run.key}</button><span>{run.title}</span></td><td>{rules.find(rule => rule.id === run.ruleId)?.name || '삭제된 규칙'}
       {run.context?.objectKind === 'deployment' && <small>배포 #{run.context.objectId} · 환경 {run.context.environment}</small>}
+      {run.context?.objectKind === 'merge_request' && <>
+        {run.context.branch && <small>소스 브랜치 <code>{run.context.branch}</code></small>}
+        {run.context.targetBranch && <small>대상 브랜치 <code>{run.context.targetBranch}</code></small>}
+      </>}
       {run.context?.objectKind === 'pipeline' && (run.context.pipelineSource !== undefined || run.context.pipelineTag !== undefined) &&
         <small>파이프라인 #{run.context.objectId} · {automationPipelineContextLabel(run.context.pipelineSource, run.context.pipelineTag)}</small>}
     </td><td><span className={`automation-outcome is-${run.outcome}`}>{outcomeLabel(run.outcome, false)}</span><small>{statusMeta(props.data, projectId, run.fromStatus).label} / {statusMeta(props.data, projectId, run.toStatus).label}</small></td><td>{run.reason}</td><td><time>{time(run.createdAt)}</time><details><summary>이벤트 정보</summary><code>{run.eventId}</code><span>발생 {time(run.occurredAt)}</span></details></td></tr>)}</tbody></table></div>}</section>
@@ -77,10 +87,12 @@ function ProjectAutomation(props: FeatureProps) {
 function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, ...props }: FeatureProps & { rule?: AutomationRule; creating: boolean; connection: GitlabSettings | null; onClose: () => void; onSaved: (rule: AutomationRule) => Promise<void>; onDeleted: () => Promise<void> }) {
   const { data, projectId, actorId, notify } = props;
   const environmentHint = useId();
+  const targetBranchHint = useId();
   const [draft, setDraft] = useState<RuleDraft>(() => rule ? draftOf(rule) : emptyDraft(actorId)), [baseline, setBaseline] = useState<RuleDraft>(() => rule ? draftOf(rule) : emptyDraft(actorId));
   const [id] = useState(rule?.id || '');
   const [version, setVersion] = useState(rule?.version || 0), [busy, setBusy] = useState(false), [error, setError] = useState('');
   const [preview, setPreview] = useState<AutomationPreview | null>(null), [selected, setSelected] = useState<string[]>([]), [branch, setBranch] = useState('main');
+  const [sampleTargetBranch, setSampleTargetBranch] = useState('');
   const [chosenSampleTrigger, setSampleTrigger] = useState<GitlabAutomationTrigger | null>(null);
   const [chosenSampleEnvironment, setSampleEnvironment] = useState<string | null>(null);
   const [samplePipelineSource, setSamplePipelineSource] = useState('');
@@ -88,13 +100,17 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
   const [sampleProject, setSampleProject] = useState(draft.gitlabProjectIds[0] || connection?.projectIds[0] || 0);
   const sampleTrigger = chosenSampleTrigger ?? draft.trigger;
   const sampleEnvironment = chosenSampleEnvironment ?? draft.environment;
+  const mergeRequestRule = isMergeRequestAutomationTrigger(draft.trigger);
+  const mergeRequestSample = isMergeRequestAutomationTrigger(sampleTrigger);
   const deploymentRule = draft.trigger === 'deployment.succeeded';
   const deploymentSample = sampleTrigger === 'deployment.succeeded';
   const pipelineRule = isPipelineAutomationTrigger(draft.trigger);
   const pipelineSample = isPipelineAutomationTrigger(sampleTrigger);
-  const { environment, pipelineSources, pipelineRefKind, ...baseRule } = draft;
+  const { environment, pipelineSources, pipelineRefKind, targetBranchPattern, ...baseRule } = draft;
+  const targetBranchCondition = targetBranchPattern.trim();
   const ruleValues = {
     ...baseRule, projectId,
+    ...(mergeRequestRule && targetBranchCondition ? { targetBranchPattern: targetBranchCondition } : {}),
     ...(deploymentRule ? { environment, branchPattern: '*' } : {}),
     ...(pipelineRule ? { pipelineSources, pipelineRefKind: pipelineRefKind || null } : {}),
   };
@@ -120,7 +136,10 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
     }
     await execute(async () => {
       const saved = creating ? await post<AutomationRule>('/automation-rules', ruleValues)
-        : await patch<AutomationRule>(`/automation-rules/${id}`, { ...ruleValues, expectedVersion: version });
+        : await patch<AutomationRule>(`/automation-rules/${id}`, {
+          ...ruleValues, expectedVersion: version,
+          ...(mergeRequestRule && !targetBranchCondition && baseline.targetBranchPattern ? { targetBranchPattern: null } : {}),
+        });
       if (!active.current) return;
       const savedDraft = draftOf(saved);
       setDraft(savedDraft);
@@ -147,6 +166,7 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
       trigger: sampleTrigger,
       gitlabProjectId: sampleProject,
       ...(deploymentSample ? { environment: sampleEnvironment } : { branch }),
+      ...(mergeRequestSample && sampleTargetBranch ? { targetBranch: sampleTargetBranch } : {}),
       ...(pipelineSample && samplePipelineSource ? { pipelineSource: samplePipelineSource } : {}),
       ...(pipelineSample && samplePipelineRefKind ? { pipelineTag: samplePipelineRefKind === 'tag' } : {}),
     };
@@ -162,9 +182,14 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
       {deploymentRule ? <label>배포 환경<input className="field" aria-label="자동화 배포 환경" aria-describedby={environmentHint} maxLength={255} value={environment}
         required autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={event => update('environment', event.target.value)} />
         <small id={environmentHint}>GitLab 환경 이름이 대소문자까지 같아야 합니다.</small>
-      </label> : <label>{pipelineRule ? '참조 이름 패턴' : '브랜치 패턴'}<input className="field" aria-label={pipelineRule ? '자동화 참조 패턴' : '자동화 브랜치 패턴'} maxLength={128} value={draft.branchPattern}
+      </label> : <label>{pipelineRule ? '참조 이름 패턴' : '소스 브랜치 패턴'}<input className="field" aria-label={pipelineRule ? '자동화 참조 패턴' : '자동화 브랜치 패턴'} maxLength={128} value={draft.branchPattern}
         required onChange={event => update('branchPattern', event.target.value)} />
         <small>*는 모든 길이, ?는 한 글자와 일치합니다. 나머지는 그대로 비교합니다.</small>
+      </label>}
+      {mergeRequestRule && <label>대상 브랜치 패턴 (선택)<input className="field" aria-label="자동화 대상 브랜치 패턴"
+        aria-describedby={targetBranchHint} maxLength={128} value={targetBranchPattern} autoCapitalize="none" autoCorrect="off" spellCheck={false}
+        onChange={event => update('targetBranchPattern', event.target.value)} />
+        <small id={targetBranchHint}>비워 두면 모든 대상 브랜치에 적용됩니다.</small>
       </label>}
       {pipelineRule && <label>참조 유형<PipelineRefSelect ariaLabel="자동화 파이프라인 참조 유형" emptyLabel="브랜치와 태그 모두" value={pipelineRefKind} onChange={value => update('pipelineRefKind', value)} /></label>}
       <label>우선순위<input className="field" type="number" aria-label="자동화 우선순위" min={0} max={10000} step={1} value={draft.priority} required onChange={event => update('priority', Number(event.target.value))} /></label><label>도착 상태<Select ariaLabel="자동화 도착 상태" value={draft.toStatusId} onChange={value => update('toStatusId', value)}><option value="">상태 선택</option>{draft.toStatusId && !statuses.some(value => value.id === draft.toStatusId) && <option value={draft.toStatusId}>{draft.toStatusId} (현재 워크플로에 없음)</option>}{statuses.map(status => <option value={status.id} key={status.id}>{status.label}</option>)}</Select></label><label>실행 작업자<Select ariaLabel="자동화 실행 작업자" value={draft.actorId} onChange={value => update('actorId', value)}>{!data.users.some(user => user.id === draft.actorId) && <option value={draft.actorId}>찾을 수 없는 작업자 · {draft.actorId}</option>}{data.users.map(user => <option value={user.id} key={user.id}>{user.name}</option>)}</Select></label></div>
@@ -187,8 +212,12 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
       {deploymentSample ? <label className="automation-wide">시험 배포 환경<input className="field" aria-label="미리보기 배포 환경"
         value={sampleEnvironment} maxLength={255} required autoCapitalize="none" autoCorrect="off" spellCheck={false}
         onChange={event => { setSampleEnvironment(event.target.value); setPreview(null); }} />
-      </label> : <label className="automation-wide">{pipelineSample ? '시험 참조 이름' : '시험 브랜치'}<input className="field" aria-label={pipelineSample ? '미리보기 참조' : '미리보기 브랜치'} value={branch}
+      </label> : <label className={pipelineSample ? 'automation-wide' : undefined}>{pipelineSample ? '시험 참조 이름' : '표본 소스 브랜치'}<input className="field" aria-label={pipelineSample ? '미리보기 참조' : '미리보기 브랜치'} value={branch}
         maxLength={512} onChange={event => { setBranch(event.target.value); setPreview(null); }} />
+      </label>}
+      {mergeRequestSample && <label>표본 대상 브랜치<input className="field" aria-label="표본 대상 브랜치"
+        value={sampleTargetBranch} maxLength={512} autoCapitalize="none" autoCorrect="off" spellCheck={false}
+        onChange={event => { setSampleTargetBranch(event.target.value); setPreview(null); }} />
       </label>}
       {pipelineSample && <>
         <label>시험 실행 유형<Select ariaLabel="미리보기 파이프라인 실행 유형" value={samplePipelineSource} onChange={value => { setSamplePipelineSource(value); setPreview(null); }}>

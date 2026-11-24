@@ -71,6 +71,7 @@ export function isRestorableGitlabLink(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const link = value as Record<string, unknown>;
   const { kind, id, issueId, projectId } = link;
+  if (Object.hasOwn(link, 'targetBranch') && (kind !== 'merge_request' || !isGitlabBranchName(link.targetBranch))) return false;
   const hasSource = Object.hasOwn(link, 'pipelineSource');
   const hasTag = Object.hasOwn(link, 'pipelineTag');
   if ((hasSource || hasTag) &&
