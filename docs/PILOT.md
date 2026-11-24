@@ -38,6 +38,10 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 `npm run test:pilot:access`는 OpenSSL과 Chromium을 사용해 임시 루프백 HTTPS 프록시에서 접속, 공동 편집, 연동 경로를 검증한다.
 
+## 상태 변경에 인수인계 남기기
+
+프로젝트 목록의 상태 칸이나 보드 카드의 **상태 변경**에서 목표 상태와 담당자를 선택한다. **인수인계 댓글**에 처리 이유나 다음 담당자에게 전달할 내용을 적고, 필요한 팀원은 `@`로 멘션한다. **상태 변경 적용**으로 티켓과 댓글을 함께 저장한다. 응답이 끊기면 **저장 결과 다시 확인**을 누른다. 다른 사람이 먼저 상태를 바꿨다면 **최신 업무 불러오기**에서 현재 초안을 유지하고 가능한 전이를 다시 선택할 수 있다.
+
 ## GitLab 웹훅 수신 확인
 
 처음 연결할 때는 **개발 · GitLab → GitLab 저장소 찾기**를 사용한다. GitLab 서비스 주소와 읽기 토큰을 입력하고 저장소 이름이나 `group/subgroup/repository` 전체 경로로 검색한다. 결과의 **추가**를 누르면 GitLab 프로젝트 ID 입력에 반영된다. 알고 있는 숫자 ID도 직접 입력할 수 있다. **연결 미리보기**에서 티켓 연결을 확인한 뒤 **연결 설정 저장**과 **지금 동기화**를 실행한다. [GitLab 저장소 조회](https://docs.gitlab.com/api/projects/#list-all-projects)

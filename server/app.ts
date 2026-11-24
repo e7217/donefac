@@ -41,6 +41,7 @@ import { CommentEditError, CommentEditingService, validateCommentEdit } from './
 import { JiraOriginalCommentLinks } from './jira-original-comment-links.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
 import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
 import { RecurringIssueError, RecurringIssueService } from './recurring-issues.js';
@@ -245,6 +246,7 @@ export function createApp(options: {
   const commentEditing = new CommentEditingService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
+  const issueStatusChanges = new IssueStatusChangeService(store);
   const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
     let customFields = defaults.customFields;
     if (source) {
@@ -373,6 +375,24 @@ export function createApp(options: {
   };
   const notifyDocumentComment = (document: DocPage, comment: Comment, participants: string[] = []) =>
     notifyComment(comment, document.projectId, document.title, [document.authorId, ...documentSubscribers(document), ...participants]);
+  const prepareOrdinaryComment = (value: unknown, rawMentions: unknown): Pick<Comment, 'body' | 'mentions'> => {
+    const body = text(value, '댓글', 20000);
+    const mentions = parseCommentMentions(body, rawMentions);
+    return { body, ...(mentions.length ? { mentions } : {}) };
+  };
+  const saveOrdinaryComment = (authorId: string, resourceType: Comment['resourceType'], resourceId: string,
+    draft: Pick<Comment, 'body' | 'mentions'>, createdAt = now()): Comment => {
+    validateCurrentMentionNames(store, draft.body, draft.mentions ?? []);
+    const comment: Comment = { ...draft, id: uid(), resourceType, resourceId, authorId, createdAt };
+    if (resourceType === 'issue') {
+      const issue = get<Issue>('issues', resourceId);
+      notifyComment(comment, issue.projectId, `${issue.key} ${issue.title}`,
+        [issue.reporterId, issue.assigneeId, ...issue.collaboratorIds, ...issueSubscribers(issue)]);
+    } else notifyDocumentComment(get<DocPage>('documents', resourceId), comment);
+    store.put('comments', comment);
+    recordActivity(authorId, resourceType, resourceId, '댓글 작성', comment.body.slice(0, 100));
+    return comment;
+  };
   const stopIssueWatch = store.onChange(({before,after,context})=>{
     const old=before as Issue | undefined, issue=after as Issue | undefined;
     if(!old || !issue)return;
@@ -1430,6 +1450,26 @@ export function createApp(options: {
     if (prepared.automaticDueDate) fields.push('dueDate');
     return {...prepared,fields};
   };
+  const prepareVersionedIssueUpdate = (old: Issue, values: Record<string, unknown>, requireStatusChange = false) => {
+    checkVersion(old, values.expectedVersion);
+    const guardedTransition = Object.hasOwn(values, 'expectedWorkflowVersion');
+    if (guardedTransition) {
+      const { expectedWorkflowVersion } = values;
+      if (!Object.hasOwn(values, 'status') || typeof expectedWorkflowVersion !== 'number' ||
+          !Number.isSafeInteger(expectedWorkflowVersion) || expectedWorkflowVersion < 1) {
+        fail('변경할 상태와 확인한 워크플로 버전을 보내 주세요.');
+      }
+      const { version } = workflows.get(old.projectId);
+      if (version !== expectedWorkflowVersion) {
+        fail('업무의 워크플로가 변경되었습니다. 최신 상태를 확인한 뒤 다시 변경해 주세요.', 409,
+          { reason: 'workflow_changed', currentWorkflowVersion: version });
+      }
+    }
+    if (requireStatusChange && old.status === values.status) {
+      fail('현재 상태와 다른 상태를 선택해 주세요.', 409, { reason: 'status_unchanged' });
+    }
+    return prepareIssueUpdate(old, values, { assigneeExplicit: guardedTransition && Object.hasOwn(values, 'assigneeId') });
+  };
   const commitIssueUpdate = (req: Request, old: Issue, {issue,decision,automaticDueDate,fields}:ReturnType<typeof prepareIssueUpdate>, history?: { action: string; detail: string }) => {
     const actorId=actor(req);
     let detail = history?.detail ?? `${issue.key}: ${fields.join(', ')}`;
@@ -1949,28 +1989,23 @@ export function createApp(options: {
     const preview = schedulePaste.previewIssueSave(req.params.id, req.body, actor(req), scheduleReviewHooks, defaultStatusDueDate);
     res.set('Cache-Control', 'no-store').json(preview);
   });
+  app.post('/api/issues/:id/status-change', (req, res) => {
+    if (Object.keys(req.query).length) return fail('업무 상태 변경 요청을 확인해 주세요.');
+    const actorId = actor(req);
+    const result = issueStatusChanges.apply(req.params.id, actorId, req.body, {
+      parseComment: prepareOrdinaryComment,
+      transition: (old, values) => commitIssueUpdate(req, old, prepareVersionedIssueUpdate(old, values, true)),
+      saveComment: (issue, draft) => saveOrdinaryComment(actorId, 'issue', issue.id, draft, issue.updatedAt),
+    });
+    res.set('Cache-Control', 'no-store').json(result);
+  });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);
       if (Object.hasOwn(req.body, 'gitlabStatusSuggestionToken')) {
         automation.verifyManualStatusSuggestion(old,req.body.status,req.body.type,req.body.gitlabStatusSuggestionToken,actor(req),gitlab.settings().version);
       }
-      checkVersion(old,req.body.expectedVersion);
-      const guardedTransition = Object.hasOwn(req.body, 'expectedWorkflowVersion');
-      if (guardedTransition) {
-        const { expectedWorkflowVersion } = req.body;
-        if (!Object.hasOwn(req.body, 'status') || !Number.isSafeInteger(expectedWorkflowVersion) || expectedWorkflowVersion < 1) {
-          fail('변경할 상태와 확인한 워크플로 버전을 보내 주세요.');
-        }
-        const { version } = workflows.get(old.projectId);
-        if (version !== expectedWorkflowVersion) {
-          fail('업무의 워크플로가 변경되었습니다. 최신 상태를 확인한 뒤 다시 변경해 주세요.', 409,
-            { reason: 'workflow_changed', currentWorkflowVersion: version });
-        }
-      }
-      const prepared = prepareIssueUpdate(old, req.body, {
-        assigneeExplicit: guardedTransition && Object.hasOwn(req.body, 'assigneeId'),
-      });
+      const prepared = prepareVersionedIssueUpdate(old, req.body);
       if (Object.hasOwn(req.body, 'schedulePreviewId')) {
         schedulePaste.consumeIssueSavePreview(req.body.schedulePreviewId, actor(req), old, prepared.issue, scheduleReviewHooks);
       }
@@ -2389,21 +2424,10 @@ export function createApp(options: {
     const {resourceType,resourceId}=req.body;
     if(resourceType!=='issue'&&resourceType!=='document')return fail('댓글 대상을 확인해 주세요.');
     if (Object.hasOwn(req.body, 'parentCommentId')) return fail('문장 댓글 답글 경로를 사용해 주세요.');
-    const body = text(req.body.body, '댓글', 20000);
-    const mentions = parseCommentMentions(body, req.body.mentions);
-    const c: Comment = { id: uid(), resourceType, resourceId, authorId: actor(req), body, createdAt: now(),
-      ...(mentions.length ? { mentions } : {}) };
-    store.transaction(()=>{
-      validateCurrentMentionNames(store, body, mentions);
-      if(resourceType==='issue'){
-        const issue=get<Issue>('issues',resourceId);
-        notifyComment(c, issue.projectId, `${issue.key} ${issue.title}`, [issue.reporterId, issue.assigneeId, ...issue.collaboratorIds, ...issueSubscribers(issue)]);
-      }else{
-        const doc=get<DocPage>('documents',resourceId);
-        notifyDocumentComment(doc,c);
-      }
-      store.put('comments',c);activity(req,resourceType,resourceId,'댓글 작성',c.body.slice(0,100));
-    });res.status(201).json(c);
+    const draft = prepareOrdinaryComment(req.body.body, req.body.mentions);
+    const authorId = actor(req);
+    const comment = store.transaction(() => saveOrdinaryComment(authorId, resourceType, resourceId, draft));
+    res.status(201).json(comment);
   });
   app.get('/api/comments/:id/edit', (req, res) => {
     res.set('Cache-Control', 'no-store').json(commentEditing.get(req.params.id, actor(req)));
@@ -3465,6 +3489,7 @@ export function createApp(options: {
       commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      issueStatusChanges.clearForImport();
       issueProjectMove.clearForImport();
       issuePaste.resetForImport();
       documentCreation.invalidateForImport();
@@ -3573,6 +3598,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueStatusChangeError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof FavoriteError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueKeyLookupError)return res.status(error.status).json({error:error.message});
     if(error instanceof RecurringIssueError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -373,6 +373,12 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 팀 보드의 화면 주소 `#/<projectId>/teamboard`에는 `boardGitlab` 조건을 더할 수 있다. 전체 프로젝트 간트의 주소는 같은 값의 `ganttGitlab` 조건을 받는다. 허용 값은 `open_merge_request`, `merge_blocked`, `failed_pipeline`, `running_pipeline`, `manual_pipeline`, `no_activity`다. 프로젝트·담당자·검색 조건과 함께 현재 워크스페이스를 판정한다. 값을 생략하거나 알 수 없는 값을 보내면 GitLab 조건 없이 업무를 표시하며, 주소에서 알 수 없는 값을 정리한다.
 
+## 상태 변경과 인수인계 댓글
+
+브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,comment:{body,mentions?}}`를 보낸다. `requestId`는 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`는 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 댓글, 이력, 알림을 함께 저장한다.
+
+응답은 `{issue,receipt,duplicate}`다. `receipt`에는 `requestId`, `issueId`, `projectId`, `appliedVersion`, `status`, `assigneeId`, `commentId`가 들어간다. 같은 작업자·업무·입력으로 7일 안에 다시 요청하면 현재 `issue`, 당시의 `receipt`, `duplicate: true`를 돌려준다. 이미 쓴 ID의 용도가 다르면 `409`와 `request_reused`를 반환한다. 다른 프로젝트로 이동했거나 티켓이 없어지면 `receipt_unavailable`, 자체 백업 가져오기 후 이전 세대의 요청은 `workspace_changed`를 반환한다.
+
 ## 보드 상태별 업무 한도
 
 브라우저의 `GET /api/projects/:projectId/workflow`에서 설정된 상태의 `statuses[].wipLimit`을 읽을 수 있다. 기존 `PATCH /api/projects/:projectId/workflow` 요청의 `expectedVersion`과 상태 목록에 `wipLimit`을 1~10,000의 정수로 전달한다. `null`은 한도를 해제한다. 속성을 생략하면 같은 ID의 기존 한도를 유지한다. 자체 백업의 형식 56에 설정을 보존한다.

@@ -718,7 +718,7 @@ export function Issues(props: FeatureProps & {
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
     {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
-    {statusEdit && <IssueStatusDialog edit={statusEdit} latest={data} refresh={refresh} notify={notify} onClose={closeStatusEdit}
+    {statusEdit && <IssueStatusDialog edit={statusEdit} actorId={props.actorId} latest={data} refresh={refresh} notify={notify} onClose={closeStatusEdit}
       onOpenDetails={() => {
         const opener = view === 'board' ? boardCardControl(boardCanvas.current, statusEdit.issue.id, 'details')
           : issueListControl(listCanvas.current, statusEdit.issue.id, 'details');

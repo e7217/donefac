@@ -318,6 +318,6 @@ export default function TeamBoard(props: Props) {
         </section>;
       })}
     </div>
-    {editing && <IssueStatusDialog edit={editing} latest={data} refresh={refresh} notify={notify} onClose={closeStatus} onOpenDetails={openEditedIssue} />}
+    {editing && <IssueStatusDialog edit={editing} actorId={props.actorId} latest={data} refresh={refresh} notify={notify} onClose={closeStatus} onOpenDetails={openEditedIssue} />}
   </div>;
 }

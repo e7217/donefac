@@ -1281,6 +1281,29 @@ export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; dup
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
 export const MAX_COMMENT_MENTIONS = 50;
 export interface CommentMention { userId: string; from: number; to: number }
+export interface IssueStatusChangeRequest {
+  requestId: string;
+  expectedVersion: number;
+  expectedWorkflowVersion: number;
+  restoreGeneration: string;
+  status: Issue['status'];
+  assigneeId?: Issue['assigneeId'];
+  comment: { body: string; mentions?: CommentMention[] };
+}
+export interface IssueStatusChangeReceipt {
+  requestId: string;
+  issueId: string;
+  projectId: string;
+  appliedVersion: number;
+  status: Issue['status'];
+  assigneeId: Issue['assigneeId'];
+  commentId: string;
+}
+export interface IssueStatusChangeResult {
+  issue: Issue;
+  receipt: IssueStatusChangeReceipt;
+  duplicate: boolean;
+}
 export type DocumentCommentResolutionState = 'open' | 'resolved';
 export interface DocumentCommentResolution {
   state: DocumentCommentResolutionState;
