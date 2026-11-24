@@ -2421,7 +2421,7 @@ export function createApp(options: {
     const encoded=encodeURIComponent(a.filename).replace(/['()*]/g,c=>`%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     res.set({'Content-Type':inline?sniffMime(bytes!):'application/octet-stream','Content-Disposition':`${inline?'inline':'attachment'}; filename="download"; filename*=UTF-8''${encoded}`,'Content-Length':String(bytes!.length),'X-Content-Type-Options':'nosniff','Cache-Control':'private, no-cache','ETag':`"${a.sha256}"`});res.end(bytes!);
   };
-  registerDocumentIncludeRevisionRoutes(app, store, (attachment, req, res) => serveAttachment(attachment, req, res, true));
+  registerDocumentIncludeRevisionRoutes(app, store, serveAttachment);
   app.get('/api/attachments/:id/content',(req,res)=>{
     const id=String(req.params.id);
     const attachment=store.get<Attachment>('attachments',id) || get<AttachmentVersion>('attachment_versions',id);

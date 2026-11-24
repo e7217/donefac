@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import type { AttachmentHead, DocPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, DocRevision, WorkspaceSnapshot } from '../../shared/types';
 
 const originalPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=', 'base64');
 const revisedPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGNgYPj/n4EBAAcAAf8DN59tAAAAAElFTkSuQmCC', 'base64');
@@ -111,6 +111,106 @@ test('문서에서 첨부 버전을 올리고 두 이미지와 이전 다운로�
       if (doc) {
         const removed = await requests.delete(`/api/documents/${doc.id}`, { timeout: 5000 });
         expect([200, 404]).toContain(removed.status());
+      }
+    } finally { await requests.dispose(); }
+  }
+});
+
+test('360px에서 파일 버전 링크를 본문에 넣고 고정본에서 휴지통의 원래 바이트를 받는다', async ({ page, playwright, baseURL }) => {
+  const requests = await playwright.request.newContext({ baseURL });
+  const created: DocPage[] = [];
+  const suffix = randomUUID().slice(0, 8);
+  const originalName = `작업 절차 초판 ${suffix}.txt`;
+  const latestName = `작업 절차 개정 ${suffix}.txt`;
+  const originalBytes = Buffer.from('initial procedure\n', 'utf8');
+  const latestBytes = Buffer.from('updated procedure\n', 'utf8');
+  const firstParagraph = '공동 편집 파일을 추가할 문단';
+  const secondParagraph = '검토 당시 파일을 연결할 문단';
+  const paragraph = (text: string) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
+
+  try {
+    const [project] = (await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot).projects;
+    const create = async (title: string, content: DocPage['content']) => {
+      const response = await requests.post('/api/documents', { data: { projectId: project.id, title, content } });
+      expect(response.status(), await response.text()).toBe(201);
+      const document = await response.json() as DocPage;
+      created.push(document);
+      return document;
+    };
+    const source = await create(`버전 파일 원문 ${suffix}`, { type: 'doc', content: [paragraph(firstParagraph), paragraph(secondParagraph)] });
+    const upload = await requests.post(`/api/attachments?${new URLSearchParams({ resourceType: 'document', resourceId: source.id, filename: originalName })}`, {
+      data: originalBytes, headers: { 'Content-Type': 'application/octet-stream' },
+    });
+    expect(upload.status(), await upload.text()).toBe(201);
+    const first = await upload.json() as AttachmentHead;
+    const append = await requests.post(`/api/attachments/${first.id}/versions?${new URLSearchParams({
+      expectedVersionId: first.currentVersionId, filename: latestName,
+    })}`, { data: latestBytes, headers: { 'Content-Type': 'application/octet-stream' } });
+    expect(append.status(), await append.text()).toBe(201);
+    const latest = await append.json() as AttachmentHead;
+    const oldHref = `/api/attachments/${first.currentVersionId}/content`;
+    const newHref = `/api/attachments/${latest.currentVersionId}/content`;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/documents/${source.id}`);
+    const manual = page.locator('.docs-prose');
+    await manual.getByText(secondParagraph, { exact: true }).click();
+    await page.keyboard.press('Home');
+    await page.keyboard.press('Shift+End');
+    await expect.poll(() => manual.evaluate(() => window.getSelection()?.toString())).toBe(secondParagraph);
+    const openFiles = () => page.getByRole('button', { name: '파일 첨부', exact: true }).click();
+    const closePanel = () => page.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
+    const attachments = page.getByRole('region', { name: '첨부파일', exact: true });
+    await openFiles();
+    await attachments.getByRole('button', { name: `${latestName} 버전`, exact: true }).click();
+    const versions = attachments.getByRole('region', { name: `${latestName} 보존 버전`, exact: true });
+    await versions.getByRole('button', { name: `${latestName} 버전 v1 본문에 링크 삽입`, exact: true }).click();
+    await expect(manual.locator('p').filter({ hasText: secondParagraph }).getByRole('link', { name: originalName })).toHaveAttribute('href', oldHref);
+    await expect(manual.locator('p').filter({ hasText: firstParagraph }).getByRole('link')).toHaveCount(0);
+    await closePanel();
+    await page.locator('.docs-save-button').click();
+    await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+
+    const revisions = await (await requests.get(`/api/documents/${source.id}/revisions`)).json() as DocRevision[];
+    const captured = revisions.find(revision => revision.version > source.version);
+    expect(captured).toBeDefined();
+    const host = await create(`버전 파일 고정본 ${suffix}`, { type: 'doc', content: [{ type: 'documentRevisionInclude', attrs: {
+      documentId: source.id, revisionId: captured!.id, label: source.title,
+    } }] });
+
+    const enabling = await requests.post(`/api/documents/${source.id}/collaboration/enable`, { data: { expectedVersion: captured!.version } });
+    expect(enabling.status(), await enabling.text()).toBe(200);
+    await page.reload();
+    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    const live = page.locator('.docs-live-prose');
+    await live.getByText(firstParagraph, { exact: true }).click();
+    await page.keyboard.press('End');
+    await openFiles();
+    await attachments.getByRole('button', { name: `${latestName} 본문에 링크 삽입`, exact: true }).click();
+    await expect(live.locator('p').filter({ hasText: firstParagraph }).getByRole('link', { name: latestName })).toHaveAttribute('href', newHref);
+    await expect.poll(async () => {
+      const snapshot = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+      return JSON.stringify(snapshot.documents.find(document => document.id === source.id)?.content);
+    }).toContain(newHref);
+
+    const removed = await requests.delete(`/api/attachments/${first.id}?expectedVersionId=${latest.currentVersionId}`);
+    expect(removed.status(), await removed.text()).toBe(200);
+    expect((await requests.get(oldHref)).status()).toBe(404);
+    await page.goto(`/#/${project.id}/documents/${host.id}`);
+    const frozen = page.getByRole('region', { name: `고정 포함 문서 ${source.title}`, exact: true });
+    await frozen.getByRole('button', { name: '고정 버전 내용 보기', exact: true }).click();
+    const link = frozen.getByRole('link', { name: originalName, exact: true });
+    await expect(link).toHaveAttribute('href', `/api/documents/${source.id}/include-revisions/${captured!.id}/files/${first.currentVersionId}`);
+    await expect(frozen.getByRole('link', { name: latestName, exact: true })).toHaveCount(0);
+    await download(page, link, originalName, originalBytes);
+  } finally {
+    try {
+      for (const document of created.reverse()) {
+        const response = await requests.delete(`/api/documents/${document.id}`, { timeout: 5000 });
+        if (response.status() === 404) continue;
+        expect(response.status(), await response.text()).toBe(200);
+        const { trashEntryId } = await response.json() as { trashEntryId: string };
+        expect((await requests.delete(`/api/trash/${trashEntryId}`, { timeout: 5000 })).ok()).toBeTruthy();
       }
     } finally { await requests.dispose(); }
   }

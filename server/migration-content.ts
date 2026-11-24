@@ -11,6 +11,8 @@ import { MAX_DOCUMENT_CHILD_LIST_DEPTH, MAX_DOCUMENT_CHILD_LIST_FIRST, normalize
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
 import { normalizeDocumentLabelListOptions } from '../shared/document-label-list.js';
 import { MAX_DOCUMENT_PROPERTY_BLOCKS, MAX_DOCUMENT_PROPERTY_REPORT_LIMIT } from '../shared/document-properties.js';
+import { attachmentDownloadIdFromUrl } from '../shared/inline-attachment.js';
+import { safeFilename } from './attachments.js';
 import { normalizeDocumentContent, MAX_DOCUMENT_BYTES } from './document-content.js';
 import { parseLegacyXml } from './legacy-import-archive.js';
 import { parseConfluenceLabelList } from './migration-confluence-label-list.js';
@@ -31,6 +33,7 @@ export interface MigrationReferenceInput extends MigrationPageIdentity {
   // A null owner marks an explicit container that cannot be resolved safely.
   attachmentOwner?: MigrationPageIdentity | null;
   attachmentVersion?: number;
+  exactAttachment?: true;
 }
 export interface MigrationContentContext {
   resolveReference: (input: MigrationReferenceInput) => { id: string; label: string; url?: string } | null;
@@ -140,6 +143,15 @@ function pageIdentity(node: XmlNode): MigrationPageIdentity {
   return { sourceId: node.attrs['ri:content-id'] || node.attrs['ri:page-id'], title: node.attrs['ri:content-title'], spaceKey: node.attrs['ri:space-key'] };
 }
 const confluenceSpaceKey = /^(?:[A-Za-z0-9]+|~[^\s:]+)$/;
+function confluencePageResource(page: XmlNode): MigrationPageIdentity | null {
+  if (page.name !== 'ri:page' || page.children.some(child => typeof child !== 'string' || child.trim()) ||
+      Object.keys(page.attrs).some(key => !['ri:content-id', 'ri:page-id', 'ri:content-title', 'ri:space-key'].includes(key))) return null;
+  const identity = pageIdentity(page);
+  if (page.attrs['ri:content-id'] && page.attrs['ri:page-id'] && page.attrs['ri:content-id'] !== page.attrs['ri:page-id']) return null;
+  if (identity.spaceKey && !confluenceSpaceKey.test(identity.spaceKey)) return null;
+  return identity.sourceId?.trim() || identity.title?.trim() ? identity : null;
+}
+
 function confluencePageParameter(parameter: XmlNode | undefined): MigrationPageIdentity | { spaceRoot: string | null } | null | undefined {
   if (!parameter) return undefined;
   if (parameter.children.every(part => typeof part === 'string')) {
@@ -160,12 +172,7 @@ function confluencePageParameter(parameter: XmlNode | undefined): MigrationPageI
     if (children.length !== 1 || typeof children[0] === 'string') return null;
     page = children[0];
   }
-  if (page.name !== 'ri:page' || page.children.some(child => typeof child !== 'string' || child.trim()) ||
-      Object.keys(page.attrs).some(key => !['ri:content-id', 'ri:page-id', 'ri:content-title', 'ri:space-key'].includes(key))) return null;
-  const identity = pageIdentity(page);
-  if (page.attrs['ri:content-id'] && page.attrs['ri:page-id'] && page.attrs['ri:content-id'] !== page.attrs['ri:page-id']) return null;
-  if (identity.spaceKey && !confluenceSpaceKey.test(identity.spaceKey)) return null;
-  return identity.sourceId?.trim() || identity.title?.trim() ? identity : null;
+  return confluencePageResource(page);
 }
 
 // https://confluence.atlassian.com/spaces/CONF50/pages/329980084/Confluence+Storage+Format+for+Macros
@@ -227,6 +234,61 @@ function attachmentIdentity(node: XmlNode): MigrationReferenceInput {
   }
   return reference;
 }
+
+// https://confluence.atlassian.com/spaces/CONF54/pages/428803596/Confluence%2BStorage%2BFormat%2Bfor%2BMacros
+type ConfluenceFileMacroSettings = { extension: RegExp; presentation: readonly string[] };
+const confluenceFileMacros = new Map<string, ConfluenceFileMacroSettings>([
+  ['viewpdf', { extension: /\.pdf$/iu, presentation: [] }],
+  ['viewdoc', { extension: /\.docx?$/iu, presentation: [] }],
+  ['viewxls', { extension: /\.xlsx?$/iu, presentation: ['col', 'row', 'grid', 'sheet'] }],
+  ['viewppt', { extension: /\.pptx?$/iu, presentation: ['height', 'width', 'slide'] }],
+]);
+function confluenceFileMacroReference(node: XmlNode, settings: ConfluenceFileMacroSettings):
+  (MigrationReferenceInput & { title: string }) | null {
+  const parts = storageMacroParts(node);
+  if (!parts || parts.body) return null;
+  const { parameters } = parts;
+  for (const [key, parameter] of parameters) {
+    if (key === 'name' || key === 'page') continue;
+    if (!settings.presentation.includes(key) || parameter.children.some(part => typeof part !== 'string') ||
+        parameter.children.join('').length > 300) return null;
+  }
+  const filename = parameters.get('name');
+  if (!filename) return null;
+  const page = confluencePageParameter(parameters.get('page'));
+  if (page === null || page && 'spaceRoot' in page) return null;
+  let attachmentOwner = page;
+  let sourceId: string | undefined;
+  let name: string | undefined;
+  if (filename.children.every(part => typeof part === 'string')) {
+    name = filename.children.join('');
+  } else {
+    const values = filename.children.filter(part => typeof part !== 'string' || part.trim());
+    const attachment = values[0];
+    if (values.length !== 1 || typeof attachment === 'string' || attachment.name !== 'ri:attachment' ||
+        Object.keys(attachment.attrs).some(key => !['ri:filename', 'ri:content-id'].includes(key))) return null;
+    name = attachment.attrs['ri:filename'];
+    sourceId = attachment.attrs['ri:content-id'];
+    if (sourceId !== undefined && !/^[1-9]\d{0,19}$/u.test(sourceId)) return null;
+    const owners = attachment.children.filter(part => typeof part !== 'string' || part.trim());
+    if (owners.length) {
+      const owner = owners[0];
+      if (page || owners.length !== 1 || typeof owner === 'string') return null;
+      const entityId = owner.attrs['ri:content-id'];
+      const resolved = owner.name === 'ri:content-entity' && entityId && Object.keys(owner.attrs).length === 1 &&
+        owner.children.every(part => typeof part === 'string' && !part.trim()) ? { sourceId: entityId } : confluencePageResource(owner);
+      if (!resolved) return null;
+      attachmentOwner = resolved;
+    }
+  }
+  if (attachmentOwner?.sourceId !== undefined && !/^[1-9]\d{0,19}$/u.test(attachmentOwner.sourceId)) return null;
+  let title: string;
+  try { title = safeFilename(name); }
+  catch { return null; }
+  if (!settings.extension.test(title)) return null;
+  return { kind: 'attachment', title, ...(sourceId ? { sourceId } : {}), ...(attachmentOwner ? { attachmentOwner } : {}), exactAttachment: true };
+}
+
 const escapeXml = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 function serializeXml(node: XmlNode | string): string { return typeof node === 'string' ? escapeXml(node) : `<${node.name}${Object.entries(node.attrs).map(([key, value]) => ` ${key}="${escapeXml(value)}"`).join('')}>${node.children.map(serializeXml).join('')}</${node.name}>`; }
 const taskAttributes = new Set(['ac:local-id', 'xmlns:ac', 'xmlns:ri']);
@@ -733,6 +795,8 @@ class Converter {
   }
   macro(node: XmlNode, depth: number): RichContent[] {
     this.tick(depth); const name = node.attrs['ac:name'] || '', params: Record<string, string> = Object.create(null);
+    const fileMacro = this.richDocument && confluenceFileMacros.get(name);
+    if (fileMacro) return this.documentFilePreview(node, fileMacro);
     for (const child of node.children) if (typeof child !== 'string' && child.name === 'ac:parameter') params[child.attrs['ac:name'] || ''] = this.xmlText(child);
     const body = node.children.find(value => typeof value !== 'string' && ['ac:rich-text-body', 'ac:plain-text-body'].includes(value.name)) as XmlNode | undefined;
     const blocks = () => flow(body ? this.xmlParts(body.children, depth + 1, true) : []);
@@ -832,6 +896,21 @@ class Converter {
     if (name === 'anchor' && this.context.legacySectionBaseline) this.warn('ANCHOR_DECLARATION_FLATTENED', '이전 앵커 매크로의 원문 표현을 확인했습니다.');
     else this.warn('UNSUPPORTED_MACRO', '지원하지 않는 동적·확장 매크로를 실행하지 않고 원문 코드 블록으로 보존했습니다.');
     return [codeBlock(serializeXml(node))];
+  }
+  private documentFilePreview(node: XmlNode, settings: ConfluenceFileMacroSettings): RichContent[] {
+    const reference = confluenceFileMacroReference(node, settings);
+    if (!reference) {
+      this.warn('CONFLUENCE_FILE_PREVIEW_UNSUPPORTED', '파일 미리보기의 원본 매크로 구조나 파일 형식을 확인할 수 없어 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    const found = this.resolve(reference);
+    const href = found?.url;
+    if (!href || attachmentDownloadIdFromUrl(href) !== found.id || found.label !== reference.title) {
+      this.warn('UNRESOLVED_CONFLUENCE_FILE_PREVIEW', '파일 미리보기에서 이관된 첨부와 원본 버전을 확인할 수 없어 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    this.warn('CONFLUENCE_FILE_PREVIEW_LINKED', 'Office·PDF 파일 미리보기를 이관된 첨부파일의 다운로드 링크로 바꿨습니다.');
+    return [paragraph(this.link(text(reference.title), href))];
   }
   private documentProperties(node: XmlNode): RichContent[] {
     const parts = storageMacroParts(node);

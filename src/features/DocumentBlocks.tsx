@@ -13,7 +13,7 @@ import { normalizeDocumentLabelListOptions } from '../../shared/document-label-l
 import { collectDocumentPropertyReport, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
 import type { DocumentSelectionHighlight } from '../../shared/document-selection-highlight';
-import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
+import { attachmentDownloadIdFromUrl, inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
@@ -231,10 +231,14 @@ function pinnedRevision(id: string, revision: string, label: string, budget: num
   return <PinnedRevision key={JSON.stringify([key, id, revision])} documentId={id} revisionId={revision} label={label} nodeBudget={budget} />;
 }
 
+function revisionAttachmentUrl(pinned: PinnedSource, kind: 'images' | 'files', attachmentId: string) {
+  return `/api${includeRevisionPath(pinned.documentId)}/${encodeURIComponent(pinned.revisionId)}/${kind}/${encodeURIComponent(attachmentId)}`;
+}
+
 function imageUrl(raw: unknown, pinned?: PinnedSource) {
   if (pinned) {
     const attachmentId = inlineAttachmentIdFromUrl(raw);
-    if (attachmentId) return `/api${includeRevisionPath(pinned.documentId)}/${encodeURIComponent(pinned.revisionId)}/images/${encodeURIComponent(attachmentId)}`;
+    if (attachmentId) return revisionAttachmentUrl(pinned, 'images', attachmentId);
   }
   return safeUrl(raw, true);
 }
@@ -248,7 +252,7 @@ function renderIncluded(context: Context, id: string, label: string, state: Rend
   if (state.includeDepth >= MAX_INCLUDE_DEPTH) return <Notice key={key}>문서 포함 깊이 제한(5단계)에 도달했습니다: {document.title}</Notice>;
   const definition = excerpt ? findDocumentExcerpt(document.content) : undefined;
   if (excerpt && !definition) return <Notice key={key}>발췌 구역을 찾을 수 없습니다: {document.title}</Notice>;
-  const next = { ...state, documentId: id, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined, excerpt: undefined };
+  const next = { ...state, documentId: id, visited: new Set([...state.visited, id]), includeDepth: state.includeDepth + 1, outline: [], section: undefined, excerpt: undefined, pinnedSource: undefined };
   const body: RichContent = definition ? { type: 'doc', content: definition.content } : document.content;
   const rendered = renderNode(body, context, next, `${key}:body`);
   state.remaining = next.remaining; state.exhausted = next.exhausted;
@@ -282,7 +286,13 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       else if (mark.type === 'strike') result = <s>{result}</s>;
       else if (mark.type === 'underline') result = <u>{result}</u>;
       else if (mark.type === 'code') result = <code>{result}</code>;
-      else if (mark.type === 'link') { const href = safeUrl(mark.attrs?.href); result = href ? <a href={href} target="_blank" rel="noopener noreferrer" onClick={event => event.stopPropagation()}>{result}</a> : result; }
+      else if (mark.type === 'link') {
+        const fileId = attachmentDownloadIdFromUrl(mark.attrs?.href);
+        const download = state.pinnedSource && fileId ? revisionAttachmentUrl(state.pinnedSource, 'files', fileId) : undefined;
+        const href = download ?? safeUrl(mark.attrs?.href);
+        if (href) result = <a href={href} download={download ? true : undefined} target={download ? undefined : '_blank'}
+          rel="noopener noreferrer" onClick={event => event.stopPropagation()}>{result}</a>;
+      }
     }
     if (wholeNodeSelected) result = excerptMark(result, state, key);
     return <span key={key}>{result}</span>;
@@ -426,7 +436,7 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   const outline: DocumentOutlineEntry[] = [];
   const sourceDocumentId = documentId ?? context.documentId;
   const excerpt = mode === 'pinned' ? selectionHighlight : undefined;
-  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource: mode === 'pinned' ? pinnedSource : undefined, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined };
+  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined };
   const body = renderNode(content, context, state, 'readonly');
   const sectionTarget = state.section?.target;
   const excerptTarget = state.excerpt?.anchorRendered ? state.excerpt.anchor : undefined;

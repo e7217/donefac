@@ -3,6 +3,7 @@ import { renderDocumentPropertiesMarkdown, renderStandaloneDocumentTableMarkdown
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
 import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-sections';
+import { attachmentDownloadIdFromUrl } from '../../shared/inline-attachment';
 
 export function contentText(node: RichContent): string { return documentPlainText(node); }
 
@@ -12,6 +13,7 @@ export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'c
 
 export function hasDocumentFormattedBlocks(node: RichContent): boolean {
   return ['callout', 'statusBadge', 'documentExcerpt', 'documentExcerptInclude', 'documentColumnLayout', 'documentProperties', 'documentPropertyReport'].includes(node.type) ||
+    Boolean(node.marks?.some(mark => mark.type === 'link' && attachmentDownloadIdFromUrl(mark.attrs?.href))) ||
     (node.content?.some(hasDocumentFormattedBlocks) ?? false);
 }
 

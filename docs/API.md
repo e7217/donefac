@@ -187,6 +187,8 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 최신 바이너리는 `GET /attachments/<currentVersionId>/content`에서 받는다. 버전 이력의 각 `id`도 특정 파일을 가리킨다. `GET /attachment-versions/<버전 id>/download`로 이전 바이트를 내려받을 수 있다. `?inline=1`은 서버가 이미지 형식을 확인한 PNG·JPEG·GIF·WebP에 적용한다. 프로젝트 범위는 첨부의 소유 업무·문서를 기준으로 판단한다.
 
+브라우저의 `GET /api/documents/:id/include-revisions/:revisionId/files/:fileId`는 문서 저장본의 본문 링크가 정확히 가리킨 파일 버전을 내려준다. 링크가 없거나 파일을 찾을 수 없으면 `404`다. 활성 파일을 우선 찾아 그 버전을 내려준다. 휴지통에서는 저장본과 같은 문서가 소유한 버전만 읽는다. 응답은 다운로드로 제공하며, 저장본의 인라인 이미지는 별도의 `/images/:fileId` 경로를 사용한다.
+
 ## 업무 생성·수정
 
 프로젝트 ID와 상태·유형·팀원·계획 ID는 조회 응답으로 확인한다. 유형·필드·선택지는 표시 이름 대신 `issue-schema`의 고유 ID를 전달한다. 기본 상태는 프로젝트 워크플로에 따르며, 같은 필수 입력·상태 전이 규칙을 적용한다.
@@ -920,6 +922,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 Confluence 본문의 `/display/SPACE/제목`, `/pages/viewpage.action?pageId=…`, `/spaces/SPACE/pages/…` 주소는 `sourceBaseUrls`의 서버와 설치 경로로 대조한다. 상대 주소는 원래 패키지의 설정을 사용한다. 다른 원본을 가리키는 절대 주소는 입력한 서버·설치 경로에서 하나의 원본 페이지로 확인될 때 연결한다. 원본 관계에 페이지 ID가 명시됐으면 URL의 대상과도 일치해야 한다. 추가 이관이나 변경분 반영은 현재 연결을 확인한 기존 페이지도 대상으로 사용할 수 있다. 대상을 확인할 수 없으면 원본 주소와 진단을 남긴다. 페이지의 진단은 `UNRESOLVED_REFERENCE`, 절의 진단은 `SECTION_LINK_UNRESOLVED`다. Server·Data Center의 짧은 주소 `/x/…`도 대상 페이지를 확인하면 문서 참조로 옮긴다. 대상 페이지를 확인할 수 없는 짧은 주소에는 일반 본문 링크 규칙을 적용한다.
 
 Confluence 본문의 `/download/attachments/{pageId}/{filename}` 다운로드 링크와 이미지는 설정된 원본 설치 경로, 첨부 소유 페이지와 파일명을 확인해 저장한 파일에 연결한다. `version`이 있으면 그 원본 버전에 대응하는 파일을 사용한다. 과거 저장본에서 원본 버전이 확인되지 않는 주소나 대상이 모호한 주소는 원본 링크로 남긴다. [Confluence 첨부 다운로드 형식](https://developer.atlassian.com/server/confluence/rest/v932/intro/#download-an-attachment)
+
+`viewpdf`, `viewdoc`, `viewxls`, `viewppt`의 지원되는 저장 형식에서 파일명·소유 페이지와 명시된 첨부 ID가 일치하면 본문에 그 파일의 다운로드 링크를 넣는다. 화면 표시 방식이 바뀌는 경우 `CONFLUENCE_FILE_PREVIEW_LINKED`를 기록한다. 대상을 확정할 수 없으면 `UNRESOLVED_CONFLUENCE_FILE_PREVIEW`, 지원 범위를 벗어난 저장 형식이면 `CONFLUENCE_FILE_PREVIEW_UNSUPPORTED`를 기록하고 원본 매크로를 코드 블록으로 보존한다. 과거 페이지 저장본은 원래 첨부 버전을 확인할 수 있을 때만 연결한다. 변환은 새 이관과 검토 후 적용하는 원본 변경분에 사용한다. [Confluence 파일 매크로 저장 형식](https://confluence.atlassian.com/spaces/CONF53/pages/411108832/Confluence%2BStorage%2BFormat%2Bfor%2BMacros)
 
 Jira 설명의 ADF 텍스트에 붙은 절대 `/browse/{issueKey}` 링크는 설정된 원본 서버·설치 경로와 대상을 확인한 경우 글자와 서식을 유지해 현재 티켓으로 연결한다. 원본 댓글이나 다른 세부 위치가 붙은 주소는 원래 위치를 연다. 본문 링크 변환은 새 이관이나 검토한 원본 변경분을 적용할 때 사용한다. [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
 

@@ -57,7 +57,7 @@ import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib
 import { newRequestId } from '../lib/request-id';
 import { DOCUMENT_TEMPLATES, templateContent } from './document-built-in-templates';
 import { contentMarkdown, contentText, documentRevisionLabel, downloadDocument } from './document-utils';
-import { Attachments } from './Attachments';
+import { Attachments, type AttachmentsProps } from './Attachments';
 import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
@@ -1429,6 +1429,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setInsertKind(null); setInsertUrl('');
   }
 
+  const insertAttachmentLink: NonNullable<AttachmentsProps['onInsertFileLink']> = ({ filename, href }) => {
+    if (bodyReadOnly || archivedLiveRecovery || checklistReselecting || !editor?.isEditable || editor.isDestroyed ||
+        draftRef.current?.id !== selectedPageId || (liveMode && liveState?.document.id !== selectedPageId)) return;
+    const { $to } = editor.state.selection;
+    const link = editor.schema.marks.link;
+    // The editor keeps its mapped selection while focus is in the file panel.
+    // Insert at its end to preserve selected document text.
+    if (!$to.parent.isTextblock || !$to.parent.type.allowsMarkType(link)) {
+      notify('본문에서 링크를 삽입할 위치를 먼저 선택해 주세요.', 'error');
+      return;
+    }
+    const inserted = editor.chain().focus().insertContentAt($to.pos, { type: 'text', text: filename, marks: [{ type: 'link', attrs: { href } }] })
+      .command(({ tr }) => { tr.removeStoredMark(link); return true; }).run();
+    if (!inserted) notify('이 위치에 첨부파일 링크를 삽입할 수 없습니다.', 'error');
+  };
+
   async function refreshReferences() {
     if (referencesRefreshing) return; setReferencesRefreshing(true);
     try {
@@ -2096,7 +2112,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div>
             </>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
-            {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>파일을 첨부하고 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
+            {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>첨부 링크나 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh}
+              onInsertFileLink={bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
+              onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
           </div>
         </aside>}
       </> : filtersActive && !visible.length ? <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>조건에 맞는 문서가 없습니다.</h2></div>

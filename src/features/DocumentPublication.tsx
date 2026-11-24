@@ -966,6 +966,7 @@ function PublicationDialog({
                   key={`${snapshotKind}:${selectedSnapshot.id}`}
                   content={renderedContent}
                   documentId={page.id}
+                  pinnedSource={{ documentId: page.id, revisionId: selectedSnapshot.id }}
                   nodeBudget={30000}
                   showOutline
                   sectionId={initialSnapshot && initialSnapshot.kind === snapshotKind && initialSnapshot.revisionId === selectedSnapshot.id ? sectionId : null}

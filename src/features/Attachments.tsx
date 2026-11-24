@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Download, File, History, ImageIcon, Loader2, Paperclip, Plus, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react';
+import { Check, Download, File, History, ImageIcon, Link2, Loader2, Paperclip, Plus, RefreshCw, Trash2, UploadCloud, X } from 'lucide-react';
 import type { AttachmentHead, AttachmentVersion } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './attachments.css';
@@ -12,6 +12,7 @@ export type AttachmentsProps = {
   actorId: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onInsertImage?: (url: string) => void;
+  onInsertFileLink?: (file: { filename: string; href: string }) => void;
   onChanged?: () => void | Promise<void>;
 };
 
@@ -40,7 +41,7 @@ const fileUrl = (versionId: string, inline = false) => `/api/attachments/${encod
 const message = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export function Attachments(props: AttachmentsProps) { return <ResourceAttachments key={`${props.resourceType}:${props.resourceId}:${props.actorId}`} {...props} />; }
-function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onChanged }: AttachmentsProps) {
+function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onInsertFileLink, onChanged }: AttachmentsProps) {
   const [attachments, setAttachments] = useState<AttachmentHead[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -304,6 +305,11 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
             <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 새 버전 업로드`}
               disabled={busy || loading} onClick={() => selectVersionFile(attachment)}><Plus size={12} />새 버전</button>
             {image && onInsertImage && <button type="button" className="attachment-insert" onClick={() => onInsertImage(fileUrl(currentVersionId, true))}><Plus size={10} />본문에 삽입</button>}
+            {onInsertFileLink && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 본문에 링크 삽입`}
+              disabled={busy || loading} onMouseDown={event => event.preventDefault()}
+              onClick={() => onInsertFileLink({ filename: attachment.filename, href: downloadUrl })}>
+              <Link2 size={12} aria-hidden="true" />본문에 링크 삽입
+            </button>}
           </div>
         </div>
         <a className="attachment-action" href={downloadUrl} download={attachment.filename} aria-label={`${attachment.filename} 다운로드`} title="다운로드"><Download size={13} /></a>
@@ -325,6 +331,11 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
               <small>{version.id === currentVersionId ? '최신 버전' : '이전 버전'}
                 {version.sourceImportId ? ' · 이관한 원본 버전' : ''} · {fileSize(version.size)} · {new Date(version.createdAt).toLocaleString('ko-KR')}</small>
             </div>
+            {onInsertFileLink && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 버전 ${version.versionLabel} 본문에 링크 삽입`}
+              disabled={busy || history.loading} onMouseDown={event => event.preventDefault()}
+              onClick={() => onInsertFileLink({ filename: version.filename, href: fileUrl(version.id) })}>
+              <Link2 size={12} aria-hidden="true" />본문에 링크 삽입
+            </button>}
             <a className="btn btn-ghost" href={`/api/attachment-versions/${encodeURIComponent(version.id)}/download`} download={version.filename}
               aria-label={`${attachment.filename} 버전 ${version.versionLabel} 다운로드`}><Download size={13} />다운로드</a>
           </li>)}

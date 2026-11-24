@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from 'express';
-import { inlineAttachmentIdFromUrl } from '../shared/inline-attachment.js';
+import { attachmentDownloadIdFromUrl, inlineAttachmentIdFromUrl } from '../shared/inline-attachment.js';
 import type { Attachment, DocRevision, RichContent } from '../shared/types.js';
 import type { Store } from './store.js';
 
@@ -46,17 +46,19 @@ function readRevision(store: Store, id: string, revisionId: string): DocRevision
   return revision && JSON.parse(revision.json) as DocRevision;
 }
 
-function referencesImage(content: RichContent, fileId: string) {
+function referencesAttachment(content: RichContent, fileId: string, inline: boolean) {
   const pending = [content];
   while (pending.length) {
     const node = pending.pop()!;
-    if (node.type === 'image' && inlineAttachmentIdFromUrl(node.attrs?.src) === fileId) return true;
+    if (inline
+      ? node.type === 'image' && inlineAttachmentIdFromUrl(node.attrs?.src) === fileId
+      : node.marks?.some(mark => mark.type === 'link' && attachmentDownloadIdFromUrl(mark.attrs?.href) === fileId)) return true;
     if (node.content) for (const child of node.content) pending.push(child);
   }
   return false;
 }
 
-function archivedImage(store: Store, documentId: string, fileId: string): Attachment | undefined {
+function archivedAttachment(store: Store, documentId: string, fileId: string): Attachment | undefined {
   const hasIndividuallyArchivedFiles = store.db.prepare(
     "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='trash_item_files'",
   ).get();
@@ -64,6 +66,7 @@ function archivedImage(store: Store, documentId: string, fileId: string): Attach
     const individual = store.db.prepare(`SELECT file.json FROM trash_item_files AS file
       JOIN trash_items AS entry ON entry.id=file.entry_id
       WHERE file.file_id=? AND entry.item_type='attachment' AND entry.owner_type='document' AND entry.owner_id=?
+        AND json_extract(file.json,'$.id')=file.file_id
         AND json_extract(file.json,'$.resourceType')=entry.owner_type AND json_extract(file.json,'$.resourceId')=entry.owner_id`)
       .get(fileId, documentId) as RevisionRow | undefined;
     if (individual) return JSON.parse(individual.json) as Attachment;
@@ -82,7 +85,7 @@ function archivedImage(store: Store, documentId: string, fileId: string): Attach
 }
 
 export function registerDocumentIncludeRevisionRoutes(app: Express, store: Store,
-  serveInline?: (attachment: Attachment, request: Request, response: Response) => void) {
+  serveAttachment?: (attachment: Attachment, request: Request, response: Response, inline: boolean) => void) {
   app.get('/api/documents/:id/include-revisions', (request, response) => {
     response.set('Cache-Control', 'no-store');
     const { id } = request.params;
@@ -118,19 +121,23 @@ export function registerDocumentIncludeRevisionRoutes(app: Express, store: Store
     return response.json(revision);
   });
 
-  if (serveInline) app.get('/api/documents/:id/include-revisions/:revisionId/images/:fileId', (request, response) => {
+  if (!serveAttachment) return;
+  const revisionAttachment = (inline: boolean) => (request: Request, response: Response) => {
     response.set('Cache-Control', 'no-store');
     const { id, revisionId, fileId } = request.params;
+    const fileLabel = inline ? '첨부 이미지를' : '첨부파일을';
     if (!validId(id) || !validId(revisionId) || !validId(fileId) || Object.keys(request.query).length) {
-      return response.status(400).json({ error: '저장본의 첨부 이미지를 확인해 주세요.' });
+      return response.status(400).json({ error: `저장본의 ${fileLabel} 확인해 주세요.` });
     }
     const revision = readRevision(store, id, revisionId);
-    if (!revision || !referencesImage(revision.content, fileId)) {
-      return response.status(404).json({ error: '이 저장본에서 첨부 이미지를 찾을 수 없습니다.' });
+    if (!revision || !referencesAttachment(revision.content, fileId, inline)) {
+      return response.status(404).json({ error: `이 저장본에서 ${fileLabel} 찾을 수 없습니다.` });
     }
     const attachment = store.get<Attachment>('attachments', fileId) ?? store.get<Attachment>('attachment_versions', fileId)
-      ?? archivedImage(store, id, fileId);
-    if (!attachment) return response.status(404).json({ error: '첨부 이미지 파일을 찾을 수 없습니다.' });
-    serveInline(attachment, request, response);
-  });
+      ?? archivedAttachment(store, id, fileId);
+    if (!attachment) return response.status(404).json({ error: `${fileLabel} 찾을 수 없습니다.` });
+    serveAttachment(attachment, request, response, inline);
+  };
+  app.get('/api/documents/:id/include-revisions/:revisionId/images/:fileId', revisionAttachment(true));
+  app.get('/api/documents/:id/include-revisions/:revisionId/files/:fileId', revisionAttachment(false));
 }

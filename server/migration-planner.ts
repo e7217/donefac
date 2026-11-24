@@ -218,6 +218,7 @@ const lossyConfluenceConversions = new Set([
   'LEGACY_LABEL_LIST_REPRESENTATION', 'CHILD_LIST_PARAMETERS_UNSUPPORTED', 'CHILD_LIST_SCOPE_UNRESOLVED',
   'CHILD_LIST_EXCERPT_UNSUPPORTED', 'LEGACY_CHILD_LIST_REPRESENTATION', 'LEGACY_EXCERPT_REPRESENTATION',
   'LAYOUT_STRUCTURE_UNSUPPORTED', 'LEGACY_LAYOUT_REPRESENTATION', 'LEGACY_DOCUMENT_PROPERTIES_REPRESENTATION',
+  'CONFLUENCE_FILE_PREVIEW_UNSUPPORTED',
   ...lossyConfluenceCalloutConversions, ...lossyConfluenceExcerptConversions, ...lossyConfluencePropertyConversions,
 ]);
 
@@ -2933,15 +2934,23 @@ class Planner{
       },
     };
   }
+  private explicitConfluenceAttachmentOwner(entry: Entry, request: MigrationReferenceInput, verifiedOrigin?: string): ResolvedConfluencePage | null {
+    const owner = request.attachmentOwner;
+    if (!owner) return null;
+    const page = this.confluencePage(entry, owner, verifiedOrigin);
+    if (request.exactAttachment && page && owner.sourceId && owner.title &&
+        owner.title !== (page.entry?.row.title ?? this.originalPage(page.sourceId)?.sourceTitle)) return null;
+    return page;
+  }
   private confluenceAttachment(entry: Entry, request: MigrationReferenceInput): Entry | null {
-    const { attachmentOwner, sourceId, title, attachmentVersion } = request;
+    const { attachmentOwner, sourceId, title, attachmentVersion, exactAttachment } = request;
     if (attachmentOwner === null) return null;
     const downloadOrigin = request.url ? this.originIdentity(entry) : undefined;
     let candidates = this.confluenceCandidates(entry, 'attachment', sourceId, title);
     if (downloadOrigin) candidates = candidates.filter(candidate => this.originIdentity(candidate) === downloadOrigin);
     let ownerId: string | undefined;
-    if (attachmentOwner || !sourceId) {
-      const owner = attachmentOwner ? this.confluencePage(entry, attachmentOwner, downloadOrigin)?.entry : this.ownerEntry(entry);
+    if (attachmentOwner || !sourceId || exactAttachment) {
+      const owner = attachmentOwner ? this.explicitConfluenceAttachmentOwner(entry, request, downloadOrigin)?.entry : this.ownerEntry(entry);
       if (owner?.row.kind !== 'page') return null;
       const binding = this.bindings.get(owner.key);
       if (binding?.type !== 'document') return null;
@@ -2964,6 +2973,8 @@ class Planner{
       if (!binding) return false;
       const version = this.attachmentVersionsById.get(binding.id);
       if (!version || ownerId && version.resourceId !== ownerId) return false;
+      if (exactAttachment && version.filename !== title) return false;
+      if (exactAttachment && entry.row.kind === 'revision' && (!sourceId || this.attachmentRoot(candidate) === candidate)) return false;
       if (attachmentVersion !== undefined) return confluenceAttachmentRevision(candidate.row) === attachmentVersion;
       if (request.url && this.attachmentRoot(candidate) !== candidate) return false;
       return sourceId || version.attachmentId === version.id;
@@ -2972,7 +2983,7 @@ class Planner{
   }
   private boundConfluenceAttachmentPage(entry: Entry, request: MigrationReferenceInput): string | undefined {
     if (request.attachmentOwner) {
-      const owner = this.confluencePage(entry, request.attachmentOwner, request.url ? this.originIdentity(entry) : undefined);
+      const owner = this.explicitConfluenceAttachmentOwner(entry, request, request.url ? this.originIdentity(entry) : undefined);
       return owner ? this.confluenceAttachmentPages.get(owner.reference.id) : undefined;
     }
     const owner = this.ownerEntry(entry);
@@ -3041,6 +3052,7 @@ class Planner{
         series.known.some(file => file.sourceId === sourceId));
       if (lines.length !== 1) return null;
       const [series] = lines;
+      if (request.exactAttachment && entry.row.kind === 'revision' && sourceId === series.sourceRootId) return null;
       const present = series.entries.filter(candidate => candidate.row.sourceId === sourceId);
       if (present.length) {
         const scoped = sourceId === series.sourceRootId ? this.confluenceCurrentAttachmentRows(entry, present)
@@ -3077,7 +3089,7 @@ class Planner{
       version = candidates.length === 1 ? candidates[0] : null;
     } else return null;
 
-    if (!version) return null;
+    if (!version || request.exactAttachment && version.filename !== title) return null;
     if (!this.attachmentVersionsById.has(version.id)) this.borrowedAttachmentVersions.set(version.id, version);
     return attachmentReference(version, title || version.filename);
   }
@@ -3118,6 +3130,7 @@ class Planner{
     return issueId ? { id: issueId, label: address.issueKey } : null;
   }
   resolve(entry: Entry, request: MigrationReferenceInput): ResolvedReference | null {
+    if (entry.row.kind === 'revision' && request.exactAttachment && !request.sourceId) return null;
     if (entry.row.kind === 'revision' && request.kind === 'attachment' && request.url &&
         request.attachmentOwner && request.attachmentVersion === undefined) return null;
     const scoped = this.isConfluenceStorageReference(entry, request);

@@ -7,7 +7,7 @@ import { addRecord,diagnostic,emptyDataset,LEGACY_MAX_TEXT_BYTES,LegacyImportErr
 type XmlObject={node:LegacyXmlNode;type:string;id:string};
 const CONTENT_TYPES=new Set(['Page','BlogPost','Comment','Attachment','UserInfo','SpaceDescription']);
 const RELATION_TYPES=new Set(['ContentPermissionSet','ContentPermission','SpacePermission','Labelling','ContentLabel','OutgoingLink','ReferralLink','ContentRelation','Relation']);
-const KNOWN_MACROS=new Set(['include','excerpt-include','excerpt','jira','jiraissues','toc','anchor','children','contentbylabel','code','noformat','info','note','warning','tip','panel','expand','details','status','tasklist','section','column','html','widget','attachments','gallery','recently-updated','pagetree','page-properties','page-properties-report']);
+const KNOWN_MACROS=new Set(['include','excerpt-include','excerpt','jira','jiraissues','toc','anchor','children','contentbylabel','code','noformat','info','note','warning','tip','panel','expand','details','status','tasklist','section','column','html','widget','attachments','gallery','recently-updated','pagetree','page-properties','page-properties-report','viewpdf','viewdoc','viewxls','viewppt']);
 const scalar=(node:LegacyXmlNode|undefined):string=>node?.text??'';
 const child=(node:LegacyXmlNode,name:string,attribute?:string,value?:string)=>node.children.find(item=>item.name===name&&(attribute===undefined||item.attributes[attribute]===value));
 const property=(node:LegacyXmlNode,name:string)=>child(node,'property','name',name);
