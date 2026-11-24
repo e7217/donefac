@@ -45,6 +45,8 @@ const jiraRefreshCountLabels = {
 const confluenceInlineCommentCountLabels = {
   confluenceInlineCommentsAnchored: '원문 위치를 연결한 문장 댓글',
   confluenceInlineCommentsUnresolved: '일반 댓글로 옮긴 위치 미확인 댓글',
+  confluenceInlineRepliesLinked: '문장 댓글에 연결한 답글',
+  confluenceInlineRepliesUnresolved: '일반 댓글로 옮긴 답글',
 };
 const confluenceRefreshCountLabels = {
   updatedDocuments: '변경 문서', updatedDocumentFields: '반영 필드', conflictingDocumentFields: '현재 값을 유지할 필드', skippedDocumentUpdates: '변경을 건너뛴 문서',

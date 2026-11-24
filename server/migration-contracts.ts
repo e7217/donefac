@@ -82,6 +82,7 @@ export interface MigrationPageAppendContext {
   hierarchyDocuments?: Pick<DocPage, 'id' | 'parentId' | 'title' | 'version'>[];
   knownAttachments?: MigrationConfluenceKnownAttachment[];
   knownHistory?: MigrationConfluenceKnownHistory[];
+  knownInlineCommentRoots?: { sourceId: string; sourcePageId: string; documentId: string; commentId: string }[];
   inlineCommentBodyHashes?: Record<string, string>;
 }
 export interface MigrationPlanningInput {

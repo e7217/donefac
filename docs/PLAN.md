@@ -495,6 +495,8 @@ Confluence 체크리스트는 항목 순서와 완료 여부를 편집 가능한
 
 Confluence 문장 댓글의 위치 표식과 표시 텍스트·서식·링크를 보존한다. 처음 옮기거나 변경분에서 새로 추가하는 댓글은 같은 XML 패키지의 댓글 속성, 원래 페이지, 하나로 확인된 위치 표식을 대조한다. 발췌 범위가 적용할 Teamspace 본문과 일치하면 문장 댓글의 원문 저장본을 고정한다. 같은 문장이 반복돼도 표식 범위에서 열고, 문서 편집 뒤에도 내보낸 원문의 위치를 읽는다. 표식이 없거나 중복된 경우, 팀에서 편집한 본문과 일치하지 않는 경우에는 일반 댓글로 보존하고 미리보기에서 확인한다. [Confluence 문장 댓글 속성](https://docs.atlassian.com/ConfluenceServer/javadoc/6.9.1/constant-values.html#com.atlassian.confluence.pages.Comment.MARKER_REF_PROP) · [Confluence 원문 위치 표식](https://support.atlassian.com/confluence/kb/keep-inline-comments-while-editing-confluence-pages/)
 
+Confluence XML에 소유 페이지와 직접 상위 댓글이 확인된 답글은 원문을 고정한 문장 댓글 아래에 옮긴다. 추가 이관에는 상위 댓글 객체가 빠져 있어도 같은 인스턴스와 페이지의 이관 기록에서 확인한 현재 문장 댓글을 찾을 수 있다. 과거 답글을 추가할 때는 팀에서 처리한 해결 상태를 보존한다. 여러 단계의 답글이나 직접 상위 댓글을 확인할 수 없는 답글은 일반 문서 댓글로 남기고, 최초 관계를 원본 기록에서 읽는다. [Confluence 6.9.1 댓글 관계](https://docs.atlassian.com/ConfluenceServer/javadoc/6.9.1/serialized-form.html#com.atlassian.confluence.pages.Comment)
+
 병행 기간에는 업무와 문서에 Jira 티켓 및 Confluence 페이지 주소를 연결한다. 조회 버튼을 누르면 설정한 각 서버의 읽기 API에서 제목·상태·식별자와 수정 시각을 가져온다. 팀에서 사용할 연결의 자격 증명은 서버의 별도 파일에 둔다. 연결 주소는 전체 백업에서 보존하며, 원본 조회는 GET 요청으로 처리한다. [Jira 이슈 읽기 API](https://developer.atlassian.com/server/jira/platform/rest/v11000/api-group-issue/), [Confluence Server 6.9.1 REST API](https://docs.atlassian.com/ConfluenceServer/rest/6.9.1/)
 
 기존 `/api/import`는 자체 백업으로 워크스페이스를 교체하는 기능이다. Jira·Confluence 이관은 별도 흐름으로 구현하며, 기본값은 새 프로젝트/문서 영역에 추가한다. 패키지 분석 → 작성자·상태·유형·필드 매핑 → 변환 샘플과 손실 미리보기 → 명시적 적용 순서다. 오프라인 분석과 원문 보관에 이어 작성자·상태·유형·필드 매핑, 문서 변환, 새 프로젝트 적용을 구현했다.

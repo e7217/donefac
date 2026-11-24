@@ -90,6 +90,75 @@ test('Confluence inline comments retain their text when property ownership or ma
   assert.ok(!data.diagnostics.some(item => item.severity === 'error'));
 });
 
+test('Confluence reply evidence accepts exact parent references, including partial exports with a direct page owner', () => {
+  const owner = r('containerContent', 'Page', '100');
+  const parent = (id: string) => r('parent', 'Comment', id);
+  const proof = [
+    ['300', '<property name="parent"><null/></property>'],
+    ['301', parent('300')],
+    ['302', r('parent', 'com.atlassian.confluence.pages.Comment', '300') + r('parentComment', 'Comment', '300')],
+    ['303', r('parentComment', 'Comment', '399')],
+    ['304', parent('301')],
+    ['305', '<property name="parent" class="Comment" package="com.atlassian.confluence.pages"/>'],
+  ];
+  const data = parseConfluence(files([
+    space, page('100', '원본 문서'), body('200', 'Page', '100', '<p>원본 문서</p>'),
+    ...proof.flatMap(([id, relationship], index) => [
+      authenticComment(id, owner + relationship), body(String(400 + index), 'Comment', id, `<p>원본 댓글 ${id}</p>`),
+    ]),
+  ]), 'synthetic-comment-parent');
+
+  const expectedParents = new Map([['301', '300'], ['302', '300'], ['303', '399'], ['304', '301']]);
+  for (const [id] of proof) {
+    const row = find(data, 'comment', id);
+    const parentId = expectedParents.get(id);
+    assert.equal(row.metadata.confluenceCommentPageSourceId, '100', id);
+    assert.equal(row.metadata.confluenceParentCommentSourceId, parentId, id);
+    assert.equal(row.metadata.confluenceCommentParentUnresolved, undefined, id);
+    assert.equal(row.parentId, parentId ?? null, id);
+    if (parentId) assert.equal(refHas(row, 'comment', parentId, 'parent'), true, id);
+  }
+  assert.ok(!codes(data).includes('CONFLUENCE_COMMENT_PARENT_EVIDENCE_UNRESOLVED'));
+});
+
+test('Confluence reply parent evidence rejects conflicting aliases, source versions, and cross-document owners', () => {
+  const owner = r('containerContent', 'Page', '100');
+  const foreignOwner = r('containerContent', 'Page', '101');
+  const parent = (id: string) => r('parent', 'Comment', id);
+  const replies = [
+    ['301', owner + r('parent', 'Page', '300')],
+    ['302', owner + parent('300') + r('parentComment', 'Comment', '399')],
+    ['303', owner + parent('303')],
+    ['304', foreignOwner + parent('300')],
+    ['305', owner + p('contentStatus', 'historical') + parent('300')],
+    ['306', owner + parent('302') + r('originalVersion', 'Comment', '302')],
+    ['307', owner + parent('300') + r('content', 'Page', '101')],
+    ['308', owner + parent('300') + '<property name="parentComment"/>'],
+    ['309', owner + parent('305')],
+    ['310', owner + '<property name="parent" class="Page"/>'],
+    ['311', owner + list('parent', 'Comment', ['300'])],
+    ['312', owner + parent('300') + list('page', 'Page', ['101'])],
+  ];
+  const data = parseConfluence(files([
+    space, page('100', '원본 문서'), page('101', '다른 문서'), authenticComment('300', owner),
+    ...replies.flatMap(([id, fields], index) => [
+      authenticComment(id, fields), body(String(400 + index), 'Comment', id, `<p>원본 댓글 ${id}</p>`),
+    ]),
+  ]), 'synthetic-comment-parent-conflicts');
+
+  for (const [id] of replies) {
+    const row = find(data, 'comment', id);
+    assert.equal(row.metadata.confluenceParentCommentSourceId, undefined, id);
+    assert.equal(row.metadata.confluenceCommentParentUnresolved, true, id);
+    assert.equal(row.text, `<p>원본 댓글 ${id}</p>`);
+    assert.ok(data.diagnostics.some(item => item.recordId === row.id && item.code === 'CONFLUENCE_COMMENT_PARENT_EVIDENCE_UNRESOLVED' &&
+      item.severity === 'warning'), id);
+  }
+  assert.equal(find(data, 'comment', '304').metadata.confluenceCommentPageSourceId, '101');
+  assert.equal(find(data, 'comment', '305').metadata.confluenceCommentPageSourceId, undefined);
+  assert.equal(find(data, 'comment', '307').metadata.confluenceCommentPageSourceId, undefined);
+});
+
 test('current-page hierarchy evidence distinguishes explicit roots from missing or contradictory XML', () => {
   const emptyParent = '<property name="parent"/>';
   const explicitNull = '<property name="parent"><null/></property>';

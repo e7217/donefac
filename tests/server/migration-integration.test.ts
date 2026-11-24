@@ -2223,16 +2223,21 @@ test('Confluence inline comments use verified native revisions through history a
       property('3', 'inline-marker-ref', markerRef) +
       property('4', 'inline-original-selection', '댓글 작성 당시 저장한 원본 문구') + body('Comment', id, `<p>${text}</p>`);
   };
+  const reply = (id: string, owner: string, parent: string, text: string) => object('Comment', id,
+    ref('containerContent', 'Page', owner) + ref('parent', 'Comment', parent) + dates(1)) + body('Comment', id, `<p>${text}</p>`);
   const upload = (name: string, records: string) => f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(
     `<hibernate-generic>${object('Space', '42', prop('key', 'WIKI42') + prop('name', '원본 댓글 공간'))}${records}</hibernate-generic>`,
   ) }]), `${name}.zip`, 'confluence', 'synthetic-confluence-inline-thread');
   const original100 = `<p>선택 1의 위치</p>${marker('selection-1', '선택 1의 위치')}${marker('selection-2', '추가할 기존 위치')}`;
   const original101 = marker('selection-conflict', '팀 수정과 충돌할 위치');
   const first = await upload('original-inline', page('100', 1, original100) + page('101', 1, original101) +
+    reply('306', '100', '300', '원본 답글') + reply('307', '100', '306', '원본의 두 단계 답글') +
     comment('300', '100', 'selection-1', '처음 이관한 문장 댓글'));
   const firstPreview = await f.preview(await f.configuration(first, 'INLINE'));
   assert.equal(firstPreview.canApply, true, JSON.stringify(firstPreview.notices));
   assert.equal(firstPreview.counts.confluenceInlineCommentsAnchored, 1);
+  assert.equal(firstPreview.counts.confluenceInlineRepliesLinked, 1);
+  assert.equal(firstPreview.counts.confluenceInlineRepliesUnresolved, 1);
   const initial = await f.apply(firstPreview);
   assert.equal(initial.status, 201, JSON.stringify(initial.data));
   const [projectId] = initial.data.import.projectIds;
@@ -2243,13 +2248,23 @@ test('Confluence inline comments use verified native revisions through history a
   const comments = async (id: string) => (await f.call<Comment[]>(`/comments?resourceType=document&resourceId=${id}`)).data;
   const revisions = async (id: string) => (await f.call<DocRevision[]>(`/documents/${id}/revisions`)).data;
   const initialRevision = (await revisions(main.id)).find(revision => revision.version === main.version)!;
-  const [initialComment] = await comments(main.id);
+  const initialComments = await comments(main.id);
+  const initialComment = initialComments.find(row => row.body === '처음 이관한 문장 댓글')!;
+  const initialReply = initialComments.find(row => row.body === '원본 답글')!;
+  const nestedSourceReply = initialComments.find(row => row.body === '원본의 두 단계 답글')!;
+  assert.equal(initialReply.parentCommentId, initialComment.id);
+  assert.equal(initialReply.documentSource, undefined);
+  assert.equal(nestedSourceReply.parentCommentId, undefined);
   const initialPin = initialComment.documentSource;
   assert.ok(initialPin);
   assert.equal(initialPin.revisionId, initialRevision.id);
   assert.equal(initialPin.text, '선택 1의 위치');
   assert.equal(readDocumentSelection(initialRevision.content, initialPin.from, initialPin.to), initialPin.text);
   assert.ok(initialPin.from > initialRevision.content.content![0].content![0].text!.length);
+  const resolved = await f.call<Comment>(`/documents/${main.id}/selection-comments/${initialComment.id}/resolution`, 'PATCH', {
+    state: 'resolved', expectedVersion: 0,
+  });
+  assert.equal(resolved.status, 200, JSON.stringify(resolved.data));
 
   const editedBody = (document: DocPage): RichContent => ({ type: 'doc', content: [
     { type: 'paragraph', content: [{ type: 'text', text: '팀에서 먼저 수정한 내용' }] }, ...(document.content.content ?? []),
@@ -2260,27 +2275,43 @@ test('Confluence inline comments use verified native revisions through history a
   const localConflict = await edit(conflict, editedBody(conflict));
   assert.equal(localConflict.status, 200);
   const next = await upload('additional-inline-history', page('100', 1, original100) + page('101', 1, original101) +
+    reply('308', '100', '300', '원본 상위 댓글 없이 들어온 과거 답글') +
     comment('301', '100', 'selection-2', '동일한 본문에 연결할 새 댓글') +
     comment('302', '101', 'selection-conflict', '현재 본문과 다른 원본의 댓글'));
   const historyPreview = await f.preview({ ...await f.configuration(next), appendPagesTo: { projectId, refreshHistory: true } });
   assert.equal(historyPreview.canApply, true, JSON.stringify(historyPreview.notices));
   assert.equal(historyPreview.counts.confluenceInlineCommentsAnchored, 1);
   assert.equal(historyPreview.counts.confluenceInlineCommentsUnresolved, 1);
+  assert.equal(historyPreview.counts.confluenceInlineRepliesLinked, 1);
   assert.ok(historyPreview.notices.some(notice => notice.code === 'CONFLUENCE_INLINE_COMMENT_ANCHOR_UNRESOLVED' && notice.recordId === `${next.id}/comment:302`));
+  const archived = await f.call<{ trashItemId: string }>(`/comments/${initialComment.id}`, 'DELETE');
+  assert.equal(archived.status, 200, JSON.stringify(archived.data));
+  const staleParent = await f.apply(historyPreview);
+  assert.equal(staleParent.status, 409, JSON.stringify(staleParent.data));
+  assert.match(JSON.stringify(staleParent.data), /답글을 추가할 문장 댓글/u);
+  assert.deepEqual((await comments(main.id)).map(row => row.id), [nestedSourceReply.id]);
+  assert.deepEqual(await comments(conflict.id), []);
+  assert.equal((await f.call(`/trash/items/${archived.data.trashItemId}/restore`, 'POST')).status, 200);
   const localMain = await edit(main, editedBody(main));
   assert.equal(localMain.status, 200);
   const stale = await f.apply(historyPreview);
   assert.equal(stale.status, 409, JSON.stringify(stale.data));
-  assert.deepEqual(await comments(main.id), [initialComment]);
+  assert.deepEqual((await comments(main.id)).map(row => row.id).sort(), initialComments.map(row => row.id).sort());
   assert.deepEqual(await comments(conflict.id), []);
   assert.equal((await edit(localMain.data, main.content)).status, 200);
   const recovered = await f.apply(historyPreview);
   assert.equal(recovered.status, 201, JSON.stringify(recovered.data));
-  assert.equal((await comments(main.id)).find(row => row.body === '동일한 본문에 연결할 새 댓글')?.documentSource?.text, '추가할 기존 위치');
+  const extended = await comments(main.id);
+  assert.equal(extended.find(row => row.body === '동일한 본문에 연결할 새 댓글')?.documentSource?.text, '추가할 기존 위치');
+  const appendedReply = extended.find(row => row.body === '원본 상위 댓글 없이 들어온 과거 답글')!;
+  assert.equal(appendedReply.parentCommentId, initialComment.id);
+  assert.equal(extended.find(row => row.id === initialComment.id)?.resolution?.state, 'resolved');
   assert.equal((await comments(conflict.id))[0].documentSource, undefined);
 
   const updated = await upload('refreshed-and-new-inline', page('100', 2, marker('selection-3', '갱신해서 승인한 위치')) +
     page('101', 2, marker('selection-4', '갱신해도 적용되지 않을 위치')) + page('102', 1, marker('selection-5', '추가 문서 원문 위치')) +
+    reply('309', '100', '300', '상위 댓글과 함께 다시 내보낸 과거 답글') +
+    comment('300', '100', 'selection-1', '처음 이관한 문장 댓글') +
     comment('303', '100', 'selection-3', '새 본문 버전에 연결한 댓글') +
     comment('304', '101', 'selection-4', '편집 중인 문서로 일반 이관한 댓글') +
     comment('305', '102', 'selection-5', '새 페이지에 연결한 댓글'));
@@ -2289,6 +2320,7 @@ test('Confluence inline comments use verified native revisions through history a
   assert.equal(refreshPreview.canApply, true, JSON.stringify(refreshPreview.notices));
   assert.equal(refreshPreview.counts.confluenceInlineCommentsAnchored, 2);
   assert.equal(refreshPreview.counts.confluenceInlineCommentsUnresolved, 1);
+  assert.equal(refreshPreview.counts.confluenceInlineRepliesLinked, 1);
   assert.equal(refreshPreview.documentRefresh?.find(row => row.documentId === main.id)?.fields.find(field => field.field === 'content')?.decision, 'apply');
   assert.equal(refreshPreview.documentRefresh?.find(row => row.documentId === conflict.id)?.fields.find(field => field.field === 'content')?.decision, 'conflict');
   const applied = await f.apply(refreshPreview);
@@ -2307,13 +2339,16 @@ test('Confluence inline comments use verified native revisions through history a
   assert.deepEqual(current.find(document => document.id === conflict.id)?.content, localConflict.data.content);
   assert.ok((await comments(conflict.id)).every(row => !row.documentSource));
   assert.equal((await f.apply(refreshPreview)).status, 200);
-  assert.equal((await comments(main.id)).length, 3);
+  const finalComments = await comments(main.id);
+  assert.equal(finalComments.length, 7);
+  assert.equal(finalComments.find(row => row.body === '상위 댓글과 함께 다시 내보낸 과거 답글')?.parentCommentId, initialComment.id);
   const backup = (await f.call<WorkspaceSnapshot & { sourceRecords: SourceRecordArchive[] }>('/export')).data;
   assert.equal(backup.sourceRecords.find(row => row.targetId === initialComment.id)?.record.metadata.confluenceInlineOriginalSelection, '댓글 작성 당시 저장한 원본 문구');
   const restored = await f.call('/import', 'POST', { data: backup });
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   assert.deepEqual((await comments(main.id)).find(row => row.id === refreshedComment?.id)?.documentSource, refreshedComment?.documentSource);
   assert.deepEqual((await comments(newPage.id))[0].documentSource, newPageComment.documentSource);
+  assert.equal((await comments(main.id)).find(row => row.id === appendedReply.id)?.parentCommentId, initialComment.id);
 });
 
 test('Confluence retained title and body changes survive partial receipts and portable restore without remapping accepted raw content', async t => {

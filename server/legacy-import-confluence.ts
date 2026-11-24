@@ -108,6 +108,7 @@ export function parseConfluence(files:Map<string,Buffer>,instanceKey:string):Leg
   }
   // The remainder resolves content bodies, labels, permissions, links and binary package paths.
   attachBodies(data,byType,rows,objectIndex,xmlPath);
+  attachCommentParentEvidence(data,byType.get('Comment')??[],rows,objectIndex,xmlPath);
   attachInlineCommentProperties(data,rawObjects,rows,xmlPath);
   attachLabels(data,byType,rows,objectIndex,xmlPath);
   attachRelations(data,byType,rows,objectIndex,kindFor,sourceIdFor,xmlPath);
@@ -192,14 +193,60 @@ function exactClass(node: LegacyXmlNode, type: keyof typeof confluenceClassPacka
     (sourcePackage === undefined || sourcePackage === expectedPackage);
 }
 
-function exactInlineCommentContainer(comment: LegacyXmlNode): boolean {
-  const containers = comment.children.filter(child => child.name === 'property' &&
-    ['containerContent', 'content', 'page'].includes(child.attributes.name));
+function exactCommentContainer(comment: LegacyXmlNode): { type: 'Page' | 'BlogPost'; id: string } | undefined {
+  const containers = comment.children.filter(child => ['containerContent', 'content', 'page'].includes(child.attributes.name));
   const owner = containers[0];
-  if (!owner) return false;
+  if (!owner) return;
   const type = objectClass(owner), id = exactReferenceId(owner);
-  return (type === 'Page' || type === 'BlogPost') && confluenceNumericId.test(id) &&
-    containers.every(container => exactClass(container, type) && exactReferenceId(container) === id);
+  if ((type === 'Page' || type === 'BlogPost') && confluenceNumericId.test(id) &&
+    containers.every(container => container.name === 'property' && exactClass(container, type) && exactReferenceId(container) === id)) return { type, id };
+}
+
+function exactCurrentComment(node: LegacyXmlNode, row: LegacyRecord): boolean {
+  const status = property(node, 'contentStatus');
+  return exactClass(node, 'Comment') && confluenceNumericId.test(row.sourceId) && exactObjectId(node) === row.sourceId &&
+    (!status || !status.children.length && ['', 'current'].includes(status.text.trim().toLowerCase())) &&
+    !row.metadata.currentVersionId && (!row.metadata.originalVersionId || row.metadata.originalVersionId === row.sourceId);
+}
+
+function explicitNullReference(node: LegacyXmlNode): boolean {
+  if (node.text.trim()) return false;
+  const [value] = node.children;
+  return !value || node.children.length === 1 && value.name === 'null' && !value.text.trim() &&
+    !value.children.length && !Object.keys(value.attributes).length;
+}
+
+function explicitRootCommentParent(field: LegacyXmlNode): boolean {
+  return field.name === 'property' && explicitNullReference(field) &&
+    (Object.keys(field.attributes).length === 1 || exactClass(field, 'Comment') &&
+      Object.keys(field.attributes).every(name => ['name', 'class', 'package'].includes(name)));
+}
+
+function attachCommentParentEvidence(data: LegacyDataset, comments: XmlObject[], rows: Map<string, LegacyRecord>,
+  objects: Map<string, XmlObject>, path: string): void {
+  for (const comment of comments) {
+    const row = rows.get(`Comment:${comment.id}`);
+    if (!row) continue;
+    const owner = exactCurrentComment(comment.node, row) ? exactCommentContainer(comment.node) : undefined;
+    if (owner) row.metadata.confluenceCommentPageSourceId = owner.id;
+    const parentFields = comment.node.children.filter(child => child.attributes.name === 'parent' || child.attributes.name === 'parentComment');
+    if (parentFields.every(explicitRootCommentParent)) continue;
+    const parentId = exactReferenceId(parentFields[0]);
+    const parentKey = `Comment:${parentId}`;
+    const parent = objects.get(parentKey);
+    const parentRow = rows.get(parentKey);
+    const parentOwner = parent && exactCommentContainer(parent.node);
+    if (owner && confluenceNumericId.test(parentId) &&
+      parentId !== row.sourceId && parentId === row.parentId && parentFields.every(field =>
+        field.name === 'property' && exactClass(field, 'Comment') && exactReferenceId(field) === parentId) &&
+      (!parent || parentRow && exactCurrentComment(parent.node, parentRow) && parentOwner?.id === owner.id && parentOwner.type === owner.type)) {
+      row.metadata.confluenceParentCommentSourceId = parentId;
+    } else {
+      row.metadata.confluenceCommentParentUnresolved = true;
+      diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_COMMENT_PARENT_EVIDENCE_UNRESOLVED',
+        message: '답글의 원본 댓글과 소유 문서 관계를 확인할 수 없어 댓글 본문과 원본 관계만 보관합니다.', recordId: row.id, path });
+    }
+  }
 }
 
 function scalarInlineProperty(node: LegacyXmlNode, name: string): string | undefined | null {
@@ -246,7 +293,7 @@ function attachInlineCommentProperties(data: LegacyDataset, objects: LegacyXmlNo
     const ownerId = idOf(owner);
     const ownerKey = `${ownerType}:${ownerId}`;
     const exactOwner = confluenceNumericId.test(ownerId) && exactObjectId(owner) === ownerId;
-    if (ownerType === 'Comment' && exactOwner && exactClass(owner, 'Comment') && exactInlineCommentContainer(owner)) exactComments.add(ownerId);
+    if (ownerType === 'Comment' && exactOwner && exactClass(owner, 'Comment') && exactCommentContainer(owner)) exactComments.add(ownerId);
     for (const declared of collections) {
       const exactCollection = collections.length === 1 && !declared.text.trim() && !property(owner, 'contentProperties') &&
         Object.keys(declared.attributes).every(name => name === 'class' || name === 'name') &&
@@ -354,10 +401,7 @@ function confluencePageParentEvidence(node: LegacyXmlNode, id: string): string |
   if (ancestorIds.size) return;
   if (!parent) return declaredAncestors ? null : undefined;
   // An omitted parent can mean a partial export. Root requires an explicit empty property or ancestor collection.
-  const [nullNode] = parent.children;
-  if (!parent.text.trim() && Object.keys(parent.attributes).length === 1 &&
-      (!nullNode || parent.children.length === 1 && nullNode.name === 'null' && !nullNode.text.trim() &&
-        !nullNode.children.length && !Object.keys(nullNode.attributes).length)) return null;
+  if (Object.keys(parent.attributes).length === 1 && explicitNullReference(parent)) return null;
 }
 
 function labelCollectionKeys(node: LegacyXmlNode, resolve: (element: LegacyXmlNode) => string): { keys: Set<string>; complete: boolean } {

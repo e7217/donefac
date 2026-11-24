@@ -8,6 +8,9 @@ const quote = '검토 반복 문구';
 const confirmed = '이 위치에서 조건을 확인해 주세요.';
 const ambiguous = '중복된 원본 위치의 댓글입니다.';
 const otherPage = '다른 문서에만 위치 표식이 있는 댓글입니다.';
+const confirmedReply = '선택한 부분의 조건을 확인했습니다.';
+const ordinaryParentReply = '원문 위치가 없는 댓글에 대한 원본 답글입니다.';
+const conflictingParentReply = '원본의 상위 댓글 정보가 서로 다릅니다.';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -28,8 +31,12 @@ function inlineCommentExport(key: string, title: string) {
     property('name', name) + property(valueField, value) + reference('contentEntity', 'Comment', commentId));
   const collection = (...ids: string[]) => `<collection name="contentProperties" class="java.util.Collection">${ids.map(id =>
     `<element class="ContentProperty" package="com.atlassian.confluence.content"><id name="id">${id}</id></element>`).join('')}</collection>`;
-  const comment = (id: string, bodyId: string, text: string, properties: string) => object('Comment', id,
-    reference('containerContent', 'Page', '100') + sourceAuthor + date + properties) + body(bodyId, 'Comment', id, `<p>${text}</p>`);
+  const parent = (id: string, name = 'parent') =>
+    `<property name="${name}" class="Comment" package="com.atlassian.confluence.pages"><id name="id">${id}</id></property>`;
+  const comment = (id: string, bodyId: string, text: string, properties: string) =>
+    `<object class="Comment" package="com.atlassian.confluence.pages"><id name="id">${id}</id>` +
+    reference('containerContent', 'Page', '100') + sourceAuthor + date + properties + '</object>' +
+    body(bodyId, 'Comment', id, `<p>${text}</p>`);
   const mainStorage = `<p>${quote}</p><p>두 번째 시작 ${marker('selection-exact', '<strong>검토</strong><em> 반복 문구</em>')} 두 번째 끝</p>` +
     `<p>${marker('selection-duplicate', '두 곳의 원본')}</p><p>${marker('selection-duplicate', '두 곳의 원본')}</p><p>다른 문서의 문장</p>`;
   const xml = `<hibernate-generic>
@@ -37,6 +44,9 @@ function inlineCommentExport(key: string, title: string) {
     <object class="ConfluenceUserImpl"><id name="key">old-author</id>${property('name', 'original-comment-author')}</object>
     ${page('100', title)}${body('200', 'Page', '100', mainStorage)}
     ${page('101', `${title} 다른 문서`)}${body('201', 'Page', '101', `<p>${marker('selection-other-page', '다른 문서의 문장')}</p>`)}
+    ${comment('303', '403', confirmedReply, parent('300'))}
+    ${comment('304', '404', ordinaryParentReply, parent('301'))}
+    ${comment('305', '405', conflictingParentReply, parent('300') + parent('301', 'parentComment'))}
     ${comment('300', '400', confirmed, collection('500', '501', '502'))}
     ${contentProperty('500', '300', 'inline-marker-ref', 'selection-exact')}
     ${contentProperty('501', '300', 'inline-original-selection', quote)}
@@ -49,7 +59,7 @@ function inlineCommentExport(key: string, title: string) {
   return zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]);
 }
 
-test('360px에서 Confluence의 문장 댓글이 원래 위치를 열고 위치 불명 댓글은 일반 댓글로 표시한다', async ({ page, request }) => {
+test('360px에서 Confluence 문장 댓글의 원래 위치와 답글을 열고 연결을 확인할 수 없는 댓글을 별도로 표시한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const suffix = randomUUID().slice(0, 7).toUpperCase();
@@ -71,7 +81,12 @@ test('360px에서 Confluence의 문장 댓글이 원래 위치를 열고 위치 
     };
     const plan = await json<MigrationPreview>(await request.post('/api/migrations/preview', { data: { configuration } }), 201);
     expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
-    expect(plan.counts).toMatchObject({ confluenceInlineCommentsAnchored: 1, confluenceInlineCommentsUnresolved: 2 });
+    expect(plan.counts).toMatchObject({
+      confluenceInlineCommentsAnchored: 1,
+      confluenceInlineCommentsUnresolved: 2,
+      confluenceInlineRepliesLinked: 1,
+      confluenceInlineRepliesUnresolved: 2,
+    });
     expect(plan.requiredAcknowledgements).toContain('CONFLUENCE_INLINE_COMMENT_ANCHOR_UNRESOLVED');
     const { import: receipt } = await json<MigrationApplyResult>(await request.post(`/api/migrations/previews/${plan.id}/apply`, {
       data: { expectedVersion: plan.version, acknowledgements: plan.requiredAcknowledgements },
@@ -87,16 +102,24 @@ test('360px에서 Confluence의 문장 댓글이 원래 위치를 열고 위치 
     const details = receipts.getByLabel('이관 영수증 상세', { exact: true });
     await expect(details.getByText('원문 위치를 연결한 문장 댓글 1', { exact: true })).toBeVisible();
     await expect(details.getByText('일반 댓글로 옮긴 위치 미확인 댓글 2', { exact: true })).toBeVisible();
+    await expect(details.getByText('문장 댓글에 연결한 답글 1', { exact: true })).toBeVisible();
+    await expect(details.getByText('일반 댓글로 옮긴 답글 2', { exact: true })).toBeVisible();
 
     const original = documents.find(row => row.title === title);
     if (!original) throw new Error('이관한 문서를 찾을 수 없습니다.');
     const commentsPath = `/api/comments?resourceType=document&resourceId=${original.id}`;
     const comments = await json<Comment[]>(await request.get(commentsPath));
-    expect(comments.map(comment => comment.body).sort()).toEqual([confirmed, ambiguous, otherPage].sort());
+    expect(comments.map(comment => comment.body).sort()).toEqual([
+      confirmed, ambiguous, otherPage, confirmedReply, ordinaryParentReply, conflictingParentReply,
+    ].sort());
     const saved = comments.find(comment => comment.body === confirmed);
     if (!saved?.documentSource) throw new Error('위치를 확인한 원본 댓글에 발췌가 저장되지 않았습니다.');
+    const reply = comments.find(comment => comment.body === confirmedReply);
+    if (!reply) throw new Error('원본 답글을 찾을 수 없습니다.');
     expect(saved.documentSource.text).toBe(quote);
     expect(comments.filter(comment => comment.documentSource).map(comment => comment.id)).toEqual([saved.id]);
+    expect(reply.parentCommentId).toBe(saved.id);
+    expect(comments.filter(comment => comment.parentCommentId).map(comment => comment.id)).toEqual([reply.id]);
 
     const latestText = '팀에서 다시 쓴 현재 문서 본문';
     const content: RichContent = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: latestText }] }] };
@@ -109,10 +132,13 @@ test('360px에서 Confluence의 문장 댓글이 원래 위치를 열고 위치 
     await expect(article).toBeFocused({ timeout: 25_000 });
     await expect(page.locator('.docs-prose')).toHaveText(latestText);
     await expect(article.locator('blockquote')).toHaveText(quote);
-    for (const body of [ambiguous, otherPage]) {
+    const replyArticle = article.getByRole('article', { name: '답글', exact: true });
+    await expect(replyArticle.getByText(confirmedReply, { exact: true })).toBeVisible();
+    for (const body of [ambiguous, otherPage, ordinaryParentReply, conflictingParentReply]) {
       const fallback = page.locator('.docs-comment').filter({ hasText: body });
       await expect(fallback).toBeVisible();
       await expect(fallback.locator('blockquote')).toHaveCount(0);
+      await expect(fallback.getByRole('article', { name: '답글', exact: true })).toHaveCount(0);
       await expect(fallback.getByRole('button', { name: '원문 저장본 열기', exact: true })).toHaveCount(0);
     }
 
@@ -135,6 +161,9 @@ test('360px에서 Confluence의 문장 댓글이 원래 위치를 열고 위치 
     expect(after.resolution?.state).toBe('resolved');
     expect(after.documentSource).toEqual(saved.documentSource);
     await expect(article.getByRole('button', { name: '다시 열기', exact: true })).toBeVisible();
+    await page.goto(`/#/${projectId}/documents/${original.id}?comment=${encodeURIComponent(reply.id)}`);
+    await expect(replyArticle).toBeFocused({ timeout: 25_000 });
+    await expect(replyArticle.getByText(confirmedReply, { exact: true })).toBeVisible();
   } finally {
     for (const id of documentIds) {
       const removed = await request.delete(`/api/documents/${id}`);

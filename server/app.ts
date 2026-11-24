@@ -61,7 +61,7 @@ import { GitlabDeploymentError } from './gitlab-deployments.js';
 import { gitlabJiraOriginalKeys, gitlabJiraSources } from './gitlab-jira-sources.js';
 import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
-import { MigrationService } from './migration.js';
+import { changedConfluenceReplyRoot, isActiveConfluenceInlineCommentRoot, MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
 import { confluencePageFieldDigest } from './migration-planner.js';
 import type { PilotConfluenceReview } from './pilot-confluence-review.js';
@@ -1073,7 +1073,12 @@ export function createApp(options: {
       const archivedSourceRevision = plannedAnchors.size ? store.db.prepare(
         "SELECT 1 FROM source_records WHERE product='confluence' AND target_type='revision' AND target_id=? LIMIT 1"
       ) : null;
+      const replies: Comment[] = [];
       for (const comment of value.comments) {
+        if (comment.parentCommentId !== undefined) {
+          replies.push(comment);
+          continue;
+        }
         const anchor = plannedAnchors.get(comment.id);
         if (!anchor) {
           store.put('comments', comment);
@@ -1091,6 +1096,15 @@ export function createApp(options: {
         const documentSource = resolveDocumentDecisionSource(store, current.document, comment.authorId, anchor.selection,
           'Confluence 문장 댓글 원문 저장', revision => !incomingSourceRevisions.has(revision.id) && !archivedSourceRevision?.get(revision.id));
         store.put('comments', { ...comment, documentSource });
+      }
+      const verifiedReplyRoots = new Map<string, string>();
+      for (const reply of replies) {
+        const parentCommentId = reply.parentCommentId!;
+        if (reply.resourceType !== 'document' || Object.hasOwn(reply, 'documentSource') || Object.hasOwn(reply, 'resolution') ||
+            plannedAnchors.has(reply.id) || (verifiedReplyRoots.get(parentCommentId) !== reply.resourceId &&
+              !isActiveConfluenceInlineCommentRoot(store, reply.resourceId, parentCommentId))) fail(changedConfluenceReplyRoot, 409);
+        verifiedReplyRoots.set(parentCommentId, reply.resourceId);
+        store.put('comments', reply);
       }
       for (const attachment of value.attachments) store.put('attachments', attachment);
       for (const link of value.resourceLinks) store.put('resource_links', link);

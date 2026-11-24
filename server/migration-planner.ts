@@ -251,7 +251,8 @@ function hasConfluenceBody(record: LegacyRecord): boolean {
 export function confluenceInlineCommentPageId(record: LegacyRecord): string | undefined {
   const { metadata, references } = record;
   if (record.kind !== 'comment' || metadata.sourceClass !== 'Comment' || typeof metadata.confluenceInlineMarkerRef !== 'string' ||
-      !metadata.confluenceInlineMarkerRef || record.parentId || metadata.currentVersionId || metadata.orphan === true || metadata.bodyVariant === true ||
+      !metadata.confluenceInlineMarkerRef || record.parentId || metadata.confluenceParentCommentSourceId || metadata.confluenceCommentParentUnresolved === true ||
+      metadata.currentVersionId || metadata.orphan === true || metadata.bodyVariant === true ||
       (metadata.originalVersionId && metadata.originalVersionId !== record.sourceId) ||
       !['', 'current'].includes(string(metadata.contentStatus).trim().toLowerCase()) ||
       references.some(ref => ref.kind === 'comment' && (ref.relation === 'parent' ||
@@ -1553,7 +1554,7 @@ class Planner{
   }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.planConfluenceCommentReplies();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
     const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
@@ -3292,6 +3293,49 @@ class Planner{
     }
     this.result.preview.counts.confluenceInlineCommentsUnresolved = (this.result.preview.counts.confluenceInlineCommentsUnresolved ?? 0) + 1;
     this.notice('CONFLUENCE_INLINE_COMMENT_ANCHOR_UNRESOLVED', '현재 문서의 정확한 원문 위치를 확인할 수 없어 댓글을 문서 댓글로 옮깁니다.', 'warning', entry, true);
+  }
+
+  private planConfluenceCommentReplies(): void {
+    const planned = new Map(this.result.comments.filter(comment => comment.resourceType === 'document').map(comment => [comment.id, comment]));
+    if (!planned.size) return;
+    const anchored = new Set(this.result.confluenceCommentAnchors?.map(({ commentId }) => commentId));
+    const known = new Map(this.input.appendPages?.knownInlineCommentRoots?.map(root => [root.sourceId, root]));
+    const counts = this.result.preview.counts;
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (row.kind !== 'comment' || entry.pkg.dataset.source.product !== 'confluence') continue;
+      const parentSourceId = row.metadata.confluenceParentCommentSourceId;
+      if (typeof parentSourceId !== 'string' && row.metadata.confluenceCommentParentUnresolved !== true) continue;
+      const binding = this.bindings.get(entry.key);
+      const reply = binding?.type === 'comment' ? planned.get(binding.id) : undefined;
+      if (!reply) continue;
+
+      const pageSourceId = row.metadata.confluenceCommentPageSourceId;
+      let parentId: string | undefined;
+      if (typeof parentSourceId === 'string' && typeof pageSourceId === 'string') {
+        const parent = this.sourceEntry(entry, 'comment', parentSourceId);
+        const sourceIsRoot = !parent || parent.row.metadata.confluenceCommentPageSourceId === pageSourceId &&
+          !parent.row.parentId && !parent.row.metadata.confluenceParentCommentSourceId &&
+          parent.row.metadata.confluenceCommentParentUnresolved !== true && !this.excluded.has(parent.key) && !this.restricted(parent);
+        if (sourceIsRoot) {
+          const parentBinding = parent && this.bindings.get(parent.key);
+          if (parentBinding?.type === 'comment') {
+            const candidate = planned.get(parentBinding.id);
+            if (candidate?.resourceId === reply.resourceId && anchored.has(candidate.id)) parentId = candidate.id;
+          } else {
+            const previous = known.get(parentSourceId);
+            if (previous?.sourcePageId === pageSourceId && previous.documentId === reply.resourceId) parentId = previous.commentId;
+          }
+        }
+      }
+      if (parentId) {
+        reply.parentCommentId = parentId;
+        counts.confluenceInlineRepliesLinked = (counts.confluenceInlineRepliesLinked ?? 0) + 1;
+      } else {
+        counts.confluenceInlineRepliesUnresolved = (counts.confluenceInlineRepliesUnresolved ?? 0) + 1;
+        this.notice('CONFLUENCE_COMMENT_REPLY_UNRESOLVED', '같은 문서에서 원문이 확인된 상위 문장 댓글을 찾을 수 없어 일반 댓글로 옮깁니다.', 'warning', entry, true);
+      }
+    }
   }
 
   converted(entry: Entry, { legacyAnnotations = false, documentId }: { legacyAnnotations?: boolean; documentId?: string } = {}) {

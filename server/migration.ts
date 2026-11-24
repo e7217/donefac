@@ -2,11 +2,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { AttachmentVersion, DocPage, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationConfluenceReviewCoverage, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
+import type { AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationConfluenceReviewCoverage, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { LegacyImportError } from './legacy-import-model.js';
+import { DocumentFollowUpError, validateDocumentDecisionSource } from './document-follow-up.js';
 import { projectJiraComponents } from './legacy-import-jira-components.js';
 import { buildMigrationOptions, confluenceInlineCommentPageId, confluencePageFieldDigest } from './migration-planner.js';
 import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
@@ -31,7 +32,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 14;
+const conversionVersion = 15;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -47,6 +48,21 @@ const invalidAppend = '같은 Jira 인스턴스에서 이관한 단일 원본 �
 const changedAppend = '추가 대상의 프로젝트 설정, 업무 버전·번호 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedPlanning = '이관을 검토하는 동안 대상 프로젝트의 릴리스가 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedCyclePlanning = '이관을 검토하는 동안 대상 프로젝트의 사이클이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+export const changedConfluenceReplyRoot = '답글을 추가할 문장 댓글이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+
+export function isActiveConfluenceInlineCommentRoot(store: Store, documentId: string, commentId: string): boolean {
+  const parent = store.get<Comment>('comments', commentId);
+  if (parent?.resourceType !== 'document' || parent.resourceId !== documentId || parent.parentCommentId !== undefined || !parent.documentSource) return false;
+  const revision = store.get<DocRevision>('revisions', parent.documentSource.revisionId);
+  if (!revision) return false;
+  try {
+    validateDocumentDecisionSource(parent.documentSource, documentId, new Map([[revision.id, revision]]), true);
+    return true;
+  } catch (error) {
+    if (error instanceof DocumentFollowUpError) return false;
+    throw error;
+  }
+}
 const invalidPageAppend = '같은 Confluence 인스턴스에서 이관한 단일 원본 공간과 기존 추가 대상을 선택해 주세요.';
 const changedPageAppend = '대상 프로젝트, 원본 연결 또는 문서·첨부 이력이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const jiraProjectKey = /^[A-Z][A-Z0-9_]*$/;
@@ -696,6 +712,8 @@ export class MigrationService {
     const knownAttachments = this.confluenceKnownAttachments(knownPages, destination, attachmentDigest);
     const knownHistory = configuration.appendPagesTo.refreshHistory
       ? this.confluenceKnownHistory(packages, knownPages, destination, digest) : undefined;
+    const knownInlineCommentRoots = configuration.appendPagesTo.refreshHistory
+      ? this.confluenceKnownInlineCommentRoots(packages, knownPages, destination) : undefined;
     const inlineCommentBodyHashes = !applying && configuration.appendPagesTo.refreshHistory
       ? this.confluenceInlineCommentBodyHashes(packages, knownPages, destination) : undefined;
     const refreshContext = configuration.appendPagesTo.refreshExisting
@@ -703,7 +721,46 @@ export class MigrationService {
     return { project, sourceSpaceId, sourceSpaceKey, token: digest.digest('hex'), knownPages, knownAttachments,
       ...(labelListScope ? { labelListScope } : {}),
       ...(hasSectionLinks ? { sectionInventory: true } : {}),
-      ...refreshContext, ...(knownHistory ? { knownHistory } : {}), ...(inlineCommentBodyHashes ? { inlineCommentBodyHashes } : {}) };
+      ...refreshContext, ...(knownHistory ? { knownHistory } : {}),
+      ...(knownInlineCommentRoots?.length ? { knownInlineCommentRoots } : {}), ...(inlineCommentBodyHashes ? { inlineCommentBodyHashes } : {}) };
+  }
+  private confluenceKnownInlineCommentRoots(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
+    { project, instanceKey, sourceSpaceId }: PageAppendDestination): MigrationPageAppendContext['knownInlineCommentRoots'] {
+    const requestedParents = new Set<string>();
+    for (const { dataset } of packages) for (const record of dataset.records) {
+      const sourceId = record.metadata.confluenceParentCommentSourceId;
+      if (record.kind === 'comment' && typeof sourceId === 'string' && sourceId) requestedParents.add(sourceId);
+    }
+    if (!requestedParents.size) return;
+    const boundDocuments = new Map<string, string | null>();
+    for (const { sourceId, documentId, projectId, sourceSpaceId: boundSpace } of knownPages) {
+      if (projectId !== project.id || boundSpace !== sourceSpaceId) continue;
+      const previous = boundDocuments.get(sourceId);
+      boundDocuments.set(sourceId, previous === undefined || previous === documentId ? documentId : null);
+    }
+    if (!boundDocuments.size) return;
+    const rows = this.store.db.prepare(`SELECT json FROM source_records
+      WHERE product='confluence' AND source_instance=? AND kind='comment' AND target_type='comment'
+        AND source_id IN (SELECT value FROM json_each(?))
+      ORDER BY source_id, id`).iterate(instanceKey, JSON.stringify([...requestedParents])) as Iterable<{ json: string }>;
+    const roots = new Map<string, NonNullable<MigrationPageAppendContext['knownInlineCommentRoots']>[number] | null>();
+    for (const { json } of rows) {
+      const archive = JSON.parse(json) as SourceRecordArchive;
+      const sourceId = archive.record.sourceId;
+      if (roots.has(sourceId)) {
+        roots.set(sourceId, null);
+        continue;
+      }
+      const sourcePageId = confluenceInlineCommentPageId(archive.record);
+      const documentId = sourcePageId && boundDocuments.get(sourcePageId);
+      const commentId = archive.targetId;
+      const root = sourcePageId && documentId && commentId && !archive.excluded && archive.ownerType === 'document' &&
+        archive.ownerId === documentId && archive.targetProjectId === project.id &&
+        isActiveConfluenceInlineCommentRoot(this.store, documentId, commentId)
+        ? { sourceId, sourcePageId, documentId, commentId } : null;
+      roots.set(sourceId, root);
+    }
+    return [...roots.values()].filter(root => root !== null);
   }
   private confluenceInlineCommentBodyHashes(packages: MigrationPackage[], knownPages: MigrationPageAppendContext['knownPages'],
     { project, sourceSpaceId }: PageAppendDestination): Record<string, string> | undefined {
@@ -1298,6 +1355,12 @@ export class MigrationService {
             const current = this.pageAppendContext(preview.configuration, this.loadPackages(preview.configuration.packageIds, true), true,
               appendPages.sectionInventory ?? false, appendPages.labelListInventory ?? false);
             if (!current || appendPages.projectId !== current.project.id || appendPages.token !== current.token) fail(409, changedPageAppend);
+            if (prepared.comments.some(comment => comment.parentCommentId !== undefined)) {
+              const newCommentIds = new Set(prepared.comments.map(comment => comment.id));
+              const knownRoots = new Map(current?.knownInlineCommentRoots?.map(root => [root.commentId, root.documentId]));
+              if (prepared.comments.some(({ parentCommentId, resourceId }) => parentCommentId !== undefined &&
+                  !newCommentIds.has(parentCommentId) && knownRoots.get(parentCommentId) !== resourceId)) fail(409, changedConfluenceReplyRoot);
+            }
             const attachmentError = this.reusedConfluenceAttachmentError(prepared, current);
             if (attachmentError) fail(409, attachmentError);
           }
