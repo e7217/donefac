@@ -1406,6 +1406,21 @@ export interface GitlabPipelineTestReport {
   suites: (GitlabTestCounts & { name: string })[];
   hasMore: boolean;
 }
+export interface GitlabPipelineFailedTest {
+  suite: string;
+  name: string;
+  className?: string;
+  status: 'failed' | 'error';
+}
+export interface GitlabPipelineFailedTests {
+  linkId: string;
+  repositoryId: number;
+  pipelineId: number;
+  status: string;
+  checkedAt: string;
+  cases: GitlabPipelineFailedTest[];
+  hasMore: boolean;
+}
 export type GitlabReviewState = 'unreviewed' | 'review_started' | 'reviewed' | 'requested_changes' | 'approved' | 'unapproved' | 'unknown';
 export interface GitlabReviewParticipant {
   id: number;

@@ -1,7 +1,7 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestReview,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
@@ -9,7 +9,7 @@ import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestReview, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 import { GitlabWebhookReceipts } from './gitlab-webhook-receipts.js';
@@ -679,6 +679,9 @@ export class GitlabIntegrationService{
   async pipelineTestReport(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabPipelineTestReport> {
     return this.readLinkedPipeline(issueId, linkId, signal, 'GitLab 테스트 결과', readGitlabPipelineTestReport);
   }
+  async pipelineFailedTests(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabPipelineFailedTests> {
+    return this.readLinkedPipeline(issueId, linkId, signal, 'GitLab 실패 테스트 상세', readGitlabPipelineFailedTests);
+  }
   private async readLinkedPipeline<Result>(issueId: string, linkId: string, signal: AbortSignal, description: string,
     read: (connection: { baseUrl: string; token: string | null }, repositoryId: number, pipelineId: number,
       expectedSha: string | null, signal: AbortSignal) => Promise<Result>) {
@@ -702,6 +705,7 @@ export class GitlabIntegrationService{
       if (deadline.aborted) fail(`${description} 조회 시간이 초과되었습니다.`, 504);
       if (!(error instanceof GitlabReadError)) throw error;
       if (error.stage === 'pipeline-test-report' && error.httpStatus === 404) fail('GitLab에서 이 파이프라인의 테스트 결과를 제공하지 않습니다.', 404);
+      if (error.stage === 'pipeline-failed-tests' && error.httpStatus === 404) fail('GitLab에서 이 파이프라인의 실패 테스트 상세를 제공하지 않습니다.', 404);
       failGitlabWorkflowRead(error);
     }
     signal.throwIfAborted();
@@ -1613,7 +1617,7 @@ export class GitlabIntegrationService{
       try { reads.push({ projectId, plan: await readProjectPlan(connection, projectId, options) }); }
       catch (error) {
         if (!(error instanceof GitlabReadError) || error.stage === 'webhooks' || error.stage === 'deployments' ||
-          error.stage === 'deployment-merge-requests' || error.stage === 'pipeline-jobs' || error.stage === 'pipeline-test-report' ||
+          error.stage === 'deployment-merge-requests' || error.stage === 'pipeline-jobs' || error.stage === 'pipeline-test-report' || error.stage === 'pipeline-failed-tests' ||
           error.stage === 'merge-request-review') throw error;
         const { stage, httpStatus, message } = error;
         reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
@@ -1964,6 +1968,8 @@ export class GitlabIntegrationService{
       linkedWorkflowRead('GitLab CI 작업 조회 조건을 확인해 주세요.', this.pipelineJobs.bind(this)));
     app.get('/api/issues/:id/gitlab-links/:linkId/pipeline-test-report',
       linkedWorkflowRead('GitLab 테스트 결과 조회 조건을 확인해 주세요.', this.pipelineTestReport.bind(this)));
+    app.get('/api/issues/:id/gitlab-links/:linkId/pipeline-failed-tests',
+      linkedWorkflowRead('GitLab 실패 테스트 상세 조회 조건을 확인해 주세요.', this.pipelineFailedTests.bind(this)));
     app.get('/api/issues/:id/gitlab-links/:linkId/merge-request-review',
       linkedWorkflowRead('GitLab MR 검토 조회 조건을 확인해 주세요.', this.mergeRequestReview.bind(this)));
     app.get('/api/issues/:id/gitlab-links/:linkId/branch-merge-requests',

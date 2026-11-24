@@ -121,6 +121,11 @@
   font-variant-numeric: tabular-nums;
 }
 
+.gitlab-failed-tests {
+  width: 100%;
+  min-width: 0;
+}
+
 .gitlab-pipeline-job-state {
   padding: 2px 5px;
   border-radius: 4px;

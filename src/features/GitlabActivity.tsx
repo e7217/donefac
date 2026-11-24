@@ -6,8 +6,8 @@ import { gitlabObjectSha, isGitlabBranchName, isRestorableGitlabLink } from '../
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type {
-  FeatureProps, GitlabBranchMergeRequests, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs,
-  GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabTestCounts,
+  FeatureProps, GitlabBranchMergeRequests, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineFailedTests,
+  GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabTestCounts,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './gitlab-activity.css';
@@ -582,17 +582,17 @@ function isPipelineTestReport(result: GitlabPipelineTestReport | undefined, targ
     result.suites.every(suite => isTestCounts(suite) && typeof suite.name === 'string' && suite.name.trim()));
 }
 
-function pipelineTestReportMessage(cause: unknown): string {
+function pipelineTestReportMessage(cause: unknown, label = '테스트 결과'): string {
   if (cause instanceof ApiError) {
-    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 테스트 결과 조회 권한을 확인해 주세요.';
+    if (cause.status === 401 || cause.status === 403) return `GitLab 연결과 ${label} 조회 권한을 확인해 주세요.`;
     if (cause.status === 404) {
-      if (cause.message === 'GitLab에서 이 파이프라인의 테스트 결과를 제공하지 않습니다.') return cause.message;
+      if (cause.message === `GitLab에서 이 파이프라인의 ${label}를 제공하지 않습니다.`) return cause.message;
       return '연결된 GitLab 파이프라인을 찾을 수 없습니다.';
     }
     if (cause.status === 409) return '파이프라인이나 GitLab 연결이 변경되었습니다. 다시 확인해 주세요.';
     if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
   }
-  return 'GitLab 테스트 결과를 불러오지 못했습니다. 다시 확인해 주세요.';
+  return `GitLab ${label}를 불러오지 못했습니다. 다시 확인해 주세요.`;
 }
 
 function PipelineTestReport({ target, revision }: { target: PipelineTarget; revision: string }) {
@@ -611,7 +611,7 @@ function PipelineTestReport({ target, revision }: { target: PipelineTarget; revi
       {view.kind === 'loading' && <p role="status">GitLab 테스트 결과를 확인하고 있습니다.</p>}
       {view.kind === 'stale' && <p role="status">파이프라인이 변경되었습니다. 테스트 결과를 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
-      {view.kind === 'ready' && <PipelineTestReportResult result={view.result} />}
+      {view.kind === 'ready' && <PipelineTestReportResult result={view.result} target={target} revision={revision} />}
       <div className="gitlab-test-report-actions">
         <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
           <RefreshCw aria-hidden="true" size={14} />테스트 결과 다시 확인
@@ -636,8 +636,9 @@ function TestCounts({ counts, label }: { counts: GitlabTestCounts; label?: strin
   </div>;
 }
 
-function PipelineTestReportResult({ result }: { result: GitlabPipelineTestReport }) {
+function PipelineTestReportResult({ result, target, revision }: { result: GitlabPipelineTestReport; target: PipelineTarget; revision: string }) {
   const reportError = result.total.reportError || result.suites.some(suite => suite.reportError);
+  const hasFailures = result.total.failed > 0 || result.total.errors > 0 || result.suites.some(suite => suite.failed > 0 || suite.errors > 0);
   return <>
     <p className="gitlab-activity-inspection-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
       <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time>
@@ -645,6 +646,7 @@ function PipelineTestReportResult({ result }: { result: GitlabPipelineTestReport
     <TestCounts counts={result.total} label="전체 테스트" />
     {reportError && <p className="gitlab-activity-inspection-warning">GitLab에서 테스트 보고서 오류를 보고했습니다.</p>}
     {result.total.count === 0 && !reportError && !result.hasMore && <p>GitLab에서 확인한 테스트가 없습니다.</p>}
+    {(hasFailures || reportError || result.hasMore) && <PipelineFailedTests target={target} revision={revision} />}
     {result.suites.length > 0 && <ul className="gitlab-test-suite-list" role="list" aria-label="테스트 스위트">
       {result.suites.map((suite, index) => <li className="gitlab-test-suite" key={`${suite.name}:${index}`}>
         <strong>{suite.name}</strong>
@@ -654,6 +656,57 @@ function PipelineTestReportResult({ result }: { result: GitlabPipelineTestReport
     </ul>}
     {result.hasMore && <p>일부 테스트 스위트만 표시합니다.</p>}
   </>;
+}
+
+function isPipelineFailedTestsResult(result: GitlabPipelineFailedTests | undefined, target: PipelineTarget): result is GitlabPipelineFailedTests {
+  const isLabel = (value: unknown) => typeof value === 'string' && value.length <= 255 && Boolean(value.trim());
+  return Boolean(result && result.linkId === target.linkId && result.repositoryId === target.repositoryId &&
+    result.pipelineId === target.pipelineId && typeof result.status === 'string' && result.status &&
+    typeof result.checkedAt === 'string' && Number.isFinite(Date.parse(result.checkedAt)) && typeof result.hasMore === 'boolean' &&
+    Array.isArray(result.cases) && result.cases.every(testCase => testCase && isLabel(testCase.suite) && isLabel(testCase.name) &&
+      (testCase.className === undefined || isLabel(testCase.className)) && (testCase.status === 'failed' || testCase.status === 'error')));
+}
+
+function PipelineFailedTests({ target, revision }: { target: PipelineTarget; revision: string }) {
+  const panelId = useId();
+  const { view, toggle, load } = useActivityLookup(revision, async signal => {
+    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/pipeline-failed-tests`;
+    const result = await api<GitlabPipelineFailedTests | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    return isPipelineFailedTestsResult(result, target) ? result : null;
+  }, '연결된 파이프라인의 실패 테스트 상세 응답을 확인할 수 없습니다.', cause => pipelineTestReportMessage(cause, '실패 테스트 상세'));
+
+  return <div className="gitlab-failed-tests">
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+      {view ? '실패 테스트 닫기' : '실패 테스트 확인'}
+    </button>
+    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab 실패 테스트" aria-busy={view.kind === 'loading'}>
+      {view.kind === 'loading' && <p role="status">GitLab 실패 테스트를 확인하고 있습니다.</p>}
+      {view.kind === 'stale' && <p role="status">파이프라인이 변경되었습니다. 실패 테스트를 다시 확인해 주세요.</p>}
+      {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
+      {view.kind === 'ready' && <>
+        <p className="gitlab-activity-inspection-meta">조회 시각
+          <time dateTime={view.result.checkedAt}>{new Date(view.result.checkedAt).toLocaleString('ko-KR')}</time>
+        </p>
+        {view.result.cases.length ? <ul className="gitlab-test-suite-list" role="list" aria-label="실패 및 오류 테스트" tabIndex={0}>
+          {view.result.cases.map((testCase, index) => <li className="gitlab-test-suite" key={`${testCase.name}:${index}`}>
+            <div className="gitlab-activity-inspection-meta">
+              <strong>{testCase.name}</strong><span className="gitlab-activity-inspection-warning">{testCase.status === 'failed' ? '실패' : '오류'}</span>
+            </div>
+            <div className="gitlab-activity-inspection-meta"><span>{testCase.suite}</span>{testCase.className && <code>{testCase.className}</code>}</div>
+          </li>)}
+        </ul> : <p>조회한 테스트 상세에 실패 또는 오류 테스트가 없습니다.</p>}
+        {view.result.hasMore && <p>조회 범위가 제한되었습니다. 전체 테스트를 GitLab에서 확인해 주세요.</p>}
+      </>}
+      <div className="gitlab-test-report-actions">
+        <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+          <RefreshCw aria-hidden="true" size={14} />실패 테스트 다시 확인
+        </button>
+        <a className="gitlab-test-report-link" href={target.url.href} target="_blank" rel="noopener noreferrer">
+          GitLab 원본 파이프라인 열기 <ExternalLink aria-hidden="true" size={13} />
+        </a>
+      </div>
+    </section>}
+  </div>;
 }
 
 function mergeRequestReviewMessage(cause: unknown): string {

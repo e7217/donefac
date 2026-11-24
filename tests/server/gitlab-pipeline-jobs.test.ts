@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { GitlabLink, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { GitlabLink, GitlabPipelineFailedTests, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const repositoryId = 42;
 const pipelineId = 802;
@@ -23,10 +23,13 @@ const jobsPath = `${pipelinePath}/jobs`;
 const triggerJobsPath = `${pipelinePath}/trigger_jobs`;
 const bridgesPath = `${pipelinePath}/bridges`;
 const testReportPath = `${pipelinePath}/test_report_summary`;
+const failedReportPath = `${pipelinePath}/test_report`;
 const route = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-jobs`;
 const reportRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-test-report`;
+const failedTestsRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-failed-tests`;
 
 type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string> };
+type FailedReportPage = { body: unknown; status?: number; headers?: Record<string, string> };
 type JobFixture = { id: number; name: string; stage: string; allow_failure: boolean; status: string; failure_reason: string | null;
   pipeline: { id: number; project_id: number; sha: string }; web_url: string };
 
@@ -48,6 +51,7 @@ async function fixture(t: TestContext) {
   let testReport: unknown;
   let testReportStatus = 200;
   let holdTestReport: (() => Promise<void>) | undefined;
+  let failedReportPages: FailedReportPage[] = [];
   const repoUrl = () => `${baseUrl}/team/app`;
   const pipelineUrl = () => `${repoUrl()}/-/pipelines/${pipelineId}`;
   const jobUrl = (id: number) => `${repoUrl()}/-/jobs/${id}`;
@@ -68,6 +72,12 @@ async function fixture(t: TestContext) {
       if (response.destroyed) return;
       if (testReportStatus === 302) response.setHeader('Location', `${baseUrl}/private-redirect-target`);
       response.writeHead(testReportStatus).end(JSON.stringify(testReportStatus === 200 ? testReport : { message: `${privateUpstream} ${token}` }));
+    } else if (url.pathname === failedReportPath) {
+      await holdTestReport?.();
+      if (response.destroyed) return;
+      const page = failedReportPages[Number(url.searchParams.get('page')) - 1];
+      if (!page) { response.writeHead(404).end('{}'); return; }
+      response.writeHead(page.status ?? 200, page.headers).end(JSON.stringify(page.body));
     } else if (url.pathname === triggerJobsPath || url.pathname === bridgesPath) {
       await holdTriggers?.();
       if (response.destroyed) return;
@@ -147,6 +157,7 @@ async function fixture(t: TestContext) {
 
   return { call, request, issue, link, createIssue, configure, baseUrl, calls, job, jobUrl,
     path: route(issue.id, link.id), reportPath: reportRoute(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
+    failedTestsPath: failedTestsRoute(issue.id, link.id),
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     setJobs(value: JobFixture[], withPagination = false) { jobs = value; paginationHeaders = withPagination; },
     setJobsStatus(status: number) { jobsStatus = status; }, setJobGate(gate?: () => Promise<void>) { holdJobs = gate; },
@@ -155,6 +166,7 @@ async function fixture(t: TestContext) {
     setTriggerGate(gate?: () => Promise<void>) { holdTriggers = gate; },
     setTestReport(value: unknown, status = 200) { testReport = value; testReportStatus = status; },
     setTestReportGate(gate?: () => Promise<void>) { holdTestReport = gate; },
+    setFailedReportPages(...pages: FailedReportPage[]) { failedReportPages = pages; },
   };
 }
 
@@ -396,6 +408,153 @@ test('rejects a test report if the pipeline or current GitLab link changes durin
   await whileReading(() => f.configure({ token: 'rotated-synthetic-report-read-token' }));
   await whileReading(() => f.call(`/issues/${f.issue.id}/gitlab-links/${encodeURIComponent(f.link.id)}?expectedManualLinkId=${f.link.manualLinkId}`, { method: 'DELETE' }));
   await f.call(f.reportPath, undefined, 404);
+});
+
+const failedReport = (failed_count: number, error_count: number, test_suites: unknown[] = []) => ({ failed_count, error_count, test_suites });
+
+test('reads only display-safe failed and error test cases from the exact linked pipeline on demand', async t => {
+  const f = await fixture(t);
+  f.setPipeline({ status: 'failed' });
+  const before = await f.snapshot();
+  const longLabel = `${'가'.repeat(254)}🚀뒤`;
+  f.setFailedReportPages({ body: failedReport(2, 1, [
+    { name: 'Smoke\u2028tests', test_cases: [
+      { status: 'success', name: 'Successful test' },
+      { status: 'failed', name: 'failed\tcase\u202e', classname: 'Test\nCase', stack_trace: privateUpstream,
+        system_output: token, file: privateUpstream, attachment: token, recent_failures: 7 },
+      { status: 'skipped', name: 'Skipped test' },
+      { status: 'error', name: longLabel },
+    ] },
+    { name: `suite ${token}`, test_cases: [{ status: 'failed', name: `case ${token}`, classname: `${token} Class` }] },
+  ]) });
+  const response = await f.request<GitlabPipelineFailedTests>(f.failedTestsPath);
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.match(response.headers.get('cache-control') ?? '', /\bno-store\b/);
+  const { checkedAt, ...result } = response.data;
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(result, {
+    linkId: f.link.id, repositoryId, pipelineId, status: 'failed', hasMore: false,
+    cases: [
+      { suite: 'Smoke\u2028tests', name: 'failed case', className: 'Test Case', status: 'failed' },
+      { suite: 'Smoke\u2028tests', name: `${'가'.repeat(254)}�`, status: 'error' },
+      { suite: '이름 미확인', name: '이름 미확인', status: 'failed' },
+    ],
+  });
+  assert.deepEqual(f.calls.map(({ method, url, credential }) => [method, url.pathname, url.search, credential]), [
+    ['GET', repositoryPath, '', token], ['GET', pipelinePath, '', token],
+    ['GET', failedReportPath, '?per_page=50&page=1', token], ['GET', pipelinePath, '', token],
+  ]);
+  assert.ok(!JSON.stringify(result).includes(privateUpstream));
+  assert.ok(!JSON.stringify(result).includes(token));
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('bounds displayed failed tests and follows only verified pagination, keeping incomplete reports distinguishable', async t => {
+  const f = await fixture(t);
+  const suite = (...test_cases: unknown[]) => ({ name: 'Smoke', test_cases });
+  const item = (name: string) => ({ status: 'failed', name });
+  const full = (...cases: unknown[]) => failedReport(cases.length, 0, [suite(...cases)]);
+  const calls = () => f.calls.filter(({ url }) => url.pathname === failedReportPath).map(({ url }) => [
+    url.searchParams.get('page'), url.searchParams.get('per_page'), [...url.searchParams.keys()].sort(),
+  ]);
+  const query = (page: string) => [page, '50', ['page', 'per_page']];
+  const fiftyOne = Array.from({ length: 51 }, (_, index) => item(`Failed ${index + 1}`));
+  f.setFailedReportPages({ body: full(...fiftyOne) });
+  const capped = await f.call<GitlabPipelineFailedTests>(f.failedTestsPath);
+  assert.equal(capped.hasMore, true);
+  assert.deepEqual(capped.cases.map(({ name }) => name), fiftyOne.slice(0, 50).map(({ name }) => name));
+  assert.deepEqual(calls(), [query('1')]);
+
+  f.calls.length = 0;
+  f.setFailedReportPages(
+    { body: failedReport(1, 0, [suite({ status: 'success' })]), headers: { Link: `<${failedReportPath}?page=2&per_page=100>; rel="next"` } },
+    { body: failedReport(1, 0, [suite(item('Second page'))]), headers: { 'X-Next-Page': '' } },
+  );
+  const second = await f.call<GitlabPipelineFailedTests>(f.failedTestsPath);
+  assert.deepEqual(second.cases, [{ suite: 'Smoke', name: 'Second page', status: 'failed' }]);
+  assert.equal(second.hasMore, false);
+  assert.deepEqual(calls(), [query('1'), query('2')]);
+
+  f.calls.length = 0;
+  f.setFailedReportPages(...Array.from({ length: 5 }, (_, index) => ({ body: full(), headers: { 'X-Next-Page': String(index + 2) } })));
+  const limited = await f.call<GitlabPipelineFailedTests>(f.failedTestsPath);
+  assert.deepEqual(limited.cases, []);
+  assert.equal(limited.hasMore, true);
+  assert.deepEqual(calls(), ['1', '2', '3', '4'].map(query));
+
+  for (const [body, hasMore] of [
+    [failedReport(0, 0), false],
+    [failedReport(2, 0), true],
+    [failedReport(0, 0, [{ ...suite(), suite_error: `${privateUpstream} ${token}` }]), true],
+    [{ ...failedReport(0, 0), suite_error: `${privateUpstream} ${token}` }, true],
+  ] as const) {
+    f.setFailedReportPages({ body });
+    const checked = await f.call<GitlabPipelineFailedTests>(f.failedTestsPath);
+    assert.deepEqual(checked.cases, []);
+    assert.equal(checked.hasMore, hasMore);
+    assert.ok(!JSON.stringify(checked).includes(privateUpstream));
+  }
+});
+
+test('validates the report and request boundaries without attempting foreign pagination or exposing upstream bodies', async t => {
+  const f = await fixture(t);
+  const unrelated = await f.createIssue('Unlinked failed tests ticket');
+  const absent = await f.call<{ error: string }>(failedTestsRoute(unrelated.id, f.link.id), undefined, 404);
+  await f.call(`${f.failedTestsPath}?page=2`, undefined, 400);
+  assert.equal(f.calls.length, 0);
+  const missing = await f.call<{ error: string }>(f.failedTestsPath, undefined, 404);
+  assert.equal(missing.error, 'GitLab에서 이 파이프라인의 실패 테스트 상세를 제공하지 않습니다.');
+  assert.notEqual(absent.error, missing.error);
+
+  for (const body of [
+    failedReport(-1, 0), failedReport(0, 0, [{ name: 'Malformed suite' }]),
+    failedReport(0, 0, [{ name: 'Malformed case', test_cases: [{ status: 'unknown' }] }]),
+  ]) {
+    f.setFailedReportPages({ body });
+    await f.call(f.failedTestsPath, undefined, 502);
+  }
+  f.calls.length = 0;
+  const first = failedReport(1, 0, [{ name: 'Smoke', test_cases: [] }]);
+  f.setFailedReportPages({ body: first, headers: { Link: '<https://other.example.test/tests?page=2>; rel="next"' } });
+  await f.call(f.failedTestsPath, undefined, 502);
+  assert.deepEqual(f.calls.map(({ url }) => url.pathname), [repositoryPath, pipelinePath, failedReportPath]);
+
+  f.setFailedReportPages({ body: first, headers: { 'X-Next-Page': '2' } });
+  const missingPage = await f.call<{ error: string }>(f.failedTestsPath, undefined, 502);
+  assert.notEqual(missingPage.error, missing.error);
+  for (const [status, expected] of [[302, 502], [403, 403], [429, 429]]) {
+    f.setFailedReportPages({ status, body: { message: `${privateUpstream} ${token}` }, headers: { Location: `${f.baseUrl}/private-target` } });
+    const result = await f.call(f.failedTestsPath, undefined, expected);
+    assert.ok(!JSON.stringify(result).includes(privateUpstream));
+    assert.ok(!JSON.stringify(result).includes(token));
+  }
+  f.setFailedReportPages({ body: {}, headers: { 'Content-Length': String(16 * 1024 * 1024 + 1) } });
+  await f.call(f.failedTestsPath, undefined, 502);
+});
+
+test('discards failed test details if the live pipeline or stored settings and link change during the lookup', async t => {
+  const f = await fixture(t);
+  f.setFailedReportPages({ body: failedReport(1, 0, [{ name: 'Smoke', test_cases: [{ status: 'failed', name: 'A failure' }] }]) });
+  async function whileReading(change: () => void | Promise<unknown>) {
+    const reached = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.setTestReportGate(() => { reached.resolve(); return release.promise; });
+    const pending = f.request(f.failedTestsPath);
+    try {
+      await Promise.race([reached.promise, pending.then(response => assert.fail(`Failed tests request ended early (${response.status})`))]);
+      await change();
+    } finally {
+      release.resolve();
+      f.setTestReportGate();
+    }
+    const result = await pending;
+    assert.equal(result.status, 409, JSON.stringify(result.data));
+    assert.ok(!Object.hasOwn(result.data as object, 'cases'));
+  }
+  await whileReading(() => f.setPipeline({ status: 'success' }));
+  await whileReading(() => f.configure({ token: 'rotated-synthetic-failed-tests-token' }));
+  await whileReading(() => f.call(`/issues/${f.issue.id}/gitlab-links/${encodeURIComponent(f.link.id)}?expectedManualLinkId=${f.link.manualLinkId}`, { method: 'DELETE' }));
+  await f.call(f.failedTestsPath, undefined, 404);
 });
 
 test('reports the bounded ordered job list and fails closed on an ambiguous or out-of-scope result', async t => {

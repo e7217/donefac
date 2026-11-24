@@ -11,9 +11,15 @@ const pipelineId = 803;
 const repositoryPath = `/forge/api/v4/projects/${repositoryId}`;
 const pipelinePath = `${repositoryPath}/pipelines/${pipelineId}`;
 const reportPath = `${pipelinePath}/test_report_summary`;
-const requestSuffix = /\/pipeline-test-report$/u;
+const failedTestReportPath = `${pipelinePath}/test_report`;
+const failedTestQuery = '?page=1&per_page=50';
+const requestSuffix = /\/pipeline-(?:test-report|failed-tests)$/u;
 const suiteName = '통합 검증';
 const omittedSuite = '한도 밖 테스트 스위트';
+const failedTestName = '저장된 계획을 여는 테스트';
+const errorTestName = '일정 편집을 초기화하는 테스트';
+const passedTestName = '통과한 입력 검증 테스트';
+const skippedTestName = '건너뛴 날짜 선택 테스트';
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   const body = await response.text();
@@ -21,12 +27,13 @@ async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   return JSON.parse(body) as T;
 }
 
-test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 테스트 결과를 필요한 때 확인한다', async ({ page, request }) => {
+test('360px 티켓과 개발 화면에서 GitLab 테스트 요약과 실패한 테스트를 필요할 때 확인한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const id = randomUUID();
   const webhookSecret = `synthetic-gitlab-test-report-${id}`;
   const readToken = `synthetic-pipeline-report-reader-${id}`;
   const privateReportError = `synthetic-private-junit-report-error-${id} ${readToken}`;
+  const privateOutput = `synthetic-private-junit-output-${id}`;
   const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
   const { projects: [project] } = await workspace();
@@ -46,19 +53,36 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
   let delayNext = false;
   let empty = false;
   let unavailable = false;
+  let failedTestsEmpty = false;
+  let failedTestsUnavailable = false;
   let upstreamStatus = 'failed';
   let upstreamUpdatedAt = startedAt;
   const mock = createServer((incoming, response) => {
     const url = new URL(incoming.url ?? '/', 'http://fixture.test');
+    url.searchParams.sort();
     const token = incoming.headers['private-token'];
     remoteCalls.push({ path: url.pathname, query: url.search, method: incoming.method, token });
     response.setHeader('Content-Type', 'application/json');
-    if (incoming.method !== 'GET' || url.search || token !== readToken) { response.writeHead(403).end('{}'); return; }
+    const expectedQuery = url.pathname === failedTestReportPath ? failedTestQuery : '';
+    if (incoming.method !== 'GET' || url.search !== expectedQuery || token !== readToken) { response.writeHead(403).end('{}'); return; }
     if (url.pathname === repositoryPath) {
       response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: repositoryUrl }));
     } else if (url.pathname === pipelinePath) {
       response.end(JSON.stringify({ id: pipelineId, iid: 20, project_id: repositoryId, status: upstreamStatus, sha, ref,
         updated_at: upstreamUpdatedAt, web_url: pipelineUrl }));
+    } else if (url.pathname === failedTestReportPath) {
+      if (failedTestsUnavailable) { response.writeHead(404).end('{}'); return; }
+      if (failedTestsEmpty) {
+        response.end(JSON.stringify({ total_count: 0, failed_count: 0, error_count: 0, test_suites: [] }));
+        return;
+      }
+      response.end(JSON.stringify({ total_count: 20, failed_count: 3, error_count: 1, success_count: 14, skipped_count: 2,
+        test_suites: [{ name: suiteName, test_cases: [
+          { status: 'failed', name: failedTestName, classname: 'teamspace.planning.ReleaseTest', stack_trace: privateOutput },
+          { status: 'error', name: errorTestName, classname: 'teamspace.planning.ScheduleTest', system_output: privateOutput },
+          { status: 'success', name: passedTestName }, { status: 'skipped', name: skippedTestName },
+        ] }],
+      }));
     } else if (url.pathname === reportPath) {
       if (unavailable) { response.writeHead(404).end('{}'); return; }
       const suite = (name: string, count: number, success: number, failed: number, skipped: number, errors: number) =>
@@ -103,7 +127,10 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
     const link = (await workspace()).gitlabLinks.find(item => item.issueId === issue.id && item.kind === 'pipeline');
     expect(link).toMatchObject({ state: 'failed', updatedAt: startedAt });
     if (!link) throw new Error('Synthetic pipeline was not connected');
-    const apiPath = `/api/issues/${issue.id}/gitlab-links/${link.id}/pipeline-test-report`;
+    const apiPrefix = `/api/issues/${issue.id}/gitlab-links/${link.id}`;
+    const recordedCall = (suffix: string) => ({ path: `${apiPrefix}/${suffix}`, query: '', method: 'GET' });
+    const summaryCall = recordedCall('pipeline-test-report');
+    const failedTestsCall = recordedCall('pipeline-failed-tests');
     const calls: { path: string; query: string; method: string }[] = [];
     function recordRequest(sent: Request) {
       const url = new URL(sent.url());
@@ -140,7 +167,32 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
     await expect(report).not.toContainText(privateReportError);
     await expect(report.getByRole('link', { name: 'GitLab에서 파이프라인 열기', exact: true })).toHaveAttribute('href', pipelineUrl);
     expect(await report.evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
-    expect(calls).toHaveLength(1);
+    expect(calls).toEqual([summaryCall]);
+    const openFailedTests = report.getByRole('button', { name: '실패 테스트 확인', exact: true });
+    await openFailedTests.press('Enter');
+    const failedTests = report.getByRole('region', { name: 'GitLab 실패 테스트', exact: true });
+    const cases = failedTests.getByRole('list', { name: '실패 및 오류 테스트', exact: true });
+    await expect(cases.getByRole('listitem').filter({ hasText: failedTestName })).toContainText('실패');
+    await expect(cases.getByRole('listitem').filter({ hasText: errorTestName })).toContainText('오류');
+    await expect(cases).toContainText(suiteName);
+    await expect(cases).toContainText('teamspace.planning.ReleaseTest');
+    await expect(cases).not.toContainText(passedTestName);
+    await expect(cases).not.toContainText(skippedTestName);
+    await expect(failedTests).toContainText('조회 범위가 제한되었습니다. 전체 테스트를 GitLab에서 확인해 주세요.');
+    await expect(failedTests).not.toContainText(privateOutput);
+    await expect(failedTests.getByRole('link', { name: 'GitLab 원본 파이프라인 열기', exact: true })).toHaveAttribute('href', pipelineUrl);
+    expect(await failedTests.evaluate(element => element.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
+    expect(calls).toEqual([summaryCall, failedTestsCall]);
+    await expect(title).toHaveValue('저장하지 않은 검토 제목');
+    await expect(comment).toHaveValue('보내지 않은 검사 메모');
+
+    failedTestsEmpty = true;
+    await failedTests.getByRole('button', { name: '실패 테스트 다시 확인', exact: true }).click();
+    await expect(failedTests).toContainText('조회한 테스트 상세에 실패 또는 오류 테스트가 없습니다.');
+    await expect(cases).toHaveCount(0);
+    await report.getByRole('button', { name: '실패 테스트 닫기', exact: true }).press('Enter');
+    await expect(failedTests).toHaveCount(0);
+    await expect(openFailedTests).toBeFocused();
 
     const retry = report.getByRole('button', { name: '테스트 결과 다시 확인', exact: true });
     delayNext = true;
@@ -155,7 +207,7 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
     await finished.promise;
     await expect.poll(() => canceled).toEqual([expect.stringContaining('ERR_ABORTED')]);
     await expect(suite).toHaveCount(0);
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(4);
 
     empty = true;
     await retry.click();
@@ -168,6 +220,7 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
     await expect(open).toBeFocused();
 
     empty = false;
+    failedTestsEmpty = false;
     const development = await page.context().newPage();
     try {
       const beforeDevelopment = remoteCalls.length;
@@ -177,22 +230,37 @@ test('360px 티켓과 개발 화면에서 연결된 GitLab 파이프라인의 �
       const activity = development.getByRole('region', { name: '연결된 개발 활동', exact: true });
       const trigger = activity.getByRole('button', { name: '테스트 결과 확인', exact: true });
       await expect(trigger).toBeVisible({ timeout: 35_000 });
-      expect(calls).toHaveLength(3);
+      const beforeTestReport = calls.length;
+      expect(beforeTestReport).toBe(5);
       expect(remoteCalls).toHaveLength(beforeDevelopment);
       await trigger.click();
       const developmentReport = activity.getByRole('region', { name: 'GitLab 테스트 결과', exact: true });
       await expect(developmentReport).toContainText(suiteName);
+      expect(calls.slice(beforeTestReport)).toEqual([summaryCall]);
+      await developmentReport.getByRole('button', { name: '실패 테스트 확인', exact: true }).click();
+      const developmentFailedTests = developmentReport.getByRole('region', { name: 'GitLab 실패 테스트', exact: true });
+      await expect(developmentFailedTests.getByText(failedTestName, { exact: true })).toBeVisible();
+      await expect(developmentFailedTests.getByText(errorTestName, { exact: true })).toBeVisible();
+      failedTestsUnavailable = true;
+      await developmentFailedTests.getByRole('button', { name: '실패 테스트 다시 확인', exact: true }).click();
+      await expect(developmentFailedTests.getByRole('alert')).toHaveText('GitLab에서 이 파이프라인의 실패 테스트 상세를 제공하지 않습니다.');
+      await expect(developmentFailedTests).not.toContainText(failedTestName);
+      await expect(developmentReport.getByText(suiteName, { exact: true })).toBeVisible();
       unavailable = true;
       await developmentReport.getByRole('button', { name: '테스트 결과 다시 확인', exact: true }).click();
       await expect(developmentReport.getByRole('alert')).toHaveText('GitLab에서 이 파이프라인의 테스트 결과를 제공하지 않습니다.');
       await expect(developmentReport).not.toContainText(suiteName);
     } finally { await development.close(); }
 
-    expect(calls).toEqual(Array(5).fill({ path: apiPath, query: '', method: 'GET' }));
+    expect(calls).toEqual([summaryCall, failedTestsCall, failedTestsCall, summaryCall, summaryCall, summaryCall,
+      failedTestsCall, failedTestsCall, summaryCall]);
     const complete = [repositoryPath, pipelinePath, reportPath, pipelinePath];
     const incomplete = [repositoryPath, pipelinePath, reportPath];
-    expect(remoteCalls).toEqual([...complete, ...incomplete, ...complete, ...complete, ...incomplete]
-      .map(path => ({ path, query: '', method: 'GET', token: readToken })));
+    const failedTestsComplete = [repositoryPath, pipelinePath, failedTestReportPath, pipelinePath];
+    const failedTestsIncomplete = [repositoryPath, pipelinePath, failedTestReportPath];
+    expect(remoteCalls).toEqual([...complete, ...failedTestsComplete, ...failedTestsComplete, ...incomplete, ...complete, ...complete,
+      ...failedTestsComplete, ...failedTestsIncomplete, ...incomplete]
+      .map(path => ({ path, query: path === failedTestReportPath ? failedTestQuery : '', method: 'GET', token: readToken })));
     const final = await workspace();
     expect(final.issues.find(item => item.id === issue.id)).toEqual(issue);
     expect(final.gitlabLinks.find(item => item.id === link.id)).toMatchObject({ state: 'success', updatedAt: changedAt });

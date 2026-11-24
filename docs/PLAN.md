@@ -419,6 +419,8 @@ GitLab 연결 미리보기는 현재 입력한 주소·저장소·읽기 토큰�
 
 연결된 파이프라인의 **테스트 결과 확인**에서 GitLab이 집계한 성공·실패·건너뜀·오류 수와 처음 50개 스위트의 결과를 본다. 보고서 처리 오류는 여부로 표시하고 빈 결과 및 조회 실패와 구분한다. 저장한 연결로 요청할 때 읽고 조회 전후 파이프라인의 상태와 업무 연결을 대조한다. 업데이트가 감지되면 다시 확인을 안내하며, 전체 보고서는 원래 GitLab 파이프라인에서 열 수 있다. [GitLab 테스트 결과 요약 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-test-report-summary-for-a-pipeline)
 
+같은 화면의 **실패 테스트 확인**에서 결과가 실패·오류인 테스트의 이름과 스위트, GitLab이 제공한 클래스를 최대 50개까지 확인한다. 상세 조회는 버튼을 눌렀을 때 시작하고, 연결된 저장소·파이프라인을 다시 대조한다. 한도에 도달했거나 집계만 확인한 실패가 남아 있으면 전체 보고서로 이어서 확인할 수 있다. 스택 추적과 출력 및 첨부는 GitLab 화면에서 읽는다. [GitLab 상세 테스트 결과 API](https://docs.gitlab.com/api/pipelines/#retrieve-a-test-report-for-a-pipeline)
+
 티켓에서 새 브랜치를 만들 때 저장한 GitLab 저장소와 대문자 티켓 키를 기본 이름에 사용한다. 미리보기는 저장소·브랜치와 기준 참조를 전체 커밋 SHA로 확인한다. 같은 작업자와 설정·티켓 위치를 다시 대조한 뒤 사용자가 한 번 입력한 쓰기 토큰으로 검토한 SHA에서 생성한다. 같은 이름을 발견하면 기존 브랜치 주소를 표시한다. 생성 요청 결과가 불명확하면 SQLite의 시도 기록과 GitLab의 현재 SHA를 조회해 확인하며 추가 생성은 보류한다. 티켓이 이동한 뒤에는 같은 활성 티켓 ID에서 팀원이 명시적으로 확인한 경우에 연결한다. 생성은 개발 활동으로 기록하고 자동 전이는 기존의 인증된 이벤트에서 평가한다. [GitLab 브랜치 생성](https://docs.gitlab.com/api/branches/#create-repository-branch)
 
 티켓과 개발 화면의 연결 브랜치에서 같은 저장소의 열린 MR을 확인하고 GitLab에서 연다. 확인을 끝낸 뒤 열린 MR이 없으면 기본 또는 직접 입력한 대상 브랜치를 확인하고, 두 브랜치의 커밋이 다를 때 GitLab 생성 화면을 연다. 저장한 티켓 키와 제목을 복사해 MR 제목에 붙일 수 있다. 작성과 최종 제출은 GitLab 화면에서 한다. [GitLab MR 생성](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)

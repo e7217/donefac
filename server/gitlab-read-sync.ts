@@ -1,15 +1,15 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
+import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
-  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'pipeline-test-report' | 'merge-request-review';
-type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report'>;
+  'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests' | 'merge-request-review';
+type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests'>;
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
 type ManualPage =
@@ -35,6 +35,9 @@ const PIPELINE_JOB_PAGE_SIZE = 50;
 const MAX_PIPELINE_JOB_PAGES = 4;
 const PIPELINE_TRIGGER_JOBS_TIMEOUT_MS = 6_000;
 const PIPELINE_TEST_SUITE_LIMIT = 50;
+const PIPELINE_FAILED_TEST_LIMIT = 50;
+const PIPELINE_TEST_REPORT_PAGE_SIZE = 50;
+const MAX_PIPELINE_TEST_REPORT_PAGES = 4;
 const MR_REVIEW_PARTICIPANT_LIMIT = 50;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
@@ -62,6 +65,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   'deployment-merge-requests': '배포에 포함된 MR',
   'pipeline-jobs': '파이프라인 작업',
   'pipeline-test-report': '파이프라인 테스트 결과',
+  'pipeline-failed-tests': '파이프라인 실패 테스트 상세',
   'merge-request-review': 'MR 검토',
 };
 
@@ -801,8 +805,8 @@ function invalidPipelineJobs(): never {
   throw new GitlabReadError('pipeline-jobs', 'invalid-response');
 }
 
-function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number,
-  stage: 'pipeline-jobs' | 'merge-requests'): boolean {
+function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number | undefined,
+  stage: 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests'): boolean {
   const invalid = () => { throw new GitlabReadError(stage, 'invalid-response'); };
   const next = headers.get('x-next-page');
   if (next !== null && next !== '' && next !== String(page + 1)) invalid();
@@ -1120,6 +1124,59 @@ export async function readGitlabPipelineTestReport(connection: Connection, repos
   });
   await recheck();
   return { status: observed.status, total, suites, hasMore: payload.test_suites.length > PIPELINE_TEST_SUITE_LIMIT };
+}
+
+export async function readGitlabPipelineFailedTests(connection: Connection, repositoryId: number, pipelineId: number,
+  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineFailedTests, 'status' | 'cases' | 'hasMore'>> {
+  const stage = 'pipeline-failed-tests';
+  const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, stage, signal);
+  const url = new URL(context.projectUrl);
+  url.pathname += `/pipelines/${pipelineId}/test_report`;
+  url.searchParams.set('per_page', String(PIPELINE_TEST_REPORT_PAGE_SIZE));
+  const cases: GitlabPipelineFailedTest[] = [];
+  let expectedFailed = 0, expectedErrors = 0, failed = 0, errors = 0;
+  let hasNext = false, omitted = false;
+
+  pages: for (let page = 1; page <= MAX_PIPELINE_TEST_REPORT_PAGES; page++) {
+    url.searchParams.set('page', String(page));
+    let pagination = new Headers();
+    const report = await readJson(url, context.headers, stage, signal, headers => { pagination = headers; }).catch(cause => {
+      if (page > 1 && cause instanceof GitlabReadError && cause.httpStatus === 404) throw new GitlabReadError(stage, 'invalid-response');
+      throw cause;
+    });
+    if (!isReadObject(report) || !Array.isArray(report.test_suites) ||
+        !nonNegativeCount(report.failed_count) || !nonNegativeCount(report.error_count)) {
+      throw new GitlabReadError(stage, 'invalid-response');
+    }
+    expectedFailed = Math.max(expectedFailed, report.failed_count);
+    expectedErrors = Math.max(expectedErrors, report.error_count);
+    if (typeof report.suite_error === 'string' && report.suite_error.trim()) omitted = true;
+    // GitLab can return its full report with no pagination headers. Only follow explicit continuation.
+    hasNext = gitlabNextPage(pagination, url, page, report.test_suites.length, undefined, stage);
+    for (const suite of report.test_suites) {
+      if (!isReadObject(suite) || typeof suite.name !== 'string' || !Array.isArray(suite.test_cases)) {
+        throw new GitlabReadError(stage, 'invalid-response');
+      }
+      const suiteName = gitlabDisplayLabel(suite.name, 255, connection.token, '이름 미확인');
+      if (typeof suite.suite_error === 'string' && suite.suite_error.trim()) omitted = true;
+      for (const testCase of suite.test_cases) {
+        if (!isReadObject(testCase)) throw new GitlabReadError(stage, 'invalid-response');
+        const { status, name, classname } = testCase;
+        if (status === 'success' || status === 'skipped') continue;
+        if ((status !== 'failed' && status !== 'error') || typeof name !== 'string' ||
+            (classname != null && typeof classname !== 'string')) throw new GitlabReadError(stage, 'invalid-response');
+        if (cases.length === PIPELINE_FAILED_TEST_LIMIT) { omitted = true; break pages; }
+        if (status === 'failed') failed++;
+        else errors++;
+        const className = typeof classname === 'string' ? gitlabDisplayLabel(classname, 255, connection.token, '') : '';
+        cases.push({ suite: suiteName, name: gitlabDisplayLabel(name, 255, connection.token, '이름 미확인'),
+          ...(className ? { className } : {}), status });
+      }
+    }
+    if (!hasNext || cases.length === PIPELINE_FAILED_TEST_LIMIT) break;
+  }
+  await recheck();
+  return { status: observed.status, cases, hasMore: omitted || hasNext || failed < expectedFailed || errors < expectedErrors };
 }
 
 export async function readGitlabManualObject(
