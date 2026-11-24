@@ -69,13 +69,15 @@ test('Jira 날짜 선택 필드를 이관 전에 검토하고 간트의 업무 �
     expect(preview.canApply, JSON.stringify(preview.notices)).toBe(true);
     expect(preview.samples.find(sample => sample.title === title)?.schedule).toEqual({ startDate: start, endDate: end });
     const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
-    await review.getByText('변환된 내용 견본', { exact: true }).click();
-    const sample = review.locator('.migration-sample').filter({ hasText: title });
+    await review.getByText('변환된 업무·문서', { exact: true }).click();
+    await review.getByRole('button', { name: `변환 결과 보기 ${title}`, exact: true }).click();
+    const sample = page.getByRole('dialog', { name: `변환 결과 · ${title}`, exact: true });
     await expect(sample).toBeVisible();
     await expect(sample).toContainText('일정');
     await expect(sample).toContainText(start);
     await expect(sample).toContainText(end);
     await expect(sample).not.toContainText(baseline);
+    await sample.getByRole('button', { name: '닫기', exact: true }).click();
 
     for (const code of preview.requiredAcknowledgements) {
       await review.getByLabel(`이관 확인 ${code}`, { exact: true }).check();

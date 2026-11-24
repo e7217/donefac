@@ -312,11 +312,13 @@ Jira REST 응답으로 리허설할 때는 업무 응답과 별도로 저장한 
 
 **이관 사전 검토 JSON 내보내기**는 미리보기 만료 시각, 패키지별 SHA-256과 분석 건수, 변환·매핑·제외 집계, 진단 코드별 건수와 적용 전 확인 항목을 저장한다. 원본 파일명·주소·객체 ID·작성자·제목·본문은 보고서에서 생략한다. 파일의 `status`는 미리보기 생성 시점의 `blocked`, `review`, `ready` 중 하나다. 브라우저에서 최신 미리보기와 확인 항목을 검토한 뒤 적용한다.
 
+미리보기의 **변환된 업무·문서**를 펼친다. **원본 패키지**를 선택하거나 제목·원본 ID·Jira 키로 **업무·문서 검색**을 한 뒤 **이전**·**다음**으로 항목을 찾는다. 행의 **변환 결과 보기**에서 Jira 설명이나 Confluence 본문의 표·목록·제목 등 변환한 구조를 확인한다. 같은 창의 **원본 보기**를 누르면 선택한 분석 기록을 대조할 수 있다. 검토 중 링크는 텍스트로, 이미지는 설명 등 메타데이터로 표시한다. 이관하려면 검토 후 **검토한 이관 실제 적용**을 누른다.
+
 **작성자 매핑 미리보기**에서 문서·댓글·문서 버전·첨부 버전·작업 시간을 패키지별로 확인한다. 매핑이 없거나 원본 작성자 정보가 없어 이관 작업자로 기록할 항목이 나타나면 사용자 매핑을 검토하고 미리보기를 다시 만든다. 변경분을 반영하는 기존 Confluence 문서는 현재 작성자를 유지한다. 사전 검토 JSON에서 작성자 항목은 상태별 건수로 확인한다.
 
 **보존할 팀 편집이 있습니다**가 보이면 변경 검토의 **현재 값 유지** 행에서 팀 값과 Jira·Confluence 원본 값을 확인한다. 이후 더 새로운 내보내기에서도 해당 필드를 마지막 반영 값과 비교한다. 같은 적용 요청을 재시도하면 기존 영수증을 사용한다.
 
-**원본 주소와 제외 항목**에는 패키지별로 Jira·Confluence의 기본 주소를 선택해서 입력할 수 있다. `https://jira.example.test/jira`나 `https://wiki.example.test/confluence`처럼 서비스 경로까지 포함한다. Teamspace 이관 미리보기에는 원래 Jira 업무 키로 만든 `/browse/OLD-1` 주소와 Confluence 페이지 ID로 만든 `/pages/viewpage.action?pageId=100` 주소를 견본으로 표시한다. [Atlassian의 Jira와 Confluence 주소 형식](https://support.atlassian.com/migration/docs/supported-products-and-types-of-links/)
+**원본 주소와 제외 항목**에는 패키지별로 Jira·Confluence의 기본 주소를 선택해서 입력할 수 있다. `https://jira.example.test/jira`나 `https://wiki.example.test/confluence`처럼 서비스 경로까지 포함한다. **변환된 업무·문서**의 상세에서 원래 Jira 업무 키로 만든 `/browse/OLD-1` 주소와 Confluence 페이지 ID로 만든 `/pages/viewpage.action?pageId=100` 주소 등 연결 예정인 원본 주소를 확인한다. [Atlassian의 Jira와 Confluence 주소 형식](https://support.atlassian.com/migration/docs/supported-products-and-types-of-links/)
 
 미리보기에서 **원본 링크 생성**과 **원본 링크 미생성** 건수를 확인한다. 자동 연결은 Jira 업무와 Confluence 일반 페이지를 대상으로 한다. 기본 주소가 비어 있거나 원본 키·페이지 ID를 사용할 수 없는 새 항목은 미생성 건수에 집계한다. 적용하면 업무 상세나 문서 **연결** 탭의 **기존 도구 연결**에서 주소를 열 수 있다. 원본 정보 조회에는 별도의 서버 설정을 사용한다. [원본 조회 설정](#jiraconfluence-원본-조회)
 

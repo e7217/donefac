@@ -479,6 +479,30 @@ export interface MigrationPreviewProject {
   sourceOriginCount?: number;
   mergesSources?: true;
 }
+export interface MigrationContentReviewRow {
+  recordId: string;
+  packageId: string;
+  sourceId: string;
+  targetType: 'issue' | 'document';
+  title: string;
+  sourceKey?: string;
+  change: 'new' | 'update';
+}
+export interface MigrationContentReviewPage {
+  previewId: string;
+  version: number;
+  total: number;
+  offset: number;
+  limit: number;
+  rows: MigrationContentReviewRow[];
+}
+export interface MigrationContentReviewDetail extends MigrationContentReviewRow {
+  description?: string;
+  descriptionFormat?: IssueDescriptionFormat;
+  content?: RichContent;
+  schedule?: Pick<Issue, 'startDate' | 'endDate'>;
+  sourceUrl?: string;
+}
 export interface MigrationPreview {
   id:string;version:number;actorId:string;createdAt:string;expiresAt:string;configuration:MigrationConfiguration;
   projects:MigrationPreviewProject[];

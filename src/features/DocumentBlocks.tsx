@@ -79,7 +79,7 @@ function safeUrl(value: unknown, image = false): string | undefined {
 }
 type PinnedSource = { documentId: string; revisionId: string };
 type RenderedExcerpt = DocumentSelectionHighlight & { anchorRendered: boolean };
-type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt };
+type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned' | 'preview'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -290,7 +290,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       else if (mark.type === 'strike') result = <s>{result}</s>;
       else if (mark.type === 'underline') result = <u>{result}</u>;
       else if (mark.type === 'code') result = <code>{result}</code>;
-      else if (mark.type === 'link') {
+      else if (mark.type === 'link' && state.mode !== 'preview') {
         const fileId = attachmentDownloadIdFromUrl(mark.attrs?.href);
         const download = state.pinnedSource && fileId ? revisionAttachmentUrl(state.pinnedSource, 'files', fileId) : undefined;
         const href = download ?? safeUrl(mark.attrs?.href);
@@ -301,7 +301,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     if (wholeNodeSelected) result = excerptMark(result, state, key);
     return <span key={key}>{result}</span>;
   }
-  if (node.type === 'documentRevisionInclude' && state.mode !== 'pinned') {
+  if (node.type === 'documentRevisionInclude' && (!state.mode || state.mode === 'history')) {
     return pinnedRevision(textAttr(node, 'documentId'), textAttr(node, 'revisionId'), textAttr(node, 'label'), Math.min(state.remaining, context.includeBudget), key);
   }
   if (state.mode && (isLiveDocumentInclude(node.type) ||
@@ -405,9 +405,14 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'codeBlock': return <pre key={key}><code>{children}</code></pre>;
     case 'hardBreak': return <br key={key} />;
     case 'horizontalRule': return <hr key={key} />;
-    // A pinned snapshot can read its own archived attachment images.
-    // eslint-disable-next-line @next/next/no-img-element
-    case 'image': { const src = imageUrl(attrs.src, state.pinnedSource); return src ? <img key={key} src={src} alt={typeof attrs.alt === 'string' ? attrs.alt : ''} title={typeof attrs.title === 'string' ? attrs.title : undefined} loading="lazy" /> : <Notice key={key}>이 이미지를 안전하게 표시할 수 없습니다.</Notice>; }
+    case 'image': {
+      const alt = typeof attrs.alt === 'string' ? attrs.alt : '';
+      if (state.mode === 'preview') return <Notice key={key}>{alt ? `이미지 · ${alt}` : '이미지'}</Notice>;
+      // A pinned snapshot can read its own archived attachment images.
+      const src = imageUrl(attrs.src, state.pinnedSource);
+      // eslint-disable-next-line @next/next/no-img-element
+      return src ? <img key={key} src={src} alt={alt} title={typeof attrs.title === 'string' ? attrs.title : undefined} loading="lazy" /> : <Notice key={key}>이 이미지를 안전하게 표시할 수 없습니다.</Notice>;
+    }
     case 'table': return <div key={key} className="doc-readonly-table"><table><tbody>{children}</tbody></table></div>;
     case 'tableRow': return <tr key={key}>{children}</tr>;
     case 'tableHeader': case 'tableCell': {

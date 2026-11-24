@@ -1207,7 +1207,8 @@ class Planner{
       if (custom) { updatedCustomFields += custom.updated; conflictingCustomFields += custom.conflicts; }
       if (fields.length || custom?.rows.length) review.push({ issueId: issue.id, key: issue.key, sourceKey, fields,
         ...(custom?.rows.length ? { customFields: custom.rows } : {}) });
-      if (Object.keys(accepted).length) updates.push({ issueId: issue.id, expectedVersion: issue.version, changes: accepted });
+      if (Object.keys(accepted).length) updates.push({ issueId: issue.id, expectedVersion: issue.version, changes: accepted,
+        ...(accepted.description !== undefined ? { contentReview: { recordId: entry.key, title: accepted.title ?? issue.title } } : {}) });
       if (canCheckpoint || custom?.hashes) this.jiraRefreshCheckpoints.set(entry.key, { issue,
         ...(canCheckpoint ? { hashes, sourceHashes } : {}), ...(custom?.hashes ? { customHashes: custom.hashes } : {}) });
     }
@@ -1449,7 +1450,8 @@ class Planner{
         }
       }
       if (fields.length) review.push({ documentId: document.id, title: document.title, sourceId: row.sourceId, recordId: entry.key, fields });
-      if (Object.keys(accepted).length) updates.push({ documentId: document.id, expectedVersion: document.version, changes: accepted });
+      if (Object.keys(accepted).length) updates.push({ documentId: document.id, expectedVersion: document.version, changes: accepted,
+        ...(accepted.content !== undefined ? { contentReview: { recordId: entry.key, title: accepted.title ?? document.title } } : {}) });
       if (accepted.content && this.confluenceInlineClaims.has(entry.key)) {
         this.confluenceInlineRefreshedBodyHashes.set(document.id, confluencePageFieldDigest('content', accepted.content));
       }

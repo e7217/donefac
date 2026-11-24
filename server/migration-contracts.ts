@@ -14,6 +14,7 @@ export interface MigrationJiraIssueUpdate {
   issueId: string;
   expectedVersion: number;
   changes: JiraMigrationIssueValues;
+  contentReview?: { recordId: string; title: string };
 }
 export interface MigrationConfluenceRefreshCandidate {
   document: DocPage;
@@ -25,6 +26,7 @@ export interface MigrationConfluenceDocumentUpdate {
   documentId: string;
   expectedVersion: number;
   changes: ConfluenceMigrationDocumentValues;
+  contentReview?: { recordId: string; title: string };
 }
 export interface MigrationConfluenceKnownAttachment {
   sourcePageId: string;

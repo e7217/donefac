@@ -25,6 +25,11 @@ async function openReconciliation(settings: Locator) {
 }
 async function preview(page: Page, settings: Locator) { const response = page.waitForResponse(value => value.url().endsWith('/api/migrations/preview') && value.request().method() === 'POST'); await settings.getByRole('button', { name: '적용 전 미리보기 만들기', exact: true }).click(); const result = await response; expect(result.ok(), await result.text()).toBe(true); return await result.json() as MigrationPreview; }
 async function acknowledge(settings: Locator, value: MigrationPreview) { for (const code of value.requiredAcknowledgements) await settings.getByLabel(`이관 확인 ${code}`, { exact: true }).check(); }
+async function inspectContent(page: Page, review: Locator, title: string) {
+  await review.getByText('변환된 업무·문서', { exact: true }).click();
+  await review.getByRole('button', { name: `변환 결과 보기 ${title}`, exact: true }).click();
+  return page.getByRole('dialog', { name: `변환 결과 · ${title}`, exact: true });
+}
 function jira(key: string, title: string) { return csv([['Issue key', 'Issue id', 'Project key', 'Project name', 'Summary', 'Description', 'Status', 'Issue Type', 'Created', 'Updated', 'Reporter', 'Comment'], [`${key}-1`, '100', key, `원본 프로젝트 ${key}`, title, 'h2. 원래 설명\n* 보존할 항목', 'Ready', 'Task', '2020-01-02T03:04:05Z', '2020-02-03T04:05:06Z', 'old-author', '2020-02-03T04:06:00Z;old-author;원래 댓글']]); }
 
 async function importIntoProject(request: APIRequestContext, source: LegacyPackageSummary, key: string, name: string, sourceBaseUrl?: string) {
@@ -1370,8 +1375,9 @@ test('360px에서 이관한 Confluence 제목·페이지 ID·짧은 주소로 �
 
     const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
     await expect(review.locator('.migration-notice').filter({ hasText: 'UNRESOLVED_REFERENCE' })).toBeVisible();
-    await review.getByText('변환된 내용 견본', { exact: true }).click();
-    await expect(review).toContainText(missingLabel);
+    const converted = await inspectContent(page, review, sourceTitle);
+    await expect(converted).toContainText(missingLabel);
+    await converted.getByRole('button', { name: '닫기', exact: true }).click();
     await acknowledge(review, plan);
     const applied = page.waitForResponse(value => value.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
     page.once('dialog', dialog => dialog.accept());
@@ -1810,8 +1816,9 @@ test('360px에서 이관한 Confluence 담당 체크리스트를 편집하고 �
     for (const value of [beforeList, expectedTask, afterList]) expect(sample?.plainText).toContain(value);
 
     const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
-    await review.getByText('변환된 내용 견본', { exact: true }).click();
-    await expect(review).toContainText(expectedTask);
+    const converted = await inspectContent(page, review, title);
+    await expect(converted).toContainText(expectedTask);
+    await converted.getByRole('button', { name: '닫기', exact: true }).click();
     await acknowledge(review, plan);
     const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${plan.id}/apply`));
     page.once('dialog', dialog => dialog.accept());
@@ -2533,11 +2540,12 @@ test('360px 이관 원본 주소를 검토하고 영수증 집계와 저장된 �
     const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
     await expect(review.getByText('원본 링크 생성 1', { exact: true })).toBeVisible();
     await expect(review.getByText('원본 링크 미생성 0', { exact: true })).toBeVisible();
-    await review.getByText('변환된 내용 견본', { exact: true }).click();
-    const example = review.getByText(sourceUrl, { exact: true });
+    const converted = await inspectContent(page, review, title);
+    const example = converted.getByText(sourceUrl, { exact: true });
     await expect(example).toBeVisible();
     const exampleSize = await example.evaluate(element => ({ width: element.clientWidth, scrollWidth: element.scrollWidth }));
     expect(exampleSize.scrollWidth).toBeLessThanOrEqual(exampleSize.width);
+    await converted.getByRole('button', { name: '닫기', exact: true }).click();
 
     await acknowledge(settings, ready);
     const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${ready.id}/apply`));

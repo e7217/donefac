@@ -16,6 +16,8 @@ import { hasConfluencePropertyReportMacro } from './migration-confluence-propert
 import { invalidMigrationMapping, makeMappingFile, mappingConfigurationInput, mappingError, readMappingFile, readMappingRequest,
   remapMappingConfiguration, resolveMappingPackages, restoreMappedUsers } from './migration-mapping.js';
 import type { MigrationAppendContext, MigrationJiraRefreshCandidate, MigrationPackage, MigrationPageAppendContext, PreparedMigration } from './migration-contracts.js';
+import { installMigrationContentReview, migrationContentReviewDetail, migrationContentReviewList, migrationContentReviewNumber,
+  storeMigrationContentReview } from './migration-content-review.js';
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
@@ -34,12 +36,21 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 21;
+const conversionVersion = 22;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
 const MAX_REUSED_FILE_BYTES = 256 * MiB;
-type PreviewRow = { json: string; generation: string; conversionVersion: number | null; confluenceRestrictionHash: string | null };
+type PreviewHeader = {
+  generation: string;
+  conversionVersion: number | null;
+  confluenceRestrictionHash: string | null;
+  actorId: string;
+  version: number;
+  expiresAt: string;
+};
+type PreviewRow = PreviewHeader & { json: string };
+type PreviewContentHeader = Omit<PreviewHeader, 'generation' | 'expiresAt'> & { packageIds: string[] };
 type JiraArchiveRow = { id: string; json: string; importId: string };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & {
   instanceKey: string; sourceProjectId: string; originalSourceProjectId: string;
@@ -113,6 +124,7 @@ export class MigrationService {
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
     )`);
+    installMigrationContentReview(store);
     this.prune();
   }
 
@@ -1291,7 +1303,7 @@ export class MigrationService {
       return prepared.preview;
     } finally { this.busy = false; }
   }
-  private storePreview(prepared: Pick<PreparedMigration, 'preview'>, generation: string) {
+  private storePreview(prepared: PreparedMigration | Pick<PreparedMigration, 'preview'>, generation: string) {
     const json = JSON.stringify({ ...prepared, conversionVersion, confluenceRestrictionHash: this.confluenceRestrictionHash });
     const size = Buffer.byteLength(json);
     if (size > 192 * MiB) fail(413, '변환 결과가 192MiB를 넘습니다. 패키지를 나누어 주세요.');
@@ -1304,21 +1316,47 @@ export class MigrationService {
         this.store.db.exec('DELETE FROM migration_previews WHERE rowid=(SELECT MIN(rowid) FROM migration_previews)');
       }
       this.store.db.prepare('INSERT INTO migration_previews VALUES (?,?,?,?,?)').run(prepared.preview.id, prepared.preview.expiresAt, generation, size, json);
+      const { actorId, version, configuration } = prepared.preview;
+      const header: PreviewContentHeader = { actorId, version, packageIds: configuration.packageIds, conversionVersion,
+        confluenceRestrictionHash: this.confluenceRestrictionHash };
+      this.store.db.prepare('INSERT INTO migration_preview_content_header VALUES (?,?)').run(prepared.preview.id, JSON.stringify(header));
+      if ('sourceRecords' in prepared) storeMigrationContentReview(this.store, prepared);
     });
+  }
+  private checkPreviewHeader(row: PreviewHeader, actorId: string) {
+    if (row.actorId !== actorId) fail(403, '미리보기를 만든 작업자를 선택해 주세요.');
+    if (row.generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
+    if (row.conversionVersion !== conversionVersion) fail(409, '원본 변환 규칙이 변경되었습니다. 새 미리보기를 만들어 주세요.');
+    if (row.confluenceRestrictionHash !== this.confluenceRestrictionHash) fail(409, 'Confluence 페이지별 검토 범위가 달라졌습니다. 새 미리보기를 만들어 주세요.');
+    if (Date.parse(row.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
   }
   private getPreview(id: string, actorId: string, reviewOnly = false): { prepared: PreparedMigration; generation: string } {
     const json = reviewOnly ? "json_object('preview',json_extract(json,'$.preview'))" : 'json';
     const row = this.store.db.prepare(`SELECT ${json} AS json, generation,
+      json_extract(json,'$.preview.actorId') AS actorId,
+      json_extract(json,'$.preview.version') AS version,
+      json_extract(json,'$.preview.expiresAt') AS expiresAt,
       json_extract(json,'$.conversionVersion') AS conversionVersion,
       json_extract(json,'$.confluenceRestrictionHash') AS confluenceRestrictionHash FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
     if (!row) return fail(408, '미리보기 보관 기간이 지났거나 새로 검토해야 합니다.');
-    const prepared = JSON.parse(row.json) as PreparedMigration;
-    if (prepared.preview.actorId !== actorId) fail(403, '미리보기를 만든 작업자를 선택해 주세요.');
-    if (row.generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
-    if (row.conversionVersion !== conversionVersion) fail(409, '원본 변환 규칙이 변경되었습니다. 새 미리보기를 만들어 주세요.');
-    if (row.confluenceRestrictionHash !== this.confluenceRestrictionHash) fail(409, 'Confluence 페이지별 검토 범위가 달라졌습니다. 새 미리보기를 만들어 주세요.');
-    if (Date.parse(prepared.preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
-    return { prepared, generation: row.generation };
+    this.checkPreviewHeader(row, actorId);
+    return { prepared: JSON.parse(row.json) as PreparedMigration, generation: row.generation };
+  }
+  private previewContentHeader(id: string, actorId: string, expectedVersion: unknown) {
+    const expected = migrationContentReviewNumber(expectedVersion, 1, Number.MAX_SAFE_INTEGER);
+    const row = this.store.db.prepare(`SELECT p.generation, p.expires_at AS expiresAt, c.json
+      FROM migration_previews p LEFT JOIN migration_preview_content_header c ON c.preview_id=p.id WHERE p.id=?`)
+      .get(id) as { generation: string; expiresAt: string; json: string | null } | undefined;
+    if (!row) return fail(408, '미리보기 보관 기간이 지났거나 새로 검토해야 합니다.');
+    if (!row.json) {
+      this.getPreview(id, actorId, true);
+      return fail(409, '이관 내용 확인을 위해 새 미리보기를 만들어 주세요.');
+    }
+    const header = JSON.parse(row.json) as PreviewContentHeader;
+    const { version, packageIds } = header;
+    this.checkPreviewHeader({ ...header, generation: row.generation, expiresAt: row.expiresAt }, actorId);
+    if (version !== expected) fail(409, '미리보기 버전이 다릅니다.');
+    return { version, packageIds };
   }
   private async apply(id: string, request: Request, hooks: Hooks): Promise<MigrationApplyResult> {
     const actorId = hooks.actor(request);
@@ -1442,6 +1480,29 @@ export class MigrationService {
     });
     app.post('/api/migrations/preview', async (req, res) => res.status(201).json(await this.preview(req.body.configuration, req, hooks)));
     app.get('/api/migrations/previews/:id', (req, res) => res.json(this.getPreview(String(req.params.id), hooks.actor(req), true).prepared.preview));
+    app.get('/api/migrations/previews/:id/content', (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const id = String(req.params.id);
+      const { version, packageIds } = this.previewContentHeader(id, hooks.actor(req), req.query.expectedVersion);
+      const { packageId } = req.query;
+      if (packageId !== undefined && (typeof packageId !== 'string' || !uuid.test(packageId))) return fail(400, '원본 패키지를 확인해 주세요.');
+      if (packageId !== undefined && !packageIds.includes(packageId)) return fail(404, '이 미리보기에서 원본 패키지를 찾을 수 없습니다.');
+      res.json(migrationContentReviewList(this.store, id, version, packageId, req.query));
+    });
+    app.get('/api/migrations/previews/:id/content/detail', (req, res) => {
+      res.set('Cache-Control', 'no-store');
+      const id = String(req.params.id);
+      const { packageIds } = this.previewContentHeader(id, hooks.actor(req), req.query.expectedVersion);
+      const { recordId } = req.query;
+      if (Object.keys(req.query).some(key => key !== 'expectedVersion' && key !== 'recordId') ||
+          typeof recordId !== 'string' || recordId.length > 543 || !recordId.isWellFormed() || /\p{Cc}/u.test(recordId)) {
+        return fail(400, '원본 기록을 확인해 주세요.');
+      }
+      const packageId = recordId.slice(0, 36);
+      if (!uuid.test(packageId) || !/^\/(?:issue|page):[\s\S]+$/u.test(recordId.slice(36))) return fail(400, '원본 기록을 확인해 주세요.');
+      if (!packageIds.includes(packageId)) return fail(404, '이 미리보기에서 원본 기록을 찾을 수 없습니다.');
+      res.json(migrationContentReviewDetail(this.store, id, recordId));
+    });
     app.post('/api/migrations/previews/:id/apply', async (req, res) => {
       const result = await this.apply(String(req.params.id), req, hooks);
       res.status(result.duplicate ? 200 : 201).json(result);

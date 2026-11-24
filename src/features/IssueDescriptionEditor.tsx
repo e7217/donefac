@@ -47,7 +47,7 @@ function safeLink(value: string) {
   return undefined;
 }
 
-type PreviewBudget = { remaining: number };
+type PreviewBudget = { remaining: number; inertLinks: boolean };
 
 function spend(budget: PreviewBudget, depth: number) {
   if (depth > MAX_PREVIEW_DEPTH || --budget.remaining < 0) throw new Error('Markdown preview bounds');
@@ -106,7 +106,7 @@ function renderTokens(tokens: readonly Token[], budget: PreviewBudget, depth = 0
           })}</tbody>
         </table></div>;
       case 'link': {
-        const href = insideLink ? undefined : safeLink(token.href);
+        const href = insideLink || budget.inertLinks ? undefined : safeLink(token.href);
         const documentLink = href?.startsWith('/#/') && parseDocumentHash(href.slice(1));
         const label = token.autolink ? token.text
           : token.tokens.length ? renderTokens(token.tokens, budget, depth + 1, true) : displayText(token.text) || '링크';
@@ -114,7 +114,7 @@ function renderTokens(tokens: readonly Token[], budget: PreviewBudget, depth = 0
           : <span key={index}>{label}</span>;
       }
       case 'image': {
-        const href = insideLink ? undefined : safeLink(token.href);
+        const href = insideLink || budget.inertLinks ? undefined : safeLink(token.href);
         const label = token.text ? `${displayText(token.text)} (이미지)` : '이미지';
         return href ? <a key={index} href={href} target="_blank" rel="noopener noreferrer">{label}</a> : <span key={index}>{label}</span>;
       }
@@ -172,6 +172,28 @@ function markdownEdit(value: string, start: number, end: number, action: EditAct
     start: start + leading.length, end: start + leading.length + text.length };
 }
 
+export function ReadonlyIssueDescription({ value, format, inertLinks = false }: {
+  value: string; format: IssueDescriptionFormat; inertLinks?: boolean;
+}) {
+  const preview = useMemo(() => {
+    if (!value.trim() || format !== 'markdown') return null;
+    try {
+      if (value.length > MAX_DESCRIPTION || !value.isWellFormed() || value.includes('\u0000')) throw new Error('Markdown preview bounds');
+      return { body: renderTokens(lexer(value, { gfm: true }), { remaining: MAX_PREVIEW_NODES, inertLinks }), fallback: false };
+    } catch {
+      return { body: value, fallback: true };
+    }
+  }, [format, inertLinks, value]);
+
+  return <section className="issue-description-preview" aria-label="설명 미리보기">
+    {preview?.fallback ? <>
+      <p className="issue-description-note" role="status">미리보기를 표시할 수 없어 설명 원문을 보여줍니다.</p>
+      <div className="issue-description-literal">{preview.body}</div>
+    </> : preview?.body ?? (value.trim() ? <div className="issue-description-literal">{value}</div>
+      : <p className="issue-description-note">작성된 설명이 없습니다.</p>)}
+  </section>;
+}
+
 export function IssueDescriptionEditor({ value, format, onChange, onFormatChange, disabled, name, initialPreview }: Props) {
   const uid = useId();
   const input = useRef<HTMLTextAreaElement>(null);
@@ -179,15 +201,6 @@ export function IssueDescriptionEditor({ value, format, onChange, onFormatChange
   const [toolMessage, setToolMessage] = useState('');
   const formatted = format === 'markdown';
   const showPreview = formatted && view === 'preview';
-  const preview = useMemo(() => {
-    if (!showPreview || !value.trim()) return null;
-    try {
-      if (value.length > MAX_DESCRIPTION || !value.isWellFormed() || value.includes('\u0000')) throw new Error('Markdown preview bounds');
-      return { body: renderTokens(lexer(value, { gfm: true }), { remaining: MAX_PREVIEW_NODES }), fallback: false };
-    } catch {
-      return { body: value, fallback: true };
-    }
-  }, [showPreview, value]);
 
   function applyFormat(action: EditAction) {
     const field = input.current;
@@ -240,11 +253,6 @@ export function IssueDescriptionEditor({ value, format, onChange, onFormatChange
         }} />
       {toolMessage && <p className="issue-description-note" role="status">{toolMessage}</p>}
     </div>
-    {showPreview && <section className="issue-description-preview" aria-label="설명 미리보기">
-      {preview?.fallback ? <>
-        <p className="issue-description-note" role="status">미리보기를 표시할 수 없어 설명 원문을 보여줍니다.</p>
-        <div className="issue-description-literal">{preview.body}</div>
-      </> : preview?.body ?? <p className="issue-description-note">작성된 설명이 없습니다.</p>}
-    </section>}
+    {showPreview && <ReadonlyIssueDescription value={value} format={format} />}
   </div>;
 }

@@ -986,6 +986,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `POST /api/migrations/mapping/import` | `{mapping}`의 원본과 현재 워크스페이스를 대조해 `{options, configuration}` 반환 |
 | `POST /api/migrations/preview` | `configuration`으로 프로젝트 생성 또는 업무·문서 추가 계획과 보존·누락 진단 검토 |
 | `GET /api/migrations/previews/:id` | 선택한 작업자의 검사 결과 다시 읽기 |
+| `GET /api/migrations/previews/:id/content` | 적용할 변환 업무·문서를 패키지·검색어로 조회 |
+| `GET /api/migrations/previews/:id/content/detail` | 선택한 변환 업무 설명 또는 문서 본문 확인 |
 | `POST /api/migrations/previews/:id/apply` | `expectedVersion`·`acknowledgements`로 검토한 계획 적용 |
 | `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
@@ -999,6 +1001,12 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `GET /api/attachments/:id/versions` · `GET /api/attachment-versions/:id/download` | 첨부 버전 목록·파일 |
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
+
+변환 목록은 `GET /api/migrations/previews/:id/content?expectedVersion=…`로 요청한다. `packageId`, 제목·원본 ID·원래 Jira 키를 검색할 최대 200자의 `q`, `offset`(0~100,000, 기본 0), `limit`(1~50, 기본 25)을 선택적으로 지정한다. 응답은 `{previewId,version,total,offset,limit,rows}`이며 각 행에는 `{recordId,packageId,sourceId,targetType,title,sourceKey?,change}`가 들어간다. `targetType`은 `issue` 또는 `document`, `change`는 `new` 또는 `update`다. 적용 계획의 새 업무·문서와 원본 설명·본문 변경분을 반영할 기존 항목을 반환한다. 차단된 계획에는 조회할 변환 행이 없다.
+
+`GET /api/migrations/previews/:id/content/detail?expectedVersion=…&recordId=…`은 목록 행과 해당 업무의 `description`·`descriptionFormat` 또는 문서의 `content`를 반환한다. 계획에 해당하면 새 업무의 `schedule`이나 새 대상의 연결 예정 `sourceUrl`도 제공한다. `recordId`는 목록에서 받은 값 전체를 인코딩해 보낸다. 이 값은 첫 `/`로 패키지 ID와 분석 레코드 ID를 나눈다. 화면의 **원본 보기**는 이 두 ID를 사용해 기존 분석 원본 조회 경로에서 기록을 읽는다.
+
+두 조회는 `Cache-Control: no-store`를 사용한다. 요청 형식이 잘못되면 `400`, 작업자가 다르면 `403`, 선택한 패키지 또는 레코드가 조회 범위에 없으면 `404`, 미리보기를 사용할 수 없거나 만료되면 `408`을 반환한다. 미리보기 버전·복원 세대·변환 규칙·현재 원본 접근 제한 검토가 달라지면 `409`를 반환한다. 응답 크기 한도를 넘는 상세 조회는 `413`을 반환한다.
 
 `preview.projects[].sources`는 대상에 들어갈 원본 파일별 프로젝트·공간 식별값, 이름, 실제 생성할 티켓과 문서 수를 제공한다. `sourceOriginCount`는 같은 제품·인스턴스에서 ID가 확인된 분할 파일을 한 원본으로 센다. ID가 불분명한 행에는 `identityUnconfirmed`가 표시되며 파일별로 확인한다. 여러 원본이 한 신규 프로젝트에 들어가면 `mergesSources: true`가 표시되고, 적용 요청의 필수 확인에 `PROJECT_SOURCE_MERGE`가 포함된다. 공유용 사전 검토 JSON은 합치기 확인을 진단 코드와 건수로 표시한다.
 
@@ -1026,7 +1034,7 @@ Jira 설명의 ADF 링크·카드, 위키 링크, 검색 결과의 렌더링 HTM
 
 Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit}`으로 반환한다. `limit`은 1~100이며 기본값은 50이다. 각 내역에는 `from`과 `to`의 원본 상태 ID·이름, 원본 작성자 이름, 확인한 시각이 포함된다. 시각을 확정할 수 있으면 `changedAt`을, 원본 값만 확인할 수 있으면 `originalChangedAt`을 사용한다. 티켓이 없어졌으면 `404`를, 확인된 Jira 상태 변경이 없으면 빈 목록을 반환한다.
 
-`configuration.sourceBaseUrls`는 선택한 분석 패키지 ID별 선택 입력이다. 기본 주소는 HTTP(S) 호스트와 서비스 경로를 사용한다. 인증 정보·쿼리·프래그먼트가 포함되면 미리보기가 적용을 막는다. Jira는 원래 업무 키, Confluence는 일반 페이지의 숫자 ID로 링크를 계산한다. 응답의 `samples[].sourceUrl`에는 생성할 정규 주소가 들어간다. 미리보기와 영수증의 `counts.atlassianLinks` 및 `counts.unlinkedAtlassianRecords`는 이관 대상 중 생성할 링크와 링크를 만들 수 없는 항목의 건수다. 누락 사유는 `notices`에 기록된다. 링크를 새 대상과 같은 트랜잭션에서 저장하며 `GET /api/atlassian-links`로 현재 링크를 읽는다.
+`configuration.sourceBaseUrls`는 선택한 분석 패키지 ID별 선택 입력이다. 기본 주소는 HTTP(S) 호스트와 서비스 경로를 사용한다. 인증 정보·쿼리·프래그먼트가 포함되면 미리보기가 적용을 막는다. Jira는 원래 업무 키, Confluence는 일반 페이지의 숫자 ID로 링크를 계산한다. 변환 상세의 `sourceUrl`과 기존 미리보기 응답의 `samples[].sourceUrl`에는 생성할 정규 주소가 들어간다. 미리보기와 영수증의 `counts.atlassianLinks` 및 `counts.unlinkedAtlassianRecords`는 이관 대상 중 생성할 링크와 링크를 만들 수 없는 항목의 건수다. 누락 사유는 `notices`에 기록된다. 링크를 새 대상과 같은 트랜잭션에서 저장하며 `GET /api/atlassian-links`로 현재 링크를 읽는다.
 
 원본의 시간대가 없는 시각에는 설정한 IANA 시간대를 사용한다. Jira CSV의 영문 월 형식도 처리하며, 두 자리 연도는 2000년대로 해석한다는 확인을 요청한다. [Atlassian Jira 날짜 형식 안내](https://confluence.atlassian.com/jirakb/date-format-changes-after-exporting-to-excel-119799961.html) 해석 불가 시 기본값은 적용 차단이다. 이관 시각을 사용하는 정책을 선택하면 그 사실을 검토 결과와 영수증에 남긴다. 원본 작성자는 원래 신원으로 보존한다. 현재 팀원으로 매핑하지 않은 작성자는 현재 문서·댓글·첨부에 이관 실행자를 기록한다. 제외한 원본은 적용 대상 없이 관리용 영수증에 보관한다. 원본 권한 정책은 별도로 검토해야 한다.
 

@@ -204,8 +204,22 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     }
     const preview = await json(source, '/migrations/preview', { method: 'POST', status: 201, headers, body: { configuration } });
     assert.equal(preview.canApply, true, JSON.stringify(preview.notices.slice(0, 10)));
+    assert.ok(preview.requiredAcknowledgements.includes('PROJECT_SOURCE_MERGE'));
     assert.equal(preview.counts.confluenceOrderedSiblingGroups, Math.floor((pageCount - 1) / 2));
     for (const [key, count] of Object.entries(expected)) assert.equal(preview.counts[key], count, key);
+    const contentPath = `/migrations/previews/${preview.id}/content`;
+    const expectedVersion = String(preview.version);
+    const summaries = await json(source, `${contentPath}?${new URLSearchParams({ expectedVersion, limit: '12' })}`, { headers });
+    assert.equal(summaries.total, issueCount + pageCount);
+    assert.equal(summaries.rows.length, 12);
+    const wikiReview = await json(source, `${contentPath}?${new URLSearchParams({ expectedVersion,
+      packageId: staged.packages[1].packageId, q: pageTitle(pageCount) })}`, { headers });
+    assert.equal(wikiReview.total, 1);
+    assert.equal(wikiReview.rows[0].sourceId, String(pageId(pageCount)));
+    const lastPage = await json(source, `${contentPath}/detail?${new URLSearchParams({ expectedVersion,
+      recordId: wikiReview.rows[0].recordId })}`, { headers });
+    assert.equal(lastPage.title, pageTitle(pageCount));
+    assert.equal(lastPage.content.content[0].content[0].text, `Synthetic wiki content ${pageCount}`);
     const applied = await json(source, `/migrations/previews/${preview.id}/apply`, { method: 'POST', status: 201, headers,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
     importedReceipt = applied.import;
@@ -232,7 +246,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     const [receipt] = receipts;
     assert.equal(receipt.id, importedReceipt.id);
     assert.deepEqual(receipt.notices.filter(notice => notice.severity !== 'info').map(notice => notice.code),
-      ['COMMENT_FORMAT_PLAIN_TEXT', 'ISSUE_DESCRIPTION_PLAIN_TEXT', 'PROJECT_ACCESS_NOT_REPRODUCED', 'WORKFLOW_RULES_NOT_REPRODUCED']);
+      ['COMMENT_FORMAT_PLAIN_TEXT', 'ISSUE_DESCRIPTION_PLAIN_TEXT', 'PROJECT_ACCESS_NOT_REPRODUCED', 'PROJECT_SOURCE_MERGE', 'WORKFLOW_RULES_NOT_REPRODUCED']);
     assert.deepEqual(receipt.attachmentCounts, { verified: expected.attachmentVersions, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 });
     assert.equal(receipt.authorAttribution.packages.flatMap(pkg => pkg.kinds).filter(group => group.kind === 'attachment')
       .reduce((total, group) => total + group.counts['missing-fallback'], 0), expected.attachmentVersions);

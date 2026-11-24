@@ -21,7 +21,7 @@ import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
-import type { ProjectWorkloadResult, SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
+import type { MigrationContentReviewDetail, MigrationContentReviewPage, ProjectWorkloadResult, SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
@@ -51,6 +51,164 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('migration content review pages through the exact plan and keeps excluded and restricted content out', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jira = await f.upload(jiraGitlabCsv(Array.from({ length: 12 }, (_, index) =>
+    [String(index + 1), `OLD-${index + 1}`, `Synthetic ticket ${index + 1}`, 'Open'])), 'inspection-jira.csv', 'jira');
+  const page = (id: number, title: string, body: string) => `<object class="Page"><id name="id">${id}</id>
+    <property name="title">${title}</property><property name="version">1</property>
+    <property name="space" class="Space"><id name="id">60</id></property></object>
+    <object class="BodyContent"><id name="id">${id + 1000}</id><property name="body"><![CDATA[${body}]]></property>
+    <property name="bodyType">2</property><property name="content" class="Page"><id name="id">${id}</id></property></object>`;
+  const wiki = await f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">60</id><property name="key">WIKI</property><property name="name">Synthetic wiki</property></object>
+    ${page(501, 'Synthetic CAFÉ', '<table><tbody><tr><th>Key</th><th>Value</th></tr><tr><td>Alpha</td><td>42</td></tr></tbody></table>')}
+    ${page(502, 'Secret title', '<p>Secret body</p>')}
+    <object class="ContentPermissionSet"><id name="id">75</id><property name="content" class="Page"><id name="id">502</id></property></object>
+  </hibernate-generic>`) }]), 'inspection-wiki.zip', 'confluence');
+  const config = await f.configuration([jira, wiki], 'INSPECT');
+  config.sourceBaseUrls[wiki.id] = 'https://wiki.example.test/confluence';
+  const previewPath = (preview: MigrationPreview) => `/migrations/previews/${preview.id}/content`;
+  const detailPath = (preview: MigrationPreview, recordId: string) =>
+    `${previewPath(preview)}/detail?${new URLSearchParams({ expectedVersion: String(preview.version), recordId })}`;
+  const privateRecord = `${wiki.id}/page:502`;
+  const blocked = await f.preview(config);
+  assert.equal(blocked.canApply, false);
+  assert.equal((await f.call<MigrationContentReviewPage>(`${previewPath(blocked)}?expectedVersion=1`)).data.total, 0);
+  assert.equal((await f.call(detailPath(blocked, privateRecord))).status, 404);
+
+  config.excludedRecords.push(privateRecord);
+  const preview = await f.preview(config);
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.equal(preview.samples.filter(item => item.targetType === 'document').length, 0);
+  const path = previewPath(preview);
+  const response = await fetch(`${f.base}${path}?expectedVersion=1&limit=12`, { headers: { 'X-Actor-Id': 'user-seo' } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  const first = await response.json() as MigrationContentReviewPage;
+  assert.deepEqual([first.previewId, first.version, first.total, first.offset, first.limit], [preview.id, 1, 13, 0, 12]);
+  assert.deepEqual(first.rows.map(item => item.recordId), Array.from({ length: 12 }, (_, index) => `${jira.id}/issue:${index + 1}`));
+  const ticket = (await f.call<MigrationContentReviewDetail>(detailPath(preview, first.rows[0].recordId))).data;
+  assert.equal(ticket.sourceKey, 'OLD-1');
+  assert.equal(ticket.description, '');
+  assert.equal(ticket.descriptionFormat, 'plain');
+  const next = (await f.call<MigrationContentReviewPage>(`${path}?expectedVersion=1&offset=12&limit=12`)).data;
+  const [wikiRow] = next.rows;
+  assert.deepEqual(wikiRow, { recordId: `${wiki.id}/page:501`, packageId: wiki.id, sourceId: '501',
+    targetType: 'document', title: 'Synthetic CAFÉ', change: 'new' });
+  const query = new URLSearchParams({ expectedVersion: '1', packageId: wiki.id, q: 'café' });
+  assert.deepEqual((await f.call<MigrationContentReviewPage>(`${path}?${query}`)).data.rows, [wikiRow]);
+  assert.deepEqual((await f.call<MigrationContentReviewPage>(`${path}?expectedVersion=1&q=old-12`)).data.rows, [first.rows[11]]);
+  const detail = await f.call<MigrationContentReviewDetail>(detailPath(preview, wikiRow.recordId));
+  assert.equal(detail.status, 200, JSON.stringify(detail.data));
+  assert.equal(detail.data.sourceUrl, 'https://wiki.example.test/confluence/pages/viewpage.action?pageId=501');
+  assert.equal(detail.data.content?.content?.[0].type, 'table');
+  assert.equal(detail.data.description, undefined);
+  assert.equal((await f.call(detailPath(preview, privateRecord))).status, 404);
+  assert.equal((await f.call(detailPath(preview, `${jira.id}/page:501`))).status, 404);
+  assert.equal((await f.call(detailPath(preview, `${randomUUID()}/page:501`))).status, 404);
+  assert.equal((await f.call(`${path}?expectedVersion=1&packageId=${randomUUID()}`)).status, 404);
+  assert.equal((await f.call(`${path}?expectedVersion=1&limit=51`)).status, 400);
+  assert.equal((await f.call(`${path}?expectedVersion=2`)).status, 409);
+  assert.equal((await f.call(detailPath(preview, wikiRow.recordId), 'GET', undefined, 'user-min')).status, 403);
+  const previewHeader = f.db.prepare('SELECT json FROM migration_preview_content_header WHERE preview_id=?').get(preview.id) as { json: string };
+  const changeHeader = f.db.prepare('UPDATE migration_preview_content_header SET json=? WHERE preview_id=?');
+  changeHeader.run(JSON.stringify({ ...JSON.parse(previewHeader.json), conversionVersion: -1 }), preview.id);
+  assert.equal((await f.call(`${path}?expectedVersion=1`)).status, 409);
+  changeHeader.run(JSON.stringify({ ...JSON.parse(previewHeader.json), confluenceRestrictionHash: 'changed' }), preview.id);
+  assert.equal((await f.call(detailPath(preview, wikiRow.recordId))).status, 409);
+  changeHeader.run(previewHeader.json, preview.id);
+  const previewRow = f.db.prepare('SELECT expires_at, generation FROM migration_previews WHERE id=?').get(preview.id) as { expires_at: string; generation: string };
+  const changeRow = f.db.prepare('UPDATE migration_previews SET expires_at=?, generation=? WHERE id=?');
+  changeRow.run(previewRow.expires_at, 'restored', preview.id);
+  assert.equal((await f.call(`${path}?expectedVersion=1`)).status, 409);
+  changeRow.run('2000-01-01T00:00:00.000Z', previewRow.generation, preview.id);
+  assert.equal((await f.call(`${path}?expectedVersion=1`)).status, 408);
+  changeRow.run(previewRow.expires_at, previewRow.generation, preview.id);
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const workspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const document = workspace.documents.find(item => item.title === wikiRow.title);
+  assert.deepEqual(document?.content, detail.data.content);
+  assert.equal(workspace.documents.some(item => item.title === 'Secret title'), false);
+  assert.equal((await f.call(detailPath(preview, wikiRow.recordId))).status, 408);
+  assert.equal((f.db.prepare('SELECT COUNT(*) AS count FROM migration_preview_content WHERE preview_id=?').get(preview.id) as { count: number }).count, 0);
+});
+
+test('migration content review exposes accepted Jira and Confluence body changes and skips local conflicts or retained content', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jiraPack = (day: number, descriptions: (string | null)[]) => f.upload(Buffer.from(JSON.stringify({
+    issues: descriptions.map((description, index) => ({ id: String(index + 100), key: `SRC-${index + 1}`, fields: {
+      project: { id: '60', key: 'SRC', name: 'Body source' }, summary: `Synthetic issue ${index + 1}`,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' },
+      created: '2020-01-01T00:00:00Z', updated: `2020-01-0${day}T00:00:00Z`, description,
+    } })),
+  })), `jira-body-${day}.json`, 'jira', 'synthetic-jira-body-review');
+  const wikiPack = (version: number, bodies: string[]) => f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">70</id><property name="key">BODY</property><property name="name">Synthetic source wiki</property></object>
+    ${bodies.map((body, index) => `<object class="Page"><id name="id">${index + 301}</id>
+      <property name="title">Synthetic page ${index + 1}</property><property name="version">${version}</property>
+      <property name="creationDate">2020-01-01T00:00:00Z</property><property name="lastModificationDate">2020-01-0${version + 1}T00:00:00Z</property>
+      <property name="space" class="Space"><id name="id">70</id></property></object>
+      <object class="BodyContent"><id name="id">${index + 401}</id><property name="body"><![CDATA[${body}]]></property>
+      <property name="bodyType">2</property><property name="content" class="Page"><id name="id">${index + 301}</id></property></object>`).join('')}
+  </hibernate-generic>`) }]), `wiki-body-${version}.zip`, 'confluence', 'synthetic-wiki-body-review');
+  const contentPath = (preview: MigrationPreview, recordId?: string) => `/migrations/previews/${preview.id}/content${recordId ? '/detail' : ''}?${new URLSearchParams({
+    expectedVersion: String(preview.version), ...(recordId ? { recordId } : {}),
+  })}`;
+  const initialJira = await jiraPack(2, ['Source one', 'Source two', 'Unchanged']);
+  const initialWiki = await wikiPack(1, ['<p>Source one</p>', '<p>Source two</p>', '<p>Unchanged</p>']);
+  const initial = await f.apply(await f.preview(await f.configuration([initialJira, initialWiki], 'BODYREVIEW')));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const [projectId] = initial.data.import.projectIds;
+  const snapshot = () => f.call<WorkspaceSnapshot>('/workspace').then(result => result.data);
+  const workspace = await snapshot();
+  const issues = workspace.issues.filter(row => row.projectId === projectId);
+  const pages = workspace.documents.filter(row => row.projectId === projectId);
+  const localIssue = issues.find(row => row.title === 'Synthetic issue 2')!;
+  const localPage = pages.find(row => row.title === 'Synthetic page 2')!;
+  assert.equal((await f.call(`/issues/${localIssue.id}`, 'PATCH', {
+    expectedVersion: localIssue.version, description: 'Team issue edit',
+  })).status, 200);
+  assert.equal((await f.call(`/documents/${localPage.id}`, 'PATCH', {
+    expectedVersion: localPage.version, content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Team page edit' }] }] },
+  })).status, 200);
+
+  const deltaJira = await jiraPack(3, [null, 'Incoming issue conflict', 'Unchanged']);
+  const { data: jiraOptions } = await f.call<MigrationOptions>(`/migrations/options?packageId=${deltaJira.id}`);
+  const target = jiraOptions.appendTarget;
+  assert.ok(target);
+  const jiraPreview = await f.preview({ ...await f.configuration(deltaJira), appendTo: {
+    projectId, refreshExisting: true, fields: {},
+    statuses: Object.fromEntries(jiraOptions.statuses.map(row => [row.id, target.statuses.find(status => status.label === row.label)!.id])),
+    issueTypes: Object.fromEntries(jiraOptions.issueTypes.map(row => [row.id, target.issueTypes.find(type => type.name === row.label)!.id])),
+  } });
+  assert.equal(jiraPreview.canApply, true, JSON.stringify(jiraPreview.notices));
+  const jiraRecord = `${deltaJira.id}/issue:100`;
+  const { data: jiraList } = await f.call<MigrationContentReviewPage>(contentPath(jiraPreview));
+  assert.deepEqual(jiraList.rows.map(row => [row.recordId, row.change]), [[jiraRecord, 'update']]);
+  const { data: jiraDetail } = await f.call<MigrationContentReviewDetail>(contentPath(jiraPreview, jiraRecord));
+  assert.equal(jiraDetail.description, '');
+  assert.equal(jiraDetail.descriptionFormat, 'plain');
+  for (const id of [101, 102]) assert.equal((await f.call(contentPath(jiraPreview, `${deltaJira.id}/issue:${id}`))).status, 404);
+  assert.equal((await f.apply(jiraPreview)).status, 201);
+  assert.equal((await snapshot()).issues.find(row => row.id === issues.find(item => item.title === 'Synthetic issue 1')?.id)?.description, jiraDetail.description);
+
+  const deltaWiki = await wikiPack(2, ['<p>New <strong>body</strong></p>', '<p>Incoming page conflict</p>', '<p>Unchanged</p>']);
+  const wikiPreview = await f.preview({ ...await f.configuration(deltaWiki), appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(wikiPreview.canApply, true, JSON.stringify(wikiPreview.notices));
+  const wikiRecord = `${deltaWiki.id}/page:301`;
+  const { data: wikiList } = await f.call<MigrationContentReviewPage>(contentPath(wikiPreview));
+  assert.deepEqual(wikiList.rows.map(row => [row.recordId, row.change]), [[wikiRecord, 'update']]);
+  const { data: wikiDetail } = await f.call<MigrationContentReviewDetail>(contentPath(wikiPreview, wikiRecord));
+  assert.equal(wikiDetail.content?.content?.[0].content?.[1].marks?.[0].type, 'bold');
+  for (const id of [302, 303]) assert.equal((await f.call(contentPath(wikiPreview, `${deltaWiki.id}/page:${id}`))).status, 404);
+  assert.equal((await f.apply(wikiPreview)).status, 201);
+  assert.deepEqual((await snapshot()).documents.find(row => row.id === pages.find(item => item.title === 'Synthetic page 1')?.id)?.content, wikiDetail.content);
+});
 
 test('Confluence user keys support reviewed author mapping across exported files', async t => {
   const f = await fixture();

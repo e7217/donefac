@@ -10,6 +10,7 @@ import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
 import { MigrationAuthorPreview } from './MigrationAuthorReview';
 import { ConfluenceSourceReview } from './MigrationConfluenceReview';
+import { MigrationContentReview } from './MigrationContentReview';
 import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceArchiveDetail, SourceImportRecords } from './SourceOrigins';
@@ -659,12 +660,10 @@ function ActorMigration(props: MigrationApplyProps) {
       </fieldset>}
       {preview.authorAttribution && preview.authorAttribution.length > 0 && <MigrationAuthorPreview groups={preview.authorAttribution} packages={options?.packages ?? packages} />}
       <MigrationReviewDetails key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages} actorId={actorId} busy={Boolean(pending) || hasReviewChanges} onExclude={stageExclusions} />
-      <MappingSection title="변환된 내용 견본"><Paged title="이관 내용 견본" items={preview.samples} label={item => item.title} render={item => <div className="migration-sample">
-        <strong>{item.targetType === 'issue' ? '업무' : '문서'} · {item.title}</strong>
-        {item.schedule && <p>일정 · {item.schedule.startDate ?? '시작일 미정'} ~ {item.schedule.endDate ?? '종료일 미정'}</p>}
-        {item.sourceUrl && <p className="migration-sample-source"><small>연결할 원본 주소</small><code>{item.sourceUrl}</code></p>}
-        <pre>{item.plainText.slice(0, 2000)}</pre>{item.plainText.length > 2000 && <small>견본은 2,000자까지 표시합니다. 원본 기록에는 전체 원문을 보존합니다.</small>}
-      </div>} /></MappingSection>
+      <MappingSection title="변환된 업무·문서">
+        <MigrationContentReview key={`${preview.id}:${preview.version}`} preview={preview} packages={options?.packages ?? packages}
+          actorId={actorId} data={data} busy={Boolean(pending) || !matching || expired || hasReviewChanges} />
+      </MappingSection>
       {expired && <p className="migration-error" role="alert">이 미리보기가 만료되었습니다. 매핑을 유지한 채 새 미리보기를 만드세요.</p>}
       <fieldset disabled={Boolean(pending)} className="migration-fieldset"><div className="migration-acknowledgements" aria-label="이관 필수 확인">{preview.requiredAcknowledgements.map(code => <label key={code}><input type="checkbox" aria-label={`이관 확인 ${code}`} checked={acknowledgements.includes(code)} onChange={event => setAcknowledgements(previous => event.target.checked ? [...previous, code] : previous.filter(value => value !== code))} /><span>{preview.notices.find(item => item.code === code)?.message || code}<small>{code}</small></span></label>)}</div><button className="btn btn-primary" disabled={!canApply} onClick={() => void apply()}><CheckCircle2 size={17} />검토한 이관 실제 적용</button></fieldset>
     </section>}
