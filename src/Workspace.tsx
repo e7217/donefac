@@ -268,7 +268,7 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   }
   if (previous?.view === 'gantt' && next.view === 'gantt' && previous.issueId !== next.issueId &&
       issueReviewContext(previous) === issueReviewContext(next)) {
-    return dispatchWorkspaceNavigation(null, false, false, 'dateDrafts');
+    return dispatchWorkspaceNavigation(null, false, false, 'issueOverlay');
   }
   if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) && hasSameProjectGanttContext(previous, next)) {
     return dispatchWorkspaceNavigation(null, false, false, true);

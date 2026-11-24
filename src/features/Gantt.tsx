@@ -592,7 +592,7 @@ function ProjectGantt(props: GanttProps) {
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
-          : keepDates ? '열린 간트 편집과 미리보기를 닫고 티켓을 볼까요? 행에 입력한 날짜는 유지됩니다.'
+          : keepDates ? '열린 간트 편집과 미리보기를 닫을까요? 행에 입력한 날짜는 유지됩니다.'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
         if (!window.confirm(confirmation)) event.preventDefault();
         else {
@@ -2034,9 +2034,12 @@ function ProjectGantt(props: GanttProps) {
     if (drag.mode === 'end') delta = Math.max(delta, -duration);
     setDrag({ ...drag, delta });
   }
-  function openIssueRow(id: string, opener: HTMLElement) {
+  function openChartIssue(id: string, opener: HTMLElement, issueIds: readonly string[]) {
     if (!props.onOpenIssueForReview) { openIssue(id); return; }
-    props.onOpenIssueForReview(id, { issueIds: issues.map(issue => issue.id), opener, fallback: scrollRef.current });
+    props.onOpenIssueForReview(id, { issueIds, opener, fallback: scrollRef.current });
+  }
+  function openIssueRow(id: string, opener: HTMLElement) {
+    openChartIssue(id, opener, issues.map(issue => issue.id));
   }
   function openMilestoneReview(id: string, opener: HTMLButtonElement) {
     if (!onChangeMilestoneReview(id)) return;
@@ -2054,8 +2057,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function openMilestoneIssue(id: string, opener: HTMLButtonElement) {
     if (!reviewedMilestone?.issueIds.includes(id)) return;
-    if (!props.onOpenIssueForReview) { openIssue(id); return; }
-    props.onOpenIssueForReview(id, { issueIds: reviewedMilestone.issueIds, opener, fallback: scrollRef.current });
+    openChartIssue(id, opener, reviewedMilestone.issueIds);
   }
   function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
@@ -2389,7 +2391,8 @@ function ProjectGantt(props: GanttProps) {
     </div>}
     <SchedulePlanningPanel {...props} selectedBaselineId={selectedBaselineId} onSelectBaseline={setSelectedBaselineId}
       onOpenMilestoneReview={openMilestoneReview} onCloseMilestoneReview={closeMilestoneReview}
-      onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue} />
+      onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue}
+      onOpenMilestoneCandidateIssue={openChartIssue} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
     <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
     {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}

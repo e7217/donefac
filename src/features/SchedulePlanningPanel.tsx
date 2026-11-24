@@ -4,7 +4,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Flag, History, LoaderCircle, Plus, Save, Trash2, X } from 'lucide-react';
 import type { FeatureProps, Milestone, ScheduleBaseline } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { isGanttPreservedByNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, dispatchWorkspaceNavigation, isGanttIssueOverlayNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
+import { ScheduleMilestoneIssuePicker } from './ScheduleMilestoneIssuePicker';
 import { ScheduleMilestoneReview, SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
 import './schedule-planning.css';
 
@@ -16,9 +17,10 @@ type Props = FeatureProps & {
   onCloseMilestoneReview: () => void;
   onLocateMilestoneIssue: (id: string) => boolean;
   onOpenMilestoneIssue: (id: string, opener: HTMLButtonElement) => void;
+  onOpenMilestoneCandidateIssue: (id: string, opener: HTMLButtonElement, issueIds: readonly string[]) => void;
 };
 type MilestoneFields = Pick<Milestone, 'title' | 'description' | 'date' | 'status' | 'ownerId' | 'issueIds'>;
-type MilestoneDraft = { id: string | null; expectedVersion: number | null; fields: MilestoneFields; original: string };
+type MilestoneDraft = { generation: number; id: string | null; expectedVersion: number | null; fields: MilestoneFields; original: string };
 type CaptureDraft = { name: string; description: string; expectedIssueVersions: Record<string, number>; expectedMilestoneVersions: Record<string, number>; expectedCalendarVersion: number };
 const fieldsOf = (item?: Milestone): MilestoneFields => item ? { title: item.title, description: item.description, date: item.date, status: item.status, ownerId: item.ownerId, issueIds: [...item.issueIds] } : { title: '', description: '', date: new Date().toISOString().slice(0, 10), status: 'open', ownerId: null, issueIds: [] };
 const messageOf = (error: unknown) => error instanceof Error ? error.message : '요청을 처리하지 못했습니다.';
@@ -26,8 +28,8 @@ const messageOf = (error: unknown) => error instanceof Error ? error.message : '
 export function SchedulePlanningPanel(props: Props) {
   return <ProjectSchedulePlanning key={`${props.projectId}:${props.actorId}`} {...props} />;
 }
-function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, openIssue, selectedBaselineId, onSelectBaseline,
-  milestoneReviewId, onOpenMilestoneReview, onCloseMilestoneReview, onLocateMilestoneIssue, onOpenMilestoneIssue }: Props) {
+function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, selectedBaselineId, onSelectBaseline,
+  milestoneReviewId, onOpenMilestoneReview, onCloseMilestoneReview, onLocateMilestoneIssue, onOpenMilestoneIssue, onOpenMilestoneCandidateIssue }: Props) {
   const milestones = (data.milestones || []).filter(item => item.projectId === projectId).sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title));
   const baselines = (data.baselines || []).filter(item => item.projectId === projectId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const issues = useMemo(() => data.issues.filter(item => item.projectId === projectId), [data.issues, projectId]);
@@ -40,6 +42,7 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
   const [busy, setBusy] = useState(false);
   const active = useRef(true);
   const pending = useRef(false);
+  const draftGeneration = useRef(0);
   const dirty = !!draft && JSON.stringify(draft.fields) !== draft.original || !!capture && !!(capture.name || capture.description);
   const current = draft?.id ? milestones.find(item => item.id === draft.id) : null;
   const reset = useCallback(() => { setDraft(null); setCapture(null); setError(''); }, [setDraft, setCapture, setError]);
@@ -48,27 +51,38 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
     const navigate = (event: Event) => {
       if (event.defaultPrevented) return;
       if (pending.current) { event.preventDefault(); notify('일정 정보를 저장하고 있습니다. 잠시 기다려주세요.', 'error'); return; }
-      if (isGanttPreservedByNavigation(event)) return;
-      if (dirty) {
-        if (!window.confirm('작성 중인 일정 정보를 버리고 이동할까요?')) { event.preventDefault(); return; }
-        reset();
+      if (isGanttPreservedByNavigation(event) || isGanttIssueOverlayNavigation(event) || !dirty) return;
+      if (!window.confirm('작성 중인 일정 정보를 버리고 이동할까요?')) {
+        event.preventDefault();
+        return;
       }
+      // Local actions replace or clear the form themselves after all listeners accept the event.
+      if (!areGanttDateDraftsPreservedByNavigation(event)) afterAcceptedNavigation(event, reset);
     };
     const unload = (event: BeforeUnloadEvent) => { if (dirty || pending.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', unload);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); };
   }, [dirty, notify, reset]);
-  const canNavigate = () => window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }));
+  const canNavigate = () => dispatchWorkspaceNavigation(null, false, false, 'dateDrafts');
   const source = () => calendar ? { expectedIssueVersions: Object.fromEntries(issues.map(item => [item.id, item.version])), expectedMilestoneVersions: Object.fromEntries(milestones.map(item => [item.id, item.version])), expectedCalendarVersion: calendar.version } : null;
   const openMilestone = (item?: Milestone) => {
     if (!canNavigate()) return;
-    const fields = fieldsOf(item); setCapture(null); setError(''); setDraft({ id: item?.id || null, expectedVersion: item?.version || null, fields, original: JSON.stringify(fields) });
+    const fields = fieldsOf(item);
+    draftGeneration.current += 1;
+    setCapture(null);
+    setError('');
+    setDraft({ generation: draftGeneration.current, id: item?.id ?? null, expectedVersion: item?.version ?? null, fields, original: JSON.stringify(fields) });
   };
   const openCapture = () => {
     const versions = source(); if (!versions || !canNavigate()) return;
     setDraft(null); setError(''); setCapture({ name: '', description: '', ...versions });
   };
   const cancel = () => { if (canNavigate()) reset(); };
+  const selectBaseline = (id: string | null) => {
+    if (!canNavigate()) return;
+    if (dirty) reset();
+    onSelectBaseline(id);
+  };
   const update = <K extends keyof MilestoneFields>(key: K, value: MilestoneFields[K]) => setDraft(previous => previous ? { ...previous, fields: { ...previous.fields, [key]: value } } : previous);
   const mutate = async (operation: () => Promise<unknown>, success: string, after?: (value: unknown) => void) => {
     if (pending.current) return;
@@ -81,7 +95,9 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
     } catch (failure) {
       if (!active.current) return;
       setError(messageOf(failure));
-      if (failure instanceof ApiError && failure.status === 409) { try { await refresh(); } catch { /* Keep the draft even when refresh is unavailable. */ } }
+      if (failure instanceof ApiError && [400, 409].includes(failure.status)) {
+        try { await refresh(); } catch { /* Keep the draft even when refresh is unavailable. */ }
+      }
     } finally { pending.current = false; if (active.current) setBusy(false); }
   };
   const request = <T,>(path: string, method: string, body?: unknown) => api<T>(path, { method, headers: { 'X-Actor-Id': actorId }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
@@ -96,11 +112,11 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
     void mutate(() => request<ScheduleBaseline>('/baselines', 'POST', { projectId, ...captured }), '일정 기준선을 저장했습니다.', value => onSelectBaseline((value as ScheduleBaseline).id));
   };
   const deleteMilestone = (item: Milestone) => {
-    if (!canNavigate() || !window.confirm(`'${item.title}' 이정표를 삭제할까요? 저장된 기준선은 보존됩니다.`)) return;
+    if (pending.current || !window.confirm(`'${item.title}' 이정표를 삭제할까요? 저장된 기준선은 보존됩니다.`) || !canNavigate()) return;
     void mutate(() => request(`/milestones/${item.id}?expectedVersion=${item.version}`, 'DELETE'), '이정표를 삭제했습니다.');
   };
   const deleteBaseline = () => {
-    if (!selected || !canNavigate() || !window.confirm(`'${selected.name}' 기준선을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
+    if (!selected || pending.current || !window.confirm(`'${selected.name}' 기준선을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`) || !canNavigate()) return;
     const captured = selected;
     void mutate(() => request(`/baselines/${captured.id}?expectedVersion=${captured.version}`, 'DELETE'), '기준선을 삭제했습니다.', () => onSelectBaseline(null));
   };
@@ -109,7 +125,7 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
   return <section className="schedule-planning" aria-label="이정표와 일정 기준선">
     <div className="schedule-planning-toolbar">
       <span className="schedule-planning-title"><Flag size={16} />이정표 · 기준선</span>
-      <label className="schedule-baseline-label"><History size={14} /><select aria-label="비교 기준선" value={selected?.id || ''} disabled={busy} onChange={event => { if (canNavigate()) onSelectBaseline(event.target.value || null); }}><option value="">기준선 비교 안 함</option>{baselines.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <label className="schedule-baseline-label"><History size={14} /><select aria-label="비교 기준선" value={selected?.id || ''} disabled={busy} onChange={event => selectBaseline(event.currentTarget.value || null)}><option value="">기준선 비교 안 함</option>{baselines.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
       <button className="btn btn-ghost" disabled={busy || !calendar} title={!calendar ? '근무일 기준을 불러오는 중입니다.' : undefined} onClick={openCapture}><History size={14} />기준선 저장</button>
       <button className="btn btn-ghost" disabled={busy} onClick={() => openMilestone()}><Plus size={14} />이정표 만들기</button>
       {busy && <LoaderCircle size={15} className="spin" aria-label="일정 정보 저장 중" />}
@@ -138,7 +154,15 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, op
     {draft && <form className="schedule-artifact-form" aria-label="이정표 편집" onSubmit={saveMilestone}>
       <div className="schedule-artifact-form-title"><strong>{draft.id ? '이정표 편집' : '새 이정표'}</strong><button type="button" className="btn btn-ghost" aria-label="일정 양식 닫기" disabled={busy} onClick={cancel}><X size={15} /></button></div>
       {draft.id && (!current || current.version !== draft.expectedVersion) && <div className="schedule-artifact-warning">다른 변경사항이 있습니다. 입력은 유지됩니다. 취소 후 이정표를 다시 열어 최신 내용을 확인하세요.</div>}
-      <fieldset disabled={busy}><label>제목<input className="field" aria-label="이정표 제목" maxLength={300} required value={draft.fields.title} onChange={event => update('title', event.target.value)} /></label><label>날짜<input className="field" aria-label="이정표 날짜" type="date" required value={draft.fields.date} onChange={event => update('date', event.target.value)} /></label><label>상태<select className="field" aria-label="이정표 상태" value={draft.fields.status} onChange={event => update('status', event.target.value as Milestone['status'])}><option value="open">예정</option><option value="reached">달성</option></select></label><label>책임자<select className="field" aria-label="이정표 책임자" value={draft.fields.ownerId || ''} onChange={event => update('ownerId', event.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="schedule-form-wide">설명<textarea className="field" aria-label="이정표 설명" value={draft.fields.description} onChange={event => update('description', event.target.value)} /></label><div className="schedule-form-wide schedule-milestone-issues"><span>연결 업무 · 같은 프로젝트</span>{issues.map(item => <label key={item.id}><input type="checkbox" aria-label={`${item.key} 이정표 연결`} checked={draft.fields.issueIds.includes(item.id)} onChange={event => update('issueIds', event.target.checked ? [...draft.fields.issueIds, item.id] : draft.fields.issueIds.filter(id => id !== item.id))} /><span>{item.key} {item.title}</span><button className="btn btn-ghost" type="button" onClick={() => openIssue(item.id)}>상세</button></label>)}</div></fieldset>
+      <fieldset disabled={busy}>
+        <label>제목<input className="field" aria-label="이정표 제목" maxLength={300} required value={draft.fields.title} onChange={event => update('title', event.target.value)} /></label>
+        <label>날짜<input className="field" aria-label="이정표 날짜" type="date" required value={draft.fields.date} onChange={event => update('date', event.target.value)} /></label>
+        <label>상태<select className="field" aria-label="이정표 상태" value={draft.fields.status} onChange={event => update('status', event.target.value as Milestone['status'])}><option value="open">예정</option><option value="reached">달성</option></select></label>
+        <label>책임자<select className="field" aria-label="이정표 책임자" value={draft.fields.ownerId || ''} onChange={event => update('ownerId', event.target.value || null)}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+        <label className="schedule-form-wide">설명<textarea className="field" aria-label="이정표 설명" value={draft.fields.description} onChange={event => update('description', event.target.value)} /></label>
+        <ScheduleMilestoneIssuePicker key={draft.generation} issues={issues} issueAliases={data.issueAliases}
+          selectedIds={draft.fields.issueIds} onChange={ids => update('issueIds', ids)} onOpenIssue={onOpenMilestoneCandidateIssue} />
+      </fieldset>
       <div className="schedule-artifact-actions"><button type="button" className="btn btn-ghost" disabled={busy} onClick={cancel}>취소</button><button className="btn btn-primary" disabled={busy || !draft.fields.title.trim() || !draft.fields.date || !!draft.id && !dirty}><Save size={14} />이정표 저장</button></div>
     </form>}
     {capture && <form className="schedule-artifact-form" aria-label="일정 기준선 저장" onSubmit={saveBaseline}><div className="schedule-artifact-form-title"><strong>현재 일정을 기준선으로 저장</strong><button type="button" className="btn btn-ghost" aria-label="일정 양식 닫기" disabled={busy} onClick={cancel}><X size={15} /></button></div><p className="muted">프로젝트 전체 업무 {Object.keys(capture.expectedIssueVersions).length}개와 이정표 {Object.keys(capture.expectedMilestoneVersions).length}개, 근무일 기준 v{capture.expectedCalendarVersion}를 변경할 수 없는 기록으로 남깁니다. 화면의 필터와 관계없이 전체 일정을 포함합니다.</p><fieldset disabled={busy}><label className="schedule-form-wide">이름<input className="field" aria-label="기준선 이름" maxLength={300} required value={capture.name} onChange={event => setCapture(previous => previous ? { ...previous, name: event.target.value } : previous)} /></label><label className="schedule-form-wide">설명<textarea className="field" aria-label="기준선 설명" value={capture.description} onChange={event => setCapture(previous => previous ? { ...previous, description: event.target.value } : previous)} /></label></fieldset>{captureStale && <p className="schedule-artifact-warning">양식을 연 뒤 일정이 변경되었습니다. 입력을 유지한 채 최신 자료를 다시 확인해주세요.</p>}<div className="schedule-artifact-actions"><button type="button" className="btn btn-ghost" disabled={busy} onClick={cancel}>취소</button><button type="button" className="btn btn-ghost" disabled={busy || !calendar} onClick={() => { const versions = source(); if (versions) { setCapture(previous => previous ? { ...previous, ...versions } : previous); setError(''); } }}>최신 자료로 다시 확인</button><button className="btn btn-primary" disabled={busy || !capture.name.trim()}><Save size={14} />기준선 확정 저장</button></div></form>}

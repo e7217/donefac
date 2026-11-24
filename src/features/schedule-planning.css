@@ -1,1 +1,111 @@
-.schedule-planning{margin:0 0 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface,#fff);overflow:hidden}.schedule-planning-toolbar{display:flex;align-items:center;gap:8px;padding:12px 15px;flex-wrap:wrap}.schedule-planning-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650;margin-right:auto}.schedule-baseline-label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.schedule-baseline-label select{max-width:230px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface,#fff);color:var(--text)}.schedule-baseline-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 15px;background:#f4f6f9;color:var(--muted);font-size:12px}.schedule-baseline-summary strong{color:var(--text)}.schedule-baseline-summary small{display:block;margin-top:4px;white-space:pre-wrap}.schedule-milestone-list{border-top:1px solid var(--border);padding:0 15px}.schedule-milestone-list summary{padding:11px 0;font-size:12px;font-weight:600;cursor:pointer}.schedule-milestone-list>p{font-size:12px;padding-bottom:10px}.schedule-milestone-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border)}.schedule-milestone-dot{width:9px;height:9px;background:#c37a20;transform:rotate(45deg);flex-shrink:0}.schedule-milestone-dot.reached{background:#398369}.schedule-milestone-name{flex:1;text-align:left;border:0;background:none;cursor:pointer;color:var(--text);min-width:0}.schedule-milestone-name strong{display:block;font-size:12px;overflow-wrap:anywhere}.schedule-milestone-name small{display:block;font-size:11px;color:var(--muted);margin-top:4px}.schedule-artifact-form{margin:0 15px 15px;border-top:1px solid var(--border);padding-top:12px}.schedule-artifact-form-title{display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:9px}.schedule-artifact-form fieldset{border:0;padding:0;margin:0;display:grid;grid-template-columns:minmax(150px,2fr) repeat(3,minmax(100px,1fr));gap:10px}.schedule-artifact-form label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:5px}.schedule-artifact-form .field{font-size:12px;width:100%;box-sizing:border-box}.schedule-form-wide{grid-column:1/-1}.schedule-artifact-form textarea{resize:vertical;min-height:65px}.schedule-artifact-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.schedule-artifact-form>.muted{font-size:12px;line-height:1.6;margin-bottom:12px}.schedule-milestone-issues{max-height:190px;overflow:auto;font-size:11px;color:var(--muted);padding-top:3px}.schedule-milestone-issues>span{display:block;margin-bottom:7px}.schedule-milestone-issues label{display:flex;flex-direction:row;align-items:center;gap:8px;padding:4px 0}.schedule-milestone-issues label>span{flex:1;overflow-wrap:anywhere}.schedule-milestone-issues input{accent-color:var(--accent,#385fc4)}.schedule-artifact-warning{background:#fff5db;color:#86631e;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px}.schedule-artifact-error{margin:12px 15px;padding:9px 12px;border:1px solid #eac0be;border-radius:7px;background:#fff3f2;color:#9d3935;font-size:12px;line-height:1.6}@media(max-width:760px){.schedule-artifact-form fieldset{grid-template-columns:1fr 1fr}.schedule-artifact-form label:first-child{grid-column:1/-1}.schedule-planning-toolbar{padding:10px}.schedule-baseline-label{width:100%}.schedule-baseline-label select{max-width:100%;flex:1}.schedule-baseline-summary{align-items:flex-start}.schedule-artifact-form{margin:0 10px 12px}}
+.schedule-planning{margin:0 0 18px;border:1px solid var(--border);border-radius:12px;background:var(--surface,#fff);overflow:hidden}.schedule-planning-toolbar{display:flex;align-items:center;gap:8px;padding:12px 15px;flex-wrap:wrap}.schedule-planning-title{display:flex;align-items:center;gap:7px;font-size:13px;font-weight:650;margin-right:auto}.schedule-baseline-label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px}.schedule-baseline-label select{max-width:230px;padding:6px 9px;border:1px solid var(--border);border-radius:7px;background:var(--surface,#fff);color:var(--text)}.schedule-baseline-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 15px;background:#f4f6f9;color:var(--muted);font-size:12px}.schedule-baseline-summary strong{color:var(--text)}.schedule-baseline-summary small{display:block;margin-top:4px;white-space:pre-wrap}.schedule-milestone-list{border-top:1px solid var(--border);padding:0 15px}.schedule-milestone-list summary{padding:11px 0;font-size:12px;font-weight:600;cursor:pointer}.schedule-milestone-list>p{font-size:12px;padding-bottom:10px}.schedule-milestone-row{display:flex;align-items:center;gap:10px;padding:8px 0;border-top:1px solid var(--border)}.schedule-milestone-dot{width:9px;height:9px;background:#c37a20;transform:rotate(45deg);flex-shrink:0}.schedule-milestone-dot.reached{background:#398369}.schedule-milestone-name{flex:1;text-align:left;border:0;background:none;cursor:pointer;color:var(--text);min-width:0}.schedule-milestone-name strong{display:block;font-size:12px;overflow-wrap:anywhere}.schedule-milestone-name small{display:block;font-size:11px;color:var(--muted);margin-top:4px}.schedule-artifact-form{margin:0 15px 15px;border-top:1px solid var(--border);padding-top:12px}.schedule-artifact-form-title{display:flex;align-items:center;justify-content:space-between;font-size:13px;margin-bottom:9px}.schedule-artifact-form fieldset{border:0;padding:0;margin:0;display:grid;grid-template-columns:minmax(150px,2fr) repeat(3,minmax(100px,1fr));gap:10px}.schedule-artifact-form label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:5px}.schedule-artifact-form .field{font-size:12px;width:100%;box-sizing:border-box}.schedule-form-wide{grid-column:1/-1}.schedule-artifact-form textarea{resize:vertical;min-height:65px}.schedule-artifact-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}.schedule-artifact-form>.muted{font-size:12px;line-height:1.6;margin-bottom:12px}.schedule-artifact-warning{background:#fff5db;color:#86631e;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:10px}.schedule-artifact-error{margin:12px 15px;padding:9px 12px;border:1px solid #eac0be;border-radius:7px;background:#fff3f2;color:#9d3935;font-size:12px;line-height:1.6}@media(max-width:760px){.schedule-artifact-form fieldset{grid-template-columns:1fr 1fr}.schedule-artifact-form label:first-child{grid-column:1/-1}.schedule-planning-toolbar{padding:10px}.schedule-baseline-label{width:100%}.schedule-baseline-label select{max-width:100%;flex:1}.schedule-baseline-summary{align-items:flex-start}.schedule-artifact-form{margin:0 10px 12px}}
+
+.schedule-milestone-issues {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.schedule-milestone-issues h3 {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.schedule-milestone-picker-controls,
+.schedule-milestone-unavailable,
+.schedule-milestone-picker-pages {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+}
+
+.schedule-milestone-picker-controls > label:first-child {
+  flex: 1 1 15rem;
+  min-width: 0;
+}
+
+.schedule-milestone-picker-controls .field {
+  min-height: 36px;
+}
+
+.schedule-milestone-issues .schedule-milestone-selected-filter,
+.schedule-milestone-candidates label {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.schedule-milestone-issues input[type='checkbox'] {
+  margin: 0;
+  accent-color: var(--accent, #385fc4);
+}
+
+.schedule-milestone-unavailable,
+.schedule-milestone-picker-empty {
+  margin-top: 6px;
+}
+
+.schedule-milestone-unavailable p,
+.schedule-milestone-picker-empty {
+  margin-bottom: 0;
+}
+
+.schedule-milestone-candidates {
+  max-height: min(17rem, 45dvh);
+  overflow: auto;
+  margin: 5px 0 0;
+  padding: 0 0 0 2px;
+  border-block: 1px solid var(--border);
+  list-style: none;
+}
+
+.schedule-milestone-candidates li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 4px 2px 0;
+}
+
+.schedule-milestone-candidates li + li {
+  border-top: 1px solid var(--border);
+}
+
+.schedule-milestone-candidates label {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: inherit;
+}
+
+.schedule-milestone-candidates label > span {
+  overflow-wrap: anywhere;
+}
+
+.schedule-milestone-candidates small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.schedule-milestone-picker-pages {
+  justify-content: flex-end;
+  margin-top: 4px;
+}
+
+.schedule-milestone-issues .btn {
+  min-height: 34px;
+}
+
+@media (max-width: 760px) {
+  .schedule-milestone-issues .field,
+  .schedule-milestone-issues .btn,
+  .schedule-milestone-issues .schedule-milestone-selected-filter,
+  .schedule-milestone-candidates label {
+    min-height: 44px;
+  }
+}
