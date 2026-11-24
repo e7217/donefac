@@ -1554,7 +1554,9 @@ export class GitlabIntegrationService{
       }
       const issueIds=matches.map(match=>match.issue.id);
       const trigger=kind==='merge_request'?({open:'merge_request.opened',reopen:'merge_request.opened',merge:'merge_request.merged',close:'merge_request.closed'} as Record<string,AutomationEvent['trigger']>)[action]:({success:'pipeline.succeeded',failed:'pipeline.failed'} as Record<string,AutomationEvent['trigger']>)[state];
-      const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
+      const pipelineEvidence = !pipelineIncompatible && objectDisposition === 'fresh' ? verifiedClassification : undefined;
+      const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,
+        ...pipelineEvidence,issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
       return{ok:true,duplicate:false,linked,runs};
     };
     return this.store.transaction(() => {

@@ -1729,15 +1729,18 @@ export interface GitlabSyncStatus {
   repositories: { repositoryId: number; activity: GitlabActivitySyncAttempt | null; deployments: GitlabDeploymentSyncAttempt | null }[];
 }
 export type GitlabAutomationTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed' | 'deployment.succeeded';
+export type GitlabPipelineRefKind = 'branch' | 'tag';
 export interface AutomationRule {
   id: string; projectId: string; name: string; enabled: boolean; trigger: GitlabAutomationTrigger;
   gitlabProjectIds: number[]; branchPattern: string; environment?: string; issueTypes: string[]; fromStatuses: string[]; toStatusId: string;
+  pipelineSources?: string[]; pipelineRefKind?: GitlabPipelineRefKind;
   actorId: string; priority: number; gitlabBaseUrl: string; enabledAt: string | null;
   version: number; createdAt: string; updatedAt: string;
 }
 export interface AutomationEvent {
   id: string; trigger: GitlabAutomationTrigger; gitlabProjectId: number; objectKind: 'merge_request' | 'pipeline' | 'deployment'; objectId: string;
   branch: string; environment?: string; issueIds: string[]; occurredAt: string | null; receivedAt: string;
+  pipelineSource?: string; pipelineTag?: boolean;
   disposition: 'fresh' | 'stale' | 'ambiguous' | 'unverified'; reason: string;
 }
 export interface AutomationOutcome {
@@ -1747,6 +1750,7 @@ export interface AutomationOutcome {
 export interface AutomationRunContext {
   ruleName: string; trigger: GitlabAutomationTrigger; gitlabBaseUrl: string; gitlabProjectId: number;
   objectKind: AutomationEvent['objectKind']; objectId: string; branch: string; environment?: string;
+  pipelineSource?: string; pipelineTag?: boolean;
   fromStatusLabel: string; toStatusLabel: string;
 }
 export interface AutomationRun extends AutomationOutcome {

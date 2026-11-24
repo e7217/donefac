@@ -457,3 +457,131 @@ test('360px에서 배포 환경을 미리 보고 일치하는 배포 성공을 �
     await request.delete(`/api/issues/${issue.id}`);
   }
 });
+
+test('360px에서 파이프라인 실행 유형과 참조 범위를 미리 보고 일치하는 결과만 티켓에 적용한다', async ({ page, request }) => {
+  const settingsPath = '/api/integrations/gitlab';
+  const rulesPath = '/api/automation-rules';
+  const unique = randomUUID();
+  const baseUrl = 'https://git.example.test';
+  const repositoryId = 42;
+  const secret = `synthetic-pipeline-automation-${unique}`;
+  const workspace = async () => await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const readSettings = async () => await (await request.get(settingsPath)).json() as GitlabSettings;
+  const original = await readSettings();
+  expect(original.baseUrl).toBe('');
+  const { projects: [project] } = await workspace();
+  const title = `파이프라인 자동화 검증 ${unique}`;
+  const ruleName = `브랜치 푸시 성공 후 완료 ${unique.slice(0, 8)}`;
+  const createdIssue = await request.post('/api/issues', { data: { projectId: project.id, title } });
+  expect(createdIssue.status(), await createdIssue.text()).toBe(201);
+  const issue = await createdIssue.json() as Issue;
+  const ref = `feature/${issue.key}`;
+  const sourceMismatch = '규칙에서 선택한 파이프라인 실행 유형이 아닙니다.';
+  const refKindMismatch = '규칙에서 선택한 파이프라인 참조 유형이 아닙니다.';
+  let rule: AutomationRule | undefined;
+
+  async function pipeline(id: number, classification: { source?: 'push' | 'schedule'; tag?: boolean }, reference = ref) {
+    const response = await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+      data: {
+        object_kind: 'pipeline', project: { id: repositoryId, web_url: `${baseUrl}/team/pipeline-automation` },
+        object_attributes: { id, ref: reference, status: 'success', sha: 'f'.repeat(40), updated_at: new Date().toISOString(), ...classification },
+      },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    return await response.json() as { runs: AutomationRun[] };
+  }
+  const readTicket = async () => (await workspace()).issues.find(item => item.id === issue.id);
+
+  try {
+    const configured = await request.patch(settingsPath, { data: { expectedVersion: original.version,
+      baseUrl, projectIds: [repositoryId], webhookSecret: secret } });
+    expect(configured.ok(), await configured.text()).toBeTruthy();
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/development`);
+    const settings = page.getByRole('region', { name: 'GitLab 상태 자동화 설정', exact: true });
+    await settings.getByRole('button', { name: '규칙 만들기', exact: true }).click();
+    const editor = settings.getByRole('region', { name: '자동화 규칙 편집', exact: true });
+    await editor.getByLabel('자동화 규칙 이름', { exact: true }).fill(ruleName);
+    await editor.getByLabel('자동화 이벤트', { exact: true }).selectOption('pipeline.succeeded');
+    await editor.getByLabel('자동화 참조 패턴', { exact: true }).fill('feature/*');
+    const sources = editor.getByRole('group', { name: '자동화 파이프라인 실행 유형', exact: true });
+    await sources.getByRole('checkbox', { name: '푸시', exact: true }).check();
+    const ruleRef = editor.getByLabel('자동화 파이프라인 참조 유형', { exact: true });
+    await ruleRef.selectOption('branch');
+    await editor.getByLabel('자동화 저장소 42', { exact: true }).check();
+    await editor.getByLabel('자동화 출발 상태 할 일', { exact: true }).check();
+    await editor.getByLabel('자동화 도착 상태', { exact: true }).selectOption('done');
+    await editor.getByLabel(`${issue.key} 자동화 미리보기 선택`, { exact: true }).check();
+    await editor.getByLabel('미리보기 참조', { exact: true }).fill(ref);
+
+    const sampleSource = editor.getByLabel('미리보기 파이프라인 실행 유형', { exact: true });
+    const sampleRef = editor.getByLabel('미리보기 파이프라인 참조 유형', { exact: true });
+    const preview = editor.getByRole('button', { name: '변경 없이 미리보기', exact: true });
+    const outcome = editor.locator('.automation-preview-outcome');
+    await sampleSource.selectOption('schedule');
+    await sampleRef.selectOption('branch');
+    await preview.click();
+    await expect(outcome).toContainText(sourceMismatch);
+    await sampleSource.selectOption('push');
+    await sampleRef.selectOption('tag');
+    await preview.click();
+    await expect(outcome).toContainText(refKindMismatch);
+    await sampleRef.selectOption('branch');
+    await preview.click();
+    await expect(outcome).toContainText('변경 예정');
+    expect(await readTicket()).toMatchObject({ status: 'todo', version: issue.version });
+    expect(await (await request.get(`/api/issues/${issue.id}/automation-runs`)).json()).toMatchObject({ items: [] });
+
+    const save = editor.getByRole('button', { name: '규칙 저장', exact: true });
+    const createResponse = page.waitForResponse(response => new URL(response.url()).pathname === rulesPath && response.request().method() === 'POST');
+    await save.click();
+    const created = await createResponse;
+    expect(created.status(), await created.text()).toBe(201);
+    rule = await created.json() as AutomationRule;
+    expect(rule).toMatchObject({ trigger: 'pipeline.succeeded', branchPattern: 'feature/*',
+      pipelineSources: ['push'], pipelineRefKind: 'branch', enabled: false });
+    await expect(sources.getByRole('checkbox', { name: '푸시', exact: true })).toBeChecked();
+    await expect(ruleRef).toHaveValue('branch');
+    await editor.getByLabel('자동화 규칙 활성화', { exact: true }).check();
+    const enableResponse = page.waitForResponse(response => new URL(response.url()).pathname === `${rulesPath}/${rule?.id}` && response.request().method() === 'PATCH');
+    await save.click();
+    const enabled = await enableResponse;
+    expect(enabled.ok(), await enabled.text()).toBeTruthy();
+    rule = await enabled.json() as AutomationRule;
+    expect(rule.enabled).toBe(true);
+
+    for (const [id, classification, reason, reference] of [
+      [9401, { source: 'schedule', tag: false }, sourceMismatch],
+      [9402, { source: 'push', tag: true }, refKindMismatch],
+      [9403, { tag: false }, '파이프라인 실행 유형을 확인할 수 없습니다.'],
+      [9404, { source: 'push' }, '파이프라인 참조가 브랜치인지 태그인지 확인할 수 없습니다.'],
+      [9405, { source: 'push', tag: false }, '참조 이름 패턴이 일치하지 않습니다.', `release/${issue.key}`],
+    ] as const) {
+      const { runs } = await pipeline(id, classification, reference);
+      expect(runs).toMatchObject([{ issueId: issue.id, outcome: 'ignored', reason }]);
+      expect(await readTicket()).toMatchObject({ status: 'todo', version: issue.version });
+    }
+    const { runs } = await pipeline(9406, { source: 'push', tag: false });
+    expect(runs).toMatchObject([{ issueId: issue.id, outcome: 'changed', context: { objectId: '9406', pipelineSource: 'push', pipelineTag: false } }]);
+    expect(await readTicket()).toMatchObject({ status: 'done', version: issue.version + 1 });
+
+    await settings.getByRole('button', { name: '자동화 설정 새로고침', exact: true }).click();
+    const history = settings.getByRole('region', { name: '자동화 실행 기록', exact: true });
+    const row = history.getByRole('row').filter({ hasText: '파이프라인 #9406' });
+    await expect(row).toContainText('브랜치 · 푸시');
+    await row.getByRole('button', { name: issue.key, exact: true }).click();
+    const panel = page.getByRole('dialog', { name: title, exact: true });
+    await expect(panel.getByRole('combobox', { name: '상태', exact: true })).toHaveValue('done');
+    await expect(panel.getByRole('region', { name: 'GitLab 상태 자동화 기록', exact: true })).toContainText('브랜치 · 푸시');
+  } finally {
+    if (rule) {
+      const latest = (await (await request.get(rulesPath)).json() as AutomationRule[]).find(item => item.id === rule?.id);
+      if (latest) await request.delete(`${rulesPath}/${latest.id}?expectedVersion=${latest.version}`);
+    }
+    const current = await readSettings();
+    if (current.baseUrl === baseUrl) await request.patch(settingsPath, { data: { expectedVersion: current.version,
+      baseUrl: '', projectIds: [], webhookSecret: '', signingToken: '', token: '' } });
+    await request.delete(`/api/issues/${issue.id}`);
+  }
+});

@@ -681,7 +681,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 | `GET /api/automation-rules?projectId=...` | 규칙 목록 |
 | `POST /api/automation-rules` | 규칙 생성 |
 | `PATCH /api/automation-rules/:id` · `DELETE /api/automation-rules/:id` | `expectedVersion`으로 변경·삭제 |
-| `POST /api/automation/preview` | `{rule,issueIds,sample}`로 브랜치 또는 배포 환경 조건 미리보기 |
+| `POST /api/automation/preview` | `{rule,issueIds,sample}`로 브랜치·파이프라인·배포 환경 조건 미리보기 |
 | `GET /api/automation-runs?projectId=...&limit=100` | 최근 실행·차단·무시 이유, 최대500건 |
 
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
@@ -696,7 +696,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인의 직접 티켓 키를 적용하고, MR에서 가져오는 키에는 저장소·브랜치·head SHA 일치를 요구한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/).
 
-규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. MR·파이프라인 규칙의 `branchPattern`은 `*`·`?`만 와일드카드로 사용하는 최대 128자 패턴이다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. MR·파이프라인의 미리보기 `sample`은 `{trigger,gitlabProjectId,branch}`다. 미리보기는 티켓 및 이력을 그대로 두고 저장된 규칙과 데이터로 결과를 계산한다.
+규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. MR·파이프라인 규칙의 `branchPattern`은 브랜치 또는 태그 이름에 적용하는 최대 128자 패턴이며 `*`·`?`를 와일드카드로 사용한다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. MR의 미리보기 `sample`은 `{trigger,gitlabProjectId,branch}`다. 미리보기는 입력 규칙과 현재 티켓으로 결과를 계산하며 티켓·규칙·이력을 저장하지 않는다.
+
+파이프라인 규칙은 `pipelineSources` 배열과 `pipelineRefKind`(`branch` 또는 `tag`)를 선택적으로 저장한다. 실행 유형은 영문 소문자로 시작하는 1~64자의 소문자·숫자·밑줄 문자열이며, 최대 64개를 중복 없이 넣을 수 있다. 선택한 실행 유형 중 하나에 일치해야 하고 참조 유형까지 쓰면 두 조건을 모두 충족해야 한다. PATCH에서 필드를 생략하면 현재 값을 유지한다. `pipelineSources: []`, `pipelineRefKind: null`로 각 조건을 해제하거나 트리거를 파이프라인 외 유형으로 바꿔 두 조건을 해제할 수 있다. 미리보기 `sample`은 `{trigger,gitlabProjectId,branch,pipelineSource?,pipelineTag?}`다. `pipelineTag: false`는 브랜치, `true`는 태그이며 생략은 미확인이다. 규칙에 지정한 조건의 값을 확인할 수 없으면 미리보기와 실제 실행 모두에서 해당 규칙의 적용 대상에서 빠진다. 실행 기록의 `context`에는 확인한 `pipelineSource`·`pipelineTag`를 저장한다. 자체 백업 형식 112는 이 필드와 규칙을 보존하며 복원한 규칙은 비활성 상태로 시작한다. [GitLab 실행 유형](https://docs.gitlab.com/ci/jobs/job_rules/#ci_pipeline_source-predefined-variable) · [GitLab 파이프라인 웹훅](https://docs.gitlab.com/user/project/integrations/webhook_events/#pipeline-events)
 
 트리거는 `merge_request.opened`(open/reopen), `merge_request.merged`, `merge_request.closed`, `pipeline.succeeded`, `pipeline.failed`, `deployment.succeeded`다. 현재 전이·필수 속성 검증이 실패하면 차단 이유를 남긴다. 이미 도착 상태이면 업무 버전을 유지한다. 활성화 전, 오래된 이벤트, 같은 시각의 모순, 확인할 수 없는 시각의 이벤트는 상태 변경을 생략한다. 이벤트 중복과 객체·파이프라인 순서는 서버에서 검사한다. 저장된 MR에서 파이프라인 업무를 찾을 때는 브랜치와 head SHA가 함께 일치해야 한다.
 

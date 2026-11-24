@@ -2,7 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
 import type { GitlabLink, GitlabStatusObservation, GitlabStatusReview, GitlabStatusSuggestionTrigger } from '../shared/types.js';
-import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,sortedAutomationRules } from '../shared/automation.js';
+import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,isPipelineAutomationTrigger,sortedAutomationRules } from '../shared/automation.js';
+import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { allowedNextStatuses,defaultWorkflow } from '../shared/workflow-helpers.js';
 import type { Store } from './store.js';
@@ -22,6 +23,8 @@ const MANUAL_STATUS_SOURCES: Record<GitlabStatusSuggestionTrigger, { kind: Gitla
 export class AutomationError extends Error{constructor(public status:number,message:string,public details?:unknown){super(message);}}
 function fail(message:string,status=400,details?:unknown):never{throw new AutomationError(status,message,details);}
 type Connection=Pick<GitlabSettings,'baseUrl'|'projectIds'|'webhookSecretConfigured'|'signingTokenConfigured'|'jiraRoutes'>;
+type PipelineEvidence = Pick<AutomationEvent, 'pipelineSource' | 'pipelineTag'>;
+type MatchEvent = Pick<AutomationEvent, 'trigger' | 'gitlabProjectId' | 'branch' | 'environment'> & PipelineEvidence;
 type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
 type PreparedChange={outcome:AutomationOutcome;next?:Issue;afterStatusChange?:AfterStatusChange};
 export interface AutomationHooks{
@@ -45,6 +48,17 @@ export function isDeploymentAutomationContext(value: { objectKind?: unknown; obj
     Number.isSafeInteger(Number(objectId)) && branch === '' && isGitlabDeploymentEnvironment(environment);
 }
 
+function parsePipelineEvidence(value: { pipelineSource?: unknown; pipelineTag?: unknown }, pipeline: boolean, message: string): PipelineEvidence {
+  const { pipelineSource, pipelineTag } = value;
+  if (pipelineSource === undefined && pipelineTag === undefined) return {};
+  const source = gitlabPipelineSource(pipelineSource);
+  if (!pipeline || (pipelineSource !== undefined && !source) || (pipelineTag !== undefined && typeof pipelineTag !== 'boolean')) fail(message);
+  return {
+    ...(source === undefined ? {} : { pipelineSource: source }),
+    ...(typeof pipelineTag === 'boolean' ? { pipelineTag } : {}),
+  };
+}
+
 function config(value:unknown,projectId:string,actorId:string,workflow:ProjectWorkflow,schema:ProjectIssueSchema,users:User[]):Omit<AutomationRule,'id'|'gitlabBaseUrl'|'enabledAt'|'version'|'createdAt'|'updatedAt'>{
   const input=object(value);if(typeof input.enabled!=='boolean')fail('자동화 사용 여부를 확인해 주세요.');
   if(typeof input.trigger!=='string'||!AUTOMATION_TRIGGERS.includes(input.trigger as AutomationRule['trigger']))fail('지원하지 않는 GitLab 자동화 이벤트입니다.');
@@ -55,15 +69,23 @@ function config(value:unknown,projectId:string,actorId:string,workflow:ProjectWo
     if (!isGitlabDeploymentEnvironment(input.environment)) fail('GitLab 배포 환경 이름을 정확히 입력해 주세요.');
     environment = input.environment;
   } else {
-    branchPattern = text(input.branchPattern, '브랜치 패턴', 128);
-    if (/[\u0000-\u001f\u007f]/u.test(branchPattern)) fail('브랜치 패턴에 제어 문자를 사용할 수 없습니다.');
+    const patternLabel = isPipelineAutomationTrigger(trigger) ? '참조 이름 패턴' : '브랜치 패턴';
+    branchPattern = text(input.branchPattern, patternLabel, 128);
+    if (/[\u0000-\u001f\u007f]/u.test(branchPattern)) fail(`${patternLabel}에 제어 문자를 사용할 수 없습니다.`);
   }
+  const pipelineSources = input.pipelineSources === undefined ? [] : strings(input.pipelineSources, '파이프라인 실행 유형', 64, true).sort();
+  if (pipelineSources.some(source => !gitlabPipelineSource(source))) fail('파이프라인 실행 유형을 확인해 주세요.');
+  const pipelineRefKind = input.pipelineRefKind ?? undefined;
+  if (pipelineRefKind !== undefined && pipelineRefKind !== 'branch' && pipelineRefKind !== 'tag') fail('파이프라인 참조 유형을 확인해 주세요.');
+  if (!isPipelineAutomationTrigger(trigger) && (pipelineSources.length || pipelineRefKind)) fail('파이프라인 이벤트에서 실행 유형과 참조 유형을 설정할 수 있습니다.');
   const issueTypes=strings(input.issueTypes,'업무 유형',50,true),fromStatuses=strings(input.fromStatuses,'출발 상태',40),toStatusId=text(input.toStatusId,'도착 상태',80),priority=input.priority===undefined?100:input.priority;
   if(issueTypes.some(id=>!schema.issueTypes.some(type=>type.id===id)))fail('프로젝트에 없는 업무 유형입니다.');
   if(fromStatuses.some(id=>!workflow.statuses.some(status=>status.id===id))||!workflow.statuses.some(status=>status.id===toStatusId))fail('프로젝트에 없는 업무 상태입니다.');
   if(!Number.isSafeInteger(priority)||Number(priority)<0||Number(priority)>10000)fail('우선순위는 0~10000의 정수여야 합니다.');
   if(!users.some(user=>user.id===actorId))fail('자동화 실행 팀원을 찾을 수 없습니다.');
-  return{projectId,name:text(input.name,'자동화 이름',120),enabled:input.enabled,trigger,gitlabProjectIds:repoIds(input.gitlabProjectIds),branchPattern,...(environment===undefined?{}:{environment}),issueTypes:[...issueTypes].sort(),fromStatuses:[...fromStatuses].sort(),toStatusId,actorId,priority:Number(priority)};
+  return{projectId,name:text(input.name,'자동화 이름',120),enabled:input.enabled,trigger,gitlabProjectIds:repoIds(input.gitlabProjectIds),branchPattern,
+    ...(environment===undefined?{}:{environment}),...(pipelineSources.length?{pipelineSources}:{}),...(pipelineRefKind?{pipelineRefKind}:{}),
+    issueTypes:[...issueTypes].sort(),fromStatuses:[...fromStatuses].sort(),toStatusId,actorId,priority:Number(priority)};
 }
 
 /** Event processing joins the caller's webhook transaction; it never starts a nested transaction. */
@@ -113,11 +135,19 @@ export class AutomationService{
   private parse(input:unknown,requestActor:string,old?:AutomationRule):AutomationRule{
     const source=object(input);if(old&&source.projectId!==undefined&&source.projectId!==old.projectId)fail('규칙의 프로젝트는 변경할 수 없습니다.');
     const projectId=old?.projectId||this.project(source.projectId),actorId=source.actorId===undefined?(old?.actorId||requestActor):text(source.actorId,'실행 팀원 ID');
-    const editable=config({...old,...source,enabled:source.enabled===undefined?(old?.enabled??false):source.enabled},projectId,actorId,this.workflow(projectId),this.schema(projectId),this.store.all<User>('users'));
+    const proposed: Record<string, unknown> = {...old,...source,enabled:source.enabled===undefined?(old?.enabled??false):source.enabled};
+    if (!isPipelineAutomationTrigger(proposed.trigger)) {
+      proposed.pipelineSources = source.pipelineSources;
+      proposed.pipelineRefKind = source.pipelineRefKind;
+    }
+    const editable=config(proposed,projectId,actorId,this.workflow(projectId),this.schema(projectId),this.store.all<User>('users'));
     const settings=this.hooks.getGitlabSettings(),base=normalizeBase(settings.baseUrl);
     if(editable.gitlabProjectIds.some(id=>!settings.projectIds.includes(id)))fail('현재 GitLab 연결에서 허용한 프로젝트만 선택해 주세요.');
     if(editable.enabled&&(!base||!(settings.webhookSecretConfigured||settings.signingTokenConfigured)))fail('자동화를 사용하려면 GitLab 주소·프로젝트와 인증된 Webhook 수신을 먼저 설정해 주세요.',409);
-    const timestamp=new Date().toISOString(),changed=!old||JSON.stringify(editable)!==JSON.stringify(Object.fromEntries(Object.keys(editable).map(key=>[key,old[key as keyof AutomationRule]])))||old.gitlabBaseUrl!==base;
+    const timestamp = new Date().toISOString();
+    const fields = Object.keys(editable) as (keyof typeof editable)[];
+    fields.push('environment', 'pipelineSources', 'pipelineRefKind');
+    const changed = !old || old.gitlabBaseUrl !== base || fields.some(key => JSON.stringify(old[key]) !== JSON.stringify(editable[key]));
     return{...editable,id:old?.id||randomUUID(),gitlabBaseUrl:base,enabledAt:editable.enabled?(old?.enabled&&!changed?old.enabledAt:timestamp):null,version:old?old.version+1:1,createdAt:old?.createdAt||timestamp,updatedAt:timestamp};
   }
   create(input:unknown,actorId:string,afterSave?:(rule:AutomationRule)=>void):AutomationRule{return this.store.transaction(()=>{if(this.all().length>=1000)fail('자동화 규칙은 최대 1000개까지 만들 수 있습니다.');const rule=this.parse(input,actorId);this.put(rule);afterSave?.(rule);return rule;});}
@@ -140,13 +170,23 @@ export class AutomationService{
     for (const rule of rules) this.put({...rule, enabled: false, enabledAt: null, version: rule.version + 1, updatedAt: timestamp});
     return rules.length;
   }
-  private matchReason(rule:AutomationRule,issue:Issue,event:Pick<AutomationEvent,'trigger'|'gitlabProjectId'|'branch'|'environment'>):string|null{
+  private matchReason(rule:AutomationRule,issue:Issue,event:MatchEvent):string|null{
     if(issue.projectId!==rule.projectId)return'규칙과 다른 팀 프로젝트의 업무입니다.';
     if(event.trigger!==rule.trigger)return'규칙과 다른 GitLab 이벤트입니다.';
     if(!rule.gitlabProjectIds.includes(event.gitlabProjectId))return'규칙에서 선택하지 않은 GitLab 프로젝트입니다.';
     if (event.trigger === 'deployment.succeeded') {
       if (!event.environment || event.environment !== rule.environment) return '배포 환경 이름이 일치하지 않습니다.';
-    } else if (!event.branch || !branchMatches(rule.branchPattern, event.branch)) return '브랜치 패턴이 일치하지 않습니다.';
+    } else if (!event.branch || !branchMatches(rule.branchPattern, event.branch)) {
+      return isPipelineAutomationTrigger(event.trigger) ? '참조 이름 패턴이 일치하지 않습니다.' : '브랜치 패턴이 일치하지 않습니다.';
+    }
+    if (rule.pipelineSources?.length) {
+      if (event.pipelineSource === undefined) return '파이프라인 실행 유형을 확인할 수 없습니다.';
+      if (!rule.pipelineSources.includes(event.pipelineSource)) return '규칙에서 선택한 파이프라인 실행 유형이 아닙니다.';
+    }
+    if (rule.pipelineRefKind) {
+      if (event.pipelineTag === undefined) return '파이프라인 참조가 브랜치인지 태그인지 확인할 수 없습니다.';
+      if (event.pipelineTag !== (rule.pipelineRefKind === 'tag')) return '규칙에서 선택한 파이프라인 참조 유형이 아닙니다.';
+    }
     if(rule.issueTypes.length&&!rule.issueTypes.includes(issue.type))return'선택한 업무 유형이 아닙니다.';
     if(!rule.fromStatuses.includes(issue.status))return'현재 상태가 규칙의 출발 상태에 없습니다.';
     return null;
@@ -206,7 +246,11 @@ export class AutomationService{
         !Number.isFinite(occurred) || occurred > checkedAt || occurred <= appliedAt) continue;
       const saved = this.store.get<GitlabLink>('gitlab_links', link.id);
       if (!saved || JSON.stringify(saved) !== JSON.stringify(link)) continue;
-      const sample = { trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '' };
+      const { pipelineSource, pipelineTag } = link;
+      const sample = {
+        trigger, gitlabProjectId: link.projectId, branch: link.sourceBranch ?? '',
+        ...(link.kind === 'pipeline' && link.pipelineObservedAt === occurredAt ? { pipelineSource, pipelineTag } : {}),
+      };
       const matches = rules.filter(rule => this.matchReason(rule, issue, sample) === null);
       const [rule] = matches;
       if (!rule || !validTime(rule.enabledAt) || occurred < Date.parse(rule.enabledAt)) continue;
@@ -250,6 +294,8 @@ export class AutomationService{
     if (deployment ? !isDeploymentAutomationContext(event) : event.objectKind === 'deployment' || event.environment !== undefined) {
       fail('정규화된 GitLab 배포 이벤트를 확인해 주세요.');
     }
+    const pipelineEvidence = parsePipelineEvidence(event, event.objectKind === 'pipeline' && isPipelineAutomationTrigger(event.trigger),
+      '정규화된 GitLab 파이프라인 이벤트를 확인해 주세요.');
     const settings=this.hooks.getGitlabSettings(),base=normalizeBase(settings.baseUrl),rules=this.all(),result:AutomationRun[]=[];
     for(const issueId of new Set(event.issueIds)){
       const prior=this.store.db.prepare('SELECT json FROM automation_runs WHERE event_id=? AND issue_id=?').get(event.id,issueId) as {json:string}|undefined;if(prior){result.push(JSON.parse(prior.json) as AutomationRun);continue;}
@@ -282,6 +328,7 @@ export class AutomationService{
           ruleName: rule.name, trigger: event.trigger, gitlabBaseUrl: base, gitlabProjectId: event.gitlabProjectId,
           objectKind: event.objectKind, objectId: event.objectId, branch: event.branch,
           ...(event.environment === undefined ? {} : { environment: event.environment }),
+          ...pipelineEvidence,
           fromStatusLabel: statuses.find(status => status.id === issue.status)?.label ?? issue.status,
           toStatusLabel: statuses.find(status => status.id === rule.toStatusId)?.label ?? rule.toStatusId,
         },
@@ -295,13 +342,14 @@ export class AutomationService{
     const issueIds=strings(input.issueIds,'미리 볼 업무',500),sample=object(input.sample);
     if(typeof sample.trigger!=='string'||!AUTOMATION_TRIGGERS.includes(sample.trigger as AutomationRule['trigger'])||!Number.isSafeInteger(sample.gitlabProjectId))fail('미리 볼 GitLab 이벤트를 확인해 주세요.');
     const gitlabProjectId = Number(sample.gitlabProjectId);
-    let event: Pick<AutomationEvent, 'trigger' | 'gitlabProjectId' | 'branch' | 'environment'>;
+    let event: MatchEvent;
+    const pipelineEvidence = parsePipelineEvidence(sample, isPipelineAutomationTrigger(sample.trigger), '미리 볼 GitLab 파이프라인의 실행 유형과 참조 유형을 확인해 주세요.');
     if (sample.trigger === 'deployment.succeeded') {
       if (!isGitlabDeploymentEnvironment(sample.environment)) fail('미리 볼 GitLab 배포 환경 이름을 확인해 주세요.');
       event = { trigger: sample.trigger, gitlabProjectId, branch: '', environment: sample.environment };
     } else {
       if (typeof sample.branch !== 'string' || !sample.branch || sample.branch.length > 512) fail('미리 볼 GitLab 이벤트를 확인해 주세요.');
-      event = { trigger: sample.trigger as AutomationRule['trigger'], gitlabProjectId, branch: sample.branch };
+      event = { trigger: sample.trigger as AutomationRule['trigger'], gitlabProjectId, branch: sample.branch, ...pipelineEvidence };
     }
     const outcomes=issueIds.map(id=>{const issue=this.store.get<Issue>('issues',id);if(!issue)fail('미리 볼 업무를 찾을 수 없습니다.',404);const reason=this.matchReason(rule,issue,event);return reason?this.outcome(rule,issue,'ignored',reason):this.prepare(rule,issue).outcome;});
     return{outcomes,warnings:['미리보기는 업무·실행 기록을 변경하지 않으며 실제 GitLab 이벤트를 요청하지 않습니다.','실제 실행에서는 활성화 시각·이벤트 순서·연결 정보를 추가로 검증합니다.']};
@@ -310,6 +358,13 @@ export class AutomationService{
     if(!Array.isArray(value)||value.length>1000)fail('자동화 규칙 목록을 확인해 주세요.');if(options.legacy)return[];const ids=new Set<string>();
     return value.map(raw=>{const source=object(raw),id=text(source.id,'자동화 ID'),projectId=text(source.projectId,'자동화 프로젝트 ID'),actorId=text(source.actorId,'자동화 실행 팀원 ID');if(ids.has(id)||!projects.some(project=>project.id===projectId))fail('자동화 ID 또는 프로젝트 참조를 확인해 주세요.');ids.add(id);
       if (source.trigger !== 'deployment.succeeded' && Object.hasOwn(source, 'environment')) fail('자동화 규칙의 배포 환경을 확인해 주세요.');
+      const hasSources = Object.hasOwn(source, 'pipelineSources');
+      const hasRefKind = Object.hasOwn(source, 'pipelineRefKind');
+      if ((hasSources || hasRefKind) && (!isPipelineAutomationTrigger(source.trigger) ||
+          (hasSources && (!Array.isArray(source.pipelineSources) || !source.pipelineSources.length)) ||
+          (hasRefKind && source.pipelineRefKind !== 'branch' && source.pipelineRefKind !== 'tag'))) {
+        fail('자동화 규칙의 파이프라인 실행 유형 및 참조 유형을 확인해 주세요.');
+      }
       const editable=config(source,projectId,actorId,workflows.find(workflow=>workflow.projectId===projectId)||defaultWorkflow(projectId),schemas.find(schema=>schema.projectId===projectId)||defaultIssueSchema(projectId),users);
       if(!Number.isSafeInteger(source.version)||Number(source.version)<1||!validTime(source.createdAt)||!validTime(source.updatedAt)||(source.enabledAt!==null&&!validTime(source.enabledAt))||typeof source.gitlabBaseUrl!=='string')fail('자동화 규칙의 버전·시간·연결 정보를 확인해 주세요.');
       return{...editable,id,enabled:false,enabledAt:null,gitlabBaseUrl:normalizeBase(source.gitlabBaseUrl),version:Number(source.version),createdAt:source.createdAt,updatedAt:source.updatedAt};

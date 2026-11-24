@@ -1,4 +1,5 @@
-import type { AutomationRule,GitlabAutomationTrigger } from './types.js';
+import { gitlabPipelineSourceLabel } from './gitlab-pipeline-source.js';
+import type { AutomationRule, GitlabAutomationTrigger, GitlabPipelineRefKind } from './types.js';
 
 export const AUTOMATION_TRIGGER_LABELS:Record<GitlabAutomationTrigger,string>={
   'merge_request.opened':'Merge Request 열림',
@@ -9,6 +10,17 @@ export const AUTOMATION_TRIGGER_LABELS:Record<GitlabAutomationTrigger,string>={
   'deployment.succeeded':'배포 성공',
 };
 export const AUTOMATION_TRIGGERS=Object.keys(AUTOMATION_TRIGGER_LABELS) as GitlabAutomationTrigger[];
+export const PIPELINE_REF_KIND_LABELS: Record<GitlabPipelineRefKind, string> = { branch: '브랜치', tag: '태그' };
+
+export function isPipelineAutomationTrigger(trigger: unknown): trigger is 'pipeline.succeeded' | 'pipeline.failed' {
+  return trigger === 'pipeline.succeeded' || trigger === 'pipeline.failed';
+}
+
+export function automationPipelineContextLabel(source?: string, tag?: boolean): string | undefined {
+  if (source === undefined && tag === undefined) return;
+  const refKind = tag === undefined ? '참조 유형 미확인' : PIPELINE_REF_KIND_LABELS[tag ? 'tag' : 'branch'];
+  return `${refKind} · ${gitlabPipelineSourceLabel(source)}`;
+}
 
 export function isGitlabDeploymentEnvironment(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && value.length <= 255 && value.trim() === value &&

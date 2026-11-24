@@ -70,7 +70,7 @@ test('pipeline automation and the direct-review token distinguish compatible run
     expectedVersion: 1, baseUrl, projectIds: [42], webhookSecret: 'integration-secret', token: 'synthetic-read-token',
   });
   assert.equal(configured.status, 200, JSON.stringify(configured.data));
-  await rule(f, { name: 'Pipeline verified', trigger: 'pipeline.succeeded', branchPattern: branch });
+  const saved = await rule(f, { name: 'Pipeline verified', trigger: 'pipeline.succeeded', branchPattern: branch });
   const before = f.observer.get<Issue>('issues', 'issue-1')!;
   const deliver = async (id: number, source: string, tag: boolean, status: 'running' | 'success', keyed = false) => {
     const time = new Date().toISOString();
@@ -104,10 +104,40 @@ test('pipeline automation and the direct-review token distinguish compatible run
   assert.equal(exact.data.links.length, 1);
   assert.equal(exact.data.statusReview, undefined);
 
+  const rulePath = `/automation-rules/${saved.id}`;
+  const scheduled = await f.call<AutomationRule>(rulePath, 'PATCH', {
+    expectedVersion: saved.version, pipelineSources: ['schedule'], pipelineRefKind: 'branch',
+  });
+  assert.equal(scheduled.status, 200, JSON.stringify(scheduled.data));
+  const outdatedRule = await f.call('/issues/issue-1', 'PATCH', {
+    expectedVersion: before.version, status: 'done', gitlabStatusSuggestionToken: review.suggestion.token,
+  });
+  assert.equal(outdatedRule.status, 409, JSON.stringify(outdatedRule.data));
+  assert.equal(outdatedRule.data.details.reason, 'gitlab_status_suggestion_stale');
+  finishedAt = new Date().toISOString();
+  assert.equal(await reviewed(), undefined);
+
+  const tags = await f.call<AutomationRule>(rulePath, 'PATCH', {
+    expectedVersion: scheduled.data.version, pipelineSources: ['push'], pipelineRefKind: 'tag',
+  });
+  assert.equal(tags.status, 200, JSON.stringify(tags.data));
+  finishedAt = new Date().toISOString();
+  assert.equal(await reviewed(), undefined);
+
+  const pushes = await f.call<AutomationRule>(rulePath, 'PATCH', {
+    expectedVersion: tags.data.version, pipelineRefKind: 'branch',
+  });
+  assert.equal(pushes.status, 200, JSON.stringify(pushes.data));
+  finishedAt = new Date().toISOString();
+  const filtered = await reviewed();
+  assert.equal(filtered?.kind, 'suggestion');
+  if (filtered?.kind !== 'suggestion') throw new Error('Filtered pipeline suggestion missing');
+  assert.equal(filtered.suggestion.rule.version, pushes.data.version);
+
   await deliver(503, 'push', false, 'running');
   assert.equal(await reviewed(), undefined);
   const stale = await f.call('/issues/issue-1', 'PATCH', {
-    expectedVersion: before.version, status: 'done', gitlabStatusSuggestionToken: review.suggestion.token,
+    expectedVersion: before.version, status: 'done', gitlabStatusSuggestionToken: filtered.suggestion.token,
   });
   assert.equal(stale.status, 409, JSON.stringify(stale.data));
   assert.equal(stale.data.details.reason, 'gitlab_status_suggestion_stale');
@@ -119,6 +149,110 @@ test('pipeline automation and the direct-review token distinguish compatible run
   const runs = (await f.call<AutomationRun[]>('/automation-runs')).data;
   assert.deepEqual(runs.map(run => [run.context?.objectId, run.outcome]), [['505', 'changed']]);
   assert.equal(f.observer.all<GitlabLink>('gitlab_links').find(link => link.iid === 505)?.pipelineSource, 'push');
+});
+
+test('pipeline filters use authenticated exact execution evidence, including on sparse terminal deliveries', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  await configure(f);
+  const before = f.observer.get<Issue>('issues', 'issue-1')!;
+  const ref = 'feature/pipeline-filter';
+  const sha = 'b'.repeat(40);
+  await rule(f, { trigger: 'pipeline.succeeded', branchPattern: ref, pipelineSources: ['push'], pipelineRefKind: 'branch' });
+  const start = Date.now() - 100;
+  let deliveryCount = 0;
+  const deliver = async (id: number, classification: Record<string, unknown>, keyed = true) => {
+    const time = new Date(start + deliveryCount++).toISOString();
+    const response = await f.call<{ runs: AutomationRun[] }>('/integrations/gitlab/webhook', 'POST', {
+      object_kind: 'pipeline', project: { id: 42, web_url: 'http://gitlab.synthetic.test/team/repo' },
+      object_attributes: { id, ref, sha, status: 'success', updated_at: time, ...classification },
+      ...(keyed ? { commit: { id: sha, message: 'NEO-1 pipeline' } } : {}),
+    }, { 'X-Gitlab-Token': 'integration-secret', 'webhook-id': randomUUID() });
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return response.data.runs;
+  };
+
+  for (const [id, classification, reason] of [
+    [700, { source: 'schedule', tag: false }, /선택한 파이프라인 실행 유형/u],
+    [701, { source: 'merge_request_event', tag: false }, /선택한 파이프라인 실행 유형/u],
+    [702, { source: 'push', tag: true }, /선택한 파이프라인 참조 유형/u],
+    [703, { tag: false }, /실행 유형을 확인/u],
+    [704, { source: 'push', tag: 'false' }, /참조가 브랜치인지 태그인지 확인/u],
+    [705, { id: undefined, iid: 705, source: 'push', tag: false }, /실행 유형을 확인/u],
+  ] as const) {
+    const [run] = await deliver(id, classification);
+    assert.equal(run.outcome, 'ignored');
+    assert.match(run.reason, reason);
+    assert.deepEqual(f.observer.get('issues', before.id), before);
+  }
+
+  assert.deepEqual(await deliver(706, { status: 'running', source: 'push', tag: false }, false), []);
+  const [conflict] = await deliver(706, { source: 'schedule', tag: false });
+  assert.equal(conflict.outcome, 'ignored');
+  assert.match(conflict.reason, /기존 연결과 다릅니다/u);
+  assert.equal(conflict.context?.pipelineSource, undefined);
+  const [applied] = await deliver(706, {});
+  assert.equal(applied.outcome, 'changed');
+  assert.equal(applied.context?.pipelineSource, 'push');
+  assert.equal(applied.context?.pipelineTag, false);
+  assert.equal(f.observer.get<Issue>('issues', before.id)?.status, 'done');
+});
+
+test('pipeline rule preview and edits preserve independent source and ref filters', async t => {
+  const f = await fixture();
+  t.after(f.close);
+  await configure(f);
+  const before = f.observer.get<Issue>('issues', 'issue-1')!;
+  const saved = await rule(f, {
+    trigger: 'pipeline.succeeded', pipelineSources: ['schedule', 'push'], pipelineRefKind: 'branch',
+  });
+  assert.deepEqual(saved.pipelineSources, ['push', 'schedule']);
+  const preview = (sample: Record<string, unknown> = {}, edits: Record<string, unknown> = {}) =>
+    f.call('/automation/preview', 'POST', {
+      rule: { ...saved, ...edits }, issueIds: [before.id],
+      sample: { trigger: 'pipeline.succeeded', gitlabProjectId: 42, branch: 'feature/NEO-1', ...sample },
+    });
+  for (const [sample, edits, outcome] of [
+    [{ pipelineSource: 'push', pipelineTag: false }, {}, 'changed'],
+    [{ pipelineSource: 'schedule', pipelineTag: false }, {}, 'changed'],
+    [{ pipelineSource: 'web', pipelineTag: false }, {}, 'ignored'],
+    [{ pipelineSource: 'push', pipelineTag: true }, {}, 'ignored'],
+    [{ pipelineSource: 'push' }, {}, 'ignored'],
+    [{ pipelineTag: false }, {}, 'ignored'],
+    [{ pipelineSource: 'push' }, { pipelineRefKind: null }, 'changed'],
+    [{ pipelineTag: true }, { pipelineSources: [], pipelineRefKind: 'tag' }, 'changed'],
+    [{}, { pipelineSources: [], pipelineRefKind: null }, 'changed'],
+  ] as const) {
+    const response = await preview(sample, edits);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    assert.equal(response.data.outcomes[0].outcome, outcome);
+  }
+  assert.equal((await preview({ pipelineSource: 'Push' })).status, 400);
+  assert.equal((await preview({ pipelineTag: 'false' })).status, 400);
+  assert.equal((await preview({ trigger: 'merge_request.merged', pipelineTag: false })).status, 400);
+  assert.deepEqual(f.observer.get('issues', before.id), before);
+  assert.deepEqual((await f.call('/automation-runs')).data, []);
+
+  const path = `/automation-rules/${saved.id}`;
+  for (const invalid of [
+    { pipelineSources: ['push', 'push'] },
+    { pipelineSources: ['schedule!'] },
+    { pipelineRefKind: 'any' },
+    { trigger: 'merge_request.merged', pipelineSources: ['push'] },
+  ]) assert.equal((await f.call(path, 'PATCH', { expectedVersion: saved.version, ...invalid })).status, 400);
+  const cleared = await f.call<AutomationRule>(path, 'PATCH', {
+    expectedVersion: saved.version, pipelineSources: [], pipelineRefKind: null,
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  assert.equal(cleared.data.version, saved.version + 1);
+  assert.ok(Date.parse(cleared.data.enabledAt!) > Date.parse(saved.enabledAt!));
+  assert.equal(Object.hasOwn(cleared.data, 'pipelineSources'), false);
+  assert.equal(Object.hasOwn(cleared.data, 'pipelineRefKind'), false);
+  const tagged = await f.call<AutomationRule>(path, 'PATCH', { expectedVersion: cleared.data.version, pipelineRefKind: 'tag' });
+  assert.equal(tagged.status, 200, JSON.stringify(tagged.data));
+  const merge = await f.call<AutomationRule>(path, 'PATCH', { expectedVersion: tagged.data.version, trigger: 'merge_request.merged' });
+  assert.equal(merge.status, 200, JSON.stringify(merge.data));
+  assert.equal(Object.hasOwn(merge.data, 'pipelineRefKind'), false);
 });
 
 test('preview and webhook honor the same required-field workflow without creating mutation events',async()=>{

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowRight, ExternalLink, RefreshCw, Workflow } from 'lucide-react';
-import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
+import { AUTOMATION_TRIGGER_LABELS, automationPipelineContextLabel } from '../../shared/automation';
 import type { AutomationRun, FeatureProps, GitlabLink, IssueAutomationRunPage, User } from '../../shared/types';
 import { api } from '../lib/api';
 import { gitlabActivityUrl } from './GitlabActivity';
@@ -99,6 +99,7 @@ export function IssueAutomationHistory({ issueId, issueVersion, links, users, re
         const time = run.occurredAt || run.createdAt;
         const actor = users.find(user => user.id === run.actorId);
         const canEdit = current && history.latestBlockedRunId === run.id && canPrepareStatus(run);
+        const pipeline = context?.objectKind === 'pipeline' && automationPipelineContextLabel(context.pipelineSource, context.pipelineTag);
         return <li key={run.id}>
           <div className="issue-automation-transition">
             <span className="issue-automation-outcome" data-outcome={run.outcome}>{outcomes[run.outcome]}</span>
@@ -110,6 +111,7 @@ export function IssueAutomationHistory({ issueId, issueVersion, links, users, re
             <span>저장소 #{context.gitlabProjectId}{context.objectKind === 'deployment'
               ? <> · 배포 #{context.objectId} · 환경 <code>{context.environment}</code></>
               : <>{context.objectId && ` · 객체 #${context.objectId}`}{context.branch && <> · <code>{context.branch}</code></>}</>}</span>
+            {pipeline && <span>{pipeline}</span>}
           </div>}
           <div className="issue-automation-meta">
             <span>{run.occurredAt ? '이벤트 시각' : '기록 시각'} <time dateTime={time}>{new Date(time).toLocaleString('ko-KR')}</time></span>

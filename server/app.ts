@@ -3077,6 +3077,14 @@ export function createApp(options: {
       Array.isArray(data.automationRules) && data.automationRules.some((rule: { trigger?: unknown } | null) => rule?.trigger === 'deployment.succeeded') ||
       Array.isArray(data.automationRuns) && data.automationRuns.some((run: { context?: { trigger?: unknown } } | null) => run?.context?.trigger === 'deployment.succeeded')
     )) fail('GitLab 배포 자동화 규칙이나 실행 기록을 포함한 백업은 schemaVersion 75가 필요합니다.');
+    if (data.schemaVersion < 112 && (
+      Array.isArray(data.automationRules) && data.automationRules.some((rule: unknown) =>
+        rule && typeof rule === 'object' && (Object.hasOwn(rule, 'pipelineSources') || Object.hasOwn(rule, 'pipelineRefKind'))) ||
+      Array.isArray(data.automationRuns) && data.automationRuns.some((run: { context?: unknown } | null) => {
+        const context = run?.context;
+        return context && typeof context === 'object' && (Object.hasOwn(context, 'pipelineSource') || Object.hasOwn(context, 'pipelineTag'));
+      })
+    )) fail('GitLab 파이프라인 자동화 조건이나 실행 유형이 기록된 백업은 schemaVersion 112가 필요합니다.');
     const importedAutomation=automation.validateImport(data.schemaVersion>=8?data.automationRules:[],data.projects,data.users,importedWorkflows,importedSchemas,{legacy:data.schemaVersion<8});
     if(data.schemaVersion<64&&data.automationRuns!==undefined&&(!Array.isArray(data.automationRuns)||data.automationRuns.length)){
       fail('GitLab 상태 자동화 실행 기록을 포함한 백업은 schemaVersion 64가 필요합니다.');

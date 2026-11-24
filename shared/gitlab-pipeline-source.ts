@@ -11,7 +11,12 @@ const sourceLabels = new Map([
   ['chat', '채팅'],
   ['external', '외부 실행'],
   ['external_pull_request_event', '외부 PR'],
+  ['ondemand_dast_scan', '요청형 DAST 검사'],
+  ['ondemand_dast_validation', '요청형 DAST 검증'],
+  ['security_orchestration_policy', '보안 정책 검사'],
 ]);
+
+export const GITLAB_PIPELINE_SOURCE_OPTIONS = Object.freeze([...sourceLabels.keys()]);
 
 export function gitlabPipelineSource(value: unknown): string | undefined {
   return typeof value === 'string' && /^[a-z][a-z0-9_]{0,63}$/u.test(value) ? value : undefined;

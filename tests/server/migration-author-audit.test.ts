@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
   LegacyPackageSummary, MigrationApplyResult, MigrationAuthorKind, MigrationAuthorStatus, MigrationOptions, MigrationPreview,
   SourceImport, SourceReconciliationAudit, SourceReconciliationAuthorAudit, SourceReconciliationAuthorFindingsPage,
@@ -207,10 +208,10 @@ test('author audit verifies exact imported authors and attachment versions throu
   assert.equal(count(archivedPage, confluence.id, 'attachment', 'missing-fallback'), 2);
 
   const backup = await f.call<Record<string, unknown>>('/export');
-  assert.equal(backup.schemaVersion, 111);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const restored = await fixture(t);
   await restored.call('/import', 'POST', { data: { ...backup, schemaVersion: 110 } }, 400);
-  await restored.call('/import', 'POST', { data: backup });
+  await restored.call('/import', 'POST', { data: { ...backup, schemaVersion: 111 } });
   const restoredReceipt = (await restored.call<SourceImport[]>('/source-imports')).find(value => value.id === receipt.id)!;
   const restoredAudit = await restored.call<SourceReconciliationAudit>(`${path}/audit?expectedVersion=${restoredReceipt.version}`);
   assert.deepEqual(restoredAudit.authorAttribution, archivedPage);
