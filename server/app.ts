@@ -3377,6 +3377,10 @@ export function createApp(options: {
       row.jiraIssueFieldHashes?.parentId !== undefined || row.jiraIssueSourceFieldHashes?.parentId !== undefined)) {
       fail('Jira 상위 티켓의 비교 기준을 포함한 백업은 schemaVersion 100이 필요합니다.');
     }
+    if (data.schemaVersion < 116 && importedSources.records.some(row =>
+      row.jiraIssueFieldHashes?.plannedEffortMinutes !== undefined || row.jiraIssueSourceFieldHashes?.plannedEffortMinutes !== undefined)) {
+      fail('Jira 계획 작업 시간의 비교 기준을 포함한 백업은 schemaVersion 116이 필요합니다.');
+    }
     const importedIssueRelations = [...importedSources.relations, ...importedTrash.flatMap(entry => entry.issueRelations)];
     const importedTeamspaceRelations = importedIssueRelations.filter(isTeamspaceIssueRelation);
     if (data.schemaVersion < 51 && importedTeamspaceRelations.length) fail('직접 만든 업무 관계를 포함한 백업은 schemaVersion 51이 필요합니다.');

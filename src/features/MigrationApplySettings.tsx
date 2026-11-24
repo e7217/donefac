@@ -24,7 +24,7 @@ const sourceLinkCountLabels = { atlassianLinks: '원본 링크 생성', unlinked
 const jiraPlanningCountLabels = {
   jiraReleases: '새 Jira 릴리스', jiraReleaseLinks: '릴리스에 연결된 업무', jiraReleaseUnassigned: '릴리스에 미연결된 업무',
   jiraSprints: '새 Jira 사이클', jiraSprintLinks: '사이클에 연결된 업무', jiraSprintUnassigned: '사이클에 미연결된 업무',
-  jiraSprintHistoryOnly: '과거 스프린트 이력만 있는 업무',
+  jiraSprintHistoryOnly: '과거 스프린트 이력만 있는 업무', jiraPlannedEffortIssues: '계획 작업 시간을 포함한 새 업무',
 };
 const jiraPlanningReviews = [
   { choices: 'jiraReleaseChoices', selections: 'jiraReleaseSelections', label: '릴리스', original: '모든 Jira 수정 버전' },
@@ -61,7 +61,7 @@ const documentOrderCountLabels = {
 };
 const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', reporterId: '요청자', labels: '라벨',
-  startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량', parentId: '상위 업무',
+  startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량', plannedEffortMinutes: '계획 작업 시간 (분)', parentId: '상위 업무',
 };
 function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>) {
   return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
@@ -505,7 +505,7 @@ function ActorMigration(props: MigrationApplyProps) {
           </p>
           {issueDestination && <p>현재 프로젝트의 상태·유형·속성에 새 업무를 연결합니다. 이미 이관한 업무가 겹치면 미리보기에 표시합니다.</p>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무 변경분 반영">
-            제목, 상태, 담당자 등 기본 필드의 원본 변경을 검토합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 필드는 유지합니다.
+            제목, 상태, 담당자, 계획 작업 시간 등 기본 필드의 원본 변경을 검토합니다. 팀에서 편집한 값은 유지합니다.
           </RefreshOption>}
           {appendTo && issueDestination && options.fields.length > 0 && <RefreshOption value={appendTo} option="refreshCustomFields" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무의 사용자 정의 속성 변경분 반영">
             아래 속성 매핑에 따라 변경된 원본 값을 비교합니다. 팀에서 편집한 값과 이전 값을 확인할 수 없는 속성은 유지합니다.

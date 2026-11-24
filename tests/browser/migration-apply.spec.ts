@@ -418,28 +418,28 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
   const originalTitle = `이전 Jira 제목 ${id}`, localTitle = `Teamspace에서 작성한 제목 ${id}`, nextTitle = `새 Jira 제목 ${id}`;
   const originalDescription = '처음 이관한 Jira 설명', nextDescription = '다시 내보낸 Jira의 설명';
   const originalIssueKey = `${sourceKey}-1`;
-  const jiraExport = (summary: string, description: string, updated: string) => Buffer.from(JSON.stringify({ issues: [{
+  const jiraExport = (summary: string, description: string, updated: string, originalEstimateSeconds: number) => Buffer.from(JSON.stringify({ issues: [{
     id: '30010', key: originalIssueKey, fields: {
       project: { id: '10100', key: sourceKey, name: `원본 프로젝트 ${sourceKey}` },
-      summary, description, created: '2020-01-01T00:00:00Z', updated,
+      summary, description, created: '2020-01-01T00:00:00Z', updated, timetracking: { originalEstimateSeconds },
       status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
     },
   }] }));
   const staged: LegacyPackageSummary[] = [];
   let issueId: string | undefined;
   try {
-    const original = await upload(request, `refresh-original-${id}.json`, jiraExport(originalTitle, originalDescription, '2020-01-02T00:00:00Z'), instance);
+    const original = await upload(request, `refresh-original-${id}.json`, jiraExport(originalTitle, originalDescription, '2020-01-02T00:00:00Z', 7200), instance);
     staged.push(original);
     const initial = await importIntoProject(request, original, targetKey, `이전 이관 프로젝트 ${id}`);
     const [projectId] = initial.import.projectIds;
     const imported = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.find(issue => issue.projectId === projectId)!;
     issueId = imported.id;
-    expect(imported).toMatchObject({ title: originalTitle, description: originalDescription });
+    expect(imported).toMatchObject({ title: originalTitle, description: originalDescription, plannedEffortMinutes: 120 });
     const savedResponse = await request.patch(`/api/issues/${imported.id}`, { data: { expectedVersion: imported.version, title: localTitle } });
     expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
     const saved = await savedResponse.json() as Issue;
 
-    const next = await upload(request, `refresh-next-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-03T00:00:00Z'), instance);
+    const next = await upload(request, `refresh-next-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-03T00:00:00Z', 9000), instance);
     staged.push(next);
     const { settings } = await open(page, request);
     await selectPackage(settings, next.filename);
@@ -462,7 +462,7 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
     const plan = await preview(page, settings);
     expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
     expect(plan.configuration.appendTo?.refreshExisting).toBe(true);
-    expect(plan.counts).toMatchObject({ issues: 0, updatedIssues: 1, updatedFields: 1, conflictingFields: 1 });
+    expect(plan.counts).toMatchObject({ issues: 0, updatedIssues: 1, updatedFields: 2, conflictingFields: 1 });
     const changes = review.getByRole('region', { name: '기존 Jira 업무 변경 검토', exact: true });
     await expect(changes.getByRole('heading', { name: `${imported.key} Jira ${originalIssueKey}`, exact: true })).toBeVisible();
     const title = changes.getByRole('listitem', { name: '제목', exact: true });
@@ -473,6 +473,10 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
     await expect(description).toContainText('Jira 값 반영');
     await expect(description).toContainText(originalDescription);
     await expect(description).toContainText(nextDescription);
+    const plannedEffort = changes.getByRole('listitem', { name: '계획 작업 시간 (분)', exact: true });
+    await expect(plannedEffort).toContainText('Jira 값 반영');
+    await expect(plannedEffort).toContainText('120분');
+    await expect(plannedEffort).toContainText('150분');
     const bounds = await changes.boundingBox();
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
@@ -490,7 +494,7 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
     await expect(receipt.getByText('현재 값을 유지할 기본 필드 1', { exact: true })).toBeVisible();
     const after = (await (await request.get('/api/workspace')).json() as WorkspaceSnapshot).issues.filter(issue => issue.projectId === projectId);
     expect(after).toHaveLength(1);
-    expect(after[0]).toMatchObject({ id: imported.id, key: imported.key, version: saved.version + 1, title: localTitle, description: nextDescription });
+    expect(after[0]).toMatchObject({ id: imported.id, key: imported.key, version: saved.version + 1, title: localTitle, description: nextDescription, plannedEffortMinutes: 150 });
 
     await selectPackage(settings, next.filename);
     await mode.selectOption('append');
@@ -500,7 +504,7 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
     await expect(review.getByRole('heading', { name: '적용할 Jira 변경이 없습니다', exact: true })).toBeVisible();
     await expect(review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true })).toBeDisabled();
 
-    const newer = await upload(request, `refresh-newer-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-04T00:00:00Z'), instance);
+    const newer = await upload(request, `refresh-newer-${id}.json`, jiraExport(nextTitle, nextDescription, '2020-01-04T00:00:00Z', 9000), instance);
     staged.push(newer);
     async function reviewNewerExport() {
       await open(page, request);
@@ -519,6 +523,7 @@ test('360px에서 Jira 변경을 반영하고 다음 원본에서도 보존한 �
     await expect(title).toContainText(localTitle);
     await expect(title).toContainText(nextTitle);
     await expect(description).toHaveCount(0);
+    await expect(plannedEffort).toHaveCount(0);
 
     const discarding = page.waitForEvent('dialog').then(async dialog => {
       const message = dialog.message();

@@ -368,6 +368,8 @@ const csvSnapshotFields = new Map<string, JiraMigrationIssueField>([
   ['due date', 'dueDate'], ['due', 'dueDate'], ['estimate', 'estimate'],
 ]);
 
+const jiraTimeTrackingFields = ['timeoriginalestimate', 'timeestimate', 'timespent'] as const;
+
 class Context{
   dataset:LegacyDataset;byId=new Map<string,LegacyRecord>();fileNames=new Map<string,string[]>();
   readonly scheduleDates=new JiraDateProjection((code,message,recordId,path)=>this.warn(code,message,recordId,path));
@@ -682,6 +684,9 @@ function parseCsv(context:Context,path:string,source:string):void{
   const reporterColumns = headers.flatMap((name, index) => /^Reporter$/i.test(name) ? [index] : []);
   const parentIdColumns = headers.flatMap((name, index) => /^Parent id$/i.test(name) ? [index] : []);
   const parentKeyColumns = headers.flatMap((name, index) => /^Parent$/i.test(name) ? [index] : []);
+  const estimateColumns = headers.flatMap((name, index) => /^Original Estimate$/i.test(name) ? [index] : []);
+  const standardKeyColumns = headers.flatMap((name, index) => /^Issue key$/i.test(name) ? [index] : []);
+  const standardIdColumns = headers.flatMap((name, index) => /^Issue id$/i.test(name) ? [index] : []);
   for (const name of customHeaders) context.field(`csv:${name}`, name, 'csv-unspecified');
   const fixVersionColumns = headers.flatMap((header, index) => /^Fix Version\/s$/i.test(header) ? [index] : []);
   const dateColumns = headers.flatMap((header, column) => {
@@ -705,6 +710,12 @@ function parseCsv(context:Context,path:string,source:string):void{
     }
     if (parent && row.length === headers.length && parentIdColumns.length <= 1 && parentKeyColumns.length <= 1) {
       context.observeIssueParent(item, jiraIssueParentIdentity(row[parentIdColumns[0]] || undefined, row[parentKeyColumns[0]] || undefined));
+    }
+    if (estimateColumns.some(column => row[column]?.trim())) {
+      const sourceKey = row[standardKeyColumns[0]], sourceId = row[standardIdColumns[0]];
+      const exact = row.length === headers.length && estimateColumns.length === 1 && standardKeyColumns.length <= 1 && standardIdColumns.length <= 1 &&
+        (sourceKey || sourceId) && (!sourceKey || isJiraHierarchyIssueKey(sourceKey)) && (!sourceId || isJiraHierarchyIssueId(sourceId));
+      recordJiraOriginalEstimate(context, item, exact ? jiraEstimateTextSeconds(row[estimateColumns[0]]) : undefined, path);
     }
     if (row.length === headers.length && customFieldIds.length) item.metadata.jiraSnapshotCustomFields = customFieldIds;
     for(let column=0;column<headers.length;column++){const name=headers[column],value=row[column]||'';if(!value)continue;if(/^Comment$/i.test(name)){const parts=value.split(';'),structured=parts.length>=3;const commentId=`csv:${id}:comment:${column}`,actor=structured?context.identity(parts[1]):null;context.put('comment',commentId,{title:'댓글',containerId:id,authorId:actor,createdAt:structured?context.date(parts[0],`comment:${commentId}`):null,text:structured?parts.slice(2).join(';'):value,textFormat:'jira-wiki',metadata:{sourceColumn:column,structured,syntheticId:true},references:[...ref('issue',id,'commentOn'),...ref('identity',actor,'author')]});if(!structured)context.warn('CSV_COMMENT_ATTRIBUTION_UNRESOLVED','댓글 원문은 보존했지만 작성자·시각 구분 형식을 확인하지 못했습니다.',item.id);}
@@ -740,6 +751,41 @@ function recordJiraReporter(item: LegacyRecord, reporter: string | null | undefi
       reference.relation === 'reporter' && reference.sourceId === reporter)) {
     item.references.push(...ref('identity', reporter, 'reporter'));
   }
+}
+
+function jiraEstimateSeconds(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function jiraEstimateTextSeconds(value: string | null | undefined): number | undefined {
+  const digits = value?.trim();
+  return digits && /^\d{1,16}$/u.test(digits) ? jiraEstimateSeconds(Number(digits)) : undefined;
+}
+
+function recordJiraOriginalEstimate(context: Context, issue: LegacyRecord, seconds: number | null | undefined, path: string) {
+  if (seconds !== undefined) issue.metadata.jiraOriginalEstimateSeconds = seconds;
+  else context.warn('JIRA_ORIGINAL_ESTIMATE_UNRESOLVED', 'Jira 원래 추정치의 초 단위 값이 모호하거나 올바르지 않아 원본에 보관합니다.', issue.id, path);
+}
+
+function readRestOriginalEstimate(context: Context, issue: LegacyRecord, fields: ObjectValue, archived: Record<string, LegacyValue>, path: string) {
+  for (const name of jiraTimeTrackingFields) if (Object.hasOwn(fields, name)) archived[name] = jsonValue(fields[name]);
+  const sourceTracking = fields.timetracking;
+  const tracking = obj(sourceTracking);
+  const malformedTracking = sourceTracking != null && (typeof sourceTracking !== 'object' || Array.isArray(sourceTracking));
+  if (Object.hasOwn(fields, 'timetracking')) {
+    const trackingFields = ['originalEstimate', 'originalEstimateSeconds', 'remainingEstimate', 'remainingEstimateSeconds', 'timeSpent', 'timeSpentSeconds'];
+    archived.timetracking = malformedTracking || sourceTracking === null ? jsonValue(sourceTracking)
+      : Object.fromEntries(trackingFields.filter(name => Object.hasOwn(tracking, name)).map(name => [name, jsonValue(tracking[name])]));
+  }
+  const claims = [];
+  if (Object.hasOwn(fields, 'timeoriginalestimate')) claims.push(fields.timeoriginalestimate);
+  if (Object.hasOwn(tracking, 'originalEstimateSeconds')) claims.push(tracking.originalEstimateSeconds);
+  const display = [tracking.originalEstimate, fields.originalEstimate].some(value => value != null && value !== '');
+  if (!claims.length && !display && !malformedTracking) return;
+  const [claim] = claims;
+  const seconds = claim === null && !display ? null : jiraEstimateSeconds(claim);
+  recordJiraOriginalEstimate(context, issue,
+    !malformedTracking && claims.every(other => claim === other) ? seconds : undefined, path);
 }
 
 function jiraCustomUser(context: Context, value: unknown, fieldType: string): string | null {
@@ -797,6 +843,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     if (!importers) context.activityPages.track(item, input.self, kind, envelope, rows.map(raw => str(obj(raw).id) || null), path);
   };
   const values=item.metadata.fields as Record<string,LegacyValue>;
+  if (!importers) readRestOriginalEstimate(context, item, fields, values, path);
   const scheduleValues = ['startDate', 'endDate', 'dueDate', 'duedate', 'estimate'];
   const jiraScheduleFields = Object.fromEntries(scheduleValues.filter(name=>Object.hasOwn(fields,name) &&
     (fields[name] === null || typeof fields[name] === 'string' || typeof fields[name] === 'number')).map(name=>[name,jsonValue(fields[name])]));
@@ -867,7 +914,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
     }, path);
     if (innerId && outerId) context.warn('JIRA_RELATION_RECORD_CONFLICT', '같은 Jira 관계 항목에 두 방향의 링크가 함께 있습니다.', `relation:${linkId}`, path);
   }
-  const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','closedSprints','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key']);
+  const known=new Set(['project','summary','description','creator','reporter','assignee','parent','created','updated','resolutiondate','duedate','dueDate','startDate','endDate','environment','originalEstimate','timeSpent','estimate','status','issuetype','issueType','priority','resolution','security','labels','components','fixVersions','fixedVersions','versions','affectedVersions','sprint','closedSprints','watches','customFieldValues','comment','comments','attachment','attachments','history','issuelinks','worklog','worklogs','externalId','id','key',...(!importers ? [...jiraTimeTrackingFields, 'timetracking'] : [])]);
   for(const name of Object.keys(fields))if(!known.has(name)&&!/^customfield_\d+$/.test(name))context.unsupported(`json-field:${name}`);
 }
 function declareRestFields(context: Context, root: ObjectValue, path: string): ProjectedDateField[] {
@@ -946,6 +993,19 @@ function rssDateValue(custom: LegacyXmlNode): unknown {
   return value?.text;
 }
 
+function readRssOriginalEstimate(context: Context, issue: LegacyRecord, node: LegacyXmlNode, archived: Record<string, LegacyValue>, path: string) {
+  for (const name of jiraTimeTrackingFields) {
+    const values = children(node, name);
+    const [original] = values;
+    if (!original) continue;
+    archived[name] = values.map(value => ({ seconds: value.attributes.seconds ?? null, text: text(value) }));
+    if (name === 'timeoriginalestimate') {
+      const exact = values.length === 1 && !original.children.length && Object.keys(original.attributes).every(attribute => attribute === 'seconds');
+      recordJiraOriginalEstimate(context, issue, exact ? jiraEstimateTextSeconds(original.attributes.seconds) : undefined, path);
+    }
+  }
+}
+
 function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
   const channel=child(root,'channel');if(!channel){context.warn('XML_SEARCH_CHANNEL_MISSING','검색 XML의 channel이 없습니다.',null,path,'error');return;}const items=children(channel,'item'),range=child(channel,'issue');if(range&&(Number(range.attributes.total)>items.length||Number(range.attributes.start)>0))context.warn('ISSUES_PARTIAL','검색 XML은 일부 검색 결과만 포함합니다.',null,path);
   for(let index=0;index<items.length;index++){
@@ -966,6 +1026,7 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
         Object.keys(parentNode.attributes).every(name => name === 'id')) {
       context.observeIssueParent(item, jiraIssueParentIdentity(parentNode.attributes.id, parentNode.text.trim() || undefined));
     }
+    readRssOriginalEstimate(context, item, node, fields, path);
     for(const name of ['type','status','priority','resolution','security','due','resolved','environment','version','fixVersion','component','labels']){const matches=children(node,name);if(!matches.length)continue;const normalized=name==='type'?'issuetype':name,fieldId=`builtin:${normalized}`;fields[normalized]=matches.map(value=>({id:value.attributes.id||null,text:text(value)}));if(['type','status','priority','resolution'].includes(name)){context.field(fieldId,normalized,'jira-builtin');for(const value of matches){const option=context.option(fieldId,{id:value.attributes.id||text(value),name:text(value)});item.references.push(...ref('option',option,normalized));}}}
     for (const value of children(node, 'fixVersion')) {
       const versionId = versionIdentifier(value.attributes.id);
@@ -1113,6 +1174,11 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       exactIssueRows.set(item, issueType && !isJiraHierarchyIssueId(issueType) ? null : issueType);
     }
     if (adminXmlScalar(node, 'priority') === null) item.metadata.jiraPriorityAmbiguous = true;
+    const originalEstimate = adminXmlScalar(node, 'timeoriginalestimate');
+    if (originalEstimate !== undefined) {
+      if (originalEstimate === null) fields.timeoriginalestimate = adminXmlScalarCandidates(node, 'timeoriginalestimate');
+      recordJiraOriginalEstimate(context, item, jiraEstimateTextSeconds(originalEstimate), path);
+    }
     const reporterElements = children(node, 'reporter');
     if (Number(Object.hasOwn(node.attributes, 'reporter')) + reporterElements.length === 1 &&
         !reporterElements.some(element => element.children.length) && typeof v.reporter === 'string') {

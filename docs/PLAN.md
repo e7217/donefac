@@ -672,6 +672,10 @@ ZIP에 연결한 Confluence 검토에서 읽기 제한을 확인하면 오프라
 
 ## Jira 작업 시간 이관
 
+Jira의 **Original Estimate**를 관리자 XML, 검색 RSS XML, REST의 초 단위 필드와 Jira 표준 CSV 열에서 확인한다. 0~1,000,000 사이의 정수 분으로 정확히 변환되는 값은 간트의 계획 작업 시간에 저장한다. 해당 열이나 필드를 생략하면 입력 기록을 유지한다. 모호한 값, 분 미만의 나머지와 범위를 넘는 값은 원본 분석에 보관하고 미리보기에 표시한다. 남은 시간과 실제 작업 시간은 각자의 원본 정보로 보존한다. [Jira Data Center REST 예시](https://developer.atlassian.com/server/jira/platform/rest/v11002/api-group-issue/) · [Jira RSS 내보내기](https://support.atlassian.com/jira-software-cloud/docs/export-search-results/) · [Jira CSV 원래 추정치](https://support.atlassian.com/jira/kb/understand-how-the-original-estimate-field-value-is-calculated-when-viewing-the-data-export-in-jira-cloud/)
+
+변경분 미리보기에서 계획 시간의 현재 값과 원본 값을 확인한다. Teamspace에서 별도로 수정하거나 지운 값은 보존하고, 기존 영수증의 비교 기준과 일치할 때 새 값을 반영한다. 이 필드를 비워 둔 이전 이관 업무에도 확인된 숫자를 추가할 수 있다. 형식 116 백업에 분 단위 반영값과 원본 초 단위 값의 비교 기준을 담는다. 기능 추가 전에 분석만 한 패키지에서 새 추정치를 읽으려면 같은 자료를 다시 분석한다.
+
 Jira 관리자 XML의 작업 기록과 REST·Importers JSON의 개별 작업 시간에서 이관할 업무, 작성자, 작업일, 초 단위 길이를 확인한다. 날짜는 기록에 명시된 현지 날짜를 유지한다. 팀원으로 명시적으로 매핑한 작성자의 기록을 업무의 작업 시간과 프로젝트 보고서에 함께 반영한다. 제한된 기록은 제외하기 전까지 적용을 차단한다. 매핑되지 않은 작성자나 기준이 불명확한 날짜·시간 단위는 원본에 보관하고 확인 항목에 표시한다. 부분 REST 페이지는 진단에 남긴다. [Jira Data Center 작업 기록 API](https://developer.atlassian.com/server/jira/platform/rest/v11003/api-group-issue/), [Jira JSON 작업 시간 예시](https://confluence.atlassian.com/servicedeskcloud/importing-data-from-json-1097176631.html#ImportingdatafromJSON-Worklogs).
 
 적용 건수와 원본에만 보관한 건수를 미리보기와 영수증에 남긴다. 작업 시간과 보관 원본은 다른 업무 데이터와 같은 트랜잭션에 저장하며 원본 ID로 연결한다. 자체 백업은 원본과 정확한 초 단위를 함께 복원한다. 기존에 적용한 이관 영수증과 부분 데이터의 운영 리허설은 따로 검토한다.

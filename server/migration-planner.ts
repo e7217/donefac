@@ -5,6 +5,7 @@ import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
+import { MAX_PLANNED_EFFORT_MINUTES } from '../shared/project-workload.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { documentSectionHash } from '../shared/document-sections.js';
@@ -477,6 +478,7 @@ export function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: Legac
         return value === undefined && Array.isArray(observed) && observed.includes(field) ? null : value;
       }
       case 'estimate': return jiraSnapshotValue(row, ['estimate']) ?? '';
+      case 'plannedEffortMinutes': return row.metadata.jiraOriginalEstimateSeconds;
     }
   };
   return [digest(identity())];
@@ -485,6 +487,21 @@ export function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: Legac
 function sameJiraSourceField(incoming: [string] | [string, string], accepted?: [string] | [string, string]): boolean {
   return !!accepted && (incoming[0] === accepted[0] || incoming.length === 1 && incoming[0] === accepted[1] ||
     accepted.length === 1 && accepted[0] === incoming[1]);
+}
+
+function matchedJiraSourceFieldHashes(row: LegacyRecord, applied: JiraMigrationIssueFieldHashes,
+  projected: JiraMigrationIssueFieldHashes = applied): JiraMigrationIssueSourceFieldHashes {
+  const result: JiraMigrationIssueSourceFieldHashes = {};
+  if (row.metadata.jiraEpicParentObserved === true && applied.parentId !== undefined &&
+      applied.parentId !== jiraFieldDigest('parentId', null) && jiraParentEvidence(row)) {
+    result.parentId = [jiraEpicParentHash];
+  }
+  for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
+    // An initial raw parent may have been outside the import, leaving a canonical root.
+    if (field === 'parentId') continue;
+    if (applied[field] !== undefined && applied[field] === projected[field]) result[field] = jiraSourceFieldHashes(field, row);
+  }
+  return result;
 }
 
 interface Entry{pkg:MigrationPackage;row:LegacyRecord;key:string;container:string}
@@ -740,19 +757,19 @@ class Planner{
     // A legacy refresh receipt may carry earlier applied hashes alongside a newer, conflicting raw record.
     const projected = previous.configuration.appendTo?.refreshExisting && previous.archive.jiraIssueFieldHashes
       ? jiraFieldDigests(this.jiraRefreshValues(entry, issueId, previous)) : applied;
-    const result: JiraMigrationIssueSourceFieldHashes = {};
-    if (previous.archive.record.metadata.jiraEpicParentObserved === true && applied.parentId !== undefined &&
-        applied.parentId !== jiraFieldDigest('parentId', null) && jiraParentEvidence(previous.archive.record)) {
-      result.parentId = [jiraEpicParentHash];
+    return matchedJiraSourceFieldHashes(previous.archive.record, applied, projected);
+  }
+  private jiraPlannedEffort(entry: Entry, row = entry.row, warn = true): number | null | undefined {
+    const seconds = row.metadata.jiraOriginalEstimateSeconds;
+    if (seconds === undefined || seconds === null) return seconds;
+    if (typeof seconds === 'number' && Number.isSafeInteger(seconds) && seconds >= 0 && seconds % 60 === 0 &&
+        seconds / 60 <= MAX_PLANNED_EFFORT_MINUTES) return seconds / 60;
+    if (warn) {
+      const maximum = MAX_PLANNED_EFFORT_MINUTES.toLocaleString('ko-KR');
+      this.notice('JIRA_ORIGINAL_ESTIMATE_ARCHIVED',
+        `Jira 원래 추정치는 초 단위 원본에 보관합니다. 계획 작업 시간은 0~${maximum} 사이의 정수 분으로만 이관합니다.`, 'warning', entry, true);
     }
-    for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
-      // An initial raw parent may have been outside the import, leaving a canonical root.
-      if (field === 'parentId') continue;
-      if (applied[field] !== undefined && applied[field] === projected[field]) {
-        result[field] = jiraSourceFieldHashes(field, previous.archive.record);
-      }
-    }
-    return result;
+    return undefined;
   }
   private jiraDescription(entry: Entry, issueId: string, row = entry.row) {
     return projectJiraDescription(row, {
@@ -843,11 +860,14 @@ class Planner{
           !!String(rawEstimate).trim() && Number(rawEstimate) >= 0 && Number(rawEstimate) <= 100000) values.estimate = Number(rawEstimate);
       else unavailable('예상 작업량');
     }
+    const plannedEffortMinutes = this.jiraPlannedEffort(entry, row, !previous);
+    if (plannedEffortMinutes !== undefined) values.plannedEffortMinutes = plannedEffortMinutes;
     return values;
   }
   private jiraReviewValue(field: JiraMigrationIssueField, value: Issue[JiraMigrationIssueField], format?: JiraMigrationIssueValues['descriptionFormat']): string {
     if (field === 'parentId' && value === null) return '최상위 업무';
     if (value === null || value === undefined || value === '' || Array.isArray(value) && value.length === 0) return '비어 있음';
+    if (field === 'plannedEffortMinutes' && typeof value === 'number') return `${value.toLocaleString('ko-KR')}분`;
     const append = this.input.append!;
     let label = Array.isArray(value) ? value.join(', ') : String(value);
     if (field === 'parentId') {
@@ -1052,13 +1072,14 @@ class Planner{
     const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
     const hierarchyAliases = new Map(append.hierarchyIssueAliases?.map(({ alias, issueId }) => [alias, issueId]));
     const sourceErrors = this.jiraHierarchySourceErrors();
-    const sourceDateWarnings = new Map<string, string[]>();
+    const sourceFieldWarnings = new Map<string, Pick<MigrationNotice, 'code' | 'message'>[]>();
     for (const pkg of this.input.packages) for (const diagnostic of pkg.dataset.diagnostics) {
-      if (diagnostic.recordId && diagnostic.code === 'JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS') {
+      if (diagnostic.recordId && diagnostic.severity === 'warning' &&
+          (diagnostic.code === 'JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS' || diagnostic.code === 'JIRA_ORIGINAL_ESTIMATE_UNRESOLVED')) {
         const key = `${pkg.summary.id}/${diagnostic.recordId}`;
-        const messages = sourceDateWarnings.get(key) ?? [];
-        messages.push(diagnostic.message);
-        sourceDateWarnings.set(key, messages);
+        const warnings = sourceFieldWarnings.get(key) ?? [];
+        warnings.push({ code: diagnostic.code, message: diagnostic.message });
+        sourceFieldWarnings.set(key, warnings);
       }
     }
     const review: JiraMigrationIssueReview[] = [];
@@ -1095,8 +1116,8 @@ class Planner{
         this.notice('JIRA_REFRESH_SOURCE_NOT_NEWER', '이관한 원본보다 새로운 수정 시각을 확인할 수 없어 변경분은 적용하지 않습니다.', 'info', entry);
         continue;
       }
-      if (reviewStandard) for (const message of sourceDateWarnings.get(entry.key) ?? []) {
-        this.notice('SOURCE_JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS', message, 'warning', entry, true);
+      if (reviewStandard) for (const { code, message } of sourceFieldWarnings.get(entry.key) ?? []) {
+        this.notice(`SOURCE_${code}`, message, 'warning', entry, true);
       }
       if ([reviewStandard ? previous.archive.record.updatedAt : null, reviewCustom ? customBaseline.archive.record.updatedAt : null,
         entry.row.updatedAt].some(value => value && jiraEnglishDate(value)?.century)) {
@@ -1128,6 +1149,8 @@ class Planner{
         const next = values[field];
         if (next === undefined) continue;
         const current = issue[field];
+        const plannedEffortWithoutBaseline = field === 'plannedEffortMinutes' && hashes.plannedEffortMinutes === undefined;
+        if (plannedEffortWithoutBaseline && current === undefined && next === null) continue;
         const incomingHash = jiraFieldDigest(field, next, values.descriptionFormat);
         const currentHash = jiraFieldDigest(field, current, issue.descriptionFormat);
         const incomingSourceHashes = jiraSourceFieldHashes(field, entry.row);
@@ -1148,7 +1171,9 @@ class Planner{
           canCheckpoint = true;
           continue;
         }
-        const decision = currentHash === hashes[field] || reporterWithoutBaseline && current === undefined ? 'apply' : 'conflict';
+        // Older imports did not populate this field. An explicit local clear is null and is kept without a baseline.
+        const canFillPreviouslyUnset = current === undefined && (reporterWithoutBaseline || plannedEffortWithoutBaseline && typeof next === 'number');
+        const decision = currentHash === hashes[field] || canFillPreviouslyUnset ? 'apply' : 'conflict';
         fields.push({ field, current: this.jiraReviewValue(field, current, issue.descriptionFormat),
           incoming: this.jiraReviewValue(field, next, values.descriptionFormat), decision });
         if (decision === 'apply') {
@@ -1161,6 +1186,8 @@ class Planner{
         } else {
           if (field === 'parentId' && hashes.parentId === undefined) this.notice('JIRA_REFRESH_PARENT_BASELINE_UNAVAILABLE',
             '이전 이관의 상위 업무를 확인할 수 없어 현재 상위 업무를 보존합니다.', 'warning', entry, true);
+          if (plannedEffortWithoutBaseline) this.notice('JIRA_REFRESH_PLANNED_EFFORT_BASELINE_UNAVAILABLE',
+            '이전 이관의 계획 작업 시간 기준을 확인할 수 없어 현재 값을 보존합니다.', 'warning', entry, true);
           conflictingFields++;
         }
       }
@@ -2014,6 +2041,10 @@ class Planner{
         const rawEstimate=sourceField(row,'estimate'),estimate=rawEstimate===undefined||rawEstimate===null||rawEstimate===''?null:Number(rawEstimate);if(estimate!==null&&(!Number.isFinite(estimate)||estimate<0||estimate>100000))this.notice('ESTIMATE_ARCHIVED','예상 작업량의 단위/범위를 현재 숫자로 옮기지 않고 원본으로 보관합니다.','warning',entry,true);
         const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:priority??'medium',assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
         if (reporterId !== undefined) issue.reporterId = reporterId;
+        if (entry.pkg.dataset.source.product === 'jira') {
+          const plannedEffortMinutes = this.jiraPlannedEffort(entry);
+          if (plannedEffortMinutes !== undefined) issue.plannedEffortMinutes = plannedEffortMinutes;
+        }
         if (mapping) this.mapAppendFields(entry, issue, schema, mapping.fields);
         else this.mapNewIssueFields(entry, issue, schema);
         if(row.textFormat!=='plain'&&row.textFormat!=='none')this.notice('ISSUE_DESCRIPTION_PLAIN_TEXT','업무 설명은 현재 일반 텍스트로 변환합니다. 원래 서식·본문은 원본 보관함에 유지합니다.','warning',entry,true);
@@ -4275,6 +4306,8 @@ class Planner{
       const createdIssue = binding?.type === 'issue' ? this.issueById.get(binding.id) : undefined;
       const issueHashes = issueCheckpoint?.hashes ??
         (createdIssue && entry.pkg.dataset.source.product === 'jira' ? jiraFieldDigests(createdIssue) : undefined);
+      const issueSourceHashes = issueCheckpoint?.sourceHashes ?? (issueHashes?.plannedEffortMinutes !== undefined ?
+        matchedJiraSourceFieldHashes(entry.row, issueHashes) : undefined);
       const customHashes = issueCheckpoint?.customHashes ??
         (createdIssue && entry.pkg.dataset.source.product === 'jira' ? this.initialJiraCustomFieldHashes(entry, createdIssue) : undefined);
       const createdPage = binding?.type === 'document' ? this.documentById.get(binding.id) : undefined;
@@ -4304,7 +4337,7 @@ class Planner{
         ...(jiraAttachmentOwner ? { jiraAttachmentAppend: true } : {}),
         ...(this.jiraRelationIds.has(entry.key) ? { jiraRelationId: this.jiraRelationIds.get(entry.key)! } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
-        ...(issueCheckpoint?.sourceHashes ? { jiraIssueSourceFieldHashes: issueCheckpoint.sourceHashes } : {}),
+        ...(issueSourceHashes ? { jiraIssueSourceFieldHashes: issueSourceHashes } : {}),
         ...(customHashes ? { jiraCustomFieldHashes: customHashes } : {}),
         ...(pageHashes && Object.keys(pageHashes).length ? { confluencePageFieldHashes: pageHashes } : {}),
         ...(pageBodySourceHash ? { confluencePageBodySourceHash: pageBodySourceHash } : {}),
@@ -4355,6 +4388,8 @@ class Planner{
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
     }
     const counts:Record<string,number>={...this.result.preview.counts,sourceRecords:this.entries.length,excludedRecords:this.excluded.size,projects:this.result.projects.length,issues:this.result.issues.length,documents:this.result.documents.length,comments:this.result.comments.length,revisions:this.result.revisions.length,attachments:this.result.attachments.length,attachmentVersions:this.result.attachmentVersions.length,fileCopies:this.result.fileCopies.length,attachmentBytes:this.result.fileCopies.reduce((sum,file)=>sum+file.size,0),resourceLinks:this.result.resourceLinks.length,issueRelations:this.result.issueRelations.length};
+    const jiraPlannedEffortIssues = this.result.issues.filter(issue => typeof issue.plannedEffortMinutes === 'number').length;
+    if (jiraPlannedEffortIssues) counts.jiraPlannedEffortIssues = jiraPlannedEffortIssues;
     const atlassianLinks = this.result.atlassianLinks.length;
     Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
     const sourceWorklogs = this.entries.filter(entry=>entry.pkg.dataset.source.product==='jira'&&isJiraWorklog(entry.row)).length;

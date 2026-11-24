@@ -20,7 +20,7 @@ import { contentReferences, documentContentSchemaVersion } from '../../shared/do
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
-import type { SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
+import type { ProjectWorkloadResult, SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
@@ -328,6 +328,90 @@ test('Jira HTTP migration projects only an explicit mapped reporter and updates 
   assert.equal(restored.status, 200, JSON.stringify(restored.data));
   const afterRestore = await read();
   assert.deepEqual(Array.from({ length: 7 }, (_, index) => issue(afterRestore, index + 1).reporterId), expected);
+});
+
+test('Jira original estimates feed Gantt workload and reviewed refresh preserves local effort after restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const day = '2026-11-23';
+  const instance = 'synthetic-original-estimate-workload';
+  const project = { id: '41', key: 'OLD', name: '가상 일정 팀' };
+  const assignee = { accountId: 'jira-estimate-owner', displayName: 'Jira 담당자' };
+  const upload = (name: string, updated: string, fields: Record<string, unknown>[]) => f.upload(Buffer.from(JSON.stringify({
+    issues: fields.map((values, index) => ({ id: String(100 + index), key: `OLD-${index + 1}`, fields: {
+      project, summary: `이관 업무 ${index + 1}`, assignee, created: '2026-11-01T00:00:00Z', updated,
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' }, startDate: day, endDate: day, ...values,
+    } })),
+  })), `${name}.json`, 'jira', instance);
+  const original = await upload('original-estimates', '2026-11-02T00:00:00Z', [
+    { timeoriginalestimate: 5400, timetracking: { originalEstimateSeconds: 5400, remainingEstimateSeconds: 1200 }, timespent: 1800 },
+    { timeoriginalestimate: 0 }, { timeoriginalestimate: 91 }, {}, {}, { timeoriginalestimate: 7200 },
+  ]);
+  const first = await f.preview(await f.configuration(original, 'EFFORT'));
+  assert.equal(first.canApply, true, JSON.stringify(first.notices));
+  assert.equal(first.counts.jiraPlannedEffortIssues, 3);
+  assert.ok(first.requiredAcknowledgements.includes('JIRA_ORIGINAL_ESTIMATE_ARCHIVED'));
+  const applied = await f.apply(first);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  const issues = async () => (await f.call<WorkspaceSnapshot>('/workspace')).data.issues.filter(issue => issue.projectId === projectId)
+    .sort((left, right) => left.key.localeCompare(right.key));
+  const workload = async () => (await f.call<ProjectWorkloadResult>(`/projects/${projectId}/workload?startDate=${day}&endDate=${day}`)).data;
+  const initial = await issues();
+  assert.deepEqual(initial.map(issue => issue.plannedEffortMinutes), [90, 0, undefined, undefined, undefined, 120]);
+  assert.equal(initial[0].estimate, null);
+  const load = await workload();
+  assert.equal(load.totalScheduledMinutes, 210);
+  assert.deepEqual(load.rows.find(row => row.userId === 'user-jun')?.days[0].allocations,
+    [{ issueId: initial[0].id, minutes: 90 }, { issueId: initial[5].id, minutes: 120 }]);
+  assert.ok(!load.incomplete.some(item => item.issueId === initial[1].id));
+  assert.ok(load.incomplete.some(item => item.issueId === initial[2].id && item.reasons.includes('missing-effort')));
+
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[] };
+  const backup = (await f.call<Backup>('/export')).data;
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const firstArchive = backup.sourceRecords.find(row => row.targetId === initial[0].id && row.record.kind === 'issue');
+  assert.equal(firstArchive?.record.metadata.jiraOriginalEstimateSeconds, 5400);
+  assert.ok(firstArchive?.jiraIssueFieldHashes?.plannedEffortMinutes);
+  assert.ok(firstArchive?.jiraIssueSourceFieldHashes?.plannedEffortMinutes);
+  assert.equal(backup.sourceRecords.find(row => row.targetId === initial[2].id && row.record.kind === 'issue')?.record.metadata.jiraOriginalEstimateSeconds, 91);
+  const downgraded = await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 115 } });
+  assert.equal(downgraded.status, 400);
+  assert.match(JSON.stringify(downgraded.data), /schemaVersion 116/);
+  const restored = await f.call('/import', 'POST', { data: backup });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.equal((await workload()).totalScheduledMinutes, 210);
+  const restoredIssues = await issues();
+
+  const local = await f.call<Issue>(`/issues/${restoredIssues[3].id}`, 'PATCH', { expectedVersion: restoredIssues[3].version, plannedEffortMinutes: 45 });
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+  const points = await f.call<Issue>(`/issues/${restoredIssues[0].id}`, 'PATCH', { expectedVersion: restoredIssues[0].version, estimate: 8 });
+  assert.equal(points.status, 200, JSON.stringify(points.data));
+  const delta = await upload('newer-estimates', '2026-11-03T00:00:00Z', [
+    { timetracking: { originalEstimateSeconds: 9000 } }, { timeoriginalestimate: null }, {},
+    { timeoriginalestimate: 10800 }, { timeoriginalestimate: 3600 }, {},
+  ]);
+  const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${delta.id}`);
+  const target = options.appendTarget;
+  assert.ok(target);
+  assert.equal(target.projectId, projectId);
+  const config = await f.configuration(delta);
+  const preview = await f.preview({ ...config, appendTo: {
+    projectId, refreshExisting: true,
+    statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(value => value.label === option.label)!.id])),
+    issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(value => value.name === option.label)!.id])),
+    fields: {},
+  } });
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  assert.deepEqual(Object.fromEntries((preview.issueRefresh ?? []).flatMap(issue => issue.fields
+    .filter(change => change.field === 'plannedEffortMinutes').map(change => [issue.sourceKey, change.decision]))),
+    { 'OLD-1': 'apply', 'OLD-2': 'apply', 'OLD-4': 'conflict', 'OLD-5': 'apply' });
+  const refreshed = await f.apply(preview);
+  assert.equal(refreshed.status, 201, JSON.stringify(refreshed.data));
+  const final = await issues();
+  assert.deepEqual(final.map(issue => issue.plannedEffortMinutes), [150, null, undefined, 45, 60, 120]);
+  assert.equal(final[0].estimate, 8);
+  assert.equal((await workload()).totalScheduledMinutes, 375);
 });
 
 test('Jira parent refresh restores format 99 safely across packages and uses the accepted parent after format 100 restore', async t => {

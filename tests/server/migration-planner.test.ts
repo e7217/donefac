@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { buildMigrationOptions,buildMigrationPlan } from '../../server/migration-planner.js';
+import { buildMigrationOptions,buildMigrationPlan,jiraFieldDigest,jiraSourceFieldHashes } from '../../server/migration-planner.js';
 import { convertLegacyContent } from '../../server/migration-content.js';
 import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
@@ -11,6 +11,7 @@ import { documentSectionHash } from '../../shared/document-sections.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
 import { allowedNextStatuses } from '../../shared/workflow-helpers.js';
+import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload.js';
 
 const now='2026-11-19T12:00:00.000Z',created='2020-01-01T00:00:00.000Z',actor:User={id:'actor',name:'이관 작업자',email:'actor@example.test',color:'#668899'};
 function pkg(id:string,product:'jira'|'confluence',records:LegacyRecord[],diagnostics:LegacyDataset['diagnostics']=[]):MigrationPackage{const source={product,format:product==='jira'?'jira-backup-xml' as const:'confluence-xml' as const,instanceKey:id,declaredVersion:'synthetic',timezone:null};return{summary:{id,filename:`${id}.zip`,sha256:createHash('sha256').update(id).digest('hex'),size:100,version:1,createdAt:now,actorId:actor.id,source,counts:{},errors:diagnostics.filter(item=>item.severity==='error').length,warnings:0,fileCount:1,expandedBytes:100,applySupported:false},dataset:{source,records,diagnostics,unsupported:[]}};}
@@ -22,6 +23,38 @@ function input(packages:MigrationPackage[]):MigrationPlanningInput{const configu
 const notices=(plan:ReturnType<typeof buildMigrationPlan>)=>new Set(plan.preview.notices.map(notice=>notice.code));
 const adfStatus = (label: string) => ({ type: 'status', attrs: { text: label, color: 'yellow' } });
 const storageStatus = (label: string) => `<ac:structured-macro ac:name="status"><ac:parameter ac:name="title">${label}</ac:parameter><ac:parameter ac:name="colour">Yellow</ac:parameter></ac:structured-macro>`;
+
+test('new Jira issues project exact original-estimate minutes and preserve unrepresentable source seconds', () => {
+  const estimates = [3_600, 0, MAX_PLANNED_EFFORT_MINUTES * 60, null, 61, (MAX_PLANNED_EFFORT_MINUTES + 1) * 60, undefined];
+  const issues = estimates.map((seconds, index) => {
+    const row = issue(String(index + 1));
+    row.metadata.fields = { ...(row.metadata.fields as Record<string, LegacyValue>), estimate: 5 };
+    if (seconds !== undefined) row.metadata.jiraOriginalEstimateSeconds = seconds;
+    return row;
+  });
+  const source = pkg('jira-estimates', 'jira', [record('project', 'j', { title: 'Jira 원본', metadata: { key: 'OLD' } }), ...issues]);
+  const plan = buildMigrationPlan(input([source]));
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.preview.counts.jiraPlannedEffortIssues, 3);
+  assert.equal(plan.sourceImport.counts.jiraPlannedEffortIssues, 3);
+  const current = new Map(plan.issues.map(row => [row.id, row]));
+  const archives = new Map(plan.sourceRecords.map(row => [row.record.sourceId, row]));
+  const expected = [60, 0, MAX_PLANNED_EFFORT_MINUTES, null, undefined, undefined, undefined];
+  issues.forEach((row, index) => {
+    const archive = archives.get(row.sourceId)!;
+    const issue = current.get(archive.targetId!)!;
+    const minutes = expected[index];
+    assert.equal(issue.estimate, 5);
+    assert.equal(issue.plannedEffortMinutes, minutes);
+    assert.deepEqual(archive.record, row);
+    assert.equal(archive.jiraIssueFieldHashes?.plannedEffortMinutes, minutes === undefined ? undefined : jiraFieldDigest('plannedEffortMinutes', minutes));
+    assert.deepEqual(archive.jiraIssueSourceFieldHashes?.plannedEffortMinutes,
+      minutes === undefined ? undefined : jiraSourceFieldHashes('plannedEffortMinutes', row));
+  });
+  assert.deepEqual(plan.preview.notices.filter(item => item.code === 'JIRA_ORIGINAL_ESTIMATE_ARCHIVED').map(item => item.recordId),
+    ['jira-estimates/issue:5', 'jira-estimates/issue:6']);
+  assert.ok(plan.preview.requiredAcknowledgements.includes('JIRA_ORIGINAL_ESTIMATE_ARCHIVED'));
+});
 
 test('author review proves planned target assignments by package and keeps archive-only rows outside the counts', () => {
   const jiraSource = jira(), wikiSource = confluence();

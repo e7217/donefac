@@ -173,6 +173,81 @@ test('RSS search XML is a separate dialect preserving authors/comments/options/l
   const data=parse('search.xml',source);assert.equal(data.source.format,'jira-search-xml');assert.equal(find(data,'issue:10').text,'<p>렌더링한 본문</p>');assert.equal(find(data,'issue:10').parentId,'11');assert.deepEqual((find(data,'issue:10').metadata.fields as Record<string,unknown>).security,[{id:'private',text:'비공개'}]);assert.equal(find(data,'comment:30').authorId,'alice');assert.equal(find(data,'field:customfield_55').title,'영향');assert.ok(data.records.some(item=>item.kind==='relation'&&item.references.some(ref=>ref.sourceId==='11')));assert.ok(codes(data).has('ISSUES_PARTIAL'));assert.ok(codes(data).has('ATTACHMENT_BYTES_MISSING'));assert.ok(codes(data).has('SEARCH_XML_HISTORY_NOT_PROVIDED'));
 });
 
+test('Jira administrator and RSS XML preserve original estimate seconds without inferring remaining effort', () => {
+  const issue = (id: number, attrs: string, body = '') => `<Issue id="${id}" summary="Issue ${id}" ${attrs}>${body}</Issue>`;
+  const administrator = parse('entities.xml', `<entity-engine-xml>
+    ${issue(10, 'timeoriginalestimate="3600" timeestimate="2400" timespent="1200"')}
+    ${issue(11, '', '<timeoriginalestimate>0</timeoriginalestimate>')}
+    ${issue(12, 'timeoriginalestimate="600"', '<timeoriginalestimate>60</timeoriginalestimate>')}
+    ${issue(13, 'timeoriginalestimate="1h"')}${issue(14, 'timeestimate="120" timespent="720"')}
+    </entity-engine-xml>`);
+  const rssRow = (id: number, body: string) => `<item><key id="${id}">OLD-${id}</key>${body}</item>`;
+  const rss = parse('search.xml', `<rss><channel>
+    ${rssRow(10, '<timeoriginalestimate seconds="3600">1시간</timeoriginalestimate><timeestimate seconds="2400">40분</timeestimate>')}
+    ${rssRow(11, '<timeoriginalestimate seconds="0">0 minutes</timeoriginalestimate>')}
+    ${rssRow(12, '<timeoriginalestimate seconds="600"/><timeoriginalestimate seconds="60"/>')}
+    ${rssRow(13, '<timeoriginalestimate>1 hour</timeoriginalestimate>')}
+    ${rssRow(14, '<timeestimate seconds="120"/><timespent seconds="720"/><aggregatetimeoriginalestimate seconds="600"/>')}
+    </channel></rss>`);
+  for (const data of [administrator, rss]) {
+    assert.deepEqual([10, 11, 12, 13, 14].map(id => find(data, `issue:${id}`).metadata.jiraOriginalEstimateSeconds),
+      [3600, 0, undefined, undefined, undefined]);
+    assert.deepEqual(data.diagnostics.filter(item => item.code === 'JIRA_ORIGINAL_ESTIMATE_UNRESOLVED').map(({ recordId }) => recordId),
+      ['issue:12', 'issue:13']);
+  }
+  assert.deepEqual((find(administrator, 'issue:12').metadata.fields as Record<string, unknown>).timeoriginalestimate, ['600', '60']);
+  assert.equal((find(administrator, 'issue:10').metadata.fields as Record<string, unknown>).timeestimate, '2400');
+  assert.deepEqual((find(rss, 'issue:10').metadata.fields as Record<string, unknown>).timeestimate, [{ seconds: '2400', text: '40분' }]);
+});
+
+test('Jira REST original estimate requires numeric seconds or explicit null and agrees across aliases', () => {
+  const claims = [
+    { timeoriginalestimate: 7200, timeestimate: 1800 },
+    { timetracking: { originalEstimateSeconds: 900, remainingEstimateSeconds: 800 } },
+    { timeoriginalestimate: 0, timetracking: { originalEstimateSeconds: 0 } },
+    { timeoriginalestimate: null },
+    { timeestimate: 1800, timespent: 400, aggregatetimeoriginalestimate: 4200, timetracking: { remainingEstimateSeconds: 1800 } },
+    { timeoriginalestimate: 30, timetracking: { originalEstimateSeconds: 60 } },
+    { timeoriginalestimate: '60' },
+    { timetracking: { originalEstimate: '1h' } },
+    { timeoriginalestimate: 60, timetracking: ['ambiguous'] },
+    { timeoriginalestimate: Number.MAX_SAFE_INTEGER + 1 },
+    { timeoriginalestimate: -60 },
+    { timeoriginalestimate: null, timetracking: { originalEstimateSeconds: 0 } },
+    { timeoriginalestimate: 1.5 },
+    { timetracking: { originalEstimateSeconds: null } },
+    { timetracking: null },
+    { timeoriginalestimate: 61 },
+  ];
+  const issues = claims.map((fields, index) => ({ id: String(index + 1), key: `OLD-${index + 1}`, fields }));
+  const data = parse('issues.json', JSON.stringify({ issues }));
+  assert.deepEqual(issues.map(({ id }) => find(data, `issue:${id}`).metadata.jiraOriginalEstimateSeconds), [
+    7200, 900, 0, null, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, null, undefined, 61,
+  ]);
+  assert.deepEqual(data.diagnostics.filter(item => item.code === 'JIRA_ORIGINAL_ESTIMATE_UNRESOLVED').map(({ recordId }) => recordId),
+    ['issue:6', 'issue:7', 'issue:8', 'issue:9', 'issue:10', 'issue:11', 'issue:12', 'issue:13']);
+  assert.deepEqual(find(data, 'issue:2').metadata.fields, { timetracking: { originalEstimateSeconds: 900, remainingEstimateSeconds: 800 } });
+  assert.deepEqual(find(data, 'issue:6').metadata.fields, { timeoriginalestimate: 30, timetracking: { originalEstimateSeconds: 60 } });
+  assert.throws(() => parse('duplicate.json', JSON.stringify({ issues: [issues[0], { ...issues[0], fields: claims[1] }] })), LegacyImportError);
+});
+
+test('Jira CSV original estimate uses one exact native seconds column with a complete issue row', () => {
+  const data = parse('issues.csv', [
+    'Issue key,Issue id,Summary,Original Estimate,Remaining Estimate,Custom field (Original Estimate)',
+    'OLD-1,1,Original,1200,2400,3', 'OLD-2,2,Zero,0,,', 'OLD-3,3,Blank,,2800,2400', 'OLD-4,4,Display,1h,,',
+    'OLD-5,5,Incomplete row,600',
+  ].join('\n'));
+  assert.deepEqual([1, 2, 3, 4, 5].map(id => find(data, `issue:${id}`).metadata.jiraOriginalEstimateSeconds),
+    [1200, 0, undefined, undefined, undefined]);
+  assert.deepEqual(data.diagnostics.filter(item => item.code === 'JIRA_ORIGINAL_ESTIMATE_UNRESOLVED').map(({ recordId }) => recordId),
+    ['issue:4', 'issue:5']);
+  const duplicate = parse('duplicate.csv', 'Issue key,Summary,Original Estimate,original estimate\nOLD-1,Duplicate,120,240');
+  assert.equal(find(duplicate, 'issue:OLD-1').metadata.jiraOriginalEstimateSeconds, undefined);
+  assert.ok(codes(duplicate).has('JIRA_ORIGINAL_ESTIMATE_UNRESOLVED'));
+  const external = parse('external.csv', 'Key,Summary,Original Estimate\nOLD-1,Custom file,120');
+  assert.equal(find(external, 'issue:OLD-1').metadata.jiraOriginalEstimateSeconds, undefined);
+});
+
 test('CSV BOM, repeated headers, quoted multiline text and attachment URLs retain each source object',()=>{
   const csv='\uFEFFIssue key,Issue id,Summary,Description,Reporter,Comment,Comment,Attachment,Custom field (영향),Custom field (영향),Status\r\nOLD-1,10,"한글, ""따옴표""\n두 번째 줄",원문,alice,"01/Mar/20 10:00;alice;첫 댓글;세미콜론",두 번째 댓글,"01/Mar/20 11:00;alice;첨부.txt;https://jira.example.test/secure/attachment/700/첨부.txt",높음,낮음,열림\r\n';
   const data=parse('issues.csv',csv,new Map([['attachments/OLD/OLD-1/700',Buffer.from('file')]]));assert.equal(data.source.format,'jira-csv');assert.equal(find(data,'issue:10').title,'한글, "따옴표"\n두 번째 줄');assert.deepEqual((find(data,'issue:10').metadata.fields as Record<string,unknown>)['Custom field (영향)'],['높음','낮음']);const comments=data.records.filter(item=>item.kind==='comment');assert.equal(comments.length,2);assert.equal(comments[0].text,'첫 댓글;세미콜론');assert.equal(comments[1].text,'두 번째 댓글');assert.equal(comments[1].authorId,null);assert.equal(find(data,'attachment:700').metadata.bytesPresent,true);assert.equal(find(data,'option:csv:Status:열림').metadata.syntheticId,true);assert.ok(codes(data).has('CSV_HISTORY_NOT_PROVIDED'));assert.ok(codes(data).has('CSV_COMMENT_ATTRIBUTION_UNRESOLVED'));
