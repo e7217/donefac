@@ -336,6 +336,34 @@ test('360px 간트 일정 완성의 저장 응답이 끊겨도 결과를 확인�
   } finally { await fixture.close(); }
 });
 
+test('막대의 종료일을 조정하고 다시 검토할 때 동료가 바꾼 시작일을 유지한다', async ({ page, request }) => {
+  const fixture = await makeFixture(request);
+  try {
+    const issue = await fixture.create('종료일 조정', 1, 4);
+    const { chart, dialog } = await openChart(page, issue);
+    const resize = chart.getByRole('button', { name: `${issue.key} 종료일 조정`, exact: true });
+    const firstPreview = nextPost(page, previewPath);
+    await resize.press('ArrowRight');
+    const reviewed = await readJson<SchedulePreview>(await firstPreview);
+    expect(reviewed.changes[0]).toMatchObject({ fromStart: fixture.date(1), toStart: fixture.date(1), toEnd: fixture.date(5) });
+    const peerVersion = await readJson<Issue>(await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': fixture.peer.id }, data: { expectedVersion: issue.version, startDate: fixture.date(2) },
+    }));
+    const rejected = nextPost(page, applyPath);
+    const apply = dialog.getByRole('button', { name: '변경 적용', exact: true });
+    await apply.click();
+    expect((await rejected).status()).toBe(409);
+    expect(await fixture.stored()).toEqual([schedule(peerVersion)]);
+    const renewed = nextPost(page, previewPath);
+    await dialog.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const proposal = await readJson<SchedulePreview>(await renewed);
+    expect(proposal.changes[0]).toMatchObject({ fromStart: fixture.date(2), toStart: fixture.date(2), toEnd: fixture.date(5) });
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    expect(await fixture.stored()).toEqual([{ ...schedule(peerVersion), endDate: fixture.date(5), version: peerVersion.version + 1 }]);
+  } finally { await fixture.close(); }
+});
+
 test('간트 목록 새로고침이 실패해도 저장 결과를 알리고 일정을 되돌린다', async ({ page, request }) => {
   const fixture = await makeFixture(request);
   try {

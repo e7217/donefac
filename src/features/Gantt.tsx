@@ -39,7 +39,7 @@ import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelectio
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { bulkDateResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
-import { GanttRowScheduleEdit } from './GanttRowScheduleEdit';
+import { GanttRowScheduleEdit, type GanttRowLinkDraft } from './GanttRowScheduleEdit';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { GanttPlanningControls } from './GanttPlanningControls';
 import { GanttPlanAssignment } from './GanttPlanAssignment';
@@ -71,7 +71,13 @@ type InlineDateValues = { source: Issue; startDate: string | null; endDate: stri
 type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owner: symbol };
 type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener };
-type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin & InlineDateValues; inlineDates?: InlineDateDraft[] };
+type ManualReview = {
+  input: ScheduleManualPreviewInput;
+  preview: SchedulePreview;
+  inline?: InlineScheduleOrigin & InlineDateValues;
+  inlineDates?: InlineDateDraft[];
+  chartEdge?: InlineDateValues;
+};
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
 type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
 type ShiftMode = 'selection' | 'hierarchy';
@@ -145,6 +151,8 @@ type RowScheduleEdit = {
   focusDate?: 'dueDate';
   inlineDraft?: InlineDateDraft;
   initialDates?: ScheduleBulkDateChanges;
+  initialLink?: GanttRowLinkDraft;
+  otherDateDrafts?: ReadonlySet<string>;
 };
 type ScheduleFocus = {
   kind: 'dependencies' | 'hierarchy';
@@ -377,9 +385,10 @@ function ProjectGantt(props: GanttProps) {
   const [hasDraft, setHasDraft] = useState(false);
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
-  const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
+  const otherScheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || preview || cascade ||
     shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
     createOpen || scheduleIssueCreation || blockedIssueCreation || linkEditor || planAssignment || planShift);
+  const scheduleEditorOpen = otherScheduleEditorOpen || Boolean(linkPicker);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -601,7 +610,8 @@ function ProjectGantt(props: GanttProps) {
   }, [notify, refresh, trackDraft, manualProblem?.kind, clearInlineDates, dateStorageError]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
-    if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
+    const draft = draftsRef.current.get(TEAM_BLOCKER_DRAFT);
+    if (draft?.pending || (draft?.dirty && !window.confirm('입력한 차단 관계를 취소하시겠습니까?'))) return;
     setTeamBlockersOpen(false);
     setTeamBlockerChartPair(undefined);
     setCreatedBlockedIssue(null);
@@ -1509,11 +1519,12 @@ function ProjectGantt(props: GanttProps) {
   async function reviewManualAgain() {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
-    const inlineDates = manualReview.inlineDates ?? (manualReview.inline ? [manualReview.inline] : undefined);
-    if (inlineDates && 'changes' in input) {
+    const singleDateEdit = manualReview.inline ?? manualReview.chartEdge;
+    const dateEdits = manualReview.inlineDates ?? (singleDateEdit ? [singleDateEdit] : undefined);
+    if (dateEdits && 'changes' in input) {
       const latest = new Map(data.issues.map(issue => [issue.id, issue]));
       const changes: ScheduleAnchorChange[] = [];
-      for (const draft of inlineDates) {
+      for (const draft of dateEdits) {
         const issue = latest.get(draft.source.id);
         if (!issue || issue.projectId !== draft.source.projectId) {
           setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
@@ -1534,7 +1545,7 @@ function ProjectGantt(props: GanttProps) {
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
       const review = { ...manualReview, input, preview };
-      if (inlineDates && !preview.previewId && !preview.blocking?.length) {
+      if (dateEdits && !preview.previewId && !preview.blocking?.length) {
         const current = review.inline && data.issues.find(issue => issue.id === review.inline?.issueId);
         if (current) review.inline?.accept?.(current);
         settleInlineDates(review, []);
@@ -1553,10 +1564,11 @@ function ProjectGantt(props: GanttProps) {
     if (startDate && endDate && startDate > endDate) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
     if (busyRef.current || manualReview) { notify('진행 중인 일정 변경이 끝난 뒤 다시 시도하세요.', 'error'); return; }
     const input = manualDates(issue, startDate, endDate);
+    const dateOrigin = { ...inline, source: issue, startDate, endDate };
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
-      const review = { input, preview, inline: { ...inline, source: issue, startDate, endDate } };
+      const review = { input, preview, inline: dateOrigin };
       if (preview.teamBlockerWarnings?.length) {
         setDatePreviewFocusTarget(inline.focus);
         setManualReview(review);
@@ -1569,8 +1581,12 @@ function ProjectGantt(props: GanttProps) {
       }
       await commitManualReview(review);
     } catch (cause) {
-      notify(errorMessage(cause), 'error');
-      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) await refresh().catch(() => undefined);
+      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
+        setDatePreviewFocusTarget(inline.focus);
+        setManualReview({ input, preview: { changes: [], warnings: [] }, inline: dateOrigin });
+        setManualProblem({ kind: 'stale', message: errorMessage(cause) });
+        await refresh().catch(() => undefined);
+      } else notify(errorMessage(cause), 'error');
     } finally { markBusy(false); }
   }
   function completeMissingDates(issue: Issue, opener: HTMLButtonElement) {
@@ -1641,8 +1657,17 @@ function ProjectGantt(props: GanttProps) {
     }
     catch (err) { notify(errorMessage(err), 'error'); } finally { markBusy(false); }
   }
-  function showLinkEditor(opener: HTMLButtonElement, options: Omit<DependencyEditor, 'opener'> = {}) {
-    if (!canLeave()) return;
+  function showLinkEditor(opener: HTMLButtonElement, options: Omit<DependencyEditor, 'opener'> = {}, fromLinkPicker = false) {
+    const keepDates = canKeepLinkDateDrafts(fromLinkPicker);
+    if (!keepDates && !canLeave()) return;
+    if (keepDates && options.anchor) {
+      const { issueId, otherRole } = options.anchor;
+      const draft = inlineDateDrafts.current.get(issueId);
+      if (draft) {
+        openRowScheduleEdit(draft.source, opener, { initialLink: { action: 'add', direction: otherRole } });
+        return;
+      }
+    }
     // An accepted draft discard is queued by the navigation guard first.
     queueMicrotask(() => {
       setLinkPicker(null);
@@ -1650,12 +1675,16 @@ function ProjectGantt(props: GanttProps) {
       setLinkEditor({ ...options, opener });
     });
   }
-  function canKeepInlineDateDrafts() {
-    return !busyRef.current && !scheduleEditorOpen && !issueOverlayOpen &&
+  function canKeepInlineDateDrafts(fromLinkPicker = false) {
+    return !busyRef.current && !otherScheduleEditorOpen && (!linkPicker || fromLinkPicker) && !issueOverlayOpen &&
       [...draftsRef.current].every(([id, value]) => id.startsWith('dates:') && !value.pending && !value.awaitingResult);
   }
-  function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement, focusDate?: RowScheduleEdit['focusDate']) {
-    const canKeepDates = canKeepInlineDateDrafts();
+  function canKeepLinkDateDrafts(fromLinkPicker = false) {
+    return draftsRef.current.size > 0 && canKeepInlineDateDrafts(fromLinkPicker);
+  }
+  function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement,
+    { focusDate, initialLink, fromLinkPicker = false }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & { fromLinkPicker?: boolean } = {}) {
+    const canKeepDates = canKeepInlineDateDrafts(fromLinkPicker);
     if (!canKeepDates && !canLeave()) return;
     const inlineDraft = canKeepDates ? inlineDateDrafts.current.get(issue.id) : undefined;
     const initialDates: ScheduleBulkDateChanges = {};
@@ -1664,7 +1693,11 @@ function ProjectGantt(props: GanttProps) {
         if (inlineDraft[field] !== inlineDraft.source[field]) initialDates[field] = inlineDraft[field];
       }
     }
-    queueMicrotask(() => setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, initialDates }));
+    const otherDateDrafts = initialLink ? new Set([...inlineDateDrafts.current.keys()].filter(id => id !== issue.id)) : undefined;
+    queueMicrotask(() => {
+      setLinkPicker(null);
+      setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, initialDates, initialLink, otherDateDrafts });
+    });
   }
   function closeRowScheduleEdit(updated?: readonly Issue[]) {
     const { opener, focusDate, issue } = rowScheduleEdit ?? {};
@@ -1690,7 +1723,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function toggleLinkPicking() {
     if (linkPicker) { cancelLinkPicking(); return; }
-    if (!canPickLink || !canLeave()) return;
+    if (!canPickLink || (!canKeepLinkDateDrafts() && !canLeave())) return;
     queueMicrotask(() => {
       setDrag(null);
       setLinkEditor(null);
@@ -1715,7 +1748,7 @@ function ProjectGantt(props: GanttProps) {
     if (!opener || !sourceRow) return;
     const predecessorId = pickedSource.issueId;
     if (target.projectId !== sourceRow.issue.projectId) {
-      if (!canLeave()) return;
+      if (!canKeepLinkDateDrafts(true) && !canLeave()) return;
       queueMicrotask(() => {
         setLinkPicker(null);
         setTeamBlockerChartPair({ sourceId: predecessorId, targetId: issueId, opener });
@@ -1726,11 +1759,29 @@ function ProjectGantt(props: GanttProps) {
     const dependency = data.dependencies.find(link => link.predecessorId === predecessorId && link.successorId === issueId);
     const type = DEPENDENCY_TYPES.find(value => DEPENDENCY_ENDPOINTS[value].predecessor === pickedSource.endpoint &&
       DEPENDENCY_ENDPOINTS[value].successor === endpoint);
-    showLinkEditor(opener, { dependency, prefill: { predecessorId, successorId: issueId, type: !dependency || pickedSource.explicit || explicit ? type : undefined } });
+    const prefilledType = !dependency || pickedSource.explicit || explicit ? type : undefined;
+    if (canKeepLinkDateDrafts(true)) {
+      const anchor = inlineDateDrafts.current.has(target.id) ? target
+        : inlineDateDrafts.current.has(predecessorId) ? sourceRow.issue : undefined;
+      if (anchor) {
+        const initialLink: GanttRowLinkDraft = dependency
+          ? { action: 'update', dependencyId: dependency.id, type: prefilledType ?? dependency.type, lag: String(dependency.lagDays) }
+          : { action: 'add', direction: anchor.id === target.id ? 'predecessor' : 'successor',
+            relatedId: anchor.id === target.id ? predecessorId : target.id, type: prefilledType ?? 'FS' };
+        openRowScheduleEdit(anchor, opener, { initialLink, fromLinkPicker: true });
+        return;
+      }
+    }
+    showLinkEditor(opener, { dependency, prefill: { predecessorId, successorId: issueId, type: prefilledType } }, true);
   }
   function closeLinkEditor() {
     linkEditorFocusTarget.current = linkEditor?.opener ?? null;
     setLinkEditor(null);
+  }
+  function cancelLinkEditor() {
+    if (busyRef.current || (draftsRef.current.get('dependency')?.dirty &&
+        !window.confirm('저장하지 않은 업무 연결 변경을 버릴까요?'))) return;
+    closeLinkEditor();
   }
   async function refreshAfterDependencyChange(message: string) {
     try {
@@ -1780,20 +1831,21 @@ function ProjectGantt(props: GanttProps) {
     if (outside(date)) showDate(date);
     else scrollToDate(dayNumber(date), range.start, 'smooth');
   }
-  async function previewIssueDates(issue: Issue, toStart: string, toEnd: string, opener: HTMLButtonElement) {
+  async function previewIssueDates(issue: Issue, toStart: string, toEnd: string, opener: HTMLButtonElement, singleEdge: boolean) {
     if (busyRef.current) return;
     if (toStart > toEnd) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
     const input = manualDates(issue, toStart, toEnd);
+    const chartEdge = singleEdge ? { source: issue, startDate: toStart, endDate: toEnd } : undefined;
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
       setDatePreviewFocusTarget(opener);
-      setManualReview({ input, preview });
+      setManualReview({ input, preview, chartEdge });
       setManualProblem(null);
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 409) {
+      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
         setDatePreviewFocusTarget(opener);
-        setManualReview({ input, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+        setManualReview({ input, chartEdge, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
           fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings: [] } });
         setManualProblem({ kind: 'stale', message: errorMessage(cause) });
         await refresh().catch(() => undefined);
@@ -1807,7 +1859,7 @@ function ProjectGantt(props: GanttProps) {
     if (!issue.startDate || !issue.endDate || !delta) return;
     const startDate = edge === 'start' ? moveDate(issue.startDate, delta) : issue.startDate;
     const endDate = edge === 'end' ? moveDate(issue.endDate, delta) : issue.endDate;
-    void previewIssueDates(issue, startDate, endDate, opener);
+    void previewIssueDates(issue, startDate, endDate, opener, true);
   }
   function focusAfterDatePicking(opener: DatePreviewOpener) {
     requestAnimationFrame(() => {
@@ -1872,7 +1924,7 @@ function ProjectGantt(props: GanttProps) {
       notify('현재 일정과 같은 날짜입니다.');
       return;
     }
-    void previewIssueDates(issue, toStart, toEnd, opener);
+    void previewIssueDates(issue, toStart, toEnd, opener, Boolean(fixedEdge));
   }
   function beginDrag(event: PointerEvent<HTMLButtonElement>, issue: Issue, mode: DragMode) {
     if (event.button !== 0 || busy || activeDatePicker) return;
@@ -2146,7 +2198,7 @@ function ProjectGantt(props: GanttProps) {
       onEditLink={(dependency, opener) => showLinkEditor(opener, { dependency })}
       onClose={() => { setFindingsOpen(false); findingsTrigger.current?.focus({ preventScroll: true }); }} />}
     {deadlinesOpen && <GanttDeadlines id={DEADLINES_PANEL_ID} issues={issues} disabled={deadlineActionsDisabled}
-      onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, 'dueDate')}
+      onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, { focusDate: 'dueDate' })}
       onPointerDown={keepInlineDateFocus} />}
     {teamBlockersOpen && canShowTeamBlockers && <GanttTeamBlockers key={draftEpoch} id={TEAM_BLOCKERS_PANEL_ID} data={data}
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
@@ -2348,7 +2400,7 @@ function ProjectGantt(props: GanttProps) {
               {deadline && !linkPicker && <button type="button" className="gantt-row-deadline" data-gantt-deadline={deadline.kind}
                 aria-label={`${issue.key} 목표 마감일 수정`} title={`${deadlineLabel} · ${GANTT_DEADLINE_LABELS[deadline.kind]}`}
                 data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={deadlineActionsDisabled}
-                onClick={event => openRowScheduleEdit(issue, event.currentTarget, 'dueDate')}>
+                onClick={event => openRowScheduleEdit(issue, event.currentTarget, { focusDate: 'dueDate' })}>
                 <span>{deadline.dueDate.slice(5)}</span><span>{deadline.kind === 'late' ? '초과' : deadline.kind === 'missing' ? '종료 미정' : '마감'}</span>
               </button>}
               <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} disabled={busy || Boolean(linkPicker)}
@@ -2544,7 +2596,7 @@ function ProjectGantt(props: GanttProps) {
     {linkEditor && <GanttDependencyModal key={editingDependency?.id ?? draftEpoch}
       issues={editingDependency || linkEditor.prefill || linkEditor.anchor ? projectIssues : scopedIssues} issueAliases={data.issueAliases}
       dependency={editingDependency} prefill={linkEditor.prefill} anchor={linkEditor.anchor} busy={busy}
-      staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={() => { if (canLeave()) closeLinkEditor(); }} onSubmit={saveDependency} />}
+      staleMessage={staleDependencyMessage} onDraftChange={trackDraft} onClose={cancelLinkEditor} onSubmit={saveDependency} />}
     {planAssignment && <GanttPlanAssignment {...planAssignment} data={data} actorId={props.actorId} refresh={refresh} onDraftChange={trackDraft}
       onClose={() => { if (canLeave()) setPlanAssignment(null); }}
       onApplied={updated => setSelected(previous => {
@@ -2569,6 +2621,7 @@ function ProjectGantt(props: GanttProps) {
       outgoingTeamBlockers={teamBlockerChoices.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
       initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
+      initialLink={rowScheduleEdit.initialLink} otherDateDrafts={rowScheduleEdit.otherDateDrafts}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
       onApplied={async (result, reviewedAnchorVersion) => {
         rememberUndo(result.undoId);

@@ -152,6 +152,46 @@ test('360px에서 간트 날짜를 키보드로 고르고 이미 저장한 날�
   }
 });
 
+test('360px에서 빈 날짜를 차트로 고른 뒤 최신 반대쪽 날짜를 유지하고 되돌리기 한다', async ({ page, request }) => {
+  const { projects: [project], users: [, peer] } = await workspace(request);
+  const title = `차트 빈 날짜 동시 변경 ${randomUUID()}`;
+  const date = datesNearToday();
+  const issues: Issue[] = [];
+  const previewPath = '/api/schedule/manual-preview';
+  const nextPreview = () => page.waitForResponse(response => response.url().endsWith(previewPath) && response.request().method() === 'POST');
+  try {
+    const issue = await createIssue(request, issues, project.id, title, { startDate: date(-1) });
+    const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { picker, day, preview, undo } = await openChart(page, project.id, title, date(-3));
+    await picker(issue).tap();
+    const changed = await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: issue.version, startDate: date(1) },
+    });
+    expect(changed.ok(), await changed.text()).toBeTruthy();
+    const latest = await changed.json() as Issue;
+    const rejected = nextPreview();
+    await day(issue, date(3)).tap();
+    expect((await rejected).status()).toBe(409);
+    await expect(preview.getByRole('button', { name: '변경 적용', exact: true })).toBeDisabled();
+    expect(await stored()).toMatchObject({ startDate: date(1), endDate: null, version: latest.version });
+
+    const renewed = nextPreview();
+    await preview.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const response = await renewed;
+    expect(response.ok(), await response.text()).toBeTruthy();
+    expect(response.request().postDataJSON()).toEqual({ changes: [
+      { id: issue.id, expectedVersion: latest.version, startDate: date(1), endDate: date(3) },
+    ] });
+    const proposal = await response.json() as SchedulePreview;
+    expect(proposal.changes[0]).toMatchObject({ fromStart: date(1), fromEnd: null, toStart: date(1), toEnd: date(3) });
+    await preview.getByRole('button', { name: '변경 적용', exact: true }).click();
+    await expect.poll(stored).toMatchObject({ startDate: date(1), endDate: date(3) });
+    await expect(preview).toHaveCount(0);
+    await undo.click();
+    await expect.poll(stored).toMatchObject({ startDate: date(1), endDate: null });
+  } finally { await removeIssues(request, issues); }
+});
+
 test('360px 주·월 간트에서 저장한 양끝을 차트로 다시 선택하고 취소·적용·되돌리기 한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const { projects: [project] } = await workspace(request);

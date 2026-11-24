@@ -107,6 +107,12 @@ function readTeamIssueQuery(value?: string | null) {
   return value?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200) || undefined;
 }
 
+function teamGanttRouteFromBoard({projectId, teamBoardFilters}: WorkspaceRoute): WorkspaceRoute {
+  return { projectId, view: 'gantt', documentId: null, issueId: null, ganttScope: 'team',
+    ganttProject: teamBoardFilters?.projectId ?? null,
+    ganttScheduleFilters: { assigneeId: teamBoardFilters?.memberId, query: teamBoardFilters?.query, gitlab: teamBoardFilters?.gitlab } };
+}
+
 function keepGanttDateFocus(event: PointerEvent<HTMLButtonElement>) {
   if (event.button === 0 && document.activeElement?.matches('input[data-schedule-edge]')) event.preventDefault();
 }
@@ -647,10 +653,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openTeamGanttFromBoard = () => {
     const current = acceptedRouteRef.current;
     if (current?.view !== 'teamboard' || current.issueId) return;
-    const filters = current.teamBoardFilters;
-    requestRoute({ projectId: current.projectId, view: 'gantt', documentId: null, issueId: null, ganttScope: 'team',
-      ganttProject: filters?.projectId ?? null,
-      ganttScheduleFilters: { assigneeId: filters?.memberId, query: filters?.query, gitlab: filters?.gitlab } });
+    requestRoute(teamGanttRouteFromBoard(current));
   };
   const changeTeamGanttProject = (id: string | null) => {
     const current = acceptedRouteRef.current;
@@ -799,7 +802,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const issue = dataRef.current?.issues.find(value => value.id === id);
     if (!issue) return false;
     const current = acceptedRouteRef.current;
-    const teamRoute = current?.view === 'gantt' && current.ganttScope === 'team' ? current : null;
+    const teamRoute = current?.view === 'teamboard' ? teamGanttRouteFromBoard(current)
+      : current?.view === 'gantt' && current.ganttScope === 'team' ? current : null;
     const target: WorkspaceRoute = {
       projectId: teamRoute?.projectId ?? issue.projectId, view: 'gantt', documentId: null, issueId: null,
       ganttScope: teamRoute?.ganttScope, ganttProject: teamRoute?.ganttProject, ganttScheduleFilters: teamRoute?.ganttScheduleFilters,

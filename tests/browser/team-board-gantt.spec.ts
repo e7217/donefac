@@ -34,9 +34,9 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
   const created: Issue[] = [];
   const timestamp = Date.now() - 60_000;
 
-  async function create(projectId: string, title: string, assigneeId = actor.id) {
+  async function create(projectId: string, title: string, assigneeId = actor.id, startDate: string | null = '2031-11-03') {
     const issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
-      projectId, title, assigneeId, startDate: '2031-11-03', endDate: '2031-11-04',
+      projectId, title, assigneeId, startDate, endDate: '2031-11-04',
     } }), 201);
     created.push(issue);
     return issue;
@@ -57,7 +57,7 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
       expectedVersion: original.version, baseUrl: gitlabUrl, projectIds: [repositoryId], webhookSecret,
     } }));
     const west = await create(first.id, `전환 서쪽 ${suffix} 검토`);
-    const east = await create(second.id, `전환 동쪽 ${suffix} 검토`);
+    const east = await create(second.id, `전환 동쪽 ${suffix} 검토`, actor.id, null);
     const differentOwner = await create(second.id, `전환 다른 담당자 ${suffix} 검토`, peer.id);
     const running = await create(second.id, `전환 실행 중 ${suffix} 검토`);
     const offQuery = await create(second.id, `검색 제외 ${suffix} 검토`);
@@ -164,6 +164,55 @@ test('360px 팀 보드의 GitLab 검토 범위를 간트에서 열고 여러 프
     await expect(gitlab).toHaveValue('manual_pipeline');
     await expect.poll(() => location(page)).toEqual(manualScope);
     await expectIssues(gantt, [east]);
+
+    const manualBoardScope = { ...boardScope, boardGitlab: 'manual_pipeline' };
+    await page.goBack();
+    await expect.poll(() => location(page)).toEqual(manualBoardScope);
+    await button(page, `${east.key} 업무 열기`).click();
+    const drawer = page.getByRole('dialog', { name: east.title, exact: true });
+    const title = drawer.getByLabel('제목', { exact: true });
+    const openSchedule = drawer.getByRole('button', { name: '간트에서 일정 보기', exact: true });
+    const boardDetailScope = { ...manualBoardScope, issue: east.id };
+    await expect.poll(() => location(page)).toEqual(boardDetailScope);
+    await title.fill(`${east.title} 확인 중`);
+    const declined = page.waitForEvent('dialog').then(async dialog => {
+      const message = dialog.message();
+      await dialog.dismiss();
+      return message;
+    });
+    await openSchedule.click();
+    expect(await declined).toContain('저장하지 않은 업무');
+    await expect(title).toHaveValue(`${east.title} 확인 중`);
+    await expect.poll(() => location(page)).toEqual(boardDetailScope);
+
+    const approved = page.waitForEvent('dialog').then(dialog => dialog.accept());
+    await openSchedule.click();
+    await approved;
+    const focusedScope = { ...manualScope, focusIssue: east.id };
+    await expect.poll(() => location(page)).toEqual(focusedScope);
+    await expect(drawer).toHaveCount(0);
+    await expectIssues(gantt, [east]);
+    const row = gantt.locator(`[data-issue-id="${east.id}"]`);
+    const start = row.getByLabel(`${east.key} 시작일`, { exact: true });
+    await expect(row).toHaveAttribute('data-focused-issue', 'true');
+    await expect(start).toBeFocused();
+    await expect(start).toBeInViewport({ ratio: 0.9 });
+    const applied = page.waitForResponse(response => response.url().endsWith('/api/schedule/manual-apply')
+      && response.request().method() === 'POST' && response.ok());
+    await start.fill('2031-11-03');
+    await start.press('Enter');
+    await applied;
+    await expect.poll(async () => (await json<WorkspaceSnapshot>(await request.get('/api/workspace'))).issues
+      .find(issue => issue.id === east.id)?.startDate).toBe('2031-11-03');
+    await expect.poll(() => location(page)).toEqual(focusedScope);
+
+    await page.goBack();
+    await expect.poll(() => location(page)).toEqual(boardDetailScope);
+    await expect(title).toHaveValue(east.title);
+    await expect(drawer.getByLabel('시작일', { exact: true })).toHaveValue('2031-11-03');
+    await drawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect.poll(() => location(page)).toEqual(manualBoardScope);
+    await expectIssues(board, [east]);
   } finally {
     try {
       for (const issue of created.reverse()) {

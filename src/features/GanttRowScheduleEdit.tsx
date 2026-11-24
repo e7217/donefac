@@ -35,6 +35,8 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+  initialLink?: GanttRowLinkDraft;
+  otherDateDrafts?: ReadonlySet<string>;
   undoScope?: ScheduleUndoScope;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
@@ -57,6 +59,9 @@ type LinkDraft = {
   lag: string;
 };
 type LinkDraftChanges = Partial<Omit<LinkDraft, 'id'>>;
+export type GanttRowLinkDraft = (
+  { action: 'add'; direction: Direction; relatedId?: string } | { action: 'update'; dependencyId: string }
+) & { type?: DependencyType; lag?: string };
 type ExistingLink = { dependency: Dependency; other: Issue; role: Direction };
 type DraftResolution = {
   selected?: ExistingLink;
@@ -150,13 +155,13 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 
 export function GanttRowScheduleEdit({
   issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
-  notify, refresh, onClose, onDraftChange, onApplied,
+  initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
   const [suggestionOverrides, setSuggestionOverrides] = useState<ScheduleBulkDateChanges>({});
   const [suggestionDuration, setSuggestionDuration] = useState('3');
-  const [drafts, setDrafts] = useState(() => [linkDraft(1)]);
+  const [drafts, setDrafts] = useState<LinkDraft[]>(() => [{ ...linkDraft(1), ...initialLink }]);
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const nextDraftId = useRef(2);
   const [review, setReview] = useState<Review | null>(null);
@@ -202,6 +207,10 @@ export function GanttRowScheduleEdit({
   }
 
   const resolvedDrafts = drafts.map(draft => resolveDraft(draft, anchor, projectIssues, links));
+  const unreviewedKeys = new Set(resolvedDrafts.flatMap(({ related, selected }) => {
+    const other = related ?? selected?.other;
+    return other && otherDateDrafts?.has(other.id) ? [other.key] : [];
+  }));
   const targetCounts = new Map<string, number>();
   const edits: ScheduleRowDependencyEdit[] = [];
   const editGroups: number[] = [];
@@ -257,8 +266,11 @@ export function GanttRowScheduleEdit({
     onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, dirty, Boolean(pending));
   }, [dirty, onDraftChange, pending]);
   useEffect(() => {
+    const initialSearch = initialLink?.action === 'add' && !initialLink.relatedId &&
+      modal.current?.querySelector<HTMLInputElement>('input[data-row-link-search]');
+    if (initialSearch) { initialSearch.focus(); return; }
     initialDateInput.current?.focus({ preventScroll: focusDate !== 'dueDate' });
-  }, [focusDate]);
+  }, [focusDate, initialLink]);
   useEffect(() => () => {
     request.current?.abort();
     onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, false);
@@ -571,6 +583,9 @@ export function GanttRowScheduleEdit({
         </fieldset>
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>선후행 연결</legend>
+          {unreviewedKeys.size > 0 && <p className="gantt-row-edit-hint">
+            {[...unreviewedKeys].join(', ')}의 날짜 입력은 간트에 남습니다. 연결 미리보기에는 해당 업무의 저장된 날짜를 사용합니다.
+          </p>}
           {links.length > 0 && <details className="gantt-row-edit-existing">
             <summary>현재 연결 {links.length}개</summary>
             <ul>{links.map(({ dependency, other, role }) => <li key={dependency.id}>
@@ -779,7 +794,7 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, issueA
     </div> : <div onKeyDown={handleCandidateKeys}>
       <div className="gantt-row-edit-control">
         <label htmlFor={`${uid}-search`}>연결할 업무 검색</label>
-        <input id={`${uid}-search`} className="field" type="text" ref={searchInput} aria-controls={`${uid}-results`}
+        <input id={`${uid}-search`} className="field" type="text" ref={searchInput} data-row-link-search="" aria-controls={`${uid}-results`}
           value={query} placeholder="업무 키, 이전 키 또는 제목" onChange={event => onChange({ query: event.currentTarget.value })} />
       </div>
       {relatedId && <p className="gantt-row-edit-hint" role="status">선택한 업무가 목록에서 사라졌습니다. 연결할 업무를 다시 선택하세요.</p>}
