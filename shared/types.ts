@@ -2171,6 +2171,7 @@ export interface ScheduleBulkDateInput {
 }
 type ScheduleRowIssue = { id: string; expectedVersion: number };
 export const MAX_SCHEDULE_BULK_LINK_ISSUES = 100;
+export type ScheduleBulkLinkDateEdit = { issue: ScheduleRowIssue; changes: ScheduleBulkDateChanges };
 export interface ScheduleBulkLinkInput {
   projectId: string;
   anchor: ScheduleRowIssue;
@@ -2178,6 +2179,7 @@ export interface ScheduleBulkLinkInput {
   direction: 'predecessor' | 'successor';
   type: DependencyType;
   lagDays: number;
+  dates?: ScheduleBulkLinkDateEdit[];
 }
 export interface ScheduleBulkChainInput {
   mode: 'chain';
@@ -2185,6 +2187,7 @@ export interface ScheduleBulkChainInput {
   issues: ScheduleRowIssue[];
   type: DependencyType;
   lagDays: number;
+  dates?: ScheduleBulkLinkDateEdit[];
 }
 export const SCHEDULE_BLOCKER_LINK_PAGE_SIZE = 25;
 export const MAX_SCHEDULE_BLOCKER_LINKS = 100;

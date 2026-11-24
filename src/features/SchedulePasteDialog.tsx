@@ -6,18 +6,31 @@ import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-depend
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
-  ScheduleBulkChainInput, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
+  ScheduleBulkChainInput, ScheduleBulkLinkDateEdit, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
   SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 import { issueSearchAliasLabel } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
-import { GanttBulkChainFields, GanttBulkLinkFields, type BulkLinkDraft, type BulkLinkRule } from './GanttBulkLinksDialog';
+import {
+  bulkLinkDateFields, GanttBulkChainFields, GanttBulkLinkDateFields, GanttBulkLinkFields,
+  type BulkLinkDateRow, type BulkLinkDraft, type BulkLinkRule,
+} from './GanttBulkLinksDialog';
 import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
 
 type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
-type BulkLinks = { issues: readonly Issue[]; candidates: readonly Issue[]; issueAliases?: WorkspaceSnapshot['issueAliases']; refresh: () => Promise<void> };
+export type BulkLinkDateDraft = {
+  source: Pick<Issue, 'id' | 'version' | 'projectId' | 'startDate' | 'endDate'>;
+  changes: ScheduleBulkDateChanges;
+};
+type BulkLinks = {
+  issues: readonly Issue[];
+  candidates: readonly Issue[];
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
+  dateDrafts?: readonly BulkLinkDateDraft[];
+  refresh: () => Promise<void>;
+};
 type BlockerLinks = { issues: readonly Issue[]; dependencies: readonly Dependency[]; projects?: readonly Project[]; refresh: () => Promise<void> };
 type TeamPaste = { projects: readonly Project[] };
 type ProjectName = Pick<Project, 'id' | 'name'>;
@@ -115,6 +128,8 @@ function ProjectScheduleEditDialog({
   const [chainOrder, setChainOrder] = useState(() => bulkLinks?.issues.map(issue => issue.id) ?? []);
   const [chainRule, setChainRule] = useState<BulkLinkRule>(defaultLinkRule);
   const [anchorQuery, setAnchorQuery] = useState('');
+  const [excludedLinkDates, setExcludedLinkDates] = useState<ReadonlySet<string>>(() => new Set());
+  const [linkDateConfirmations, setLinkDateConfirmations] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [blockerSelection, setBlockerSelection] = useState<BlockerLinkSelection>(() => new Map());
   const [blockerRefreshKey, setBlockerRefreshKey] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
@@ -157,7 +172,9 @@ function ProjectScheduleEditDialog({
   const chainMode = linkMode === 'chain';
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
-  const linksEdited = hasLinkInput(link, anchorQuery) || chainEdited;
+  const linkRuleEdited = hasLinkInput(link, anchorQuery) || chainEdited;
+  const linkDateChoicesEdited = excludedLinkDates.size > 0 || linkDateConfirmations.size > 0;
+  const linksEdited = linkRuleEdited || linkDateChoicesEdited;
   const selectedBlockers = [...blockerSelection.values()];
   const blockerInput: ScheduleBlockerLinkInput | null = blockerLinks
     ? projectId === null ? {
@@ -167,9 +184,10 @@ function ProjectScheduleEditDialog({
     } : { projectId, relations: selectedBlockers.map(({ id, version }) => ({ id, version })) }
     : null;
   const input = blockerInput ? JSON.stringify(blockerInput)
-    : bulkLinks ? JSON.stringify(chainMode
+    : bulkLinks ? JSON.stringify([chainMode
       ? [linkMode, chainOrder, chainRule.type, chainRule.lagDays]
-      : [linkMode, link.choice?.id, link.direction, link.type, link.lagDays])
+      : [linkMode, link.choice?.id, link.direction, link.type, link.lagDays],
+      [...excludedLinkDates], [...linkDateConfirmations]])
       : bulkDates ? JSON.stringify(dates) : JSON.stringify([text, rescheduleSuccessors]);
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
   const selectedIds = new Set(issues.map(issue => issue.id));
@@ -180,15 +198,43 @@ function ProjectScheduleEditDialog({
   const anchor = chainMode ? undefined : anchors.find(issue => issue.id === link.choice?.id);
   const bulkIssuesById = new Map(bulkIssues.map(issue => [issue.id, issue]));
   const chainIssues = chainOrder.map(id => bulkIssuesById.get(id)).filter((issue): issue is Issue => Boolean(issue));
+  const dateDrafts = bulkLinks?.dateDrafts;
+  const linkDateDraftsById = useMemo(() => new Map(dateDrafts?.map(draft => [draft.source.id, draft])), [dateDrafts]);
+  const linkDateRows: BulkLinkDateRow[] = [];
+  const linkDateEdits: ScheduleBulkLinkDateEdit[] = [];
+  let hasConflictingLinkDates = false;
+  const linkDateIssues = chainMode ? chainIssues : anchor ? [...bulkIssues, anchor] : bulkIssues;
+  for (const issue of linkDateIssues) {
+    const dateDraft = linkDateDraftsById.get(issue.id);
+    if (!dateDraft || dateDraft.source.projectId !== issue.projectId || !sameProjectIds.has(issue.id)) continue;
+    const changedDates: BulkLinkDateRow['dates'] = [];
+    const changes: ScheduleBulkDateChanges = {};
+    for (const field of bulkLinkDateFields) {
+      const draft = dateDraft.changes[field];
+      if (draft === undefined) continue;
+      const base = dateDraft.source[field] ?? null;
+      const saved = issue[field] ?? null;
+      changedDates.push({ field, base, saved, draft, conflict: saved !== base && saved !== draft });
+      if (saved !== draft) changes[field] = draft;
+    }
+    if (!changedDates.length) continue;
+    linkDateRows.push({ issue, dates: changedDates });
+    if (excludedLinkDates.has(issue.id)) continue;
+    if (changedDates.some(date => date.conflict) && linkDateConfirmations.get(issue.id) !== issue.version) hasConflictingLinkDates = true;
+    if (Object.keys(changes).length) linkDateEdits.push({ issue: { id: issue.id, expectedVersion: issue.version }, changes });
+  }
+  const editsLinkDates = linkDateEdits.length > 0;
+  const linkDatesInput = editsLinkDates ? { dates: linkDateEdits } : {};
   const { lagDays: lag, type: linkType } = chainMode ? chainRule : link;
   const lagDays = lag.trim() ? Number(lag) : NaN;
-  const linkRulesValid = projectId !== null && !unavailableTargets?.length &&
+  const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingLinkDates &&
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES && isDependencyLag(lagDays);
   const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid
-    ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction, type: linkType, lagDays }
+    ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction, type: linkType, lagDays, ...linkDatesInput }
     : null;
   const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && chainIssues.length === issues.length
-    ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })), type: linkType, lagDays }
+    ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })),
+      type: linkType, lagDays, ...linkDatesInput }
     : null;
   const blockerIssues = blockerLinks?.issues;
   const blockerDependencies = blockerLinks?.dependencies;
@@ -361,7 +407,7 @@ function ProjectScheduleEditDialog({
 
   function updateLink(next: BulkLinkDraft) {
     setLink(next);
-    resetReview(hasLinkInput(next, anchorQuery) || chainEdited);
+    resetReview(hasLinkInput(next, anchorQuery) || chainEdited || linkDateChoicesEdited);
   }
 
   function updateLinkMode(next: LinkMode) {
@@ -379,6 +425,25 @@ function ProjectScheduleEditDialog({
   function updateChainRule(next: BulkLinkRule) {
     setChainRule(next);
     resetReview(true);
+  }
+
+  function updateLinkDateInclusion(id: string, include: boolean) {
+    const excluded = new Set(excludedLinkDates);
+    if (include) excluded.delete(id);
+    else excluded.add(id);
+    setExcludedLinkDates(excluded);
+    const confirmations = new Map(linkDateConfirmations);
+    confirmations.delete(id);
+    setLinkDateConfirmations(confirmations);
+    resetReview(linkRuleEdited || excluded.size > 0 || confirmations.size > 0);
+  }
+
+  function updateLinkDateConfirmation(issue: Issue, confirm: boolean) {
+    const confirmations = new Map(linkDateConfirmations);
+    if (confirm) confirmations.set(issue.id, issue.version);
+    else confirmations.delete(issue.id);
+    setLinkDateConfirmations(confirmations);
+    resetReview(linkRuleEdited || excludedLinkDates.size > 0 || confirmations.size > 0);
   }
 
   function updateBlockers(selection: BlockerLinkSelection) {
@@ -471,6 +536,9 @@ function ProjectScheduleEditDialog({
     if (!controller) return;
     setApproved(false);
     setNotice('');
+    const inputLabel = bulkLinks
+      ? linkDateRows.length ? '선택한 업무와 연결 입력, 날짜 초안' : '선택한 업무와 연결 입력'
+      : '선택한 업무와 날짜 입력';
     try {
       await managed.refresh();
       if (!mounted.current || controller.signal.aborted) return;
@@ -478,10 +546,10 @@ function ProjectScheduleEditDialog({
       if (blockerLinks) {
         setBlockerRefreshKey(value => value + 1);
         setNotice('차단 관계 선택을 유지했습니다. 변경된 관계는 다시 선택한 뒤 연결 미리보기를 만들어 주세요.');
-      } else setNotice(`선택한 업무와 ${bulkLinks ? '연결' : '날짜'} 입력을 유지했습니다. 최신 업무 상태로 미리보기를 다시 만들어 주세요.`);
+      } else setNotice(`${inputLabel}을 유지했습니다. 최신 업무 상태로 미리보기를 다시 만들어 주세요.`);
     } catch (cause) {
       if (mounted.current && !controller.signal.aborted) {
-        const kept = blockerLinks ? '차단 관계 선택' : `선택한 업무와 ${bulkLinks ? '연결' : '날짜'} 입력`;
+        const kept = blockerLinks ? '차단 관계 선택' : inputLabel;
         setError(`${errorMessage(cause)} ${kept}은 유지했습니다.`);
       }
     } finally {
@@ -565,6 +633,8 @@ function ProjectScheduleEditDialog({
   }
 
   const result = review?.result;
+  const reviewedLinkDates = Boolean(bulkLinks && result?.changes.length);
+  const mixedLinkReview = editsLinkDates || reviewedLinkDates;
   const followUpIssues = new Set(result?.followUpIssueIds);
   const appliedFollowUpCount = applied?.updated.filter(issue => followUpIssues.has(issue.id)).length ?? 0;
   const dependencyChanges = result?.dependencyChanges ?? [];
@@ -653,6 +723,8 @@ function ProjectScheduleEditDialog({
                 {chainMode ? <GanttBulkChainFields issues={chainIssues} value={chainRule} onChange={updateChainRule} onMove={moveChainIssue} />
                   : <GanttBulkLinkFields anchors={anchors} anchor={anchor} issueAliases={bulkLinks.issueAliases} searchRef={anchorSearch} query={anchorQuery}
                     value={link} onSearch={setAnchorQuery} onChange={updateLink} />}
+                {linkDateRows.length > 0 && <GanttBulkLinkDateFields rows={linkDateRows} excluded={excludedLinkDates}
+                  confirmations={linkDateConfirmations} onInclude={updateLinkDateInclusion} onConfirm={updateLinkDateConfirmation} />}
               </>
             ) : bulkDates ? (
                 <div className="schedule-bulk-date-fields">
@@ -762,7 +834,8 @@ function ProjectScheduleEditDialog({
             <p className="schedule-paste-pending" role="status">
               <Loader2 className="spin" size={17} />
               {pending === 'preview' && blockerLinks ? '선택한 차단 관계의 선후행 연결을 검토하는 중입니다.'
-                : pending === 'preview' && bulkLinks ? '선택한 업무의 선후행 연결을 검토하는 중입니다.'
+                : pending === 'preview' && bulkLinks ? editsLinkDates ? '선택한 날짜와 선후행 연결을 검토하는 중입니다.'
+                  : '선택한 업무의 선후행 연결을 검토하는 중입니다.'
                 : pending === 'preview' && bulkDates ? '선택한 업무의 날짜를 검토하는 중입니다.' : pendingLabels[pending]}
             </p>
           )}
@@ -781,7 +854,9 @@ function ProjectScheduleEditDialog({
           )}
           {applied && (
             <p className="schedule-paste-success" role="status">
-              {directLinks ? `선후행 연결 ${applied.dependencyChanges ?? 0}건을 추가했습니다. `
+              {directLinks && applied.updated.length > 0 && `날짜 ${applied.updated.length}건을 변경했습니다. `}
+              {directLinks ? (applied.dependencyChanges || !applied.updated.length
+                ? `선후행 연결 ${applied.dependencyChanges ?? 0}건을 추가했습니다. ` : null)
                 : bulkDates ? bulkDateResultMessage(applied.updated, team)
                   : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
               {appliedFollowUpCount > 0 && ` 후행 일정 ${appliedFollowUpCount}건을 조정했습니다.`}
@@ -822,7 +897,7 @@ function ProjectScheduleEditDialog({
               <div className="schedule-paste-review-heading">
                 <div>
                   <h3>
-                    {directLinks ? `추가 ${dependencyChanges.length}건 · 유지 ${result.unchanged}건`
+                    {directLinks ? `${reviewedLinkDates ? `날짜 변경 ${result.changes.length}건 · 연결 ` : ''}추가 ${dependencyChanges.length}건 · 유지 ${result.unchanged}건`
                       : bulkDates ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
                         : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
@@ -860,7 +935,8 @@ function ProjectScheduleEditDialog({
               )}
               {!hasChanges(result) && (
                 <p className="schedule-paste-noop">
-                  {directLinks ? '추가할 선후행 연결이 없습니다.' : bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
+                  {directLinks ? mixedLinkReview ? '변경할 날짜나 추가할 선후행 연결이 없습니다.' : '추가할 선후행 연결이 없습니다.'
+                    : bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
                 </p>
               )}
               {keyMappings.length > 0 && <ScheduleKeyMappings mappings={keyMappings}
@@ -869,7 +945,7 @@ function ProjectScheduleEditDialog({
                 <WarningList warnings={result.warnings} label="일정 검토 경고" />
               )}
               {result.changes.length > 0 && (
-                <ChangeTable changes={result.changes} bulk={Boolean(bulkDates)} projects={review?.projects}
+                <ChangeTable changes={result.changes} bulk={Boolean(bulkDates || bulkLinks)} projects={review?.projects}
                   teamProjects={teamProjects} followUpIssues={followUpIssues} />
               )}
               {dependencyChanges.length > 0 && (
@@ -887,7 +963,7 @@ function ProjectScheduleEditDialog({
               ? '적용 후 간트에서 되돌리기를 사용할 수 있습니다.'
               : retryApply
                 ? '적용 여부가 확인되지 않았습니다. 같은 요청의 결과를 확인하세요.'
-                : directLinks ? '검토한 새 연결을 한 번에 추가합니다.'
+                : directLinks ? mixedLinkReview ? '검토한 날짜와 새 연결을 함께 적용합니다.' : '검토한 새 연결을 한 번에 추가합니다.'
                   : bulkDates ? '검토한 날짜만 한 번에 적용됩니다.' : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
           </span>
           <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>
@@ -921,7 +997,7 @@ function ProjectScheduleEditDialog({
               onClick={() => void apply()}
             >
               <Check size={16} />
-              {directLinks ? '검토한 연결 적용' : '검토한 일정 적용'}
+              {directLinks ? mixedLinkReview ? '날짜와 선후행 연결 적용' : '검토한 연결 적용' : '검토한 일정 적용'}
             </button>
           )}
         </footer>

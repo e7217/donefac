@@ -56,7 +56,7 @@ import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
 import { GanttTeamBlockers } from './GanttTeamBlockers';
-import { GanttTeamBlockerEdit, type TeamBlockerDateDraft } from './GanttTeamBlockerEdit';
+import { GanttTeamBlockerEdit } from './GanttTeamBlockerEdit';
 import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { groupActiveTeamBlockers } from './team-follow-up-choices';
 import { GanttLinkEndpoints, GanttLinkPrompt, type GanttLinkEndpoint } from './GanttLinkPicker';
@@ -71,8 +71,8 @@ import './gantt-deadline-markers.css';
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
 type InlineDateValues = { source: Issue; startDate: string | null; endDate: string | null };
 type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owner: symbol };
-type ChartBlockerDraft = TeamBlockerDateDraft & { owner?: symbol; stored?: StoredGanttDateDraft };
-type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartBlockerDraft; targetDraft?: ChartBlockerDraft };
+type ChartDateDraft = { source: Issue; changes: ScheduleBulkDateChanges; owner?: symbol; stored?: StoredGanttDateDraft };
+type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartDateDraft; targetDraft?: ChartDateDraft };
 type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
 type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener };
 type ManualReview = {
@@ -140,7 +140,7 @@ type GanttProps = FeatureProps & {
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type ScheduleProjectScope = Project | 'team';
-type BulkLinkSelection = { project: Project; issues: Issue[] };
+type BulkLinkSelection = { project: Project; issues: Issue[]; dateDrafts: ChartDateDraft[] };
 type DependencyEditor = {
   dependency?: Dependency;
   prefill?: DependencyPrefill;
@@ -665,7 +665,7 @@ function ProjectGantt(props: GanttProps) {
     setCreatedBlockedIssue(null);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
   }
-  function blockerDateDraft(issue: Issue): ChartBlockerDraft | undefined {
+  function chartDateDraft(issue: Issue): ChartDateDraft | undefined {
     const live = inlineDateDrafts.current.get(issue.id);
     const stored = recoverableDates(issue, retainedDates.current.get(issue.id));
     if (live?.source.projectId === issue.projectId) {
@@ -677,10 +677,19 @@ function ProjectGantt(props: GanttProps) {
     const changes = changedInlineDates({ source, startDate: stored.draftStart, endDate: stored.draftEnd });
     return Object.keys(changes).length ? { source, changes, stored } : undefined;
   }
+  function acceptChartDateDraft(saved: Issue, draft: ChartDateDraft | undefined) {
+    if (!draft) return;
+    const live = inlineDateDrafts.current.get(saved.id);
+    if (live && live.owner === draft.owner) live.accept(saved);
+    else if (draft.stored && retainedDates.current.get(saved.id) === draft.stored) {
+      if (live) live.accept(saved);
+      else { retainedDates.current.delete(saved.id); storeInlineDates(); }
+    }
+  }
   function reviewTeamBlockerDates(source: Issue, target: Issue, opener: HTMLButtonElement) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
         [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) return;
-    const sourceDraft = blockerDateDraft(source), targetDraft = blockerDateDraft(target);
+    const sourceDraft = chartDateDraft(source), targetDraft = chartDateDraft(target);
     if (sourceDraft || targetDraft) setTeamBlockerEdit({ source, target, opener, sourceDraft, targetDraft });
   }
   function closeTeamBlockerEdit() {
@@ -695,12 +704,7 @@ function ProjectGantt(props: GanttProps) {
     setScheduleWarnings(result.warnings);
     for (const saved of result.updated) {
       const selected = [teamBlockerEdit?.sourceDraft, teamBlockerEdit?.targetDraft].find(draft => draft?.source.id === saved.id);
-      const live = inlineDateDrafts.current.get(saved.id);
-      if (live && live.owner === selected?.owner) live.accept(saved);
-      else if (selected?.stored && retainedDates.current.get(saved.id) === selected.stored) {
-        if (live) live.accept(saved);
-        else { retainedDates.current.delete(saved.id); storeInlineDates(); }
-      }
+      acceptChartDateDraft(saved, selected);
     }
     const opener = teamBlockerChartPair?.opener;
     try {
@@ -1433,15 +1437,23 @@ function ProjectGantt(props: GanttProps) {
     });
   }
   function openBulkLinks() {
-    if (busyRef.current || activeDatePicker || selectedIssues.length < 2 || !bulkLinkProject || bulkLinkProblem || !canLeave()) return;
+    if (busyRef.current || activeDatePicker || selectedIssues.length < 2 || !bulkLinkProject || bulkLinkProblem) return;
+    const keepDates = canKeepInlineDateDrafts();
+    if (!keepDates && !canLeave()) return;
+    const dateDrafts = keepDates ? projectIssues.flatMap(issue => {
+      if (issue.projectId !== bulkLinkProject.id) return [];
+      const draft = chartDateDraft(issue);
+      return draft ? [draft] : [];
+    }) : [];
     queueMicrotask(() => {
       setLinkPicker(null);
       setDatePicker(null);
-      setBulkLinkSelection({ project: bulkLinkProject, issues: selectedIssues });
+      setBulkLinkSelection({ project: bulkLinkProject, issues: selectedIssues, dateDrafts });
     });
   }
-  function closeBulkLinks() {
+  function closeBulkLinks(updated?: readonly Issue[]) {
     setBulkLinkSelection(null);
+    if (updated && focusAfterCompletingMissingRows(updated)) return;
     requestAnimationFrame(() => {
       const trigger = bulkLinksTrigger.current;
       (trigger && !trigger.disabled ? trigger : scrollRef.current)?.focus({ preventScroll: true });
@@ -2320,7 +2332,7 @@ function ProjectGantt(props: GanttProps) {
       visibleIssueIds={new Set(issueRows.keys())} selectedIssueIds={selectedIssues.map(issue => issue.id)}
       busy={busy || Boolean(issueOverlayOpen || linkPicker || teamBlockerEdit)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
       chartPair={teamBlockerChartPair} onChartPairSettled={() => setTeamBlockerChartPair(undefined)}
-      hasDateDraft={issue => Boolean(blockerDateDraft(issue))} onReviewDates={reviewTeamBlockerDates}
+      hasDateDraft={issue => Boolean(chartDateDraft(issue))} onReviewDates={reviewTeamBlockerDates}
       onReviewSchedule={(relation, source, target, opener) => reviewTeamBlockerSchedules(source, [{ relation, target }], opener)}
       onReviewTogether={reviewTeamBlockerSchedules}
       createdBlockedIssue={createdBlockedIssue} onCreateBlockedIssue={openBlockedIssueCreation}
@@ -2804,16 +2816,25 @@ function ProjectGantt(props: GanttProps) {
       bulkLinks={{
         issues: bulkLinkSelection.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original),
         candidates: projectIssues.filter(issue => issue.projectId === bulkLinkSelection.project.id),
+        dateDrafts: bulkLinkSelection.dateDrafts,
         issueAliases: data.issueAliases,
         refresh,
       }}
-      notify={notify} onDraftChange={trackDraft} onClose={closeBulkLinks}
+      notify={notify} onDraftChange={trackDraft} onClose={() => closeBulkLinks()}
       onApplied={async result => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
+        for (const saved of result.updated) {
+          const draft = bulkLinkSelection.dateDrafts.find(candidate => candidate.source.id === saved.id);
+          const capturedDatesSaved = draft && (['startDate', 'endDate'] as const).every(field =>
+            !Object.hasOwn(draft.changes, field) || saved[field] === draft.changes[field]);
+          if (capturedDatesSaved) acceptChartDateDraft(saved, draft);
+        }
         await refresh();
-        closeBulkLinks();
-        notify(`선후행 연결 ${result.dependencyChanges ?? 0}건을 추가했습니다.`);
+        closeBulkLinks(result.updated);
+        const dates = result.updated.length, links = result.dependencyChanges ?? 0;
+        notify(dates && links ? `${dates}개 업무의 날짜와 선후행 연결 ${links}건을 저장했습니다.`
+          : dates ? bulkDateResultMessage(result.updated, false) : `선후행 연결 ${links}건을 추가했습니다.`);
       }}
     />}
     {blockerLinksScope && <SchedulePasteDialog

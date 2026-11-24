@@ -64,6 +64,157 @@ function chain(projectId: string, issues: Issue[]): ScheduleBulkChainInput {
   return { mode: 'chain', projectId, issues: issues.map(reference), type: 'FF', lagDays: 1 };
 }
 
+test('mixed ordered chain projects dates for new and existing links and atomically applies, retries and undoes', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('종료일을 채울 선행', f.project.id, { endDate: null });
+  const second = await f.issue('시작일을 채울 후행', f.project.id, { startDate: null, endDate: '2026-11-30' });
+  const third = await f.issue('기존 연결 후행', f.project.id, { startDate: '2026-11-30', endDate: '2026-12-01' });
+  const outside = await f.issue('선택 밖 후행', f.project.id, { startDate: '2026-11-24', endDate: '2026-11-25' });
+  const retained = await f.link(second, third, 'SS', -1);
+  const outsideLink = await f.link(first, outside);
+  const body: ScheduleBulkChainInput = { ...chain(f.project.id, [first, second, third]), type: 'FS', lagDays: 0, dates: [
+    { issue: reference(first), changes: { endDate: '2026-11-25', dueDate: null } },
+    { issue: reference(second), changes: { startDate: '2026-11-27' } },
+  ] };
+  const before = await f.workspace();
+  const linkOnly = await f.review({ ...body, dates: [] });
+  assert.ok(linkOnly.warnings.some(warning => warning.includes(`${first.key} → ${second.key} · 날짜 미정`)));
+  const mixed = await f.review(body);
+  assert.ok(mixed.previewId, JSON.stringify(mixed.errors));
+  assert.deepEqual(mixed.changes.map(change => [change.id, change.fromStart, change.toStart, change.fromEnd, change.toEnd, change.fromDue, change.toDue]), [
+    [first.id, first.startDate, first.startDate, null, '2026-11-25', first.dueDate, null],
+    [second.id, null, '2026-11-27', second.endDate, second.endDate, undefined, undefined],
+  ]);
+  assert.deepEqual(mixed.dependencyChanges?.map(change => [change.predecessorKey, change.successorKey]), [[first.key, second.key]]);
+  assert.deepEqual(mixed.retainedDependencies?.map(change => [change.predecessorKey, change.successorKey, change.after]), [
+    [second.key, third.key, { type: retained.type, lagDays: retained.lagDays }],
+  ]);
+  assert.ok(!mixed.warnings.some(warning => warning.includes(`${first.key} → ${second.key}`)));
+  assert.ok(mixed.warnings.some(warning => warning.includes(`${first.key} → ${outside.key}`) && warning.includes('2026-11-26')));
+  assert.deepEqual(await f.workspace(), before);
+
+  const db = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER fail_mixed_chain_link BEFORE INSERT ON dependencies
+      WHEN NEW.predecessor_id='${first.id}' AND NEW.successor_id='${second.id}'
+      BEGIN SELECT RAISE(ABORT,'synthetic mixed chain link failure'); END`);
+    await f.apply(mixed.previewId, 500);
+    assert.deepEqual(await f.workspace(), before);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schedule_undos').get()?.count, 0);
+    db.exec('DROP TRIGGER fail_mixed_chain_link');
+
+    const [saved, retried] = await Promise.all([f.apply(mixed.previewId), f.apply(mixed.previewId)]);
+    assert.deepEqual(retried, saved);
+    assert.equal(saved.dependencyChanges, 1);
+    assert.deepEqual(saved.warnings, mixed.warnings);
+    assert.deepEqual(saved.updated.map(({ id, startDate, endDate, dueDate }) => [id, startDate, endDate, dueDate]), [
+      [first.id, first.startDate, '2026-11-25', null], [second.id, '2026-11-27', second.endDate, second.dueDate],
+    ]);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schedule_undos').get()?.count, 1);
+    const applied = await f.workspace();
+    assert.equal(findLink(applied, first, second)?.type, 'FS');
+    assert.deepEqual(findLink(applied, second, third), retained);
+    assert.deepEqual(findLink(applied, first, outside), outsideLink);
+    for (const untouched of [third, outside]) assert.deepEqual(applied.issues.find(issue => issue.id === untouched.id), untouched);
+
+    const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: saved.undoId });
+    assert.equal(undo.dependencyChanges, 1);
+    assert.deepEqual(undo.updated.map(({ id, startDate, endDate, dueDate }) => [id, startDate, endDate, dueDate]),
+      [first, second].map(({ id, startDate, endDate, dueDate }) => [id, startDate, endDate, dueDate]));
+    assert.deepEqual((await f.workspace()).dependencies, before.dependencies);
+    assert.deepEqual(await f.apply(mixed.previewId), saved);
+  } finally { db.close(); }
+});
+
+test('mixed common-anchor links review anchor and target drafts, retained missing dates and incoming blockers', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('종료일을 바꿀 공통 선행');
+  const first = await f.issue('종료일만 바꿀 후행');
+  const second = await f.issue('시작일을 지울 기존 후행');
+  const external = await f.issue('외부 차단 선행', 'project-neo', { endDate: '2026-11-25' });
+  const retained = await f.link(anchor, second, 'FS');
+  await f.call<IssueRelation>(`/issues/${external.id}/relations`, 201, 'POST', { type: 'blocks', direction: 'outgoing', otherIssueId: first.id });
+  const body: ScheduleBulkLinkInput = { ...input(anchor, [first, second]), dates: [
+    { issue: reference(anchor), changes: { endDate: '2026-11-26' } },
+    { issue: reference(first), changes: { endDate: '2026-11-27' } },
+    { issue: reference(second), changes: { startDate: null } },
+  ] };
+  const mixed = await f.review(body);
+  assert.ok(mixed.previewId, JSON.stringify(mixed.errors));
+  assert.deepEqual(mixed.changes.map(change => change.id), [anchor.id, first.id, second.id]);
+  assert.ok(mixed.warnings.some(warning => warning.includes(`${anchor.key} → ${second.key} · 날짜 미정`)));
+  assert.ok(mixed.teamBlockerWarnings?.some(warning => warning.includes(`${external.key} → ${first.key}`) && warning.includes('2026-11-26')));
+  await f.call(`/issues/${external.id}`, 200, 'PATCH', { expectedVersion: external.version, title: '현 검토에서 참조한 외부 업무가 바뀜' }, 'user-seo');
+  const concurrent = await f.workspace();
+  const rejected = await f.call<{ error: string }>(applyPath, 409, 'POST', { previewId: mixed.previewId });
+  assert.match(rejected.error, /프로젝트 간 연결 업무 또는 차단 관계가 변경되었습니다/);
+  assert.deepEqual(await f.workspace(), concurrent);
+
+  const fresh = await f.review(body);
+  assert.ok(fresh.previewId);
+  const applied = await f.apply(fresh.previewId);
+  assert.equal(applied.dependencyChanges, 1);
+  assert.deepEqual([...applied.warnings].sort(), [...fresh.warnings].sort());
+  const saved = await f.workspace();
+  assert.deepEqual(findLink(saved, anchor, second), retained);
+  assert.equal(findLink(saved, anchor, first)?.type, 'FS');
+  const updatedAnchor = applied.updated.find(issue => issue.id === anchor.id)!;
+  const updatedSelected = applied.updated.filter(issue => issue.id !== anchor.id);
+  const dateOnly = await f.review({ ...input(updatedAnchor, updatedSelected), dates: [
+    { issue: reference(updatedAnchor), changes: { endDate: '2026-11-30' } },
+  ] });
+  assert.ok(dateOnly.previewId);
+  assert.deepEqual(dateOnly.dependencyChanges, []);
+  assert.equal(dateOnly.retainedDependencies?.length, 2);
+  const final = await f.apply(dateOnly.previewId);
+  assert.equal(final.dependencyChanges, undefined);
+  assert.equal(final.updated[0].endDate, '2026-11-30');
+  assert.deepEqual((await f.workspace()).dependencies, saved.dependencies);
+});
+
+test('mixed ordered chain rejects unmatched, invalid, stale or cyclic date and relationship proposals without partial writes', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('첫 번째 선택');
+  const second = await f.issue('두 번째 선택');
+  const third = await f.issue('세 번째 선택');
+  const unrelated = await f.issue('선택하지 않은 업무');
+  const foreign = await f.issue('다른 프로젝트의 이름이 표시되면 안 되는 업무', 'project-neo');
+  const body = chain(f.project.id, [first, second, third]);
+  const date = { issue: reference(first), changes: { endDate: '2026-11-25' } };
+  const before = await f.workspace();
+  for (const dates of [null, [date, date], [{ ...date, issue: reference(unrelated) }], [{ ...date, issue: reference(foreign) }],
+    [{ ...date, issue: { id: first.id, expectedVersion: first.version + 1 } }], [{ ...date, changes: {} }],
+    [{ ...date, changes: { startDate: '2026-02-30' } }]]) {
+    await f.call(previewPath, 400, 'POST', { ...body, dates });
+  }
+  const foreignReview = await f.review({ ...chain(f.project.id, [first, foreign, third]), dates: [{ ...date, issue: reference(foreign) }] });
+  assert.equal(foreignReview.previewId, null);
+  assert.deepEqual(foreignReview.errors.map(error => error.issueId), [foreign.id]);
+  assert.ok(!JSON.stringify(foreignReview).includes(foreign.title));
+  const badRange = await f.review({ ...body, dates: [{ ...date, changes: { startDate: '2026-11-27' } }] });
+  assert.equal(badRange.previewId, null);
+  assert.ok(badRange.errors.some(error => error.issueId === first.id && /시작일|종료일/.test(error.message)));
+  assert.deepEqual(await f.workspace(), before);
+
+  const candidate = { ...body, dates: [date, { issue: reference(second), changes: { endDate: '2026-11-27' } }] };
+  const ready = await f.review(candidate);
+  assert.ok(ready.previewId);
+  const updated = await f.call<Issue>(`/issues/${second.id}`, 200, 'PATCH', { expectedVersion: second.version, endDate: '2026-11-24' }, 'user-seo');
+  const concurrent = await f.workspace();
+  await f.apply(ready.previewId, 409);
+  const stale = await f.review(candidate);
+  assert.equal(stale.previewId, null);
+  assert.deepEqual(stale.errors.map(error => error.issueId), [second.id]);
+  assert.deepEqual(await f.workspace(), concurrent);
+
+  await f.link(third, first);
+  const topology = await f.workspace();
+  const cyclic = await f.review({ ...chain(f.project.id, [first, updated, third]), dates: [date] });
+  assert.equal(cyclic.previewId, null);
+  assert.ok(cyclic.errors.some(error => /순환/u.test(error.message)));
+  assert.deepEqual(await f.workspace(), topology);
+});
+
 test('ordered bulk chain previews only adjacent pairs and undoes its new links without changing dates or retained rules', async t => {
   const f = await fixture(t);
   const second = await f.issue('두 번째 연결 업무');
