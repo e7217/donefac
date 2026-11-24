@@ -3,6 +3,7 @@ import { link, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { dirname, extname, isAbsolute, join, resolve } from 'node:path';
 import { compareConfluenceArchive } from './confluence-pilot-audit-archive.mjs';
 import { readConfluenceInventory } from './confluence-pilot-audit-rest.mjs';
+import { CONFLUENCE_FINDINGS_FORMAT, CONFLUENCE_FINDINGS_VERSION } from './pilot-migration-confluence-findings.mjs';
 
 const spaceKeyPattern = /^~?[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/;
 const pageIdPattern = /^[1-9]\d{0,19}$/;
@@ -162,9 +163,12 @@ try {
       .sort(([left], [right]) => left.length - right.length || left.localeCompare(right))
       .map(([pageId, codes]) => ({ pageId, codes: [...codes].sort() }));
     await writeFindings(findingsPath, {
-      format: 'teamspace-confluence-audit-findings', version: 1, checkedAt: new Date().toISOString(),
+      format: CONFLUENCE_FINDINGS_FORMAT, version: CONFLUENCE_FINDINGS_VERSION, checkedAt: new Date().toISOString(),
       selection, status, archive: { sha256: archive.sha256, bytes: archive.bytes }, spacePermissions,
       unidentifiedPages: pageFindings.size - findings.length, findings,
+      coverage: { archivePages: archive.totalCurrentPages, matchedPages: archive.matchedPages,
+        permissionCheckedPages: archive.permissionCheckedPages, outsideSelectionPages: archive.outsideSelectionPages,
+        otherSpacePages: archive.otherSpacePages, unassignedPages: archive.unassignedPages },
     }, signal);
   }
   process.stdout.write(`${JSON.stringify({ status, selection, visiblePages: inventory.pages.size, unavailablePages,

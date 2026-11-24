@@ -55,18 +55,21 @@ function apiRequest(url, pilotSignal) {
   };
 }
 
-export async function startRehearsalPilot(dataDir, { signal, port = 0, restrictions = [] } = {}) {
+export async function startRehearsalPilot(dataDir, { signal, port = 0, restrictions = [], reviews = [] } = {}) {
   signal?.throwIfAborted();
   if (!isAbsolute(dataDir) || (lstatSync(dataDir, { throwIfNoEntry: false })?.isSymbolicLink() ?? false)) {
     throw new Error('리허설 데이터 경로는 심볼릭 링크가 아닌 절대 경로여야 합니다.');
   }
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('리허설 포트는 0~65535여야 합니다.');
   // Start the normal pilot with its lock, and keep service credentials out of its environment.
-  const input = restrictions.length ? JSON.stringify(restrictions) : undefined;
+  const input = reviews.length ? JSON.stringify({ restrictions, reviews })
+    : restrictions.length ? JSON.stringify(restrictions) : undefined;
+  const reviewEnv = reviews.length ? { TEAMSPACE_PILOT_CONFLUENCE_REVIEW: 'stdin' }
+    : restrictions.length ? { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' } : {};
   const { child, exited } = launch('bash', ['scripts/pilot-lock.sh', dataDir, process.execPath, '--import', 'tsx', 'server/pilot.ts'], {
     ...commandEnv, TEAMSPACE_PILOT_PORT: String(port), TEAMSPACE_PILOT_DEMO: '0', TEAMSPACE_PILOT_OUTBOUND: '0',
     TEAMSPACE_PILOT_DEADLINE_REMINDERS: '0', TEAMSPACE_PILOT_RECURRING_ISSUES: '0',
-    ...(input ? { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: 'stdin' } : {}),
+    ...reviewEnv,
   }, false, input);
   let startupError = '', stdout = '', stopping;
   const ready = new Promise(resolve => {

@@ -11,7 +11,8 @@ const sourceRecordPageSize = 100;
 const sourceRecordMaxOffset = 1_000_000;
 
 /** @typedef {'matched'|'needs-review'} ConfluenceReviewStatus */
-/** @typedef {{proof: {packageId: string, sha256: string, status: ConfluenceReviewStatus},
+/** @typedef {{proof: {packageId: string, sha256: string, status: ConfluenceReviewStatus,
+ * coverage?: {archivePages: number, permissionCheckedPages: number}},
  * findings: {status: ConfluenceReviewStatus, archive: {sha256: string, bytes: number},
  * findings: {pageId: string, codes: string[]}[]}}} ConfluenceReview */
 
@@ -310,10 +311,15 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   const restrictedPages = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
+  const withoutFullCoverage = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
+  for (const { proof: { packageId, coverage } } of confluenceReviews) {
+    if (coverage && coverage.archivePages === coverage.permissionCheckedPages) withoutFullCoverage.delete(packageId);
+  }
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
     receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
     receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
-    receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0 };
+    receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0,
+    confluencePackagesWithoutFullPageCoverage: withoutFullCoverage.size };
   const seenReceipts = new Set();
   const receipts = [];
   for (const receipt of imports) {

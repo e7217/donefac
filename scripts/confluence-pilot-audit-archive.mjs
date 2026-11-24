@@ -100,6 +100,7 @@ export async function compareConfluenceArchive(archivePath, inventory, addFindin
 
   let missingPages = 0;
   let matchedPages = 0;
+  let permissionCheckedPages = 0;
   let versionMismatches = 0;
   let hierarchyMismatches = 0;
   let restrictionMismatches = 0;
@@ -120,9 +121,12 @@ export async function compareConfluenceArchive(archivePath, inventory, addFindin
       hierarchyMismatches++;
       addFinding?.(id, 'HIERARCHY_MISMATCH');
     }
-    if (page.restriction !== 'unknown' && (row.metadata.restricted === true) !== (page.restriction === 'restricted')) {
-      restrictionMismatches++;
-      addFinding?.(id, 'RESTRICTION_MISMATCH');
+    if (page.restriction !== 'unknown') {
+      permissionCheckedPages++;
+      if ((row.metadata.restricted === true) !== (page.restriction === 'restricted')) {
+        restrictionMismatches++;
+        addFinding?.(id, 'RESTRICTION_MISMATCH');
+      }
     }
   }
 
@@ -186,6 +190,7 @@ export async function compareConfluenceArchive(archivePath, inventory, addFindin
 
   return {
     sha256, bytes: bytes.length, pages: archived.size, matchedPages, missingPages, archiveOnlyPages, outsideSelectionPages,
+    totalCurrentPages: current.length, permissionCheckedPages,
     otherSpaces: spaces.length - 1, otherSpacePages, unassignedPages, versionMismatches, hierarchyMismatches, restrictionMismatches,
     archivedRestrictedPages, missingPageBodies, attachments: scopedAttachments.length, attachmentBinaries, attachmentEvidenceProblems,
     permissionWarnings, unlinkedAttachmentWarnings, analysisErrors, analysisWarnings,

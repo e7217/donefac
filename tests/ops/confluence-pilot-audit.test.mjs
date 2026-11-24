@@ -32,12 +32,15 @@ function property(name, value) { return `<property name="${name}">${value}</prop
 function reference(name, type, id) { return `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`; }
 function object(type, id, properties) { return `<object class="${type}"><id name="id">${id}</id>${properties}</object>`; }
 
-function nativeExport(pages = [root, child], { extras = false, restricted = [], spaceId = '42', includeBinary = true, spacePermission = false, omitBody = [] } = {}) {
+function nativeExport(pages = [root, child], { extras = false, restricted = [], spaceId = '42', includeBinary = true,
+  spacePermission = false, omitBody = [], otherSpaceId } = {}) {
   const space = object('Space', spaceId, property('key', 'WIKI') + property('name', 'Fixture Wiki'));
+  const otherSpace = otherSpaceId ? object('Space', otherSpaceId, property('key', 'OTHER')) : '';
   function pageRows(page, originalId) {
     const parent = page.ancestors.at(-1);
+    const owner = page.spaceId === undefined ? spaceId : page.spaceId;
     return [object('Page', page.id, property('contentStatus', originalId ? 'historical' : 'current') +
-      property('title', `${privateTitle} ${page.id}`) + property('version', page.version) + reference('space', 'Space', spaceId) +
+      property('title', `${privateTitle} ${page.id}`) + property('version', page.version) + (owner ? reference('space', 'Space', owner) : '') +
       (parent ? reference('parent', 'Page', parent) : '') + (originalId ? reference('originalVersion', 'Page', originalId) : '')),
     ...(omitBody.includes(page.id) ? [] :
       [object('BodyContent', `9${page.id}`, property('body', `<![CDATA[<p>${privateBody}</p>]]>`) + reference('content', 'Page', page.id))])];
@@ -54,7 +57,7 @@ function nativeExport(pages = [root, child], { extras = false, restricted = [], 
     rows.push(object('ContentPermissionSet', `80${index}`, property('type', 'View') + reference('owningContent', 'Page', id)));
   }
   if (spacePermission) rows.push(object('SpacePermission', '900', property('type', 'VIEWSPACE') + reference('space', 'Space', spaceId)));
-  return zip([{ path: 'native/entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${rows.join('')}</hibernate-generic>`) },
+  return zip([{ path: 'native/entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${otherSpace}${rows.join('')}</hibernate-generic>`) },
     ...files.map(file => ({ ...file, path: `native/${file.path}` }))]);
 }
 
@@ -153,16 +156,16 @@ function assertCounts(report, expected) {
   for (const [key, count] of Object.entries(expected)) assert.equal(report[key], count, key);
 }
 
-async function assertFindings(path, { directory, archive, status, selection, findings, unidentifiedPages = 0 }) {
+async function assertFindings(path, { directory, archive, status, selection, findings, unidentifiedPages = 0, coverage }) {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   const raw = await readFile(path, 'utf8');
   assertPrivate({ stdout: raw, stderr: '' }, directory);
   const { checkedAt, ...report } = parseConfluenceFindings(JSON.parse(raw));
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
   assert.deepEqual(report, {
-    format: 'teamspace-confluence-audit-findings', version: 1, selection, status,
+    format: 'teamspace-confluence-audit-findings', version: 2, selection, status,
     archive: { sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length },
-    spacePermissions: 'manual-review', unidentifiedPages, findings,
+    spacePermissions: 'manual-review', unidentifiedPages, findings, coverage,
   });
   return raw;
 }
@@ -182,7 +185,8 @@ test('native Confluence ZIP matches paged live metadata without reading document
   assertCounts(report, { status: 'matched', selection: 'visible-space', visiblePages: 2, unavailablePages: 0, restrictedPages: 0,
     unknownRestrictions: 0, spacePermissions: 'manual-review' });
   assertCounts(report.archive, { sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length,
-    pages: 2, matchedPages: 2, missingPages: 0, archiveOnlyPages: 0, versionMismatches: 0, hierarchyMismatches: 0,
+    pages: 2, totalCurrentPages: 2, matchedPages: 2, permissionCheckedPages: 2, missingPages: 0, archiveOnlyPages: 0,
+    versionMismatches: 0, hierarchyMismatches: 0,
     restrictionMismatches: 0, archivedRestrictedPages: 0, missingPageBodies: 0, attachments: 1, attachmentBinaries: 1,
     attachmentEvidenceProblems: 0, analysisErrors: 0, needsReview: false });
   assert.deepEqual(source.requests.filter(({ url }) => url.pathname === listing).map(({ url }) => url.searchParams.get('start')), ['0', '1']);
@@ -198,7 +202,8 @@ test('native Confluence ZIP matches paged live metadata without reading document
   assert.equal(detailed.code, 0, detailed.stdout + detailed.stderr);
   assert.equal(detailed.stdout, result.stdout);
   assertPrivate(detailed, directory);
-  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'visible-space', findings: [] });
+  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'visible-space', findings: [],
+    coverage: { archivePages: 2, matchedPages: 2, permissionCheckedPages: 2, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 } });
   assert.deepEqual(await readFile(exportPath), archive);
 });
 
@@ -234,7 +239,8 @@ test('optional findings preserve aggregate stdout and list the selected page IDs
   assert.deepEqual(source.errors, []);
   assertPrivate(detailed, directory);
   assert.ok(!detailed.stdout.includes('"pageId"'));
-  const raw = await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space', unidentifiedPages: 1, findings: [
+  const raw = await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space', unidentifiedPages: 1,
+    coverage: { archivePages: 4, matchedPages: 2, permissionCheckedPages: 2, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 }, findings: [
     { pageId: liveOnly.id, codes: ['MISSING_FROM_ARCHIVE'] },
     { pageId: root.id, codes: ['VERSION_MISMATCH'] },
     { pageId: child.id, codes: ['ARCHIVE_RESTRICTED', 'ATTACHMENT_EVIDENCE_PROBLEM', 'HIERARCHY_MISMATCH', 'MISSING_ARCHIVE_BODY', 'RESTRICTION_MISMATCH'] },
@@ -266,12 +272,28 @@ test('explicit selection checks inherited restrictions outside the selection and
     assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, restrictedPages: 1, unknownRestrictions: 0 });
     assertCounts(report.archive, { outsideSelectionPages: 1, missingPages: 0, archiveOnlyPages: 0, restrictionMismatches });
     await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages',
+      coverage: { archivePages: 2, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 1, otherSpacePages: 0, unassignedPages: 0 },
       findings: [{ pageId: child.id, codes }] });
   }
   assert.deepEqual(source.errors, []);
   assert.ok(!source.requests.some(({ url }) => url.pathname === listing));
   assert.ok(source.requests.some(({ url }) => url.pathname === `${apiPath}/content/${root.id}`));
   assert.ok(source.requests.some(({ url }) => url.pathname === `${apiPath}/content/${root.id}/restriction/byOperation/read`));
+});
+
+test('findings report uncovered ZIP pages even when the selection matches without any findings', async t => {
+  const source = await fixture(t);
+  const otherSpace = { id: '801', version: 1, ancestors: [], spaceId: '99' };
+  const archive = nativeExport([root, child, otherSpace], { otherSpaceId: otherSpace.spaceId });
+  const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [root.id], archive });
+  const findingsPath = join(directory, 'private-review.json');
+  const result = await audit('--findings', findingsPath);
+  assert.equal(result.code, 0, result.stderr);
+  const expected = { archivePages: 3, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 1, otherSpacePages: 1, unassignedPages: 0 };
+  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'explicit-pages', findings: [], coverage: expected });
+  assertCounts(JSON.parse(result.stdout).archive, { totalCurrentPages: 3, matchedPages: 1, permissionCheckedPages: 1,
+    outsideSelectionPages: 1, otherSpacePages: 1, unassignedPages: 0 });
+  assert.deepEqual(source.errors, []);
 });
 
 test('unsupported or incomplete permission evidence keeps the current page and descendants under review', async t => {
@@ -317,7 +339,7 @@ test('the audit counts an explicitly selected unreadable page without exposing i
     json({ message: privateBody }, 404);
     return true;
   } });
-  const archive = nativeExport([root, child]);
+  const archive = nativeExport([root, child, { id: '802', version: 1, ancestors: [], spaceId: null }]);
   const { directory, audit } = await invocation(t, source.origin + context, { pageIds: [child.id, root.id], archive });
   const findingsPath = join(directory, 'private-review.json');
   const result = await audit('--findings', findingsPath);
@@ -326,9 +348,10 @@ test('the audit counts an explicitly selected unreadable page without exposing i
   assertPrivate(result, directory);
   const report = JSON.parse(result.stdout);
   assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, unavailablePages: 1, unknownRestrictions: 1 });
-  assertCounts(report.archive, { archiveOnlyPages: 1, outsideSelectionPages: 0 });
+  assertCounts(report.archive, { archiveOnlyPages: 1, outsideSelectionPages: 0, unassignedPages: 1 });
   assert.ok(!source.requests.some(({ url }) => url.pathname.startsWith(`${apiPath}/content/${child.id}/`)));
-  await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages', findings: [
+  await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages',
+    coverage: { archivePages: 3, matchedPages: 1, permissionCheckedPages: 0, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 1 }, findings: [
     { pageId: root.id, codes: ['LIVE_RESTRICTION_UNKNOWN'] },
     { pageId: child.id, codes: ['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE'] },
   ] });

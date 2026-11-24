@@ -479,7 +479,13 @@ async function review(directory) {
   const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
   const restricted = confirmedConfluenceRestrictions(confluenceReviews, reviewedPackages);
   const restrictions = [...restricted].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
-  const pilot = await startRehearsalPilot(workspace, { signal, restrictions });
+  const reviews = confluenceReviews.map(({ proof }) => ({
+    packageId: proof.packageId, archiveSha256: proof.archive.sha256, archiveBytes: proof.archive.bytes,
+    checkedAt: proof.checkedAt, selection: proof.selection, status: proof.status, spacePermissions: proof.spacePermissions,
+    findingsPages: proof.pageCount, unidentifiedPages: proof.unidentifiedPages,
+    ...(proof.coverage ? { coverage: proof.coverage } : {}),
+  }));
+  const pilot = await startRehearsalPilot(workspace, { signal, restrictions, reviews });
   try {
     if (confluenceReviews.length) {
       const bundles = await verifyBundles(workspace, reviewedPackages);

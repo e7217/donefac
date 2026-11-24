@@ -451,14 +451,30 @@ test('Confluence live restrictions follow the same source instance into a differ
   assert.equal(pageScans, 1);
 });
 
-test('Confluence matched findings with no rows preserve status and malformed page evidence is rejected', async () => {
+test('Confluence matched findings need coverage evidence before counting a package as fully checked', async () => {
   const matched = confluenceReview('9'.repeat(64), []);
   const offsets: number[] = [];
   const result = await confluenceEvidence([], [matched], offsets);
   assert.deepEqual(offsets, []);
-  assert.equal(result.status, 'verified');
+  assert.equal(result.status, 'review');
+  assert.equal(result.checks.confluencePackagesWithoutFullPageCoverage, 1);
   assert.deepEqual(result.receipts[0].confluenceReviews?.[0].counts, emptyDispositions);
   assert.deepEqual(result.receipts[0].confluenceReviews?.[0].liveRestrictedCounts, emptyDispositions);
+
+  const partial = { ...matched, proof: { ...matched.proof, coverage: { archivePages: 2, permissionCheckedPages: 1 } } };
+  const separate = { ...partial, proof: { ...partial.proof, sha256: '7'.repeat(64) } };
+  const partialResult = await confluenceEvidence([], [partial, separate], offsets);
+  assert.equal(partialResult.status, 'review');
+  assert.equal(partialResult.checks.confluencePackagesWithoutFullPageCoverage, 1);
+
+  const full = { ...matched, proof: { ...matched.proof, sha256: '6'.repeat(64), coverage: { archivePages: 2, permissionCheckedPages: 2 } } };
+  const fullResult = await confluenceEvidence([], [partial, full], offsets);
+  assert.equal(fullResult.status, 'verified');
+  assert.equal(fullResult.checks.confluencePackagesWithoutFullPageCoverage, 0);
+  assert.deepEqual(offsets, []);
+});
+
+test('Confluence verification rejects malformed page evidence', async () => {
   const review = confluenceReview('8'.repeat(64), [reviewedPageIds[0]]);
   await assert.rejects(confluenceEvidence([reviewedPage(reviewedPageIds[0])], [review], [], page => ({ ...page, total: 9000 })),
     /Confluence 페이지별 검토의 영수증 원본 목록/);

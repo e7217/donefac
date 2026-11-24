@@ -21,10 +21,18 @@ const pageId = '99999999999999999999';
 
 function report(overrides = {}) {
   return {
-    format: CONFLUENCE_FINDINGS_FORMAT, version: CONFLUENCE_FINDINGS_VERSION, checkedAt, selection: 'explicit-pages',
+    format: CONFLUENCE_FINDINGS_FORMAT, version: 1, checkedAt, selection: 'explicit-pages',
     status: 'needs-review', archive: { sha256: zipHash, bytes: 13 }, spacePermissions: 'manual-review', unidentifiedPages: 0,
     findings: [{ pageId, codes: ['VERSION_MISMATCH', 'LIVE_RESTRICTED'] }], ...overrides,
   };
+}
+
+const partialCoverage = Object.freeze({
+  archivePages: 8, matchedPages: 3, permissionCheckedPages: 2, outsideSelectionPages: 1, otherSpacePages: 1, unassignedPages: 1,
+});
+
+function coveredReport(overrides = {}) {
+  return report({ version: CONFLUENCE_FINDINGS_VERSION, coverage: partialCoverage, ...overrides });
 }
 
 test('projects a validated findings file into stable counts and no page details', () => {
@@ -55,6 +63,39 @@ test('accepts empty matched and needs-review audits with manual space permission
   }
   const unidentified = parseConfluenceFindings(report({ findings: [], unidentifiedPages: 1 }));
   assert.equal(validConfluenceFindingsProof(confluenceFindingsProof(unidentified, reportHash, packageId)), true);
+});
+
+test('records aggregate ZIP coverage in the v2 proof without private page or source information', () => {
+  const findings = parseConfluenceFindings(coveredReport());
+  const proof = confluenceFindingsProof(findings, reportHash, packageId);
+  assert.equal(proof.version, 2);
+  assert.deepEqual(proof.coverage, partialCoverage);
+  assert.notEqual(proof.coverage, partialCoverage);
+  assert.ok(!JSON.stringify(proof).includes(pageId));
+  assert.equal(validConfluenceFindingsProof(proof), true);
+
+  const coverage = { ...partialCoverage, archivePages: 5, permissionCheckedPages: 3, unassignedPages: 0 };
+  const matched = parseConfluenceFindings(coveredReport({ status: 'matched', findings: [], coverage }));
+  assert.equal(validConfluenceFindingsProof(confluenceFindingsProof(matched, reportHash, packageId)), true);
+});
+
+test('rejects missing or inconsistent coverage in sidecars and their proofs', () => {
+  const proof = confluenceFindingsProof(parseConfluenceFindings(coveredReport()), reportHash, packageId);
+  for (const changes of [
+    { coverage: undefined }, { coverage: null }, { version: 1 }, { version: 3 }, { selection: 'visible-space' },
+    { coverage: { ...partialCoverage, archivePages: 100_001 } },
+    { coverage: { ...partialCoverage, archivePages: 1000, matchedPages: 501 } },
+    { coverage: { ...partialCoverage, archivePages: 5 } },
+    { coverage: { ...partialCoverage, outsideSelectionPages: -1 } },
+    { coverage: { ...partialCoverage, otherSpacePages: 0.5 } },
+    { coverage: { ...partialCoverage, permissionCheckedPages: 4 } },
+    { coverage: { ...partialCoverage, pageId } },
+  ]) {
+    assert.throws(() => parseConfluenceFindings(coveredReport(changes)), /형식 또는 건수/u);
+    assert.equal(validConfluenceFindingsProof({ ...proof, ...changes }), false);
+  }
+  assert.throws(() => parseConfluenceFindings(coveredReport({ status: 'matched', findings: [] })), /형식 또는 건수/u);
+  assert.equal(validConfluenceFindingsProof({ ...proof, status: 'matched', pageCount: 0, reasonCounts: {} }), false);
 });
 
 test('rejects incompatible metadata, duplicate page or reason, and injected private fields', () => {

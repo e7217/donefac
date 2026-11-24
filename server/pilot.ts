@@ -6,6 +6,7 @@ import type { Duplex } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { createPilotAccess } from './pilot-access.js';
+import { readPilotConfluenceReview } from './pilot-confluence-review.js';
 
 const { TEAMSPACE_DATA_DIR: dataDir, TEAMSPACE_PILOT_LOCKED_DIR: lockedDir, TEAMSPACE_PILOT_LOCK_FD: lockDescriptor } = process.env;
 if (!dataDir || dataDir !== lockedDir || !lockDescriptor || !/^\d+$/.test(lockDescriptor)) {
@@ -14,33 +15,6 @@ if (!dataDir || dataDir !== lockedDir || !lockDescriptor || !/^\d+$/.test(lockDe
 const lock = fstatSync(Number(lockDescriptor));
 const lockPath = statSync(`${dataDir}.teamspace.lock`);
 if (!lock.isFile() || lock.dev !== lockPath.dev || lock.ino !== lockPath.ino) throw new Error('The Teamspace data lock is missing.');
-
-async function readConfluenceRestrictions() {
-  const message = 'Confluence 리허설의 페이지 제한을 읽을 수 없습니다.';
-  if (process.env.TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS !== 'stdin') throw new Error(message);
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of process.stdin) {
-    const bytes = Buffer.from(chunk);
-    size += bytes.length;
-    if (size > 128 * 1024 * 1024) throw new Error(message);
-    chunks.push(bytes);
-  }
-  let input: unknown;
-  try { input = JSON.parse(Buffer.concat(chunks, size).toString('utf8')); }
-  catch { throw new Error(message); }
-  const result = new Map<string, ReadonlySet<string>>();
-  if (!Array.isArray(input) || !input.length || input.length > 20) throw new Error(message);
-  for (const entry of input) {
-    if (!Array.isArray(entry) || entry.length !== 2) throw new Error(message);
-    const [instance, pageIds] = entry;
-    if (typeof instance !== 'string' || !instance.trim() || instance.length > 200 || result.has(instance) ||
-        !Array.isArray(pageIds) || !pageIds.length ||
-        !pageIds.every(id => typeof id === 'string' && /^[1-9]\d{0,19}$/.test(id))) throw new Error(message);
-    result.set(instance, new Set(pageIds));
-  }
-  return result;
-}
 
 const portValue = process.env.TEAMSPACE_PILOT_PORT ?? '5190';
 const port = Number(portValue);
@@ -55,15 +29,13 @@ try {
 }
 
 const access = createPilotAccess();
-const restrictedConfluencePages = process.env.TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS === undefined
-  ? undefined : await readConfluenceRestrictions();
-if (access && restrictedConfluencePages) throw new Error('Confluence 검토는 오프라인 리허설에서 실행해 주세요.');
+const confluenceReview = await readPilotConfluenceReview(process.env, Boolean(access), process.stdin);
 const teamIndex = access ? readFileSync(index, 'utf8').replace('</head>', '<meta name="teamspace-pilot-access" content="enabled"></head>') : null;
 const api = createApp({
   dataDir,
   browserOrigin: access?.origin,
   gitlabWebhookPublicOrigin: access?.origin,
-  restrictedConfluencePages,
+  ...confluenceReview,
   seed: process.env.TEAMSPACE_PILOT_DEMO === '1',
   outboundWorker: process.env.TEAMSPACE_PILOT_OUTBOUND !== '0',
   deadlineReminderWorker: process.env.TEAMSPACE_PILOT_DEADLINE_REMINDERS !== '0',

@@ -270,8 +270,10 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   input.packages[0] = { ...input.packages[0], file: movedFile, instanceKey: ` ${input.packages[0].instanceKey} ` };
   await writeFile(manifest, JSON.stringify(input));
   const wikiBytes = packages.find(item => item.product === 'confluence').bytes;
+  const partialCoverage = { archivePages: 3, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 2,
+    otherSpacePages: 0, unassignedPages: 0 };
   const reviewInputs = [confluenceFindings(wikiBytes), confluenceFindings(wikiBytes, {
-    selection: 'visible-space', status: 'matched', findings: [],
+    version: 2, status: 'matched', findings: [], coverage: partialCoverage,
   })];
   const paths = [join(scratch, 'private-page-findings.json'), join(scratch, 'private-empty-findings.json')];
   const reportBytes = reviewInputs.map(value => Buffer.from(`${JSON.stringify(value, null, 2)}\n`));
@@ -300,10 +302,11 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const wikiId = staged.packages[1].packageId;
   for (const [index, reportSha] of reviewDigests.entries()) {
     const proof = staged.confluenceReviews.find(value => value.sha256 === reportSha);
-    const { status, selection, checkedAt, archive, spacePermissions, unidentifiedPages, findings, version } = reviewInputs[index];
+    const { status, selection, checkedAt, archive, spacePermissions, unidentifiedPages, findings, version, coverage } = reviewInputs[index];
     assert.deepEqual(proof, { packageId: wikiId, sha256: reportSha, checkedAt, version, selection, status, archive,
       spacePermissions, pageCount: findings.length, unidentifiedPages,
-      reasonCounts: index === 0 ? { LIVE_RESTRICTED: 2, MISSING_FROM_ARCHIVE: 1, RESTRICTION_MISMATCH: 1, VERSION_MISMATCH: 1 } : {} });
+      reasonCounts: index === 0 ? { LIVE_RESTRICTED: 2, MISSING_FROM_ARCHIVE: 1, RESTRICTION_MISMATCH: 1, VERSION_MISMATCH: 1 } : {},
+      ...(coverage ? { coverage } : {}) });
     const snapshot = join(root, 'confluence-findings', `${reportSha}.json`);
     assert.deepEqual(await readFile(snapshot), reportBytes[index]);
     assert.equal((await stat(snapshot)).mode & 0o777, 0o600);
@@ -320,6 +323,15 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.doesNotMatch(changedSnapshot.stdout, /검증 결과/);
   assert.equal((missingSnapshot.stderr + changedSnapshot.stderr).includes(missingPage), false);
   await writeFile(reviewSnapshot, reportBytes[0]);
+
+  const differentCoverage = structuredClone(staged);
+  differentCoverage.confluenceReviews[1].coverage.archivePages++;
+  differentCoverage.confluenceReviews[1].coverage.outsideSelectionPages++;
+  await writeFile(stagePath, JSON.stringify(differentCoverage));
+  const mismatchedCoverage = await launch(['review', root], env).exited;
+  assert.equal(mismatchedCoverage.code, 1);
+  assert.match(mismatchedCoverage.stderr, /보관한 Confluence 페이지별 검토 파일과 리허설 기록이 다릅니다/);
+  assert.doesNotMatch(mismatchedCoverage.stdout, /이관 검토 주소/);
 
   const differentInstance = structuredClone(staged);
   differentInstance.packages[1].instanceKey = 'incorrect-confluence-instance';
@@ -386,8 +398,29 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     const actor = workspace.users[0].id;
     assert.notEqual(actor, previousActor);
     assert.equal(workspace.issues.length + workspace.documents.length, 0);
+    const expectedReviews = reviewInputs.map(({ checkedAt, selection, status, spacePermissions, unidentifiedPages, findings, coverage }) => ({
+      packageId: wikiId, checkedAt, selection, status, spacePermissions, findingsPages: findings.length, unidentifiedPages,
+      ...(coverage ? { coverage } : {}),
+    }));
+    const optionsPath = packageId => `/migrations/options?${new URLSearchParams({ packageId })}`;
+    const wikiOptions = await json(base, optionsPath(wikiId), { actor });
+    assert.deepEqual(wikiOptions.confluenceReviews, expectedReviews);
+    const jiraOptions = await json(base, optionsPath(staged.packages[0].packageId), { actor });
+    assert.equal(Object.hasOwn(jiraOptions, 'confluenceReviews'), false);
+    const cloneQuery = new URLSearchParams({ filename: 'same-bytes.zip', instanceKey: 'other-wiki-instance', product: 'confluence' });
+    const cloneResponse = await fetch(`${base}/api/legacy-import/packages?${cloneQuery}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': actor },
+      body: wikiBytes, signal: AbortSignal.timeout(35_000),
+    });
+    assert.equal(cloneResponse.status, 201);
+    const clone = await cloneResponse.json();
+    assert.notEqual(clone.id, wikiId);
+    assert.equal(clone.sha256, staged.packages[1].sha256);
+    const cloneOptions = await json(base, optionsPath(clone.id), { actor });
+    assert.equal(Object.hasOwn(cloneOptions, 'confluenceReviews'), false);
     const mapping = JSON.parse(await readFile(mappingPath, 'utf8'));
     const { options, configuration } = await json(base, '/migrations/mapping/import', { method: 'POST', actor, body: { mapping } });
+    assert.deepEqual(options.confluenceReviews, expectedReviews);
     assert.deepEqual(configuration.packageIds, staged.packages.map(pkg => pkg.packageId));
     assert.deepEqual(configuration.excludedRecords, [`${wikiId}/page:${restrictedPage}`]);
     assert.ok(configuration.packageIds.every(id => !mapping.configuration.packageIds.includes(id)));
@@ -477,6 +510,8 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(report.status, 'review');
   assert.deepEqual(report.profile, expectedProfileProof);
   assert.deepEqual(report.confluenceReviews, staged.confluenceReviews);
+  assert.equal(report.source.evidence.checks.confluencePackagesWithoutFullPageCoverage, 1);
+  assert.equal(report.restore.evidence.checks.confluencePackagesWithoutFullPageCoverage, 1);
   assert.equal(report.source.evidence.checks.pendingPackages, 0);
   assert.equal(report.source.evidence.checks.receiptsWithWarnings, 1);
   assert.equal(report.source.evidence.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);

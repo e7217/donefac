@@ -8,6 +8,7 @@ import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigration
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
+import { ConfluenceSourceReview } from './MigrationConfluenceReview';
 import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
 import { SourceImportRecords } from './SourceOrigins';
@@ -243,6 +244,8 @@ function ActorMigration(props: MigrationApplyProps) {
   const pageDestination = appendPagesTo && appendPagesTo.projectId === appendPagesTarget?.projectId ? appendPagesTarget : undefined;
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
+  const confluenceSourceReview = matching && options?.confluenceReviews?.length ? <ConfluenceSourceReview
+    reviews={options.confluenceReviews} packages={packages.filter(item => selected.includes(item.id))} /> : null;
   const destinationReady = mode === 'new' ? Boolean(configuration?.projects.length) : Boolean(existingDestination);
   const previewDraftKey = preview ? `${preview.id}:${preview.version}` : null;
   const planningChanges = planningDraft?.key === previewDraftKey ? planningDraft.selections : undefined;
@@ -553,6 +556,7 @@ function ActorMigration(props: MigrationApplyProps) {
           </MappingRow>} />
           <Exclusions key={configuration.packageIds.join('|')} packageIds={configuration.packageIds} packages={options.packages} excluded={configuration.excludedRecords} onChange={changeExclusions} />
         </MappingSection>
+        {!preview && confluenceSourceReview}
         <button ref={previewButton} className="btn btn-primary" disabled={!matching || !destinationReady} onClick={() => void createPreview()}><FileCheck2 size={17} />적용 전 미리보기 만들기</button>
       </div>}
     </fieldset>
@@ -567,6 +571,7 @@ function ActorMigration(props: MigrationApplyProps) {
           <button type="button" className="btn btn-ghost" disabled={Boolean(pending) || hasReviewChanges} onClick={downloadPreflight}><Download size={16} aria-hidden="true" />이관 사전 검토 JSON 내보내기</button>
         </div>
       </header>
+      {confluenceSourceReview}
       <MigrationCounts entries={Object.entries(preview.counts)} mode={reviewMode} />
       <Paged title={reviewProduct ? `${reviewProduct} 이관을 적용할 프로젝트` : reviewMode === 'new' ? '생성할 프로젝트' : `${appendLabels[reviewMode].item}를 추가할 프로젝트`} items={preview.projects} label={item => `${item.key} ${item.name}`} render={item => <p><strong>{item.key} · {item.name}</strong> · {reviewProduct ? refreshSummary(reviewProduct, preview.counts) || '적용할 변경 없음' : reviewMode === 'append' ? `새 업무 ${item.issueCount}` : reviewMode === 'append-pages' ? `새 문서 ${item.documentCount}` : `업무 ${item.issueCount} · 문서 ${item.documentCount}`}</p>} />
       {Boolean(preview.jiraWorkflows?.length) && <MigrationJiraWorkflowPreview workflows={preview.jiraWorkflows ?? []} />}

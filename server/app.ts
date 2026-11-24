@@ -62,6 +62,7 @@ import { LegacyImportService } from './legacy-import.js';
 import { LegacyImportError } from './legacy-import-model.js';
 import { MigrationService } from './migration.js';
 import type { MigrationJiraIssueUpdate, PreparedMigration } from './migration-contracts.js';
+import type { PilotConfluenceReview } from './pilot-confluence-review.js';
 import { readJiraDeadlineRecovery } from './jira-deadline-recovery.js';
 import { SourcePreservationService, SourcePreservationError } from './source-preservation.js';
 import { findTeamspaceIssueRelation, issueRelationVersionFloor, IssueRelationVersionError, nextIssueRelationVersion, recordIssueRelationVersion } from './issue-relation-persistence.js';
@@ -201,6 +202,7 @@ export function createApp(options: {
   browserOrigin?: string;
   gitlabWebhookPublicOrigin?: string;
   restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
+  confluenceReviews?: readonly PilotConfluenceReview[];
 } = {}) {
   const dataDir=options.dataDir || process.env.TEAMSPACE_DATA_DIR || resolve('data');
   const store = new Store(dataDir);
@@ -298,7 +300,7 @@ export function createApp(options: {
   const documentTreeMove=new DocumentTreeMoveService(store,trash);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>
     Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id),
-    options.restrictedConfluencePages);
+    options.restrictedConfluencePages, options.confluenceReviews);
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const documentTreeCopy = new DocumentTreeCopyService(store, new DocumentCopyAssets(store, files, attachmentVersions), documentOrders);

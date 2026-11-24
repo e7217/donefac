@@ -377,11 +377,30 @@ export interface MigrationJiraObservedTransition extends MigrationJiraWorkflowTr
 export interface MigrationJiraObservedWorkflow extends Omit<MigrationJiraWorkflowReview, 'transitions'> {
   transitions: MigrationJiraObservedTransition[];
 }
+export interface MigrationConfluenceCoverage {
+  archivePages: number;
+  matchedPages: number;
+  permissionCheckedPages: number;
+  outsideSelectionPages: number;
+  otherSpacePages: number;
+  unassignedPages: number;
+}
+export interface MigrationConfluenceReview {
+  packageId: string;
+  checkedAt: string;
+  selection: 'explicit-pages' | 'visible-space';
+  status: 'matched' | 'needs-review';
+  spacePermissions: 'manual-review';
+  findingsPages: number;
+  unidentifiedPages: number;
+  coverage?: MigrationConfluenceCoverage;
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
   defaultConfiguration:MigrationConfiguration;
   jiraWorkflowStatuses?: MigrationJiraWorkflowStatusOption[];
+  confluenceReviews?: MigrationConfluenceReview[];
   appendTarget?: MigrationAppendTarget;
   appendPagesTarget?: MigrationPageAppendTarget;
 }

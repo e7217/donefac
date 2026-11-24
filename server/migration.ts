@@ -22,6 +22,7 @@ import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import type { Store } from './store.js';
 import type { LegacyImportService } from './legacy-import.js';
+import type { PilotConfluenceReview } from './pilot-confluence-review.js';
 import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationJiraWorkflows, parseMigrationPageAppendConfiguration, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 
 const MiB = 1024 * 1024;
@@ -68,7 +69,8 @@ export class MigrationService {
 
   constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService,
     private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean,
-    private readonly restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>) {
+    private readonly restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>,
+    private readonly confluenceReviews: readonly PilotConfluenceReview[] = []) {
     this.append = new AttachmentAppend(dataDir);
     this.files = new AttachmentFiles(dataDir);
     const restrictions = [...(restrictedConfluencePages ?? [])]
@@ -980,6 +982,15 @@ export class MigrationService {
       const { project, instanceKey, sourceSpaceId, sourceSpaceKey } = pageDestination;
       options.appendPagesTarget = { projectId: project.id, key: project.key, name: project.name, instanceKey, sourceSpaceId, sourceSpaceKey };
     }
+    if (this.confluenceReviews.length) {
+      const summaries = new Map(packages.map(({ summary }) => [summary.id, summary]));
+      const reviews = this.confluenceReviews.flatMap(({ archiveSha256, archiveBytes, ...review }) => {
+        const summary = summaries.get(review.packageId);
+        return summary?.source.product === 'confluence' && summary.source.format === 'confluence-xml' &&
+          summary.sha256 === archiveSha256 && summary.size === archiveBytes ? [review] : [];
+      });
+      if (reviews.length) options.confluenceReviews = reviews;
+    }
     return options;
   }
 
@@ -1252,6 +1263,7 @@ export class MigrationService {
     app.get('/api/migrations/options', (req, res) => {
       if (Object.keys(req.query).some(key => key !== 'packageId')) fail(400, '원본 패키지 조회 조건을 확인해 주세요.');
       const packages = this.loadPackages(this.packageIds(req.query.packageId), true);
+      if (this.confluenceReviews.length) res.set('Cache-Control', 'no-store');
       res.json(this.optionsForPackages(packages));
     });
     app.get('/api/migrations/identity-roster', (req, res) => {
