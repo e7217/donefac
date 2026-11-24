@@ -4,7 +4,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { contentReferences } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
-import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, ResourceLink, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationResourceLinkFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -1421,6 +1421,121 @@ test('360px Jira 설명의 확인된 Confluence 문서·절 링크를 열고 티
     }
     for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
     await page.context().unroute(isOriginal);
+  }
+});
+
+test('360px 이관 영수증에서 업무·문서 연결의 정확한 누락을 확인한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), jiraKey = `RA${id}`, wikiKey = `WA${id}`;
+  const issueTitle = `연결을 대조할 원본 업무 ${id}`, docTitle = `연결을 대조할 원본 문서 ${id}`;
+  const body = `<p><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">${jiraKey}-1</ac:parameter></ac:structured-macro></p>`;
+  const wiki = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">${wikiKey}</property><property name="name">${wikiKey}</property></object>
+    <object class="Page"><id name="id">200</id><property name="title">${docTitle}</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">2020-01-02T00:00:00Z</property></object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[${body}]]></property>
+      <property name="content" class="Page"><id name="id">200</id></property><property name="bodyType">2</property></object>
+  </hibernate-generic>`) }]);
+  const staged: LegacyPackageSummary[] = [];
+  const createdPaths: string[] = [];
+  try {
+    staged.push(await upload(request, `jira-resource-audit-${id}.csv`, jira(jiraKey, issueTitle), `jira-resource-audit-${id}`));
+    staged.push(await upload(request, `wiki-resource-audit-${id}.zip`, wiki, `wiki-resource-audit-${id}`));
+    const query = new URLSearchParams(staged.map(pkg => ['packageId', pkg.id]));
+    const options = await request.get(`/api/migrations/options?${query}`);
+    expect(options.ok(), await options.text()).toBe(true);
+    const { defaultConfiguration: configuration } = await options.json() as MigrationOptions;
+    const proposed = await request.post('/api/migrations/preview', { data: { configuration } });
+    expect(proposed.status(), await proposed.text()).toBe(201);
+    const plan = await proposed.json() as MigrationPreview;
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts.resourceLinks).toBe(1);
+    const applied = await request.post(`/api/migrations/previews/${plan.id}/apply`, { data: {
+      expectedVersion: plan.version, acknowledgements: plan.requiredAcknowledgements,
+    } });
+    expect(applied.status(), await applied.text()).toBe(201);
+    const { import: receipt } = await applied.json() as MigrationApplyResult;
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const issue = snapshot.issues.find(item => item.title === issueTitle);
+    const document = snapshot.documents.find(item => item.title === docTitle);
+    if (issue) createdPaths.push(`/api/issues/${issue.id}`);
+    if (document) createdPaths.push(`/api/documents/${document.id}`);
+    if (!issue || !document) throw new Error('이관한 합성 업무 또는 문서를 찾을 수 없습니다.');
+    const link = snapshot.resourceLinks.find(item => item.issueId === issue.id && item.documentId === document.id);
+    if (!link) throw new Error('이관한 업무·문서 연결을 찾을 수 없습니다.');
+    expect(receipt.resourceLinkProof).toEqual([{ id: link.id, issueId: issue.id, documentId: document.id }]);
+
+    await page.goto(`/#/${issue.projectId}/settings`);
+    const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
+    const receipts = settings.getByRole('region', { name: '완료한 이관 영수증', exact: true });
+    await receipts.getByRole('button').filter({ hasText: receipt.id }).click();
+    const reconciliation = await openReconciliation(settings);
+    const run = reconciliation.getByRole('button', { name: '전체 이관 검증', exact: true });
+    const verification = reconciliation.getByRole('region', { name: '업무·문서 연결 검증', exact: true });
+    const auditPath = `/api/source-imports/${receipt.id}/reconciliation/audit`;
+    const findingsPath = `/api/source-imports/${receipt.id}/reconciliation/resource-link-findings`;
+    const findingReads: string[] = [];
+    page.on('request', sent => {
+      if (new URL(sent.url()).pathname === findingsPath) findingReads.push(sent.method());
+    });
+    async function audit() {
+      const pending = page.waitForResponse(response => new URL(response.url()).pathname === auditPath);
+      await run.click();
+      const response = await pending;
+      expect(response.ok(), await response.text()).toBe(true);
+      await expect(verification).toBeVisible();
+      return response.json() as Promise<SourceReconciliationAudit>;
+    }
+    const initial = await audit();
+    expect(initial.resourceLinkProjection).toMatchObject({ expected: 1, counts: { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 } });
+    await expect(verification.getByText('일치', { exact: true })).toBeVisible();
+    expect(findingReads).toEqual([]);
+
+    expect((await request.delete(`/api/resource-links/${link.id}`)).ok()).toBe(true);
+    const replacement = await request.post('/api/resource-links', { data: { issueId: issue.id, documentId: document.id, kind: link.kind } });
+    expect(replacement.status(), await replacement.text()).toBe(201);
+    expect((await replacement.json() as ResourceLink).id).not.toBe(link.id);
+    const removed = await audit();
+    expect(removed.resourceLinkProjection).toMatchObject({ expected: 1, counts: { linked: 0, trashed: 0, missing: 1, mismatch: 0, unavailable: 0 } });
+    await expect(verification.getByText('검증 실패', { exact: true })).toBeVisible();
+    await expect(verification.getByText('건수만 비교', { exact: true })).toHaveCount(0);
+    const opener = verification.getByRole('button', { name: '연결 누락 1개 보기', exact: true });
+    const findings = verification.getByRole('region', { name: '확인할 업무·문서 연결', exact: true });
+    const pending = page.waitForResponse(response => new URL(response.url()).pathname === findingsPath);
+    await opener.click();
+    const loaded = await pending;
+    expect(loaded.ok(), await loaded.text()).toBe(true);
+    expect(Object.fromEntries(new URL(loaded.url()).searchParams)).toEqual({
+      expectedVersion: String(receipt.version), expectedSha256: removed.resourceLinkProjection?.sha256,
+      finding: 'missing', offset: '0', limit: '20',
+    });
+    const pageOfFindings = await loaded.json() as SourceReconciliationResourceLinkFindingsPage;
+    expect(pageOfFindings.rows).toEqual([{
+      id: link.id, issueId: issue.id, documentId: document.id, issue: { id: issue.id, key: issue.key, title: issue.title },
+      document: { id: document.id, title: document.title },
+    }]);
+    await expect(findings.getByRole('heading', { name: '확인할 업무·문서 연결', exact: true })).toBeFocused();
+    const row = findings.getByRole('list', { name: '업무·문서 연결 목록', exact: true }).getByRole('listitem');
+    await expect(row).toContainText(issueTitle);
+    await expect(row).toContainText(docTitle);
+    for (const expectedId of [link.id, issue.id, document.id]) await expect(row.getByText(expectedId, { exact: true })).toBeVisible();
+    await findings.getByRole('button', { name: '연결 목록 닫기', exact: true }).click();
+    await expect(opener).toBeFocused();
+    expect(findingReads).toEqual(['GET']);
+    expect(await page.evaluate(() => window.document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    await opener.click();
+    await row.getByRole('button', { name: `현재 문서 열기 ${docTitle}`, exact: true }).click();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(docTitle);
+  } finally {
+    for (const path of createdPaths) {
+      const removed = await request.delete(path);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
   }
 });
 

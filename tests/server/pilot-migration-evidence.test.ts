@@ -360,6 +360,57 @@ test('offline rehearsal detects Jira relationship loss before backup and keeps a
   await assert.rejects(evidence(wiki, { ...wiki.observations, jiraRelationProjection: projection }), /Jira 업무 관계의 검증/u);
 });
 
+test('offline rehearsal gates migrated ticket–document links on exact audit evidence', async () => {
+  const pair = { id: '00000000-0000-0000-0000-000000000051', issueId: '00000000-0000-0000-0000-000000000052',
+    documentId: '00000000-0000-0000-0000-000000000053' };
+  const projection = { version: 1, expected: 1, counts: { ...relationLinked }, sha256: '8'.repeat(64) };
+  const empty = { ...relationLinked, linked: 0 };
+  const inspect = (expected: number | null, resourceLinkProjection: unknown, hasProof = false) => {
+    const input = sample();
+    const receipt = { ...input.receipt, counts: { ...input.receipt.counts, ...(expected !== null ? { resourceLinks: expected } : {}) },
+      ...(hasProof ? { resourceLinkProof: [pair] } : {}) };
+    return evidence({ ...input, receipt }, { ...input.observations, resourceLinkProjection });
+  };
+
+  const clean = await inspect(1, { ...projection, links: [pair], title: 'never-emit-link-title' }, true);
+  assert.equal(clean.status, 'verified');
+  assert.deepEqual(clean.receipts[0].resourceLinkProjection, projection);
+  assert.doesNotMatch(JSON.stringify(clean), /never-emit-link-title/u);
+  for (const value of Object.values(pair)) assert.ok(!JSON.stringify(clean).includes(value));
+  const changed = await inspect(1, { ...projection, sha256: '9'.repeat(64) }, true);
+  assert.deepEqual(compareMigrationEvidence(clean, changed), {
+    status: 'failed', matches: false, changedReceiptIds: [receiptId], workspaceMatches: true, packagesMatch: true,
+  });
+
+  for (const finding of ['missing', 'mismatch', 'trashed', 'unavailable'] as const) {
+    const result = await inspect(1, { ...projection, counts: { ...empty, [finding]: 1 } }, true);
+    const failed = finding === 'missing' || finding === 'mismatch';
+    assert.equal(result.status, failed ? 'failed' : 'review');
+    assert.equal(result.checks.receiptsWithResourceLinkFailures, Number(failed));
+    assert.equal(result.checks.receiptsWithResourceLinkReview, Number(!failed));
+  }
+  const tooMany = await inspect(1, { ...projection, counts: { ...empty, linked: 2 } }, true);
+  assert.equal(tooMany.status, 'failed');
+  assert.equal(tooMany.checks.receiptsWithResourceLinkFailures, 1);
+
+  const legacy = await inspect(1, { ...projection, counts: empty });
+  assert.equal(legacy.status, 'review');
+  assert.equal(legacy.checks.receiptsWithResourceLinkReview, 1);
+  assert.deepEqual(legacy.receipts[0].resourceLinkProjection, { ...projection, counts: empty });
+  const absent = await inspect(1, undefined);
+  assert.equal(absent.status, 'review');
+  assert.deepEqual(absent.receipts[0].resourceLinkProjection, { ...projection, counts: empty, sha256: null });
+  await assert.rejects(inspect(1, undefined, true), /업무·문서 연결의 검증/u);
+  await assert.rejects(inspect(1, { ...projection, counts: empty }, true), /업무·문서 연결의 검증/u);
+  assert.equal((await inspect(0, { ...projection, expected: 0, counts: empty })).status, 'verified');
+  assert.equal((await inspect(null, undefined)).status, 'verified');
+
+  for (const invalid of [{ ...projection, expected: 2 }, { ...projection, sha256: 'private evidence' },
+    { ...projection, version: 2 }, { ...projection, counts: { ...relationLinked, linked: -1 } }]) {
+    await assert.rejects(inspect(1, invalid), /업무·문서 연결의 검증/u);
+  }
+});
+
 test('migration rehearsal surfaces pending stages, conflicted package identities, and corrupt files', async () => {
   const pendingData = sample();
   const pending = await collectMigrationEvidence(async path => path === '/source-imports' ? [] : pendingData.workspace, pendingData.packages);

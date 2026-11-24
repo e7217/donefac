@@ -146,6 +146,8 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
 
     <MigrationReceiptAudit key={`${base}:${receiptVersion ?? ''}`} base={base} receiptVersion={receiptVersion}
       canStart={Boolean(result)} recordLabels={statusLabels} packages={packages} users={data.users} primaryListId={listId} onPrimaryDrill={drill}
+      openResourceLinkIssue={openIssue} openResourceLinkDocument={openDocument}
+      canOpenResourceLinkEndpoint={(kind, id) => (kind === 'issue' ? data.issues : data.documents).some(record => record.id === id)}
       onStale={() => updateFilters()}
       detail={{
         openId: auditRecord?.sourceRecordId ?? null,

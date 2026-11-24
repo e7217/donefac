@@ -247,6 +247,10 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     assert.deepEqual(receipt.jiraRelationProjection.counts, {
       linked: expected.issueRelations, trashed: 0, missing: 0, mismatch: 0, unavailable: 0,
     });
+    assert.equal(receipt.resourceLinkProjection.expected, expected.resourceLinks);
+    assert.deepEqual(receipt.resourceLinkProjection.counts, {
+      linked: expected.resourceLinks, trashed: 0, missing: 0, mismatch: 0, unavailable: 0,
+    });
   }
   const restored = await startRehearsalPilot(join(attempt, 'restored'));
   try {

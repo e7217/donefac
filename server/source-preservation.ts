@@ -1,6 +1,7 @@
 import type { Express, Request } from 'express';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, JIRA_MIGRATION_ISSUE_FIELDS, STATUS, type Attachment, type AttachmentVersion, type Comment, type DocPage, type DocRevision, type Issue, type IssueRelation, type JiraMigrationCustomFieldHashes, type LegacyRecord, type LegacyRecordKind, type LegacySource, type MigrationAppendConfiguration, type MigrationConfiguration, type MigrationJiraWorkflow, type MigrationJiraWorkflowStatus, type MigrationNotice, type Project, type SourceImport, type SourceImportIntegrity, type SourceImportIntegrityPackage, type SourceRecordArchive, type SourceRecordPage, type SourceRecordSummary, type TeamScheduleBlocker, type User } from '../shared/types.js';
 import { MIGRATION_AUTHOR_DISPOSITIONS, MIGRATION_AUTHOR_KINDS } from '../shared/types.js';
+import type { SourceImportResourceLink } from '../shared/types.js';
 import { isCanonicalTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { addRecord, emptyDataset, LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 import { attachmentId, MAX_FILE_BYTES, safeFilename } from './attachments.js';
@@ -279,6 +280,26 @@ function validateArchiveManifests(imports: SourceImport[], records: SourceRecord
   }
 }
 
+export function parseResourceLinkProof(raw: unknown, expected: number | undefined): SourceImportResourceLink[] | undefined {
+  if (raw === undefined) return;
+  const values = list(raw, '이관 티켓·문서 연결 근거', LEGACY_MAX_RECORDS);
+  if (values.length !== expected) fail(400, '이관 티켓·문서 연결 근거가 당시 수량과 일치하지 않습니다.');
+  const linkIds = new Set<string>();
+  const pairs = new Set<string>();
+  return values.map(raw => {
+    const row = object(raw, '이관 티켓·문서 연결 근거');
+    if (Object.keys(row).length !== 3) fail(400, '이관 티켓·문서 연결 근거의 형식을 확인해 주세요.');
+    const id = uuid(row.id);
+    const issueId = string(row.issueId, '이관 연결의 티켓', 200);
+    const documentId = string(row.documentId, '이관 연결의 문서', 200);
+    const pair = JSON.stringify([issueId, documentId]);
+    if (linkIds.has(id) || pairs.has(pair)) fail(400, '이관 티켓·문서 연결 근거가 중복되었습니다.');
+    linkIds.add(id);
+    pairs.add(pair);
+    return { id, issueId, documentId };
+  });
+}
+
 function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const value = object(raw, '이관 영수증'), actorId = string(value.actorId, '이관 작업자', 200); if (!users.has(actorId)) fail(400, '이관 작업자가 현재 사용자 목록에 없습니다.');
   const projectIds = list(value.projectIds, '이관 프로젝트', 100).map(value => string(value, '이관 프로젝트', 200)); if (new Set(projectIds).size !== projectIds.length) fail(400, '이관 프로젝트가 중복되었습니다.');
@@ -298,6 +319,7 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   }
   const rawCounts = object(value.counts, '이관 수량'), counts: Record<string, number> = {}; if (Object.keys(rawCounts).length > 100) fail(400, '이관 수량 종류가 너무 많습니다.');
   for (const [key, count] of Object.entries(rawCounts)) { string(key, '수량 종류', 100); if (['__proto__', 'prototype', 'constructor'].includes(key) || !Number.isSafeInteger(count) || Number(count) < 0) fail(400, '이관 수량을 확인해 주세요.'); counts[key] = Number(count); }
+  const resourceLinkProof = parseResourceLinkProof(value.resourceLinkProof, counts.resourceLinks);
   const notices = value.notices === undefined ? undefined : list(value.notices, '검토한 이관 안내', 10000).map(raw => {
     const item = object(raw, '검토한 이관 안내'); if (item.severity !== 'warning' && item.severity !== 'info' || typeof item.requiresAcknowledgement !== 'boolean') fail(400, '완료된 이관에는 오류 진단을 포함할 수 없습니다.');
     if (typeof item.message !== 'string' || !item.message.trim() || item.message.length > 2000) fail(400, '이관 안내 메시지를 확인해 주세요.');
@@ -306,6 +328,7 @@ function parseImport(raw: unknown, users: Set<string>): SourceImport {
   const integrity = parseIntegrity(value.integrity, packages);
   if (value.authorAttributionVersion !== undefined && value.authorAttributionVersion !== 1) fail(400, '이관 작성자 대조 기록 형식을 확인해 주세요.');
   return { id: string(value.id, '이관 ID', 200), version: positive(value.version), createdAt: timestamp(value.createdAt), actorId, projectIds, configuration: config, packages, counts, ...(notices ? { notices } : {}), ...(integrity ? { integrity } : {}),
+    ...(resourceLinkProof ? { resourceLinkProof } : {}),
     ...(value.authorAttributionVersion === 1 ? { authorAttributionVersion: 1 } : {}) };
 }
 
@@ -797,6 +820,11 @@ export class SourcePreservationService {
   validateImport(input: { imports: unknown; records: unknown; versions: unknown; relations: unknown }, context: SourcePreservationContext,
     earlier?: EarlierAttachments, appliedHistory?: AppliedConfluenceHistory, appliedJiraChildren?: AppliedJiraChildren): SourcePreservationData {
     const users = new Set(context.users.map(value => value.id)), imports = list(input.imports, '이관 영수증', 10000).map(value => parseImport(value, users)), byImport = unique(imports, '이관 영수증');
+    const resourceLinkIds = new Set<string>();
+    for (const receipt of imports) for (const { id } of receipt.resourceLinkProof ?? []) {
+      if (resourceLinkIds.has(id)) fail(400, '여러 이관 영수증에 같은 티켓·문서 연결 근거가 있습니다.');
+      resourceLinkIds.add(id);
+    }
     const datasets = new Map<string, ReturnType<typeof emptyDataset>>(), packages = new Map(imports.map(value => [value.id, new Map(value.packages.map(pkg => [stable([pkg.sha256, pkg.source]), pkg]))]));
     const records = list(input.records, '보존 원본').map(raw => {
       const value = object(raw, '보존 원본'), sourceImportId = string(value.sourceImportId, '이관 ID', 200), owner = byImport.get(sourceImportId); if (!owner) fail(400, '보존 원본의 이관 영수증이 없습니다.');
@@ -1391,7 +1419,20 @@ export class SourcePreservationService {
       worklogs: new Map((prepared.worklogs ?? []).filter(worklog => historyOwners.has(worklog.issueId)).map(worklog => [worklog.sourceRecordId!, worklog.issueId])),
       attachments: new Map(prepared.attachments.filter(attachment => attachmentOwners.has(attachment.resourceId))
         .map(attachment => [attachment.id, attachment.resourceId])) };
-    const context = this.current(), data = this.validateImport({ imports: [prepared.sourceImport], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations },
+    const resourceLinkProof = prepared.resourceLinks.map(({ id, issueId, documentId }) => ({ id, issueId, documentId }));
+    if (resourceLinkProof.length !== (prepared.sourceImport.counts.resourceLinks ?? 0)) {
+      fail(409, '이관 티켓·문서 연결이 검토한 수량과 일치하지 않습니다.');
+    }
+    if (resourceLinkProof.length) {
+      const saved = this.store.db.prepare(`SELECT 1 FROM resource_links WHERE id=? AND issue_id=? AND document_id=?
+        AND json_extract(json, '$.id')=id AND json_extract(json, '$.issueId')=issue_id
+        AND json_extract(json, '$.documentId')=document_id AND json_extract(json, '$.kind')='related'`);
+      if (resourceLinkProof.some(({ id, issueId, documentId }) => !saved.get(id, issueId, documentId))) {
+        fail(409, '이관 티켓·문서 연결을 저장한 결과가 검토한 연결과 일치하지 않습니다.');
+      }
+    }
+    const receiptInput = resourceLinkProof.length ? { ...prepared.sourceImport, resourceLinkProof } : prepared.sourceImport;
+    const context = this.current(), data = this.validateImport({ imports: [receiptInput], records: prepared.sourceRecords, versions: prepared.attachmentVersions, relations: prepared.issueRelations },
       context, earlier, appliedHistory, appliedJiraChildren);
     this.validateTargets(data.records, context, new Map(data.versions.map(value => [value.id, value])), true);
     const receipt = data.imports[0];

@@ -20,6 +20,7 @@ import { contentReferences, documentContentSchemaVersion } from '../../shared/do
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
+import type { SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
 import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
@@ -3245,6 +3246,97 @@ test('mixed migration creates only reviewed original Jira and Confluence links w
   assert.deepEqual(await readStoredLinks('document', document.id), canonicalWiki);
   assert.deepEqual((await f.call<SourceImport[]>('/source-imports')).data[0].counts, receipt.counts);
   assert.deepEqual(upstreamRequests, []);
+});
+
+test('receipt verifies exact ticket-document links through same-count drift, trash, and portable restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jira = await f.upload(Buffer.from([
+    'Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type',
+    '101,OLD-1,OLD,Original linked ticket,2020-01-01,2020-01-02,Open,Task',
+    '102,OLD-2,OLD,Another live ticket,2020-01-01,2020-01-02,Open,Task',
+  ].join('\r\n')), 'resource-links.csv', 'jira');
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">SYN</property><property name="name">Synthetic space</property></object>
+    <object class="Page"><id name="id">100</id><property name="title">Linked reference page</property><property name="version">1</property>
+      <property name="space" class="Space"><id name="id">42</id></property></object>
+    <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[<p><ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">OLD-1</ac:parameter></ac:structured-macro></p>]]></property>
+      <property name="content" class="Page"><id name="id">100</id></property></object>
+  </hibernate-generic>`;
+  const wiki = await f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), 'resource-links.zip', 'confluence');
+  const plan = await f.preview(await f.configuration([jira, wiki], 'LINKS'));
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.resourceLinks, 1);
+  const migrated = await f.apply(plan);
+  assert.equal(migrated.status, 201, JSON.stringify(migrated.data));
+  const receipt = migrated.data.import;
+  const workspace = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const issue = workspace.issues.find(row => row.title === 'Original linked ticket')!;
+  const other = workspace.issues.find(row => row.title === 'Another live ticket')!;
+  const document = workspace.documents.find(row => row.title === 'Linked reference page')!;
+  const [proof] = receipt.resourceLinkProof ?? [];
+  assert.ok(proof);
+  assert.deepEqual(proof, { id: proof.id, issueId: issue.id, documentId: document.id });
+  const auditBase = `/source-imports/${receipt.id}/reconciliation`;
+  const audit = async (version = receipt.version) => {
+    const response = await f.call<SourceReconciliationAudit>(`${auditBase}/audit?expectedVersion=${version}`);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    const projection = response.data.resourceLinkProjection;
+    assert.ok(projection);
+    assert.equal(projection.expected, 1);
+    return projection;
+  };
+  const findings = (finding: string, expectedSha256: string) => f.call<SourceReconciliationResourceLinkFindingsPage>(
+    `${auditBase}/resource-link-findings?${new URLSearchParams({ finding, expectedSha256, expectedVersion: String(receipt.version), limit: '1' })}`);
+  const clean = await audit();
+  assert.deepEqual(clean.counts, { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 });
+
+  const retarget = f.db.prepare("UPDATE resource_links SET issue_id=?, json=json_set(json,'$.issueId',?) WHERE id=?");
+  assert.equal(retarget.run(other.id, other.id, proof.id).changes, 1);
+  assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.resourceLinks.filter(link => link.documentId === document.id).length, 1);
+  const drift = await audit();
+  assert.equal(drift.counts.mismatch, 1);
+  assert.notEqual(drift.sha256, clean.sha256);
+  assert.equal((await findings('mismatch', clean.sha256)).status, 409);
+  const detail = await findings('mismatch', drift.sha256);
+  assert.equal(detail.status, 200, JSON.stringify(detail.data));
+  assert.equal(detail.data.total, 1);
+  assert.deepEqual(detail.data.rows, [{ ...proof, issue: { id: issue.id, key: issue.key, title: issue.title },
+    document: { id: document.id, title: document.title } }]);
+  assert.equal(retarget.run(issue.id, issue.id, proof.id).changes, 1);
+  assert.equal((await audit()).sha256, clean.sha256);
+
+  const archived = await f.call<{ trashEntryId: string }>(`/documents/${document.id}`, 'DELETE');
+  assert.equal(archived.status, 200, JSON.stringify(archived.data));
+  const inTrash = await audit();
+  assert.equal(inTrash.counts.trashed, 1);
+  const backup = (await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceImports: SourceImport[] }>('/export')).data;
+  assert.deepEqual(backup.sourceImports.find(row => row.id === receipt.id)?.resourceLinkProof, [proof]);
+  const invalidVersion = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 113 } });
+  assert.equal(invalidVersion.status, 400);
+  assert.match(invalidVersion.data.error, /schemaVersion 114/u);
+  const malformed = structuredClone(backup);
+  malformed.sourceImports.find(row => row.id === receipt.id)!.resourceLinkProof = [];
+  assert.equal((await f.call('/import', 'POST', { data: malformed })).status, 400);
+  assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+  const restored = (await f.call<SourceImport[]>('/source-imports')).data.find(row => row.id === receipt.id)!;
+  assert.ok(restored.version > receipt.version);
+  assert.deepEqual(restored.resourceLinkProof, [proof]);
+  assert.equal((await audit(restored.version)).sha256, inTrash.sha256);
+  assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST')).status, 200);
+  assert.deepEqual((await audit(restored.version)).counts, clean.counts);
+  assert.equal((await f.call(`/resource-links/${proof.id}`, 'DELETE')).status, 200);
+  assert.equal((await audit(restored.version)).counts.missing, 1);
+
+  const legacy = await fixture();
+  t.after(() => legacy.close());
+  const oldBackup = { ...structuredClone(backup), schemaVersion: 113 };
+  delete oldBackup.sourceImports.find(row => row.id === receipt.id)!.resourceLinkProof;
+  assert.equal((await legacy.call('/import', 'POST', { data: oldBackup })).status, 200);
+  const oldAudit = await legacy.call<SourceReconciliationAudit>(`${auditBase}/audit?expectedVersion=${receipt.version}`);
+  assert.equal(oldAudit.status, 200, JSON.stringify(oldAudit.data));
+  assert.equal(oldAudit.data.resourceLinkProjection?.expected, 1);
+  assert.deepEqual(oldAudit.data.resourceLinkProjection?.counts, { linked: 0, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 });
 });
 
 test('actual ZIP attachment versions survive native9 exact downloads and migration audit/save/install failures roll back database and files', async t => {

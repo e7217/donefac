@@ -3314,6 +3314,9 @@ export function createApp(options: {
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'authorAttributionVersion')))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'authorAttribution')))
     ))fail('이관 작성자 대조 기록을 포함한 백업은 schemaVersion 111이 필요합니다.');
+    if (data.schemaVersion < 114 && Array.isArray(data.sourceImports) && data.sourceImports.some((row: unknown) =>
+      row && typeof row === 'object' && Object.hasOwn(row, 'resourceLinkProof'))
+    ) fail('이관 티켓·문서 연결 근거를 포함한 백업은 schemaVersion 114가 필요합니다.');
     const importedSources=sourcePreservation.validateImport({
       imports:data.schemaVersion>=9?data.sourceImports:[], records:data.schemaVersion>=9?data.sourceRecords:[],
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],

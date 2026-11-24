@@ -10,6 +10,7 @@ import type {
 import { api, ApiError } from '../lib/api';
 import { MigrationAuthorAudit } from './MigrationAuthorReview';
 import { MigrationJiraRelationAudit } from './MigrationJiraRelationAudit';
+import { MigrationResourceLinkAudit } from './MigrationResourceLinkAudit';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
 
@@ -77,6 +78,9 @@ type AuditProps = {
   primaryListId: string;
   onPrimaryDrill: (drill: PrimaryRecordDrill) => void;
   onStale: () => void;
+  openResourceLinkIssue?: (id: string) => void;
+  openResourceLinkDocument?: (id: string) => void;
+  canOpenResourceLinkEndpoint?: (kind: 'issue' | 'document', id: string) => boolean;
   detail: AuditDetail;
   jiraDetail: AuditDetail;
   relationDetail: AuditDetail;
@@ -84,7 +88,7 @@ type AuditProps = {
 };
 
 export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, packages, users, primaryListId, onPrimaryDrill,
-  onStale, detail, jiraDetail, relationDetail, authorDetail }: AuditProps) {
+  onStale, openResourceLinkIssue, openResourceLinkDocument, canOpenResourceLinkEndpoint, detail, jiraDetail, relationDetail, authorDetail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -132,6 +136,11 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
     requestAnimationFrame(() => startButton.current?.focus());
   }
 
+  function restart() {
+    startButton.current?.focus();
+    void start();
+  }
+
   function download(report: SourceReconciliationAudit) {
     const id = report.importId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
     downloadDocument(`migration-audit-${id}.json`, JSON.stringify(report), 'application/json;charset=utf-8');
@@ -168,17 +177,14 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
         <PrimaryRecordCoverage records={report.primaryRecords} packages={packages} integrityPackages={report.integrity.packages}
           recordLabels={recordLabels} primaryListId={primaryListId} onDrill={onPrimaryDrill} />
         <MigrationAuthorAudit report={report.authorAttribution ?? null} base={base} receiptVersion={report.receiptVersion}
-          packages={packages} users={users} detail={authorDetail} onRestart={() => {
-            startButton.current?.focus();
-            void start();
-          }} />
+          packages={packages} users={users} detail={authorDetail} onRestart={restart} />
         {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
           base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
         {report.jiraRelationProjection && <MigrationJiraRelationAudit projection={report.jiraRelationProjection}
-          base={base} importId={report.importId} receiptVersion={report.receiptVersion} detail={relationDetail} onRestart={() => {
-            startButton.current?.focus();
-            void start();
-          }} />}
+          base={base} importId={report.importId} receiptVersion={report.receiptVersion} detail={relationDetail} onRestart={restart} />}
+        {report.resourceLinkProjection && <MigrationResourceLinkAudit projection={report.resourceLinkProjection}
+          base={base} importId={report.importId} receiptVersion={report.receiptVersion} onRestart={restart}
+          openIssue={openResourceLinkIssue} openDocument={openResourceLinkDocument} canOpenEndpoint={canOpenResourceLinkEndpoint} />}
         <h5>원본 객체 상태</h5>
         <AuditCounts label="원본 검증 건수" labels={recordLabels} counts={report.recordCounts} />
         <h5>첨부 검증 결과</h5>

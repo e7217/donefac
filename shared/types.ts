@@ -481,7 +481,9 @@ export interface SourceImport {
   notices?:MigrationNotice[];
   integrity?:SourceImportIntegrity;
   authorAttributionVersion?: 1;
+  resourceLinkProof?: SourceImportResourceLink[];
 }
+export type SourceImportResourceLink = Pick<ResourceLink, 'id' | 'issueId' | 'documentId'>;
 export interface SourceImportIntegrityPackage {
   stagingId: string;
   recordCount: number;
@@ -657,6 +659,28 @@ export interface SourceReconciliationJiraRelationFindingsPage {
   limit: number;
   rows: { sourceRecordId: string; sourceId: string; sourceInstance: string }[];
 }
+export type SourceReconciliationResourceLinkStatus = 'linked' | 'trashed' | 'missing' | 'mismatch' | 'unavailable';
+export type SourceReconciliationResourceLinkFinding = Extract<SourceReconciliationResourceLinkStatus, 'missing' | 'mismatch' | 'unavailable'>;
+export interface SourceReconciliationResourceLinkProjection {
+  version: 1;
+  expected: number | null;
+  counts: Record<SourceReconciliationResourceLinkStatus, number>;
+  sha256: string;
+}
+export interface SourceReconciliationResourceLinkRow extends SourceImportResourceLink {
+  issue: Pick<Issue, 'id' | 'key' | 'title'> | null;
+  document: Pick<DocPage, 'id' | 'title'> | null;
+}
+export interface SourceReconciliationResourceLinkFindingsPage {
+  importId: string;
+  receiptVersion: number;
+  finding: SourceReconciliationResourceLinkFinding;
+  sha256: string;
+  total: number;
+  offset: number;
+  limit: number;
+  rows: SourceReconciliationResourceLinkRow[];
+}
 export interface SourceReconciliationAuthorAudit {
   version: 1;
   packages: MigrationAuthorPackageReview[];
@@ -694,6 +718,7 @@ export interface SourceReconciliationAudit {
   targetContent: SourceReconciliationTargetContent;
   jiraStatusHistory: SourceReconciliationJiraStatusHistory | null;
   jiraRelationProjection?: SourceReconciliationJiraRelationProjection | null;
+  resourceLinkProjection?: SourceReconciliationResourceLinkProjection | null;
   authorAttribution?: SourceReconciliationAuthorAudit | null;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];

@@ -1146,6 +1146,10 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `GET /api/source-imports/:id/reconciliation/jira-relation-findings`에 `expectedVersion`, `expectedSha256`, `finding`을 지정한다. `finding`은 `missing`, `mismatch`, `unavailable` 중 하나다. `offset`의 범위는 0~1,000,000이며 기본값은 0이다. `limit`의 범위는 1~100이며 기본값은 20이다. 영수증 버전이나 전체 검증의 `jiraRelationProjection.sha256`과 조회 결과가 달라졌으면 `409`를 반환한다. 각 행의 `sourceRecordId`로 같은 영수증의 개별 보존 원본을 열 수 있다.
 
+`resourceLinkProjection`은 영수증에 함께 저장한 업무·문서 연결의 ID와 양쪽 대상 ID를 활성 연결 및 휴지통과 대조한 `{version:1,expected,counts,sha256}`이다. `counts`는 `linked`, `trashed`, `missing`, `mismatch`, `unavailable`로 나뉜다. 같은 연결 ID의 대상이나 유형이 달라지면 `mismatch`, 양쪽 대상을 확인했지만 해당 연결 ID가 없으면 `missing`이다. 같은 두 대상을 새 ID로 연결했어도 이관 당시 ID는 누락으로 표시된다. 기존 영수증에 연결 건수만 있으면 `expected`와 대조 가능한 건수의 차이를 표시한다. 자체 백업 형식 114는 영수증의 `resourceLinkProof`를 보존한다.
+
+`GET /api/source-imports/:id/reconciliation/resource-link-findings`는 같은 `expectedVersion`, `expectedSha256`, `finding`, `offset`, `limit` 형식을 사용한다. 검증값은 `resourceLinkProjection.sha256`을 사용한다. 행에는 이관 당시 연결 `id`, `issueId`, `documentId`와 현재 확인한 업무 키·제목 및 문서 제목을 반환한다. 해당 대상을 확인할 수 없으면 그 대상 요약은 `null`이다. 영수증 버전 또는 검증값이 달라졌으면 `409`다.
+
 서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 

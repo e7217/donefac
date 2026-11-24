@@ -60,7 +60,9 @@ function confluenceFindings(bytes, changes = {}) {
   };
 }
 
-function fixturePackages() {
+function fixturePackages({ crossLink = false } = {}) {
+  const remoteLink = crossLink ? `<RemoteIssueLink id="602" issueid="100" title="Runbook"
+    url="https://confluence.example.invalid/pages/viewpage.action?pageId=200"/>` : '';
   const jira = zip([
     { path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml>
       <ApplicationUser id="21" userKey="${jiraAuthor}" lowerUserName="audit-jira-user"/>
@@ -74,6 +76,7 @@ function fixturePackages() {
       <CustomFieldValue id="71" issue="100" customfield="70" stringvalue="14"/>
       <IssueLinkType id="600" linkname="Blocks" inward="is blocked by" outward="blocks"/>
       <IssueLink id="601" linktype="600" source="100" destination="101"/>
+      ${remoteLink}
       <ChangeGroup id="320" issue="100" author="audit-jira-user" created="2020-03-02T09:15:00+0900"/>
       <ChangeItem id="321" group="320" fieldtype="jira" field="status" oldvalue="2" oldstring="${privateOldStatus}" newvalue="1" newstring="Open"/>
       <ChangeItem id="322" group="320" fieldtype="jira" field="summary" oldstring="Earlier title" newstring="${privateTitle}"/>
@@ -244,7 +247,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const env = { ...process.env, TEAMSPACE_DATA_DIR: join(scratch, 'other-workspace'), TEAMSPACE_PILOT_ACCESS_FILE: join(scratch, 'absent-key'),
     TEAMSPACE_PILOT_ORIGIN: 'https://rehearsal.example.invalid', TEAMSPACE_JIRA_BASE_URL: 'https://source.example.invalid' };
   const manifest = join(scratch, 'manifest.json'), root = join(scratch, 'run'), profilePath = join(scratch, 'profile.json');
-  const packages = fixturePackages();
+  const packages = fixturePackages({ crossLink: true });
   for (const item of packages) await writeFile(join(scratch, item.filename), item.bytes);
   const input = { packages: packages.map(item => ({ file: item.filename, product: item.product, instanceKey: `${originalFrom}-${item.product}` })) };
   await writeFile(manifest, `{ "packages": [ malformed ${privateTitle} ] }`);
@@ -395,7 +398,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(pendingEvidence.restore, null);
 
   const review = launch(['review', root], env);
-  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding, importedDocument, otherDocumentId;
+  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding, importedDocument, importedLink, otherDocumentId;
   try {
     const base = await waitForReview(review);
     assert.equal((await fetch(base, { signal: AbortSignal.timeout(10_000) })).status, 200);
@@ -445,6 +448,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.equal(preview.counts.revisions, 2);
     assert.equal(preview.counts.worklogs, 1);
     assert.equal(preview.counts.issueRelations, 1);
+    assert.equal(preview.counts.resourceLinks, 1);
     assert.equal(preview.counts.jiraReleases, 1);
     assert.equal(preview.counts.jiraReleaseLinks, 1);
     assert.equal(preview.counts.jiraSprints, 1);
@@ -457,6 +461,9 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     const related = imported.issues.find(value => value.title === privateRelatedTitle);
     const [document] = imported.documents;
     assert.ok(issue && related && document);
+    assert.equal(imported.resourceLinks.length, 1);
+    [importedLink] = imported.resourceLinks;
+    assert.deepEqual(importedLink, { id: importedLink.id, issueId: issue.id, documentId: document.id, kind: 'related' });
     assert.deepEqual(imported.issueAliases[issue.id], [{ key: 'SRC-1', source: 'jira' }]);
     const resolve = url => json(base, `/atlassian-links/resolve?${new URLSearchParams({ url })}`);
     assert.deepEqual(await resolve('https://jira.example.invalid/browse/SRC-1'), { targets: [{ targetType: 'issue', targetId: issue.id }] });
@@ -531,6 +538,8 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(report.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
   assert.equal(report.source.evidence.checks.receiptsWithInvalidPrimaryTargets, 0);
   assert.equal(report.source.evidence.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithResourceLinkFailures, 0);
+  assert.equal(report.source.evidence.checks.receiptsWithResourceLinkReview, 0);
   assert.equal(report.source.evidence.receipts.length, 1);
   const [receipt] = report.source.evidence.receipts;
   const coverage = new Map(receipt.primaryRecords.map(entry => [entry.kind, entry]));
@@ -570,6 +579,13 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.deepEqual(Object.keys(targetContent[section]).sort(), ['count', 'sha256']);
   }
   assert.deepEqual(report.restore.evidence.receipts[0].targetContent, targetContent);
+  const { resourceLinkProjection } = receipt;
+  assert.match(resourceLinkProjection.sha256, /^[a-f0-9]{64}$/);
+  assert.deepEqual(resourceLinkProjection, { version: 1, expected: 1, sha256: resourceLinkProjection.sha256,
+    counts: { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 } });
+  assert.deepEqual(report.restore.evidence.receipts[0].resourceLinkProjection, resourceLinkProjection);
+  assert.equal(report.source.evidence.workspace.counts.resourceLinks, 1);
+  for (const value of [importedLink.id, importedLink.issueId, importedLink.documentId]) assert.ok(!JSON.stringify(report).includes(value));
   const { authorAttribution } = receipt;
   assert.equal(authorAttribution.version, 1);
   assert.match(authorAttribution.fingerprint, /^[a-f0-9]{64}$/);
@@ -715,7 +731,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   const issueAlias = ['jira', `${originalFrom}-jira`, 'issue', 'SRC-1'];
   const pageAlias = ['confluence', `${originalFrom}-confluence`, 'page', '200'];
   const aliasCondition = 'product=? AND source_instance=? AND kind=? AND source_alias=?';
-  function changeAliases(action) {
+  function changeWorkspace(action) {
     const db = new DatabaseSync(join(workspacePath, 'teamspace.sqlite'));
     try {
       db.exec('BEGIN IMMEDIATE');
@@ -726,7 +742,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
       throw error;
     } finally { db.close(); }
   }
-  changeAliases(db => {
+  changeWorkspace(db => {
     const binding = db.prepare(`SELECT target_type, target_id, import_id FROM source_bindings WHERE ${aliasCondition}`);
     assert.deepEqual({ ...binding.get(...issueAlias) }, { target_type: 'issue', target_id: importedIssueId, import_id: importedReceipt.id });
     assert.deepEqual({ ...binding.get(...pageAlias) }, { target_type: 'document', target_id: importedDocument.id, import_id: importedReceipt.id });
@@ -756,11 +772,46 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.equal(existsSync(join(failedAttempt, 'backup')), false);
     assert.equal(existsSync(join(failedAttempt, 'restored')), false);
   } finally {
-    changeAliases(db => {
+    changeWorkspace(db => {
       db.prepare(`INSERT INTO source_bindings(product, source_instance, kind, source_alias, target_type, target_id, import_id)
         VALUES(?,?,?,?,?,?,?)`).run(...issueAlias, 'issue', importedIssueId, importedReceipt.id);
       db.prepare(`UPDATE source_bindings SET target_id=? WHERE ${aliasCondition}`).run(importedDocument.id, ...pageAlias);
     });
+  }
+
+  const retargetedLink = { ...importedLink, issueId: importedRelated.id };
+  const replacementLink = { ...retargetedLink, id: randomUUID() };
+  const insertResourceLink = (db, link) => db.prepare('INSERT INTO resource_links(id, issue_id, document_id, json) VALUES(?,?,?,?)')
+    .run(link.id, link.issueId, link.documentId, JSON.stringify(link));
+  const removeResourceLink = (db, id) => db.prepare('DELETE FROM resource_links WHERE id=?').run(id);
+  for (const [changedLink, finding] of [[retargetedLink, 'mismatch'], [replacementLink, 'missing']]) {
+    changeWorkspace(db => {
+      assert.equal(removeResourceLink(db, importedLink.id).changes, 1);
+      insertResourceLink(db, changedLink);
+    });
+    try {
+      const rejected = await launch(['verify', root], env).exited;
+      assert.equal(rejected.code, 1, rejected.stdout + rejected.stderr);
+      const { attempt: failedAttempt, report: failedLinks } = await readReport(root, rejected);
+      assert.equal(failedLinks.status, 'failed');
+      assert.equal(failedLinks.source.evidence.checks.receiptsWithResourceLinkFailures, 1);
+      assert.equal(failedLinks.source.evidence.checks.receiptsWithResourceLinkReview, 0);
+      assert.equal(failedLinks.source.evidence.workspace.counts.resourceLinks, report.source.evidence.workspace.counts.resourceLinks);
+      const [audited] = failedLinks.source.evidence.receipts;
+      assert.deepEqual(audited.primaryRecords, receipt.primaryRecords);
+      const { sha256, ...affected } = audited.resourceLinkProjection;
+      assert.notEqual(sha256, resourceLinkProjection.sha256);
+      assert.deepEqual(affected, { version: 1, expected: 1, counts: { ...resourceLinkProjection.counts, linked: 0, [finding]: 1 } });
+      for (const value of [changedLink.id, changedLink.issueId, changedLink.documentId]) assert.ok(!JSON.stringify(failedLinks).includes(value));
+      assert.equal(failedLinks.restore, null);
+      assert.equal(failedLinks.comparison, null);
+      assert.equal(existsSync(join(failedAttempt, 'backup')), false);
+    } finally {
+      changeWorkspace(db => {
+        removeResourceLink(db, changedLink.id);
+        insertResourceLink(db, importedLink);
+      });
+    }
   }
 
   // Keep the source bundle and receipt intact while changing the staged issue count.
