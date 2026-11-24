@@ -312,6 +312,7 @@ export interface MigrationAppendConfiguration {
   refreshExisting?: true;
   refreshCustomFields?: true;
   refreshHistory?: true;
+  refreshWorklogs?: true;
   refreshAttachments?: true;
   refreshRelations?: true;
 }
@@ -328,6 +329,20 @@ export interface JiraMigrationIssueReview {
   issueId: string; key: string; sourceKey: string;
   fields: { field: JiraMigrationIssueField; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
   customFields?: { fieldId: string; label: string; current: string; incoming: string; decision: 'apply' | 'conflict' }[];
+}
+export interface JiraMigrationWorklogValues {
+  workDate: string;
+  durationSeconds: number;
+  note: string;
+}
+export interface JiraMigrationWorklogReview {
+  recordId: string;
+  sourceId: string;
+  issueKey?: string;
+  decision: 'apply' | 'confirm' | 'local-conflict' | 'archive-only';
+  reason: string;
+  before?: JiraMigrationWorklogValues;
+  after?: JiraMigrationWorklogValues;
 }
 export interface JiraDeadlineRecoveryReview {
   sourceImportId: string;
@@ -509,6 +524,7 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
+  jiraWorklogReview?: JiraMigrationWorklogReview[];
   jiraWorkflows?: MigrationJiraWorkflowReview[];
   jiraObservedWorkflows?: MigrationJiraObservedWorkflow[];
   jiraRelationRefresh?: { recordId: string; sourceKey: string; targetKey: string; type: string;
@@ -548,6 +564,7 @@ export interface SourceRecordArchive {
   jiraIssueSourceFieldHashes?: JiraMigrationIssueSourceFieldHashes;
   jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
   jiraHistoryAppend?: true;
+  jiraWorklogCorrection?: { worklogId: string; originalRecordId: string; previousRecordId: string; noteSha256: string; confirmed?: true };
   jiraAttachmentAppend?: true;
   jiraRelationId?: string;
   confluencePageFieldHashes?: ConfluenceMigrationPageFieldHashes;

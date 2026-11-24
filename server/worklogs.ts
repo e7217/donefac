@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { Express, Request } from 'express';
-import type { Issue, IssueWorklogPage, Project, ProjectWorklogReport, SourceRecordArchive, User, WorklogEntry } from '../shared/types.js';
+import type { Issue, IssueWorklogPage, Project, ProjectWorklogReport, SourceImport, SourceRecordArchive, User, WorklogEntry } from '../shared/types.js';
 import { calendarDay, isCalendarDate } from '../shared/calendar.js';
+import { jiraWorklogCorrectionBaseline, jiraWorklogNoteHash, readJiraWorklogCorrectionCandidates, validRestoredJiraWorklogCorrections } from './jira-worklog-corrections.js';
+import type { MigrationJiraWorklogUpdate } from './migration-contracts.js';
 import { isRestrictedJiraWorklog } from './migration-worklog.js';
 import type { Store } from './store.js';
 
@@ -11,6 +13,7 @@ export class WorklogError extends Error {
 interface WorklogRecord extends WorklogEntry {
   createHash: string;
   deletedAt: string | null;
+  jiraCorrectionRecordId?: string;
 }
 interface Hooks {
   actor(request: Request): string;
@@ -170,7 +173,8 @@ export class WorklogService {
       const fingerprint = createHash('sha256').update(JSON.stringify(['jira-worklog-import', value.id, value.sourceRecordId, value.issueId, value.authorId, value.workDate, value.durationSeconds])).digest('hex');
       return {...value,createHash:fingerprint,deletedAt:null};
     });
-    const validated = this.validateRestore(candidates, this.store.all<Project>('projects'), this.store.all<Issue>('issues'), this.store.all<User>('users'), new Date().toISOString(), sourceRecords);
+    const originalRecords = sourceRecords.filter(record => !record.jiraWorklogCorrection);
+    const validated = this.validateRestore(candidates, this.store.all<Project>('projects'), this.store.all<Issue>('issues'), this.store.all<User>('users'), new Date().toISOString(), originalRecords);
     const existingIdentities = new Set<string>();
     if (this.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='source_records'").get()) {
       const sources = this.store.db.prepare(`
@@ -179,7 +183,7 @@ export class WorklogService {
       `).all() as {instanceKey: string; sourceId: string}[];
       for (const source of sources) existingIdentities.add(JSON.stringify([source.instanceKey, source.sourceId]));
     }
-    const incomingSources = sourceMap(sourceRecords);
+    const incomingSources = sourceMap(originalRecords);
     for (const value of validated) {
       const issue = this.store.get<Issue>('issues', value.issueId);
       if (!issue || issue.key !== value.issueKey || issue.title !== value.issueTitle) fail(400, '이관 작업 시간의 현재 업무와 저장할 키·제목이 일치하지 않습니다.');
@@ -189,6 +193,54 @@ export class WorklogService {
       if (existingIdentities.has(sourceBinding(value, incomingSources))) fail(409, '같은 Jira 인스턴스의 작업 시간 원본이 이미 저장되어 있습니다.');
     }
     for (const value of validated) this.write(value, true);
+  }
+
+  /** A migration receipt and all corrected worklogs commit in the same transaction. */
+  persistJiraCorrections(updates: MigrationJiraWorklogUpdate[], sourceRecords: SourceRecordArchive[], sourceImport: SourceImport): void {
+    if (!updates.length) return;
+    if (!this.store.db.isTransaction) fail(500, 'Jira 작업 시간 보정은 이관 트랜잭션에서 적용해야 합니다.');
+    const append = sourceImport.configuration.appendTo;
+    const correctionRecords = sourceRecords.filter(record => record.jiraWorklogCorrection);
+    const [first] = correctionRecords;
+    const instanceKey = first?.source.instanceKey;
+    if (!append?.refreshWorklogs || !instanceKey || correctionRecords.length !== updates.length ||
+        correctionRecords.some(record => record.source.instanceKey !== instanceKey)) fail(409, '검토한 Jira 작업 시간 보정의 원본 범위가 변경되었습니다.');
+    const sources = sourceMap(correctionRecords);
+    const candidates = new Map(readJiraWorklogCorrectionCandidates(this.store, instanceKey,
+      correctionRecords.map(record => record.record.sourceId), append.projectId).map(candidate => [candidate.sourceId, candidate]));
+    const expected = new Set<string>();
+    const currentTime = new Date().toISOString();
+    const pending = updates.map(update => {
+      const source = sources.get(update.sourceRecordId);
+      const marker = source?.jiraWorklogCorrection;
+      const candidate = source && candidates.get(source.record.sourceId);
+      const prior = candidate?.previous;
+      const old = this.store.get<WorklogRecord>('worklogs', update.id);
+      if (!source || !marker || !candidate || !prior || !old || expected.has(update.id) || old.deletedAt !== null ||
+          old.projectId !== append.projectId || old.projectId !== update.projectId || old.issueId !== update.issueId ||
+          old.id !== candidate.current.id || old.sourceRecordId !== candidate.originalRecordId ||
+          candidate.current.deletedAt !== null || old.version !== update.expectedVersion || old.version >= maxVersion - 1 ||
+          old.workDate !== prior.workDate || old.durationSeconds !== prior.durationSeconds || jiraWorklogNoteHash(old.note) !== prior.noteSha256 ||
+          marker.previousRecordId !== candidate.previousRecordId || (old.jiraCorrectionRecordId ?? old.sourceRecordId) !== marker.previousRecordId) {
+        fail(409, 'Jira 작업 시간 또는 이전 이관 기준이 변경되었습니다. 보정 미리보기를 다시 만들어 주세요.');
+      }
+      const original = this.store.get<SourceRecordArchive>('source_records', candidate.originalRecordId);
+      const earlier = this.store.get<SourceRecordArchive>('source_records', candidate.previousRecordId);
+      const earlierReceipt = earlier && this.store.get<SourceImport>('source_imports', earlier.sourceImportId);
+      const next = original && earlier && jiraWorklogCorrectionBaseline(source, sourceImport, original, earlier, earlierReceipt, prior, old);
+      const { workDate, durationSeconds, note } = update.changes;
+      const fields = sourceFields({ workDate, minutes: durationSeconds / 60, note }, durationSeconds);
+      const sameValues = old.workDate === fields.workDate && old.durationSeconds === durationSeconds && old.note === fields.note;
+      if (!next || next.workDate !== fields.workDate || next.durationSeconds !== durationSeconds ||
+          next.noteSha256 !== jiraWorklogNoteHash(fields.note) || fields.note !== note ||
+          (marker.confirmed === true) !== sameValues) {
+        fail(409, '검토한 Jira 원본의 수정 시각과 작업 시간 보정값을 확인해 주세요.');
+      }
+      expected.add(update.id);
+      return { ...old, ...fields, durationSeconds, jiraCorrectionRecordId: source.id, version: old.version + 1,
+        updatedAt: currentTime < old.updatedAt ? old.updatedAt : currentTime };
+    });
+    for (const value of pending) this.write(value);
   }
 
   private list(issueId: string, offset: unknown): IssueWorklogPage {
@@ -331,15 +383,15 @@ export class WorklogService {
   }
 
   validateRestore(raw: unknown, projects: Project[], issues: Issue[], users: User[], exportedAt: string, sourceRecords: SourceRecordArchive[] = [],
-    moved?: WorklogMoveProof): WorklogRecord[] {
+    moved?: WorklogMoveProof, sourceImports: SourceImport[] = []): WorklogRecord[] {
     if (!Array.isArray(raw)) fail(400,'백업의 작업 시간 기록 목록이 필요합니다.');
     const projectIds = new Set(projects.map(project => project.id));
     const userIds = new Set(users.map(user => user.id));
     const issueProjects = new Map(issues.map(issue => [issue.id,issue.projectId]));
     const ids = new Set<string>(), sourceIds = new Set<string>(), sourceIdentities = new Set<string>(), sources = sourceMap(sourceRecords);
-    return raw.map(value => {
+    const entries = raw.map(value => {
       if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400,'작업 시간 기록을 확인해 주세요.');
-      const {id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,sourceRecordId,durationSeconds} = value as WorklogRecord;
+      const {id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,sourceRecordId,durationSeconds,jiraCorrectionRecordId} = value as WorklogRecord;
       const exists = typeof issueId === 'string' && issueProjects.has(issueId);
       if (typeof id !== 'string' || !uuid.test(id) || ids.has(id) || typeof issueId !== 'string' || !issueId ||
           !projectIds.has(projectId) || !userIds.has(authorId) || exists && issueProjects.get(issueId) !== projectId ||
@@ -354,6 +406,9 @@ export class WorklogService {
       }
       const hasSource = Object.hasOwn(value, 'sourceRecordId'), hasSeconds = Object.hasOwn(value, 'durationSeconds');
       if (hasSource !== hasSeconds) fail(400, '이관 작업 시간의 원본 ID와 초 단위 값은 함께 있어야 합니다.');
+      if (Object.hasOwn(value, 'jiraCorrectionRecordId') && (!hasSource || typeof jiraCorrectionRecordId !== 'string' || !uuid.test(jiraCorrectionRecordId))) {
+        fail(400, '백업의 Jira 작업 시간 보정 원본 ID를 확인해 주세요.');
+      }
       let input: Fields;
       if (hasSource) {
         const identity = sourceBinding({sourceRecordId,durationSeconds,issueId,projectId}, sources, moved);
@@ -363,8 +418,11 @@ export class WorklogService {
         input = sourceFields(value, durationSeconds!);
       } else input = fields(value);
       ids.add(id);
-      return {...input,id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,...(hasSource ? {sourceRecordId,durationSeconds} : {})};
+      return {...input,id,issueId,projectId,issueKey,issueTitle,authorId,version,createdAt,updatedAt,createHash,deletedAt,...(hasSource ? {sourceRecordId,durationSeconds} : {}),
+        ...(jiraCorrectionRecordId === undefined ? {} : { jiraCorrectionRecordId })};
     });
+    if (!validRestoredJiraWorklogCorrections(entries, sources, sourceImports)) fail(400, '백업의 Jira 작업 시간 보정 원본과 이어진 적용 기준을 확인해 주세요.');
+    return entries;
   }
 
   clearForRestore(): Map<string, number> {

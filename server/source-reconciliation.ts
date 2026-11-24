@@ -211,7 +211,10 @@ const rowsSql = (audit: boolean, scoped = false) => `
   FROM source_records r
   LEFT JOIN projects p ON r.target_type='project' AND p.id=r.target_id
   -- Unary + removes the column's TEXT affinity so SQLite can seek the expression index.
-  LEFT JOIN worklogs w ON r.target_type IS NULL AND json_extract(w.json,'$.sourceRecordId')=+r.id
+  LEFT JOIN worklogs w ON r.target_type IS NULL AND json_extract(w.json,'$.sourceRecordId')=
+    +coalesce(json_extract(r.json,'$.jiraWorklogCorrection.originalRecordId'),r.id)
+    AND (json_extract(r.json,'$.jiraWorklogCorrection.worklogId') IS NULL OR
+      (w.id=json_extract(r.json,'$.jiraWorklogCorrection.worklogId') AND w.issue_id=r.owner_id))
   LEFT JOIN issues i ON i.id=CASE WHEN r.target_type='issue' THEN r.target_id WHEN w.id IS NOT NULL THEN w.issue_id WHEN r.owner_type='issue' THEN r.owner_id END
   LEFT JOIN documents d ON d.id=CASE WHEN r.target_type='document' THEN r.target_id WHEN r.owner_type='document' THEN r.owner_id END
   LEFT JOIN comments c ON r.target_type='comment' AND c.id=r.target_id

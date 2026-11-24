@@ -967,6 +967,7 @@ export function createApp(options: {
       const { refreshedIssues, hierarchy: issueHierarchy } = prepareJiraRefreshes(value);
       const refreshedDocuments = prepareConfluenceRefreshes(value);
       const importedWorklogs = value.worklogs ?? [];
+      const correctedWorklogs = value.jiraWorklogUpdates ?? [];
       const issueHistoryOwners = new Set(value.jiraHistoryOwners ?? []);
       const newJiraComments = value.comments.filter(comment => issueHistoryOwners.has(comment.resourceId)).length;
       const newJiraWorklogs = importedWorklogs.filter(worklog => issueHistoryOwners.has(worklog.issueId)).length;
@@ -996,7 +997,7 @@ export function createApp(options: {
             [...historyOwners].some(id => store.get<DocPage>('documents', id)?.projectId !== projectId))) {
           fail('댓글과 이력을 추가할 기존 Confluence 문서를 확인해 주세요.', 409);
         }
-        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length || importedWorklogs.length ||
+        if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.issues.length || importedWorklogs.length || correctedWorklogs.length ||
             (!value.documents.length && !refreshedDocuments.length && !newConfluenceAttachments && !newConfluenceVersions && !hasConfluenceHistory) ||
             value.documents.some(document => document.projectId !== projectId || store.get('documents', document.id)) ||
             value.revisions.some(revision => store.get('revisions', revision.id) || (newDocumentIds.has(revision.documentId)
@@ -1030,6 +1031,10 @@ export function createApp(options: {
             [...issueHistoryOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
           fail('댓글과 작업 시간을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
         }
+        if (correctedWorklogs.length && (value.preview.configuration.appendTo?.refreshWorklogs !== true ||
+            correctedWorklogs.some(row => row.projectId !== projectId || store.get<Issue>('issues', row.issueId)?.projectId !== projectId))) {
+          fail('작업 시간을 수정할 기존 Jira 업무를 확인해 주세요.', 409);
+        }
         if (jiraAttachmentOwners.size && (value.preview.configuration.appendTo?.refreshAttachments !== true ||
             [...jiraAttachmentOwners].some(id => store.get<Issue>('issues', id)?.projectId !== projectId))) {
           fail('첨부파일을 추가할 기존 Jira 업무를 확인해 주세요.', 409);
@@ -1049,7 +1054,7 @@ export function createApp(options: {
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || value.revisions.length ||
-            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !newJiraAttachments && !jiraRelationRefresh.length) ||
+            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !correctedWorklogs.length && !newJiraAttachments && !jiraRelationRefresh.length) ||
             !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
               issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id)) ||
             value.comments.some(comment => comment.resourceType !== 'issue' || store.get('comments', comment.id) ||
@@ -1067,6 +1072,7 @@ export function createApp(options: {
         if (value.issues.length) store.db.prepare(`INSERT INTO issue_sequences VALUES(?,?) ON CONFLICT(project_id)
           DO UPDATE SET next_number=excluded.next_number`).run(projectId,startIssueNumber + value.issues.length);
       } else {
+        if (correctedWorklogs.length) fail('Jira 작업 시간 수정에는 기존 프로젝트가 필요합니다.', 409);
         const schemas = issueSchemas.validateImport(value.issueSchemas, value.projects, value.issues, {users:store.all<User>('users')});
         const importedWorkflows = workflows.validateImport(value.workflows, value.projects, value.issues, schemas);
         validateVisibilityStatuses(schemas, importedWorkflows);
@@ -1112,6 +1118,13 @@ export function createApp(options: {
         return { ...worklog, issueKey: key, issueTitle: title };
       });
       worklogs.persistMigrated(worklogRows, value.sourceRecords);
+      worklogs.persistJiraCorrections(correctedWorklogs, value.sourceRecords, value.sourceImport);
+      const confirmedWorklogs = new Set(value.sourceRecords.filter(record => record.jiraWorklogCorrection?.confirmed).map(record => record.id));
+      for (const row of correctedWorklogs) {
+        if (!confirmedWorklogs.has(row.sourceRecordId)) {
+          activity(req, 'issue', row.issueId, 'Jira 작업 시간 수정 반영', `${row.changes.workDate} · ${row.changes.durationSeconds}초`);
+        }
+      }
       for (const revision of value.revisions) store.put('revisions', revision);
       const plannedAnchors = new Map(value.confluenceCommentAnchors?.map(anchor => [anchor.commentId, anchor]));
       const anchorDocuments = new Map<string, { document: DocPage; bodyHash: string }>();
@@ -1172,12 +1185,15 @@ export function createApp(options: {
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length || hasJiraHistory || newJiraAttachments || jiraRelationRefresh.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length || hasJiraHistory || correctedWorklogs.length || newJiraAttachments || jiraRelationRefresh.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (newJiraComments) details.push(`기존 업무에 원본 댓글 ${newJiraComments}개 추가`);
       if (newJiraWorklogs) details.push(`기존 업무에 원본 작업 시간 ${newJiraWorklogs}개 추가`);
+      const worklogEdits = correctedWorklogs.length - confirmedWorklogs.size;
+      if (worklogEdits) details.push(`기존 Jira 작업 시간 ${worklogEdits}개 수정`);
+      if (confirmedWorklogs.size) details.push(`기존 Jira 작업 시간 ${confirmedWorklogs.size}개 최신 원본 확인`);
       if (newJiraAttachments) details.push(`기존 업무에 원본 첨부파일 ${newJiraAttachments}개 추가`);
       if (jiraRelationRefresh.length) details.push(`기존 업무 사이에 Jira 관계 ${jiraRelationRefresh.length}개 추가`);
       if (refreshedDocuments.length) details.push(`기존 문서 ${refreshedDocuments.length}개 변경`);
@@ -3213,6 +3229,11 @@ export function createApp(options: {
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshHistory!==undefined))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraHistoryAppend')))
     ))fail('기존 Jira 업무의 댓글과 작업 시간 이관에는 schemaVersion 44 백업이 필요합니다.');
+    if(data.schemaVersion<118&&(
+      (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshWorklogs!==undefined))||
+      (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraWorklogCorrection')))||
+      (Array.isArray(data.worklogs)&&data.worklogs.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraCorrectionRecordId')))
+    ))fail('Jira 작업 시간 수정 이관에는 schemaVersion 118 백업이 필요합니다.');
     if(data.schemaVersion<45&&(
       (Array.isArray(data.sourceImports)&&data.sourceImports.some((receipt: SourceImport | null)=>receipt?.configuration?.appendTo?.refreshAttachments!==undefined))||
       (Array.isArray(data.sourceRecords)&&data.sourceRecords.some((row:unknown)=>row&&typeof row==='object'&&Object.hasOwn(row,'jiraAttachmentAppend')))
@@ -3463,6 +3484,7 @@ export function createApp(options: {
     const importedWorklogs=data.schemaVersion>=11?worklogs.validateRestore(
       data.worklogs,data.projects,allImportedIssues,data.users,data.exportedAt,data.schemaVersion>=12?importedSources.records:[],
       data.schemaVersion>=109?proveJiraProjectMove:undefined,
+      data.schemaVersion>=118?importedSources.imports:[],
     ):[];
     if(data.schemaVersion<14&&Array.isArray(data.documentPublications)&&data.documentPublications.length)fail('문서 검토·발행 기록을 포함한 백업은 schemaVersion 14가 필요합니다.');
     const importedPublications=data.schemaVersion>=14?documentPublication.validateRestore(

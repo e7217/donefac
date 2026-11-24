@@ -24,6 +24,7 @@ import { AttachmentFiles } from './attachments.js';
 import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
+import { readJiraWorklogCorrectionCandidates } from './jira-worklog-corrections.js';
 import { readMigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
@@ -36,7 +37,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 22;
+const conversionVersion = 23;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -261,7 +262,7 @@ export class MigrationService {
     const mapping = configuration.appendTo;
     if (!mapping) return;
     const destination = this.appendDestination(packages, buildMigrationOptions(packages), {
-      history: mapping.refreshHistory, attachments: mapping.refreshAttachments, relations: mapping.refreshRelations,
+      history: mapping.refreshHistory || mapping.refreshWorklogs, attachments: mapping.refreshAttachments, relations: mapping.refreshRelations,
     });
     if (!destination || destination.project.id !== mapping.projectId) {
       return fail(applying ? 409 : 400, applying ? changedAppend : invalidAppend);
@@ -289,7 +290,8 @@ export class MigrationService {
     const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields || hasEpicLinks
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, destination, digest)
       : undefined;
-    const history = mapping.refreshHistory ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
+    const history = mapping.refreshHistory || mapping.refreshWorklogs
+      ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const attachments = mapping.refreshAttachments ? this.jiraAttachmentContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const relationRefresh = mapping.refreshRelations ? this.jiraRelationContext(packages, configuration, knownIssues, destination, digest) : undefined;
     return { project, workflow, schema, nextIssueNumber: sequence.value, token: digest.digest('hex'), knownIssues,
@@ -359,18 +361,21 @@ export class MigrationService {
     return { origins, issues };
   }
   private jiraHistoryContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
-    destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'historyIssues' | 'knownHistory'> {
+    destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'historyIssues' | 'knownHistory' | 'jiraWorklogCandidates'> {
     const selected = { comment: new Set<string>(), worklog: new Set<string>() };
     const { origins, issues: historyIssues } = this.jiraChildIssues(packages, configuration, knownIssues, destination, row => {
       const source = jiraHistorySourceKey(row);
-      if (!source) return null;
+      if (!source || source.kind === 'comment' && !configuration.appendTo?.refreshHistory) return null;
       selected[source.kind].add(source.sourceId);
       return jiraHistoryOwnerAliases(row);
     });
     const known = this.sources.jiraKnownHistory(destination.instanceKey, { comment: [...selected.comment], worklog: [...selected.worklog] });
+    const jiraWorklogCandidates = configuration.appendTo?.refreshWorklogs
+      ? readJiraWorklogCorrectionCandidates(this.store, destination.instanceKey, [...selected.worklog].sort(), destination.project.id) : undefined;
     // An unrelated local change to a ticket title is not a history conflict.
     digest.update('\njira-history\n').update(JSON.stringify([origins, historyIssues.map(issue => issue.id), known]));
-    return { historyIssues, knownHistory: known.map(({ kind, sourceId, issueId }) => ({ kind, sourceId, issueId })) };
+    if (jiraWorklogCandidates) digest.update('\njira-worklog-corrections\n').update(JSON.stringify(jiraWorklogCandidates));
+    return { historyIssues, knownHistory: known.map(({ kind, sourceId, issueId }) => ({ kind, sourceId, issueId })), jiraWorklogCandidates };
   }
   private jiraAttachmentContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
     destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'attachmentIssues' | 'knownAttachments'> {
@@ -1161,7 +1166,7 @@ export class MigrationService {
     const append = configuration.appendTo;
     if (append) {
       const destination = this.appendDestination(packages, options, {
-        history: append.refreshHistory, attachments: append.refreshAttachments, relations: append.refreshRelations,
+        history: append.refreshHistory || append.refreshWorklogs, attachments: append.refreshAttachments, relations: append.refreshRelations,
       });
       if (!destination || destination.project.id !== append.projectId) return unavailable();
       const statuses = new Set(destination.workflow.statuses.map(status => status.id));

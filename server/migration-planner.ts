@@ -17,6 +17,7 @@ import { confluenceParentEvidence, confluencePositionEvidence } from './migratio
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
 import { hasConfluencePropertyMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
+import { jiraWorklogNoteHash, jiraWorklogProjectedNote, jiraWorklogSourceUpdatedAt } from './jira-worklog-corrections.js';
 import type { MigrationContentContext, MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
@@ -36,9 +37,10 @@ import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHi
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
-import type { LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
+import type { JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
+const MAX_WORKLOG_CORRECTION_REVIEW = 1000;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
 const hash=(...parts:string[])=>createHash('sha256').update(JSON.stringify(parts)).digest('hex');
@@ -574,6 +576,7 @@ class Planner{
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes;
     sourceHashes?: JiraMigrationIssueSourceFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
   private jiraHistoryOwners = new Map<string, JiraHistoryIssue>();
+  private jiraWorklogCorrections = new Map<string, { owner: JiraHistoryIssue; marker: NonNullable<SourceRecordArchive['jiraWorklogCorrection']> }>();
   private knownJiraHistory = new Set<string>();
   private jiraAttachmentOwners = new Map<string, AttachmentOwner>();
   private knownJiraAttachments = new Set<string>();
@@ -673,7 +676,7 @@ class Planner{
       else if (previous?.issueId !== issue.issueId || previous.projectId !== issue.projectId) this.retainedIssuesByJiraKey.set(key, null);
     }
     const retainedIssues = this.retainedEntries.size;
-    if (mapping.refreshHistory === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
+    if (mapping.refreshHistory === true || mapping.refreshWorklogs === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
       this.knownJiraHistory.add(JSON.stringify([kind, sourceId]));
     }
     if (mapping.refreshAttachments === true) for (const { sourceId } of append.knownAttachments ?? []) {
@@ -682,7 +685,8 @@ class Planner{
     for (const entry of this.entries) {
       if (entry.row.kind === 'issue' || entry.row.kind === 'relation' || this.excluded.has(entry.key)) continue;
       const owner = this.ownerEntry(entry);
-      if (mapping.refreshHistory === true && entry.pkg.dataset.source.product === 'jira' && jiraHistoryKind(entry.row)) {
+      if ((mapping.refreshHistory === true || mapping.refreshWorklogs === true && isJiraWorklog(entry.row)) &&
+          entry.pkg.dataset.source.product === 'jira' && jiraHistoryKind(entry.row)) {
         const identity = jiraHistorySourceKey(entry.row);
         if (!owner || identity && this.knownJiraHistory.has(JSON.stringify([identity.kind, identity.sourceId]))) {
           this.retainedEntries.add(entry.key);
@@ -1611,7 +1615,7 @@ class Planner{
   }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.planConfluenceCommentReplies();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.reviewJiraWorklogCorrections();this.createSecondary();this.createConfluenceHistory();this.planConfluenceCommentReplies();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
     const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
@@ -1904,7 +1908,8 @@ class Planner{
       if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
       const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
       if (diagnostic.code === 'NO_PRIMARY_CONTENT' && (this.result.appendPages && config.appendPagesTo?.refreshHistory === true ||
-          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshAttachments === true || config.appendTo?.refreshRelations === true) &&
+          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshWorklogs === true ||
+            config.appendTo?.refreshAttachments === true || config.appendTo?.refreshRelations === true) &&
           pkg.dataset.source.format === 'jira-backup-xml')) {
         this.deferredPrimaryNotices.push({ message: diagnostic.message, entry });
       } else this.notice(`SOURCE_${diagnostic.code}`, diagnostic.message, 'error', entry);
@@ -4279,6 +4284,86 @@ class Planner{
     this.result.jiraHistoryOwners = [...new Set([...this.jiraHistoryOwners.values()].map(issue => issue.id))];
     Object.assign(this.result.preview.counts, { newJiraComments, newJiraWorklogs, retainedRecords: this.retainedEntries.size });
   }
+  private reviewJiraWorklogCorrections(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshWorklogs !== true) return;
+    const issues = new Map(append.historyIssues?.map(issue => [issue.id, issue]));
+    const scope = this.jiraChildScope(append);
+    const candidates = Map.groupBy(append.jiraWorklogCandidates ?? [], worklog => worklog.sourceId);
+    const entries = this.entries.filter(entry => entry.pkg.dataset.source.product === 'jira' && isJiraWorklog(entry.row) &&
+      this.retainedEntries.has(entry.key) && !this.excluded.has(entry.key));
+    const groups = Map.groupBy(entries, entry => jiraHistorySourceKey(entry.row)?.sourceId ?? entry.key);
+    const planned: JiraMigrationWorklogReview[] = [], retained: JiraMigrationWorklogReview[] = [];
+    const updates: NonNullable<PreparedMigration['jiraWorklogUpdates']> = [];
+    const counts = { updatedJiraWorklogs: 0, confirmedJiraWorklogs: 0, conflictingJiraWorklogs: 0, archivedJiraWorklogCorrections: 0 };
+    const archiveOnly = 'archive-only', localConflict = 'local-conflict';
+    for (const group of groups.values()) {
+      const [entry, ...duplicates] = group;
+      const { row } = entry;
+      const known = candidates.get(row.sourceId);
+      if (!known?.length && this.jiraHistoryOwners.has(entry.key)) continue;
+      const owner = this.resolveJiraChildOwner(entry, jiraHistoryOwnerAliases(row), issues, scope);
+      const addReview = (decision: JiraMigrationWorklogReview['decision'], reason: string,
+        values: Pick<JiraMigrationWorklogReview, 'before' | 'after'> = {}) => {
+        counts[decision === 'apply' ? 'updatedJiraWorklogs' : decision === 'confirm' ? 'confirmedJiraWorklogs' :
+          decision === localConflict ? 'conflictingJiraWorklogs' : 'archivedJiraWorklogCorrections']++;
+        const review = decision === 'apply' || decision === 'confirm' ? planned : retained;
+        if (review.length < MAX_WORKLOG_CORRECTION_REVIEW) {
+          review.push({ recordId: entry.key, sourceId: row.sourceId, issueKey: owner?.key, decision, reason, ...values });
+        }
+      };
+      if (known?.length !== 1 || !owner || duplicates.some(duplicate =>
+        JSON.stringify(duplicate.row) !== JSON.stringify(row) || this.mappedAuthor(duplicate) !== this.mappedAuthor(entry) ||
+        this.resolveJiraChildOwner(duplicate, jiraHistoryOwnerAliases(duplicate.row), issues, scope)?.id !== owner.id)) {
+        addReview(archiveOnly, '이전에 이관한 작업 시간과 이번 원본의 업무·ID를 확인할 수 없습니다.');
+        continue;
+      }
+      const [{ current, previous, originalRecordId, previousRecordId }] = known;
+      if (owner.id !== current.issueId || this.mappedAuthor(entry) !== current.authorId) {
+        addReview(archiveOnly, '이전 기록과 Jira 수정본의 소유 업무 또는 작성자 연결이 다릅니다.');
+        continue;
+      }
+      const parsed = parseJiraWorklog(row, this.configuration.timezone);
+      const updatedAt = jiraWorklogSourceUpdatedAt(row, this.configuration.timezone);
+      if ('code' in parsed || !updatedAt || !previous) {
+        addReview(archiveOnly, '이전 적용값이나 Jira 수정 시각·작업일·시간을 확인할 수 없습니다.');
+        continue;
+      }
+      const projectedNote = jiraWorklogProjectedNote(row);
+      const noteSha256 = projectedNote === undefined ? previous.noteSha256 : jiraWorklogNoteHash(projectedNote);
+      const confirmed = parsed.workDate === previous.workDate && parsed.durationSeconds === previous.durationSeconds &&
+        noteSha256 === previous.noteSha256;
+      if (updatedAt <= previous.updatedAt) {
+        if (!confirmed) addReview(archiveOnly, 'Jira 수정 시각이 마지막으로 확인한 원본보다 최신임을 확인할 수 없습니다.');
+        continue;
+      }
+      const before = { workDate: current.workDate, durationSeconds: current.durationSeconds, note: current.note };
+      const after = { workDate: parsed.workDate, durationSeconds: parsed.durationSeconds, note: projectedNote ?? current.note };
+      if (current.deletedAt !== null || current.workDate !== previous.workDate || current.durationSeconds !== previous.durationSeconds ||
+          jiraWorklogNoteHash(current.note) !== previous.noteSha256) {
+        addReview(localConflict, current.deletedAt ? '팀에서 삭제한 기록을 유지합니다.' : '팀에서 수정한 기록을 유지합니다.',
+          current.deletedAt ? {} : { before, ...(projectedNote === undefined ? {} : { after }) });
+        continue;
+      }
+      addReview(confirmed ? 'confirm' : 'apply', confirmed ? '같은 값이 담긴 최신 Jira 원본의 수정 시각을 기록합니다.' :
+        '최근 Jira 수정본을 기존 작업 시간 기록에 반영합니다.', { before, after });
+      if (updates.length >= MAX_WORKLOG_CORRECTION_REVIEW) continue;
+      updates.push({ id: current.id, issueId: owner.id, projectId: owner.projectId, expectedVersion: current.version,
+        sourceRecordId: this.archiveIds.get(entry.key)!, changes: after });
+      this.jiraWorklogCorrections.set(entry.key, { owner, marker: { worklogId: current.id, originalRecordId, previousRecordId, noteSha256,
+        ...(confirmed ? { confirmed: true } : {}) } });
+    }
+    if (counts.updatedJiraWorklogs + counts.confirmedJiraWorklogs > updates.length) {
+      this.notice('JIRA_WORKLOG_CORRECTIONS_LIMIT', '한 번에 수정할 수 있는 작업 시간은 1,000건입니다. 날짜 범위를 나누어 이관해 주세요.', 'error');
+    }
+    const review = [...planned, ...retained.slice(0, MAX_WORKLOG_CORRECTION_REVIEW - planned.length)];
+    if (Object.values(counts).reduce((sum, value) => sum + value, 0) > review.length) {
+      this.notice('JIRA_WORKLOG_REVIEW_LIMIT', '작업 시간 수정분은 앞의 1,000건까지 목록에 표시합니다.', 'info');
+    }
+    this.result.jiraWorklogUpdates = updates;
+    this.result.preview.jiraWorklogReview = review;
+    Object.assign(this.result.preview.counts, counts);
+  }
   private authorExpectation(entry: Entry, binding: Binding | undefined, worklogId: string | undefined): MigrationAuthorExpectation | undefined {
     const retainedPage = this.confluenceRefreshCheckpoints.get(entry.key);
     if (retainedPage) return { kind: 'document', targetId: retainedPage.document.id,
@@ -4305,8 +4390,10 @@ class Planner{
       const restrictedJiraHistory = entry.pkg.dataset.source.product === 'jira' && isRestrictedJiraStatusHistory(entry.row);
       const ownerEntry = excluded || restrictedJiraHistory ? null : this.ownerEntry(entry);
       const jiraHistoryOwner = this.jiraHistoryOwners.get(entry.key);
+      const jiraWorklogCorrection = this.jiraWorklogCorrections.get(entry.key);
       const jiraAttachmentOwner = this.jiraAttachmentOwners.get(entry.key);
-      const owner = issueCheckpoint || pageCheckpoint ? binding : jiraHistoryOwner ? { type: 'issue' as const, id: jiraHistoryOwner.id, projectId: jiraHistoryOwner.projectId } :
+      const jiraActivityOwner = jiraHistoryOwner ?? jiraWorklogCorrection?.owner;
+      const owner = issueCheckpoint || pageCheckpoint ? binding : jiraActivityOwner ? { type: 'issue' as const, id: jiraActivityOwner.id, projectId: jiraActivityOwner.projectId } :
         jiraAttachmentOwner ?? this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
         (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
       const ownerType = owner?.type === 'issue' || owner?.type === 'document' ? owner.type : null;
@@ -4341,6 +4428,7 @@ class Planner{
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
         ...(jiraHistoryOwner ? { jiraHistoryAppend: true } : {}),
+        ...(jiraWorklogCorrection ? { jiraWorklogCorrection: jiraWorklogCorrection.marker } : {}),
         ...(jiraAttachmentOwner ? { jiraAttachmentAppend: true } : {}),
         ...(this.jiraRelationIds.has(entry.key) ? { jiraRelationId: this.jiraRelationIds.get(entry.key)! } : {}),
         ...(issueHashes ? { jiraIssueFieldHashes: issueHashes } : {}),
@@ -4390,7 +4478,8 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
-    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length &&
+    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraWorklogUpdates?.length &&
+        !this.result.jiraAttachmentOwners?.length &&
         this.result.preview.counts.newJiraRelations === undefined) for (const { message, entry } of this.deferredPrimaryNotices) {
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
     }
@@ -4400,7 +4489,8 @@ class Planner{
     const atlassianLinks = this.result.atlassianLinks.length;
     Object.assign(counts, { atlassianLinks, unlinkedAtlassianRecords: this.primaryById.size - atlassianLinks });
     const sourceWorklogs = this.entries.filter(entry=>entry.pkg.dataset.source.product==='jira'&&isJiraWorklog(entry.row)).length;
-    if (sourceWorklogs) Object.assign(counts,{worklogs:this.result.worklogs.length,archivedWorklogs:sourceWorklogs-this.result.worklogs.length});
+    if (sourceWorklogs) Object.assign(counts,{worklogs:this.result.worklogs.length,
+      archivedWorklogs:sourceWorklogs-this.result.worklogs.length-(this.result.jiraWorklogUpdates?.length ?? 0)});
     if(Object.entries(counts).filter(([key])=>['issues','documents','comments','revisions','attachmentVersions','resourceLinks','issueRelations','worklogs'].includes(key)).reduce((sum,[,value])=>sum+value,0)>MAX_RECORDS)this.notice('CANONICAL_RECORD_LIMIT','생성할 현재 객체·이력·파일 버전 합계가100000개를 넘습니다.','error');
     const target = this.input.append?.project ?? this.input.appendPages?.project;
     const projects = target ? [target] : this.result.projects;
@@ -4423,13 +4513,17 @@ class Planner{
         ...('startDate' in item && (item.startDate || item.endDate) ? { schedule: { startDate: item.startDate, endDate: item.endDate } } : {}),
       });
     }
-    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraAttachmentOwners?.length && !counts.newJiraRelations && !this.notices.some(notice => notice.severity === 'error')) {
+    if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length &&
+        !this.result.jiraWorklogUpdates?.length && !this.result.jiraAttachmentOwners?.length && !counts.newJiraRelations &&
+        !this.notices.some(notice => notice.severity === 'error')) {
       if (this.configuration.appendTo?.refreshRelations) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무 관계나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshAttachments) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 첨부나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshHistory) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무·댓글·작업 시간이나 기존 업무 변경분이 없습니다.', 'error');
+      } else if (this.configuration.appendTo?.refreshWorklogs) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 Jira 작업 시간 수정이나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무나 기존 업무 변경분이 없습니다.', 'error');
       }

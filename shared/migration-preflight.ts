@@ -9,6 +9,7 @@ const countKeys = [
   'updatedCustomFields', 'conflictingCustomFields', 'updatedDocuments', 'updatedDocumentFields', 'conflictingDocumentFields',
   'skippedDocumentUpdates', 'newConfluenceAttachments', 'newConfluenceAttachmentVersions', 'reusedConfluenceAttachmentVersions',
   'newConfluenceComments', 'newConfluenceRevisions', 'newJiraAttachments', 'newJiraComments', 'newJiraWorklogs',
+  'updatedJiraWorklogs', 'confirmedJiraWorklogs', 'conflictingJiraWorklogs', 'archivedJiraWorklogCorrections',
   'newJiraRelations', 'skippedJiraRelations',
   'jiraReleases', 'jiraReleaseLinks', 'jiraReleaseUnassigned',
   'jiraSprints', 'jiraSprintLinks', 'jiraSprintUnassigned', 'jiraSprintHistoryOnly',
@@ -66,6 +67,7 @@ export function buildMigrationPreflightReport(preview: MigrationPreview, package
     return kinds.length ? [{ packageId, kinds }] : [];
   });
   const needsReview = missingPackageSummaryCount > 0 || requiredAcknowledgements.length > 0 ||
+    Boolean(counts.conflictingJiraWorklogs || counts.archivedJiraWorklogCorrections) ||
     diagnostics.some(entry => entry.severity === 'warning') || authorAttribution.some(({ kinds }) =>
       kinds.some(({ counts }) => counts['unmapped-fallback'] > 0 || counts['missing-fallback'] > 0));
   const status = !canApply ? 'blocked' : needsReview ? 'review' : 'ready';

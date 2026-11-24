@@ -1,5 +1,6 @@
 import type { Attachment,AttachmentVersion,Comment,ConfluenceMigrationDocumentValues,DocPage,DocRevision,DocumentSiblingOrder,DocumentSourceSelection,Issue,IssueRelation,JiraMigrationIssueValues,LegacyDataset,LegacyPackageSummary,LegacyRecord,MigrationConfiguration,MigrationPreview,PlanningItem,Project,ProjectIssueSchema,ProjectWorkflow,ResourceLink,SourceImport,SourceRecordArchive,User,WorklogEntry } from '../shared/types.js';
 import type { AtlassianLink } from '../shared/atlassian-links.js';
+import type { JiraMigrationWorklogValues } from '../shared/types.js';
 import type { MigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 
 export interface MigrationPackage { summary:LegacyPackageSummary;dataset:LegacyDataset }
@@ -45,6 +46,22 @@ export interface MigrationConfluenceKnownHistory {
   documentId: string;
   sourceVersion: number | null;
 }
+export interface MigrationJiraWorklogCandidate {
+  sourceId: string;
+  originalRecordId: string;
+  previousRecordId: string;
+  current: Pick<WorklogEntry, 'id' | 'issueId' | 'projectId' | 'authorId' | 'workDate' | 'note' | 'version'> &
+    { durationSeconds: number; deletedAt: string | null };
+  previous: { updatedAt: string; workDate: string; durationSeconds: number; noteSha256: string } | null;
+}
+export interface MigrationJiraWorklogUpdate {
+  id: string;
+  issueId: string;
+  projectId: string;
+  expectedVersion: number;
+  sourceRecordId: string;
+  changes: JiraMigrationWorklogValues;
+}
 export interface MigrationAppendContext {
   project: Project;
   workflow: ProjectWorkflow;
@@ -62,6 +79,7 @@ export interface MigrationAppendContext {
   hierarchyIssueAliases?: { alias: string; issueId: string }[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
   knownHistory?: { kind: 'comment' | 'worklog'; sourceId: string; issueId: string }[];
+  jiraWorklogCandidates?: MigrationJiraWorklogCandidate[];
   attachmentIssues?: Pick<Issue, 'id' | 'projectId'>[];
   knownAttachments?: { sourceId: string; issueId: string }[];
   relationRefresh?: {
@@ -111,6 +129,7 @@ export interface PreparedMigration {
   retainedResourceLinkToken?: string;
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
+  jiraWorklogUpdates?: MigrationJiraWorklogUpdate[];
   jiraAttachmentOwners?: string[];
   documentUpdates?: MigrationConfluenceDocumentUpdate[];
   confluenceAttachmentOwners?: string[];

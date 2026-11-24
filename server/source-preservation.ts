@@ -68,11 +68,13 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
   const refresh = Object.hasOwn(append, 'refreshExisting');
   const custom = Object.hasOwn(append, 'refreshCustomFields');
   const history = Object.hasOwn(append, 'refreshHistory');
+  const worklogs = Object.hasOwn(append, 'refreshWorklogs');
   const attachments = Object.hasOwn(append, 'refreshAttachments');
   const relations = Object.hasOwn(append, 'refreshRelations');
-  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) + Number(attachments) + Number(relations) ||
+  if (Object.keys(append).length !== 4 + Number(refresh) + Number(custom) + Number(history) + Number(worklogs) + Number(attachments) + Number(relations) ||
       (refresh && append.refreshExisting !== true) || (custom && append.refreshCustomFields !== true) ||
-      (history && append.refreshHistory !== true) || (attachments && append.refreshAttachments !== true) || (relations && append.refreshRelations !== true)) {
+      (history && append.refreshHistory !== true) || (worklogs && append.refreshWorklogs !== true) ||
+      (attachments && append.refreshAttachments !== true) || (relations && append.refreshRelations !== true)) {
     fail(400, '기존 프로젝트 추가 설정 형식을 확인해 주세요.');
   }
   return {
@@ -83,6 +85,7 @@ export function parseMigrationAppendConfiguration(raw: unknown): MigrationAppend
     ...(refresh ? { refreshExisting: true } : {}),
     ...(custom ? { refreshCustomFields: true } : {}),
     ...(history ? { refreshHistory: true } : {}),
+    ...(worklogs ? { refreshWorklogs: true } : {}),
     ...(attachments ? { refreshAttachments: true } : {}),
     ...(relations ? { refreshRelations: true } : {}),
   };
@@ -466,6 +469,7 @@ interface AppliedJiraChildren {
   attachmentOwners: Set<string>;
   comments: Map<string, string>;
   worklogs: Map<string, string>;
+  worklogCorrections: Map<string, string>;
   attachments: Map<string, string>;
 }
 interface JiraIssueOrigin { alias: string; issueId: string; projectId: string; sourceProjectId: string; archiveId: string }
@@ -870,6 +874,20 @@ export class SourcePreservationService {
           targetType !== (jiraHistory.kind === 'comment' ? 'comment' : null))) {
         fail(400, 'Jira 댓글·작업 시간 원본의 적용 설정과 대상을 확인해 주세요.');
       }
+      let jiraWorklogCorrection: SourceRecordArchive['jiraWorklogCorrection'];
+      if (Object.hasOwn(value, 'jiraWorklogCorrection')) {
+        const correction = object(value.jiraWorklogCorrection, 'Jira 작업 시간 수정 원본 연결');
+        const confirmed = Object.hasOwn(correction, 'confirmed');
+        if (Object.keys(correction).length !== 4 + Number(confirmed) || confirmed && correction.confirmed !== true ||
+            source.product !== 'jira' || targetType !== null ||
+            ownerType !== 'issue' || !ownerId || value.excluded === true || jiraHistory || value.authorAttribution !== undefined ||
+            owner.configuration.appendTo?.refreshWorklogs !== true || owner.configuration.appendTo.projectId !== targetProjectId ||
+            jiraHistorySourceKey(record)?.kind !== 'worklog' || isRestrictedJiraHistory(record)) {
+          fail(400, 'Jira 작업 시간 수정 원본의 설정과 업무 연결을 확인해 주세요.');
+        }
+        jiraWorklogCorrection = { worklogId: uuid(correction.worklogId), originalRecordId: uuid(correction.originalRecordId),
+          previousRecordId: uuid(correction.previousRecordId), noteSha256: sha(correction.noteSha256), ...(confirmed ? { confirmed: true } : {}) };
+      }
       const jiraAttachmentAppend = Object.hasOwn(value, 'jiraAttachmentAppend');
       if (jiraAttachmentAppend && (value.jiraAttachmentAppend !== true || source.product !== 'jira' ||
           !owner.configuration.appendTo?.refreshAttachments || owner.configuration.appendTo.projectId !== targetProjectId ||
@@ -886,6 +904,7 @@ export class SourcePreservationService {
         ...(jiraIssueSourceFieldHashes ? { jiraIssueSourceFieldHashes } : {}),
         ...(jiraCustomFieldHashes ? { jiraCustomFieldHashes } : {}),
         ...(jiraHistory ? { jiraHistoryAppend: true } : {}),
+        ...(jiraWorklogCorrection ? { jiraWorklogCorrection } : {}),
         ...(jiraAttachmentAppend ? { jiraAttachmentAppend: true } : {}),
         ...(jiraRelationId ? { jiraRelationId } : {}),
         ...(confluencePageFieldHashes ? { confluencePageFieldHashes } : {}),
@@ -1074,8 +1093,18 @@ export class SourcePreservationService {
   }
   private validateJiraChildren(imports: SourceImport[], records: SourceRecordArchive[], attachments: Map<string, Attachment>,
     versions: Map<string, AttachmentVersion>, applied?: AppliedJiraChildren): void {
-    const marked = records.filter(record => record.jiraHistoryAppend || record.jiraAttachmentAppend);
-    if (!marked.length && !applied?.comments.size && !applied?.worklogs.size && !applied?.attachments.size) return;
+    const marked = records.filter(record => record.jiraHistoryAppend || record.jiraAttachmentAppend || record.jiraWorklogCorrection);
+    const correctionsByReceipt = Map.groupBy(marked.filter(record => record.jiraWorklogCorrection), record => record.sourceImportId);
+    for (const receipt of imports) {
+      const corrections = correctionsByReceipt.get(receipt.id) ?? [];
+      const confirmed = corrections.filter(record => record.jiraWorklogCorrection?.confirmed).length;
+      if (receipt.configuration.appendTo?.refreshWorklogs
+        ? receipt.counts.updatedJiraWorklogs !== corrections.length - confirmed || receipt.counts.confirmedJiraWorklogs !== confirmed
+        : corrections.length > 0) {
+        fail(400, 'Jira 작업 시간 수정 원본이 이관 영수증의 수량과 다릅니다.');
+      }
+    }
+    if (!marked.length && !applied?.comments.size && !applied?.worklogs.size && !applied?.worklogCorrections.size && !applied?.attachments.size) return;
     const receipts = new Map(imports.map(receipt => [receipt.id, receipt]));
     const jira = records.filter(record => record.source.product === 'jira');
     const sourceIdentity = (record: SourceRecordArchive) => stable([record.source.instanceKey, record.record.kind, record.record.sourceId]);
@@ -1119,6 +1148,7 @@ export class SourcePreservationService {
     const projectArchive = this.store.db.prepare(`SELECT json FROM source_records WHERE product='jira' AND source_instance=?
       AND kind='project' AND target_type='project' AND target_id=?`);
     const verified = { comment: new Set<string>(), worklog: new Set<string>(), attachment: new Set<string>() };
+    const verifiedCorrections = new Set<string>(), correctionSources = new Set<string>();
     const alreadyStored = new Map<string, Set<string>>();
     if (applied) {
       const selectedByInstance = new Map<string, { comment: string[]; worklog: string[]; attachment: string[]; aliases: Set<string> }>();
@@ -1160,9 +1190,17 @@ export class SourcePreservationService {
       const { kind, sourceId } = supplementalKey(history);
       const instance = history.source.instanceKey, projectId = history.targetProjectId!;
       const isAttachment = kind === 'attachment';
+      const correction = history.jiraWorklogCorrection;
       const owners = isAttachment ? applied?.attachmentOwners : applied?.historyOwners;
-      if (applied && (!owners?.has(history.ownerId!) || alreadyStored.get(instance)?.has(stable([kind, sourceId])))) invalid(isAttachment);
-      if (linkedCounts.get(sourceIdentity(history)) !== 1) invalid(isAttachment);
+      if (correction) {
+        const key = stable([history.sourceImportId, instance, sourceId]);
+        if (correctionSources.has(key) || applied && applied.worklogCorrections.get(history.id) !== history.ownerId) invalid();
+        correctionSources.add(key);
+        verifiedCorrections.add(history.id);
+      } else {
+        if (applied && (!owners?.has(history.ownerId!) || alreadyStored.get(instance)?.has(stable([kind, sourceId])))) invalid(isAttachment);
+        if (linkedCounts.get(sourceIdentity(history)) !== 1) invalid(isAttachment);
+      }
       const scope = projectKey(instance, projectId);
       if (applied && !archivedProjectScopes.has(scope)) {
         for (const row of projectArchive.all(instance, projectId) as { json: string }[]) addProject(JSON.parse(row.json) as SourceRecordArchive);
@@ -1188,6 +1226,7 @@ export class SourcePreservationService {
         return owners.length > 0 && owners.every(owner => owner.targetId === history.ownerId &&
           supplied.every(row => sameProject(owner.record.containerId!, row.record.containerId!)));
       })) invalid(isAttachment);
+      if (correction) continue;
       const targetId = kind === 'worklog' ? history.id : history.targetId!;
       const targets = kind === 'comment' ? applied?.comments : kind === 'worklog' ? applied?.worklogs : applied?.attachments;
       if (verified[kind].has(targetId) || applied && targets?.get(targetId) !== history.ownerId) invalid(isAttachment);
@@ -1202,7 +1241,8 @@ export class SourcePreservationService {
       }
       verified[kind].add(targetId);
     }
-    if (applied && (verified.comment.size !== applied.comments.size || verified.worklog.size !== applied.worklogs.size)) invalid();
+    if (applied && (verified.comment.size !== applied.comments.size || verified.worklog.size !== applied.worklogs.size ||
+        verifiedCorrections.size !== applied.worklogCorrections.size)) invalid();
     if (applied && verified.attachment.size !== applied.attachments.size) invalid(true);
   }
   confluenceArchivedRecord(archive: SourceRecordArchive, kind: ConfluenceArchiveKind, sourceId: string): LegacyRecord | undefined {
@@ -1423,6 +1463,7 @@ export class SourcePreservationService {
     const appliedJiraChildren = { historyOwners, attachmentOwners,
       comments: new Map(prepared.comments.filter(comment => historyOwners.has(comment.resourceId)).map(comment => [comment.id, comment.resourceId])),
       worklogs: new Map((prepared.worklogs ?? []).filter(worklog => historyOwners.has(worklog.issueId)).map(worklog => [worklog.sourceRecordId!, worklog.issueId])),
+      worklogCorrections: new Map((prepared.jiraWorklogUpdates ?? []).map(worklog => [worklog.sourceRecordId, worklog.issueId])),
       attachments: new Map(prepared.attachments.filter(attachment => attachmentOwners.has(attachment.resourceId))
         .map(attachment => [attachment.id, attachment.resourceId])) };
     const resourceLinkProof = prepared.resourceLinks.map(({ id, issueId, documentId }) => ({ id, issueId, documentId }));

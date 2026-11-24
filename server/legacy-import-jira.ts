@@ -104,6 +104,10 @@ function jsonWorklogMetadata(input: ObjectValue, syntheticId: boolean): Record<s
     kind: 'worklog', ...selected(input, ['started', 'startDate', 'startdate', 'timeSpent', 'timeSpentSeconds', 'timeworked']),
   };
   if (syntheticId) metadata.syntheticId = true;
+  if (Object.hasOwn(input, 'comment')) {
+    metadata.worklogNoteObserved = input.comment === null || typeof input.comment === 'string' ||
+      typeof input.comment === 'object' && !Array.isArray(input.comment);
+  }
   let hasVisibility = false;
   for (const [name, value] of Object.entries(input)) {
     const restriction = jiraWorklogRestrictionAttribute(name);
@@ -1362,7 +1366,7 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       }
     }
     else if(name==='RemoteIssueLink'){handled.add(name);const url=context.url(v.url),author=resolveActor(v.author);const references=ref('issue',v.issueid||v.issue,'source');if(url){const pageId=new URL(url).searchParams.get('pageId');if(pageId)references.push(...ref('page',pageId,'externalDocument'));}context.put('relation',`remote:${str(v.id)}`,{title:str(v.title)||'외부 연결',authorId:author,containerId:str(v.issueid||v.issue)||null,metadata:{url,relationship:str(v.relationship),globalId:str(v.globalid)},references});}
-    else if(name==='Worklog'){handled.add(name);const author=resolveActor(v.author);context.put('history',`worklog:${str(v.id)}`,{title:'작업 시간 기록',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created),updatedAt:context.date(v.updated),text:str(v.body),textFormat:'plain',metadata:{kind:'worklog',...selected(v,['started','startDate','startdate','timeworked','timeSpentSeconds','timeSpent','role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','visibility','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'])},references:[...ref('issue',v.issue,'worklogOf'),...ref('identity',author,'author')]});}
+    else if(name==='Worklog'){handled.add(name);const author=resolveActor(v.author);context.put('history',`worklog:${str(v.id)}`,{title:'작업 시간 기록',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created),updatedAt:context.date(v.updated),text:str(v.body),textFormat:'plain',metadata:{kind:'worklog',...(Object.hasOwn(v,'body')?{worklogNoteObserved:typeof v.body==='string'}:{}),...selected(v,['started','startDate','startdate','timeworked','timeSpentSeconds','timeSpent','role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','visibility','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'])},references:[...ref('issue',v.issue,'worklogOf'),...ref('identity',author,'author')]});}
     else if(name==='Label'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`);if(issue){const fields=issue.metadata.fields as Record<string,LegacyValue>;fields.labels=[...(Array.isArray(fields.labels)?fields.labels:[]),str(v.label)];}else context.warn('LABEL_ISSUE_MISSING','라벨의 이슈가 없습니다.',null,path);}
     else if (name === 'Version' || name === 'ProjectVersion') {
       handled.add(name);

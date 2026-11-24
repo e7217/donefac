@@ -50,11 +50,11 @@ async function fixture() {
     });
     return { status: response.status, data: (await response.json()) as T };
   }
-  async function upload(value: unknown, filename?: string) {
+  async function upload(value: unknown, filename?: string, instanceKey = `synthetic-worklogs-${randomUUID()}`) {
     const params = new URLSearchParams({
       filename: filename ?? (typeof value === 'string' ? 'entities.xml' : `worklogs-${randomUUID()}.json`),
       product: 'jira',
-      instanceKey: `synthetic-worklogs-${randomUUID()}`,
+      instanceKey,
     });
     const body = Buffer.isBuffer(value) ? Buffer.from(value) : Buffer.from(typeof value === 'string' ? value : JSON.stringify(value));
     const response = await fetch(`${base}/legacy-import/packages?${params}`, {
@@ -677,4 +677,242 @@ test('administrator XML Worklog timeworked and role restrictions pass through re
   } finally {
     await f.close();
   }
+});
+
+test('Jira worklog corrections preserve receipt identity, local changes, and the latest source baseline after restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const instanceKey = `synthetic-corrections-${randomUUID()}`;
+  const originalTimestamp = '2020-01-02T00:32:00+09:00';
+  const correctedTimestamp = '2020-01-06T10:00:00Z';
+  const worklog = (id: string, seconds: number, note: string | undefined, updated = originalTimestamp, sourceStart = started) => ({
+    id, issueId: '100', author: mappedAuthor, started: sourceStart, created: sourceCreated, updated,
+    timeSpentSeconds: seconds, ...(note === undefined ? {} : { comment: note }),
+  });
+  const payload = (worklogs: ReturnType<typeof worklog>[], description: string) => {
+    const original = restPayload().issues[0];
+    return { startAt: 0, total: 1, issues: [{ ...original, fields: {
+      ...original.fields, description, worklog: { startAt: 0, total: worklogs.length, worklogs },
+    } }] };
+  };
+  const initialPackage = await f.upload(payload([
+    worklog('410', 91, '첫 작업 원문'), worklog('411', 137, '팀원이 편집할 작업 원문'), worklog('412', 173, '팀원이 삭제할 작업 원문'),
+  ], '첫 합성 원본'), 'initial-worklogs.json', instanceKey);
+  const origin = await f.preview(await f.configure(initialPackage, mappedAuthor.accountId));
+  assert.equal(origin.counts.worklogs, 3);
+  assert.equal((await f.apply(origin)).status, 201);
+  const issue = await f.importedIssue(origin.id);
+  const firstArchives = await f.originals(origin.id);
+  const initialPage = await f.list(issue.id);
+  const entryFor = (id: string) => {
+    const archive = firstArchives.find(row => row.record.sourceId === `worklog:${id}`);
+    assert.ok(archive);
+    const entry = initialPage.entries.find(row => row.sourceRecordId === archive.id);
+    assert.ok(entry);
+    return { archive, entry };
+  };
+  const clean = entryFor('410'), edited = entryFor('411'), deleted = entryFor('412');
+  const worklogPath = (entry: ImportedEntry) => `/issues/${issue.id}/worklogs/${entry.id}`;
+  const values = (entry: ImportedEntry) => ({ workDate: entry.workDate, durationSeconds: entry.durationSeconds, note: entry.note });
+  const decisions = (plan: MigrationPreview) => Object.fromEntries(plan.jiraWorklogReview?.map(row => [row.sourceId, row.decision]) ?? []);
+  async function followUp(service: typeof f, rows: ReturnType<typeof worklog>[], name: string): Promise<MigrationConfiguration> {
+    const staged = await service.upload(payload(rows, name), `${name}.json`, instanceKey);
+    const reply = await service.call<MigrationOptions>(`/migrations/options?packageId=${staged.id}`);
+    assert.equal(reply.status, 200, JSON.stringify(reply.data));
+    const options = reply.data;
+    const target = options.appendTarget;
+    assert.ok(target);
+    assert.equal(target.projectId, issue.projectId);
+    const author = options.identities.find(identity => identity.sourceValue === mappedAuthor.accountId);
+    assert.ok(author);
+    return { ...options.defaultConfiguration, users: { ...options.defaultConfiguration.users, [author.id]: 'user-seo' },
+      appendTo: { projectId: issue.projectId, refreshWorklogs: true,
+        statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+        issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
+        fields: {},
+      },
+    };
+  }
+  const corrected = worklog('410', 257, 'Jira에서 정정한 첫 작업', correctedTimestamp, '2020-01-04T00:10:00+09:00');
+  const settings = await followUp(f, [corrected,
+    worklog('411', 271, '팀에서 편집한 작업의 Jira 정정', correctedTimestamp),
+    worklog('412', 283, '팀에서 삭제한 작업의 Jira 정정', correctedTimestamp),
+  ], 'later-worklogs');
+  const stale = await f.preview(settings);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  assert.equal(stale.counts.updatedJiraWorklogs, 3);
+  assert.deepEqual(decisions(stale), { 'worklog:410': 'apply', 'worklog:411': 'apply', 'worklog:412': 'apply' });
+  assert.deepEqual(await f.list(issue.id), initialPage);
+  const changed = await f.call<ImportedEntry>(worklogPath(edited.entry), 'PATCH', {
+    expectedVersion: edited.entry.version, note: 'Teamspace에서 편집한 메모',
+  }, 'user-seo');
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal((await f.call(worklogPath(deleted.entry), 'DELETE', { expectedVersion: deleted.entry.version }, 'user-seo')).status, 200);
+  const afterTeamEdits = await f.list(issue.id);
+  const rejected = await f.apply(stale);
+  assert.equal(rejected.status, 409, JSON.stringify(rejected.data));
+  assert.deepEqual(await f.list(issue.id), afterTeamEdits);
+  assert.ok(!(await f.call<SourceImport[]>('/source-imports')).data.some(receipt => receipt.id === stale.id));
+
+  const reviewed = await f.preview(settings);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  assert.deepEqual(decisions(reviewed), { 'worklog:410': 'apply', 'worklog:411': 'local-conflict', 'worklog:412': 'local-conflict' });
+  assert.equal(reviewed.counts.updatedJiraWorklogs, 1);
+  assert.equal(reviewed.counts.conflictingJiraWorklogs, 2);
+  assert.equal(reviewed.counts.newJiraWorklogs ?? 0, 0);
+  const selection = reviewed.jiraWorklogReview?.find(row => row.sourceId === 'worklog:410');
+  assert.deepEqual(selection?.before, values(clean.entry));
+  assert.deepEqual(selection?.after, { workDate: '2020-01-04', durationSeconds: 257, note: corrected.comment });
+  const applied = await f.apply(reviewed);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal(applied.data.import.counts.updatedJiraWorklogs, 1);
+  assert.equal(applied.data.import.counts.conflictingJiraWorklogs, 2);
+  assert.equal((await f.apply(reviewed)).data.duplicate, true);
+  const snapshot = await f.list(issue.id);
+  assert.equal(snapshot.totalEntries, 2);
+  assert.deepEqual(snapshot.entries.find(row => row.id === edited.entry.id), changed.data);
+  const current = snapshot.entries.find(row => row.id === clean.entry.id);
+  assert.ok(current);
+  assert.deepEqual(values(current), selection?.after);
+  assert.equal(current.minutes, 257 / 60);
+  for (const key of ['id', 'issueId', 'authorId', 'sourceRecordId', 'createdAt'] as const) assert.equal(current[key], clean.entry[key]);
+  assert.ok(current.version > clean.entry.version);
+  const report = await f.call<ProjectWorklogReport>(
+    `/projects/${issue.projectId}/worklog-report?startDate=2020-01-01&endDate=2020-01-07&authorId=user-seo`,
+  );
+  assert.equal(report.status, 200, JSON.stringify(report.data));
+  assert.equal(report.data.entryCount, 2);
+  assert.deepEqual(report.data.days.filter(day => day.entries), [
+    { date: '2020-01-02', minutes: 137 / 60, entries: 1 }, { date: '2020-01-04', minutes: 257 / 60, entries: 1 },
+  ]);
+
+  async function reconcile(service: typeof f, importId: string) {
+    const result = await service.call<SourceReconciliationPage>(`/source-imports/${importId}/reconciliation?kind=history`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return Object.fromEntries(result.data.rows.map(row => [row.sourceId, { status: row.status, target: row.target?.id }]));
+  }
+  const originalReconciliation = await reconcile(f, origin.id);
+  assert.deepEqual(originalReconciliation['worklog:410'], { status: 'linked', target: clean.entry.id });
+  assert.deepEqual(originalReconciliation['worklog:411'], { status: 'linked', target: edited.entry.id });
+  assert.deepEqual(originalReconciliation['worklog:412'], { status: 'missing', target: deleted.entry.id });
+  const correctedReconciliation = await reconcile(f, reviewed.id);
+  assert.deepEqual(correctedReconciliation['worklog:410'], { status: 'linked', target: clean.entry.id });
+  assert.equal(correctedReconciliation['worklog:411']?.status, 'archive-only');
+  assert.equal(correctedReconciliation['worklog:412']?.status, 'archive-only');
+  assert.deepEqual((await f.originals(origin.id)).find(row => row.id === clean.archive.id), clean.archive);
+  const correctionArchive = (await f.originals(reviewed.id)).find(row => row.record.sourceId === 'worklog:410');
+  assert.ok(correctionArchive);
+  assert.notEqual(correctionArchive.id, current.sourceRecordId);
+  assert.equal(correctionArchive.record.text, corrected.comment);
+  assert.equal(Number(correctionArchive.record.metadata.timeSpentSeconds), 257);
+
+  const sameTime = await f.preview(await followUp(f, [{ ...corrected, updated: '2020-01-06T19:00:00+09:00',
+    timeSpentSeconds: 311, comment: '같은 수정 시각의 다른 내용' }], 'conflicting-timestamp'));
+  assert.deepEqual(decisions(sameTime), { 'worklog:410': 'archive-only' });
+  assert.equal(sameTime.counts.archivedJiraWorklogCorrections, 1);
+  assert.equal(sameTime.counts.updatedJiraWorklogs ?? 0, 0);
+  assert.equal(sameTime.canApply, false);
+  const sameTimeResult = await f.apply(sameTime);
+  assert.equal(sameTimeResult.status, 409, JSON.stringify(sameTimeResult.data));
+  assert.deepEqual(await f.list(issue.id), snapshot);
+
+  const backup = await f.call<Backup>('/export');
+  assert.equal(backup.status, 200);
+  assert.equal(backup.data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.ok(backup.data.worklogs.find(row => row.id === deleted.entry.id)?.deletedAt);
+  const cold = await fixture();
+  t.after(() => cold.close());
+  const wrongFormat = await cold.call('/import', 'POST', { data: { ...backup.data, schemaVersion: 117 } });
+  assert.equal(wrongFormat.status, 400, JSON.stringify(wrongFormat.data));
+  const invalid = structuredClone(backup.data);
+  const tampered = invalid.sourceRecords.find(row => row.id === correctionArchive.id);
+  assert.ok(tampered?.jiraWorklogCorrection);
+  tampered.jiraWorklogCorrection.previousRecordId = edited.archive.id;
+  const wrongBaseline = await cold.call('/import', 'POST', { data: invalid });
+  assert.equal(wrongBaseline.status, 400, JSON.stringify(wrongBaseline.data));
+  const alteredWorklogBackup = structuredClone(backup.data);
+  const alteredWorklog = alteredWorklogBackup.worklogs.find(row => row.id === clean.entry.id);
+  assert.ok(alteredWorklog);
+  assert.equal(alteredWorklog.version, current.version);
+  alteredWorklog.note = '백업에서 변경한 메모';
+  const wrongCanonicalNote = await cold.call('/import', 'POST', { data: alteredWorklogBackup });
+  assert.equal(wrongCanonicalNote.status, 400, JSON.stringify(wrongCanonicalNote.data));
+  assert.deepEqual((await cold.call<SourceImport[]>('/source-imports')).data, []);
+  const restore = await cold.call('/import', 'POST', { data: backup.data });
+  assert.equal(restore.status, 200, JSON.stringify(restore.data));
+  const restored = await cold.list(issue.id);
+  const restoredEntry = restored.entries.find(row => row.id === clean.entry.id);
+  assert.ok(restoredEntry);
+  assert.deepEqual(values(restoredEntry), values(current));
+  assert.deepEqual((await reconcile(cold, reviewed.id))['worklog:410'], { status: 'linked', target: clean.entry.id });
+  const lastSource = worklog('410', 313, undefined, '2020-01-08T10:00:00Z', '2020-01-07T00:05:00+09:00');
+  const last = await cold.preview(await followUp(cold, [lastSource], 'restored-newer-worklog'));
+  assert.equal(last.canApply, true, JSON.stringify(last.notices));
+  assert.deepEqual(decisions(last), { 'worklog:410': 'apply' });
+  assert.deepEqual(last.jiraWorklogReview?.[0].before, values(restoredEntry));
+  const laterValues = { workDate: '2020-01-07', durationSeconds: 313, note: current.note };
+  assert.deepEqual(last.jiraWorklogReview?.[0].after, laterValues);
+  const lastApply = await cold.apply(last);
+  assert.equal(lastApply.status, 201, JSON.stringify(lastApply.data));
+  const finalPage = await cold.list(issue.id);
+  const finalEntry = finalPage.entries.find(row => row.id === clean.entry.id);
+  assert.ok(finalEntry);
+  assert.deepEqual(values(finalEntry), laterValues);
+  assert.equal(finalEntry.sourceRecordId, clean.archive.id);
+  assert.equal(finalEntry.authorId, clean.entry.authorId);
+  assert.deepEqual(await reconcile(cold, reviewed.id), correctedReconciliation);
+  assert.deepEqual((await reconcile(cold, last.id))['worklog:410'], { status: 'linked', target: clean.entry.id });
+
+  const emptyNote = worklog('410', 313, '', '2020-01-10T10:00:00Z', lastSource.started);
+  const newWorklog = worklog('413', 47, '새로 추가한 Jira 작업 시간');
+  const mixedSettings = await followUp(cold, [emptyNote, newWorklog], 'cleared-note-and-new-worklog');
+  assert.ok(mixedSettings.appendTo);
+  const mixed = await cold.preview({ ...mixedSettings, appendTo: { ...mixedSettings.appendTo, refreshHistory: true } });
+  assert.equal(mixed.canApply, true, JSON.stringify(mixed.notices));
+  assert.deepEqual(decisions(mixed), { 'worklog:410': 'apply' });
+  assert.equal(mixed.counts.updatedJiraWorklogs, 1);
+  assert.equal(mixed.counts.newJiraWorklogs, 1);
+  assert.deepEqual(mixed.jiraWorklogReview?.[0].after, { ...laterValues, note: '' });
+  const mixedResult = await cold.apply(mixed);
+  assert.equal(mixedResult.status, 201, JSON.stringify(mixedResult.data));
+  assert.equal(mixedResult.data.import.counts.updatedJiraWorklogs, 1);
+  assert.equal(mixedResult.data.import.counts.newJiraWorklogs, 1);
+  const mixedPage = await cold.list(issue.id);
+  assert.equal(mixedPage.totalEntries, 3);
+  const cleared = mixedPage.entries.find(row => row.id === clean.entry.id);
+  assert.ok(cleared);
+  assert.deepEqual(values(cleared), { ...laterValues, note: '' });
+  assert.equal(cleared.sourceRecordId, clean.archive.id);
+  const inserted = mixedPage.entries.find(row => row.note === newWorklog.comment);
+  assert.ok(inserted);
+  assert.equal(inserted.durationSeconds, 47);
+  assert.deepEqual((await reconcile(cold, mixed.id))['worklog:413'], { status: 'linked', target: inserted.id });
+
+  const confirmedSource = { ...emptyNote, updated: '2020-01-12T10:00:00Z' };
+  const confirmation = await cold.preview(await followUp(cold, [confirmedSource], 'confirmed-newer-worklog'));
+  assert.equal(confirmation.canApply, true, JSON.stringify(confirmation.notices));
+  assert.deepEqual(decisions(confirmation), { 'worklog:410': 'confirm' });
+  assert.equal(confirmation.counts.confirmedJiraWorklogs, 1);
+  assert.equal(confirmation.counts.updatedJiraWorklogs ?? 0, 0);
+  assert.deepEqual(await cold.list(issue.id), mixedPage);
+  const confirmed = await cold.apply(confirmation);
+  assert.equal(confirmed.status, 201, JSON.stringify(confirmed.data));
+  assert.equal(confirmed.data.import.counts.confirmedJiraWorklogs, 1);
+  const confirmedPage = await cold.list(issue.id);
+  assert.equal(confirmedPage.totalEntries, mixedPage.totalEntries);
+  const confirmedEntry = confirmedPage.entries.find(row => row.id === cleared.id);
+  assert.ok(confirmedEntry);
+  assert.deepEqual(values(confirmedEntry), values(cleared));
+  for (const key of ['issueId', 'authorId', 'sourceRecordId', 'createdAt'] as const) assert.equal(confirmedEntry[key], cleared[key]);
+  assert.deepEqual((await reconcile(cold, confirmation.id))['worklog:410'], { status: 'linked', target: cleared.id });
+
+  const intermediate = await cold.preview(await followUp(cold, [{ ...emptyNote, updated: '2020-01-11T10:00:00Z',
+    timeSpentSeconds: 421, comment: '확인된 Jira 기준 시각보다 이전 기록' }], 'superseded-worklog'));
+  assert.deepEqual(decisions(intermediate), { 'worklog:410': 'archive-only' });
+  assert.equal(intermediate.counts.archivedJiraWorklogCorrections, 1);
+  assert.equal(intermediate.counts.updatedJiraWorklogs ?? 0, 0);
+  assert.equal(intermediate.canApply, false);
+  const superseded = await cold.apply(intermediate);
+  assert.equal(superseded.status, 409, JSON.stringify(superseded.data));
+  assert.deepEqual(await cold.list(issue.id), confirmedPage);
 });
