@@ -943,8 +943,8 @@ export interface WorkflowStatusMigrationPreviewInput {
   toStatusId: string;
   expectedWorkflowVersion: number;
 }
-export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'labels' | 'customFields'>>;
-export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate'>> & {
+export type IssueBulkEditValues = Pick<Issue, 'status' | 'priority' | 'assigneeId'> & Partial<Pick<Issue, 'dueDate' | 'parentId' | 'labels' | 'customFields'>>;
+export type IssueBulkEditChanges = Partial<Pick<Issue, 'status' | 'priority' | 'assigneeId' | 'dueDate' | 'parentId'>> & {
   addLabels?: string[];
   removeLabels?: string[];
   customFields?: Record<string, CustomFieldValue>;
@@ -957,7 +957,7 @@ export interface IssueBulkEditPreviewInput {
 }
 export interface TeamIssueBulkEditPreviewInput {
   issues: { id: string; expectedVersion: number; projectId: string }[];
-  changes: Omit<IssueBulkEditChanges, 'status' | 'customFields'>;
+  changes: Omit<IssueBulkEditChanges, 'status' | 'customFields' | 'parentId'>;
   statuses?: Record<string, string>;
   workflowVersions?: Record<string, number>;
 }
@@ -966,6 +966,7 @@ export interface IssueBulkEditRow extends Pick<Issue, 'id' | 'key' | 'title'> {
   outcome: 'changed' | 'unchanged' | 'blocked';
   before: IssueBulkEditValues;
   after: IssueBulkEditValues | null;
+  parents?: { before: Pick<Issue, 'id' | 'key' | 'title'> | null; after: Pick<Issue, 'id' | 'key' | 'title'> | null };
   reason: string | null;
 }
 export interface IssueBulkEditPreview {

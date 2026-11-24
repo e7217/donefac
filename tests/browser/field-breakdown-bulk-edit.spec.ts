@@ -141,19 +141,26 @@ test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답�
     await report.editor.getByText('제거할 라벨 선택', { exact: true }).click();
     await report.editor.getByRole('checkbox', { name: `${firstLabel} 라벨 제거`, exact: true }).check();
     await expect(report.editor.getByRole('checkbox', { name: `${lastLabel} 라벨 제거`, exact: true })).toBeVisible();
+    await report.editor.getByRole('combobox', { name: '일괄 변경 상위 업무', exact: true }).selectOption('set');
+    await report.editor.getByRole('searchbox', { name: '상위 업무 검색', exact: true }).fill(outside.key);
+    await report.editor.getByRole('button', { name: `${outside.key} · ${outside.title}`, exact: true }).click();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
     const proposed = postAt(page, `${f.bulkPath}-preview`);
     await report.editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
     const previewResponse = await proposed;
     expect(previewResponse.request().postDataJSON()).toMatchObject({
       fieldBreakdown: { ...report.scope, revision: report.report.revision, bucketId: report.row.id, comparisonBucketId: report.unassigned.id },
-      changes: { assigneeId: f.assignee.id, removeLabels: [firstLabel] },
+      changes: { assigneeId: f.assignee.id, removeLabels: [firstLabel], parentId: outside.id },
     });
     const targets = previewResponse.request().postDataJSON().issues as { id: string; expectedVersion: number }[];
     expect(targets).toHaveLength(2);
     expect(new Set(targets.map(target => `${target.id}:${target.expectedVersion}`))).toEqual(new Set([`${first.id}:${first.version}`, `${last.id}:${last.version}`]));
     const preview = await json<IssueBulkEditPreview>(previewResponse);
     expect(sortIds(preview.rows)).toEqual(sortIds([first, last]));
+    for (const row of preview.rows) expect(row).toMatchObject({
+      before: { parentId: null }, after: { parentId: outside.id },
+      parents: { before: null, after: { id: outside.id, key: outside.key, title: outside.title } },
+    });
     expect(preview.rows.find(row => row.id === first.id)?.after?.labels).toEqual(['유지']);
     expect(preview.rows.find(row => row.id === last.id)?.after?.labels).toEqual(last.labels);
     expect(await f.savedIssues()).toEqual(before);
@@ -182,7 +189,8 @@ test('360px 집계 교차표의 두 페이지에서 선택하고 적용 응답�
     await expect(page).toHaveURL(url => new URLSearchParams(url.hash.split('?')[1]).get('savedView') === f.view().id);
     const after = await f.savedIssues();
     for (const issue of [first, last]) expect(after.find(current => current.id === issue.id)).toMatchObject({
-      assigneeId: f.assignee.id, version: issue.version + 1, labels: issue.id === first.id ? ['유지'] : issue.labels,
+      assigneeId: f.assignee.id, parentId: outside.id, version: issue.version + 1,
+      labels: issue.id === first.id ? ['유지'] : issue.labels,
     });
     for (const issue of [matching[1], otherColumn, otherRow, outside]) expect(after.find(current => current.id === issue.id)).toEqual(issue);
   } finally { await f.close(); }

@@ -26,6 +26,7 @@ const bulkPath = (project = projectId) => `/projects/${project}/issues/bulk`;
 const teamBulkPath = '/team/issues/bulk';
 const issueFields = ({ status, priority, assigneeId }: Issue) => ({ status, priority, assigneeId });
 const issueVersions = (issues: Issue[]) => issues.map(({ id, version }) => ({ id, expectedVersion: version }));
+const parentLabel = ({ id, key, title }: Issue) => ({ id, key, title });
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-bulk-edit-'));
@@ -74,6 +75,9 @@ async function fixture(t: TestContext) {
   function createIssue(title: string, fields: Partial<Issue> = {}) {
     return expectStatus<Issue>(201, '/issues', 'POST', { title, projectId, status: 'todo', priority: 'medium', ...fields });
   }
+  function editIssue({ id, version }: Issue, fields: Partial<Issue>) {
+    return expectStatus<Issue>(200, `/issues/${id}`, 'PATCH', { ...fields, expectedVersion: version });
+  }
   function createRule() {
     return expectStatus<IssueAssignmentRule>(201, rulesPath, 'POST', {
       name: '합성 검토 배정', enabled: true, fromStatuses: ['todo'], toStatusId: 'review', issueTypes: [],
@@ -107,12 +111,130 @@ async function fixture(t: TestContext) {
     await service.close();
     service = await start();
   }
-  return { call, expectStatus, createIssue, createRule, requireForReview, installFields, enableEndpoint, database, snapshot, deliveries, runs, inbox, preview, apply, restart };
+  return { call, expectStatus, createIssue, editIssue, createRule, requireForReview, installFields, enableEndpoint, database, snapshot, deliveries, runs, inbox, preview, apply, restart };
 }
 
 function customField(id: string, name: string, kind: CustomFieldDefinition['kind'], options: Partial<CustomFieldDefinition> = {}): CustomFieldDefinition {
   return { id, name, kind, archived: false, description: '', required: false, issueTypes: [], options: [], ...options };
 }
+
+test('project bulk parent review can make a selected ancestor and child siblings and clear their shared parent', async t => {
+  const f = await fixture(t);
+  const original = await f.createIssue('기존 상위 업무');
+  const destination = await f.createIssue('새 공통 상위 업무');
+  const ancestor = await f.editIssue(await f.createIssue('선택한 상위 업무'), { parentId: original.id });
+  const child = await f.editIssue(await f.createIssue('선택한 하위 업무', { labels: ['유지'], description: '유지할 설명' }), { parentId: ancestor.id });
+  const unchanged = await f.editIssue(await f.createIssue('이미 연결된 업무'), { parentId: destination.id });
+  const before = await f.snapshot();
+
+  const priorityOnly = await f.preview([child], { priority: 'high' });
+  assert.equal(priorityOnly.rows[0].parents, undefined);
+  assert.equal(Object.hasOwn(priorityOnly.rows[0].before, 'parentId'), false);
+  assert.equal(Object.hasOwn(priorityOnly.rows[0].after!, 'parentId'), false);
+
+  const first = await f.preview([child, ancestor, unchanged], { parentId: destination.id });
+  assert.ok(first.previewId);
+  assert.deepEqual([first.changed, first.unchanged, first.blocked], [2, 1, 0]);
+  assert.deepEqual(first.rows.map(row => [row.id, row.before.parentId, row.after?.parentId, row.parents]), [child, ancestor, unchanged]
+    .map((issue, index) => [issue.id, issue.parentId, destination.id,
+      { before: parentLabel([ancestor, original, destination][index]), after: parentLabel(destination) }]));
+  assert.deepEqual(await f.snapshot(), before);
+
+  const [applied, duplicate] = await Promise.all([f.apply(first.previewId), f.apply(first.previewId)]);
+  assert.equal(applied.status, 200, JSON.stringify(applied.data));
+  assert.deepEqual(duplicate, applied);
+  assert.deepEqual(applied.data, {
+    previewId: first.previewId, updated: [child, ancestor].map(({ id, key, version }) => ({ id, key, version: version + 1 })), unchanged: 1,
+  });
+  const after = new Map((await f.snapshot()).issues.map(issue => [issue.id, issue]));
+  const updatedChild = after.get(child.id)!;
+  const updatedAncestor = after.get(ancestor.id)!;
+  assert.deepEqual([updatedChild.parentId, updatedAncestor.parentId], [destination.id, destination.id]);
+  assert.deepEqual({ ...updatedChild, parentId: child.parentId, version: child.version, updatedAt: child.updatedAt }, child);
+  assert.deepEqual(after.get(unchanged.id), unchanged);
+  assert.deepEqual(after.get(destination.id), destination);
+
+  const clear = await f.preview([updatedAncestor, updatedChild], { parentId: null });
+  assert.ok(clear.previewId);
+  assert.deepEqual(clear.rows.map(row => [row.before.parentId, row.after?.parentId, row.parents]), [ancestor, child]
+    .map(() => [destination.id, null, { before: parentLabel(destination), after: null }]));
+  assert.equal((await f.apply(clear.previewId)).status, 200);
+  const cleared = await f.snapshot();
+  const clearedIssues = cleared.issues.filter(issue => issue.id === child.id || issue.id === ancestor.id);
+  assert.equal(clearedIssues.length, 2);
+  assert.ok(clearedIssues.every(issue => issue.parentId === null));
+  const noop = await f.preview(clearedIssues, { parentId: null });
+  assert.deepEqual([noop.previewId, noop.unchanged, noop.blocked], [null, 2, 0]);
+  await f.restart();
+  assert.deepEqual(await f.apply(first.previewId), applied);
+  assert.deepEqual(await f.snapshot(), cleared);
+});
+
+test('project bulk parent review blocks self, descendant and cross-project destinations atomically and checks workflow fields', async t => {
+  const f = await fixture(t);
+  const ancestor = await f.createIssue('선택한 상위 업무');
+  const child = await f.editIssue(await f.createIssue('중간 하위 업무'), { parentId: ancestor.id });
+  const descendant = await f.editIssue(await f.createIssue('더 깊은 하위 업무'), { parentId: child.id });
+  const unrelated = await f.createIssue('다른 선택 업무');
+  const foreign = await f.createIssue('다른 프로젝트 상위 업무', { projectId: otherProjectId });
+  await f.requireForReview(['parentId']);
+  const before = await f.snapshot();
+
+  for (const invalid of [ancestor, descendant]) {
+    const preview = await f.preview([ancestor, unrelated], { parentId: invalid.id });
+    assert.deepEqual([preview.previewId, preview.changed, preview.blocked], [null, 1, 1]);
+    assert.deepEqual(preview.rows.map(row => row.outcome), ['blocked', 'changed']);
+    assert.equal(preview.rows[0].after, null);
+    assert.match(preview.rows[0].reason ?? '', /순환/);
+  }
+  const outside = await f.preview([ancestor, unrelated], { parentId: foreign.id });
+  assert.deepEqual([outside.previewId, outside.changed, outside.blocked], [null, 0, 2]);
+  assert.ok(outside.rows.every(row => row.after === null && row.parents?.after === null && /같은 프로젝트/.test(row.reason ?? '')));
+  await f.expectStatus(400, `${teamBulkPath}-preview`, 'POST', {
+    issues: [{ ...issueVersions([child])[0], projectId }], changes: { parentId: null },
+  });
+
+  const withoutParent = await f.preview([child], { status: 'review', parentId: null });
+  assert.deepEqual([withoutParent.previewId, withoutParent.blocked], [null, 1]);
+  assert.match(withoutParent.rows[0].reason ?? '', /상위|parentId/);
+  const withParent = await f.preview([unrelated], { status: 'review', parentId: ancestor.id });
+  assert.ok(withParent.previewId);
+  assert.equal(withParent.rows[0].after?.status, 'review');
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('project bulk parent receipt stops on changed ancestry, reviewed title, or a deleted destination', async t => {
+  const f = await fixture(t);
+  const newRoot = await f.createIssue('더 위로 이동할 상위 업무');
+  const ancestor = await f.createIssue('변경 전 조상 업무');
+  const destination = await f.editIssue(await f.createIssue('미리보기에서 확인할 상위 업무'), { parentId: ancestor.id });
+  const previous = await f.createIssue('현재 상위 업무');
+  const linked = await f.editIssue(await f.createIssue('기존에 연결된 업무'), { parentId: previous.id });
+  const unlinked = await f.createIssue('연결할 또 다른 업무');
+  const children = [linked, unlinked];
+
+  const first = await f.preview(children, { parentId: destination.id });
+  assert.ok(first.previewId);
+  await f.editIssue(ancestor, { parentId: newRoot.id });
+  const reparented = await f.snapshot();
+  assert.equal((await f.apply(first.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), reparented);
+
+  const second = await f.preview(children, { parentId: destination.id });
+  assert.ok(second.previewId);
+  const renamedParent = await f.editIssue(previous, { title: '현재 상위 업무의 새 제목' });
+  const renamed = await f.snapshot();
+  assert.equal((await f.apply(second.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), renamed);
+
+  const third = await f.preview(children, { parentId: destination.id });
+  assert.ok(third.previewId);
+  assert.deepEqual(third.rows[0].parents?.before, parentLabel(renamedParent));
+  await f.expectStatus(200, `/issues/${destination.id}?expectedVersion=${destination.version}`, 'DELETE');
+  const deleted = await f.snapshot();
+  assert.equal((await f.apply(third.previewId)).status, 409);
+  assert.deepEqual(await f.snapshot(), deleted);
+});
 
 test('team bulk uses each project workflow and writes an actor-bound receipt for a single atomic edit', async t => {
   const f = await fixture(t);

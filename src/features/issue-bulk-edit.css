@@ -117,6 +117,7 @@
 
 .issue-bulk-removal-option input { flex-shrink: 0; accent-color: #286c5d; }
 
+.issue-bulk-parent-fields,
 .issue-bulk-custom-fields {
   display: grid;
   grid-column: 1 / -1;
@@ -125,6 +126,38 @@
   padding-top: 10px;
   border-top: 1px solid #d5e7dd;
 }
+
+.issue-bulk-parent-fields > label:first-of-type { width: min(100%, 16rem); }
+.issue-bulk-parent-fields p { overflow-wrap: anywhere; }
+
+.issue-bulk-parent-results {
+  display: grid;
+  gap: 4px;
+  max-height: 16rem;
+  margin: 0;
+  padding: 3px;
+  overflow: auto;
+  list-style: none;
+}
+
+.issue-bulk-parent-results .btn {
+  display: grid;
+  justify-items: start;
+  width: 100%;
+  gap: 2px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.issue-bulk-parent-results .btn[aria-pressed="true"] {
+  border-color: #bcdacb;
+  background: #e7f3ed;
+  color: #175e4d;
+}
+
+.issue-bulk-parent-results small { color: #4e695f; }
+.issue-bulk-parent-pages { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; font-size: 12px; }
 
 .issue-bulk-custom-picker,
 .issue-bulk-custom-controls {
@@ -256,4 +289,5 @@
   .issue-bulk-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .issue-bulk-label-removal { grid-column: 1 / -1; }
   .issue-bulk-custom-controls { grid-template-columns: minmax(0, 1fr); }
+  .issue-bulk-parent-fields .btn { min-height: 44px; }
 }

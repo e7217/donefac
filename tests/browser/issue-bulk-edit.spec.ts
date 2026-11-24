@@ -1,5 +1,6 @@
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 import type { Issue, IssueAssignmentRule, IssueBulkEditPreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
@@ -269,5 +270,168 @@ test('360px에서 마감일과 라벨 변경을 검토하고 충돌 뒤 전체�
     expect(await stored(hidden)).toEqual(hidden);
   } finally {
     await removeIssues(request, issues);
+  }
+});
+
+test('360px에서 이동 전 키로 상위 업무를 찾아 일괄 지정하고 계층을 확인한 뒤 해제한다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project, source], users: [actor, teammate] } = await workspace(request);
+  const prefix = `상위 지정 ${randomUUID().slice(0, 8)}`;
+  const bulkPath = `/api/projects/${project.id}/issues/bulk`;
+  const headers = { 'X-Actor-Id': actor.id };
+  const dates = { startDate: '2030-05-13', endDate: '2030-05-16', dueDate: '2030-05-20' };
+  const created: Issue[] = [];
+
+  async function create(name: string, options: Partial<Pick<Issue, 'projectId' | 'parentId'>> = {}) {
+    const response = await request.post('/api/issues', { headers, data: {
+      projectId: project.id, status: 'backlog', title: `${prefix} ${name}`, ...dates, ...options,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const original = await create('이동할 상위', { projectId: source.id });
+    const movePath = `/api/issues/${original.id}/project-move`;
+    const move: IssueProjectMoveInput = { expectedVersion: original.version, projectId: project.id, includeConnected: false,
+      mappings: [{ issueId: original.id, status: original.status, type: original.type }] };
+    const proposed = await request.post(`${movePath}/preview`, { headers, data: move });
+    expect(proposed.status(), await proposed.text()).toBe(200);
+    const { token, blockers } = await proposed.json() as IssueProjectMovePreview;
+    expect(blockers).toEqual([]);
+    expect(token).toBeTruthy();
+    const moved = await request.post(`${movePath}/apply`, { headers, data: { ...move, token } });
+    expect(moved.status(), await moved.text()).toBe(200);
+    const { issues: [parent] } = await moved.json() as IssueProjectMoveResult;
+    expect(parent).toMatchObject({ id: original.id, projectId: project.id });
+    expect(parent.key).not.toBe(original.key);
+
+    const formerParent = await create('기존 상위');
+    const first = await create('선택할 업무 하나', { parentId: formerParent.id });
+    const second = await create('선택할 업무 둘');
+    const descendant = await create('함께 유지할 하위', { parentId: first.id });
+    const editor = page.getByRole('region', { name: '업무 일괄 편집', exact: true });
+    const list = page.getByRole('region', { name: '업무 목록', exact: true });
+    const previewRegion = editor.getByRole('region', { name: '일괄 변경 미리보기', exact: true });
+    const previewButton = editor.getByRole('button', { name: '변경 미리보기', exact: true });
+    const parentMode = editor.getByRole('combobox', { name: '일괄 변경 상위 업무', exact: true });
+    const parentSearch = editor.getByRole('searchbox', { name: '상위 업무 검색', exact: true });
+    const candidates = editor.getByRole('list', { name: '상위 업무 후보', exact: true });
+    const rowReference = (issue: Issue) => ({ id: issue.id, key: issue.key, title: issue.title });
+    const issueRow = (issue: Issue) => list.locator(`[data-issue-id="${issue.id}"]`);
+    const previewRow = (issue: Issue) => previewRegion.getByRole('listitem').filter({ has: page.getByText(`${issue.key} ${issue.title}`, { exact: true }) });
+
+    async function selectChildren() {
+      await page.goto(`/#/${project.id}/issues`);
+      const search = page.getByRole('textbox', { name: '업무 검색', exact: true });
+      await expect(search).toBeVisible({ timeout: 24_000 });
+      await search.fill(`${prefix} 선택할 업무`);
+      await expect(issueRow(parent)).toHaveCount(0);
+      await expect(issueRow(descendant)).toHaveCount(0);
+      await page.getByRole('button', { name: '일괄 편집', exact: true }).click();
+      await list.getByRole('checkbox', { name: '검색 결과 전체 선택', exact: true }).check();
+      for (const issue of [first, second]) await expect(issueRow(issue).getByRole('checkbox', { name: `${issue.key} 선택`, exact: true })).toBeChecked();
+    }
+
+    async function review(parentId: string | null) {
+      const posted = responseAt(page, `${bulkPath}-preview`);
+      await previewButton.click();
+      const response = await posted;
+      expect(response.status(), await response.text()).toBe(200);
+      expect(response.request().postDataJSON()).toMatchObject({ changes: { parentId } });
+      const result = await response.json() as IssueBulkEditPreview;
+      expect(result.previewId).toBeTruthy();
+      expect({ changed: result.changed, blocked: result.blocked }).toEqual({ changed: 2, blocked: 0 });
+      expect(result.rows.map(row => row.id).sort()).toEqual([first.id, second.id].sort());
+      return result;
+    }
+
+    async function apply(expected: 200 | 409) {
+      const posted = responseAt(page, `${bulkPath}-apply`);
+      await previewRegion.getByRole('button', { name: '일괄 적용', exact: true }).click();
+      const response = await posted;
+      expect(response.status(), await response.text()).toBe(expected);
+      await expect(previewRegion).toHaveCount(0);
+    }
+
+    async function verifyStored(parentId: string | null, versionIncrease: number) {
+      const current = (await workspace(request)).issues;
+      for (const issue of [first, second]) {
+        expect(current.find(row => row.id === issue.id)).toMatchObject({
+          ...dates, parentId, status: issue.status, version: issue.version + versionIncrease,
+        });
+      }
+      expect(current.find(row => row.id === descendant.id)).toEqual(descendant);
+      expect(current.find(row => row.id === formerParent.id)).toEqual(formerParent);
+    }
+
+    await selectChildren();
+    await parentMode.selectOption('set');
+    await parentSearch.fill(original.key);
+    const choose = candidates.getByRole('button', { name: `${parent.key} · ${parent.title}`, exact: true });
+    await expect(candidates).toContainText(`이동 전 키 ${original.key}`);
+    await parentSearch.press('Enter');
+    await expect(choose).toBeFocused();
+    await choose.press('Enter');
+    await expect(choose).toHaveAttribute('aria-pressed', 'true');
+    const firstReview = await review(parent.id);
+    for (const issue of [first, second]) {
+      const prior = issue.id === first.id ? rowReference(formerParent) : null;
+      expect(firstReview.rows.find(row => row.id === issue.id)).toMatchObject({
+        before: { parentId: issue.parentId }, after: { parentId: parent.id },
+        parents: { before: prior, after: rowReference(parent) },
+      });
+      await expect(previewRow(issue)).toContainText(`${parent.key} · ${parent.title}`);
+    }
+    await expect(previewRow(first)).toContainText(`${formerParent.key} · ${formerParent.title}`);
+    await expect(previewRow(second)).toContainText('상위 업무 없음');
+
+    const rename = await request.patch(`/api/issues/${parent.id}`, { headers: { 'X-Actor-Id': teammate.id },
+      data: { expectedVersion: parent.version, title: `${prefix} 다른 팀원이 고친 상위` } });
+    expect(rename.status(), await rename.text()).toBe(200);
+    const latestParent = await rename.json() as Issue;
+    await apply(409);
+    await expect(editor.getByRole('alert')).toBeVisible();
+    await expect(parentMode).toHaveValue('set');
+    const unchanged = (await workspace(request)).issues;
+    for (const issue of [first, second, descendant]) expect(unchanged.find(row => row.id === issue.id)).toEqual(issue);
+    await editor.getByRole('button', { name: '최신 업무 불러오기', exact: true }).click();
+    await expect(parentSearch).toHaveValue(original.key);
+    await expect(candidates.getByRole('button', { name: `${latestParent.key} · ${latestParent.title}`, exact: true })).toHaveAttribute('aria-pressed', 'true');
+    const reviewedAgain = await review(parent.id);
+    expect(reviewedAgain.previewId).not.toBe(firstReview.previewId);
+    for (const row of reviewedAgain.rows) expect(row.parents?.after).toMatchObject(rowReference(latestParent));
+    await apply(200);
+    await verifyStored(parent.id, 1);
+
+    await editor.getByRole('button', { name: '일괄 편집 닫기', exact: true }).click();
+    await issueRow(first).getByRole('button', { name: new RegExp(first.title) }).click();
+    const issueDetail = page.getByRole('dialog', { name: first.title, exact: true });
+    await expect(issueDetail.getByRole('button', { name: `상위 업무 · ${latestParent.key} ${latestParent.title}`, exact: true })).toBeVisible();
+    await issueDetail.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(latestParent.title);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await chart.getByRole('checkbox', { name: `${parent.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '하위 업무 일정 보기', exact: true }).click();
+    await expect(chart.locator(`[data-issue-id="${first.id}"]`)).toContainText('하위 1단계');
+    await expect(chart.locator(`[data-issue-id="${second.id}"]`)).toContainText('하위 1단계');
+    await expect(chart.locator(`[data-issue-id="${descendant.id}"]`)).toContainText('하위 2단계');
+
+    await selectChildren();
+    await parentMode.selectOption('clear');
+    await expect(parentSearch).toHaveCount(0);
+    const clearing = await review(null);
+    for (const row of clearing.rows) expect(row).toMatchObject({
+      before: { parentId: parent.id }, after: { parentId: null }, parents: { before: rowReference(latestParent), after: null },
+    });
+    await apply(200);
+    await verifyStored(null, 2);
+  } finally {
+    await removeIssues(request, created.reverse());
   }
 });

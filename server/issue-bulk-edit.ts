@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { isCalendarDate } from '../shared/calendar.js';
 import { hasCustomValue } from '../shared/issue-schema.js';
@@ -47,13 +47,19 @@ type BulkEditProposal = ((BulkEditScope & { configurationToken: string }) |
   id: string;
   removeAfter: string;
   rows: IssueBulkEditRow[];
+  parentFingerprint?: string;
   result?: IssueBulkEditResult;
 };
 interface BulkEditCandidate<T> { before: Issue; row: IssueBulkEditRow; prepared?: T }
+type ParentIssue = Pick<Issue, 'id' | 'projectId' | 'parentId' | 'version' | 'key' | 'title'>;
+type ParentReview = {
+  fingerprint: string;
+  label(id: string | null | undefined): Pick<Issue, 'id' | 'key' | 'title'> | null;
+};
 
 const TABLE = 'issue_bulk_edit_previews';
 const STALE_MESSAGE = '업무 또는 프로젝트 설정이 변경되었습니다. 다시 미리 확인해 주세요.';
-const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels', 'customFields']);
+const CHANGE_FIELDS = new Set(['status', 'priority', 'assigneeId', 'dueDate', 'parentId', 'addLabels', 'removeLabels', 'customFields']);
 const TEAM_CHANGE_FIELDS = new Set(['priority', 'assigneeId', 'dueDate', 'addLabels', 'removeLabels']);
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 
@@ -142,6 +148,10 @@ function parseChanges(raw: unknown, allowedFields = CHANGE_FIELDS, allowEmpty = 
   if (Object.hasOwn(change, 'dueDate')) {
     if (change.dueDate !== null && !isCalendarDate(change.dueDate)) fail(400, '마감일을 YYYY-MM-DD 형식으로 입력해 주세요.');
     changes.dueDate = change.dueDate;
+  }
+  if (Object.hasOwn(change, 'parentId')) {
+    if (change.parentId !== null && !isId(change.parentId)) fail(400, '지정할 상위 업무를 확인해 주세요.');
+    changes.parentId = change.parentId;
   }
   if (Object.hasOwn(change, 'addLabels')) changes.addLabels = parseLabels(change.addLabels, 'add');
   if (Object.hasOwn(change, 'removeLabels')) changes.removeLabels = parseLabels(change.removeLabels, 'remove');
@@ -235,10 +245,11 @@ function issueUpdate(before: Issue, { addLabels, removeLabels, customFields, ...
   return { ...update, labels };
 }
 
-function values({ status, priority, assigneeId, dueDate, labels, customFields }: Issue, update: IssueUpdate,
+function values({ status, priority, assigneeId, dueDate, parentId, labels, customFields }: Issue, update: IssueUpdate,
   includeDueDate = Object.hasOwn(update, 'dueDate')): IssueBulkEditValues {
   return { status, priority, assigneeId,
     ...(includeDueDate ? { dueDate: dueDate ?? null } : {}),
+    ...(Object.hasOwn(update, 'parentId') ? { parentId: parentId ?? null } : {}),
     ...(Object.hasOwn(update, 'labels') ? { labels } : {}),
     ...(update.customFields ? { customFields: Object.fromEntries(Object.keys(update.customFields).map(id => [id, customFieldValue(customFields, id)])) } : {}),
   };
@@ -258,14 +269,16 @@ function sameCustomFields(left: Issue['customFields'], right: Issue['customField
 function sameValues(left: IssueBulkEditValues | null, right: IssueBulkEditValues | null): boolean {
   return left === null || right === null ? left === right
     : left.status === right.status && left.priority === right.priority && left.assigneeId === right.assigneeId
-      && left.dueDate === right.dueDate && sameLabels(left.labels, right.labels) && sameCustomFields(left.customFields, right.customFields);
+      && left.dueDate === right.dueDate && left.parentId === right.parentId
+      && sameLabels(left.labels, right.labels) && sameCustomFields(left.customFields, right.customFields);
 }
 
 function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulkEditChanges, prepare: BulkEditHooks<T>['prepare'],
-  preparedAt: string): BulkEditCandidate<T> {
+  preparedAt: string, parents?: ParentReview): BulkEditCandidate<T> {
   const { id, key, title } = before;
   const update = issueUpdate(before, changes);
-  const row = { id, key, title, before: values(before, update) };
+  const row = { id, key, title, before: values(before, update),
+    ...(parents ? { parents: { before: parents.label(before.parentId), after: parents.label(update.parentId) } } : {}) };
   if (!update.customFields && sameValues(row.before, { ...row.before, ...update })) {
     return { before, row: { ...row, after: row.before, outcome: 'unchanged', reason: null } };
   }
@@ -289,7 +302,8 @@ function candidate<T extends { issue: Issue }>(before: Issue, changes: IssueBulk
 
 function matchesReview(current: IssueBulkEditRow, reviewed: IssueBulkEditRow): boolean {
   return current.id === reviewed.id && current.projectId === reviewed.projectId && current.outcome === reviewed.outcome
-    && sameValues(current.before, reviewed.before) && sameValues(current.after, reviewed.after);
+    && sameValues(current.before, reviewed.before) && sameValues(current.after, reviewed.after)
+    && JSON.stringify(current.parents) === JSON.stringify(reviewed.parents);
 }
 
 function changesFor(scope: EditScope, projectId: string): IssueBulkEditChanges {
@@ -298,8 +312,8 @@ function changesFor(scope: EditScope, projectId: string): IssueBulkEditChanges {
 }
 
 function reviewCandidate<T extends { issue: Issue }>(scope: EditScope, issue: Issue,
-  prepare: BulkEditHooks<T>['prepare'], preparedAt: string): BulkEditCandidate<T> {
-  const result = candidate(issue, changesFor(scope, issue.projectId), prepare, preparedAt);
+  prepare: BulkEditHooks<T>['prepare'], preparedAt: string, parents?: ParentReview): BulkEditCandidate<T> {
+  const result = candidate(issue, changesFor(scope, issue.projectId), prepare, preparedAt, parents);
   if (scope.team) result.row.projectId = issue.projectId;
   return result;
 }
@@ -340,14 +354,38 @@ export class IssueBulkEditService {
     return [...projectIds].map(projectId => [projectId, hooks.configurationToken(projectId, changesFor(scope, projectId))]);
   }
 
+  private parentReview(scope: EditScope, issues: readonly Issue[]): ParentReview | undefined {
+    if (scope.team || !Object.hasOwn(scope.changes, 'parentId')) return undefined;
+    const references = new Map<string, ParentIssue | null>();
+    const roots = [scope.changes.parentId, ...issues.map(issue => issue.parentId)];
+    // Version and ancestry are review evidence even when a parent's displayed label does not change.
+    for (const root of roots) {
+      for (let id = root; id && !references.has(id);) {
+        const issue = this.store.get<Issue>('issues', id);
+        const parent = issue ? { id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+          projectId: issue.projectId, parentId: issue.parentId ?? null } : null;
+        references.set(id, parent);
+        id = parent?.projectId === scope.projectId ? parent.parentId : null;
+      }
+    }
+    return {
+      fingerprint: createHash('sha256').update(JSON.stringify([...references])).digest('hex'),
+      label(id) {
+        const parent = id ? references.get(id) : null;
+        return parent?.projectId === scope.projectId ? { id: parent.id, key: parent.key, title: parent.title } : null;
+      },
+    };
+  }
+
   private review<T extends { issue: Issue }>(scope: EditScope, issues: Issue[], hooks: BulkEditHooks<T>): IssueBulkEditPreview {
     const rows: IssueBulkEditRow[] = [];
     const counts = { changed: 0, unchanged: 0, blocked: 0 };
     const preparedAt = new Date().toISOString();
+    const parents = this.parentReview(scope, issues);
     const hasCustomFields = !scope.team && Boolean(scope.changes.customFields);
     let remainingBytes = hasCustomFields ? MAX_PACKAGE_BYTES - Buffer.byteLength(JSON.stringify(scope)) : Infinity;
     for (const issue of issues) {
-      const { row } = reviewCandidate(scope, issue, hooks.prepare, preparedAt);
+      const { row } = reviewCandidate(scope, issue, hooks.prepare, preparedAt, parents);
       if (hasCustomFields) {
         remainingBytes -= Buffer.byteLength(JSON.stringify(row)) + 1;
         if (remainingBytes < 0) fail(413, '미리보기 데이터가 너무 큽니다. 업무 또는 변경할 필드 수를 줄여 주세요.');
@@ -359,7 +397,7 @@ export class IssueBulkEditService {
 
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-    const summary = { id, removeAfter: expiresAt, rows };
+    const summary = { id, removeAfter: expiresAt, rows, ...(parents ? { parentFingerprint: parents.fingerprint } : {}) };
     const proposal: BulkEditProposal = scope.team
       ? { ...scope, ...summary, configurationTokens: this.teamConfigurationTokens(scope, hooks) }
       : { ...scope, ...summary, configurationToken: hooks.configurationToken(scope.projectId, scope.changes) };
@@ -456,7 +494,9 @@ export class IssueBulkEditService {
   private commitReview<T extends { issue: Issue }>(proposal: BulkEditProposal, issues: Issue[], request: Request,
     hooks: BulkEditHooks<T>): IssueBulkEditResult {
     const preparedAt = new Date().toISOString();
-    const prepared = issues.map(issue => reviewCandidate(proposal, issue, hooks.prepare, preparedAt));
+    const parents = this.parentReview(proposal, issues);
+    if (parents?.fingerprint !== proposal.parentFingerprint) fail(409, STALE_MESSAGE);
+    const prepared = issues.map(issue => reviewCandidate(proposal, issue, hooks.prepare, preparedAt, parents));
     if (prepared.some(({ row }, index) => !matchesReview(row, proposal.rows[index]))) fail(409, STALE_MESSAGE);
 
     const result: IssueBulkEditResult = { previewId: proposal.id, updated: [], unchanged: 0 };
