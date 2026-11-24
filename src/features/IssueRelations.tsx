@@ -5,6 +5,7 @@ import { Link2, Pencil, Plus, RefreshCw, SquareChartGantt, Unlink2 } from 'lucid
 import { issueRelationScheduleMode, type IssueRelationScheduleMode } from '../../shared/issue-relations';
 import type { FeatureProps, Issue, IssueCloseAsDuplicateInput, IssueCloseAsDuplicateResult, IssueRelation, IssueRelationDirection, IssueRelationType, IssueRelationView, WorkspaceSnapshot } from '../../shared/types';
 import { allowedNextStatuses, isTerminalStatus, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { api, ApiError, patch, post, remove } from '../lib/api';
 import './issue-relations.css';
 
@@ -92,7 +93,7 @@ function RelationList({
 
   const path = `/issues/${encodeURIComponent(issueId)}/relations`;
   const issueById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
-  const projectNames = useMemo(() => new Map(data.projects.map(project => [project.id, project.name])), [data.projects]);
+  const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
   const otherIssues = useMemo(() => data.issues.filter(issue => issue.id !== issueId), [data.issues, issueId]);
   const scheduledIssueIds = useMemo(() => new Set(data.dependencies.flatMap(dependency => {
     if (dependency.predecessorId === issueId) return [dependency.successorId];
@@ -100,12 +101,10 @@ function RelationList({
     return [];
   })), [data.dependencies, issueId]);
   const targetDraft = duplicateDraft ?? (draft && !draft.original ? draft : null);
-  const terms = targetDraft?.query.trim().toLocaleLowerCase().split(/\s+/u) ?? [];
-  const matches = targetDraft
-    ? otherIssues.filter(issue => {
-      const item = `${issue.key} ${issue.title}`.toLocaleLowerCase();
-      return terms.every(term => item.includes(term));
-    }) : [];
+  const matches = targetDraft ? searchIssueCandidates(data, otherIssues, targetDraft.query, issue => {
+    const project = projectsById.get(issue.projectId);
+    return `${issue.title} ${project?.name ?? ''} ${project?.key ?? ''}`;
+  }) : [];
   const shownMatches = matches.slice(0, MATCH_LIMIT);
   const selectedIssue = issueById.get((duplicateDraft ?? draft)?.otherIssueId ?? '');
   const originals = relations.filter(row => row.origin === 'teamspace' && row.type === 'duplicates' && row.sourceIssueId === issueId);
@@ -369,23 +368,25 @@ function RelationList({
   const targetName = unlinkTarget && issueById.get(otherId(unlinkTarget, issueId))?.key;
   const staleMessage = '다른 작업자가 업무 관계를 변경했습니다. 최신 관계를 열어 확인해 주세요.';
   function optionLabel(issue: Issue) {
-    return `${issue.key} · ${issue.title} · ${projectNames.get(issue.projectId) ?? '프로젝트 없음'}`;
+    return `${issue.key} · ${issue.title} · ${projectsById.get(issue.projectId)?.name ?? '프로젝트 없음'}`;
   }
 
   function targetPicker(target: TargetDraft, searchLabel: string, selectLabel: string, update: (changes: Partial<TargetDraft>) => void) {
     return <>
       <label className="issue-form-label">{searchLabel}
         <input className="field" ref={searchInput} type="search" value={target.query} disabled={controlsDisabled}
-          placeholder="업무 번호 또는 제목" onChange={event => update({ query: event.target.value })}
+          placeholder="업무 키, 이전 키, 제목 또는 프로젝트" onChange={event => update({ query: event.target.value })}
           onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { event.preventDefault(); otherSelect.current?.focus(); } }} />
       </label>
       <label className="issue-form-label">{selectLabel}
         <select className="field" ref={otherSelect} value={target.otherIssueId} disabled={controlsDisabled} required
           onChange={event => update({ otherIssueId: event.target.value })}>
           <option value="">{matches.length ? '업무 선택' : '조건에 맞는 업무 없음'}</option>
-          {selectedIssue && !shownMatches.some(issue => issue.id === selectedIssue.id) && <option value={selectedIssue.id}>{optionLabel(selectedIssue)}</option>}
+          {shownMatches.map(({ issue, matchedAliases }) => <option key={issue.id} value={issue.id}>
+            {optionLabel(issue)}{matchedAliases.length > 0 && ` · ${matchedAliases.map(issueSearchAliasLabel).join(' · ')}`}
+          </option>)}
+          {selectedIssue && !shownMatches.some(({ issue }) => issue.id === selectedIssue.id) && <option value={selectedIssue.id}>{optionLabel(selectedIssue)}</option>}
           {target.otherIssueId && !selectedIssue && <option value={target.otherIssueId} disabled>현재 목록에 없는 업무</option>}
-          {shownMatches.map(issue => <option key={issue.id} value={issue.id}>{optionLabel(issue)}</option>)}
         </select>
       </label>
       {matches.length > MATCH_LIMIT && <p className="issue-relations-hint">검색 결과 {matches.length}개 중 {MATCH_LIMIT}개를 표시합니다. 검색어로 범위를 좁히세요.</p>}
@@ -490,7 +491,7 @@ function RelationList({
           </div>
           {other ? <button className="btn btn-ghost issue-relations-target" type="button"
             aria-label={blockerStatus !== undefined ? `${other.key} 업무 열기` : undefined} onClick={() => openIssue(targetId)}>
-            <span><strong>{other.key}</strong> · {other.title}</span><small>{projectNames.get(other.projectId)}</small>
+            <span><strong>{other.key}</strong> · {other.title}</span><small>{projectsById.get(other.projectId)?.name}</small>
           </button> : <span className="issue-relations-hint">현재 목록에 없는 업무 · {targetId}</span>}
           {local && other && <div className="issue-relations-row-actions">
             <button className="issue-icon-button" type="button" aria-label={`${other.key} 관계 수정`} aria-describedby={labelId} title="관계 수정"

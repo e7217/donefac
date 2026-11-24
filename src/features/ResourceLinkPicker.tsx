@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { ArrowLeft, ArrowRight, Check, Link2, Search } from 'lucide-react';
-import type { Project } from '../../shared/types';
+import type { Project, WorkspaceSnapshot } from '../../shared/types';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import './resource-link-picker.css';
 
 export type ResourceLinkCandidate = {
@@ -17,6 +18,7 @@ type Props = {
   kind: 'document' | 'issue';
   items: readonly ResourceLinkCandidate[];
   projects: readonly Pick<Project, 'id' | 'key' | 'name'>[];
+  issueAliases?: WorkspaceSnapshot['issueAliases'];
   busy?: boolean;
   onLink: (id: string) => void | boolean | Promise<void | boolean>;
 };
@@ -29,7 +31,7 @@ const sortLabels = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' 
 const projectScope = (projectId: string) => `project:${projectId}`;
 const normalizeSearch = (text: string) => text.trim().normalize('NFKC').toLocaleLowerCase('ko');
 
-export function ResourceLinkPicker({ kind, items, projects, busy = false, onLink }: Props) {
+export function ResourceLinkPicker({ kind, items, projects, issueAliases, busy = false, onLink }: Props) {
   const documentPicker = kind === 'document';
   const label = documentPicker ? '문서' : '업무';
   const [query, setQuery] = useState('');
@@ -50,24 +52,26 @@ export function ResourceLinkPicker({ kind, items, projects, busy = false, onLink
     const title = item.title.trim() || `제목 없는 ${label}`;
     return {
       ...item,
+      key: item.key ?? '',
       title,
       meta: [projectLabel, item.context].filter(Boolean).join(' › '),
       scope: item.projectId === null ? COMMON_SCOPE : projectScope(item.projectId),
       searchText: normalizeSearch([item.key, title, project?.key, projectLabel, item.context].filter(Boolean).join(' ')),
-      searchKey: item.key ? normalizeSearch(item.key) : '',
     };
   }).sort((a, b) => sortLabels(a.title, b.title) || sortLabels(a.meta, b.meta) ||
-    sortLabels(a.key ?? '', b.key ?? '') || sortLabels(a.id, b.id)), [items, label, projectById]);
+    sortLabels(a.key, b.key) || sortLabels(a.id, b.id)), [items, label, projectById]);
   const knownScope = (documentPicker && scope === COMMON_SCOPE) || scopeOptions.some(project => projectScope(project.id) === scope);
   const activeScope = knownScope ? scope : ALL_SCOPES;
   const matches = useMemo(() => {
-    const normalizedQuery = normalizeSearch(query);
-    const terms = normalizedQuery.split(/\s+/u).filter(Boolean);
-    const scoped = candidates.filter(candidate => (!activeScope || candidate.scope === activeScope) &&
-      terms.every(term => candidate.searchText.includes(term)));
-    if (documentPicker || !normalizedQuery) return scoped;
-    return scoped.sort((a, b) => Number(b.searchKey === normalizedQuery) - Number(a.searchKey === normalizedQuery));
-  }, [activeScope, candidates, documentPicker, query]);
+    const scoped = activeScope ? candidates.filter(candidate => candidate.scope === activeScope) : candidates;
+    if (!documentPicker) {
+      return searchIssueCandidates({ issueAliases }, scoped, query, issue => issue.searchText)
+        .map(({ issue, matchedAliases }) => ({ ...issue, matchedAliases }));
+    }
+    const terms = normalizeSearch(query).split(/\s+/u).filter(Boolean);
+    return scoped.filter(candidate => terms.every(term => candidate.searchText.includes(term)))
+      .map(candidate => ({ ...candidate, matchedAliases: [] }));
+  }, [activeScope, candidates, documentPicker, issueAliases, query]);
   const lastPage = Math.max(0, Math.ceil(matches.length / PAGE_SIZE) - 1);
   const currentPage = Math.min(page, lastPage);
   const visible = matches.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
@@ -119,7 +123,7 @@ export function ResourceLinkPicker({ kind, items, projects, busy = false, onLink
           <span className="resource-link-search">
             <Search size={15} aria-hidden="true" />
             <input ref={search} className="field" type="search" value={query} disabled={disabled}
-              placeholder={documentPicker ? '제목 또는 상위 문서' : '업무 번호 또는 제목'}
+              placeholder={documentPicker ? '제목 또는 상위 문서' : '번호·이전 키·제목'}
               onChange={event => { setQuery(event.target.value); resetResults(); }}
               onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.preventDefault(); }} />
           </span>
@@ -145,6 +149,7 @@ export function ResourceLinkPicker({ kind, items, projects, busy = false, onLink
               <span>
                 <strong>{item.key && <><span>{item.key}</span>{' · '}</>}{item.title}</strong>
                 <small>{item.meta}</small>
+                {item.matchedAliases.map(alias => <small key={`${alias.source}:${alias.key}`}>{issueSearchAliasLabel(alias)}</small>)}
               </span>
               {item.id === selectedId && <Check size={15} aria-hidden="true" />}
             </button>
@@ -163,6 +168,7 @@ export function ResourceLinkPicker({ kind, items, projects, busy = false, onLink
           <small>선택한 {label}</small>
           <strong>{selected.key && `${selected.key} · `}{selected.title}</strong>
           <small>{selected.meta}</small>
+          {selected.matchedAliases.map(alias => <small key={`${alias.source}:${alias.key}`}>{issueSearchAliasLabel(alias)}</small>)}
         </div>}
         <button className="btn btn-primary" type="button" disabled={disabled || !selected} onClick={event => void confirmLink(event)}>
           <Link2 size={14} aria-hidden="true" />{disabled && selected ? '연결 중…' : `${label} 연결`}

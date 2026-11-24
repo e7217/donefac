@@ -2088,7 +2088,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>
               </DocumentLinkedWork>
               <ResourceLinkPicker key={`${actorId}:${selectedPage.id}`} kind="issue" items={candidateIssues} projects={data.projects}
-                busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} />
+                issueAliases={data.issueAliases} busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} />
               <div className="docs-reference-list">
                 <h3>본문에서 참조하는 문서</h3>
                 {!outgoingDocuments.length && <p>본문에 문서 링크, 참조나 포함을 추가하면 표시됩니다.</p>}

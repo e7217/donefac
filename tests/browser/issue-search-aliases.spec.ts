@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse } from '@playwright/test';
+import { contentReferences } from '../../shared/document-nodes';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 import type {
-  Dependency, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project,
+  Dependency, DocPage, Issue, IssueRelation, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project,
   SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot,
 } from '../../shared/types';
 
@@ -60,6 +61,191 @@ function aliasFixture(request: APIRequestContext) {
   }
   return { suffix, currentKey, snapshot, addIssue, migrate, close };
 }
+
+test('360px 문서 연결과 본문 참조, 티켓 관계에서 이전 키가 가리키는 현재 업무를 선택한다', async ({ page, request }) => {
+  test.setTimeout(110_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { suffix, currentKey, snapshot, addIssue, migrate, close } = aliasFixture(request);
+  const { projects: [destination] } = await snapshot();
+  let document: DocPage | undefined;
+
+  try {
+    const project = await json<Project>(await request.post('/api/projects', { data: { key: currentKey, name: `현행 연결 업무 ${suffix}` } }), 201);
+    const current = await addIssue(project.id, `현재 키인 업무 ${suffix}`);
+    const first = await migrate(current.key, 'A', `첫 Jira의 원본 업무 ${suffix}`);
+    const second = await migrate(current.key, 'B', `둘째 Jira의 원본 업무 ${suffix}`);
+    const beforeMove = await addIssue(project.id, `다른 프로젝트로 이동한 업무 ${suffix}`);
+    const movePath = `/api/issues/${beforeMove.id}/project-move`;
+    const move: IssueProjectMoveInput = { expectedVersion: beforeMove.version, projectId: destination.id, includeConnected: false, mappings: [] };
+    const reviewed = await json<IssueProjectMovePreview>(await request.post(`${movePath}/preview`, { data: move }));
+    expect(reviewed.token, JSON.stringify(reviewed.blockers)).toBeTruthy();
+    const { issues: [moved] } = await json<IssueProjectMoveResult>(await request.post(`${movePath}/apply`, { data: { ...move, token: reviewed.token } }));
+    expect(moved.key).not.toBe(beforeMove.key);
+    const anchor = await addIssue(project.id, `관계를 편집할 업무 ${suffix}`);
+    const jiraAlias = `Jira 원래 키 ${current.key}`;
+    const moveAlias = `이동 전 키 ${beforeMove.key}`;
+    const oldKeyQuery = [...current.key.toLowerCase()].map(char => String.fromCharCode(char.charCodeAt(0) + 0xfee0)).join('');
+    const movedQuery = beforeMove.key.toLowerCase();
+    const directLinkPath = '/api/resource-links';
+
+    document = await json<DocPage>(await request.post('/api/documents', { data: {
+      projectId: destination.id, title: `업무 연결을 검토하는 문서 ${suffix}`, content: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '보존할 문서 본문' }] },
+      ] },
+    } }), 201);
+    const documentId = document.id;
+    await page.goto(`/#/${destination.id}/documents/${documentId}`);
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(title).toHaveValue(document.title);
+    const draftTitle = `저장 전 문서 제목 ${suffix}`;
+    const draftBody = `저장 전 본문 ${suffix}`;
+    const prose = page.locator('.docs-prose');
+    await title.fill(draftTitle);
+    await prose.locator('p').first().click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText(` ${draftBody}`);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const aside = page.getByLabel('문서 상세 정보', { exact: true });
+    await aside.getByRole('button', { name: '연결', exact: true }).click();
+    const documentPicker = aside.getByRole('region', { name: '연결할 업무 선택', exact: true });
+    const documentSearch = documentPicker.getByRole('searchbox', { name: '연결할 업무 검색', exact: true });
+    const documentResults = documentPicker.getByRole('list', { name: '업무 검색 결과', exact: true }).getByRole('button');
+    await documentSearch.fill(movedQuery);
+    await expect(documentResults).toHaveCount(1);
+    await expect(documentResults.first()).toContainText(moved.key);
+    await expect(documentResults.first()).toContainText(destination.name);
+    await expect(documentResults.first()).toContainText(moveAlias);
+    await documentSearch.fill(oldKeyQuery);
+    await expect(documentResults).toHaveCount(3);
+    await expect(documentResults.first()).toContainText(current.title);
+    for (const candidate of [first, second]) {
+      const result = documentResults.filter({ hasText: candidate.issue.title });
+      await expect(result).toContainText(candidate.issue.key);
+      await expect(result).toContainText(candidate.project.name);
+      await expect(result).toContainText(jiraAlias);
+    }
+    const directCandidate = documentResults.filter({ hasText: second.issue.title });
+    await directCandidate.click();
+    await expect(directCandidate).toHaveAttribute('aria-pressed', 'true');
+    const linking = page.waitForResponse(response => new URL(response.url()).pathname === directLinkPath && response.request().method() === 'POST');
+    await documentPicker.getByRole('button', { name: '업무 연결', exact: true }).click();
+    const linked = await linking;
+    expect(linked.request().postDataJSON()).toMatchObject({ documentId, issueId: second.issue.id });
+    expect(linked.ok(), await linked.text()).toBe(true);
+    await expect(aside.locator('.docs-linked-issue').filter({ hasText: second.issue.key })).toHaveCount(1);
+    await expect(directCandidate).toHaveCount(0);
+    await expect(title).toHaveValue(draftTitle);
+    await expect(prose).toContainText(draftBody);
+    const afterLink = await snapshot();
+    expect(afterLink.documents.find(value => value.id === documentId)).toEqual(document);
+    expect(afterLink.resourceLinks.filter(link => link.documentId === documentId)).toEqual([
+      expect.objectContaining({ issueId: second.issue.id, documentId }),
+    ]);
+    await aside.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
+
+    const inlineOpen = page.getByRole('button', { name: '업무 참조 삽입', exact: true });
+    const chooser = page.getByRole('dialog', { name: '업무 참조 삽입', exact: true });
+    const inlineRows = chooser.locator('.doc-reference-results button');
+    for (const [candidate, query, alias, count] of [
+      [first, oldKeyQuery, jiraAlias, 3], [{ issue: moved, project: destination }, movedQuery, moveAlias, 1],
+    ] as const) {
+      await prose.locator('p').last().click();
+      await page.keyboard.press('Control+End');
+      await inlineOpen.click();
+      await chooser.getByRole('textbox', { name: '참조할 항목 검색', exact: true }).fill(query);
+      await expect(inlineRows).toHaveCount(count);
+      if (count === 3) await expect(inlineRows.first()).toContainText(current.title);
+      const result = inlineRows.filter({ hasText: candidate.issue.title });
+      await expect(result).toContainText(candidate.issue.key);
+      await expect(result).toContainText(candidate.project.name);
+      await expect(result).toContainText(alias);
+      await result.click();
+      await expect(chooser).toHaveCount(0);
+      await expect(prose.locator('.doc-reference-card.issue').filter({ hasText: candidate.issue.title })).toContainText(candidate.issue.key);
+    }
+    await expect(title).toHaveValue(draftTitle);
+    await expect(prose).toContainText(draftBody);
+    await page.locator('.docs-save-button').click();
+    await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+    const savedDoc = (await snapshot()).documents.find(value => value.id === documentId)!;
+    expect(savedDoc.title).toBe(draftTitle);
+    expect(savedDoc.plainText).toContain(draftBody);
+    expect(contentReferences(savedDoc.content).map(reference => reference.id).sort()).toEqual([first.issue.id, moved.id].sort());
+
+    await page.goto(`/#/${anchor.projectId}/issues?issue=${anchor.id}`);
+    const ticket = page.getByRole('dialog', { name: anchor.title, exact: true });
+    const draftTicketTitle = '관계 검토 중 보존할 티켓 제목';
+    const draftComment = '관계 검토 중 보존할 댓글';
+    const ticketTitle = ticket.getByRole('textbox', { name: '제목', exact: true });
+    const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
+    await ticketTitle.fill(draftTicketTitle);
+    await comment.fill(draftComment);
+    const relations = ticket.getByRole('region', { name: '업무 관계', exact: true });
+    const addRelation = relations.getByRole('button', { name: '업무 관계 추가', exact: true });
+    const form = relations.getByRole('form', { name: '업무 관계 추가', exact: true });
+    const relationSearch = form.getByRole('searchbox', { name: '연결할 업무 검색', exact: true });
+    const select = form.getByRole('combobox', { name: '연결할 업무', exact: true });
+    const options = select.locator('option:not([value=""])');
+    const option = (id: string) => select.locator(`option[value="${id}"]`);
+    const relationPath = `/api/issues/${anchor.id}/relations`;
+    const relationIds: string[] = [];
+    for (const [candidate, query, alias] of [
+      [second, oldKeyQuery, jiraAlias], [{ issue: moved, project: destination }, movedQuery, moveAlias],
+    ] as const) {
+      await addRelation.click();
+      await relationSearch.fill(query);
+      if (candidate.issue.id === second.issue.id) {
+        await expect(option(current.id)).toHaveCount(1);
+        await expect(option(first.issue.id)).toContainText(jiraAlias);
+        await expect(options.first()).toHaveAttribute('value', current.id);
+        await relationSearch.fill(`${query} ${second.project.key}`);
+        await expect(option(current.id)).toHaveCount(0);
+        await expect(option(first.issue.id)).toHaveCount(0);
+      }
+      const choice = option(candidate.issue.id);
+      await expect(choice).toContainText(candidate.issue.key);
+      await expect(choice).toContainText(candidate.project.name);
+      await expect(choice).toContainText(alias);
+      await expect(form.getByRole('button', { name: '관계 저장', exact: true })).toBeDisabled();
+      await select.selectOption(candidate.issue.id);
+      await form.getByRole('combobox', { name: '업무 관계 유형', exact: true }).selectOption('blocks');
+      const writing = page.waitForResponse(response => new URL(response.url()).pathname === relationPath && response.request().method() === 'POST');
+      await form.getByRole('button', { name: '관계 저장', exact: true }).click();
+      const response = await writing;
+      expect(response.request().postDataJSON()).toMatchObject({ otherIssueId: candidate.issue.id });
+      const relation = await json<IssueRelation>(response, 201);
+      expect(relation).toMatchObject({ sourceIssueId: anchor.id, targetIssueId: candidate.issue.id, type: 'blocks' });
+      relationIds.push(relation.id);
+      await expect(form).toHaveCount(0);
+      await expect(addRelation).toBeFocused();
+      await expect(ticketTitle).toHaveValue(draftTicketTitle);
+      await expect(comment).toHaveValue(draftComment);
+    }
+    const openDuplicate = relations.getByRole('button', { name: '중복으로 닫기', exact: true });
+    await openDuplicate.click();
+    const duplicate = relations.getByRole('form', { name: '중복으로 닫기', exact: true });
+    const originalSearch = duplicate.getByRole('searchbox', { name: '원본 업무 검색', exact: true });
+    const originalSelect = duplicate.getByRole('combobox', { name: '원본 업무', exact: true });
+    await originalSearch.fill(`${oldKeyQuery} ${first.project.key}`);
+    const original = originalSelect.locator(`option[value="${first.issue.id}"]`);
+    await expect(original).toContainText(first.issue.key);
+    await expect(original).toContainText(jiraAlias);
+    await originalSelect.selectOption(first.issue.id);
+    await duplicate.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(duplicate).toHaveCount(0);
+    await expect(openDuplicate).toBeFocused();
+    await expect(ticketTitle).toHaveValue(draftTicketTitle);
+    await expect(comment).toHaveValue(draftComment);
+    expect((await json<IssueRelation[]>(await request.get(relationPath))).map(relation => relation.id).sort()).toEqual(relationIds.sort());
+    expect((await snapshot()).issues.find(issue => issue.id === anchor.id)).toEqual(anchor);
+  } finally {
+    if (document) {
+      const removed = await request.delete(`/api/documents/${document.id}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    await close();
+  }
+});
 
 test('360px 검색과 간트에서 이전 번호의 충돌을 구분하고 현재 업무를 열거나 연결한다', async ({ page, request }) => {
   test.setTimeout(95_000);

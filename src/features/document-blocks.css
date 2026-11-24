@@ -160,6 +160,25 @@
   flex-shrink: 0;
 }
 
+.doc-reference-results > .doc-reference-issue > span {
+  display: grid;
+  flex: 1;
+  gap: 3px;
+  min-width: 0;
+  max-width: none;
+  color: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.doc-reference-issue small {
+  color: #536d5c;
+}
+
+.doc-reference-issue > svg {
+  flex-shrink: 0;
+}
+
 @media (max-width: 440px) {
   .doc-revision-chooser-source { padding-inline: 12px; }
   .doc-reference-results > button > time { display: none; }

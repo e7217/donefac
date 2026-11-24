@@ -16,6 +16,7 @@ import type { DocumentSelectionHighlight } from '../../shared/document-selection
 import { attachmentDownloadIdFromUrl, inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { issueSearchText } from '../../shared/issue-schema';
 import { statusMeta } from '../../shared/workflow-helpers';
+import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { IssueListCard, issueListAttrs, type OpenIssueBlock } from './DocumentIssueList';
 import { IssueSummaryCard, issueSummaryAttrs } from './DocumentIssueSummary';
@@ -714,10 +715,15 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
   const dialogLabel = excerptMode ? '문서 발췌 포함' : issueMode ? '업무 참조 삽입' : includeMode ? '문서 포함 삽입' : pinnedMode ? '문서 버전 포함 삽입' : '문서 참조 삽입';
   const heading = excerptMode ? '발췌할 문서를 고르세요' : issueMode ? '업무를 참조하세요' : includeMode ? '문서 내용을 포함하세요' : pinnedMode ? '포함할 문서 버전을 고르세요' : '문서를 참조하세요';
   const description = includeMode || excerptMode ? '원본을 읽기 전용으로 표시합니다. 변경된 내용은 참조 새로고침으로 불러오세요.' : pinnedMode ? '문서를 고른 뒤 그 문서의 저장 버전을 선택하세요.' : '이름이 바뀌어도 같은 항목을 가리킵니다.';
+  const { data } = context;
+  const projects = new Map(data.projects.map(project => [project.id, project]));
   const search = query.toLowerCase();
-  const results = issueMode ? context.data.issues.filter(issue => issueSearchText(context.data, issue).toLowerCase().includes(search)).slice(0, 40)
-    : context.data.documents.filter(page => `${page.title} ${page.plainText}`.toLowerCase().includes(search) &&
-      (!excerptMode || Boolean(findDocumentExcerpt(page.content)))).slice(0, 40);
+  const issues = issueMode ? searchIssueCandidates(data, data.issues, query, issue => {
+    const project = projects.get(issue.projectId);
+    return `${issueSearchText(data, issue)} ${project?.key ?? ''} ${project?.name ?? ''}`;
+  }).slice(0, 40) : [];
+  const pages = issueMode ? [] : data.documents.filter(page => `${page.title} ${page.plainText}`.toLowerCase().includes(search) &&
+    (!excerptMode || Boolean(findDocumentExcerpt(page.content)))).slice(0, 40);
   function insert(id: string, label: string, revisionId?: string) {
     if (!selection.editor.isEditable || selection.editor.isDestroyed || context.documentId !== selection.documentId) { notify('현재 편집할 문서를 다시 확인해주세요.', 'error'); return; }
     try {
@@ -732,19 +738,30 @@ export function ReferenceChooser({ selection, onClose, notify }: { selection: Re
     <section className="doc-reference-chooser" role="dialog" aria-modal="true" aria-label={dialogLabel}>
       <header><div><h3>{heading}</h3><p>{description}</p></div><button type="button" className="btn btn-ghost" aria-label="참조 삽입 닫기" onClick={onClose}><X size={16} /></button></header>
       {source ? <RevisionChoices key={source.id} source={source} onBack={() => setSource(null)} onChoose={revision => insert(source.id, revision.title, revision.id)} /> : <>
-        <label><Search size={15} /><input className="field" aria-label="참조할 항목 검색" placeholder={issueMode ? '업무 번호, 제목, 속성 검색' : '문서 제목 또는 내용 검색'} autoFocus value={query} onChange={event => setQuery(event.target.value)} /></label>
+        <label><Search size={15} /><input className="field" aria-label="참조할 항목 검색" placeholder={issueMode ? '업무 키(이전 키 포함), 제목, 속성 검색' : '문서 제목 또는 내용 검색'} autoFocus value={query} onChange={event => setQuery(event.target.value)} /></label>
         {excerptMode && <label className="document-excerpt-panel-toggle"><input type="checkbox" checked={noPanel}
           onChange={event => setNoPanel(event.target.checked)} /> 원본 안내 숨기기</label>}
         <div className="doc-reference-results">
-          {results.map(item => {
-            const issue = 'key' in item ? item : null, page = issue ? null : item as DocPage;
-            const cycle = !!page && (includeMode || excerptMode) && createsIncludeCycle(context.data, selection.documentId, page.id);
-            return <button type="button" key={item.id} disabled={cycle} title={cycle ? '자기 자신 또는 순환하는 문서는 포함할 수 없습니다.' : undefined}
-              onClick={() => { if (pinnedMode && page) setSource(page); else insert(item.id, issue ? `${issue.key} ${issue.title}` : item.title); }}>
-              <span>{issue?.key || context.data.projects.find(project => project.id === page?.projectId)?.name || '팀 공통 문서'}</span><strong>{item.title}</strong>{cycle ? <small>순환 포함 불가</small> : <ChevronRight size={15} />}
+          {issues.map(({ issue, matchedAliases }) => {
+            const project = projects.get(issue.projectId);
+            return <button type="button" key={issue.id} className="doc-reference-issue"
+              onClick={() => insert(issue.id, `${issue.key} ${issue.title}`)}>
+              <span>
+                <small>{issue.key}{project && ` · ${project.name}`}</small>
+                <strong>{issue.title}</strong>
+                {matchedAliases.length > 0 && <small>{matchedAliases.map(issueSearchAliasLabel).join(' · ')}</small>}
+              </span>
+              <ChevronRight size={15} aria-hidden="true" />
             </button>;
           })}
-          {!results.length && <p>{excerptMode ? '조건에 맞는 발췌 문서가 없습니다.' : '조건에 맞는 항목이 없습니다.'}</p>}
+          {pages.map(page => {
+            const cycle = (includeMode || excerptMode) && createsIncludeCycle(data, selection.documentId, page.id);
+            return <button type="button" key={page.id} disabled={cycle} title={cycle ? '자기 자신 또는 순환하는 문서는 포함할 수 없습니다.' : undefined}
+              onClick={() => { if (pinnedMode) setSource(page); else insert(page.id, page.title); }}>
+              <span>{projects.get(page.projectId ?? '')?.name || '팀 공통 문서'}</span><strong>{page.title}</strong>{cycle ? <small>순환 포함 불가</small> : <ChevronRight size={15} />}
+            </button>;
+          })}
+          {!(issueMode ? issues : pages).length && <p>{excerptMode ? '조건에 맞는 발췌 문서가 없습니다.' : '조건에 맞는 항목이 없습니다.'}</p>}
         </div>
       </>}
     </section>
