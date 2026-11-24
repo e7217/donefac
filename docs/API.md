@@ -915,6 +915,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `POST /api/migrations/previews/:id/apply` | `expectedVersion`·`acknowledgements`로 검토한 계획 적용 |
 | `GET /api/source-imports` | 적용된 프로젝트와 패키지·수량·진단 영수증 |
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
+| `GET /api/source-imports/:id/notices/:index/source?expectedVersion=…` | 영수증 진단에 연결된 개별 보존 원본 |
 | `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
 
 오프라인 리허설 `review`에서 검토에 연결한 Confluence XML ZIP을 선택하면 옵션 조회와 매핑 불러오기의 `options.confluenceReviews`에 해당 검토의 범위·판정·건수와 공간 권한 수동 검토 표시가 포함된다. 형식 2와 3은 각 검토의 `coverage`를 제공한다. 형식 3의 확인 ID를 같은 ZIP의 현재 페이지 목록과 대조한 집계는 `options.confluenceReviewCoverage`에서 `{packageId,archivePages,permissionCheckedPages}` 배열로 제공한다. 같은 페이지는 한 번 집계한다. 원본 페이지 ID는 비공개 검토 파일에서 읽는다.
@@ -1056,6 +1057,8 @@ Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있�
 ### 적용 후 대조
 
 브라우저의 `GET /api/source-imports/:id/reconciliation`은 영수증 전체의 상태별 건수와 현재 조회의 `total`, `offset`, `limit`, `rows`를 반환한다. `kind`, `status`, `q`로 원본 종류·연결 상태·원래 키·제목을 검색한다. `offset`은 0~1,000,000, `limit`은 1~100이며 기본값은 각각 0과 30이다. 결과의 현재 대상에는 업무·문서로 이동하는 데 필요한 ID와 프로젝트가 들어 있다. 원문과 적용 당시 진단은 기존 원본 기록과 영수증에서 읽는다.
+
+`GET /api/source-imports/:id/notices/:index/source`의 `index`는 영수증의 `notices`에서 0으로 시작하는 위치다. `expectedVersion`에는 조회한 영수증 버전을 보낸다. 일치하는 기록 하나를 `SourceRecordArchive`로 반환한다. 영수증 버전이 달라졌으면 `409`, 개별 기록이 없거나 같은 영수증과 패키지에서 원본을 하나로 확인할 수 없으면 `404`를 반환한다.
 
 `packageId`로 이 영수증의 원본 패키지 `stagingId`를 지정하면 제품·인스턴스·원본 SHA-256이 모두 일치하는 원본을 조회한다. 다른 영수증의 패키지나 알 수 없는 ID에는 `404`를 반환한다. `counts`는 선택한 패키지 전체의 상태별 건수이고, `total`과 `rows`에는 나머지 조건을 함께 적용한다. 패키지와 `finding=invalid-primary-target`을 보내면 전체 이관 검증의 `invalidTargets`에 해당하는 티켓·페이지를 조회한다. 해당 행에는 `invalidPrimaryTarget: true`가 표시된다.
 

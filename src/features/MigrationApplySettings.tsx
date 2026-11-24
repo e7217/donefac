@@ -1,10 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useId, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { suggestMigrationIdentityMappings } from '../../shared/migration-identity-suggestions';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
-import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type StatusCategory, type User } from '../../shared/types';
+import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type SourceRecordArchive, type StatusCategory, type User } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -12,7 +12,7 @@ import { MigrationAuthorPreview } from './MigrationAuthorReview';
 import { ConfluenceSourceReview } from './MigrationConfluenceReview';
 import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
-import { SourceImportRecords } from './SourceOrigins';
+import { SourceArchiveDetail, SourceImportRecords } from './SourceOrigins';
 import { downloadDocument } from './document-utils';
 import './migration-apply.css';
 
@@ -641,10 +641,12 @@ function ActorMigration(props: MigrationApplyProps) {
 
 const receiptNoticeLabels: Record<MigrationNotice['severity'], string> = { warning: '경고', error: '오류', info: '안내' };
 type ReceiptFinding = 'warning' | 'error';
+type ReceiptNoticeSource = { index: number; opener: HTMLButtonElement };
 
 function MigrationReceiptFindings({ receipt }: { receipt: SourceImport }) {
   const [open, setOpen] = useState(false);
   const [scope, setScope] = useState<{ severity: ReceiptFinding | ''; revision: number }>({ severity: '', revision: 0 });
+  const [selectedSource, setSelectedSource] = useState<ReceiptNoticeSource | null>(null);
   const scopeHeading = useRef<HTMLHeadingElement>(null);
   const focusScope = useRef(false);
   const summaryId = useId();
@@ -655,7 +657,9 @@ function MigrationReceiptFindings({ receipt }: { receipt: SourceImport }) {
   const explicit = receipt.counts.explicitExcludedRecords ?? receipt.configuration.excludedRecords.length;
   const excluded = receipt.counts.excludedRecords ?? explicit;
   const descendants = receipt.counts.excludedDescendants ?? Math.max(0, excluded - explicit);
-  const scopedNotices = scope.severity ? notices?.filter(notice => notice.severity === scope.severity) : notices;
+  const scopedNotices = notices?.map((notice, index) => ({ notice, index }))
+    .filter(({ notice }) => !scope.severity || notice.severity === scope.severity);
+  const packageIds = new Set(receipt.packages.map(item => item.stagingId));
 
   function showDiagnostics(severity: ReceiptFinding | '') {
     focusScope.current = true;
@@ -696,13 +700,82 @@ function MigrationReceiptFindings({ receipt }: { receipt: SourceImport }) {
         </h5>
         <p>{scopedNotices.length.toLocaleString()}건</p>
         {scope.severity && <button type="button" className="btn btn-ghost" onClick={() => showDiagnostics('')}>전체 진단 보기</button>}
-        <Paged key={scope.revision} title="영수증 이관 진단" items={scopedNotices} label={item => `${item.code} ${item.message}`} render={item => <div className={`migration-notice is-${item.severity}`}>
-          <strong>{receiptNoticeLabels[item.severity]} · {item.code}</strong><p>{item.message}</p>{item.recordId && <small>원본 항목 {item.recordId}</small>}
-        </div>} />
+        <Paged key={scope.revision} title="영수증 이관 진단" items={scopedNotices} label={({ notice }) => `${notice.code} ${notice.message}`}
+          render={({ notice, index }) => {
+            const { recordId } = notice;
+            const slash = recordId?.indexOf('/') ?? -1;
+            const scopedSource = recordId && slash > 0 && slash < recordId.length - 1 && packageIds.has(recordId.slice(0, slash));
+            return <div className={`migration-notice is-${notice.severity}`}>
+              <strong>{receiptNoticeLabels[notice.severity]} · {notice.code}</strong>
+              <p>{notice.message}</p>
+              {recordId && <small>원본 항목 {recordId}</small>}
+              {scopedSource && <button type="button" className="btn migration-source-button" aria-haspopup="dialog"
+                onClick={event => setSelectedSource({ index, opener: event.currentTarget })}>
+                <FileSearch size={15} aria-hidden="true" />보존 원본 보기
+              </button>}
+            </div>;
+          }} />
         {!scopedNotices.length && <p>저장된 진단이 없습니다.</p>}
       </> : <p>이전 버전에서 만든 영수증이라 검토 진단이 별도로 저장되지 않았습니다. 원본 기록과 이관 설정을 확인하세요.</p>}</div>}
     </details>
+    {selectedSource && <ReceiptNoticeSourceDialog key={selectedSource.index} receiptId={receipt.id} receiptVersion={receipt.version}
+      {...selectedSource} onClose={() => setSelectedSource(null)} />}
   </>;
+}
+
+function ReceiptNoticeSourceDialog({ receiptId, receiptVersion, index, opener, onClose }:
+  ReceiptNoticeSource & { receiptId: string; receiptVersion: number; onClose: () => void }) {
+  const titleId = useId();
+  const element = useRef<HTMLDialogElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [response, setResponse] = useState<{ archive: SourceRecordArchive } | { error: string } | null>(null);
+
+  useLayoutEffect(() => {
+    const dialog = element.current;
+    if (!dialog) return;
+    dialog.showModal();
+    heading.current?.focus({ preventScroll: true });
+    return () => {
+      dialog.close();
+      if (opener.isConnected) opener.focus({ preventScroll: true });
+    };
+  }, [opener]);
+
+  useLayoutEffect(() => {
+    if (response && 'archive' in response && !element.current?.contains(document.activeElement)) {
+      heading.current?.focus({ preventScroll: true });
+    }
+  }, [response]);
+
+  useEffect(() => {
+    const request = new AbortController();
+    const path = `/source-imports/${encodeURIComponent(receiptId)}/notices/${index}/source?expectedVersion=${receiptVersion}`;
+    void api<SourceRecordArchive>(path, { cache: 'no-store', signal: request.signal })
+      .then(archive => { if (!request.signal.aborted) setResponse({ archive }); })
+      .catch(cause => { if (!request.signal.aborted) setResponse({ error: errorText(cause) }); });
+    return () => request.abort();
+  }, [attempt, index, receiptId, receiptVersion]);
+
+  return <dialog ref={element} className="migration-original-dialog" aria-labelledby={titleId}
+    onCancel={event => { event.preventDefault(); onClose(); }}>
+    <header className="migration-original-heading">
+      <h3 id={titleId} ref={heading} tabIndex={-1}>이관 진단의 보존 원본</h3>
+      {(!response || 'error' in response) && <button type="button" className="btn btn-ghost" onClick={onClose}>
+        <X size={16} aria-hidden="true" />닫기
+      </button>}
+    </header>
+    {!response && <p role="status">보존 원본을 불러오는 중…</p>}
+    {response && 'error' in response && <div>
+      <p className="migration-error" role="alert">{response.error}</p>
+      <button type="button" className="btn" onClick={() => {
+        heading.current?.focus({ preventScroll: true });
+        setResponse(null);
+        setAttempt(current => current + 1);
+      }}>다시 불러오기</button>
+    </div>}
+    {response && 'archive' in response && <SourceArchiveDetail archive={response.archive} originalAuthorName={null} onClose={onClose} />}
+  </dialog>;
 }
 
 function JiraPlanningReview({ rows, label, original, disabled, reviewed, changes, onChoose, actions }: {

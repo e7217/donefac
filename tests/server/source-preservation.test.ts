@@ -138,6 +138,89 @@ test('summary APIs page without raw bodies/metadata, include archived-only histo
   } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); f.close(); }
 });
 
+test('applied migration notices open only the exact archived record from their receipt and package', async () => {
+  const f = fixture();
+  const input = f.prepared.sourceImport;
+  const [firstPackage] = input.packages;
+  const secondPackage = { ...firstPackage, stagingId: randomUUID(), filename: 'later.json', sha256: '1'.repeat(64) };
+  input.packages.push(secondPackage);
+  input.configuration.packageIds.push(secondPackage.stagingId);
+  input.configuration.sourceBaseUrls![secondPackage.stagingId] = null;
+  const first = f.archive('history', 'project/changes/91', {});
+  first.record.text = '첫 번째 패키지의 원래 변경';
+  const second = f.archive('history', first.record.sourceId, { packageSha256: secondPackage.sha256 });
+  second.record.text = '두 번째 패키지의 원래 변경';
+  f.prepared.sourceRecords.push(first, second);
+  const notice = (recordId: string | null) => ({ severity: 'warning' as const, code: 'REVIEW_SOURCE', message: '원본을 확인하세요.',
+    recordId, requiresAcknowledgement: false });
+  input.notices = [notice(null), notice(`${firstPackage.stagingId}/${first.record.id}`), notice(`${secondPackage.stagingId}/${second.record.id}`),
+    notice(`${randomUUID()}/${first.record.id}`), notice(first.record.id)];
+  persist(f);
+  const other = structuredClone(f.prepared);
+  other.sourceImport.id = randomUUID();
+  other.sourceRecords = [{ ...first, id: randomUUID(), sourceImportId: other.sourceImport.id }];
+  other.attachmentVersions = [];
+  other.issueRelations = [];
+  f.store.transaction(() => f.service.persistPrepared(other));
+
+  const app = express();
+  f.service.registerRoutes(app);
+  const handleError: ErrorRequestHandler = (error: unknown, _request, response, next) => {
+    void next;
+    response.status(error instanceof SourcePreservationError ? error.status : 500).json({ error: error instanceof Error ? error.message : 'error' });
+  };
+  app.use(handleError);
+  const server = app.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}/api/source-imports`;
+  const source = (index: number | string, query = 'expectedVersion=1', receiptId = input.id) =>
+    fetch(`${base}/${receiptId}/notices/${index}/source${query ? `?${query}` : ''}`);
+  async function expectSource(index: number, candidate: SourceRecordArchive, query?: string, receiptId?: string) {
+    const response = await source(index, query, receiptId);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('Cache-Control'), 'no-store');
+    assert.deepEqual(await response.json(), candidate);
+  }
+
+  try {
+    const before = data(f);
+    await expectSource(1, first);
+    await expectSource(2, second);
+    await expectSource(1, other.sourceRecords[0], undefined, other.sourceImport.id);
+    for (const index of [0, 3, 4, 5]) assert.equal((await source(index)).status, 404);
+    for (const index of ['01', '-1', '1.0', '9007199254740992']) assert.equal((await source(index)).status, 400);
+    for (const query of ['', 'expectedVersion=0', 'expectedVersion=9007199254740992', 'expectedVersion=1&expectedVersion=1', 'expectedVersion=1&recordId=other']) {
+      assert.equal((await source(1, query)).status, 400);
+    }
+    assert.equal((await source(1, 'expectedVersion=2')).status, 409);
+    assert.deepEqual(data(f), before);
+
+    const restored = f.service.validateImport(before, f.context());
+    f.store.transaction(() => f.service.replaceImported(restored, new Map(before.imports.map(row => [row.id, row.version]))));
+    assert.equal((await source(1)).status, 409);
+    await expectSource(1, first, 'expectedVersion=2');
+    await expectSource(2, second, 'expectedVersion=2');
+
+    const duplicate = { ...first, id: randomUUID() };
+    f.store.db.prepare(`INSERT INTO source_records(id,import_id,owner_type,owner_id,target_type,target_id,kind,source_instance,product,source_id,json)
+      SELECT ?,import_id,owner_type,owner_id,target_type,target_id,kind,source_instance,product,source_id,? FROM source_records WHERE id=?`)
+      .run(duplicate.id, JSON.stringify(duplicate), first.id);
+    assert.equal((await source(1, 'expectedVersion=2')).status, 404);
+    f.store.db.prepare("UPDATE source_records SET json=json_set(json,'$.source.format','jira-csv') WHERE id=?").run(duplicate.id);
+    await expectSource(1, first, 'expectedVersion=2');
+    f.store.db.prepare('DELETE FROM source_records WHERE id=?').run(first.id);
+    assert.equal((await source(1, 'expectedVersion=2')).status, 404);
+    await expectSource(2, second, 'expectedVersion=2');
+    await expectSource(1, other.sourceRecords[0], 'expectedVersion=2', other.sourceImport.id);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    f.close();
+  }
+});
+
 test('native source validation rejects membership, identity, author, owner, version-file and live relation mismatches without writes', () => {
   const f = fixture(); try {
     persist(f); const valid = data(f), before = structuredClone(valid);

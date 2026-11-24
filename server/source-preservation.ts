@@ -1464,6 +1464,53 @@ export class SourcePreservationService {
   record(importId: string, id: string): SourceRecordArchive {
     this.sourceImport(importId); const row = this.store.db.prepare('SELECT json FROM source_records WHERE import_id=? AND id=?').get(importId, id) as { json: string } | undefined; return row ? JSON.parse(row.json) as SourceRecordArchive : fail(404, '보존한 원본 객체를 찾을 수 없습니다.');
   }
+  private noticeSource(importId: string, noticeIndex: unknown, expectedVersion: unknown): SourceRecordArchive {
+    if (typeof noticeIndex !== 'string' || !/^(?:0|[1-9]\d{0,15})$/u.test(noticeIndex) ||
+        !Number.isSafeInteger(Number(noticeIndex))) fail(400, '이관 진단 번호를 확인해 주세요.');
+    if (typeof expectedVersion !== 'string' || !/^\d{1,16}$/u.test(expectedVersion) ||
+        !Number.isSafeInteger(Number(expectedVersion)) || Number(expectedVersion) < 1) {
+      fail(400, '이관 진단 원본을 확인할 영수증 버전을 지정해 주세요.');
+    }
+    const receipt = this.sourceImport(importId);
+    if (receipt.version !== Number(expectedVersion)) fail(409, '이관 영수증이 변경되었습니다. 새로고침하고 다시 확인해 주세요.');
+
+    const unavailable = '이관 진단에 연결된 보존 원본을 찾을 수 없습니다.';
+    const reference = receipt.notices?.[Number(noticeIndex)]?.recordId;
+    if (typeof reference !== 'string') return fail(404, unavailable);
+    const separator = reference.indexOf('/');
+    if (separator < 1) return fail(404, unavailable);
+    const stagingId = reference.slice(0, separator);
+    const recordId = reference.slice(separator + 1);
+    const kindEnd = recordId.indexOf(':');
+    const kind = recordId.slice(0, kindEnd);
+    const sourceId = recordId.slice(kindEnd + 1);
+    if (kindEnd < 1 || !isLegacyRecordKind(kind) || !sourceId) return fail(404, unavailable);
+
+    const packages = receipt.packages.filter(pkg => pkg.stagingId === stagingId);
+    if (packages.length !== 1) return fail(404, unavailable);
+    const [pkg] = packages;
+    const { product, instanceKey, format } = pkg.source;
+    if (receipt.packages.some(other => other !== pkg && other.sha256 === pkg.sha256 &&
+        other.source.product === product && other.source.instanceKey === instanceKey && other.source.format === format)) {
+      return fail(404, unavailable);
+    }
+    const matches = this.store.db.prepare(`SELECT r.id, r.json FROM source_records r
+      WHERE r.import_id=? AND r.product=? AND r.source_instance=? AND r.kind=? AND r.source_id=?
+        AND CASE WHEN json_valid(r.json) THEN
+          json_extract(r.json,'$.sourceImportId')=r.import_id
+          AND json_extract(r.json,'$.source.product')=r.product
+          AND json_extract(r.json,'$.source.instanceKey')=r.source_instance
+          AND json_extract(r.json,'$.source.format')=?
+          AND json_extract(r.json,'$.packageSha256')=?
+          AND json_extract(r.json,'$.record.id')=?
+        END
+      LIMIT 2`).all(importId, product, instanceKey, kind, sourceId, format, pkg.sha256, recordId) as { id: string; json: string }[];
+    if (matches.length !== 1) return fail(404, unavailable);
+    const [match] = matches;
+    const archive = JSON.parse(match.json) as SourceRecordArchive;
+    if (archive.id !== match.id || archive.record.kind !== kind || archive.record.sourceId !== sourceId) return fail(404, unavailable);
+    return archive;
+  }
   private page(where: string, params: (string | number)[], query: Record<string, unknown>): SourceRecordPage {
     const { offset, limit } = sourceRecordWindow(query);
     if (query.kind !== undefined) { if (!isLegacyRecordKind(query.kind)) fail(400, '원본 객체 종류를 확인해 주세요.'); where += ' AND r.kind=?'; params.push(query.kind); }
@@ -1503,6 +1550,11 @@ export class SourcePreservationService {
     app.get('/api/source-imports', (request, response) => { query(request, []); response.json(this.allImports().sort((a, b) => b.createdAt.localeCompare(a.createdAt))); });
     app.get('/api/source-imports/:id/records', (request, response) => response.json(this.records(String(request.params.id), query(request, ['offset', 'limit', 'kind', 'targetType', 'targetId']))));
     app.get('/api/source-imports/:id/records/:recordId', (request, response) => { query(request, []); response.json(this.record(String(request.params.id), String(request.params.recordId))); });
+    app.get('/api/source-imports/:id/notices/:index/source', (request, response) => {
+      response.set('Cache-Control', 'no-store');
+      const { expectedVersion } = query(request, ['expectedVersion']);
+      response.json(this.noticeSource(String(request.params.id), request.params.index, expectedVersion));
+    });
     app.get('/api/resource-origins', (request, response) => response.json(this.origins(query(request, ['resourceType', 'resourceId', 'kind', 'offset', 'limit']))));
     app.get('/api/issues/:id/jira-status-history', (request, response) => {
       response.set('Cache-Control', 'no-store');
