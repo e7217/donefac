@@ -1008,7 +1008,9 @@ Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있�
 
 충돌한 필드의 원본 값이 더 새로운 내보내기에 그대로 들어 있어도 현재 값과 마지막 반영 값을 다시 비교한다. 형식 98 백업은 마지막으로 반영한 기본 필드의 원본 검증값을 함께 보존한다.
 
-`issueRefresh[].fields`의 `parentId`는 두 상위 업무의 키와 제목 또는 최상위를 표시한다. 상위 업무가 확인되는 REST·검색 CSV·RSS XML·관리자 XML 자료를 사용한다. 최상위 이동은 REST `fields.parent`에 명시한 `null`을 사용한다. 생략한 필드나 모호한 연결은 현재 값을 보존한다. 같은 원본 프로젝트에서 확인한 기존 업무 또는 이번 적용에서 생성할 업무로 이동할 수 있다. 최종 트리의 순환과 관련 업무의 버전을 확인한다. 형식 100 백업은 상위 업무 비교 기준을 보존한다.
+`issueRefresh[].fields`의 `parentId`는 두 상위 업무의 키와 제목 또는 최상위를 표시한다. 상위 업무가 확인되는 REST·검색 CSV·RSS XML·관리자 XML 자료를 사용한다. 생략한 필드나 모호한 연결은 현재 값을 보존한다. 같은 원본 프로젝트에서 확인한 기존 업무 또는 이번 적용에서 생성할 업무로 이동할 수 있다. 최종 트리의 순환과 관련 업무의 버전을 확인한다. 형식 100 백업은 상위 업무 비교 기준을 보존한다.
+
+Jira Software의 `Epic Link` 유형이 확인된 REST와 RSS XML, 관리자 XML의 `jira_gh_epic_story`에서 같은 Jira 프로젝트의 에픽을 상위 업무 후보로 읽는다. REST `fields.parent`와 확인한 `Epic Link`의 `null`은 마지막으로 적용한 상위 연결과 근거가 일치할 때만 최상위 이동을 검토한다. 원래 Epic Link 값은 원본에 보관하며 확인한 전용 필드에는 별도 사용자 정의 필드 매핑이 필요 없다. [Jira Epic Link 필드](https://support.atlassian.com/jira/kb/translating-jira-agile-custom-fields/) · [Jira 에픽 링크의 원본 방향](https://support.atlassian.com/jira/kb/reindexing-jira-server-data-center-causes-a-nullpointer-error/)
 
 ### 보존 원본의 Jira 마감일 복구
 

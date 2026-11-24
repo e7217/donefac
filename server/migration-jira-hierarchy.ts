@@ -2,6 +2,7 @@ import type { LegacyRecord } from '../shared/types.js';
 
 const issueId = /^[1-9]\d{0,24}$/u;
 const issueKey = /^[A-Z][A-Z0-9_]*-[1-9]\d*$/u;
+export const JIRA_EPIC_RELATION_STYLE = 'jira_gh_epic_story';
 
 export const isJiraHierarchyIssueId = (value: string) => issueId.test(value);
 export const isJiraHierarchyIssueKey = (value: string) => value.length <= 200 && issueKey.test(value);

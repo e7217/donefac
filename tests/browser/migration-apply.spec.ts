@@ -646,6 +646,60 @@ test('360px에서 Jira 상위 업무 변경을 검토하고 팀이 옮긴 업무
   }
 });
 
+test('360px에서 Jira Server Epic Link로 이관한 에픽과 하위 업무를 티켓과 간트에서 연다', async ({ page, request }) => {
+  const token = suffix(), sourceKey = `JE${token}`;
+  const epicTitle = `원본 에픽 ${token}`, storyTitle = `에픽에 속한 스토리 ${token}`, subtaskTitle = `스토리의 하위 업무 ${token}`;
+  const epicField = 'customfield_10008';
+  function issue(number: number, summary: string, type: string, hierarchy = {}) {
+    return { id: String(100 + number), key: `${sourceKey}-${number}`, fields: {
+      project: { id: '42', key: sourceKey, name: `Jira 에픽 프로젝트 ${token}` }, summary,
+      status: { id: '1', name: 'Ready' }, issuetype: { id: String(10 + number), name: type, subtask: number === 3 },
+      created: '2020-04-01T00:00:00Z', updated: '2020-04-02T00:00:00Z', ...hierarchy,
+    } };
+  }
+  const pack = await upload(request, `jira-epic-link-${token}.json`, Buffer.from(JSON.stringify({
+    names: { [epicField]: '에픽 연결' }, schema: { [epicField]: { type: 'any', custom: 'com.pyxis.greenhopper.jira:gh-epic-link' } },
+    issues: [issue(1, epicTitle, 'Epic'), issue(2, storyTitle, 'Story', { [epicField]: `${sourceKey}-1` }),
+      issue(3, subtaskTitle, 'Sub-task', { parent: { id: '102', key: `${sourceKey}-2` } })],
+  })), `jira-epic-link-${token}`);
+  const cleanup: Issue[] = [];
+  try {
+    const { import: { projectIds: [projectId] } } = await importIntoProject(request, pack, `JEI${token}`, `이관한 에픽 계획 ${token}`);
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const byTitle = new Map(snapshot.issues.filter(item => item.projectId === projectId).map(item => [item.title, item]));
+    const epic = byTitle.get(epicTitle), story = byTitle.get(storyTitle), subtask = byTitle.get(subtaskTitle);
+    for (const title of [subtaskTitle, storyTitle, epicTitle]) {
+      const issue = byTitle.get(title);
+      if (issue) cleanup.push(issue);
+    }
+    if (!epic || !story || !subtask) throw new Error('이관한 Jira 업무를 찾을 수 없습니다.');
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${projectId}/issues?issue=${subtask.id}`);
+    const dialog = (title: string) => page.getByRole('dialog', { name: title, exact: true });
+    const openParent = (child: Issue, parent: Issue) => dialog(child.title)
+      .getByRole('button', { name: `상위 업무 · ${parent.key} ${parent.title}`, exact: true }).click();
+    await openParent(subtask, story);
+    await openParent(story, epic);
+    await expect(dialog(epic.title)).toBeVisible();
+
+    await page.goto(`/#/${projectId}/gantt`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const row = (issue: Issue) => chart.locator(`.gantt-row[data-issue-id="${issue.id}"]`);
+    await row(epic).getByRole('checkbox', { name: `${epic.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '하위 업무 일정 보기', exact: true }).press('Enter');
+    await expect(page.getByRole('region', { name: '하위 업무 일정', exact: true })).toContainText('전체 2개');
+    await expect(row(story).getByText('하위 1단계', { exact: true })).toBeVisible();
+    await expect(row(subtask).getByText('하위 2단계', { exact: true })).toBeVisible();
+  } finally {
+    for (const issue of cleanup) {
+      const removed = await request.delete(`/api/issues/${issue.id}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+    await request.delete(`/api/legacy-import/packages/${pack.id}?expectedVersion=${pack.version}`);
+  }
+});
+
 test('360px에서 기존 Jira 사용자 정의 속성만 검토하고 팀에서 편집한 값을 유지한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

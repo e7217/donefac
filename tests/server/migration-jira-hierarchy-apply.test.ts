@@ -70,12 +70,12 @@ async function workspace(t: TestContext) {
   return { db, request, upload, uploadSource, preview, apply, allIssues };
 }
 
-function refreshConfig(options: MigrationOptions, projectId: string): MigrationConfiguration {
+function refreshConfig(options: MigrationOptions, projectId: string, refreshExisting = true): MigrationConfiguration {
   const target = options.appendTarget;
   assert.equal(target?.projectId, projectId);
   assert.ok(target);
   return { ...options.defaultConfiguration, appendTo: {
-    projectId, refreshExisting: true,
+    projectId, ...(refreshExisting ? { refreshExisting: true as const } : {}),
     statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
     issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
     fields: {},
@@ -196,4 +196,129 @@ test('Jira parent provenance survives adding the REST project ID to a CSV projec
   assert.ok(cross.notices.some(notice => notice.code === 'JIRA_REFRESH_PARENT_UNAVAILABLE'));
   assert.equal(parentReview(cross), undefined);
   assert.equal((await f.allIssues()).find(issue => issue.id === child.id)?.parentId, parent.id);
+});
+
+test('Jira Server REST Epic Link imports the hierarchy and refreshes it without overwriting team moves', async t => {
+  const f = await workspace(t);
+  const epicField = 'customfield_10008';
+  const names = { [epicField]: 'Localized names do not establish field type', customfield_10009: 'Epic Link' };
+  const schema = {
+    [epicField]: { type: 'any', custom: 'com.pyxis.greenhopper.jira:gh-epic-link' },
+    customfield_10009: { type: 'string', custom: 'com.atlassian.jira.plugin.system.customfieldtypes:textfield' },
+  };
+  const epicType = { id: '10000', name: 'Epic', subtask: false };
+  const storyType = { id: '10001', name: 'Story', subtask: false };
+  const subtaskType = { id: '10002', name: 'Sub-task', subtask: true };
+  function issue(number: number, summary: string, updatedDay: number, extra: Record<string, unknown> = {}) {
+    return { id: String(number * 100), key: `ORIGINAL-${number}`, fields: {
+      project: { id: '42', key: 'ORIGINAL', name: 'Jira hierarchy' }, summary, status: { id: '1', name: 'Open' },
+      issuetype: storyType, created: '2025-04-01T00:00:00Z', updated: `2025-04-0${updatedDay}T00:00:00Z`, ...extra,
+    } };
+  }
+  const upload = (name: string, issues: ReturnType<typeof issue>[]) =>
+    f.uploadSource(`${name}.json`, JSON.stringify({ names, schema, issues }));
+  const story = (number: number, summary: string, updatedDay: number, parent: string | null) =>
+    issue(number, summary, updatedDay, { [epicField]: parent });
+  const initial = await upload('epic-hierarchy', [
+    issue(1, 'Old epic', 2, { issuetype: epicType }),
+    issue(2, 'Incoming epic', 2, { issuetype: epicType }),
+    issue(3, 'Team epic', 2, { issuetype: epicType }),
+    story(4, 'Source moved story', 2, 'ORIGINAL-1'),
+    story(5, 'Team moved story', 2, 'ORIGINAL-1'),
+    story(6, 'Unlinked story', 2, 'ORIGINAL-1'),
+    issue(7, 'Real subtask', 2, { issuetype: subtaskType, parent: { id: '400', key: 'ORIGINAL-4' }, [epicField]: 'ORIGINAL-2' }),
+    issue(8, 'Display-name-only field', 2, { customfield_10009: 'ORIGINAL-1' }),
+    { ...issue(9, 'Other source project epic', 2, { issuetype: epicType, project: { id: '99', key: 'OTHER', name: 'Other source project' } }), key: 'OTHER-9' },
+    issue(10, 'Story with a native parent', 2, { parent: { id: '100', key: 'ORIGINAL-1' } }),
+    issue(12, 'Story with a parent to clear', 2, { parent: { id: '100', key: 'ORIGINAL-1' } }),
+  ]);
+  const first = await f.preview({ ...initial.defaultConfiguration, projects: initial.defaultConfiguration.projects.map(mapping => ({
+    ...mapping, key: 'EPICBRIDGE', name: 'Same Teamspace project',
+  })) });
+  assert.equal(first.canApply, true, JSON.stringify(first.notices));
+  const [projectId] = (await f.apply(first)).import.projectIds;
+  function find(issues: Issue[], title: string) {
+    const value = issues.find(item => item.projectId === projectId && item.title === title);
+    assert.ok(value, title);
+    return value;
+  }
+  const original = await f.allIssues();
+  const oldEpic = find(original, 'Old epic'), incomingEpic = find(original, 'Incoming epic'), teamEpic = find(original, 'Team epic');
+  const moved = find(original, 'Source moved story'), conflict = find(original, 'Team moved story'), detached = find(original, 'Unlinked story');
+  const subtask = find(original, 'Real subtask'), nativeParent = find(original, 'Story with a native parent');
+  const nativeClear = find(original, 'Story with a parent to clear');
+  assert.deepEqual([moved.parentId, conflict.parentId, detached.parentId, subtask.parentId,
+    find(original, 'Display-name-only field').parentId, nativeParent.parentId], [oldEpic.id, oldEpic.id, oldEpic.id, moved.id, null, oldEpic.id]);
+  find(original, 'Other source project epic');
+  const locallyMoved = await f.request<Issue>(`/issues/${conflict.id}`, 200, 'PATCH', { expectedVersion: conflict.version, parentId: teamEpic.id });
+
+  const incoming = await upload('epic-hierarchy-delta', [
+    story(4, moved.title, 3, 'ORIGINAL-2'), story(5, conflict.title, 3, 'ORIGINAL-2'), story(6, detached.title, 3, null),
+    story(10, nativeParent.title, 3, null),
+    issue(12, nativeClear.title, 3, { parent: null, [epicField]: null }),
+  ]);
+  const delta = await f.preview(refreshConfig(incoming, projectId));
+  const review = (plan: MigrationPreview, value: Issue) => plan.issueRefresh?.find(item => item.issueId === value.id)
+    ?.fields.find(field => field.field === 'parentId');
+  const label = (value: Issue) => `${value.key} · ${value.title}`;
+  assert.equal(delta.canApply, true, JSON.stringify(delta.notices));
+  assert.deepEqual(review(delta, moved), { field: 'parentId', current: label(oldEpic), incoming: label(incomingEpic), decision: 'apply' });
+  assert.deepEqual(review(delta, locallyMoved), { field: 'parentId', current: label(teamEpic), incoming: label(incomingEpic), decision: 'conflict' });
+  assert.deepEqual(review(delta, detached), { field: 'parentId', current: label(oldEpic), incoming: '최상위 업무', decision: 'apply' });
+  await f.apply(delta);
+  const refreshed = await f.allIssues();
+  assert.equal(find(refreshed, moved.title).parentId, incomingEpic.id);
+  assert.deepEqual(find(refreshed, locallyMoved.title), locallyMoved);
+  assert.equal(find(refreshed, detached.title).parentId, null);
+  assert.deepEqual(find(refreshed, subtask.title), subtask);
+  assert.deepEqual(find(refreshed, nativeParent.title), nativeParent);
+  assert.equal(find(refreshed, nativeClear.title).parentId, null);
+
+  const outside = await upload('epic-hierarchy-outside', [story(4, moved.title, 4, 'OTHER-9')]);
+  const invalid = await f.preview(refreshConfig(outside, projectId));
+  assert.ok(invalid.notices.some(notice => notice.code === 'JIRA_REFRESH_PARENT_UNAVAILABLE' && notice.severity === 'warning'),
+    JSON.stringify(invalid.notices));
+  assert.equal(review(invalid, moved), undefined);
+  assert.deepEqual(await f.allIssues(), refreshed);
+
+  const addedTitle = 'Appended story';
+  const appendOptions = await upload('epic-hierarchy-append', [story(11, addedTitle, 4, 'ORIGINAL-2')]);
+  const appendConfiguration = refreshConfig(appendOptions, projectId, false);
+  assert.ok(!appendOptions.fields.some(field => field.sourceValue === epicField));
+  const append = await f.preview(appendConfiguration);
+  assert.equal(append.canApply, true, JSON.stringify(append.notices));
+  assert.equal(append.counts.issues, 1);
+  await f.apply(append);
+  const added = find(await f.allIssues(), addedTitle);
+  assert.equal(added.parentId, incomingEpic.id);
+
+  const oldClientTitle = 'Appended story from a partial snapshot';
+  const plainNull = await f.preview(refreshConfig(await upload('epic-hierarchy-plain-null', [
+    issue(11, oldClientTitle, 5, { parent: null }),
+  ]), projectId));
+  assert.equal(plainNull.canApply, true, JSON.stringify(plainNull.notices));
+  assert.equal(review(plainNull, added), undefined);
+  await f.apply(plainNull);
+  assert.equal(find(await f.allIssues(), oldClientTitle).parentId, incomingEpic.id);
+
+  const partialTitle = 'Appended story with omitted parent fields';
+  const partial = await f.preview(refreshConfig(await upload('epic-hierarchy-partial', [issue(11, partialTitle, 6)]), projectId));
+  assert.equal(partial.canApply, true, JSON.stringify(partial.notices));
+  assert.equal(review(partial, added), undefined);
+  await f.apply(partial);
+  assert.equal(find(await f.allIssues(), partialTitle).parentId, incomingEpic.id);
+
+  const backup = await f.request<{ schemaVersion: number; sourceRecords: SourceRecordArchive[] }>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.ok(backup.sourceRecords.some(row => row.targetId === added.id && row.record.metadata.jiraEpicParentObserved === true));
+  await f.request('/import', 200, 'POST', { data: backup });
+  const restored = find(await f.allIssues(), partialTitle);
+  assert.equal(restored.id, added.id);
+  assert.equal(restored.parentId, incomingEpic.id);
+
+  const clearRestored = await f.preview(refreshConfig(await upload('epic-hierarchy-clear-restored', [story(11, partialTitle, 7, null)]), projectId));
+  assert.equal(clearRestored.canApply, true, JSON.stringify(clearRestored.notices));
+  assert.deepEqual(review(clearRestored, restored), { field: 'parentId', current: label(incomingEpic), incoming: '최상위 업무', decision: 'apply' });
+  await f.apply(clearRestored);
+  assert.equal(find(await f.allIssues(), partialTitle).parentId, null);
 });

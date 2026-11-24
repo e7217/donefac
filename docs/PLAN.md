@@ -543,6 +543,8 @@ Jira 관리자의 스프린트 테이블과 확인된 업무 필드, Agile REST�
 
 상위 업무 변경은 명시적인 원본 업무 ID·키나 REST의 빈 상위 값을 근거로 비교한다. 검증한 같은 Jira 원본 프로젝트의 이미 이관한 업무와 같은 적용에서 생성할 업무를 상위로 지정할 수 있다. 검토 이후 관련 업무 버전이나 계층이 바뀌면 새 미리보기가 필요하다. 여러 업무를 옮길 때는 최종 계층에 순환이 있는지 확인하고 전체를 함께 적용한다. 형식 100 백업은 마지막으로 반영한 상위 업무의 원본 및 저장값 비교 기준을 보존한다. [Jira REST 상위 업무 필드](https://developer.atlassian.com/server/jira/platform/jira-rest-api-examples/)
 
+Jira REST와 검색 XML에서 Jira Software의 실제 `Epic Link` 필드 유형과 업무 키를 확인하고, 관리자 XML에서는 확인한 `jira_gh_epic_story` 관계의 에픽과 하위 업무 방향을 사용한다. 같은 원본 프로젝트와 대상 프로젝트에서 확인한 에픽을 상위 업무로 이관하면 티켓과 간트에서 에픽·스토리·하위 작업을 따라갈 수 있다. 기존 에픽에 새 업무를 추가할 때는 현재 이관 연결을 대조한다. 원래 상위 작업과 에픽 근거가 충돌하거나 다른 원본 프로젝트를 가리키는 경우는 검토에 표시하고 원본을 보존한다. 후속 REST의 명시적 빈 `Epic Link`는 이전에 이 방식으로 적용한 연결만 해제로 검토한다. [Atlassian Epic Link 정의](https://support.atlassian.com/jira/kb/epic-name-vs-epic-link/) · [Jira 관리자 XML에 대응하는 관계 유형](https://support.atlassian.com/jira/kb/advanced-search-for-has-epic-link-type-fails-in-jira-server/)
+
 Jira·Confluence의 한 필드를 적용하고 다른 필드의 팀 편집을 보존한 뒤에는, 더 새로운 내보내기에서도 미반영 필드를 마지막으로 반영한 값과 비교한다. 현재 값이 다르면 미리보기에 계속 표시하고, 마지막 반영 값으로 돌아온 필드는 새 원본을 적용할 수 있는지 다시 확인한다. 형식 98 자체 백업은 적용한 Jira 기본 필드와 Confluence 본문에 대한 원본 비교 근거를 보존한다.
 
 티켓의 **변경 이력**에서 이관한 Jira 상태 변경의 전후 상태·원본 작성자·시각을 읽는다. 이력은 관리자 XML의 변경 그룹과 REST 변경 기록에서 원래 상태 항목과 업무 연결을 확인해 표시한다. 별도 REST 페이지는 원본 서버와 업무를 함께 확인할 수 있을 때 연결한다. 당시 이름을 확인할 수 없으면 확인된 원본 상태 ID를, 시각을 확정할 수 없으면 원본 값을 표시한다. 보존된 원본 기록에서 상세 내용을 열 수 있으며 Teamspace에서 발생한 변경과 Jira 원본 변경을 각각 확인할 수 있다. 보고서 관측은 Teamspace 이관 시점부터 시작한다. [Jira 상태 변경 원본 구조](https://developer.atlassian.com/server/jira/platform/database-change-history/)

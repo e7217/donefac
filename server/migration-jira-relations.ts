@@ -1,4 +1,5 @@
 import type { IssueRelationType, LegacyRecord } from '../shared/types.js';
+import { JIRA_EPIC_RELATION_STYLE } from './migration-jira-hierarchy.js';
 
 export interface JiraIssueRelationSource {
   sourceAlias: string;
@@ -36,7 +37,7 @@ function searchNativeType(name: string, description: string, inward: boolean): I
 
 export function jiraIssueRelationSource(record: LegacyRecord): JiraIssueRelationSource | null {
   if (record.kind !== 'relation' || record.references.length !== 2 || record.metadata.style === 'jira_subtask' ||
-      record.metadata.jiraRelationConflict === true) return null;
+      record.metadata.style === JIRA_EPIC_RELATION_STYLE || record.metadata.jiraEpicLinkClaims || record.metadata.jiraRelationConflict === true) return null;
   const source = record.references.find(ref => ref.kind === 'issue' && ref.relation === 'source');
   const target = record.references.find(ref => ref.kind === 'issue' && ref.relation === 'target');
   if (!source || !target || !jiraIssueAlias.test(source.sourceId) || !jiraIssueAlias.test(target.sourceId)) return null;

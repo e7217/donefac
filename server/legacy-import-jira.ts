@@ -9,7 +9,7 @@ import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-im
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
-import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey } from './migration-jira-hierarchy.js';
+import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey, JIRA_EPIC_RELATION_STYLE } from './migration-jira-hierarchy.js';
 import { observeJiraIdentityEmail } from './migration-identity-email.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType } from './migration-jira-relations.js';
@@ -34,6 +34,9 @@ const selected=(value:ObjectValue,names:string[]):Record<string,LegacyValue>=>Ob
 function jsonValue(value:unknown,depth=0):LegacyValue{if(depth>30)return'[nested value omitted]';if(value===null||typeof value==='string'||typeof value==='boolean')return value;if(typeof value==='number')return Number.isFinite(value)?value:null;if(Array.isArray(value))return value.map(item=>jsonValue(item,depth+1));return Object.fromEntries(Object.entries(obj(value)).filter(([key])=>!/(?:password|credential|secret|token|privatekey)/i.test(key)).map(([key,value])=>[key,jsonValue(value,depth+1)]));}
 
 type JiraIssueParentEvidence = { id?: string; key?: string };
+const JIRA_EPIC_LINK_TYPE = 'com.pyxis.greenhopper.jira:gh-epic-link';
+const jiraCustomFieldId = /^customfield_[1-9]\d{0,24}$/u;
+type RestEpicField = { id: string; exact: boolean };
 
 function jiraIssueParentIdentity(rawId: unknown, rawKey: unknown): JiraIssueParentEvidence | undefined {
   const id = typeof rawId === 'string' || typeof rawId === 'number' && Number.isSafeInteger(rawId) ? String(rawId) : '';
@@ -223,6 +226,8 @@ class Context{
   readonly fixVersionIds = new Map<LegacyRecord, Set<string>>();
   readonly restIssues = new Map<LegacyRecord, JiraRestIssueHistory>();
   private readonly issueParents = new Map<LegacyRecord, JiraIssueParentEvidence | null | undefined>();
+  private readonly epicParents = new Map<LegacyRecord, { evidence: JiraIssueParentEvidence | null | undefined; path: string; fieldId?: string }>();
+  private readonly epicFieldTypes = new Map<string, Set<string>>();
   private readonly repeatedLinks: { first: LegacyRecord; next: LegacyRecord; path: string }[] = [];
   readonly historyPages: JiraHistoryPage[] = [];
   readonly activityPages = new JiraActivityPages((code, message, recordId, path) => this.warn(code, message, recordId, path));
@@ -237,13 +242,54 @@ class Context{
   observeIssueParent(issue: LegacyRecord, evidence: JiraIssueParentEvidence | null | undefined) {
     this.issueParents.set(issue, this.issueParents.has(issue) ? undefined : evidence);
   }
+  observeEpicField(id: string, type: string, exact: boolean) {
+    const types = this.epicFieldTypes.get(id) ?? new Set<string>();
+    types.add(type);
+    if (!exact) types.add('unverified');
+    this.epicFieldTypes.set(id, types);
+  }
+  observeEpicParent(issue: LegacyRecord, evidence: JiraIssueParentEvidence | null | undefined, path: string, fieldId?: string) {
+    this.epicParents.set(issue, { evidence: this.epicParents.has(issue) ? undefined : evidence, path, fieldId });
+  }
+  private applyEpicParents(issueKeys: ReadonlyMap<string, string>, ambiguousKeys: ReadonlySet<string>) {
+    const candidates = [...this.epicFieldTypes].filter(([, types]) => types.has(JIRA_EPIC_LINK_TYPE));
+    const [field] = candidates;
+    const verifiedFieldId = candidates.length === 1 && field[1].size === 1 ? field[0] : undefined;
+    const definition = verifiedFieldId && this.byId.get(`field:${verifiedFieldId}`);
+    if (definition) definition.metadata.jiraEpicLinkField = true;
+    for (const [row, { evidence, path, fieldId }] of this.epicParents) {
+      const key = evidence?.key;
+      const id = evidence && (evidence.id ?? (key && (issueKeys.get(key) ?? key)));
+      const parent = id ? this.byId.get(`issue:${id}`) : undefined;
+      const invalid = evidence === undefined || fieldId && fieldId !== verifiedFieldId ||
+        this.issueParents.has(row) && this.issueParents.get(row) === undefined ||
+        key && ambiguousKeys.has(key) || id && (id === row.sourceId || key === row.metadata.key);
+      const differentProject = parent && (!row.containerId || row.containerId !== parent.containerId);
+      const conflictingParent = Boolean(row.parentId && id && row.parentId !== id);
+      if (invalid || differentProject || conflictingParent) {
+        row.metadata.jiraEpicParentUnresolved = true;
+        this.warn('JIRA_EPIC_PARENT_UNRESOLVED', 'Jira 에픽 관계의 업무·프로젝트 또는 기존 상위 연결을 대조할 수 없어 에픽 연결을 원본에 보관합니다.', row.id, path);
+        if (!row.parentId) this.issueParents.delete(row);
+        continue;
+      }
+      if (row.parentId && this.issueParents.has(row)) continue;
+      if (id && !row.parentId) {
+        row.parentId = id;
+        row.references.push(...ref('issue', id, 'parent'));
+      }
+      if (evidence === null && this.issueParents.get(row) === null) row.metadata.jiraDirectParentClearObserved = true;
+      row.metadata.jiraEpicParentObserved = true;
+      this.issueParents.set(row, evidence);
+    }
+  }
   private applyIssueParents(issueKeys: ReadonlyMap<string, string>) {
-    if (!this.issueParents.size) return;
+    if (!this.issueParents.size && !this.epicParents.size && !this.epicFieldTypes.size) return;
     const ambiguousKeys = new Set<string>();
     for (const row of this.dataset.records) {
       const key = row.metadata.key;
       if (row.kind === 'issue' && typeof key === 'string' && key && issueKeys.get(key) !== row.sourceId) ambiguousKeys.add(key);
     }
+    this.applyEpicParents(issueKeys, ambiguousKeys);
     for (const [row, evidence] of this.issueParents) {
       if (evidence === null && row.parentId === null) row.metadata.jiraParentSourceId = null;
       if (!evidence) continue;
@@ -554,7 +600,32 @@ function jiraCustomUser(context: Context, value: unknown, fieldType: string): st
   return stableId || legacyId && (legacyProfile || typedUser) ? context.identity(profile) : null;
 }
 
-function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean,dateFields:ProjectedDateField[]=[]):void{
+function restEpicFields(context: Context, root: ObjectValue): RestEpicField[] {
+  const names = obj(root.names);
+  return Object.entries(obj(root.schema)).flatMap(([id, raw]) => {
+    const { custom, customId } = obj(raw);
+    if (!jiraCustomFieldId.test(id) || typeof custom !== 'string' || !custom) return [];
+    const exact = customId === undefined || (typeof customId === 'string' ||
+      typeof customId === 'number' && Number.isSafeInteger(customId)) && String(customId) === id.slice('customfield_'.length);
+    context.observeEpicField(id, custom, exact);
+    if (custom !== JIRA_EPIC_LINK_TYPE) return [];
+    context.field(id, str(names[id]) || id, custom);
+    return [{ id, exact }];
+  });
+}
+
+function restEpicParent(context: Context, issue: LegacyRecord, fields: ObjectValue, typedFields: readonly RestEpicField[], path: string) {
+  const observed = typedFields.filter(({ id }) => Object.hasOwn(fields, id));
+  if (!observed.length) return;
+  const [{ id, exact }] = observed;
+  const value = fields[id];
+  const issueType = obj(fields.issuetype);
+  if (issueType.subtask === true && value === null) return;
+  context.observeEpicParent(issue, typedFields.length !== 1 || !exact || issueType.subtask === true ? undefined :
+    value === null ? null : jiraIssueParentIdentity(undefined, value), path, id);
+}
+
+function issueJson(context:Context,input:ObjectValue,projectId:string,path:string,index:number,importers:boolean,dateFields:ProjectedDateField[]=[],epicFields:RestEpicField[]=[]):void{
   const fields=importers?input:obj(input.fields),id=str(input.id||input.externalId||input.key)||`json:${path}:${index}`,key=str(input.key),project=obj(fields.project),containerId=str(project.id||project.key)||projectId;
   if(containerId)context.ensure('project',containerId,{title:str(project.name)||containerId,metadata:{key:str(project.key)||projectId}});
   const authorId=context.identity(fields.creator||fields.reporter),assignee=context.identity(fields.assignee),parent=obj(fields.parent),parentId=str(parent.id||parent.key)||str(fields.parent),description=fields.description;
@@ -566,6 +637,7 @@ function issueJson(context:Context,input:ObjectValue,projectId:string,path:strin
   if (!importers && Object.hasOwn(fields, 'parent')) {
     context.observeIssueParent(item, fields.parent === null ? null : jiraIssueParentIdentity(parent.id, parent.key));
   }
+  if (!importers) restEpicParent(context, item, fields, epicFields, path);
   const readActivity = (kind: JiraActivityKind, envelope: unknown, rows: unknown[]) => {
     for (const [position, raw] of rows.entries()) jsonActivity(context, kind, raw, id, position);
     if (!importers) context.activityPages.track(item, input.self, kind, envelope, rows.map(raw => str(obj(raw).id) || null), path);
@@ -697,8 +769,9 @@ function parseJson(context:Context,path:string,source:string):void{
     context.warn('JSON_REST_DIALECT','Jira REST 검색 응답 JSON을 분석했습니다. 별도 페이지·첨부 바이트는 자동 조회하지 않습니다.',null,path,'info');
     if(Number(root.startAt)>0||Number(root.total)>root.issues.length)context.warn('ISSUES_PARTIAL','검색 응답의 일부 페이지입니다. 전체 이슈 개수와 파일 묶음을 대조해야 합니다.',null,path);
     const dateFields=declareRestFields(context,root,path);
-    for(let index=0;index<root.issues.length;index++)issueJson(context,obj(root.issues[index]),'',path,index,false,dateFields);
-  }else if(root.fields&&(root.id||root.key)){context.warn('JSON_REST_DIALECT','단일 Jira REST 이슈 JSON을 분석했습니다.',null,path,'info');issueJson(context,root,'',path,0,false,declareRestFields(context,root,path));}
+    const epicFields = restEpicFields(context, root);
+    for(let index=0;index<root.issues.length;index++)issueJson(context,obj(root.issues[index]),'',path,index,false,dateFields,epicFields);
+  }else if(root.fields&&(root.id||root.key)){context.warn('JSON_REST_DIALECT','단일 Jira REST 이슈 JSON을 분석했습니다.',null,path,'info');issueJson(context,root,'',path,0,false,declareRestFields(context,root,path),restEpicFields(context,root));}
   else {
     const page = standaloneHistoryPage(root, path);
     if (page) context.historyPages.push(page);
@@ -762,6 +835,14 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
       context.field(fieldId,name || fieldId,custom.attributes.key || 'search-unspecified');
       fields[fieldId]=values;
       item.references.push(...ref('field',fieldId,'customField'));
+      if (jiraCustomFieldId.test(fieldId) && custom.attributes.key) context.observeEpicField(fieldId, custom.attributes.key, true);
+      if (custom.attributes.key === JIRA_EPIC_LINK_TYPE) {
+        const containers = children(custom, 'customfieldvalues');
+        const [container] = containers;
+        const exact = jiraCustomFieldId.test(fieldId) && containers.length === 1 && !container.text.trim() &&
+          container.children.length === 1 && container.children[0].name === 'customfieldvalue' && !container.children[0].children.length;
+        context.observeEpicParent(item, exact ? jiraIssueParentIdentity(undefined, values[0]) : undefined, path, fieldId);
+      }
       const role = jiraScheduleDateRole(name);
       if (!role || !custom.attributes.id) continue;
       const proof = jiraDatePickerProof(custom.attributes.key || '');
@@ -795,6 +876,9 @@ function adminXmlDateValue(node: LegacyXmlNode, value: ObjectValue): unknown {
 function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   context.dataset.source.declaredVersion=root.attributes.version||null;
   const rows=root.children,values=rows.map(node=>({name:node.name,value:entityValues(node),node}));
+  const defaultNonEpicTypes = new Set(['bug', 'improvement', 'new feature', 'story', 'task']);
+  const nonEpicIssueTypes = new Set<string>(), subtaskIssueTypes = new Set<string>();
+  const exactIssueRows = new Map<LegacyRecord, string | null | undefined>();
   const appUsers = new Map<string, string>();
   const ambiguousUsernames = new Set<string>();
   for (const { name, value } of values) {
@@ -842,6 +926,14 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       context.field(fieldId, name, 'jira-builtin');
       const option = context.ensure('option', `${fieldId}:${id}`, { title, containerId: fieldId,
         metadata: selected(v, ['id','description','sequence','style']), references: ref('field', fieldId, 'field') });
+      if (name === 'IssueType' && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id) {
+        const labels = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
+        const names = new Set(labels.filter((label): label is string => typeof label === 'string' && !!label.trim()).map(label => label.trim().toLowerCase()));
+        const [label] = !labels.includes(null) && names.size === 1 ? names : [];
+        const subtask = adminXmlScalar(node, 'style') === 'jira_subtask' || label === 'sub-task' || label === 'subtask';
+        if (subtask) subtaskIssueTypes.add(id);
+        if (subtask || defaultNonEpicTypes.has(label)) nonEpicIssueTypes.add(id);
+      }
       if (name === 'Priority' && option) {
         const labels = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
         const names = new Set(labels.filter((label): label is string => typeof label === 'string' && !!label.trim()).map(label => label.trim()));
@@ -862,6 +954,9 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     const item = context.put('issue',id,{title:str(v.summary),containerId:projectId||null,parentId:parent||null,authorId:creator,createdAt:context.date(v.created,`issue:${id}`),updatedAt:context.date(v.updated,`issue:${id}`),text:str(v.description),textFormat:'jira-wiki',metadata:{key,fields,jiraSnapshotFields},references:[...ref('project',projectId,'project'),...ref('identity',creator,'creator'),...ref('identity',resolveActor(v.assignee),'assignee'),...ref('identity',reporter,'reporter'),...ref('issue',parent,'parent'),...['issuetype','status','priority','resolution'].flatMap(name=>ref('option',v[name]?`builtin:${name}:${str(v[name])}`:'',name))]});
     if (adminXmlScalar(node, 'id') !== id || adminXmlScalar(node, 'project') !== projectId) {
       item.metadata.jiraComponentProjectAmbiguous = true;
+    } else if (isJiraHierarchyIssueId(id) && isJiraHierarchyIssueId(projectId)) {
+      const issueType = adminXmlScalar(node, 'issuetype');
+      exactIssueRows.set(item, issueType && !isJiraHierarchyIssueId(issueType) ? null : issueType);
     }
     if (adminXmlScalar(node, 'priority') === null) item.metadata.jiraPriorityAmbiguous = true;
     const reporterElements = children(node, 'reporter');
@@ -873,13 +968,26 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (directParent !== undefined) rawIssueParents.set(item, directParent);
   }
   const linkTypes = new Map<string, ObjectValue>(), verifiedSubtaskTypes = new Set<string>();
+  const epicTypeClaims = new Set<string>(), verifiedEpicTypes = new Set<string>(), seenLinkTypeIds = new Set<string>();
   for (const { name, value, node } of values) if (name === 'IssueLinkType') {
     const id = str(value.id);
     if (!linkTypes.has(id) && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id && adminXmlScalar(node, 'style') === 'jira_subtask') {
       verifiedSubtaskTypes.add(id);
     } else verifiedSubtaskTypes.delete(id);
     linkTypes.set(id, value);
+    const claimsEpic = adminXmlScalarCandidates(node, 'style').includes(JIRA_EPIC_RELATION_STYLE);
+    for (const candidate of new Set(adminXmlScalarCandidates(node, 'id'))) {
+      if (claimsEpic) epicTypeClaims.add(candidate);
+      if (!isJiraHierarchyIssueId(candidate)) continue;
+      if (seenLinkTypeIds.has(candidate)) verifiedEpicTypes.delete(candidate);
+      else if (claimsEpic && adminXmlScalar(node, 'id') === candidate && adminXmlScalar(node, 'style') === JIRA_EPIC_RELATION_STYLE) {
+        verifiedEpicTypes.add(candidate);
+      }
+      seenLinkTypeIds.add(candidate);
+    }
   }
+  // Jira can retain multiple Epic link styles after a failed configuration change. A style with competing IDs cannot prove membership.
+  if ([...epicTypeClaims].filter(isJiraHierarchyIssueId).length > 1) verifiedEpicTypes.clear();
   const groups = new Map<string, ObjectValue>();
   const historyItems = new Map<string, LegacyValue[]>();
   for (const { name, value } of values) {
@@ -914,8 +1022,8 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     }
     else if (name === 'IssueLink') {
       handled.add(name);
-      const typeId = str(v.linktype), type = linkTypes.get(typeId), sourceId = str(v.source), targetId = str(v.destination);
-      context.put('relation', v.id, { title: str(type?.linkname || type?.name) || '업무 연결', containerId: sourceId || null,
+      const linkId = str(v.id), typeId = str(v.linktype), type = linkTypes.get(typeId), sourceId = str(v.source), targetId = str(v.destination);
+      const relation = context.put('relation', linkId, { title: str(type?.linkname || type?.name) || '업무 연결', containerId: sourceId || null,
         metadata: { typeId, ...selected(type || {}, ['inward', 'outward', 'style']) },
         references: [...ref('issue', sourceId, 'source'), ...ref('issue', targetId, 'target')] });
       if (str(type?.style) === 'jira_subtask') {
@@ -929,6 +1037,29 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
           target.parentId = sourceId;
           target.references.push(...ref('issue', sourceId, 'parent'));
         }
+      }
+      const typeCandidates = adminXmlScalarCandidates(node, 'linktype');
+      if (typeCandidates.some(candidate => epicTypeClaims.has(candidate))) {
+        const destinationCandidates = adminXmlScalarCandidates(node, 'destination');
+        const source = context.byId.get(`issue:${sourceId}`);
+        const sourceType = source && exactIssueRows.get(source);
+        const exact = verifiedEpicTypes.has(typeId) && adminXmlScalar(node, 'linktype') === typeId &&
+          isJiraHierarchyIssueId(linkId) && adminXmlScalar(node, 'id') === linkId &&
+          isJiraHierarchyIssueId(sourceId) && adminXmlScalar(node, 'source') === sourceId && sourceId !== targetId &&
+          isJiraHierarchyIssueId(targetId) && adminXmlScalar(node, 'destination') === targetId &&
+          (!source || exactIssueRows.has(source)) && sourceType !== null && (!sourceType || !nonEpicIssueTypes.has(sourceType));
+        if (!exact) relation.metadata.jiraEpicLinkClaims = { ids: adminXmlScalarCandidates(node, 'id'), typeIds: typeCandidates,
+          sourceIds: adminXmlScalarCandidates(node, 'source'), destinationIds: destinationCandidates };
+        let foundDestination = false;
+        for (const candidate of new Set(destinationCandidates)) {
+          const target = context.byId.get(`issue:${candidate}`);
+          if (!target) continue;
+          foundDestination = true;
+          const targetType = exactIssueRows.get(target);
+          const exactTarget = exactIssueRows.has(target) && targetType !== null && (!targetType || !subtaskIssueTypes.has(targetType));
+          context.observeEpicParent(target, exact && exactTarget ? jiraIssueParentIdentity(sourceId, undefined) : undefined, path);
+        }
+        if (!foundDestination) context.warn('JIRA_EPIC_LINK_DESTINATION_UNVERIFIED', 'Epic 연결의 하위 업무를 현재 원본에서 확인할 수 없습니다.', relation.id, path);
       }
     }
     else if(name==='RemoteIssueLink'){handled.add(name);const url=context.url(v.url),author=resolveActor(v.author);const references=ref('issue',v.issueid||v.issue,'source');if(url){const pageId=new URL(url).searchParams.get('pageId');if(pageId)references.push(...ref('page',pageId,'externalDocument'));}context.put('relation',`remote:${str(v.id)}`,{title:str(v.title)||'외부 연결',authorId:author,containerId:str(v.issueid||v.issue)||null,metadata:{url,relationship:str(v.relationship),globalId:str(v.globalid)},references});}

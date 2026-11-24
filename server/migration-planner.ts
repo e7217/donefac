@@ -128,7 +128,7 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
         }
         containerRows.set(id, count);
       }
-      if (customField(row)) {
+      if (customField(row) && !(pkg.dataset.source.product === 'jira' && row.metadata.jiraEpicLinkField === true)) {
         const projectedDate = projectedSources.get(row.sourceId);
         const jiraComponents = pkg.dataset.source.product === 'jira' && row.sourceId === JIRA_COMPONENTS_FIELD_ID;
         fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
@@ -436,7 +436,11 @@ function jiraLabelValues(raw: unknown): string[] | null {
   return [...new Set(labels.filter(label => label.length > 0))];
 }
 
+const jiraEpicParentHash = hash('jira-source:parentId', 'epic-link-source');
+
 export function jiraSourceFieldHashes(field: JiraMigrationIssueField, row: LegacyRecord): [string] | [string, string] {
+  // Epic membership has a separate source from the standard parent. Its applied value is tracked by the canonical field digest.
+  if (field === 'parentId' && row.metadata.jiraEpicParentObserved === true) return [jiraEpicParentHash];
   const digest = (value: unknown) => hash(`jira-source:${field}`, JSON.stringify(value) ?? 'undefined');
   if (field === 'status' || field === 'type') {
     const { value, label } = sourceBuiltin(row, field === 'status' ? 'status' : 'issuetype');
@@ -732,6 +736,10 @@ class Planner{
     const projected = previous.configuration.appendTo?.refreshExisting && previous.archive.jiraIssueFieldHashes
       ? jiraFieldDigests(this.jiraRefreshValues(entry, issueId, previous)) : applied;
     const result: JiraMigrationIssueSourceFieldHashes = {};
+    if (previous.archive.record.metadata.jiraEpicParentObserved === true && applied.parentId !== undefined &&
+        applied.parentId !== jiraFieldDigest('parentId', null) && jiraParentEvidence(previous.archive.record)) {
+      result.parentId = [jiraEpicParentHash];
+    }
     for (const field of JIRA_MIGRATION_ISSUE_FIELDS) {
       // An initial raw parent may have been outside the import, leaving a canonical root.
       if (field === 'parentId') continue;
@@ -1026,6 +1034,10 @@ class Planner{
     }
     if (targets.size === 1) return [...targets][0];
   }
+  private jiraHierarchySourceErrors(): Set<string> {
+    return new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
+      .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
+  }
   private createJiraRefreshes(): void {
     const mapping = this.configuration.appendTo;
     if ((!mapping?.refreshExisting && !mapping?.refreshCustomFields) || !this.input.append) return;
@@ -1033,8 +1045,7 @@ class Planner{
     const definitions = new Map(append.schema.fields.map(field => [field.id, field]));
     const candidates = new Map(append.refreshIssues?.map(candidate => [candidate.issue.id, candidate]));
     const hierarchyAliases = new Map(append.hierarchyIssueAliases?.map(({ alias, issueId }) => [alias, issueId]));
-    const sourceErrors = new Set(this.input.packages.flatMap(pkg => pkg.dataset.diagnostics
-      .filter(item => item.recordId && item.severity === 'error').map(item => `${pkg.summary.id}/${item.recordId}`)));
+    const sourceErrors = this.jiraHierarchySourceErrors();
     const sourceDateWarnings = new Map<string, string[]>();
     for (const pkg of this.input.packages) for (const diagnostic of pkg.dataset.diagnostics) {
       if (diagnostic.recordId && diagnostic.code === 'JIRA_PROJECTED_DATE_VALUE_AMBIGUOUS') {
@@ -1089,8 +1100,14 @@ class Planner{
       const hashes = reviewStandard ? { ...this.originalJiraIssueDigests(previous) } : {};
       const sourceHashes = reviewStandard ? this.originalJiraSourceFieldHashes(entry, issue.id, previous, hashes) : {};
       if (reviewStandard) {
+        if (entry.row.metadata.jiraEpicParentUnresolved === true) {
+          this.notice('JIRA_REFRESH_EPIC_PARENT_UNRESOLVED', '새 원본의 에픽 연결을 확인할 수 없어 해당 연결은 원본에 보관합니다.', 'warning', entry, true);
+        }
         const evidence = jiraParentEvidence(entry.row);
-        if (evidence === null) values.parentId = null;
+        const epic = entry.row.metadata.jiraEpicParentObserved === true;
+        const previousEpic = sourceHashes.parentId?.[0] === jiraEpicParentHash;
+        // A blank value can clear only the hierarchy last applied from that source.
+        if (evidence === null && (epic === previousEpic || entry.row.metadata.jiraDirectParentClearObserved === true)) values.parentId = null;
         else if (evidence) {
           const parent = this.jiraRefreshParent(entry, evidence, hierarchyAliases, sourceErrors);
           if (parent) values.parentId = parent;
@@ -1109,7 +1126,7 @@ class Planner{
         const currentHash = jiraFieldDigest(field, current, issue.descriptionFormat);
         const incomingSourceHashes = jiraSourceFieldHashes(field, entry.row);
         const reporterWithoutBaseline = field === 'reporterId' && hashes.reporterId === undefined;
-        if (sameJiraSourceField(incomingSourceHashes, sourceHashes[field])) {
+        if (incomingSourceHashes[0] !== jiraEpicParentHash && sameJiraSourceField(incomingSourceHashes, sourceHashes[field])) {
           if (incomingSourceHashes.length === 2) sourceHashes[field] = incomingSourceHashes;
           canCheckpoint = true;
           continue;
@@ -3381,6 +3398,28 @@ class Planner{
     const binding = parent && this.bindings.get(parent.key);
     return binding ?? (entry.row.kind === 'issue' && (!parent || !this.excluded.has(parent.key)) ? this.originalIssue(parentId) : undefined);
   }
+  private epicParentBinding(entry: Entry, projectId: string, archivedAliases: ReadonlyMap<string, string>,
+    sourceErrors: ReadonlySet<string>): Binding | undefined {
+    const aliases = jiraParentEvidence(entry.row);
+    if (!aliases || sourceErrors.has(entry.key)) return;
+    if (this.input.append) {
+      const id = this.jiraRefreshParent(entry, aliases, archivedAliases, sourceErrors);
+      if (id) return { type: 'issue', id, projectId };
+      return;
+    }
+    const targets = new Map<string, Binding>();
+    for (const alias of aliases) {
+      const matches = this.referenceIndex.get(JSON.stringify(['issue', 'id', alias])) ?? [];
+      for (const candidate of matches) {
+        if (candidate.pkg.dataset.source.instanceKey !== entry.pkg.dataset.source.instanceKey) continue;
+        const binding = this.bindings.get(candidate.key);
+        if (candidate.container !== entry.container || this.restricted(candidate) || sourceErrors.has(candidate.key) ||
+            !binding || binding.type !== 'issue' || binding.projectId !== projectId) return;
+        targets.set(binding.id, binding);
+      }
+    }
+    if (targets.size === 1) return targets.values().next().value;
+  }
   convertDocuments():void{
     for (const entry of this.entries) {
       if (this.excluded.has(entry.key)) continue;
@@ -3403,14 +3442,20 @@ class Planner{
         }
       }
     }
+    const archivedHierarchy = new Map(this.input.append?.hierarchyIssueAliases?.map(({ alias, issueId }) => [alias, issueId]));
+    const hierarchyErrors = this.jiraHierarchySourceErrors();
     for (const entry of this.entries) {
       if (this.skip(entry) || !['issue', 'page'].includes(entry.row.kind)) continue;
       const binding = this.bindings.get(entry.key);
       const { parentId } = entry.row;
       if (!binding || !parentId) continue;
-      const parent = this.parentBinding(entry, parentId);
+      const epic = binding.type === 'issue' && entry.row.metadata.jiraEpicParentObserved === true;
+      const parent = epic && binding.projectId ? this.epicParentBinding(entry, binding.projectId, archivedHierarchy, hierarchyErrors)
+        : this.parentBinding(entry, parentId);
       if (!parent || parent.type !== binding.type) {
-        this.notice('PARENT_NOT_IMPORTED', '원본 상위 항목이 적용 대상에 없어 현재 항목은 최상위로 배치합니다. 원래 계층은 보관합니다.', 'warning', entry, true);
+        this.notice(epic ? 'JIRA_EPIC_PARENT_UNAVAILABLE' : 'PARENT_NOT_IMPORTED', epic
+          ? '같은 Jira 프로젝트에서 에픽을 확인할 수 없어 업무를 최상위로 배치합니다. 원래 에픽 연결은 보관합니다.'
+          : '원본 상위 항목이 적용 대상에 없어 현재 항목은 최상위로 배치합니다. 원래 계층은 보관합니다.', 'warning', entry, true);
         continue;
       }
       if (parent.projectId !== binding.projectId) {

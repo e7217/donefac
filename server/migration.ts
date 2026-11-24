@@ -255,7 +255,9 @@ export class MigrationService {
     const cyclePlanningToken = createHash('sha256').update(JSON.stringify(cyclePlanningItems)).digest('hex');
     const digest = createHash('sha256').update(JSON.stringify([instanceKey, sourceProjectId, project, workflow, schema, sequence.value, knownIssues]));
     if (movedOutIssueAliases.length) digest.update('\njira-moved-issues\n').update(JSON.stringify(movedOutIssueAliases));
-    const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields
+    const hasEpicLinks = packages.some(({ dataset }) => dataset.records.some(row => row.kind === 'issue' && row.parentId &&
+      row.metadata.jiraEpicParentObserved === true));
+    const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields || hasEpicLinks
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, destination, digest)
       : undefined;
     const history = mapping.refreshHistory ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
@@ -433,6 +435,7 @@ export class MigrationService {
     Required<Pick<MigrationAppendContext, 'refreshIssues' | 'hierarchyIssues' | 'hierarchyIssueAliases'>> {
     const { project: { id: projectId }, instanceKey } = destination;
     const refreshCustomFields = configuration.appendTo?.refreshCustomFields === true;
+    const refreshExisting = configuration.appendTo?.refreshExisting === true;
     const live = new Map(knownIssues.filter(issue => issue.projectId === projectId).map(issue => [issue.alias, issue.issueId]));
     const excluded = new Set(configuration.excludedRecords);
     const selected = new Set<string>();
@@ -444,9 +447,14 @@ export class MigrationService {
       if (row.kind !== 'issue' || excluded.has(`${summary.id}/${row.id}`)) continue;
       const byId = live.get(row.sourceId);
       const byKey = typeof row.metadata.key === 'string' ? live.get(row.metadata.key) : undefined;
-      if (byId) selected.add(byId);
-      if (byKey) selected.add(byKey);
-      if (!configuration.appendTo?.refreshExisting) continue;
+      if (refreshExisting || refreshCustomFields) {
+        if (byId) selected.add(byId);
+        if (byKey) selected.add(byKey);
+      }
+      if (!byId && !byKey && row.metadata.jiraEpicParentObserved === true) {
+        for (const alias of jiraParentEvidence(row) ?? []) parentAliases.add(alias);
+      }
+      if (!refreshExisting) continue;
       if (byId || byKey) {
         if (byId && typeof row.metadata.key === 'string') stagedAliases.set(row.metadata.key, byId);
         if (byKey) stagedAliases.set(row.sourceId, byKey);
@@ -476,7 +484,7 @@ export class MigrationService {
     const originalParent = this.store.db.prepare(`SELECT DISTINCT target_id AS id FROM source_records
       WHERE import_id=? AND product='jira' AND source_instance=? AND kind='issue' AND source_id=? AND target_type='issue'
         AND json_extract(json,'$.packageSha256')=? AND json_extract(json,'$.targetProjectId')=? AND json_extract(json,'$.record.containerId')=? LIMIT 2`);
-    const sourceProjects = hierarchyAnchors.size ? this.jiraHierarchySourceProjects(packages, destination) : new Set<string>();
+    const sourceProjects = hierarchyAnchors.size || parentAliases.size ? this.jiraHierarchySourceProjects(packages, destination) : new Set<string>();
     const sameOrigin = (origin: { projectId: string; sourceProjectId: string }) => origin.projectId === projectId && sourceProjects.has(origin.sourceProjectId);
     const originalArchives = Map.groupBy(this.sources.jiraIssueOrigins(instanceKey, [...hierarchyAnchors], 'issue').filter(sameOrigin), origin => origin.issueId);
     const initialParent = (id: string): string | null | undefined => {
