@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type Locator } from '@playwright/test';
-import type { Dependency, Issue, Project, SavedView, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIResponse, type Locator, type Response } from '@playwright/test';
+import type { AutomaticSchedulePreview, Dependency, Issue, IssueRelation, Project, SavedView,
+  SchedulePasteApplyResult, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 async function expectUsableFocus(field: Locator) {
   await expect(field).toBeFocused();
@@ -169,5 +170,141 @@ test('360px 간트에서 공유 보기에 가려진 날짜를 찾아 일정 충�
     if (baselineCalendar && changedCalendar) {
       await request.patch(calendarPath, { data: { ...baselineCalendar, expectedVersion: changedCalendar.version } });
     }
+  }
+});
+
+test('360px 팀 간트에서 가려진 프로젝트 간 차단의 날짜 충돌을 검토하고 적용 후 되돌린다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const suffix = randomUUID().slice(0, 8).toUpperCase();
+  const prefix = `프로젝트 간 날짜 충돌 ${suffix}`;
+  const predecessorStart = '2026-12-09';
+  const predecessorEnd = '2026-12-11';
+  const holiday = '2026-12-14';
+  const requiredStart = '2026-12-15';
+  const requiredEnd = '2026-12-16';
+  const storedStart = '2026-12-10';
+  const storedEnd = '2026-12-11';
+  const dueDate = '2026-12-18';
+  async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
+    expect(response.status(), await response.text()).toBe(status);
+    return await response.json() as T;
+  }
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { users: [actor] } = await workspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const createProject = async (key: string, name: string) => json<Project>(await request.post('/api/projects', {
+    headers, data: { key: `${key}${suffix}`, name: `${prefix} ${name}` },
+  }), 201);
+  const [sending, receiving, other] = [
+    await createProject('GS', '선행 프로젝트'), await createProject('GR', '후행 프로젝트'), await createProject('GO', '다른 범위'),
+  ];
+  const calendarPath = `/api/projects/${receiving.id}/calendar`;
+  const baseCalendar = await json<WorkCalendar>(await request.get(calendarPath));
+  let calendar: WorkCalendar | undefined;
+  const issues: Issue[] = [];
+  async function createIssue(project: Project, title: string, dates: Partial<Pick<Issue, 'startDate' | 'endDate' | 'dueDate' | 'status'>>) {
+    const issue = await json<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId: project.id, title: `${prefix} ${title}`, ...dates },
+    }), 201);
+    issues.push(issue);
+    return issue;
+  }
+  const block = async (source: Issue, target: Issue) => json<IssueRelation>(await request.post(`/api/issues/${source.id}/relations`, {
+    headers, data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' },
+  }), 201);
+  const nextPost = (path: string) => page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+  try {
+    calendar = await json<WorkCalendar>(await request.patch(calendarPath, { headers, data: {
+      ...baseCalendar, expectedVersion: baseCalendar.version, workingWeekdays: [1, 2, 3, 4, 5],
+      exceptions: [{ date: holiday, isWorking: false, label: '후행 프로젝트 휴무' }],
+    } }));
+    const source = await createIssue(sending, '가려진 선행 업무', { startDate: predecessorStart, endDate: predecessorEnd });
+    const target = await createIssue(receiving, '시작이 빠른 후행 업무', { startDate: storedStart, endDate: storedEnd, dueDate });
+    const missing = await createIssue(receiving, '후행 시작일 미정', { startDate: null, endDate: dueDate });
+    const completed = await createIssue(sending, '완료된 선행 업무', { startDate: predecessorStart, endDate: predecessorEnd, status: 'done' });
+    const outside = await createIssue(other, '현재 범위 밖 후행 업무', { startDate: storedStart, endDate: storedEnd });
+    const relation = await block(source, target), missingRelation = await block(source, missing);
+    const ignored = [await block(completed, target), await block(source, outside)];
+    const route = `#/${receiving.id}/gantt?${new URLSearchParams({ scope: 'team', ganttProject: receiving.id, ganttQ: prefix })}`;
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/${route}`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const row = (issue: Issue) => chart.locator(`[data-issue-id="${issue.id}"]`);
+    const toggle = page.getByRole('button', { name: '일정 충돌', exact: true });
+    const panel = page.getByRole('region', { name: '일정 충돌', exact: true });
+    const list = panel.getByRole('list', { name: '일정 점검 항목', exact: true });
+    const finding = (relation: IssueRelation) => list.locator(`[data-team-blocker-id="${relation.id}"]`);
+    const summary = panel.getByLabel('일정 점검 요약', { exact: true });
+    const openPanel = async () => {
+      if (!await panel.isVisible()) await toggle.click();
+      await expect(panel).toBeVisible();
+    };
+    async function expectCounts(count: number) {
+      await expect(summary).toContainText(new RegExp(`충돌\\s*${count}건`));
+      await expect(summary).toContainText(/날짜 미정\s*1건/);
+    }
+    const conflict = finding(relation), missingDates = finding(missingRelation);
+    const review = conflict.getByRole('button', { name: '프로젝트 간 일정 검토', exact: true });
+    await expect(row(source)).toHaveCount(0);
+    await expect(row(target)).toBeVisible();
+    await openPanel();
+    await expectCounts(1);
+    await expect(conflict).toContainText(source.title);
+    await expect(conflict).toContainText(target.title);
+    await expect(conflict.getByText('프로젝트 간 차단 · Teamspace', { exact: true })).toBeVisible();
+    for (const label of ['선행 종료일', '현재 후행 시작일', '후행 시작일 가능일']) {
+      await expect(conflict.getByText(label, { exact: true })).toBeVisible();
+    }
+    await expect(conflict.locator('time')).toHaveText([predecessorEnd, storedStart, requiredStart]);
+    await expect(missingDates.getByText('날짜 미정', { exact: true })).toBeVisible();
+    await expect(missingDates.getByText('미정', { exact: true })).toBeVisible();
+    await expect(missingDates.locator('time')).toHaveText([predecessorEnd, requiredStart]);
+    for (const unrelated of ignored) await expect(finding(unrelated)).toHaveCount(0);
+
+    const started = nextPost('/api/schedule/team-follow-up-preview');
+    await review.click();
+    const response = await started;
+    expect(response.request().postDataJSON()).toEqual({ relationId: relation.id, expectedVersion: relation.version });
+    const preview = await json<AutomaticSchedulePreview>(response);
+    expect(preview.blocking).toEqual([]);
+    expect(preview.calendarVersions?.[receiving.id]).toBe(calendar.version);
+    expect(preview.changes.map(item => [item.id, item.toStart, item.toEnd])).toEqual([[target.id, requiredStart, requiredEnd]]);
+    const reviewDialog = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    await expect(reviewDialog.getByRole('table', { name: '검토할 업무 일정', exact: true })).toContainText(requiredStart);
+    const applying = nextPost('/api/schedule/team-follow-up-apply');
+    await reviewDialog.getByRole('button', { name: '함께 적용', exact: true }).click();
+    const applied = await applying;
+    expect(applied.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    const receipt = await json<SchedulePasteApplyResult>(applied);
+    expect(receipt.updated).toMatchObject([{ id: target.id, startDate: requiredStart, endDate: requiredEnd, dueDate }]);
+    await expect(reviewDialog).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === route);
+    await expect(conflict).toHaveCount(0);
+    await expectCounts(0);
+    await expect(missingDates).toBeVisible();
+    const appliedWorkspace = await workspace();
+    expect(appliedWorkspace.issues.find(issue => issue.id === source.id)).toEqual(source);
+    expect(appliedWorkspace.issues.find(issue => issue.id === missing.id)).toEqual(missing);
+
+    const undoing = nextPost('/api/schedule/undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: receipt.undoId });
+    await json(undone);
+    await openPanel();
+    await expectCounts(1);
+    await expect(conflict.locator('time')).toHaveText([predecessorEnd, storedStart, requiredStart]);
+    expect((await workspace()).issues.find(issue => issue.id === target.id)).toMatchObject({ startDate: storedStart, endDate: storedEnd, dueDate });
+  } finally {
+    for (const issue of issues.reverse()) {
+      const removed = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`, { headers });
+      }
+    }
+    if (calendar) await request.patch(calendarPath, { headers, data: { ...baseCalendar, expectedVersion: calendar.version } });
   }
 });

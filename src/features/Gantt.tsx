@@ -6,7 +6,7 @@ import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BU
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
-import { checkDependencySchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
+import { checkDependencySchedule, checkTeamBlockerSchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, SCHEDULE_DATE_LABELS, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { renderGanttExport } from '../../shared/gantt-export';
 import { buildGanttExportReport } from '../../shared/gantt-export-model';
@@ -50,7 +50,7 @@ import { TeamWorkload } from './TeamWorkload';
 import { TimeReservations } from './TimeReservations';
 import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityEditor';
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill, type RelatedIssueDirection } from './GanttDependencyModal';
-import { GanttDependencyFindings, type GanttDependencyFinding } from './GanttDependencyFindings';
+import { GanttDependencyFindings, type GanttDependencyFinding, type GanttTeamBlockerFinding } from './GanttDependencyFindings';
 import { GanttDeadlines } from './GanttDeadlines';
 import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from './gantt-deadline';
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
@@ -162,7 +162,7 @@ type DateRangePick = {
 };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
-type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement } | { kind: 'preview' } |
+type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement; fallback: HTMLButtonElement | null } | { kind: 'preview' } |
   (Extract<CascadeOrigin, { kind: 'inline' }> & { source: Issue });
 type TeamFollowUpReview = TeamFollowUpSelection & { origin: TeamFollowUpOrigin };
 type TeamFollowUpHandoff = {
@@ -747,12 +747,13 @@ function ProjectGantt(props: GanttProps) {
       target?.focus({ preventScroll: true });
     });
   }
-  function reviewTeamBlockerSchedules(source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement) {
+  function reviewTeamBlockerSchedules(source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement,
+    fallback = teamBlockersTrigger.current) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen || draftsRef.current.size) {
       notify('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', 'error');
       return;
     }
-    if (choices.length) startTeamFollowUp({ source, choices, origin: { kind: 'blockers', opener } });
+    if (choices.length) startTeamFollowUp({ source, choices, origin: { kind: 'blockers', opener, fallback } });
   }
   function reviewTeamSuccessors(source: TeamFollowUpHandoff['source'], initialChange: ScheduleAnchorChange,
     origin: Exclude<TeamFollowUpOrigin, { kind: 'blockers' }>) {
@@ -786,7 +787,7 @@ function ProjectGantt(props: GanttProps) {
         const currentAction = origin.opener.dataset.teamFollowUpSource === sourceId
           ? document.getElementById(TEAM_BLOCKERS_PANEL_ID)?.querySelector<HTMLButtonElement>(`[data-team-follow-up-source="${CSS.escape(sourceId)}"]`)
           : null;
-        const target = [origin.opener, currentAction, teamBlockersTrigger.current, scrollRef.current].find(element =>
+        const target = [origin.opener, currentAction, origin.fallback, scrollRef.current].find(element =>
           element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
         target?.focus({ preventScroll: true });
       }
@@ -858,7 +859,6 @@ function ProjectGantt(props: GanttProps) {
   }
   const projectsById = useMemo(() => new Map(data.projects.map(project => [project.id, project])), [data.projects]);
   const teamGitlabSummaries = useMemo(() => allProjects ? summarizeIssueGitlabLinks(data.gitlabLinks) : null, [allProjects, data.gitlabLinks]);
-  const { outgoing: teamBlockerChoices, incoming: incomingTeamBlockers } = useMemo(() => groupActiveTeamBlockers(data, projectsById), [data, projectsById]);
   const projectIssues = useMemo(() => {
     if (!allProjects) return data.issues.filter(issue => issue.projectId === projectId);
     const byProject = new Map(data.projects.map(project => [project.id, [] as Issue[]]));
@@ -963,14 +963,25 @@ function ProjectGantt(props: GanttProps) {
   const findingsProjectId = focusedTrace?.anchor.projectId ?? chartProjectFilter;
   const calendar = useMemo(() => timelineProjectId ? calendarFor(timelineProjectId) : undefined, [calendarFor, timelineProjectId]);
   const calendarMath = useMemo(() => calendar && createCalendarMath(calendar), [calendar]);
-  const { projectDependencyCount, findings, conflictingIds, linkedIssueIds, outgoingIssueIds } = useMemo(() => {
+  const { projectDependencyCount, findings, teamBlockerFindings, conflictingIds, linkedIssueIds, outgoingIssueIds,
+    teamBlockerChoices, incomingTeamBlockers } = useMemo(() => {
+    const { outgoing: teamBlockerChoices, incoming: incomingTeamBlockers } = groupActiveTeamBlockers(data, projectsById);
     const issuesById = new Map(projectIssues.map(issue => [issue.id, issue]));
     const findings: GanttDependencyFinding[] = [];
+    const teamBlockerFindings: GanttTeamBlockerFinding[] = [];
     const conflictingIds = new Set<string>();
     const linkedIssueIds = new Set<string>();
     const outgoingIssueIds = new Set<string>();
     const mathByProject = new Map<string, ReturnType<typeof createCalendarMath>>();
     if (timelineProjectId && calendarMath) mathByProject.set(timelineProjectId, calendarMath);
+    function mathForProject(id: string) {
+      let math = mathByProject.get(id);
+      if (!math) {
+        math = createCalendarMath(calendarFor(id));
+        mathByProject.set(id, math);
+      }
+      return math;
+    }
     let projectDependencyCount = 0;
     for (const dependency of data.dependencies) {
       const predecessor = issuesById.get(dependency.predecessorId);
@@ -982,18 +993,27 @@ function ProjectGantt(props: GanttProps) {
       outgoingIssueIds.add(predecessor.id);
       if (!chartProjectFilter || dependencyProjectId === chartProjectFilter) projectDependencyCount++;
       if (findingsProjectId && dependencyProjectId !== findingsProjectId) continue;
-      let dependencyCalendar = mathByProject.get(dependencyProjectId);
-      if (!dependencyCalendar) {
-        dependencyCalendar = createCalendarMath(calendarFor(dependencyProjectId));
-        mathByProject.set(dependencyProjectId, dependencyCalendar);
-      }
-      const check = checkDependencySchedule(dependency, predecessor, successor, dependencyCalendar);
+      const check = checkDependencySchedule(dependency, predecessor, successor, mathForProject(dependencyProjectId));
       if (check.kind === 'valid') continue;
       findings.push({ dependency, predecessor, successor, check });
       if (check.kind === 'conflict') conflictingIds.add(dependency.id);
     }
-    return { projectDependencyCount, findings, conflictingIds, linkedIssueIds, outgoingIssueIds };
-  }, [projectIssues, data.dependencies, calendarFor, calendarMath, chartProjectFilter, timelineProjectId, findingsProjectId]);
+    if (teamBlockerChoices.size) {
+      const workspaceIssues = allProjects ? issuesById : new Map(data.issues.map(issue => [issue.id, issue]));
+      const projectScope = findingsProjectId ?? (allProjects ? null : projectId);
+      for (const [sourceId, choices] of teamBlockerChoices) {
+        const predecessor = workspaceIssues.get(sourceId);
+        if (!predecessor) continue;
+        for (const { relation, target: successor } of choices) {
+          if (projectScope && predecessor.projectId !== projectScope && successor.projectId !== projectScope) continue;
+          const check = checkTeamBlockerSchedule(predecessor, successor, mathForProject(successor.projectId));
+          if (check.kind !== 'valid') teamBlockerFindings.push({ relation, predecessor, successor, check });
+        }
+      }
+    }
+    return { projectDependencyCount, findings, teamBlockerFindings, conflictingIds, linkedIssueIds, outgoingIssueIds,
+      teamBlockerChoices, incomingTeamBlockers };
+  }, [projectIssues, data, projectsById, calendarFor, calendarMath, chartProjectFilter, timelineProjectId, findingsProjectId, allProjects, projectId]);
   const singleChange = preview?.changes.length === 1 ? preview.changes[0] : undefined;
   const hierarchyPreview = manualReview && 'hierarchy' in manualReview.input ? manualReview.input.hierarchy : null;
   const missingHierarchyAnchor = Boolean(hierarchyPreview && hierarchyTrace?.anchor.id !== hierarchyPreview.id);
@@ -1114,7 +1134,12 @@ function ProjectGantt(props: GanttProps) {
   const automaticProjectId = allProjects ? selectedProjectId ?? (!selectedIssues.length ? chartProjectFilter : null) : projectId;
   const automaticNeedsSelection = teamScheduleFilterActive && !selectedIssues.length;
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
-  const activeFindings = scheduleFocus ? findings.filter(({ predecessor, successor }) => issueRows.has(predecessor.id) && issueRows.has(successor.id)) : findings;
+  const savedFindings = useMemo(() => [...findings, ...teamBlockerFindings], [findings, teamBlockerFindings]);
+  const activeFindings = scheduleFocus ? savedFindings.filter(finding => {
+    const predecessorInTrace = issueRows.has(finding.predecessor.id);
+    const successorInTrace = issueRows.has(finding.successor.id);
+    return 'relation' in finding ? predecessorInTrace || successorInTrace : predecessorInTrace && successorInTrace;
+  }) : savedFindings;
   const activeConflictCount = activeFindings.filter(finding => finding.check.kind === 'conflict').length;
   const canShowFindings = hasProject || (allProjects && data.projects.length > 0);
   const canShowTeamBlockers = allProjects && data.projects.length > 1;
@@ -2378,6 +2403,9 @@ function ProjectGantt(props: GanttProps) {
       allProjects={allProjects && !chartProjectFilter}
       disabled={busy || Boolean(issueOverlayOpen)} onLocateDate={locateFindingDate}
       onEditLink={(dependency, opener) => showLinkEditor(opener, { dependency })}
+      onReviewTeamBlocker={({ relation, predecessor, successor }, opener) =>
+        reviewTeamBlockerSchedules(predecessor, [{ relation, target: successor }], opener, findingsTrigger.current)}
+      onPointerDown={keepInlineDateFocus}
       onClose={() => { setFindingsOpen(false); findingsTrigger.current?.focus({ preventScroll: true }); }} />}
     {deadlinesOpen && <GanttDeadlines id={DEADLINES_PANEL_ID} issues={issues} disabled={deadlineActionsDisabled}
       onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, { focusDate: 'dueDate' })}

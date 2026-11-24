@@ -7,7 +7,7 @@ import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE
   type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteDependencyPair, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
   type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleTeamBlockerInput, type ScheduleTeamBlockerPreview,
   type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
-import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, checkDependencySchedule, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
+import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, TEAM_BLOCKER_SCHEDULE_RULE, checkDependencySchedule, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { addsScheduleDependencyPair, dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
@@ -91,7 +91,6 @@ const table = 'schedule_paste_previews';
 const after = (ms: number) => new Date(Date.now() + ms).toISOString();
 const dateFields = { startDate: '시작일', endDate: '종료일', dueDate: '목표 마감일' };
 const dateKeys = ['startDate', 'endDate', 'dueDate'] as const;
-const teamBlockerScheduleRule = { type: 'FS', lagDays: 0 } as const;
 
 function incomingTeamBlockerGuard(blockers: IncomingTeamBlocker[]): string {
   const fields = blockers.map(({ relation, source }) => [relation.id, relation.sourceIssueId, relation.targetIssueId,
@@ -657,7 +656,7 @@ export class SchedulePasteService {
         calendar = { version: workCalendar.version, math: createCalendarMath(workCalendar) };
         calendars.set(target.projectId, calendar);
       }
-      const check = checkDependencySchedule(teamBlockerScheduleRule, changes.get(source.id) ?? source,
+      const check = checkDependencySchedule(TEAM_BLOCKER_SCHEDULE_RULE, changes.get(source.id) ?? source,
         changes.get(target.id) ?? target, calendar.math);
       const label = `프로젝트 간 차단 관계 ${source.key} → ${target.key}`;
       if (check.kind === 'missing') warnings.push(missingTeamBlockerDates(source, target, check));
@@ -1239,7 +1238,7 @@ export class SchedulePasteService {
         if (blockers.length) {
           const math = createCalendarMath(hooks.calendar(projectId));
           for (const { source } of blockers) {
-            const check = checkDependencySchedule(teamBlockerScheduleRule, source, targetDates, math);
+            const check = checkDependencySchedule(TEAM_BLOCKER_SCHEDULE_RULE, source, targetDates, math);
             if (check.kind === 'missing') {
               missingDateWarnings.push(missingTeamBlockerDates(source, target, check));
             } else if (check.kind === 'conflict' || check.kind === 'invalid') {

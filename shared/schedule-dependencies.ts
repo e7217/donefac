@@ -3,6 +3,7 @@ import type { Dependency, DependencyType } from './types.js';
 
 export const DEPENDENCY_TYPES = ['FS', 'SS', 'FF', 'SF'] as const;
 export const MAX_DEPENDENCY_LAG_DAYS = 3650;
+export const TEAM_BLOCKER_SCHEDULE_RULE = { type: 'FS', lagDays: 0 } as const;
 
 export type ScheduleDependencyEndpoint = 'startDate' | 'endDate';
 type ScheduleDates = Record<ScheduleDependencyEndpoint, string | null>;
@@ -28,6 +29,9 @@ export type DependencyScheduleCheck =
       requiredDate: string;
     }
   | { kind: 'invalid'; reason: string };
+
+export type TeamBlockerScheduleCheck = Exclude<DependencyScheduleCheck, { kind: 'missing' }>
+  | (Extract<DependencyScheduleCheck, { kind: 'missing' }> & { requiredDate?: string });
 
 export const DEPENDENCY_ENDPOINTS = {
   FS: { predecessor: 'endDate', successor: 'startDate' },
@@ -97,6 +101,18 @@ export function checkDependencySchedule(
   } catch (error) {
     if (!(error instanceof CalendarError)) throw error;
     return { kind: 'invalid', reason: error.message };
+  }
+}
+
+export function checkTeamBlockerSchedule(predecessor: ScheduleDates, successor: ScheduleDates, math: CalendarMath): TeamBlockerScheduleCheck {
+  const check = checkDependencySchedule(TEAM_BLOCKER_SCHEDULE_RULE, predecessor, successor, math);
+  if (check.kind !== 'missing' || !check.predecessorDate || check.successorDate) return check;
+  try {
+    const bound = dependencyBound(TEAM_BLOCKER_SCHEDULE_RULE, predecessor, math);
+    return bound ? { ...check, requiredDate: bound.date } : check;
+  } catch (error) {
+    if (!(error instanceof CalendarError)) throw error;
+    return check;
   }
 }
 

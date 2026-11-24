@@ -239,6 +239,14 @@ test('360px에서는 간트의 날짜 초안과 고른 Jira 이관 관계를 함
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
     await page.goto(`/#/${source.projectId}/gantt`);
+    await page.getByRole('button', { name: '일정 충돌', exact: true }).click();
+    const findings = page.getByRole('region', { name: '일정 충돌', exact: true });
+    await expect(findings.getByText('프로젝트 간 차단 · Jira 원본', { exact: true })).toHaveCount(3);
+    for (const link of jiraLinks) {
+      const row = findings.locator(`[data-team-blocker-id="${link.id}"]`);
+      await expect(row).toContainText('2026-11-23부터');
+    }
+    await findings.getByRole('button', { name: '일정 충돌 닫기', exact: true }).click();
     const anchor = page.getByRole('region', { name: '간트 차트', exact: true }).locator(`[data-issue-id="${source.id}"]`);
     const sourceEnd = anchor.getByLabel(`${source.key} 종료일`, { exact: true });
     const startReview = anchor.getByRole('button', { name: `${source.key} 프로젝트 간 일정 검토`, exact: true });

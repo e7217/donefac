@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { CalendarError, createCalendarMath, defaultWorkCalendar, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar.js';
-import { checkDependencySchedule, dependencyPredecessorBound, dependencyScheduleWarning } from '../../shared/schedule-dependencies.js';
+import { TEAM_BLOCKER_SCHEDULE_RULE, checkDependencySchedule, checkTeamBlockerSchedule, dependencyPredecessorBound, dependencyScheduleWarning } from '../../shared/schedule-dependencies.js';
 import type { DependencyType } from '../../shared/types.js';
 
 const predecessor = { key: 'TEAM-1', startDate: '2026-11-19', endDate: '2026-11-20' };
@@ -59,6 +59,53 @@ test('missing endpoint dates identify the correct fields without changing legacy
     });
     assert.equal(dependencyScheduleWarning(dependency, before, after, math), null);
   }
+});
+
+test('team blockers use the receiving calendar for conflicts and a missing successor start', () => {
+  const receivingMath = createCalendarMath({ ...defaultWorkCalendar('receiving-project'), exceptions: [
+    { date: '2026-11-23', isWorking: false, label: '후행 프로젝트 휴무일' },
+  ] });
+  const onSourceCalendar = { ...successor, startDate: '2026-11-23', endDate: '2026-11-25' };
+  const missingStart = { ...onSourceCalendar, startDate: null };
+  assert.deepEqual(TEAM_BLOCKER_SCHEDULE_RULE, { type: 'FS', lagDays: 0 });
+  assert.deepEqual(checkTeamBlockerSchedule(predecessor, onSourceCalendar, math), { kind: 'valid' });
+  assert.deepEqual(checkTeamBlockerSchedule(predecessor, onSourceCalendar, receivingMath), {
+    kind: 'conflict', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate',
+    predecessorDate: predecessor.endDate, successorDate: '2026-11-23', requiredDate: '2026-11-24',
+  });
+  assert.deepEqual(checkTeamBlockerSchedule(predecessor, { ...onSourceCalendar, startDate: '2026-11-24' }, receivingMath), { kind: 'valid' });
+  assert.deepEqual(checkTeamBlockerSchedule(predecessor, missingStart, receivingMath), {
+    kind: 'missing', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate',
+    predecessorDate: predecessor.endDate, successorDate: null, requiredDate: '2026-11-24',
+  });
+  const missingEnd = { ...predecessor, endDate: null };
+  for (const next of [onSourceCalendar, missingStart]) {
+    assert.deepEqual(checkTeamBlockerSchedule(missingEnd, next, receivingMath), {
+      kind: 'missing', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate', predecessorDate: null, successorDate: next.startDate,
+    });
+  }
+  assert.deepEqual(checkDependencySchedule(TEAM_BLOCKER_SCHEDULE_RULE, predecessor, missingStart, receivingMath), {
+    kind: 'missing', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate', predecessorDate: predecessor.endDate, successorDate: null,
+  });
+});
+
+test('team blockers preserve missing starts when a calendar bound is unavailable and rethrow other failures', () => {
+  const missingStart = { ...successor, startDate: null };
+  const last = { ...predecessor, endDate: MAX_CALENDAR_DATE };
+  assert.deepEqual(checkTeamBlockerSchedule(last, missingStart, math), {
+    kind: 'missing', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate', predecessorDate: MAX_CALENDAR_DATE, successorDate: null,
+  });
+  assert.deepEqual(checkTeamBlockerSchedule(last, successor, math), {
+    kind: 'invalid', reason: '이후에 필요한 작업일이 없거나 날짜 범위를 벗어났습니다.',
+  });
+  const sevenDays = createCalendarMath({ ...projectCalendar, workingWeekdays: [0, 1, 2, 3, 4, 5, 6] });
+  assert.deepEqual(checkTeamBlockerSchedule({ ...predecessor, endDate: MIN_CALENDAR_DATE }, missingStart, sevenDays), {
+    kind: 'missing', predecessorEndpoint: 'endDate', successorEndpoint: 'startDate', predecessorDate: MIN_CALENDAR_DATE,
+    successorDate: null, requiredDate: '0000-01-02',
+  });
+  const unexpected = new Error('unexpected calendar failure');
+  const failingMath = { ...math, shift() { throw unexpected; } };
+  assert.throws(() => checkTeamBlockerSchedule(predecessor, missingStart, failingMath), error => error === unexpected);
 });
 
 test('invalid dependency rules and calendar bounds retain their prior warnings', () => {
