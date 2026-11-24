@@ -31,9 +31,24 @@ function countPipeline(summary: IssueGitlabSummary, state: string) {
   else if (state === 'manual') summary.manualPipelines++;
 }
 
+export function latestGitlabPipelineLinks(links: readonly GitlabLink[]): GitlabLink[] {
+  const ungrouped: GitlabLink[] = [];
+  const grouped = new Map<string, { id: number; link: GitlabLink }>();
+  for (const link of links) {
+    if (link.kind !== 'pipeline') continue;
+    const group = gitlabPipelineGroup(link);
+    if (!group) {
+      ungrouped.push(link);
+      continue;
+    }
+    const latest = grouped.get(group.key);
+    if (!latest || latest.id < group.id) grouped.set(group.key, { id: group.id, link });
+  }
+  return [...ungrouped, ...Array.from(grouped.values(), ({ link }) => link)];
+}
+
 export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): ReadonlyMap<string, IssueGitlabSummary> {
   const summaries = new Map<string, IssueGitlabSummary>();
-  const latestPipelines = new Map<string, { id: number; state: string; summary: IssueGitlabSummary }>();
   for (const link of links) {
     let summary = summaries.get(link.issueId);
     if (!summary) {
@@ -45,18 +60,10 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
       summary.openMergeRequests++;
       if (isGitlabMergeReadinessBlocked(link.mergeReadiness?.state)) summary.blockedMergeRequests++;
     }
-    if (link.kind !== 'pipeline') continue;
-
-    const group = gitlabPipelineGroup(link);
-    if (!group) {
-      countPipeline(summary, link.state);
-      continue;
-    }
-    const latest = latestPipelines.get(group.key);
-    if (!latest || latest.id < group.id) {
-      latestPipelines.set(group.key, { id: group.id, state: link.state, summary });
-    }
   }
-  for (const { state, summary } of latestPipelines.values()) countPipeline(summary, state);
+  for (const link of latestGitlabPipelineLinks(links)) {
+    const summary = summaries.get(link.issueId);
+    if (summary) countPipeline(summary, link.state);
+  }
   return summaries;
 }

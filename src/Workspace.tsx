@@ -7,6 +7,7 @@ import { DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, isIssueViewGitlabFil
 import { reservationDayRange } from '../shared/time-reservations';
 import { isCalendarDate } from '../shared/calendar';
 import { planningFields } from '../shared/planning-helpers';
+import { appendGitlabActivityFilters, DEFAULT_GITLAB_ACTIVITY_FILTERS, readGitlabActivityFilters, type GitlabActivityFilters } from '../shared/gitlab-activity-filter';
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { countActiveMyWork } from '../shared/my-work';
@@ -84,6 +85,7 @@ type WorkspaceRoute = {
   teamOverviewFilters?: TeamOverviewFilters;
   teamBoardFilters?: TeamBoardFilters;
   cycleQuery?: string;
+  gitlabActivityFilters?: GitlabActivityFilters;
   searchFilters?: WorkspaceSearchFilters;
 };
 type WorkspaceCommentFocus = {
@@ -138,6 +140,7 @@ function routeHash(route: WorkspaceRoute) {
   }
   if (route.issueId) query.set('issue', route.issueId);
   if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
+  if (route.view === 'development' && route.gitlabActivityFilters) appendGitlabActivityFilters(query, route.gitlabActivityFilters);
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'gantt' && !teamGantt && route.ganttMilestoneId) query.set('milestone', route.ganttMilestoneId);
   if (route.view === 'reports' && route.blockerScope) {
@@ -232,6 +235,9 @@ function hasSameProjectGanttContext(previous: WorkspaceRoute, next: WorkspaceRou
     previous.projectId === next.projectId && (previous.planningId ?? null) === (next.planningId ?? null) &&
     (previous.savedViewId ?? null) === (next.savedViewId ?? null);
 }
+function hasSameDevelopmentProject(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
+  return previous.view === 'development' && next.view === 'development' && previous.projectId === next.projectId;
+}
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
     previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
@@ -242,10 +248,12 @@ function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRou
   const sameFavorites = previous.view === 'favorites' && next.view === 'favorites' && previous.projectId === next.projectId;
   const sameMilestone = Boolean(previous.ganttMilestoneId && previous.ganttMilestoneId === next.ganttMilestoneId) &&
     hasSameProjectGanttContext(previous, next);
-  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
+  const sameDevelopment = hasSameDevelopmentProject(previous, next) && issueReviewContext(previous) === issueReviewContext(next);
+  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || sameDevelopment ||
+    hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
 }
 function hasContextualIssueOverlay(route: WorkspaceRoute | null): boolean {
-  return Boolean(route?.issueId && (route.view === 'reports' || route.view === 'search' || route.view === 'favorites'));
+  return Boolean(route?.issueId && (route.view === 'reports' || route.view === 'search' || route.view === 'favorites' || route.view === 'development'));
 }
 function hasTeamBoardIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'teamboard' && route.issueId);
@@ -261,21 +269,24 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   if (previous && previous.projectId === next.projectId && hasSameDocumentContext(previous, next)) {
     if (previous.issueId === next.issueId && (previous.sectionId !== next.sectionId || previous.documentCommentId !== next.documentCommentId) &&
         previous.documentPreviewId === next.documentPreviewId) return true;
-    return dispatchWorkspaceNavigation(previous.documentId);
+    return dispatchWorkspaceNavigation({ preservedDocumentId: previous.documentId });
   }
   if (previous && hasSameReportContext(previous, next) && previous.issueId !== next.issueId) {
-    return dispatchWorkspaceNavigation(null, true);
+    return dispatchWorkspaceNavigation({ preserveReport: true });
+  }
+  if (previous && hasSameDevelopmentProject(previous, next)) {
+    return dispatchWorkspaceNavigation({ preserveDevelopment: true });
   }
   if (previous?.view === 'gantt' && next.view === 'gantt' && previous.issueId !== next.issueId &&
       issueReviewContext(previous) === issueReviewContext(next)) {
-    return dispatchWorkspaceNavigation(null, false, false, 'issueOverlay');
+    return dispatchWorkspaceNavigation({ preserveGantt: 'issueOverlay' });
   }
   if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) && hasSameProjectGanttContext(previous, next)) {
-    return dispatchWorkspaceNavigation(null, false, false, true);
+    return dispatchWorkspaceNavigation({ preserveGantt: true });
   }
   if (previous?.view === 'teamboard' && next.view === 'teamboard' && !previous.issueId && !next.issueId &&
       !previous.documentPreviewId && !next.documentPreviewId && previous.projectId === next.projectId) {
-    return dispatchWorkspaceNavigation(null, false, true);
+    return dispatchWorkspaceNavigation({ preserveTeamBoard: true });
   }
   return dispatchWorkspaceNavigation();
 }
@@ -390,7 +401,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   return { projectId, view, documentId, issueId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publication, sectionId, documentCommentId,
     documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
-    cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined };
+    cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
+    gitlabActivityFilters: view === 'development' ? readGitlabActivityFilters(parameters) : undefined };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -425,6 +437,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [teamBoardFilters, setTeamBoardFilters] = useState(emptyTeamBoardFilters);
   const [cycleQuery, setCycleQuery] = useState('');
+  const [gitlabActivityFilters, setGitlabActivityFilters] = useState(DEFAULT_GITLAB_ACTIVITY_FILTERS);
   const [searchFilters, setSearchFilters] = useState(DEFAULT_WORKSPACE_SEARCH_FILTERS);
   const [searchOpen, setSearchOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
@@ -565,11 +578,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       } else if (previous.issueId && !route.issueId) {
         const opener = overlayIssueOpener.current;
         overlayIssueOpener.current = null;
-        if (!boardTrigger && (opener || route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites')) requestAnimationFrame(() => {
+        if (!boardTrigger && (opener || route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' || route.view === 'development')) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
           if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-          else if (route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites') workspaceMain.current?.focus({ preventScroll: true });
+          else if (route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' || route.view === 'development') workspaceMain.current?.focus({ preventScroll: true });
         });
       }
     }
@@ -611,6 +624,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
     setCycleQuery(route.cycleQuery ?? '');
+    setGitlabActivityFilters(route.gitlabActivityFilters ?? DEFAULT_GITLAB_ACTIVITY_FILTERS);
     const search = route.searchFilters ?? DEFAULT_WORKSPACE_SEARCH_FILTERS;
     setSearchFilters(previous => sameWorkspaceSearchFilters(previous, search) ? previous : search);
   }, []);
@@ -669,6 +683,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       documentLabel: sameView ? documentLabel : null,
       planningId: sameView && (nextView === 'backlog' || nextView === 'planning') ? planningId : null,
       cycleQuery: sameView && nextView === 'backlog' ? cycleQuery : undefined,
+      gitlabActivityFilters: sameView && nextView === 'development' ? gitlabActivityFilters : undefined,
       savedViewId: sameView ? savedViewId : null, ganttFocusIssueId: sameView ? ganttFocusIssueId : null,
       ganttFocusDate: sameView ? ganttFocusDate : null,
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined,
@@ -679,6 +694,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const nextQuery = readIssueFilterQuery(query);
     if (current?.view === 'backlog' && current.cycleQuery !== nextQuery) {
       writeRoute({ ...current, cycleQuery: nextQuery }, routeIndexRef.current, 'replace', true);
+    }
+  };
+  const changeGitlabActivityFilters = (filters: GitlabActivityFilters, mode: 'push' | 'replace' = 'replace') => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'development' || current.issueId) return;
+    const parameters = new URLSearchParams();
+    appendGitlabActivityFilters(parameters, filters);
+    const next = { ...current, gitlabActivityFilters: readGitlabActivityFilters(parameters) };
+    if (routeHash(next) !== routeHash(current)) {
+      writeRoute(next, routeIndexRef.current + (mode === 'push' ? 1 : 0), mode);
     }
   };
   const changeTeamBoardFilters = (filters: TeamBoardFilters) => {
@@ -738,7 +763,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       }
       return;
     }
-    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'gantt' && current.ganttScope === 'team') {
+    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'gantt' && current.ganttScope === 'team' ||
+        current?.view === 'development' && current.projectId === issue.projectId) {
       if (requestRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
     }
@@ -770,7 +796,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openIssueForReview: OpenIssueForReview = (id, source) => {
     const current = acceptedRouteRef.current;
     if (!current || current.issueId || !source.issueIds.includes(id) ||
-        (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt')) {
+        (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development')) {
       openIssue(id);
       return;
     }
@@ -1025,7 +1051,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const teamPageLabel = teamBoard ? '전체 프로젝트 보드' : teamGantt ? '전체 프로젝트 간트' :
     teamDecisions ? '팀 결정 후속 업무' : view === 'teamoverview' ? '팀 개요' : view === 'search' ? '검색 결과' : view === 'favorites' ? '즐겨찾기' : null;
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
-  const contextualIssueOpen = Boolean(openedIssue && (view === 'reports' || view === 'search' || view === 'favorites'));
+  const contextualIssueOpen = Boolean(openedIssue && (view === 'reports' || view === 'search' || view === 'favorites' || view === 'development'));
   const reportIssueOpen = view === 'reports' && contextualIssueOpen;
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
@@ -1149,7 +1175,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           }}/></Suspense>}
         {view === 'publication' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검토함을 불러오는 중입니다.</p></div>}><DocumentPublicationLibrary {...props} initialTab={publicationTab} onOpenPublication={openPublication}
           onTabChange={tab => requestRoute({projectId,view:'publication',documentId:null,issueId:null,publicationTab:tab})}/></Suspense>}
-        {view === 'development' && <Development {...props}/>}
+        {view === 'development' && <Development {...props} activityFilters={gitlabActivityFilters}
+          onChangeActivityFilters={changeGitlabActivityFilters} onOpenIssueForReview={openIssueForReview} />}
         {view === 'settings' && <WorkspaceSettings key={actorId} {...props}/>}
         {view === 'trash' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>휴지통을 불러오는 중입니다.</p></div>}><Trash key={actorId} {...props}/></Suspense>}
         {!project && view !== 'trash' && view !== 'teamoverview' && view !== 'search' && view !== 'favorites' && <div className="empty-state"><FolderPlus/><h2>첫 프로젝트를 만들어보세요</h2><button className="btn btn-primary" onClick={() => setProjectModal(true)}>프로젝트 만들기</button></div>}

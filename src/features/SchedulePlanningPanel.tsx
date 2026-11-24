@@ -63,7 +63,7 @@ function ProjectSchedulePlanning({ data, projectId, actorId, refresh, notify, se
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', unload);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', unload); };
   }, [dirty, notify, reset]);
-  const canNavigate = () => dispatchWorkspaceNavigation(null, false, false, 'dateDrafts');
+  const canNavigate = () => dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' });
   const source = () => calendar ? { expectedIssueVersions: Object.fromEntries(issues.map(item => [item.id, item.version])), expectedMilestoneVersions: Object.fromEntries(milestones.map(item => [item.id, item.version])), expectedCalendarVersion: calendar.version } : null;
   const openMilestone = (item?: Milestone) => {
     if (!canNavigate()) return;

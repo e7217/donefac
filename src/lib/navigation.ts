@@ -1,7 +1,14 @@
-export function dispatchWorkspaceNavigation(preservedDocumentId?: string | null, preserveReport = false, preserveTeamBoard = false,
-  preserveGantt: boolean | 'dateDrafts' | 'issueOverlay' = false) {
-  const event = preservedDocumentId || preserveReport || preserveTeamBoard || preserveGantt
-    ? new CustomEvent('teamspace:navigate', { cancelable: true, detail: { preservedDocumentId, preserveReport, preserveTeamBoard, preserveGantt } })
+type NavigationPreservation = {
+  preservedDocumentId?: string | null;
+  preserveReport?: boolean;
+  preserveTeamBoard?: boolean;
+  preserveGantt?: true | 'dateDrafts' | 'issueOverlay';
+  preserveDevelopment?: boolean;
+};
+
+export function dispatchWorkspaceNavigation(detail?: NavigationPreservation) {
+  const event = detail
+    ? new CustomEvent('teamspace:navigate', { cancelable: true, detail })
     : new Event('teamspace:navigate', { cancelable: true });
   return window.dispatchEvent(event);
 }
@@ -28,6 +35,10 @@ export function areGanttDateDraftsPreservedByNavigation(event: Event): boolean {
 
 export function isGanttIssueOverlayNavigation(event: Event): boolean {
   return event instanceof CustomEvent && event.detail?.preserveGantt === 'issueOverlay';
+}
+
+export function isDevelopmentReviewNavigation(event: Event): boolean {
+  return event instanceof CustomEvent && event.detail?.preserveDevelopment === true;
 }
 
 /** Other forms may still cancel the same synchronous navigation dispatch. */

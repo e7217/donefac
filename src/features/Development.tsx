@@ -1,10 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
-import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
+import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters, type GitlabActivityScope } from '../../shared/gitlab-activity-filter';
+import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import type { OpenIssueForReview } from '../lib/issue-review';
+import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
 import { GitlabDeploymentPreview } from './GitlabDeploymentPreview';
@@ -55,7 +57,24 @@ function syncFailure(cause: unknown, version: number): GitlabSyncFailure | null 
     ? details as GitlabSyncFailure : null;
 }
 
-export function Development(props:FeatureProps){
+type DevelopmentActivityProps = {
+  activityFilters: GitlabActivityFilters;
+  onChangeActivityFilters: (filters: GitlabActivityFilters, mode?: 'push' | 'replace') => void;
+  onOpenIssueForReview: OpenIssueForReview;
+};
+const scopeLabels = {
+  all: '전체 활동',
+  merge_request: 'MR',
+  open_merge_requests: '열린 MR',
+  blocked_merge_requests: '검토가 막힌 MR',
+  pipeline: '파이프라인',
+  failed_pipelines: '실패 파이프라인',
+  manual_pipelines: '수동 실행 대기 파이프라인',
+  branch: '브랜치',
+  commit: '커밋',
+} satisfies Record<GitlabActivityScope, string>;
+
+export function Development(props: FeatureProps & DevelopmentActivityProps) {
   const {notify}=props;
   const [settings,setSettings]=useState<GitlabSettings|null>(null),[draft,setDraft]=useState< Draft>(empty),[baseline,setBaseline]=useState< Draft>(empty);
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -159,7 +178,24 @@ export function Development(props:FeatureProps){
     return () => { window.clearTimeout(scheduled); jiraSourcesRequest.current?.abort(); };
   }, [loadJiraSources]);
   useEffect(()=>{
-    const guard=(event:Event)=>{if(event.defaultPrevented)return;if(pending.current){event.preventDefault();notify('GitLab 요청이 끝난 뒤 이동해 주세요.','error');}else if(dirtyRef.current){if(!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?'))event.preventDefault();else afterAcceptedNavigation(event,()=>{clearPreview();clearRepositorySearch();clearDeploymentPreview();setDraft(baseline);dirtyRef.current=false;setError('');});}};
+    const guard = (event: Event) => {
+      if (event.defaultPrevented) return;
+      if (pending.current) {
+        event.preventDefault();
+        notify('GitLab 요청이 끝난 뒤 이동해 주세요.', 'error');
+        return;
+      }
+      if (isDevelopmentReviewNavigation(event) || !dirtyRef.current) return;
+      if (!window.confirm('저장하지 않은 GitLab 설정을 버리고 이동할까요?')) event.preventDefault();
+      else afterAcceptedNavigation(event, () => {
+        clearPreview();
+        clearRepositorySearch();
+        clearDeploymentPreview();
+        setDraft(baseline);
+        dirtyRef.current = false;
+        setError('');
+      });
+    };
     const unload=(event:BeforeUnloadEvent)=>{if(pending.current||dirtyRef.current){event.preventDefault();event.returnValue='';}};
     window.addEventListener('teamspace:navigate',guard);window.addEventListener('beforeunload',unload);
     return()=>{window.removeEventListener('teamspace:navigate',guard);window.removeEventListener('beforeunload',unload);};
@@ -260,17 +296,23 @@ export function Development(props:FeatureProps){
       if (previewRequest.current === controller) previewRequest.current = null;
     }
   }
-  const projectIssues = props.data.issues.filter(issue => issue.projectId === props.projectId);
-  const issueKeys = new Map(projectIssues.map(issue => [issue.id, issue.key]));
-  const issueVersions = new Map(projectIssues.map(issue => [issue.id, issue.version]));
-  const links = props.data.gitlabLinks.filter(link => issueKeys.has(link.issueId));
   const repositoryIds = editableRepoIds(draft.ids);
   const currentSyncRead = syncRead?.version === settings?.version ? syncRead : null;
   const syncStatus = currentSyncRead?.status ?? null;
   const legacySyncFallback = Boolean(currentSyncRead?.error && !currentSyncRead.settingsChanged && !syncStatus);
-  return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div><button className="btn btn-primary" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={() => void sync()}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button></div>
+  function focusConnectionSettings() {
+    const heading = connectionForm.current?.querySelector('h2');
+    heading?.focus({ preventScroll: true });
+    heading?.scrollIntoView({ block: 'start' });
+  }
+  return <div className="page development-page"><div className="page-heading"><div><div className="eyebrow">DEVELOPMENT</div><h1>코드와 업무를 연결하세요</h1><p>GitLab 활동과 자동화, 외부 도구로 보내는 알림을 관리합니다.</p></div>
+    <div className="development-heading-actions">
+      <button className="btn" type="button" onClick={focusConnectionSettings}>연결 설정으로 이동</button>
+      <button className="btn btn-primary" type="button" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={() => void sync()}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button>
+    </div></div>
     {error&&<div className="inline-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}
-    <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
+    <DevelopmentActivityFeed key={props.projectId} {...props} />
+    <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2 tabIndex={-1}><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
       <label className="form-label">GitLab 주소<input type="url" className="field" placeholder="https://gitlab.example.com" value={draft.baseUrl} onChange={e=>edit('baseUrl',e.target.value)}/></label>
       {missingRoutesAfterAddressEdit && <p className="help-text gitlab-token-note" role="status">주소가 바뀌어 Jira 원본 연결 범위를 비웠습니다. 새 저장소에서 사용할 범위를 선택하세요.</p>}
       <label className="form-label">읽기 API 토큰<input type="password" autoComplete="new-password" className="field" placeholder={retainsToken?'저장된 토큰 유지 · 변경할 때만 입력':'선택 · read_api 권한의 토큰'} value={draft.token} onChange={e=>edit('token',e.target.value)}/></label>
@@ -300,11 +342,75 @@ export function Development(props:FeatureProps){
     {settings && <RepositoryGitlabDeployments settings={settings} syncStatus={syncStatus}
       onSyncSettled={() => readSyncStatus(settings.version)} />}
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
-    <section className="card linked-development" aria-label="연결된 개발 활동">
-      <div className="card-heading gitlab-activity-header"><h2>연결된 개발 활동 <span className="count-pill">{links.length}</span></h2><GitlabActivityRefresh refresh={props.refresh} notify={notify} /></div>
-      {links.length ? <GitlabActivityList links={links} heading="h3" issueVersions={issueVersions} issueContext={{ keys: issueKeys, openIssue: props.openIssue }} /> : <div className="empty-state"><GitBranch aria-hidden="true"/><h3>아직 연결된 개발 활동이 없습니다</h3><p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}
-    </section>
   </div>;
+}
+
+function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFilters, onChangeActivityFilters, onOpenIssueForReview }:
+  Pick<FeatureProps, 'data' | 'projectId' | 'refresh' | 'notify'> & DevelopmentActivityProps) {
+  const { scope, query, pages } = activityFilters;
+  const heading = useRef<HTMLHeadingElement>(null);
+  const [search, setSearch] = useState({ source: query, value: query, invalid: false });
+  if (search.source !== query) setSearch({ source: query, value: query, invalid: false });
+  const projectIssues = useMemo(() => data.issues.filter(issue => issue.projectId === projectId), [data.issues, projectId]);
+  const issueKeys = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.key])), [projectIssues]);
+  const issueVersions = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.version])), [projectIssues]);
+  const links = useMemo(() => data.gitlabLinks.filter(link => issueKeys.has(link.issueId)), [data.gitlabLinks, issueKeys]);
+  const matching = useMemo(() => filterGitlabActivityLinks({ issues: projectIssues, issueAliases: data.issueAliases }, links, { scope, query, pages: {} }),
+    [data.issueAliases, projectIssues, links, scope, query]);
+  const hasFilters = scope !== 'all' || Boolean(query || search.value || Object.keys(pages).length);
+
+  function submitSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const nextQuery = normalizeGitlabActivityQuery(search.value);
+    if (search.value.trim() && !nextQuery) {
+      setSearch({ ...search, invalid: true });
+      return;
+    }
+    setSearch({ source: query, value: nextQuery, invalid: false });
+    onChangeActivityFilters({ scope, query: nextQuery, pages: {} }, 'replace');
+  }
+  function changePage(kind: GitlabLink['kind'], page: number) {
+    const next = { ...pages };
+    if (page === 1) delete next[kind];
+    else next[kind] = page;
+    onChangeActivityFilters({ scope, query, pages: next }, 'push');
+  }
+  function clearFilters() {
+    setSearch({ source: query, value: '', invalid: false });
+    onChangeActivityFilters(DEFAULT_GITLAB_ACTIVITY_FILTERS, 'push');
+  }
+
+  return <section className="card linked-development" aria-label="연결된 개발 활동">
+    <div className="card-heading gitlab-activity-header">
+      <h2 ref={heading} tabIndex={-1}>연결된 개발 활동 <span className="count-pill">{matching.length}</span></h2>
+      <GitlabActivityRefresh refresh={refresh} notify={notify} />
+    </div>
+    <div className="development-activity-filters">
+      <label className="form-label development-activity-scope">개발 활동 범위
+        <select className="field" value={scope} onChange={event => {
+          const nextScope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
+          if (nextScope) onChangeActivityFilters({ scope: nextScope, query, pages: {} }, 'push');
+        }}>
+          {GITLAB_ACTIVITY_SCOPES.map(value => <option key={value} value={value}>{scopeLabels[value]}</option>)}
+        </select>
+      </label>
+      <form className="development-activity-search" onSubmit={submitSearch}>
+        <label className="form-label">개발 활동 검색
+          <input type="search" className="field" value={search.value} maxLength={GITLAB_ACTIVITY_QUERY_LIMIT}
+            placeholder="티켓 키, 제목, 저장소 또는 GitLab 주소" aria-invalid={search.invalid || undefined}
+            onChange={event => setSearch({ source: query, value: event.currentTarget.value, invalid: false })} />
+        </label>
+        <button type="submit" className="btn"><Search size={15} aria-hidden="true" />검색</button>
+        {search.invalid && <p role="alert">GitLab 활동 주소 또는 검색어를 확인해 주세요.</p>}
+      </form>
+      <button type="button" className="btn btn-ghost" disabled={!hasFilters} onClick={clearFilters}>활동 필터 초기화</button>
+    </div>
+    {matching.length > 0 ? <GitlabActivityList links={matching} heading="h3" issueVersions={issueVersions}
+      issueReview={{ keys: issueKeys, openIssue: onOpenIssueForReview, fallbackRef: heading }} pagination={{ pages, onChangePage: changePage }} />
+      : links.length > 0 ? <p className="development-activity-empty" role="status">조건에 맞는 개발 활동이 없습니다.</p>
+        : <div className="empty-state"><GitBranch aria-hidden="true" /><h3>아직 연결된 개발 활동이 없습니다</h3>
+          <p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}
+  </section>;
 }
 
 function JiraRouteSettings({ repositoryIds, routes, sources, projects, onRetry, onChange }: {

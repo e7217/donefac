@@ -7,7 +7,7 @@ import { AUTOMATION_TRIGGER_LABELS, AUTOMATION_TRIGGERS, sortedAutomationRules }
 import { projectIssueTypes } from '../../shared/issue-schema';
 import { projectStatuses, statusMeta } from '../../shared/workflow-helpers';
 import { api, patch, post, remove } from '../lib/api';
-import { afterAcceptedNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
 import { errorMessage } from './schedule-utils';
 import './automation-settings.css';
 
@@ -69,7 +69,7 @@ function RuleEditor({ rule, creating, connection, onClose, onSaved, onDeleted, .
   if (rule && remoteChanged && !dirty && !busy && !preview) { setDraft(draftOf(rule)); setBaseline(draftOf(rule)); setVersion(rule.version); setError(''); }
   useEffect(() => { dirtyRef.current = dirty || Boolean(preview); }, [dirty, preview]);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
-  useEffect(() => { const guard = (event: Event) => { if (event.defaultPrevented) return; if (busyRef.current) { event.preventDefault(); notify('자동화 처리가 끝난 뒤 이동해 주세요.', 'error'); } else if (dirtyRef.current) { if (!window.confirm('저장하지 않은 자동화 입력과 미리보기를 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(structuredClone(baseline)); setPreview(null); setError(''); }); } }; const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } }; window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); }; }, [baseline, notify]);
+  useEffect(() => { const guard = (event: Event) => { if (event.defaultPrevented) return; if (busyRef.current) { event.preventDefault(); notify('자동화 처리가 끝난 뒤 이동해 주세요.', 'error'); } else if (!isDevelopmentReviewNavigation(event) && dirtyRef.current) { if (!window.confirm('저장하지 않은 자동화 입력과 미리보기를 버리고 이동할까요?')) event.preventDefault(); else afterAcceptedNavigation(event, () => { dirtyRef.current = false; setDraft(structuredClone(baseline)); setPreview(null); setError(''); }); } }; const unload = (event: BeforeUnloadEvent) => { if (busyRef.current || dirtyRef.current) { event.preventDefault(); event.returnValue = ''; } }; window.addEventListener('teamspace:navigate', guard); window.addEventListener('beforeunload', unload); return () => { window.removeEventListener('teamspace:navigate', guard); window.removeEventListener('beforeunload', unload); }; }, [baseline, notify]);
   function update<K extends keyof RuleDraft>(key: K, value: RuleDraft[K]) { setDraft(previous => ({ ...previous, [key]: value })); setPreview(null); }
   const statuses = projectStatuses(data, projectId), knownTypes = projectIssueTypes(data, projectId, { includeArchived: true });
   const types = [...knownTypes, ...draft.issueTypes.filter(id => !knownTypes.some(value => value.id === id)).map(id => ({ id, name: `${id} (현재 양식에 없음)`, color: '', archived: true }))];

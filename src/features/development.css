@@ -3,10 +3,21 @@
 .development-page .integration-form .form-label{font-size:14px;margin:0;color:#486554}
 .development-page .integration-form .field{font-size:16px}
 .development-page>.page-heading .btn,.development-page .integration-form .btn{font-size:14px}
+.development-heading-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px}
+.development-page .integration-form h2{scroll-margin-block-start:70px}
 .development-page .integration-guide p,.development-page .integration-guide li,.development-page .integration-guide>code{font-size:16px;color:#486554}
 .development-page .integration-guide .help-text,.development-page .integration-guide .help-text code{font-size:12px}
 .development-page .help-text{font-size:12px}
 .development-page .development-row{font-size:14px}
+.development-page .linked-development{min-width:0;margin-bottom:18px}
+.development-activity-filters{display:flex;align-items:start;flex-wrap:wrap;gap:10px 12px;margin-bottom:12px}
+.development-activity-filters .form-label{display:grid;gap:4px;min-width:0;margin:0;color:#486554;font-size:13px}
+.development-activity-filters .field{width:100%;min-width:0;font-size:14px}
+.development-activity-scope{flex:1 1 12rem}
+.development-activity-search{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:4px 6px;flex:2 1 20rem;min-width:0}
+.development-activity-search p{grid-column:1/-1;margin:0;color:#9c3b37;font-size:12px}
+.development-activity-filters>.btn{align-self:start;margin-top:22px}
+.development-activity-empty{padding:16px 0;color:#486554;font-size:14px}
 
 .development-page .data-actions{flex-wrap:wrap}
 .gitlab-token-note{margin:0;color:#71542a}
@@ -87,6 +98,11 @@
 .gitlab-preview-ambiguity p{font-weight:650}
 .gitlab-preview-ambiguity ul{display:flex;gap:4px 8px;flex-wrap:wrap;padding:0;list-style:none;overflow-wrap:anywhere}
 @media(max-width:600px){
+  .development-page>.page-heading{align-items:flex-start;flex-direction:column}
+  .development-heading-actions{justify-content:flex-start}
+  .development-heading-actions .btn{min-height:44px}
+  .development-activity-filters .field,.development-activity-filters .btn{min-height:44px}
+  .development-activity-filters>.btn{margin-top:0}
   .gitlab-preview,.gitlab-sync-result,.gitlab-webhook-status{padding:14px}
   .gitlab-preview-candidates li{align-items:flex-start;flex-direction:column}
   .gitlab-preview-target{justify-content:flex-start}
