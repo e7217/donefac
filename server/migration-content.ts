@@ -39,6 +39,7 @@ export interface MigrationContentContext {
   legacyDocumentToc?: boolean;
   legacyDocumentLabelList?: boolean;
   legacyDocumentChildList?: boolean;
+  legacyChildListDefaultOrder?: boolean;
   legacyDocumentExcerpt?: boolean;
   legacyDocumentLayout?: boolean;
   legacyDocumentProperties?: boolean;
@@ -896,7 +897,8 @@ class Converter {
     const first = childListBound(setting('first'), MAX_DOCUMENT_CHILD_LIST_FIRST);
     const depth = childListBound(setting('depth'), MAX_DOCUMENT_CHILD_LIST_DEPTH);
     const sortValue = setting('sort'), styleValue = setting('style');
-    const sort = sortValue === 'creation' ? 'created' : sortValue === 'modified' ? 'updated' : sortValue === 'title' || !sortValue ? 'title' : null;
+    const sort = !sortValue ? (this.context.legacyChildListDefaultOrder ? 'title' : 'manual')
+      : sortValue === 'creation' ? 'created' : sortValue === 'modified' ? 'updated' : sortValue === 'title' ? 'title' : null;
     const style = !styleValue || styleValue === 'none' ? 'list' : styleValue;
     if (first === null || depth === null || !sort || !['', 'true', 'false'].includes(all) || !['', 'true', 'false'].includes(reverse) ||
         !['list', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(style)) return unsupported();
@@ -918,7 +920,9 @@ class Converter {
     const options = normalizeDocumentChildListOptions({ scope, documentId, projectId, depth: all === 'true' ? 'all' : depth ?? 1,
       first: first ?? null, sort, descending: reverse === 'true', style });
     if (!options) return unsupported();
-    if (!sortValue) this.warn('CHILD_LIST_DEFAULT_ORDER_CONVERTED', '원본에 정렬 기준이 없어 문서 제목순으로 표시합니다. 원본의 수동 순서는 보관 자료에서 확인할 수 있습니다.');
+    if (!sortValue && this.context.legacyChildListDefaultOrder) {
+      this.warn('CHILD_LIST_DEFAULT_ORDER_CONVERTED', '원본에 정렬 기준이 없어 문서 제목순으로 표시합니다. 원본의 수동 순서는 보관 자료에서 확인할 수 있습니다.');
+    }
     return [{ type: 'documentChildList', attrs: { ...options } }];
   }
   private documentLabelList(node: XmlNode, params: Record<string, string>): RichContent[] {

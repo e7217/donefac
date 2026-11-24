@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { DocPage, DocumentSiblingOrder } from '../shared/types.js';
+import type { DocPage, DocumentSiblingOrder, WorkspaceSnapshot } from '../shared/types.js';
 import type { Store, StoreChange } from './store.js';
 
 type Scope = Pick<DocumentSiblingOrder, 'projectId' | 'parentId'>;
@@ -80,8 +80,9 @@ export class DocumentOrderService {
     return (this.findSiblings.all(parentId, projectId) as { id: string }[]).map(({ id }) => id);
   }
 
-  private put(key: string, baseline: string[], documentIds: string[]): void {
-    this.saveOrder.run(key, sameOrder(baseline, documentIds) ? null : JSON.stringify(documentIds), randomUUID());
+  private put(key: string, baseline: string[], documentIds: string[], keepOrder = false): void {
+    const ordered = documentIds.length > 0 && (keepOrder || !sameOrder(baseline, documentIds));
+    this.saveOrder.run(key, ordered ? JSON.stringify(documentIds) : null, randomUUID());
   }
 
   private track({ before, after, context }: StoreChange): void {
@@ -94,8 +95,8 @@ export class DocumentOrderService {
     this.trackMembership(before, after);
   }
 
-  seedMigratedGroups(orders: readonly Omit<DocumentSiblingOrder, 'version'>[], documents: readonly DocPage[], newProjectIds: ReadonlySet<string>): void {
-    if (!this.store.db.isTransaction) throw new Error('Migrated document order requires a transaction.');
+  seedNewGroups(orders: readonly Omit<DocumentSiblingOrder, 'version'>[], documents: readonly DocPage[], newProjectIds = new Set<string>()): void {
+    if (!this.store.db.isTransaction) throw new Error('Initial document order requires a transaction.');
     const imported = new Map(documents.map(document => [document.id, document]));
     const scopes = new Set<string>();
     for (const order of orders) {
@@ -103,13 +104,13 @@ export class DocumentOrderService {
       const key = scopeKey(order);
       const members = this.members(order);
       const remaining = new Set(members);
-      const newScope = projectId !== null && (parentId === null ? newProjectIds.has(projectId) : imported.get(parentId)?.projectId === projectId);
-      if (!newScope || scopes.has(key) || this.stored(key) || documentIds.length < 2 || documentIds.length !== members.length ||
+      const newScope = parentId === null ? projectId !== null && newProjectIds.has(projectId) : imported.get(parentId)?.projectId === projectId;
+      if (!newScope || scopes.has(key) || this.stored(key)?.document_ids || documentIds.length === 0 || documentIds.length !== members.length ||
           documentIds.some(id => !imported.has(id) || !remaining.delete(id))) {
-        throw new DocumentOrderError(409, '이관할 형제 문서의 범위가 달라졌습니다. 미리보기를 다시 만들어 주세요.', 'document_order_membership_changed');
+        throw new DocumentOrderError(409, '새 형제 문서의 범위가 달라졌습니다. 미리보기를 다시 만들어 주세요.', 'document_order_membership_changed');
       }
       scopes.add(key);
-      this.put(key, members, documentIds);
+      this.put(key, members, documentIds, true);
     }
   }
 
@@ -121,7 +122,7 @@ export class DocumentOrderService {
       const stored = this.stored(oldKey);
       if (stored?.document_ids) {
         const baseline = this.members(old);
-        this.put(oldKey, baseline, arranged(baseline, stored));
+        this.put(oldKey, baseline, arranged(baseline, stored), true);
       } else this.saveOrder.run(oldKey, null, randomUUID());
     }
     if (next && nextKey) {
@@ -131,7 +132,7 @@ export class DocumentOrderService {
       else {
         const baseline = this.members(next);
         const rest = baseline.filter(id => id !== next.id);
-        this.put(nextKey, baseline, [...arranged(rest, stored), next.id]);
+        this.put(nextKey, baseline, [...arranged(rest, stored), next.id], Boolean(stored?.document_ids));
       }
     }
     if (old && !next) this.store.db.prepare('DELETE FROM document_sibling_orders WHERE scope_key=?').run(parentKey(old.id));
@@ -177,33 +178,34 @@ export class DocumentOrderService {
           'document_order_membership_changed', current.version);
       }
       if (sameOrder(documentIds, current.documentIds)) return current;
-      this.put(key, baseline, documentIds);
+      this.put(key, baseline, documentIds, true);
       record(document);
       return this.resolve(group, this.stored(key), generation);
     });
   }
 
   /** The caller supplies all live children in insertion order. */
-  orderChildren(parentId: string, childIds: readonly string[]): string[] {
-    if (childIds.length < 2) return [...childIds];
-    return arranged(childIds, this.stored(parentKey(parentId)));
+  childOrder(parentId: string, childIds: readonly string[]): { documentIds: string[]; custom: boolean } {
+    if (!childIds.length) return { documentIds: [], custom: false };
+    const stored = this.stored(parentKey(parentId));
+    return { documentIds: arranged(childIds, stored), custom: Boolean(stored?.document_ids) };
   }
 
-  private orders(documents: DocPage[], customOnly: boolean): DocumentSiblingOrder[] {
+  private orders(documents: DocPage[], customOnly: boolean): NonNullable<WorkspaceSnapshot['documentOrders']> {
     const rows = this.store.db.prepare('SELECT scope_key, document_ids, revision FROM document_sibling_orders').all() as StoredOrder[];
     const byKey = new Map(rows.map(row => [row.scope_key, row]));
     const generation = this.store.setting('attachmentImportGeneration');
-    const result: DocumentSiblingOrder[] = [];
+    const result: NonNullable<WorkspaceSnapshot['documentOrders']> = [];
     for (const [key, group] of grouped(documents)) {
       const stored = byKey.get(key);
       if (customOnly && !stored?.document_ids) continue;
       const order = this.resolve(group, stored, generation);
-      if (!customOnly || !sameOrder(order.documentIds, group.documentIds)) result.push(order);
+      result.push(!customOnly && stored?.document_ids ? { ...order, custom: true } : order);
     }
     return result;
   }
 
-  snapshot(documents: DocPage[]): DocumentSiblingOrder[] { return this.orders(documents, false); }
+  snapshot(documents: DocPage[]): NonNullable<WorkspaceSnapshot['documentOrders']> { return this.orders(documents, false); }
 
   forBackup(documents: DocPage[]): DocumentSiblingOrder[] { return this.orders(documents, true); }
 
@@ -231,6 +233,6 @@ export class DocumentOrderService {
   replaceImported(orders: DocumentSiblingOrder[]): void {
     if (!this.store.db.isTransaction) throw new Error('Document order restore requires a transaction.');
     this.store.db.exec('DELETE FROM document_sibling_orders');
-    for (const order of orders) this.put(scopeKey(order), this.members(order), order.documentIds);
+    for (const order of orders) this.put(scopeKey(order), this.members(order), order.documentIds, true);
   }
 }

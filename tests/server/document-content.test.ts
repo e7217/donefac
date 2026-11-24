@@ -307,6 +307,42 @@ test('multi-room imports validate the whole prospective graph including non-live
   }finally{service.close();f.close();}
 });
 
+test('manual child list collaboration rejects schema 13 clients and serves the saved order mode to schema 14', async () => {
+  const f = fixture();
+  const service = new CollaborationService(f.store, f.contents);
+  const server = createServer();
+  service.attachWebSocket(server);
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const url = `ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;
+  const peers: Peer[] = [];
+  try {
+    const authored = normalizeDocumentContent({ type: 'doc', content: [{ type: 'documentChildList', attrs: { sort: 'manual' } }] });
+    f.store.put('documents', { ...document('doc-a', authored.content), plainText: authored.plainText });
+    const session = service.enable('doc-a', 1, 'user-test');
+    const old = new Peer(url);
+    peers.push(old);
+    await once(old.ws, 'open');
+    old.send({ type: 'hello', epoch: session.epoch, schemaVersion: 13 });
+    assert.equal((await old.next('error')).code, 'SCHEMA_MISMATCH');
+
+    const current = new Peer(url);
+    peers.push(current);
+    await once(current.ws, 'open');
+    current.send({ type: 'hello', epoch: session.epoch, schemaVersion: 14 });
+    const welcome = await current.next('welcome');
+    assert.equal(welcome.schemaVersion, 14);
+    assert.deepEqual(welcome.document.content, authored.content);
+  } finally {
+    for (const peer of peers) peer.ws.terminate();
+    service.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    f.close();
+  }
+});
+
 test('live updates validate references, includes and label lists before durable ACK and reject v1 through v8 protocol clients',async()=>{
   const f=fixture(),service=new CollaborationService(f.store,f.contents),server=createServer();service.attachWebSocket(server);server.listen(0,'127.0.0.1');await once(server,'listening');const address=server.address();if(!address||typeof address==='string')throw new Error('No server address');const url=`ws://127.0.0.1:${address.port}/api/collaboration?documentId=doc-a&actorId=user-test`;const peers:Peer[]=[];
   try{

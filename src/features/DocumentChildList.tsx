@@ -129,6 +129,7 @@ function DocumentChildListSettings({ options, data, onApply, onClose, onDraftCha
         onChange={event => setOption('first', event.target.value)} /></label>
       <label>문서 정렬<select value={draft.sort} onChange={event => setOption('sort', event.target.value as Draft['sort'])}>
         <option value="title">제목</option><option value="created">작성일</option><option value="updated">수정일</option>
+        <option value="manual">사용자 지정 순서</option>
       </select></label>
       <label>표시 형식<select value={draft.style} onChange={event => setOption('style', event.target.value as Draft['style'])}>
         <option value="list">목록</option>{headings.map((heading, index) => <option key={heading} value={heading}>제목 {index + 1}</option>)}
@@ -214,8 +215,8 @@ function DocumentChildListRows({ projection, limit, style, documentId, openDocum
 
 export function DocumentChildListCard({ attrs, data, documentId, projection, openDocument, renderLimit, onChange, onDelete, onSettingsDraftChange }: Props) {
   const options = useMemo(() => normalizeDocumentChildListOptions(attrs), [attrs]);
-  const result = useMemo(() => projection ?? (options && projectDocumentChildren(data.documents, documentId, options)),
-    [data.documents, documentId, options, projection]);
+  const result = useMemo(() => projection ?? (options && projectDocumentChildren(data.documents, documentId, options, data.documentOrders)),
+    [data.documents, data.documentOrders, documentId, options, projection]);
   const available = Boolean(result?.available) && !(options?.scope === 'space' && options.projectId !== null &&
     !data.projects.some(project => project.id === options.projectId));
   const settingsButton = useRef<HTMLButtonElement>(null);

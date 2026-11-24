@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,6 +8,7 @@ import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { normalizeDocumentContent } from '../../server/document-content.js';
 import { convertLegacyContent, type MigrationContentContext, type MigrationReferenceInput } from '../../server/migration-content.js';
+import { measureIncomingArchive } from '../../server/source-archive-integrity.js';
 import { DOCUMENT_CHILD_LIST_DEFAULTS, documentChildLists } from '../../shared/document-child-list.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import type {
@@ -21,6 +23,7 @@ const legacyPage = (text: string): LegacyRecord => ({
   id: 'page:100', kind: 'page', sourceId: '100', title: '원본 문서', containerId: '42', parentId: null, authorId: null,
   createdAt: null, updatedAt: null, text, textFormat: 'confluence-storage', metadata: {}, references: [],
 });
+type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
 
 test('Confluence children parameters preserve scope, hierarchy bounds, sibling order and heading style', () => {
   const references: MigrationReferenceInput[] = [], spaces: (string | null)[] = [];
@@ -32,21 +35,25 @@ test('Confluence children parameters preserve scope, hierarchy bounds, sibling o
     macro(), macro({ page: '<ac:link><ri:page ri:content-title="책임 문서" ri:space-key="SUPPORT"></ri:page></ac:link>',
       all: 'true', depth: '2', first: '99', sort: 'creation', reverse: 'true', style: 'h4', excerpt: 'none' }),
     macro({ page: '/', sort: 'modified', depth: '60' }), macro({ page: 'SUPPORT:', sort: 'title', first: '500' }),
-    macro({ page: 'SUPPORT:다른 부모', sort: 'title' }),
+    macro({ page: 'SUPPORT:다른 부모', sort: 'title' }), macro({ sort: ' ' }),
   ].join('');
   const result = convertLegacyContent(legacyPage(xml), context);
-  assert.deepEqual(result.diagnostics.map(item => item.code), ['CHILD_LIST_DEFAULT_ORDER_CONVERTED']);
+  assert.deepEqual(result.diagnostics.map(item => item.code), []);
   assert.deepEqual(documentChildLists(result.content), [
-    DOCUMENT_CHILD_LIST_DEFAULTS,
+    { ...DOCUMENT_CHILD_LIST_DEFAULTS, sort: 'manual' },
     { ...DOCUMENT_CHILD_LIST_DEFAULTS, scope: 'document', documentId: 'resolved-page', depth: 'all', first: 99, sort: 'created', descending: true, style: 'h4' },
     { ...DOCUMENT_CHILD_LIST_DEFAULTS, scope: 'current-space', depth: 60, sort: 'updated' },
     { ...DOCUMENT_CHILD_LIST_DEFAULTS, scope: 'space', projectId: 'support-project', first: 500 },
     { ...DOCUMENT_CHILD_LIST_DEFAULTS, scope: 'document', documentId: 'resolved-page' },
+    { ...DOCUMENT_CHILD_LIST_DEFAULTS, sort: 'manual' },
   ]);
   assert.deepEqual(references.map(({ title, spaceKey }) => [title, spaceKey]), [['책임 문서', 'SUPPORT'], ['다른 부모', 'SUPPORT']]);
   assert.deepEqual(spaces, [null, 'SUPPORT']);
   assert.ok(contentReferences(result.content).every(reference => reference.kind !== 'include'));
   assert.deepEqual(normalizeDocumentContent(result.content), { content: result.content, plainText: result.plainText });
+  const former = convertLegacyContent(legacyPage(xml), { ...context, legacyChildListDefaultOrder: true });
+  assert.deepEqual(former.diagnostics.map(item => item.code), ['CHILD_LIST_DEFAULT_ORDER_CONVERTED']);
+  assert.deepEqual(documentChildLists(former.content).map(options => options.sort), ['title', 'created', 'updated', 'title', 'title', 'title']);
 });
 
 test('Confluence children preserves unknown settings, excerpt modes, unresolved scopes and former rendering as inert XML', () => {
@@ -165,13 +172,16 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
   const initial = await app(t), restored = await app(t);
   const instance = 'synthetic-children-old-checkpoint';
   const legacy = macro({ page: '/', sort: 'title' });
-  const pages = [{ id: '100', title: '기존 색인', body: legacy }, { id: '200', title: '별도 편집한 색인', body: legacy }];
+  const formerDefault = macro();
+  const pages = [
+    { id: '100', title: '기존 색인', body: legacy }, { id: '200', title: '별도 편집한 색인', body: legacy },
+    { id: '250', title: '이전 기본 정렬 색인', body: formerDefault },
+  ];
   const first = await initial.upload(instance, 'old', archive(pages));
   const receipt = await initial.apply(await initial.preview(first));
   const [projectId] = receipt.import.projectIds;
-  type Backup = WorkspaceSnapshot & { schemaVersion: number; revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
   const backup = await initial.call<Backup>('/export');
-  backup.schemaVersion = 66;
+  backup.schemaVersion = 67;
   for (const value of backup.sourceImports) delete value.integrity;
   for (const value of backup.sourceRecords) {
     delete value.confluencePageFieldHashes;
@@ -180,11 +190,15 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
   const oldBody = normalizeDocumentContent({ type: 'doc', content: [{ type: 'codeBlock', content: [{ type: 'text', text: legacy }] }] });
   const original = backup.documents.find(doc => doc.title === '기존 색인')!;
   const edited = backup.documents.find(doc => doc.title === '별도 편집한 색인')!;
+  const former = backup.documents.find(doc => doc.title === '이전 기본 정렬 색인')!;
+  const { content, plainText } = convertLegacyContent(legacyPage(formerDefault), { resolveReference: () => null, legacyChildListDefaultOrder: true });
+  Object.assign(former, { content, plainText });
   Object.assign(original, oldBody);
   Object.assign(edited, normalizeDocumentContent({ type: 'doc', content: [
     ...oldBody.content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀 편집' }] },
   ] }));
   for (const value of backup.revisions.filter(revision => revision.documentId === original.id || revision.documentId === edited.id)) Object.assign(value, oldBody);
+  for (const value of backup.revisions.filter(revision => revision.documentId === former.id)) Object.assign(value, { content, plainText });
   await restored.call('/import', 'POST', { data: backup });
 
   const fresh = macro({ page: '/', depth: '3', sort: 'modified', reverse: 'true' });
@@ -199,6 +213,7 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
   }
   assert.equal(contentDecision(original.id), 'apply');
   assert.equal(contentDecision(edited.id), 'conflict');
+  assert.equal(contentDecision(former.id), 'apply');
   const local = await restored.call<DocPage>('/documents', 'POST', { projectId, title: '이관 밖 팀 문서' }, 201);
   await restored.apply(plan, 409);
   const mixed = await restored.preview(configuration);
@@ -211,4 +226,68 @@ test('Confluence children refresh reconstructs exact older XML and keeps edited 
     { ...DOCUMENT_CHILD_LIST_DEFAULTS, scope: 'current-space', depth: 3, sort: 'updated', descending: true },
   ]);
   assert.equal(JSON.stringify(snapshot.documents.find(doc => doc.id === edited.id)?.content), JSON.stringify(edited.content));
+});
+
+test('same-version Confluence refresh upgrades only the proven former default sort', async t => {
+  const initial = await app(t), restored = await app(t);
+  const instance = 'synthetic-children-former-default';
+  const formerDefault = macro({ page: '/', reverse: 'true' }), explicit = macro({ sort: 'title' });
+  const pages = [
+    { id: '100', title: '기본 정렬', body: formerDefault + explicit },
+    { id: '200', title: '정렬과 본문 편집', body: formerDefault },
+    { id: '300', title: '명시적 제목순', body: explicit },
+    { id: '400', title: '본문 비교 기준이 없는 이전 이관', body: formerDefault },
+    { id: '500', title: '다른 원본 본문을 반영한 이관', body: formerDefault },
+  ];
+  const first = await initial.upload(instance, 'initial-default', archive(pages));
+  const receipt = await initial.apply(await initial.preview(first));
+  const [projectId] = receipt.import.projectIds;
+  const backup = await initial.call<Backup>('/export');
+  const previousBodies = new Map<string, DocPage['content']>();
+  for (const source of backup.sourceRecords.filter(record => record.targetType === 'document')) {
+    const { content, plainText } = convertLegacyContent(source.record, {
+      resolveReference: () => null, resolveChildListSpaceProject: () => projectId, legacyChildListDefaultOrder: true,
+    });
+    const document = backup.documents.find(doc => doc.id === source.targetId)!;
+    if (source.record.sourceId === '400') {
+      delete source.confluencePageFieldHashes;
+      delete source.confluencePageBodySourceHash;
+    } else {
+      source.confluencePageFieldHashes!.content = createHash('sha256').update(JSON.stringify(['content', JSON.stringify(content)])).digest('hex');
+    }
+    if (source.record.sourceId === '500') source.confluencePageBodySourceHash = 'b'.repeat(64);
+    const body = source.record.sourceId === '200' ? normalizeDocumentContent({ type: 'doc', content: [
+      ...content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀에서 작성한 문단' }] },
+    ] }) : { content, plainText };
+    Object.assign(document, body);
+    previousBodies.set(source.record.sourceId, body.content);
+    for (const revision of backup.revisions.filter(value => value.documentId === document.id)) Object.assign(revision, { content, plainText });
+  }
+  for (const item of backup.sourceImports) {
+    item.integrity = { version: 1, packages: measureIncomingArchive(item, backup.sourceRecords).packages };
+  }
+  await restored.call('/import', 'POST', { data: backup });
+
+  const refreshed = await restored.upload(instance, 'same-version', archive([...pages].reverse()));
+  const configuration = { ...refreshed, appendPagesTo: { projectId, refreshExisting: true as const } };
+  const local = await restored.call<DocPage>('/documents', 'POST', { projectId, title: '이관 밖 팀 문서' }, 201);
+  assert.ok(!(await restored.preview(configuration)).documentRefresh?.some(value => value.fields.some(field => field.field === 'content')));
+  await restored.call(`/documents/${local.id}?expectedVersion=${local.version}`, 'DELETE');
+  const plan = await restored.preview(configuration);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.deepEqual(plan.documentRefresh?.map(row => [row.sourceId, row.fields.map(field => [field.field, field.decision])]), [
+    ['400', [['content', 'apply']]],
+    ['100', [['content', 'apply']]],
+  ]);
+  assert.ok(plan.notices.some(item => item.code === 'CONFLUENCE_REFRESH_CHILD_LIST_ORDER_RESTORED'));
+  await restored.apply(plan);
+  const snapshot = await restored.call<WorkspaceSnapshot>('/workspace');
+  const current = (sourceId: string) => snapshot.documents.find(document => document.title === pages.find(page => page.id === sourceId)!.title)!.content;
+  assert.deepEqual(documentChildLists(current('100')).map(options => [options.sort, options.descending]), [['manual', true], ['title', false]]);
+  assert.deepEqual(documentChildLists(current('400')).map(options => options.sort), ['manual']);
+  for (const sourceId of ['200', '300', '500']) assert.deepEqual(current(sourceId), previousBodies.get(sourceId));
+
+  const repeat = await restored.upload(instance, 'same-version-repeat', archive([pages[1], pages[0], ...pages.slice(2)]));
+  const repeatedPlan = await restored.preview({ ...repeat, appendPagesTo: configuration.appendPagesTo });
+  assert.ok(!repeatedPlan.documentRefresh?.some(row => row.fields.some(field => field.field === 'content')));
 });

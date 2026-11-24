@@ -318,9 +318,9 @@ function workspaceEvidence(workspace) {
   for (const order of orders.slice().sort((a, b) => scope(a).localeCompare(scope(b)))) {
     const key = scope(order), expected = siblings.get(key);
     requireEvidence(expected && Array.isArray(order.documentIds) && order.documentIds.length === expected.size &&
-      order.documentIds.every(id => expected.delete(id)), invalidOrder);
+      order.documentIds.every(id => expected.delete(id)) && (order.custom === undefined || order.custom === true), invalidOrder);
     siblings.delete(key);
-    digest.update(JSON.stringify([key, order.documentIds])).update('\n');
+    digest.update(JSON.stringify([key, order.documentIds, order.custom === true])).update('\n');
   }
   return { counts, sha256: digest.digest('hex') };
 }

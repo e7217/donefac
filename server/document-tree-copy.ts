@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { isLiveDocumentInclude } from '../shared/document-nodes.js';
 import { documentNodes } from '../shared/document-references.js';
 import { documentSectionHash, isDocumentSectionId } from '../shared/document-sections.js';
-import type { Attachment, DocPage, DocumentTreeCopyOptions, DocumentTreeCopyPreview, Project } from '../shared/types.js';
+import type { Attachment, DocPage, DocumentSiblingOrder, DocumentTreeCopyOptions, DocumentTreeCopyPreview, Project } from '../shared/types.js';
 import { MAX_PACKAGE_BYTES } from './attachments.js';
 import { creationRequestId } from './creation-request.js';
 import { workspaceContentOrigins, workspaceContentUrl } from './document-content-urls.js';
@@ -130,6 +130,7 @@ export class DocumentTreeCopyService {
     const pending = [root.id];
     const discovered = new Set(pending);
     const documents: DocPage[] = [];
+    const customOrders = new Map<string, string[]>();
     let contentBytes = 0;
     for (const id of pending) {
       const page = id === root.id ? root : this.store.get<DocPage>('documents', id) ?? hierarchyError();
@@ -145,7 +146,9 @@ export class DocumentTreeCopyService {
         discovered.add(childId);
         children.push(childId);
       }
-      pending.push(...this.orders.orderChildren(id, children));
+      const order = this.orders.childOrder(id, children);
+      if (order.custom) customOrders.set(id, order.documentIds);
+      pending.push(...order.documentIds);
     }
 
     const authorizedOrigins = workspaceContentOrigins(origins);
@@ -153,13 +156,13 @@ export class DocumentTreeCopyService {
     const token = createHash('sha256').update(JSON.stringify([
       'document-tree-copy', this.store.setting('attachmentImportGeneration'), actorId, options, sourceProject, targetProject,
       sourceAncestors, destinationAncestors, documents.map(({ id, parentId, projectId, version, title }) => [id, parentId, projectId, version, title]),
-      [...authorizedOrigins].sort(), assetPlan.fingerprint,
+      [...authorizedOrigins].sort(), assetPlan.fingerprint, [...customOrders.keys()],
     ])).digest('hex');
     const preview: DocumentTreeCopyPreview = {
       ...options, sourceDocumentId, token, documents: documents.map(({ id, title, version }) => ({ id, title, version })),
       attachmentCount: assetPlan.attachmentCount, attachmentBytes: assetPlan.attachmentBytes, warnings: assetPlan.warnings,
     };
-    return { preview, documents, assetPlan, authorizedOrigins };
+    return { preview, documents, assetPlan, authorizedOrigins, customOrders };
   }
 
   preview(sourceId: string, actorId: string, body: unknown, origins: readonly string[]): DocumentTreeCopyPreview {
@@ -171,10 +174,11 @@ export class DocumentTreeCopyService {
     documents: DocPage[];
     originals: DocPage[];
     files: { attachment: Attachment; bytes: Buffer }[];
+    orders: Omit<DocumentSiblingOrder, 'version'>[];
   } {
     if (!this.store.db.isTransaction) throw new Error('Document copy must be prepared inside a transaction.');
     const { options, token } = copyRequest(body, true);
-    const { preview, documents: originals, assetPlan, authorizedOrigins } = this.plan(sourceId, actorId, options, origins, true);
+    const { preview, documents: originals, assetPlan, authorizedOrigins, customOrders } = this.plan(sourceId, actorId, options, origins, true);
     if (token !== preview.token) throw stale();
     const ids = new Map(originals.map(original => [original.id, randomUUID()]));
     const documents = originals.map((original): DocPage => {
@@ -189,6 +193,9 @@ export class DocumentTreeCopyService {
       return copy;
     });
     const files = assetPlan.materialize(documents, ids, actorId, timestamp);
-    return { documents, originals, files };
+    const orders = [...customOrders].map(([parentId, children]) => ({
+      projectId: options.projectId, parentId: ids.get(parentId)!, documentIds: children.map(id => ids.get(id)!),
+    }));
+    return { documents, originals, files, orders };
   }
 }

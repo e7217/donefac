@@ -118,7 +118,7 @@ test('Confluence root and nested sibling positions apply atomically and survive 
   for (const { leader, parentId, ids } of expected) {
     const order = await f.request<DocumentSiblingOrder>(orderPath(leader));
     assert.deepEqual([order.projectId, order.parentId, order.documentIds], [projectId, parentId, ids]);
-    assert.deepEqual(snapshot.documentOrders?.find(group => group.projectId === projectId && group.parentId === parentId), order);
+    assert.deepEqual(snapshot.documentOrders?.find(group => group.projectId === projectId && group.parentId === parentId), { ...order, custom: true });
   }
   assert.equal((await f.apply(plan, 200)).duplicate, true);
   assert.deepEqual((await f.request<WorkspaceSnapshot>('/workspace')).documentOrders, snapshot.documentOrders);
@@ -182,6 +182,10 @@ test('Confluence append preserves existing page order and seeds siblings of a ne
   const [projectId] = (await f.apply(first)).import.projectIds;
   const initial = await f.docs();
   const prior = (id: number) => importedPage(initial, projectId, id);
+  const initialOrders = (await f.request<WorkspaceSnapshot>('/workspace')).documentOrders;
+  const order = initialOrders?.find(group => group.projectId === projectId && group.parentId === null);
+  assert.equal(order?.custom, true);
+  assert.deepEqual(order?.documentIds, [prior(100).id, prior(200).id]);
   async function reorder(leader: number, ...ordered: number[]) {
     const path = orderPath(prior(leader));
     const { version: expectedVersion } = await f.request<DocumentSiblingOrder>(path);

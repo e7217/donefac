@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync,rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { contentMarkdown,contentText } from '../../src/features/document-utils.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { DOCUMENT_LABEL_LIST_DEFAULTS, MAX_DOCUMENT_LABEL_LISTS, MAX_DOCUMENT_LABEL_LIST_LIMIT } from '../../shared/document-label-list.js';
-import type { ApiKeyCreated,DocPage,DocRevision,DocumentPublicationView,RichContent,SavedView,WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated,DocPage,DocRevision,DocumentPublicationView,DocumentTemplateSummary,RichContent,SavedView,WorkspaceSnapshot } from '../../shared/types.js';
 import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
 
 type Backup=WorkspaceSnapshot&{schemaVersion:number;collabStates:{documentId:string;schemaVersion:number;state:string}[]};
@@ -32,6 +33,60 @@ async function fixture(){const dir=mkdtempSync(join(tmpdir(),'teamspace-document
 type Fixture=Awaited<ReturnType<typeof fixture>>;
 async function make(f:Fixture,title:string,content=body(p('원본')),projectId:string|null='project-neo'){const result=await f.call<DocPage>('/documents','POST',{projectId,title,content});assert.equal(result.status,201,JSON.stringify(result.data));return result.data;}
 const snapshot=async(f:Fixture)=>(await f.call<WorkspaceSnapshot>('/workspace')).data;
+
+test('manual child lists require content and collaboration schema 14 and workspace backup format 105', async () => {
+  const f = await fixture();
+  try {
+    const childList = (sort: 'created' | 'manual') => body({ type: 'documentChildList', attrs: { sort } });
+    const legacy = await make(f, '기존 하위 문서 목록', childList('created'));
+    const manual = await make(f, '직접 정렬하는 하위 문서 목록', childList('manual'));
+    assert.equal(documentContentSchemaVersion(legacy.content), 10);
+    assert.equal(documentContentSchemaVersion(manual.content), 14);
+    const path = `/documents/${manual.id}`;
+    const oldWrite = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: manual.version, contentSchemaVersion: 13, content: childList('created'),
+    });
+    assert.equal(oldWrite.status, 409);
+    assert.equal(oldWrite.data.details.contentSchemaVersion, 14);
+    assert.deepEqual((await snapshot(f)).documents.find(doc => doc.id === manual.id)?.content, manual.content);
+    assert.equal((await f.call(`/documents/${legacy.id}`, 'PATCH', {
+      expectedVersion: legacy.version, contentSchemaVersion: 10, content: body(p('기존 형식의 새 본문'), ...childList('created').content!),
+    })).status, 200);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: manual.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, 14);
+    const activeBackup = (await f.call<Backup>('/export')).data;
+    assert.equal(activeBackup.schemaVersion, 105);
+    const rejectDowngrade = async (backup: Backup) => {
+      const rejected = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 104 } });
+      assert.equal(rejected.status, 400);
+      assert.match(rejected.data.error, /schemaVersion 105/u);
+    };
+    await rejectDowngrade(activeBackup);
+    const staleState = { ...activeBackup, collabStates: activeBackup.collabStates.map(state =>
+      state.documentId === manual.id ? { ...state, schemaVersion: 13 } : state) };
+    assert.equal((await f.call('/import', 'POST', { data: staleState })).status, 422);
+    assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+
+    const template = await f.call<DocumentTemplateSummary>('/document-templates', 'POST', {
+      requestId: randomUUID(), sourceDocumentId: manual.id, expectedDocumentVersion: live.data.document.version, name: '직접 정렬 템플릿',
+    });
+    assert.equal(template.status, 201, JSON.stringify(template.data));
+    const trashed = await f.call<{ trashEntryId: string }>(path, 'DELETE');
+    assert.equal(trashed.status, 200);
+    const archived = (await f.call<Backup & { documentTemplates: unknown[] }>('/export')).data;
+    assert.ok(!archived.documents.some(doc => doc.id === manual.id));
+    await rejectDowngrade(archived);
+    const withoutTemplate = { ...archived, documentTemplates: [] };
+    await rejectDowngrade(withoutTemplate);
+    assert.equal((await f.call('/import', 'POST', { data: archived })).status, 200);
+    assert.equal((await f.call(`/trash/${trashed.data.trashEntryId}/restore`, 'POST')).status, 200);
+    const session = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.equal(session.schemaVersion, COLLABORATION_SCHEMA);
+    assert.notEqual(session.epoch, live.data.epoch);
+    assert.deepEqual(session.document.content, manual.content);
+  } finally { await f.close(); }
+});
 
 test('label list options are canonical, bounded and protected in live and archived document backups', async () => {
   const f = await fixture();

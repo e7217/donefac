@@ -1828,7 +1828,7 @@ export interface WorkspaceSnapshot {
   issueOrders?: ProjectIssueOrder[];
   issueMoveOrigins?: Record<string, string[]>;
   issueAliases?: Record<string, IssueSearchAlias[]>;
-  documentOrders?: DocumentSiblingOrder[];
+  documentOrders?: (DocumentSiblingOrder & { custom?: true })[];
 }
 export interface ScheduleChange {
   id: string;

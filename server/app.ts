@@ -170,6 +170,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 14 && backupVersion < 105) fail('직접 정렬하는 하위 문서 목록을 포함한 백업은 schemaVersion 105가 필요합니다.');
   if (version >= 13 && backupVersion < 96) fail('문서 속성 또는 속성 보고서를 포함한 백업은 schemaVersion 96이 필요합니다.');
   if (version >= 12 && backupVersion < 79) fail('문서 열 배치를 포함한 백업은 schemaVersion 79가 필요합니다.');
   if (version >= 11 && backupVersion < 69) fail('문서 발췌를 포함한 백업은 schemaVersion 69가 필요합니다.');
@@ -1023,7 +1024,7 @@ export function createApp(options: {
       }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       if (value.documentOrders?.length) {
-        documentOrders.seedMigratedGroups(value.documentOrders, value.documents, new Set(value.projects.map(project => project.id)));
+        documentOrders.seedNewGroups(value.documentOrders, value.documents, new Set(value.projects.map(project => project.id)));
       }
       for (const { before, after, fields } of refreshedIssues) {
         store.put('issues', after);
@@ -2028,7 +2029,7 @@ export function createApp(options: {
     let result: ReturnType<DocumentCreationService['create']>;
     try {
       result = documentCreation.create(authorId, req.body, () => {
-        const { documents, originals, files: copiedFiles } = documentTreeCopy.prepareCopy(sourceId, authorId, req.body, templateOrigins(req), now());
+        const { documents, originals, files: copiedFiles, orders } = documentTreeCopy.prepareCopy(sourceId, authorId, req.body, templateOrigins(req), now());
         const [root] = documents;
         const edits = documents.map((document, index) => {
           const original = originals[index];
@@ -2037,6 +2038,7 @@ export function createApp(options: {
           return { id: document.id, content: document.content, previousContent: original.content };
         });
         documentContent.validateBatch(edits);
+        if (orders.length) documentOrders.seedNewGroups(orders, documents);
         if (copiedFiles.length) {
           staged = documentDraftFiles.stage(root.id, copiedFiles.map(({ attachment, bytes }) => ({
             id: attachment.id, size: attachment.size, sha256: attachment.sha256, bytes,
@@ -2851,6 +2853,9 @@ export function createApp(options: {
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
     const importedTemplates=data.schemaVersion>=63?documentTemplates.validateRestore(data.documentTemplates,data.projects,data.users,data.exportedAt):[];
+    if (data.schemaVersion < 105 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 14)) {
+      fail('직접 정렬하는 하위 문서 목록이 있는 템플릿에는 schemaVersion 105 백업이 필요합니다.');
+    }
     if (data.schemaVersion < 96 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 13)) {
       fail('문서 속성 또는 속성 보고서가 있는 템플릿에는 schemaVersion 96 백업이 필요합니다.');
     }

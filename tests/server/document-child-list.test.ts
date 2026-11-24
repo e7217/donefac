@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
 import type { CollaborationExport } from '../../server/collaboration.js';
 import { COLLABORATION_SCHEMA, type CollaborationSession } from '../../shared/collaboration.js';
-import { DOCUMENT_CHILD_LIST_DEFAULTS, normalizeDocumentChildListOptions, projectDocumentChildren,
+import { DOCUMENT_CHILD_LIST_DEFAULTS, documentChildListDescription, normalizeDocumentChildListOptions, projectDocumentChildren,
   MAX_DOCUMENT_CHILD_LIST_ITEMS, MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list.js';
 import { contentReferences, documentContentSchemaVersion } from '../../shared/document-nodes.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
@@ -51,6 +51,42 @@ test('child list projects only the selected live tree, sorts each branch and lim
   assert.equal(overflow.truncated, true);
 });
 
+test('child list ranks live siblings from custom orders in the selected space and reverses each level before limiting', () => {
+  const documents = [
+    page('root', '팀 문서 10', null), page('other-root', '팀 문서 2', null),
+    page('a', '절 10', 'root'), page('b', '절 2', 'root'), page('c', '절 1', 'root'),
+    page('a2', '상세 2', 'a'), page('a10', '상세 10', 'a'),
+    page('b2', '상세 2', 'b'), page('b10', '상세 10', 'b'),
+    page('wrong-parent', '다른 상위 문서', 'other-root'),
+    page('wrong-project', '다른 프로젝트', 'root', { projectId: 'project-team' }),
+    page('team-root', '팀 문서 10', null, { projectId: 'project-team' }),
+    page('team-other-root', '팀 문서 2', null, { projectId: 'project-team' }),
+  ];
+  const version = '0'.repeat(64);
+  const orders: NonNullable<WorkspaceSnapshot['documentOrders']> = [
+    { projectId: 'project-neo', parentId: null, documentIds: ['root', 'other-root'], version, custom: true },
+    { projectId: 'project-neo', parentId: 'root', documentIds: ['c', 'a', 'stale', 'wrong-project', 'wrong-parent', 'c'], version, custom: true },
+    { projectId: 'project-neo', parentId: 'a', documentIds: ['a10', 'a2'], version, custom: true },
+    { projectId: 'project-neo', parentId: 'b', documentIds: ['b10', 'b2'], version },
+    { projectId: 'project-team', parentId: 'root', documentIds: ['b', 'wrong-project'], version, custom: true },
+    { projectId: 'project-team', parentId: null, documentIds: ['team-root', 'team-other-root'], version, custom: true },
+  ];
+  const project = (attrs: Record<string, unknown>, siblingOrders = orders, current = 'root') =>
+    projectDocumentChildren(documents, current, normalizeDocumentChildListOptions(attrs)!, siblingOrders)
+      .items.map(({ document }) => document.id);
+  assert.equal(normalizeDocumentChildListOptions(undefined)?.sort, 'title');
+  assert.match(documentChildListDescription(normalizeDocumentChildListOptions({ sort: 'manual' })!), /사용자 지정 순서 오름차순/u);
+  assert.deepEqual(project({}), ['c', 'b', 'a']);
+  assert.deepEqual(project({ sort: 'manual' }), ['a', 'c', 'b']);
+  assert.deepEqual(project({ sort: 'manual', depth: 'all', first: 1 }), ['a', 'a10', 'a2']);
+  assert.deepEqual(project({ sort: 'manual', depth: 'all', first: 1, descending: true }), ['b', 'b10', 'b2']);
+  assert.deepEqual(project({ sort: 'manual', scope: 'document', documentId: 'a', descending: true }, orders, 'team-root'), ['a2', 'a10']);
+  assert.deepEqual(project({ sort: 'manual', scope: 'current-space' }), ['root', 'other-root']);
+  assert.deepEqual(project({ sort: 'manual', scope: 'space', projectId: 'project-team' }), ['team-root', 'team-other-root']);
+  assert.deepEqual(project({ sort: 'manual' }, []), ['c', 'b', 'a']);
+  assert.deepEqual(project({ sort: 'manual' }, [...orders, orders[1]]), ['c', 'b', 'a']);
+});
+
 async function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-document-child-list-'));
   const service = createApp({ dataDir: directory, outboundWorker: false });
@@ -83,14 +119,15 @@ async function fixture(t: TestContext) {
 test('child list validates settings and older save formats, and restores current and prior collaborative formats', async t => {
   const f = await fixture(t);
   const target = await f.create('운영 절차');
-  const attrs = { depth: 'all', first: 3, scope: 'document', documentId: target.id, title: ' 운영 안내 ', style: 'h3' };
+  const attrs = { depth: 'all', first: 3, scope: 'document', documentId: target.id, title: ' 운영 안내 ', style: 'h3', sort: 'manual' };
   const authored = await f.create('운영 문서 목록', body(childList(attrs)));
   const path = `/documents/${authored.id}`;
   const canonical = body(childList({ ...DOCUMENT_CHILD_LIST_DEFAULTS, ...attrs, title: '운영 안내' }));
   assert.deepEqual(authored.content, canonical);
-  assert.equal(documentContentSchemaVersion(authored.content), 10);
+  assert.equal(documentContentSchemaVersion(authored.content), 14);
+  assert.equal(documentContentSchemaVersion(body(childList())), 10);
   assert.deepEqual(contentReferences(authored.content), [{ type: 'document', id: target.id, kind: 'reference', label: '운영 안내' }]);
-  assert.match(authored.plainText, /하위 문서 목록.*운영 안내.*모든 하위 단계/u);
+  assert.match(authored.plainText, /하위 문서 목록.*운영 안내.*모든 하위 단계.*사용자 지정 순서/u);
   for (const bad of [{ depth: 0 }, { depth: 61 }, { first: 0 }, { first: 501 }, { descending: 'yes' }, { sort: 'random' },
     { style: 'a' }, { title: '줄\n바꿈' }, { snapshot: true }, { documentId: target.id }, { scope: 'document' },
     { scope: 'document', documentId: 'missing-document' }, { scope: 'space', projectId: 'missing-project' }]) {
@@ -100,10 +137,10 @@ test('child list validates settings and older save formats, and restores current
   assert.equal((await f.call('/documents', 'POST', { title: '목록 개수 한도', projectId: 'project-neo',
     content: body(...Array.from({ length: MAX_DOCUMENT_CHILD_LISTS + 1 }, () => childList())) })).status, 422);
   const oldWrite = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
-    expectedVersion: authored.version, contentSchemaVersion: 9, content: body(paragraph('오래된 편집기의 본문')),
+    expectedVersion: authored.version, contentSchemaVersion: 13, content: body(paragraph('오래된 편집기의 본문')),
   });
   assert.equal(oldWrite.status, 409);
-  assert.equal(oldWrite.data.details.contentSchemaVersion, 10);
+  assert.equal(oldWrite.data.details.contentSchemaVersion, 14);
 
   const v9 = await f.create('이전 공동 편집 문서', body({ type: 'documentLabelList', attrs: { projectId: 'project-neo' } }));
   for (const doc of [authored, v9]) {

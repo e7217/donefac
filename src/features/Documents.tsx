@@ -1730,6 +1730,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
+    editorReadOnly={bodyReadOnly || archivedLiveRecovery}
     openIssueBlock={bodyReadOnly || checklistReselecting ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly || checklistReselecting ? undefined : openAnnotation}><section className="documents-feature">
     <div className="docs-heading" inert={newOpen || archiveImport || checklistReselecting || Boolean(templateManager || offlineExport)}><div><div className="docs-eyebrow">KNOWLEDGE</div><h1>문서 <span>{scoped.length}</span></h1><p>아이디어부터 결정까지, 팀의 지식을 한곳에.</p></div>

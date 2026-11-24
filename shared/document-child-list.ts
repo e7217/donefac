@@ -1,5 +1,5 @@
 import { documentNodes } from './document-references.js';
-import type { DocPage, RichContent } from './types.js';
+import type { DocPage, RichContent, WorkspaceSnapshot } from './types.js';
 
 export const MAX_DOCUMENT_CHILD_LISTS = 30;
 export const MAX_DOCUMENT_CHILD_LIST_DEPTH = 60;
@@ -13,7 +13,7 @@ export interface DocumentChildListOptions {
   projectId: string | null;
   depth: number | 'all';
   first: number | null;
-  sort: 'title' | 'created' | 'updated';
+  sort: 'title' | 'created' | 'updated' | 'manual';
   descending: boolean;
   style: 'list' | 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
   title: string;
@@ -52,7 +52,7 @@ export function normalizeDocumentChildListOptions(raw: unknown): DocumentChildLi
   if (scope === 'space' ? projectId !== null && !isId(projectId) : projectId !== null) return null;
   if ((depth !== 'all' && !boundedLimit(depth, MAX_DOCUMENT_CHILD_LIST_DEPTH)) ||
     (first !== null && !boundedLimit(first, MAX_DOCUMENT_CHILD_LIST_FIRST)) ||
-    (sort !== 'title' && sort !== 'created' && sort !== 'updated') || typeof descending !== 'boolean' ||
+    (sort !== 'title' && sort !== 'created' && sort !== 'updated' && sort !== 'manual') || typeof descending !== 'boolean' ||
     !childListStyles.has(style) || typeof title !== 'string' || !title.isWellFormed() || control.test(title)) return null;
   const normalizedTitle = title.trim().normalize('NFC');
   if (normalizedTitle.length > MAX_DOCUMENT_CHILD_LIST_TITLE_LENGTH) return null;
@@ -69,7 +69,7 @@ export function documentChildLists(content: RichContent): DocumentChildListOptio
   return lists;
 }
 
-const sortLabels = { title: '제목', created: '작성일', updated: '수정일' };
+const sortLabels = { title: '제목', created: '작성일', updated: '수정일', manual: '사용자 지정 순서' };
 
 export function documentChildListDescription(options: DocumentChildListOptions): string {
   const range = {
@@ -86,7 +86,8 @@ type ChildRow = { document: DocPage; depth: number };
 
 /** Projects only the active documents from the selected hierarchy and space. */
 export function projectDocumentChildren(documents: readonly DocPage[], currentDocumentId: string | null,
-  options: DocumentChildListOptions): { available: boolean; items: ChildRow[]; truncated: boolean } {
+  options: DocumentChildListOptions, siblingOrders?: readonly NonNullable<WorkspaceSnapshot['documentOrders']>[number][],
+): { available: boolean; items: ChildRow[]; truncated: boolean } {
   const { scope, depth, first, sort, descending } = options;
   const items: ChildRow[] = [];
   const targetId = scope === 'document' ? options.documentId : currentDocumentId;
@@ -102,12 +103,39 @@ export function projectDocumentChildren(documents: readonly DocPage[], currentDo
     siblings.push(document);
     children.set(document.parentId, siblings);
   }
+  const customOrders = new Map<string | null, readonly string[] | null>();
+  if (sort === 'manual') {
+    for (const order of siblingOrders ?? []) {
+      if (order.custom !== true || order.projectId !== projectId) continue;
+      customOrders.set(order.parentId, customOrders.has(order.parentId) ? null : order.documentIds);
+    }
+  }
   const dateKey = sort === 'created' ? 'createdAt' : 'updatedAt';
-  const sorted = (id: string | null) => (children.get(id) ?? []).sort((a, b) => {
-    const order = sort === 'title' ? titleCollator.compare(a.title, b.title) :
-      (Date.parse(a[dateKey]) || 0) - (Date.parse(b[dateKey]) || 0);
-    return order ? (descending ? -order : order) : a.id.localeCompare(b.id);
-  });
+  const sorted = (id: string | null) => {
+    const siblings = children.get(id) ?? [];
+    const customIds = customOrders.get(id);
+    if (customIds?.length) {
+      // Only IDs unique in the saved order can rank a live sibling in this group.
+      const unused = new Set(siblings.map(document => document.id));
+      const ranks = new Map<string, number>();
+      customIds.forEach((documentId, index) => {
+        if (unused.delete(documentId)) ranks.set(documentId, index);
+        else ranks.delete(documentId);
+      });
+      if (ranks.size) {
+        siblings.sort((a, b) => {
+          const rank = (ranks.get(a.id) ?? customIds.length) - (ranks.get(b.id) ?? customIds.length);
+          return rank || titleCollator.compare(a.title, b.title) || a.id.localeCompare(b.id);
+        });
+        return descending ? siblings.reverse() : siblings;
+      }
+    }
+    return siblings.sort((a, b) => {
+      const order = sort === 'title' || sort === 'manual' ? titleCollator.compare(a.title, b.title) :
+        (Date.parse(a[dateKey]) || 0) - (Date.parse(b[dateKey]) || 0);
+      return order ? (descending ? -order : order) : a.id.localeCompare(b.id);
+    });
+  };
   const firstLevel = sorted(parentId);
   const pending = (first === null ? firstLevel : firstLevel.slice(0, first)).map(document => ({ document, depth: 1 })).reverse();
   const visited = new Set(parentId === null ? [] : [parentId]);

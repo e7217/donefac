@@ -3,14 +3,14 @@ import { expect, test } from '@playwright/test';
 import type { DocPage, LegacyPackageSummary, MigrationApplyResult, MigrationPreview, WorkspaceSnapshot } from '../../shared/types';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
-function sourcePage(id: string, title: string, parentId: string | null, position?: number) {
+function sourcePage(id: string, title: string, parentId: string | null, position?: number, macro = '') {
   const parent = parentId === null ? '<property name="parent"/>' : `<property name="parent" class="Page"><id name="id">${parentId}</id></property>`;
   return `<object class="Page"><id name="id">${id}</id><property name="title">${title}</property><property name="version">1</property>
     ${parent}${position === undefined ? '' : `<property name="position">${position}</property>`}
     <property name="creationDate">2020-01-02T03:04:05Z</property><property name="lastModificationDate">2020-01-03T03:04:05Z</property>
     <property name="space" class="Space"><id name="id">42</id></property></object>
     <object class="BodyContent"><id name="id">8${id}</id><property name="bodyType">2</property>
-    <property name="body"><![CDATA[<p>${title} 본문</p>]]></property>
+    <property name="body"><![CDATA[<p>${title} 본문</p>${macro}]]></property>
     <property name="content" class="Page"><id name="id">${id}</id></property></object>`;
 }
 
@@ -22,7 +22,7 @@ test('360px 이관 미리보기에서 문서 그룹의 순서를 확인하고 �
   const filename = `document-order-${suffix}.zip`;
   const source = '<hibernate-generic>' +
     `<object class="Space"><id name="id">42</id><property name="key">${key}</property><property name="name">이관 ${key}</property></object>` +
-    sourcePage('100', 'A 원본 뒤 그룹', null, 11) + sourcePage('200', 'Z 원본 앞 그룹', null, 2) +
+    sourcePage('100', 'A 원본 뒤 그룹', null, 11) + sourcePage('200', 'Z 원본 앞 그룹', null, 2, '<ac:structured-macro ac:name="children"/>') +
     sourcePage('210', 'B 원본 두 번째', '200', 10) + sourcePage('220', 'Y 원본 첫 번째', '200', 2) +
     sourcePage('110', '혼합 위치 첫 문서', '100') + sourcePage('120', '혼합 위치 둘째 문서', '100', 1) + '</hibernate-generic>';
   const query = new URLSearchParams({ filename, product: 'confluence', instanceKey: `document-order-${suffix}` });
@@ -66,6 +66,8 @@ test('360px 이관 미리보기에서 문서 그룹의 순서를 확인하고 �
     const tree = page.getByRole('complementary', { name: '문서 목록', exact: true });
     const treeTitles = tree.locator('.docs-tree-link > span:nth-child(2)');
     await expect(treeTitles).toHaveText(['Z 원본 앞 그룹', 'Y 원본 첫 번째', 'B 원본 두 번째', 'A 원본 뒤 그룹', '혼합 위치 첫 문서', '혼합 위치 둘째 문서']);
+    const directory = page.getByRole('region', { name: '하위 문서 목록', exact: true });
+    await expect(directory.getByRole('link')).toHaveText(['Y 원본 첫 번째', 'B 원본 두 번째']);
     await tree.getByText('Y 원본 첫 번째', { exact: true }).click();
     await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue('Y 원본 첫 번째');
     await page.reload();

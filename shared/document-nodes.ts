@@ -13,7 +13,7 @@ export { documentPlainText, ISSUE_SUMMARY_GROUP_BY, ISSUE_SUMMARY_GROUP_LABELS, 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 13;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 14;
 export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_DOCUMENT_COLUMNS = 3;
 export const MAX_DOCUMENT_TABLE_SPAN = 100;
@@ -59,9 +59,10 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if (nodeType === 'documentChildList' && attrs?.sort === 'manual') return 14;
   if (nodeType === 'documentProperties' || nodeType === 'documentPropertyReport') return 13;
   if (nodeType === 'documentColumnLayout' || nodeType === 'documentColumn') return 12;
   if (nodeType === 'documentExcerpt' || nodeType === 'documentExcerptInclude') return 11;

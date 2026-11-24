@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buffer } from 'node:stream/consumers';
 import { fileURLToPath } from 'node:url';
+import { COLLABORATION_SCHEMA } from '../shared/collaboration.ts';
 import { zip } from '../tests/fixtures/legacy-export-zip.mjs';
 import { startPilotTestProxy } from './pilot-test-proxy.mjs';
 
@@ -923,7 +924,7 @@ async function runStandardPilot() {
     assert.deepEqual(revisions.map(item => item.content.content), [[propertyReportBlock]]);
     assert.equal(session.enabled, true);
     assert.equal(session.epoch, propertySession.epoch);
-    assert.equal(session.schemaVersion, 13);
+    assert.equal(session.schemaVersion, COLLABORATION_SCHEMA);
     assert.equal(session.document.plainText, '');
     assert.deepEqual(session.document.content.content, [propertyBlock]);
   };

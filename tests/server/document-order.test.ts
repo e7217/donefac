@@ -83,7 +83,7 @@ test('a sibling order survives content edits and cross-space moves, appends rest
   assert.deepEqual(await f.call(`${path(a)}/revisions`), revisions);
   assert.deepEqual(await f.saveOrder(b, reviewed.version, reviewed.documentIds), reviewed);
   const workspace = await f.workspace();
-  assert.deepEqual(workspace.documentOrders?.find(order => order.parentId === parent.id), reviewed);
+  assert.deepEqual(workspace.documentOrders?.find(order => order.parentId === parent.id), { ...reviewed, custom: true });
   const audit = workspace.activities.filter(activity => activity.action === '문서 순서 변경' && activity.resourceId === a.id);
   assert.equal(audit.length, 1);
   assert.equal(audit[0].actorId, 'user-seo');
@@ -149,5 +149,13 @@ test('copy preview is fenced by sibling order and the saved subtree copies the v
   const workspace = await f.workspace();
   const children = workspace.documents.filter(page => page.parentId === copy.id);
   assert.deepEqual(children.map(page => page.title), [c.title, a.title, b.title]);
-  assert.deepEqual((await f.getOrder(children[0])).documentIds, children.map(page => page.id));
+  const copiedOrder = await f.getOrder(children[0]);
+  assert.deepEqual(copiedOrder.documentIds, children.map(page => page.id));
+  assert.deepEqual(workspace.documentOrders?.find(order => order.parentId === copy.id), { ...copiedOrder, custom: true });
+  const backup = await f.call<Backup>('/export');
+  assert.deepEqual(backup.documentOrders.find(order => order.parentId === copy.id), copiedOrder);
+  await f.call('/import', 200, 'POST', { data: backup });
+  const restored = (await f.workspace()).documentOrders?.find(order => order.parentId === copy.id);
+  assert.equal(restored?.custom, true);
+  assert.deepEqual(restored?.documentIds, copiedOrder.documentIds);
 });

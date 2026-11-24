@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test as base, type APIRequestContext, type Page } from '@playwright/test';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes';
-import type { DocPage, DocRevision, DocumentTreeMovePreview, RichContent, WorkspaceSnapshot } from '../../shared/types';
+import type { DocPage, DocRevision, DocumentSiblingOrder, DocumentTreeMovePreview, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 const paragraph = (text: string): RichContent => ({ type: 'paragraph', content: [{ type: 'text', text }] });
 const content = (...nodes: RichContent[]): RichContent => ({ type: 'doc', content: nodes });
@@ -93,6 +93,62 @@ async function openDocument(page: Page, document: DocPage) {
 async function refreshReferences(page: Page) {
   await page.getByRole('button', { name: '참조 새로고침', exact: true }).click();
 }
+
+test('360px에서 목록의 사용자 지정 순서를 저장하고 같은 순서를 최신 포함에서 읽는다', async ({ page, request, wiki }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const root = await wiki.create('수동 순서 색인', null, content(collection('원본 순서 목록')));
+  const zulu = await wiki.create('Zulu 배포', root.id);
+  const alpha = await wiki.create('Alpha 시작', root.id);
+  const mike = await wiki.create('Mike 검증', root.id);
+  await openDocument(page, root);
+  const editor = page.locator('.docs-prose[contenteditable=true]');
+  const block = editor.getByRole('region', { name: '하위 문서 목록', exact: true });
+  const links = block.getByRole('link');
+  await expect(links).toHaveText([alpha.title, mike.title, zulu.title]);
+  await block.getByRole('button', { name: '하위 문서 목록 설정', exact: true }).click();
+  const form = block.getByRole('form', { name: '하위 문서 목록 설정', exact: true });
+  await form.getByRole('combobox', { name: '문서 정렬', exact: true }).selectOption({ label: '사용자 지정 순서' });
+  await form.getByRole('button', { name: '목록 설정 적용', exact: true }).click();
+  await expect(links).toHaveText([alpha.title, mike.title, zulu.title]);
+  const saving = page.waitForResponse(reply => new URL(reply.url()).pathname === `/api/documents/${root.id}` && reply.request().method() === 'PATCH');
+  await page.locator('.docs-save-button').click();
+  const reply = await saving;
+  expect(reply.ok(), await reply.text()).toBe(true);
+  expect(reply.request().postDataJSON().contentSchemaVersion).toBe(14);
+  const saved = await reply.json() as DocPage;
+  expect(saved.content.content?.find(node => node.type === 'documentChildList')?.attrs?.sort).toBe('manual');
+  await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+
+  const orderUrl = `/api/documents/${zulu.id}/sibling-order`;
+  const response = await request.get(orderUrl, { headers: wiki.headers });
+  expect(response.ok(), await response.text()).toBe(true);
+  const initial = await response.json() as DocumentSiblingOrder;
+  const reordered = await request.patch(orderUrl, { headers: wiki.headers, data: { expectedVersion: initial.version, documentIds: [mike.id, zulu.id, alpha.id] } });
+  expect(reordered.ok(), await reordered.text()).toBe(true);
+  await refreshReferences(page);
+  await expect(links).toHaveText([mike.title, zulu.title, alpha.title]);
+
+  const order = await reordered.json() as DocumentSiblingOrder;
+  const explicitlyRestored = await request.patch(orderUrl, { headers: wiki.headers, data: { expectedVersion: order.version, documentIds: initial.documentIds } });
+  expect(explicitlyRestored.ok(), await explicitlyRestored.text()).toBe(true);
+  const history = await request.get(`/api/documents/${root.id}/revisions`, { headers: wiki.headers });
+  expect(history.ok(), await history.text()).toBe(true);
+  const currentRevision = (await history.json() as DocRevision[]).find(revision => revision.version === saved.version);
+  expect(currentRevision).toBeDefined();
+  const host = await wiki.create('같은 목록의 최신 포함과 고정본', null, content(
+    { type: 'documentInclude', attrs: { documentId: root.id, label: root.title } },
+    { type: 'documentRevisionInclude', attrs: { documentId: root.id, revisionId: currentRevision!.id, label: root.title } },
+  ));
+  await refreshReferences(page);
+  await page.getByRole('complementary', { name: '문서 목록', exact: true }).locator('.docs-tree-link').filter({ hasText: host.title }).click();
+  await expect(documentTitle(page)).toHaveValue(host.title);
+  const live = page.getByRole('region', { name: `포함된 문서 ${root.title}`, exact: true });
+  await expect(live.getByRole('region', { name: '하위 문서 목록', exact: true }).getByRole('link')).toHaveText([zulu.title, alpha.title, mike.title]);
+  const pinned = page.getByRole('region', { name: `고정 포함 문서 ${root.title}`, exact: true });
+  await pinned.getByRole('button', { name: '고정 버전 내용 보기', exact: true }).click();
+  await expect(pinned).toContainText('사용자 지정 순서');
+  await expect(pinned.getByRole('link', { name: zulu.title, exact: true })).toHaveCount(0);
+});
 
 test('360px에서 하위 문서 목록을 저장하고 계층 이동·이름 변경·휴지통을 반영한다', async ({ page, wiki }) => {
   test.setTimeout(120_000);
