@@ -480,7 +480,7 @@ async function readExactCommit({ projectUrl, headers }: ReturnType<typeof projec
   return sha;
 }
 
-function includesGitlabCredential(token: string | null | undefined, values: readonly string[]) {
+export function includesGitlabCredential(token: string | null | undefined, values: readonly string[]) {
   if (!token) return false;
   if (!token.isWellFormed()) return true;
   const encoded = encodeURIComponent(token);

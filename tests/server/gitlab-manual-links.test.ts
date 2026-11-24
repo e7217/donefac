@@ -793,12 +793,21 @@ test('manual pipeline status review and save reject a newer upstream execution e
     const hidden = await review(path);
     assert.equal(hidden.links[0]?.state, 'failed');
     assert.equal(hidden.statusReview, undefined);
-    assert.deepEqual(hidden.pipelineReview, { unverified: 0, superseded: 1 });
+    assert.deepEqual(hidden.pipelineReview, { unverified: 0, superseded: 1, ...(path === selectedReview ? { replacement: {
+      linkId: link.id, repositoryId, pipelineId: pipelineId + 1, webUrl: f.newerPipelineUrl, status: 'running',
+      ref: sourceBranch, source: 'push', tag: false, sha: commitSha,
+    } } : {}) });
     expectLatestRead([...exactPaths, listPath, `${listPath}/${pipelineId + 1}`]);
   }
   assert.deepEqual((await f.links()).map(({ id }) => id), [link.id]);
 
-  f.setNewerPipeline({ source: 'push', tag: true });
+  f.setNewerPipeline({ status: 'private fixture status' });
+  const unsafe = await review();
+  assert.deepEqual(unsafe.pipelineReview, { unverified: 0, superseded: 1 });
+  assert.doesNotMatch(JSON.stringify(unsafe), /private fixture status/u);
+  assert.equal(unsafe.statusReview, undefined);
+
+  f.setNewerPipeline({ source: 'push', tag: true, status: 'running' });
   resetReads();
   const latest = await review();
   expectLatestRead([...exactPaths, listPath, `${listPath}/${pipelineId + 1}`]);
@@ -1156,16 +1165,27 @@ test('selected GitLab review rejects mismatched reads and accounts for newer com
   const skipped = await review();
   assert.equal(skipped.statusReview, undefined);
   assert.equal(skipped.links[0]?.state, 'failed');
+  assert.deepEqual(skipped.pipelineReview, { unverified: 1, superseded: 0 });
   await rejects(original.suggestion.token);
   await f.call(deletePath(f.issue.id, compatible), { method: 'DELETE' });
 
   const beforeHook = (await review()).statusReview;
   assert.ok(beforeHook?.kind === 'suggestion');
+  f.setNewerPipeline({ source: 'push', tag: false, status: 'running', sha });
+  const verifiedAlias = await f.call<GitlabLink>(path, f.attach(f.newerPipelineUrl), 201);
+  f.setNewerPipeline({ sha: commitSha });
+  const contradictoryAlias = await review();
+  assert.equal(contradictoryAlias.statusReview, undefined);
+  assert.deepEqual(contradictoryAlias.pipelineReview, { unverified: 0, superseded: 1 });
+  await f.call(deletePath(f.issue.id, verifiedAlias), { method: 'DELETE' });
+  assert.equal((await review()).pipelineReview?.replacement?.pipelineId, pipelineId + 1);
   const hookUrl = f.pipelineUrl.replace(String(pipelineId), String(pipelineId + 2));
   const hook = await f.webhook('pipeline', { id: pipelineId + 2, ref: sourceBranch, source: 'push', tag: false, sha,
     status: 'running', url: hookUrl, updated_at: new Date().toISOString() });
   assert.equal(hook.linked, 0);
-  assert.equal((await review()).statusReview, undefined);
+  const blockedByNewerHook = await review();
+  assert.equal(blockedByNewerHook.statusReview, undefined);
+  assert.deepEqual(blockedByNewerHook.pipelineReview, { unverified: 0, superseded: 1 });
   await rejects(beforeHook.suggestion.token);
   assert.deepEqual((await f.call<IssueAutomationRunPage>(`${issuePath}/automation-runs`)).items, []);
   assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).issues.find(issue => issue.id === f.issue.id), f.issue);

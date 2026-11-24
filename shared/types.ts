@@ -1501,7 +1501,18 @@ export interface GitlabIssueRefreshResult {
   failures: { linkId: string; message: string }[];
   skipped: number;
   statusReview?: GitlabStatusReview;
-  pipelineReview?: { superseded: number; unverified: number };
+  pipelineReview?: { superseded: number; unverified: number; replacement?: GitlabPipelineReviewReplacement };
+}
+export interface GitlabPipelineReviewReplacement {
+  linkId: string;
+  repositoryId: number;
+  pipelineId: number;
+  webUrl: string;
+  status: string;
+  ref: string;
+  source: string;
+  tag: boolean;
+  sha: string;
 }
 export type GitlabWorkflowStatusSuggestionTrigger = 'merge_request.opened' | 'merge_request.merged' | 'merge_request.closed' | 'pipeline.succeeded' | 'pipeline.failed';
 export type GitlabStatusSuggestionTrigger = GitlabWorkflowStatusSuggestionTrigger | 'deployment.succeeded';

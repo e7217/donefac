@@ -360,6 +360,8 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
     const status = ticket.getByRole('combobox', { name: '상태', exact: true });
     const outcome = gitlab.getByRole('group', { name: 'GitLab 상태 확인 결과', exact: true });
     const proposal = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const replacementUrl = pipelineUrl(blockedById);
+    const replacement = outcome.getByRole('link', { name: `GitLab에서 더 최신 파이프라인 #${blockedById} 열기`, exact: true });
     await title.fill('아직 저장하지 않은 최신 파이프라인 검토 제목');
     await comment.fill('보내지 않은 파이프라인 검토 댓글');
     const reviewPath = (link: GitlabLink) => `${issuePath}/gitlab-links/${encodeURIComponent(link.id)}/status-review`;
@@ -367,17 +369,32 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
     await expect(row(blockedId)).toHaveAttribute('data-gitlab-state', 'running');
     const older = await refreshActivity(page, button(row(blockedId), selectedReviewAction), reviewPath(blocked));
     expect(older).toMatchObject({ links: [{ id: blocked.id, state: 'success' }], failures: [], skipped: 0,
-      pipelineReview: { superseded: 1, unverified: 0 },
+      pipelineReview: { superseded: 1, unverified: 0, replacement: {
+        linkId: blocked.id, repositoryId, pipelineId: blockedById, webUrl: replacementUrl, status: 'running',
+        ref: blockedRef, source: 'push', tag: false, sha: 'c'.repeat(40),
+      } },
     });
     expect(older.statusReview).toBeUndefined();
     expect(reviewedQueries(blockedId, blockedRef)).toEqual([pipelineRead(blockedById)]);
     await expect(row(blockedId)).toHaveAttribute('data-gitlab-state', 'success');
     await expect(outcome.getByText('같은 실행 계열에 더 최신 GitLab 파이프라인이 있습니다. 최신 실행에서 상태를 다시 검토해 주세요.', { exact: true })).toBeVisible();
+    await expect(replacement).toBeVisible();
+    await expect(replacement).toHaveAttribute('href', replacementUrl);
+    await expect(replacement).toHaveAttribute('target', '_blank');
+    await expect(replacement).toHaveAttribute('rel', 'noopener noreferrer');
+    await expect(outcome).toContainText('조회 시 상태 실행 중');
+    await expect(row(blockedById)).toHaveCount(0);
     await expect(outcome).toBeFocused();
     await expect(proposal).toHaveCount(0);
+    await expect(status).toHaveValue(issue.status);
+    const afterOlderReview = await workspace();
+    expect(afterOlderReview.issues.find(row => row.id === issue.id)).toEqual(issue);
+    expect(afterOlderReview.gitlabLinks.filter(link => link.issueId === issue.id).map(link => link.id).sort()).toEqual([blocked.id, ready.id].sort());
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
 
     const latest = await refreshActivity(page, button(row(readyId), selectedReviewAction), reviewPath(ready));
     expect(reviewedQueries(readyId, readyRef)).toEqual([pipelineRead(taggedId)]);
+    await expect(replacement).toHaveCount(0);
     if (latest.statusReview?.kind !== 'suggestion') throw new Error('최신 계열 파이프라인의 상태 변경 제안이 없습니다.');
     const { suggestion } = latest.statusReview;
     expect(suggestion).toMatchObject({ issueId: issue.id, toStatus: 'done', rule: { id: rule.id },

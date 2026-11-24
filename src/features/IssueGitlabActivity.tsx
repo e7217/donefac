@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
 import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
+import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName } from '../../shared/gitlab-links';
+import { gitlabPipelineSource } from '../../shared/gitlab-pipeline-source';
 import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
-  type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabSettings,
+  type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabPipelineReviewReplacement, type GitlabSettings,
   type GitlabStatusSuggestion } from '../../shared/types';
 import { api, ApiError, apiResponse, post, remove } from '../lib/api';
 import type { GitlabIssueReviewSelection } from '../lib/issue-review';
@@ -37,6 +39,7 @@ type RefreshFeedback = CheckingFeedback | { kind: 'failed'; message: string } | 
   issueVersion: number;
   statusReview?: GitlabIssueRefreshResult['statusReview'];
   pipelineReview?: GitlabIssueRefreshResult['pipelineReview'];
+  reviewedPipeline?: GitlabLink;
   selectedReview?: 'reviewed' | 'no-proposal';
   verifiedState?: { label: string; state: string };
   deploymentReview?: GitlabDeploymentReviewResult['state'];
@@ -59,6 +62,32 @@ function gitlabLinkLabel(link: GitlabLink) {
   const kind = gitlabActivityKindLabel(link.kind);
   return link.kind === 'branch' ? `${kind} ${link.sourceBranch || link.title}`
     : `${kind} ${link.kind === 'merge_request' ? '!' : '#'}${link.iid} ${link.title}`;
+}
+
+function replacementPipelineUrl(candidate: GitlabPipelineReviewReplacement, link: GitlabLink): URL | null {
+  const identity = gitlabPipelineLinkIdentity(link);
+  if (link.kind !== 'pipeline' || !identity || candidate.linkId !== link.id || candidate.repositoryId !== link.projectId ||
+      !Number.isSafeInteger(candidate.pipelineId) || candidate.pipelineId <= identity.objectId ||
+      !isGitlabBranchName(candidate.ref) || candidate.ref !== link.sourceBranch ||
+      !gitlabPipelineSource(candidate.source) || candidate.source !== link.pipelineSource ||
+      typeof candidate.tag !== 'boolean' || candidate.tag !== link.pipelineTag ||
+      !candidate.sha || gitlabObjectSha(candidate.sha) !== candidate.sha || /^0+$/u.test(candidate.sha) ||
+      typeof candidate.status !== 'string' || !/^[a-z][a-z0-9_]{0,39}$/u.test(candidate.status)) return null;
+  const selected = gitlabActivityUrl(link.webUrl, 'pipeline');
+  const url = gitlabActivityUrl(candidate.webUrl, 'pipeline');
+  const selectedPath = selected && /^(\/.+?)\/(?:-\/)?pipelines\/([1-9]\d*)\/?$/u.exec(selected.pathname);
+  if (!url || !selected || selectedPath?.[2] !== String(identity.objectId) || url.href.length > 4_000 ||
+      url.href !== candidate.webUrl || url.href !== `${selected.origin}${selectedPath[1]}/-/pipelines/${candidate.pipelineId}`) return null;
+  return url;
+}
+
+function samePipelineRead(current: GitlabLink, reviewed: GitlabLink): boolean {
+  return current.kind === 'pipeline' && current.id === reviewed.id && current.issueId === reviewed.issueId &&
+    current.projectId === reviewed.projectId && current.manualLinkId === reviewed.manualLinkId &&
+    current.updatedAt === reviewed.updatedAt && current.pipelineObservedAt === reviewed.pipelineObservedAt &&
+    current.state === reviewed.state && current.webUrl === reviewed.webUrl &&
+    current.sourceBranch === reviewed.sourceBranch && current.sourceSha === reviewed.sourceSha &&
+    current.pipelineSource === reviewed.pipelineSource && current.pipelineTag === reviewed.pipelineTag;
 }
 
 function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected: GitlabDeployment, issueId: string) {
@@ -115,6 +144,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     refreshFeedback.issueVersion === issueVersion ? refreshFeedback : undefined;
   const statusReview = currentFeedback?.statusReview;
   const suggestion = statusReview?.kind === 'suggestion' ? statusReview.suggestion : undefined;
+  const reviewedPipeline = currentFeedback?.reviewedPipeline;
+  const pipelineReplacement = currentFeedback?.pipelineReview?.superseded === 1 ? currentFeedback.pipelineReview.replacement : undefined;
+  const replacementUrl = pipelineReplacement && reviewedPipeline && visibleLinks.some(link => samePipelineRead(link, reviewedPipeline))
+    ? replacementPipelineUrl(pipelineReplacement, reviewedPipeline) : null;
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const settingsRequest = useRef<AbortController | null>(null);
@@ -411,6 +444,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         skipped: result.skipped, failures, workspaceRefreshFailed, issueVersion,
         statusReview: !selectedLink || reviewSelected ? result.statusReview : undefined,
         pipelineReview: result.pipelineReview,
+        reviewedPipeline: reviewSelected && result.pipelineReview?.replacement && !result.statusReview ? verified : undefined,
         selectedReview: reviewSelected && verified ? result.statusReview ? 'reviewed' : 'no-proposal' : undefined,
         verifiedState: verified ? { label: gitlabLinkLabel(verified), state: gitlabActivityStateLabel(verified.state) } : undefined });
     });
@@ -463,6 +497,12 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       {Boolean(currentFeedback?.pipelineReview?.superseded) && <p className="gitlab-activity-hint" role="status">
         같은 실행 계열에 더 최신 GitLab 파이프라인이 있습니다. 최신 실행에서 상태를 다시 검토해 주세요.
       </p>}
+      {pipelineReplacement && replacementUrl && <div className="gitlab-activity-actions">
+        <a className="btn btn-ghost" href={replacementUrl.href} target="_blank" rel="noopener noreferrer">
+          GitLab에서 더 최신 파이프라인 #{pipelineReplacement.pipelineId} 열기 <ExternalLink size={13} aria-hidden="true" />
+        </a>
+        <span className="gitlab-activity-hint">조회 시 상태 {gitlabActivityStateLabel(pipelineReplacement.status)}</span>
+      </div>}
       {Boolean(currentFeedback?.pipelineReview?.unverified) && <p className="gitlab-activity-hint" role="status">
         GitLab에서 같은 실행 계열의 최신 파이프라인을 확인할 수 없습니다. GitLab 상태를 다시 확인해 주세요.
       </p>}

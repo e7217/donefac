@@ -10,7 +10,7 @@ import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, includesGitlabCredential, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import type { MergeRequestPipelineTestReaders } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -937,10 +937,10 @@ export class GitlabIntegrationService{
           if (!status || status.occurredAt !== proof.occurredAt || !confirmWorkflowRead(link, draft, status, [])?.observation ||
               classification.pipelineSource !== link.pipelineSource || classification.pipelineTag !== link.pipelineTag) return { latest: false };
           const freshness = await readGitlabWorkflowPipelineFreshness(read, repositoryId, object, readSignal);
-          return { latest: freshness === 'latest' };
+          return { latest: freshness.kind === 'latest' };
         });
       const newest = this.latestVerifiedPipelineId(link);
-      return result.latest && (newest === null || newest <= result.pipelineId) && !this.hasNewerLinkedPipeline(link);
+      return result.latest && (newest === null || newest <= result.pipelineId) && this.latestNewerLinkedPipelineId(link) === null;
     } catch (error) {
       if (signal.aborted || error instanceof GitlabIntegrationError) return false;
       throw error;
@@ -1208,22 +1208,53 @@ export class GitlabIntegrationService{
     return this.latestCompatiblePipelineId(identity.instance, link.projectId, link.sourceBranch, link);
   }
 
-  private hasNewerLinkedPipeline(link: GitlabLink): boolean {
-    if (link.kind !== 'pipeline' || !isGitlabBranchName(link.sourceBranch)) return false;
+  private latestNewerLinkedPipelineId(link: GitlabLink): number | null {
+    if (link.kind !== 'pipeline' || !isGitlabBranchName(link.sourceBranch)) return null;
     const identity = gitlabPipelineLinkIdentity(link);
-    if (!identity) return false;
+    if (!identity) return null;
     const prefix = `gitlab:${identity.instance}:${link.projectId}:pipeline`;
     const rows = this.store.db.prepare(`SELECT json FROM gitlab_links WHERE issue_id=? AND id>=? AND id<?
       AND json_extract(json,'$.sourceBranch')=?`).iterate(link.issueId, `${prefix}:`, `${prefix};`, link.sourceBranch) as Iterable<{ json: string }>;
+    let latest = identity.objectId;
     for (const { json } of rows) {
       const candidate = JSON.parse(json) as GitlabLink;
       // A link without a verified observation can have an IID in the object-ID slot.
       if (candidate.kind !== 'pipeline' || candidate.pipelineObservedAt === null) continue;
       const candidateIdentity = gitlabPipelineLinkIdentity(candidate);
-      if (candidateIdentity && candidateIdentity.objectId > identity.objectId &&
-          !conflictingPipelineClassification(link, candidate)) return true;
+      if (candidateIdentity && candidateIdentity.objectId > latest && !conflictingPipelineClassification(link, candidate)) {
+        latest = candidateIdentity.objectId;
+      }
     }
-    return false;
+    return latest === identity.objectId ? null : latest;
+  }
+
+  private selectedPipelineReview(link: GitlabLink, freshness: GitlabWorkflowPipelineFreshness | undefined,
+    captured: RawSettings, token: string | null): GitlabIssueRefreshResult['pipelineReview'] {
+    if (!freshness) return;
+    const identity = gitlabPipelineLinkIdentity(link);
+    if (!identity) return;
+    const observedFloor = Math.max(this.latestVerifiedPipelineId(link) ?? 0, this.latestNewerLinkedPipelineId(link) ?? 0);
+    if (freshness.kind !== 'superseded') {
+      if (freshness.kind === 'unverified' || observedFloor > identity.objectId) return { superseded: 0, unverified: 1 };
+      return;
+    }
+    const replacement = freshness.replacement;
+    if (replacement && replacement.pipelineId > identity.objectId && replacement.pipelineId >= observedFloor && replacement.repositoryId === link.projectId &&
+        replacement.ref === link.sourceBranch && replacement.source === link.pipelineSource && replacement.tag === link.pipelineTag &&
+        ![token, ...this.webhookCredentials(captured)].some(secret => includesGitlabCredential(secret,
+          [replacement.webUrl, replacement.status, replacement.ref, replacement.source, replacement.sha]))) {
+      const { instance } = identity;
+      const { repositoryId, pipelineId, sha: sourceSha, ref: sourceBranch, source: pipelineSource, tag: pipelineTag } = replacement;
+      const evidence = { sourceSha, sourceBranch, pipelineSource, pipelineTag };
+      const cursor = this.pipelineObjectCursor(instance, repositoryId, pipelineId)?.pipeline;
+      const aliases = this.workflowLinksForObject(instance, repositoryId, 'pipeline', String(pipelineId))
+        .filter(alias => alias.pipelineObservedAt !== null);
+      const known = cursor ? [cursor, ...aliases] : aliases;
+      if (known.every(prior => samePipelineRevision(prior, evidence) && !conflictingPipelineClassification(prior, evidence))) {
+        return { superseded: 1, unverified: 0, replacement: { linkId: link.id, ...replacement } };
+      }
+    }
+    return { superseded: 1, unverified: 0 };
   }
 
   async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string, linkId?:string,
@@ -1404,16 +1435,20 @@ export class GitlabIntegrationService{
           const checkedIds = new Set(checked.map(({ link }) => link.id));
           if (current.length !== checkedIds.size || current.some(({ id }) => !checkedIds.has(id))) return result;
         }
-        const observations = currentWorkflowObservations(checked, link => this.latestVerifiedPipelineId(link))
-          .filter(({ link }) => !reviewSelected || !this.hasNewerLinkedPipeline(link));
+        const observations = currentWorkflowObservations(checked, link => this.latestVerifiedPipelineId(link));
+        const selectedPipeline = reviewSelected ? checked[0]?.observation?.link : undefined;
+        const selectedReview = selectedPipeline?.kind === 'pipeline'
+          ? this.selectedPipelineReview(selectedPipeline, freshnessByLink.get(selectedPipeline.id), captured, token) : undefined;
         const pipelineReview = { superseded: 0, unverified: 0 };
         const verified = observations.filter(({ link }) => {
           if (link.kind !== 'pipeline') return true;
           const freshness = freshnessByLink.get(link.id);
-          if (freshness === 'superseded' || freshness === 'unverified') pipelineReview[freshness]++;
-          return freshness === 'latest';
+          if (reviewSelected) return !selectedReview && freshness?.kind === 'latest';
+          if (freshness?.kind === 'superseded' || freshness?.kind === 'unverified') pipelineReview[freshness.kind]++;
+          return freshness?.kind === 'latest';
         });
-        if (pipelineReview.superseded || pipelineReview.unverified) result.pipelineReview = pipelineReview;
+        if (selectedReview) result.pipelineReview = selectedReview;
+        else if (pipelineReview.superseded || pipelineReview.unverified) result.pipelineReview = pipelineReview;
         const review = this.hooks.manualStatusReview(latestIssue,verified,reviewActorId,captured.version);
         if (review) result.statusReview = review;
       }

@@ -197,28 +197,45 @@ test('GitLab pipeline freshness requires ordered, exact and bounded evidence acr
   const newerTag = pipeline(52, { tag: true });
   const selectedRow = pipeline(11);
 
-  assert.equal(await read([firstPage, [selectedRow]], [newerTag]), 'latest');
+  assert.deepEqual(await read([firstPage, [selectedRow]], [newerTag]), { kind: 'latest' });
   assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath, `${pipelinesPath}/52`, pipelinesPath]);
   assert.deepEqual(listQueries(), [{ ...query, page: '1' }, { ...query, page: '2' }]);
 
-  assert.equal(await read([firstPage, [selectedRow]], [newerTag], next => { next.searchParams.set('source', 'schedule'); }), 'unverified');
+  assert.deepEqual(await read([firstPage, [selectedRow]], [newerTag], next => { next.searchParams.set('source', 'schedule'); }), { kind: 'unverified' });
   assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath]);
 
   const repeatedId = pipeline(33, { source: 'schedule' });
-  assert.equal(await read([firstPage, [repeatedId, selectedRow]], [newerTag]), 'unverified');
+  assert.deepEqual(await read([firstPage, [repeatedId, selectedRow]], [newerTag]), { kind: 'unverified' });
   assert.deepEqual(listQueries().map(({ page }) => page), ['1', '2']);
 
   const secondPage = Array.from({ length: 20 }, (_, index) => pipeline(32 - index, { source: 'schedule' }));
-  assert.equal(await read([firstPage, secondPage, [selectedRow]], [newerTag]), 'unverified');
+  assert.deepEqual(await read([firstPage, secondPage, [selectedRow]], [newerTag]), { kind: 'unverified' });
   assert.deepEqual(listQueries().map(({ page }) => page), ['1', '2']);
 
   const newerRows = Array.from({ length: 11 }, (_, index) => pipeline(22 - index));
-  assert.equal(await read([[...newerRows, selectedRow]], newerRows.map(row => ({ ...row, tag: true }))), 'unverified');
+  assert.deepEqual(await read([[...newerRows, selectedRow]], newerRows.map(row => ({ ...row, tag: true }))), { kind: 'unverified' });
   assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath,
     ...newerRows.slice(0, 10).map(row => `${pipelinesPath}/${row.id}`)]);
 
-  assert.equal(await read([[pipeline(11, { status: undefined })]]), 'unverified');
+  assert.deepEqual(await read([[pipeline(11, { status: undefined })]]), { kind: 'unverified' });
   assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath]);
+
+  const compatible = pipeline(12, { status: 'pending' });
+  const exact = { ...compatible, tag: false, status: 'running', web_url: `${origin}/gitlab/team/repository/pipelines/12` };
+  const scopedRows = [[pipeline(52), pipeline(31, { source: 'schedule' }), compatible, selectedRow]];
+  assert.deepEqual(await read(scopedRows, [newerTag, exact]), { kind: 'superseded', replacement: {
+    repositoryId, pipelineId: 12, ref, source: 'push', tag: false, sha, status: 'running',
+    webUrl: `${origin}/gitlab/team/repository/-/pipelines/12`,
+  } });
+  assert.deepEqual(requests.map(url => url.pathname), [projectPath, pipelinesPath, `${pipelinesPath}/52`, `${pipelinesPath}/12`]);
+
+  for (const status of [undefined, 'unknown', 'private response status']) {
+    assert.deepEqual(await read(scopedRows, [newerTag, { ...exact, status }]), { kind: 'superseded' });
+  }
+  for (const changed of [{ project_id: repositoryId + 1 }, { ref: 'other' }, { source: 'schedule' },
+    { sha: 'b'.repeat(40) }, { web_url: 'https://example.invalid/team/repository/-/pipelines/12' }]) {
+    assert.deepEqual(await read(scopedRows, [newerTag, { ...exact, ...changed }]), { kind: 'unverified' });
+  }
 });
 
 test('optional repository history uses bounded numeric project paths and never follows remote pagination links', async t => {

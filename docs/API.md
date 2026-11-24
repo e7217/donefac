@@ -838,6 +838,8 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 최근 활동과 한 건의 상태 검토에서 적용 가능한 파이프라인은 GitLab의 프로젝트 파이프라인 목록으로 최신 여부를 검증한다. 동일 저장소의 `ref`와 `source`로 조회하고 ID 내림차순으로 최대 20건씩 두 페이지를 읽는다. 같은 유형의 더 최신 후보는 단건 조회로 브랜치·태그 여부를 최대 10건 확인한다. 선택한 실행의 원본 ID·상태·커밋도 목록과 대조한다. 제안을 보류한 경우 `pipelineReview`의 `superseded`와 `unverified`에 건수가 들어가며, 확인한 연결은 `links`에 반환한다. 티켓 `PATCH`는 상태 변경 직전에 선택한 단건과 최신 목록을 다시 검증한다. 새 실행이나 불완전한 근거를 확인하면 `409`와 `gitlab_status_suggestion_stale`을 반환한다. [GitLab 프로젝트 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#list-project-pipelines)
 
+파이프라인 한 건의 `status-review`에서 더 최신 실행을 검증하면 선택적으로 `pipelineReview.replacement`에 `{linkId,repositoryId,pipelineId,webUrl,status,ref,source,tag,sha}`를 반환한다. `linkId`는 검토한 티켓 연결, 나머지 필드는 같은 저장소·참조·실행 유형·태그 여부가 확인된 더 최신 실행을 가리킨다. 목록과 단건 조회에서 후보의 원본 ID와 SHA를 대조하며, `webUrl`은 확인한 저장소 경로와 파이프라인 ID로 구성하고 `status`는 조회 당시 상태를 담는다. 티켓에 미연결인 실행도 화면에서 열 수 있다. 목록과 단건 조회의 근거가 불완전하거나 서로 충돌하면 `replacement`를 생략한다. 연결 또는 인증 수신 기록에 더 큰 ID의 같은 계열 후보가 있어도 생략한다. 이 정보는 원본을 열기 위한 조회 결과이며 새 티켓 연결과 상태 변경은 각각 별도 작업이다. [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
+
 ### 파이프라인 CI 작업 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-jobs`는 해당 업무에 연결한 파이프라인에서 실패(`failed`)와 수동 실행 대기(`manual`) 작업을 읽는다. 저장한 GitLab 주소와 읽기 자격 증명을 사용한다. 저장소와 파이프라인의 실제 ID, 확인 가능한 커밋 SHA를 대조한다. 작업은 50건씩 최대 4페이지를 조회하며 재실행으로 대체된 작업은 제외한다. 새 연결이나 업무 상태를 저장하는 과정과 독립된 브라우저 조회다. [GitLab Jobs API](https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)
