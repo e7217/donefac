@@ -19,7 +19,12 @@ import {
 import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
 
-type BulkDates = { issues: readonly Issue[]; projects: readonly Project[]; refresh: () => Promise<void> };
+type BulkDates = {
+  issues: readonly Issue[];
+  projects: readonly Project[];
+  dateDrafts?: readonly BulkLinkDateDraft[];
+  refresh: () => Promise<void>;
+};
 export type BulkLinkDateDraft = {
   source: Pick<Issue, 'id' | 'version' | 'projectId' | 'startDate' | 'endDate'>;
   changes: ScheduleBulkDateChanges;
@@ -42,7 +47,8 @@ export type SchedulePasteDialogProps = {
   notify: FeatureProps['notify'];
   onClose: (awaitingResult?: boolean) => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
-  onApplied: (result: SchedulePasteApplyResult, followUpIssueIds: readonly string[], linkOperation: BulkLinkOperation) => Promise<void>;
+  onApplied: (result: SchedulePasteApplyResult, followUpIssueIds: readonly string[], linkOperation: BulkLinkOperation,
+    includedDateDraftIds?: readonly string[]) => Promise<void>;
 } & (
   | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: BulkLinks; blockerLinks?: never; teamPaste?: never }
   | { projectId: string | null; projectLabel?: string; bulkDates?: never; bulkLinks?: never; blockerLinks: BlockerLinks; teamPaste?: never }
@@ -50,7 +56,14 @@ export type SchedulePasteDialogProps = {
   | { projectId: null; projectLabel?: never; bulkDates?: never; bulkLinks?: never; blockerLinks?: never; teamPaste: TeamPaste }
 );
 
-type Review = { input: string; targets: string; projects?: ProjectLabels; result: SchedulePastePreview; linkOperation: BulkLinkOperation };
+type Review = {
+  input: string;
+  targets: string;
+  projects?: ProjectLabels;
+  result: SchedulePastePreview;
+  linkOperation: BulkLinkOperation;
+  includedDateDraftIds?: readonly string[];
+};
 type DateField = 'startDate' | 'endDate' | 'dueDate';
 type DateAction = 'keep' | 'set' | 'clear';
 type DateEntry = { action: DateAction; value: string };
@@ -144,8 +157,8 @@ function ProjectScheduleEditDialog({
   const [chainOrder, setChainOrder] = useState(() => bulkLinks?.issues.map(issue => issue.id) ?? []);
   const [chainRule, setChainRule] = useState<BulkLinkRule>(defaultLinkRule);
   const [anchorQuery, setAnchorQuery] = useState('');
-  const [excludedLinkDates, setExcludedLinkDates] = useState<ReadonlySet<string>>(() => new Set());
-  const [linkDateConfirmations, setLinkDateConfirmations] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [excludedDateDrafts, setExcludedDateDrafts] = useState<ReadonlySet<string>>(() => new Set());
+  const [dateDraftConfirmations, setDateDraftConfirmations] = useState<ReadonlyMap<string, number>>(() => new Map());
   const [blockerSelection, setBlockerSelection] = useState<BlockerLinkSelection>(() => new Map());
   const [blockerRefreshKey, setBlockerRefreshKey] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
@@ -179,7 +192,7 @@ function ProjectScheduleEditDialog({
   const isTeamBlocker = projectId === null && blockerDialog;
   const focusTeamRecovery = isTeamPaste || isTeamBlocker;
   const preserveUnknownResult = Boolean(managed || teamPaste);
-  const reportUnknownResult = directLinks || isTeamPaste;
+  const reportUnknownResult = directLinks || isTeamPaste || Boolean(bulkDates);
   const draftId = blockerLinks ? BLOCKER_LINK_DRAFT_ID : bulkLinks ? BULK_LINK_DRAFT_ID : bulkDates ? BULK_DRAFT_ID : SCHEDULE_PASTE_DRAFT_ID;
   const team = projectId === null;
   const scopeLabel = focusTeamRecovery ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
@@ -191,9 +204,10 @@ function ProjectScheduleEditDialog({
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
   const linkRuleEdited = hasLinkInput(link, anchorQuery) || chainEdited;
-  const linkDateChoicesEdited = excludedLinkDates.size > 0 || linkDateConfirmations.size > 0;
+  const dateDraftChoicesEdited = excludedDateDrafts.size > 0 || dateDraftConfirmations.size > 0;
+  const bulkDateInputsEdited = datesEdited || dateDraftChoicesEdited || rescheduleSuccessors;
   const linkPreferencesEdited = rescheduleSuccessors || linkOperation !== 'add';
-  const linksEdited = linkRuleEdited || linkDateChoicesEdited || linkPreferencesEdited;
+  const linksEdited = linkRuleEdited || dateDraftChoicesEdited || linkPreferencesEdited;
   const linkAction = bulkLinkAction(linkOperation, chainMode ? chainRule : link, linkRuleChanges);
   const selectedBlockers = [...blockerSelection.values()];
   const blockerInput: ScheduleBlockerLinkInput | null = blockerLinks
@@ -203,12 +217,6 @@ function ProjectScheduleEditDialog({
         ? [{ id: relation.id, version: relation.version, projectId: relation.projectId }] : []),
     } : { projectId, relations: selectedBlockers.map(({ id, version }) => ({ id, version })) }
     : null;
-  const input = blockerInput ? JSON.stringify(blockerInput)
-    : bulkLinks ? JSON.stringify([chainMode
-      ? [linkMode, chainOrder]
-      : [linkMode, link.choice?.id, link.direction],
-      linkAction, [...excludedLinkDates], [...linkDateConfirmations], rescheduleSuccessors])
-      : bulkDates ? JSON.stringify(dates) : JSON.stringify([text, rescheduleSuccessors]);
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
   const selectedIds = new Set(issues.map(issue => issue.id));
   const sameProjectCandidates = bulkLinks?.candidates.filter(issue => issue.projectId === projectId) ?? [];
@@ -218,15 +226,15 @@ function ProjectScheduleEditDialog({
   const anchor = chainMode ? undefined : anchors.find(issue => issue.id === link.choice?.id);
   const bulkIssuesById = new Map(bulkIssues.map(issue => [issue.id, issue]));
   const chainIssues = chainOrder.map(id => bulkIssuesById.get(id)).filter((issue): issue is Issue => Boolean(issue));
-  const dateDrafts = bulkLinks?.dateDrafts;
-  const linkDateDraftsById = useMemo(() => new Map(dateDrafts?.map(draft => [draft.source.id, draft])), [dateDrafts]);
-  const linkDateRows: BulkLinkDateRow[] = [];
-  const linkDateEdits: ScheduleBulkLinkDateEdit[] = [];
-  let hasConflictingLinkDates = false;
-  const linkDateIssues = chainMode ? chainIssues : anchor ? [...bulkIssues, anchor] : bulkIssues;
-  for (const issue of linkDateIssues) {
-    const dateDraft = linkDateDraftsById.get(issue.id);
-    if (!dateDraft || dateDraft.source.projectId !== issue.projectId || !sameProjectIds.has(issue.id)) continue;
+  const dateDrafts = bulkDates?.dateDrafts ?? bulkLinks?.dateDrafts;
+  const dateDraftsById = useMemo(() => new Map(dateDrafts?.map(draft => [draft.source.id, draft])), [dateDrafts]);
+  const dateDraftRows: BulkLinkDateRow[] = [];
+  const dateDraftEdits: ScheduleBulkLinkDateEdit[] = [];
+  let hasConflictingDateDrafts = false;
+  const dateDraftIssues = bulkDates ? bulkIssues : chainMode ? chainIssues : anchor ? [...bulkIssues, anchor] : bulkIssues;
+  for (const issue of dateDraftIssues) {
+    const dateDraft = dateDraftsById.get(issue.id);
+    if (!dateDraft || dateDraft.source.projectId !== issue.projectId || (bulkLinks && !sameProjectIds.has(issue.id))) continue;
     const changedDates: BulkLinkDateRow['dates'] = [];
     const changes: ScheduleBulkDateChanges = {};
     for (const field of bulkLinkDateFields) {
@@ -235,26 +243,36 @@ function ProjectScheduleEditDialog({
       const base = dateDraft.source[field] ?? null;
       const saved = issue[field] ?? null;
       changedDates.push({ field, base, saved, draft, conflict: saved !== base && saved !== draft });
-      if (saved !== draft) changes[field] = draft;
+      // A date in a bulk date draft takes precedence over the common edit even when already saved.
+      if (bulkDates || saved !== draft) changes[field] = draft;
     }
     if (!changedDates.length) continue;
-    linkDateRows.push({ issue, dates: changedDates });
-    if (excludedLinkDates.has(issue.id)) continue;
-    if (changedDates.some(date => date.conflict) && linkDateConfirmations.get(issue.id) !== issue.version) hasConflictingLinkDates = true;
-    if (Object.keys(changes).length) linkDateEdits.push({ issue: { id: issue.id, expectedVersion: issue.version }, changes });
+    dateDraftRows.push({ issue, dates: changedDates });
+    if (excludedDateDrafts.has(issue.id)) continue;
+    if (changedDates.some(date => date.conflict) && dateDraftConfirmations.get(issue.id) !== issue.version) hasConflictingDateDrafts = true;
+    if (Object.keys(changes).length) dateDraftEdits.push({ issue: { id: issue.id, expectedVersion: issue.version }, changes });
   }
-  const editsLinkDates = linkDateEdits.length > 0;
-  const linkDatesInput = editsLinkDates ? { dates: linkDateEdits } : {};
+  const hasDateDraftEdits = dateDraftEdits.length > 0;
+  const editsLinkDates = Boolean(bulkLinks && hasDateDraftEdits);
+  const rowDatesInput = hasDateDraftEdits ? { dates: dateDraftEdits } : {};
   const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true } : {};
-  const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingLinkDates &&
+  const reviewChoices = [[...excludedDateDrafts], [...dateDraftConfirmations], rescheduleSuccessors];
+  const input = blockerInput ? JSON.stringify(blockerInput)
+    : bulkLinks ? JSON.stringify([chainMode
+      ? [linkMode, chainOrder]
+      : [linkMode, link.choice?.id, link.direction],
+      linkAction, ...reviewChoices])
+      : bulkDates ? JSON.stringify([dates, ...reviewChoices])
+        : JSON.stringify([text, rescheduleSuccessors]);
+  const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingDateDrafts &&
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
   const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid && linkAction
     ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction,
-      ...linkAction, ...linkDatesInput, ...followUpInput }
+      ...linkAction, ...rowDatesInput, ...followUpInput }
     : null;
   const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && linkAction && chainIssues.length === issues.length
     ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })),
-      ...linkAction, ...linkDatesInput, ...followUpInput }
+      ...linkAction, ...rowDatesInput, ...followUpInput }
     : null;
   const blockerIssues = blockerLinks?.issues;
   const blockerDependencies = blockerLinks?.dependencies;
@@ -273,9 +291,9 @@ function ProjectScheduleEditDialog({
   const selectedProjects = projectNames && bulkDates ? new Map(bulkDates.issues.map(issue => [issue.id, {
     id: issue.projectId, name: projectNames.get(issue.projectId) ?? '프로젝트 정보 없음',
   }])) : undefined;
-  const teamProjectList = teamPaste?.projects ?? (isTeamBlocker ? blockerLinks?.projects : undefined);
+  const teamProjectList = team ? bulkDates?.projects ?? teamPaste?.projects ?? blockerLinks?.projects : undefined;
   const teamProjects = teamProjectList && new Map(teamProjectList.map(project => [project.id, {
-    id: project.id, name: `${project.key} · ${project.name}`,
+    id: project.id, name: bulkDates ? project.name : `${project.key} · ${project.name}`,
   }]));
   const projectCount = selectedProjects ? new Set([...selectedProjects.values()].map(project => project.id)).size : undefined;
   const canPreview = blockerInput
@@ -284,11 +302,12 @@ function ProjectScheduleEditDialog({
     : bulkLinks
     ? Boolean(bulkLinkInput || bulkChainInput)
     : bulkDates
-      ? issues.length > 0 && datesEdited && bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
+      ? issues.length > 0 && (datesEdited || hasDateDraftEdits) && !hasConflictingDateDrafts &&
+        bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
       : Boolean(text.trim());
   const editLocked = Boolean(pending || applied || (preserveUnknownResult && retryApply));
   const dirty = !applied && Boolean((blockerLinks ? blockerSelection.size
-    : bulkLinks ? linksEdited : bulkDates ? datesEdited : text || rescheduleSuccessors) || review || latest || error);
+    : bulkLinks ? linksEdited : bulkDates ? bulkDateInputsEdited : text || rescheduleSuccessors) || review || latest || error);
   const awaitingResult = Boolean(reportUnknownResult && retryApply);
   const expiresAt = review?.result.expiresAt;
   const expiry = expiresAt ? Date.parse(expiresAt) : NaN;
@@ -357,7 +376,7 @@ function ProjectScheduleEditDialog({
     if (dirtyRef.current && !window.confirm(confirmation)) return;
     dirtyRef.current = false;
     onDraftChange(draftId, false, false);
-    if (focusTeamRecovery && retryApply) onClose(true);
+    if ((focusTeamRecovery || bulkDates) && retryApply) onClose(true);
     else onClose();
   }, [blockerLinks, bulkDates, directLinks, draftId, focusTeamRecovery, isTeamPaste, notify, onClose, onDraftChange, retryApply]);
 
@@ -416,23 +435,25 @@ function ProjectScheduleEditDialog({
 
   function updateSuccessorReview(value: boolean) {
     setRescheduleSuccessors(value);
-    resetReview(Boolean((bulkLinks ? linkRuleEdited || linkDateChoicesEdited || linkOperation !== 'add' : text) || value));
+    const edited = bulkLinks ? linkRuleEdited || dateDraftChoicesEdited || linkOperation !== 'add'
+      : bulkDates ? datesEdited || dateDraftChoicesEdited : Boolean(text);
+    resetReview(edited || value);
   }
 
   function updateDate(field: DateField, entry: DateEntry) {
     const next = { ...dates, [field]: entry };
     setDates(next);
-    resetReview(bulkFields.some(item => next[item.field].action !== 'keep'));
+    resetReview(bulkFields.some(item => next[item.field].action !== 'keep') || dateDraftChoicesEdited || rescheduleSuccessors);
   }
 
   function updateLink(next: BulkLinkDraft) {
     setLink(next);
-    resetReview(hasLinkInput(next, anchorQuery) || chainEdited || linkDateChoicesEdited || linkPreferencesEdited);
+    resetReview(hasLinkInput(next, anchorQuery) || chainEdited || dateDraftChoicesEdited || linkPreferencesEdited);
   }
 
   function updateLinkOperation(next: BulkLinkOperation) {
     setLinkOperation(next);
-    resetReview(linkRuleEdited || linkDateChoicesEdited || rescheduleSuccessors || next !== 'add');
+    resetReview(linkRuleEdited || dateDraftChoicesEdited || rescheduleSuccessors || next !== 'add');
   }
 
   function updateLinkRuleChanges(next: BulkLinkRuleChanges) {
@@ -457,23 +478,23 @@ function ProjectScheduleEditDialog({
     resetReview(true);
   }
 
-  function updateLinkDateInclusion(id: string, include: boolean) {
-    const excluded = new Set(excludedLinkDates);
+  function updateDateDraftInclusion(id: string, include: boolean) {
+    const excluded = new Set(excludedDateDrafts);
     if (include) excluded.delete(id);
     else excluded.add(id);
-    setExcludedLinkDates(excluded);
-    const confirmations = new Map(linkDateConfirmations);
+    setExcludedDateDrafts(excluded);
+    const confirmations = new Map(dateDraftConfirmations);
     confirmations.delete(id);
-    setLinkDateConfirmations(confirmations);
-    resetReview(linkRuleEdited || excluded.size > 0 || confirmations.size > 0 || linkPreferencesEdited);
+    setDateDraftConfirmations(confirmations);
+    resetReview(excluded.size > 0 || confirmations.size > 0 || (bulkDates ? datesEdited || rescheduleSuccessors : linkRuleEdited || linkPreferencesEdited));
   }
 
-  function updateLinkDateConfirmation(issue: Issue, confirm: boolean) {
-    const confirmations = new Map(linkDateConfirmations);
+  function updateDateDraftConfirmation(issue: Issue, confirm: boolean) {
+    const confirmations = new Map(dateDraftConfirmations);
     if (confirm) confirmations.set(issue.id, issue.version);
     else confirmations.delete(issue.id);
-    setLinkDateConfirmations(confirmations);
-    resetReview(linkRuleEdited || excludedLinkDates.size > 0 || confirmations.size > 0 || linkPreferencesEdited);
+    setDateDraftConfirmations(confirmations);
+    resetReview(excludedDateDrafts.size > 0 || confirmations.size > 0 || (bulkDates ? datesEdited || rescheduleSuccessors : linkRuleEdited || linkPreferencesEdited));
   }
 
   function updateBlockers(selection: BlockerLinkSelection) {
@@ -520,7 +541,8 @@ function ProjectScheduleEditDialog({
     setApproved(false);
     setRetryApply(null);
     setNotice('');
-    const submitted = { input, targets, projects: selectedProjects, linkOperation };
+    const submitted = { input, targets, projects: selectedProjects, linkOperation,
+      ...(bulkDates && { includedDateDraftIds: dateDraftEdits.map(({ issue }) => issue.id) }) };
     let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
@@ -532,7 +554,7 @@ function ProjectScheduleEditDialog({
         const { action, value } = dates[field];
         if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
       }
-      payload = { projectId, issues, changes };
+      payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput };
     } else payload = { projectId, text, ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}) };
     try {
       const endpoint = blockerLinks ? '/schedule/blocker-links/preview'
@@ -567,8 +589,8 @@ function ProjectScheduleEditDialog({
     setApproved(false);
     setNotice('');
     const inputLabel = bulkLinks
-      ? linkDateRows.length ? '선택한 업무와 연결 입력, 날짜 초안' : '선택한 업무와 연결 입력'
-      : '선택한 업무와 날짜 입력';
+      ? dateDraftRows.length ? '선택한 업무와 연결 입력, 날짜 초안' : '선택한 업무와 연결 입력'
+      : dateDraftRows.length ? '선택한 업무와 날짜 입력, 날짜 초안' : '선택한 업무와 날짜 입력';
     try {
       await managed.refresh();
       if (!mounted.current || controller.signal.aborted) return;
@@ -589,7 +611,7 @@ function ProjectScheduleEditDialog({
 
   async function reflectResult(result: SchedulePasteApplyResult) {
     try {
-      await onApplied(result, review?.result.followUpIssueIds ?? [], review?.linkOperation ?? linkOperation);
+      await onApplied(result, review?.result.followUpIssueIds ?? [], review?.linkOperation ?? linkOperation, review?.includedDateDraftIds);
     } catch (cause) {
       if (mounted.current) {
         setError(`${directLinks ? '선후행 연결은' : '일정은'} 적용되었습니다. ${errorMessage(cause)} 아래에서 화면 반영을 다시 시도하세요.`);
@@ -698,6 +720,12 @@ function ProjectScheduleEditDialog({
       <p id="schedule-paste-follow-up-help">{followUpDescription}</p>
     </div>
   );
+  const dateDraftFields = dateDraftRows.length > 0 && <GanttBulkLinkDateFields rows={dateDraftRows} excluded={excludedDateDrafts}
+    confirmations={dateDraftConfirmations} onInclude={updateDateDraftInclusion} onConfirm={updateDateDraftConfirmation}
+    projectNames={projectNames ?? undefined}
+    description={bulkDates
+      ? '포함한 초안은 해당 업무의 같은 날짜 항목에서 위 공통 변경보다 우선합니다. 제외한 초안은 간트에 남습니다.'
+      : undefined} />;
   return (
     <div className="schedule-paste-overlay">
       <section
@@ -722,7 +750,7 @@ function ProjectScheduleEditDialog({
                 : bulkLinks
                 ? `${linkDescription} ${linkInstructions}`
                 : bulkDates
-                  ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
+                  ? '날짜별 공통 변경과 업무별 간트 초안을 함께 검토할 수 있습니다.'
                   : isTeamPaste
                     ? '여러 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'
                     : '현재 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'}
@@ -792,11 +820,11 @@ function ProjectScheduleEditDialog({
                   : <GanttBulkLinkFields anchors={anchors} anchor={anchor} issueAliases={bulkLinks.issueAliases} searchRef={anchorSearch} query={anchorQuery}
                     value={link} onSearch={setAnchorQuery} onChange={updateLink}
                     operation={linkOperation} changes={linkRuleChanges} onChanges={updateLinkRuleChanges} />}
-                {linkDateRows.length > 0 && <GanttBulkLinkDateFields rows={linkDateRows} excluded={excludedLinkDates}
-                  confirmations={linkDateConfirmations} onInclude={updateLinkDateInclusion} onConfirm={updateLinkDateConfirmation} />}
+                {dateDraftFields}
                 {followUpOption}
               </>
             ) : bulkDates ? (
+              <>
                 <div className="schedule-bulk-date-fields">
                   {bulkFields.map(({ field, label }, index) => {
                     const entry = dates[field];
@@ -824,6 +852,9 @@ function ProjectScheduleEditDialog({
                     );
                   })}
                 </div>
+                {dateDraftFields}
+                {followUpOption}
+              </>
             ) : (
               <>
                 <label htmlFor="schedule-paste-text">일정표 (TSV 또는 CSV)</label>
@@ -1012,7 +1043,7 @@ function ProjectScheduleEditDialog({
               {result.changes.length > 0 && (
                 <ChangeTable changes={result.changes} bulk={Boolean(bulkDates || bulkLinks)} projects={review?.projects}
                   teamProjects={teamProjects} followUpIssues={followUpIssues}
-                  label={bulkLinks && followUpIssues.size ? '선택 업무와 후행 업무 날짜 변경 목록' : undefined} />
+                  label={bulk && followUpIssues.size ? '선택 업무와 후행 업무 날짜 변경 목록' : undefined} />
               )}
               {dependencyChanges.length > 0 && (
                 <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? reviewedOperation : 'paste'} teamProjects={teamProjects} />
@@ -1158,7 +1189,9 @@ function ChangeTable({ changes, bulk, projects, teamProjects, followUpIssues, la
                   <>
                     <DateChangeCell before={change.fromStart} after={change.toStart} />
                     <DateChangeCell before={change.fromEnd} after={change.toEnd} />
-                    <DateChangeCell before={change.fromDue ?? null} after={change.toDue ?? null} />
+                    {hasDueDateChange(change)
+                      ? <DateChangeCell before={change.fromDue ?? null} after={change.toDue ?? null} />
+                      : <td>유지</td>}
                   </>
                 ) : (
                   <>

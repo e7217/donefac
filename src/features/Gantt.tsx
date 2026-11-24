@@ -140,7 +140,8 @@ type GanttProps = FeatureProps & {
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type ScheduleProjectScope = Project | 'team';
-type BulkLinkSelection = { project: Project; issues: Issue[]; dateDrafts: ChartDateDraft[] };
+type BulkDateSelection = { issues: Issue[]; dateDrafts: ChartDateDraft[] };
+type BulkLinkSelection = BulkDateSelection & { project: Project };
 type DependencyEditor = {
   dependency?: Dependency;
   prefill?: DependencyPrefill;
@@ -302,7 +303,7 @@ function ProjectGantt(props: GanttProps) {
   const [hideDone, setHideDone] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteScope, setPasteScope] = useState<ScheduleProjectScope | null>(null);
-  const [bulkDateSelection, setBulkDateSelection] = useState<Issue[] | null>(null);
+  const [bulkDateSelection, setBulkDateSelection] = useState<BulkDateSelection | null>(null);
   const [bulkLinkSelection, setBulkLinkSelection] = useState<BulkLinkSelection | null>(null);
   const [blockerLinksScope, setBlockerLinksScope] = useState<ScheduleProjectScope | null>(null);
   const [rowScheduleEdit, setRowScheduleEdit] = useState<RowScheduleEdit | null>(null);
@@ -585,7 +586,8 @@ function ProjectGantt(props: GanttProps) {
       if (previewRef.current || discardableDrafts.some(([, value]) => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get(BULK_LINKS_DRAFT)?.awaitingResult || draftsRef.current.get(BLOCKER_LINKS_DRAFT)?.awaitingResult;
-        const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult;
+        const awaitingPasteResult = draftsRef.current.get(SCHEDULE_PASTE_DRAFT_ID)?.awaitingResult ||
+          draftsRef.current.get(BULK_DATES_DRAFT)?.awaitingResult;
         const awaitingFollowUpResult = draftsRef.current.get(TEAM_FOLLOW_UP_DRAFT)?.awaitingResult || draftsRef.current.get(TEAM_BLOCKER_EDIT_DRAFT)?.awaitingResult;
         const awaitingScheduleResult = awaitingPasteResult || awaitingFollowUpResult || manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
         const confirmation = awaitingLinkResult ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
@@ -1091,9 +1093,10 @@ function ProjectGantt(props: GanttProps) {
     : selectedIssues.length > MAX_SCHEDULE_BULK_LINK_ISSUES ? `한 번에 ${MAX_SCHEDULE_BULK_LINK_ISSUES}개까지 연결할 수 있습니다.` : '';
   const canEditBulkDates = hasProject || (allProjects && data.projects.length > 0);
   const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
-  const bulkDateIssues = bulkDateSelection?.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
+  const bulkDateIssues = bulkDateSelection?.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
   const schedulePasteTarget = bulkDateIssues
-    ? { projectId: allProjects ? null : projectId, bulkDates: { issues: bulkDateIssues, projects: data.projects, refresh } }
+    ? { projectId: allProjects ? null : projectId,
+      bulkDates: { issues: bulkDateIssues, dateDrafts: bulkDateSelection?.dateDrafts, projects: data.projects, refresh } }
     : pasteScope === 'team' ? { projectId: null, teamPaste: { projects: data.projects } }
       : pasteScope ? { projectId: pasteScope.id, projectLabel: `${pasteScope.key} · ${pasteScope.name}` } : null;
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
@@ -1420,11 +1423,17 @@ function ProjectGantt(props: GanttProps) {
     requestAnimationFrame(() => pasteTrigger.current?.focus({ preventScroll: true }));
   }
   function openBulkDates() {
-    if (busyRef.current || !canEditBulkDates || activeDatePicker || !selectedIssues.length || bulkDatesOverLimit || !canLeave()) return;
+    if (busyRef.current || !canEditBulkDates || activeDatePicker || !selectedIssues.length || bulkDatesOverLimit) return;
+    const keepDates = canKeepInlineDateDrafts();
+    if (!keepDates && !canLeave()) return;
+    const dateDrafts = keepDates ? selectedIssues.flatMap(issue => {
+      const draft = chartDateDraft(issue);
+      return draft ? [draft] : [];
+    }) : [];
     queueMicrotask(() => {
       setLinkPicker(null);
       setPasteScope(null);
-      setBulkDateSelection(selectedIssues);
+      setBulkDateSelection({ issues: selectedIssues, dateDrafts });
     });
   }
   function closeBulkDates(updated?: readonly Issue[]) {
@@ -2741,9 +2750,19 @@ function ProjectGantt(props: GanttProps) {
         else closeSchedulePaste();
         if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
       }}
-      onApplied={async result => {
+      onApplied={async (result, _followUpIssueIds, _operation, includedDateDraftIds) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
+        if (bulkDateSelection && includedDateDraftIds?.length) {
+          const included = new Set(includedDateDraftIds);
+          const savedById = new Map(result.updated.map(issue => [issue.id, issue]));
+          for (const draft of bulkDateSelection.dateDrafts) {
+            if (!included.has(draft.source.id)) continue;
+            const saved = savedById.get(draft.source.id) ?? bulkDateIssues?.find(issue => issue.id === draft.source.id);
+            if (saved && (['startDate', 'endDate'] as const).every(field =>
+              !Object.hasOwn(draft.changes, field) || saved[field] === draft.changes[field])) acceptChartDateDraft(saved, draft);
+          }
+        }
         await refresh();
         if (bulkDateIssues) {
           closeBulkDates(result.updated);

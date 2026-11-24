@@ -197,6 +197,89 @@ test('360px 간트에서 보이는 선택 업무의 날짜만 검토하고 응�
   } finally { await fixture.close(); }
 });
 
+test('360px 팀 간트에서 선택한 날짜 초안과 공통 날짜를 후행 업무까지 함께 검토한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const fixture = await makeFixture(request);
+  try {
+    const visible = `${fixture.prefix} 선택`;
+    const first = await fixture.create(`${visible} 개별 종료일`, { startDate: date(1), endDate: date(4), dueDate: null });
+    const second = await fixture.create(`${visible} 공통 종료일`, { startDate: date(2), endDate: date(5), dueDate: null }, fixture.secondProject.id);
+    const successor = await fixture.create(`${fixture.prefix} 필터 밖 후행 업무`, { startDate: date(8), endDate: date(9), dueDate: date(22) });
+    await fixture.link(first, successor);
+    const { chart, selected, open, dialog } = await openChart(page, fixture.projectId, visible, true);
+    const firstEnd = chart.getByLabel(`${first.key} 종료일`, { exact: true });
+    const secondEnd = chart.getByLabel(`${second.key} 종료일`, { exact: true });
+    await firstEnd.fill(date(12));
+    await secondEnd.fill(date(10));
+    await selected(first).check();
+    await selected(second).check();
+    await expect(selected(successor)).toHaveCount(0);
+    await open.click();
+    await expect(dialog).toBeVisible();
+    const drafts = dialog.getByRole('region', { name: '간트 날짜 초안', exact: true });
+    await expect(drafts.getByRole('checkbox', { name: `${first.key} 날짜 초안 포함`, exact: true })).toBeChecked();
+    await drafts.getByRole('checkbox', { name: `${second.key} 날짜 초안 포함`, exact: true }).uncheck();
+    await dialog.getByLabel('종료일 변경', { exact: true }).selectOption('set');
+    await dialog.getByLabel('종료일 값', { exact: true }).fill(date(8));
+    await dialog.getByLabel('목표 마감일 변경', { exact: true }).selectOption('set');
+    await dialog.getByLabel('목표 마감일 값', { exact: true }).fill(date(30));
+    await dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true }).check();
+
+    const nextPreview = nextPost(page, previewRoute);
+    await dialog.getByRole('button', { name: previewName, exact: true }).click();
+    const previewResponse = await nextPreview;
+    expect(previewResponse.request().postDataJSON()).toMatchObject({
+      projectId: null, changes: { endDate: date(8), dueDate: date(30) }, rescheduleSuccessors: true,
+      dates: [{ issue: { id: first.id, expectedVersion: first.version }, changes: { endDate: date(12) } }],
+    });
+    const preview = await readJson<SchedulePastePreview>(previewResponse, 200);
+    expect(preview.errors).toEqual([]);
+    expect(preview.followUpIssueIds).toEqual([successor.id]);
+    expect(preview.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, toEnd: date(12), toDue: date(30) }),
+      expect.objectContaining({ id: second.id, toEnd: date(8), toDue: date(30) }),
+      expect.objectContaining({ id: successor.id, toStart: date(15), toEnd: date(16), fromDue: date(22), toDue: date(22) }),
+    ]));
+    const table = dialog.getByRole('table', { name: '선택 업무와 후행 업무 날짜 변경 목록', exact: true });
+    const followUp = table.getByRole('row').filter({ hasText: successor.key });
+    await expect(followUp).toContainText('후행 조정');
+    await expect(followUp).toContainText(fixture.firstProject.name);
+    await expect(followUp).toContainText(date(22));
+    expect(await fixture.stored()).toEqual([first, second, successor].map(values));
+
+    let savedResponse: SchedulePasteApplyResult | undefined;
+    await page.route(`**${applyRoute}`, async route => {
+      savedResponse = await readJson<SchedulePasteApplyResult>(await route.fetch(), 200);
+      await route.fulfill({ status: 408, json: { error: '합성 프록시 응답 시간 초과' } });
+    }, { times: 1 });
+    const applying = nextPost(page, applyRoute);
+    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    expect((await applying).status()).toBe(408);
+    const recovery = nextPost(page, applyRoute);
+    await dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true }).click();
+    const recovered = await recovery;
+    expect(recovered.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+    expect(await readJson<SchedulePasteApplyResult>(recovered, 200)).toEqual(savedResponse);
+    await expect(dialog).toHaveCount(0);
+    expect(await fixture.stored()).toEqual([
+      { ...values(first), version: first.version + 1, endDate: date(12), dueDate: date(30) },
+      { ...values(second), version: second.version + 1, endDate: date(8), dueDate: date(30) },
+      { ...values(successor), version: successor.version + 1, startDate: date(15), endDate: date(16) },
+    ]);
+    await expect(firstEnd).toHaveValue(date(12));
+    await expect(secondEnd).toHaveValue(date(10));
+    const undoing = nextPost(page, undoRoute);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await readJson(await undoing, 200);
+    for (const [index, stored] of (await fixture.stored()).entries()) {
+      const original = [first, second, successor][index];
+      expect(stored).toEqual({ ...values(original), version: original.version + 2 });
+    }
+    await expect(firstEnd).toHaveValue(date(4));
+    await expect(secondEnd).toHaveValue(date(10));
+  } finally { await fixture.close(); }
+});
+
 test('선택 업무의 날짜 오류와 검토 이후 충돌은 적용을 막고 날짜 선택을 보존한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const fixture = await makeFixture(request);

@@ -2213,6 +2213,8 @@ export interface ScheduleBulkDateInput {
   projectId: string | null;
   issues: { id: string; expectedVersion: number }[];
   changes: ScheduleBulkDateChanges;
+  dates?: ScheduleBulkLinkDateEdit[];
+  rescheduleSuccessors?: boolean;
 }
 type ScheduleRowIssue = { id: string; expectedVersion: number };
 export const MAX_SCHEDULE_BULK_LINK_ISSUES = 100;

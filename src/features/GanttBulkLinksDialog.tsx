@@ -138,27 +138,33 @@ export function GanttBulkChainFields({ issues, value, onChange, onMove, ...ruleO
   </>;
 }
 
-export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclude, onConfirm }: {
+export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclude, onConfirm, projectNames,
+  description = '함께 저장할 날짜를 선택하세요. 제외한 초안은 간트에 남습니다.' }: {
   rows: readonly BulkLinkDateRow[];
   excluded: ReadonlySet<string>;
   confirmations: ReadonlyMap<string, number>;
   onInclude: (id: string, include: boolean) => void;
   onConfirm: (issue: Issue, confirm: boolean) => void;
+  projectNames?: ReadonlyMap<string, string>;
+  description?: string;
 }) {
   const title = useId();
   return <section className="schedule-bulk-link-dates" aria-labelledby={title}>
     <h3 id={title}>간트 날짜 초안</h3>
-    <p>함께 저장할 날짜를 선택하세요. 제외한 초안은 간트에 남습니다.</p>
+    <p>{description}</p>
     <ul>
       {rows.map(({ issue, dates }) => {
         const included = !excluded.has(issue.id);
         const hasConflict = dates.some(date => date.conflict);
         const confirmed = confirmations.get(issue.id) === issue.version;
+        const projectName = projectNames?.get(issue.projectId);
         return <li key={issue.id}>
           <label>
             <input type="checkbox" checked={included} aria-label={`${issue.key} 날짜 초안 포함`}
               onChange={event => onInclude(issue.id, event.currentTarget.checked)} />
-            <span><strong>{issue.key}</strong> {issue.title}</span>
+            <span><strong>{issue.key}</strong> {issue.title}
+              {projectName && <small className="schedule-bulk-project" data-schedule-project={issue.projectId}>{projectName}</small>}
+            </span>
           </label>
           <ul>
             {dates.map(({ field, base, saved, draft, conflict }) => <li key={field}>
