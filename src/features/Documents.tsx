@@ -1680,12 +1680,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
   }
   function cancelChecklistReselect() { setChecklistReselecting(false); }
-  function openCommentFollowUp(comment: Comment, opener: HTMLButtonElement) {
+  function openCommentFollowUp(comment: Comment, opener: HTMLButtonElement, kind: 'create' | 'link') {
     const source = comment.documentSource;
     if (!source || comment.resourceType !== 'document' || comment.parentCommentId !== undefined || latestPage?.id !== comment.resourceId) return;
     const { id, title, projectId, version } = latestPage;
     documentActionOpener.current = opener;
-    setDocumentAction({ kind: 'create', source: { id, title, projectId, version, comment: { id: comment.id, body: comment.body, source: { ...source } } } });
+    const page = { id, title, projectId, version };
+    const evidence = { id: comment.id, source: { ...source } };
+    if (kind === 'link') setDocumentAction({ kind, source: { ...page, comment: evidence } });
+    else setDocumentAction({ kind, source: { ...page, comment: { ...evidence, body: comment.body } } });
   }
   function openDecisionLink(page: DocPage, opener: HTMLButtonElement, sourceSelection: DocumentSourceSelection) {
     documentActionOpener.current = opener;
@@ -2016,6 +2019,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 const threadReplies = repliesByParent.get(comment.id) ?? [];
                 const replyEditor = reply.current?.parentId === comment.id ? reply.current : null;
                 const commentControlsDisabled = commentBusy || saving || pending || reply.busy || comment.resourceId !== documentId;
+                const followUpDisabled = commentControlsDisabled || restoring || isCommentEditPending() || !actorId || !data.projects.length ||
+                  draft.id !== comment.resourceId || latestPage?.id !== comment.resourceId;
                 return <article className="docs-comment" id={`document-comment-${comment.id}`} tabIndex={-1} key={comment.id}>
                   <div className="docs-comment-head">
                     <span className="docs-avatar" style={{ background: user?.color || '#78849a' }}>{user?.name.slice(0, 1) || '팀'}</span>
@@ -2043,10 +2048,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                     </span>}
                     <div className="docs-comment-review-actions">
                       <button type="button" className="btn btn-ghost"
-                        disabled={commentControlsDisabled || restoring || isCommentEditPending() || !actorId || !data.projects.length ||
-                          draft.id !== comment.resourceId || latestPage?.id !== comment.resourceId}
-                        onClick={event => openCommentFollowUp(comment, event.currentTarget)}>
+                        disabled={followUpDisabled} onClick={event => openCommentFollowUp(comment, event.currentTarget, 'create')}>
                         <Plus size={14} aria-hidden="true" />댓글에서 후속 업무 만들기
+                      </button>
+                      <button type="button" className="btn btn-ghost"
+                        disabled={followUpDisabled} onClick={event => openCommentFollowUp(comment, event.currentTarget, 'link')}>
+                        <Link2 size={14} aria-hidden="true" />댓글을 기존 업무에 연결
                       </button>
                       <button type="button" className="btn btn-ghost" aria-disabled={Boolean(resolvingCommentId) || !actorId}
                         onClick={event => void changeCommentResolution(comment, event.currentTarget)}>
@@ -2144,7 +2151,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     {documentAction?.kind === 'create' && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
       sourceDocument={documentAction.source} selectingChecklist={checklistReselecting} onReselectChecklist={reselectChecklistSource} onClose={closeDocumentAction} />}
     {documentAction?.kind === 'link' && <DocumentDecisionLinkDialog source={documentAction.source} data={data} actorId={actorId}
-      refresh={refresh} notify={notify} onClose={closeDocumentAction} />}
+      refresh={refresh} notify={notify} onClose={closeDocumentAction}
+      reloadComments={() => window.dispatchEvent(new Event(COMMENT_LIST_CHANGED))} />}
     {documentAction?.kind === 'comment' && <DocumentSelectionCommentDialog source={documentAction.source} initialDraft={documentAction.initialDraft}
       actorId={actorId} users={data.users} refresh={refresh} notify={notify} onClose={closeDocumentAction} onSaved={showSavedSelectionComment} onReselect={reselectCommentSource} />}
     {publicationOpen && selectedPage && draft?.id === selectedPage.id && <DocumentPublication data={data}

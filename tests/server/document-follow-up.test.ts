@@ -13,8 +13,9 @@ import { documentChecklistItemSelection } from '../../shared/document-selection.
 import { createEditorSchema } from '../../shared/editor-schema.js';
 import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { ApiKeyCreated, Comment, DocPage, DocRevision, DocumentChecklistWork, DocumentCommentReplyResult, DocumentSelectionCommentResult,
-  DocumentSourceSelection, Issue, Project, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Comment, DecisionFollowUpPage, DecisionFollowUpSource, DocPage, DocRevision, DocumentChecklistWork,
+  DocumentCommentReplyResult, DocumentSelectionCommentResult, DocumentSourceSelection, Issue, Project, ResourceLink, RichContent,
+  WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const commonTarget = 'project-team';
@@ -924,6 +925,97 @@ test('an existing-issue decision receipt survives document edits and restart and
   assert.notEqual(reattached.link.id, attached.link.id);
   await call(path, 'POST', input, 409);
   assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).resourceLinks.filter(link => link.documentId === doc.id), [reattached.link]);
+});
+
+test('attaching a sentence comment to an existing issue preserves its original evidence through edits, conflicts and replay', async t => {
+  const { call, directory, key, restart } = await fixture(t);
+  const narrow = await key([projectId], 'write', 'user-min');
+  const wide = await key([projectId, commonTarget], 'write', 'user-min');
+  const document = await call<DocPage>('/documents', 'POST', {
+    projectId, title: '댓글을 남긴 설계', content: issueSummaryBody(commonTarget),
+  }, 201);
+  const { comment, source } = await sentenceComment(call, document);
+  const otherText = '합성 결정';
+  const otherSelection = { from: 1, to: 1 + otherText.length, text: otherText };
+  const { comment: other } = await call<DocumentSelectionCommentResult>(`/documents/${document.id}/selection-comments`, 'POST', {
+    requestId: randomUUID(), expectedDocumentVersion: document.version, sourceSelection: otherSelection, body: '같은 저장본의 다른 발췌',
+  }, 201);
+  assert.equal(other.documentSource?.revisionId, source.revisionId);
+  const issue = await call<Issue>('/issues', 'POST', { projectId, title: '이미 계획한 기존 업무', description: '기존 업무 설명' }, 201);
+  const ordinary = await call<ResourceLink>('/resource-links', 'POST', { issueId: issue.id, documentId: document.id, kind: '설계 참고' }, 201);
+  const latest = await call<DocPage>(`/documents/${document.id}`, 'PATCH', {
+    expectedVersion: document.version, title: '편집한 현재 설계', contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION,
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '원래 문장을 교체했다.' }] }] },
+  });
+  const path = `/v1${decisionPathFor(document.id)}`;
+  const base = { requestId: randomUUID(), expectedDocumentVersion: latest.version, issueId: issue.id };
+  const input = { ...base, sourceComment: { commentId: comment.id, revisionId: source.revisionId } };
+  const before = await call<WorkspaceSnapshot>('/workspace');
+  const revisionsPath = `/documents/${document.id}/revisions`;
+  const revisions = await call<DocRevision[]>(revisionsPath);
+  const currentRevision = revisions.find(revision => revision.version === latest.version);
+  assert.ok(currentRevision && currentRevision.id !== source.revisionId);
+
+  await call(path, 'POST', base, 400, wide);
+  await call(path, 'POST', { ...input, sourceSelection: otherSelection }, 400, wide);
+  await call(path, 'POST', { ...input, sourceComment: { ...input.sourceComment, text: '위조한 원문' } }, 400, wide);
+  const stale = await call<{ details: { currentVersion: number } }>(path, 'POST', { ...input, expectedDocumentVersion: document.version }, 409, wide);
+  assert.equal(stale.details.currentVersion, latest.version);
+  const wrongRevision = await call<{ details: { reason: string } }>(path, 'POST', {
+    ...input, sourceComment: { ...input.sourceComment, revisionId: currentRevision.id },
+  }, 409, wide);
+  assert.equal(wrongRevision.details.reason, 'comment_source_unavailable');
+  await call(path, 'POST', input, 403, narrow);
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+
+  const observer = new DatabaseSync(join(directory, 'teamspace.sqlite'));
+  try {
+    observer.exec(`CREATE TRIGGER fail_comment_decision_link_receipt BEFORE INSERT ON document_decision_link_requests
+      BEGIN SELECT RAISE(ABORT, 'synthetic comment decision link receipt failure'); END`);
+    await call(path, 'POST', input, 500, wide);
+    assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), before);
+  } finally {
+    observer.exec('DROP TRIGGER IF EXISTS fail_comment_decision_link_receipt');
+    observer.close();
+  }
+
+  const attached = await call<Created>(path, 'POST', input, 201, wide);
+  assert.deepEqual(attached, { issue, link: { ...ordinary, documentSource: source }, duplicate: false });
+  const after = await call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(after.documents, before.documents);
+  assert.deepEqual(after.issues, before.issues);
+  assert.deepEqual(after.resourceLinks.filter(link => link.documentId === document.id), [attached.link]);
+  const entries = after.activities.filter(activity => !before.activities.some(previous => previous.id === activity.id));
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].action, '문서 결정 근거 연결');
+  assert.equal(entries[0].actorId, 'user-min');
+  assert.deepEqual(await call<DocRevision[]>(revisionsPath), revisions);
+
+  const reportPath = `/projects/${projectId}/decision-follow-ups`;
+  const report = await call<DecisionFollowUpPage>(`${reportPath}?q=${encodeURIComponent(issue.key)}`);
+  assert.equal(report.total, 1);
+  assert.equal(report.items[0].document.title, latest.title);
+  assert.equal(report.items[0].source.title, document.title);
+  assert.equal(report.items[0].source.version, document.version);
+  assert.deepEqual(await call<DecisionFollowUpSource>(`${reportPath}/${attached.link.id}/source`), {
+    linkId: attached.link.id, documentId: document.id, source,
+  });
+
+  const changedComment = { ...input, sourceComment: { ...input.sourceComment, commentId: other.id } };
+  await call(path, 'POST', changedComment, 409, wide);
+  const conflict = await call<{ details: { reason: string } }>(path, 'POST', { ...changedComment, requestId: randomUUID() }, 409, wide);
+  assert.equal(conflict.details.reason, 'decision_source_exists');
+  assert.deepEqual(await call<Created>(path, 'POST', { ...input, requestId: randomUUID() }, 200, wide), { ...attached, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), after);
+
+  await call(`/comments/${comment.id}`, 'DELETE');
+  const archived = await call<WorkspaceSnapshot>('/workspace');
+  await restart();
+  const unavailable = await call<{ details: { reason: string } }>(path, 'POST', { ...input, requestId: randomUUID() }, 404, wide);
+  assert.equal(unavailable.details.reason, 'comment_source_unavailable');
+  await call(path, 'POST', input, 403, narrow);
+  assert.deepEqual(await call<Created>(path, 'POST', input, 200, wide), { ...attached, duplicate: true });
+  assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), archived);
 });
 
 test('failure at an existing-issue receipt rolls back its source snapshot, relation upgrade and activity', async t => {

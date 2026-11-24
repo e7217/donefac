@@ -2,23 +2,29 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Link2, X } from 'lucide-react';
-import type { DocPage, DocumentIssueLinkResult, DocumentSourceSelection, FeatureProps } from '../../shared/types';
+import type { DocPage, DocumentDecisionSource, DocumentIssueLinkResult, DocumentSourceSelection, FeatureProps } from '../../shared/types';
 import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import './document-decision-link.css';
 
-export type DecisionLinkSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & { sourceSelection: DocumentSourceSelection };
+export type DecisionLinkSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> & (
+  { sourceSelection: DocumentSourceSelection } | { comment: { id: string; source: DocumentDecisionSource } }
+);
 
-type Props = Pick<FeatureProps, 'data' | 'actorId' | 'refresh' | 'notify'> & { source: DecisionLinkSource; onClose: () => void };
+type Props = Pick<FeatureProps, 'data' | 'actorId' | 'refresh' | 'notify'> & {
+  source: DecisionLinkSource;
+  onClose: () => void;
+  reloadComments: () => void;
+};
 type Attempt = { actorId: string; issueId: string; body: string };
 
 const RESULTS_LIMIT = 40;
 const UNKNOWN_RESULT = '연결 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.';
 const CONFIRM_UNKNOWN_CLOSE = '연결이 저장됐을 수 있습니다. 문서의 연결 목록에서 확인할 수 있습니다. 창을 닫을까요?';
 
-export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, notify, onClose }: Props) {
+export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, notify, onClose, reloadComments }: Props) {
   const titleId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -34,6 +40,7 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
   const [sourceConflict, setSourceConflict] = useState(false);
   const [issueConflict, setIssueConflict] = useState<{ issueId: string; message: string } | null>(null);
   const [error, setError] = useState('');
+  const excerpt = 'comment' in source ? source.comment.source : source.sourceSelection;
 
   const matches = useMemo(() => {
     const search = query.trim().toLocaleLowerCase();
@@ -106,7 +113,9 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
     if (pending.current || sourceConflict || replayRejected || (!attempt.current && (!selected || issueError))) return;
     const replay = Boolean(attempt.current);
     const request = attempt.current ?? { actorId, issueId: selectedId, body: JSON.stringify({
-      requestId: newRequestId(), expectedDocumentVersion: source.version, issueId: selectedId, sourceSelection: source.sourceSelection,
+      requestId: newRequestId(), expectedDocumentVersion: source.version, issueId: selectedId,
+      ...('comment' in source ? { sourceComment: { commentId: source.comment.id, revisionId: source.comment.source.revisionId } }
+        : { sourceSelection: source.sourceSelection }),
     }) };
     let confirmed = false;
     pending.current = true;
@@ -118,9 +127,10 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
         method: 'POST', headers: { 'X-Actor-Id': request.actorId }, body: request.body,
       });
       const saved = result?.link?.documentSource;
-      const { from, to, text } = source.sourceSelection;
+      const { from, to, text } = excerpt;
       if (result?.issue?.id !== request.issueId || result.link?.issueId !== request.issueId || result.link.documentId !== source.id
-        || !saved?.revisionId || saved.from !== from || saved.to !== to || saved.text !== text) throw new Error(UNKNOWN_RESULT);
+        || !saved?.revisionId || saved.from !== from || saved.to !== to || saved.text !== text
+        || ('comment' in source && saved.revisionId !== source.comment.source.revisionId)) throw new Error(UNKNOWN_RESULT);
       confirmed = true;
       await refresh();
       attempt.current = null;
@@ -132,15 +142,22 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
         attempt.current = null;
         setRecovering(false);
         const details = cause.details as { currentVersion?: number; reason?: string } | undefined;
-        const staleSource = cause.status === 409 && (Number.isSafeInteger(details?.currentVersion) || details?.reason === 'source_selection_changed');
+        const unavailableComment = details?.reason === 'comment_source_unavailable';
+        const staleSource = unavailableComment || (cause.status === 409 &&
+          (Number.isSafeInteger(details?.currentVersion) || details?.reason === 'source_selection_changed'));
         if (staleSource) setSourceConflict(true);
         if (replay) setReplayRejected(true);
         if (!staleSource && !replay && (cause.status === 409 || cause.status === 404)) {
           setIssueConflict({ issueId: request.issueId, message: cause.message });
+        } else if (unavailableComment) {
+          setError(cause.message);
+        } else if (staleSource) {
+          setError('comment' in source ? '문서의 저장본이 변경됐습니다. 최신 문서의 댓글에서 다시 열어 주세요.'
+            : '문서의 저장본이 변경됐습니다. 문서에서 본문을 다시 선택해 주세요.');
         } else {
-          setError(staleSource ? '문서의 저장본이 변경됐습니다. 문서에서 본문을 다시 선택해 주세요.'
-            : replay ? `${cause.message} 문서의 연결 목록을 확인해 주세요.` : cause.message);
+          setError(replay ? `${cause.message} 문서의 연결 목록을 확인해 주세요.` : cause.message);
         }
+        if (unavailableComment) reloadComments();
         if (staleSource) await refresh().catch(() => {});
       } else {
         setRecovering(true);
@@ -159,11 +176,12 @@ export function DocumentDecisionLinkDialog({ source, data, actorId, refresh, not
     }}>
     <form onSubmit={submit}>
       <header className="document-decision-link-header">
-        <div><h2 id={titleId}>기존 업무에 결정 근거 연결</h2><p>{source.title} · 버전 {source.version}</p></div>
+        <div><h2 id={titleId}>기존 업무에 결정 근거 연결</h2>
+          <p>{source.title} · {'comment' in source ? '댓글의 원문 저장본' : `버전 ${source.version}`}</p></div>
         <button type="button" className="btn btn-ghost" aria-label="닫기" disabled={busy} onClick={close}><X size={19} aria-hidden="true" /></button>
       </header>
-      <section className="document-decision-link-excerpt" aria-label="선택한 본문">
-        <blockquote tabIndex={0}>{source.sourceSelection.text}</blockquote>
+      <section className="document-decision-link-excerpt" aria-label={'comment' in source ? '댓글이 달린 본문' : '선택한 본문'}>
+        <blockquote tabIndex={0}>{excerpt.text}</blockquote>
       </section>
       <fieldset disabled={busy || recovering || sourceConflict || replayRejected} className="document-decision-link-controls">
         <div className="document-decision-link-filters">

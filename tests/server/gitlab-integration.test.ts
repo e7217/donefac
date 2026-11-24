@@ -58,6 +58,157 @@ test('pipeline branch ordering prevents late older results and MR inheritance re
   }finally{f.close();}
 });
 
+test('pipeline webhook freshness compares compatible ref, source and tag evidence across sparse updates', t => {
+  const f = fixture();
+  t.after(f.close);
+  f.configure();
+  const start = Date.now() - 30_000;
+  const sha = 'a'.repeat(40);
+  const branch = 'main';
+  const delivery = (id: number, offset: number, fields: Record<string, unknown> = {}, keyed = false) => {
+    const body = pipeline({ id, ref: branch, sha, status: 'success', finished_at: new Date(start + offset).toISOString(), ...fields });
+    return f.service.webhook(request({ ...body, ...(keyed ? { commit: { id: sha, message: 'NEO-1 pipeline' } } : {}) }));
+  };
+
+  // Retain the source and tag even when a pipeline does not yet match a Teamspace ticket.
+  delivery(802, 1000, { status: 'running', source: 'push', tag: false });
+  delivery(803, 2000, { status: 'running', source: 'schedule', tag: false });
+  delivery(804, 3000, { status: 'running', source: 'merge_request_event', tag: false });
+  assert.equal(f.events.length, 0);
+  assert.equal(links(f).length, 0);
+
+  delivery(802, 4000, { source: 'schedule' });
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.equal(delivery(802, 5000, {}, true).linked, 1);
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-1']);
+  const push = links(f).find(link => link.iid === 802)!;
+  assert.deepEqual([push.pipelineSource, push.pipelineTag], ['push', false]);
+  assert.equal(f.service.latestVerifiedPipelineId(push), 802);
+
+  delivery(801, 6000, { source: 'push', tag: true }, true);
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  assert.equal(f.service.latestVerifiedPipelineId(links(f).find(link => link.iid === 801)!), 801);
+
+  delivery(800, 7000, { source: 'push', tag: false }, true);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.equal(links(f).find(link => link.iid === 800)?.state, 'success');
+  delivery(799, 8000, { source: 'push' }, true);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+  delivery(798, 9000, { tag: false }, true);
+  assert.equal(f.events.at(-1)?.disposition, 'stale');
+
+  delivery(805, 10_000, { source: 'push', tag: false, ref: 'release' });
+  assert.equal(f.service.latestVerifiedPipelineId(push), 802);
+  delivery(806, 11_000, { status: 'running', source: 'push', tag: false });
+  assert.equal(f.service.latestVerifiedPipelineId(push), 806);
+});
+
+test('reopening existing GitLab state conservatively retains a legacy pipeline cursor until exactly reobserved', t => {
+  const f = fixture();
+  t.after(f.close);
+  const settings = f.configure();
+  const instance = createHash('sha256').update(settings.baseUrl).digest('hex').slice(0,12);
+  const ref = 'feature/NEO-1';
+  const scope = `${instance}:42:${ref}`;
+  const start = Date.now() - 30_000;
+  const at = (offset: number) => new Date(start + offset).toISOString();
+  const legacy = { id: scope, pipelineId: 910 };
+  const object = { id: `${instance}:42:pipeline:910`, state: 'running', occurredAt: at(0) };
+  f.store.put('gitlab_branch_cursors', legacy);
+  f.store.put('gitlab_object_cursors', object);
+  const store = new Store(f.dir);
+  t.after(() => store.db.close());
+  const events: AutomationEvent[] = [];
+  const service = new GitlabIntegrationService(store, {
+    processEvent: event => { events.push(event); return []; }, onConnectionChanged: () => 0,
+  });
+  assert.deepEqual(store.all('gitlab_branch_cursors'), [legacy]);
+  assert.deepEqual(store.all('gitlab_object_cursors'), [object]);
+  const delivery = (id: number, offset: number, fields: Record<string, unknown>) => service.webhook(request(pipeline({
+    id, ref, finished_at: at(offset), ...fields,
+  })));
+
+  delivery(906, 1000, { source: 'push', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'stale');
+  delivery(910, 0, { source: 'schedule', tag: false, status: 'running' });
+  assert.equal(events.length, 1);
+  delivery(907, 3000, { source: 'push', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'fresh');
+  delivery(909, 4000, { source: 'schedule', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'stale');
+  delivery(908, 5000, {});
+  assert.equal(events.at(-1)?.disposition, 'stale');
+  assert.deepEqual(store.all('gitlab_branch_cursors'), [legacy]);
+
+  // A persisted exact link may already identify an older release's legacy cursor.
+  const nextLegacy = { id: scope, pipelineId: 930 };
+  store.put('gitlab_branch_cursors', nextLegacy);
+  store.put('gitlab_object_cursors', { id: `${instance}:42:pipeline:930`, state: 'running', occurredAt: at(6000) });
+  const storedLink: GitlabLink = { id: `gitlab:${instance}:42:pipeline:930:issue-1`, issueId: 'issue-1', projectId: 42,
+    iid: 930, kind: 'pipeline', title: ref, sourceBranch: ref, pipelineSource: 'schedule', pipelineTag: false,
+    state: 'running', webUrl: `${settings.baseUrl}/team/repo/-/pipelines/930`, updatedAt: at(5000), pipelineObservedAt: at(5000) };
+  store.put('gitlab_links', storedLink);
+  delivery(912, 7000, { source: 'push', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'stale');
+  store.put('gitlab_links', { ...storedLink, updatedAt: at(6000), pipelineObservedAt: at(6000) });
+  delivery(913, 8000, { source: 'push', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'fresh');
+  delivery(920, 9000, { source: 'schedule', tag: false });
+  assert.equal(events.at(-1)?.disposition, 'stale');
+  assert.deepEqual(store.all('gitlab_branch_cursors'), [nextLegacy]);
+});
+
+test('repository reads respect exact execution evidence from authenticated unlinked pipeline webhooks', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const start = Date.now() - 30_000;
+  const at = (offset: number) => new Date(start + offset).toISOString();
+  const sha = 'a'.repeat(40);
+  const ref = 'main';
+  const id = 612;
+  let row: Record<string, unknown> = {};
+  let repositoryUrl = '';
+  const mock = await mockServer((path, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (path === '/api/v4/projects/42') res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo', web_url: repositoryUrl }));
+    else if (path === '/api/v4/projects/42/pipelines/612') res.end(JSON.stringify(row));
+    else res.end(JSON.stringify(path.includes('/projects/42/pipelines?') ? [row] : []));
+  });
+  t.after(mock.close);
+  repositoryUrl = `${mock.url}/team/repo`;
+  const settings = f.configure({ baseUrl: mock.url, token: 'synthetic-read-token' });
+  const message = { id: sha, message: 'NEO-1 pipeline' };
+  const delivery = (offset: number, fields: Record<string, unknown>, key?: typeof message) => f.service.webhook(request({
+    object_kind: 'pipeline', project: { id: 42, web_url: repositoryUrl }, object_attributes: {
+      id, ref, sha, status: 'running', updated_at: at(offset), ...fields,
+    }, ...(key ? { commit: key } : {}),
+  }));
+
+  delivery(1000, { source: 'push', tag: false });
+  assert.deepEqual(links(f), []);
+  row = { id, iid: id, project_id: 42, ref, sha, status: 'success', source: 'schedule', tag: false,
+    updated_at: at(2000), web_url: `${repositoryUrl}/-/pipelines/${id}`, commit: message };
+  const preview = await f.service.previewSync({ expectedVersion: settings.version });
+  assert.deepEqual([preview.counts.skipped, preview.counts.create], [1, 0]);
+  assert.equal((await f.service.sync()).linked, 0);
+  await assert.rejects(f.service.attachLink('issue-1', { repositoryId: 42, url: row.web_url, expectedSettingsVersion: settings.version }),
+    error => error instanceof GitlabIntegrationError && error.status === 409);
+  assert.deepEqual(links(f), []);
+
+  delivery(2500, { id: undefined, iid: id, ref: 'other', status: 'success' }, message);
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.deepEqual(links(f), []);
+  delivery(3000, { status: 'success' }, message);
+  assert.equal(f.events.at(-1)?.disposition, 'fresh');
+  const [linked] = links(f);
+  assert.deepEqual([linked.pipelineSource, linked.pipelineTag], ['push', false]);
+  row = { ...row, updated_at: at(4000) };
+  const refresh = await f.service.refreshIssueLinks(linked.issueId, {});
+  assert.deepEqual(refresh.failures.map(failure => failure.linkId), [linked.id]);
+  assert.deepEqual(links(f), [linked]);
+});
+
 test('repository sync and keyless webhooks refresh an existing automatic pipeline without reusing its ticket for automation', async t => {
   const f = fixture();
   t.after(f.close);
@@ -134,7 +285,7 @@ test('repository sync and keyless webhooks refresh an existing automatic pipelin
   assert.deepEqual(links(f), [succeeded]);
 
   // Older event shapes may still create a status-only link using IID. That shape cannot borrow exact-object evidence.
-  const fallback = observation({ id: undefined, iid: 200, status: 'running', updated_at: time(4000), source: 'schedule', tag: true });
+  const fallback = observation({ id: undefined, iid: 205, status: 'running', updated_at: time(4000), source: 'schedule', tag: true });
   assert.equal(f.service.webhook(request({ ...fallback, commit: { id: sha, message: 'NEO-2 legacy pipeline' } })).linked, 1);
   const legacyAlias = links(f).find(link => link.issueId === 'issue-2')!;
   assert.equal(legacyAlias.pipelineObservedAt, null);

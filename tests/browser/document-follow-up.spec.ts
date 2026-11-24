@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import type { CollaborationSession } from '../../shared/collaboration';
 import { documentContentSchemaVersion } from '../../shared/document-nodes';
-import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentChecklistWork, DocumentFollowUpResult, DocumentIssueLinkResult, Issue,
+import type { DecisionFollowUpPage, DocPage, DocRevision, DocumentChecklistWork, DocumentFollowUpResult, DocumentIssueLinkResult, DocumentSelectionCommentResult, Issue,
   LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, Project, ProjectWorkflow, ResourceLink, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext): Promise<WorkspaceSnapshot> {
@@ -147,6 +147,115 @@ test('360px 문서에서 원래 Jira 키로 업무에 결정 근거를 붙이고
     }
     await request.delete(`/api/issues/${current.id}`);
     await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px 문장 댓글을 기존 업무에 연결하고 응답 유실 뒤 원문과 초안을 확인한다', async ({ page, context, request }) => {
+  test.setTimeout(80_000);
+  const { projects: [project] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const title = `변경 전 회의록 ${suffix}`;
+  const issueTitle = `이미 진행 중인 합의 사항 ${suffix}`;
+  const quote = '배포 전 측정값을 기록한다.';
+  const originalDetail = '이 검토 기준은 첫 저장본에만 있습니다.';
+  const feedback = '결정 내용을 현재 진행 중인 업무에 기록해 주세요.';
+  const latestBody = '팀에서 수정한 최신 본문';
+  const source = await createDecision(request, project.id, title, { type: 'doc', content: [
+    { type: 'paragraph', content: [{ type: 'text', text: quote }] },
+    { type: 'paragraph', content: [{ type: 'text', text: originalDetail }] },
+  ] });
+  const path = `/api/documents/${source.id}`;
+  const attempts: Record<string, unknown>[] = [];
+  let issuePage: Page | undefined;
+  try {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: issueTitle } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    const linked = await request.post('/api/resource-links', { data: {
+      issueId: issue.id, documentId: source.id, kind: '설계 참고',
+    } });
+    expect(linked.status(), await linked.text()).toBe(201);
+    const ordinary = await linked.json() as ResourceLink;
+    const posted = await request.post(`${path}/selection-comments`, { data: {
+      requestId: randomUUID(), expectedDocumentVersion: source.version, body: feedback,
+      sourceSelection: { from: 1, to: 1 + quote.length, text: quote },
+    } });
+    expect(posted.status(), await posted.text()).toBe(201);
+    const { comment } = await posted.json() as DocumentSelectionCommentResult;
+    const pinned = comment.documentSource!;
+    expect(pinned).toMatchObject({ text: quote, revisionId: expect.any(String) });
+    const changed = await request.patch(path, { data: { expectedVersion: source.version, content: {
+      type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: latestBody }] }],
+    } } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    const latest = await changed.json() as DocPage;
+
+    await openDecision(page, latest, project.id);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveText(latestBody);
+    const draftBody = '아직 저장하지 않은 다음 회의록';
+    const commentDraftText = '팀에게 보낼 다른 문서 댓글 초안';
+    await editor.fill(draftBody);
+    await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const commentDraft = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await commentDraft.fill(commentDraftText);
+    const thread = page.locator(`#document-comment-${comment.id}`);
+    const action = thread.getByRole('button', { name: '댓글을 기존 업무에 연결', exact: true });
+    await expect(thread.getByRole('button', { name: '댓글에서 후속 업무 만들기', exact: true })).toBeVisible();
+    await action.click();
+
+    const dialog = page.getByRole('dialog', { name: '기존 업무에 결정 근거 연결', exact: true });
+    await expect(dialog.locator('blockquote')).toHaveText(quote);
+    await dialog.getByRole('textbox', { name: '업무 키 또는 제목 검색', exact: true }).fill(issue.key);
+    await dialog.getByRole('radio', { name: `${issue.key} ${issueTitle}`, exact: true }).check();
+    await page.route(`**${path}/decision-links`, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postDataJSON() as Record<string, unknown>);
+      if (attempts.length === 1) {
+        const applied = await route.fetch();
+        expect(applied.status(), await applied.text()).toBe(201);
+        await route.abort('failed');
+      } else await route.continue();
+    });
+    await dialog.getByRole('button', { name: '선택한 업무에 연결', exact: true }).click();
+    const retry = dialog.getByRole('button', { name: '연결 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    const replay = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/decision-links`
+      && response.request().method() === 'POST');
+    await retry.click();
+    const response = await replay;
+    expect(response.status(), await response.text()).toBe(200);
+    const result = await response.json() as DocumentIssueLinkResult;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ issueId: issue.id, expectedDocumentVersion: latest.version,
+      sourceComment: { commentId: comment.id, revisionId: pinned.revisionId },
+    });
+    expect(attempts[0]).not.toHaveProperty('sourceSelection');
+    expect(attempts[1]).toEqual(attempts[0]);
+    expect(result).toEqual({ issue, duplicate: true, link: { ...ordinary, documentSource: pinned } });
+    await expect(dialog).toHaveCount(0);
+    await expect(action).toBeFocused();
+    await expect(editor).toHaveText(draftBody);
+    await expect(commentDraft).toHaveValue(commentDraftText);
+    const snapshot = await workspace(request);
+    expect(snapshot.resourceLinks.filter(link => link.documentId === source.id)).toEqual([result.link]);
+    expect(snapshot.documents.find(item => item.id === source.id)).toEqual(latest);
+    expect(snapshot.activities.filter(activity => activity.resourceId === issue.id && activity.action === '문서 결정 근거 연결')).toHaveLength(1);
+
+    issuePage = await context.newPage();
+    await issuePage.setViewportSize({ width: 360, height: 820 });
+    await issuePage.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const ticket = issuePage.getByRole('dialog', { name: issueTitle, exact: true });
+    const evidence = ticket.getByRole('region', { name: '결정 근거', exact: true });
+    await expect(evidence.locator('blockquote')).toHaveText(quote);
+    await evidence.getByRole('button', { name: '원문 저장본 열기', exact: true }).click();
+    const revision = evidence.getByRole('region', { name: `결정 근거 원문 ${title}`, exact: true });
+    await expect(revision).toContainText(originalDetail);
+    await expect(revision).not.toContainText(latestBody);
+  } finally {
+    if (issuePage) await issuePage.close();
+    await cleanupDecision(request, source.id, issueTitle);
   }
 });
 

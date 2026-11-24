@@ -5,10 +5,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { Store } from '../../server/store.js';
-import type { AutomationRule, AutomationRun, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
+import type { AutomationRule, AutomationRun, GitlabIssueRefreshResult, GitlabLink, GitlabWebhookStatus, Issue, IssueAutomationRunPage, ProjectWorkflow, TeamNotificationPage, WebhookDelivery, WebhookEndpointCreated, WebhookEnvelope } from '../../shared/types.js';
 
 async function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'teamspace-automation-outbox-')),service=createApp({dataDir:dir,outboundWorker:false});
@@ -38,6 +39,86 @@ test('authenticated automation shares issue, audit, receipt and minimal outbox t
     assert.equal((await hook(f,body,id)).data.duplicate,true);assert.equal((await f.call<WebhookDelivery[]>('/webhook-deliveries')).data.length,1);assert.equal((await f.call('/automation-runs')).data.length,1);
     const older=payload(101,'NEO-1',new Date(Date.now()-60000).toISOString());older.object_attributes.action='reopen';older.object_attributes.state='opened';assert.equal((await hook(f,older)).status,200);assert.equal(f.observer.get<Issue>('issues','issue-1')!.status,'done');
   }finally{await f.close();}
+});
+
+test('pipeline automation and the direct-review token distinguish compatible runs on the same ref', async t => {
+  const branch = 'feature/pipeline-scope';
+  const sha = 'a'.repeat(40);
+  const checkedId = 500;
+  let finishedAt = '';
+  let repositoryUrl = '';
+  const mock = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/v4/projects/42') {
+      res.end(JSON.stringify({ id: 42, path_with_namespace: 'team/repo', web_url: repositoryUrl }));
+    } else if (req.url === `/api/v4/projects/42/pipelines/${checkedId}`) {
+      res.end(JSON.stringify({ id: checkedId, iid: checkedId, project_id: 42, ref: branch, sha, status: 'success',
+        source: 'push', tag: false, finished_at: finishedAt, updated_at: finishedAt, web_url: `${repositoryUrl}/-/pipelines/${checkedId}` }));
+    } else res.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  t.after(() => new Promise<void>(resolve => mock.close(() => resolve())));
+  await once(mock, 'listening');
+  const address = mock.address();
+  if (!address || typeof address === 'string') throw new Error('GitLab mock address missing');
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  repositoryUrl = `${baseUrl}/team/repo`;
+
+  const f = await fixture();
+  t.after(f.close);
+  const configured = await f.call('/integrations/gitlab', 'PATCH', {
+    expectedVersion: 1, baseUrl, projectIds: [42], webhookSecret: 'integration-secret', token: 'synthetic-read-token',
+  });
+  assert.equal(configured.status, 200, JSON.stringify(configured.data));
+  await rule(f, { name: 'Pipeline verified', trigger: 'pipeline.succeeded', branchPattern: branch });
+  const before = f.observer.get<Issue>('issues', 'issue-1')!;
+  const deliver = async (id: number, source: string, tag: boolean, status: 'running' | 'success', keyed = false) => {
+    const time = new Date().toISOString();
+    const response = await f.call('/integrations/gitlab/webhook', 'POST', {
+      object_kind: 'pipeline', project: { id: 42, web_url: repositoryUrl },
+      object_attributes: { id, ref: branch, sha, source, tag, status, updated_at: time, ...(status === 'success' ? { finished_at: time } : {}) },
+      ...(keyed ? { commit: { id: sha, message: 'NEO-1 pipeline' } } : {}),
+    }, { 'X-Gitlab-Token': 'integration-secret', 'webhook-id': randomUUID() });
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return time;
+  };
+  const reviewed = async () => {
+    const response = await f.call<GitlabIssueRefreshResult>('/issues/issue-1/gitlab-links/refresh', 'POST', {});
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    assert.deepEqual(response.data.failures, []);
+    return response.data.statusReview;
+  };
+
+  const startedAt = await deliver(checkedId, 'push', false, 'running', true);
+  await deliver(501, 'schedule', false, 'running');
+  await deliver(502, 'push', true, 'running');
+  finishedAt = new Date().toISOString();
+  assert.ok(finishedAt > startedAt);
+  const review = await reviewed();
+  assert.equal(review?.kind, 'suggestion');
+  if (review?.kind !== 'suggestion') throw new Error('Pipeline suggestion missing');
+  assert.equal(review.suggestion.evidence.link.pipelineSource, 'push');
+  assert.equal(review.suggestion.evidence.link.pipelineTag, false);
+  const exact = await f.call<GitlabIssueRefreshResult>(`/issues/issue-1/gitlab-links/${encodeURIComponent(review.suggestion.evidence.link.id)}/refresh`, 'POST', {});
+  assert.equal(exact.status, 200);
+  assert.equal(exact.data.links.length, 1);
+  assert.equal(exact.data.statusReview, undefined);
+
+  await deliver(503, 'push', false, 'running');
+  assert.equal(await reviewed(), undefined);
+  const stale = await f.call('/issues/issue-1', 'PATCH', {
+    expectedVersion: before.version, status: 'done', gitlabStatusSuggestionToken: review.suggestion.token,
+  });
+  assert.equal(stale.status, 409, JSON.stringify(stale.data));
+  assert.equal(stale.data.details.reason, 'gitlab_status_suggestion_stale');
+  assert.deepEqual(f.observer.get('issues', before.id), before);
+
+  await deliver(506, 'merge_request_event', false, 'running');
+  await deliver(505, 'push', false, 'success', true);
+  assert.equal(f.observer.get<Issue>('issues', before.id)?.status, 'done');
+  const runs = (await f.call<AutomationRun[]>('/automation-runs')).data;
+  assert.deepEqual(runs.map(run => [run.context?.objectId, run.outcome]), [['505', 'changed']]);
+  assert.equal(f.observer.all<GitlabLink>('gitlab_links').find(link => link.iid === 505)?.pipelineSource, 'push');
 });
 
 test('preview and webhook honor the same required-field workflow without creating mutation events',async()=>{

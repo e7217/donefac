@@ -41,7 +41,8 @@ type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute
 type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[]; deploymentUpdated?: true };
 type AcceptedWebhookEvents = Partial<Record<GitlabWebhookTrackedEvent, GitlabWebhookDelivery>>;
 type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery; lastAcceptedByEvent?: AcceptedWebhookEvents };
-type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string;approvalRevision?:{updatedAt:string;head:string}};
+type VerifiedPipelineCursor = PipelineClassification & { scope: string; objectId: number; sourceBranch: string; sourceSha: string };
+type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string;approvalRevision?:{updatedAt:string;head:string};pipeline?:VerifiedPipelineCursor};
 type BranchCursor={id:string;pipelineId:number};
 type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string;source?:'read';revision?:string};
 type Hooks={
@@ -313,7 +314,7 @@ function pipelineObservedAt(draft: LinkDraft): string | null {
   return draft.id === draft.numericId && draft.numericId && draft.state !== 'unknown' && bound(draft.state,100)
     ? draft.incomingTime : null;
 }
-function samePipelineRevision(link: GitlabLink, draft: Pick<LinkDraft,'sourceBranch'|'sourceSha'>): boolean {
+function samePipelineRevision(link: Pick<GitlabLink, 'sourceBranch' | 'sourceSha'>, draft: Pick<LinkDraft,'sourceBranch'|'sourceSha'>): boolean {
   const storedSha = gitlabObjectSha(link.sourceSha) ?? link.sourceSha;
   const incomingSha = gitlabObjectSha(draft.sourceSha) ?? draft.sourceSha;
   return (!storedSha || !incomingSha || storedSha === incomingSha) &&
@@ -331,7 +332,7 @@ function addPipelineClassification<T extends PipelineClassification>(known: T, e
   if (source === undefined && tag === undefined) return known;
   return { ...known, ...(source !== undefined ? { pipelineSource: source } : {}), ...(tag !== undefined ? { pipelineTag: tag } : {}) };
 }
-function knownPipelineClassification(aliases: readonly GitlabLink[]): PipelineClassification | null {
+function knownPipelineClassification(aliases: readonly PipelineClassification[]): PipelineClassification | null {
   let known: PipelineClassification = {};
   for (const alias of aliases) {
     if (conflictingPipelineClassification(known, alias)) return null;
@@ -339,11 +340,12 @@ function knownPipelineClassification(aliases: readonly GitlabLink[]): PipelineCl
   }
   return known;
 }
-function classifyPipelineDraft(draft: LinkDraft, aliases: readonly GitlabLink[], mayAddEvidence = true): LinkDraft | null {
+function classifyPipelineDraft(draft: LinkDraft, aliases: readonly GitlabLink[], cursor?: VerifiedPipelineCursor, mayAddEvidence = true): LinkDraft | null {
   if (!draft.numericId || draft.id !== draft.numericId) return { ...draft, pipelineClassification: {} };
-  const known = knownPipelineClassification(aliases);
+  const references = cursor ? [cursor, ...aliases] : aliases;
+  const known = knownPipelineClassification(references);
   if (!known || conflictingPipelineClassification(known, draft.pipelineClassification) ||
-      aliases.some(alias => !samePipelineRevision(alias, draft))) return null;
+      references.some(reference => !samePipelineRevision(reference, draft))) return null;
   const time = pipelineObservedAt(draft);
   const fresh = time && aliases.every(alias => alias.pipelineObservedAt === null ||
     !keepNewerLink(alias,draft) || time === alias.updatedAt && draft.state === alias.state);
@@ -537,6 +539,7 @@ export class GitlabIntegrationService{
   private readonly pendingBranchReads=new Map<string,{count:number;webUrl:string}>();
   private readonly manualLinkRows:StatementSync;
   private readonly linkedActivityRows:StatementSync;
+  private readonly compatiblePipelineCursor: StatementSync;
   private readonly projectWebhooks: GitlabProjectWebhookSetup;
   private readonly webhookReceipts: GitlabWebhookReceipts;
   private readonly issueBranches: GitlabIssueBranchCreation;
@@ -551,10 +554,18 @@ export class GitlabIntegrationService{
       CREATE TABLE IF NOT EXISTS gitlab_branch_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_push_cursors(id TEXT PRIMARY KEY,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS gitlab_webhook_deliveries(id TEXT PRIMARY KEY,json TEXT NOT NULL);
+      CREATE INDEX IF NOT EXISTS gitlab_pipeline_cursor_scope ON gitlab_object_cursors(
+        json_extract(json,'$.pipeline.scope'), json_extract(json,'$.pipeline.objectId') DESC
+      ) WHERE json_type(json,'$.pipeline')='object';
       CREATE INDEX IF NOT EXISTS gitlab_links_manual ON gitlab_links(id) WHERE json_extract(json,'$.manualLinkId') IS NOT NULL;`);
     this.manualLinkRows=store.db.prepare(`SELECT json FROM gitlab_links WHERE id>=? AND id<?
       AND json_extract(json,'$.manualLinkId') IS NOT NULL`);
     this.linkedActivityRows=store.db.prepare('SELECT json FROM gitlab_links WHERE id>=? AND id<? ORDER BY id');
+    this.compatiblePipelineCursor = store.db.prepare(`SELECT json_extract(json,'$.pipeline.objectId') AS pipelineId
+      FROM gitlab_object_cursors WHERE json_type(json,'$.pipeline')='object' AND json_extract(json,'$.pipeline.scope')=?
+      AND (? IS NULL OR json_extract(json,'$.pipeline.pipelineSource') IS NULL OR json_extract(json,'$.pipeline.pipelineSource')=?)
+      AND (? IS NULL OR json_extract(json,'$.pipeline.pipelineTag') IS NULL OR json_extract(json,'$.pipeline.pipelineTag')=?)
+      ORDER BY json_extract(json,'$.pipeline.objectId') DESC LIMIT 1`);
     this.projectWebhooks = new GitlabProjectWebhookSetup(store, () => {
       const saved = this.raw();
       const authMode = saved.signingToken ? 'signature' : saved.webhookSecret ? 'secret' : null;
@@ -669,7 +680,7 @@ export class GitlabIntegrationService{
       const currentIssue=this.requireIssue(issueId);
       if(currentIssue.projectId!==issue.projectId)fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 연결해 주세요.',409);
       const draft=kind==='pipeline'
-        ? classifyPipelineDraft(observedDraft,this.workflowLinksForObject(instance,repositoryId,kind,observedDraft.id)) : observedDraft;
+        ? this.classifyReadPipeline(instance,repositoryId,observedDraft,this.workflowLinksForObject(instance,repositoryId,kind,observedDraft.id)) : observedDraft;
       if(!draft)fail('GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다. 최신 활동을 다시 확인해 주세요.',409);
       const snapshot=linkForIssue(instance,repositoryId,kind,{issue:currentIssue},draft);
       const existing=this.store.get<GitlabLink>('gitlab_links',snapshot.id);
@@ -919,12 +930,34 @@ export class GitlabIntegrationService{
     return this.attachLink(issueId, { repositoryId: link.projectId, url: url.href, expectedSettingsVersion: captured.version },
       afterAttach, AbortSignal.any([signal, deadline]), { assertCurrent, assertMergeRequest });
   }
+  private pipelineObjectCursor(instance: string, repositoryId: number, objectId: string | number): ObjectCursor | undefined {
+    return this.store.get<ObjectCursor>('gitlab_object_cursors', `${instance}:${repositoryId}:pipeline:${objectId}`);
+  }
+  private classifyReadPipeline(instance: string, repositoryId: number, draft: LinkDraft, aliases: readonly GitlabLink[]): LinkDraft | null {
+    return classifyPipelineDraft(draft, aliases, this.pipelineObjectCursor(instance, repositoryId, draft.id)?.pipeline);
+  }
+  private latestCompatiblePipelineId(instance: string, repositoryId: number, ref: string, classification: PipelineClassification): number | null {
+    const scope = `${instance}:${repositoryId}:${ref}`;
+    const source = gitlabPipelineSource(classification.pipelineSource) ?? null;
+    const tag = typeof classification.pipelineTag === 'boolean' ? Number(classification.pipelineTag) : null;
+    const cursor = this.compatiblePipelineCursor.get(scope, source, source, tag, tag) as { pipelineId: number } | undefined;
+    const legacy = this.store.get<BranchCursor>('gitlab_branch_cursors', scope);
+    let legacyId = legacy?.pipelineId;
+    if (legacyId && (source !== null || tag !== null)) {
+      const original = this.pipelineObjectCursor(instance, repositoryId, legacyId);
+      const proof = original?.pipeline?.scope === scope ? original.pipeline : original?.occurredAt
+        ? knownPipelineClassification(this.workflowLinksForObject(instance, repositoryId, 'pipeline', String(legacyId)).filter(link =>
+          link.sourceBranch === ref && link.pipelineObservedAt === original.occurredAt && link.state === original.state)) : null;
+      // Legacy rows lack source/tag. Only narrow a floor when the exact observation identifies it.
+      if (proof && conflictingPipelineClassification(classification, proof)) legacyId = undefined;
+    }
+    return Math.max(cursor?.pipelineId ?? 0, legacyId ?? 0) || null;
+  }
   latestVerifiedPipelineId(link: GitlabLink): number | null {
     if (link.kind !== 'pipeline' || !isGitlabBranchName(link.sourceBranch)) return null;
     const identity = gitlabPipelineLinkIdentity(link);
     if (!identity) return null;
-    const branchId = `${identity.instance}:${link.projectId}:${link.sourceBranch}`;
-    return this.store.get<BranchCursor>('gitlab_branch_cursors',branchId)?.pipelineId ?? null;
+    return this.latestCompatiblePipelineId(identity.instance, link.projectId, link.sourceBranch, link);
   }
 
   async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string, linkId?:string):Promise<GitlabIssueRefreshResult> {
@@ -1050,7 +1083,7 @@ export class GitlabIntegrationService{
         }
         const aliases = kind === 'pipeline' || reviewActorId && this.hooks.manualStatusReview
           ? this.workflowLinksForObject(instance,link.projectId,kind,observed.id) : [];
-        const draft = kind==='pipeline' ? classifyPipelineDraft(observed,aliases) : observed;
+        const draft = kind==='pipeline' ? this.classifyReadPipeline(instance,link.projectId,observed,aliases) : observed;
         if (!draft) {
           result.failures.push({ linkId:link.id, message:'GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다.' });
           continue;
@@ -1430,14 +1463,19 @@ export class GitlabIntegrationService{
       const pipelineLinks=kind==='pipeline'?this.workflowLinksForObject(instance,projectId,kind,id):[];
       const readToken=kind==='pipeline'&&raw.token?this.store.unseal(raw.token):null;
       const exactPipelineId=kind==='pipeline'&&numericObjectId(attributes.id)===id&&Boolean(id);
+      const priorPipeline=exactPipelineId?prior?.pipeline:undefined;
       const classification=exactPipelineId?readPipelineClassification(attributes,true,readToken,req.header('X-Gitlab-Token')):undefined;
-      const knownClassification=knownPipelineClassification(pipelineLinks);
+      const knownClassification=knownPipelineClassification(priorPipeline?[priorPipeline,...pipelineLinks]:pipelineLinks);
       const pipelineClassificationMismatch=classification&&(!knownClassification||conflictingPipelineClassification(knownClassification,classification));
+      const verifiedClassification=classification&&knownClassification?addPipelineClassification(knownClassification,classification):classification;
+      const unverifiedPipelineId=kind==='pipeline'&&!exactPipelineId&&Boolean(prior?.pipeline);
       const pipelineIdentityMismatch=kind==='pipeline'&&(
         (attributes.project_id!==undefined&&numericObjectId(attributes.project_id)!==String(projectId))||
+        (priorPipeline&&!samePipelineRevision(priorPipeline,{sourceBranch:branch,sourceSha:sha}))||
         pipelineLinks.some(link=>!samePipelineRevision(link,{sourceBranch:branch,sourceSha:sha}))
       );
       if(pipelineIdentityMismatch){disposition='unverified';reason='파이프라인의 저장소, 브랜치 또는 커밋이 기존 연결과 다릅니다.';}
+      else if(unverifiedPipelineId){disposition='unverified';reason='기존 관측의 정확한 파이프라인 ID를 확인할 수 없습니다.';}
       else if(!id||!time||kind==='pipeline'&&!numericObjectId(id)){disposition='unverified';reason='이벤트 식별자 또는 유효한 과거 발생 시각을 확인할 수 없습니다.';}
       else if(prior?.occurredAt){const difference=Date.parse(time)-Date.parse(prior.occurredAt);if(difference<0){disposition='stale';reason='이 객체의 최신 수신 이벤트보다 오래된 이벤트입니다.';}else if(difference===0){disposition=state===prior.state?'stale':'ambiguous';reason=state===prior.state?'같은 발생 시각·상태의 이벤트를 이미 반영했습니다.':'같은 발생 시각의 상태가 서로 달라 적용하지 않았습니다.';}}
       // A saved status can be newer than the last received webhook. An equal matching read
@@ -1454,19 +1492,29 @@ export class GitlabIntegrationService{
         disposition='unverified';reason='파이프라인의 실행 유형 또는 태그 정보가 기존 연결과 다릅니다.';
       }
       const objectDisposition=disposition;
-      const pipelineIncompatible=pipelineIdentityMismatch||pipelineClassificationMismatch;
+      const pipelineIncompatible=pipelineIdentityMismatch||pipelineClassificationMismatch||unverifiedPipelineId;
+      const confirmsLegacyPipeline = exactPipelineId && !priorPipeline && Boolean(branch && time && prior &&
+        time === prior.occurredAt && state === prior.state) && !pipelineIncompatible;
       if(id&&!pipelineIncompatible&&(disposition==='fresh'||disposition==='unverified'&&!prior)){
         const updatedAt=occurredAt(attributes.updated_at),head=gitlabObjectSha(attributes.sha||record(attributes.last_commit).id);
         const approvalRevision=mergeRepositoryMatches&&state==='opened'&&approvalActions.has(action)&&time&&updatedAt&&updatedAt<time&&head
           ?{updatedAt,head}:undefined;
-        this.store.put('gitlab_object_cursors',{id:cursorId,occurredAt:time,state,receivedAt:now(),...(approvalRevision?{approvalRevision}:{})} satisfies ObjectCursor);
+        const pipeline = exactPipelineId && disposition==='fresh' && (branch || priorPipeline) ? {
+          scope: `${instance}:${projectId}:${branch || priorPipeline?.sourceBranch}`,
+          objectId: Number(id), sourceBranch: branch || priorPipeline?.sourceBranch || '',
+          sourceSha: sha || priorPipeline?.sourceSha || '', ...verifiedClassification,
+        } : prior?.pipeline;
+        this.store.put('gitlab_object_cursors',{id:cursorId,occurredAt:time,state,receivedAt:now(),...(approvalRevision?{approvalRevision}:{}),...(pipeline?{pipeline}:{})} satisfies ObjectCursor);
+      }else if(confirmsLegacyPipeline&&prior){
+        this.store.put('gitlab_object_cursors',{...prior,pipeline:{scope:`${instance}:${projectId}:${branch}`,objectId:Number(id),
+          sourceBranch:branch,sourceSha:sha,...verifiedClassification}} satisfies ObjectCursor);
       }
       if(kind==='pipeline'&&branch&&objectDisposition==='fresh'){
         const numericId=Number(id),branchId=`${instance}:${projectId}:${branch}`;
-        const latest=this.store.get<BranchCursor>('gitlab_branch_cursors',branchId);
-        if(latest&&numericId<latest.pipelineId){
-          disposition='stale';reason='이 브랜치에 더 최근에 생성된 파이프라인이 있어 이전 결과를 적용하지 않았습니다.';
-        }else if(!latest||numericId>latest.pipelineId){
+        const latest=this.latestCompatiblePipelineId(instance,projectId,branch,verifiedClassification??{});
+        if(latest!==null&&numericId<latest){
+          disposition='stale';reason='이 참조에 같은 실행으로 볼 수 있는 더 최근 파이프라인이 있어 이전 결과를 적용하지 않았습니다.';
+        }else if(!exactPipelineId&&(latest===null||numericId>latest)){
           this.store.put('gitlab_branch_cursors',{id:branchId,pipelineId:numericId} satisfies BranchCursor);
         }
       }
@@ -1477,8 +1525,8 @@ export class GitlabIntegrationService{
       const object={...attributes,...(time?{updated_at:time}:{}),...(branch?{source_branch:branch}:{}),...(sha?{sha}:{}),web_url:attributes.web_url||attributes.url||(kind==='pipeline'&&project.web_url?`${project.web_url}/-/pipelines/${id}`:'')};
       const invalidate=Boolean(attributes.oldrev)||action==='reopen'||approvalActions.has(action);
       const observation:MergeObservation|undefined=mergeRepositoryMatches&&objectDisposition==='fresh'&&time?{source:'webhook',observedAt:time,invalidate,repositoryId:projectId}:undefined;
-      const observedDraft=readLink(kind,object,extra,readKeys,observation,classification);
-      const draft=exactPipelineId?classifyPipelineDraft(observedDraft,pipelineLinks,objectDisposition==='fresh')??observedDraft:observedDraft;
+      const observedDraft=readLink(kind,object,extra,readKeys,observation,verifiedClassification);
+      const draft=exactPipelineId?classifyPipelineDraft(observedDraft,pipelineLinks,priorPipeline,objectDisposition==='fresh')??observedDraft:observedDraft;
       const canUpsert=!pipelineIncompatible&&(objectDisposition==='fresh'||objectDisposition==='unverified');
       const direct=canUpsert?draft.matchedKeys:readKeys(attributes.title,attributes.description,branch,attributes.ref,...extra);
       const byMatchId=new Map((id?matcher.match(direct,inherited):[]).map(match=>[match.issue.id,match]));
@@ -1568,7 +1616,7 @@ export class GitlabIntegrationService{
             plannedPipelineAliases.set(draft.id,pipelineAliases);
           }
           pipelineCandidates=[...pipelineAliases.values()];
-          const classified=classifyPipelineDraft(draft,pipelineCandidates);
+          const classified=this.classifyReadPipeline(instance,projectId,draft,pipelineCandidates);
           if(!classified){counts.skipped++;continue;}
           draft=classified;
         }

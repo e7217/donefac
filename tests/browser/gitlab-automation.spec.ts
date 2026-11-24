@@ -94,12 +94,16 @@ test('저장 전 GitLab 연결을 확인하고 접근 가능한 저장소를 동
     expect((await workspace()).gitlabLinks.filter(link=>link.issueId===issue.id)).toHaveLength(0);
     expect(received.every(value=>value.method==='GET' && value.token===token)).toBeTruthy();
 
-    page.once('dialog',dialog=>dialog.dismiss());
     await candidates.getByRole('button',{name:`업무 ${issue.key} 열기`,exact:true}).first().click();
+    const issueDetails = page.getByRole('dialog', { name: issue.title, exact: true });
+    await expect(issueDetails).toBeVisible();
+    await issueDetails.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(issueDetails).toHaveCount(0);
     await expect(result).toBeVisible();
     await expect(address).toHaveValue(url);
     await expect(privateToken).toHaveValue(token);
-    await ids.fill('42, 99 ');
+    await ids.fill('42,99');
+    await expect(ids).toHaveValue('42,99');
     await expect(result).toHaveCount(0);
     const saved = page.waitForResponse(value=>new URL(value.url()).pathname==='/api/integrations/gitlab' && value.request().method()==='PATCH');
     await page.getByRole('button',{name:'연결 설정 저장',exact:true}).click();
