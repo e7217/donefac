@@ -829,6 +829,7 @@ export interface RecurringIssueRule extends RecurringIssueConfig {
 }
 export interface IssueChildCreationResult { issue: Issue; duplicate: boolean }
 export interface IssueCloneResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
+export interface IssueBlockedCreationResult { issue: Issue; relation: IssueRelation | null; duplicate: boolean }
 export interface IssueCloseAsDuplicateInput {
   originalIssueId: string;
   status: IssueStatus;

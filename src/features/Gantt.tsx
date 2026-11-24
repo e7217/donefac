@@ -269,6 +269,8 @@ function ProjectGantt(props: GanttProps) {
   const [cascade, setCascade] = useState<CascadeReview | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [scheduleIssueCreation, setScheduleIssueCreation] = useState<{ link: ScheduleIssueLink; opener: HTMLButtonElement } | null>(null);
+  const [blockedIssueCreation, setBlockedIssueCreation] = useState<{ issue: Issue; opener: HTMLButtonElement } | null>(null);
+  const [createdBlockedIssue, setCreatedBlockedIssue] = useState<Pick<Issue, 'id' | 'key'> | null>(null);
   const [busy, setBusy] = useState(false);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const undoScope = useMemo<ScheduleUndoScope>(() => allProjects ? { kind: 'team' } : { kind: 'project', id: projectId }, [allProjects, projectId]);
@@ -387,7 +389,8 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const scheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || linkPicker || preview || cascade ||
-    shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit || createOpen || scheduleIssueCreation || linkEditor || planAssignment || planShift);
+    shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
+    createOpen || scheduleIssueCreation || blockedIssueCreation || linkEditor || planAssignment || planShift);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
   useLayoutEffect(() => {
     const previous = restoringScheduleFocus.current;
@@ -592,6 +595,7 @@ function ProjectGantt(props: GanttProps) {
       setBulkLinkSelection(null);
       setBlockerLinksScope(null);
       setManualReview(null); setManualProblem(null); setDatePreviewFocusTarget(null);
+      setBlockedIssueCreation(null); setCreatedBlockedIssue(null);
       setRowScheduleEdit(null); setScheduleFocus(null); setShiftMode(null); setSelected(new Set());
       clearInlineDates();
       setDraftEpoch(value => value + 1);
@@ -608,7 +612,25 @@ function ProjectGantt(props: GanttProps) {
   function closeTeamBlockers() {
     if (draftsRef.current.has(TEAM_BLOCKER_DRAFT) && !canLeave()) return;
     setTeamBlockersOpen(false);
+    setCreatedBlockedIssue(null);
     teamBlockersTrigger.current?.focus({ preventScroll: true });
+  }
+  function openBlockedIssueCreation(issue: Issue, opener: HTMLButtonElement) {
+    if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
+        [...draftsRef.current.values()].some(draft => draft.pending || draft.awaitingResult)) {
+      notify('처리 중인 간트 작업을 마친 뒤 새 업무를 만들어 주세요.', 'error');
+      return;
+    }
+    setBlockedIssueCreation({ issue, opener });
+  }
+  function closeBlockedIssueCreation() {
+    const opener = blockedIssueCreation?.opener;
+    setBlockedIssueCreation(null);
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body && document.activeElement !== opener) return;
+      const target = opener?.isConnected && !opener.disabled ? opener : teamBlockersTrigger.current ?? scrollRef.current;
+      target?.focus({ preventScroll: true });
+    });
   }
   function reviewTeamBlockerSchedules(source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen || draftsRef.current.size) {
@@ -1839,7 +1861,7 @@ function ProjectGantt(props: GanttProps) {
   const months = ticks.filter(t => t.date.getUTCDate() === 1 || t.index === 0);
 
   const datePickingDisabled = busy || Boolean(linkPicker || activeDatePicker);
-  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || teamFollowUp || teamFollowUpHandoff || bulkLinkSelection || blockerLinksScope || rowScheduleEdit)} onFocusCapture={event => {
+  return <><div className="gantt-feature" inert={Boolean(scheduleIssueCreation || blockedIssueCreation || teamFollowUp || teamFollowUpHandoff || bulkLinkSelection || blockerLinksScope || rowScheduleEdit)} onFocusCapture={event => {
     if (event.target.matches('input[data-schedule-edge]')) {
       setInlineDateFocused(true);
       reconsider();
@@ -2089,6 +2111,7 @@ function ProjectGantt(props: GanttProps) {
       busy={busy || Boolean(issueOverlayOpen)} openIssue={openIssue} onLocateIssueDate={onLocateIssueDate}
       onReviewSchedule={(relation, source, target, opener) => reviewTeamBlockerSchedules(source, [{ relation, target }], opener)}
       onReviewTogether={reviewTeamBlockerSchedules}
+      createdBlockedIssue={createdBlockedIssue} onCreateBlockedIssue={openBlockedIssueCreation}
       onPointerDown={keepInlineDateFocus} refresh={refresh} notify={notify} onClose={closeTeamBlockers}
       onDraftChange={trackTeamBlockerDraft} />}
     {analysisResult && <ScheduleAnalysis id={ANALYSIS_PANEL_ID} analysis={analysisResult.analysis} error={analysisResult.error}
@@ -2550,6 +2573,8 @@ function ProjectGantt(props: GanttProps) {
       }}
     />}
     {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link} onClose={closeScheduleIssueCreation} />}
+    {blockedIssueCreation && <NewIssueModal {...props} blockedByIssue={blockedIssueCreation.issue} onClose={closeBlockedIssueCreation}
+      onBlockedIssueCreated={({ id, key }) => setCreatedBlockedIssue({ id, key })} />}
     {teamFollowUpHandoff && <GanttTeamFollowUpChooser source={teamFollowUpHandoff.source} choices={teamFollowUpHandoff.choices}
       projects={data.projects} onChoose={choices => openTeamFollowUpChoices(teamFollowUpHandoff, choices)} onClose={closeTeamFollowUp} />}
     {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} actorId={props.actorId} undoScope={undoScope}

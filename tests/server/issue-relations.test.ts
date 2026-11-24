@@ -10,7 +10,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type {
-  ApiKeyCreated, Dependency, Issue, IssueChangeHistoryPage, IssueRelation, ProjectWorkflow, TeamScheduleBlocker, WorkspaceSnapshot,
+  ApiKeyCreated, Dependency, Issue, IssueBlockedCreationResult, IssueChangeHistoryPage, IssueRelation, ProjectWorkflow, TeamScheduleBlocker, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const actor = 'user-seo';
@@ -139,6 +139,101 @@ test('team issue links are symmetric or directional as requested, idempotent, ve
   const events = after.activities.filter(event => event.action.startsWith('업무 관계 '));
   assert.equal(events.length, 8);
   assert.ok(events.every(event => [a.id, b.id].includes(event.resourceId) && event.actorId === actor));
+});
+
+test('creating a cross-project blocked issue commits both resources and replays exactly once', async t => {
+  const f = await fixture(t);
+  const source = await f.create('검토할 선행 티켓');
+  const targetCalendar = await f.call<WorkCalendar>(`/projects/${secondary}/calendar`);
+  const path = `/issues/${source.id}/blocked-issues`;
+  const body = { requestId: randomUUID(), expectedSourceVersion: source.version, expectedTargetCalendarVersion: targetCalendar.version,
+    issue: { projectId: secondary, title: '다른 프로젝트 검증', assigneeId: otherActor, startDate: '2026-11-25', endDate: '2026-11-26' } };
+  const post = { method: 'POST', body };
+  const before = await f.call<WorkspaceSnapshot>('/workspace');
+  const sql = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  try {
+    sql.exec(`CREATE TRIGGER fail_cross_project_relation BEFORE INSERT ON issue_relations
+      WHEN NEW.source_issue_id='${source.id}' BEGIN SELECT RAISE(ABORT, 'synthetic blocked issue relation failure'); END`);
+    await f.call(path, post, 500);
+    assert.deepEqual(await f.call<WorkspaceSnapshot>('/workspace'), before);
+    assert.deepEqual(await f.call<IssueRelation[]>(pathFor(source.id)), []);
+  } finally {
+    sql.exec('DROP TRIGGER IF EXISTS fail_cross_project_relation');
+    sql.close();
+  }
+  const attempts = await Promise.all([f.request<IssueBlockedCreationResult>(path, post), f.request<IssueBlockedCreationResult>(path, post)]);
+  assert.deepEqual(attempts.map(attempt => attempt.status).sort(), [200, 201]);
+  const first = attempts.find(attempt => attempt.status === 201)!.data;
+  const replay = attempts.find(attempt => attempt.status === 200)!.data;
+  assert.equal(first.duplicate, false);
+  assert.deepEqual(replay, { ...first, duplicate: true });
+  assert.equal(first.issue.projectId, secondary);
+  assert.equal(first.issue.assigneeId, otherActor);
+  assert.deepEqual([first.issue.startDate, first.issue.endDate], ['2026-11-25', '2026-11-26']);
+  assert.ok(first.relation);
+  const relation = first.relation;
+  assert.deepEqual([relation.sourceIssueId, relation.targetIssueId, relation.type, relation.origin], [source.id, first.issue.id, 'blocks', 'teamspace']);
+  assert.deepEqual(await f.call<IssueRelation[]>(pathFor(first.issue.id)), [relation]);
+  const blockers = await f.call<TeamScheduleBlocker[]>('/schedule/team-blockers');
+  assert.ok(blockers.some(item => item.id === relation.id));
+  const saved = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.equal(saved.issues.length, before.issues.length + 1);
+  assert.deepEqual(saved.issues.find(issue => issue.id === source.id), source);
+  assert.deepEqual(saved.dependencies, before.dependencies);
+  await f.call(path, { ...post, body: { ...body, issue: { ...body.issue, title: '다른 요청' } } }, 409);
+
+  await f.call(erase(source.id, relation), { method: 'DELETE' });
+  assert.deepEqual(await f.call<IssueBlockedCreationResult>(path, post), { ...replay, relation: null });
+  assert.deepEqual(await f.call<IssueRelation[]>(pathFor(source.id)), []);
+  assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).issues.length, saved.issues.length);
+});
+
+test('cross-project blocked creation checks versions and grants at both projects', async t => {
+  const f = await fixture(t);
+  const initialSource = await f.create('다른 프로젝트의 원인 업무');
+  const calendarPath = `/projects/${secondary}/calendar`;
+  const initialCalendar = await f.call<WorkCalendar>(calendarPath);
+  const path = `/issues/${initialSource.id}/blocked-issues`;
+  const older = { requestId: randomUUID(), expectedSourceVersion: initialSource.version, expectedTargetCalendarVersion: initialCalendar.version,
+    issue: { projectId: secondary, title: '범위 확인 업무' } };
+  const post = { method: 'POST', body: older };
+  const source = await f.call<Issue>(`/issues/${initialSource.id}`, { method: 'PATCH', body: {
+    expectedVersion: initialSource.version, endDate: '2026-11-25',
+  } });
+  const before = await f.call<WorkspaceSnapshot>('/workspace');
+  type Rejection = { details: { reason: string; currentVersion: number } };
+  const staleSource = await f.call<Rejection>(path, post, 409);
+  assert.deepEqual(staleSource.details, { reason: 'source_version_changed', currentVersion: source.version });
+  assert.deepEqual(await f.call<WorkspaceSnapshot>('/workspace'), before);
+
+  const calendar = await f.call<WorkCalendar>(calendarPath, { method: 'PATCH', body: {
+    expectedVersion: initialCalendar.version, exceptions: [{ date: '2026-11-26', isWorking: false, label: '휴일' }],
+  } });
+  const currentSource = { ...older, expectedSourceVersion: source.version };
+  const staleCalendar = await f.call<Rejection>(path, { ...post, body: currentSource }, 409);
+  assert.deepEqual(staleCalendar.details, { reason: 'calendar_changed', currentVersion: calendar.version });
+  const current = { ...currentSource, expectedTargetCalendarVersion: calendar.version };
+  await f.call(path, { ...post, body: { ...current, issue: { ...current.issue, projectId: primary } } }, 400);
+  await f.call(path, { ...post, body: { ...current, issue: { ...current.issue, projectId: 'missing-project' } } }, 404);
+
+  const sourceOnly = await f.key('원인 쓰기', [primary], 'write');
+  const targetOnly = await f.key('대상 쓰기', [secondary], 'write');
+  const read = await f.key('양쪽 읽기', [primary, secondary], 'read');
+  const write = await f.key('양쪽 쓰기', [primary, secondary], 'write');
+  assert.deepEqual(await f.call(`/v1${calendarPath}`, { headers: read }), calendar);
+  await f.call(`/v1${calendarPath}`, { headers: sourceOnly }, 403);
+  const publicPath = `/v1${path}`;
+  for (const headers of [sourceOnly, targetOnly, read]) {
+    await f.call(publicPath, { method: 'POST', body: current, headers }, 403);
+  }
+  assert.deepEqual(await f.call<IssueRelation[]>(pathFor(source.id)), []);
+  const result = await f.call<IssueBlockedCreationResult>(publicPath, { method: 'POST', body: current, headers: write }, 201);
+  assert.ok(result.relation);
+  assert.equal(result.issue.reporterId, actor);
+  assert.equal(result.issue.startDate, null);
+  assert.equal(result.issue.endDate, null);
+  assert.equal(result.relation.targetIssueId, result.issue.id);
+  assert.deepEqual(await f.call(publicPath, { method: 'POST', body: current, headers: write }), { ...result, duplicate: true });
 });
 
 test('relation API keys can only read or edit edges whose two endpoints are in scope', async t => {

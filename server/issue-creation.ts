@@ -4,7 +4,8 @@ import type { Store } from './store.js';
 
 type IssueInput = Record<string, unknown>;
 type CreationScope = { kind: 'schedule-successor'; predecessorId: string } |
-  { kind: 'schedule-predecessor'; successorId: string } | { kind: 'issue-clone'; sourceIssueId: string };
+  { kind: 'schedule-predecessor'; successorId: string } |
+  { kind: 'issue-clone' | 'blocked-issue'; sourceIssueId: string };
 type Receipt = { actorId: string; projectId: string; fingerprint: string; issueId: string | null };
 type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
 

@@ -24,6 +24,8 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   onLocateIssueDate: (id: string, endpoint: ScheduleDependencyEndpoint) => boolean;
   onReviewSchedule: (relation: TeamScheduleBlocker, source: Issue, target: Issue, opener: HTMLButtonElement) => void;
   onReviewTogether: (source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement) => void;
+  createdBlockedIssue: Pick<Issue, 'id' | 'key'> | null;
+  onCreateBlockedIssue: (source: Issue, opener: HTMLButtonElement) => void;
   onPointerDown: PointerEventHandler<HTMLButtonElement>;
 };
 
@@ -37,7 +39,7 @@ interface Draft {
 
 export function GanttTeamBlockers({
   id, data, visibleIssueIds, selectedIssueIds, busy, openIssue, refresh, notify,
-  onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onReviewTogether, onPointerDown,
+  onClose, onDraftChange, onLocateIssueDate, onReviewSchedule, onReviewTogether, createdBlockedIssue, onCreateBlockedIssue, onPointerDown,
 }: Props) {
   const heading = useId();
   const formHeading = useId();
@@ -48,6 +50,7 @@ export function GanttTeamBlockers({
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [page, setPage] = useState(0);
+  const [revealedBlockedIssueId, setRevealedBlockedIssueId] = useState<string>();
   const [draft, setDraft] = useState<Draft | null>(null);
   const getRequest = useRef<AbortController | null>(null);
   const saveRequest = useRef<AbortController | null>(null);
@@ -81,12 +84,19 @@ export function GanttTeamBlockers({
     a.target.key.localeCompare(b.target.key, 'ko', { numeric: true }) || a.source.key.localeCompare(b.source.key, 'ko', { numeric: true }) ||
     a.relation.id.localeCompare(b.relation.id)), [activeRows, visibleIssueIds]);
   const lastPage = Math.max(0, Math.ceil(rows.length / ROWS_PER_PAGE) - 1);
+  const createdIndex = createdBlockedIssue ? rows.findIndex(({ target }) => target.id === createdBlockedIssue.id) : -1;
+  if (createdBlockedIssue && createdIndex >= 0 && createdBlockedIssue.id !== revealedBlockedIssueId) {
+    setRevealedBlockedIssueId(createdBlockedIssue.id);
+    setPage(Math.floor(createdIndex / ROWS_PER_PAGE));
+  }
   const currentPage = Math.min(page, lastPage);
   const offset = currentPage * ROWS_PER_PAGE;
   const pageRows = rows.slice(offset, offset + ROWS_PER_PAGE);
 
   const source = draft && activeById.get(draft.sourceId);
   const target = draft && activeById.get(draft.targetId);
+  const selectedSource = selectedIssueIds.length === 1 && visibleIssueIds.has(selectedIssueIds[0])
+    ? activeById.get(selectedIssueIds[0]) : undefined;
   const dirty = Boolean(draft && (draft.sourceId || draft.targetId !== draft.initialTargetId ||
     draft.sourceQuery.trim() || draft.targetQuery.trim()));
   const duplicate = Boolean(source && target && relations.some(relation => relation.origin !== 'jira' &&
@@ -241,6 +251,12 @@ export function GanttTeamBlockers({
           aria-controls={draftOpen ? `${formHeading}-form` : undefined} disabled={disabled || draftOpen} onClick={startDraft}>
           <Plus size={15} aria-hidden="true" />차단 관계 추가
         </button>
+        {!draftOpen && <button type="button" className="btn btn-ghost" aria-haspopup="dialog" disabled={disabled || !selectedSource}
+          aria-describedby={selectedSource ? undefined : `${heading}-create-hint`}
+          data-gantt-focus-control="" onPointerDown={onPointerDown}
+          onClick={event => { if (selectedSource) onCreateBlockedIssue(selectedSource, event.currentTarget); }}>
+          <Plus size={15} aria-hidden="true" />새 차단 대상 업무
+        </button>}
         <button type="button" className="issue-icon-button" aria-label="차단 관계 새로고침"
           disabled={disabled || refreshing} onClick={() => void refreshList()}>
           <RefreshCw size={16} aria-hidden="true" />
@@ -250,6 +266,9 @@ export function GanttTeamBlockers({
         </button>
       </div>
     </header>
+    {!draftOpen && !selectedSource && <p id={`${heading}-create-hint`} className="gantt-team-blockers-status">
+      새 업무에 연결할 원인 업무를 간트에서 하나 선택하세요.
+    </p>}
     {draft && <form id={`${formHeading}-form`} className="gantt-team-blockers-form" aria-labelledby={formHeading} onSubmit={event => void save(event)}>
       <h3 id={formHeading}>프로젝트 간 차단 관계 추가</h3>
       <fieldset disabled={disabled}>
@@ -270,11 +289,21 @@ export function GanttTeamBlockers({
         <button type="submit" className="btn btn-primary" disabled={disabled || loading || refreshing || !source || !target || invalidPair || duplicate}>
           {saving ? '차단 관계 저장 중' : '차단 관계 저장'}
         </button>
+        {source && <button type="button" className="btn" aria-haspopup="dialog" disabled={disabled || refreshing}
+          data-gantt-focus-control="" onPointerDown={onPointerDown}
+          onClick={event => onCreateBlockedIssue(source, event.currentTarget)}>
+          <Plus size={15} aria-hidden="true" />새 차단 대상 업무
+        </button>}
         <button type="button" className="btn btn-ghost" onClick={cancelDraft} disabled={disabled}>차단 관계 입력 취소</button>
       </div>
     </form>}
     {(loading || refreshing) && <p className="gantt-team-blockers-status" role="status">차단 관계를 불러오는 중입니다.</p>}
     {loadError && <p className="gantt-team-blockers-status" role="alert">차단 관계를 불러오지 못했습니다. {loadError}</p>}
+    {createdBlockedIssue && createdIndex < 0 && !loading && !refreshing && <div className="gantt-team-blockers-actions gantt-team-blockers-status">
+      <span>새 업무가 현재 차단 목록에 표시되지 않습니다.</span>
+      <button type="button" className="btn btn-ghost" disabled={disabled} data-gantt-focus-control="" onPointerDown={onPointerDown}
+        onClick={() => openIssue(createdBlockedIssue.id)}>{createdBlockedIssue.key} 업무 열기</button>
+    </div>}
     {rows.length > 0 ? <>
       <ul className="gantt-team-blockers-list" role="list" aria-label="프로젝트 간 차단 관계 목록">
         {pageRows.map(({ relation, source, target }, index) => {

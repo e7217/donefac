@@ -204,6 +204,15 @@ function IssuePanelContent(props: IssuePanelProps) {
     setRelationsRefreshKey(key => key + 1);
   }, [refresh]);
   const [scheduleIssueCreation, setScheduleIssueCreation] = useState<{ link: ScheduleIssueLink; opener: HTMLButtonElement } | null>(null);
+  const [blockedIssueCreation, setBlockedIssueCreation] = useState<{ issue: Issue; opener: HTMLButtonElement } | null>(null);
+  function closeBlockedIssueCreation() {
+    const opener = blockedIssueCreation?.opener;
+    setBlockedIssueCreation(null);
+    requestAnimationFrame(() => {
+      if (document.activeElement !== document.body && document.activeElement !== opener) return;
+      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
+    });
+  }
   function closeScheduleIssueCreation() {
     const opener = scheduleIssueCreation?.opener;
     setScheduleIssueCreation(null);
@@ -257,7 +266,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLinkedDocumentCreation(false);
     if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
   }, [trackLinkedDocumentDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || projectMove || linkedDocumentCreation);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const [jiraDeadlinePending, setJiraDeadlinePending] = useState(false);
   const jiraDeadlinePendingRef = useRef(false);
@@ -1065,6 +1074,7 @@ function IssuePanelContent(props: IssuePanelProps) {
         refreshKey={relationsRefreshKey} disabled={saving || dependencyBusy} controlsRef={relationControls} highlightOpenBlockers={Boolean(error?.openBlockers)}
         duplicateCloseDisabled={conflict || baseDraft?.version !== savedRelationIssue.version}
         hasUnsavedStatus={draft.status !== baseDraft?.status} onDuplicateClosed={reflectDuplicateClosure}
+        onCreateBlockedIssue={opener => setBlockedIssueCreation({ issue: savedRelationIssue, opener })}
         onDraftChange={trackRelationDraft} onReviewSchedule={openRelationScheduleReview} />
       <section className="issue-related-section issue-linked-documents" aria-label="연결된 문서">
         <div className="issue-linked-documents-heading">
@@ -1173,6 +1183,8 @@ function IssuePanelContent(props: IssuePanelProps) {
       onDraftChange={trackLinkedDocumentDraft} onClose={closeLinkedDocumentCreation} onCreated={showCreatedLinkedDocument} />}
     {scheduleIssueCreation && <NewIssueModal {...props} scheduleLink={scheduleIssueCreation.link}
       onClose={closeScheduleIssueCreation} onScheduleIssueCreated={focusCreatedScheduleIssue} />}
+    {blockedIssueCreation && <NewIssueModal {...props} blockedByIssue={blockedIssueCreation.issue}
+      onClose={closeBlockedIssueCreation} refresh={refreshIssueRelations} />}
     {rowScheduleEdit && <GanttRowScheduleEdit issue={rowScheduleEdit.issue} initialDates={rowScheduleEdit.initialDates}
       initialDateDraft={rowScheduleEdit.initialDateDraft}
       issues={data.issues} issueAliases={data.issueAliases}

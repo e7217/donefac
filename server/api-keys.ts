@@ -356,7 +356,7 @@ export class ApiKeyService {
     const worklogs = /^\/api\/issues\/([^/]+)\/worklogs(?:\/([^/]+))?$/.exec(path);
     const issueRelations = /^\/api\/issues\/([^/]+)\/relations(?:\/([^/]+))?$/.exec(path);
     const publication = /^\/api\/documents\/([^/]+)\/publication(\/snapshot|\/comparison)?$/.exec(path);
-    const projectResource = /^\/api\/projects\/([^/]+)\/(workload|workload-capacity|issue-order|schedule-analysis|dependencies)$/.exec(path);
+    const projectResource = /^\/api\/projects\/([^/]+)\/(calendar|workload|workload-capacity|issue-order|schedule-analysis|dependencies)$/.exec(path);
     if (projectResource && (request.method === 'GET' || (request.method === 'PATCH' && ['workload-capacity','issue-order'].includes(projectResource[2])))) {
       if (request.method === 'PATCH' && key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
       this.query(request, projectResource[2] === 'workload' ? ['startDate','endDate'] : []);
@@ -515,7 +515,7 @@ export class ApiKeyService {
     }
     if (key.access !== 'write') fail(403, '이 API 키는 읽기 전용입니다.');
     const detail = /^\/api\/(issues|documents)\/([^/]+)$/.exec(path);
-    const issueClone = /^\/api\/issues\/([^/]+)\/clone$/.exec(path);
+    const linkedIssueCreation = /^\/api\/issues\/([^/]+)\/(clone|blocked-issues)$/.exec(path);
     const documentDecision = /^\/api\/documents\/([^/]+)\/(follow-up-issues|decision-links)$/.exec(path);
     const closeAsDuplicate = /^\/api\/issues\/([^/]+)\/close-as-duplicate$/.exec(path);
     const cycleCompletion = /^\/api\/planning-items\/([^/]+)\/complete(\/preview)?$/.exec(path);
@@ -536,13 +536,19 @@ export class ApiKeyService {
         if (!issue || typeof issue !== 'object' || Array.isArray(issue)) fail(400, '생성할 업무 정보를 확인해 주세요.');
         this.references(key, issue, Object.hasOwn(issue, 'projectId') ? issue.projectId : document.projectId, 'issue');
       }
-    } else if (request.method === 'POST' && issueClone) {
+    } else if (request.method === 'POST' && linkedIssueCreation) {
       this.query(request, []);
-      const source = this.store.get<Issue>('issues', this.decode(issueClone[1]));
+      const source = this.store.get<Issue>('issues', this.decode(linkedIssueCreation[1]));
       if (!source) throw new ApiKeyError(404, '원본 업무를 찾을 수 없습니다.', { reason: 'source_missing' });
       this.allowedProject(key, source.projectId);
-      const issue = request.body.issue;
-      if (!issue || typeof issue !== 'object' || Array.isArray(issue)) fail(400, '복제할 업무 정보를 확인해 주세요.');
+      const issue = request.body?.issue;
+      const createsBlock = linkedIssueCreation[2] === 'blocked-issues';
+      if (!issue || typeof issue !== 'object' || Array.isArray(issue)) {
+        fail(400, createsBlock ? '생성할 차단 대상 업무 정보를 확인해 주세요.' : '복제할 업무 정보를 확인해 주세요.');
+      }
+      if (createsBlock && (typeof issue.projectId !== 'string' || !issue.projectId.trim() || issue.projectId.length > 200)) {
+        fail(400, '차단 대상 업무의 프로젝트를 선택해 주세요.');
+      }
       this.references(key, issue, Object.hasOwn(issue, 'projectId') ? issue.projectId : source.projectId, 'issue');
     } else if (request.method === 'POST' && closeAsDuplicate) {
       this.query(request, []);

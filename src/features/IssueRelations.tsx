@@ -35,6 +35,7 @@ type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'refresh' | 'notify'> & {
   highlightOpenBlockers: boolean;
   controlsRef: Ref<IssueRelationsHandle>;
   onDuplicateClosed: (updated: Issue, observed?: boolean) => void;
+  onCreateBlockedIssue: (opener: HTMLButtonElement) => void;
   onReviewSchedule: (opener: HTMLButtonElement, relation: IssueRelation, mode: IssueRelationScheduleMode, reload: () => Promise<void>) => void;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
 };
@@ -64,7 +65,7 @@ export function IssueRelations(props: Props) {
 
 function RelationList({
   issue: currentIssue, refreshKey, data, openIssue, refresh, notify, disabled, duplicateCloseDisabled, hasUnsavedStatus,
-  highlightOpenBlockers, controlsRef, onReviewSchedule, onDraftChange, onDuplicateClosed,
+  highlightOpenBlockers, controlsRef, onReviewSchedule, onDraftChange, onDuplicateClosed, onCreateBlockedIssue,
 }: Props) {
   const { id: issueId } = currentIssue;
   const editHeading = useId(), removeHeading = useId(), duplicateHeading = useId();
@@ -399,6 +400,9 @@ function RelationList({
           disabled={controlsDisabled || loading} onClick={() => void load()}><RefreshCw size={14} aria-hidden="true" />새로고침</button>
         <button ref={addButton} className="btn" type="button" disabled={controlsDisabled || actionsOpen || !otherIssues.length}
           onClick={event => editRelation(event.currentTarget)}><Plus size={14} aria-hidden="true" />업무 관계 추가</button>
+        {data.projects.some(project => project.id !== currentIssue.projectId) && <button className="btn" type="button"
+          aria-haspopup="dialog" disabled={controlsDisabled || actionsOpen}
+          onClick={event => onCreateBlockedIssue(event.currentTarget)}><Plus size={14} aria-hidden="true" />새 차단 대상 업무</button>}
         <button className="btn" type="button" disabled={controlsDisabled || duplicateCloseDisabled || actionsOpen || loading || !otherIssues.length || !duplicateStatuses.length}
           title={duplicateStatuses.length ? undefined : '이 업무에서 이동할 수 있는 종료 상태가 없습니다.'}
           onClick={event => editDuplicate(event.currentTarget)}>중복으로 닫기</button>

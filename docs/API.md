@@ -55,6 +55,8 @@ curl --fail-with-body \
 | `GET /attachments/:id/content` · `GET /attachment-versions/:id/download` | 지정된 파일 버전의 바이너리 |
 | `POST /issues` · `PATCH /issues/:id` · `DELETE /issues/:id` | 업무 생성·수정·휴지통 이동 |
 | `POST /issues/:id/clone` | 같은 프로젝트에 업무 복제와 원본 관련 관계 저장 |
+| `POST /issues/:id/blocked-issues` | 다른 프로젝트에 새 업무를 만들고 원인 업무의 차단 관계를 같은 요청으로 저장 |
+| `GET /projects/:id/calendar` | 허용된 프로젝트의 근무일·예외 날짜와 달력 버전 조회 |
 | `POST /documents` · `PATCH /documents/:id` · `DELETE /documents/:id` | 문서 생성·수정·휴지통 이동 |
 | `POST /documents/:id/publication` | 검토 요청·승인·발행·수정 요청·철회 |
 | `POST /comments` | 업무 또는 문서 댓글 작성 |
@@ -114,6 +116,12 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 ## 팀 간트의 프로젝트 간 차단
 
 브라우저의 `GET /api/schedule/team-blockers`는 서로 다른 프로젝트의 현재 두 업무를 잇는 차단 관계를 조회한다. 응답 항목은 `{id, sourceIssueId, targetIssueId, version}`이며 원인에서 차단 대상 방향이다. 원본 방향과 양쪽 업무 연결이 확인된 Jira 차단 관계에는 `origin: 'jira'`가 추가된다. 같은 방향의 Teamspace 차단이 있으면 그 항목을 반환한다. 화면은 두 업무의 현재 워크플로로 진행 중인 차단을 표시한다. Teamspace 차단 저장·방향 수정·해제는 기존 업무 관계 경로를 사용한다. [티켓 사이의 업무 관계](#티켓-사이의-업무-관계)
+
+### 다른 프로젝트에 새 차단 대상 업무 만들기
+
+`POST /api/issues/:id/blocked-issues`에 `{requestId, expectedSourceVersion, expectedTargetCalendarVersion, issue}`를 보낸다. `:id`는 차단하는 기존 업무 ID다. `issue`에는 다른 프로젝트의 `projectId`와 일반 업무 생성 필드를 넣는다. 원인 업무와 대상 프로젝트 달력의 확인한 버전을 보내야 한다. 최신 원인 업무나 달력이 달라진 `409`는 `source_version_changed` 또는 `calendar_changed`와 `currentVersion`을 반환한다. 원인 업무가 없으면 `404`와 `source_missing`을 반환한다.
+
+처음에는 `201`과 `{issue, relation, duplicate: false}`를 돌려준다. 새 업무와 원인에서 새 업무를 향하는 `blocks` 관계, 변경 기록과 알림을 같은 트랜잭션에 저장한다. 같은 작업자가 같은 UUIDv4·주소·입력으로 재요청하면 `200`과 기존 업무를 돌려준다. 관계가 해제됐으면 `relation`은 `null`이며 재요청으로 관계를 다시 만들지 않는다. `/api/v1`의 쓰기 키는 원인과 새 업무가 속한 프로젝트 및 입력 참조에 접근할 수 있어야 한다. 대상 달력은 같은 범위의 `GET /api/v1/projects/:id/calendar`에서 읽을 수 있다.
 
 ## 저장된 간트 데이터 갱신
 

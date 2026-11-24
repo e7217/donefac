@@ -107,7 +107,7 @@ import { reservationDayRange, reservationLocalDateTime } from '../shared/time-re
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
-import type { IssueCloneResult, IssueCloseAsDuplicateResult } from '../shared/types.js';
+import type { IssueBlockedCreationResult, IssueCloneResult, IssueCloseAsDuplicateResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
 import { isTerminalStatus, requiredFieldsFor, statusMeta } from '../shared/workflow-helpers.js';
 import { analyzeProjectSchedule, MAX_SCHEDULE_ANALYSIS_DEPENDENCIES, MAX_SCHEDULE_ANALYSIS_TASKS, ScheduleAnalysisError } from '../shared/schedule-analysis.js';
@@ -2397,6 +2397,47 @@ export function createApp(options: {
   };
   const relationNotification = (req: Request) => (before: IssueRelation | undefined, after: IssueRelation | undefined) =>
     blockerNotifications.relationChanged(before,after,actor(req),now());
+  app.post('/api/issues/:id/blocked-issues', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key =>
+      !['requestId', 'expectedSourceVersion', 'expectedTargetCalendarVersion', 'issue', 'actorId'].includes(key))) {
+      return fail('차단 대상 업무 생성 요청을 확인해 주세요.');
+    }
+    const { expectedSourceVersion, expectedTargetCalendarVersion, issue } = input;
+    if (![expectedSourceVersion, expectedTargetCalendarVersion].every(value =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value > 0)) {
+      return fail('원본 업무와 대상 프로젝트 작업 달력의 버전을 확인해 주세요.');
+    }
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail('생성할 차단 대상 업무 정보를 확인해 주세요.');
+    const issueInput = issue as Record<string, unknown>;
+    const targetProjectId = issueInput.projectId;
+    if (typeof targetProjectId !== 'string' || !targetProjectId.trim() || targetProjectId.length > 200) {
+      return fail('차단 대상 업무의 프로젝트를 선택해 주세요.');
+    }
+    const sourceIssueId = String(req.params.id);
+    let createdRelation: IssueRelation | undefined;
+    const result = issueCreation.create(() => actor(req), input, () => {
+      const source = store.get<Issue>('issues', sourceIssueId);
+      if (!source) return fail('원본 업무를 찾을 수 없습니다.', 404, { reason: 'source_missing' });
+      if (source.version !== expectedSourceVersion) {
+        return fail('원본 업무가 변경되었습니다. 최신 일정을 확인해 주세요.', 409,
+          { reason: 'source_version_changed', currentVersion: source.version });
+      }
+      if (source.projectId === targetProjectId) return fail('차단 대상 업무는 다른 프로젝트에 만들어 주세요.');
+      const calendar = calendars.get(targetProjectId);
+      if (calendar.version !== expectedTargetCalendarVersion) {
+        return fail('대상 프로젝트의 작업 달력이 변경되었습니다. 최신 일정을 확인해 주세요.', 409,
+          { reason: 'calendar_changed', currentVersion: calendar.version });
+      }
+      const created = createIssueInTransaction(req, issueCreationInput(issueInput));
+      createdRelation = issueRelations.createInTransaction(source.id,
+        { otherIssueId: created.id, type: 'blocks', direction: 'outgoing' }, relationAudit(req), relationNotification(req)).relation;
+      return created;
+    }, { kind: 'blocked-issue', sourceIssueId });
+    const relation = createdRelation ?? findTeamspaceIssueRelation(store, { sourceIssueId, targetIssueId: result.issue.id, type: 'blocks' }) ?? null;
+    const response: IssueBlockedCreationResult = { ...result, relation };
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
+  });
   app.post('/api/issues/:id/clone', (req, res) => {
     const input = req.body as Record<string, unknown>;
     if (Object.keys(input).some(key => !['requestId', 'expectedSourceVersion', 'issue', 'actorId'].includes(key))) {
