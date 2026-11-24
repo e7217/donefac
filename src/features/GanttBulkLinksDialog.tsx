@@ -3,11 +3,13 @@
 import { useId, useState, type ReactNode, type RefObject } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 import { DEPENDENCY_LABELS, DEPENDENCY_TYPES, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../../shared/schedule-dependencies';
-import type { Issue, ScheduleBulkLinkInput, WorkspaceSnapshot } from '../../shared/types';
+import type { DependencyType, Issue, ScheduleBulkLinkAction, ScheduleBulkLinkInput, WorkspaceSnapshot } from '../../shared/types';
 import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 
 type AnchorChoice = Pick<Issue, 'id' | 'key' | 'title'>;
-export type BulkLinkRule = Pick<ScheduleBulkLinkInput, 'type'> & { lagDays: string };
+export type BulkLinkOperation = NonNullable<ScheduleBulkLinkAction['operation']>;
+export type BulkLinkRule = { type: DependencyType; lagDays: string };
+export type BulkLinkRuleChanges = Record<keyof BulkLinkRule, boolean>;
 export type BulkLinkDraft = BulkLinkRule & Pick<ScheduleBulkLinkInput, 'direction'> & { choice: AnchorChoice | null };
 export const bulkLinkDateFields = ['startDate', 'endDate'] as const;
 export type BulkLinkDateField = typeof bulkLinkDateFields[number];
@@ -25,11 +27,17 @@ type Props = {
   value: BulkLinkDraft;
   onSearch: (query: string) => void;
   onChange: (draft: BulkLinkDraft) => void;
+} & RuleOptions;
+
+type RuleOptions = {
+  operation: BulkLinkOperation;
+  changes: BulkLinkRuleChanges;
+  onChanges: (changes: BulkLinkRuleChanges) => void;
 };
 
 const PAGE_SIZE = 12;
 
-export function GanttBulkLinkFields({ anchors, anchor, issueAliases, searchRef, query, value, onSearch, onChange }: Props) {
+export function GanttBulkLinkFields({ anchors, anchor, issueAliases, searchRef, query, value, onSearch, onChange, ...ruleOptions }: Props) {
   const id = useId();
   const [visible, setVisible] = useState(PAGE_SIZE);
   const results = searchIssueCandidates({ issueAliases }, anchors.filter(issue => issue.id !== anchor?.id), query);
@@ -75,7 +83,7 @@ export function GanttBulkLinkFields({ anchors, anchor, issueAliases, searchRef, 
           </>
         )}
       </div>
-      <BulkLinkRuleFields value={value} onChange={rule => onChange({ ...value, ...rule })}>
+      <BulkLinkRuleFields value={value} onChange={rule => onChange({ ...value, ...rule })} {...ruleOptions}>
         <div className="schedule-bulk-date-field">
           <label htmlFor={`${id}-direction`}>기준 업무 방향</label>
           <select id={`${id}-direction`} value={value.direction} className="field" onChange={event => {
@@ -91,12 +99,12 @@ export function GanttBulkLinkFields({ anchors, anchor, issueAliases, searchRef, 
   );
 }
 
-export function GanttBulkChainFields({ issues, value, onChange, onMove }: {
+export function GanttBulkChainFields({ issues, value, onChange, onMove, ...ruleOptions }: {
   issues: readonly AnchorChoice[];
   value: BulkLinkRule;
   onChange: (rule: BulkLinkRule) => void;
   onMove: (from: number, to: number) => void;
-}) {
+} & RuleOptions) {
   const [announcement, setAnnouncement] = useState('');
 
   function move(from: number, to: number, button: HTMLButtonElement) {
@@ -126,7 +134,7 @@ export function GanttBulkChainFields({ issues, value, onChange, onMove }: {
       </li>)}
     </ol>
     <p className="sr-only" role="status">{announcement}</p>
-    <BulkLinkRuleFields value={value} onChange={onChange} />
+    <BulkLinkRuleFields value={value} onChange={onChange} {...ruleOptions} />
   </>;
 }
 
@@ -173,17 +181,23 @@ export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclu
   </section>;
 }
 
-function BulkLinkRuleFields({ value, onChange, children }: {
+function BulkLinkRuleFields({ value, onChange, children, operation, changes, onChanges }: {
   value: BulkLinkRule;
   onChange: (rule: BulkLinkRule) => void;
   children?: ReactNode;
-}) {
+} & RuleOptions) {
   const id = useId();
+  if (operation === 'remove') return children ? <div className="schedule-bulk-date-fields">{children}</div> : null;
+  const updating = operation === 'update';
   return <div className="schedule-bulk-date-fields">
     {children}
     <div className="schedule-bulk-date-field">
+      {updating && <label className="schedule-bulk-link-change">
+        <input type="checkbox" checked={changes.type} onChange={event => onChanges({ ...changes, type: event.currentTarget.checked })} />
+        연결 유형 변경
+      </label>}
       <label htmlFor={`${id}-type`}>연결 유형</label>
-      <select id={`${id}-type`} value={value.type} className="field" onChange={event => {
+      <select id={`${id}-type`} value={value.type} className="field" disabled={updating && !changes.type} onChange={event => {
         const type = event.currentTarget.value;
         if (isDependencyType(type)) onChange({ ...value, type });
       }}>
@@ -191,9 +205,14 @@ function BulkLinkRuleFields({ value, onChange, children }: {
       </select>
     </div>
     <div className="schedule-bulk-date-field schedule-bulk-link-lag">
+      {updating && <label className="schedule-bulk-link-change">
+        <input type="checkbox" checked={changes.lagDays} onChange={event => onChanges({ ...changes, lagDays: event.currentTarget.checked })} />
+        근무일 간격 변경
+      </label>}
       <label htmlFor={`${id}-lag`}>근무일 간격</label>
       <input id={`${id}-lag`} className="field" type="number" step={1} min={-MAX_DEPENDENCY_LAG_DAYS}
-        max={MAX_DEPENDENCY_LAG_DAYS} value={value.lagDays} required onChange={event => onChange({ ...value, lagDays: event.currentTarget.value })} />
+        max={MAX_DEPENDENCY_LAG_DAYS} value={value.lagDays} disabled={updating && !changes.lagDays} required
+        onChange={event => onChange({ ...value, lagDays: event.currentTarget.value })} />
     </div>
   </div>;
 }

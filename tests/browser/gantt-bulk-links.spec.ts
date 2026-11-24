@@ -742,3 +742,184 @@ test('360px 간트에서 순차 연결과 필터 밖 후행 일정을 한 번에
     await f.close();
   }
 });
+
+test('360px 간트에서 기존 선후행 연결의 간격만 바꾸고 선택한 방향을 해제한 뒤 되돌린다', async ({ page, request }) => {
+  const { projects: [project], users: [actor] } = await workspace(request);
+  const f = fixture(request);
+  try {
+    const anchor = await f.create(project.id, '필터 밖 공통 기준');
+    const first = await f.create(project.id, '선택 대상 첫 연결');
+    const second = await f.create(project.id, '선택 대상 둘째 연결');
+    const third = await f.create(project.id, '선택 대상 같은 간격');
+    const reverse = await f.create(project.id, '선택 대상 반대 연결');
+    const missing = await f.create(project.id, '선택 대상 연결 없음');
+    const outside = await f.create(project.id, '선택 밖 다른 연결');
+    const selected = [first, second, third, reverse, missing];
+    const add = async (source: Issue, target: Issue, type: Dependency['type'], lagDays: number) =>
+      readJson<Dependency>(await request.post('/api/dependencies', { data: {
+        predecessorId: source.id, successorId: target.id, type, lagDays,
+      } }), 201);
+    const firstLink = await add(anchor, first, 'FS', -1);
+    const secondLink = await add(anchor, second, 'SS', 0);
+    const thirdLink = await add(anchor, third, 'FF', 2);
+    const reverseLink = await add(reverse, anchor, 'SF', -1);
+    const outsideLink = await add(anchor, outside, 'FS', 0);
+    const linkOrder = (links: Dependency[]) => [...links].sort((left, right) => left.id.localeCompare(right.id));
+    const storedLinks = async () => linkOrder((await workspace(request)).dependencies.filter(
+      link => link.predecessorId === anchor.id || link.successorId === anchor.id,
+    ));
+    const originalLinks = [firstLink, secondLink, thirdLink, reverseLink, outsideLink];
+    const originalIssues = await f.stored();
+    const excludedEnd = '2026-11-26';
+    const includedEnd = '2026-11-25';
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/gantt`);
+    const search = page.getByLabel('간트 업무 검색', { exact: true });
+    await expect(search).toBeVisible({ timeout: 35_000 });
+    await search.fill(`${f.prefix} 선택 대상`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const endDate = (issue: Issue) => chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const saveDate = (issue: Issue) => chart.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true });
+    await expect(endDate(anchor)).toHaveCount(0);
+    await expect(endDate(outside)).toHaveCount(0);
+    for (const issue of selected) await chart.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true }).check();
+    await endDate(first).fill(excludedEnd);
+    const open = page.getByRole('button', { name: '선후행 일괄 연결', exact: true });
+    const button = (name: string) => page.getByRole('dialog').getByRole('button', { name, exact: true });
+    const changeOperation = (operation: 'update' | 'remove') =>
+      page.getByRole('dialog').getByRole('combobox', { name: '연결 작업', exact: true }).selectOption(operation);
+    const chooseAnchor = async () => {
+      await page.getByRole('dialog').getByLabel('기준 업무 검색', { exact: true }).fill(anchor.key);
+      await button(`${anchor.key} ${anchor.title}`).click();
+    };
+    const excludeFirstDraft = async () => {
+      const include = page.getByRole('dialog').getByRole('checkbox', { name: `${first.key} 날짜 초안 포함`, exact: true });
+      await expect(include).toBeChecked();
+      await include.uncheck();
+    };
+    const baseInput = {
+      projectId: project.id, anchor: reference(anchor), direction: 'predecessor',
+    };
+    const viewPreview = async (expected: object) => {
+      const pending = nextPost(page, previewPath);
+      await button('연결 미리보기').click();
+      const response = await pending;
+      const input = response.request().postDataJSON() as ScheduleBulkLinkInput;
+      expect(input).toEqual({ ...expected, issues: expect.arrayContaining(selected.map(reference)) });
+      expect(input.issues).toHaveLength(selected.length);
+      const reviewed = await readJson<SchedulePastePreview>(response);
+      expect(reviewed.errors).toEqual([]);
+      expect(reviewed.previewId).toBeTruthy();
+      return reviewed;
+    };
+    const applyPreview = async (preview: SchedulePastePreview, label: string) => {
+      const pending = nextPost(page, applyPath);
+      await button(label).click();
+      const response = await pending;
+      expect(response.request().postDataJSON()).toEqual({ previewId: preview.previewId });
+      const applied = await readJson<SchedulePasteApplyResult>(response);
+      await expect(page.getByRole('dialog')).toHaveCount(0);
+      return applied;
+    };
+    const expectMissing = async (preview: SchedulePastePreview) => {
+      expect(preview.missingDependencies).toHaveLength(2);
+      expect(preview.missingDependencies).toEqual(expect.arrayContaining([reverse, missing].map(issue =>
+        expect.objectContaining({ predecessorKey: anchor.key, successorKey: issue.key }))));
+      const table = page.getByRole('table', { name: '연결이 없는 업무 목록', exact: true });
+      await expect(table).toContainText(reverse.key);
+      await expect(table).toContainText(missing.key);
+      await expect(table).not.toContainText(outside.key);
+    };
+
+    await open.click();
+    await changeOperation('update');
+    await expect(page.getByRole('dialog', { name: '선후행 연결 일괄 수정', exact: true })).toBeVisible();
+    await chooseAnchor();
+    await excludeFirstDraft();
+    await expect(button('연결 미리보기')).toBeDisabled();
+    await page.getByRole('dialog').getByRole('checkbox', { name: '근무일 간격 변경', exact: true }).check();
+    await expect(page.getByRole('dialog').getByRole('checkbox', { name: '연결 유형 변경', exact: true })).not.toBeChecked();
+    await page.getByRole('dialog').getByLabel('근무일 간격', { exact: true }).fill('2');
+
+    const update = await viewPreview({ ...baseInput, operation: 'update', lagDays: 2 });
+    expect(update.changes).toEqual([]);
+    expect(update.unchanged).toBe(1);
+    expect(update.dependencyChanges).toHaveLength(2);
+    expect(update.dependencyChanges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ predecessorKey: anchor.key, successorKey: first.key,
+        before: { type: 'FS', lagDays: -1 }, after: { type: 'FS', lagDays: 2 } }),
+      expect.objectContaining({ predecessorKey: anchor.key, successorKey: second.key,
+        before: { type: 'SS', lagDays: 0 }, after: { type: 'SS', lagDays: 2 } }),
+    ]));
+    expect(update.retainedDependencies).toEqual([expect.objectContaining({ predecessorKey: anchor.key, successorKey: third.key,
+      before: { type: 'FF', lagDays: 2 }, after: { type: 'FF', lagDays: 2 } })]);
+    await expectMissing(update);
+    const updateTable = page.getByRole('table', { name: '수정할 선후행 연결 목록', exact: true });
+    const firstRow = updateTable.getByRole('row').filter({ hasText: first.key });
+    await expect(firstRow).toContainText('-1근무일');
+    await expect(firstRow).toContainText('+2근무일');
+    await expect(updateTable.getByRole('row').filter({ hasText: second.key })).toContainText('SS');
+    await expect(page.getByRole('table', { name: '유지할 선후행 연결 목록', exact: true })).toContainText(third.key);
+    expect(await storedLinks()).toEqual(linkOrder(originalLinks));
+    expect(await f.stored()).toEqual(originalIssues);
+
+    expect(await applyPreview(update, '검토한 연결 적용')).toMatchObject({ updated: [], dependencyChanges: 2 });
+    const [updatedFirst, updatedSecond] = [firstLink, secondLink].map(link => ({
+      ...link, lagDays: 2, version: (link.version ?? 1) + 1,
+    }));
+    const updatedLinks = [updatedFirst, updatedSecond, thirdLink, reverseLink, outsideLink];
+    expect(await storedLinks()).toEqual(linkOrder(updatedLinks));
+    await expect(endDate(first)).toHaveValue(excludedEnd);
+    await expect(saveDate(first)).toBeVisible();
+
+    await endDate(second).fill(includedEnd);
+    await open.click();
+    await changeOperation('remove');
+    await expect(page.getByRole('dialog', { name: '선후행 연결 일괄 해제', exact: true })).toBeVisible();
+    await chooseAnchor();
+    await excludeFirstDraft();
+    await expect(page.getByRole('dialog').getByRole('checkbox', { name: `${second.key} 날짜 초안 포함`, exact: true })).toBeChecked();
+    const removal = await viewPreview({
+      ...baseInput, operation: 'remove', dates: [{ issue: reference(second), changes: { endDate: includedEnd } }],
+    });
+    expect(removal.changes).toEqual([expect.objectContaining({ id: second.id, fromEnd: second.endDate, toEnd: includedEnd })]);
+    expect(removal.dependencyChanges).toHaveLength(3);
+    expect(removal.dependencyChanges).toEqual(expect.arrayContaining([first, second, third].map(issue =>
+      expect.objectContaining({ predecessorKey: anchor.key, successorKey: issue.key, after: null }))));
+    await expectMissing(removal);
+    const removalTable = page.getByRole('table', { name: '해제할 선후행 연결 목록', exact: true });
+    await expect(removalTable).toContainText(first.key);
+    await expect(removalTable).not.toContainText(reverse.key);
+    await expect(removalTable).not.toContainText(outside.key);
+    expect(await storedLinks()).toEqual(linkOrder(updatedLinks));
+    expect(await f.stored()).toEqual(originalIssues);
+
+    const applied = await applyPreview(removal, '날짜와 선후행 연결 적용');
+    expect(applied).toMatchObject({ dependencyChanges: 3, updated: [expect.objectContaining({ id: second.id, endDate: includedEnd })] });
+    expect(await storedLinks()).toEqual(linkOrder([reverseLink, outsideLink]));
+    await expect(endDate(first)).toHaveValue(excludedEnd);
+    await expect(saveDate(first)).toBeVisible();
+    await expect(endDate(second)).toHaveValue(includedEnd);
+    await expect(saveDate(second)).toHaveCount(0);
+
+    const undoing = nextPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undo = await undoing;
+    expect(undo.request().postDataJSON()).toEqual({ undoId: applied.undoId });
+    const undone = await readJson<SchedulePasteApplyResult>(undo);
+    expect(undone).toMatchObject({ dependencyChanges: 3, updated: [expect.objectContaining({ id: second.id, endDate: second.endDate })] });
+    const restored = await storedLinks();
+    expect(restored).toHaveLength(updatedLinks.length);
+    for (const { version, ...link } of [updatedFirst, updatedSecond, thirdLink]) {
+      expect(restored.find(item => item.id === link.id)).toEqual({ ...link, version: (version ?? 1) + 1 });
+    }
+    expect(restored).toEqual(expect.arrayContaining([reverseLink, outsideLink]));
+    await expect(endDate(first)).toHaveValue(excludedEnd);
+    await expect(saveDate(first)).toBeVisible();
+    await expect(endDate(second)).toHaveValue(second.endDate!);
+  } finally {
+    await f.close();
+  }
+});

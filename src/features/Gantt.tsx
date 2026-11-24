@@ -39,7 +39,7 @@ import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelectio
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
 import { SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
-import { bulkDateResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
+import { bulkDateResultMessage, bulkLinkResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit, type GanttRowLinkDraft } from './GanttRowScheduleEdit';
 import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import { GanttPlanningControls } from './GanttPlanningControls';
@@ -2821,7 +2821,7 @@ function ProjectGantt(props: GanttProps) {
         refresh,
       }}
       notify={notify} onDraftChange={trackDraft} onClose={() => closeBulkLinks()}
-      onApplied={async (result, followUpIssueIds) => {
+      onApplied={async (result, followUpIssueIds, operation) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
         const adjusted = new Set(followUpIssueIds);
@@ -2835,8 +2835,9 @@ function ProjectGantt(props: GanttProps) {
         await refresh();
         closeBulkLinks(result.updated);
         const dates = result.updated.length, links = result.dependencyChanges ?? 0;
-        notify(dates && links ? `${dates}개 업무의 날짜와 선후행 연결 ${links}건을 저장했습니다.`
-          : dates ? bulkDateResultMessage(result.updated, false) : `선후행 연결 ${links}건을 추가했습니다.`);
+        const dateMessage = dates ? bulkDateResultMessage(result.updated, false) : '';
+        const linkMessage = links ? bulkLinkResultMessage(links, operation) : '';
+        notify([dateMessage, linkMessage].filter(Boolean).join(' '));
       }}
     />}
     {blockerLinksScope && <SchedulePasteDialog

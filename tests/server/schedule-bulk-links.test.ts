@@ -60,7 +60,7 @@ function input(anchor: Issue, issues: Issue[], direction: ScheduleBulkLinkInput[
   return { projectId: anchor.projectId, anchor: reference(anchor), issues: issues.map(reference), direction, type: 'FS', lagDays: 2 };
 }
 
-function chain(projectId: string, issues: Issue[]): ScheduleBulkChainInput {
+function chain(projectId: string, issues: Issue[]): Extract<ScheduleBulkChainInput, { operation?: 'add' }> {
   return { mode: 'chain', projectId, issues: issues.map(reference), type: 'FF', lagDays: 1 };
 }
 
@@ -326,6 +326,133 @@ test('common-anchor follow-up uses both newly linked predecessors and blocks inc
   assert.deepEqual(new Map(applied.updated.map(({ id, startDate, endDate }) => [id, [startDate, endDate]])), new Map([
     [anchor.id, ['2026-11-27', '2026-11-30']], [available.id, ['2026-12-01', '2026-12-02']],
   ]));
+});
+
+test('bulk common-anchor update preserves omitted values, ignores reverse pairs and rechecks formerly missing links before apply', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('공통 기준 업무');
+  const changed = await f.issue('연결 유형을 변경할 업무');
+  const retained = await f.issue('이미 요청한 유형인 업무');
+  const missing = await f.issue('뒤늦게 연결할 업무');
+  const reversed = await f.issue('반대 방향의 업무');
+  const old = await f.link(anchor, changed, 'FS', -2);
+  const unchanged = await f.link(anchor, retained, 'SS', 3);
+  const opposite = await f.link(reversed, anchor, 'FF', 4);
+  const target = { projectId: anchor.projectId, anchor: reference(anchor),
+    issues: [changed, retained, missing, reversed].map(reference), direction: 'predecessor' as const };
+  const body = { ...target, operation: 'update', type: 'SS' } satisfies ScheduleBulkLinkInput;
+  const before = await f.workspace();
+  for (const invalid of [
+    { ...target, operation: 'update' }, { ...body, type: 'bad' }, { ...body, lagDays: 3651 }, { ...body, lagDays: null },
+    { ...target, operation: 'add', type: 'FS' }, { ...target, operation: 'remove', type: 'FS' },
+    { ...target, operation: 'remove', lagDays: 0 }, { ...body, operation: null }, { ...body, mode: 'unknown' },
+  ]) await f.call(previewPath, 400, 'POST', invalid);
+
+  const review = await f.review(body);
+  assert.ok(review.previewId, JSON.stringify(review.errors));
+  assert.deepEqual(review.dependencyChanges?.map(({ successorKey, before, after }) => [successorKey, before, after]),
+    [[changed.key, { type: 'FS', lagDays: -2 }, { type: 'SS', lagDays: -2 }]]);
+  assert.deepEqual(review.retainedDependencies?.map(({ successorKey, before, after }) => [successorKey, before, after]),
+    [[retained.key, { type: 'SS', lagDays: 3 }, { type: 'SS', lagDays: 3 }]]);
+  assert.equal(review.unchanged, 1);
+  assert.deepEqual(review.missingDependencies, [missing, reversed].map((issue, index) => ({
+    line: index + 3, predecessorKey: anchor.key, predecessorTitle: anchor.title, successorKey: issue.key, successorTitle: issue.title,
+  })));
+  assert.deepEqual(await f.workspace(), before);
+  const late = await f.link(anchor, missing, 'SF', -1);
+  const concurrent = await f.workspace();
+  await f.apply(review.previewId, 409);
+  assert.deepEqual(await f.workspace(), concurrent);
+
+  const fresh = await f.review(body);
+  assert.ok(fresh.previewId);
+  assert.deepEqual(fresh.missingDependencies?.map(({ successorKey }) => successorKey), [reversed.key]);
+  const [saved, retry] = await Promise.all([f.apply(fresh.previewId), f.apply(fresh.previewId)]);
+  assert.deepEqual(retry, saved);
+  assert.equal(saved.dependencyChanges, 2);
+  assert.deepEqual(saved.updated, []);
+  assert.deepEqual(saved.warnings, fresh.warnings);
+  const applied = await f.workspace();
+  const updatedOld = findLink(applied, anchor, changed)!;
+  const updatedLate = findLink(applied, anchor, missing)!;
+  assert.deepEqual(updatedOld, { ...old, type: 'SS', version: updatedOld.version });
+  assert.deepEqual(updatedLate, { ...late, type: 'SS', version: updatedLate.version });
+  assert.ok(updatedOld.version! > old.version! && updatedLate.version! > late.version!);
+  assert.deepEqual(findLink(applied, anchor, retained), unchanged);
+  assert.deepEqual(findLink(applied, reversed, anchor), opposite);
+  assert.equal(findLink(applied, anchor, reversed), undefined);
+
+  const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: saved.undoId });
+  assert.equal(undo.dependencyChanges, 2);
+  const restored = await f.workspace();
+  const restoredOld = findLink(restored, anchor, changed)!;
+  const restoredLate = findLink(restored, anchor, missing)!;
+  assert.deepEqual(restoredOld, { ...old, version: restoredOld.version });
+  assert.deepEqual(restoredLate, { ...late, version: restoredLate.version });
+  assert.ok(restoredOld.version! > updatedOld.version! && restoredLate.version! > updatedLate.version!);
+  assert.deepEqual(findLink(restored, anchor, retained), unchanged);
+  assert.deepEqual(findLink(restored, reversed, anchor), opposite);
+});
+
+test('ordered bulk links review lag-only changes and remove only existing adjacent pairs in one reversible write', async t => {
+  const f = await fixture(t);
+  const first = await f.issue('초안과 함께 연결을 해제할 선행');
+  const second = await f.issue('첫 번째 후행', f.project.id, { startDate: '2026-11-23', endDate: '2026-11-24' });
+  const third = await f.issue('두 번째 후행', f.project.id, { startDate: '2026-11-25', endDate: '2026-11-26' });
+  const missing = await f.issue('연속 연결이 없는 업무');
+  const outside = await f.issue('검토 범위 밖 연결', f.project.id, { startDate: '2026-11-30', endDate: '2026-12-01' });
+  const firstLink = await f.link(first, second, 'FS');
+  const secondLink = await f.link(second, third, 'FF');
+  const outsideLink = await f.link(second, outside);
+  const selection = { mode: 'chain' as const, projectId: f.project.id, issues: [first, second, third, missing].map(reference) };
+  const lagReview = await f.review({ ...selection, operation: 'update', lagDays: 1, rescheduleSuccessors: true });
+  assert.ok(lagReview.previewId, JSON.stringify(lagReview.errors));
+  assert.deepEqual(lagReview.dependencyChanges?.map(({ before, after }) => [before, after]), [
+    [{ type: 'FS', lagDays: 0 }, { type: 'FS', lagDays: 1 }],
+    [{ type: 'FF', lagDays: 0 }, { type: 'FF', lagDays: 1 }],
+  ]);
+  assert.deepEqual(lagReview.followUpIssueIds, [second.id]);
+  assert.deepEqual(lagReview.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd]), [[second.id, '2026-11-24', '2026-11-25']]);
+  assert.deepEqual(lagReview.missingDependencies?.map(({ predecessorKey, successorKey }) => [predecessorKey, successorKey]),
+    [[third.key, missing.key]]);
+
+  const before = await f.workspace();
+  const removal = await f.review({ ...selection, operation: 'remove', rescheduleSuccessors: true,
+    dates: [{ issue: reference(first), changes: { endDate: '2026-11-27' } }],
+  } satisfies ScheduleBulkChainInput);
+  assert.ok(removal.previewId, JSON.stringify(removal.errors));
+  assert.deepEqual(removal.dependencyChanges?.map(({ predecessorKey, successorKey, before, after }) => [predecessorKey, successorKey, before, after]), [
+    [first.key, second.key, { type: 'FS', lagDays: 0 }, null], [second.key, third.key, { type: 'FF', lagDays: 0 }, null],
+  ]);
+  assert.deepEqual(removal.missingDependencies, lagReview.missingDependencies);
+  assert.deepEqual(removal.retainedDependencies, []);
+  assert.equal(removal.followUpIssueIds, undefined);
+  assert.deepEqual(removal.changes.map(({ id }) => id), [first.id]);
+  assert.deepEqual(removal.warnings, []);
+  assert.deepEqual(await f.workspace(), before);
+
+  const saved = await f.apply(removal.previewId);
+  assert.equal(saved.dependencyChanges, 2);
+  assert.deepEqual(saved.updated.map(({ id, endDate }) => [id, endDate]), [[first.id, '2026-11-27']]);
+  const applied = await f.workspace();
+  assert.equal(findLink(applied, first, second), undefined);
+  assert.equal(findLink(applied, second, third), undefined);
+  assert.deepEqual(findLink(applied, second, outside), outsideLink);
+  const absent = await f.review({ ...selection, issues: [saved.updated[0], second, third, missing].map(reference), operation: 'remove' });
+  assert.equal(absent.previewId, null);
+  assert.equal(absent.missingDependencies?.length, 3);
+  assert.deepEqual(absent.dependencyChanges, []);
+
+  const undo = await f.call<SchedulePasteApplyResult>(undoPath, 200, 'POST', { undoId: saved.undoId });
+  assert.equal(undo.dependencyChanges, 2);
+  assert.deepEqual(undo.updated.map(({ id, endDate }) => [id, endDate]), [[first.id, first.endDate]]);
+  const restored = await f.workspace();
+  for (const [left, right, link] of [[first, second, firstLink], [second, third, secondLink]] as const) {
+    const restoredLink = findLink(restored, left, right)!;
+    assert.deepEqual(restoredLink, { ...link, version: restoredLink.version });
+    assert.ok(restoredLink.version! > link.version!);
+  }
+  assert.deepEqual(findLink(restored, second, outside), outsideLink);
 });
 
 test('ordered bulk chain previews only adjacent pairs and undoes its new links without changing dates or retained rules', async t => {

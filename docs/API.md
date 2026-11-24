@@ -1239,17 +1239,23 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 ## 선택 업무의 선후행 일괄 연결
 
-브라우저의 `POST /api/schedule/bulk-links/preview`에 `{projectId,anchor,issues,direction,type,lagDays}`를 보낸다. `anchor`와 `issues`의 각 업무는 `{id,expectedVersion}` 형식이다. 한 프로젝트에 속한 2~100개의 서로 다른 업무와 별도의 공통 업무를 지정한다. `direction`은 공통 업무의 역할이며 `predecessor` 또는 `successor`다. `type`은 `FS`, `SS`, `FF`, `SF`이고 `lagDays`에는 −3,650~3,650 사이의 정수 근무일을 보낸다.
+브라우저의 `POST /api/schedule/bulk-links/preview`에서 `projectId`, `anchor`, `issues`, `direction`으로 공통 기준 연결의 대상을 지정한다. `anchor`와 `issues`의 각 업무는 `{id,expectedVersion}` 형식이다. 한 프로젝트에 속한 2~100개의 서로 다른 업무와 별도의 공통 업무를 지정한다. `direction`은 공통 업무의 역할이며 `predecessor` 또는 `successor`다.
 
-목록의 순서대로 연결할 때는 `{mode:'chain',projectId,issues,type,lagDays}`를 보낸다. `issues`에 두 업무를 연속으로 넣으면 앞 업무를 선행, 뒤 업무를 후행으로 검토한다. 예를 들어 A·B·C를 지정하면 A→B와 B→C를 검토한다. 업무마다 버전과 같은 프로젝트 소속을 확인한다.
+목록의 순서대로 연결할 때는 `mode:'chain'`, `projectId`, `issues`로 대상을 지정한다. `issues`에 두 업무를 연속으로 넣으면 앞 업무를 선행, 뒤 업무를 후행으로 검토한다. 예를 들어 A·B·C를 지정하면 A→B와 B→C를 검토한다. 업무마다 버전과 같은 프로젝트 소속을 확인한다.
+
+두 요청 모두 `operation`으로 연결 작업을 지정할 수 있다. `type`은 `FS`, `SS`, `FF`, `SF`를 받고, `lagDays`는 −3,650~3,650 사이의 정수 근무일을 받는다.
+
+- `add`는 `type`과 `lagDays`를 모두 받고 연결이 없는 쌍에 새 연결을 추가한다. `operation`을 생략하면 `add`를 적용한다.
+- `update`는 `type`과 `lagDays` 중 하나 이상을 받고 같은 방향의 기존 연결에서 지정한 값만 바꾼다. 연결 ID는 유지한다.
+- `remove`는 같은 방향의 기존 연결을 해제한다. 요청에서 `type`과 `lagDays`를 생략한다.
 
 두 요청에 선택적으로 `dates: [{issue:{id,expectedVersion},changes}]`를 보낼 수 있다. 선택 업무나 공통 기준 업무의 ID와 같은 조회 버전을 사용하고 업무마다 한 번 지정한다. `changes`에 변경할 날짜 칸만 보내며 `null`로 날짜를 지운다. 응답의 `changes`에는 날짜 변경 전후를 담는다. 일정 누락과 충돌은 제안한 날짜와 연결을 기준으로 검토한다.
 
-두 요청 모두 `rescheduleSuccessors: true`를 받는다. 실제로 변경한 시작일·종료일과 추가할 선후행 관계가 영향을 주는 같은 프로젝트의 직접·간접 후행 업무를 새 연결 그래프에서 계산한다. 직접 바꾼 시작일·종료일이 있는 업무는 제안 날짜를 고정한다. 나머지 업무는 기존 근무일 기간을 유지해 조건을 충족하는 데 필요한 만큼 늦춘다. 계산한 변경도 `changes`에 포함하고 해당 업무 ID를 `followUpIssueIds`에 담는다. 바뀌는 업무의 한도는 직접 변경과 후행 조정을 합쳐 1,000개다. 계산에 필요한 날짜가 없거나 고정 일정이 충돌하면 `errors`에 이유를 표시한다.
+두 요청 모두 `rescheduleSuccessors: true`를 받는다. 실제로 변경한 시작일·종료일과 추가·수정한 선후행 관계가 영향을 주는 같은 프로젝트의 직접·간접 후행 업무를 계산한다. 계산은 해제할 연결을 제외한 최종 그래프를 사용한다. 직접 바꾼 시작일·종료일이 있는 업무는 제안 날짜를 고정한다. 나머지 업무는 기존 근무일 기간을 유지해 조건을 충족하는 데 필요한 만큼 늦춘다. 계산한 변경도 `changes`에 포함하고 해당 업무 ID를 `followUpIssueIds`에 담는다. 바뀌는 업무의 한도는 직접 변경과 후행 조정을 합쳐 1,000개다. 계산에 필요한 날짜가 없거나 고정 일정이 충돌하면 `errors`에 이유를 표시한다.
 
-응답의 `dependencyChanges`에는 새 연결이 담긴다. 같은 방향의 연결이 이미 있으면 `unchanged` 건수와 `retainedDependencies`에 기록하며 각 행의 `before`와 `after`에 기존 유형과 간격이 들어간다. 업무 위치·버전이 일치하지 않거나 전체 연결에 순환이 생기면 `errors`와 빈 `previewId`를 반환한다. 날짜와 연결의 실질 변경이 모두 없으면 적용 ID 없이 검토 결과를 반환한다.
+응답의 `dependencyChanges`에는 변경할 연결의 `before`와 `after`가 담긴다. 추가의 `before`와 해제의 `after`는 `null`이다. 유지할 기존 연결은 `unchanged` 건수와 `retainedDependencies`에 기록한다. 수정·해제에서 같은 방향의 연결을 찾지 못한 업무 쌍은 `missingDependencies`에 담는다. 업무 위치·버전이 일치하지 않거나 새 연결 때문에 순환이 생기면 `errors`와 빈 `previewId`를 반환한다. 날짜와 연결의 실질 변경이 모두 없으면 적용 ID 없이 검토 결과를 반환한다.
 
-`POST /api/schedule/bulk-links/apply`에 `{previewId}`를 보내 검토한 날짜와 연결을 한 트랜잭션에서 저장한다. 검토 뒤 관련 업무·연결·프로젝트 규칙이 바뀌면 `409`가 반환된다. 후행 일정 계산에서 날짜가 유지된 업무도 대조 범위에 포함한다. 같은 작업자는 같은 ID로 이미 저장한 결과를 확인할 수 있다. 결과의 `undoId`를 `POST /api/schedule/undo`에 보내 직접 입력한 날짜와 조정한 후행 일정을 복원하고 이 요청에서 추가한 연결을 해제한다.
+`POST /api/schedule/bulk-links/apply`에 `{previewId}`를 보내 검토한 날짜와 연결을 한 트랜잭션에서 저장한다. 검토 뒤 관련 업무·연결·프로젝트 규칙이 바뀌면 `409`가 반환된다. 후행 일정 계산에서 날짜가 유지된 업무와 미리보기에서 연결이 없던 쌍도 대조 범위에 포함한다. 같은 작업자는 같은 ID로 이미 저장한 결과를 확인할 수 있다. 결과의 `undoId`를 `POST /api/schedule/undo`에 보내 직접 입력한 날짜, 조정한 후행 일정과 이 요청의 연결 변경을 복원한다.
 
 ## 차단 관계의 선후행 일괄 연결
 

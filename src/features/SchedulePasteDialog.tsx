@@ -6,15 +6,15 @@ import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-depend
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
-  ScheduleBulkChainInput, ScheduleBulkLinkDateEdit, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult, SchedulePasteDependencyChange,
-  SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
+  ScheduleBulkChainInput, ScheduleBulkLinkAction, ScheduleBulkLinkDateEdit, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult,
+  SchedulePasteDependencyChange, SchedulePasteDependencyPair, SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 import { issueSearchAliasLabel } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
 import {
   bulkLinkDateFields, GanttBulkChainFields, GanttBulkLinkDateFields, GanttBulkLinkFields,
-  type BulkLinkDateRow, type BulkLinkDraft, type BulkLinkRule,
+  type BulkLinkDateRow, type BulkLinkDraft, type BulkLinkOperation, type BulkLinkRule, type BulkLinkRuleChanges,
 } from './GanttBulkLinksDialog';
 import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
@@ -42,7 +42,7 @@ export type SchedulePasteDialogProps = {
   notify: FeatureProps['notify'];
   onClose: (awaitingResult?: boolean) => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
-  onApplied: (result: SchedulePasteApplyResult, followUpIssueIds: readonly string[]) => Promise<void>;
+  onApplied: (result: SchedulePasteApplyResult, followUpIssueIds: readonly string[], linkOperation: BulkLinkOperation) => Promise<void>;
 } & (
   | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: BulkLinks; blockerLinks?: never; teamPaste?: never }
   | { projectId: string | null; projectLabel?: string; bulkDates?: never; bulkLinks?: never; blockerLinks: BlockerLinks; teamPaste?: never }
@@ -50,7 +50,7 @@ export type SchedulePasteDialogProps = {
   | { projectId: null; projectLabel?: never; bulkDates?: never; bulkLinks?: never; blockerLinks?: never; teamPaste: TeamPaste }
 );
 
-type Review = { input: string; targets: string; projects?: ProjectLabels; result: SchedulePastePreview };
+type Review = { input: string; targets: string; projects?: ProjectLabels; result: SchedulePastePreview; linkOperation: BulkLinkOperation };
 type DateField = 'startDate' | 'endDate' | 'dueDate';
 type DateAction = 'keep' | 'set' | 'clear';
 type DateEntry = { action: DateAction; value: string };
@@ -69,6 +69,7 @@ const bulkFields: { field: DateField; label: string }[] = [
 const keepDate: DateEntry = { action: 'keep', value: '' };
 const defaultLinkRule: BulkLinkRule = { type: 'FS', lagDays: '0' };
 const defaultLink: BulkLinkDraft = { ...defaultLinkRule, choice: null, direction: 'predecessor' };
+const linkOperationLabels = { add: '추가', update: '수정', remove: '해제' } as const;
 const hasLinkInput = (link: BulkLinkDraft, query: string) =>
   Boolean(link.choice || query || link.direction !== defaultLink.direction || link.type !== defaultLink.type || link.lagDays !== defaultLink.lagDays);
 const pendingLabels = {
@@ -103,6 +104,19 @@ export function bulkDateResultMessage(updated: readonly Issue[], team: boolean) 
   return `프로젝트 ${projects.size}개에서 업무 ${updated.length}개의 날짜를 변경했습니다.`;
 }
 
+export function bulkLinkResultMessage(count: number, operation: BulkLinkOperation) {
+  return `선후행 연결 ${count}건을 ${linkOperationLabels[operation]}했습니다.`;
+}
+
+function bulkLinkAction(operation: BulkLinkOperation, rule: BulkLinkRule, changes: BulkLinkRuleChanges): ScheduleBulkLinkAction | null {
+  if (operation === 'remove') return { operation };
+  const lagDays = rule.lagDays.trim() ? Number(rule.lagDays) : NaN;
+  const validLag = isDependencyLag(lagDays);
+  if (operation === 'add') return validLag ? { type: rule.type, lagDays } : null;
+  if ((!changes.type && !changes.lagDays) || (changes.lagDays && !validLag)) return null;
+  return { operation, ...(changes.type ? { type: rule.type } : {}), ...(changes.lagDays ? { lagDays } : {}) };
+}
+
 function ProjectScheduleEditDialog({
   actorId,
   undoScope,
@@ -121,6 +135,8 @@ function ProjectScheduleEditDialog({
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
   const [link, setLink] = useState<BulkLinkDraft>(defaultLink);
+  const [linkOperation, setLinkOperation] = useState<BulkLinkOperation>('add');
+  const [linkRuleChanges, setLinkRuleChanges] = useState<BulkLinkRuleChanges>({ type: false, lagDays: false });
   const [linkMode, setLinkMode] = useState<LinkMode>(() => {
     const selected = new Set(bulkLinks?.issues.map(issue => issue.id));
     return bulkLinks?.candidates.some(issue => issue.projectId === projectId && !selected.has(issue.id)) ? 'anchor' : 'chain';
@@ -167,14 +183,18 @@ function ProjectScheduleEditDialog({
   const draftId = blockerLinks ? BLOCKER_LINK_DRAFT_ID : bulkLinks ? BULK_LINK_DRAFT_ID : bulkDates ? BULK_DRAFT_ID : SCHEDULE_PASTE_DRAFT_ID;
   const team = projectId === null;
   const scopeLabel = focusTeamRecovery ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
-  const title = blockerLinks ? '차단 관계 선후행 검토' : bulkLinks ? '선후행 연결 일괄 추가' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
+  const linkOperationLabel = linkOperationLabels[linkOperation];
+  const title = blockerLinks ? '차단 관계 선후행 검토'
+    : bulkLinks ? `선후행 연결 일괄 ${linkOperationLabel}` : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
   const chainMode = linkMode === 'chain';
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
   const linkRuleEdited = hasLinkInput(link, anchorQuery) || chainEdited;
   const linkDateChoicesEdited = excludedLinkDates.size > 0 || linkDateConfirmations.size > 0;
-  const linksEdited = linkRuleEdited || linkDateChoicesEdited || rescheduleSuccessors;
+  const linkPreferencesEdited = rescheduleSuccessors || linkOperation !== 'add';
+  const linksEdited = linkRuleEdited || linkDateChoicesEdited || linkPreferencesEdited;
+  const linkAction = bulkLinkAction(linkOperation, chainMode ? chainRule : link, linkRuleChanges);
   const selectedBlockers = [...blockerSelection.values()];
   const blockerInput: ScheduleBlockerLinkInput | null = blockerLinks
     ? projectId === null ? {
@@ -185,9 +205,9 @@ function ProjectScheduleEditDialog({
     : null;
   const input = blockerInput ? JSON.stringify(blockerInput)
     : bulkLinks ? JSON.stringify([chainMode
-      ? [linkMode, chainOrder, chainRule.type, chainRule.lagDays]
-      : [linkMode, link.choice?.id, link.direction, link.type, link.lagDays],
-      [...excludedLinkDates], [...linkDateConfirmations], rescheduleSuccessors])
+      ? [linkMode, chainOrder]
+      : [linkMode, link.choice?.id, link.direction],
+      linkAction, [...excludedLinkDates], [...linkDateConfirmations], rescheduleSuccessors])
       : bulkDates ? JSON.stringify(dates) : JSON.stringify([text, rescheduleSuccessors]);
   const issues = bulkIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version }));
   const selectedIds = new Set(issues.map(issue => issue.id));
@@ -226,17 +246,15 @@ function ProjectScheduleEditDialog({
   const editsLinkDates = linkDateEdits.length > 0;
   const linkDatesInput = editsLinkDates ? { dates: linkDateEdits } : {};
   const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true } : {};
-  const { lagDays: lag, type: linkType } = chainMode ? chainRule : link;
-  const lagDays = lag.trim() ? Number(lag) : NaN;
   const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingLinkDates &&
-    issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES && isDependencyLag(lagDays);
-  const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid
+    issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
+  const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid && linkAction
     ? { projectId, issues, anchor: { id: anchor.id, expectedVersion: anchor.version }, direction: link.direction,
-      type: linkType, lagDays, ...linkDatesInput, ...followUpInput }
+      ...linkAction, ...linkDatesInput, ...followUpInput }
     : null;
-  const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && chainIssues.length === issues.length
+  const bulkChainInput: ScheduleBulkChainInput | null = bulkLinks && chainMode && linkRulesValid && linkAction && chainIssues.length === issues.length
     ? { mode: 'chain', projectId, issues: chainIssues.map(issue => ({ id: issue.id, expectedVersion: issue.version })),
-      type: linkType, lagDays, ...linkDatesInput, ...followUpInput }
+      ...linkAction, ...linkDatesInput, ...followUpInput }
     : null;
   const blockerIssues = blockerLinks?.issues;
   const blockerDependencies = blockerLinks?.dependencies;
@@ -329,7 +347,7 @@ function ProjectScheduleEditDialog({
     }
     let confirmation = '붙여넣은 일정과 검토 결과를 버리고 닫을까요?';
     if (directLinks) confirmation = retryApply
-      ? '연결이 이미 추가됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
+      ? '연결 변경이 이미 적용됐을 수 있습니다. 적용 결과 확인을 닫을까요?'
       : blockerLinks
         ? '선택한 차단 관계와 검토 결과를 버리고 닫을까요?'
         : '입력한 선후행 연결과 검토 결과를 버리고 닫을까요?';
@@ -398,7 +416,7 @@ function ProjectScheduleEditDialog({
 
   function updateSuccessorReview(value: boolean) {
     setRescheduleSuccessors(value);
-    resetReview(Boolean((bulkLinks ? linkRuleEdited || linkDateChoicesEdited : text) || value));
+    resetReview(Boolean((bulkLinks ? linkRuleEdited || linkDateChoicesEdited || linkOperation !== 'add' : text) || value));
   }
 
   function updateDate(field: DateField, entry: DateEntry) {
@@ -409,7 +427,17 @@ function ProjectScheduleEditDialog({
 
   function updateLink(next: BulkLinkDraft) {
     setLink(next);
-    resetReview(hasLinkInput(next, anchorQuery) || chainEdited || linkDateChoicesEdited || rescheduleSuccessors);
+    resetReview(hasLinkInput(next, anchorQuery) || chainEdited || linkDateChoicesEdited || linkPreferencesEdited);
+  }
+
+  function updateLinkOperation(next: BulkLinkOperation) {
+    setLinkOperation(next);
+    resetReview(linkRuleEdited || linkDateChoicesEdited || rescheduleSuccessors || next !== 'add');
+  }
+
+  function updateLinkRuleChanges(next: BulkLinkRuleChanges) {
+    setLinkRuleChanges(next);
+    resetReview(true);
   }
 
   function updateLinkMode(next: LinkMode) {
@@ -437,7 +465,7 @@ function ProjectScheduleEditDialog({
     const confirmations = new Map(linkDateConfirmations);
     confirmations.delete(id);
     setLinkDateConfirmations(confirmations);
-    resetReview(linkRuleEdited || excluded.size > 0 || confirmations.size > 0 || rescheduleSuccessors);
+    resetReview(linkRuleEdited || excluded.size > 0 || confirmations.size > 0 || linkPreferencesEdited);
   }
 
   function updateLinkDateConfirmation(issue: Issue, confirm: boolean) {
@@ -445,7 +473,7 @@ function ProjectScheduleEditDialog({
     if (confirm) confirmations.set(issue.id, issue.version);
     else confirmations.delete(issue.id);
     setLinkDateConfirmations(confirmations);
-    resetReview(linkRuleEdited || excludedLinkDates.size > 0 || confirmations.size > 0 || rescheduleSuccessors);
+    resetReview(linkRuleEdited || excludedLinkDates.size > 0 || confirmations.size > 0 || linkPreferencesEdited);
   }
 
   function updateBlockers(selection: BlockerLinkSelection) {
@@ -492,7 +520,7 @@ function ProjectScheduleEditDialog({
     setApproved(false);
     setRetryApply(null);
     setNotice('');
-    const submitted = { input, targets, projects: selectedProjects };
+    const submitted = { input, targets, projects: selectedProjects, linkOperation };
     let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true } | ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
@@ -561,7 +589,7 @@ function ProjectScheduleEditDialog({
 
   async function reflectResult(result: SchedulePasteApplyResult) {
     try {
-      await onApplied(result, review?.result.followUpIssueIds ?? []);
+      await onApplied(result, review?.result.followUpIssueIds ?? [], review?.linkOperation ?? linkOperation);
     } catch (cause) {
       if (mounted.current) {
         setError(`${directLinks ? '선후행 연결은' : '일정은'} 적용되었습니다. ${errorMessage(cause)} 아래에서 화면 반영을 다시 시도하세요.`);
@@ -641,8 +669,25 @@ function ProjectScheduleEditDialog({
   const appliedFollowUpCount = applied?.updated.filter(issue => followUpIssues.has(issue.id)).length ?? 0;
   const dependencyChanges = result?.dependencyChanges ?? [];
   const retainedDependencies = result?.retainedDependencies ?? [];
+  const missingDependencies = result?.missingDependencies ?? [];
+  const reviewedOperation = review?.linkOperation ?? linkOperation;
+  const reviewedOperationLabel = linkOperationLabels[reviewedOperation];
   const keyMappings = result?.keyMappings ?? [];
   const rejected = latest?.result.errors.length ? latest.result : null;
+  const rejectedMissingDependencies = rejected?.missingDependencies ?? [];
+  const linkDescription = chainMode
+    ? '목록에서 연이어 배치한 두 업무가 연결 대상입니다.'
+    : '같은 프로젝트에서 기준 업무를 고르고 선택한 업무들과의 연결 방향을 지정하세요.';
+  const linkInstructions = {
+    add: '새 연결의 유형과 간격을 지정하세요.',
+    update: '기존 연결에서 수정할 항목을 하나 이상 선택하세요.',
+    remove: '선택한 방향의 기존 연결을 검토한 뒤 해제하세요.',
+  }[linkOperation];
+  const followUpDescription = bulkLinks
+    ? linkOperation === 'remove'
+      ? '직접 바꾼 시작일과 종료일을 유지합니다. 남은 연결을 기준으로 후행 업무를 필요한 만큼 늦춥니다.'
+      : '직접 바꾼 시작일과 종료일을 유지합니다. 연결과 날짜가 영향을 주는 후행 업무는 현재 보기에 없어도 필요한 만큼 늦춥니다.'
+    : '직접 바꾼 시작일과 종료일을 유지합니다. 각 프로젝트의 선후행 연결에 맞춰 후행 일정을 필요한 만큼 늦춥니다.';
   const followUpOption = (
     <div className="schedule-paste-follow-up">
       <label>
@@ -650,9 +695,7 @@ function ProjectScheduleEditDialog({
           onChange={event => updateSuccessorReview(event.currentTarget.checked)} />
         후행 일정 함께 검토
       </label>
-      <p id="schedule-paste-follow-up-help">{bulkLinks
-        ? '직접 바꾼 시작일과 종료일을 유지합니다. 새 연결과 날짜가 영향을 주는 후행 업무는 현재 보기에 없어도 필요한 만큼 늦춥니다.'
-        : '직접 바꾼 시작일과 종료일을 유지합니다. 각 프로젝트의 선후행 연결에 맞춰 후행 일정을 필요한 만큼 늦춥니다.'}</p>
+      <p id="schedule-paste-follow-up-help">{followUpDescription}</p>
     </div>
   );
   return (
@@ -677,9 +720,7 @@ function ProjectScheduleEditDialog({
               {blockerLinks
                 ? '차단하는 업무를 선행으로, 차단된 업무를 후행으로 연결합니다. 새 연결은 종료→시작(FS) · 0근무일이며 기존 연결은 유지합니다.'
                 : bulkLinks
-                ? chainMode
-                  ? '목록의 위에서 아래로 바로 다음 업무를 연결합니다. 기존 연결의 유형과 간격은 유지합니다.'
-                  : '같은 프로젝트에서 기준 업무를 고르고 선택한 업무들과 맺을 관계를 확인하세요. 기존 연결은 유지합니다.'
+                ? `${linkDescription} ${linkInstructions}`
                 : bulkDates
                   ? '날짜별로 유지, 지정, 삭제를 고른 뒤 업무별 변경 내용을 확인하세요.'
                   : isTeamPaste
@@ -725,18 +766,32 @@ function ProjectScheduleEditDialog({
                 selection={blockerSelection} refreshKey={blockerRefreshKey} onChange={updateBlockers} />
             ) : bulkLinks ? (
               <>
-                <label className="schedule-bulk-link-mode">연결 방식
-                  <select ref={linkModeSelect} className="field" value={linkMode} onChange={event => {
-                    const mode = event.currentTarget.value;
-                    if (mode === 'anchor' || mode === 'chain') updateLinkMode(mode);
-                  }}>
-                    <option value="anchor" disabled={!anchors.length}>공통 기준 업무 연결</option>
-                    <option value="chain">순서대로 연결</option>
-                  </select>
-                </label>
-                {chainMode ? <GanttBulkChainFields issues={chainIssues} value={chainRule} onChange={updateChainRule} onMove={moveChainIssue} />
+                <div className="schedule-bulk-date-fields">
+                  <label className="schedule-bulk-link-mode schedule-bulk-date-field">연결 방식
+                    <select ref={linkModeSelect} className="field" value={linkMode} onChange={event => {
+                      const mode = event.currentTarget.value;
+                      if (mode === 'anchor' || mode === 'chain') updateLinkMode(mode);
+                    }}>
+                      <option value="anchor" disabled={!anchors.length}>공통 기준 업무 연결</option>
+                      <option value="chain">순서대로 연결</option>
+                    </select>
+                  </label>
+                  <label className="schedule-bulk-link-mode schedule-bulk-date-field">연결 작업
+                    <select className="field" value={linkOperation} onChange={event => {
+                      const operation = event.currentTarget.value;
+                      if (operation === 'add' || operation === 'update' || operation === 'remove') updateLinkOperation(operation);
+                    }}>
+                      <option value="add">새 연결 추가</option>
+                      <option value="update">기존 연결 수정</option>
+                      <option value="remove">기존 연결 해제</option>
+                    </select>
+                  </label>
+                </div>
+                {chainMode ? <GanttBulkChainFields issues={chainIssues} value={chainRule} onChange={updateChainRule} onMove={moveChainIssue}
+                    operation={linkOperation} changes={linkRuleChanges} onChanges={updateLinkRuleChanges} />
                   : <GanttBulkLinkFields anchors={anchors} anchor={anchor} issueAliases={bulkLinks.issueAliases} searchRef={anchorSearch} query={anchorQuery}
-                    value={link} onSearch={setAnchorQuery} onChange={updateLink} />}
+                    value={link} onSearch={setAnchorQuery} onChange={updateLink}
+                    operation={linkOperation} changes={linkRuleChanges} onChanges={updateLinkRuleChanges} />}
                 {linkDateRows.length > 0 && <GanttBulkLinkDateFields rows={linkDateRows} excluded={excludedLinkDates}
                   confirmations={linkDateConfirmations} onInclude={updateLinkDateInclusion} onConfirm={updateLinkDateConfirmation} />}
                 {followUpOption}
@@ -864,7 +919,7 @@ function ProjectScheduleEditDialog({
             <p className="schedule-paste-success" role="status">
               {directLinks && applied.updated.length > 0 && `날짜 ${applied.updated.length}건을 변경했습니다. `}
               {directLinks ? (applied.dependencyChanges || !applied.updated.length
-                ? `선후행 연결 ${applied.dependencyChanges ?? 0}건을 추가했습니다. ` : null)
+                ? `${bulkLinkResultMessage(applied.dependencyChanges ?? 0, reviewedOperation)} ` : null)
                 : bulkDates ? bulkDateResultMessage(applied.updated, team)
                   : `날짜 ${applied.updated.length}건과 업무 연결 ${applied.dependencyChanges ?? 0}건의 변경을 적용했습니다.`}
               {appliedFollowUpCount > 0 && ` 후행 일정 ${appliedFollowUpCount}건을 조정했습니다.`}
@@ -895,6 +950,7 @@ function ProjectScheduleEditDialog({
                   </li>
                 )}
               />
+              {rejectedMissingDependencies.length > 0 && <DependencyChangeTable changes={rejectedMissingDependencies} mode="missing" />}
             </section>
           )}
           {rejected && rejected.warnings.length > 0 && (
@@ -905,10 +961,11 @@ function ProjectScheduleEditDialog({
               <div className="schedule-paste-review-heading">
                 <div>
                   <h3>
-                    {directLinks ? `${reviewedLinkDates ? `날짜 변경 ${result.changes.length}건 · 연결 ` : ''}추가 ${dependencyChanges.length}건 · 유지 ${result.unchanged}건`
+                    {directLinks ? `${reviewedLinkDates ? `날짜 변경 ${result.changes.length}건 · 연결 ` : ''}${reviewedOperationLabel} ${dependencyChanges.length}건 · 유지 ${result.unchanged}건`
                       : bulkDates ? `변경 ${result.changes.length}개 · 유지 ${result.unchanged}개`
                         : `날짜 ${result.changes.length}건 · 업무 연결 ${dependencyChanges.length}건 · 유지 ${result.unchanged}행`}
                   </h3>
+                  {missingDependencies.length > 0 && <p>연결 없음 {missingDependencies.length}건</p>}
                   {followUpIssues.size > 0 && <p>후행 일정 조정 {followUpIssues.size}건</p>}
                   {result.projectIds && <p>대상 프로젝트 {result.projectIds.length}개</p>}
                   {result.expiresAt && (
@@ -943,7 +1000,7 @@ function ProjectScheduleEditDialog({
               )}
               {!hasChanges(result) && (
                 <p className="schedule-paste-noop">
-                  {directLinks ? mixedLinkReview ? '변경할 날짜나 추가할 선후행 연결이 없습니다.' : '추가할 선후행 연결이 없습니다.'
+                  {directLinks ? `${mixedLinkReview ? '변경할 날짜나 ' : ''}${reviewedOperationLabel}할 선후행 연결이 없습니다.`
                     : bulkDates ? '선택한 업무에서 바꿀 날짜가 없습니다.' : '변경할 날짜나 업무 연결이 없습니다.'}
                 </p>
               )}
@@ -958,10 +1015,11 @@ function ProjectScheduleEditDialog({
                   label={bulkLinks && followUpIssues.size ? '선택 업무와 후행 업무 날짜 변경 목록' : undefined} />
               )}
               {dependencyChanges.length > 0 && (
-                <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? 'added' : 'paste'} teamProjects={teamProjects} />
+                <DependencyChangeTable changes={dependencyChanges} mode={directLinks ? reviewedOperation : 'paste'} teamProjects={teamProjects} />
               )}
               {retainedDependencies.length > 0 && <DependencyChangeTable changes={retainedDependencies} mode="retained"
                 teamProjects={teamProjects} showInputLine={!directLinks} />}
+              {!rejected && missingDependencies.length > 0 && <DependencyChangeTable changes={missingDependencies} mode="missing" />}
             </section>
           )}
         </div>
@@ -972,7 +1030,8 @@ function ProjectScheduleEditDialog({
               ? '적용 후 간트에서 되돌리기를 사용할 수 있습니다.'
               : retryApply
                 ? '적용 여부가 확인되지 않았습니다. 같은 요청의 결과를 확인하세요.'
-                : directLinks ? mixedLinkReview ? '검토한 날짜와 새 연결을 함께 적용합니다.' : '검토한 새 연결을 한 번에 추가합니다.'
+                : directLinks ? mixedLinkReview ? '검토한 날짜와 선후행 연결을 함께 적용합니다.'
+                    : `검토한 선후행 연결을 한 번에 ${linkOperationLabel}합니다.`
                   : bulkDates ? '검토한 날짜만 한 번에 적용됩니다.' : '날짜와 업무 연결은 적용할 때 함께 변경됩니다.'}
           </span>
           <button className="btn btn-ghost" type="button" disabled={Boolean(pending)} onClick={close}>
@@ -1132,12 +1191,26 @@ function DateChangeCell({ before, after }: { before: string | null; after: strin
   );
 }
 
+const dependencyTableLabels = {
+  paste: '붙여넣기 업무 연결 변경 목록',
+  add: '새 선후행 연결 목록',
+  update: '수정할 선후행 연결 목록',
+  remove: '해제할 선후행 연결 목록',
+  retained: '유지할 선후행 연결 목록',
+  missing: '연결이 없는 업무 목록',
+};
+
 function DependencyChangeTable({ changes, mode, teamProjects, showInputLine = mode === 'paste' }: {
-  changes: SchedulePasteDependencyChange[]; mode: 'paste' | 'added' | 'retained'; teamProjects?: ProjectLabels; showInputLine?: boolean;
+  changes: (SchedulePasteDependencyChange | SchedulePasteDependencyPair)[];
+  mode: keyof typeof dependencyTableLabels;
+  teamProjects?: ProjectLabels;
+  showInputLine?: boolean;
 }) {
   const [offset, setOffset] = useState(0);
   const start = Math.min(offset, Math.max(0, Math.floor((changes.length - 1) / PAGE_SIZE) * PAGE_SIZE));
-  const label = mode === 'retained' ? '유지할 선후행 연결 목록' : mode === 'added' ? '새 선후행 연결 목록' : '붙여넣기 업무 연결 변경 목록';
+  const label = dependencyTableLabels[mode];
+  const showProposedRule = mode !== 'missing' && mode !== 'retained';
+  const proposedRuleLabel = mode === 'add' ? '추가할 연결' : mode === 'remove' ? '해제 후' : '변경할 연결';
   return (
     <div className="schedule-paste-change-table schedule-paste-dependency-table">
       {mode !== 'paste' && <h4>{label}</h4>}
@@ -1145,8 +1218,8 @@ function DependencyChangeTable({ changes, mode, teamProjects, showInputLine = mo
         <thead>
           <tr>
             <th scope="col">선행 → 후행 업무</th>
-            <th scope="col">{mode === 'retained' ? '유지할 연결' : '현재 연결'}</th>
-            {mode !== 'retained' && <th scope="col">{mode === 'added' ? '추가할 연결' : '변경할 연결'}</th>}
+            {mode !== 'missing' && <th scope="col">{mode === 'retained' ? '유지할 연결' : '현재 연결'}</th>}
+            {showProposedRule && <th scope="col">{proposedRuleLabel}</th>}
           </tr>
         </thead>
         <tbody>
@@ -1161,11 +1234,13 @@ function DependencyChangeTable({ changes, mode, teamProjects, showInputLine = mo
                 <small>{change.successorKey}</small>
                 <strong>{change.successorTitle}</strong>
               </th>
-              <td><DependencyRule rule={change.before} action={mode === 'retained' ? '유지' : undefined} /></td>
-              {mode !== 'retained' && <td>
-                <DependencyRule rule={change.after}
-                  action={!change.after ? '삭제' : !change.before ? '추가' : '변경'} />
-              </td>}
+              {'before' in change && <>
+                <td><DependencyRule rule={change.before} action={mode === 'retained' ? '유지' : undefined} /></td>
+                {showProposedRule && <td>
+                  <DependencyRule rule={change.after}
+                    action={!change.after ? mode === 'remove' ? '해제' : '삭제' : !change.before ? '추가' : '변경'} />
+                </td>}
+              </>}
             </tr>
           ))}
         </tbody>
@@ -1179,7 +1254,7 @@ function DependencyChangeTable({ changes, mode, teamProjects, showInputLine = mo
 
 function DependencyRule({ rule, action }: {
   rule: SchedulePasteDependencyChange['before'];
-  action?: '추가' | '변경' | '삭제' | '유지';
+  action?: '추가' | '변경' | '삭제' | '해제' | '유지';
 }) {
   return (
     <span className={`schedule-paste-dependency-rule${action && action !== '유지' ? rule ? ' is-changed' : ' is-removed' : ''}`}>

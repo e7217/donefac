@@ -2101,13 +2101,15 @@ export interface ProjectScheduleAnalysis {
   partial: boolean;
 }
 export interface SchedulePasteDiagnostic { line: number | null; key?: string; issueId?: string; message: string }
-export interface SchedulePasteDependencyChange {
+export interface SchedulePasteDependencyPair {
   line: number;
   projectId?: string;
   predecessorKey: string;
   predecessorTitle: string;
   successorKey: string;
   successorTitle: string;
+}
+export interface SchedulePasteDependencyChange extends SchedulePasteDependencyPair {
   before: Pick<Dependency, 'type' | 'lagDays'> | null;
   after: Pick<Dependency, 'type' | 'lagDays'> | null;
 }
@@ -2129,6 +2131,7 @@ export interface SchedulePastePreview {
   followUpIssueIds?: string[];
   dependencyChanges?: SchedulePasteDependencyChange[];
   retainedDependencies?: SchedulePasteDependencyChange[];
+  missingDependencies?: SchedulePasteDependencyPair[];
   keyMappings?: SchedulePasteKeyMapping[];
   warnings: string[];
   teamBlockerWarnings?: string[];
@@ -2176,25 +2179,23 @@ export interface ScheduleBulkDateInput {
 type ScheduleRowIssue = { id: string; expectedVersion: number };
 export const MAX_SCHEDULE_BULK_LINK_ISSUES = 100;
 export type ScheduleBulkLinkDateEdit = { issue: ScheduleRowIssue; changes: ScheduleBulkDateChanges };
-export interface ScheduleBulkLinkInput {
+export type ScheduleBulkLinkAction =
+  | { operation?: 'add'; type: DependencyType; lagDays: number }
+  | { operation: 'update'; type?: DependencyType; lagDays?: number }
+  | { operation: 'remove'; type?: never; lagDays?: never };
+type ScheduleBulkLinkSelection = {
   projectId: string;
+  issues: ScheduleRowIssue[];
+  dates?: ScheduleBulkLinkDateEdit[];
+  rescheduleSuccessors?: boolean;
+};
+export type ScheduleBulkLinkInput = ScheduleBulkLinkSelection & ScheduleBulkLinkAction & {
   anchor: ScheduleRowIssue;
-  issues: ScheduleRowIssue[];
   direction: 'predecessor' | 'successor';
-  type: DependencyType;
-  lagDays: number;
-  dates?: ScheduleBulkLinkDateEdit[];
-  rescheduleSuccessors?: boolean;
-}
-export interface ScheduleBulkChainInput {
+};
+export type ScheduleBulkChainInput = ScheduleBulkLinkSelection & ScheduleBulkLinkAction & {
   mode: 'chain';
-  projectId: string;
-  issues: ScheduleRowIssue[];
-  type: DependencyType;
-  lagDays: number;
-  dates?: ScheduleBulkLinkDateEdit[];
-  rescheduleSuccessors?: boolean;
-}
+};
 export const SCHEDULE_BLOCKER_LINK_PAGE_SIZE = 25;
 export const MAX_SCHEDULE_BLOCKER_LINKS = 100;
 export type ScheduleBlockerLinkCandidate = TeamScheduleBlocker & { projectId?: string };
