@@ -59,6 +59,14 @@
   color: #8d402e;
 }
 
+.gitlab-trigger-jobs {
+  display: grid;
+  justify-self: stretch;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #dce8e1;
+}
+
 .gitlab-pipeline-job-list,
 .gitlab-test-suite-list {
   display: grid;

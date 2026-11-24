@@ -7,7 +7,7 @@ import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readine
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type {
   FeatureProps, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs,
-  GitlabPipelineTestReport, GitlabTestCounts,
+  GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabTestCounts,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import './gitlab-activity.css';
@@ -24,6 +24,7 @@ const states = new Map([
   ['active', '활성'], ['deleted', '삭제됨'], ['committed', '커밋됨'],
   ['opened', '열림'], ['merged', '병합됨'], ['closed', '닫힘'],
   ['created', '생성됨'], ['pending', '대기 중'], ['running', '실행 중'],
+  ['preparing', '실행 준비 중'], ['waiting_for_resource', '리소스 대기'], ['waiting_for_callback', '외부 응답 대기'],
   ['success', '성공'], ['failed', '실패'], ['canceled', '취소됨'],
   ['cancelled', '취소됨'], ['skipped', '건너뜀'], ['manual', '수동 실행'],
   ['scheduled', '예약됨'], ['unknown', '미확인'],
@@ -149,11 +150,32 @@ function isPipelineJobsResult(result: GitlabPipelineJobs | undefined, target: Pi
   });
 }
 
-function pipelineJobUrl(job: GitlabPipelineJob, target: PipelineTarget): URL | null {
+function pipelineJobUrl(job: Pick<GitlabPipelineTriggerJob, 'id' | 'webUrl'>, target: PipelineTarget): URL | null {
   const url = gitlabActivityUrl(job.webUrl, 'pipeline');
-  const suffix = `/-/jobs/${job.id}`;
-  return url && url.origin === target.url.origin && !url.search && !url.hash && url.pathname.length > suffix.length &&
-    url.pathname.endsWith(suffix) ? url : null;
+  const repositoryPath = target.url.pathname.replace(/\/(?:-\/)?pipelines\/[1-9]\d*\/?$/u, '');
+  return url && url.origin === target.url.origin && !url.search && !url.hash &&
+    url.pathname === `${repositoryPath}/-/jobs/${job.id}` ? url : null;
+}
+
+function isTriggerJobsResult(value: GitlabPipelineJobs['triggerJobs'] | undefined): value is NonNullable<GitlabPipelineJobs['triggerJobs']> {
+  if (!value || typeof value.hasMore !== 'boolean' || !Array.isArray(value.jobs)) return false;
+  const validStatus = (status: unknown) => typeof status === 'string' && /^[a-z][a-z0-9_]{0,39}$/u.test(status);
+  const validId = (id: unknown) => typeof id === 'number' && Number.isSafeInteger(id) && id > 0;
+  const nullableString = (value: unknown) => value === null || typeof value === 'string';
+  const ids = new Set<number>();
+  return value.jobs.every(job => {
+    if (!job || !validId(job.id) || ids.has(job.id) || typeof job.name !== 'string' || typeof job.stage !== 'string' ||
+        !validStatus(job.status) || typeof job.allowFailure !== 'boolean' || !nullableString(job.failureReason) || !nullableString(job.webUrl)) return false;
+    ids.add(job.id);
+    const downstream = job.downstream;
+    return downstream === null || Boolean(downstream && validId(downstream.id) && validStatus(downstream.status) && nullableString(downstream.webUrl));
+  });
+}
+
+function downstreamPipelineUrl(downstream: NonNullable<GitlabPipelineTriggerJob['downstream']>, target: PipelineTarget): URL | null {
+  const url = gitlabActivityUrl(downstream.webUrl, 'pipeline');
+  const pipeline = url && /^\/(?:[^/]+\/){2,}-\/pipelines\/([1-9]\d*)$/u.exec(url.pathname);
+  return url && url.origin === target.url.origin && !url.search && !url.hash && pipeline?.[1] === String(downstream.id) ? url : null;
 }
 
 function pipelineJobsMessage(cause: unknown): string {
@@ -238,29 +260,57 @@ function PipelineJobs({ target, revision }: { target: PipelineTarget; revision: 
 }
 
 function PipelineJobsResult({ result, target }: { result: GitlabPipelineJobs; target: PipelineTarget }) {
+  const triggers = isTriggerJobsResult(result.triggerJobs) ? result.triggerJobs : null;
   return <>
     <p className="gitlab-activity-inspection-meta" role="status">파이프라인 상태 <strong>{gitlabActivityStateLabel(result.status)}</strong>
       <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time>
     </p>
     {result.configurationError && <p className="gitlab-activity-inspection-warning">GitLab에서 파이프라인 설정 오류를 보고했습니다.</p>}
     {result.jobs.length === 0 ? <p>조회한 CI 작업 중 실패 또는 수동 대기 상태가 없습니다.</p> :
-      <ul className="gitlab-pipeline-job-list" aria-label="실패 및 수동 실행 작업">{result.jobs.map(job => {
-        const href = pipelineJobUrl(job, target);
-        const reason = job.failureReason && (failureReasonLabels.get(job.failureReason) ?? job.failureReason);
-        return <li className="gitlab-pipeline-job" key={job.id}>
-          {href ? <a className="gitlab-pipeline-job-link" href={href.href} target="_blank" rel="noopener noreferrer">
-            <strong>{job.name}</strong><ExternalLink aria-hidden="true" size={13} />
-          </a> : <strong>{job.name}</strong>}
-          <div className="gitlab-activity-inspection-meta">
-            <span className="gitlab-pipeline-job-state" data-state={job.status}>{gitlabActivityStateLabel(job.status)}</span>
-            <span>{job.stage}</span>
-            <span>{job.allowFailure ? '실패 허용' : '성공 필요'}</span>
-            {reason && <span>{reason}</span>}
-          </div>
-        </li>;
-      })}</ul>}
+      <ul className="gitlab-pipeline-job-list" aria-label="실패 및 수동 실행 작업">
+        {result.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target} />)}
+      </ul>}
     {result.hasMore && <p>조회 한도를 넘은 작업은 <a href={target.url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
+    <section className="gitlab-trigger-jobs" aria-label="GitLab 트리거 작업">
+      <h4>트리거 작업</h4>
+      {!triggers ? <p className="gitlab-activity-inspection-warning">GitLab 트리거 작업을 확인하지 못했습니다.</p>
+        : !triggers.jobs.length ? <p>조회한 트리거 작업이 없습니다.</p>
+          : <ul className="gitlab-pipeline-job-list" aria-label="트리거 작업">
+            {triggers.jobs.map(job => <PipelineJobRow key={job.id} job={job} target={target}>
+              {job.downstream && <DownstreamPipeline downstream={job.downstream} target={target} />}
+            </PipelineJobRow>)}
+          </ul>}
+      {triggers?.hasMore && <p>나머지 트리거 작업은 <a href={target.url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
+    </section>
   </>;
+}
+
+function PipelineJobRow({ job, target, children }: { job: GitlabPipelineJob | GitlabPipelineTriggerJob; target: PipelineTarget; children?: React.ReactNode }) {
+  const href = pipelineJobUrl(job, target);
+  const reason = job.failureReason && (failureReasonLabels.get(job.failureReason) ?? job.failureReason);
+  return <li className="gitlab-pipeline-job">
+    {href ? <a className="gitlab-pipeline-job-link" href={href.href} target="_blank" rel="noopener noreferrer">
+      <strong>{job.name}</strong><ExternalLink aria-hidden="true" size={13} />
+    </a> : <strong>{job.name}</strong>}
+    <div className="gitlab-activity-inspection-meta">
+      <span className="gitlab-pipeline-job-state" data-state={job.status}>{gitlabActivityStateLabel(job.status)}</span>
+      <span>{job.stage}</span>
+      <span>{job.allowFailure ? '실패 허용' : '성공 필요'}</span>
+      {reason && <span>{reason}</span>}
+    </div>
+    {children}
+  </li>;
+}
+
+function DownstreamPipeline({ downstream, target }: { downstream: NonNullable<GitlabPipelineTriggerJob['downstream']>; target: PipelineTarget }) {
+  const url = downstreamPipelineUrl(downstream, target);
+  const label = `다운스트림 파이프라인 #${downstream.id}`;
+  return <div className="gitlab-activity-inspection-meta">
+    {url ? <a className="gitlab-pipeline-job-link" href={url.href} target="_blank" rel="noopener noreferrer" aria-label={`${label} 열기`}>
+      {label}<ExternalLink aria-hidden="true" size={13} />
+    </a> : <span>{label}</span>}
+    <span className="gitlab-pipeline-job-state" data-state={downstream.status}>{gitlabActivityStateLabel(downstream.status)}</span>
+  </div>;
 }
 
 function isTestCounts(value: unknown): value is GitlabTestCounts {

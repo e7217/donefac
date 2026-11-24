@@ -19,6 +19,7 @@ import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
 import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt } from '../../shared/document-nodes';
+import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
@@ -71,6 +72,7 @@ import './document-comment-review.css';
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
   onSelectDocument: (id: string) => void;
+  openDocument: (id: string, sectionId?: string) => void;
   documentLabel?: string | null;
   onChangeDocumentLabel?: (label: string | null) => void;
   sectionId?: string | null;
@@ -1542,7 +1544,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   const references = draft ? contentReferences(draft.content) : [];
-  const outgoingDocuments = [...new Map(references.filter(reference => reference.type === 'document').map(reference => [JSON.stringify([reference.id, reference.kind, reference.revisionId]), reference])).values()];
+  const showLinkPanel = sidebarOpen && sideTab === 'links';
+  const workspaceLocation = typeof window === 'undefined' ? undefined : window.location;
+  const draftContent = draft?.content;
+  const draftId = draft?.id;
+  const documentsById = useMemo(() => new Map(data.documents.map(page => [page.id, page])), [data.documents]);
+  const outgoingDocuments = useMemo(() => showLinkPanel && draftContent
+    ? documentPanelReferences(draftContent, workspaceLocation) : [], [showLinkPanel, draftContent, workspaceLocation]);
+  const backlinks = useMemo(() => showLinkPanel && draftId
+    ? documentPanelBacklinks(data.documents, draftId, workspaceLocation) : [], [showLinkPanel, draftId, data.documents, workspaceLocation]);
   const savedContent = selectedPage?.content;
   const savedIssueReferences = useMemo(() => savedContent
     ? contentReferences(savedContent).filter(reference => reference.type === 'issue') : [], [savedContent]);
@@ -1553,7 +1563,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const unresolvedIssueReferences = savedIssueReferences.filter(reference => !issuesById.has(reference.id));
   const supplementalIssueReferences = [...new Map([...draftIssueReferences, ...unresolvedIssueReferences]
     .map(reference => [reference.id, reference])).values()];
-  const backlinks = data.documents.filter(page => page.id !== draft?.id && contentReferences(page.content).some(reference => reference.type === 'document' && reference.id === draft?.id));
   const candidateIssues = useMemo(() => {
     const linkedIssueIds = new Set(data.resourceLinks.filter(link => link.documentId === documentId).map(link => link.issueId));
     return data.issues.filter(issue => !linkedIssueIds.has(issue.id));
@@ -2031,8 +2040,31 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </DocumentLinkedWork>
               <ResourceLinkPicker key={`${actorId}:${selectedPage.id}`} kind="issue" items={candidateIssues} projects={data.projects}
                 busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} />
-              <div className="docs-reference-list"><h3>본문에서 참조하는 문서</h3>{!outgoingDocuments.length && <p>본문에 문서 참조나 포함을 추가하면 표시됩니다.</p>}{outgoingDocuments.map(reference => { const page = data.documents.find(value => value.id === reference.id); return <button key={JSON.stringify([reference.id, reference.kind, reference.revisionId])} disabled={!page} onClick={() => page && openDocument(page.id)}><small>{reference.revisionId ? '고정 버전 포함' : reference.kind === 'include' ? '문서 포함' : '문서 참조'}{!page && (reference.revisionId ? ' · 원본 열기 불가' : ' · 찾을 수 없음')}</small><strong>{(reference.revisionId ? reference.label : page?.title) || reference.label || reference.id}</strong></button>; })}</div>
-              <div className="docs-reference-list"><h3>이 문서를 참조하는 문서</h3>{!backlinks.length && <p>다른 문서의 참조가 아직 없습니다.</p>}{backlinks.map(page => <button key={page.id} onClick={() => openDocument(page.id)}><small>{contentReferences(page.content).some(reference => reference.id === draft.id && reference.kind === 'include') ? '내 문서를 포함함' : '내 문서를 참조함'}</small><strong>{page.title}</strong></button>)}</div>
+              <div className="docs-reference-list">
+                <h3>본문에서 참조하는 문서</h3>
+                {!outgoingDocuments.length && <p>본문에 문서 링크, 참조나 포함을 추가하면 표시됩니다.</p>}
+                {outgoingDocuments.map(reference => {
+                  const page = documentsById.get(reference.id);
+                  const sectionTitle = page && reference.sectionId ? savedDocumentSectionTitle(page.content, reference.sectionId) : undefined;
+                  const missingSection = Boolean(page && reference.sectionId && sectionTitle === undefined);
+                  const label = reference.revisionId ? '고정 버전 포함' : reference.kind === 'include' ? '문서 포함'
+                    : reference.sectionId ? '절 링크' : reference.linkMark ? '문서 링크' : '문서 참조';
+                  return <button key={documentPanelReferenceKey(reference)} disabled={!page} type="button"
+                    onClick={() => page && openDocument(page.id, missingSection ? undefined : reference.sectionId)}>
+                    <small>{label}{sectionTitle && ` · ${sectionTitle}`}
+                      {missingSection && ' · 절을 찾을 수 없음 · 현재 문서 열기'}
+                      {!page && (reference.revisionId ? ' · 원본 열기 불가' : ' · 찾을 수 없음')}</small>
+                    <strong>{(reference.revisionId ? reference.label : page?.title) || reference.label || reference.id}</strong>
+                  </button>;
+                })}
+              </div>
+              <div className="docs-reference-list">
+                <h3>이 문서를 참조하는 문서</h3>
+                {!backlinks.length && <p>다른 문서의 참조나 링크가 아직 없습니다.</p>}
+                {backlinks.map(({ document, label }) => <button key={document.id} type="button" onClick={() => openDocument(document.id)}>
+                  <small>{label}</small><strong>{document.title}</strong>
+                </button>)}
+              </div>
               {supplementalIssueReferences.length > 0 && <div className="docs-reference-list">
                 <h3>본문의 업무 참조</h3>
                 {supplementalIssueReferences.map(reference => {

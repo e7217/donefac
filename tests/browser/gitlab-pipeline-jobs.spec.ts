@@ -12,6 +12,8 @@ const sha = 'e'.repeat(40);
 const repositoryPath = `/forge/api/v4/projects/${repositoryId}`;
 const pipelinePath = `${repositoryPath}/pipelines/${pipelineId}`;
 const jobsPath = `${pipelinePath}/jobs`;
+const triggerJobsPath = `${pipelinePath}/trigger_jobs`;
+const bridgesPath = `${pipelinePath}/bridges`;
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   const body = await response.text();
@@ -19,7 +21,7 @@ async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   return JSON.parse(body) as T;
 }
 
-test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab 실패·수동 작업을 직접 확인한다', async ({ page, request }) => {
+test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab 실패·수동·트리거 작업을 직접 확인한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const unique = randomUUID();
   const token = `synthetic-gitlab-jobs-read-${unique}`;
@@ -40,11 +42,13 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
   const requests: { url: URL; method?: string; credential?: string | string[] }[] = [];
   let baseUrl = '';
   let unavailable = false;
+  let bridgesUnavailable = false;
   let recovered = false;
   let upstreamUpdatedAt = at;
   const repoUrl = () => `${baseUrl}/team/app`;
   const pipelineUrl = () => `${repoUrl()}/-/pipelines/${pipelineId}`;
   const jobUrl = (id: number) => `${repoUrl()}/-/jobs/${id}`;
+  const downstreamUrl = () => `${baseUrl}/team/deployment/-/pipelines/940`;
   const mock = createServer((incoming, response) => {
     const url = new URL(incoming.url ?? '/', 'http://fixture.test');
     requests.push({ url, method: incoming.method, credential: incoming.headers['private-token'] });
@@ -61,6 +65,16 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
       else response.end(JSON.stringify(recovered ? [] : [
         job(815, '실패한 통합 검사', 'integration-test', 'failed', false, 'script_failure'),
         job(814, '수동 검토 작업', 'deployment', 'manual', true, null),
+      ]));
+    } else if (url.pathname === bridgesPath) {
+      if (bridgesUnavailable) response.writeHead(403).end(JSON.stringify({ message: `${upstreamError} ${token}` }));
+      else response.end(JSON.stringify(recovered ? [] : [
+        { ...job(818, '배포팀 파이프라인 실행', 'trigger', 'success', false, null),
+          downstream_pipeline: { id: 940, status: 'failed', web_url: downstreamUrl() } },
+        { ...job(817, '다운스트림 생성 실패', 'trigger', 'failed', true, 'script_failure'), downstream_pipeline: null },
+        { ...job(816, '주소를 확인할 트리거 작업', 'trigger', 'success', false, null),
+          web_url: 'https://link-fixture.invalid/team/app/-/jobs/816',
+          downstream_pipeline: { id: 941, status: 'pending', web_url: new URL('/outside/repo/-/pipelines/941', baseUrl).href } },
       ]));
     } else response.writeHead(404).end('{}');
   });
@@ -108,6 +122,24 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(jobs.getByRole('link', { name: '수동 검토 작업', exact: true })).toHaveAttribute('href', jobUrl(814));
     await expect(jobs).toContainText('실패 허용');
     await expect(jobs).toContainText('파이프라인 설정 오류');
+    const triggers = jobs.getByRole('region', { name: 'GitLab 트리거 작업', exact: true });
+    const triggerList = triggers.getByRole('list', { name: '트리거 작업', exact: true });
+    const trigger = triggerList.getByRole('listitem').filter({ hasText: '배포팀 파이프라인 실행' });
+    const failedTrigger = triggerList.getByRole('listitem').filter({ hasText: '다운스트림 생성 실패' });
+    const unsafeTrigger = triggerList.getByRole('listitem').filter({ hasText: '주소를 확인할 트리거 작업' });
+    const downstream = trigger.getByRole('link', { name: '다운스트림 파이프라인 #940 열기', exact: true });
+    await expect(triggerList.getByRole('listitem')).toHaveCount(3);
+    await expect(trigger.getByRole('link', { name: '배포팀 파이프라인 실행', exact: true })).toHaveAttribute('href', jobUrl(818));
+    await expect(trigger.getByText('성공', { exact: true })).toBeVisible();
+    await expect(trigger.getByText('실패', { exact: true })).toBeVisible();
+    await expect(downstream).toHaveAttribute('href', downstreamUrl());
+    await expect(downstream).toHaveAttribute('rel', 'noopener noreferrer');
+    await expect(failedTrigger.getByText('실패', { exact: true })).toBeVisible();
+    await expect(failedTrigger).toContainText('작업 스크립트 실패');
+    await expect(failedTrigger.getByRole('link', { name: /^다운스트림 파이프라인/u })).toHaveCount(0);
+    await expect(unsafeTrigger).toContainText('#941');
+    await expect(unsafeTrigger.getByText('대기 중', { exact: true })).toBeVisible();
+    await expect(unsafeTrigger.getByRole('link')).toHaveCount(0);
     await expect(pipelineRow).toHaveAttribute('data-gitlab-state', 'running');
     await expect(jobs).not.toContainText(upstreamError);
     await expect(jobs).not.toContainText(token);
@@ -122,6 +154,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     await expect(pipelineRow).toHaveAttribute('data-gitlab-state', 'failed');
     await expect(invalidated).toBeVisible();
     await expect(job).toHaveCount(0);
+    await expect(triggers).toHaveCount(0);
     expect(requests).toHaveLength(beforeUpdate);
 
     const started = Promise.withResolvers<void>();
@@ -154,8 +187,18 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     } finally { release.resolve(); }
     await finished.promise;
     await expect(job).toHaveCount(0);
+    await expect(triggers).toHaveCount(0);
     const refreshed = (await workspace()).gitlabLinks.find(link => link.id === saved?.id);
     expect(refreshed).toMatchObject({ state: 'failed', updatedAt: latestAt });
+
+    bridgesUnavailable = true;
+    await retry.click();
+    await expect(job).toHaveAttribute('href', jobUrl(815));
+    await expect(triggers.getByText('GitLab 트리거 작업을 확인하지 못했습니다.', { exact: true })).toBeVisible();
+    await expect(triggerList).toHaveCount(0);
+    await expect(jobs).not.toContainText(upstreamError);
+    await expect(jobs).not.toContainText(token);
+    bridgesUnavailable = false;
 
     unavailable = true;
     await retry.click();
@@ -165,6 +208,7 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
     unavailable = false;
     recovered = true;
     await retry.click();
+    await expect(triggers.getByText('조회한 트리거 작업이 없습니다.', { exact: true })).toBeVisible();
     await expect(jobs.getByText('성공', { exact: true })).toBeVisible();
     await expect(jobs.getByRole('alert')).toHaveCount(0);
     await expect(job).toHaveCount(0);
@@ -187,13 +231,16 @@ test('360px 티켓과 개발 화면에서 저장 내용을 유지하며 GitLab �
       await developmentOpen.click();
       await expect(development.getByRole('region', { name: 'GitLab CI 작업', exact: true })
         .getByRole('link', { name: '수동 검토 작업', exact: true })).toBeVisible();
+      await expect(development.getByRole('region', { name: 'GitLab 트리거 작업', exact: true })
+        .getByRole('link', { name: '다운스트림 파이프라인 #940 열기', exact: true })).toHaveAttribute('href', downstreamUrl());
     } finally { await development.close(); }
 
     const final = await workspace();
     expect(final.gitlabLinks.find(link => link.id === saved?.id)).toEqual(refreshed);
     expect(final.issues.find(item => item.id === issue.id)).toMatchObject({ title: issue.title, status: issue.status, version: issue.version });
-    expect(requests.filter(call => call.url.pathname === jobsPath)).toHaveLength(5);
-    expect(new Set(requests.map(call => call.url.pathname))).toEqual(new Set([repositoryPath, pipelinePath, jobsPath]));
+    expect(requests.filter(call => call.url.pathname === jobsPath)).toHaveLength(6);
+    expect([5, 6]).toContain(requests.filter(call => call.url.pathname === bridgesPath).length);
+    expect(new Set(requests.map(call => call.url.pathname))).toEqual(new Set([repositoryPath, pipelinePath, jobsPath, triggerJobsPath, bridgesPath]));
     expect(requests.every(call => call.method === 'GET' && call.credential === token)).toBe(true);
   } finally {
     try {

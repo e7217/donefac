@@ -20,6 +20,8 @@ const updatedAt = new Date(Date.now() - 60_000).toISOString();
 const repositoryPath = `/forge/api/v4/projects/${repositoryId}`;
 const pipelinePath = `${repositoryPath}/pipelines/${pipelineId}`;
 const jobsPath = `${pipelinePath}/jobs`;
+const triggerJobsPath = `${pipelinePath}/trigger_jobs`;
+const bridgesPath = `${pipelinePath}/bridges`;
 const testReportPath = `${pipelinePath}/test_report_summary`;
 const route = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-jobs`;
 const reportRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/pipeline-test-report`;
@@ -38,6 +40,11 @@ async function fixture(t: TestContext) {
   let jobsStatus = 200;
   let paginationHeaders = false;
   let holdJobs: (() => Promise<void>) | undefined;
+  let triggerJobs: unknown = [];
+  let triggerJobsStatus = 200;
+  let bridgeJobs: unknown = [];
+  let bridgeJobsStatus = 404;
+  let holdTriggers: (() => Promise<void>) | undefined;
   let testReport: unknown;
   let testReportStatus = 200;
   let holdTestReport: (() => Promise<void>) | undefined;
@@ -61,6 +68,25 @@ async function fixture(t: TestContext) {
       if (response.destroyed) return;
       if (testReportStatus === 302) response.setHeader('Location', `${baseUrl}/private-redirect-target`);
       response.writeHead(testReportStatus).end(JSON.stringify(testReportStatus === 200 ? testReport : { message: `${privateUpstream} ${token}` }));
+    } else if (url.pathname === triggerJobsPath || url.pathname === bridgesPath) {
+      await holdTriggers?.();
+      if (response.destroyed) return;
+      const modern = url.pathname === triggerJobsPath;
+      const status = modern ? triggerJobsStatus : bridgeJobsStatus;
+      const rows = modern ? triggerJobs : bridgeJobs;
+      if (status === 0) {
+        response.destroy();
+      } else if (status !== 200) {
+        response.writeHead(status).end(JSON.stringify({ message: `${privateUpstream} ${token}` }));
+      } else if (!Array.isArray(rows)) {
+        response.end(JSON.stringify(rows));
+      } else {
+        const page = Number(url.searchParams.get('page'));
+        const perPage = Number(url.searchParams.get('per_page'));
+        const from = (page - 1) * perPage;
+        response.setHeader('X-Next-Page', from + perPage < rows.length ? String(page + 1) : '');
+        response.end(JSON.stringify(rows.slice(from, from + perPage)));
+      }
     } else if (url.pathname === jobsPath) {
       await holdJobs?.();
       if (response.destroyed) return;
@@ -124,6 +150,9 @@ async function fixture(t: TestContext) {
     setPipeline(patch: Partial<typeof pipeline>) { pipeline = { ...pipeline, ...patch }; },
     setJobs(value: JobFixture[], withPagination = false) { jobs = value; paginationHeaders = withPagination; },
     setJobsStatus(status: number) { jobsStatus = status; }, setJobGate(gate?: () => Promise<void>) { holdJobs = gate; },
+    setTriggerJobs(value: unknown, status = 200) { triggerJobs = value; triggerJobsStatus = status; },
+    setBridgeJobs(value: unknown, status = 200) { bridgeJobs = value; bridgeJobsStatus = status; },
+    setTriggerGate(gate?: () => Promise<void>) { holdTriggers = gate; },
     setTestReport(value: unknown, status = 200) { testReport = value; testReportStatus = status; },
     setTestReportGate(gate?: () => Promise<void>) { holdTestReport = gate; },
   };
@@ -143,7 +172,8 @@ test('looks up the connected pipeline by global ID and returns only live CI meta
   assert.match(response.headers.get('cache-control') ?? '', /\bno-store\b/);
   const { checkedAt, jobs, ...pipeline } = response.data;
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
-  assert.deepEqual(pipeline, { linkId: f.link.id, repositoryId, pipelineId, status: 'failed', configurationError: true, hasMore: false });
+  assert.deepEqual(pipeline, { linkId: f.link.id, repositoryId, pipelineId, status: 'failed', configurationError: true, hasMore: false,
+    triggerJobs: { jobs: [], hasMore: false } });
   assert.deepEqual(jobs.slice(0, 2), [
     { id: 812, name: 'verify build', stage: 'test', status: 'failed', allowFailure: false, failureReason: 'script_failure', webUrl: f.jobUrl(812) },
     { id: 811, name: 'approve deployment', stage: 'deploy', status: 'manual', allowFailure: true, failureReason: null, webUrl: f.jobUrl(811) },
@@ -151,7 +181,10 @@ test('looks up the connected pipeline by global ID and returns only live CI meta
   assert.equal(jobs.length, 3);
   assert.ok(!JSON.stringify(response.data).includes(token));
   assert.ok(!JSON.stringify(response.data).includes(privateUpstream));
-  assert.deepEqual(f.calls.map(call => call.url.pathname), [repositoryPath, pipelinePath, jobsPath, pipelinePath]);
+  const paths = f.calls.map(call => call.url.pathname);
+  assert.deepEqual(paths.slice(0, 2), [repositoryPath, pipelinePath]);
+  assert.deepEqual(paths.slice(2, -1).sort(), [jobsPath, triggerJobsPath].sort());
+  assert.equal(paths.at(-1), pipelinePath);
   for (const call of f.calls) {
     assert.equal(call.method, 'GET');
     assert.equal(call.credential, token);
@@ -162,6 +195,105 @@ test('looks up the connected pipeline by global ID and returns only live CI meta
   assert.equal(query.get('page'), '1');
   assert.equal(query.get('per_page'), '50');
   assert.deepEqual(await f.snapshot(), before);
+});
+
+test('reads connected trigger jobs including successful dispatch with a failing downstream pipeline and sanitizes source links', async t => {
+  const f = await fixture(t);
+  const before = await f.snapshot();
+  f.setJobs([f.job(812)]);
+  f.setTriggerJobs([
+    { ...f.job(818, { name: 'dispatch child checks', status: 'success' }),
+      downstream_pipeline: { id: 915, status: 'failed', web_url: `${f.baseUrl}/group/child/pipelines/915` } },
+    { ...f.job(817, { name: `manual ${token}`, web_url: `https://elsewhere.invalid/team/app/-/jobs/817`, status: 'manual' }),
+      downstream_pipeline: { id: 914, status: 'running', web_url: `${f.baseUrl}/group/child/-/pipelines/913` }, raw_child: privateUpstream },
+    { ...f.job(816, { web_url: `${f.baseUrl}/group/child/-/jobs/816` }),
+      downstream_pipeline: { id: 913, status: 'manual', web_url: `https://elsewhere.invalid/group/child/-/pipelines/913` } },
+    { ...f.job(815, { web_url: `${f.jobUrl(815)}?private_token=${token}` }),
+      downstream_pipeline: { id: 912, status: 'failed', web_url: `${new URL(f.baseUrl).origin}/group/outside/-/pipelines/912` } },
+  ]);
+  const result = await f.call<GitlabPipelineJobs>(f.path);
+  assert.deepEqual(result.jobs.map(job => job.id), [812]);
+  assert.deepEqual(result.triggerJobs, { hasMore: false, jobs: [
+    { id: 818, name: 'dispatch child checks', stage: 'test', status: 'success', allowFailure: false, failureReason: null,
+      webUrl: f.jobUrl(818), downstream: { id: 915, status: 'failed', webUrl: `${f.baseUrl}/group/child/-/pipelines/915` } },
+    { id: 817, name: '이름 미확인', stage: 'test', status: 'manual', allowFailure: false, failureReason: null,
+      webUrl: null, downstream: { id: 914, status: 'running', webUrl: null } },
+    { id: 816, name: 'test-816', stage: 'test', status: 'failed', allowFailure: false, failureReason: 'script_failure',
+      webUrl: null, downstream: { id: 913, status: 'manual', webUrl: null } },
+    { id: 815, name: 'test-815', stage: 'test', status: 'failed', allowFailure: false, failureReason: 'script_failure',
+      webUrl: null, downstream: { id: 912, status: 'failed', webUrl: null } },
+  ] });
+  const trigger = f.calls.find(({ url }) => url.pathname === triggerJobsPath)!;
+  assert.deepEqual([...trigger.url.searchParams], [['per_page', '50'], ['page', '1']]);
+  assert.ok(f.calls.every(({ method, url }) => method === 'GET' && [repositoryPath, pipelinePath, jobsPath, triggerJobsPath].includes(url.pathname)));
+  assert.ok(!JSON.stringify(result).includes(token));
+  assert.ok(!JSON.stringify(result).includes(privateUpstream));
+  assert.deepEqual(await f.snapshot(), before);
+});
+
+test('falls back to legacy bridges only on an unavailable modern endpoint and keeps ordinary jobs on trigger failures', async t => {
+  const f = await fixture(t);
+  f.setJobs([f.job(812)]);
+  f.setTriggerJobs([], 404);
+  f.setBridgeJobs([f.job(818, { status: 'manual' })]);
+  const legacy = await f.call<GitlabPipelineJobs>(f.path);
+  assert.deepEqual(legacy.triggerJobs?.jobs.map(({ id, downstream }) => ({ id, downstream })), [{ id: 818, downstream: null }]);
+  assert.deepEqual(f.calls.filter(({ url }) => [triggerJobsPath, bridgesPath].includes(url.pathname)).map(({ url }) => url.pathname),
+    [triggerJobsPath, bridgesPath]);
+
+  for (const [value, status] of [
+    [null, 403], [null, 429], [null, 0], [{ jobs: [] }, 200],
+    [[f.job(817, { pipeline: { id: pipelineId + 1, project_id: repositoryId, sha } })], 200],
+    [[f.job(817, { pipeline: { id: pipelineId, project_id: repositoryId + 1, sha } })], 200],
+    [[f.job(817, { pipeline: { id: pipelineId, project_id: repositoryId, sha: '2'.repeat(40) } })], 200],
+  ] as const) {
+    f.calls.length = 0;
+    f.setTriggerJobs(value, status);
+    const result = await f.call<GitlabPipelineJobs>(f.path);
+    assert.equal(result.triggerJobs, null);
+    assert.deepEqual(result.jobs.map(({ id }) => id), [812]);
+    assert.ok(!f.calls.some(({ url }) => url.pathname === bridgesPath));
+  }
+});
+
+test('returns ordinary jobs after an optional trigger lookup times out', async t => {
+  const f = await fixture(t);
+  f.setJobs([f.job(812)]);
+  const release = Promise.withResolvers<void>();
+  f.setTriggerGate(() => release.promise);
+  try {
+    const result = await f.call<GitlabPipelineJobs>(f.path);
+    assert.deepEqual(result.jobs.map(({ id }) => id), [812]);
+    assert.equal(result.triggerJobs, null);
+    assert.ok(!f.calls.some(({ url }) => url.pathname === bridgesPath));
+  } finally { release.resolve(); }
+});
+
+test('bounds trigger job pages and discards both results if the parent changes during trigger reads', async t => {
+  const f = await fixture(t);
+  f.setJobs([f.job(812)]);
+  const triggers = Array.from({ length: 201 }, (_, index) => f.job(1900 - index, { status: 'success' }));
+  f.setTriggerJobs(triggers);
+  const limited = await f.call<GitlabPipelineJobs>(f.path);
+  assert.equal(limited.triggerJobs?.hasMore, true);
+  assert.deepEqual(limited.triggerJobs?.jobs.map(({ id }) => id), triggers.slice(0, 200).map(({ id }) => id));
+  assert.deepEqual(f.calls.filter(({ url }) => url.pathname === triggerJobsPath).map(({ url }) => url.searchParams.get('page')), ['1', '2', '3', '4']);
+
+  const reached = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  f.setTriggerGate(() => { reached.resolve(); return release.promise; });
+  const pending = f.request(f.path);
+  try {
+    await Promise.race([reached.promise, pending.then(response => assert.fail(`Job request ended early (${response.status})`))]);
+    f.setPipeline({ status: 'failed' });
+  } finally {
+    release.resolve();
+    f.setTriggerGate();
+  }
+  const stale = await pending;
+  assert.equal(stale.status, 409);
+  assert.ok(!Object.hasOwn(stale.data as object, 'jobs'));
+  assert.ok(!Object.hasOwn(stale.data as object, 'triggerJobs'));
 });
 
 function reportTotals(count: number, passed = count, failed = 0, skipped = 0, errors = 0, suiteError: string | null = null) {
@@ -309,7 +441,7 @@ test('checks exact ticket and repository access before sending a GitLab read and
   assert.ok(!JSON.stringify(limited).includes(privateUpstream));
   f.setJobsStatus(302);
   await f.call(f.path, undefined, 502);
-  assert.ok(f.calls.every(call => [repositoryPath, pipelinePath, jobsPath].includes(call.url.pathname)));
+  assert.ok(f.calls.every(call => [repositoryPath, pipelinePath, jobsPath, triggerJobsPath].includes(call.url.pathname)));
 
   const callsBefore = f.calls.length;
   await f.configure({ projectIds: [] });

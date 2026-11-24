@@ -1,7 +1,7 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabRepositoryCandidate,
+import type { GitlabIssueBranchTarget, GitlabMergeRequestReview, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -31,6 +31,7 @@ const MAX_MERGE_REQUEST_PAGES = 10;
 const PIPELINE_PAGE_SIZE = 50;
 const PIPELINE_JOB_PAGE_SIZE = 50;
 const MAX_PIPELINE_JOB_PAGES = 4;
+const PIPELINE_TRIGGER_JOBS_TIMEOUT_MS = 6_000;
 const PIPELINE_TEST_SUITE_LIMIT = 50;
 const MR_REVIEW_PARTICIPANT_LIMIT = 50;
 const BRANCH_PAGE_SIZE = 100;
@@ -825,25 +826,75 @@ function gitlabDisplayLabel(value: string, limit: number, token: string | null |
   return label && !includesGitlabCredential(token, [value, label]) ? label : fallback;
 }
 
-function pipelineJob(row: GitlabReadObject, repository: { id: number; path: string; base: URL },
-  pipeline: { id: number; sha: string }, token: string | null | undefined): GitlabPipelineJob {
+type PipelineJobRepository = { id: number; path: string; base: URL };
+type PipelineJobSource = { id: number; sha: string };
+
+function matchesPipelineJobSource(value: unknown, repositoryId: number, pipeline: PipelineJobSource) {
+  return isReadObject(value) && value.id === pipeline.id && value.project_id === repositoryId &&
+    (value.sha == null || gitlabObjectSha(value.sha) === pipeline.sha);
+}
+
+function pipelineJobFailureReason(status: string, reason: unknown, token: Connection['token']) {
+  return status === 'failed' && typeof reason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(reason) &&
+    !includesGitlabCredential(token, [reason]) ? reason : null;
+}
+
+function pipelineJob(row: GitlabReadObject, repository: PipelineJobRepository, pipeline: PipelineJobSource,
+  token: Connection['token']): GitlabPipelineJob {
   const { id, name, stage, status, allow_failure: allowFailure, failure_reason: reason } = row;
-  const source = row.pipeline;
   if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 ||
     typeof name !== 'string' || !name.trim() || typeof stage !== 'string' || !stage.trim() ||
     (status !== 'failed' && status !== 'manual') || typeof allowFailure !== 'boolean' ||
-    !isReadObject(source) || source.id !== pipeline.id || source.project_id !== repository.id ||
-    (source.sha != null && gitlabObjectSha(source.sha) !== pipeline.sha)) invalidPipelineJobs();
+    !matchesPipelineJobSource(row.pipeline, repository.id, pipeline)) invalidPipelineJobs();
   const address = gitlabPageAddress(row.web_url, repository.base, false);
   const path = address && gitlabPathInScope(address.pathname, address.scope);
   const canonicalPath = `${repository.path}/-/jobs/${id}`;
   if (path !== canonicalPath && path !== `${repository.path}/jobs/${id}`) invalidPipelineJobs();
   const webUrl = new URL(canonicalPath, repository.base.origin).href;
   if (includesGitlabCredential(token, [webUrl])) invalidPipelineJobs();
-  const failureReason = status === 'failed' && typeof reason === 'string' && /^[a-z][a-z0-9_]{0,79}$/u.test(reason) &&
-    !includesGitlabCredential(token, [reason]) ? reason : null;
+  const failureReason = pipelineJobFailureReason(status, reason, token);
   return { id, name: gitlabDisplayLabel(name, 255, token, '이름 미확인'), stage: gitlabDisplayLabel(stage, 128, token, '단계 미확인'),
     status, failureReason, allowFailure, webUrl };
+}
+
+function triggerActivityUrl(raw: unknown, repository: PipelineJobRepository, kind: 'jobs' | 'pipelines', id: number,
+  token: Connection['token']) {
+  const address = gitlabPageAddress(raw, repository.base, false);
+  const path = address && gitlabPathInScope(address.pathname, address.scope);
+  if (!path) return null;
+  const legacyEnding = `/${kind}/${id}`;
+  const ending = `/-${legacyEnding}`;
+  const matchedEnding = path.endsWith(ending) ? ending : legacyEnding;
+  if (!path.endsWith(matchedEnding)) return null;
+  const projectPath = path.slice(0, -matchedEnding.length);
+  const projectUrl = new URL(projectPath, repository.base.origin);
+  if (kind === 'jobs' ? projectPath !== repository.path
+    : gitlabRepositoryUrl(repository.base.href, { web_url: projectUrl.href })?.pathname !== projectPath) return null;
+  const canonical = new URL(`${projectPath}${ending}`, repository.base.origin).href;
+  return includesGitlabCredential(token, [canonical]) ? null : canonical;
+}
+
+function isTriggerStatus(value: unknown, token: Connection['token']): value is string {
+  return typeof value === 'string' && /^[a-z][a-z0-9_]{0,39}$/u.test(value) && !includesGitlabCredential(token, [value]);
+}
+
+function pipelineTriggerJob(row: GitlabReadObject, repository: PipelineJobRepository, pipeline: PipelineJobSource,
+  token: Connection['token']): GitlabPipelineTriggerJob {
+  const { id, name, stage, status, allow_failure: allowFailure, failure_reason: reason, downstream_pipeline: child } = row;
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id < 1 ||
+    typeof name !== 'string' || !name.trim() || typeof stage !== 'string' || !stage.trim() ||
+    !isTriggerStatus(status, token) || typeof allowFailure !== 'boolean' ||
+    !matchesPipelineJobSource(row.pipeline, repository.id, pipeline)) invalidPipelineJobs();
+  let downstream: GitlabPipelineTriggerJob['downstream'] = null;
+  if (child != null) {
+    if (!isReadObject(child) || typeof child.id !== 'number' || !Number.isSafeInteger(child.id) || child.id < 1 ||
+      !isTriggerStatus(child.status, token)) invalidPipelineJobs();
+    downstream = { id: child.id, status: child.status,
+      webUrl: triggerActivityUrl(child.web_url, repository, 'pipelines', child.id, token) };
+  }
+  return { id, name: gitlabDisplayLabel(name, 255, token, '이름 미확인'), stage: gitlabDisplayLabel(stage, 128, token, '단계 미확인'),
+    status, allowFailure, failureReason: pipelineJobFailureReason(status, reason, token),
+    webUrl: triggerActivityUrl(row.web_url, repository, 'jobs', id, token), downstream };
 }
 
 async function pipelineInspection(connection: Connection, repositoryId: number, pipelineId: number,
@@ -873,32 +924,65 @@ async function pipelineInspection(connection: Connection, repositoryId: number, 
   return { context, observed, recheck };
 }
 
+async function readPipelineJobPages<Job extends { id: number }>(url: URL, headers: Record<string, string>,
+  parse: (row: GitlabReadObject) => Job, signal: AbortSignal, legacyUrl?: URL): Promise<{ jobs: Job[]; hasMore: boolean }> {
+  const jobs: Job[] = [];
+  const seen = new Set<number>();
+  let hasMore = false;
+  url.searchParams.set('per_page', String(PIPELINE_JOB_PAGE_SIZE));
+  for (let page = 1; page <= MAX_PIPELINE_JOB_PAGES; page++) {
+    url.searchParams.set('page', String(page));
+    let pagination = new Headers();
+    let rows: GitlabReadObject[];
+    try {
+      rows = await readPage(url, headers, 'pipeline-jobs', PIPELINE_JOB_PAGE_SIZE, signal, value => { pagination = value; });
+    } catch (cause) {
+      signal.throwIfAborted();
+      if (page === 1 && legacyUrl && cause instanceof GitlabReadError && cause.httpStatus === 404) {
+        return readPipelineJobPages(legacyUrl, headers, parse, signal);
+      }
+      throw cause;
+    }
+    for (const row of rows) {
+      const job = parse(row);
+      if (seen.has(job.id)) invalidPipelineJobs();
+      seen.add(job.id);
+      jobs.push(job);
+    }
+    hasMore = pipelineJobsNextPage(pagination, url, page, rows.length);
+    if (!hasMore) break;
+  }
+  return { jobs, hasMore };
+}
+
 export async function readGitlabPipelineJobs(connection: Connection, repositoryId: number, pipelineId: number,
-  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore'>> {
+  expectedSha: string | null, signal?: AbortSignal): Promise<Pick<GitlabPipelineJobs, 'status' | 'configurationError' | 'jobs' | 'hasMore' | 'triggerJobs'>> {
   const { context, observed, recheck } = await pipelineInspection(connection, repositoryId, pipelineId, expectedSha, 'pipeline-jobs', signal);
   const repository = { id: repositoryId, path: context.repositoryPath, base: context.base };
   const pipeline = { id: pipelineId, sha: observed.sha };
   const jobsUrl = new URL(context.projectUrl);
   jobsUrl.pathname += `/pipelines/${pipelineId}/jobs`;
-  const jobs: GitlabPipelineJob[] = [];
-  const seen = new Set<number>();
-  let hasMore = false;
-  for (let page = 1; page <= MAX_PIPELINE_JOB_PAGES; page++) {
-    jobsUrl.search = new URLSearchParams([['scope[]', 'failed'], ['scope[]', 'manual'], ['include_retried', 'false'],
-      ['per_page', String(PIPELINE_JOB_PAGE_SIZE)], ['page', String(page)]]).toString();
-    let pagination = new Headers();
-    const rows = await readPage(jobsUrl, context.headers, 'pipeline-jobs', PIPELINE_JOB_PAGE_SIZE, signal, headers => { pagination = headers; });
-    for (const row of rows) {
-      const job = pipelineJob(row, repository, pipeline, connection.token);
-      if (seen.has(job.id)) invalidPipelineJobs();
-      seen.add(job.id);
-      jobs.push(job);
-    }
-    hasMore = pipelineJobsNextPage(pagination, jobsUrl, page, rows.length);
-    if (!hasMore) break;
-  }
-  await recheck();
-  return { status: observed.status, configurationError: observed.configurationError, jobs, hasMore };
+  jobsUrl.search = new URLSearchParams([['scope[]', 'failed'], ['scope[]', 'manual'], ['include_retried', 'false']]).toString();
+  const triggerUrl = new URL(context.projectUrl);
+  triggerUrl.pathname += `/pipelines/${pipelineId}/trigger_jobs`;
+  const legacyUrl = new URL(context.projectUrl);
+  legacyUrl.pathname += `/pipelines/${pipelineId}/bridges`;
+  const lists = new AbortController();
+  const listSignal = signal ? AbortSignal.any([signal, lists.signal]) : lists.signal;
+  const triggerDeadline = AbortSignal.timeout(PIPELINE_TRIGGER_JOBS_TIMEOUT_MS);
+  try {
+    const [ordinary, triggerJobs] = await Promise.all([
+      readPipelineJobPages(jobsUrl, context.headers, row => pipelineJob(row, repository, pipeline, connection.token), listSignal),
+      readPipelineJobPages(triggerUrl, context.headers, row => pipelineTriggerJob(row, repository, pipeline, connection.token),
+        AbortSignal.any([listSignal, triggerDeadline]), legacyUrl).catch(cause => {
+        listSignal.throwIfAborted();
+        if (!(cause instanceof GitlabReadError) && !triggerDeadline.aborted) throw cause;
+        return null;
+      }),
+    ]);
+    await recheck();
+    return { status: observed.status, configurationError: observed.configurationError, ...ordinary, triggerJobs };
+  } finally { lists.abort(); }
 }
 
 function pipelineTestCounts(row: GitlabReadObject, fields: readonly string[]): GitlabTestCounts {

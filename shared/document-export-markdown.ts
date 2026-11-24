@@ -7,7 +7,7 @@ import {
   isCalloutVariant, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeTone, MAX_DOCUMENT_TABLE_SPAN,
 } from './document-nodes.js';
 import { documentNodes } from './document-references.js';
-import { isDocumentSectionId, outlineHeadingTitle } from './document-sections.js';
+import { isDocumentSectionId, outlineHeadingTitle, parseDocumentHash } from './document-sections.js';
 import { inlineAttachmentIdFromUrl } from './inline-attachment.js';
 import type { DocPage, RichContent } from './types.js';
 
@@ -144,23 +144,11 @@ function outline(content: RichContent): Map<RichContent, Heading> {
 }
 
 function documentTarget(href: string): { id: string; target?: DocumentTarget } | undefined {
-  const hash = href.startsWith('/#') ? href.slice(1) : href;
-  const match = /^#\/[^/?#]+\/documents\/([^/?#]+)(?:\?([^#]*))?$/u.exec(hash);
-  if (!match) return undefined;
-  const query = new URLSearchParams(match[2]);
-  const section = query.get('section');
-  const revision = query.get('revision');
-  const publication = query.get('publication');
-  if ([...query.keys()].some(key => !['section', 'revision', 'publication'].includes(key) || query.getAll(key).length !== 1) ||
-      (section !== null && !isDocumentSectionId(section)) || ((publication === null) !== (revision === null)) ||
-      (publication !== null && publication !== 'published' && publication !== 'review') || (revision !== null && !revision)) return undefined;
-  try {
-    const id = decodeURIComponent(match[1]);
-    if (!id || /[\u0000-\u001f\u007f]/u.test(id)) return undefined;
-    return { id, ...(section || revision ? { target: { ...(section ? { sectionId: section } : {}), ...(revision ? { revisionId: revision } : {}) } } : {}) };
-  } catch {
-    return undefined;
-  }
+  const parsed = parseDocumentHash(href.startsWith('/#') ? href.slice(1) : href);
+  if (!parsed) return undefined;
+  const { id, sectionId, publication } = parsed;
+  const revisionId = publication?.revisionId;
+  return { id, ...(sectionId || revisionId ? { target: { ...(sectionId ? { sectionId } : {}), ...(revisionId ? { revisionId } : {}) } } : {}) };
 }
 
 const attachmentUrl = /^\/api\/(attachments|attachment-versions)\/([\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12})\/(content|download)(\?inline=1)?$/iu;

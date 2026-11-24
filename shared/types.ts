@@ -1356,6 +1356,16 @@ export interface GitlabPipelineJob {
   allowFailure: boolean;
   webUrl: string;
 }
+export interface GitlabPipelineTriggerJob {
+  id: number;
+  name: string;
+  stage: string;
+  status: string;
+  allowFailure: boolean;
+  failureReason: string | null;
+  webUrl: string | null;
+  downstream: { id: number; status: string; webUrl: string | null } | null;
+}
 export interface GitlabPipelineJobs {
   linkId: string;
   repositoryId: number;
@@ -1365,6 +1375,7 @@ export interface GitlabPipelineJobs {
   configurationError: boolean;
   hasMore: boolean;
   jobs: GitlabPipelineJob[];
+  triggerJobs: { jobs: GitlabPipelineTriggerJob[]; hasMore: boolean } | null;
 }
 export interface GitlabTestCounts {
   count: number;
