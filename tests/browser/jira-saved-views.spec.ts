@@ -316,3 +316,58 @@ test('360px에서 Jira 우선순위 일부만 합쳐지는 조건을 막고 전�
     if (source) await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
   }
 });
+
+test('360px에서 Jira 날짜순을 저장하고 응답이 끊겨도 정렬한 공유 보기를 다시 연다', async ({ page, request }) => {
+  const projectId = 'project-neo';
+  const label = `date-order-${randomUUID().slice(0, 8)}`;
+  const issues: Issue[] = [];
+  const stored: { view?: SavedView } = {};
+  const previewPath = '/api/views/jira/preview';
+  const importPath = '/api/views/jira/import';
+  const expectedSort = [{ field: 'dueDate', direction: 'desc' }];
+  const matchingRows = (id: string) => page.locator(`.issue-table tbody tr[data-issue-id="${id}"]`);
+
+  try {
+    for (const [title, dueDate] of [['마감일 없이 먼저 등록한 업무', null], ['이른 마감일 업무', '2026-11-24'], ['늦은 마감일 업무', '2026-11-30']]) {
+      const issue = await json<Issue>(await request.post('/api/issues', { data: { projectId, title, labels: [label], dueDate } }), 201);
+      issues.push(issue);
+    }
+    const expectedIds = [issues[2].id, issues[1].id, issues[0].id];
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${projectId}/issues`);
+    await page.getByRole('button', { name: 'Jira 필터 옮기기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Jira 필터 옮기기', exact: true });
+    await dialog.getByLabel('Jira 검색식 (JQL)', { exact: true }).fill(`project = NEO AND labels = "${label}" ORDER BY dueDate DESC`);
+    await dialog.getByLabel('보기 이름', { exact: true }).fill(`Jira 날짜순 ${label}`);
+    const reviewed = page.waitForResponse(response => new URL(response.url()).pathname === previewPath && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '조건 미리보기', exact: true }).click();
+    const review = await json<JiraSavedViewPreview>(await reviewed);
+    expect(review.sort).toEqual(expectedSort);
+    expect(review.issues.map(issue => issue.id)).toEqual(expectedIds);
+    await expect(dialog.getByText('저장할 정렬 · 목표 마감일 내림차순')).toBeVisible();
+    await expect(dialog.getByText(/목표 마감일이 비어 있으면 뒤에 표시합니다/)).toBeVisible();
+    await expect(dialog.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true })).toHaveCount(0);
+
+    await page.route(url => url.pathname === importPath, async route => {
+      stored.view = await json<SavedView>(await route.fetch(), 201);
+      await route.fulfill({ status: 408, json: { error: '합성 저장 응답 유실' } });
+    }, { times: 1 });
+    const saving = page.waitForResponse(response => new URL(response.url()).pathname === importPath && response.request().method() === 'POST');
+    await dialog.getByRole('button', { name: '공유 보기 저장', exact: true }).click();
+    expect((await saving).request().postDataJSON()).toMatchObject({ acceptProjectOrder: false, revision: review.revision });
+    expect(stored.view?.sort).toEqual(expectedSort);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByLabel('저장된 업무 보기', { exact: true })).toHaveValue(stored.view!.id);
+    await expect(matchingRows(issues[0].id)).toBeVisible();
+    await expect.poll(() => page.locator('.issue-table tbody tr[data-issue-id]').evaluateAll(rows => rows.map(row => row.getAttribute('data-issue-id')))).toEqual(expectedIds);
+    await page.reload();
+    await expect(matchingRows(issues[0].id)).toBeVisible();
+    await expect.poll(() => page.locator('.issue-table tbody tr[data-issue-id]').evaluateAll(rows => rows.map(row => row.getAttribute('data-issue-id')))).toEqual(expectedIds);
+  } finally {
+    if (stored.view) await request.delete(`/api/views/${stored.view.id}?expectedVersion=${stored.view.version}`);
+    for (const issue of issues) {
+      const removed = await request.delete(`/api/issues/${issue.id}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+  }
+});

@@ -3,11 +3,9 @@
 import { useId, useMemo, useState } from 'react';
 import { ArrowUpRight, ChartBar, ChevronRight, SlidersHorizontal, X } from 'lucide-react';
 import { DOCUMENT_ISSUE_LIST_LIMIT, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, type DocumentIssueSummary } from '../../shared/document-nodes';
-import { projectIssueSchema } from '../../shared/issue-schema';
-import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
 import { PRIORITY, type Issue, type Priority, type SavedView, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses } from '../../shared/workflow-helpers';
-import { issueListAttrs, keepDocumentSelection } from './DocumentIssueList';
+import { issueListAttrs, keepDocumentSelection, matchingDocumentIssues } from './DocumentIssueList';
 
 const number = new Intl.NumberFormat('ko-KR');
 const percentage = new Intl.NumberFormat('ko-KR', { style: 'percent', maximumFractionDigits: 1 });
@@ -23,7 +21,6 @@ export function issueSummaryAttrs(attrs: Record<string, unknown> | undefined): D
 }
 
 function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, groupBy: DocumentIssueSummary['groupBy']) {
-  const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, projectId)) : null;
   const statuses = groupBy === 'status' ? projectStatuses(data, projectId) : [];
   const people = groupBy === 'assignee' ? data.users : [];
   const statusGroups = statuses.map(status => [status.id, { label: status.label, color: status.color }] as const);
@@ -34,10 +31,9 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
   );
   const orderedIds = new Map([...definitions.keys()].map((id, index) => [id, index]));
   const groups = new Map<string, Group>();
-  const matching = data.issues.filter(issue => issue.projectId === projectId && (!match || match(issue)));
-  const order = data.issueOrders?.find(candidate => candidate.projectId === projectId);
+  const matching = matchingDocumentIssues(data, projectId, savedView);
 
-  for (const issue of orderProjectIssues(matching, order)) {
+  for (const issue of matching) {
     const id = groupBy === 'status' ? issue.status : groupBy === 'assignee' ? (issue.assigneeId ?? '') : issue.priority;
     let group = groups.get(id);
     if (!group) {

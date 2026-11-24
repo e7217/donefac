@@ -1699,9 +1699,13 @@ export interface IssueViewLabelFilter {
 
 export type IssueViewReporterFilter = { kind: 'member'; memberId: string } | { kind: 'unset' } | { kind: 'unknown' };
 
+export type IssueViewSortField = 'dueDate' | 'startDate' | 'endDate' | 'priority' | 'createdAt' | 'updatedAt' | 'key' | 'title';
+export interface IssueViewSortRule { field: IssueViewSortField; direction: 'asc' | 'desc' }
+
 export interface SavedViewState {
   layout: 'list' | 'board';
   boardGrouping?: 'assignee';
+  sort?: IssueViewSortRule[];
   filters: {
     query: string;
     status: string;
@@ -1787,6 +1791,8 @@ export interface JiraSavedViewPreview {
   filters: SavedViewState['filters'];
   criteria: { field: string; label: string }[];
   orderBy: { field: string; direction?: 'asc' | 'desc' }[];
+  sort?: IssueViewSortRule[];
+  requiresProjectOrderAcceptance?: true;
   total: number;
   issues: Pick<Issue, 'id' | 'key' | 'title'>[];
   revision: string;

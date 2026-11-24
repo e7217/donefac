@@ -7,9 +7,9 @@ import type {
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import {
-  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewStatusFilterError,
-  createIssueViewMatcher, orderProjectIssues, parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter,
-  issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewStatusIds,
+  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewSortError, IssueViewStatusFilterError,
+  createIssueViewMatcher, orderIssueView, parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter,
+  issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewSort, parseIssueViewStatusIds,
 } from '../shared/issue-view.js';
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
 import { planningFields } from '../shared/planning-helpers.js';
@@ -44,6 +44,7 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
   if (type !== 'all' && !schema.issueTypes.some(value => value.id === type)) return fail('지원하지 않는 업무 유형 필터입니다.');
   const fieldFilter = filters.fieldFilter == null ? undefined : parseIssueFieldFilter(filters.fieldFilter, schema, users);
   try {
+    const sort = parseIssueViewSort(v.sort);
     const statusIds = Object.hasOwn(filters, 'statusIds') ? parseIssueViewStatusIds(filters.statusIds)
       : status === 'all' ? previous?.statusIds : undefined;
     if (statusIds?.length && status !== 'all') return fail('단일 상태 조건과 여러 상태 조건을 함께 지정할 수 없습니다.');
@@ -54,14 +55,14 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const priorities = Object.hasOwn(filters, 'priorities') ? parseIssueViewPriorities(filters.priorities) : previous?.priorities;
     const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
     const reporter = parseIssueViewReporterFilter(Object.hasOwn(filters, 'reporter') ? filters.reporter : previous?.reporter, users);
-    return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), filters: {
+    return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), ...(sort ? { sort } : {}), filters: {
       query, ...statusCriteria, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
       ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
     } };
   } catch (error) {
     if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError ||
         error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewReporterFilterError ||
-        error instanceof IssueViewStatusFilterError) return fail(error.message, error.status);
+        error instanceof IssueViewSortError || error instanceof IssueViewStatusFilterError) return fail(error.message, error.status);
     throw error;
   }
 }
@@ -177,19 +178,21 @@ export class SavedViewService {
     if (translated.filters.priorities?.some(priority => blockedPriorities?.has(priority))) {
       throw new JiraViewQueryError('우선순위 · 이관한 업무의 원본 값과 현재 우선순위가 일치하지 않아 같은 결과를 저장할 수 없습니다.');
     }
-    const selected = state({ layout: 'list', filters: translated.filters }, schema, users, hooks.planningItems(projectId));
+    const selected = state({ layout: 'list', filters: translated.filters, sort: translated.sort }, schema, users, hooks.planningItems(projectId));
     this.validateAssignee(selected, users);
-    const { filters } = selected;
-    const { criteria, orderBy } = translated;
+    const { filters, sort } = selected;
+    const { criteria, orderBy, requiresProjectOrderAcceptance } = translated;
     const matches = createIssueViewMatcher(filters, { users }, schema);
     const rows = this.store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as { json: string }[];
-    const matchingIssues = orderProjectIssues(rows.map(row => JSON.parse(row.json) as Issue).filter(matches), hooks.issueOrder(projectId));
+    const matchingIssues = orderIssueView(rows.map(row => JSON.parse(row.json) as Issue).filter(matches), hooks.issueOrder(projectId), sort);
     const cohort = matchingIssues.map(({ id, key, title, version }) => [id, key, title, version]);
     const revision = createHash('sha256').update(JSON.stringify([
-      projectId, actorId, jql, aliases, sourceMatches, filters, criteria, orderBy, cohort, this.store.setting('attachmentImportGeneration'),
+      projectId, actorId, jql, aliases, sourceMatches, filters, criteria, orderBy, sort, requiresProjectOrderAcceptance, cohort,
+      this.store.setting('attachmentImportGeneration'),
     ])).digest('hex');
     return {
-      filters, criteria, orderBy, total: matchingIssues.length, revision,
+      filters, criteria, orderBy, ...(sort ? { sort } : {}), ...(requiresProjectOrderAcceptance ? { requiresProjectOrderAcceptance } : {}),
+      total: matchingIssues.length, revision,
       issues: matchingIssues.slice(0, 20).map(({ id, key, title }) => ({ id, key, title })),
     };
   }
@@ -275,8 +278,8 @@ export class SavedViewService {
           throw error;
         }
         if (preview.revision !== revision) return staleJiraPreview();
-        if (preview.orderBy.length && !acceptProjectOrder) return fail('Jira 정렬 대신 Teamspace 프로젝트 순서를 사용하는 데 동의해주세요.');
-        return create(req, project.id, name, { layout, filters: preview.filters }, actorId);
+        if (preview.requiresProjectOrderAcceptance && !acceptProjectOrder) return fail('Jira 정렬 대신 Teamspace 프로젝트 순서를 사용하는 데 동의해주세요.');
+        return create(req, project.id, name, { layout, filters: preview.filters, ...(preview.sort ? { sort: preview.sort } : {}) }, actorId);
       });
       res.status(201).json(view);
     }));
@@ -291,6 +294,7 @@ export class SavedViewService {
         this.validateAssignee(selected, users);
         const updated: SavedView = { ...old, ...selected, name: 'name' in req.body ? string(req.body.name, '보기 이름', 80) : old.name, version: old.version + 1, updatedAt: new Date().toISOString() };
         if (!selected.boardGrouping) delete updated.boardGrouping;
+        if (!selected.sort) delete updated.sort;
         this.put(updated);
         hooks.activity(req, 'project', old.projectId, '업무 보기 변경', updated.name);
         return updated;

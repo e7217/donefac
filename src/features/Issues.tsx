@@ -17,6 +17,7 @@ import { SavedViews } from './SavedViews';
 import { IssueFieldFilters } from './IssueFieldFilters';
 import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
 import { IssueStatusFilter } from './IssueStatusFilter';
+import { IssueViewSort } from './IssueViewSort';
 import { IssuePlanningFilters } from './IssuePlanningFilters';
 import { IssuePriorityLabelFilters } from './IssuePriorityLabelFilters';
 import { IssueReporterFilterSelect } from './IssueReporterSelect';
@@ -27,7 +28,7 @@ import { NotificationSubscriptionButton } from './NotificationSubscriptionButton
 import { GitlabActivityRefresh } from './GitlabActivity';
 import { ISSUE_GITLAB_FILTER_LABELS, IssueGitlabSummary } from './IssueGitlabSummary';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
-import { createIssueViewMatcher, issueViewStatusCriteria, issueViewStatusIds, orderProjectIssues } from '../../shared/issue-view';
+import { createIssueViewMatcher, issueViewStatusCriteria, issueViewStatusIds, orderIssueView, orderProjectIssues } from '../../shared/issue-view';
 import { errorMessage } from './schedule-utils';
 import './issues.css';
 import './issue-order.css';
@@ -38,7 +39,7 @@ const issueDragType = 'text/issue-id';
 type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
 type BoardCell = { status: IssueStatus; targetAssigneeId?: string | null };
 type BoardDrop = IssuePlacement & BoardCell;
-type BoardDrag = { issue: Issue; projectId: string; orderVersion?: string };
+type BoardDrag = { issue: Issue; projectId: string; fieldSorted: boolean; orderVersion?: string };
 type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
 type IssueRowAction = 'details' | 'status';
 type ProjectStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
@@ -146,6 +147,7 @@ export function Issues(props: FeatureProps & {
   const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; id: string | null; applied: boolean }>();
   const [view, setView] = useState<'list' | 'board'>('list');
   const [boardGrouping, setBoardGrouping] = useState<SavedViewState['boardGrouping']>();
+  const [sort, setSort] = useState<SavedViewState['sort']>();
   const [showEmptyAssignees, setShowEmptyAssignees] = useState(false);
   const groupingInstructions = useId();
   const [query, setQuery] = useState('');
@@ -189,8 +191,10 @@ export function Issues(props: FeatureProps & {
   const capacityHeading = useRef<HTMLHeadingElement>(null);
   const capacityOpener = useRef<HTMLButtonElement | null>(null);
   const order = isAll(projectId) ? undefined : data.issueOrders?.find(value => value.projectId === projectId);
-  const ordering = Boolean(order) && orderEditProject === projectId;
+  const fieldSorted = Boolean(sort?.length);
+  const ordering = !fieldSorted && Boolean(order) && orderEditProject === projectId;
   const notice = orderNotice?.projectId === projectId ? orderNotice : null;
+  const rankRefreshRequired = !fieldSorted && Boolean(notice?.needsRefresh);
   const statuses = projectStatuses(data, projectId);
   const workflow = projectWorkflow(data, projectId);
   const createFromFilter = selectedStatuses.length === 1 && statuses.some(value => value.id === selectedStatuses[0])
@@ -198,7 +202,11 @@ export function Issues(props: FeatureProps & {
   const projectIssues = useMemo(() => orderProjectIssues(data.issues.filter(i => isAll(projectId) || i.projectId === projectId), order), [data.issues, projectId, order]);
   const showGitlabRefresh = Boolean(gitlab) || projectIssues.some(issue => gitlabSummary.has(issue.id));
   const hierarchy = useMemo(() => buildIssueHierarchy(projectIssues), [projectIssues]);
-  const issues = unavailableView ? [] : projectIssues.filter(matchesIssue);
+  const issues = useMemo(() => {
+    if (unavailableView) return [];
+    // The project rows already carry manual ranks for any ties in a field sort.
+    return orderIssueView(projectIssues.filter(matchesIssue), undefined, sort);
+  }, [unavailableView, projectIssues, matchesIssue, sort]);
   const bulk = useIssueBulkEdit(props, issues);
   const project = data.projects.find(value => value.id === projectId);
   const projectSelected = Boolean(project);
@@ -273,6 +281,8 @@ export function Issues(props: FeatureProps & {
   function applySavedView(value: SavedViewState) {
     setView(value.layout);
     setBoardGrouping(value.layout === 'board' ? value.boardGrouping : undefined);
+    setSort(value.sort);
+    if (value.sort?.length) setOrderEditProject(null);
     setQuery(value.filters.query);
     setStatus(value.filters.status);
     setAssignee(value.filters.assigneeId);
@@ -285,6 +295,7 @@ export function Issues(props: FeatureProps & {
     setAppliedRouteView({ projectId, id: savedViewId, applied: Boolean(selectedView) });
     if (appliedRouteView?.projectId !== projectId) {
       setBoardGrouping(undefined);
+      setSort(undefined);
       setShowEmptyAssignees(false);
     }
     if (selectedView || savedViewId || appliedRouteView?.id) applySavedView(selectedView ?? defaultView);
@@ -324,15 +335,23 @@ export function Issues(props: FeatureProps & {
     setOrderEditProject(null);
     bulk.open();
   }
-  async function changeStatus(issue: Issue, next: IssueStatus) {
-    if (issue.status === next || pendingMutation.current) return;
-    if (!allowedNextStatuses(data, issue).some(value => value.id === next)) { notify('이 업무 유형에 허용되지 않은 상태 전이입니다.', 'error'); return; }
+  async function changeBoardCell(issue: Issue, status: IssueStatus, assigneeId?: string | null) {
+    const statusChanged = status !== issue.status;
+    if ((!statusChanged && assigneeId === undefined) || pendingMutation.current) return;
+    if (statusChanged && !allowedNextStatuses(data, issue).some(value => value.id === status)) {
+      notify('이 업무 유형에 허용되지 않은 상태 전이입니다.', 'error');
+      return;
+    }
     pendingMutation.current = true;
     setBusy(issue.id);
     try {
-      await patch(`/issues/${issue.id}`, { expectedVersion: issue.version, expectedWorkflowVersion: projectWorkflow(data, issue.projectId).version, status: next });
+      await patch(`/issues/${issue.id}`, {
+        expectedVersion: issue.version, expectedWorkflowVersion: projectWorkflow(data, issue.projectId).version, status,
+        ...(assigneeId !== undefined ? { assigneeId } : {}),
+      });
       await refresh();
-      notify(`${issue.key} · ${statusMeta(data, issue.projectId, next).label}(으)로 변경했습니다.`);
+      notify(assigneeId === undefined ? `${issue.key} · ${statusMeta(data, issue.projectId, status).label}(으)로 변경했습니다.`
+        : `${issue.key} 업무${statusChanged ? '의 상태와 담당자' : ' 담당자'}를 변경했습니다.`);
     }
     catch (error) { notify(errorMessage(error), 'error'); } finally { pendingMutation.current = false; setBusy(null); }
   }
@@ -355,7 +374,7 @@ export function Issues(props: FeatureProps & {
     version?: string;
     opener?: HTMLButtonElement;
   } = {}) {
-    if (!order || issue.projectId !== projectId || placement.anchorId === issue.id || notice?.needsRefresh || pendingMutation.current) return;
+    if (!order || fieldSorted || issue.projectId !== projectId || placement.anchorId === issue.id || notice?.needsRefresh || pendingMutation.current) return;
     const nextStatus = options.status !== issue.status ? options.status : undefined;
     if (nextStatus !== undefined && !allowedNextStatuses(data, issue).some(value => value.id === nextStatus)) {
       setOrderNotice({ projectId, error: true, text: '이 업무 유형에 허용되지 않은 상태 전이입니다.' });
@@ -420,10 +439,10 @@ export function Issues(props: FeatureProps & {
   }
 
   function startBoardDrag(event: DragEvent<HTMLElement>, issue: Issue) {
-    if (pendingMutation.current || notice?.needsRefresh) { event.preventDefault(); return; }
+    if (pendingMutation.current || rankRefreshRequired) { event.preventDefault(); return; }
     event.dataTransfer.setData(issueDragType, issue.id);
     event.dataTransfer.effectAllowed = 'move';
-    drag.current = { issue, projectId, orderVersion: order?.version };
+    drag.current = { issue, projectId, fieldSorted, orderVersion: order?.version };
     reconsider();
   }
 
@@ -435,11 +454,14 @@ export function Issues(props: FeatureProps & {
   }
 
   function boardDragOver(event: DragEvent<HTMLElement>, cell: BoardCell, column: Issue[]) {
-    if (!event.dataTransfer.types.includes(issueDragType) || pendingMutation.current || notice?.needsRefresh) return;
-    if (drag.current && drag.current.projectId !== projectId) return;
+    if (!event.dataTransfer.types.includes(issueDragType) || pendingMutation.current || rankRefreshRequired) return;
+    const source = drag.current;
+    if (source && (source.projectId !== projectId || source.fieldSorted !== fieldSorted)) return;
+    if (fieldSorted && source?.issue.status === cell.status &&
+      (cell.targetAssigneeId === undefined || (source.issue.assigneeId ?? null) === cell.targetAssigneeId)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
-    const placement = order ? boardPlacement(event, column, drag.current?.issue.id) : { anchorId: null, position: 'after' } as const;
+    const placement = order && !fieldSorted ? boardPlacement(event, column, source?.issue.id) : { anchorId: null, position: 'after' } as const;
     const target = { ...placement, ...cell };
     setDropTarget(current => current?.status === cell.status && current.targetAssigneeId === cell.targetAssigneeId &&
       current.anchorId === target.anchorId && current.position === target.position ? current : target);
@@ -449,14 +471,18 @@ export function Issues(props: FeatureProps & {
     const id = event.dataTransfer.getData(issueDragType);
     const source = drag.current;
     endBoardDrag();
-    if (!id || source && (source.projectId !== projectId || source.issue.id !== id)) return;
+    if (!id || source && (source.projectId !== projectId || source.fieldSorted !== fieldSorted || source.issue.id !== id)) return;
     event.preventDefault();
     const issue = source?.issue ?? projectIssues.find(value => value.id === id);
     if (!issue) return;
     const changesAssignee = targetAssigneeId !== undefined && (issue.assigneeId ?? null) !== targetAssigneeId;
+    if (fieldSorted) {
+      void changeBoardCell(issue, status, changesAssignee ? targetAssigneeId : undefined);
+      return;
+    }
     if (!order) {
       if (changesAssignee) notify('업무 순서를 불러온 뒤 다른 담당자에게 이동하세요.', 'error');
-      else void changeStatus(issue, status);
+      else void changeBoardCell(issue, status);
       return;
     }
     const placement = boardPlacement(event, column, issue.id);
@@ -505,9 +531,9 @@ export function Issues(props: FeatureProps & {
       {column.map((issue, index) => {
         const user = data.users.find(user => user.id === issue.assigneeId);
         const destinations = allowedNextStatuses(data, issue).filter(status => status.id !== issue.status);
-        return <div key={issue.id} className="issue-board-card-row" data-order-card={issue.id}>
+        return <div key={issue.id} className="issue-board-card-row" data-order-card={fieldSorted ? undefined : issue.id}>
           <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
-            draggable={!busy && !notice?.needsRefresh} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
+            draggable={!busy && !rankRefreshRequired} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
             <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
             <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(label => <span className="issue-label" key={label}>{label}</span>)}</span>
             <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
@@ -594,12 +620,16 @@ export function Issues(props: FeatureProps & {
         {Object.entries(ISSUE_GITLAB_FILTER_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       {showGitlabRefresh && <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={bulk.locked} />}
-      {order && !bulk.active && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
+      {order && !fieldSorted && !bulk.active && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
       {projectSelected && view === 'list' && <button ref={bulkToggle} type="button" className="btn btn-ghost issue-bulk-toggle" aria-pressed={bulk.active}
         disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
       {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
     {projectSelected && <fieldset ref={filterEditors} className="issue-bulk-filter-controls" disabled={bulk.locked}>
+      <IssueViewSort key={`sort:${projectId}:${filterEditorEpoch}`} value={sort} disabled={Boolean(busy || bulk.locked)} onChange={next => {
+        if (next?.length) setOrderEditProject(null);
+        setSort(next);
+      }} />
       <IssuePriorityLabelFilters key={`priority-label:${projectId}:${filterEditorEpoch}`} issues={projectIssues}
         value={{ priorities, labels }} onApply={updateProjectFilters} />
       {(schema.fields.length > 0 || fieldFilter) && <IssueFieldFilters
@@ -609,7 +639,7 @@ export function Issues(props: FeatureProps & {
         value={planning} onApply={value => updateProjectFilters({ planning: value })} />
     </fieldset>}
     <SavedViews projectId={projectId} project={project} actorId={props.actorId} planningItems={planningItems} statuses={statuses} users={data.users} views={projectViews} selectedId={savedViewId}
-      current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
+      current={{layout:view,...(groupedBoard ? { boardGrouping: 'assignee' } : {}),...(sort?.length ? { sort } : {}),filters}} onSelect={onChangeSavedView} onApply={applySavedView} onOpenGantt={onOpenGantt}
       onOpenFieldBreakdown={onOpenFieldBreakdown}
       onViewsLoaded={values => setLoadedViews({ projectId, snapshot: data.savedViews, values })} onViewsChanged={refresh} notify={notify} />
     <div className="issue-results">
@@ -621,9 +651,9 @@ export function Issues(props: FeatureProps & {
         {bulk.active && <button className="btn btn-ghost" type="button" disabled={csvDisabled || !bulk.selectedCount} onClick={() => downloadIssuesCsv(true)}>
           <ArrowDownToLine size={14} aria-hidden="true" />선택 업무 CSV
         </button>}
-      </div> : <span className="muted" id={groupedBoard ? groupingInstructions : undefined}>{groupedBoard ? '다른 담당자 행으로 끌면 담당자가 바뀝니다.' : order ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
+      </div> : <span className="muted" id={groupedBoard ? groupingInstructions : undefined}>{groupedBoard ? '다른 담당자 행으로 끌면 담당자가 바뀝니다.' : order && !fieldSorted ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
     </div>
-    {order && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
+    {order && !fieldSorted && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
     </div>}

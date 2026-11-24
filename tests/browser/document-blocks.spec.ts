@@ -174,6 +174,58 @@ test('360px 문서에서 공유 보기 업무 목록을 삽입하고 현재 상�
   }
 });
 
+test('문서의 업무 목록과 현황 상세에 공유 보기의 최신 정렬을 반영한다', async ({ page, blocks: f }) => {
+  const projectId = f.source.projectId!;
+  const query = `${f.prefix} 정렬 업무`;
+  async function create(suffix: string, dueDate: string | null) {
+    const response = await f.requests.post('/api/issues', { data: { projectId, title: `${query} ${suffix}`, status: 'todo', dueDate } });
+    expect(response.status(), await response.text()).toBe(201);
+    return response.json() as Promise<Issue>;
+  }
+  const later = await create('늦은 마감일', '2027-02-03');
+  const noDate = await create('마감일 미정', null);
+  const earlier = await create('이른 마감일', '2027-02-01');
+  const viewResponse = await f.requests.post('/api/views', { data: {
+    projectId, name: `${f.prefix} 마감일순`, layout: 'list',
+    sort: [{ field: 'dueDate', direction: 'asc' }],
+    filters: { query, status: 'all', assigneeId: 'all', type: 'all' },
+  } });
+  expect(viewResponse.status(), await viewResponse.text()).toBe(201);
+  let view = await viewResponse.json() as SavedView;
+
+  try {
+    const attrs = { projectId, savedViewId: view.id, label: view.name };
+    const saved = await f.requests.patch(`/api/documents/${f.source.id}`, { data: {
+      expectedVersion: f.source.version, contentSchemaVersion: 4,
+      content: doc({ type: 'issueList', attrs }, { type: 'issueSummary', attrs: { ...attrs, groupBy: 'status' } }),
+    } });
+    expect(saved.status(), await saved.text()).toBe(200);
+    const savedDocument = await saved.json() as DocPage;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await open(page, f);
+    const list = page.getByRole('region', { name: '업무 목록', exact: true });
+    const summary = page.getByRole('region', { name: '업무 현황', exact: true });
+    await summary.getByRole('button', { name: '할 일 3개', exact: true }).click();
+
+    async function expectOrder(ordered: Issue[]) {
+      await expect(list.getByRole('button', { name: /^목록 업무 열기/ }).locator('strong')).toHaveText(ordered.map(issue => issue.title));
+      await expect(summary.getByRole('button', { name: /^현황 업무 열기/ }).locator('strong')).toHaveText(ordered.map(issue => issue.title));
+    }
+    await expectOrder([earlier, later, noDate]);
+
+    const changed = await f.requests.patch(`/api/views/${view.id}`, { data: {
+      expectedVersion: view.version, sort: [{ field: 'dueDate', direction: 'desc' }],
+    } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    view = await changed.json() as SavedView;
+    await page.getByRole('button', { name: '참조 새로고침', exact: true }).click();
+    await expectOrder([later, earlier, noDate]);
+    expect((await currentDoc(f)).version).toBe(savedDocument.version);
+  } finally {
+    await f.requests.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+  }
+});
+
 test('360px 회의록에서 공유 보기 업무 현황을 바꾸고 묶음별 티켓을 연다', async ({ page, blocks: f }) => {
   const projectId = f.source.projectId!;
   const assignee = f.workspace.users[1];

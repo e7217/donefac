@@ -285,7 +285,25 @@ test('JQL sort descriptors are parsed separately from the saved view filters', (
   assert.deepEqual(translated.orderBy, [
     { field: 'Rank', direction: 'asc' }, { field: 'Epic Link', direction: 'desc' }, { field: 'cf[10001]' }, { field: 'updated' },
   ]);
+  assert.equal(translated.requiresProjectOrderAcceptance, true);
+  assert.equal(translated.sort, undefined);
   assert.deepEqual(translateJiraViewQuery('ORDER BY updated', context).orderBy, [{ field: 'updated' }]);
+});
+
+test('only complete explicit Jira date order maps to a saved sort', () => {
+  const dated = translateJiraViewQuery('ORDER BY "dueDate" ASC, updatedDate dEsC, created asc', context);
+  assert.deepEqual(dated.sort, [
+    { field: 'dueDate', direction: 'asc' }, { field: 'updatedAt', direction: 'desc' }, { field: 'createdAt', direction: 'asc' },
+  ]);
+  assert.equal(dated.requiresProjectOrderAcceptance, undefined);
+  for (const order of ['Rank ASC', 'Rank DESC', 'priority DESC', 'due', 'due ASC, rank ASC', 'due ASC, duedate DESC', 'created DESC, updated']) {
+    const fallback = translateJiraViewQuery(`ORDER BY ${order}`, context);
+    assert.equal(fallback.sort, undefined, order);
+    assert.equal(fallback.requiresProjectOrderAcceptance, true, order);
+  }
+  const unsorted = translateJiraViewQuery('project = TEAM', context);
+  assert.equal(unsorted.sort, undefined);
+  assert.equal(unsorted.requiresProjectOrderAcceptance, undefined);
 });
 
 test('unsupported, contradictory and ambiguous JQL cannot silently become a broader saved view', () => {

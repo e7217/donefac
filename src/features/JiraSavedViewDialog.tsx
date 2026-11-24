@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { ISSUE_VIEW_SORT_LABELS } from '../../shared/issue-view';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type FeatureProps, type JiraSavedViewPreview, type Project, type SavedView, type SavedViewState } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -18,8 +19,8 @@ type Operation = 'preview' | 'save' | 'verify';
 const REQUEST_TIMEOUT = 25_000;
 const nameKey = (name: string) => name.replace(/[A-Z]/g, letter => letter.toLowerCase());
 
-function filterSignature(filters: SavedViewState['filters']) {
-  return JSON.stringify(filters, (_key, value: unknown) => {
+function viewSignature({ filters, sort }: Pick<SavedViewState, 'filters' | 'sort'>) {
+  return JSON.stringify({ filters, sort }, (_key, value: unknown) => {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
     return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)));
   });
@@ -48,7 +49,8 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
   const locked = Boolean(pending || uncertain);
   const queryTooLong = query.length > JIRA_SAVED_VIEW_QUERY_LIMIT;
   const canPreview = Boolean(query.trim()) && !queryTooLong && !locked;
-  const canSave = Boolean(review && name.trim() && (!review.orderBy.length || acceptProjectOrder));
+  const requiresProjectOrder = review?.requiresProjectOrderAcceptance === true;
+  const canSave = Boolean(review && name.trim() && (!requiresProjectOrder || acceptProjectOrder));
   const criteria = review?.criteria.filter(({ field }) => field !== 'project') ?? [];
 
   useEffect(() => {
@@ -197,7 +199,7 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
     if (signal.aborted) return;
     const named = views.find(view => nameKey(view.name) === nameKey(name.trim()));
     if (named && named.name === name.trim() && named.projectId === project.id && named.authorId === actorId &&
-        named.layout === layout && !named.boardGrouping && filterSignature(named.filters) === filterSignature(reviewed.filters)) {
+        named.layout === layout && !named.boardGrouping && viewSignature(named) === viewSignature(reviewed)) {
       complete(named);
       return;
     }
@@ -243,9 +245,15 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
           {review.total > review.issues.length && <p>처음 {review.issues.length.toLocaleString('ko-KR')}개 업무를 표시합니다.</p>}
           {review.orderBy.length > 0 && <div className="jira-saved-view-sort">
             <p><code>ORDER BY {review.orderBy.map(({ field, direction }) => [field, direction?.toUpperCase()].filter(Boolean).join(' ')).join(', ')}</code></p>
-            <p>공유 보기에서는 대상 프로젝트에 저장된 업무 순서를 사용합니다.</p>
-            <label><input type="checkbox" checked={acceptProjectOrder} disabled={locked}
-              onChange={event => setAcceptProjectOrder(event.currentTarget.checked)} />프로젝트 정렬 사용</label>
+            {review.sort?.length ? <>
+              <p>저장할 정렬 · {review.sort.map(({ field, direction }) => `${ISSUE_VIEW_SORT_LABELS[field]} ${direction === 'asc' ? '오름차순' : '내림차순'}`).join(', ')}</p>
+              <p>현재 Teamspace 업무 값으로 정렬합니다. {review.sort.some(({ field }) => field === 'dueDate') && '목표 마감일이 비어 있으면 뒤에 표시합니다.'}</p>
+            </> : null}
+            {requiresProjectOrder && <>
+              <p>공유 보기에서는 대상 프로젝트에 저장된 업무 순서를 사용합니다.</p>
+              <label><input type="checkbox" checked={acceptProjectOrder} disabled={locked}
+                onChange={event => setAcceptProjectOrder(event.currentTarget.checked)} />프로젝트 정렬 사용</label>
+            </>}
           </div>}
         </section>}
         <div className="jira-saved-view-details">

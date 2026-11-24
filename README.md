@@ -155,6 +155,10 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 프로젝트의 **업무 → 여러 상태 선택**에서 예를 들어 **진행 중**과 **검토 중**을 고르면 둘 중 하나에 해당하는 업무가 표시됩니다. **현재 보기 저장**을 누르면 목록·보드·간트·문서의 업무 목록과 보고서에서 같은 조건을 쓸 수 있습니다. 단일 상태나 **모든 상태**로 돌아가려면 **상태 필터**에서 선택합니다.
 
+## 공유 보기 정렬
+
+프로젝트의 **업무 정렬**에서 예를 들어 **목표 마감일 오름차순**, **우선순위 내림차순**을 설정한 뒤 **현재 보기 저장**을 선택합니다. 목록, 보드의 각 그룹, 같은 보기로 연 간트와 문서 업무 목록이 지정한 순서로 표시됩니다. 날짜가 비어 있는 업무는 뒤에 표시됩니다. [공유 보기 정렬](docs/API.md#공유-보기의-정렬)
+
 ## Jira 필터를 공유 보기로 옮기기
 
 옮겨온 프로젝트의 **업무 → Jira 필터 옮기기**에서 Jira의 고급 검색식을 붙여넣고 **조건 미리보기**를 누릅니다. Teamspace 프로젝트와 현재 상태·유형·팀원·우선순위·라벨 조건, 일치하는 업무를 확인하고 목록 또는 보드 보기로 저장합니다. 저장한 보기는 간트, 문서의 업무 목록과 프로젝트 보고서에서도 열 수 있습니다.
@@ -167,7 +171,7 @@ Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워�
 
 `due >= "2026-11-01" AND due < "2026-12-01"`은 목표 마감일이 11월 안에 있는 업무를 고릅니다. 저장하면 목록·보드·간트와 문서 업무 목록에서 같은 조회 조건을 사용합니다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
-예를 들어 `project = OLD AND status = "Open" AND labels NOT IN ("hold") ORDER BY Rank ASC`를 검토할 수 있습니다. 이관 기록으로 `OLD`의 소속을 확인하고 라벨이 있는 업무에서 `hold`를 제외합니다. `ORDER BY`가 있으면 **프로젝트 정렬 사용**을 선택해 현재 Teamspace 업무 순서를 적용합니다. 지원되는 조건과 요청 형식은 API 사용법에 정리했습니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
+`ORDER BY due ASC, updated DESC`를 추가하면 목표 마감일과 수정일 정렬을 검토하고 공유 보기에 저장할 수 있습니다. 원본이 `Rank ASC`나 지원 범위 밖의 정렬을 지정한 경우 **프로젝트 정렬 사용**을 확인해 현재 Teamspace 업무 순서로 저장합니다. [Jira 필터 변환](docs/API.md#jira-필터를-공유-보기로-옮기기) · [Atlassian JQL 필드 안내](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html)
 
 ### Confluence 문서의 Jira 목록 복원
 

@@ -21,11 +21,12 @@ import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-ref
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
-import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter } from '../../shared/issue-view';
+import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter, orderIssueView } from '../../shared/issue-view';
 import { planningFields } from '../../shared/planning-helpers';
 import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { issueStatusFilterLabel } from './IssueStatusFilter';
+import { issueViewSortLabels } from './IssueViewSort';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
@@ -778,6 +779,8 @@ function ProjectGantt(props: GanttProps) {
   }, [data, ganttViewId, projectId]);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
   const sharedFilters = sharedView?.filters;
+  const sharedSortLabels = issueViewSortLabels(sharedView?.sort);
+  const sharedIssueOrder = sharedView && data.issueOrders?.find(order => order.projectId === projectId);
   const sharedStatusLabel = sharedFilters ? issueStatusFilterLabel(sharedFilters, projectStatuses(data, projectId)) : undefined;
   const sharedGitlabFilter = sharedFilters?.gitlab;
   const sharedReporterLabel = sharedFilters?.reporter ? issueReporterFilterLabel(sharedFilters.reporter, data.users) : undefined;
@@ -807,7 +810,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function sharedViewRows(rows: Issue[]) {
     if (sharedViewUnavailable) return [];
-    return matchSharedView ? rows.filter(matchSharedView) : rows;
+    return matchSharedView ? orderIssueView(rows.filter(matchSharedView), sharedIssueOrder, sharedView?.sort) : rows;
   }
   function chartRows(text: string, hideTerminal: boolean, scope?: PlanningItem, candidates = scopedIssues, scheduleFilters?: TeamGanttScheduleFilters) {
     const rows = sharedViewRows(locallyVisibleIssues(text, hideTerminal, scope, candidates, scheduleFilters));
@@ -1073,6 +1076,7 @@ function ProjectGantt(props: GanttProps) {
     } else if (sharedView) {
       const { query: savedQuery, type, assigneeId, fieldFilter } = sharedView.filters;
       filters.push(`공유 보기 · ${sharedView.name}`);
+      if (sharedSortLabels.length) filters.push(`업무 정렬 · ${sharedSortLabels.join(' → ')}`);
       if (savedQuery) filters.push(`공유 보기 검색 · ${savedQuery}`);
       if (sharedStatusLabel) filters.push(sharedStatusLabel);
       if (type !== 'all') {
@@ -1998,6 +2002,9 @@ function ProjectGantt(props: GanttProps) {
       {sharedView && onOpenSavedIssueView && <button type="button" className="btn btn-ghost" disabled={busy}
         onClick={() => onOpenSavedIssueView(sharedView.id)}>업무 보기에서 열기 <ArrowRight size={14} aria-hidden="true" /></button>}
       {sharedView && <span role="status" aria-label="간트에 표시된 업무">{projectIssues.length}개 중 {issues.length}개 업무</span>}
+      {sharedSortLabels.length > 0 && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 업무 정렬">
+        {sharedSortLabels.map(label => <li key={label}>{label}</li>)}
+      </ul>}
       {sharedStatusLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 상태 조건">
         <li>{sharedStatusLabel}</li>
       </ul>}

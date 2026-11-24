@@ -4,8 +4,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../../server/app.js';
+import { orderIssueView } from '../../shared/issue-view.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { GitlabLink, PlanningItem, PlanningKind, Priority, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
+import type { GitlabLink, Issue, IssueViewSortRule, PlanningItem, PlanningKind, Priority, SavedView, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture(directory?: string) {
   const dir = directory || mkdtempSync(join(tmpdir(), 'teamspace-views-'));
@@ -62,6 +63,62 @@ test('saved view validation rejects invalid filters and duplicate project names 
     assert.equal((await f.request('/views','POST',{...definition,projectId:'missing'})).status,404);
     assert.equal((await f.request('/views?projectId=project-neo')).data.length,1);
   }finally{await f.close();rmSync(f.dir,{recursive:true,force:true});}
+});
+
+test('saved views keep field priority, use rank for ties and restore native sort rules without affecting project ranks', async () => {
+  const f = await fixture();
+  try {
+    const sort: IssueViewSortRule[] = [{ field: 'dueDate', direction: 'desc' }, { field: 'priority', direction: 'desc' }];
+    const native = await f.request('/views', 'POST', definition);
+    assert.equal(native.status, 201);
+    assert.equal(Object.hasOwn(native.data, 'sort'), false);
+    const sorted = await f.request('/views', 'POST', { ...definition, name: '마감일과 우선순위', sort });
+    assert.equal(sorted.status, 201);
+    assert.deepEqual(sorted.data.sort, sort);
+    const path = `/views/${sorted.data.id}`;
+    const list = `/views?projectId=${definition.projectId}`;
+    const loadView = async (): Promise<SavedView> => ((await f.request(list)).data as SavedView[]).find(view => view.id === sorted.data.id)!;
+    const renamed = await f.request(path, 'PATCH', { expectedVersion: sorted.data.version, name: '마감일 먼저' });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(renamed.data.sort, sort);
+    for (const invalid of [true, { field: 'dueDate', direction: 'asc' }, [null], [{ field: 'unknown', direction: 'asc' }],
+      [{ field: 'dueDate', direction: 'ASC' }], [{ field: 'dueDate', direction: 'asc', extra: true }], [sort[0], sort[0]]]) {
+      assert.equal((await f.request(path, 'PATCH', { expectedVersion: renamed.data.version, sort: invalid })).status, 400);
+    }
+    assert.deepEqual(await loadView(), renamed.data);
+
+    const workspace = (await f.request('/workspace')).data as WorkspaceSnapshot;
+    const template = workspace.issues.find(issue => issue.projectId === definition.projectId)!;
+    const issue = (id: string, key: string, dueDate: Issue['dueDate'], priority: Priority): Issue => ({ ...template, id, key, dueDate, priority });
+    const late = issue('late', 'NEO-10', '2027-01-02', 'low');
+    const early = issue('early', 'NEO-3', '2027-01-01', 'urgent');
+    const urgentFirst = issue('urgent-first', 'NEO-22', late.dueDate, 'urgent');
+    const urgentSecond = issue('urgent-second', 'NEO-2', late.dueDate, 'urgent');
+    const undated = issue('undated', 'NEO-4', null, 'urgent');
+    const original = [urgentSecond, late, undated, early, urgentFirst];
+    const rank = { projectId: template.projectId, issueIds: ['undated', 'urgent-first', 'early'], version: '1' };
+    assert.deepEqual(orderIssueView(original, rank, sort), [urgentFirst, urgentSecond, late, early, undated]);
+    assert.deepEqual(orderIssueView(original, rank, [{ field: 'dueDate', direction: 'asc' }]), [early, urgentFirst, urgentSecond, late, undated]);
+    assert.deepEqual(orderIssueView(original, rank, [{ field: 'key', direction: 'asc' }]), [urgentSecond, early, undated, late, urgentFirst]);
+    assert.deepEqual(orderIssueView(original, rank), [undated, urgentFirst, early, urgentSecond, late]);
+    assert.equal(original[0], urgentSecond);
+
+    const { data: backup } = await f.request('/export');
+    assert.equal(backup.schemaVersion, 106);
+    assert.equal((await f.request('/import', 'POST', { data: { ...backup, schemaVersion: 105 } })).status, 400);
+    assert.deepEqual(await loadView(), renamed.data);
+    assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);
+    const restored = await loadView();
+    assert.deepEqual(restored.sort, sort);
+    assert.ok(restored.version > renamed.data.version);
+    assert.equal((await f.request(path, 'PATCH', { expectedVersion: renamed.data.version, sort: null })).status, 409);
+    const cleared = await f.request(path, 'PATCH', { expectedVersion: restored.version, sort: null });
+    assert.equal(cleared.status, 200);
+    assert.equal(Object.hasOwn(cleared.data, 'sort'), false);
+    const after = (await f.request('/workspace')).data as WorkspaceSnapshot;
+    const ranks = (snapshot: WorkspaceSnapshot) => snapshot.issueOrders?.map(({ projectId, issueIds }) => ({ projectId, issueIds }));
+    assert.deepEqual(ranks(after), ranks(workspace));
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
 });
 
 test('saved multi-status views keep exact conditions and restore them with native format 103', async () => {

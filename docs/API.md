@@ -580,7 +580,15 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 `priority`는 `=`와 `IN`을 지원하며 `AND`의 교집합을 원본 값에서 먼저 계산한다. 이관 기록으로 한 Jira 프로젝트를 확인하면 같은 패키지의 옵션과 업무에 남은 ID·이름을 대조한다. CSV에 이름만 있으면 확인한 같은 이름의 범위를 사용할 수 있다. 숫자 ID는 해당 ID가 확인된 원본 값을 선택한다. 원본 이름이 여러 ID를 가리키거나 최종 조건이 같은 Teamspace 우선순위에 대응하는 원본 값 일부만 선택하면 변환 오류로 표시한다. 이관한 업무의 현재 값이 확인된 원본 매핑에서 어긋나거나 확인할 근거가 없는 업무가 선택한 우선순위에 있으면 저장을 보류한다. Jira 이관 연결이 없는 프로젝트에서는 Teamspace의 우선순위 코드와 한글 이름을 사용한다. 저장한 `filters.priorities`는 이후 새 티켓도 현재 값으로 조회한다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
-미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. 원본에 `ORDER BY`가 있으면 `acceptProjectOrder:true`를 보내 Teamspace의 프로젝트 순서를 사용한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 기존 공유 보기와 같은 형식으로 저장하고 원래 JQL은 보기 데이터에 포함하지 않는다.
+미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `due`·`dueDate`, `created`·`createdDate`, `updated`·`updatedDate`에 `ASC` 또는 `DESC`를 명시하고 정렬 필드가 서로 다르면 같은 순서의 `sort`를 반환한다. Teamspace의 현재 날짜를 사용하고 비어 있는 날짜는 뒤에 표시한다. `Rank`, `priority`, 방향이 생략된 기준이나 지원하지 않는 기준이 섞인 정렬은 `requiresProjectOrderAcceptance: true`를 반환한다. [Atlassian JQL 정렬](https://support.atlassian.com/jira-software-cloud/docs/jql-keywords/) · [Atlassian Jira 우선순위 순서](https://confluence.atlassian.com/adminjiraserver/associating-priorities-with-projects-939514001.html)
+
+`POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. `requiresProjectOrderAcceptance`가 있으면 `acceptProjectOrder:true`로 프로젝트 순서 적용을 확인한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 일반 공유 보기와 같은 형식으로 `filters`와 적용할 `sort`를 저장한다.
+
+## 공유 보기의 정렬
+
+`POST /api/views`와 `PATCH /api/views/:id`의 `sort`에 `{field,direction}` 배열을 우선순위 순으로 보낸다. `field`는 `dueDate`, `priority`, `startDate`, `endDate`, `createdAt`, `updatedAt`, `key`, `title` 중 하나이며 같은 필드를 두 번 지정할 수 없다. `direction`은 `asc` 또는 `desc`다. 날짜가 비어 있는 업무는 두 방향 모두 뒤에 배치한다. 우선순위는 `asc`일 때 낮음부터 긴급까지 정렬한다. 모든 정렬 값이 같으면 프로젝트 순서를 사용한다.
+
+수정할 때 `sort`를 생략하면 저장값을 유지하고 `null` 또는 `[]`를 보내면 프로젝트 순서를 사용한다. 정렬 기준을 포함한 자체 백업은 형식 106을 사용한다. 목록, 보드의 각 그룹, 간트, 문서의 실시간 업무 목록과 업무 현황에서 이 순서를 사용한다.
 
 ## 공유 보기의 여러 상태
 

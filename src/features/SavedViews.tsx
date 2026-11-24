@@ -10,6 +10,7 @@ import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { issueReporterFilterLabel } from './IssueReporterSelect';
 import { issueStatusFilterLabel } from './IssueStatusFilter';
+import { issueViewSortLabels } from './IssueViewSort';
 import { JiraSavedViewDialog } from './JiraSavedViewDialog';
 import './saved-views.css';
 
@@ -33,10 +34,11 @@ type Props = {
 };
 type ViewEditor = { mode: 'create'; state: SavedViewState } | { mode: 'update'; state: SavedViewState; target: SavedView };
 
-function viewState({ layout, boardGrouping, filters }: SavedViewState): SavedViewState {
+function viewState({ layout, boardGrouping, filters, sort }: SavedViewState): SavedViewState {
   const { status, statusIds, ...otherFilters } = filters;
   const statusCriteria = issueViewStatusCriteria(issueViewStatusIds({ status, statusIds }));
-  return { layout, ...(layout === 'board' && boardGrouping ? { boardGrouping } : {}), filters: { ...otherFilters, ...statusCriteria } };
+  return { layout, ...(layout === 'board' && boardGrouping ? { boardGrouping } : {}),
+    ...(sort?.length ? { sort } : {}), filters: { ...otherFilters, ...statusCriteria } };
 }
 
 export function SavedViews(props: Props) {
@@ -199,7 +201,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
     try {
       const value = editing.mode === 'update'
         ? await patch<SavedView>(`/views/${encodeURIComponent(editing.target.id)}`, {
-          name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, filters: {
+          name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, sort: editing.state.sort ?? null, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
             priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
             reporter: editing.state.filters.reporter ?? null, statusIds: editing.state.filters.statusIds ?? [],
@@ -300,7 +302,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       <span className="saved-view-indicator">{changed ? '조건이 변경됨' : <><Check size={12}/> 저장된 조건</>}</span>
       {changed && <button className="btn btn-ghost" type="button" disabled={busy} onClick={reapplySelected}>저장된 조건 다시 적용</button>}
       {onOpenGantt && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenGantt)}
-        title="선택한 보기의 저장된 조건을 적용합니다."><SquareChartGantt size={14} aria-hidden="true" /> 간트에서 열기</button>}
+        title="선택한 보기의 저장된 조건과 정렬을 적용합니다."><SquareChartGantt size={14} aria-hidden="true" /> 간트에서 열기</button>}
       {onOpenFieldBreakdown && <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void openSavedView(onOpenFieldBreakdown)}
         title="선택한 보기의 저장된 조건으로 집계 범위를 지정합니다."><BarChart3 size={14} aria-hidden="true" /> 필드 집계에서 열기</button>}
       <button className="btn btn-ghost" type="button" disabled={busy} onClick={() => void copyViewLink(selected)}
@@ -322,13 +324,14 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       onClose={() => setJiraOpen(false)} onSaved={view => { void acceptJiraView(view); }} />}
     {editing && editorState && <div className="modal-backdrop"><form className="modal-card saved-view-dialog" role="dialog" aria-modal="true" aria-labelledby="saved-view-title" onSubmit={save}>
       <div className="card-heading"><h2 id="saved-view-title">{editing.mode === 'create' ? '업무 보기 저장' : '저장된 보기 수정'}</h2><button type="button" className="icon-btn" disabled={busy} onClick={() => setEditing(null)} aria-label="보기 저장 닫기"><X size={18}/></button></div>
-      <p className="muted">적용된 검색어와 필터를 {editorState.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>
+      <p className="muted">적용된 검색어, 필터, 정렬을 {editorState.layout === 'board' ? '보드' : '목록'} 보기로 저장해 프로젝트에서 공유합니다.</p>
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
       <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{issueStatusFilterLabel(editorState.filters, statuses) ?? '모든 상태'}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
         {editorState.filters.reporter && <span>{issueReporterFilterLabel(editorState.filters.reporter, users)}</span>}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
         {issuePriorityLabelFilterLabels(editorState.filters).map(label => <span key={label}>{label}</span>)}
+        {editorState.sort?.length ? <span>정렬 · {issueViewSortLabels(editorState.sort).join(' → ')}</span> : null}
       </div>
       {dialogError && <p className="error-text" role="alert">{dialogError}</p>}
       {conflicted && <button type="button" className="btn" disabled={busy} onClick={() => void reloadConflicted()}>최신 보기 불러오기</button>}

@@ -1,4 +1,4 @@
-import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
+import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type IssueViewSortField, type IssueViewSortRule, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
@@ -24,6 +24,38 @@ export class IssueViewReporterFilterError extends Error {
 
 export class IssueViewStatusFilterError extends Error {
   readonly status = 400;
+}
+
+export const ISSUE_VIEW_SORT_LABELS = {
+  dueDate: '목표 마감일', priority: '우선순위', startDate: '시작일', endDate: '종료일',
+  createdAt: '등록일', updatedAt: '수정일', key: '업무 키', title: '제목',
+} satisfies Record<IssueViewSortField, string>;
+export const ISSUE_VIEW_SORT_FIELDS = Object.keys(ISSUE_VIEW_SORT_LABELS) as IssueViewSortField[];
+export const ISSUE_VIEW_SORT_LIMIT = ISSUE_VIEW_SORT_FIELDS.length;
+
+export class IssueViewSortError extends Error {
+  readonly status = 400;
+}
+
+export function parseIssueViewSort(value: unknown): IssueViewSortRule[] | undefined {
+  if (value == null) return undefined;
+  if (!Array.isArray(value) || value.length > ISSUE_VIEW_SORT_LIMIT) {
+    throw new IssueViewSortError(`정렬 기준은 최대 ${ISSUE_VIEW_SORT_LIMIT}개까지 지정할 수 있습니다.`);
+  }
+  const rules: IssueViewSortRule[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || Object.keys(entry).length !== 2) {
+      throw new IssueViewSortError('정렬 기준과 방향을 확인해 주세요.');
+    }
+    const { field, direction } = entry as Record<string, unknown>;
+    if (typeof field !== 'string' || !Object.hasOwn(ISSUE_VIEW_SORT_LABELS, field) || (direction !== 'asc' && direction !== 'desc')) {
+      throw new IssueViewSortError('정렬 기준과 방향을 확인해 주세요.');
+    }
+    const key = field as IssueViewSortField;
+    if (rules.some(rule => rule.field === key)) throw new IssueViewSortError('같은 정렬 기준을 두 번 지정할 수 없습니다.');
+    rules.push({ field: key, direction });
+  }
+  return rules.length ? rules : undefined;
 }
 
 export const ISSUE_VIEW_STATUS_LIMIT = 40;
@@ -293,4 +325,35 @@ export function orderProjectIssues(issues: Issue[], order: ProjectIssueOrder | u
   }
   for (const issue of remaining.values()) ranked.push(issue);
   return ranked;
+}
+
+const prioritySortValue = { low: 0, medium: 1, high: 2, urgent: 3 } satisfies Record<Priority, number>;
+const issueSortCollator = new Intl.Collator('ko', { numeric: true, sensitivity: 'base' });
+
+function issueSortValue(issue: Issue, field: IssueViewSortField): string | number | null {
+  if (field === 'priority') return prioritySortValue[issue.priority] ?? null;
+  if (field === 'createdAt' || field === 'updatedAt') {
+    const timestamp = Date.parse(issue[field]);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  return issue[field] || null;
+}
+
+export function orderIssueView(issues: Issue[], order: ProjectIssueOrder | undefined, sort?: readonly IssueViewSortRule[]): Issue[] {
+  const ranked = orderProjectIssues(issues, order);
+  if (!sort?.length || ranked.length < 2) return ranked;
+  const rows = ranked.map(issue => ({ issue, values: sort.map(({ field }) => issueSortValue(issue, field)) }));
+  // Stable sort retains project rank for ties. Empty values always follow populated values.
+  return rows.sort((a, b) => {
+    for (const [index, { direction }] of sort.entries()) {
+      const left = a.values[index], right = b.values[index];
+      if (left === right) continue;
+      if (left === null) return 1;
+      if (right === null) return -1;
+      const comparison = typeof left === 'number' && typeof right === 'number'
+        ? left - right : issueSortCollator.compare(String(left), String(right));
+      if (comparison) return direction === 'asc' ? comparison : -comparison;
+    }
+    return 0;
+  }).map(({ issue }) => issue);
 }

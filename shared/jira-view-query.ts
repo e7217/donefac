@@ -3,7 +3,7 @@ import {
   ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
   issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
 } from './issue-view.js';
-import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueTypeDefinition, type IssueViewLabelFilter, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
+import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
 
 export interface JiraViewQueryContext {
   project: Pick<Project, 'id' | 'key' | 'name'>;
@@ -22,7 +22,7 @@ export class JiraViewQueryError extends Error {
   }
 }
 
-type Translation = Pick<JiraSavedViewPreview, 'filters' | 'criteria' | 'orderBy'>;
+type Translation = Pick<JiraSavedViewPreview, 'filters' | 'criteria' | 'orderBy' | 'sort' | 'requiresProjectOrderAcceptance'>;
 export type JiraViewAliasField = 'status' | 'type' | 'assignee' | 'reporter' | 'priority';
 export type JiraViewSourceAlias = {
   kind: 'mapped';
@@ -289,6 +289,21 @@ class QueryParser {
     } while (this.consume(','));
     return orderBy;
   }
+}
+
+function translateOrderBy(orderBy: Translation['orderBy']): Pick<Translation, 'sort' | 'requiresProjectOrderAcceptance'> {
+  if (!orderBy.length) return {};
+  const sort: IssueViewSortRule[] = [];
+  for (const { field, direction } of orderBy) {
+    const name = field.toLowerCase();
+    const target = name === 'due' || name === 'duedate' ? 'dueDate'
+      : name === 'created' || name === 'createddate' ? 'createdAt'
+        : name === 'updated' || name === 'updateddate' ? 'updatedAt' : undefined;
+    // Jira has field-specific defaults and an administrator-defined priority order. Original ranks are also unavailable.
+    if (!direction || !target || sort.some(rule => rule.field === target)) return { requiresProjectOrderAcceptance: true };
+    sort.push({ field: target, direction });
+  }
+  return { sort };
 }
 
 function sameIdentifier(candidate: string, value: string): boolean {
@@ -560,5 +575,5 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),
   ];
-  return { filters, criteria, orderBy };
+  return { filters, criteria, orderBy, ...translateOrderBy(orderBy) };
 }

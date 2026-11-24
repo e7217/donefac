@@ -98,7 +98,7 @@ const test = base.extend<{ migratedJiraList: Fixture }>({
     const jiraKey = `JR${suffix}`, wikiKey = `WK${suffix}`;
     const login = `legacy_owner_${suffix}`;
     const title = `이관한 배포 문서 ${suffix}`;
-    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND priority = High AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY Rank ASC`;
+    const jql = `project = ${jiraKey} AND status = Open AND assignee = ${login} AND priority = High AND due >= "2026-11-25" AND due < "2026-11-27" ORDER BY due DESC`;
     const { users: [assignee, secondActor] } = await workspace(request);
     expect(assignee).toBeDefined();
     expect(secondActor).toBeDefined();
@@ -154,11 +154,12 @@ async function openReview(page: Page, editor: Locator, fixture: Fixture) {
   await review.getByRole('button', { name: '조건 미리보기', exact: true }).click();
   const preview = await read<JiraSavedViewPreview>(await pending);
   expect(preview.issues.map(issue => issue.id)).toEqual([fixture.matched.id]);
+  expect(preview.sort).toEqual([{ field: 'dueDate', direction: 'desc' }]);
   expect(preview.filters).toMatchObject({ status: fixture.matched.status, assigneeId: fixture.assignee.id, priorities: ['high'],
     planning: { dates: { mode: 'due', from: '2026-11-25', to: '2026-11-26' } } });
   await expect(review.getByText('우선순위 · 높음', { exact: true })).toBeVisible();
   await review.getByLabel('보기 이름', { exact: true }).fill(`이관한 업무 표 ${fixture.suffix}`);
-  await review.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true }).check();
+  await expect(review.getByRole('checkbox', { name: '프로젝트 정렬 사용', exact: true })).toHaveCount(0);
   return review;
 }
 
@@ -207,6 +208,7 @@ test('360px에서 보관한 Confluence Jira 목록을 복원하고 초안과 원
   await expect(chooser).toHaveCount(0);
   const storedView = result.view;
   if (!storedView) throw new Error('The server did not keep the saved Jira view.');
+  expect(storedView.sort).toEqual([{ field: 'dueDate', direction: 'desc' }]);
   expect((await nativeViewList(request, f.jiraProjectId)).map(view => view.id)).toEqual([storedView.id]);
   const list = editor.getByRole('region', { name: '업무 목록', exact: true });
   const ticket = list.getByRole('button', { name: `목록 업무 열기 ${f.matched.key} ${f.matched.title}`, exact: true });
@@ -246,6 +248,9 @@ test('360px에서 보관한 Confluence Jira 목록을 복원하고 초안과 원
   }));
   await refreshButton.click();
   await expect(list).toContainText(f.unmatched.title);
+  await expect(list.getByRole('button', { name: /^목록 업무 열기 / })).toHaveText([
+    new RegExp(f.unmatched.title), new RegExp(f.matched.title),
+  ]);
   expect((await currentDoc(request, f.original.id))?.version).toBe(savedDoc?.version);
   await page.reload();
   await expect(list).toContainText(f.matched.title);

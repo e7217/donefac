@@ -12,7 +12,7 @@ import {
   isIssueSummaryGroupBy, type DocumentIssueList as IssueListAttrs, type IssueSummaryGroupBy,
 } from '../../shared/document-nodes';
 import { projectIssueSchema } from '../../shared/issue-schema';
-import { createIssueViewMatcher, orderProjectIssues } from '../../shared/issue-view';
+import { createIssueViewMatcher, orderIssueView } from '../../shared/issue-view';
 import type { FeatureProps, SavedView, WorkspaceSnapshot } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { JiraSavedViewDialog } from './JiraSavedViewDialog';
@@ -50,6 +50,13 @@ export function keepDocumentSelection(event: MouseEvent<HTMLButtonElement>) {
   event.stopPropagation();
 }
 
+export function matchingDocumentIssues(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined) {
+  const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, projectId)) : null;
+  const matching = data.issues.filter(issue => issue.projectId === projectId && (!match || match(issue)));
+  const projectOrder = data.issueOrders?.find(candidate => candidate.projectId === projectId);
+  return orderIssueView(matching, projectOrder, savedView?.sort);
+}
+
 export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_LIST_LIMIT, onEdit, onDelete }: {
   data: WorkspaceSnapshot;
   attrs: IssueListAttrs;
@@ -65,10 +72,8 @@ export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_L
   const listId = useId();
   const { issues, count } = useMemo(() => {
     if (unavailable) return { issues: [], count: 0 };
-    const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, attrs.projectId)) : null;
-    const matching = data.issues.filter(issue => issue.projectId === attrs.projectId && (!match || match(issue)));
-    const order = data.issueOrders?.find(candidate => candidate.projectId === attrs.projectId);
-    return { issues: orderProjectIssues(matching, order).slice(0, limit), count: matching.length };
+    const matching = matchingDocumentIssues(data, attrs.projectId, savedView);
+    return { issues: matching.slice(0, limit), count: matching.length };
   }, [unavailable, savedView, data, attrs.projectId, limit]);
   const people = useMemo(() => new Map(data.users.map(person => [person.id, person.name])), [data.users]);
 

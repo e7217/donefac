@@ -2940,6 +2940,9 @@ export function createApp(options: {
       view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' &&
       'gitlab' in view.filters && view.filters.gitlab === 'manual_pipeline'
     )) fail('GitLab 수동 실행 대기 조건을 포함한 보기는 schemaVersion 104가 필요합니다.');
+    if (data.schemaVersion < 106 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && Object.hasOwn(view, 'sort')
+    )) fail('저장된 보기의 필드 정렬을 포함한 백업은 schemaVersion 106이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {

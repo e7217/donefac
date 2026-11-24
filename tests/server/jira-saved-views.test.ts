@@ -123,13 +123,15 @@ test('Jira saved-view preview follows shared filter semantics and manual rank, a
   await f.addIssue('Another project', ['release'], 'project-team');
   const orderPath = `/projects/${PROJECT_ID}/issue-order`;
   const order = await f.request<ProjectIssueOrder>(orderPath);
-  const jql = 'project = NEO AND labels = "release" ORDER BY created DESC';
+  const jql = 'project = NEO AND labels = "release" ORDER BY Rank ASC';
   const before = await f.snapshot();
   const firstReview = await f.preview(jql);
   assert.deepEqual(await f.preview(jql), firstReview);
   assert.deepEqual(firstReview.issues.map(issue => issue.id), [first.id, second.id]);
   assert.equal(firstReview.total, 2);
   assert.equal(firstReview.orderBy.length, 1);
+  assert.equal(firstReview.requiresProjectOrderAcceptance, true);
+  assert.equal(firstReview.sort, undefined);
   assert.match(firstReview.revision, /^[a-f0-9]{64}$/);
   const afterPreview = await f.snapshot();
   assert.deepEqual(afterPreview.savedViews, before.savedViews);
@@ -170,6 +172,42 @@ test('Jira saved-view preview follows shared filter semantics and manual rank, a
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
   await f.request('/import', 'POST', { data: backup });
   assert.deepEqual(await f.request(VIEWS), [view]);
+});
+
+test('explicit Jira date order previews and persists the sorted view without changing project rank', async t => {
+  const f = await fixture(t);
+  const projectId = await f.migrateJira('saved-view-date-order', [
+    { id: '20001', key: 'SOURCE', fields: { summary: 'Date missing', updated: '2026-11-27T09:00:00Z' } },
+    { id: '20001', key: 'SOURCE', fields: { summary: 'Later deadline', duedate: '2026-11-27', updated: '2026-11-26T09:00:00Z' } },
+    { id: '20001', key: 'SOURCE', fields: { summary: 'Earlier deadline, old update', duedate: '2026-11-24', updated: '2026-11-24T09:00:00Z' } },
+    { id: '20001', key: 'SOURCE', fields: { summary: 'Earlier deadline, new update', duedate: '2026-11-24', updated: '2026-11-25T09:00:00Z' } },
+  ], 'MIGSORT');
+  const snapshot = await f.snapshot();
+  const projectIssues = snapshot.issues.filter(issue => issue.projectId === projectId);
+  const [missing, late, old, recent] = ['Date missing', 'Later deadline', 'Earlier deadline, old update', 'Earlier deadline, new update']
+    .map(title => projectIssues.find(issue => issue.title === title)!);
+  const orderPath = `/projects/${projectId}/issue-order`;
+  const originalRank = await f.request<ProjectIssueOrder>(orderPath);
+  const jql = 'project = SOURCE ORDER BY dueDate ASC, updated DESC';
+  const review = await f.preview(jql, projectId);
+  assert.deepEqual(review.sort, [{ field: 'dueDate', direction: 'asc' }, { field: 'updatedAt', direction: 'desc' }]);
+  assert.equal(review.requiresProjectOrderAcceptance, undefined);
+  assert.deepEqual(review.issues.map(issue => issue.id), [recent.id, old.id, late.id, missing.id]);
+  const fallback = await f.preview('project = SOURCE ORDER BY due ASC, priority DESC', projectId);
+  assert.equal(fallback.requiresProjectOrderAcceptance, true);
+  assert.equal(fallback.sort, undefined);
+  assert.deepEqual(fallback.issues.map(issue => issue.id), originalRank.issueIds);
+
+  await f.request(`/issues/${late.id}`, 'PATCH', { expectedVersion: late.version, dueDate: '2026-11-23' });
+  const input = { projectId, jql, name: 'Jira date sort', layout: 'list', acceptProjectOrder: false };
+  const stale = await f.request<{ details: unknown }>(IMPORT, 'POST', { ...input, revision: review.revision }, 409);
+  assert.deepEqual(stale.details, STALE);
+  const fresh = await f.preview(jql, projectId);
+  assert.deepEqual(fresh.issues.map(issue => issue.id), [late.id, recent.id, old.id, missing.id]);
+  const saved = await f.request<SavedView>(IMPORT, 'POST', { ...input, revision: fresh.revision }, 201);
+  assert.deepEqual(saved.sort, fresh.sort);
+  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [saved]);
+  assert.deepEqual(await f.request(orderPath), originalRank);
 });
 
 test('Jira save checks the full reviewed cohort and rejects an untranslatable or unchecked revision without writes', async t => {
