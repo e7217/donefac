@@ -288,6 +288,25 @@ function workspaceEvidence(workspace) {
       digest.update(JSON.stringify(row, canonicalKeys)).update('\n');
     }
   }
+  const scope = ({ projectId, parentId }) => JSON.stringify([projectId, parentId]);
+  const siblings = new Map();
+  for (const document of workspace.documents) {
+    const key = scope(document);
+    if (!siblings.has(key)) siblings.set(key, new Set());
+    siblings.get(key).add(document.id);
+  }
+  const orders = workspace.documentOrders;
+  const invalidOrder = '워크스페이스의 복원 검증에서 형제 문서 순서를 확인할 수 없습니다.';
+  requireEvidence(Array.isArray(orders) && orders.length === siblings.size && orders.every(isObject), invalidOrder);
+  counts.documentOrders = orders.length;
+  digest.update(JSON.stringify(['documentOrders', orders.length])).update('\n');
+  for (const order of orders.slice().sort((a, b) => scope(a).localeCompare(scope(b)))) {
+    const key = scope(order), expected = siblings.get(key);
+    requireEvidence(expected && Array.isArray(order.documentIds) && order.documentIds.length === expected.size &&
+      order.documentIds.every(id => expected.delete(id)), invalidOrder);
+    siblings.delete(key);
+    digest.update(JSON.stringify([key, order.documentIds])).update('\n');
+  }
   return { counts, sha256: digest.digest('hex') };
 }
 

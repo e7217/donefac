@@ -893,6 +893,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 
 자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.
 
+Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있으면 미리보기와 영수증의 `counts.confluenceOrderedSiblingGroups`에 집계한다. 일부 위치의 누락·중복이나 범위 불일치로 순서를 적용할 수 없는 그룹은 `counts.confluenceUnresolvedSiblingGroups`와 `CONFLUENCE_SIBLING_ORDER_UNRESOLVED`에 표시한다. 적용한 순서는 문서의 [형제 순서 조회](#형제-문서-순서)에서 읽는다.
+
 ### 새 Jira 프로젝트의 워크플로 지정
 
 `options.jiraWorkflowStatuses`에는 Jira 이관 업무에 관측된 상태의 `id`, `label`, `containerIds`가 들어 있다. `id`는 같은 원본 인스턴스·상태를 같은 값으로 분석하면 유지된다. `configuration.jiraWorkflows`는 정규화한 새 프로젝트 키마다 `{initialStatusId, transitions, additionalStatuses?}`를 받는다. 각 전이는 `{from, to}`의 한 방향이며, 빈 배열은 상태 변경을 제한한다. 추가 상태는 `{id, label, category}` 형식이고 `s_new_1`부터 `s_new_40`까지 중 하나를 사용한다. 한 프로젝트의 전체 상태는 40개까지다.
@@ -1081,6 +1083,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 선행 업무의 날짜도 바꾸려면 `anchorChange: {id,expectedVersion,startDate,endDate}`를 함께 보낸다. `id`와 내부 `expectedVersion`은 선택한 관계의 선행 업무에 해당한다. 날짜는 `YYYY-MM-DD` 또는 `null`을 사용한다. 입력한 날짜를 고정하고, 선행 업무로 들어오는 연결과 선행 업무부터 이어지는 모든 프로젝트 내부 연결·열린 Teamspace 차단 및 선택한 Jira 관계를 검사한다. 이 경우 선행 업무를 포함해 최대 1,000개를 계산한다. 날짜가 바뀐 선행 업무는 후행 업무와 함께 `changes`에 들어간다. 선행 업무 버전이 바뀌면 미리보기와 적용은 `409` 및 `details.reason: "stale_team_follow_up_source"`와 현재 `currentVersion`, `startDate`, `endDate`를 반환한다.
 
 미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. 배열 요청에서는 이 필드가 선택한 첫 관계를 가리키고, `relations`에 전체 선택의 `{relationId,expectedVersion,targetIssueId}`가 들어간다. `sourceSchedule`은 서버에 저장된 선행 업무의 `version`, `startDate`, `endDate`를 제공한다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 모든 선택 관계의 버전과 현재 대상, 관련 업무의 소속·버전, 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
+
+검토 범위에 들어온 업무에 방향을 확인한 추가 Jira 선행 연결이 있으면 완료 후 시작 제약으로 계산한다. 범위 밖 원인 업무는 저장한 일정으로 계산하고, 필요한 종료일이 비어 있으면 `blocking`에 표시한다. 미리보기 뒤 원인 일정이나 이관 근거가 바뀌면 적용할 때 새 미리보기를 요구한다.
 
 `POST /api/schedule/team-follow-up-apply`에 `{previewId}`를 보내면 한 트랜잭션으로 일정을 적용한다. `GET /api/schedule/team-follow-up-result/:previewId`는 같은 작업자에게 미적용 상태 또는 저장한 `{undoId,updated,warnings}`를 돌려준다. 미리보기는 30분, 적용 결과는 7일간 보관한다. `/api/schedule/undo`에 `undoId`를 보내 여러 프로젝트의 변경 날짜를 함께 복원할 수 있다. 원인 티켓에서는 `X-Teamspace-Schedule-Undo-Scope: issue:<원인 업무 ID>` 헤더로 적용과 되돌리기를 요청한다. 원인 날짜를 그대로 두고 후행만 변경해도 `GET /api/schedule/undo/latest?scope=issue&id=…`로 같은 티켓의 마지막 변경을 찾을 수 있다.
 

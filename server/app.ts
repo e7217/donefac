@@ -1020,6 +1020,9 @@ export function createApp(options: {
         checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalPlans, hierarchy: issueHierarchy,
       }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
+      if (value.documentOrders?.length) {
+        documentOrders.seedMigratedGroups(value.documentOrders, value.documents, new Set(value.projects.map(project => project.id)));
+      }
       for (const { before, after, fields } of refreshedIssues) {
         store.put('issues', after);
         reportLedger.recordImportedIssueUpdate(before, after, actor(req));

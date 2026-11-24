@@ -386,6 +386,32 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     expect(await schedule()).toEqual(beforeReview);
     expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
 
+    const localSourceResponse = await request.post('/api/issues', { data: {
+      projectId: blocker.projectId, title: `먼저 마치는 선행 업무 ${suffix}`, startDate: '2026-11-17', endDate: '2026-11-18',
+    } });
+    expect(localSourceResponse.status(), await localSourceResponse.text()).toBe(201);
+    const localSource = await localSourceResponse.json() as Issue;
+    tickets.push(localSource);
+    const localSourcePath = `/api/issues/${localSource.id}/relations`;
+    const addedIncoming = await request.post(localSourcePath, { data: { otherIssueId: blocked.id, type: 'blocks', direction: 'outgoing' } });
+    expect(addedIncoming.status(), await addedIncoming.text()).toBe(201);
+    const incoming = await addedIncoming.json() as IssueRelation;
+    await page.reload();
+    await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
+    const localPair = blockersPanel.locator(`[data-team-blocker-id="${incoming.id}"]`);
+    const incomingPreview = mutation('team-follow-up-preview');
+    await localPair.getByRole('button', { name: `${localSource.key} → ${blocked.key} 프로젝트 간 일정 검토`, exact: true }).click();
+    const inspected = await incomingPreview;
+    expect(inspected.status(), await inspected.text()).toBe(200);
+    const incomingPlan = await inspected.json() as AutomaticSchedulePreview;
+    expect(incomingPlan.teamFollowUp).toMatchObject({ relationId: incoming.id, sourceEndDate: '2026-11-18' });
+    expect(incomingPlan.changes.map(({ id, toStart, toEnd }) => [id, toStart, toEnd])).toEqual([[blocked.id, '2026-11-23', '2026-11-24']]);
+    await expect(scheduleDialog.getByRole('table', { name: '검토할 업무 일정' })).toContainText('2026-11-23');
+    await scheduleDialog.getByRole('button', { name: '돌아가기', exact: true }).click();
+    const removedIncoming = await request.delete(`${localSourcePath}/${incoming.id}?expectedVersion=${incoming.version}`);
+    expect(removedIncoming.ok(), await removedIncoming.text()).toBe(true);
+    expect(await schedule()).toEqual(beforeReview);
+
     await blockersPanel.getByRole('button', { name: '차단 관계 추가', exact: true }).click();
     const form = blockersPanel.getByRole('form', { name: '프로젝트 간 차단 관계 추가', exact: true });
     await form.getByLabel('원인 업무 검색', { exact: true }).fill(blocker.key);
@@ -394,7 +420,9 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     await form.getByRole('combobox', { name: '차단되는 업무', exact: true }).selectOption(blocked.id);
     const saveBlock = form.getByRole('button', { name: '차단 관계 저장', exact: true });
     const senderPath = `/api/issues/${blocker.id}/relations`;
-    const senderRoute = (url: URL) => url.pathname === senderPath;
+    const blockerPath = '/api/schedule/team-blockers';
+    const senderRoute = (url: URL) => url.pathname === blockerPath;
+    const beforeBlocking = await read<WorkspaceSnapshot>(request, '/api/workspace');
     let failedSave: unknown;
     const failFirstSave = async (route: Route) => {
       if (route.request().method() !== 'POST' || failedSave) return route.continue();
@@ -408,9 +436,11 @@ test('360px에서 따로 이관한 Jira 프로젝트 간 관계를 열고 후행
     } finally {
       await page.unroute(senderRoute, failFirstSave);
     }
-    expect(failedSave).toEqual({ otherIssueId: blocked.id, type: 'blocks', direction: 'outgoing' });
+    expect(failedSave).toEqual({ sourceIssueId: blocker.id, targetIssueId: blocked.id,
+      expectedSourceVersion: beforeBlocking.issues.find(issue => issue.id === blocker.id)!.version,
+      expectedTargetVersion: beforeBlocking.issues.find(issue => issue.id === blocked.id)!.version });
     expect(await read<IssueRelation[]>(request, linksPath)).toEqual([restoredLink]);
-    const savingBlock = page.waitForResponse(response => new URL(response.url()).pathname === senderPath && response.request().method() === 'POST');
+    const savingBlock = page.waitForResponse(response => new URL(response.url()).pathname === blockerPath && response.request().method() === 'POST');
     await saveBlock.click();
     const savedBlock = await savingBlock;
     expect(savedBlock.status(), await savedBlock.text()).toBe(201);

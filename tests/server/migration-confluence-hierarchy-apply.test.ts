@@ -8,6 +8,7 @@ import { test, type TestContext } from 'node:test';
 import { WebSocket } from 'ws';
 import { createApp } from '../../server/app.js';
 import { COLLABORATION_SCHEMA, type CollaborationServerMessage, type CollaborationSession } from '../../shared/collaboration.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { DocPage, DocRevision, DocumentSiblingOrder, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration,
   MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
@@ -43,17 +44,19 @@ async function workspace(t: TestContext) {
   };
   const reference = (name: string, type: string, id: number) =>
     `<property name="${name}" class="${type}"><id name="id">${id}</id></property>`;
-  async function upload(name: string, version: number, pages: readonly [id: number, parentId: number | null][]) {
+  async function upload(name: string, version: number, pages: readonly [id: number, parentId: number | null, position?: number | string][],
+    instanceKey = 'confluence-hierarchy-apply') {
     const space = '<object class="Space"><id name="id">42</id><property name="key">HIER</property><property name="name">Hierarchy source</property></object>';
-    const objects = pages.map(([id, parent]) => `<object class="Page"><id name="id">${id}</id>
+    const objects = pages.map(([id, parent, position]) => `<object class="Page"><id name="id">${id}</id>
       <property name="title">Page ${id}</property><property name="version">${version}</property>
       <property name="creationDate">2020-05-01T00:00:00Z</property>
       <property name="lastModificationDate">2020-05-0${version + 1}T00:00:00Z</property>
       ${reference('space', 'Space', 42)}${parent === null ? '<property name="parent"/>' : reference('parent', 'Page', parent)}
+      ${position === undefined ? '' : `<property name="position">${position}</property>`}
       </object><object class="BodyContent"><id name="id">${id + 1000}</id>
       <property name="body"><![CDATA[<p>Body ${id}</p>]]></property>${reference('content', 'Page', id)}</object>`).join('');
     const archive = zip([{ path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${objects}</hibernate-generic>`) }]);
-    const query = new URLSearchParams({ filename: `${name}.zip`, product: 'confluence', instanceKey: 'confluence-hierarchy-apply' });
+    const query = new URLSearchParams({ filename: `${name}.zip`, product: 'confluence', instanceKey });
     const response = await fetch(`${base}/legacy-import/packages?${query}`, { method: 'POST', body: new Uint8Array(archive),
       headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' } });
     const data = await response.text();
@@ -79,6 +82,129 @@ async function workspace(t: TestContext) {
   }
   return { db, request, upload, preview, apply, docs, connect };
 }
+
+function importedPage(documents: readonly DocPage[], projectId: string, sourceId: number): DocPage {
+  const title = `Page ${sourceId}`;
+  const page = documents.find(document => document.projectId === projectId && document.title === title);
+  assert.ok(page, title);
+  return page;
+}
+
+const orderPath = (document: DocPage) => `/documents/${document.id}/sibling-order`;
+
+test('Confluence root and nested sibling positions apply atomically and survive the native backup roundtrip', async t => {
+  const f = await workspace(t);
+  const source = await f.upload('native-sibling-order', 1, [
+    [100, null, 10], [200, 100, 10], [300, 100, 0], [400, 100, 2], [500, null, 2],
+  ]);
+  const plan = await f.preview(source);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.confluenceOrderedSiblingGroups, 2);
+  assert.equal(plan.counts.confluenceUnresolvedSiblingGroups, undefined);
+  const before = await f.request<WorkspaceSnapshot>('/workspace');
+  f.db.exec(`CREATE TRIGGER fail_confluence_order_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic document order receipt failure'); END`);
+  try { await f.apply(plan, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_confluence_order_receipt'); }
+  assert.deepEqual(await f.request<WorkspaceSnapshot>('/workspace'), before);
+
+  const { import: receipt } = await f.apply(plan);
+  const [projectId] = receipt.projectIds;
+  assert.equal(receipt.counts.confluenceOrderedSiblingGroups, 2);
+  const snapshot = await f.request<WorkspaceSnapshot>('/workspace');
+  const page = (id: number) => importedPage(snapshot.documents, projectId, id);
+  const expected = [{ leader: page(100), parentId: null, ids: [page(500).id, page(100).id] },
+    { leader: page(200), parentId: page(100).id, ids: [page(300).id, page(400).id, page(200).id] }];
+  for (const { leader, parentId, ids } of expected) {
+    const order = await f.request<DocumentSiblingOrder>(orderPath(leader));
+    assert.deepEqual([order.projectId, order.parentId, order.documentIds], [projectId, parentId, ids]);
+    assert.deepEqual(snapshot.documentOrders?.find(group => group.projectId === projectId && group.parentId === parentId), order);
+  }
+  assert.equal((await f.apply(plan, 200)).duplicate, true);
+  assert.deepEqual((await f.request<WorkspaceSnapshot>('/workspace')).documentOrders, snapshot.documentOrders);
+
+  const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.deepEqual(backup.documentOrders?.filter(group => group.projectId === projectId).map(group => [group.parentId, group.documentIds]),
+    expected.map(({ parentId, ids }) => [parentId, ids]));
+  await f.request('/import', 200, 'POST', { data: backup });
+  for (const { leader, ids } of expected) {
+    assert.deepEqual((await f.request<DocumentSiblingOrder>(orderPath(leader))).documentIds, ids);
+  }
+});
+
+test('Confluence sibling groups keep their baseline when positions are missing, invalid or repeated', async t => {
+  const f = await workspace(t);
+  const source = await f.upload('ambiguous-sibling-order', 1, [
+    [100, null], [200, 100, 2], [300, 100, 2],
+    [500, null], [501, 500, 10], [502, 500],
+    [600, null], [601, 600, '1.5'], [602, 600, 1],
+    [700, null], [701, 700], [702, 700, -1],
+    [900, null], [901, 900, 10], [902, 900, 2], [903, 900, 2],
+  ]);
+  const plan = await f.preview({ ...source, excludedRecords: [`${source.packageIds[0]}/page:903`] });
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.confluenceOrderedSiblingGroups, 1);
+  assert.equal(plan.counts.confluenceUnresolvedSiblingGroups, 3);
+  const unresolved = plan.notices.filter(notice => notice.code === 'CONFLUENCE_SIBLING_ORDER_UNRESOLVED');
+  assert.ok(unresolved.length > 0);
+  assert.ok(unresolved.every(notice => notice.severity === 'warning' && !notice.requiresAcknowledgement));
+  const [projectId] = (await f.apply(plan)).import.projectIds;
+  const documents = await f.docs();
+  const page = (id: number) => importedPage(documents, projectId, id);
+  assert.ok(!documents.some(document => document.projectId === projectId && document.title === 'Page 903'));
+  for (const [leader, ...siblings] of [[200, 300], [501, 502], [601, 602], [701, 702], [902, 901]]) {
+    assert.deepEqual((await f.request<DocumentSiblingOrder>(orderPath(page(leader)))).documentIds, [leader, ...siblings].map(id => page(id).id));
+  }
+});
+
+test('Confluence roots from different source instances cannot establish one sibling order', async t => {
+  const f = await workspace(t);
+  const one = await f.upload('sibling-instance-one', 1, [[100, null, 10], [200, null, 2]], 'confluence-one');
+  const two = await f.upload('sibling-instance-two', 1, [[300, null, 9], [400, null, 1]], 'confluence-two');
+  const query = new URLSearchParams([...one.packageIds, ...two.packageIds].map(id => ['packageId', id]));
+  const { defaultConfiguration } = await f.request<MigrationOptions>(`/migrations/options?${query}`);
+  const projects = defaultConfiguration.projects.map(project => ({ ...project, key: 'SHARED', name: 'Merged Confluence spaces' }));
+  const plan = await f.preview({ ...defaultConfiguration, projects });
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.confluenceOrderedSiblingGroups, undefined);
+  assert.equal(plan.counts.confluenceUnresolvedSiblingGroups, 1);
+  const [projectId] = (await f.apply(plan)).import.projectIds;
+  const documents = (await f.docs()).filter(document => document.projectId === projectId);
+  assert.equal(documents.length, 4);
+  assert.deepEqual((await f.request<DocumentSiblingOrder>(orderPath(documents[0]))).documentIds, documents.map(document => document.id));
+});
+
+test('Confluence append preserves existing page order and seeds siblings of a newly imported parent', async t => {
+  const f = await workspace(t);
+  const source = await f.upload('sibling-order-original', 1, [[100, null, 1], [110, 100, 1], [120, 100, 2], [200, null, 2]]);
+  const first = await f.preview(source);
+  const [projectId] = (await f.apply(first)).import.projectIds;
+  const initial = await f.docs();
+  const prior = (id: number) => importedPage(initial, projectId, id);
+  async function reorder(leader: number, ...ordered: number[]) {
+    const path = orderPath(prior(leader));
+    const { version: expectedVersion } = await f.request<DocumentSiblingOrder>(path);
+    return f.request<DocumentSiblingOrder>(path, 200, 'PATCH', { expectedVersion, documentIds: ordered.map(id => prior(id).id) });
+  }
+  await reorder(100, 200, 100);
+  await reorder(110, 120, 110);
+
+  const incoming = await f.upload('sibling-order-append', 2, [
+    [100, null, 1], [110, 100, 1], [120, 100, 2], [130, 100, 0], [200, null, 2],
+    [500, null, 0], [510, 500, 9], [520, 500, 1],
+  ]);
+  const plan = await f.preview({ ...incoming, appendPagesTo: { projectId } });
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  assert.equal(plan.counts.documents, 4);
+  assert.equal(plan.counts.confluenceOrderedSiblingGroups, 1);
+  await f.apply(plan);
+  const documents = await f.docs();
+  const page = (id: number) => importedPage(documents, projectId, id);
+  for (const [leader, ...siblings] of [[200, 100, 500], [120, 110, 130], [520, 510]]) {
+    assert.deepEqual((await f.request<DocumentSiblingOrder>(orderPath(page(leader)))).documentIds, [leader, ...siblings].map(id => page(id).id));
+  }
+});
 
 async function nextCollaborationChange(socket: WebSocket) {
   for await (const [bytes] of on(socket, 'message', { signal: AbortSignal.timeout(6000) })) {
@@ -112,7 +238,6 @@ test('Confluence parent updates validate and commit the projected tree with docu
   assert.equal(a.parentId, root.id);
   assert.equal(b.parentId, a.id);
 
-  const orderPath = (document: DocPage) => `/documents/${document.id}/sibling-order`;
   const order = (document: DocPage) => f.request<DocumentSiblingOrder>(orderPath(document));
   async function reorder(document: DocPage, documentIds: string[]) {
     const { version: expectedVersion } = await order(document);

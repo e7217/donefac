@@ -47,6 +47,10 @@ const confluenceRefreshCountLabels = {
   reusedConfluenceAttachmentVersions: '재사용한 첨부 버전', skippedConfluenceAttachments: '변경을 건너뛴 첨부',
   newConfluenceComments: '기존 문서의 새 댓글', newConfluenceRevisions: '기존 문서의 새 원본 버전',
 };
+const documentOrderCountLabels = {
+  confluenceOrderedSiblingGroups: '원본 순서를 적용할 문서 그룹',
+  confluenceUnresolvedSiblingGroups: '기본 순서를 사용할 문서 그룹',
+};
 const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
   title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', reporterId: '요청자', labels: '라벨',
   startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량', parentId: '상위 업무',
@@ -55,7 +59,7 @@ function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldO
   return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
 }
 const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문', labels: '라벨', parentId: '상위 문서' };
-const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels };
+const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels, ...documentOrderCountLabels };
 const appendLabels = {
   append: {
     item: '업무', counts: ['issues', 'retainedIssues', 'retainedRecords', ...Object.keys(jiraRefreshCountLabels), ...Object.keys(jiraPlanningCountLabels)],
@@ -63,7 +67,7 @@ const appendLabels = {
     success: '새 업무를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
   'append-pages': {
-    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords', ...Object.keys(confluenceRefreshCountLabels)],
+    item: '문서', counts: ['documents', 'retainedPages', 'retainedRecords', ...Object.keys(confluenceRefreshCountLabels), ...Object.keys(documentOrderCountLabels)],
     confirm: '검토한 Confluence 문서를 기존 프로젝트에 추가할까요? 적용 결과는 이관 영수증으로 보관됩니다.',
     success: '새 문서를 기존 프로젝트에 추가했습니다. 이관 영수증에서 원본 기록을 확인하세요.',
   },
@@ -449,7 +453,8 @@ function ActorMigration(props: MigrationApplyProps) {
   const receiptMode = destinationMode(receipt?.configuration);
   const receiptProduct = refreshProduct(receipt?.configuration);
   const receiptLinkCounts = receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(sourceLinkCountLabels, key)) : [];
-  const receiptPlanningCounts = receiptMode === 'new' && receipt ? Object.entries(receipt.counts).filter(([key]) => Object.hasOwn(jiraPlanningCountLabels, key)) : [];
+  const receiptDetailCounts = receiptMode === 'new' && receipt ? Object.entries(receipt.counts).filter(([key]) =>
+    Object.hasOwn(jiraPlanningCountLabels, key) || Object.hasOwn(documentOrderCountLabels, key)) : [];
   return <section className="card migration-apply" aria-label="실제 데이터 이관">
     <header className="migration-heading"><div><h2 ref={migrationHeading} tabIndex={-1}><ArchiveRestore size={21} />실제 데이터 이관</h2><p>분석한 Jira·Confluence 패키지를 매핑하고 적용할 대상을 미리 확인합니다.</p></div><button className="btn btn-ghost" disabled={loading || Boolean(pending)} onClick={() => void load()} aria-label="이관 원본·영수증 새로고침"><RefreshCw size={16} />새로고침</button></header>
     <p className="migration-info">원본 작성자·키·시각·변경 이력은 별도 원본 기록으로 보존하고, 현재 서비스의 작성자는 지정한 사용자 또는 이관 실행자를 사용합니다.</p>
@@ -618,7 +623,7 @@ function ActorMigration(props: MigrationApplyProps) {
         <p>이관 실행자 {data.users.find(user => user.id === receipt.actorId)?.name || receipt.actorId}</p>
         <MigrationReceiptFindings key={`findings:${receipt.id}:${receipt.version}`} receipt={receipt} />
         {receiptMode !== 'new' && <MigrationCounts entries={Object.entries(receipt.counts).filter(([key]) => appendLabels[receiptMode].counts.includes(key))} mode={receiptMode} />}
-        {receiptPlanningCounts.length > 0 && <MigrationCounts entries={receiptPlanningCounts} />}
+        {receiptDetailCounts.length > 0 && <MigrationCounts entries={receiptDetailCounts} />}
         {receiptLinkCounts.length > 0 && <section className="migration-origin-summary" aria-label="이관 당시 원본 링크 집계">
           <MigrationCounts entries={receiptLinkCounts} />
           <small>이관 완료 시점의 집계입니다. 현재 링크는 업무와 문서의 기존 도구 연결에서 확인할 수 있습니다.</small>

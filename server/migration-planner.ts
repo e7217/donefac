@@ -8,7 +8,7 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { convertLegacyContent } from './migration-content.js';
-import { confluenceParentEvidence } from './migration-confluence-hierarchy.js';
+import { confluenceParentEvidence, confluencePositionEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
 import { hasConfluencePropertyMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
@@ -1447,7 +1447,7 @@ class Planner{
   }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.createSecondary();this.createConfluenceHistory();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
     const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
@@ -3118,6 +3118,53 @@ class Planner{
       }
       if (binding.type === 'issue') this.issueById.get(binding.id)!.parentId = parent.id;
       else this.documentById.get(binding.id)!.parentId = parent.id;
+    }
+  }
+  private createConfluenceDocumentOrders(): void {
+    const groups = new Map<string, DocPage[]>();
+    for (const document of this.result.documents) {
+      const key = JSON.stringify([document.projectId, document.parentId]);
+      const group = groups.get(key);
+      if (group) group.push(document);
+      else groups.set(key, [document]);
+    }
+    const existingMoveTargets = new Set((this.result.documentUpdates ?? []).map(update => update.changes.parentId));
+    const orders: NonNullable<PreparedMigration['documentOrders']> = [];
+    let unresolved = 0;
+    for (const group of groups.values()) {
+      if (group.length < 2) continue;
+      const entries = group.map(document => this.primaryById.get(document.id)!);
+      const positions = entries.map(({ row }) => confluencePositionEvidence(row));
+      if (positions.every(position => position === null)) continue;
+
+      const [{ projectId, parentId }] = group;
+      const [first] = entries;
+      const sourceSpace = first.row.containerId;
+      const sourceInstance = first.pkg.dataset.source.instanceKey;
+      const parent = parentId ? this.primaryById.get(parentId) : undefined;
+      const sourceParent = parent?.row.sourceId ?? null;
+      const sameSourceSpace = ({ pkg, row }: Entry) => pkg.dataset.source.product === 'confluence' &&
+        pkg.dataset.source.format === 'confluence-xml' && pkg.dataset.source.instanceKey === sourceInstance &&
+        row.kind === 'page' && row.metadata.sourceClass === 'Page' && row.containerId === sourceSpace;
+      const positioned = group.flatMap(({ id }, index) => typeof positions[index] === 'number' ? [{ id, position: positions[index] }] : []);
+      if (!projectId || !sourceSpace || (this.input.appendPages && !parentId) || existingMoveTargets.has(parentId) ||
+          (parentId && (!parent || !sameSourceSpace(parent))) || !this.uniqueConfluenceOrigin(parent ? [...entries, parent] : entries) ||
+          entries.some(entry => !sameSourceSpace(entry) || confluenceParentEvidence(entry.row) !== sourceParent) ||
+          new Set(entries.map(entry => entry.row.sourceId)).size !== group.length || positioned.length !== group.length ||
+          new Set(positioned.map(({ position }) => position)).size !== group.length) {
+        unresolved++;
+        continue;
+      }
+      positioned.sort((left, right) => left.position - right.position);
+      orders.push({ projectId, parentId, documentIds: positioned.map(({ id }) => id) });
+    }
+    if (orders.length) {
+      this.result.documentOrders = orders;
+      this.result.preview.counts.confluenceOrderedSiblingGroups = orders.length;
+    }
+    if (unresolved) {
+      this.result.preview.counts.confluenceUnresolvedSiblingGroups = unresolved;
+      this.notice('CONFLUENCE_SIBLING_ORDER_UNRESOLVED', `형제 문서 ${unresolved}개 그룹의 순서는 원본에 보관합니다. 원본 위치와 계층을 모두 확인할 수 없는 그룹과 기존 문서가 있는 그룹은 현재 배치 방식을 유지합니다.`);
     }
   }
   createSecondary():void{

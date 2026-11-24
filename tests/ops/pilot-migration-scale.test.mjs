@@ -72,7 +72,7 @@ function confluenceArchive() {
     const parent = number > 1 ? `<property name="parent" class="Page"><id name="id">${pageId(pageParent(number))}</id></property>` : '';
     const jiraMacro = `<ac:structured-macro ac:name="jira"><ac:parameter ac:name="key">${jiraKey}-${number * 4}</ac:parameter></ac:structured-macro>`;
     records.push(`<object class="Page"><id name="id">${id}</id><property name="title">${pageTitle(number)}</property>
-      <property name="version">1</property><property name="space" class="Space"><id name="id">20</id></property>
+      <property name="version">1</property><property name="position">${pageCount - number}</property><property name="space" class="Space"><id name="id">20</id></property>
       <property name="creationDate">${date}</property><property name="lastModificationDate">${date}</property>
       <property name="creator" class="ConfluenceUserImpl"><id name="key">fixture-wiki-user</id></property>${parent}</object>
       <object class="BodyContent"><id name="id">${id + 1_000}</id><property name="body"><![CDATA[<p>Synthetic wiki content ${number}</p>${jiraMacro}]]></property>
@@ -133,6 +133,12 @@ async function checkWorkspace(pilot) {
     assert.ok(page && issue);
     assert.equal(page.parentId, number > 1 ? pages.get(pageTitle(pageParent(number)))?.id : null);
     assert.ok(links.has(`${page.id}/${issue.id}`), `Wiki page ${number} must link to Jira issue ${number * 4}`);
+  }
+  const pageOrders = new Map(workspace.documentOrders.map(order => [order.parentId, order.documentIds]));
+  for (let parent = 1; parent <= Math.floor(pageCount / 2); parent++) {
+    const childNumbers = [parent * 2 + 1, parent * 2].filter(number => number <= pageCount);
+    const parentId = pages.get(pageTitle(parent)).id;
+    assert.deepEqual(pageOrders.get(parentId), childNumbers.map(number => pages.get(pageTitle(number)).id));
   }
   return { firstIssue: issues.get(issueTitle(jiraAttachmentInterval)).id, lastPage: pages.get(pageTitle(pageCount)).id };
 }
@@ -198,6 +204,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     }
     const preview = await json(source, '/migrations/preview', { method: 'POST', status: 201, headers, body: { configuration } });
     assert.equal(preview.canApply, true, JSON.stringify(preview.notices.slice(0, 10)));
+    assert.equal(preview.counts.confluenceOrderedSiblingGroups, Math.floor((pageCount - 1) / 2));
     for (const [key, count] of Object.entries(expected)) assert.equal(preview.counts[key], count, key);
     const applied = await json(source, `/migrations/previews/${preview.id}/apply`, { method: 'POST', status: 201, headers,
       body: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements } });
@@ -217,6 +224,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     const { workspace, checks, receipts } = observation.evidence;
     assert.equal(workspace.counts.issues, issueCount);
     assert.equal(workspace.counts.documents, pageCount);
+    assert.equal(workspace.counts.documentOrders, Math.floor(pageCount / 2) + 1);
     assert.deepEqual(Object.entries(checks).filter(([, count]) => count !== 0), [
       ['receiptsWithWarnings', 1], ['confluencePackagesWithoutFullPageCoverage', 1],
     ]);

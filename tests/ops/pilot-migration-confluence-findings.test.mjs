@@ -88,7 +88,7 @@ test('staged Confluence packages require full permission coverage even without a
       instanceKey: 'jira', sha256: 'c'.repeat(64), size: 13, errors: 0, warnings: 0, counts: { issue: 1 } },
   ];
   const workspace = Object.fromEntries(['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas',
-    'dependencies', 'resourceLinks', 'planningItems'].map(section => [section, []]));
+    'dependencies', 'resourceLinks', 'planningItems', 'documentOrders'].map(section => [section, []]));
   async function call(path) {
     if (path === '/source-imports') return [];
     assert.equal(path, '/workspace');

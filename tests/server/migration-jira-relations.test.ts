@@ -308,7 +308,7 @@ test('Jira relation-only follow-up links separately migrated projects using exac
   assert.equal(retained.counts.skippedJiraRelations, 1);
 });
 
-test('a selected proven Jira blocker schedules across project calendars without activating other imported relations', async t => {
+test('a selected Jira blocker schedules across calendars and respects other proven predecessors', async t => {
   const f = await fixture(t);
   await f.importInitial([sourceIssue('100'), sourceIssue('300')], 'ALPHA');
   await f.importInitial([sourceIssue('200', [], 'OTHER'), sourceIssue('400', [], 'OTHER')], 'BRAVO');
@@ -373,7 +373,7 @@ test('a selected proven Jira blocker schedules across project calendars without 
     relationId: relation.id, expectedVersion: relation.version, anchorChange,
   });
   const plannedDates = (proposal: AutomaticSchedulePreview) => proposal.changes.map(row => [row.id, row.toStart, row.toEnd]);
-  const expected = [[target.id, '2026-11-21', '2026-11-24'], [successor.id, '2026-11-25', '2026-11-25']];
+  const expected = [[target.id, '2026-11-30', '2026-12-01'], [successor.id, '2026-12-02', '2026-12-02']];
 
   const rowInput = (issue: Issue, startDate: string, endDate: string) => ({ projectId: issue.projectId,
     issue: { id: issue.id, expectedVersion: issue.version }, changes: { startDate, endDate }, reviewIncomingTeamBlockers: true,
@@ -418,8 +418,8 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.equal(moved.teamFollowUp?.sourceEndDate, anchorChange.endDate);
   assert.deepEqual(moved.teamFollowUp?.anchorChange, anchorChange);
   assert.deepEqual(plannedDates(moved).sort(), [
-    [source.id, source.startDate, '2026-11-24'], [target.id, '2026-11-25', '2026-11-26'],
-    [successor.id, '2026-11-27', '2026-11-27'], [later.id, '2026-11-27', '2026-11-30'],
+    [source.id, source.startDate, '2026-11-24'], [target.id, '2026-12-01', '2026-12-02'],
+    [successor.id, '2026-12-03', '2026-12-03'], [later.id, '2026-11-27', '2026-11-30'],
   ].sort());
   assert.deepEqual(await f.workspace(), before);
 
@@ -450,9 +450,42 @@ test('a selected proven Jira blocker schedules across project calendars without 
   assert.ok(final.dependencies.some(dependency => dependency.id === local.id));
   assert.deepEqual((await f.backup()).issueRelations, archivedRelations);
   assert.deepEqual((await f.call<SourceReconciliationAudit>(auditPath)).targetContent.issueRelations, sourceAudit.targetContent.issueRelations);
+
+  const staleUpstream = await preview(selected);
+  const fixedPredecessor = final.issues.find(issue => issue.id === later.id)!;
+  const updatedPredecessor = await schedule(fixedPredecessor, '2026-12-01', '2026-12-02');
+  const beforeStaleApply = await f.workspace();
+  await f.call(applyPath, 'POST', { previewId: staleUpstream.previewId }, 409);
+  assert.deepEqual(await f.workspace(), beforeStaleApply);
+  assert.deepEqual(plannedDates(await preview(selected)), [
+    [target.id, '2026-12-03', '2026-12-04'], [successor.id, '2026-12-07', '2026-12-07'],
+  ]);
+
+  const incompletePredecessor = await f.call<Issue>(`/issues/${updatedPredecessor.id}`, 'PATCH', {
+    expectedVersion: updatedPredecessor.version, endDate: null,
+  });
+  const missingFinish = await preview(selected);
+  assert.ok(missingFinish.blocking.some(message => message.includes(target.key) && message.includes(`${later.key}의 종료일`)));
+  await f.call(applyPath, 'POST', { previewId: missingFinish.previewId }, 422);
+  await schedule(incompletePredecessor, '2026-12-01', '2026-12-02');
+  const reviewedBeforeProofRemoval = await preview(selected);
+  assert.deepEqual(reviewedBeforeProofRemoval.blocking, []);
+
+  const proof = (await f.backup()).sourceRecords.find(row => row.jiraRelationId === unselected.id);
+  assert.ok(proof);
+  const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    assert.equal(database.prepare('DELETE FROM source_records WHERE id=?').run(proof.id).changes, 1);
+  } finally { database.close(); }
+  await f.call(applyPath, 'POST', { previewId: reviewedBeforeProofRemoval.previewId }, 409);
+  const afterProofRemoval = await preview(selected);
+  assert.deepEqual(afterProofRemoval.blocking, []);
+  assert.deepEqual(plannedDates(afterProofRemoval), [
+    [target.id, '2026-11-21', '2026-11-24'], [successor.id, '2026-11-25', '2026-11-25'],
+  ]);
 });
 
-test('a handoff batch activates only the selected verified Jira blockers and rechecks every source proof', async t => {
+test('a handoff batch retimes selected Jira roots and rechecks each selected source proof', async t => {
   const f = await fixture(t);
   const targets = ['200', '300', '400'];
   await f.importInitial([sourceIssue('100')], 'ALPHA');

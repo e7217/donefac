@@ -530,16 +530,26 @@ export class AutomaticScheduleService{
         reason: 'stale_team_follow_up_source', currentVersion: source.version, startDate: source.startDate, endDate: source.endDate,
       });
     }
-    for (const { id, sourceIssueId, targetIssueId, version, origin } of blockers) {
-      // Imported relations only participate when explicitly chosen for this review.
-      if (origin === 'jira' && !chosenIds.has(id)) continue;
+    const addBlocker = ({ id, sourceIssueId, targetIssueId, version }: TeamScheduleBlocker) => {
       const predecessor = byId.get(sourceIssueId), successor = byId.get(targetIssueId);
-      if (!predecessor || !successor || predecessor.projectId === successor.projectId || terminal(predecessor) || terminal(successor)) continue;
+      if (!predecessor || !successor || predecessor.projectId === successor.projectId || terminal(predecessor) || terminal(successor)) return;
       dependencies.push({ id: `team-blocker:${id}`, predecessorId: sourceIssueId, successorId: targetIssueId, type: 'FS', lagDays: 0, version });
       if (dependencies.length > MAX_WORKLOAD_LEVEL_DEPENDENCIES) limit();
+    };
+    for (const relation of blockers) {
+      if (relation.origin !== 'jira' || chosenIds.has(relation.id)) addBlocker(relation);
     }
     try {
-      const scope = teamFollowUpScope(source.id, choices.map(({ target }) => target.id), issues, dependencies, anchorChange);
+      const targets = choices.map(({ target }) => target.id);
+      const initialScope = teamFollowUpScope(source.id, targets, issues, dependencies, anchorChange);
+      const selected = new Set(initialScope.selectedIds);
+      const dependencyCount = dependencies.length;
+      // An unselected Jira relation constrains an already selected ticket without adding a downstream ticket to the review.
+      for (const relation of blockers) {
+        if (relation.origin === 'jira' && !chosenIds.has(relation.id) && selected.has(relation.targetIssueId)) addBlocker(relation);
+      }
+      const scope = dependencies.length === dependencyCount ? initialScope
+        : teamFollowUpScope(source.id, targets, issues, dependencies, anchorChange);
       const teamFollowUp: TeamFollowUpRelation = { relationId: first.relation.id, expectedVersion: first.relation.version,
         ...(anchorChange ? { anchorChange } : {}), sourceIssueId: source.id, targetIssueId: first.target.id,
         sourceEndDate: anchorChange ? anchorChange.endDate : source.endDate,

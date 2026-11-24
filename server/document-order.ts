@@ -94,6 +94,25 @@ export class DocumentOrderService {
     this.trackMembership(before, after);
   }
 
+  seedMigratedGroups(orders: readonly Omit<DocumentSiblingOrder, 'version'>[], documents: readonly DocPage[], newProjectIds: ReadonlySet<string>): void {
+    if (!this.store.db.isTransaction) throw new Error('Migrated document order requires a transaction.');
+    const imported = new Map(documents.map(document => [document.id, document]));
+    const scopes = new Set<string>();
+    for (const order of orders) {
+      const { projectId, parentId, documentIds } = order;
+      const key = scopeKey(order);
+      const members = this.members(order);
+      const remaining = new Set(members);
+      const newScope = projectId !== null && (parentId === null ? newProjectIds.has(projectId) : imported.get(parentId)?.projectId === projectId);
+      if (!newScope || scopes.has(key) || this.stored(key) || documentIds.length < 2 || documentIds.length !== members.length ||
+          documentIds.some(id => !imported.has(id) || !remaining.delete(id))) {
+        throw new DocumentOrderError(409, '이관할 형제 문서의 범위가 달라졌습니다. 미리보기를 다시 만들어 주세요.', 'document_order_membership_changed');
+      }
+      scopes.add(key);
+      this.put(key, members, documentIds);
+    }
+  }
+
   private trackMembership(old: DocPage | undefined, next: DocPage | undefined): void {
     const oldKey = old && scopeKey(old), nextKey = next && scopeKey(next);
     // The parent's own ID identifies its children before and after moving a subtree to another space.
