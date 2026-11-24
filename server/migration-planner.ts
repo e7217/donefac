@@ -234,8 +234,21 @@ function formerConfluenceChildListOrderDigest(record: LegacyRecord, context: Mig
   }
 }
 
+function formerConfluenceHeadingDepthDigest(record: LegacyRecord, context: MigrationContentContext): string | undefined {
+  if (!hasConfluenceHeadingDepth(record)) return;
+  const legacy = convertLegacyContent(record, { ...context, legacyDocumentHeadingLevels: true });
+  if (usableConfluenceBody(legacy) && legacy.diagnostics.some(item =>
+    item.code === 'HEADING_LEVEL_NORMALIZED' || item.code === 'LEGACY_TOC_DEPTH_REPRESENTATION')) {
+    return confluencePageFieldDigest('content', legacy.content);
+  }
+}
+
 function hasConfluenceBody(record: LegacyRecord): boolean {
   return record.textFormat === 'confluence-storage' && (record.metadata.bodyPresent === true || record.text.length > 0);
+}
+
+function hasConfluenceHeadingDepth(record: LegacyRecord): boolean {
+  return hasConfluenceBody(record) && /<h[4-6](?=[\s/>])|<ac:(?:structured-macro|macro)\s[^<>]*\bac:name\s*=\s*(?:"toc"|'toc')/u.test(record.text);
 }
 
 function hasOriginalConfluenceChecklistFallback(record: LegacyRecord, current: DocPage['content']): boolean {
@@ -279,12 +292,13 @@ function reviewNewerConfluenceBody(record: LegacyRecord, previous: SourceRecordA
     const standalone = convertLegacyContent(record, context);
     if (usableConfluenceBody(standalone)) {
       const unchanged = confluencePageFieldDigest('content', standalone.content) === previousContentHash ||
+        formerConfluenceHeadingDepthDigest(record, context) === previousContentHash ||
         documentChildLists(standalone.content).some(options => options.sort === 'manual') &&
         formerConfluenceChildListOrderDigest(record, context) === previousContentHash;
       return unchanged ? { review: false, acceptedSourceHash: incoming } : { review: true };
     }
   }
-  return { review: hasConfluenceExcerptMacro(record) || hasConfluenceColumnLayout(record) };
+  return { review: hasConfluenceExcerptMacro(record) || hasConfluenceColumnLayout(record) || hasConfluenceHeadingDepth(record) };
 }
 
 function previousConfluencePageFieldDigests(archive: SourceRecordArchive, currentContent: DocPage['content']): ConfluenceMigrationPageFieldHashes {
@@ -300,13 +314,15 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
     const converted = convertLegacyContent(record, { resolveReference });
     if (usableConfluenceBody(converted)) values.content = converted.content;
     const currentHash = confluencePageFieldDigest('content', currentContent);
-    if (documentChildLists(currentContent).some(options => options.sort === 'title') &&
+    if (formerConfluenceHeadingDepthDigest(record, { resolveReference }) === currentHash ||
+        documentChildLists(currentContent).some(options => options.sort === 'title') &&
         formerConfluenceChildListOrderDigest(record, { resolveReference }) === currentHash) {
       values.content = currentContent;
     }
     if (!values.content || confluencePageFieldDigest('content', values.content) !== currentHash) {
       // An older document can still exactly match a former renderer's conversion.
-      const earlierContent = { legacyDocumentChildList: true, legacySectionBaseline: true, legacyDocumentToc: true, legacyDocumentLabelList: true };
+      const earlierContent = { legacyDocumentChildList: true, legacySectionBaseline: true, legacyDocumentToc: true,
+        legacyDocumentLabelList: true, legacyDocumentHeadingLevels: true };
       const legacyLayout = hasConfluenceColumnLayout(record) ? { legacyDocumentLayout: true } : {};
       const legacyProperties = hasConfluencePropertyMacro(record.text) ? { legacyDocumentProperties: true } : {};
       const legacyOptions = [
@@ -1213,16 +1229,35 @@ class Planner{
         resolveChildListSpaceProject: space => this.confluenceChildListProject(entry, space, append.project.id),
       };
       let childListBaseline: string | undefined;
-      if ((newer || sameSourceRevision) && !sourceBodyErrors.has(entry.key) && incomingBody && (!acceptedBody || incomingBody === acceptedBody) &&
-          hasConfluenceBody(previous.record) && row.text === previous.record.text &&
-          documentChildLists(document.content).some(options => options.sort === 'title')) {
-        // Prove the entire previously accepted body, including the resolved scope, before upgrading an omitted sort.
-        const former = formerConfluenceChildListOrderDigest(row, contentContext);
-        if (former && (!previous.confluencePageFieldHashes || previous.confluencePageFieldHashes.content === former) &&
-            confluencePageFieldDigest('content', document.content) === former) childListBaseline = former;
+      let headingDepthBaseline: string | undefined;
+      const canCheckFormerBody = (newer || sameSourceRevision) && !sourceBodyErrors.has(entry.key) &&
+        incomingBody !== undefined && (!acceptedBody || incomingBody === acceptedBody) &&
+        hasConfluenceBody(previous.record) && row.text === previous.record.text;
+      const hasOldChildList = canCheckFormerBody && documentChildLists(document.content).some(options => options.sort === 'title');
+      const hasHeadingDepth = canCheckFormerBody && hasConfluenceHeadingDepth(row);
+      if (hasOldChildList || hasHeadingDepth) {
+        // Compare the complete previously accepted body before upgrading conversion behavior.
+        const currentHash = confluencePageFieldDigest('content', document.content);
+        const isOriginalBody = (former?: string): former is string => Boolean(former && former === currentHash &&
+          (!previous.confluencePageFieldHashes || previous.confluencePageFieldHashes.content === former));
+        if (hasOldChildList) {
+          const former = formerConfluenceChildListOrderDigest(row, contentContext);
+          if (isOriginalBody(former)) childListBaseline = former;
+        }
+        if (hasHeadingDepth) {
+          const formerHeading = formerConfluenceHeadingDepthDigest(row, contentContext);
+          if (isOriginalBody(formerHeading)) headingDepthBaseline = formerHeading;
+          else if (hasOldChildList && !childListBaseline) {
+            const former = formerConfluenceHeadingDepthDigest(row, { ...contentContext, legacyChildListDefaultOrder: true });
+            if (isOriginalBody(former)) {
+              headingDepthBaseline = former;
+              childListBaseline = former;
+            }
+          }
+        }
       }
       const sameRevision = sameSourceRevision && (row.metadata.labelSetComplete === true || originalChecklistFallback ||
-        propertiesProjection || childListBaseline !== undefined);
+        propertiesProjection || childListBaseline !== undefined || headingDepthBaseline !== undefined);
       const sourceParent = confluenceParentEvidence(row);
       const reviewParent = sourceParent !== undefined && (newer || laterConfluenceHierarchy(row, previous.record, timezone, previousTimezone));
       if (!newer && !sameRevision && !reviewParent) {
@@ -1235,7 +1270,7 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
       const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (originalChecklistFallback ||
-        childListBaseline !== undefined || incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
+        childListBaseline !== undefined || headingDepthBaseline !== undefined || incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
         ? convertLegacyContent(row, contentContext) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
@@ -1275,6 +1310,7 @@ class Planner{
       }
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
       if (childListBaseline) hashes.content = childListBaseline;
+      if (headingDepthBaseline) hashes.content = headingDepthBaseline;
       if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = confluencePageFieldDigest('parentId', initialParentId);
       if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
         // For old receipts, the full original code block is the only proven baseline.
@@ -1332,6 +1368,8 @@ class Planner{
             '같은 원본 버전의 속성 표나 보고서를 편집 가능한 문서 블록으로 바꿉니다.', 'warning', entry, true);
           if (field === 'content' && sameRevision && childListBaseline) this.notice('CONFLUENCE_REFRESH_CHILD_LIST_ORDER_RESTORED',
             '같은 원본 버전의 하위 문서 목록에 수동 순서가 있으면 반영합니다.', 'info', entry);
+          if (field === 'content' && sameRevision && headingDepthBaseline) this.notice('CONFLUENCE_REFRESH_HEADING_DEPTH_RESTORED',
+            '같은 원본 버전에서 확인한 제목 단계와 목차 범위를 복원합니다.', 'warning', entry, true);
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
           if (field === 'content') acceptedBody = incomingBody;

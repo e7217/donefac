@@ -11,7 +11,7 @@ import {
   type CollaborationSession,
 } from '../../shared/collaboration';
 import {
-  DOCUMENT_TOC_DEFAULTS, documentNodeSchemaVersion, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS,
+  DOCUMENT_TOC_DEFAULTS, documentNodeSchemaVersion, isDocumentHeadingLevel, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS,
 } from '../../shared/document-nodes';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { createEditorSchema } from '../../shared/editor-schema';
@@ -101,7 +101,7 @@ function validateLegacyPending(update: string, schemaVersion: Exclude<Collaborat
       }
       if (node.type === 'image' && typeof attrs.src === 'string' && !/^(?:https?:\/\/|\/)/i.test(attrs.src)) throw new Error('지원하지 않는 이미지 형식입니다.');
       if (node.type === 'heading') {
-        if (typeof attrs.level !== 'number' || ![1, 2, 3].includes(attrs.level)) throw new Error('지원하지 않는 제목 단계입니다.');
+        if (!isDocumentHeadingLevel(attrs.level)) throw new Error('지원하지 않는 제목 단계입니다.');
         if (attrs.sectionId !== undefined) {
           if (!isDocumentSectionId(attrs.sectionId) || sectionIds.has(attrs.sectionId)) throw new Error('보관한 문서의 절 ID가 올바르지 않습니다.');
           sectionIds.add(attrs.sectionId);

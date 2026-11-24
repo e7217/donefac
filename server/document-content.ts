@@ -5,7 +5,7 @@ import { documentPropertyReports, MAX_DOCUMENT_PROPERTY_BLOCKS,
   normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../shared/document-properties.js';
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
-  isCalloutVariant, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
+  isCalloutVariant, isDocumentHeadingLevel, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
   MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
@@ -90,7 +90,7 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
     for(const value of Array.isArray(node.marks)?node.marks:[]){const mark=object(value);if(typeof mark.type!=='string'||!schema.marks[mark.type])invalid('지원하지 않는 문서 서식입니다.');const attributes=attrs(mark.attrs,schema.marks[mark.type].spec.attrs);if(mark.type==='link'&&typeof attributes.href==='string'&&/^(?:javascript|vbscript|data):/i.test(attributes.href.trim()))invalid('지원하지 않는 링크 형식입니다.');}
     if(node.type==='image'&&typeof attributes.src==='string'&&!/^(?:https?:\/\/|\/)/i.test(attributes.src))invalid('이미지는 http(s) 또는 첨부파일 주소를 사용해 주세요.');
     if (node.type === 'heading') {
-      if (typeof attributes.level !== 'number' || ![1, 2, 3].includes(attributes.level)) invalid('제목 단계는 1~3이어야 합니다.');
+      if (!isDocumentHeadingLevel(attributes.level)) invalid('제목 단계는 1~6이어야 합니다.');
       const id = attributes.sectionId;
       if (id !== undefined) {
         if (!isDocumentSectionId(id)) invalid('문서 절 ID는 영문·숫자로 시작하며 영문·숫자·하이픈·밑줄을 사용해 80자 이내여야 합니다.');

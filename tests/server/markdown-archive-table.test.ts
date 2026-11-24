@@ -5,6 +5,28 @@ import { previewMarkdownImport } from '../../shared/document-markdown-import.js'
 import { documentNodes } from '../../shared/document-references.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
+test('archived HTML tables preserve deeper editable headings and section identifiers', async () => {
+  const path = 'documents/tables.md';
+  const archive = zip([
+    { path: 'manifest.json', bytes: Buffer.from(JSON.stringify({
+      format: 'teamspace-document-markdown', schemaVersion: 1, source: 'saved', attachments: [],
+      documents: [{ id: 'table-doc', title: '표', path, parentId: null }],
+    })) },
+    { path, bytes: Buffer.from('<table>\n<tbody>\n<tr><td><h4>4단계</h4><h5>5단계</h5><h6>6단계</h6></td></tr>\n</tbody>\n</table>\n') },
+  ]);
+  const plan = await prepareMarkdownArchive(archive, {
+    actorId: 'user-min', projectId: null, parentId: null, timestamp: '2026-11-23T00:00:00.000Z',
+  });
+  const [document] = plan.documents;
+  const [table] = document.content.content ?? [];
+  assert.equal(table?.type, 'table');
+  const headings = [...documentNodes(table)].filter(node => node.type === 'heading');
+  assert.deepEqual(headings.map(node => node.attrs?.level), [4, 5, 6]);
+  assert.equal(new Set(headings.map(node => node.attrs?.sectionId)).size, 3);
+  assert.ok(headings.every(node => typeof node.attrs?.sectionId === 'string'));
+  assert.deepEqual(plan.warnings, []);
+});
+
 test('malformed and unsafe HTML tables in a Teamspace archive remain literal and produce a review warning', async () => {
   const documents = [
     {

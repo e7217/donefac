@@ -28,6 +28,9 @@
 .document-outline-entries > li { display: flex; align-items: stretch; gap: 4px; }
 .document-outline-entries > [data-heading-level="2"] { margin-inline-start: 12px; }
 .document-outline-entries > [data-heading-level="3"] { margin-inline-start: 24px; }
+.document-outline-entries > [data-heading-level="4"] { margin-inline-start: 36px; }
+.document-outline-entries > [data-heading-level="5"] { margin-inline-start: 48px; }
+.document-outline-entries > [data-heading-level="6"] { margin-inline-start: 60px; }
 
 .document-outline-entry {
   display: block;

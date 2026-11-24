@@ -2095,7 +2095,7 @@ test('Confluence refresh replaces an exact legacy table of contents and preserve
   assert.equal((await f.apply(plan)).status, 201);
   const result = (await f.call<WorkspaceSnapshot>('/workspace')).data.documents;
   const converted = result.find(document => document.id === untouched.id);
-  assert.deepEqual(converted?.content.content?.[0], { type: 'documentToc', attrs: { minLevel: 1, maxLevel: 3, layout: 'list' } });
+  assert.deepEqual(converted?.content.content?.[0], { type: 'documentToc', attrs: { minLevel: 1, maxLevel: 6, layout: 'list' } });
   assert.match(converted?.plainText ?? '', /새 원본 제목/);
   assert.deepEqual(result.find(document => document.id === edited.id)?.content, restoredEdited?.content);
 });

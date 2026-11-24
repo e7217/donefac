@@ -4,7 +4,7 @@ import { documentLabelListDescription, normalizeDocumentLabelListOptions } from 
 import { documentPropertyReportDescription, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from './document-properties.js';
 import {
   CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, STATUS_BADGE_TONE_LABELS, documentPlainText, documentTocOptions,
-  isCalloutVariant, isDocumentTocLevel, isIssueSummaryGroupBy, isStatusBadgeTone, MAX_DOCUMENT_TABLE_SPAN,
+  isCalloutVariant, isDocumentHeadingLevel, isIssueSummaryGroupBy, isStatusBadgeTone, MAX_DOCUMENT_TABLE_SPAN, type DocumentHeadingLevel,
 } from './document-nodes.js';
 import { documentNodes } from './document-references.js';
 import { isDocumentSectionId, outlineHeadingTitle, parseDocumentHash } from './document-sections.js';
@@ -45,7 +45,7 @@ export interface DocumentMarkdownExportDiagnostic {
   message: string;
 }
 
-type Heading = { level: 1 | 2 | 3; anchor: string; title: string };
+type Heading = { level: DocumentHeadingLevel; anchor: string; title: string };
 type StandaloneTable = { headings?: ReadonlyMap<RichContent, { anchor: string; level: number; title: string }> };
 const emptyExportResolvers: DocumentMarkdownExportResolvers = { document: () => undefined, attachment: () => undefined };
 
@@ -139,7 +139,7 @@ function outline(content: RichContent): Map<RichContent, Heading> {
     if (!isDocumentSectionId(anchor)) {
       do { anchor = `section-${++counter}`; } while (reserved.has(anchor));
     }
-    return [node, { anchor, level: isDocumentTocLevel(level) ? level : 3, title: outlineHeadingTitle(documentPlainText(node)) }];
+    return [node, { anchor, level: isDocumentHeadingLevel(level) ? level : 3, title: outlineHeadingTitle(documentPlainText(node)) }];
   }));
 }
 
@@ -197,7 +197,7 @@ class DocumentMarkdownRenderer {
     if (standalone?.headings?.size) {
       const allHeadings = new Map<RichContent, Heading>();
       for (const [node, heading] of standalone.headings) {
-        allHeadings.set(node, { ...heading, level: isDocumentTocLevel(heading.level) ? heading.level : 3 });
+        allHeadings.set(node, { ...heading, level: isDocumentHeadingLevel(heading.level) ? heading.level : 3 });
       }
       for (const [node, heading] of this.headings) {
         if (!allHeadings.has(node)) allHeadings.set(node, heading);

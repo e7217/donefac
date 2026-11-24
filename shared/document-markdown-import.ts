@@ -11,7 +11,6 @@ const maxDocumentBytes = 8 * 1024 * 1024;
 const boundsMessage = '문서 블록이나 중첩이 너무 많습니다. Markdown 파일을 나누어 주세요.';
 
 const messages = {
-  headingLevel: '4~6단계 제목은 3단계 제목으로 가져옵니다.',
   html: 'HTML 마크업은 원문 텍스트로 가져옵니다.',
   image: '이미지는 대체 텍스트와 확인 가능한 원본 링크로 가져옵니다.',
   relativeLink: '원본 주소를 확인할 수 없는 상대 링크는 텍스트로 가져옵니다.',
@@ -320,9 +319,8 @@ class MarkdownConversion {
       switch (token.type) {
         case 'space': case 'def': case 'checkbox': break;
         case 'heading': {
-          if (token.depth > 3) this.warn('headingLevel');
           const inline = this.inline(token.tokens, depth + 1);
-          content.push({ type: 'heading', attrs: { level: Math.min(3, token.depth), sectionId: this.sections.get(token) },
+          content.push({ type: 'heading', attrs: { level: token.depth, sectionId: this.sections.get(token) },
             ...(inline.length ? { content: inline } : {}) });
           break;
         }

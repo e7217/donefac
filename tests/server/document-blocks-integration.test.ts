@@ -110,7 +110,7 @@ test('identified checklist items survive edits, live startup, and workspace back
     assert.equal(saved.status, 200);
     const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: saved.data.version });
     assert.equal(live.status, 200);
-    assert.equal(live.data.schemaVersion, 15);
+    assert.equal(live.data.schemaVersion, COLLABORATION_SCHEMA);
     assert.deepEqual(live.data.document.content, updatedContent);
 
     const backup = (await f.call<Backup>('/export')).data;
@@ -337,6 +337,101 @@ test('body contents navigation survives live state and active and archived versi
     assert.deepEqual((await f.call<CollaborationSession>(`${path}/collaboration`)).data.document.content, after);
     const history = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
     assert.deepEqual(history.find(revision => revision.id === original.id)?.content, before);
+  } finally {
+    await f.close();
+  }
+});
+
+test('heading levels 4 through 6 require content schema 16 and backup format 110', async () => {
+  const f = await fixture();
+  try {
+    const heading = (level: number, sectionId: string, text: string): RichContent => ({
+      type: 'heading', attrs: { level, sectionId }, content: [{ type: 'text', text }],
+    });
+    const toc = (minLevel: number, maxLevel: number): RichContent => ({
+      type: 'documentToc', attrs: { minLevel, maxLevel, layout: 'flat' },
+    });
+    const shallow = body(toc(1, 3), heading(3, 'summary', '요약'));
+    const deep = body(toc(4, 6), heading(4, 'procedure', '운영 절차'), heading(5, 'bounds', '입출력'), heading(6, 'check', '저장 확인'));
+    for (const node of deep.content!) assert.equal(documentContentSchemaVersion(body(node)), 16);
+    assert.equal(documentContentSchemaVersion(shallow), 8);
+    const shallowDoc = await make(f, '기존 제목 문서', shallow);
+    const { data: shallowBackup } = await f.call<Backup>('/export');
+    const oldBackup = await f.call('/import', 'POST', { data: { ...shallowBackup, schemaVersion: 109 } });
+    assert.equal(oldBackup.status, 200, JSON.stringify(oldBackup.data));
+    assert.deepEqual((await snapshot(f)).documents.find(doc => doc.id === shallowDoc.id)?.content, shallow);
+
+    const original = await make(f, '4~6단계 제목', deep);
+    const path = `/documents/${original.id}`;
+    assert.deepEqual(original.content, deep);
+    const [firstRevision] = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    const oldClient = await f.call<{ details: { contentSchemaVersion: number } }>(path, 'PATCH', {
+      expectedVersion: original.version, contentSchemaVersion: 15, content: shallow,
+    });
+    assert.equal(oldClient.status, 409);
+    assert.equal(oldClient.data.details.contentSchemaVersion, 16);
+    assert.deepEqual((await snapshot(f)).documents.find(doc => doc.id === original.id)?.content, deep);
+
+    const rejectOldBackup = async (backup: Backup, pattern = /schemaVersion 110/u) => {
+      const denied = await f.call<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 109 } });
+      assert.equal(denied.status, 400, JSON.stringify(denied.data));
+      assert.match(denied.data.error, pattern);
+    };
+    const { data: activeBackup } = await f.call<Backup>('/export');
+    assert.equal(activeBackup.schemaVersion, 110);
+    await rejectOldBackup(activeBackup);
+    const edited = await f.call<DocPage>(path, 'PATCH', {
+      expectedVersion: original.version, contentSchemaVersion: 16, content: shallow,
+    });
+    assert.equal(edited.status, 200);
+    assert.deepEqual(edited.data.content, shallow);
+    const { data: historyBackup } = await f.call<Backup>('/export');
+    await rejectOldBackup(historyBackup);
+
+    const reapplied = await f.call<DocPage>(path, 'PATCH', {
+      expectedVersion: edited.data.version, contentSchemaVersion: 16, content: deep,
+    });
+    assert.equal(reapplied.status, 200);
+    const live = await f.call<CollaborationSession>(`${path}/collaboration/enable`, 'POST', { expectedVersion: reapplied.data.version });
+    assert.equal(live.status, 200);
+    assert.equal(live.data.schemaVersion, 16);
+    assert.deepEqual(live.data.document.content, deep);
+    const { data: liveBackup } = await f.call<Backup>('/export');
+    const wrongSchema = structuredClone(liveBackup);
+    const state = wrongSchema.collabStates.find(item => item.documentId === original.id);
+    assert.ok(state);
+    state.schemaVersion = 15;
+    assert.equal((await f.call('/import', 'POST', { data: wrongSchema })).status, 422);
+    assert.equal((await f.call<CollaborationSession>(`${path}/collaboration`)).data.epoch, live.data.epoch);
+    assert.equal((await f.call('/import', 'POST', { data: liveBackup })).status, 200);
+    const restored = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.notEqual(restored.epoch, live.data.epoch);
+    assert.equal(restored.schemaVersion, 16);
+    assert.deepEqual(restored.document.content, deep);
+
+    const template = await f.call<DocumentTemplateSummary>('/document-templates', 'POST', {
+      requestId: randomUUID(), sourceDocumentId: original.id, expectedDocumentVersion: restored.document.version, name: '제목 4~6 템플릿',
+    });
+    assert.equal(template.status, 201, JSON.stringify(template.data));
+    const archived = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restored.document.version });
+    assert.equal(archived.status, 200);
+    const { data: archivedBackup } = await f.call<Backup & { documentTemplates: unknown[] }>('/export');
+    assert.equal(archivedBackup.documents.some(doc => doc.id === original.id), false);
+    const withoutTemplate = { ...archivedBackup, documentTemplates: [] };
+    await rejectOldBackup(withoutTemplate);
+    assert.equal((await f.call('/import', 'POST', { data: archivedBackup })).status, 200);
+    assert.equal((await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    const restoredArchive = (await f.call<CollaborationSession>(`${path}/collaboration`)).data;
+    assert.deepEqual(restoredArchive.document.content, deep);
+    const history = (await f.call<DocRevision[]>(`${path}/revisions`)).data;
+    assert.deepEqual(history.find(revision => revision.id === firstRevision.id)?.content, deep);
+
+    const discarded = await f.call<{ trashEntryId: string }>(path, 'DELETE', { expectedVersion: restoredArchive.document.version });
+    assert.equal(discarded.status, 200);
+    assert.equal((await f.call(`/trash/${discarded.data.trashEntryId}`, 'DELETE')).status, 200);
+    const { data: templateBackup } = await f.call<Backup>('/export');
+    await rejectOldBackup(templateBackup, /템플릿.+schemaVersion 110/u);
+    assert.equal((await f.call('/import', 'POST', { data: templateBackup })).status, 200);
   } finally {
     await f.close();
   }

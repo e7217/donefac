@@ -103,6 +103,10 @@
 .docs-prose h1 { font-size:26px; font-weight:700; color:#2b3952; line-height:1.5; margin:1.8em 0 .7em; letter-spacing:-.6px; }
 .docs-prose h2 { font-size:19px; font-weight:650; color:#37455e; line-height:1.5; margin:1.7em 0 .7em; letter-spacing:-.5px; padding-bottom:9px; border-bottom:1px solid #edf0f5; }
 .docs-prose h3 { font-size:15px; font-weight:650; color:#455470; line-height:1.5; margin:1.5em 0 .5em; }
+.docs-prose :is(h4,h5,h6) { color:#455470; line-height:1.5; margin:1.3em 0 .5em; }
+.docs-prose h4 { font-size:14px; font-weight:650; }
+.docs-prose h5 { font-size:13px; font-weight:650; }
+.docs-prose h6 { font-size:13px; font-weight:600; }
 .docs-prose strong { font-weight:650; color:#475670; }
 .docs-prose a { color:#5779da; text-decoration:underline; text-decoration-color:#b9c8f3; text-underline-offset:3px; }
 .docs-prose ul { list-style:disc; padding-left:22px; margin:12px 0; }

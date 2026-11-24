@@ -44,6 +44,7 @@ export interface MigrationContentContext {
   keepUnresolvedIssueUrls?: boolean;
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
+  legacyDocumentHeadingLevels?: boolean;
   legacyDocumentLabelList?: boolean;
   legacyDocumentChildList?: boolean;
   legacyChildListDefaultOrder?: boolean;
@@ -310,7 +311,7 @@ class Converter {
   private sections?: ReturnType<typeof scanConfluenceSections>;
   private localSectionLinks = new Map<Mark, { id: string; originalTarget: string }>();
   private sourceTitle = '';
-  private sourceHeadingMaximum = 3;
+  private legacySourceHeadingMaximum = 3;
   private richDocument = false;
   private projectedProperties = 0;
   private firstSourceExcerpt?: XmlNode;
@@ -581,7 +582,8 @@ class Converter {
     const type = node.name, children = () => this.xmlParts(node.children, depth), child = (name: string) => node.children.find(value => typeof value !== 'string' && value.name === name) as XmlNode | undefined;
     if (/^h[1-6]$/.test(type)) {
       const sectionId = this.sections?.ids.get(node);
-      return flow(children(), 'heading', { level: this.headingLevel(type.slice(1)), ...(sectionId ? { sectionId } : {}) });
+      const level = this.richDocument && !this.context.legacyDocumentHeadingLevels ? Number(type[1]) : this.headingLevel(type[1]);
+      return flow(children(), 'heading', { level, ...(sectionId ? { sectionId } : {}) });
     }
     if (['b', 'strong', 'i', 'em', 's', 'strike', 'del', 'u', 'code', 'tt'].includes(type)) return this.marked(children(), { type: ({ b: 'bold', strong: 'bold', i: 'italic', em: 'italic', s: 'strike', strike: 'strike', del: 'strike', u: 'underline', code: 'code', tt: 'code' } as Record<string, string>)[type] });
     switch (type) {
@@ -1080,17 +1082,22 @@ class Converter {
       const parameterValue = key === 'include' || key === 'exclude' ? value : value.trim();
       return !Object.hasOwn(defaults, key) || parameterValue !== defaults[key];
     });
-    const wouldIncludeExcludedHeadings = maxLevel >= 3 && maxLevel < this.sourceHeadingMaximum;
-    if (malformed || unsupported || !['list', 'flat'].includes(layout) || !/^[1-3]$/.test(min) || !/^[1-7]$/.test(max) ||
-        minLevel > maxLevel || wouldIncludeExcludedHeadings) {
+    if (malformed || unsupported || !['list', 'flat'].includes(layout) || !/^[1-6]$/.test(min) || !/^[1-7]$/.test(max) ||
+        minLevel > maxLevel) {
       this.warn('TOC_PARAMETERS_UNSUPPORTED', '현재 편집기로 재현할 수 없는 목차 구조 또는 설정을 원문 코드 블록으로 보존했습니다.');
+      return [codeBlock(serializeXml(node))];
+    }
+    const legacy = this.context.legacyDocumentHeadingLevels;
+    if (legacy && (minLevel > 3 || maxLevel >= 3 && maxLevel < this.legacySourceHeadingMaximum)) {
+      this.warn('LEGACY_TOC_DEPTH_REPRESENTATION', '이전 이관에서 제목 단계 한도로 원문에 남은 목차를 확인했습니다.');
       return [codeBlock(serializeXml(node))];
     }
     if (this.context.legacyDocumentToc) {
       this.warn('LEGACY_TOC_REPRESENTATION', '이전 이관의 목차 원문 코드 블록을 확인했습니다.');
       return [codeBlock(serializeXml(node))];
     }
-    return [{ type: 'documentToc', attrs: { minLevel, maxLevel: Math.min(maxLevel, 3), layout } }];
+    if (legacy && maxLevel > 3) this.warn('LEGACY_TOC_DEPTH_REPRESENTATION', '이전 이관에서 최대 3단계로 저장한 목차를 확인했습니다.');
+    return [{ type: 'documentToc', attrs: { minLevel, maxLevel: Math.min(maxLevel, legacy ? 3 : 6), layout } }];
   }
   storage(title: string): RichContent[] {
     const htmlEntities: Record<string, string> = { nbsp: '160', mdash: '8212', ndash: '8211', hellip: '8230', copy: '169', reg: '174', trade: '8482', euro: '8364', lsquo: '8216', rsquo: '8217', ldquo: '8220', rdquo: '8221', laquo: '171', raquo: '187', bull: '8226', middot: '183' };
@@ -1110,7 +1117,9 @@ class Converter {
         if (Object.hasOwn(item, '#text')) return [decodeXml(string(item['#text']))];
         if (Object.hasOwn(item, '#cdata')) { if (cdataIndex >= rawCdata.length) throw new Error('CDATA 위치가 일치하지 않습니다.'); return [rawCdata[cdataIndex++]]; }
         const name = Object.keys(item).find(key => key !== ':@'); if (!name) return [];
-        if (this.richDocument && /^h[4-6]$/.test(name)) this.sourceHeadingMaximum = Math.max(this.sourceHeadingMaximum, Number(name[1]));
+        if (this.context.legacyDocumentHeadingLevels && /^h[4-6]$/.test(name)) {
+          this.legacySourceHeadingMaximum = Math.max(this.legacySourceHeadingMaximum, Number(name[1]));
+        }
         const node: XmlNode = { name, attrs: Object.fromEntries(Object.entries(object(item[':@'])).map(([key, value]) => [key, decodeXml(string(value))])), children: [] };
         if (this.richDocument && !this.context.legacyDocumentExcerpt && !this.firstSourceExcerpt &&
             (name === 'ac:structured-macro' || name === 'ac:macro') && node.attrs['ac:name'] === 'excerpt') this.firstSourceExcerpt = node;

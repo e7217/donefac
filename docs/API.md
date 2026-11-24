@@ -230,7 +230,7 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 본문 형식 7은 `heading.attrs.sectionId`를 지원한다. ID는 영문자 또는 숫자로 시작하며 영문자·숫자·`_`·`-`로 구성된 1~80자다. 한 문서에 같은 ID를 두 번 지정하면 저장을 거절한다. 이 속성이 있는 본문을 수정할 때는 `contentSchemaVersion: 7`을 보낸다. 절 주소는 `#/project-id/documents/document-id?section=section-id`를 사용한다. 검토·발행 고정본 주소는 `publication=review` 또는 `publication=published`와 `revision`을 함께 넣는다. 자체 백업 형식 49와 문서 JSON 형식 7에서 절 ID를 보존한다.
 
-본문 형식 8은 `documentToc` 블록을 지원한다. `attrs`에는 `minLevel`과 `maxLevel`을 1~3의 숫자로, `layout`을 `list` 또는 `flat`으로 지정한다. 기본값은 각각 `1`, `3`, `list`다. 목차의 제목과 링크는 표시할 문서 버전에서 생성한다. 이 블록이 있는 문서의 본문을 교체하는 `PATCH`에는 `contentSchemaVersion: 8`을 보낸다. 자체 백업 형식 54와 문서 JSON 형식 8에 목차 설정을 보존한다.
+본문 형식 8은 `documentToc` 블록을 지원한다. `attrs`에는 `minLevel`과 `maxLevel`을 1~3의 정수로, `layout`을 `list` 또는 `flat`으로 지정한다. 기본값은 각각 `1`, `3`, `list`다. 목차의 제목과 링크는 표시할 문서 버전에서 생성한다. 이 블록이 있는 본문을 교체하는 `PATCH`에는 `contentSchemaVersion` 8 이상을 보낸다. 자체 백업 형식 54와 문서 JSON 형식 8에 이 범위의 목차 설정을 보존한다.
 
 본문 형식 9의 `documentLabelList`는 `projectId`에 프로젝트 ID 또는 팀 공통을 뜻하는 `null`을 받는다. `labels`는 문서 라벨과 같은 정규화 규칙을 사용하고, 라벨이 비어 있으면 결과가 비어 있다. `match`는 `any` 또는 `all`, `sort`는 `title`, `created`, `updated` 중 하나다. `descending`, `showLabels`, `showSpace`, `excludeCurrent`는 불리언이고 `limit`은 1~500, `title`은 최대 160 UTF-16 코드 단위다. 문서당 최대 30개 블록을 포함할 수 있다. 이 블록이 있는 본문을 교체할 때 `contentSchemaVersion: 9`를 보내며, 자체 백업 형식 59와 문서 JSON 형식 9는 목록 조건을 보존한다. 프로젝트 제한 API 키는 본문과 이력의 목록 대상도 같은 키의 허용 프로젝트에 있어야 한다.
 
@@ -265,6 +265,10 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 `documentPropertyReport`는 `attrs: {projectId, group, labels, match, columns, sort, descending, limit, title}`을 받는다. `projectId`는 대상 프로젝트 ID 또는 팀 공통을 뜻하는 `null`이다. 라벨은 `all` 또는 `any`로 일치시키며, 라벨이 비어 있으면 결과도 비어 있다. 비어 있지 않은 `group`은 같은 이름의 그룹만 선택한다. 현재 저장된 문서에서 일치하는 속성 블록마다 한 행을 표시한다. `columns`는 최대 24개 이름을 순서대로 지정하고 비어 있으면 결과에서 열을 찾는다. `sort`는 `title` 또는 `updated`, `limit`은 1~200, `title`은 최대 160자다.
 
 두 블록을 한 문서에 합쳐 최대 30개를 둔다. 편집 `PATCH`와 문서 JSON에는 형식 13 이상을 사용한다. 자체 백업은 형식 96부터 활성·휴지통 문서와 이력·템플릿에서 두 블록을 보존한다. Markdown은 값을 일반 표로 내보내고 보고서의 저장 조건을 표시한다. 범위 제한 API 키는 문서와 보고서 대상 양쪽의 프로젝트를 허용해야 한다. 대상이 팀 공통인 보고서는 전체 범위 키로 읽거나 쓴다.
+
+### 제목 단계와 본문 목차
+
+본문 형식 16은 `heading.attrs.level`과 `documentToc.attrs.minLevel`·`maxLevel`에 1~6의 정수를 받는다. 목차의 최소 단계는 최대 단계 이하여야 하며 기본 범위는 1~3이다. 요청이나 기존 본문에 4~6단계 제목 또는 목차 범위가 있으면 본문 `PATCH`에 `contentSchemaVersion: 16`을 보낸다. 문서 제목과 같은 속성만 바꿀 때는 생략할 수 있다. 공동 편집은 프로토콜 16에서 이 형식을 사용한다. 자체 백업 형식 110은 제목 단계·절 ID와 목차 범위를 현재 문서, 이력, 휴지통, 템플릿에 보존한다.
 
 ## 티켓의 필드 변경 기록
 

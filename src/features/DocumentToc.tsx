@@ -2,11 +2,10 @@
 
 import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { NodeViewWrapper, type Editor, type NodeViewProps } from '@tiptap/react';
-import { documentTocOptions, isDocumentTocLayout, isDocumentTocLevel, type DocumentTocLevel, type DocumentTocOptions } from '../../shared/document-nodes';
+import { DOCUMENT_HEADING_LEVELS, documentTocOptions, isDocumentTocLayout, isDocumentTocLevel, type DocumentTocOptions } from '../../shared/document-nodes';
 import { editorHeadings, useOutlineDocument } from './DocumentEditorOutline';
 import { jumpToReadonlyHeading, OutlineEntries, revealDocumentTarget, type DocumentOutlineEntry } from './DocumentOutline';
 
-const levels: DocumentTocLevel[] = [1, 2, 3];
 const headingPageSize = 100;
 
 const preserveSelection = (event: MouseEvent<HTMLElement>) => event.preventDefault();
@@ -61,13 +60,13 @@ export function DocumentTocNodeView({ node, editor, selected, updateAttributes, 
           <select value={options.minLevel} onChange={event => {
             const minLevel = Number(event.target.value);
             if (editor.isEditable && isDocumentTocLevel(minLevel) && minLevel <= options.maxLevel) updateAttributes({ minLevel });
-          }}>{levels.filter(level => level <= options.maxLevel).map(level => <option key={level} value={level}>제목 {level}</option>)}</select>
+          }}>{DOCUMENT_HEADING_LEVELS.filter(level => level <= options.maxLevel).map(level => <option key={level} value={level}>제목 {level}</option>)}</select>
         </label>
         <label>끝 제목 단계
           <select value={options.maxLevel} onChange={event => {
             const maxLevel = Number(event.target.value);
             if (editor.isEditable && isDocumentTocLevel(maxLevel) && maxLevel >= options.minLevel) updateAttributes({ maxLevel });
-          }}>{levels.filter(level => level >= options.minLevel).map(level => <option key={level} value={level}>제목 {level}</option>)}</select>
+          }}>{DOCUMENT_HEADING_LEVELS.filter(level => level >= options.minLevel).map(level => <option key={level} value={level}>제목 {level}</option>)}</select>
         </label>
         <label>목차 배치
           <select value={options.layout} onChange={event => {

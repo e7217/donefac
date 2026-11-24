@@ -5,7 +5,7 @@ import { buildMigrationOptions,buildMigrationPlan } from '../../server/migration
 import { convertLegacyContent } from '../../server/migration-content.js';
 import { record } from '../../server/legacy-import-model.js';
 import type { MigrationPackage,MigrationPlanningInput } from '../../server/migration-contracts.js';
-import type { DocPage,LegacyDataset,LegacyRecord,LegacyValue,User } from '../../shared/types.js';
+import type { DocPage,LegacyDataset,LegacyRecord,LegacyValue,SourceRecordArchive,User } from '../../shared/types.js';
 import { contentReferences } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { parseConfluence } from '../../server/legacy-import-confluence.js';
@@ -1158,6 +1158,65 @@ test('reviewed Confluence refresh repairs only untouched full-page checklist fal
   assert.ok(refresh(fallback, fallbackReceipt, newerSameBody).documentUpdates?.[0].changes.content);
   const laterChanged = { ...changedInSameSourceRevision, metadata: { version: '4' } };
   assert.equal(refresh(locallyEdited, fallbackReceipt, laterChanged).preview.documentRefresh?.[0].fields[0].decision, 'conflict');
+});
+
+test('reviewed Confluence refresh restores deeper headings only when the original whole-body projection matches', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const original = page('10', { authorId: null, text: '<ac:structured-macro ac:name="toc"/>' +
+    '<ac:structured-macro ac:name="toc"><ac:parameter ac:name="maxLevel">3</ac:parameter></ac:structured-macro>' +
+    '<h4 id="check">확인 절차</h4><h6>작업 항목</h6><p>다음 단계</p>' });
+  const initialSource = pkg('original-heading-depth', 'confluence', [space, original]);
+  const initial = buildMigrationPlan(input([initialSource]));
+  assert.equal(initial.preview.canApply, true, JSON.stringify(initial.preview.notices));
+  const [project] = initial.projects;
+  const [current] = initial.documents;
+  const receipt = initial.sourceRecords.find(item => item.targetId === current.id)!;
+  const legacyProjection = (record: LegacyRecord) => {
+    const { content, plainText } = convertLegacyContent(record, { resolveReference: () => null,
+      sectionLinks: { documentId: current.id }, legacyDocumentHeadingLevels: true });
+    return { ...current, content, plainText };
+  };
+  const legacyReceipt = (record: LegacyRecord, projection: DocPage): SourceRecordArchive => ({ ...receipt, record,
+    confluencePageFieldHashes: { ...receipt.confluencePageFieldHashes,
+      content: createHash('sha256').update(JSON.stringify(['content', JSON.stringify(projection.content)])).digest('hex') },
+  });
+  const fallback = legacyProjection(original);
+  const fallbackReceipt = legacyReceipt(original, fallback);
+  const refresh = (local = fallback, previous = fallbackReceipt, source = original) => {
+    const next = pkg('heading-depth-refresh', 'confluence', [space, source]);
+    next.dataset.source.instanceKey = initialSource.dataset.source.instanceKey;
+    const request = input([next]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = { project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'heading-depth-refresh',
+      knownPages: [{ sourceId: original.sourceId, documentId: current.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: current.title }],
+      refreshDocuments: [{ document: local, previous, previousTimezone: 'UTC' }] };
+    return buildMigrationPlan(request);
+  };
+
+  assert.deepEqual(fallback.content.content?.map(node => node.type), ['documentToc', 'codeBlock', 'heading', 'heading', 'paragraph']);
+  const unsignedFallbackReceipt = { ...fallbackReceipt, confluencePageFieldHashes: undefined, confluencePageBodySourceHash: undefined };
+  for (const previous of [fallbackReceipt, unsignedFallbackReceipt]) {
+    const repaired = refresh(fallback, previous);
+    assert.equal(repaired.preview.canApply, true, JSON.stringify(repaired.preview.notices));
+    assert.ok(repaired.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_HEADING_DEPTH_RESTORED'));
+    assert.deepEqual(repaired.preview.documentRefresh?.[0].fields.map(({ field, decision }) => [field, decision]), [['content', 'apply']]);
+    const update = repaired.documentUpdates?.[0];
+    assert.equal(update?.expectedVersion, fallback.version);
+    assert.deepEqual(update?.changes.content, current.content);
+    const checkpoint = repaired.sourceRecords.find(item => item.targetId === current.id)!;
+    assert.equal(checkpoint.confluencePageFieldHashes?.content, receipt.confluencePageFieldHashes?.content);
+    assert.deepEqual(refresh({ ...current, version: current.version + 1 }, checkpoint).documentUpdates, []);
+  }
+
+  const locallyEdited = { ...fallback, version: fallback.version + 1, content: { ...fallback.content, content: [
+    ...(fallback.content.content ?? []), { type: 'paragraph', content: [{ type: 'text', text: '팀의 메모' }] },
+  ] } };
+  assert.deepEqual(refresh(locallyEdited).documentUpdates, []);
+  assert.deepEqual(refresh(fallback, receipt).documentUpdates, []);
+  assert.deepEqual(refresh(fallback, fallbackReceipt, { ...original, text: original.text.replace('다음 단계', '변경된 단계') }).documentUpdates, []);
+  const unsupported = { ...original, text: `${original.text}<ac:structured-macro ac:name="custom-unsupported"/>` };
+  const lossy = legacyProjection(unsupported);
+  assert.deepEqual(refresh(lossy, { ...legacyReceipt(unsupported, lossy), confluencePageBodySourceHash: undefined }, unsupported).documentUpdates, []);
 });
 
 test('all available attachment versions retain distinct files and a missing newest version requires acknowledgement',()=>{

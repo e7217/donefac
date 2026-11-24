@@ -171,6 +171,7 @@ const dependencyVersionKey='schedule.dependencyVersion';
 function normalizeBackupDocumentContent(value: unknown, backupVersion: number) {
   const normalized = normalizeDocumentContent(value);
   const version = documentContentSchemaVersion(normalized.content);
+  if (version >= 16 && backupVersion < 110) fail('4~6단계 제목 또는 목차 범위를 포함한 백업은 schemaVersion 110이 필요합니다.');
   if (version >= 15 && backupVersion < 108) fail('체크리스트 항목 ID가 있는 백업은 schemaVersion 108이 필요합니다.');
   if (version >= 14 && backupVersion < 105) fail('직접 정렬하는 하위 문서 목록을 포함한 백업은 schemaVersion 105가 필요합니다.');
   if (version >= 13 && backupVersion < 96) fail('문서 속성 또는 속성 보고서를 포함한 백업은 schemaVersion 96이 필요합니다.');
@@ -2879,6 +2880,9 @@ export function createApp(options: {
       fail('팀 문서 템플릿을 포함한 백업은 schemaVersion 63이 필요합니다.');
     }
     const importedTemplates=data.schemaVersion>=63?documentTemplates.validateRestore(data.documentTemplates,data.projects,data.users,data.exportedAt):[];
+    if (data.schemaVersion < 110 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 16)) {
+      fail('4~6단계 제목 또는 목차 범위가 있는 템플릿에는 schemaVersion 110 백업이 필요합니다.');
+    }
     if (data.schemaVersion < 108 && importedTemplates.some(template => documentContentSchemaVersion(template.content) >= 15)) {
       fail('체크리스트 항목 ID가 있는 템플릿에는 schemaVersion 108 백업이 필요합니다.');
     }

@@ -10,7 +10,7 @@ type TableOptions = {
   sectionId?: (node: MarkdownArchiveHtmlNode) => string | undefined;
   resolveLink?: (href: string) => LinkResult;
   resolveImage?: (src: string) => string | undefined;
-  warn?: (code: 'image' | 'headingLevel' | 'numberedTask') => void;
+  warn?: (code: 'image' | 'numberedTask') => void;
 };
 
 const headingTags = new Set(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']);
@@ -228,10 +228,9 @@ class ArchiveTableProjection {
     checkDepth(depth);
     if (headingTags.has(node.tag)) {
       const level = Number(node.tag.slice(1));
-      if (level > 3) this.options.warn?.('headingLevel');
       this.headings.push({ node, title: label(node.children, depth + 1).trim(), explicitId });
       const sectionId = this.options.sectionId?.(node);
-      return { type: 'heading', attrs: { level: Math.min(3, level), ...(sectionId ? { sectionId } : {}) },
+      return { type: 'heading', attrs: { level, ...(sectionId ? { sectionId } : {}) },
         content: this.inline(node.children, depth + 1) };
     }
     switch (node.tag) {

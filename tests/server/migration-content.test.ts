@@ -235,7 +235,7 @@ test('Confluence page and revision tables of contents become editable blocks wit
   canonical(result);
   assert.deepEqual(result.content.content?.map(node => node.type), ['documentToc', 'heading', 'paragraph', 'documentToc', 'paragraph', 'heading', 'heading']);
   assert.deepEqual(nodes(result.content, 'documentToc').map(node => ({ ...node.attrs })), [
-    { minLevel: 1, maxLevel: 3, layout: 'list' }, { minLevel: 2, maxLevel: 3, layout: 'flat' },
+    { minLevel: 1, maxLevel: 6, layout: 'list' }, { minLevel: 2, maxLevel: 3, layout: 'flat' },
   ]);
   assert.deepEqual(result.diagnostics, []);
   const revision = convertLegacyContent({ ...source('confluence-storage', xml), kind: 'revision' }, resolver());
@@ -244,10 +244,24 @@ test('Confluence page and revision tables of contents become editable blocks wit
   assert.equal(nodes(comment.content, 'documentToc').length, 0);
   assert.equal(comment.diagnostics[0]?.code, 'UNSUPPORTED_MACRO');
 
-  const deepHeading = convertLegacyContent(source('confluence-storage', `${toc}<h4>깊은 제목</h4>`), resolver());
-  assert.equal(nodes(deepHeading.content, 'documentToc').length, 1);
-  assert.equal(nodes(deepHeading.content, 'heading')[0].attrs?.level, 3);
-  assert.equal(deepHeading.diagnostics[0]?.code, 'HEADING_LEVEL_NORMALIZED');
+  const deepRange = '<ac:macro ac:name="toc"><ac:parameter ac:name="minLevel">4</ac:parameter><ac:parameter ac:name="maxLevel">6</ac:parameter></ac:macro>';
+  const bounded = '<ac:macro ac:name="toc"><ac:parameter ac:name="maxLevel">3</ac:parameter></ac:macro>';
+  const deepXml = `${toc}${deepRange}${bounded}<h4 id="deep">깊은 제목</h4><h5>하위 소제목</h5><h6>가장 깊은 제목</h6>`;
+  const context = { ...resolver(), sectionLinks: { documentId: 'doc-deep' } };
+  const deep = convertLegacyContent(source('confluence-storage', deepXml), context);
+  canonical(deep);
+  assert.deepEqual(nodes(deep.content, 'documentToc').map(node => ({ ...node.attrs })), [
+    { minLevel: 1, maxLevel: 6, layout: 'list' }, { minLevel: 4, maxLevel: 6, layout: 'list' },
+    { minLevel: 1, maxLevel: 3, layout: 'list' },
+  ]);
+  assert.deepEqual(nodes(deep.content, 'heading').map(node => node.attrs?.level), [4, 5, 6]);
+  assert.equal(nodes(deep.content, 'heading')[0].attrs?.sectionId, deep.sectionTargets?.get('deep'));
+  assert.ok(deep.sectionTargets?.get('deep'));
+  assert.deepEqual(deep.diagnostics, []);
+  assert.deepEqual(convertLegacyContent({ ...source('confluence-storage', deepXml), kind: 'revision' }, context), deep);
+  const legacy = convertLegacyContent(source('confluence-storage', deepXml), { ...context, legacyDocumentHeadingLevels: true });
+  assert.deepEqual(nodes(legacy.content, 'heading').map(node => node.attrs?.level), [3, 3, 3]);
+  assert.deepEqual(nodes(legacy.content, 'codeBlock').map(node => node.content?.[0].text), [deepRange, bounded]);
 });
 
 test('Confluence table of contents preserves unsupported and malformed settings as inert XML', () => {
@@ -258,7 +272,8 @@ test('Confluence table of contents preserves unsupported and malformed settings 
     ['<ac:parameter ac:name="minLevel">3</ac:parameter><ac:parameter ac:name="maxLevel">2</ac:parameter>', ''],
     ['<ac:parameter ac:name="minLevel">3</ac:parameter><ac:parameter ac:name="minLevel">2</ac:parameter>', ''],
     ['<ac:parameter ac:name="minLevel"><strong>2</strong></ac:parameter>', ''],
-    ['<ac:parameter ac:name="maxLevel">3</ac:parameter>', '<h4>원래 제외되는 제목</h4>'],
+    ['<ac:parameter ac:name="maxLevel">8</ac:parameter>', '<h4>깊은 제목</h4>'],
+    ['<ac:parameter ac:name="minLevel">7</ac:parameter>', ''],
     ['<ac:rich-text-body><p>잘못 붙은 본문</p></ac:rich-text-body>', ''],
   ]) {
     const macro = `<ac:structured-macro ac:name="toc">${body}</ac:structured-macro>`;

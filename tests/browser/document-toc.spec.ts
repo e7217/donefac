@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
+import { documentSectionHash, isDocumentSectionId } from '../../shared/document-sections';
 import type { DocPage, DocumentPublicationView, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
 const firstHeading = '배포 계획';
@@ -154,9 +155,10 @@ function confluenceExport(key: string, title: string) {
   const entity = (type: string, id: string, body: string) => `<object class="${type}"><id name="id">${id}</id>${body}</object>`;
   const storage = '<ac:structured-macro ac:name="toc">' +
     '<ac:parameter ac:name="type">flat</ac:parameter>' +
-    '<ac:parameter ac:name="minLevel">2</ac:parameter>' +
-    '<ac:parameter ac:name="maxLevel">2</ac:parameter></ac:structured-macro>' +
-    '<h1>머리말</h1><h2>운영 절차</h2><h3>세부 항목</h3>';
+    '<ac:parameter ac:name="minLevel">4</ac:parameter>' +
+    '<ac:parameter ac:name="maxLevel">6</ac:parameter></ac:structured-macro>' +
+    '<p><a href="#legacy-h6">저장 장치 절 링크</a></p>' +
+    '<h1>머리말</h1><h3>운영 개요</h3><h4>운영 절차</h4><h5>세부 항목</h5><h6 id="legacy-h6">저장 장치 확인</h6>';
   const xml = '<hibernate-generic>' +
     entity('Space', '42', property('key', key) + property('name', title)) +
     entity('Page', '100', property('title', title) + property('version', '1') + reference('space', 'Space', '42') +
@@ -187,7 +189,7 @@ test('Confluence ZIP에서 이관한 본문 목차가 가로 배치와 제목 �
     expect(proposed.status(), await proposed.text()).toBe(201);
     const preview = await proposed.json() as MigrationPreview;
     expect(preview.canApply, JSON.stringify(preview.notices)).toBe(true);
-    expect(preview.notices.some(notice => notice.code.includes('UNSUPPORTED_MACRO'))).toBe(false);
+    expect(preview.notices.map(notice => notice.code)).not.toContain('TOC_PARAMETERS_UNSUPPORTED');
     const applied = await request.post(`/api/migrations/previews/${preview.id}/apply`, {
       data: { expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements },
     });
@@ -196,7 +198,7 @@ test('Confluence ZIP에서 이관한 본문 목차가 가로 배치와 제목 �
     imported = (await workspace(request)).documents.find(document => document.title === title && receipt.projectIds.includes(document.projectId ?? ''));
     expect(imported).toBeDefined();
     if (!imported) return;
-    expect(imported.content.content?.[0]).toEqual({ type: 'documentToc', attrs: { minLevel: 2, maxLevel: 2, layout: 'flat' } });
+    expect(imported.content.content?.[0]).toEqual({ type: 'documentToc', attrs: { minLevel: 4, maxLevel: 6, layout: 'flat' } });
 
     await page.setViewportSize({ width: 360, height: 820 });
     await page.goto(`/#/${imported.projectId}/documents/${imported.id}`);
@@ -206,14 +208,129 @@ test('Confluence ZIP에서 이관한 본문 목차가 가로 배치와 제목 �
     await expect(operation).toBeVisible({ timeout: 25_000 });
     await expect(toc).toHaveAttribute('data-outline-layout', 'flat');
     await expect(headingInToc(toc, '머리말')).toHaveCount(0);
-    await expect(headingInToc(toc, '세부 항목')).toHaveCount(0);
+    await expect(headingInToc(toc, '운영 개요')).toHaveCount(0);
+    await expect(headingInToc(toc, '세부 항목')).toBeVisible();
+    await expect(headingInToc(toc, '저장 장치 확인')).toBeVisible();
     await operation.click();
-    await expect(editor.getByRole('heading', { name: '운영 절차', exact: true, level: 2 })).toBeInViewport();
+    await expect(editor.getByRole('heading', { name: '운영 절차', exact: true, level: 4 })).toBeInViewport();
+    await expect(editor.getByRole('heading', { name: '세부 항목', exact: true, level: 5 })).toBeVisible();
+    const target = editor.getByRole('heading', { name: '저장 장치 확인', exact: true, level: 6 });
+    const sectionId = await target.getAttribute('data-document-section-id');
+    expect(isDocumentSectionId(sectionId)).toBe(true);
+    const jump = editor.getByRole('link', { name: '저장 장치 절 링크', exact: true });
+    await expect(jump).toHaveAttribute('href', documentSectionHash(imported.id, sectionId!));
+    await jump.click();
+    await expect(target).toBeFocused();
     expect((await workspace(request)).documents.find(document => document.id === imported?.id)?.version).toBe(imported.version);
   } finally {
     if (imported) await removeDocument(request, imported.id);
     const deleted = await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
     expect(deleted.ok(), await deleted.text()).toBe(true);
+  }
+});
+
+test('360px에서 제목 4~6을 편집하고 공동 편집과 고정 검토본에서 절을 연다', async ({ page, request, context, browser, baseURL }) => {
+  test.setTimeout(90_000);
+  const { projects: [project], users: [author, reviewer] } = await workspace(request);
+  const headers = { 'X-Actor-Id': author.id };
+  const shallow = '설계 개요', fourth = '저장 장치', fifth = '입력과 출력', sixth = '쓰기 검증';
+  const created = await request.post('/api/documents', { headers, data: {
+    projectId: project.id, title: `깊은 제목 ${randomUUID().slice(0, 8)}`,
+    content: { type: 'doc', content: [
+      { type: 'paragraph' }, heading(3, shallow), { type: 'paragraph', content: [text(fourth)] },
+      { type: 'paragraph', content: [text(sixth)] }, { type: 'paragraph' },
+    ] },
+  } });
+  expect(created.status(), await created.text()).toBe(201);
+  const original = await created.json() as DocPage;
+  const route = `/#/${project.id}/documents/${original.id}`;
+  const peerContext = await browser.newContext({ baseURL, viewport: { width: 360, height: 820 } });
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(route);
+    const editor = page.locator('.docs-prose[contenteditable=true]');
+    const style = page.getByRole('combobox', { name: '문단 서식', exact: true });
+    for (const [label, level] of [[fourth, 4], [sixth, 6]] as const) {
+      await editor.getByText(label, { exact: true }).click();
+      await style.selectOption(`h${level}`);
+      await expect(editor.getByRole('heading', { name: label, exact: true, level })).toBeVisible();
+    }
+    await editor.locator(':scope > p').last().click();
+    await page.keyboard.insertText('/h5');
+    await page.getByRole('group', { name: '블록 추가', exact: true }).getByRole('button', { name: '제목 5', exact: true }).click();
+    await page.keyboard.insertText(fifth);
+    await expect(editor.getByRole('heading', { name: fifth, exact: true, level: 5 })).toBeVisible();
+
+    await editor.locator(':scope > p').first().click();
+    await page.getByRole('button', { name: '본문 목차 삽입', exact: true }).click();
+    const toc = tocIn(editor);
+    await expect(headingInToc(toc, shallow)).toBeVisible();
+    await expect(headingInToc(toc, fourth)).toHaveCount(0);
+    await editor.getByText('목차 설정', { exact: true }).click();
+    await editor.getByRole('combobox', { name: '끝 제목 단계', exact: true }).selectOption('6');
+    await editor.getByRole('combobox', { name: '시작 제목 단계', exact: true }).selectOption('4');
+    await expect(headingInToc(toc, shallow)).toHaveCount(0);
+    for (const label of [fourth, fifth, sixth]) await expect(headingInToc(toc, label)).toBeVisible();
+    await headingInToc(toc, sixth).click();
+    const target = editor.getByRole('heading', { name: sixth, exact: true, level: 6 });
+    await expect(target).toBeInViewport();
+
+    await page.locator('summary').filter({ hasText: '문서 목차' }).click();
+    const outline = page.getByRole('navigation', { name: '문서 제목', exact: true });
+    await outline.getByRole('button', { name: `절 링크 만들기 ${sixth}`, exact: true }).click();
+    const sectionId = await target.getAttribute('data-document-section-id');
+    expect(isDocumentSectionId(sectionId)).toBe(true);
+    const saved = await saveDocument(page, original.id);
+    expect(saved.content.content).toEqual(expect.arrayContaining([
+      { type: 'documentToc', attrs: { minLevel: 4, maxLevel: 6, layout: 'list' } },
+      heading(4, fourth), heading(5, fifth), { ...heading(6, sixth), attrs: { level: 6, sectionId } },
+    ]));
+    await outline.getByRole('button', { name: `절 링크 복사 ${sixth}`, exact: true }).click();
+    await expect(page.getByText('절 링크를 복사했습니다.', { exact: true })).toBeVisible();
+    const copied = new URL(await page.evaluate(() => navigator.clipboard.readText()));
+    expect(copied.hash).toBe(documentSectionHash(original.id, sectionId!, project.id));
+
+    const publicationPath = `/api/documents/${original.id}/publication`;
+    const initial = await (await request.get(publicationPath, { headers })).json() as DocumentPublicationView;
+    const submitted = await request.post(publicationPath, { headers, data: {
+      action: 'request', expectedVersion: initial.version, workspaceGeneration: initial.workspaceGeneration,
+      expectedDocumentVersion: saved.version, reviewerId: reviewer.id,
+    } });
+    expect(submitted.ok(), await submitted.text()).toBe(true);
+    const review = await submitted.json() as DocumentPublicationView;
+    const revisionId = review.reviewRevision?.id;
+    expect(revisionId).toBeTruthy();
+
+    const enabled = await request.post(`/api/documents/${original.id}/collaboration/enable`, { headers, data: { expectedVersion: saved.version } });
+    expect(enabled.ok(), await enabled.text()).toBe(true);
+    await peerContext.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), reviewer.id);
+    const peer = await peerContext.newPage();
+    await Promise.all([page.reload(), peer.goto(copied.href)]);
+    const peerEditor = peer.locator('.docs-live-prose[contenteditable=true]');
+    const liveEditor = page.locator('.docs-live-prose[contenteditable=true]');
+    await expect(peer.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+    const peerHeading = peerEditor.getByRole('heading', { name: sixth, exact: true, level: 6 });
+    await expect(peerHeading).toBeFocused();
+    await peerHeading.click();
+    await peer.getByRole('combobox', { name: '문단 서식', exact: true }).selectOption('h5');
+    await expect(liveEditor.getByRole('heading', { name: sixth, exact: true, level: 5 })).toHaveAttribute('data-document-section-id', sectionId!);
+    await expect.poll(async () => (await workspace(request)).documents.find(item => item.id === original.id)?.content.content).toEqual(expect.arrayContaining([
+      { ...heading(5, sixth), attrs: { level: 5, sectionId } },
+    ]));
+
+    const fixed = new URL(copied);
+    fixed.hash = documentSectionHash(original.id, sectionId!, project.id, { kind: 'review', revisionId: revisionId! });
+    await peer.goto(fixed.href);
+    const snapshot = peer.getByRole('region', { name: '검토 고정본 내용', exact: true });
+    const fixedHeading = snapshot.getByRole('heading', { name: sixth, exact: true, level: 6 });
+    await expect(fixedHeading).toBeFocused();
+    await headingInToc(tocIn(snapshot), sixth).press('Enter');
+    await expect(fixedHeading).toBeFocused();
+  } finally {
+    await peerContext.close();
+    await removeDocument(request, original.id, headers);
   }
 });
 

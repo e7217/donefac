@@ -18,7 +18,7 @@ import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
 import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
-import { DOCUMENT_CONTENT_SCHEMA_VERSION, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt } from '../../shared/document-nodes';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION, DOCUMENT_HEADING_LEVELS, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel } from '../../shared/document-nodes';
 import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
@@ -1505,8 +1505,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   const slashCommands: ({ label: string; search: string } & ({ action: () => unknown } | { annotation: DocumentAnnotationKind } | { columns: 2 | 3 }))[] = [
-    { label: '제목 1', search: 'h1 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 1 }).run() },
-    { label: '제목 2', search: 'h2 heading 제목', action: () => editor?.chain().focus().toggleHeading({ level: 2 }).run() },
+    ...DOCUMENT_HEADING_LEVELS.map(level => ({
+      label: `제목 ${level}`,
+      search: `h${level} heading 제목`,
+      action: () => editor?.chain().focus().toggleHeading({ level }).run(),
+    })),
     { label: '글머리 목록', search: 'list bullet 목록', action: () => editor?.chain().focus().toggleBulletList().run() },
     { label: '체크리스트', search: 'task check 할일 체크', action: () => editor?.chain().focus().toggleTaskList().run() },
     { label: '인용', search: 'quote 인용', action: () => editor?.chain().focus().toggleBlockquote().run() },
@@ -1719,6 +1722,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => { if (editor && !editor.isDestroyed) editor.commands.focus(); });
   }
   const button = (label: string, icon: React.ReactNode, onClick: (event: React.MouseEvent<HTMLButtonElement>) => unknown, active = false) => <button disabled={bodyReadOnly} type="button" className={`docs-format-btn ${active ? 'is-active' : ''}`} title={label} aria-label={label} onMouseDown={event => event.preventDefault()} onClick={onClick}>{icon}</button>;
+  const activeHeadingLevel = DOCUMENT_HEADING_LEVELS.find(level => editor?.isActive('heading', { level }));
   const inColumnLayout = editor?.isActive('documentColumnLayout');
   function openFind() {
     if (!canFind) return;
@@ -1871,7 +1875,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <button ref={findOpener} type="button" className={`docs-format-btn ${findOpen ? 'is-active' : ''}`}
                   title="본문에서 찾기" aria-label="본문에서 찾기" aria-expanded={findOpen} aria-keyshortcuts="Control+F Meta+F"
                   disabled={!canFind} onClick={() => findOpen ? closeFind() : openFind()}><Search size={15} aria-hidden="true" /></button>
-                <select disabled={bodyReadOnly} aria-label="문단 서식" value={editor?.isActive('heading', { level: 1 }) ? 'h1' : editor?.isActive('heading', { level: 2 }) ? 'h2' : editor?.isActive('heading', { level: 3 }) ? 'h3' : 'p'} onChange={event => { if (event.target.value === 'p') editor?.chain().focus().setParagraph().run(); else editor?.chain().focus().toggleHeading({ level: Number(event.target.value.slice(1)) as 1 | 2 | 3 }).run(); }}><option value="p">본문</option><option value="h1">제목 1</option><option value="h2">제목 2</option><option value="h3">제목 3</option></select><span className="docs-toolbar-separator" />
+                <select disabled={bodyReadOnly} aria-label="문단 서식" value={activeHeadingLevel ? `h${activeHeadingLevel}` : 'p'}
+                  onChange={event => {
+                    const { value } = event.target;
+                    if (value === 'p') {
+                      editor?.chain().focus().setParagraph().run();
+                      return;
+                    }
+                    const level = Number(value.slice(1));
+                    if (isDocumentHeadingLevel(level)) editor?.chain().focus().setHeading({ level }).run();
+                  }}>
+                  <option value="p">본문</option>
+                  {DOCUMENT_HEADING_LEVELS.map(level => <option key={level} value={`h${level}`}>제목 {level}</option>)}
+                </select><span className="docs-toolbar-separator" />
                 {button('굵게', <Bold size={15} />, () => editor?.chain().focus().toggleBold().run(), editor?.isActive('bold'))}
                 {button('기울임', <Italic size={15} />, () => editor?.chain().focus().toggleItalic().run(), editor?.isActive('italic'))}
                 {button('취소선', <Strikethrough size={15} />, () => editor?.chain().focus().toggleStrike().run(), editor?.isActive('strike'))}

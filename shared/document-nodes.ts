@@ -13,7 +13,7 @@ export { documentPlainText, ISSUE_SUMMARY_GROUP_BY, ISSUE_SUMMARY_GROUP_LABELS, 
 export const DOCUMENT_ISSUE_LIST_LIMIT = 20;
 export const MAX_DOCUMENT_ISSUE_BLOCKS = 30;
 export const MAX_DOCUMENT_ISSUE_LISTS = MAX_DOCUMENT_ISSUE_BLOCKS;
-export const DOCUMENT_CONTENT_SCHEMA_VERSION = 15;
+export const DOCUMENT_CONTENT_SCHEMA_VERSION = 16;
 export const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024;
 export const MAX_DOCUMENT_COLUMNS = 3;
 export const MAX_DOCUMENT_TABLE_SPAN = 100;
@@ -37,7 +37,13 @@ export function normalizeDocumentColumnLayoutOptions(attrs: unknown, columnCount
 export function documentColumnLayoutTracks(weights: readonly number[]): string {
   return weights.map(weight => `minmax(0, ${weight}fr)`).join(' ');
 }
-export type DocumentTocLevel = 1 | 2 | 3;
+export const DOCUMENT_HEADING_LEVELS = [1, 2, 3, 4, 5, 6] as const;
+export type DocumentHeadingLevel = (typeof DOCUMENT_HEADING_LEVELS)[number];
+export function isDocumentHeadingLevel(value: unknown): value is DocumentHeadingLevel {
+  return DOCUMENT_HEADING_LEVELS.some(level => level === value);
+}
+
+export type DocumentTocLevel = DocumentHeadingLevel;
 export type DocumentTocLayout = 'list' | 'flat';
 export interface DocumentTocOptions {
   minLevel: DocumentTocLevel;
@@ -59,9 +65,12 @@ export const STATUS_BADGE_TONE_LABELS: Record<StatusBadgeTone, string> = {
 };
 const versionTwoNodes = new Set(['issueReference', 'documentReference', 'documentInclude', 'details', 'detailsSummary', 'detailsContent']);
 
-type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+type DocumentSchemaVersion = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | typeof DOCUMENT_CONTENT_SCHEMA_VERSION;
+const isDeepHeadingLevel = (level: unknown) => isDocumentHeadingLevel(level) && level > 3;
 
 export function documentNodeSchemaVersion(nodeType: string, attrs?: Record<string, unknown>): DocumentSchemaVersion {
+  if ((nodeType === 'heading' && isDeepHeadingLevel(attrs?.level)) || (nodeType === 'documentToc' &&
+      (isDeepHeadingLevel(attrs?.minLevel) || isDeepHeadingLevel(attrs?.maxLevel)))) return 16;
   if (nodeType === 'taskItem' && attrs?.checklistItemId !== undefined) return 15;
   if (nodeType === 'documentChildList' && attrs?.sort === 'manual') return 14;
   if (nodeType === 'documentProperties' || nodeType === 'documentPropertyReport') return 13;
@@ -98,7 +107,7 @@ export function documentContentSchemaVersion(content: RichContent): DocumentSche
 }
 
 export function isDocumentTocLevel(value: unknown): value is DocumentTocLevel {
-  return value === 1 || value === 2 || value === 3;
+  return isDocumentHeadingLevel(value);
 }
 
 export function isDocumentTocLayout(value: unknown): value is DocumentTocLayout {

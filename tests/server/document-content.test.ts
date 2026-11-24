@@ -107,12 +107,24 @@ test('in-body tables of contents store only configuration in schema 8', () => {
   assert.equal(plainText.trim(), '한 번만 저장할 제목');
   const filtered: RichContent = { ...toc, attrs: { minLevel: 2, maxLevel: 2, layout: 'flat' } };
   assert.deepEqual(JSON.parse(JSON.stringify(normalizeDocumentContent(doc(filtered)).content)), doc(filtered));
-  for (const attrs of [{ minLevel: '2' }, { maxLevel: 4 }, { minLevel: null }, { minLevel: 3, maxLevel: 2 },
+  for (const attrs of [{ minLevel: '2' }, { maxLevel: 7 }, { minLevel: null }, { minLevel: 3, maxLevel: 2 },
     { layout: 'columns' }, { layout: null }, { headings: [] }]) {
     rejects(() => normalizeDocumentContent(doc({ ...toc, attrs })));
   }
   rejects(() => normalizeDocumentContent(doc({ ...toc, content: [heading('목차에 들어가면 안 되는 제목')] })));
   rejects(() => normalizeDocumentContent(doc({ type: 'paragraph', content: [toc] })));
+});
+
+test('deep headings and TOC ranges preserve exact levels and require content schema 16', () => {
+  const toc: RichContent = { type: 'documentToc', attrs: { minLevel: 4, maxLevel: 6, layout: 'flat' } };
+  const headings = [4, 5, 6].map(level => heading(`저장할 제목 ${level}`, `section-${level}`, level));
+  for (const blocks of [[toc], headings, [toc, ...headings]]) {
+    const input: RichContent = { type: 'doc', content: blocks };
+    const normalized = normalizeDocumentContent(input);
+    assert.deepEqual(JSON.parse(JSON.stringify(normalized.content)), input);
+    assert.equal(documentContentSchemaVersion(normalized.content), 16);
+  }
+  for (const level of [0, 3.5, 7]) rejects(() => normalizeDocumentContent({ type: 'doc', content: [heading('제목', undefined, level)] }));
 });
 
 test('editor heading copies and splits preserve the original ID and multi-heading formatting keeps each identity', () => {
@@ -235,7 +247,7 @@ test('missing target preservation and prospective include graph validation disti
   }finally{f.close();}
 });
 
-test('startup upgrades v1 through v8 rooms atomically, preserving Yjs bytes and leaving current rooms untouched',()=>{
+test('startup upgrades older rooms atomically, preserving their Yjs bytes including the preceding format',()=>{
   const f=fixture();try{
     const initial=new CollaborationService(f.store,f.contents);
     const current=initial.enable('doc-c',1,'user-test');
@@ -262,6 +274,10 @@ test('startup upgrades v1 through v8 rooms atomically, preserving Yjs bytes and 
     const tocBody: RichContent = { type: 'doc', content: [{ type: 'documentToc', attrs: { minLevel: 2, maxLevel: 3, layout: 'flat' } }, heading('목차의 제목') ] };
     f.store.put('documents', document('doc-i'));
     const i = insertState(f.store, 'doc-i', tocBody, 8);
+    const precedingBody: RichContent = { type: 'doc', content: [heading('이전 협업 절', 'prev-section', 3),
+      { type: 'documentToc', attrs: { minLevel: 1, maxLevel: 3, layout: 'list' } }] };
+    f.store.put('documents', document('doc-j', precedingBody));
+    const j = insertState(f.store, 'doc-j', precedingBody, 15);
     const request=f.store.db.prepare('INSERT INTO collaboration_requests(document_id,epoch,request_id,hash) VALUES(?,?,?,?)');
     request.run('doc-a',a.epoch,'old-request-v1','old-hash');
     request.run('doc-b',b.epoch,'old-request-v2','old-hash');
@@ -271,9 +287,10 @@ test('startup upgrades v1 through v8 rooms atomically, preserving Yjs bytes and 
     request.run('doc-g',g.epoch,'old-request-v6','old-hash');
     request.run('doc-h',h.epoch,'old-request-v7','old-hash');
     request.run('doc-i',i.epoch,'old-request-v8','old-hash');
+    request.run('doc-j',j.epoch,'old-request-v15','old-hash');
     request.run('doc-c',current.epoch,'current-request','current-hash');
     const migrated=new CollaborationService(f.store,f.contents);try{
-      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목'],['doc-h',h,'연결된 저장 절'],['doc-i',i,'목차의 제목']] as const){
+      for(const [id,prior,label] of [['doc-a',a,'보존할 원본'],['doc-b',b,'두 번째 원본'],['doc-d',d,'검증할 업무'],['doc-e',e,'검증할 업무 현황'],['doc-f',pinned,'검증할 문서 버전'],['doc-g',g,'기존 절 제목'],['doc-h',h,'연결된 저장 절'],['doc-i',i,'목차의 제목'],['doc-j',j,'이전 협업 절']] as const){
         const session=migrated.session(id);
         assert.equal(session.schemaVersion,COLLABORATION_SCHEMA);
         assert.notEqual(session.epoch,prior.epoch);
@@ -285,6 +302,7 @@ test('startup upgrades v1 through v8 rooms atomically, preserving Yjs bytes and 
       assert.equal(JSON.stringify(migrated.session('doc-g').document.content), JSON.stringify(legacyHeading));
       assert.deepEqual(migrated.session('doc-h').document.content, anchoredHeading);
       assert.deepEqual(migrated.session('doc-i').document.content, tocBody);
+      assert.deepEqual(migrated.session('doc-j').document.content, precedingBody);
       assert.deepEqual(migrated.session('doc-c'),current);
       assert.deepEqual(f.store.db.prepare('SELECT request_id FROM collaboration_requests').all().map(row=>row.request_id),['current-request']);
       const before=migrated.session('doc-a');const second=new CollaborationService(f.store,f.contents);try{assert.deepEqual(second.session('doc-a'),before);}finally{second.close();}
@@ -341,6 +359,11 @@ test('one invalid persisted room prevents every migration write, and legacy impo
       assert.equal(service.validateImport([anchoredState], [anchored])[0].schemaVersion, COLLABORATION_SCHEMA);
       assert.equal(service.validateImport([{ ...anchoredState, schemaVersion: 7 }], [anchored])[0].schemaVersion, COLLABORATION_SCHEMA);
       assert.throws(() => service.validateImport([{ ...anchoredState, schemaVersion: 6 }], [anchored]),
+        (error: unknown) => error instanceof CollaborationError && error.code === 'SCHEMA_MISMATCH');
+      const deep = document('doc-c', normalizeDocumentContent({ type: 'doc', content: [heading('깊은 절', 'deep-section', 6)] }).content);
+      const deepState = { ...current, state: encode(deep.content).toString('base64') };
+      assert.equal(service.validateImport([deepState], [deep])[0].schemaVersion, COLLABORATION_SCHEMA);
+      assert.throws(() => service.validateImport([{ ...deepState, schemaVersion: 15 }], [deep]),
         (error: unknown) => error instanceof CollaborationError && error.code === 'SCHEMA_MISMATCH');
       f.store.transaction(()=>{f.store.put('documents',legacyDoc);service.replaceImported(valid);});assert.ok(service.session('doc-a').document.plainText.includes('기존 형식'));
     }finally{service.close();}

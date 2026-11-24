@@ -33,6 +33,33 @@ test('Markdown exports preserve the reading order, formatting and section links 
   }
 });
 
+test('Markdown exports keep heading levels 4–6, section anchors and matching table of contents entries', () => {
+  const heading = (level: number, title: string, sectionId: string): RichContent => ({
+    type: 'heading', attrs: { level, sectionId }, content: [text(title)],
+  });
+  const content: RichContent[] = [
+    { type: 'documentToc', attrs: { minLevel: 4, maxLevel: 6 } },
+    heading(3, '개요', 'overview'),
+    heading(4, '검증 절차', 'checks'),
+    heading(5, '연결 점검', 'connection'),
+    heading(6, '오류 코드', 'error-codes'),
+    { type: 'table', content: [{ type: 'tableRow', content: [{ type: 'tableCell', content: [
+      heading(6, '결과 표', 'results'),
+    ] }] }] },
+  ];
+
+  for (const markdown of [render(content).markdown, contentMarkdown({ type: 'doc', content })]) {
+    assert.match(markdown, /^#### 검증 절차$/mu);
+    assert.match(markdown, /^##### 연결 점검$/mu);
+    assert.match(markdown, /^###### 오류 코드$/mu);
+    const html = parse(markdown, { async: false, gfm: true });
+    assert.doesNotMatch(html, /href="#overview"/u);
+    assert.match(html, /href="#checks">검증 절차<\/a>[\s\S]*href="#connection">연결 점검<\/a>[\s\S]*href="#error-codes">오류 코드<\/a>[\s\S]*href="#results">결과 표<\/a>/u);
+    assert.match(html, /id="checks"[\s\S]*<h4>검증 절차<\/h4>[\s\S]*id="connection"[\s\S]*<h5>연결 점검<\/h5>[\s\S]*id="error-codes"[\s\S]*<h6>오류 코드<\/h6>/u);
+    assert.match(html, /<td>(?:<p>)?<a id="results"[^>]*><\/a>(?:<\/p>)?(?:&#10;|\s)*<h6>결과 표<\/h6><\/td>/u);
+  }
+});
+
 test('standalone Markdown keeps merged table headers, rich cell content and safe links', () => {
   const row = (...content: RichContent[]): RichContent => ({ type: 'tableRow', content });
   const header = (value: string, attrs?: RichContent['attrs']): RichContent => ({

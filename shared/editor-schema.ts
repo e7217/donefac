@@ -8,7 +8,7 @@ import { Plugin, type Transaction } from '@tiptap/pm/state';
 import { Fragment, Slice, type Node as EditorNode } from '@tiptap/pm/model';
 import { Mapping, ReplaceAroundStep } from '@tiptap/pm/transform';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
-import { documentNodeExtensions } from './document-nodes.js';
+import { DOCUMENT_HEADING_LEVELS, documentNodeExtensions } from './document-nodes.js';
 import { isDocumentSectionId } from './document-sections.js';
 
 type SectionHeading = { position: number; node: EditorNode };
@@ -196,7 +196,7 @@ const ChecklistItemIdentity = Extension.create({
 /** Identical document schema on the server and browser; no editor or DOM needed. */
 export function createEditorExtensions(options: { collaboration?: boolean } = {}): AnyExtension[] {
   return [
-    StarterKit.configure({ heading: { levels: [1,2,3] }, link: { openOnClick:false }, ...(options.collaboration ? {undoRedo:false} : {}) }),
+    StarterKit.configure({ heading: { levels: [...DOCUMENT_HEADING_LEVELS] }, link: { openOnClick:false }, ...(options.collaboration ? {undoRedo:false} : {}) }),
     HeadingSections,
     ChecklistItemIdentity,
     TableKit.configure({ table: { resizable:true } }),

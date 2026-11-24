@@ -14,6 +14,10 @@ test('Markdown headings, GFM styles, nested checklists, code, tables and breaks 
     '',
     '#### 이후 절',
     '',
+    '##### 하위 절',
+    '',
+    '###### [가장 깊은 절](#이후-절)',
+    '',
     '일반 **강조**와 *기울임*, ~~이전~~, `종료`  ',
     '다음 줄',
     '',
@@ -42,15 +46,16 @@ test('Markdown headings, GFM styles, nested checklists, code, tables and breaks 
   const nodes = children(normalized.content);
   assert.equal(result.suggestedTitle, '운영 & 점검');
   assert.deepEqual(normalized.content.content?.map(node => node.type), [
-    'heading', 'heading', 'paragraph', 'blockquote', 'orderedList', 'taskList', 'orderedList', 'table', 'codeBlock', 'horizontalRule',
+    'heading', 'heading', 'heading', 'heading', 'paragraph', 'blockquote', 'orderedList', 'taskList', 'orderedList', 'table', 'codeBlock', 'horizontalRule',
   ]);
   assert.deepEqual(nodes.filter(node => node.type === 'heading').map(node => [node.attrs?.level, node.attrs?.sectionId]), [
-    [1, markdownImportSectionId(1)], [3, markdownImportSectionId(2)],
+    [1, markdownImportSectionId(1)], [4, markdownImportSectionId(2)], [5, markdownImportSectionId(3)], [6, markdownImportSectionId(4)],
   ]);
-  assert.deepEqual(nodes.filter(node => node.type === 'text' && node.marks?.length).slice(0, 4)
+  assert.deepEqual(nodes.filter(node => node.type === 'text' && node.marks?.length).slice(0, 5)
     .map(node => [node.text, node.marks?.map(mark => mark.type)]), [
-    ['강조', ['bold']], ['기울임', ['italic']], ['이전', ['strike']], ['종료', ['code']],
+    ['가장 깊은 절', ['link']], ['강조', ['bold']], ['기울임', ['italic']], ['이전', ['strike']], ['종료', ['code']],
   ]);
+  assert.equal(linkOf(nodes.find(node => node.text === '가장 깊은 절')!), `#${markdownImportSectionId(2)}`);
   assert.equal(nodes.filter(node => node.type === 'hardBreak').length, 1);
   assert.deepEqual(nodes.filter(node => node.type === 'taskItem').map(node => node.attrs?.checked), [true, false, false, true]);
   assert.deepEqual(nodes.filter(node => node.type === 'orderedList').map(node => node.attrs?.start), [0, 2]);
@@ -58,7 +63,7 @@ test('Markdown headings, GFM styles, nested checklists, code, tables and breaks 
   assert.deepEqual(nodes.filter(node => node.type === 'tableCell').map(node => node.attrs?.align), ['left', 'right']);
   assert.equal(nodes.find(node => node.type === 'codeBlock')?.attrs?.language, 'sh');
   assert.equal(nodes.find(node => node.type === 'codeBlock')?.content?.[0]?.text, 'printf "<그대로>"');
-  assert.deepEqual(result.warnings.map(({ code, count }) => [code, count]), [['headingLevel', 1], ['numberedTask', 1]]);
+  assert.deepEqual(result.warnings.map(({ code, count }) => [code, count]), [['numberedTask', 1]]);
 });
 
 test('Markdown fragment and link destinations bind only matched headings or validated source-relative addresses', () => {

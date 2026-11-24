@@ -7,7 +7,7 @@ import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap
 import type { AnyExtension, NodeViewRenderer } from '@tiptap/core';
 import { ArrowLeft, ChevronDown, ChevronRight, FileClock, FileText, Link2, Search, X } from 'lucide-react';
 import type { DocPage, DocRevision, DocumentSourceSelection, RichContent, WorkspaceSnapshot } from '../../shared/types';
-import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isLiveDocumentInclude, MAX_DOCUMENT_TABLE_SPAN, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
+import { contentReferences, DOCUMENT_ISSUE_LIST_LIMIT, documentColumnLayoutTracks, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel, isLiveDocumentInclude, MAX_DOCUMENT_TABLE_SPAN, normalizeDocumentColumnLayoutOptions } from '../../shared/document-nodes';
 import { normalizeDocumentChildListOptions, projectDocumentChildren } from '../../shared/document-child-list';
 import { normalizeDocumentLabelListOptions } from '../../shared/document-label-list';
 import { collectDocumentPropertyReport, normalizeDocumentPropertiesOptions, normalizeDocumentPropertyReportOptions } from '../../shared/document-properties';
@@ -366,8 +366,8 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     case 'doc': return <div key={key}>{children}</div>;
     case 'paragraph': return <p key={key}>{children.length ? children : <br />}</p>;
     case 'heading': {
-      const level = attrs.level === 1 ? 1 : attrs.level === 2 ? 2 : 3;
-      const Heading = level === 1 ? 'h1' : level === 2 ? 'h2' : 'h3';
+      const level = isDocumentHeadingLevel(attrs.level) ? attrs.level : 3;
+      const Heading = `h${level}` as const;
       const canNavigate = children.every(child => child !== null);
       const title = canNavigate ? headingTitle(node) : '';
       const sectionId = state.includeDepth === 0 && isDocumentSectionId(attrs.sectionId) ? attrs.sectionId : undefined;
