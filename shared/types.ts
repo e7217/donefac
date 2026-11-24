@@ -1492,6 +1492,11 @@ export interface GitlabOpenedMergeRequestStatusBinding {
   sourceProjectId: number;
 }
 export type GitlabPipelineStatusBinding = Pick<GitlabOpenedMergeRequestStatusBinding, 'linkId' | 'occurredAt'>;
+export type GitlabClosedMergeRequestStatusBinding = Pick<GitlabOpenedMergeRequestStatusBinding, 'linkId' | 'occurredAt'> & {
+  targetBranch?: string;
+};
+export type GitlabMergeRequestStatusBinding = { kind: 'opened'; proof: GitlabOpenedMergeRequestStatusBinding } |
+  { kind: 'closed'; proof: GitlabClosedMergeRequestStatusBinding };
 export type GitlabStatusObservation = {
   link: GitlabLink;
   occurredAt: string;

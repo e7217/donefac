@@ -2033,9 +2033,9 @@ export function createApp(options: {
         const abort = () => controller.abort();
         res.once('close', abort);
         try {
-          verified = binding.kind === 'opened'
-            ? await gitlab.verifyManualOpenedMergeRequest(issue.id, binding.proof, controller.signal)
-            : await gitlab.verifyManualPipelineStatus(issue.id, binding.proof, controller.signal);
+          verified = binding.kind === 'pipeline'
+            ? await gitlab.verifyManualPipelineStatus(issue.id, binding.proof, controller.signal)
+            : await gitlab.verifyManualMergeRequestStatus(issue.id, binding, controller.signal);
         }
         finally { res.off('close', abort); }
         if (controller.signal.aborted) return;

@@ -758,7 +758,7 @@ function mergeRequestReviewMessage(cause: unknown): string {
   return 'GitLab MR 검토 정보를 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function MergeRequestReview({ target, revision }: { target: ReviewTarget; revision: string }) {
+function MergeRequestReview({ target, revision, directDiscussions }: { target: ReviewTarget; revision: string; directDiscussions: boolean }) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/merge-request-review`;
@@ -767,6 +767,7 @@ function MergeRequestReview({ target, revision }: { target: ReviewTarget; revisi
   }, '연결된 MR의 검토 정보 응답을 확인할 수 없습니다.', mergeRequestReviewMessage);
 
   return <div className="gitlab-activity-inspection">
+    {directDiscussions && <MergeRequestDiscussions target={target} revision={revision} />}
     <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
       <GitMerge aria-hidden="true" size={14} />{view ? 'MR 검토 닫기' : 'MR 검토 확인'}
     </button>
@@ -776,7 +777,7 @@ function MergeRequestReview({ target, revision }: { target: ReviewTarget; revisi
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
       {view.kind === 'ready' && <>
         <MergeRequestReviewResult result={view.result} url={target.url} />
-        <MergeRequestDiscussions target={target} revision={revision} />
+        {!directDiscussions && <MergeRequestDiscussions target={target} revision={revision} />}
       </>}
       <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
         <RefreshCw aria-hidden="true" size={14} />MR 검토 다시 확인
@@ -1265,6 +1266,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       mr={link} manualActions={manualActions} reviewStatus={reviewStatus}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas, manualActions ? issueVersion : null])} />}
     {mr && state === 'opened' && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
+      directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
     {(issueKey || statusCheck || manual) && <div className="gitlab-activity-row-actions">

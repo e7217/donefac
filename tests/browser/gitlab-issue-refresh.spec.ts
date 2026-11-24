@@ -564,6 +564,175 @@ test('360px 티켓에서 동기화한 열린 MR로 상태를 검토하고 저장
   }
 });
 
+test('360px 닫힌 MR 상태 제안은 저장 전 재개를 감지하고 다시 닫힌 근거로 저장한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const unique = randomUUID();
+  const token = `synthetic-closed-review-${unique}`;
+  const secret = `synthetic-closed-review-hook-${unique}`;
+  const repositoryId = 42;
+  const iid = 31;
+  const repositoryPath = 'team/review/reclosed';
+  const repoRead = `/forge/api/v4/projects/${repositoryId}`;
+  const mrRead = `${repoRead}/merge_requests/${iid}`;
+  const branchPrefix = `feature/closed-review-${unique.slice(0, 8)}/`;
+  const targetBranch = 'main';
+  const createdAt = new Date(Date.now() - 60_000).toISOString();
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const settings = async () => json<GitlabSettings>(await request.get(settingsPath));
+  const { projects: [project], users: [editor, automationActor] } = await workspace();
+  const original = await settings();
+  expect(original.baseUrl).toBe('');
+  let issue: Issue | undefined;
+  let rule: AutomationRule | undefined;
+  let baseUrl = '';
+  let closedAt: string | null = null;
+  let updatedAt = createdAt;
+  const advance = () => new Date(Math.max(Date.now(), Date.parse(updatedAt) + 1)).toISOString();
+  const calls: { method: string | undefined; path: string }[] = [];
+  const repoUrl = () => `${baseUrl}/${repositoryPath}`;
+  const mrUrl = () => `${repoUrl()}/-/merge_requests/${iid}`;
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    calls.push({ method: incoming.method, path });
+    response.setHeader('Content-Type', 'application/json');
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end('{}');
+    if (path === repoRead) return response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repositoryPath, web_url: repoUrl() }));
+    if (path === `${repoRead}/pipelines`) return response.end('[]');
+    if (issue && (path === `${repoRead}/merge_requests` || path === mrRead)) {
+      const mr = { id: 7000 + iid, iid, project_id: repositoryId, source_project_id: repositoryId, target_project_id: repositoryId,
+        title: `${issue.key} 닫힌 변경 검토`, state: closedAt ? 'closed' : 'opened', source_branch: branchPrefix + issue.key,
+        target_branch: targetBranch, sha: 'c'.repeat(40), created_at: createdAt, updated_at: updatedAt,
+        closed_at: closedAt, web_url: mrUrl() };
+      return response.end(JSON.stringify(path === mrRead ? mr : [mr]));
+    }
+    return response.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/forge`;
+  const exactRead = [{ method: 'GET', path: repoRead }, { method: 'GET', path: mrRead }];
+  try {
+    const connected = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
+      expectedVersion: original.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    const ticket = await json<Issue>(await request.post('/api/issues', {
+      data: { projectId: project.id, title: `닫힌 MR 검토 ${unique.slice(0, 8)}`, status: 'todo' },
+    }), 201);
+    issue = ticket;
+    const issuePath = `/api/issues/${ticket.id}`;
+    const historyPath = `${issuePath}/automation-runs`;
+    const persisted = async () => (await workspace()).issues.find(row => row.id === ticket.id);
+    const activeRule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `닫힌 MR 상태 검토 ${unique.slice(0, 8)}`, enabled: true, trigger: 'merge_request.closed',
+      gitlabProjectIds: [repositoryId], branchPattern: `${branchPrefix}*`, targetBranchPattern: targetBranch,
+      issueTypes: [], fromStatuses: ['todo'], toStatusId: 'review', actorId: automationActor.id,
+    } }), 201);
+    rule = activeRule;
+    const originalClose = advance();
+    closedAt = updatedAt = originalClose;
+    const sync = await json<GitlabSyncResult>(await request.post(`${settingsPath}/sync`, { data: { expectedVersion: connected.version } }));
+    expect(sync).toMatchObject({ linked: 1, partial: false });
+    const synchronized = await workspace();
+    const link = synchronized.gitlabLinks.find(row => row.issueId === ticket.id && row.kind === 'merge_request' && row.iid === iid);
+    if (!link) throw new Error(`동기화된 MR !${iid} 연결이 없습니다.`);
+    expect(link).toMatchObject({ state: 'closed', updatedAt: originalClose, webUrl: mrUrl() });
+    const linkId = link.id;
+    calls.length = 0;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(actorId => localStorage.setItem('teamspace.actor', actorId), editor.id);
+    const route = `#/${project.id}/issues?issue=${ticket.id}`;
+    await page.goto(`/${route}`);
+    const panel = page.getByRole('dialog', { name: ticket.title, exact: true });
+    const gitlab = panel.getByRole('region', { name: 'GitLab', exact: true });
+    const mr = gitlab.getByRole('region', { name: 'MR', exact: true }).getByRole('listitem');
+    const form = panel.locator('form.issue-detail-form');
+    const status = form.getByRole('combobox', { name: '상태', exact: true });
+    const title = form.getByRole('textbox', { name: '제목', exact: true });
+    const comment = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const draftTitle = `검토 중인 닫힌 MR ${unique.slice(0, 8)}`;
+    const draftComment = '아직 전송하지 않은 MR 검토 댓글';
+    const proposal = gitlab.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const stage = proposal.getByRole('button', { name: '목표 상태로 편집', exact: true });
+    const reviewPath = `${issuePath}/gitlab-links/${encodeURIComponent(linkId)}/status-review`;
+    async function review(expectedClosedAt: string) {
+      const reading = page.waitForResponse(response => new URL(response.url()).pathname === reviewPath && response.request().method() === 'POST');
+      await mr.getByRole('button', { name: '이 활동으로 상태 검토', exact: true }).click();
+      const checked = await json<GitlabIssueRefreshResult>(await reading);
+      expect(calls.splice(0)).toEqual(exactRead);
+      expect(checked).toMatchObject({ links: [{ id: linkId, state: 'closed' }], failures: [], skipped: 0 });
+      if (checked.statusReview?.kind !== 'suggestion') throw new Error('닫힌 MR의 상태 변경 제안이 없습니다.');
+      const { suggestion } = checked.statusReview;
+      expect(suggestion).toMatchObject({ rule: { id: activeRule.id }, fromStatus: 'todo', toStatus: 'review',
+        evidence: { trigger: 'merge_request.closed', occurredAt: expectedClosedAt, targetBranch, link: { id: linkId, iid, state: 'closed' } },
+      });
+      await expect(proposal).toContainText('Merge Request 닫힘');
+      await expect(proposal.locator('time')).toHaveAttribute('datetime', expectedClosedAt);
+      await stage.click();
+      await expect(status).toHaveValue('review');
+      return suggestion.token;
+    }
+    async function save(suggestionToken: string) {
+      const saving = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
+      await form.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+      const saved = await saving;
+      expect(saved.request().postDataJSON()).toMatchObject({ status: 'review', title: draftTitle, gitlabStatusSuggestionToken: suggestionToken });
+      expect(calls.splice(0)).toEqual(exactRead);
+      return saved;
+    }
+
+    await expect(mr).toHaveAttribute('data-gitlab-state', 'closed');
+    await title.fill(draftTitle);
+    await comment.fill(draftComment);
+    expect(calls).toEqual([]);
+    const staleToken = await review(originalClose);
+    closedAt = null;
+    updatedAt = advance();
+    expect((await workspace()).gitlabLinks.find(row => row.id === linkId)?.state).toBe('closed');
+
+    expect(await json(await save(staleToken), 409)).toMatchObject({ details: { reason: 'gitlab_status_suggestion_stale' } });
+    await expect(form.getByRole('alert')).toContainText('다시 확인');
+    await expect(status).toHaveValue('todo');
+    await expect(proposal).toHaveCount(0);
+    await expect(title).toHaveValue(draftTitle);
+    await expect(comment).toHaveValue(draftComment);
+    await expect(page).toHaveURL(url => url.hash === route);
+    expect(await persisted()).toEqual(ticket);
+
+    const reclosedAt = advance();
+    closedAt = updatedAt = reclosedAt;
+    const freshToken = await review(reclosedAt);
+    expect(freshToken).not.toBe(staleToken);
+    const saved = await json<Issue>(await save(freshToken));
+    expect(saved).toMatchObject({ id: ticket.id, status: 'review', title: draftTitle, version: ticket.version + 1 });
+    const unsent = page.getByRole('dialog', { name: draftTitle, exact: true }).getByRole('textbox', { name: '댓글 내용', exact: true });
+    await expect(unsent).toHaveValue(draftComment);
+    const current = await workspace();
+    expect(current.issues.find(row => row.id === ticket.id)).toEqual(saved);
+    expect(current.activities.filter(activity => activity.resourceId === ticket.id).at(-1)?.actorId).toBe(editor.id);
+    expect((await json<IssueAutomationRunPage>(await request.get(historyPath))).items).toEqual([]);
+    await unsent.fill('');
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
+      if (issue) {
+        const removed = await request.delete(`/api/issues/${issue.id}`);
+        if (removed.ok()) {
+          const { trashEntryId } = await removed.json() as { trashEntryId: string };
+          await request.delete(`/api/trash/${trashEntryId}`);
+        }
+      }
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
+    } finally {
+      mock.closeAllConnections();
+      await new Promise<void>(resolve => mock.close(() => resolve()));
+    }
+  }
+});
+
 test('360px 브랜치만 연결한 티켓에서 HEAD를 확인하고 조회 실패 시 저장한 상태와 초안을 유지한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const unique = randomUUID();

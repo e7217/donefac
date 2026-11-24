@@ -638,6 +638,83 @@ test('incomplete or predating opened-MR evidence leaves an independently verifie
   assert.deepEqual((await f.call<IssueAutomationRunPage>(`/issues/${f.issue.id}/automation-runs`)).items, []);
 });
 
+test('a closed MR proposal cannot save after an unobserved reopen or a different close', async t => {
+  const f = await fixture(t);
+  const issuePath = `/issues/${f.issue.id}`;
+  const workspace = () => f.call<WorkspaceSnapshot>('/workspace');
+  const history = () => f.call<IssueAutomationRunPage>(`${issuePath}/automation-runs`);
+  const automationActor = (await workspace()).users.find(user => user.id !== actor)!;
+  const rule = await f.call<AutomationRule>('/automation-rules', { method: 'POST', body: {
+    projectId, name: 'Review a discarded merge request', enabled: true, trigger: 'merge_request.closed', gitlabProjectIds: [repositoryId],
+    branchPattern: sourceBranch, targetBranchPattern: 'main', issueTypes: [], fromStatuses: [f.issue.status], toStatusId: 'review', actorId: automationActor.id,
+  } }, 201);
+  f.setMr({ target_branch: 'main' });
+  const link = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.mrUrl), 201);
+  const mrPath = `${f.projectPath}/merge_requests/${mrIid}`;
+  const expectReads = (paths = [f.projectPath, mrPath]) => assert.deepEqual(f.calls,
+    paths.map(path => ({ method: 'GET', path, credential: token })));
+  const review = async (closedAt: string) => {
+    f.calls.length = 0;
+    const result = await f.call<GitlabIssueRefreshResult>(activityStatusReviewPath(f.issue.id, link.id), { method: 'POST', body: {} });
+    expectReads();
+    assert.deepEqual(result.failures, []);
+    assert.ok(result.statusReview?.kind === 'suggestion');
+    const { suggestion } = result.statusReview;
+    assert.equal(suggestion.toStatus, 'review');
+    assert.equal(suggestion.rule.id, rule.id);
+    assert.deepEqual(suggestion.evidence, {
+      link: result.links[0], trigger: 'merge_request.closed', occurredAt: closedAt, targetBranch: 'main',
+    });
+    assert.equal(suggestion.evidence.link.id, link.id);
+    return suggestion.token;
+  };
+  const closedAt = new Date().toISOString();
+  assert.ok(rule.enabledAt && closedAt >= rule.enabledAt);
+  f.setMr({ state: 'closed', closed_at: closedAt, updated_at: closedAt });
+  const firstToken = await review(closedAt);
+  const before = await workspace(), priorHistory = await history(), originalLinks = await f.links();
+  assert.deepEqual(before.issues.find(issue => issue.id === f.issue.id), f.issue);
+  assert.deepEqual(priorHistory.items, []);
+
+  const edit = { expectedVersion: f.issue.version, status: 'review', title: 'Reviewed the closed implementation', gitlabStatusSuggestionToken: firstToken };
+  const reject = async (paths?: string[]) => {
+    f.calls.length = 0;
+    const rejected = await f.call<{ details?: { reason?: string } }>(issuePath, { method: 'PATCH', body: edit }, 409);
+    assert.equal(rejected.details?.reason, 'gitlab_status_suggestion_stale');
+    assert.ok(!JSON.stringify(rejected).includes(token) && !JSON.stringify(rejected).includes(secret));
+    expectReads(paths);
+    const current = await workspace();
+    assert.deepEqual(current.issues.find(issue => issue.id === f.issue.id), f.issue);
+    assert.deepEqual(current.activities, before.activities);
+    assert.deepEqual(await history(), priorHistory);
+    assert.deepEqual(await f.links(), originalLinks);
+  };
+  f.setProjectRead({ status: 403 });
+  await reject([f.projectPath]);
+  f.setProjectRead({ status: 200 });
+  f.setMr({ target_branch: 'develop' });
+  await reject();
+  f.setMr({ state: 'opened', target_branch: 'main', updated_at: new Date().toISOString() });
+  await reject();
+  const reclosedAt = new Date().toISOString();
+  assert.ok(reclosedAt > closedAt);
+  f.setMr({ state: 'closed', closed_at: reclosedAt, updated_at: reclosedAt });
+  await reject();
+
+  const currentToken = await review(reclosedAt);
+  const reviewedLinks = await f.links();
+  f.calls.length = 0;
+  const saved = await f.call<Issue>(issuePath, { method: 'PATCH', body: { ...edit, gitlabStatusSuggestionToken: currentToken } });
+  expectReads();
+  assert.equal(saved.status, 'review');
+  assert.equal(saved.title, edit.title);
+  assert.equal(saved.version, f.issue.version + 1);
+  const activities = (await workspace()).activities.filter(activity => activity.resourceId === f.issue.id);
+  assert.equal(activities.at(-1)?.actorId, actor);
+  assert.deepEqual(await history(), { ...priorHistory, issueVersion: saved.version });
+  assert.deepEqual(await f.links(), reviewedLinks);
+});
+
 test('a newer running pipeline suppresses an older confirmed failure on the same repository and branch even before attaching', async t => {
   const f = await fixture(t);
   const path = pathFor(f.issue.id);

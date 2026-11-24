@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Express,Request } from 'express';
 import type { AutomationEvent,AutomationOutcome,AutomationPreview,AutomationRule,AutomationRun,GitlabSettings,Issue,IssueAutomationRunPage,Project,ProjectIssueSchema,ProjectWorkflow,User } from '../shared/types.js';
-import type { GitlabDeploymentStatusBinding, GitlabLink, GitlabOpenedMergeRequestStatusBinding, GitlabPipelineStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
+import type { GitlabClosedMergeRequestStatusBinding, GitlabDeploymentStatusBinding, GitlabLink, GitlabMergeRequestStatusBinding, GitlabOpenedMergeRequestStatusBinding, GitlabPipelineStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import { AUTOMATION_TRIGGERS,branchMatches,isGitlabDeploymentEnvironment,isMergeRequestAutomationTrigger,isPipelineAutomationTrigger,sortedAutomationRules } from '../shared/automation.js';
 import { isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
@@ -10,7 +10,7 @@ import { allowedNextStatuses,defaultWorkflow } from '../shared/workflow-helpers.
 import type { Store } from './store.js';
 
 const ISSUE_RUN_PAGE_SIZE = 20;
-const MANUAL_STATUS_TOKEN_DOMAIN = 'teamspace.gitlab-status-suggestion.v2';
+const MANUAL_STATUS_TOKEN_DOMAIN = 'teamspace.gitlab-status-suggestion.v3';
 const MANUAL_STATUS_TOKEN_TTL = 5 * 60 * 1_000;
 const MAX_MANUAL_STATUS_TOKEN_LENGTH = 32 * 1024;
 const MANUAL_STATUS_TOKEN = /^[A-Za-z0-9+/]{16}\.[A-Za-z0-9+/]{22}==\.[A-Za-z0-9+/]+={0,2}$/u;
@@ -31,7 +31,7 @@ export type ManualPipelineStatusCandidate = Pick<MatchEvent, 'gitlabProjectId' |
   trigger: Extract<GitlabWorkflowStatusSuggestionTrigger, `pipeline.${string}`>;
   occurredAt: string;
 };
-type ManualRemoteStatusBinding = { kind: 'opened'; proof: GitlabOpenedMergeRequestStatusBinding } |
+type ManualRemoteStatusBinding = GitlabMergeRequestStatusBinding |
   { kind: 'pipeline'; proof: GitlabPipelineStatusBinding };
 type ManualDeploymentProof = { binding: GitlabDeploymentStatusBinding; digest: string };
 type AfterStatusChange=(rule:AutomationRule,event:AutomationEvent)=>void;
@@ -57,16 +57,22 @@ export function staleManualStatusSuggestion(): never {
     { reason: 'gitlab_status_suggestion_stale' });
 }
 
-function isPipelineStatusBinding(value: unknown): value is GitlabPipelineStatusBinding {
+function isLinkStatusBinding(value: unknown): value is GitlabPipelineStatusBinding {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const { linkId, occurredAt } = value as Partial<GitlabPipelineStatusBinding>;
   return typeof linkId === 'string' && linkId.length > 0 && linkId.length <= 500 && validTime(occurredAt);
 }
 
 function isOpenedStatusBinding(value: unknown): value is GitlabOpenedMergeRequestStatusBinding {
-  if (!isPipelineStatusBinding(value)) return false;
+  if (!isLinkStatusBinding(value)) return false;
   const { sourceProjectId } = value as Partial<GitlabOpenedMergeRequestStatusBinding>;
   return typeof sourceProjectId === 'number' && Number.isSafeInteger(sourceProjectId) && sourceProjectId > 0;
+}
+
+function isClosedStatusBinding(value: unknown): value is GitlabClosedMergeRequestStatusBinding {
+  if (!isLinkStatusBinding(value)) return false;
+  const { targetBranch } = value as GitlabClosedMergeRequestStatusBinding;
+  return targetBranch === undefined || isGitlabBranchName(targetBranch);
 }
 
 function isDeploymentStatusBinding(value: unknown): value is GitlabDeploymentStatusBinding {
@@ -358,11 +364,15 @@ export class AutomationService{
     const opened = evidence.trigger === 'merge_request.opened' ? {
       linkId: evidence.link.id, occurredAt: evidence.occurredAt, sourceProjectId: evidence.sourceProjectId,
     } : undefined;
+    const closed = evidence.trigger === 'merge_request.closed' ? {
+      linkId: evidence.link.id, occurredAt: evidence.occurredAt, targetBranch: evidence.targetBranch,
+    } : undefined;
     const pipeline = evidence.trigger === 'pipeline.succeeded' || evidence.trigger === 'pipeline.failed'
       ? { linkId: evidence.link.id, occurredAt: evidence.occurredAt } : undefined;
     const token = this.store.seal(JSON.stringify({ domain: MANUAL_STATUS_TOKEN_DOMAIN, actorId, expiresAt, toStatus: rule.toStatusId,
       fence: this.manualStatusFence(issue, settingsVersion, context, deploymentProof?.digest),
-      ...(deploymentProof ? { deployment: deploymentProof.binding } : {}), ...(opened ? { opened } : {}), ...(pipeline ? { pipeline } : {}) }));
+      ...(deploymentProof ? { deployment: deploymentProof.binding } : {}), ...(opened ? { opened } : {}),
+      ...(closed ? { closed } : {}), ...(pipeline ? { pipeline } : {}) }));
     return { kind: 'suggestion', suggestion: {
       issueId: issue.id, projectId: issue.projectId, issueVersion: issue.version, workflowVersion: workflow.version,
       fromStatus: issue.status, toStatus: rule.toStatusId,
@@ -388,12 +398,14 @@ export class AutomationService{
       if (!current) return stale();
       deploymentDigest = current;
     }
-    const { opened, pipeline } = proof;
-    if (opened !== undefined && (pipeline !== undefined || deploymentDigest !== undefined || !isOpenedStatusBinding(opened))) return stale();
-    if (pipeline !== undefined && (deploymentDigest !== undefined || !isPipelineStatusBinding(pipeline))) return stale();
+    const { opened, closed, pipeline } = proof;
+    if ([opened, closed, pipeline, proof.deployment].filter(value => value !== undefined).length > 1) return stale();
+    if (opened !== undefined && !isOpenedStatusBinding(opened) || closed !== undefined && !isClosedStatusBinding(closed) ||
+      pipeline !== undefined && !isLinkStatusBinding(pipeline)) return stale();
     const context = this.manualStatusContext(issue, deploymentDigest !== undefined);
     if (proof.fence !== this.manualStatusFence(issue, settingsVersion, context, deploymentDigest)) return stale();
     if (opened) return { kind: 'opened', proof: opened };
+    if (closed) return { kind: 'closed', proof: closed };
     if (pipeline) return { kind: 'pipeline', proof: pipeline };
   }
   processEvent(event:AutomationEvent):AutomationRun[]{

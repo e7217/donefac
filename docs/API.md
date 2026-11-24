@@ -828,6 +828,8 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 최근 활동과 한 건의 상태 검토에서 `merge_request.opened` 제안은 현재 열린 MR의 `created_at`, 소스 저장소·브랜치·커밋과 대상 브랜치를 확인한다. 생성 시각은 규칙 활성 시각 이후여야 한다. 제안의 `evidence`는 `targetBranch`와 `sourceProjectId`를 포함한다. 티켓 `PATCH`는 열린 MR 토큰을 확인한 뒤 저장한 읽기 자격 증명으로 해당 MR을 다시 읽고, 상태·생성/갱신 시각·소스·대상을 대조한다. 읽기 또는 대조가 실패하면 일반 저장 전에 `409`와 `gitlab_status_suggestion_stale`을 반환한다. 다시 열림의 발생 시각은 인증된 이벤트의 자료를 사용한다. [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request)
 
+`merge_request.closed` 제안은 티켓 저장 직전에 같은 MR을 조회해 닫힌 상태·`closed_at`·갱신 시각·소스 브랜치와 커밋을 대조한다. 검토 당시 확인한 대상 브랜치도 일치해야 한다. MR이 다시 열리거나 새 종료가 확인되거나 읽기에 실패하면 `409`와 `gitlab_status_suggestion_stale`을 반환한다. 변경 전 발급한 상태 제안으로 저장하려면 상태를 다시 검토한다.
+
 최근 활동과 한 건의 상태 검토에서 적용 가능한 파이프라인은 GitLab의 프로젝트 파이프라인 목록으로 최신 여부를 검증한다. 동일 저장소의 `ref`와 `source`로 조회하고 ID 내림차순으로 최대 20건씩 두 페이지를 읽는다. 같은 유형의 더 최신 후보는 단건 조회로 브랜치·태그 여부를 최대 10건 확인한다. 선택한 실행의 원본 ID·상태·커밋도 목록과 대조한다. 제안을 보류한 경우 `pipelineReview`의 `superseded`와 `unverified`에 건수가 들어가며, 확인한 연결은 `links`에 반환한다. 티켓 `PATCH`는 상태 변경 직전에 선택한 단건과 최신 목록을 다시 검증한다. 새 실행이나 불완전한 근거를 확인하면 `409`와 `gitlab_status_suggestion_stale`을 반환한다. [GitLab 프로젝트 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#list-project-pipelines)
 
 ### 파이프라인 CI 작업 확인
