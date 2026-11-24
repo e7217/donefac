@@ -154,6 +154,163 @@ test('row edit previews and writes dates plus one successor link and recovers a 
   assert.deepEqual(await f.workspace(), reverted);
 });
 
+test('row edit stores both projected dates and the new dependency in one retriable and reversible change', async t => {
+  const f = await fixture(t);
+  const predecessor = await f.issue('선행 날짜 편집');
+  const successor = await f.issue('후행 날짜 편집', { startDate: '2026-11-25', endDate: '2026-11-26' });
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(successor), changes: { startDate: '2026-11-30', endDate: '2026-12-01' },
+    relatedDates: { issue: versionOf(predecessor), changes: { endDate: '2026-11-27', dueDate: null } },
+    dependency: { action: 'add', relatedIssue: versionOf(predecessor), direction: 'predecessor', type: 'FS', lagDays: 0 },
+  };
+  const before = await f.workspace();
+  const conflict = await f.review({ ...input, changes: { startDate: '2026-11-26', endDate: '2026-12-01' } });
+  assert.ok(conflict.warnings.some(warning => warning.includes(`${predecessor.key} → ${successor.key}`) && warning.includes('2026-11-30')));
+  const preview = await f.review(input);
+  const previewId = reviewId(preview);
+  assert.deepEqual(preview.changes.map(({ id, fromStart, toStart, fromEnd, toEnd, fromDue, toDue }) => ({
+    id, fromStart, toStart, fromEnd, toEnd, fromDue, toDue,
+  })), [
+    { id: successor.id, fromStart: successor.startDate, toStart: '2026-11-30', fromEnd: successor.endDate, toEnd: '2026-12-01',
+      fromDue: successor.dueDate, toDue: successor.dueDate },
+    { id: predecessor.id, fromStart: predecessor.startDate, toStart: predecessor.startDate, fromEnd: predecessor.endDate, toEnd: '2026-11-27',
+      fromDue: predecessor.dueDate, toDue: null },
+  ]);
+  assert.ok(!preview.warnings.some(warning => warning.includes(`${predecessor.key} → ${successor.key}`)));
+
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  try {
+    database.exec(`CREATE TRIGGER fail_paired_dependency BEFORE INSERT ON dependencies
+      BEGIN SELECT RAISE(ABORT,'synthetic paired dependency failure'); END`);
+    try {
+      await f.apply(previewId, 500);
+      assert.deepEqual(await f.workspace(), before);
+      assert.equal(database.prepare('SELECT count(*) AS count FROM schedule_undos').get()?.count, 0);
+    } finally { database.exec('DROP TRIGGER fail_paired_dependency'); }
+  } finally { database.close(); }
+
+  const applied = await f.apply(previewId);
+  assert.deepEqual(applied.updated.map(({ id, version }) => ({ id, version })), [
+    { id: successor.id, version: successor.version + 1 }, { id: predecessor.id, version: predecessor.version + 1 },
+  ]);
+  assert.deepEqual(applied.updated.map(dates), [
+    { startDate: '2026-11-30', endDate: '2026-12-01', dueDate: successor.dueDate },
+    { startDate: predecessor.startDate, endDate: '2026-11-27', dueDate: null },
+  ]);
+  assert.equal(applied.dependencyChanges, 1);
+  assert.deepEqual(linkFields(findLink(await f.workspace(), predecessor, successor)!), { type: 'FS', lagDays: 0 });
+  await f.restart();
+  assert.deepEqual(await f.apply(previewId), applied);
+
+  const undone = await f.undo(applied.undoId);
+  assert.equal(undone.dependencyChanges, 1);
+  assert.deepEqual(undone.updated.map(dates), [dates(successor), dates(predecessor)]);
+  assert.deepEqual((await f.workspace()).dependencies, before.dependencies);
+});
+
+test('row edit requires a same-project linked peer with a valid current version and date window', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('기준 일정');
+  const peer = await f.issue('연결 일정');
+  const foreign = await f.issue('프로젝트 밖 일정', { projectId: 'project-neo' });
+  const base: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: { endDate: '2026-11-25' },
+    relatedDates: { issue: versionOf(peer), changes: { endDate: '2026-11-26' } },
+  };
+  const input: ScheduleRowEditInput = { ...base,
+    dependency: { action: 'add', relatedIssue: versionOf(peer), direction: 'predecessor', type: 'FS', lagDays: 0 },
+  };
+  const before = await f.workspace();
+  for (const relatedDates of [null, { issue: versionOf(peer), changes: {} },
+    { issue: versionOf(peer), changes: { endDate: '2026-02-29' } },
+    { issue: versionOf(peer), changes: { title: '날짜 외 변경' } }]) {
+    await f.review({ ...input, relatedDates }, 400);
+  }
+  for (const attempted of [base,
+    { ...input, relatedDates: { ...base.relatedDates!, issue: versionOf(anchor) } },
+    { ...input, relatedDates: { ...base.relatedDates!, issue: versionOf(foreign) } },
+    { ...input, relatedDates: { ...base.relatedDates!, issue: { id: peer.id, expectedVersion: peer.version + 1 } } },
+    { ...input, relatedDates: { ...base.relatedDates!, issue: { id: 'missing-issue', expectedVersion: 1 } } },
+    { ...input, relatedDates: { ...base.relatedDates!, changes: { endDate: '2026-11-22' } } },
+  ]) {
+    const rejected = await f.review(attempted);
+    assert.equal(rejected.previewId, null, JSON.stringify(attempted));
+    assert.ok(rejected.errors.length);
+  }
+  assert.deepEqual(await f.workspace(), before);
+
+  const link = await f.link(peer, anchor);
+  const removal = await f.review({ ...base,
+    dependency: { action: 'remove', id: link.id, expectedVersion: link.version!, relatedIssue: versionOf(peer) },
+  });
+  assert.equal(removal.previewId, null);
+  assert.ok(removal.errors.some(error => error.issueId === peer.id && error.message.includes('선후행 연결')));
+
+  const previewId = reviewId(await f.review(base)); // Existing dependencies can supply the relation without a link edit.
+  await f.call(`/issues/${peer.id}`, 200, 'PATCH', { expectedVersion: peer.version, title: '동료가 편집한 연결 일정' }, otherActor);
+  const afterPeerEdit = await f.workspace();
+  await f.apply(previewId, 409);
+  assert.deepEqual(await f.workspace(), afterPeerEdit);
+});
+
+test('row edit preserves both explicit schedules while rescheduling successors of either row', async t => {
+  const f = await fixture(t);
+  const peer = await f.issue('날짜를 고친 선행');
+  const anchor = await f.issue('날짜를 고친 후행', { startDate: '2026-11-25', endDate: '2026-11-26' });
+  const branch = await f.issue('선행의 다른 후행', { startDate: '2026-11-25', endDate: '2026-11-25' });
+  const downstream = await f.issue('두 번째 업무의 후행', { startDate: '2026-11-27', endDate: '2026-11-27' });
+  await f.link(peer, branch);
+  await f.link(anchor, downstream);
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: { startDate: '2026-11-27', endDate: '2026-11-30' },
+    relatedDates: { issue: versionOf(peer), changes: { endDate: '2026-11-26', dueDate: '2026-11-30' } },
+    dependency: { action: 'add', relatedIssue: versionOf(peer), direction: 'predecessor', type: 'FS', lagDays: 0 },
+    rescheduleSuccessors: true,
+  };
+  const conflict = await f.review({ ...input, changes: { ...input.changes, startDate: '2026-11-26' } });
+  assert.equal(conflict.previewId, null);
+  assert.ok(conflict.errors.some(error => error.message.includes(anchor.key) && error.message.includes('입력한 시작일')));
+
+  const preview = await f.review(input);
+  const previewId = reviewId(preview);
+  const dateChanges = (changes: SchedulePastePreview['changes']) => new Map(changes.map(({ id, toStart, toEnd, toDue }) =>
+    [id, { startDate: toStart, endDate: toEnd, dueDate: toDue }]));
+  assert.deepEqual(dateChanges(preview.changes), new Map([
+    [anchor.id, { startDate: '2026-11-27', endDate: '2026-11-30', dueDate: anchor.dueDate }],
+    [peer.id, { startDate: peer.startDate, endDate: '2026-11-26', dueDate: '2026-11-30' }],
+    [branch.id, { startDate: '2026-11-27', endDate: '2026-11-27', dueDate: branch.dueDate }],
+    [downstream.id, { startDate: '2026-12-01', endDate: '2026-12-01', dueDate: downstream.dueDate }],
+  ]));
+  const applied = await f.apply(previewId);
+  assert.deepEqual(new Map(applied.updated.map(issue => [issue.id, dates(issue)])), dateChanges(preview.changes));
+  const undone = await f.undo(applied.undoId);
+  assert.deepEqual(new Map(undone.updated.map(issue => [issue.id, dates(issue)])),
+    new Map([anchor, peer, branch, downstream].map(issue => [issue.id, dates(issue)])));
+});
+
+test('row edit reviews and fences incoming cross-project blockers on the peer even for an end-only edit', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('프로젝트 내부 선행');
+  const peer = await f.issue('프로젝트 간 차단 연결 업무', { startDate: '2026-11-30', endDate: '2026-12-01' });
+  const external = await f.issue('외부 차단 선행', { projectId: 'project-neo', endDate: '2026-11-26' });
+  await f.link(anchor, peer);
+  await f.blocker(external, peer);
+  const input: ScheduleRowEditInput = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: { endDate: '2026-11-25' },
+    relatedDates: { issue: versionOf(peer), changes: { endDate: '2026-12-02' } }, reviewIncomingTeamBlockers: true,
+  };
+  const conflict = await f.review({ ...input, relatedDates: { issue: versionOf(peer), changes: { startDate: '2026-11-26' } } });
+  assert.equal(conflict.previewId, null);
+  assert.ok(conflict.errors.some(error => error.issueId === peer.id && error.message.includes(external.key)));
+
+  const previewId = reviewId(await f.review(input));
+  await f.call(`/issues/${external.id}`, 200, 'PATCH', { expectedVersion: external.version, title: '외부 선행 업무 수정' }, otherActor);
+  const beforeApply = await f.workspace();
+  const rejected = await f.call<{ error: string }>(applyPath, 409, 'POST', { previewId });
+  assert.match(rejected.error, /프로젝트 간 선행 업무 또는 차단 관계가 변경되었습니다/u);
+  assert.deepEqual(await f.workspace(), beforeApply);
+});
+
 test('row edit preserves predecessor direction on update and shares link-only removal undo', async t => {
   const f = await fixture(t);
   const anchor = await f.issue('연결 수정할 업무');

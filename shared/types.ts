@@ -2079,6 +2079,7 @@ export interface ScheduleRowEditInput {
   projectId: string;
   issue: ScheduleRowIssue;
   changes: ScheduleBulkDateChanges;
+  relatedDates?: { issue: ScheduleRowIssue; changes: ScheduleBulkDateChanges };
   dependency?: ScheduleRowDependencyEdit;
   dependencies?: readonly ScheduleRowDependencyEdit[];
   rescheduleSuccessors?: boolean;

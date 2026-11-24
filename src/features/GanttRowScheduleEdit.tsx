@@ -30,24 +30,27 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
   incomingTeamBlockers?: readonly TeamIncomingBlocker[];
+  relatedIncomingTeamBlockers?: readonly TeamIncomingBlocker[];
   outgoingTeamBlockers?: readonly TeamFollowUpChoice[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+  initialRelatedDates?: { source: Issue; changes: ScheduleBulkDateChanges };
   initialLink?: GanttRowLinkDraft;
   otherDateDrafts?: ReadonlySet<string>;
   undoScope?: ScheduleUndoScope;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
-  onApplied: (result: SchedulePasteApplyResult, reviewedAnchorVersion: number) => Promise<void>;
+  onApplied: (result: SchedulePasteApplyResult, reviewedAnchorVersion: number, reviewedRelatedIssue?: ScheduleRowEditInput['issue']) => Promise<void>;
 };
 type DateField = keyof ScheduleBulkDateChanges;
 type LinkAction = 'none' | 'add' | 'update' | 'remove';
 type Direction = 'predecessor' | 'successor';
 type Pending = 'preview' | 'apply' | 'recover' | 'reload' | 'reflect';
-type Review = { input: string; result: SchedulePastePreview; editGroups: number[]; anchorVersion: number };
-type AppliedReview = { result: SchedulePasteApplyResult; anchorVersion: number };
+type ReviewedRows = { anchorVersion: number; relatedIssue?: ScheduleRowEditInput['issue'] };
+type Review = ReviewedRows & { input: string; result: SchedulePastePreview; editGroups: number[] };
+type AppliedReview = ReviewedRows & { result: SchedulePasteApplyResult };
 type LinkDraft = {
   id: number;
   action: LinkAction;
@@ -131,13 +134,13 @@ function resolveDraft(draft: LinkDraft, anchor: Issue, projectIssues: ReadonlyMa
 }
 
 function linksForDateSuggestion(links: readonly ExistingLink[], edits: readonly ScheduleRowDependencyEdit[],
-  projectIssues: ReadonlyMap<string, Issue>): MissingScheduleLink[] {
-  const byId = new Map(links.map(({ dependency: { id, type, lagDays }, role, other }) => [id, { type, lagDays, role, other }]));
+  projectIssues: ReadonlyMap<string, Issue>, projectDates: (issue: Issue) => Issue): MissingScheduleLink[] {
+  const byId = new Map(links.map(({ dependency: { id, type, lagDays }, role, other }) => [id, { type, lagDays, role, other: projectDates(other) }]));
   const added: MissingScheduleLink[] = [];
   for (const edit of edits) {
     if (edit.action === 'add') {
       const other = projectIssues.get(edit.relatedIssue.id);
-      if (other) added.push({ role: edit.direction, type: edit.type, lagDays: edit.lagDays, other });
+      if (other) added.push({ role: edit.direction, type: edit.type, lagDays: edit.lagDays, other: projectDates(other) });
     } else if (edit.action === 'remove') byId.delete(edit.id);
     else {
       const link = byId.get(edit.id);
@@ -153,15 +156,19 @@ function definiteRejection(cause: unknown, recovering: boolean) {
     (!recovering || (cause.status !== 401 && cause.status !== 403));
 }
 
+const incomingBlockerVersions = ({ relation, source }: TeamIncomingBlocker) =>
+  [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate];
+
 export function GanttRowScheduleEdit({
-  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
-  initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied,
+  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  initialRelatedDates, initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
   const [suggestionOverrides, setSuggestionOverrides] = useState<ScheduleBulkDateChanges>({});
   const [suggestionDuration, setSuggestionDuration] = useState('3');
   const [drafts, setDrafts] = useState<LinkDraft[]>(() => [{ ...linkDraft(1), ...initialLink }]);
+  const [includeRelatedDates, setIncludeRelatedDates] = useState(true);
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const nextDraftId = useRef(2);
   const [review, setReview] = useState<Review | null>(null);
@@ -207,9 +214,19 @@ export function GanttRowScheduleEdit({
   }
 
   const resolvedDrafts = drafts.map(draft => resolveDraft(draft, anchor, projectIssues, links));
+  const relatedId = initialRelatedDates?.source.id;
+  const pairedIssue = relatedId && resolvedDrafts.some(({ related, selected }, index) => {
+    const action = drafts[index].action;
+    return action === 'add' && related?.id === relatedId || action === 'update' && selected?.other.id === relatedId;
+  }) ? projectIssues.get(relatedId) : undefined;
+  const relatedDates = includeRelatedDates && pairedIssue && initialRelatedDates
+    ? { issue: versionedIssue(pairedIssue), changes: initialRelatedDates.changes } : undefined;
+  function projectedRelatedIssue(other: Issue) {
+    return relatedDates?.issue.id === other.id ? { ...other, ...relatedDates.changes } : other;
+  }
   const unreviewedKeys = new Set(resolvedDrafts.flatMap(({ related, selected }) => {
     const other = related ?? selected?.other;
-    return other && otherDateDrafts?.has(other.id) ? [other.key] : [];
+    return other && other.id !== relatedDates?.issue.id && otherDateDrafts?.has(other.id) ? [other.key] : [];
   }));
   const targetCounts = new Map<string, number>();
   const edits: ScheduleRowDependencyEdit[] = [];
@@ -222,19 +239,21 @@ export function GanttRowScheduleEdit({
   const suggestionApplied = Object.keys(suggestionOverrides).length > 0;
   const payload: ScheduleRowEditInput = { projectId: issue.projectId, issue: versionedIssue(anchor), changes,
     ...(edits.length === 1 ? { dependency: edits[0] } : edits.length > 1 ? { dependencies: edits } : {}),
+    ...(relatedDates ? { relatedDates } : {}),
     ...(rescheduleSuccessors ? { rescheduleSuccessors } : {}),
     ...(suggestionApplied ? { reviewIncomingTeamBlockers: true } : {}) };
   const input = JSON.stringify({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
-    incoming: changes.startDate !== undefined || suggestionApplied || rescheduleSuccessors ? incomingTeamBlockers.map(({ relation, source }) =>
-      [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate]) : undefined,
+    incoming: changes.startDate !== undefined || suggestionApplied || rescheduleSuccessors ? incomingTeamBlockers.map(incomingBlockerVersions) : undefined,
+    relatedIncoming: suggestionApplied && relatedDates ? relatedIncomingTeamBlockers.map(incomingBlockerVersions) : undefined,
     outgoing: changes.endDate !== undefined || rescheduleSuccessors ? outgoingTeamBlockers.map(({ relation, target }) =>
       [relation.id, relation.origin, relation.version, target.id, target.projectId, target.version, target.startDate]) : undefined,
   });
   const linksValid = resolvedDrafts.every(draft => draft.valid && !duplicateDraft(draft));
-  const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length) &&
-    Object.values(changes).every(value => value === null || isCalendarDate(value)));
+  const pairedDatesChanged = dates.some(({ field }) => relatedDates?.changes[field] !== undefined && relatedDates.changes[field] !== pairedIssue?.[field]);
+  const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length || pairedDatesChanged) &&
+    [...Object.values(changes), ...Object.values(relatedDates?.changes ?? {})].every(value => value === null || isCalendarDate(value)));
   const result = review?.result;
   const expiry = result?.expiresAt ? Date.parse(result.expiresAt) : NaN;
   const reviewStale = review && (input !== review.input || expiry <= clock);
@@ -252,7 +271,7 @@ export function GanttRowScheduleEdit({
   for (const [index, resolved] of resolvedDrafts.entries()) {
     if (!resolved.predecessor || duplicateDraft(resolved)) continue;
     try {
-      const candidate = dependencyBound({ type: drafts[index].type, lagDays: resolved.lagDays }, resolved.predecessor, calendarMath);
+      const candidate = dependencyBound({ type: drafts[index].type, lagDays: resolved.lagDays }, projectedRelatedIssue(resolved.predecessor), calendarMath);
       if (candidate && candidate.date > (nextDates[candidate.endpoint] ?? '') && candidate.date > (earliestDates[candidate.endpoint] ?? '')) {
         earliestDates[candidate.endpoint] = candidate.date;
       }
@@ -438,7 +457,7 @@ export function GanttRowScheduleEdit({
         method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify(payload), signal: controller.signal,
       });
       if (controller.signal.aborted) return;
-      setReview({ input, result, editGroups, anchorVersion: payload.issue.expectedVersion });
+      setReview({ input, result, editGroups, anchorVersion: payload.issue.expectedVersion, relatedIssue: payload.relatedDates?.issue });
       setClock(currentTime());
       focusAfter.current = 'review';
     } catch (cause) {
@@ -466,7 +485,7 @@ export function GanttRowScheduleEdit({
   }
 
   async function reflect(appliedReview: AppliedReview, controller: AbortController) {
-    try { await onApplied(appliedReview.result, appliedReview.anchorVersion); }
+    try { await onApplied(appliedReview.result, appliedReview.anchorVersion, appliedReview.relatedIssue); }
     catch (cause) {
       if (controller.signal.aborted) return;
       setError(`일정과 연결은 적용되었습니다. ${errorMessage(cause)} 화면에 다시 반영할 수 있습니다.`);
@@ -492,7 +511,7 @@ export function GanttRowScheduleEdit({
         !Array.isArray(recorded.updated) || !Array.isArray(recorded.warnings) ||
         !(recorded.updated.length || recorded.dependencyChanges)) throw new Error('일정 적용 응답을 확인할 수 없습니다.');
       setRetryId(null);
-      const appliedReview = { result: recorded, anchorVersion: review.anchorVersion };
+      const appliedReview = { result: recorded, anchorVersion: review.anchorVersion, relatedIssue: review.relatedIssue };
       setApplied(appliedReview);
       dirtyRef.current = false;
       onDraftChange(GANTT_ROW_SCHEDULE_DRAFT, false, true);
@@ -566,7 +585,7 @@ export function GanttRowScheduleEdit({
           {showMissingDateSuggestion && <MissingDateSuggestion
             startDate={nextDates.startDate} endDate={nextDates.endDate} calendarMath={calendarMath}
             links={linksValid ? [
-              ...linksForDateSuggestion(links, edits, projectIssues),
+              ...linksForDateSuggestion(links, edits, projectIssues, projectedRelatedIssue),
               ...incomingTeamBlockers.map(({ source }): MissingScheduleLink => ({ role: 'predecessor', type: 'FS', lagDays: 0, other: source })),
             ] : null}
             duration={suggestionDuration} durationInput={suggestionDurationInput} onDurationChange={setSuggestionDuration}
@@ -581,6 +600,21 @@ export function GanttRowScheduleEdit({
               invalidate();
             }} />
         </fieldset>
+        {pairedIssue && initialRelatedDates && <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
+          <legend>연결 업무의 날짜</legend>
+          <div className="gantt-row-edit-diff">
+            <div className="gantt-row-edit-diff-title"><strong>{issueText(pairedIssue)}</strong></div>
+            <dl>{dates.filter(({ field }) => Object.hasOwn(initialRelatedDates.changes, field)).map(({ field, label }) =>
+              <div key={field}><dt>{label}</dt><dd>{pairedIssue[field] ?? '미정'} → <strong>{initialRelatedDates.changes[field] ?? '미정'}</strong></dd></div>)}</dl>
+          </div>
+          <label className="gantt-row-edit-date-toggle">
+            <input type="checkbox" checked={includeRelatedDates} onChange={event => {
+              setIncludeRelatedDates(event.currentTarget.checked);
+              invalidate();
+            }} />
+            이 업무의 날짜도 저장
+          </label>
+        </fieldset>}
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>선후행 연결</legend>
           {unreviewedKeys.size > 0 && <p className="gantt-row-edit-hint">
@@ -622,7 +656,8 @@ export function GanttRowScheduleEdit({
               후행 일정 함께 검토
             </label>
             <p id={`${uid}-reschedule-help`} className="gantt-row-edit-hint">
-              선택한 업무는 위 날짜를 유지합니다. 변경할 연결을 기준으로 후행 업무의 근무일 기간을 유지하며 일정을 필요한 만큼 늦춥니다.
+              {relatedDates ? '두 업무는 입력한 날짜를 유지합니다. ' : '선택한 업무는 위 날짜를 유지합니다. '}
+              변경할 연결을 기준으로 후행 업무의 근무일 기간을 유지하며 일정을 필요한 만큼 늦춥니다.
             </p>
           </div>
         </fieldset>
@@ -647,9 +682,9 @@ export function GanttRowScheduleEdit({
           {!result.errors.length && !hasChanges(result) && <p className="schedule-paste-noop" role="status">적용할 변경이 없습니다.</p>}
           {reviewStale && !retryId && !applied && <p className="schedule-paste-stale" role="status">일정 조건이 바뀌었거나 미리보기가 만료되었습니다. 다시 검토해 주세요.</p>}
           {result.changes.map(change => <div className="gantt-row-edit-diff" key={change.id}>
-            {rescheduleSuccessors && <header className="gantt-row-edit-diff-title">
+            {(rescheduleSuccessors || review?.relatedIssue) && <header className="gantt-row-edit-diff-title">
               <h4>{change.key} · {change.title}</h4>
-              <small className="gantt-row-edit-hint">{change.id === anchor.id ? '선택한 업무' : '후행 업무'}</small>
+              <small className="gantt-row-edit-hint">{change.id === anchor.id ? '선택한 업무' : change.id === review?.relatedIssue?.id ? '연결 업무' : '후행 업무'}</small>
             </header>}
             <dl>{dates.filter(({ from, to }) => (change[from] ?? null) !== (change[to] ?? null)).map(({ field, label, from, to }) =>
               <div key={field}><dt>{label}</dt><dd>{change[from] ?? '미정'} → <strong>{change[to] ?? '미정'}</strong></dd></div>)}</dl>

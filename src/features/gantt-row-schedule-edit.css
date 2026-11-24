@@ -136,7 +136,8 @@
   margin-top: 1rem;
 }
 
-.gantt-row-edit-cascade > label {
+.gantt-row-edit-cascade > label,
+.gantt-row-edit-fields > .gantt-row-edit-date-toggle {
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -145,7 +146,8 @@
   margin: 0;
 }
 
-.gantt-row-edit-cascade input {
+.gantt-row-edit-cascade input,
+.gantt-row-edit-date-toggle input {
   flex: none;
   accent-color: #177c72;
 }
@@ -155,7 +157,7 @@
 }
 
 .gantt-row-edit-existing li span,
-.gantt-row-edit-review dl dt,
+.gantt-row-edit-diff dl dt,
 .gantt-row-schedule-edit .gantt-row-edit-hint {
   color: #526d5d;
   font-size: 0.8125rem;

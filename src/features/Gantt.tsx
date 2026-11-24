@@ -89,6 +89,14 @@ function inlineDateChange(draft: InlineDateValues, issue = draft.source): Schedu
     startDate: draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
     endDate: draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
 }
+function changedInlineDates(draft?: InlineDateValues): ScheduleBulkDateChanges {
+  if (!draft) return {};
+  const changes: ScheduleBulkDateChanges = {};
+  for (const field of ['startDate', 'endDate'] as const) {
+    if (draft[field] !== draft.source[field]) changes[field] = draft[field];
+  }
+  return changes;
+}
 function recoverableDates(issue: Issue, draft: StoredGanttDateDraft | undefined) {
   if (draft?.projectId !== issue.projectId || draft.version > issue.version) return undefined;
   if (draft.version === issue.version && (draft.startDate !== issue.startDate || draft.endDate !== issue.endDate)) return undefined;
@@ -150,6 +158,7 @@ type RowScheduleEdit = {
   opener: HTMLButtonElement;
   focusDate?: 'dueDate';
   inlineDraft?: InlineDateDraft;
+  relatedInlineDraft?: InlineDateDraft;
   initialDates?: ScheduleBulkDateChanges;
   initialLink?: GanttRowLinkDraft;
   otherDateDrafts?: ReadonlySet<string>;
@@ -1683,20 +1692,18 @@ function ProjectGantt(props: GanttProps) {
     return draftsRef.current.size > 0 && canKeepInlineDateDrafts(fromLinkPicker);
   }
   function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement,
-    { focusDate, initialLink, fromLinkPicker = false }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & { fromLinkPicker?: boolean } = {}) {
+    { focusDate, initialLink, relatedId, fromLinkPicker = false }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & {
+      relatedId?: string; fromLinkPicker?: boolean;
+    } = {}) {
     const canKeepDates = canKeepInlineDateDrafts(fromLinkPicker);
     if (!canKeepDates && !canLeave()) return;
     const inlineDraft = canKeepDates ? inlineDateDrafts.current.get(issue.id) : undefined;
-    const initialDates: ScheduleBulkDateChanges = {};
-    if (inlineDraft) {
-      for (const field of ['startDate', 'endDate'] as const) {
-        if (inlineDraft[field] !== inlineDraft.source[field]) initialDates[field] = inlineDraft[field];
-      }
-    }
+    const relatedInlineDraft = canKeepDates && relatedId ? inlineDateDrafts.current.get(relatedId) : undefined;
+    const initialDates = changedInlineDates(inlineDraft);
     const otherDateDrafts = initialLink ? new Set([...inlineDateDrafts.current.keys()].filter(id => id !== issue.id)) : undefined;
     queueMicrotask(() => {
       setLinkPicker(null);
-      setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, initialDates, initialLink, otherDateDrafts });
+      setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, relatedInlineDraft, initialDates, initialLink, otherDateDrafts });
     });
   }
   function closeRowScheduleEdit(updated?: readonly Issue[]) {
@@ -1768,7 +1775,7 @@ function ProjectGantt(props: GanttProps) {
           ? { action: 'update', dependencyId: dependency.id, type: prefilledType ?? dependency.type, lag: String(dependency.lagDays) }
           : { action: 'add', direction: anchor.id === target.id ? 'predecessor' : 'successor',
             relatedId: anchor.id === target.id ? predecessorId : target.id, type: prefilledType ?? 'FS' };
-        openRowScheduleEdit(anchor, opener, { initialLink, fromLinkPicker: true });
+        openRowScheduleEdit(anchor, opener, { initialLink, relatedId: anchor.id === target.id ? predecessorId : target.id, fromLinkPicker: true });
         return;
       }
     }
@@ -2618,18 +2625,26 @@ function ProjectGantt(props: GanttProps) {
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} issueAliases={data.issueAliases}
       incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}
+      relatedIncomingTeamBlockers={rowScheduleEdit.relatedInlineDraft && incomingTeamBlockers.get(rowScheduleEdit.relatedInlineDraft.source.id)}
       outgoingTeamBlockers={teamBlockerChoices.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
       initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
+      initialRelatedDates={rowScheduleEdit.relatedInlineDraft && { source: rowScheduleEdit.relatedInlineDraft.source,
+        changes: changedInlineDates(rowScheduleEdit.relatedInlineDraft) }}
       initialLink={rowScheduleEdit.initialLink} otherDateDrafts={rowScheduleEdit.otherDateDrafts}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
-      onApplied={async (result, reviewedAnchorVersion) => {
+      onApplied={async (result, reviewedAnchorVersion, reviewedRelatedIssue) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
-        if (rowScheduleEdit.inlineDraft) {
-          const saved = result.updated.find(issue => issue.id === rowScheduleEdit.issue.id)
-            ?? rowEditIssues.find(issue => issue.id === rowScheduleEdit.issue.id && issue.version === reviewedAnchorVersion);
-          if (saved) rowScheduleEdit.inlineDraft.accept(saved);
+        const reviewedRows = [{ id: rowScheduleEdit.issue.id, expectedVersion: reviewedAnchorVersion }, reviewedRelatedIssue];
+        for (const row of reviewedRows) {
+          if (!row) continue;
+          const draft = inlineDateDrafts.current.get(row.id);
+          const original = row.id === rowScheduleEdit.issue.id ? rowScheduleEdit.inlineDraft : rowScheduleEdit.relatedInlineDraft;
+          if (!draft || draft.owner !== original?.owner) continue;
+          const saved = result.updated.find(issue => issue.id === row.id)
+            ?? rowEditIssues.find(issue => issue.id === row.id && issue.version === row.expectedVersion);
+          if (saved) draft.accept(saved);
         }
         await refresh();
         closeRowScheduleEdit(result.updated);
