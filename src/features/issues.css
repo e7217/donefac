@@ -236,6 +236,12 @@
 }
 
 .issue-schedule-warnings ul { margin: 2px 0; padding-left: 16px; overflow-wrap: anywhere; }
+.issue-schedule-save-review { min-width: 0; max-width: 100%; }
+.issue-schedule-save-dates { display: grid; gap: 8px; margin: 0; font-size: 12px; }
+.issue-schedule-save-dates > div { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px 12px; }
+.issue-schedule-save-dates dd { display: flex; align-items: center; gap: 6px; margin: 0; }
+.issue-schedule-save-review .issue-schedule-warnings li + li { margin-top: 6px; }
+.issue-schedule-save-review .issue-schedule-warnings li > small { display: block; margin-top: 3px; }
 .issue-export-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-inline-start: auto; }
 .issue-reporter-filter { max-width: 100%; min-width: 0; }
 .issue-reporter-filter > span { font-size: 11px; flex-shrink: 0; }

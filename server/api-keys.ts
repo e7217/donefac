@@ -559,6 +559,9 @@ export class ApiKeyService {
       const source = this.resource(key, detail[1] as 'issues' | 'documents', id);
       if ('content' in source) this.requireDocumentBody(key, source.content);
       const query = this.query(request, request.method === 'DELETE' ? ['expectedVersion'] : []);
+      if (request.method === 'PATCH' && detail[1] === 'issues' && Object.hasOwn(request.body, 'schedulePreviewId')) {
+        fail(403, '업무 일정 미리보기를 적용하려면 브라우저에서 저장해 주세요.');
+      }
       if (request.method === 'DELETE') {
         const fromQuery = query.expectedVersion === undefined ? undefined : /^\d+$/.test(query.expectedVersion) ? Number(query.expectedVersion) : NaN;
         const version = request.body.expectedVersion ?? fromQuery;

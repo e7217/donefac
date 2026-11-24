@@ -393,6 +393,12 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 일괄 편집은 적용 전에 달력 버전과 계산된 날짜를 다시 대조한다. 달력이 바뀌거나 서울 기준일이 넘어 결과가 달라진 경우 `409`를 반환하고 새 미리보기를 요구한다. 저장된 날짜와 작업자는 티켓의 변경 이력에 기록된다.
 
+## 티켓 저장 전 일정 검토
+
+브라우저의 `POST /api/issues/:id/schedule-save-preview`에 `{expectedVersion,startDate,endDate,dueDate,status?}`를 보낸다. 세 날짜는 `YYYY-MM-DD` 또는 `null`이다. 상태도 바꿀 때는 상태 ID를 보내면 자동 목표 마감일과 변경 후 열리는 프로젝트 간 차단 관계를 반영한다. 응답의 `changes`에 날짜 전후 값과 `warnings`에 업무 키·필요한 날짜가 표시된다. 변경할 날짜가 있고 날짜 순서가 유효하면 30분간 유효한 `previewId`를 발급한다. 종료일이 시작일보다 빠르면 `blocking`을 반환한다.
+
+검토 ID를 `schedulePreviewId`로 일반 `PATCH /api/issues/:id`에 보낸다. 서버는 같은 작업자·업무·버전·최종 날짜·상태와 현재 달력·관계를 대조한 뒤 전체 티켓 변경과 이력을 한 번에 저장한다. 일정 검토 근거가 바뀌거나 검토가 만료되면 `409`와 `details.reason`의 `schedule_preview_stale`을 반환한다. 티켓 자체가 변경된 경우 일반 저장의 버전 충돌 응답을 사용한다. 이 검토는 브라우저의 상세 편집에서 사용한다.
+
 ## 워크플로 상태 일괄 이동
 
 `POST /api/projects/:projectId/workflow/status-migration-preview`에 `{fromStatusId,toStatusId,expectedWorkflowVersion}`을 보낸다. 두 상태 ID는 같은 프로젝트의 저장된 워크플로에서 고른다. 서버가 출발 상태인 활성 티켓 전체를 조회하며 최대 1,000건을 검토한다. 응답 형식은 [업무 일괄 편집](#업무-일괄-편집) 미리보기와 같다. 이동할 업무가 없거나 검증이 차단된 업무가 있으면 `previewId`가 `null`이다.

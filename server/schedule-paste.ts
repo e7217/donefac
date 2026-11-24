@@ -15,7 +15,7 @@ import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-pars
 import type { Store } from './store.js';
 
 export class SchedulePasteError extends Error {
-  constructor(public status: number, message: string) { super(message); }
+  constructor(public status: number, message: string, public details?: { reason: 'schedule_preview_stale' } | { currentVersion: number }) { super(message); }
 }
 
 interface ScheduleVersions {
@@ -27,17 +27,20 @@ interface ScheduleVersions {
 export type ScheduleDateMutation = AutomaticScheduleMutation & Partial<Pick<Issue, 'dueDate'>>;
 type TeamBlockerPair = Pick<ScheduleTeamBlockerInput, 'source' | 'target'>;
 
-interface PasteHooks {
-  actor(request: Request): string;
+interface ScheduleReviewHooks {
   versions(projectId: string): ScheduleVersions;
   calendar(projectId: string): WorkCalendar;
+  warnings(issues: Issue[], dependencies: Dependency[]): string[];
+  teamBlockers(issueIds: readonly string[]): TeamScheduleBlocker[];
+  isTerminal(issue: Issue): boolean;
+}
+
+interface PasteHooks extends ScheduleReviewHooks {
+  actor(request: Request): string;
   workflow(projectId: string): ProjectWorkflow;
   validateChange(issue: Issue, change: ScheduleDateMutation): string | null;
-  warnings(issues: Issue[], dependencies: Dependency[]): string[];
   projectBlockers(projectIds: readonly string[] | null): TeamScheduleBlocker[];
-  teamBlockers(issueIds: readonly string[]): TeamScheduleBlocker[];
   directBlockers(targetId: string): TeamScheduleBlocker[];
-  isTerminal(issue: Issue): boolean;
   commitChanges(request: Request, changes: ScheduleDateMutation[], dependencies: Dependency[], linkChanges: ScheduleDependencyMutation[],
     origin: ScheduleUndoOrigin): SchedulePasteApplyResult;
   commitTeamBlocker(request: Request, pair: TeamBlockerPair, changes: ScheduleDateMutation[], dependencies: Dependency[]): ScheduleTeamBlockerApplyResult;
@@ -72,12 +75,13 @@ interface PasteProposal extends ScheduleScope {
   teamBlockerGuard?: string;
   teamBlockerWarnings?: string[];
   teamBlocker?: TeamBlockerPair;
-  kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit' | 'team-blocker-edit';
+  kind?: 'bulk-dates' | 'bulk-links' | 'blocker-links' | 'row-edit' | 'manual-edit' | 'team-blocker-edit' | 'issue-save';
+  issueSaveStatus?: string;
   result?: SchedulePasteApplyResult;
 }
 
 type ProposalDraft = Pick<PasteProposal, 'actorId' | 'issueIds' | 'resolvedKeyBindings' | 'hierarchyId' | 'hierarchyIssueIds' |
-  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard' | 'teamBlocker'>;
+  'changes' | 'linkChanges' | 'kind' | 'followUpWarnings' | 'missingDateWarnings' | 'blockerRelations' | 'incomingTeamBlockerGuard' | 'teamBlocker' | 'issueSaveStatus'>;
 
 type DependencyCandidate = { line: number; predecessor: Issue; successor: Issue; projectId?: string };
 type ScopedBlockerReference = Pick<TeamScheduleBlocker, 'id' | 'version'> & { projectId: string };
@@ -579,6 +583,17 @@ export class SchedulePasteService {
     return { issues: groups.flatMap(group => group.issues), dependencies: groups.flatMap(group => group.dependencies) };
   }
 
+  private issueScheduleState(issue: Issue): ScheduleState {
+    const linkRows = this.store.db.prepare('SELECT json FROM dependencies WHERE predecessor_id=? OR successor_id=? ORDER BY id')
+      .all(issue.id, issue.id) as { json: string }[];
+    const dependencies = linkRows.map(({ json }) => JSON.parse(json) as Dependency);
+    const relatedIds = new Set(dependencies.flatMap(({ predecessorId, successorId }) => [predecessorId, successorId]));
+    relatedIds.delete(issue.id);
+    const rows = this.store.db.prepare('SELECT json FROM issues WHERE id IN (SELECT value FROM json_each(?))')
+      .all(JSON.stringify([...relatedIds])) as { json: string }[];
+    return { issues: [issue, ...rows.map(({ json }) => JSON.parse(json) as Issue)], dependencies };
+  }
+
   private incomingTeamBlockers(target: Issue, hooks: PasteHooks): IncomingTeamBlocker[] {
     if (hooks.isTerminal(target)) return [];
     return hooks.directBlockers(target.id).flatMap(relation => {
@@ -587,18 +602,21 @@ export class SchedulePasteService {
     }).sort((left, right) => left.relation.id.localeCompare(right.relation.id));
   }
 
-  private reviewTeamBlockerDates(state: ScheduleState, edits: ScheduleDateMutation[], hooks: PasteHooks,
-    { kind, teamBlocker: proposed }: Pick<ProposalDraft, 'kind' | 'teamBlocker'>) {
+  private reviewTeamBlockerDates(state: ScheduleState, edits: ScheduleDateMutation[], hooks: ScheduleReviewHooks,
+    { kind, teamBlocker: proposed, issueSaveStatus }: Pick<ProposalDraft, 'kind' | 'teamBlocker' | 'issueSaveStatus'>) {
     if (!edits.length && !proposed) return null;
     const issues = new Map(state.issues.map(issue => [issue.id, issue]));
     const changes = new Map(edits.map(edit => [edit.id, edit]));
     const incomingTargets = new Set<string>(), outgoingSources = new Set<string>();
+    const projectedStatus = (issue: Issue) => issue.id === edits[0]?.id && kind === 'issue-save' && issueSaveStatus !== undefined
+      ? { ...issue, status: issueSaveStatus } : issue;
     for (const edit of edits) {
       const issue = issues.get(edit.id);
       if (!issue) continue;
       const endChanged = edit.endDate !== issue.endDate;
-      if (edit.startDate !== issue.startDate || (kind === 'bulk-links' && endChanged)) incomingTargets.add(edit.id);
-      if (endChanged) outgoingSources.add(edit.id);
+      const reopened = kind === 'issue-save' && issueSaveStatus !== issue.status && hooks.isTerminal(issue) && !hooks.isTerminal(projectedStatus(issue));
+      if (reopened || edit.startDate !== issue.startDate || (kind === 'bulk-links' && endChanged)) incomingTargets.add(edit.id);
+      if (reopened || endChanged) outgoingSources.add(edit.id);
     }
     const endpoints = new Set(proposed ? [proposed.source.id, proposed.target.id] : []);
     const issueIds = [...new Set([...incomingTargets, ...outgoingSources, ...endpoints])];
@@ -608,7 +626,7 @@ export class SchedulePasteService {
     const activeIssue = (id: string) => {
       if (!activeIssues.has(id)) {
         const issue = issues.get(id) ?? this.store.get<Issue>('issues', id);
-        activeIssues.set(id, issue && !hooks.isTerminal(issue) ? issue : undefined);
+        activeIssues.set(id, issue && !hooks.isTerminal(projectedStatus(issue)) ? issue : undefined);
       }
       return activeIssues.get(id);
     };
@@ -704,7 +722,7 @@ export class SchedulePasteService {
     return resolved;
   }
 
-  private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind' | 'hierarchyId'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: PasteHooks) {
+  private guard(scope: ScheduleScope & Pick<PasteProposal, 'kind' | 'hierarchyId'>, { issues, dependencies }: ScheduleState, targetIds: string[], hooks: ScheduleReviewHooks) {
     const links = incidentLinks(dependencies, targetIds);
     const related = new Set([...targetIds, ...links.flatMap(link => [link.predecessorId, link.successorId])]);
     // Keep the original single-project guard encoding for existing pending previews.
@@ -712,6 +730,7 @@ export class SchedulePasteService {
       .map(issue => {
         if (scope.kind === 'manual-edit' || scope.kind === 'team-blocker-edit') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate,
           ...(scope.hierarchyId ? [issue.parentId ?? null, issue.status] : [])];
+        if (scope.kind === 'issue-save') return [issue.id, issue.version, issue.projectId, issue.startDate, issue.endDate, issue.dueDate, issue.status];
         if (scope.kind === 'blocker-links') return [issue.id, issue.version, issue.startDate, issue.endDate,
           ...(scope.projectId === null ? [issue.projectId] : [])];
         return scope.projectId === null ? [issue.id, issue.version, issue.projectId] : [issue.id, issue.version];
@@ -729,7 +748,7 @@ export class SchedulePasteService {
     return { ...preview, ...this.saveProposal(preview, state, proposal, hooks, preview.warnings) };
   }
 
-  private saveProposal(scope: ScheduleScope, state: ScheduleState, proposal: ProposalDraft, hooks: PasteHooks, warnings: string[]) {
+  private saveProposal(scope: ScheduleScope, state: ScheduleState, proposal: ProposalDraft, hooks: ScheduleReviewHooks, warnings: string[]) {
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
     const team = this.reviewTeamBlockerDates(state, proposal.changes, hooks, proposal);
@@ -745,6 +764,58 @@ export class SchedulePasteService {
     return { previewId: id, expiresAt, ...(team?.warnings.length ? {
       teamBlockerWarnings: team.warnings, warnings: reviewedWarnings,
     } : {}) };
+  }
+
+  previewIssueSave(issueId: string, raw: unknown, actorId: string, hooks: ScheduleReviewHooks,
+    defaultDueDate: (before: Issue, after: Issue) => string | null): SchedulePreview {
+    if (!isRecord(raw) || !isVersion(raw.expectedVersion) || !dateKeys.every(key => Object.hasOwn(raw, key)) ||
+        Object.keys(raw).some(key => key !== 'expectedVersion' && key !== 'status' && !Object.hasOwn(dateFields, key)) ||
+        (Object.hasOwn(raw, 'status') && !isId(raw.status))) {
+      throw new SchedulePasteError(400, '확인한 업무 버전과 시작일, 종료일, 목표 마감일을 보내 주세요.');
+    }
+    const { expectedVersion, status, ...dates } = raw;
+    const requested = parseDateChanges(dates);
+    return this.store.transaction(() => {
+      const before = this.store.get<Issue>('issues', issueId);
+      if (!before) throw new SchedulePasteError(404, '업무를 찾을 수 없습니다.');
+      if (before.version !== expectedVersion) {
+        throw new SchedulePasteError(409, '다른 작업자가 변경했습니다. 새로고침 후 다시 시도해 주세요.', { currentVersion: before.version });
+      }
+      const preview: SchedulePreview = { changes: [], warnings: [] };
+      if (requested.startDate && requested.endDate && requested.startDate > requested.endDate) {
+        return { ...preview, blocking: ['종료일은 시작일보다 빠를 수 없습니다.'] };
+      }
+      const proposed = { ...before, ...requested, status: typeof status === 'string' ? status : before.status, updatedAt: after(0) };
+      const dueDate = defaultDueDate(before, proposed) ?? proposed.dueDate;
+      const edit = proposeDateEdit(before, { ...requested, dueDate });
+      if (!edit) return preview;
+      this.prune();
+      const state = this.issueScheduleState(before);
+      const warnings = hooks.warnings([{ ...proposed, dueDate }, ...state.issues.slice(1)], state.dependencies);
+      return { changes: [omitUnchangedDueDate(edit.summary)], warnings,
+        ...this.saveProposal({ projectId: before.projectId }, state, {
+          actorId, issueIds: [before.id], changes: [edit.change], kind: 'issue-save', issueSaveStatus: proposed.status,
+        }, hooks, warnings) };
+    });
+  }
+
+  /** The ordinary issue update owns this transaction and commits all of the prepared fields together. */
+  consumeIssueSavePreview(previewId: unknown, actorId: string, before: Issue, proposed: Issue, hooks: ScheduleReviewHooks): void {
+    if (typeof previewId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(previewId)) {
+      throw new SchedulePasteError(400, '확인한 업무 일정 미리보기 ID를 보내 주세요.');
+    }
+    const stale = () => new SchedulePasteError(409, '확인한 일정이나 관련 업무가 변경되었거나 확인이 만료되었습니다. 일정을 다시 검토해 주세요.',
+      { reason: 'schedule_preview_stale' });
+    const proposal = this.store.get<PasteProposal>(table, previewId);
+    if (!proposal || proposal.kind !== 'issue-save' || proposal.actorId !== actorId || proposal.projectId !== before.projectId ||
+        proposal.removeAfter <= after(0) || proposal.issueSaveStatus !== proposed.status) throw stale();
+    const [change] = proposal.changes;
+    if (!change || change.id !== before.id || change.expectedVersion !== before.version || change.startDate !== proposed.startDate ||
+        change.endDate !== proposed.endDate || (Object.hasOwn(change, 'dueDate') ? change.dueDate : before.dueDate ?? null) !== proposed.dueDate) throw stale();
+    const state = this.issueScheduleState(before);
+    if (this.guard(proposal, state, proposal.issueIds, hooks) !== proposal.guard ||
+        this.reviewTeamBlockerDates(state, proposal.changes, hooks, proposal)?.guard !== proposal.teamBlockerGuard) throw stale();
+    this.store.remove(table, previewId);
   }
 
   private previewManual(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePreview {

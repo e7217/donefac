@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from 'react';
 import { ArrowRight, CalendarRange, Check, ChevronLeft, ChevronRight, Clock3, Copy, Eye, FileText, Flag, FolderInput, Link2, MessageSquare, Pencil, Plus, Save, SquareChartGantt, Trash2, Undo2, X } from 'lucide-react';
-import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type AutomationRun, type Comment, type Dependency, type DocPage, type FeatureProps, type GitlabStatusSuggestion, type Issue, type IssueCommentView, type IssueRelation, type LinkedDocumentCreationResult, type ResourceLink, type ScheduleBulkDateChanges, type SchedulePasteApplyResult, type SchedulePreview, type ScheduleUndoScope, type WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError, patch, post, relativeTime, remove } from '../lib/api';
 import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { IssueTypeIcon } from './Issues';
@@ -26,6 +26,7 @@ import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
+import { IssueScheduleSaveReview } from './IssueScheduleSaveReview';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueChangeHistory } from './IssueChangeHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
@@ -60,6 +61,14 @@ type IssueDependencyEditor =
 type ChildDraft = { dirty: boolean; pending: boolean; discard: () => void; label?: string };
 type IssueEditError = { message: string; openBlockers?: boolean };
 const scheduleDateFields = ['startDate', 'endDate', 'dueDate'] as const;
+type IssueScheduleSaveInput = {
+  expectedVersion: number;
+  startDate: string | null;
+  endDate: string | null;
+  dueDate: string | null;
+  status?: Issue['status'];
+};
+type ScheduleSaveReview = { preview: SchedulePreview; input: IssueScheduleSaveInput; staleMessage?: string };
 type ScheduleDraftFields = 'none' | 'due-date' | 'all';
 type TicketTeamFollowUp = Omit<TeamFollowUpSelection, 'source'> & { source: Issue; choosing: boolean };
 type IssuePanelProps = FeatureProps & {
@@ -130,6 +139,11 @@ function isStaleGitlabStatusSuggestion(cause: unknown): cause is ApiError {
     typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'gitlab_status_suggestion_stale';
 }
 
+function isStaleScheduleSaveReview(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError && cause.status === 409 && cause.details !== null &&
+    typeof cause.details === 'object' && 'reason' in cause.details && cause.details.reason === 'schedule_preview_stale';
+}
+
 export function IssuePanel(props: IssuePanelProps) {
   const panel = <IssuePanelContent key={JSON.stringify([props.issueId, props.actorId, props.data.restoreGeneration])} {...props} />;
   return props.documentOverlay ? <div className="issue-panel-document-layer">{panel}</div> : panel;
@@ -187,6 +201,13 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [commentError, setCommentError] = useState('');
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
+  const [scheduleSaveReview, setScheduleSaveReview] = useState<ScheduleSaveReview | null>(null);
+  const saveButton = useRef<HTMLButtonElement>(null);
+  const scheduleSaveReturnFocus = useRef(false);
+  const closeScheduleSaveReview = useCallback((restoreFocus = true) => {
+    scheduleSaveReturnFocus.current = restoreFocus;
+    setScheduleSaveReview(null);
+  }, []);
   const [commenting, setCommenting] = useState(false);
   const commentingRef = useRef(false);
   const [error, setError] = useState<IssueEditError | null>(null);
@@ -311,7 +332,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLinkedDocumentCreation(false);
     if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
   }, [trackLinkedDocumentDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || teamFollowUp || projectMove || linkedDocumentCreation);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || teamFollowUp || projectMove || linkedDocumentCreation || scheduleSaveReview);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const [jiraDeadlinePending, setJiraDeadlinePending] = useState(false);
   const jiraDeadlinePendingRef = useRef(false);
@@ -476,6 +497,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       if (teamFollowUp) afterAcceptedNavigation(event, () => closeTeamFollowUp(false));
       if (projectMove) afterAcceptedNavigation(event, () => closeProjectMove(false));
       if (linkedDocumentCreation) afterAcceptedNavigation(event, () => closeLinkedDocumentCreation(false));
+      if (scheduleSaveReview) afterAcceptedNavigation(event, () => closeScheduleSaveReview(false));
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
@@ -489,7 +511,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
   }, [issue, notify, tab, projectMove, rowScheduleEdit, teamFollowUp, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeTeamFollowUp,
-    closeLinkedDocumentCreation, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
+    closeLinkedDocumentCreation, scheduleSaveReview, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -519,6 +541,12 @@ function IssuePanelContent(props: IssuePanelProps) {
     };
   }, [issueId, props.actorId, commentActivation]);
   const closeButton = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (saving || nestedModalOpen || previewDocumentId || !scheduleSaveReturnFocus.current) return;
+    scheduleSaveReturnFocus.current = false;
+    const target = saveButton.current && !saveButton.current.disabled ? saveButton.current : closeButton.current;
+    target?.focus({ preventScroll: true });
+  }, [saving, nestedModalOpen, previewDocumentId]);
   const previousReviewButton = useRef<HTMLButtonElement>(null);
   const nextReviewButton = useRef<HTMLButtonElement>(null);
   const reviewFocusDirection = reviewPosition?.focusDirection;
@@ -763,22 +791,63 @@ function IssuePanelContent(props: IssuePanelProps) {
     if (canPrepareGitlabStatusSuggestion(suggestion) && prepareStatus(suggestion.toStatus)) setStagedGitlabStatus(suggestion);
   }
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
-  async function save(event: FormEvent) {
-    event.preventDefault(); if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return; savingRef.current = true; setSaving(true); setError(null);
+  function submitIssue(event: FormEvent) {
+    event.preventDefault();
+    if (!scheduleSaveReview) void save();
+  }
+  async function save(mode: 'save' | 'review-again' | 'confirm' = 'save') {
+    if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return;
+    const { descriptionFormat, reporterId, dueDate, ...fields } = editableIssue(draft, labels);
+    const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
+    const changedDueDate = (dueDate ?? null) !== (baseDraft?.dueDate ?? null);
+    const changedDates = scheduleDateFields.some(field => (draft[field] ?? null) !== (baseDraft?.[field] ?? null));
+    const input: IssueScheduleSaveInput = {
+      expectedVersion: draft.version, startDate: draft.startDate ?? null, endDate: draft.endDate ?? null, dueDate: dueDate ?? null,
+      ...(draft.status !== baseDraft?.status ? { status: draft.status } : {}),
+    };
+    let preview = scheduleSaveReview?.preview;
+    if (mode === 'confirm' && (!changedDates || !preview?.previewId || preview.blocking?.length || scheduleSaveReview?.staleMessage ||
+        !equalIssueInput(scheduleSaveReview?.input, input))) {
+      if (scheduleSaveReview) setScheduleSaveReview({ ...scheduleSaveReview, staleMessage: '현재 날짜로 일정을 다시 검토해 주세요.' });
+      return;
+    }
+    savingRef.current = true;
+    setSaving(true);
+    setError(null);
     const suggestion = stagedGitlabStatus?.toStatus === draft.status ? stagedGitlabStatus : null;
     try {
-      const { descriptionFormat, reporterId, dueDate, ...fields } = editableIssue(draft, labels);
-      const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
-      const changedDueDate = (dueDate ?? null) !== (baseDraft?.dueDate ?? null);
+      if (changedDates && mode !== 'confirm') {
+        preview = await post<SchedulePreview>(`/issues/${issueId}/schedule-save-preview`, input);
+        if (!preview || !Array.isArray(preview.changes) || !Array.isArray(preview.warnings) ||
+            !preview.blocking?.length && !preview.previewId) {
+          throw new Error('일정 검토 결과를 불러오지 못했습니다. 다시 저장해 주세요.');
+        }
+        if (mode === 'review-again' || preview.warnings.length || preview.teamBlockerWarnings?.length || preview.blocking?.length) {
+          setScheduleSaveReview({ preview, input });
+          return;
+        }
+      }
+      if (mode === 'review-again') {
+        closeScheduleSaveReview();
+        return;
+      }
       const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
+        ...(changedDates && preview?.previewId ? { schedulePreviewId: preview.previewId } : {}),
         ...(suggestion ? { gitlabStatusSuggestionToken: suggestion.token } : {}),
         ...(reporterId !== undefined && reporterId !== baseDraft?.reporterId ? { reporterId } : {}),
         ...(changedDueDate ? { dueDate: dueDate ?? null } : {}),
         ...(changedFormat ? { descriptionFormat } : {}) });
+      if (scheduleSaveReview) closeScheduleSaveReview();
       setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
       setStagedGitlabStatus(null);
       await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
     } catch (err) {
+      if (isStaleScheduleSaveReview(err) && preview) {
+        setScheduleSaveReview({ preview, input, staleMessage: err.message });
+        await refresh().catch(() => undefined);
+        return;
+      }
+      if (scheduleSaveReview) closeScheduleSaveReview();
       if (suggestion && isStaleGitlabStatusSuggestion(err)) {
         setStagedGitlabStatus(null);
         setRejectedGitlabStatusToken(suggestion.token);
@@ -1118,7 +1187,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     </div>
     <div className="issue-panel-content">{tab === 'details' ? <>
       {(conflict || issue.version > draft.version) && <div className="issue-conflict-banner" role="alert"><div><strong>다른 변경사항이 있습니다</strong><p>작성 중인 내용은 유지됩니다. 편집 시작 버전은 {draft.version}, 현재 버전은 {issue.version}입니다. 최신 내용을 확인한 뒤 다시 편집하세요.</p></div><button className="btn" onClick={reloadLatest} disabled={saving}>최신 버전 불러오기</button></div>}
-      <form className="issue-detail-form" onSubmit={save} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <form className="issue-detail-form" onSubmit={submitIssue} aria-busy={saving}><fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <label className="issue-form-label">제목<input aria-label="제목" className="field issue-title-input" value={draft.title} onChange={e => update('title', e.target.value)} maxLength={300} required /></label>
         <IssueDescriptionEditor value={draft.description} format={draft.descriptionFormat ?? 'plain'} disabled={saving} initialPreview
           onChange={value => update('description', value)} onFormatChange={format => update('descriptionFormat', format)} />
@@ -1161,7 +1230,7 @@ function IssuePanelContent(props: IssuePanelProps) {
           {error.openBlockers && <button className="btn issue-transition-blocker-action" type="button"
             onClick={() => relationControls.current?.focusBlockers()}>차단 업무 보기</button>}
         </div>}
-        <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button className="btn btn-primary" type="submit" disabled={saving || dependencyBusy || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
+        <div className="issue-save-row"><span className="muted">편집 버전 {draft.version}{dirty ? ' · 저장하지 않은 변경사항' : ` · ${relativeTime(issue.updatedAt)} 수정`}</span><button ref={saveButton} className="btn btn-primary" type="submit" disabled={saving || dependencyBusy || !dirty}><Save size={15} />{saving ? '저장 중…' : '변경사항 저장'}</button></div>
       </fieldset></form>
       {linkedMilestones.length > 0 && <section className="issue-related-section" aria-label="연결된 이정표">
         <h3><Flag size={16} aria-hidden="true" />연결된 이정표 <span>{linkedMilestones.length}</span></h3>
@@ -1331,6 +1400,9 @@ function IssuePanelContent(props: IssuePanelProps) {
       referenceIssueId={bodyReferences.has(previewDocument.id) ? issueId : undefined}
       onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}
+    {scheduleSaveReview && <IssueScheduleSaveReview preview={scheduleSaveReview.preview} issues={data.issues} issueId={issueId}
+      busy={saving} staleMessage={scheduleSaveReview.staleMessage} onClose={() => closeScheduleSaveReview()}
+      onReviewAgain={() => void save('review-again')} onSave={() => void save('confirm')} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {cloneCreation && <NewIssueModal {...props} cloneIssue={cloneCreation} onClose={closeCloneCreation}
       onCloneCreated={showCreatedClone} refresh={refreshIssueRelations} />}

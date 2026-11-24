@@ -259,13 +259,19 @@ test('360px 티켓에서 완료 웹훅을 받지 못한 배포를 확인해 일�
     await expect(title).toHaveValue(titleDraft);
     await expect(comment).toHaveValue(commentDraft);
     expect((await workspace()).issues.find(value => value.id === issue?.id)).toEqual(issue);
+    const startDate = '2027-03-10';
+    await issueForm.getByLabel('시작일', { exact: true }).fill(startDate);
+    const reviewingSchedule = page.waitForResponse(response => new URL(response.url()).pathname === `${issuePath}/schedule-save-preview` &&
+      response.request().method() === 'POST');
     const saving = page.waitForResponse(response => new URL(response.url()).pathname === issuePath && response.request().method() === 'PATCH');
     await issueForm.getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    const schedule = await json<{ previewId: string }>(await reviewingSchedule);
     const saved = await saving;
     expect(saved.request().postDataJSON()).toMatchObject({
-      expectedVersion: issue.version, title: titleDraft, status: 'done', gitlabStatusSuggestionToken: proposal.token,
+      expectedVersion: issue.version, title: titleDraft, status: 'done', startDate,
+      gitlabStatusSuggestionToken: proposal.token, schedulePreviewId: schedule.previewId,
     });
-    expect(await json<Issue>(saved)).toMatchObject({ status: 'done', title: titleDraft, version: issue.version + 1 });
+    expect(await json<Issue>(saved)).toMatchObject({ status: 'done', title: titleDraft, startDate, version: issue.version + 1 });
     const savedPanel = page.getByRole('dialog', { name: titleDraft, exact: true });
     await expect(savedPanel.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue(commentDraft);
 

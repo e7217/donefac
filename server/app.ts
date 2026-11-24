@@ -1235,17 +1235,20 @@ export function createApp(options: {
     workflow:projectId=>workflows.get(projectId),validateChange:validateScheduleChange,
     teamBlockers:()=>issueRelations.teamScheduleBlockers(),
   });
-  schedulePaste.registerRoutes(app,{
-    actor,
+  const scheduleReviewHooks = {
     versions:scheduleVersions,
-    calendar:projectId=>calendars.get(projectId),
+    calendar:(projectId:string)=>calendars.get(projectId),
+    warnings:scheduleWarnings,
+    teamBlockers:(issueIds:readonly string[])=>issueRelations.teamScheduleBlockers(issueIds),
+    isTerminal:isIssueTerminal,
+  };
+  schedulePaste.registerRoutes(app,{
+    ...scheduleReviewHooks,
+    actor,
     workflow:projectId=>workflows.get(projectId),
     validateChange:validateScheduleChange,
-    warnings:scheduleWarnings,
     projectBlockers:projectIds=>issueRelations.localScheduleBlockers(projectIds),
-    teamBlockers:issueIds=>issueRelations.teamScheduleBlockers(issueIds),
     directBlockers:targetId=>issueRelations.directBlockers([targetId]),
-    isTerminal:isIssueTerminal,
     commitChanges:(request,changes,dependencies,linkChanges,origin)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true,origin),
     commitTeamBlocker(request,{source,target},changes,dependencies){
       const predecessor=get<Issue>('issues',source.id),successor=get<Issue>('issues',target.id);
@@ -1941,6 +1944,11 @@ export function createApp(options: {
     });
     res.set('Cache-Control', 'no-store').json({ issue });
   });
+  app.post('/api/issues/:id/schedule-save-preview', (req, res) => {
+    if (Object.keys(req.query).length) return fail('업무 일정 미리보기 조건을 확인해 주세요.');
+    const preview = schedulePaste.previewIssueSave(req.params.id, req.body, actor(req), scheduleReviewHooks, defaultStatusDueDate);
+    res.set('Cache-Control', 'no-store').json(preview);
+  });
   app.patch('/api/issues/:id',(req,res)=>{
     const updated=store.transaction(()=>{
       const old=get<Issue>('issues',req.params.id);
@@ -1960,9 +1968,13 @@ export function createApp(options: {
             { reason: 'workflow_changed', currentWorkflowVersion: version });
         }
       }
-      return commitIssueUpdate(req, old, prepareIssueUpdate(old, req.body, {
+      const prepared = prepareIssueUpdate(old, req.body, {
         assigneeExplicit: guardedTransition && Object.hasOwn(req.body, 'assigneeId'),
-      }));
+      });
+      if (Object.hasOwn(req.body, 'schedulePreviewId')) {
+        schedulePaste.consumeIssueSavePreview(req.body.schedulePreviewId, actor(req), old, prepared.issue, scheduleReviewHooks);
+      }
+      return commitIssueUpdate(req, old, prepared);
     });res.json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{
