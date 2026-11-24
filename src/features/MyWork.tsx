@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useId, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { buildMyWorkQueue, type MyWorkGrouping, type MyWorkGroupId, type MyWorkItem, type MyWorkRole, type MyWorkRoleFilter } from '../../shared/my-work';
 import type { FeatureProps } from '../../shared/types';
 import { STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { todayDate } from './schedule-utils';
 import './my-work.css';
 
@@ -20,12 +21,16 @@ const groupLabels: Record<MyWorkGroupId, string> = {
 const pageSize = 20;
 const roleLabels: Record<MyWorkRole, string> = { assigned: '담당', collaborating: '협력', reported: '요청' };
 
-export function MyWork({ data, actorId, openIssue }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'>) {
+export function MyWork({ data, actorId, openIssue, onOpenIssueForReview }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'> & {
+  onOpenIssueForReview?: OpenIssueForReview;
+}) {
   const [today, setToday] = useState(todayDate);
   const [projectId, setProjectId] = useState('');
   const [role, setRole] = useState<MyWorkRoleFilter>('all');
   const [grouping, setGrouping] = useState<MyWorkGrouping>('deadline');
   const [includeClosed, setIncludeClosed] = useState(false);
+  const heading = useRef<HTMLHeadingElement>(null);
+  const queue = useRef<HTMLDivElement>(null);
   const selectedProject = data.projects.some(project => project.id === projectId) ? projectId : '';
 
   useEffect(() => {
@@ -54,10 +59,19 @@ export function MyWork({ data, actorId, openIssue }: Pick<FeatureProps, 'data' |
     projectId: selectedProject || null, role, includeClosed, grouping,
   }), [data, actorId, today, selectedProject, role, includeClosed, grouping]);
 
+  function openWorkIssue(id: string, opener: HTMLButtonElement) {
+    if (!onOpenIssueForReview) { openIssue(id); return; }
+    const rows = queue.current?.querySelectorAll<HTMLButtonElement>('button[data-issue-review-id]');
+    if (!rows) return;
+    // Each group owns its current page, so read the rows rendered in the queue.
+    const issueIds = Array.from(rows, row => row.dataset.issueReviewId!);
+    onOpenIssueForReview(id, { issueIds, opener, fallback: heading.current, projectScope: selectedProject || null });
+  }
+
   return (
     <div className="page my-work-page">
       <header className="page-heading my-work-heading">
-        <h1>내 업무</h1>
+        <h1 ref={heading} tabIndex={-1}>내 업무</h1>
         <p>기준일 <time dateTime={today}>{today}</time></p>
       </header>
 
@@ -93,14 +107,16 @@ export function MyWork({ data, actorId, openIssue }: Pick<FeatureProps, 'data' |
 
       <p className="my-work-total" role="status">업무 {total.toLocaleString('ko-KR')}개</p>
       {total === 0 && <p className="card my-work-empty">표시할 업무가 없습니다.</p>}
-      <div className="my-work-groups" key={JSON.stringify([today, selectedProject, role, includeClosed, grouping])}>
-        {groups.map(({ id, items }) => items.length > 0 && <WorkGroup key={id} id={id} items={items} openIssue={openIssue} />)}
+      <div className="my-work-groups" ref={queue} key={JSON.stringify([today, selectedProject, role, includeClosed, grouping])}>
+        {groups.map(({ id, items }) => items.length > 0 && <WorkGroup key={id} id={id} items={items} openIssue={openWorkIssue} />)}
       </div>
     </div>
   );
 }
 
-function WorkGroup({ id, items, openIssue }: { id: MyWorkGroupId; items: MyWorkItem[]; openIssue: FeatureProps['openIssue'] }) {
+function WorkGroup({ id, items, openIssue }: {
+  id: MyWorkGroupId; items: MyWorkItem[]; openIssue: (id: string, opener: HTMLButtonElement) => void;
+}) {
   const headingId = useId();
   const [pageIndex, setPageIndex] = useState(0);
   const lastPage = Math.ceil(items.length / pageSize) - 1;
@@ -117,7 +133,8 @@ function WorkGroup({ id, items, openIssue }: { id: MyWorkGroupId; items: MyWorkI
       <ul className="my-work-list">
         {items.slice(start, end).map(({ issue, project, status, role, reported, date }) => (
           <li key={issue.id}>
-            <button className="my-work-row" type="button" onClick={() => openIssue(issue.id)}>
+            <button className="my-work-row" type="button" data-issue-review-id={issue.id}
+              onClick={event => openIssue(issue.id, event.currentTarget)}>
               <span className="my-work-identity">
                 <span className="my-work-item-title"><span className="issue-key">{issue.key}</span> <strong>{issue.title}</strong></span>
                 <span className="my-work-item-project">{project.name}<span aria-hidden="true">·</span>{roleLabels[role]}

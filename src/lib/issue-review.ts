@@ -6,6 +6,7 @@ export type IssueReviewSource = {
   issueIds: readonly string[];
   opener: HTMLElement;
   fallback: HTMLElement | null;
+  projectScope?: string | null;
   gitlabActivity?: GitlabIssueReviewSelection;
 };
 export type OpenIssueForReview = (id: string, source: IssueReviewSource) => void;

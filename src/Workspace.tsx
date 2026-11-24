@@ -249,8 +249,26 @@ type IssueReview = {
   projectScope: string | null;
   issueIds: readonly string[];
   gitlabActivity?: GitlabIssueReviewSelection;
+  openerIssueId?: string;
   focusDirection?: IssueReviewDirection;
 };
+type MyWorkReviewHistory = { index: number; issueId: string; review: IssueReview };
+
+function myWorkHistoryReview(value: unknown, route: WorkspaceRoute, index: number, actorId: string): MyWorkReviewHistory | undefined {
+  if (!value || typeof value !== 'object' || route.view !== 'mywork' || !route.issueId) return;
+  const entry = value as Partial<MyWorkReviewHistory>;
+  const review = entry.review;
+  if (entry.index === index && entry.issueId === route.issueId && review?.actorId === actorId &&
+      review.context === issueReviewContext(route) && Array.isArray(review.issueIds) &&
+      review.issueIds.every(id => typeof id === 'string') && review.issueIds.includes(route.issueId) &&
+      typeof review.openerIssueId === 'string' && review.issueIds.includes(review.openerIssueId) &&
+      (review.projectScope === null || typeof review.projectScope === 'string')) return entry as MyWorkReviewHistory;
+}
+
+function rememberMyWorkReview(index: number, issueId: string, review: IssueReview) {
+  const entry: MyWorkReviewHistory = { index, issueId, review: { ...review, focusDirection: undefined } };
+  history.replaceState({ ...history.state, teamspaceMyWorkReview: entry }, '');
+}
 function sameTeamGanttScheduleFilters(a?: TeamGanttScheduleFilters, b?: TeamGanttScheduleFilters): boolean {
   return a?.assigneeId === b?.assigneeId && Boolean(a?.unscheduledOnly) === Boolean(b?.unscheduledOnly) &&
     a?.query === b?.query && a?.gitlab === b?.gitlab;
@@ -274,11 +292,15 @@ function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRou
   const sameMilestone = Boolean(previous.ganttMilestoneId && previous.ganttMilestoneId === next.ganttMilestoneId) &&
     hasSameProjectGanttContext(previous, next);
   const sameDevelopment = hasSameDevelopmentProject(previous, next) && issueReviewContext(previous) === issueReviewContext(next);
-  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || sameDevelopment ||
+  const sameMyWork = previous.view === 'mywork' && next.view === 'mywork' && previous.projectId === next.projectId;
+  return sameTeamGantt || sameMilestone || sameSearch || sameFavorites || sameDevelopment || sameMyWork ||
     hasSameDocumentContext(previous, next) || hasSameReportContext(previous, next) || hasSameTeamBoardContext(previous, next);
 }
+function isContextualIssueView(view: View): boolean {
+  return view === 'reports' || view === 'search' || view === 'favorites' || view === 'development' || view === 'mywork';
+}
 function hasContextualIssueOverlay(route: WorkspaceRoute | null): boolean {
-  return Boolean(route?.issueId && (route.view === 'reports' || route.view === 'search' || route.view === 'favorites' || route.view === 'development'));
+  return Boolean(route?.issueId && isContextualIssueView(route.view));
 }
 function hasTeamBoardIssueOverlay(route: WorkspaceRoute | null): boolean {
   return Boolean(route?.view === 'teamboard' && route.issueId);
@@ -356,7 +378,8 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
     issueId = issue.id;
-    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && view !== 'favorites' && !ganttScope && !documentId) projectId = issue.projectId;
+    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && view !== 'favorites' &&
+        view !== 'mywork' && !ganttScope && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
   const issueCommentSelectors = parameters.getAll('issueComment');
@@ -583,9 +606,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   }, []);
   const writeRoute = useCallback((route: WorkspaceRoute, index: number, mode: 'push' | 'replace', preserveIssueOpener = false) => {
     const previous = acceptedRouteRef.current;
+    const historyReview = mode === 'replace' && previous?.view === 'mywork'
+      ? myWorkHistoryReview(history.state?.teamspaceMyWorkReview, route, index, actorRef.current) : undefined;
     setIssueReview(review => {
       const id = route.issueId;
-      return review && id && review.context === issueReviewContext(route) && review.issueIds.includes(id) ? review : null;
+      if (review && id && review.context === issueReviewContext(route) && review.issueIds.includes(id)) return review;
+      return historyReview?.review ?? null;
     });
     if (previous && (previous.view === 'issues' || previous.view === 'teamboard' || previous.view === 'gantt')) {
       const changedPane = route.view !== previous.view || route.projectId !== previous.projectId || route.issueId !== previous.issueId;
@@ -602,6 +628,15 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       linkedComment = { targetType: 'issue', targetId: issueId, actorId: null, commentId: issueCommentId, activation: ++commentFocusActivation.current };
     } else if (documentId && documentCommentId && (previous?.documentId !== documentId || previous.documentCommentId !== documentCommentId)) {
       linkedComment = { targetType: 'document', targetId: documentId, actorId: null, commentId: documentCommentId, activation: ++commentFocusActivation.current };
+    }
+    const openerIssueId = historyReview?.review.openerIssueId;
+    if (historyReview && openerIssueId && !boardIssueOpener.current && !previous?.issueId) {
+      const main = workspaceMain.current;
+      const fallback = main?.querySelector<HTMLElement>('.my-work-heading h1');
+      if (main && fallback) {
+        const opener = main.querySelector<HTMLElement>(`[data-issue-review-id="${CSS.escape(openerIssueId)}"]`);
+        boardIssueOpener.current = { opener: opener ?? fallback, fallback, reviewContext: historyReview.review.context };
+      }
     }
     const boardTrigger = boardIssueOpener.current;
     if (boardTrigger) {
@@ -632,17 +667,20 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       } else if (previous.issueId && !route.issueId) {
         const opener = overlayIssueOpener.current;
         overlayIssueOpener.current = null;
-        if (!boardTrigger && (opener || route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' || route.view === 'development')) requestAnimationFrame(() => {
+        const focusMain = route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' ||
+          route.view === 'development' || route.view === 'mywork';
+        if (!boardTrigger && (opener || focusMain)) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
           if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-          else if (route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' || route.view === 'development') workspaceMain.current?.focus({ preventScroll: true });
+          else if (focusMain) workspaceMain.current?.focus({ preventScroll: true });
         });
       }
     }
     if (hasDocumentIssueOverlay(route) || hasContextualIssueOverlay(route) || hasTeamBoardIssueOverlay(route) || route.documentPreviewId) setSearchOpen(false);
     const hash = routeHash(route);
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
+    if (!historyReview) delete state.teamspaceMyWorkReview;
     const returnFocus = route.view === 'publication' && !route.issueId && mode === 'replace' && hash === location.hash
       ? publicationHistoryFocus(state.teamspacePublicationReturnFocus, hash, index) : null;
     if (!returnFocus) delete state.teamspacePublicationReturnFocus;
@@ -866,7 +904,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       }
       return;
     }
-    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'gantt' && current.ganttScope === 'team' ||
+    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'mywork' || current?.view === 'gantt' && current.ganttScope === 'team' ||
         current?.view === 'development' && current.projectId === issue.projectId) {
       if (requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
@@ -902,7 +940,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     const { gitlabActivity } = source;
     if (!current || current.issueId || !source.issueIds.includes(id) ||
-        (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development')) {
+        (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development' &&
+          current.view !== 'mywork')) {
       if (!gitlabActivity) openIssue(id);
       return;
     }
@@ -914,12 +953,16 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!issue) return;
     const context = issueReviewContext(current);
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
-      : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null : current.projectId;
+      : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null
+        : current.view === 'mywork' ? source.projectScope ?? null : current.projectId;
     if (!requestRoute({ ...current, issueId: id, issueCommentId: null, documentPreviewId: null })) return;
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
     boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
-    setIssueReview({ context, actorId, projectScope, issueIds: [...new Set(source.issueIds)], gitlabActivity });
+    const review = { context, actorId, projectScope, issueIds: [...new Set(source.issueIds)], gitlabActivity,
+      ...(opened.view === 'mywork' && { openerIssueId: id }) };
+    setIssueReview(review);
+    if (opened.view === 'mywork') rememberMyWorkReview(routeIndexRef.current, id, review);
     setSearchOpen(false);
   };
   const advanceIssueReview = (direction: IssueReviewDirection) => {
@@ -932,7 +975,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (target && requestRoute({ ...current, issueId: target.id, issueCommentId: null, documentPreviewId: null }, 'replace', true)) {
       const opened = acceptedRouteRef.current;
       if (opened?.issueId === target.id && issueReviewContext(opened) === review.context) {
-        setIssueReview({ ...review, gitlabActivity: undefined, focusDirection: direction });
+        const nextReview = { ...review, gitlabActivity: undefined, focusDirection: direction };
+        setIssueReview(nextReview);
+        if (opened.view === 'mywork') rememberMyWorkReview(routeIndexRef.current, target.id, nextReview);
       }
     }
   };
@@ -1182,7 +1227,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const teamPageLabel = teamBoard ? '전체 프로젝트 보드' : teamGantt ? '전체 프로젝트 간트' :
     teamDecisions ? '팀 결정 후속 업무' : view === 'teamoverview' ? '팀 개요' : view === 'search' ? '검색 결과' : view === 'favorites' ? '즐겨찾기' : null;
   const documentIssueOpen = view === 'documents' && Boolean(documentId && openedIssue);
-  const contextualIssueOpen = Boolean(openedIssue && (view === 'reports' || view === 'search' || view === 'favorites' || view === 'development'));
+  const contextualIssueOpen = Boolean(openedIssue && isContextualIssueView(view));
   const reportIssueOpen = view === 'reports' && contextualIssueOpen;
   const activeDocumentPreviewId = openedIssue && documentPreviewId && canPreviewIssueDocument(data, openedIssue.id, documentPreviewId)
     ? documentPreviewId : null;
@@ -1243,7 +1288,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           setActorId(e.target.value);setActor(e.target.value);localStorage.setItem('teamspace.actor',e.target.value);
         }}>{data.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select></div>
       </div></header>
-      <main className={`main-content view-${view}`} ref={workspaceMain} tabIndex={teamBoard || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' ? -1 : undefined}>
+      <main className={`main-content view-${view}`} ref={workspaceMain}
+        tabIndex={teamBoard || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' || view === 'mywork' ? -1 : undefined}>
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}
@@ -1257,7 +1303,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenIssueForReview={openIssueForReview}
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
-        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}/>}
+        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue} onOpenIssueForReview={openIssueForReview}/>}
         {view === 'favorites' && <FavoritesPage data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh}/>}
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
           <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openSearchIssue} openDocument={openDocument}/>
