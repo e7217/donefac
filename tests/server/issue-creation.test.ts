@@ -9,12 +9,17 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentSectionHash, markdownImportSectionId } from '../../shared/document-sections.js';
-import type { ApiKeyCreated, DependencyType, DocPage, DocRevision, Issue, IssueCloneResult, IssueRelation, PlanningItem, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated, WorkCalendar, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, CycleBoardCreateInput, CycleCompletionPreview, CycleCompletionResult, DependencyType, DocPage, DocRevision,
+  Issue, IssueCloneResult, IssueRelation, PlanningItem, ProjectIssueOrder, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated,
+  WorkCalendar, WorkspaceSnapshot,
+} from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actorId = 'user-seo';
 const assigneeId = 'user-min';
 type Failure = { details: { reason: string } };
+const cycleBoardCreatePath = (project = projectId) => `/projects/${project}/cycle-board/issues`;
+const cycleDestination = ({ id, version }: PlanningItem) => ({ id, expectedVersion: version });
 
 async function fixture(t: TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teamspace-issue-create-'));
@@ -58,7 +63,9 @@ async function fixture(t: TestContext) {
       .map(table => Number(observer.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get()?.total));
     return [nextNumber, ...totals];
   }
-  return { call, enableOutbox, observer, sideEffects, async restart() { await stop(); service = await start(); } };
+  const createPlan = async (name: string, fields: Partial<Pick<PlanningItem, 'projectId' | 'kind' | 'status'>> = {}) =>
+    (await call<PlanningItem>('/planning-items', 'POST', { projectId, name, kind: 'cycle', status: 'active', ...fields }, 201)).data;
+  return { call, createPlan, enableOutbox, observer, sideEffects, async restart() { await stop(); service = await start(); } };
 }
 
 test('ordinary ticket retries allocate one issue, key, audit, notification and outbound event', async t => {
@@ -121,6 +128,146 @@ test('a failed create or receipt insert rolls back the issue and all side effect
   const legacyFirst = await call<Issue>('/issues', 'POST', legacy, 201);
   const legacySecond = await call<Issue>('/issues', 'POST', legacy, 201);
   assert.notEqual(legacyFirst.data.id, legacySecond.data.id);
+});
+
+test('cycle board creates directly in both lanes and receipts are scoped by request, project and actor', async t => {
+  const { call, createPlan, enableOutbox, sideEffects } = await fixture(t);
+  const planned = await createPlan('계획 사이클에서 새 업무', { status: 'planned' });
+  const relatedModule = await createPlan('유지할 별도 모듈', { kind: 'module' });
+  await enableOutbox();
+  const { data: key } = await call<ApiKeyCreated>('/api-keys', 'POST', { name: '보드 경로 검사용 키', access: 'write', projectIds: [projectId] }, 201);
+  const orderPath = `/projects/${projectId}/issue-order`;
+  const { data: beforeOrder } = await call<ProjectIssueOrder>(orderPath);
+  const before = sideEffects();
+  const input: CycleBoardCreateInput = { requestId: randomUUID(), targetCycle: cycleDestination(planned), issue: {
+    title: '계획 사이클 업무', assigneeId, moduleId: relatedModule.id, labels: ['lane-synthetic'], startDate: '2026-11-23', endDate: '2026-11-25',
+  } };
+  const path = cycleBoardCreatePath();
+  await call(`/v1${path}`, 'POST', input, 403, actorId, key.token);
+  assert.deepEqual(sideEffects(), before);
+  const results = await Promise.all([input, { ...input, requestId: input.requestId.toUpperCase() }]
+    .map(body => call<Issue>(path, 'POST', body, [200, 201])));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+  const issue = results[0].data;
+  assert.deepEqual(results[1].data, issue);
+  assert.equal(issue.key, `NEO-${before[0]}`);
+  assert.equal(issue.projectId, projectId);
+  assert.equal(issue.reporterId, actorId);
+  assert.equal(issue.cycleId, planned.id);
+  assert.equal(issue.cycle, planned.name);
+  assert.equal(issue.moduleId, relatedModule.id);
+  assert.deepEqual(issue.labels, input.issue.labels);
+  assert.deepEqual(sideEffects(), before.map(value => value + 1));
+  for (const [route, body, actor] of [
+    [path, { ...input, targetCycle: null }, actorId],
+    [path, { ...input, issue: { ...input.issue, title: '다른 입력' } }, actorId],
+    [path, input, assigneeId],
+    [cycleBoardCreatePath('project-team'), input, actorId],
+    ['/issues', { requestId: input.requestId, projectId, ...input.issue }, actorId],
+  ] as const) {
+    assert.equal((await call<Failure>(route, 'POST', body, 409, actor)).data.details.reason, 'request_conflict');
+  }
+
+  const backlog = { requestId: randomUUID(), targetCycle: null, issue: { title: '백로그 업무', projectId, assigneeId } };
+  const { data: backlogIssue } = await call<Issue>(path, 'POST', backlog, 201);
+  assert.equal(backlogIssue.key, `NEO-${before[0] + 1}`);
+  assert.equal(backlogIssue.cycleId, null);
+  assert.equal(backlogIssue.cycle, null);
+  assert.deepEqual((await call<Issue>(path, 'POST', backlog)).data, backlogIssue);
+  assert.deepEqual((await call<ProjectIssueOrder>(orderPath)).data.issueIds, [...beforeOrder.issueIds, issue.id, backlogIssue.id]);
+  assert.deepEqual(sideEffects(), before.map(value => value + 2));
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  for (const created of [issue, backlogIssue]) {
+    assert.deepEqual(workspace.issues.find(item => item.id === created.id), created);
+    assert.equal(workspace.activities.filter(item => item.resourceId === created.id && item.action === '티켓 생성' && item.actorId === actorId).length, 1);
+  }
+});
+
+test('cycle board rejects invalid, stale and closed destinations while keeping shared issue validation', async t => {
+  const { call, createPlan, sideEffects } = await fixture(t);
+  const active = await createPlan('수정할 활성 사이클');
+  const archived = await createPlan('보관된 사이클', { status: 'archived' });
+  const completed = await createPlan('완료된 사이클', { status: 'completed' });
+  const foreign = await createPlan('다른 프로젝트 사이클', { projectId: 'project-team' });
+  const relatedModule = await createPlan('사이클이 아닌 계획 항목', { kind: 'module' });
+  const deleted = await createPlan('삭제될 예정 사이클');
+  await call(`/planning-items/${deleted.id}?expectedVersion=${deleted.version}`, 'DELETE');
+  const { data: current } = await call<PlanningItem>(`/planning-items/${active.id}`, 'PATCH', { expectedVersion: active.version, name: '수정된 활성 사이클' });
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const { data: workflow } = await call<ProjectWorkflow>(workflowPath);
+  await call(workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    fieldRules: [...workflow.fieldRules, { issueType: '*', statusId: workflow.initialStatusId, requiredFields: ['cycle'] }],
+  });
+  const input: CycleBoardCreateInput = { requestId: randomUUID(), targetCycle: cycleDestination(current), issue: { title: '검토 중인 생성 입력' } };
+  const path = cycleBoardCreatePath();
+  const before = sideEffects();
+  for (const bad of [
+    { ...input, targetCycle: undefined }, { ...input, targetCycle: [] }, { ...input, issue: [] },
+    { ...input, targetCycle: { id: current.id, expectedVersion: 0 } },
+    { ...input, targetCycle: { id: current.id, expectedVersion: '2' } },
+    { ...input, issue: { ...input.issue, projectId: foreign.projectId } },
+    { ...input, issue: { ...input.issue, cycleId: current.id } },
+    { ...input, targetCycle: null, issue: { ...input.issue, cycleId: null } },
+    { ...input, issue: { ...input.issue, cycle: current.name } },
+    { ...input, requestId: 'invalid' },
+  ]) await call(path, 'POST', bad, 400);
+  await call(cycleBoardCreatePath('missing-project'), 'POST', { ...input, targetCycle: null }, 404);
+
+  for (const plan of [active, archived, completed, foreign, relatedModule, deleted]) {
+    const { data } = await call<{ details: { reason: string; currentCycleVersion?: number } }>(path, 'POST', {
+      ...input, targetCycle: cycleDestination(plan),
+    }, 409);
+    assert.equal(data.details.reason, 'target_cycle_changed');
+    if (plan === active) assert.equal(data.details.currentCycleVersion, current.version);
+  }
+  const missingRequired = await call<{ details: { requiredFields: string[] } }>(path, 'POST', { ...input, targetCycle: null }, 422);
+  assert.deepEqual(missingRequired.data.details.requiredFields, ['cycle']);
+  assert.deepEqual(sideEffects(), before);
+
+  const { data: repaired } = await call<Issue>(path, 'POST', input, 201);
+  assert.equal(repaired.key, `NEO-${before[0]}`);
+  assert.equal(repaired.cycleId, active.id);
+  assert.equal(repaired.cycle, current.name);
+});
+
+test('cycle board creation rolls back a late receipt failure and replays the live issue after cycle completion', async t => {
+  const { call, createPlan, enableOutbox, observer, sideEffects, restart } = await fixture(t);
+  await enableOutbox();
+  const active = await createPlan('완료할 활성 사이클');
+  const path = cycleBoardCreatePath();
+  const input: CycleBoardCreateInput = { requestId: randomUUID(), targetCycle: cycleDestination(active), issue: { title: '이월될 새 업무', assigneeId } };
+  const orderPath = `/projects/${projectId}/issue-order`;
+  const { data: originalOrder } = await call<ProjectIssueOrder>(orderPath);
+  const before = sideEffects();
+  observer.exec("CREATE TRIGGER fail_cycle_board_creation_receipt BEFORE INSERT ON issue_creation_requests BEGIN SELECT RAISE(ABORT,'synthetic cycle board creation receipt failure'); END");
+  try {
+    await call(path, 'POST', input, 500);
+    assert.deepEqual(sideEffects(), before);
+    assert.deepEqual((await call<ProjectIssueOrder>(orderPath)).data, originalOrder);
+  } finally { observer.exec('DROP TRIGGER fail_cycle_board_creation_receipt'); }
+
+  const { data: issue } = await call<Issue>(path, 'POST', input, 201);
+  assert.equal(issue.key, `NEO-${before[0]}`);
+  assert.equal(issue.cycleId, active.id);
+  assert.deepEqual(sideEffects(), before.map(value => value + 1));
+  const completePath = `/planning-items/${active.id}/complete`;
+  const { data: completePreview } = await call<CycleCompletionPreview>(`${completePath}/preview`, 'POST', {
+    expectedVersion: active.version, destinationId: null,
+  });
+  assert.ok(completePreview.previewId);
+  const { data: { cycle: completed } } = await call<CycleCompletionResult>(completePath, 'POST', { previewId: completePreview.previewId });
+  assert.equal(completed.status, 'completed');
+  const { data: workspace } = await call<WorkspaceSnapshot>('/workspace');
+  const carried = workspace.issues.find(item => item.id === issue.id);
+  assert.ok(carried && carried.version > issue.version);
+  assert.equal(carried.cycleId, null);
+  const afterCompletion = sideEffects();
+  await restart();
+  assert.deepEqual((await call<Issue>(path, 'POST', input)).data, carried);
+  const fresh = { ...input, requestId: randomUUID(), targetCycle: cycleDestination(completed) };
+  assert.equal((await call<Failure>(path, 'POST', fresh, 409)).data.details.reason, 'target_cycle_changed');
+  assert.deepEqual(sideEffects(), afterCompletion);
 });
 
 test('issue reporters preserve unknown history, declared team members, explicit clearing and scoped queries', async t => {

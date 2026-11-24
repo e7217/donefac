@@ -49,7 +49,7 @@ import { IssueRelationError, IssueRelationsService } from './issue-relations.js'
 import { IssueBlockerNotifications } from './issue-blocker-notifications.js';
 import { ScheduleArtifactService, ScheduleArtifactError } from './schedule-artifacts.js';
 import { IssueSchemaService, IssueSchemaError, validateVisibilityStatuses } from './issue-schema.js';
-import { IssueOrderError, IssueOrderService } from './issue-order.js';
+import { IssueOrderError, IssueOrderService, parseCycleBoardDestination, readCycleBoardDestination } from './issue-order.js';
 import { IssueBulkEditError, IssueBulkEditService } from './issue-bulk-edit.js';
 import { AutomationService, AutomationError } from './automation.js';
 import { exportAutomationRunHistory, restoreAutomationRunHistory, validateAutomationRunHistory } from './automation-run-backup.js';
@@ -1720,6 +1720,27 @@ export function createApp(options: {
   app.post('/api/issues',(req,res)=>{
     const result=issueCreation.create(()=>actor(req),req.body,()=>createIssueInTransaction(req,issueCreationInput(req.body)));
     res.status(result.duplicate?200:201).json(result.issue);
+  });
+  app.post('/api/projects/:projectId/cycle-board/issues', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (!input || typeof input !== 'object' || Array.isArray(input) ||
+        Object.keys(input).some(key => !['requestId', 'targetCycle', 'issue'].includes(key))) {
+      return fail('사이클 보드의 업무 생성 요청을 확인해 주세요.');
+    }
+    const projectId = String(req.params.projectId);
+    const { issue } = input;
+    if (!issue || typeof issue !== 'object' || Array.isArray(issue)) return fail('생성할 업무 정보를 확인해 주세요.');
+    const fields = issue as Record<string, unknown>;
+    if ((Object.hasOwn(fields, 'projectId') && fields.projectId !== projectId) ||
+        Object.hasOwn(fields, 'cycleId') || Object.hasOwn(fields, 'cycle')) {
+      return fail('업무의 프로젝트와 사이클은 선택한 보드에서 지정합니다.');
+    }
+    const target = parseCycleBoardDestination(input.targetCycle);
+    const result = issueCreation.create(() => actor(req), input, () => {
+      const cycle = readCycleBoardDestination(store, projectId, target, 'target');
+      return createIssueInTransaction(req, issueCreationInput({ ...fields, projectId, cycleId: cycle?.id ?? null }));
+    }, { kind: 'cycle-board', projectId });
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.issue);
   });
   const registerScheduleLinkedIssue = (direction: 'predecessor' | 'successor') => {
     const createsPredecessor = direction === 'predecessor';

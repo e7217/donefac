@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { CycleBoardMoveInput, CycleBoardMoveResult, Issue, IssueOrderMove, IssueOrderMoveResult, PlanningItem, Project, ProjectIssueOrder } from '../shared/types.js';
+import type { CycleBoardDestination, CycleBoardMoveInput, CycleBoardMoveResult, Issue, IssueOrderMove, IssueOrderMoveResult, PlanningItem, Project, ProjectIssueOrder } from '../shared/types.js';
 import { AUTO_RESULT_RETENTION_MS } from './automatic-schedule.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store, StoreChange } from './store.js';
@@ -42,12 +42,25 @@ function parseMove(value: Record<string, unknown>): IssueOrderMove {
   return { issueId, expectedVersion, expectedIssueVersion, anchorId, position, status, targetAssigneeId, assigneeId };
 }
 
-function parseCycleReference(value: unknown): CycleBoardMoveInput['sourceCycle'] {
+export function parseCycleBoardDestination(value: unknown): CycleBoardDestination {
   if (value === null) return null;
   if (!isRecord(value) || Object.keys(value).length !== 2 || !isBoardId(value.id) || !isVersion(value.expectedVersion)) {
     return fail('사이클 ID와 조회한 버전을 확인해 주세요.');
   }
   return { id: value.id, expectedVersion: value.expectedVersion };
+}
+
+export function readCycleBoardDestination(store: Store, projectId: string, reference: CycleBoardDestination, role: 'source' | 'target'): PlanningItem | null {
+  if (reference === null) return null;
+  const current = store.get<PlanningItem>('planning_items', reference.id);
+  const matching = current?.projectId === projectId && current.kind === 'cycle';
+  if (!matching || (current.status !== 'planned' && current.status !== 'active') || current.version !== reference.expectedVersion) {
+    return fail('사이클의 버전이나 상태가 변경되었습니다. 최신 보드를 확인해 주세요.', 409, {
+      reason: role === 'source' ? 'source_cycle_changed' : 'target_cycle_changed',
+      ...(matching ? { currentCycleVersion: current.version } : {}),
+    });
+  }
+  return current;
 }
 
 function parseCycleBoardMove(value: unknown): CycleBoardMoveInput {
@@ -60,7 +73,7 @@ function parseCycleBoardMove(value: unknown): CycleBoardMoveInput {
   }
   if (!isBoardId(expectedVersion) || !isVersion(expectedIssueVersion)) return fail('업무 순서와 이동할 업무의 버전이 필요합니다.');
   return { requestId: requestId.toLowerCase(), issueId, expectedVersion, expectedIssueVersion, anchorId, position,
-    sourceCycle: parseCycleReference(value.sourceCycle), targetCycle: parseCycleReference(value.targetCycle) };
+    sourceCycle: parseCycleBoardDestination(value.sourceCycle), targetCycle: parseCycleBoardDestination(value.targetCycle) };
 }
 
 function placeIssue(issueIds: string[], issueId: string, anchorId: string | null, position: IssueOrderMove['position']): string[] {
@@ -212,19 +225,6 @@ export class IssueOrderService {
     });
   }
 
-  private currentCycle(projectId: string, reference: CycleBoardMoveInput['sourceCycle'], role: 'source' | 'target'): PlanningItem | null {
-    if (reference === null) return null;
-    const current = this.store.get<PlanningItem>('planning_items', reference.id);
-    const matching = current?.projectId === projectId && current.kind === 'cycle';
-    if (!matching || (current.status !== 'planned' && current.status !== 'active') || current.version !== reference.expectedVersion) {
-      return fail('사이클의 버전이나 상태가 변경되었습니다. 최신 보드를 확인해 주세요.', 409, {
-        reason: role === 'source' ? 'source_cycle_changed' : 'target_cycle_changed',
-        ...(matching ? { currentCycleVersion: current.version } : {}),
-      });
-    }
-    return current;
-  }
-
   private cycleAnchor(order: ProjectIssueOrder, move: CycleBoardMoveInput): Issue | undefined {
     const targetId = move.targetCycle?.id ?? null;
     if (move.anchorId !== null) {
@@ -272,11 +272,11 @@ export class IssueOrderService {
         return fail('이동할 업무가 변경되었습니다. 최신 보드를 확인해 주세요.', 409,
           { reason: 'issue_changed', currentIssueVersion: source.version });
       }
-      const sourceCycle = this.currentCycle(projectId, move.sourceCycle, 'source');
+      const sourceCycle = readCycleBoardDestination(this.store, projectId, move.sourceCycle, 'source');
       if (laneId(source) !== (sourceCycle?.id ?? null)) {
         return fail('이동할 업무의 사이클이 변경되었습니다. 최신 보드를 확인해 주세요.', 409, { reason: 'source_cycle_changed' });
       }
-      const targetCycle = this.currentCycle(projectId, move.targetCycle, 'target');
+      const targetCycle = readCycleBoardDestination(this.store, projectId, move.targetCycle, 'target');
       const anchor = this.cycleAnchor(order, move);
       const nextIds = anchor ? placeIssue(order.issueIds, source.id, anchor.id, move.position) : order.issueIds;
       const orderChanged = nextIds.some((id, index) => id !== order.issueIds[index]);

@@ -320,9 +320,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   }
   const requestedFocusDate = parameters.get('focusDate');
   const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
-  const planningId = (view === 'planning' || view === 'backlog' || view === 'gantt' && !ganttScope && !ganttFocusIssueId) && projectId === parts[0] &&
-    snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId &&
-      (view !== 'backlog' || item.kind === 'cycle' && (item.status === 'planned' || item.status === 'active'))) ? parts[2] : null;
+  const planningId = projectId === parts[0] && (view === 'backlog' ? isRelationId(parts[2])
+    : (view === 'planning' || view === 'gantt' && !ganttScope && !ganttFocusIssueId) &&
+      snapshot.planningItems?.some(item => item.id === parts[2] && item.projectId === projectId)) ? parts[2] : null;
   const savedViewId = (view === 'issues' || (view === 'gantt' && !ganttScope && !ganttFocusIssueId)) && (!issue || projectId === parts[0])
     ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';

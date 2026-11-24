@@ -1809,14 +1809,19 @@ export interface IssueOrderMove {
   assigneeId?: string | null;
 }
 export interface IssueOrderMoveResult { order: ProjectIssueOrder; issue: Issue }
-type CycleBoardVersion = { id: string; expectedVersion: number };
+export type CycleBoardDestination = { id: string; expectedVersion: number } | null;
+export interface CycleBoardCreateInput {
+  requestId: string;
+  targetCycle: CycleBoardDestination;
+  issue: Record<string, unknown>;
+}
 export interface CycleBoardMoveInput {
   requestId: string;
   issueId: string;
   expectedVersion: string;
   expectedIssueVersion: number;
-  sourceCycle: CycleBoardVersion | null;
-  targetCycle: CycleBoardVersion | null;
+  sourceCycle: CycleBoardDestination;
+  targetCycle: CycleBoardDestination;
   anchorId: string | null;
   position: 'before' | 'after';
 }

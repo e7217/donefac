@@ -560,6 +560,14 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 자동화 클라이언트는 프로젝트 범위의 키로 `/api/v1/projects/:id/issue-order`에 같은 요청을 보낸다. 이동에는 쓰기 키가 필요하다.
 
+## 백로그 또는 사이클에서 업무 생성
+
+브라우저의 `POST /api/projects/:id/cycle-board/issues`에 `{requestId,targetCycle,issue}`를 보낸다. `requestId`는 UUID v4다. 백로그는 `targetCycle:null`을 보내고, 사이클은 `{id,expectedVersion}`을 보낸다. `issue`는 일반 생성 양식의 필드를 사용하며, 프로젝트 ID를 보내면 주소의 프로젝트와 같아야 한다. 사이클은 `targetCycle`로 지정한다.
+
+사이클은 같은 프로젝트의 `planned` 또는 `active` 상태여야 한다. 현재 상태·소속·버전이 선택한 대상과 다르면 `409`와 `details.reason: 'target_cycle_changed'`를 반환한다. 확인한 사이클이 같은 프로젝트에 있으면 `details.currentCycleVersion`도 반환한다. 유효한 요청은 일반 생성 규칙과 템플릿을 적용하고 업무·사이클 배정·프로젝트 순서·생성 이력을 한 트랜잭션에 저장한 뒤 `201`과 업무를 반환한다.
+
+응답을 받지 못한 경우 같은 작업자·프로젝트·요청 ID·입력으로 다시 보낸다. 이미 저장한 요청은 `200`과 현재 업무를 반환한다. 사이클이 그 뒤 완료되거나 업무가 같은 프로젝트 안에서 다른 그룹으로 이동한 경우에도 읽을 수 있다. 같은 요청 ID에 다른 입력이나 프로젝트를 지정하면 `409`를 반환한다.
+
 ## 백로그와 사이클 사이에서 업무 이동
 
 브라우저의 `POST /api/projects/:id/cycle-board/move`에 `requestId`(UUID v4), `issueId`, 조회한 프로젝트 순서의 `expectedVersion`, `expectedIssueVersion`, `sourceCycle`, `targetCycle`, `anchorId`, `position`을 보낸다. 사이클은 `{id,expectedVersion}`으로 지정한다. `null`은 사이클 미지정 백로그다. 출발·도착 사이클은 같은 프로젝트의 `planned` 또는 `active` 상태여야 한다.

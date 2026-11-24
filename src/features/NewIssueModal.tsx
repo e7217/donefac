@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { Plus, X } from 'lucide-react';
-import { PRIORITY, type CustomFieldValue, type DependencyType, type DocPage, type DocumentDecisionSource, type DocumentFollowUpCommentSource, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueBlockedCreationResult, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type IssueTemplate, type Priority, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
+import { PRIORITY, type CustomFieldValue, type CycleBoardCreateInput, type DependencyType, type DocPage, type DocumentDecisionSource, type DocumentFollowUpCommentSource, type DocumentFollowUpResult, type DocumentSourceSelection, type FeatureProps, type Issue, type IssueBlockedCreationResult, type IssueChildCreationResult, type IssueCloneResult, type IssueDescriptionFormat, type IssueStatus, type IssueTemplate, type PlanningItem, type Priority, type WorkCalendar, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS } from '../../shared/workflow-helpers';
 import { fieldApplies, hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
@@ -34,17 +34,20 @@ export type ScheduleIssueLink = {
   direction: 'predecessor' | 'successor';
   issue: ScheduledIssue;
 };
+type CycleBoardCycle = Pick<PlanningItem, 'id' | 'name' | 'status' | 'version'>;
+type CycleBoardCreation = { cycle: CycleBoardCycle | null; onCreated: (issue: Issue) => void };
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStatus?: IssueStatus;
   selectingChecklist?: boolean;
   onReselectChecklist?: () => void;
   onClose: () => void;
 } & (
-  { sourceDocument?: FollowUpSource; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
-  { sourceDocument?: never; parentIssue: ParentIssue; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
-  { sourceDocument?: never; parentIssue?: never; scheduleLink: ScheduleIssueLink; onScheduleIssueCreated?: (issue: Issue) => void; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
-  { sourceDocument?: never; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue: Issue; onCloneCreated?: (issue: Issue) => void; blockedByIssue?: never; onBlockedIssueCreated?: never } |
-  { sourceDocument?: never; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue: ScheduledIssue; onBlockedIssueCreated?: (issue: Issue) => void }
+  (({ sourceDocument?: FollowUpSource; cycleBoardCreation?: never } | { sourceDocument?: never; cycleBoardCreation: CycleBoardCreation }) &
+    { parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never }) |
+  { cycleBoardCreation?: never; sourceDocument?: never; parentIssue: ParentIssue; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
+  { cycleBoardCreation?: never; sourceDocument?: never; parentIssue?: never; scheduleLink: ScheduleIssueLink; onScheduleIssueCreated?: (issue: Issue) => void; cloneIssue?: never; onCloneCreated?: never; blockedByIssue?: never; onBlockedIssueCreated?: never } |
+  { cycleBoardCreation?: never; sourceDocument?: never; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue: Issue; onCloneCreated?: (issue: Issue) => void; blockedByIssue?: never; onBlockedIssueCreated?: never } |
+  { cycleBoardCreation?: never; sourceDocument?: never; parentIssue?: never; scheduleLink?: never; onScheduleIssueCreated?: never; cloneIssue?: never; onCloneCreated?: never; blockedByIssue: ScheduledIssue; onBlockedIssueCreated?: (issue: Issue) => void }
 );
 type ParentReview = { state: 'available'; issue: ParentIssue } | { state: 'missing' | 'moved' | 'failed' };
 type CloneReview = { state: 'available'; issue: Issue } | { state: 'missing' | 'moved' | 'failed' };
@@ -52,6 +55,7 @@ type ReviewedSchedule = ScheduleIssueLink & { calendar: WorkCalendar };
 type ScheduleReview = { state: 'available'; schedule: ReviewedSchedule } | { state: 'missing' | 'moved' | 'failed' };
 type BlockedReview = { state: 'available'; issue: ScheduledIssue; calendar: WorkCalendar | null } |
   { state: 'missing' | 'moved' | 'project_missing' | 'failed' };
+type CycleReview = { state: 'available'; cycle: CycleBoardCycle } | { state: 'missing' | 'closed' | 'failed' };
 type ScheduleDates = Record<ScheduleDependencyEndpoint, string>;
 type CloneDates = ScheduleDates & { dueDate: string };
 
@@ -138,6 +142,14 @@ function blockedReviewFrom(data: WorkspaceSnapshot, previous: ScheduledIssue, ca
     calendar: calendar && latestCalendar && calendar.version >= latestCalendar.version ? calendar : latestCalendar };
 }
 
+function cycleReviewFrom(data: WorkspaceSnapshot, projectId: string, previous: CycleBoardCycle, authoritative = false): CycleReview | null {
+  if (!data.planningItems) return authoritative ? { state: 'failed' } : null;
+  const cycle = data.planningItems.find(item => item.id === previous.id && item.kind === 'cycle' && item.projectId === projectId);
+  if (!cycle) return { state: 'missing' };
+  if (cycle.status !== 'planned' && cycle.status !== 'active') return { state: 'closed' };
+  return authoritative || cycle.version > previous.version ? { state: 'available', cycle } : null;
+}
+
 function scheduleProposal(schedule: ReviewedSchedule, type: DependencyType, lagDays: number | null, dates?: ScheduleDates) {
   if (lagDays === null) return {};
   const relation = { type, lagDays };
@@ -167,7 +179,7 @@ function titleFromChecklist(text: string): string {
 }
 
 export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, selectingChecklist = false,
-  onReselectChecklist, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue,
+  onReselectChecklist, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue, cycleBoardCreation,
   onBlockedIssueCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -186,6 +198,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [reporterId, setReporterId] = useState<Issue['reporterId']>();
   const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
+    if (cycleBoardCreation) return projectId;
     if (parentIssue) return parentIssue.projectId;
     if (scheduleLink) return scheduleLink.issue.projectId;
     if (cloneIssue) return cloneIssue.projectId;
@@ -212,6 +225,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const [reviewedBlocked, setReviewedBlocked] = useState(blockedByIssue);
   const [blockedCalendar, setBlockedCalendar] = useState<WorkCalendar | null>(null);
   const [blockedReview, setBlockedReview] = useState<BlockedReview | null>(null);
+  const [reviewedCycle, setReviewedCycle] = useState(cycleBoardCreation?.cycle);
+  const [cycleReview, setCycleReview] = useState<CycleReview | null>(null);
   const [dependencyType, setDependencyType] = useState<DependencyType>('FS');
   const [lag, setLag] = useState('0');
   const [scheduleDates, setScheduleDates] = useState<ScheduleDates>(() => {
@@ -270,6 +285,12 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   const needsScheduleReview = Boolean(pendingScheduleReview && !recovering && !busy);
   const pendingBlockedReview = blockedReview ?? (reviewedBlocked && blockedReviewFrom(data, reviewedBlocked, blockedCalendar));
   const needsBlockedReview = Boolean(pendingBlockedReview && !recovering && !replayRejected && !busy);
+  const pendingCycleReview = reviewedCycle && (cycleReview ?? cycleReviewFrom(data, projectId, reviewedCycle));
+  const needsCycleReview = Boolean(pendingCycleReview && !recovering && !replayRejected && !busy);
+  const cycleReviewMessage = pendingCycleReview?.state === 'missing' ? '등록할 사이클을 찾을 수 없습니다.'
+    : pendingCycleReview?.state === 'closed' ? '선택한 사이클이 종료되어 업무를 등록할 수 없습니다.'
+    : pendingCycleReview?.state === 'failed' ? '최신 사이클을 불러오지 못했습니다.'
+    : '등록할 사이클이 변경되었습니다. 최신 사이클을 확인해 주세요.';
   const blockedReviewMessage = pendingBlockedReview?.state === 'missing' ? '차단하는 업무를 찾을 수 없습니다.'
     : pendingBlockedReview?.state === 'moved' ? '차단하는 업무가 다른 프로젝트로 이동했습니다.'
     : pendingBlockedReview?.state === 'project_missing' ? '대상 프로젝트를 찾을 수 없습니다. 다른 프로젝트를 선택해 주세요.'
@@ -299,7 +320,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         '원본 업무가 변경됐습니다. 최신 원본 버전을 확인해 주세요.') : '') ||
     (needsBlockedReview ? blockedReviewMessage : '');
   const confirmationLocation = childMode ? '상위 업무의 하위 목록' : scheduleMode ? `${scheduleAnchorRole} 업무의 일정 연결 목록`
-    : cloneMode ? '원본 업무의 관련 업무 목록' : blockedMode ? '차단하는 업무의 관계 목록' : sourceDocument ? '문서의 연결 목록' : '업무 목록';
+    : cloneMode ? '원본 업무의 관련 업무 목록' : blockedMode ? '차단하는 업무의 관계 목록' : sourceDocument ? '문서의 연결 목록'
+    : cycleBoardCreation ? '백로그와 사이클 목록' : '업무 목록';
   const fieldsLocked = busy || recovering || (usesIssueReceipt && replayRejected);
   const refreshAfterClose = useCallback(() => {
     void refresh().catch(() => notify(childMode
@@ -310,7 +332,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
       : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
   }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, blockedMode, sourceDocument, refresh, notify]);
-  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode;
+  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode || Boolean(cycleBoardCreation);
 
   function close() {
     if (pendingRef.current) return;
@@ -429,7 +451,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       plannedEffortMinutes: form.get('plannedEffortMinutes') ? Number(form.get('plannedEffortMinutes')) : null,
       labels,
       parentId: reviewedParent?.id ?? (form.get('parentId') || null), collaboratorIds: form.getAll('collaboratorIds'),
-      cycleId: form.get('cycleId') || null, moduleId: form.get('moduleId') || null, releaseId: form.get('releaseId') || null,
+      ...(cycleBoardCreation ? {} : { cycleId: form.get('cycleId') || null }),
+      moduleId: form.get('moduleId') || null, releaseId: form.get('releaseId') || null,
       customFields: formValues,
     };
   }
@@ -522,6 +545,24 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
     finally { pendingRef.current = false; setBusy(false); }
   }
 
+  async function readCycleReview(previous: CycleBoardCycle) {
+    try {
+      const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
+      setCycleReview(cycleReviewFrom(snapshot, projectId, previous, true));
+    } catch {
+      setCycleReview({ state: 'failed' });
+    }
+  }
+
+  async function reloadCycleReview() {
+    if (!reviewedCycle || pendingRef.current) return;
+    pendingRef.current = true;
+    setBusy(true);
+    setError('');
+    try { await readCycleReview(reviewedCycle); }
+    finally { pendingRef.current = false; setBusy(false); }
+  }
+
   function copyCloneDates() {
     if (!reviewedClone) return;
     dirtyRef.current = true;
@@ -563,7 +604,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pendingRef.current || checklistPicking || !selectedProject || needsSourceReview || needsParentReview || needsScheduleReview ||
-      needsCloneReview || needsBlockedReview || (blockedMode && !blockedCalendar) || replayRejected) return;
+      needsCloneReview || needsBlockedReview || needsCycleReview || (blockedMode && !blockedCalendar) || replayRejected) return;
     const replay = Boolean(attempt.current);
     if (scheduleMode && lagDays === null && !replay) return;
     const form = event.currentTarget;
@@ -688,17 +729,24 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
         dirtyRef.current = false;
         onClose();
       } else {
-        const request = attempt.current ?? createIssueAttempt(actorId, issuePayload(new FormData(form)));
+        const request = attempt.current ?? createIssueAttempt(actorId, cycleBoardCreation ? {
+          targetCycle: reviewedCycle ? { id: reviewedCycle.id, expectedVersion: reviewedCycle.version } : null,
+          issue: issuePayload(new FormData(form)),
+        } satisfies Omit<CycleBoardCreateInput, 'requestId'> : issuePayload(new FormData(form)));
         attempt.current = request;
-        const issue = await requestIssueCreation(request, selectedProject);
+        const path = cycleBoardCreation ? `/projects/${encodeURIComponent(projectId)}/cycle-board/issues` : undefined;
+        const issue = await requestIssueCreation(request, selectedProject, path);
         confirmed = true;
         await refresh();
         attempt.current = null;
         dirtyRef.current = false;
-        notify('새 업무를 만들었습니다.');
         pendingRef.current = false;
-        onClose();
-        openIssue(issue.id);
+        if (cycleBoardCreation) cycleBoardCreation.onCreated(issue);
+        else {
+          notify('새 업무를 만들었습니다.');
+          onClose();
+          openIssue(issue.id);
+        }
       }
     } catch (cause) {
       const status = cause instanceof ApiError ? cause.status : null;
@@ -738,6 +786,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           await readBlockedReview(reviewedBlocked, blockedCalendar);
         } else if (reviewedBlocked && status === 404 && details?.reason === 'source_missing') {
           setBlockedReview({ state: 'missing' });
+        } else if (reviewedCycle && status === 409 && details?.reason === 'target_cycle_changed') {
+          attempt.current = null;
+          await readCycleReview(reviewedCycle);
+          requestAnimationFrame(() => dialog.current?.focus({ preventScroll: true }));
         } else if (templateRejected) {
           setTemplateError(errorMessage(cause));
         } else if (sourceDocument && status === 409 && (!replay || staleChecklistSource)) {
@@ -765,7 +817,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   }
 
   function keyboard(event: KeyboardEvent<HTMLElement>) {
-    if (!linkedCreation) return;
+    if (!linkedCreation && !cycleBoardCreation) return;
     if (event.key === 'Escape' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) {
       event.preventDefault();
       event.stopPropagation();
@@ -813,6 +865,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           {reviewedSchedule && <p className="issue-follow-up-source">{scheduleAnchorRole} 업무 · <strong>{reviewedSchedule.issue.key} {reviewedSchedule.issue.title}</strong></p>}
           {reviewedClone && <p className="issue-follow-up-source">원본 업무 · <strong>{reviewedClone.key} {reviewedClone.title}</strong></p>}
           {reviewedBlocked && <p className="issue-follow-up-source">차단하는 업무 · <strong>{reviewedBlocked.key} {reviewedBlocked.title}</strong></p>}
+          {cycleBoardCreation && <p className="issue-follow-up-source">등록 위치 · <strong>{reviewedCycle?.name ?? '백로그'}</strong></p>}
         </div><button ref={closeButton} className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
         {sourceSelection && <section className="issue-follow-up-passage" aria-label={checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}>
           <strong>{checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}</strong>
@@ -826,7 +879,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
               <select name="projectId" className="field" value={selectedProject} autoFocus={blockedMode}
-                disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId)} onChange={event => {
+                disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId) || Boolean(cycleBoardCreation)} onChange={event => {
                 const next = event.target.value;
                 setSelectedProject(next);
                 setSelectedType(initialIssueType(data, next));
@@ -937,13 +990,35 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
                   ? <textarea className="field" name="labels" rows={2} placeholder="한 줄에 하나" defaultValue={cloneLabels} />
                   : <input ref={labelInput} className="field" name="labels" placeholder="쉼표로 구분" />}</label>
                 {!childMode && <label className="issue-form-label">상위 업무<select className="field" name="parentId" key={selectedProject}><option value="">없음</option>{data.issues.filter(issue => issue.projectId === selectedProject).map(issue => <option key={issue.id} value={issue.id}>{issue.key} · {issue.title}</option>)}</select></label>}
-                {(['cycle', 'module', 'release'] as const).map(field => <label className="issue-form-label" key={field}>{REQUIRED_FIELD_LABELS[field]}<PlanningSelect data={data} projectId={selectedProject} kind={field} name={`${field}Id`} /></label>)}
+                {(['cycle', 'module', 'release'] as const).map(field => cycleBoardCreation && field === 'cycle' ? null
+                  : <label className="issue-form-label" key={field}>{REQUIRED_FIELD_LABELS[field]}<PlanningSelect data={data} projectId={selectedProject} kind={field} name={`${field}Id`} /></label>)}
                 <label className="issue-form-label">참여자<select className="field" name="collaboratorIds" multiple defaultValue={cloneIssue?.collaboratorIds}>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
               </div>
             </details>
-            {!linkedCreation && error && <div className="issue-form-error" role="alert">{error}</div>}
+            {!linkedCreation && !cycleBoardCreation && error && <div className="issue-form-error" role="alert">{error}</div>}
           </div>
         </fieldset>
+        {cycleBoardCreation && (error || needsCycleReview) && <div className="issue-follow-up-error">
+          <div className="issue-form-error" role="alert">{error || cycleReviewMessage}</div>
+          {needsCycleReview && pendingCycleReview?.state === 'available' && <>
+            <span className="issue-follow-up-source">{pendingCycleReview.cycle.name} · {pendingCycleReview.cycle.status === 'active' ? '진행 중' : '계획'}</span>
+            <button type="button" className="btn" onClick={() => {
+              setReviewedCycle(pendingCycleReview.cycle);
+              setCycleReview(null);
+              setError('');
+              titleInput.current?.focus({ preventScroll: true });
+            }}>최신 사이클 사용</button>
+          </>}
+          {needsCycleReview && pendingCycleReview?.state === 'failed' && <button type="button" className="btn"
+            onClick={() => void reloadCycleReview()}>최신 사이클 불러오기</button>}
+          {needsCycleReview && (pendingCycleReview?.state === 'missing' || pendingCycleReview?.state === 'closed') &&
+            <button type="button" className="btn" onClick={() => {
+              setReviewedCycle(null);
+              setCycleReview(null);
+              setError('');
+              titleInput.current?.focus({ preventScroll: true });
+            }}>백로그로 등록 위치 변경</button>}
+        </div>}
         {linkedCreation && linkedError && <div className="issue-follow-up-error">
           <div className="issue-form-error" role="alert">{linkedError}</div>
           {checklistMode && needsSourceReview && onReselectChecklist && <button type="button" className="btn" disabled={busy}
@@ -1014,7 +1089,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           {!scheduleMode && !blockedMode && <span className="muted">{sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : childMode ? '생성한 업무는 상위 업무의 하위 목록에서 열 수 있어요.' : cloneMode ? '복제 업무는 원본의 관련 업무 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>}
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={close}>취소</button>
           <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType ||
-            needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || needsBlockedReview || replayRejected ||
+            needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || needsBlockedReview || needsCycleReview || replayRejected ||
             (blockedMode && !blockedCalendar) || (scheduleMode && lagDays === null && !recovering)}>
             {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument ? '업무 만들고 연결' : childMode ? '하위 업무 만들기' : scheduleMode ? '업무 만들고 일정 연결' : cloneMode ? '복제 업무 만들기' : blockedMode ? '업무 만들고 차단 관계 연결' : '업무 만들기'}</>}
           </button>

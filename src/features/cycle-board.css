@@ -124,6 +124,18 @@
   padding: 2px 0 10px;
 }
 
+.cycle-board-lane-header > div:first-child {
+  min-width: 0;
+}
+
+.cycle-board-lane-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
 .cycle-board-lane-header h2 {
   margin: 0;
   color: #2a483b;
@@ -296,6 +308,14 @@
   .cycle-board .btn,
   .cycle-board .field {
     min-height: 44px;
+  }
+
+  .cycle-board-lane-header {
+    flex-wrap: wrap;
+  }
+
+  .cycle-board-lane-actions {
+    justify-content: flex-start;
   }
 
   .cycle-board-row-actions .btn,

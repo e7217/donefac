@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
-import { ArrowDown, ArrowDownUp, ArrowUp, ListTodo, Loader2, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownUp, ArrowUp, ListTodo, Loader2, Plus, Search, X } from 'lucide-react';
 import { orderProjectIssues } from '../../shared/issue-view';
 import { PRIORITY, type CycleBoardMoveInput, type CycleBoardMoveResult, type FeatureProps, type Issue, type PlanningItem } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
@@ -9,6 +9,7 @@ import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CycleProgress } from './CycleProgress';
+import { NewIssueModal } from './NewIssueModal';
 import { errorMessage } from './schedule-utils';
 import './cycle-board.css';
 
@@ -22,8 +23,9 @@ type CycleRef = CycleBoardMoveInput['sourceCycle'];
 type MoveTarget = Pick<CycleBoardMoveInput, 'anchorId' | 'position'> & { cycleId: string | null };
 type Attempt = { input: CycleBoardMoveInput; issueKey: string };
 type Hold = { stage: 'conflict' } | { stage: 'uncertain' | 'confirmed'; attempt: Attempt };
-type Feedback = { text: string; error?: boolean };
+type Feedback = { text: string; error?: boolean; created?: Issue };
 type DragSource = { issue: Issue; input: Pick<CycleBoardMoveInput,'sourceCycle'|'expectedVersion'> };
+type Creation = { cycle: PlanningItem | null; opener: HTMLButtonElement };
 const BACKLOG = 'backlog';
 const CYCLE_OPTION_PREFIX = 'cycle:';
 const DRAG_TYPE = 'application/x-teamspace-cycle-board';
@@ -46,6 +48,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const uid = useId();
   const [search, setSearch] = useState('');
   const [moveIssue, setMoveIssue] = useState<Issue | null>(null);
+  const [creation, setCreation] = useState<Creation | null>(null);
   const [pending, setPending] = useState(false);
   const [hold, setHold] = useState<Hold | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
@@ -58,6 +61,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const rowOpeners = useRef(new Map<string, HTMLButtonElement>());
   const dragSource = useRef<DragSource | null>(null);
   const focusTarget = useRef<string | null>(null);
+  const creationFocus = useRef<string | null>(null);
+  const showCreatedButton = useRef<HTMLButtonElement>(null);
 
   const project = data.projects.find(item => item.id === projectId);
   const order = data.issueOrders?.find(item => item.projectId === projectId);
@@ -68,13 +73,18 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     .sort((left, right) => Number(right.status === 'active') - Number(left.status === 'active') ||
       (left.startDate ?? '9999-99-99').localeCompare(right.startDate ?? '9999-99-99') || collator.compare(left.name, right.name)),
     [data.planningItems, projectId]);
-  const cycle = cycles.find(item => item.id === initialCycleId) ?? cycles[0];
+  const cycle = initialCycleId ? cycles.find(item => item.id === initialCycleId) : cycles[0];
+  const requestedCycleUnavailable = Boolean(initialCycleId && !cycle);
   const cycleId = cycle?.id;
   const backlog = issues.filter(issue => cycleIdOf(issue) === null);
   const members = cycleId ? issues.filter(issue => cycleIdOf(issue) === cycleId) : [];
-  const writable = Boolean(order && actorId && !pending && !hold);
+  const writable = Boolean(order && actorId && !pending && !hold && !creation);
   const terms = search.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
   const matchesSearch = (issue: Issue) => terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
+  const created = feedback?.created && (issues.find(issue => issue.id === feedback.created?.id) ?? feedback.created);
+  const createdMatchesSearch = created && matchesSearch(created);
+  const createdInLane = created && (cycleIdOf(created) === null || cycleIdOf(created) === cycleId);
+  const hiddenCreated = created && (!createdMatchesSearch || !createdInLane) ? created : null;
 
   useEffect(() => {
     const guard = (event: Event) => {
@@ -125,7 +135,39 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     focusTarget.current = null;
     const row = rowOpeners.current.get(target);
     (row ?? searchInput.current)?.focus({ preventScroll: !row });
-  }, [cycleId, cycles, issues, onChangeCycle, pending]);
+  }, [cycleId, cycles, feedback, issues, onChangeCycle, pending, search]);
+
+  useEffect(() => {
+    if (creation || !created || creationFocus.current !== created.id) return;
+    creationFocus.current = null;
+    const target = rowOpeners.current.get(created.id) ?? showCreatedButton.current ?? searchInput.current;
+    target?.focus();
+  }, [created, creation]);
+
+  function closeCreation() {
+    const opener = creation?.opener;
+    setCreation(null);
+    requestAnimationFrame(() => {
+      (opener?.isConnected && !opener.disabled ? opener : searchInput.current)?.focus({ preventScroll: true });
+    });
+  }
+
+  function completeCreation(issue: Issue) {
+    creationFocus.current = issue.id;
+    setCreation(null);
+    setFeedback({ text: `${issue.key} 업무를 만들었습니다.`, created: issue });
+  }
+
+  function revealCreated(issue: Issue) {
+    const destination = cycleIdOf(issue);
+    if (destination && !cycles.some(item => item.id === destination)) {
+      openIssue(issue.id);
+      return;
+    }
+    focusTarget.current = issue.id;
+    setSearch('');
+    setFeedback({ text: `${issue.key} 업무를 만들었습니다.` });
+  }
 
   function keep(value: Hold | null) {
     held.current = value;
@@ -280,7 +322,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
 
 
   if (!project) return <section className="cycle-board"><h1>백로그 · 사이클</h1><p>프로젝트를 선택해 주세요.</p></section>;
-  return <section className="cycle-board" aria-labelledby={`${uid}-title`}>
+  return <><section className="cycle-board" aria-labelledby={`${uid}-title`} inert={Boolean(creation)}>
     <header className="cycle-board-heading">
       <div><h1 id={`${uid}-title`}>백로그 · 사이클</h1><p>{project.name}</p></div>
       <button type="button" className="btn" onClick={onOpenIssues}><ListTodo size={16} aria-hidden="true" /> 업무 목록</button>
@@ -296,13 +338,16 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         <label htmlFor={`${uid}-cycle`}>보고 있는 사이클</label>
         <select id={`${uid}-cycle`} className="field" value={cycleId ?? ''} disabled={pending || !cycles.length}
           onChange={event => { if (event.currentTarget.value) onChangeCycle(event.currentTarget.value); }}>
-          {!cycles.length && <option value="">선택할 사이클 없음</option>}
+          {!cycle && <option value="">{cycles.length ? '다른 사이클 선택' : '선택할 사이클 없음'}</option>}
           {cycles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.status === 'active' ? '진행 중' : '계획'}</option>)}
         </select>
       </div>
     </div>
     {(feedback || hold) && <div className="cycle-board-feedback" data-error={feedback?.error || undefined}>
-      {feedback && <p role={feedback.error ? 'alert' : 'status'}>{pending && <Loader2 size={15} className="spin" aria-hidden="true" />}{feedback.text}</p>}
+      {feedback && <p role={feedback.error ? 'alert' : 'status'}>{pending && <Loader2 size={15} className="spin" aria-hidden="true" />}{feedback.text}
+        {hiddenCreated && (createdInLane ? ' 현재 검색 조건에서 숨겨져 있습니다.' : ' 현재 선택한 사이클 밖에 있습니다.')}</p>}
+      {hiddenCreated && <button ref={showCreatedButton} className="btn" type="button" disabled={pending}
+        onClick={() => revealCreated(hiddenCreated)}>만든 업무 보기</button>}
       {hold?.stage === 'uncertain' ? <button className="btn btn-primary" type="button" disabled={pending}
         onClick={() => void submit(hold.attempt, true)}>이동 결과 다시 확인</button> : hold && <button className="btn btn-primary" type="button" disabled={pending}
         onClick={() => void retryRefresh()}>{hold.stage === 'conflict' ? '최신 업무 불러오기' : '화면에 다시 반영'}</button>}
@@ -329,7 +374,14 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                 <p>{targetCycle ? <>{targetCycle.status === 'active' ? '진행 중' : '계획'} · {dateRange}</> : '사이클 미지정'}
                   {' · '}{terms.length ? `${visible.length}/${items.length}` : items.length}개{targetCycle && ` · 완료 ${done}개`}</p>
               </div>
-              {targetCycle && <button className="btn btn-ghost" type="button" onClick={() => onOpenPlanning(targetCycle.id)}>사이클 상세</button>}
+              <div className="cycle-board-lane-actions">
+                {targetCycle && <button className="btn btn-ghost" type="button" onClick={() => onOpenPlanning(targetCycle.id)}>사이클 상세</button>}
+                <button className="btn btn-primary" type="button" aria-haspopup="dialog" disabled={!actorId || pending || Boolean(hold || moveIssue)}
+                  onClick={event => {
+                    setFeedback(null);
+                    setCreation({ cycle: targetCycle ?? null, opener: event.currentTarget });
+                  }}><Plus size={16} aria-hidden="true" />{targetCycle ? '사이클에 업무 만들기' : '백로그에 업무 만들기'}</button>
+              </div>
             </div>
             {visible.length ? <ol className="cycle-board-rows">{visible.map((issue, index) => {
               const status = statusMeta(data, projectId, issue.status);
@@ -372,13 +424,16 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         })}
       {!cycle && <section className="cycle-board-lane" aria-label="선택한 사이클">
         <div className="cycle-board-lane-header"><h2>사이클</h2></div>
-        <p className="cycle-board-empty">계획 또는 진행 중인 사이클이 없습니다.</p>
+        <p className="cycle-board-empty" role={requestedCycleUnavailable ? 'status' : undefined}>{requestedCycleUnavailable
+          ? '선택한 사이클에 업무를 등록할 수 없습니다. 다른 사이클을 선택해 주세요.'
+          : '계획 또는 진행 중인 사이클이 없습니다.'}</p>
       </section>}
     </div>
     {moveIssue && <CycleAssignmentDialog issue={moveIssue} cycles={cycles} onClose={() => closeMove(true)}
       onDraft={value => { draft.current = value; }}
       onMove={id => move(moveIssue, { cycleId: id, anchorId: null, position: 'after' })} />}
-  </section>;
+  </section>{creation && <NewIssueModal data={data} projectId={projectId} actorId={actorId} refresh={refresh} notify={notify} openIssue={openIssue}
+    cycleBoardCreation={{ cycle: creation.cycle, onCreated: completeCreation }} onClose={closeCreation} />}</>;
 }
 
 function CycleAssignmentDialog({ issue, cycles, onClose, onDraft, onMove }: {

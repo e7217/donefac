@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
 import type { CycleBoardMoveInput, CycleBoardMoveResult, Issue, PlanningItem, ProjectIssueOrder, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200) {
@@ -15,9 +15,13 @@ async function fixture(request: APIRequestContext) {
   const suffix = randomUUID().slice(0, 8);
   const issues: string[] = [], plans: string[] = [];
   const movePath = `/api/projects/${project.id}/cycle-board/move`;
+  const createPath = `/api/projects/${project.id}/cycle-board/issues`;
   return {
-    project, actor, peer, headers, suffix, movePath,
+    project, actor, peer, headers, suffix, movePath, createPath,
     order: async () => json<ProjectIssueOrder>(await request.get(`/api/projects/${project.id}/issue-order`)),
+    trackIssue(issue: Issue) {
+      if (!issues.includes(issue.id)) issues.push(issue.id);
+    },
     async issue(title: string, fields: Partial<Issue> = {}) {
       const issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
         projectId: project.id, title, priority: 'high', ...fields,
@@ -40,7 +44,12 @@ async function fixture(request: APIRequestContext) {
           await request.delete(`/api/trash/${trashEntryId}`, { headers });
         }
       }
-      for (const id of plans.reverse()) await request.delete(`/api/planning-items/${id}`, { headers });
+      for (const id of plans.reverse()) {
+        const response = await request.get(`/api/planning-items/${id}`, { headers });
+        if (!response.ok()) continue;
+        const current = await response.json() as PlanningItem;
+        await request.delete(`/api/planning-items/${id}?expectedVersion=${current.version}`, { headers });
+      }
     },
   };
 }
@@ -64,6 +73,209 @@ async function openBoard(page: Page, f: Fixture, from: 'issues' | 'backlog', cyc
 function waitMove(page: Page, f: Fixture) {
   return page.waitForResponse(response => new URL(response.url()).pathname === f.movePath && response.request().method() === 'POST');
 }
+
+function waitCreate(page: Page, f: Fixture) {
+  return page.waitForResponse(response => new URL(response.url()).pathname === f.createPath && response.request().method() === 'POST');
+}
+
+async function openLaneCreation(page: Page, lane: Locator, target: '백로그' | '사이클') {
+  await lane.getByRole('button', { name: `${target}에 업무 만들기`, exact: true }).press('Enter');
+  const dialog = page.getByRole('dialog', { name: '새 업무 만들기', exact: true });
+  const title = dialog.getByLabel('업무 제목', { exact: true });
+  await expect(title).toBeFocused();
+  return { dialog, title, submit: dialog.getByRole('button', { name: '업무 만들기', exact: true }) };
+}
+
+test('360px 백로그에서 업무를 만들고 검색에서 숨겨진 결과를 표시한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('백로그와 함께 보는 사이클');
+    const board = await openBoard(page, f, 'backlog', cycle);
+    const query = `검색 범위 밖 ${f.suffix}`;
+    await board.search.fill(query);
+    const { dialog, title, submit } = await openLaneCreation(page, board.backlog, '백로그');
+    await expect(dialog.getByText('등록 위치 · 백로그', { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('combobox', { name: '프로젝트', exact: true })).toBeDisabled();
+    const summary = `백로그에서 바로 만드는 업무 ${f.suffix}`;
+    await title.fill(summary);
+    const saved = waitCreate(page, f);
+    await submit.click();
+    const response = await saved;
+    const issue = await json<Issue>(response, 201);
+    f.trackIssue(issue);
+    expect(response.request().postDataJSON()).toMatchObject({ targetCycle: null, issue: { title: summary } });
+    expect(issue).toMatchObject({ projectId: f.project.id, title: summary, cycleId: null });
+    await expect(dialog).toHaveCount(0);
+    await expect(board.search).toHaveValue(query);
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.backlog.locator(rowSelector(issue))).toHaveCount(0);
+    await expect(board.lane.locator(rowSelector(issue))).toHaveCount(0);
+    await expect(page.getByRole('status').filter({ hasText: issue.key })).toContainText('현재 검색 조건에서 숨겨져 있습니다.');
+
+    const show = page.getByRole('button', { name: '만든 업무 보기', exact: true });
+    await expect(show).toBeFocused();
+    await show.press('Enter');
+    await expect(board.search).toHaveValue('');
+    const opened = board.backlog.locator(rowSelector(issue)).getByRole('button', { name: `${issue.key} · ${summary}`, exact: true });
+    await expect(opened).toBeFocused();
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.lane.locator(rowSelector(issue))).toHaveCount(0);
+    expect(new URL(page.url()).hash).toBe(`#/${f.project.id}/backlog/${cycle.id}`);
+  } finally { await f.close(); }
+});
+
+test('360px 사이클 생성 중 바뀐 등록 위치를 다시 확인하고 응답 유실 뒤 업무를 한 번만 만든다', async ({ page, request }) => {
+  test.setTimeout(95_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const planned = await f.plan('계획 상태로 열어 두는 사이클');
+    const first = await f.issue(`먼저 등록한 업무 ${f.suffix}`, { cycleId: planned.id });
+    const hidden = await f.issue('순위를 보존할 검색 밖 업무', { cycleId: planned.id });
+    const originalOrder = await f.order();
+    const board = await openBoard(page, f, 'backlog', planned);
+    await board.search.fill(f.suffix);
+    await expect(board.lane.locator(rowSelector(first))).toBeVisible();
+    await expect(board.lane.locator(rowSelector(hidden))).toHaveCount(0);
+    const { dialog, title, submit } = await openLaneCreation(page, board.lane, '사이클');
+    await expect(dialog.getByText(planned.name, { exact: true })).toBeVisible();
+    const summary = `사이클 열에서 만든 업무 ${f.suffix}`;
+    const start = dialog.getByLabel('시작일', { exact: true });
+    const end = dialog.getByLabel('종료일', { exact: true });
+    const dates = { startDate: '2026-11-24', endDate: '2026-11-26' };
+    await title.fill(summary);
+    await start.fill(dates.startDate);
+    await end.fill(dates.endDate);
+    async function expectDraft() {
+      await expect(title).toHaveValue(summary);
+      await expect(start).toHaveValue(dates.startDate);
+      await expect(end).toHaveValue(dates.endDate);
+    }
+
+    const attempts: { body: string; actorId?: string }[] = [];
+    let active: PlanningItem | undefined, committed: Issue | undefined;
+    const activeName = `진행 중으로 바뀐 사이클 ${f.suffix}`;
+    await page.route(url => url.pathname === f.createPath, async route => {
+      const sent = route.request();
+      attempts.push({ body: sent.postData()!, actorId: sent.headers()['x-actor-id'] });
+      if (attempts.length === 1) {
+        active = await json<PlanningItem>(await request.patch(`/api/planning-items/${planned.id}`, {
+          headers: { 'X-Actor-Id': f.peer.id }, data: { expectedVersion: planned.version, name: activeName, status: 'active' },
+        }));
+        return route.continue();
+      }
+      if (attempts.length === 2) {
+        committed = await json<Issue>(await route.fetch(), 201);
+        f.trackIssue(committed);
+        return route.abort('failed');
+      }
+      return route.continue();
+    });
+    const stale = waitCreate(page, f);
+    await submit.click();
+    const conflict = await stale;
+    expect(conflict.status(), await conflict.text()).toBe(409);
+    expect(await conflict.json()).toMatchObject({ details: { reason: 'target_cycle_changed' } });
+    expect(conflict.request().postDataJSON()).toMatchObject({ targetCycle: { id: planned.id, expectedVersion: planned.version },
+      issue: { title: summary, ...dates } });
+    await expect(dialog.getByRole('alert')).toContainText('사이클');
+    await expectDraft();
+    expect((await workspace(request)).issues.some(issue => issue.title === summary)).toBe(false);
+    expect(await f.order()).toEqual(originalOrder);
+    await dialog.getByRole('button', { name: '최신 사이클 사용', exact: true }).click();
+    await expect(dialog.getByText(activeName, { exact: true })).toBeVisible();
+    await expect(title).toBeFocused();
+    await expectDraft();
+
+    await submit.click();
+    const retry = dialog.getByRole('button', { name: '업무 생성 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    await expectDraft();
+    await expect(title).toBeDisabled();
+    expect(committed).toMatchObject({ title: summary, cycleId: planned.id, ...dates });
+    const updatedInput = JSON.parse(attempts[1].body);
+    expect(updatedInput).toMatchObject({ targetCycle: { id: planned.id, expectedVersion: active!.version },
+      issue: { title: summary, ...dates } });
+    expect(updatedInput.requestId).not.toBe(JSON.parse(attempts[0].body).requestId);
+    expect(attempts[1].actorId).toBe(f.actor.id);
+
+    const repeated = waitCreate(page, f);
+    await retry.click();
+    const replay = await json<Issue>(await repeated);
+    expect(replay).toEqual(committed);
+    expect(attempts).toEqual([attempts[0], attempts[1], attempts[1]]);
+    const current = await workspace(request);
+    expect(current.issues.filter(issue => issue.title === summary)).toEqual([replay]);
+    expect(current.activities.filter(activity => activity.resourceId === replay.id && activity.action === '티켓 생성')).toHaveLength(1);
+    const newOrder = await f.order();
+    expect(newOrder.issueIds.filter(id => id !== replay.id)).toEqual(originalOrder.issueIds);
+    expect(newOrder.issueIds.filter(id => [first.id, hidden.id, replay.id].includes(id))).toEqual([first.id, hidden.id, replay.id]);
+
+    await expect(dialog).toHaveCount(0);
+    await expect(board.selectedCycle).toHaveValue(planned.id);
+    await expect(board.search).toHaveValue(f.suffix);
+    await expect(board.lane.getByRole('heading', { name: activeName, exact: true })).toBeVisible();
+    await expect(board.backlog.locator(rowSelector(replay))).toHaveCount(0);
+    await expect(board.lane.getByRole('button', { name: `${replay.key} · ${summary}`, exact: true })).toBeFocused();
+  } finally { await f.close(); }
+});
+
+test('작성 중 사이클이 보관되면 초안을 유지하고 직접 선택한 백로그에 저장한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const f = await fixture(request);
+  try {
+    const selected = await f.plan('열어 둔 계획 사이클');
+    const other = await f.plan('다른 진행 중인 사이클', 'active');
+    const board = await openBoard(page, f, 'backlog', selected);
+    await board.search.fill(f.suffix);
+    await expect(board.selectedCycle).toHaveValue(selected.id);
+    const { dialog, title, submit } = await openLaneCreation(page, board.lane, '사이클');
+    const summary = `보관된 사이클의 업무 초안 ${f.suffix}`;
+    await title.fill(summary);
+    await dialog.getByText('추가 속성', { exact: true }).click();
+    const due = dialog.getByLabel('목표 마감일', { exact: true });
+    await due.fill('2026-11-30');
+    await page.route(url => url.pathname === f.createPath, async route => {
+      await json<PlanningItem>(await request.patch(`/api/planning-items/${selected.id}`, {
+        headers: { 'X-Actor-Id': f.peer.id }, data: { expectedVersion: selected.version, status: 'archived' },
+      }));
+      await route.continue();
+    }, { times: 1 });
+    const stale = waitCreate(page, f);
+    await submit.click();
+    const rejection = await stale;
+    expect(rejection.status(), await rejection.text()).toBe(409);
+    expect(rejection.request().postDataJSON()).toMatchObject({ targetCycle: { id: selected.id, expectedVersion: selected.version } });
+    const switchToBacklog = dialog.getByRole('button', { name: '백로그로 등록 위치 변경', exact: true });
+    await expect(switchToBacklog).toBeVisible();
+    await expect(submit).toBeDisabled();
+    await expect(title).toHaveValue(summary);
+    await expect(due).toHaveValue('2026-11-30');
+    expect(new URL(page.url()).hash).not.toContain(other.id);
+    expect((await workspace(request)).issues.some(issue => issue.title === summary)).toBe(false);
+
+    await switchToBacklog.click();
+    await expect(dialog.getByText('등록 위치 · 백로그', { exact: true })).toBeVisible();
+    await expect(title).toBeFocused();
+    await expect(title).toHaveValue(summary);
+    await expect(due).toHaveValue('2026-11-30');
+    const saving = waitCreate(page, f);
+    await submit.click();
+    const response = await saving;
+    const issue = await json<Issue>(response, 201);
+    f.trackIssue(issue);
+    expect(response.request().postDataJSON()).toMatchObject({ targetCycle: null, issue: { title: summary, dueDate: '2026-11-30' } });
+    expect(issue).toMatchObject({ projectId: f.project.id, title: summary, cycleId: null, dueDate: '2026-11-30' });
+    await expect(dialog).toHaveCount(0);
+    await expect(board.search).toHaveValue(f.suffix);
+    await expect(board.selectedCycle).toHaveValue('');
+    await expect(board.backlog.getByRole('button', { name: `${issue.key} · ${summary}`, exact: true })).toBeFocused();
+    await expect(board.lane.locator(rowSelector(issue))).toHaveCount(0);
+    expect(new URL(page.url()).hash).not.toContain(other.id);
+  } finally { await f.close(); }
+});
 
 test('360px 백로그에서 사이클로 보내고 응답 유실 뒤 같은 결과를 확인해 순위를 조정한다', async ({ page, request }) => {
   test.setTimeout(90_000);
