@@ -6,6 +6,7 @@ const sha = /^[a-f0-9]{64}$/;
 const sourceFormats = new Set(['jira-backup-xml', 'jira-search-xml', 'jira-csv', 'jira-json', 'confluence-xml']);
 const recordStatuses = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
 const attachmentStatuses = ['verified', 'missing', 'corrupt', 'unbound', 'excluded', 'unreadable'];
+const jiraRelationStatuses = ['linked', 'trashed', 'missing', 'mismatch', 'unavailable'];
 const authorKinds = ['document', 'comment', 'revision', 'attachment', 'worklog'];
 const authorStatuses = ['mapped', 'unmapped-fallback', 'missing-fallback', 'retained', 'unavailable', 'mismatch'];
 const workspaceSections = ['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas', 'dependencies', 'resourceLinks', 'planningItems'];
@@ -153,6 +154,31 @@ function jiraStatusHistoryEvidence(raw, hasJira) {
     unavailable, unresolvedTime, unresolvedAuthor };
 }
 
+function jiraRelationProjectionEvidence(raw, hasJira, expected, archivedRecords) {
+  const message = 'Jira 업무 관계의 검증 건수 또는 해시가 올바르지 않습니다.';
+  if (!hasJira) {
+    requireEvidence(raw === null, message);
+    return null;
+  }
+  requireEvidence(isObject(raw) && raw.version === 1 && hex(raw.sha256) &&
+    (expected === null || count(expected)) && raw.expected === expected && isObject(raw.counts) &&
+    jiraRelationStatuses.every(status => count(raw.counts[status])), message);
+  const observed = counts(raw.counts, jiraRelationStatuses);
+  const tracked = sum(Object.values(observed));
+  requireEvidence(count(tracked) && tracked <= archivedRecords, message);
+  return { version: 1, expected, counts: observed, sha256: raw.sha256 };
+}
+
+function jiraRelationFailure(projection) {
+  return projection && (projection.counts.missing > 0 || projection.counts.mismatch > 0 ||
+    projection.expected !== null && sum(Object.values(projection.counts)) > projection.expected);
+}
+
+function jiraRelationReview(projection) {
+  return projection && (projection.counts.trashed > 0 || projection.counts.unavailable > 0 || projection.expected === null ||
+    sum(Object.values(projection.counts)) < projection.expected);
+}
+
 function authorAttributionEvidence(raw, version, integrity) {
   const message = '이관 작성자 검증의 패키지, 건수 또는 해시가 올바르지 않습니다.';
   if (version === undefined) {
@@ -213,11 +239,14 @@ async function auditReceipt(call, receipt, matches, receiptKeys) {
   const primaryRecords = primaryRecordsEvidence(raw.primaryRecords, receipt.packages, matches, integrity, recordCounts);
   const attachmentsSha256 = attachmentEvidence(raw.attachments, receiptKeys, attachmentCounts);
   const targetContent = targetContentEvidence(raw.targetContent);
-  const jiraStatusHistory = jiraStatusHistoryEvidence(raw.jiraStatusHistory, receipt.packages.some(pkg => pkg.source.product === 'jira'));
+  const hasJira = receipt.packages.some(pkg => pkg.source.product === 'jira');
+  const jiraStatusHistory = jiraStatusHistoryEvidence(raw.jiraStatusHistory, hasJira);
+  const jiraRelationProjection = jiraRelationProjectionEvidence(raw.jiraRelationProjection, hasJira, receipt.counts?.issueRelations ?? null,
+    integrity.records.observed);
   const authorAttribution = authorAttributionEvidence(raw.authorAttribution, receipt.authorAttributionVersion, integrity);
   return { id: receipt.id, version: receipt.version, packageIds: [...matches.keys()].sort(),
     projectCount: receipt.projectIds.length, integrity, recordCounts, primaryRecords, attachmentCounts, attachmentsSha256, targetContent, jiraStatusHistory,
-    authorAttribution,
+    jiraRelationProjection, authorAttribution,
     configurationSha256: fingerprint([receipt.projectIds.slice().sort(), receipt.configuration]),
     noticesAvailable, notices: noticeCounts(receipt.notices) };
 }
@@ -398,6 +427,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   }
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
     receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
+    receiptsWithJiraRelationFailures: 0, receiptsWithJiraRelationReview: 0,
     receiptsWithoutAuthorEvidence: 0, receiptsWithAuthorReview: 0, receiptsWithAuthorMismatches: 0,
     receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
     receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0,
@@ -448,6 +478,8 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   checks.receiptsWithoutNotices = receipts.filter(receipt => !receipt.noticesAvailable).length;
   checks.receiptsWithJiraHistoryReview = receipts.filter(({ jiraStatusHistory }) => jiraStatusHistory &&
     (jiraStatusHistory.unavailable > 0 || jiraStatusHistory.restricted > 0 || jiraStatusHistory.unresolvedTime > 0 || jiraStatusHistory.unresolvedAuthor > 0)).length;
+  checks.receiptsWithJiraRelationFailures = receipts.filter(({ jiraRelationProjection }) => jiraRelationFailure(jiraRelationProjection)).length;
+  checks.receiptsWithJiraRelationReview = receipts.filter(({ jiraRelationProjection }) => jiraRelationReview(jiraRelationProjection)).length;
   checks.receiptsWithoutAuthorEvidence = receipts.filter(({ authorAttribution }) => authorAttribution === null).length;
   checks.receiptsWithAuthorReview = receipts.filter(({ authorAttribution }) =>
     hasAuthorFinding(authorAttribution, ['unmapped-fallback', 'missing-fallback', 'unavailable'])).length;
@@ -458,7 +490,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     if (primaryRecords.some(record => record.counts['archive-only'] > 0)) checks.receiptsWithArchiveOnlyPrimaryRecords++;
   }
   receipts.sort((a, b) => a.id.localeCompare(b.id));
-  const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 ||
+  const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 || checks.receiptsWithJiraRelationFailures > 0 ||
     checks.receiptsWithPrimaryRecordCountMismatches > 0 || checks.receiptsWithInvalidPrimaryTargets > 0 || receipts.some(failedAudit);
   const review = confluenceReviews.some(({ proof }) => proof.status === 'needs-review') ||
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>

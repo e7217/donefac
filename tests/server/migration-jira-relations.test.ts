@@ -13,7 +13,7 @@ import type {
   ApiKeyCreated, AutomaticSchedulePreview, DeliveryBlockerDraftResult, DeliveryBlockerReport, Dependency, Issue, IssueRelation,
   IssueRelationView, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, PlanningItem, Project,
   ProjectWorkflow, ScheduleAnchorChange, ScheduleBlockerLinkPage, SchedulePasteApplyResult, SchedulePastePreview, SourceImport, SourceReconciliationAudit,
-  SourceRecordArchive, TeamScheduleBlocker,
+  SourceReconciliationJiraRelationFinding, SourceReconciliationJiraRelationFindingsPage, SourceRecordArchive, TeamScheduleBlocker,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -126,6 +126,81 @@ function original(workspace: WorkspaceSnapshot, sourceId: string, project = 'OLD
   assert.ok(result, `Missing migrated Jira issue ${project}-${sourceId}`);
   return result;
 }
+
+test('receipt audit distinguishes a retired Jira endpoint from loss or corruption of a recorded relation', async t => {
+  const f = await fixture(t);
+  let receipt = await f.importInitial([sourceIssue('100', [link('701', '200'), link('702', '999')]), sourceIssue('200')]);
+  const workspace = await f.workspace();
+  const blocker = original(workspace, '100'), blocked = original(workspace, '200');
+  const [relation] = await f.relations(blocker);
+  assert.ok(relation);
+  const sourceRecords = (await f.backup()).sourceRecords.filter(row => row.sourceImportId === receipt.id && row.record.kind === 'relation');
+  const marked = sourceRecords.find(record => record.jiraRelationId === relation.id)!;
+  assert.equal(marked.record.sourceId, '701');
+  assert.equal(sourceRecords.find(record => record.record.sourceId === '702')?.jiraRelationId, undefined);
+  const base = `/source-imports/${receipt.id}/reconciliation`;
+  async function audit() {
+    const result = await f.call<SourceReconciliationAudit>(`${base}/audit?expectedVersion=${receipt.version}`);
+    assert.ok(result.jiraRelationProjection);
+    assert.equal(result.jiraRelationProjection.expected, 1);
+    return result.jiraRelationProjection;
+  }
+  const empty = { linked: 0, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 };
+  const findingPath = (finding: SourceReconciliationJiraRelationFinding, sha256: string, version = receipt.version) =>
+    `${base}/jira-relation-findings?expectedVersion=${version}&expectedSha256=${sha256}&finding=${finding}&offset=0&limit=1`;
+  const findingRow = { sourceRecordId: marked.id, sourceId: '701', sourceInstance: INSTANCE };
+  async function assertFinding(kind: SourceReconciliationJiraRelationFinding, sha256: string) {
+    const page = await f.call<SourceReconciliationJiraRelationFindingsPage>(findingPath(kind, sha256));
+    assert.deepEqual(page, { importId: receipt.id, receiptVersion: receipt.version, finding: kind,
+      sha256, total: 1, offset: 0, limit: 1, rows: [findingRow] });
+  }
+  async function restore(data: Backup) {
+    await f.call('/import', 'POST', { data });
+    const previous = receipt.version;
+    receipt = (await f.call<SourceImport[]>('/source-imports')).find(row => row.id === receipt.id)!;
+    assert.ok(receipt.version > previous);
+  }
+
+  const clean = await audit();
+  assert.deepEqual(clean.counts, { ...empty, linked: 1 });
+  const trash = await f.call<{ trashEntryId: string }>(`/issues/${blocked.id}`, 'DELETE', { expectedVersion: blocked.version });
+  const archived = await audit();
+  assert.deepEqual(archived.counts, { ...empty, trashed: 1 });
+  assert.notEqual(archived.sha256, clean.sha256);
+  await restore(await f.backup());
+  assert.deepEqual(await audit(), archived);
+  await f.call(`/trash/${trash.trashEntryId}/restore`, 'POST', {});
+  assert.deepEqual(await audit(), clean);
+
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    const inverse = { ...relation, sourceIssueId: blocked.id, targetIssueId: blocker.id };
+    db.prepare('UPDATE issue_relations SET source_issue_id=?,target_issue_id=?,json=? WHERE id=?')
+      .run(inverse.sourceIssueId, inverse.targetIssueId, JSON.stringify(inverse), relation.id);
+    const mismatched = await audit();
+    assert.deepEqual(mismatched.counts, { ...empty, mismatch: 1 });
+    await assertFinding('mismatch', mismatched.sha256);
+    await f.call(findingPath('missing', clean.sha256), 'GET', undefined, 409);
+    await f.call(findingPath('mismatch', mismatched.sha256, receipt.version - 1), 'GET', undefined, 409);
+    assert.equal(db.prepare('DELETE FROM issue_relations WHERE id=?').run(relation.id).changes, 1);
+  } finally { db.close(); }
+
+  const missing = await audit();
+  assert.deepEqual(missing.counts, { ...empty, missing: 1 });
+  await assertFinding('missing', missing.sha256);
+  await restore(await f.backup());
+  assert.deepEqual(await audit(), missing, 'The same loss is still a failed audit after copying the workspace.');
+  const originals = await f.call<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${marked.id}`);
+  assert.deepEqual(originals.record, marked.record);
+
+  const lastTarget = (await f.workspace()).issues.find(row => row.id === blocked.id)!;
+  const deleted = await f.call<{ trashEntryId: string }>(`/issues/${blocked.id}`, 'DELETE', { expectedVersion: lastTarget.version });
+  assert.deepEqual((await audit()).counts, { ...empty, missing: 1 });
+  await f.call(`/trash/${deleted.trashEntryId}`, 'DELETE');
+  const unavailable = await audit();
+  assert.deepEqual(unavailable.counts, { ...empty, unavailable: 1 });
+  await assertFinding('unavailable', unavailable.sha256);
+});
 
 test('Jira follow-up explicitly imports one mirrored blocking link between existing issues and exposes its Gantt handoff', async t => {
   const f = await fixture(t);
@@ -260,6 +335,7 @@ test('Jira relation-only follow-up links separately migrated projects using exac
   const proof = await f.call<SourceReconciliationAudit>(auditPath);
   assert.equal(proof.targetContent.issueRelations.count, 1);
   assert.match(proof.targetContent.issueRelations.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(proof.jiraRelationProjection?.counts.linked, 1);
 
   const replay = await f.apply(review);
   assert.equal(replay.status, 200, JSON.stringify(replay.data));
@@ -279,6 +355,7 @@ test('Jira relation-only follow-up links separately migrated projects using exac
   assert.ok(restored.version > receipt.version);
   const restoredAudit = await f.call<SourceReconciliationAudit>(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${restored.version}`);
   assert.deepEqual(restoredAudit.targetContent.issueRelations, proof.targetContent.issueRelations);
+  assert.deepEqual(restoredAudit.jiraRelationProjection, proof.jiraRelationProjection);
 
   const repeated = await f.upload('B-follow-up-mirrored-side', [sourceIssue('200', [link('701', '100', 'inward'), link('704', '100', 'inward')], 'OTHER')]);
   const repeat = await f.appendConfiguration(repeated);
@@ -352,6 +429,7 @@ test('a selected Jira blocker schedules across calendars and respects other prov
   const activeReceipt = (await f.call<SourceImport[]>('/source-imports')).find(row => row.id === originalReceipt.id)!;
   const auditPath = `/source-imports/${activeReceipt.id}/reconciliation/audit?expectedVersion=${activeReceipt.version}`;
   const sourceAudit = await f.call<SourceReconciliationAudit>(auditPath);
+  assert.equal(sourceAudit.jiraRelationProjection?.counts.linked, 2, 'Stored inward order remains valid when Jira proves the logical direction.');
   const calendar = async (projectId: string, exceptions: WorkCalendar['exceptions']) => {
     const path = `/projects/${projectId}/calendar`;
     const current = await f.call<WorkCalendar>(path);

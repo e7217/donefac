@@ -29,6 +29,7 @@ const targetDigests = {
 };
 const statusHistory = { sourceChanges: 2, projected: { count: 1, sha256: '5'.repeat(64) }, duplicate: 1, excluded: 0,
   restricted: 0, unavailable: 0, unresolvedTime: 0, unresolvedAuthor: 0 };
+const relationLinked = { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 };
 const authorCounts = { mapped: 1, 'unmapped-fallback': 0, 'missing-fallback': 0, retained: 0, unavailable: 0, mismatch: 0 };
 
 interface ReceiptNotice {
@@ -44,12 +45,13 @@ const warning: ReceiptNotice = {
 const info: ReceiptNotice = { ...warning, severity: 'info', code: 'SOURCE_DETAIL' };
 
 function sample({ version = 1, corrupt = false, changedOwner = false, swappedAuthors = false,
-  notices = [] as ReceiptNotice[] | null, wikiOnly = false, legacyAuthors = false } = {}) {
+  notices = [] as ReceiptNotice[] | null, wikiOnly = false, legacyAuthors = false, expectedJiraRelations = 1 as number | null } = {}) {
   const packages: Parameters<typeof collectMigrationEvidence>[1] = wikiOnly ? [wiki] : [jira, wiki];
   const receipt = {
     id: receiptId, version, projectIds: ['project-synthetic'], configuration: { users: { original: changedOwner ? 'team-2' : 'team-1' } },
     packages: packages.map(({ packageId, sha256, product, instanceKey, format }) => ({ stagingId: packageId,
       sha256, source: { product, instanceKey, format }, filename: '/private/never-emit-export.zip' })),
+    counts: expectedJiraRelations === null ? {} : { issueRelations: expectedJiraRelations },
     ...(!legacyAuthors ? { authorAttributionVersion: 1 } : {}),
     ...(notices === null ? {} : { notices }),
   };
@@ -73,6 +75,8 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
       documentHistory: 'never-emit-unexpected-target-section' },
     jiraStatusHistory: wikiOnly ? null : { ...statusHistory,
       projected: { ...statusHistory.projected, author: 'never-emit-jira-history-author' }, originalLabel: 'never-emit-jira-history-status' },
+    jiraRelationProjection: wikiOnly ? null : { version: 1, expected: expectedJiraRelations, counts: { ...relationLinked },
+      sha256: '7'.repeat(64), rawJiraRelation: 'never-emit-jira-relation-body' },
     authorAttribution: legacyAuthors ? null : { version: 1, fingerprint: '6'.repeat(64), packages: packages.map(({ packageId, product }) => ({
       packageId, kinds: [{ kind: product === 'jira' ? 'comment' : 'document', counts: { ...authorCounts }, expectedAuthorId: 'never-emit-author-id' }],
     })) },
@@ -322,6 +326,38 @@ test('Jira status history flags unresolved evidence for review and validates rec
   assert.equal(wikiEvidence.status, 'verified');
   assert.equal(wikiEvidence.receipts[0].jiraStatusHistory, null);
   await assert.rejects(evidence(wiki, { ...wiki.observations, jiraStatusHistory: statusHistory }), /Jira 상태 이력의 검증 건수 또는 해시/);
+});
+
+test('offline rehearsal detects Jira relationship loss before backup and keeps archived relations and legacy counts distinct', async () => {
+  const clean = await evidence(sample());
+  assert.equal(clean.status, 'verified');
+  assert.doesNotMatch(JSON.stringify(clean), /never-emit-jira-relation-body/);
+
+  for (const finding of ['trashed', 'unavailable', 'missing', 'mismatch'] as const) {
+    const input = sample();
+    input.observations.jiraRelationProjection!.counts = { ...relationLinked, linked: 0, [finding]: 1 };
+    const result = await evidence(input);
+    const failure = finding === 'missing' || finding === 'mismatch';
+    assert.equal(result.status, failure ? 'failed' : 'review');
+    assert.equal(result.checks.receiptsWithJiraRelationFailures, Number(failure));
+    assert.equal(result.checks.receiptsWithJiraRelationReview, Number(!failure));
+    if (failure) assert.equal(compareMigrationEvidence(result, result).status, 'failed');
+  }
+  assert.equal((await evidence(sample({ expectedJiraRelations: 2 }))).status, 'review');
+  assert.equal((await evidence(sample({ expectedJiraRelations: null }))).status, 'review');
+  assert.equal((await evidence(sample({ expectedJiraRelations: 0 }))).status, 'failed');
+  const after = sample();
+  const projection = after.observations.jiraRelationProjection!;
+  projection.sha256 = '8'.repeat(64);
+  const changed = compareMigrationEvidence(clean, await evidence(after));
+  assert.deepEqual(changed.changedReceiptIds, [receiptId]);
+  assert.equal(changed.status, 'failed');
+  for (const invalid of [undefined, null, { ...projection, expected: 2 }, { ...projection, sha256: 'raw-key' },
+    { ...projection, counts: { ...relationLinked, linked: 100 } }]) {
+    await assert.rejects(evidence(after, { ...after.observations, jiraRelationProjection: invalid }), /Jira 업무 관계의 검증/u);
+  }
+  const wiki = sample({ wikiOnly: true });
+  await assert.rejects(evidence(wiki, { ...wiki.observations, jiraRelationProjection: projection }), /Jira 업무 관계의 검증/u);
 });
 
 test('migration rehearsal surfaces pending stages, conflicted package identities, and corrupt files', async () => {

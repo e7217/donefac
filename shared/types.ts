@@ -638,6 +638,24 @@ export interface SourceReconciliationJiraStatusFindingsPage {
   limit: number;
   fingerprint: string;
 }
+export type SourceReconciliationJiraRelationStatus = 'linked' | 'trashed' | 'missing' | 'mismatch' | 'unavailable';
+export type SourceReconciliationJiraRelationFinding = Extract<SourceReconciliationJiraRelationStatus, 'missing' | 'mismatch' | 'unavailable'>;
+export interface SourceReconciliationJiraRelationProjection {
+  version: 1;
+  expected: number | null;
+  counts: Record<SourceReconciliationJiraRelationStatus, number>;
+  sha256: string;
+}
+export interface SourceReconciliationJiraRelationFindingsPage {
+  importId: string;
+  receiptVersion: number;
+  finding: SourceReconciliationJiraRelationFinding;
+  sha256: string;
+  total: number;
+  offset: number;
+  limit: number;
+  rows: { sourceRecordId: string; sourceId: string; sourceInstance: string }[];
+}
 export interface SourceReconciliationAuthorAudit {
   version: 1;
   packages: MigrationAuthorPackageReview[];
@@ -674,6 +692,7 @@ export interface SourceReconciliationAudit {
   primaryRecords: SourceReconciliationPrimaryRecords[];
   targetContent: SourceReconciliationTargetContent;
   jiraStatusHistory: SourceReconciliationJiraStatusHistory | null;
+  jiraRelationProjection?: SourceReconciliationJiraRelationProjection | null;
   authorAttribution?: SourceReconciliationAuthorAudit | null;
   attachmentCounts: Record<SourceReconciliationAuditStatus, number>;
   attachments: SourceReconciliationAuditAttachment[];

@@ -6,13 +6,15 @@ import { MIGRATION_AUTHOR_KINDS, MIGRATION_AUTHOR_STATUSES } from '../shared/typ
 import type {
   Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment, SourceReconciliationAuthorFindingsPage,
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
-  SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
+  SourceReconciliationJiraFinding, SourceReconciliationJiraRelationFinding, SourceReconciliationJiraRelationFindingsPage,
+  SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
   SourceReconciliationPage, SourceReconciliationPrimaryRecords, SourceReconciliationRow, SourceReconciliationStatus,
   SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
 import { MAX_FILE_BYTES, type AttachmentFiles } from './attachments.js';
 import { auditJiraStatusHistory, jiraStatusHistoryFindings } from './jira-status-history.js';
 import { auditSourceAuthors } from './migration-author-audit.js';
+import { auditJiraRelationProjections } from './migration-jira-relation-audit.js';
 import { isLegacyRecordKind, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
 import type { TrashArchive, TrashService } from './trash.js';
@@ -47,6 +49,8 @@ const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'm
 const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding']);
 const jiraFindings: readonly SourceReconciliationJiraFinding[] = ['unavailable', 'restricted', 'excluded', 'unresolved-time', 'unresolved-author'];
 const jiraFindingKeys = new Set(['expectedVersion', 'finding', 'offset', 'limit', 'expectedFingerprint']);
+const jiraRelationFindings: readonly SourceReconciliationJiraRelationFinding[] = ['missing', 'mismatch', 'unavailable'];
+const jiraRelationFindingKeys = new Set(['expectedVersion', 'expectedSha256', 'finding', 'offset', 'limit']);
 const authorFindingKeys = new Set(['expectedVersion', 'packageId', 'kind', 'status', 'offset', 'limit', 'expectedFingerprint']);
 const casefold = (value: string) => value.normalize('NFC').toLocaleLowerCase('ko-KR');
 
@@ -518,13 +522,15 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const jiraStatusHistory = receipt.packages.some(packageInfo => packageInfo.source.product === 'jira')
     ? auditJiraStatusHistory(dependencies.store, receipt)
     : null;
+  const jiraRelationProjection = auditJiraRelationProjections(dependencies, receipt)?.audit ?? null;
   const authorAttribution = auditSourceAuthors(dependencies.store, dependencies.trash, receipt)?.audit ?? null;
   const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash }]) => ({
     packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'),
   }));
-  fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory, authorAttribution]));
+  fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory, jiraRelationProjection, authorAttribution]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);
-  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, primaryRecords, integrity, targetContent, jiraStatusHistory, authorAttribution };
+  return { fingerprint: fingerprint.digest('hex'), entries, recordCounts, primaryRecords, integrity, targetContent,
+    jiraStatusHistory, jiraRelationProjection, authorAttribution };
 }
 
 function errorCode(error: unknown): unknown {
@@ -600,6 +606,26 @@ function jiraFindingsPage(store: Store, importId: string, query: Record<string, 
   return { importId, receiptVersion: receipt.version, finding, offset, limit, ...page };
 }
 
+function jiraRelationFindingsPage(dependencies: Dependencies, importId: string,
+  query: Record<string, unknown>): SourceReconciliationJiraRelationFindingsPage {
+  if (Object.keys(query).some(key => !jiraRelationFindingKeys.has(key))) failure(400, '지원하지 않는 Jira 업무 관계 조회 조건입니다.');
+  const finding = jiraRelationFindings.find(value => value === query.finding) ?? failure(400, 'Jira 업무 관계의 확인 항목을 선택해 주세요.');
+  const { expectedSha256 } = query;
+  if (typeof expectedSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(expectedSha256)) {
+    return failure(400, 'Jira 업무 관계 목록의 검증값을 확인해 주세요.');
+  }
+  const expectedVersion = receiptVersion(query.expectedVersion, 'Jira 업무 관계 조회에 사용할 영수증 버전을 확인해 주세요.');
+  const offset = pageInteger(query.offset, 0, 0, 1_000_000);
+  const limit = pageInteger(query.limit, 20, 1, 100);
+  const receipt = dependencies.store.get<SourceImport>('source_imports', importId) ?? failure(404, '이관 영수증을 찾을 수 없습니다.');
+  if (receipt.version !== expectedVersion) return failure(409, '이관 영수증이 변경되었습니다. 새로고침하고 다시 확인해 주세요.');
+  const result = auditJiraRelationProjections(dependencies, receipt, { finding, offset, limit });
+  if (!result) return failure(404, 'Jira 이관 영수증을 찾을 수 없습니다.');
+  const { audit: { sha256 }, rows, total } = result;
+  if (expectedSha256 !== sha256) return failure(409, 'Jira 업무 관계 목록이 변경되었습니다. 전체 이관 검증을 다시 실행해 주세요.');
+  return { importId, receiptVersion: receipt.version, finding, sha256, total, offset, limit, rows };
+}
+
 function authorFindingsPage({ store, trash }: Dependencies, importId: string, query: Record<string, unknown>): SourceReconciliationAuthorFindingsPage {
   if (Object.keys(query).some(key => !authorFindingKeys.has(key))) failure(400, '지원하지 않는 이관 작성자 조회 조건입니다.');
   const { packageId, expectedFingerprint } = query;
@@ -650,7 +676,8 @@ async function auditReceipt(dependencies: Dependencies, importId: string, expect
   return {
     importId, receiptVersion: receipt.version, startedAt, completedAt: new Date().toISOString(),
     integrity: before.integrity, recordCounts: before.recordCounts, primaryRecords: before.primaryRecords, targetContent: before.targetContent,
-    jiraStatusHistory: before.jiraStatusHistory, authorAttribution: before.authorAttribution, attachmentCounts, attachments,
+    jiraStatusHistory: before.jiraStatusHistory, jiraRelationProjection: before.jiraRelationProjection,
+    authorAttribution: before.authorAttribution, attachmentCounts, attachments,
   };
 }
 
@@ -661,6 +688,9 @@ export function registerSourceReconciliationRoutes(app: Express, dependencies: D
   });
   app.get('/api/source-imports/:id/reconciliation/jira-status-findings', (request, response) => {
     response.set('Cache-Control', 'no-store').json(jiraFindingsPage(dependencies.store, String(request.params.id), request.query));
+  });
+  app.get('/api/source-imports/:id/reconciliation/jira-relation-findings', (request, response) => {
+    response.set('Cache-Control', 'no-store').json(jiraRelationFindingsPage(dependencies, String(request.params.id), request.query));
   });
   app.get('/api/source-imports/:id/reconciliation/author-findings', (request, response) => {
     response.set('Cache-Control', 'no-store').json(authorFindingsPage(dependencies, String(request.params.id), request.query));

@@ -31,7 +31,7 @@ type Destination = NonNullable<SourceReconciliationTarget['owner']>;
 type Props = Pick<FeatureProps, 'data' | 'openIssue' | 'openDocument' | 'refresh' | 'notify'> & {
   sourceImportId: string; packages: SourceImport['packages'];
 };
-type RecordArea = 'list' | 'audit' | 'jira-audit' | 'author-audit';
+type RecordArea = 'list' | 'audit' | 'jira-audit' | 'author-audit' | 'jira-relation-audit';
 type RecordLoad = { sourceRecordId: string; area: RecordArea } & ({ pending: true } | { archive: SourceRecordArchive } | { error: string });
 
 export function MigrationReconciliation(props: Props) {
@@ -64,6 +64,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
   const auditRecord = record?.area === 'audit' ? record : null;
   const jiraRecord = record?.area === 'jira-audit' ? record : null;
   const authorRecord = record?.area === 'author-audit' ? record : null;
+  const jiraRelationRecord = record?.area === 'jira-relation-audit' ? record : null;
 
   useEffect(() => {
     const abort = new AbortController();
@@ -161,6 +162,11 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
         onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'author-audit', trigger),
         onClose: () => { if (authorRecord) closeRecord(); },
         content: authorRecord && <ReconciliationRecordDetail state={authorRecord} onClose={() => closeRecord(true)} />,
+      }} relationDetail={{
+        openId: jiraRelationRecord?.sourceRecordId ?? null,
+        onToggle: (sourceRecordId, trigger) => toggleAuditRecord(sourceRecordId, 'jira-relation-audit', trigger),
+        onClose: () => { if (jiraRelationRecord) closeRecord(); },
+        content: jiraRelationRecord && <ReconciliationRecordDetail state={jiraRelationRecord} onClose={() => closeRecord(true)} />,
       }} />
 
     <section id={listId} aria-labelledby={`${listId}-heading`}>

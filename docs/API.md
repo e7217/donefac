@@ -1084,6 +1084,10 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 다음 페이지에서 첫 요청의 `fingerprint`를 `expectedFingerprint`로 보내면 같은 조건과 목록을 대조한다. 영수증 버전이나 목록이 달라지면 `409`를 반환한다. 상태·작성자·시각의 상세는 개별 원본 기록으로 확인한다.
 
+전체 이관 검증의 `jiraRelationProjection`은 `jiraRelationId`가 저장된 원본 관계를 대조한 `{version:1,expected,counts,sha256}`이다. `expected`는 이관 당시 관계 건수이며, 기록이 없을 때는 `null`이다. `counts`는 현재 연결 `linked`, 휴지통에 정확한 관계가 보관된 `trashed`, 양쪽 업무가 보존됐지만 관계가 없어진 `missing`, 원본과 연결이 다른 `mismatch`, 업무 연결 근거를 확인할 수 없는 `unavailable`로 나뉜다. 원본에 관계 식별자가 없으면 당시 건수와 추적 건수의 차이로 나타날 수 있다. Confluence만 있는 영수증에서는 `jiraRelationProjection`이 `null`이다.
+
+`GET /api/source-imports/:id/reconciliation/jira-relation-findings`에 `expectedVersion`, `expectedSha256`, `finding`을 지정한다. `finding`은 `missing`, `mismatch`, `unavailable` 중 하나다. `offset`의 범위는 0~1,000,000이며 기본값은 0이다. `limit`의 범위는 1~100이며 기본값은 20이다. 영수증 버전이나 전체 검증의 `jiraRelationProjection.sha256`과 조회 결과가 달라졌으면 `409`를 반환한다. 각 행의 `sourceRecordId`로 같은 영수증의 개별 보존 원본을 열 수 있다.
+
 서버는 파일을 순서대로 읽고, 보존 원본에 크기·해시가 있으면 그 값도 대조한다. 검증 중 영수증·보존 원본·대상·첨부 메타데이터가 바뀌거나 워크스페이스가 복원되면 `409`를 반환한다. 시작·완료 시각은 검증 구간을 나타낸다. 워크스페이스당 한 번씩 실행하며, 진행 중 다른 전체 검증 요청은 `429`를 반환한다. 이 경로는 브라우저용이다.
 
 

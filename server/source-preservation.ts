@@ -9,7 +9,7 @@ import { migrationOptionId } from './migration-option-id.js';
 import { isJiraWorklog } from './migration-worklog.js';
 import { jiraIssueStatusHistory } from './jira-status-history.js';
 import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
-import { jiraIssueRelationSource, jiraRelationEndpoints } from './migration-jira-relations.js';
+import { jiraIssueRelationSource, jiraRelationEndpoints, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { measureIncomingArchive, SourceArchiveMeasurer, type SourceArchiveMeasurement } from './source-archive-integrity.js';
 import { issueProjectAt, readIssueProjectHistory, type IssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
@@ -447,14 +447,14 @@ interface AppliedJiraChildren {
 }
 interface JiraIssueOrigin { alias: string; issueId: string; projectId: string; sourceProjectId: string; archiveId: string }
 type JiraRelationAlias = { instanceKey: string; alias: string };
-type JiraRelationPackageAlias = JiraRelationAlias & { importId: string; packageSha256: string };
+export type JiraRelationPackageAlias = JiraRelationAlias & { importId: string; packageSha256: string };
 const jiraRelationAliasKey = ({ instanceKey, alias }: JiraRelationAlias) => JSON.stringify([instanceKey, alias]);
 const jiraRelationPackageAliasKey = ({ instanceKey, importId, packageSha256, alias }: JiraRelationPackageAlias) =>
   JSON.stringify([instanceKey, importId, packageSha256, alias]);
 type JiraRelationProjectScope = { projectIds: readonly string[]; createdAt: string; anchor?: string };
 type JiraRelationEndpoint = { issueId: string; projectId: string };
 
-function jiraRelationProjectsAtReceipt(scope: JiraRelationProjectScope, source: JiraRelationEndpoint, target: JiraRelationEndpoint,
+export function jiraRelationProjectsAtReceipt(scope: JiraRelationProjectScope, source: JiraRelationEndpoint, target: JiraRelationEndpoint,
   history?: IssueProjectHistory): readonly [string, string] | undefined {
   const checkTime = Date.parse(scope.createdAt);
   if (!Number.isFinite(checkTime)) return;
@@ -482,6 +482,14 @@ function jiraRelationProjectsAtReceipt(scope: JiraRelationProjectScope, source: 
   if (!scope.anchor || sourceProject === scope.anchor) return [sourceProject, targetProject];
   if (targetOptions.includes(scope.anchor)) return [sourceProject, scope.anchor];
   if (sourceOptions.includes(scope.anchor)) return [scope.anchor, targetProject];
+}
+
+export function jiraRelationMatchesEndpoints(link: JiraIssueRelationSource, first: string, second: string,
+  relation: Pick<IssueRelation, 'sourceIssueId' | 'targetIssueId'>): boolean {
+  const [canonicalSource, canonicalTarget] = jiraRelationEndpoints(link, first, second);
+  if (relation.sourceIssueId === canonicalSource && relation.targetIssueId === canonicalTarget) return true;
+  const [storedSource, storedTarget] = link.sourceAlias === link.storedSourceAlias ? [first, second] : [second, first];
+  return relation.sourceIssueId === storedSource && relation.targetIssueId === storedTarget;
 }
 interface JiraHistoryArchive { kind: 'comment' | 'worklog'; sourceId: string; issueId: string; archiveId: string }
 interface JiraAttachmentArchive { sourceId: string; issueId: string; archiveId: string }
@@ -647,14 +655,26 @@ export class SourcePreservationService {
     if (!candidates.length) return [];
 
     const history = readIssueProjectHistory(this.store, [...new Set(candidates.flatMap(({ sourceIssueId, targetIssueId }) => [sourceIssueId, targetIssueId]))]);
-    const aliases = candidates.flatMap(({ source, target }) => [source, target]);
+    const resolve = this.jiraRelationAliasResolver(candidates.flatMap(({ source, target }) => [source, target]));
+    return candidates.flatMap(({ id, sourceIssueId, targetIssueId, version, source, target, sourceProjectId, targetProjectId, receiptScope }) => {
+      const first = resolve(source), second = resolve(target);
+      // An older backup may retain the original storage direction. The Jira
+      // aliases confirm orientation without rewriting the archived relation.
+      if (!(first === sourceIssueId && second === targetIssueId || first === targetIssueId && second === sourceIssueId)) return [];
+      if (!jiraRelationProjectsAtReceipt(receiptScope,
+        { issueId: sourceIssueId, projectId: sourceProjectId }, { issueId: targetIssueId, projectId: targetProjectId }, history)) return [];
+      return [{ id, sourceIssueId: first, targetIssueId: second, version, origin: 'jira' as const }];
+    });
+  }
+
+  jiraRelationAliasResolver(aliases: JiraRelationPackageAlias[]): (alias: JiraRelationPackageAlias) => string | undefined {
     const retained = this.jiraRelationPackageAliases(aliases);
     const packagedAliases = retained.flatMap(({ instanceKey, sourceAlias, keyAlias }) => [
       { instanceKey, alias: sourceAlias }, { instanceKey, alias: keyAlias },
     ]);
     const bindings = this.jiraRelationAliasBindings([...aliases, ...packagedAliases]);
     const retainedByAlias = Map.groupBy(retained, jiraRelationPackageAliasKey);
-    const resolve = (alias: JiraRelationPackageAlias) => {
+    return alias => {
       const known = bindings.get(jiraRelationAliasKey(alias));
       const rows = retainedByAlias.get(jiraRelationPackageAliasKey(alias));
       if (!rows) return known;
@@ -665,15 +685,6 @@ export class SourcePreservationService {
       if (known) targets.add(known);
       if (targets.size === 1) return [...targets][0];
     };
-    return candidates.flatMap(({ id, sourceIssueId, targetIssueId, version, source, target, sourceProjectId, targetProjectId, receiptScope }) => {
-      const first = resolve(source), second = resolve(target);
-      // An older backup may retain the original storage direction. The Jira
-      // aliases confirm orientation without rewriting the archived relation.
-      if (!(first === sourceIssueId && second === targetIssueId || first === targetIssueId && second === sourceIssueId)) return [];
-      if (!jiraRelationProjectsAtReceipt(receiptScope,
-        { issueId: sourceIssueId, projectId: sourceProjectId }, { issueId: targetIssueId, projectId: targetProjectId }, history)) return [];
-      return [{ id, sourceIssueId: first, targetIssueId: second, version, origin: 'jira' as const }];
-    });
   }
 
   private jiraRelationAliasBindings(aliases: JiraRelationAlias[]): Map<string, string> {
@@ -1011,11 +1022,8 @@ export class SourcePreservationService {
         }
         continue;
       }
-      const canonical = first && second && jiraRelationEndpoints(source, first, second);
-      const original = source.sourceAlias === source.storedSourceAlias ? [first, second] : [second, first];
       // Initial/default import keeps the original row order. Follow-up relations between existing issues use canonical direction.
-      const matchesEndpoints = Boolean(canonical) && [canonical, original].some(endpoints => endpoints &&
-        relation.sourceIssueId === endpoints[0] && relation.targetIssueId === endpoints[1]);
+      const matchesEndpoints = first && second && jiraRelationMatchesEndpoints(source, first, second, relation);
       const projects = projectsAtReceipt(relation.sourceIssueId, relation.targetIssueId);
       const bothPresent = activeProject(relation.sourceIssueId) && activeProject(relation.targetIssueId);
       if (relation.origin || relation.type !== source.typeName || !matchesEndpoints || (!projects && (liveRelation || bothPresent))) {

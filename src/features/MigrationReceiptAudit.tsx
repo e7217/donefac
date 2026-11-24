@@ -9,6 +9,7 @@ import type {
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { MigrationAuthorAudit } from './MigrationAuthorReview';
+import { MigrationJiraRelationAudit } from './MigrationJiraRelationAudit';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
 
@@ -78,11 +79,12 @@ type AuditProps = {
   onStale: () => void;
   detail: AuditDetail;
   jiraDetail: AuditDetail;
+  relationDetail: AuditDetail;
   authorDetail: AuditDetail;
 };
 
 export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLabels, packages, users, primaryListId, onPrimaryDrill,
-  onStale, detail, jiraDetail, authorDetail }: AuditProps) {
+  onStale, detail, jiraDetail, relationDetail, authorDetail }: AuditProps) {
   const [state, setState] = useState<AuditState>({ kind: 'idle' });
   const [filter, setFilter] = useState<Filter>('all');
   const [offset, setOffset] = useState(0);
@@ -105,6 +107,7 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
     request.current = abort;
     detail.onClose();
     jiraDetail.onClose();
+    relationDetail.onClose();
     authorDetail.onClose();
     setState({ kind: 'pending' });
     try {
@@ -171,6 +174,11 @@ export function MigrationReceiptAudit({ base, receiptVersion, canStart, recordLa
           }} />
         {report.jiraStatusHistory && <JiraStatusHistoryAudit history={report.jiraStatusHistory} integrity={report.integrity.status}
           base={base} receiptVersion={report.receiptVersion} detail={jiraDetail} />}
+        {report.jiraRelationProjection && <MigrationJiraRelationAudit projection={report.jiraRelationProjection}
+          base={base} importId={report.importId} receiptVersion={report.receiptVersion} detail={relationDetail} onRestart={() => {
+            startButton.current?.focus();
+            void start();
+          }} />}
         <h5>원본 객체 상태</h5>
         <AuditCounts label="원본 검증 건수" labels={recordLabels} counts={report.recordCounts} />
         <h5>첨부 검증 결과</h5>

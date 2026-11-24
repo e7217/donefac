@@ -6,6 +6,7 @@ import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -207,6 +208,8 @@ test('a Jira collection plan requires the exact batches and survives physical re
     assert.deepEqual(audited.primaryRecords.map(record => [record.records.expected, record.records.observed, record.counts.linked, record.invalidTargets])
       .sort((a, b) => a[0] - b[0]), [[1, 1, 1, 0], [2, 2, 2, 0]]);
     assert.equal(audited.targetContent.issueRelations.count, 1);
+    assert.equal(audited.jiraRelationProjection.expected, 1);
+    assert.deepEqual(audited.jiraRelationProjection.counts, { linked: 1, trashed: 0, missing: 0, mismatch: 0, unavailable: 0 });
   }
   const restoredPath = join(attempt, 'restored');
   const restoredStatePath = join(restoredPath, '.teamspace-rehearsal', 'stage.json');
@@ -223,5 +226,19 @@ test('a Jira collection plan requires the exact batches and survives physical re
   const badProof = await run(t, rehearsal, ['review', restoredPath], 1);
   assert.match(badProof.stderr, /Jira.*보관한 ZIP 연결/u);
   assert.doesNotMatch(badProof.stdout, /이관 검토 주소/u);
+
+  const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+  try {
+    const removed = db.prepare(`DELETE FROM issue_relations WHERE id IN (
+      SELECT json_extract(json,'$.jiraRelationId') FROM source_records WHERE import_id=? AND kind='relation')`).run(receipt.id);
+    assert.equal(removed.changes, 1);
+  } finally { db.close(); }
+  await run(t, rehearsal, ['verify', root], 1);
+  const secondAttempt = (await readdir(root)).find(name => name.startsWith('verification-') && name !== attempts[0]);
+  const failed = JSON.parse(await readFile(join(root, secondAttempt, 'report.json')));
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.restore, null, 'Copying the damaged workspace cannot satisfy rehearsal.');
+  assert.equal(failed.source.evidence.checks.receiptsWithJiraRelationFailures, 1);
+  assert.equal(failed.source.evidence.receipts[0].jiraRelationProjection.counts.missing, 1);
   assert.deepEqual(source.unexpected, []);
 });

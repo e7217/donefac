@@ -226,7 +226,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     assert.equal(workspace.counts.documents, pageCount);
     assert.equal(workspace.counts.documentOrders, Math.floor(pageCount / 2) + 1);
     assert.deepEqual(Object.entries(checks).filter(([, count]) => count !== 0), [
-      ['receiptsWithWarnings', 1], ['confluencePackagesWithoutFullPageCoverage', 1],
+      ['receiptsWithWarnings', 1], ['receiptsWithAuthorReview', 1], ['confluencePackagesWithoutFullPageCoverage', 1],
     ]);
     assert.equal(receipts.length, 1);
     const [receipt] = receipts;
@@ -234,6 +234,8 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     assert.deepEqual(receipt.notices.filter(notice => notice.severity !== 'info').map(notice => notice.code),
       ['COMMENT_FORMAT_PLAIN_TEXT', 'ISSUE_DESCRIPTION_PLAIN_TEXT', 'PROJECT_ACCESS_NOT_REPRODUCED', 'WORKFLOW_RULES_NOT_REPRODUCED']);
     assert.deepEqual(receipt.attachmentCounts, { verified: expected.attachmentVersions, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 });
+    assert.equal(receipt.authorAttribution.packages.flatMap(pkg => pkg.kinds).filter(group => group.kind === 'attachment')
+      .reduce((total, group) => total + group.counts['missing-fallback'], 0), expected.attachmentVersions);
     for (const [kind, count] of [['issue', issueCount], ['page', pageCount]]) {
       const primary = receipt.primaryRecords.find(item => item.kind === kind);
       assert.deepEqual(primary?.records, { expected: count, observed: count });
@@ -241,6 +243,10 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
       assert.equal(primary.invalidTargets, 0);
     }
     for (const kind of ['comments', 'worklogs', 'issueRelations']) assert.equal(receipt.targetContent[kind].count, expected[kind]);
+    assert.equal(receipt.jiraRelationProjection.expected, expected.issueRelations);
+    assert.deepEqual(receipt.jiraRelationProjection.counts, {
+      linked: expected.issueRelations, trashed: 0, missing: 0, mismatch: 0, unavailable: 0,
+    });
   }
   const restored = await startRehearsalPilot(join(attempt, 'restored'));
   try {
