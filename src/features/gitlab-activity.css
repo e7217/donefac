@@ -18,7 +18,7 @@
 }
 
 .gitlab-activity-actions,
-.gitlab-activity-manual-actions {
+.gitlab-activity-row-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -234,12 +234,12 @@ a.gitlab-activity-target:hover {
 .gitlab-merge-badge[data-tone='blocked'] { color: #8d402e; background: #faeae3; }
 .gitlab-merge-observed { color: #4d685b; font-size: 11px; overflow-wrap: anywhere; }
 
-.gitlab-activity-manual-actions {
+.gitlab-activity-row-actions {
   grid-column: 1 / -1;
   justify-content: flex-end;
 }
 
-.gitlab-activity-manual-actions .btn {
+.gitlab-activity-row-actions .btn {
   font-size: 12px;
 }
 
@@ -294,7 +294,7 @@ a.gitlab-activity-target:hover {
   .gitlab-activity-target[href],
   .gitlab-activity-refresh,
   .gitlab-activity-actions .btn,
-  .gitlab-activity-manual-actions .btn,
+  .gitlab-activity-row-actions .btn,
   .gitlab-activity-pages button {
     min-height: 44px;
   }

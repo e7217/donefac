@@ -10,7 +10,7 @@ import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { isGitlabManualLinkId } from '../../shared/gitlab-links.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueAutomationRunPage, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, AutomationRule, GitlabIssueRefreshResult, GitlabLink, GitlabSettings, GitlabSyncResult, Issue, IssueAutomationRunPage, ProjectWorkflow, WorkspaceSnapshot } from '../../shared/types.js';
 
 const projectId = 'project-neo';
 const actor = 'user-seo';
@@ -25,6 +25,7 @@ const mrId = 1007;
 const mrIid = 17;
 const pipelineId = 215;
 const pathFor = (id: string) => `/issues/${id}/gitlab-links`;
+const exactRefreshPath = (issueId: string, linkId: string) => `${pathFor(issueId)}/${encodeURIComponent(linkId)}/refresh`;
 const deletePath = (id: string, link: GitlabLink) => `${pathFor(id)}/${encodeURIComponent(link.id)}?expectedManualLinkId=${link.manualLinkId}`;
 type Backup = WorkspaceSnapshot & { schemaVersion: number; trashEntries: { id: string; gitlabLinks: GitlabLink[] }[] };
 type Options = { method?: string; body?: unknown; headers?: Record<string, string> };
@@ -114,7 +115,7 @@ async function fixture(t: TestContext) {
   async function request<T = unknown>(path: string, { method = 'GET', body, headers }: Options = {}) {
     const response = await fetch(base + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': actor, ...headers },
       body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: response.status, data: await response.json() as T };
+    return { status: response.status, headers: response.headers, data: await response.json() as T };
   }
   async function call<T = unknown>(path: string, options?: Options, status = 200) {
     const result = await request<T>(path, options);
@@ -245,6 +246,21 @@ test('ticket GitLab refresh reads exact linked objects, reports partial failure,
   assert.deepEqual((await f.links()).find(link => link.id === commit.id), commit);
   assert.deepEqual((await f.links()).find(link => link.id === pipeline.id), pipeline);
 
+  const nextHead = '3'.repeat(40);
+  f.setBranchHead(nextHead);
+  f.calls.length = 0;
+  const exact = await f.call<GitlabIssueRefreshResult>(exactRefreshPath(f.issue.id, branch.id), { method: 'POST' });
+  assert.equal(exact.links.length, 1);
+  assert.equal(exact.links[0].id, branch.id);
+  assert.equal(exact.links[0].sourceSha, nextHead);
+  assert.deepEqual(exact.failures, []);
+  assert.equal(exact.skipped, 0);
+  assert.deepEqual(f.calls.map(call => call.path), [f.projectPath, f.branchPath]);
+  const exactAliases = new Map((await f.links(other.id)).map(link => [link.id, link]));
+  assert.deepEqual(exactAliases.get(unrelatedBranch.id), unrelatedBranch);
+  assert.deepEqual(exactAliases.get(otherBranch.id), { ...otherBranch, sourceSha: nextHead,
+    branchObservationSource: 'read', updatedAt: exact.links[0].updatedAt });
+
   const after = await f.call<WorkspaceSnapshot>('/workspace');
   assert.deepEqual(after.issues.find(issue => issue.id === f.issue.id), before.issues.find(issue => issue.id === f.issue.id));
   assert.deepEqual(after.activities, before.activities);
@@ -280,6 +296,9 @@ test('a verified pipeline observation proposes a manual transition and preserves
 
   const finishedAt = new Date().toISOString();
   f.setPipeline({ status: 'success', finished_at: finishedAt, updated_at: finishedAt });
+  const single = await f.call<GitlabIssueRefreshResult>(exactRefreshPath(f.issue.id, attached.id), { method: 'POST', body: {} });
+  assert.equal(single.links[0]?.state, 'success');
+  assert.equal(Object.hasOwn(single, 'statusReview'), false);
   const checked = await f.call<GitlabIssueRefreshResult>(`${path}/refresh`, { method: 'POST', body: {} });
   assert.deepEqual(checked.failures, []);
   assert.equal(checked.links.find(link => link.id === attached.id)?.state, 'success');
@@ -641,7 +660,7 @@ test('a deferred exact branch refresh cannot replace a concurrent attachment, pu
   });
 });
 
-test('ticket GitLab refresh limits exact branch and workflow reads to the 20 most recent links', async t => {
+test('ticket GitLab refresh limits bulk reads to 20 and can refresh one selected older link', async t => {
   const f = await fixture(t);
   const ids = Array.from({ length: 23 }, (_, index) => pipelineId + index);
   for (const [index, id] of ids.entries()) {
@@ -660,6 +679,86 @@ test('ticket GitLab refresh limits exact branch and workflow reads to the 20 mos
   assert.deepEqual(f.calls.filter(call => call.path.startsWith(`${f.projectPath}/pipelines/`)).map(call => call.path).sort(),
     ids.slice(4).map(id => `${f.projectPath}/pipelines/${id}`).sort());
   assert.deepEqual((await f.links()).filter(link => link.kind !== 'branch'), before.filter(link => link.kind !== 'branch'));
+
+  const selected = before.find(link => link.kind === 'pipeline' && link.iid === pipelineId)!;
+  const beforeSingle = await f.links();
+  f.setPipeline({ ref: `feature/${f.issue.key}`, status: 'success', updated_at: f.instant(30) });
+  f.calls.length = 0;
+  const single = await f.request<GitlabIssueRefreshResult>(exactRefreshPath(f.issue.id, selected.id), { method: 'POST', body: {} });
+  assert.equal(single.status, 200);
+  assert.match(single.headers.get('Cache-Control') ?? '', /\bno-store\b/u);
+  assert.deepEqual(single.data.links.map(({ id, state }) => ({ id, state })), [{ id: selected.id, state: 'success' }]);
+  assert.deepEqual(single.data.failures, []);
+  assert.equal(single.data.skipped, 0);
+  assert.equal(Object.hasOwn(single.data, 'statusReview'), false);
+  assert.deepEqual(f.calls.map(call => call.path), [f.projectPath, `${f.projectPath}/pipelines/${pipelineId}`]);
+  assert.ok(f.calls.every(call => call.method === 'GET' && call.credential === token));
+  assert.deepEqual((await f.links()).filter(link => link.id !== selected.id), beforeSingle.filter(link => link.id !== selected.id));
+});
+
+test('single GitLab refresh rejects unsupported links, foreign tickets and API keys before contacting GitLab', async t => {
+  const f = await fixture(t);
+  const pipeline = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.pipelineUrl), 201);
+  const commit = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.commitUrl), 201);
+  const branch = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.branchUrl), 201);
+  await f.push(sha, '0'.repeat(40));
+  assert.equal((await f.links()).find(link => link.id === branch.id)?.state, 'deleted');
+  const other = await f.call<Issue>('/issues', { method: 'POST', body: { projectId, title: 'Different ticket' } }, 201);
+  const key = await f.call<ApiKeyCreated>('/api-keys', { method: 'POST', body: {
+    name: 'GitLab refresh route proof', access: 'write', projectIds: [projectId], expiresAt: null,
+  } }, 201);
+  f.calls.length = 0;
+  const options = { method: 'POST', body: {} };
+  const path = exactRefreshPath(f.issue.id, pipeline.id);
+  await f.call(exactRefreshPath(other.id, pipeline.id), options, 404);
+  await f.call(exactRefreshPath(f.issue.id, 'missing-activity'), options, 404);
+  await f.call(exactRefreshPath(f.issue.id, commit.id), options, 400);
+  await f.call(exactRefreshPath(f.issue.id, branch.id), options, 400);
+  await f.call(`${path}?linkId=unexpected`, options, 400);
+  await f.call(path, { ...options, body: { linkId: commit.id } }, 400);
+  await f.call(`/v1${path}`, { ...options, headers: { Authorization: `Bearer ${key.token}` } }, 403);
+  assert.deepEqual(f.calls, []);
+});
+
+test('single GitLab refresh discards results held across link replacement and new connection settings', async t => {
+  const f = await fixture(t);
+  const original = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.mrUrl), 201);
+  const refreshPath = exactRefreshPath(f.issue.id, original.id);
+  async function holdRefresh(change: () => Promise<void>) {
+    let enter!: () => void, release!: () => void;
+    const waiting = new Promise<void>(resolve => { enter = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    f.holdRead(() => { enter(); return resume; });
+    const pending = f.request<GitlabIssueRefreshResult>(refreshPath, { method: 'POST', body: {} });
+    await Promise.race([waiting, pending.then(result => assert.fail(`MR read did not reach the mock endpoint (${result.status})`))]);
+    f.holdRead(async () => {});
+    try { await change(); }
+    finally { release(); }
+    return pending;
+  }
+
+  let replacement: GitlabLink | undefined;
+  f.setMr({ state: 'closed', updated_at: f.instant(10) });
+  const replaced = await holdRefresh(async () => {
+    await f.call(deletePath(f.issue.id, original), { method: 'DELETE' });
+    f.setMr({ state: 'opened', updated_at: f.instant(20) });
+    replacement = await f.call<GitlabLink>(pathFor(f.issue.id), f.attach(f.mrUrl), 201);
+  });
+  assert.equal(replaced.status, 200);
+  assert.deepEqual(replaced.data.links, []);
+  assert.deepEqual(replaced.data.failures.map(failure => failure.linkId), [original.id]);
+  assert.equal(replaced.data.skipped, 0);
+  assert.equal(replacement?.id, original.id);
+  assert.notEqual(replacement?.manualLinkId, original.manualLinkId);
+  assert.deepEqual(await f.links(), [replacement]);
+
+  f.setMr({ state: 'merged', updated_at: f.instant(30) });
+  const changedSettings = await holdRefresh(async () => {
+    const current = await f.call<GitlabSettings>('/integrations/gitlab');
+    await f.call('/integrations/gitlab', { method: 'PATCH', body: { expectedVersion: current.version, token: 'updated-mock-credential' } });
+  });
+  assert.equal(changedSettings.status, 409);
+  assert.deepEqual(await f.links(), [replacement]);
 });
 
 test('manual GitLab links verify saved repositories and store one canonical record per ticket and object', async t => {

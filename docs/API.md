@@ -778,6 +778,12 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 파이프라인 링크는 원본에서 확인한 `pipelineSource`와 태그 실행 여부인 `pipelineTag`를 선택적으로 포함한다. 저장소 목록은 실행 유형을, 단건 조회와 인증된 웹훅은 실행 유형과 태그 여부를 제공한다. 업데이트에서 값이 생략되면 앞서 확인한 값을 유지한다. 같은 파이프라인의 명시된 값이 저장값과 다르면 해당 관측을 보류한다. 자동 상태 전이는 인증 이벤트와 저장소·브랜치 순서를 기준으로 평가한다. 자체 백업 형식 101은 활성 업무와 휴지통의 값을 보존한다. [GitLab 파이프라인 API](https://docs.gitlab.com/api/pipelines/) · [GitLab Pipeline Hook](https://docs.gitlab.com/user/project/integrations/webhook_events/#pipeline-events)
 
+### 연결된 GitLab 활동 한 건 확인
+
+브라우저의 `POST /api/issues/:id/gitlab-links/:linkId/refresh`에 빈 객체를 보낸다. 해당 티켓에 연결된 MR·파이프라인·활성 브랜치를 하나 지정한다. 최근 20건보다 오래된 연결도 지정할 수 있다. 티켓이나 소속 연결을 찾을 수 없으면 `404`, 갱신할 수 없는 종류나 삭제된 브랜치면 `400`을 반환한다. 기존 상태 확인과 같은 원본 식별자·연결 버전·최신 관측 검사와 GitLab 읽기 자격 증명을 사용한다.
+
+응답은 선택한 연결 한 건을 `links` 또는 `failures`에 담으며 `skipped`는 `0`이다. 브랜치를 확인하면 같은 저장소·이름으로 연결된 기존 행에 HEAD를 함께 기록한다. 이 요청은 연결된 개발 활동을 갱신한다. 전체 연결을 근거로 하는 티켓 상태 제안은 위의 최근 활동 확인 경로에서 검토한다.
+
 ### 파이프라인 CI 작업 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/pipeline-jobs`는 해당 업무에 연결한 파이프라인에서 실패(`failed`)와 수동 실행 대기(`manual`) 작업을 읽는다. 저장한 GitLab 주소와 읽기 자격 증명을 사용한다. 저장소와 파이프라인의 실제 ID, 확인 가능한 커밋 SHA를 대조한다. 작업은 50건씩 최대 4페이지를 조회하며 재실행으로 대체된 작업은 제외한다. 새 연결이나 업무 상태를 저장하는 과정과 독립된 브라우저 조회다. [GitLab Jobs API](https://docs.gitlab.com/api/jobs/#list-all-jobs-by-pipeline) · [GitLab 파이프라인 단건 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline)

@@ -1,14 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
 import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters, type GitlabActivityScope } from '../../shared/gitlab-activity-filter';
-import type { FeatureProps, GitlabHistoryLimits, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
+import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
-import { GitlabActivityList, GitlabActivityRefresh } from './GitlabActivity';
+import { GitlabActivityList, GitlabActivityRefresh, gitlabActivityKindLabel, gitlabActivityStateLabel,
+  gitlabLinkedStatusRefreshPath, isGitlabLinkedStatusRefreshResult } from './GitlabActivity';
 import { GitlabDeploymentPreview } from './GitlabDeploymentPreview';
 import { RepositoryGitlabDeployments } from './GitlabDeployments';
 import { GitlabProjectWebhookPanel } from './GitlabProjectWebhookPanel';
@@ -80,6 +81,9 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const [includeHistory, setIncludeHistory] = useState(false);
+  const [refreshingLinkId, setRefreshingLinkId] = useState<string | null>(null);
+  const activityRequest = useRef<AbortController | null>(null);
+  const activityReturnFocus = useRef<{ trigger: HTMLButtonElement; fallback: HTMLElement | null } | null>(null);
   const [syncRead, setSyncRead] = useState<SyncStatusRead | null>(null);
   const [jiraSources, setJiraSources] = useState<JiraSources>({ items: [], loading: true, error: '' });
   const [repositorySearchRevision, setRepositorySearchRevision] = useState(0);
@@ -95,6 +99,15 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
   const missingRoutesAfterAddressEdit = baseline.jiraRoutes.length > 0 && draft.jiraRoutes.length === 0
     && normalizedAddress(draft.baseUrl) !== normalizedAddress(baseline.baseUrl);
   useEffect(()=>{dirtyRef.current=dirty;},[dirty]);
+  useEffect(() => () => activityRequest.current?.abort(), []);
+  useLayoutEffect(() => {
+    const focus = activityReturnFocus.current;
+    if (busy || !focus) return;
+    activityReturnFocus.current = null;
+    if (document.activeElement !== document.body && document.activeElement !== focus.trigger) return;
+    const target = focus.trigger.isConnected && !focus.trigger.disabled ? focus.trigger : focus.fallback;
+    if (target?.isConnected) target.focus({ preventScroll: true });
+  }, [busy]);
   const clearPreview = useCallback(() => {
     previewRequest.current?.abort();
     previewRequest.current = null;
@@ -296,6 +309,52 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
       if (previewRequest.current === controller) previewRequest.current = null;
     }
   }
+  async function checkActivityStatus(link: GitlabLink, trigger: HTMLButtonElement, fallback: HTMLElement | null) {
+    if (pending.current) return;
+    const hadFocus = document.activeElement === trigger;
+    const controller = new AbortController();
+    activityRequest.current = controller;
+    pending.current = true;
+    setBusy(true);
+    setRefreshingLinkId(link.id);
+    try {
+      const result = await api<GitlabIssueRefreshResult>(gitlabLinkedStatusRefreshPath(link.issueId, link.id), {
+        method: 'POST', body: '{}', signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      if (!isGitlabLinkedStatusRefreshResult(result, link)) {
+        notify('GitLab 상태 확인 결과를 받지 못했습니다. GitLab 활동 새로고침을 눌러 주세요.', 'error');
+        return;
+      }
+      const checked = result.links[0];
+      if (!checked) {
+        notify(result.failures[0].message, 'error');
+        return;
+      }
+      try { await props.refresh(); }
+      catch {
+        if (!controller.signal.aborted) notify('GitLab 상태를 저장했습니다. 목록을 다시 불러오려면 새로고침을 눌러 주세요.', 'error');
+        return;
+      }
+      if (!controller.signal.aborted) notify(`${gitlabActivityKindLabel(checked.kind)} 상태를 확인했습니다. ${gitlabActivityStateLabel(checked.state)}`, 'success');
+    } catch (cause) {
+      if (controller.signal.aborted) return;
+      if (cause instanceof ApiError) {
+        notify(cause.message, 'error');
+        if (cause.status === 404 || cause.status === 409) await props.refresh().catch(() => undefined);
+      } else {
+        notify('GitLab 상태 확인 결과를 받지 못했습니다. GitLab 활동 새로고침을 눌러 주세요.', 'error');
+      }
+    } finally {
+      activityRequest.current = null;
+      pending.current = false;
+      if (!controller.signal.aborted) {
+        if (hadFocus) activityReturnFocus.current = { trigger, fallback };
+        setRefreshingLinkId(null);
+        setBusy(false);
+      }
+    }
+  }
   const repositoryIds = editableRepoIds(draft.ids);
   const currentSyncRead = syncRead?.version === settings?.version ? syncRead : null;
   const syncStatus = currentSyncRead?.status ?? null;
@@ -311,7 +370,8 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
       <button className="btn btn-primary" type="button" disabled={busy||!settings?.baseUrl||!settings.projectIds.length} onClick={() => void sync()}><GitBranch size={16}/>{busy?'처리 중…':'지금 동기화'}</button>
     </div></div>
     {error&&<div className="inline-error" role="alert">{error} 작성 내용은 유지됩니다.</div>}
-    <DevelopmentActivityFeed key={props.projectId} {...props} />
+    <DevelopmentActivityFeed key={props.projectId} {...props} statusBusy={busy} refreshingLinkId={refreshingLinkId}
+      onCheckActivityStatus={checkActivityStatus} />
     <div className="integration-grid"><form ref={connectionForm} className="card integration-form" onSubmit={save}><div className="card-heading"><h2 tabIndex={-1}><GitBranch size={19}/>GitLab 연결</h2><button type="button" className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14}/>최신 설정</button></div><fieldset disabled={busy||!settings} style={{border:0,padding:0,margin:0,minWidth:0}}>
       <label className="form-label">GitLab 주소<input type="url" className="field" placeholder="https://gitlab.example.com" value={draft.baseUrl} onChange={e=>edit('baseUrl',e.target.value)}/></label>
       {missingRoutesAfterAddressEdit && <p className="help-text gitlab-token-note" role="status">주소가 바뀌어 Jira 원본 연결 범위를 비웠습니다. 새 저장소에서 사용할 범위를 선택하세요.</p>}
@@ -345,8 +405,12 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
   </div>;
 }
 
-function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFilters, onChangeActivityFilters, onOpenIssueForReview }:
-  Pick<FeatureProps, 'data' | 'projectId' | 'refresh' | 'notify'> & DevelopmentActivityProps) {
+function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFilters, onChangeActivityFilters, onOpenIssueForReview,
+  statusBusy, refreshingLinkId, onCheckActivityStatus }: Pick<FeatureProps, 'data' | 'projectId' | 'refresh' | 'notify'> & DevelopmentActivityProps & {
+    statusBusy: boolean;
+    refreshingLinkId: string | null;
+    onCheckActivityStatus: (link: GitlabLink, trigger: HTMLButtonElement, fallback: HTMLElement | null) => void;
+  }) {
   const { scope, query, pages } = activityFilters;
   const heading = useRef<HTMLHeadingElement>(null);
   const [search, setSearch] = useState({ source: query, value: query, invalid: false });
@@ -383,7 +447,7 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
   return <section className="card linked-development" aria-label="연결된 개발 활동">
     <div className="card-heading gitlab-activity-header">
       <h2 ref={heading} tabIndex={-1}>연결된 개발 활동 <span className="count-pill">{matching.length}</span></h2>
-      <GitlabActivityRefresh refresh={refresh} notify={notify} />
+      <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={statusBusy} />
     </div>
     <div className="development-activity-filters">
       <label className="form-label development-activity-scope">개발 활동 범위
@@ -406,7 +470,8 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
       <button type="button" className="btn btn-ghost" disabled={!hasFilters} onClick={clearFilters}>활동 필터 초기화</button>
     </div>
     {matching.length > 0 ? <GitlabActivityList links={matching} heading="h3" issueVersions={issueVersions}
-      issueReview={{ keys: issueKeys, openIssue: onOpenIssueForReview, fallbackRef: heading }} pagination={{ pages, onChangePage: changePage }} />
+      issueReview={{ keys: issueKeys, openIssue: onOpenIssueForReview, fallbackRef: heading }} pagination={{ pages, onChangePage: changePage }}
+      statusActions={{ disabled: statusBusy, refreshingLinkId, checkStatus: (link, trigger) => onCheckActivityStatus(link, trigger, heading.current) }} />
       : links.length > 0 ? <p className="development-activity-empty" role="status">조건에 맞는 개발 활동이 없습니다.</p>
         : <div className="empty-state"><GitBranch aria-hidden="true" /><h3>아직 연결된 개발 활동이 없습니다</h3>
           <p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}

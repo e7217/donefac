@@ -1,0 +1,205 @@
+import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { expect, test, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
+import type { AutomationRule, GitlabIssueRefreshResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+
+const settingsPath = '/api/integrations/gitlab';
+const rulesPath = '/api/automation-rules';
+const repositoryId = 42;
+const repository = 'team/triage';
+const projectRead = `/forge/api/v4/projects/${repositoryId}`;
+const pipelineRead = (id: number) => `${projectRead}/pipelines/${id}`;
+const oldPipelineId = 701;
+const button = (container: Locator, name: string) => container.getByRole('button', { name, exact: true });
+const exactAction = '이 GitLab 활동 상태 확인';
+
+async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
+  const body = await response.text();
+  expect(response.status(), body).toBe(status);
+  return JSON.parse(body) as T;
+}
+
+async function refreshActivity(page: Page, trigger: Locator, path: string) {
+  const receiving = page.waitForResponse(response => new URL(response.url()).pathname === path);
+  await trigger.press('Enter');
+  const response = await receiving;
+  expect(response.request().method()).toBe('POST');
+  expect(response.request().postDataJSON()).toEqual({});
+  expect(new URL(response.url()).search).toBe('');
+  expect(response.headers()['cache-control']).toBe('no-store');
+  return json<GitlabIssueRefreshResult>(response);
+}
+
+test('360px에서 최근 확인 범위 밖 GitLab 연결을 직접 확인하고 해소된 실패 목록에 초점을 돌려준다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const suffix = randomUUID();
+  const marker = `old-triage-${suffix.slice(0, 8)}`;
+  const token = `synthetic-exact-read-${suffix}`;
+  const secret = `synthetic-exact-hook-${suffix}`;
+  const epoch = Date.now() - 90_000;
+  const at = (seconds: number) => new Date(epoch + seconds * 1000).toISOString();
+  const settings = () => request.get(settingsPath).then(response => json<GitlabSettings>(response));
+  const workspace = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
+  const initialSettings = await settings();
+  expect(initialSettings.baseUrl).toBe('');
+  const { projects: [project] } = await workspace();
+  const issue = await json<Issue>(await request.post('/api/issues', { data: {
+    projectId: project.id, title: `GitLab 이전 연결 확인 ${suffix.slice(0, 8)}`,
+  } }), 201);
+  const oldRef = `feature/${issue.key}/${marker}`;
+  function pipeline(id: number, ref: string, status: 'running' | 'failed' | 'success', seconds: number) {
+    return { id, iid: id, project_id: repositoryId, ref, status, sha: 'a'.repeat(40), source: 'push', tag: false,
+      updated_at: at(seconds), ...(status !== 'running' ? { finished_at: at(seconds) } : {}) };
+  }
+  const storedOld = pipeline(oldPipelineId, oldRef, 'running', 0);
+  const newer = Array.from({ length: 20 }, (_, index) => pipeline(800 + index, `feature/${issue.key}/newer-${index}`, 'running', 10 + index));
+  const newerById = new Map(newer.map(value => [value.id, value]));
+  let remoteOld = pipeline(oldPipelineId, oldRef, 'failed', 1);
+  let baseUrl = '';
+  const repositoryUrl = () => `${baseUrl}/${repository}`;
+  const calls: { path: string; method?: string; credential?: string | string[] }[] = [];
+  const remote = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    calls.push({ path, method: incoming.method, credential: incoming.headers['private-token'] });
+    response.setHeader('Content-Type', 'application/json');
+    if (path === projectRead) {
+      response.end(JSON.stringify({ id: repositoryId, path_with_namespace: repository, web_url: repositoryUrl() }));
+      return;
+    }
+    const id = path.startsWith(`${projectRead}/pipelines/`) ? Number(path.slice(`${projectRead}/pipelines/`.length)) : NaN;
+    const state = id === oldPipelineId ? remoteOld : newerById.get(id);
+    if (state) response.end(JSON.stringify({ ...state, web_url: `${repositoryUrl()}/-/pipelines/${id}` }));
+    else response.writeHead(404).end('{}');
+  });
+  remote.listen(0, '127.0.0.1');
+  await once(remote, 'listening');
+  baseUrl = `http://127.0.0.1:${(remote.address() as AddressInfo).port}/forge`;
+  const publish = async (value: ReturnType<typeof pipeline>) => {
+    const result = await json<{ linked: number }>(await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: repositoryUrl() }, object_attributes: value },
+    }));
+    expect(result.linked).toBe(1);
+  };
+  let rule: AutomationRule | undefined;
+
+  try {
+    const configured = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
+      expectedVersion: initialSettings.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret,
+    } }));
+    rule = await json<AutomationRule>(await request.post(rulesPath, { data: {
+      projectId: project.id, name: `파이프라인 성공 후 완료 ${suffix.slice(0, 8)}`, enabled: true, trigger: 'pipeline.succeeded',
+      gitlabProjectIds: [repositoryId], branchPattern: oldRef, issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    } }), 201);
+    expect(rule.enabled).toBe(true);
+    await publish(storedOld);
+    for (const value of newer) await publish(value);
+    const before = await workspace();
+    const linked = before.gitlabLinks.filter(link => link.issueId === issue.id);
+    expect(linked).toHaveLength(21);
+    const oldLink = linked.find(link => link.iid === oldPipelineId)!;
+    expect(oldLink).toMatchObject({ state: 'running', kind: 'pipeline' });
+    expect(oldLink.manualLinkId).toBeUndefined();
+    const runsPath = `/api/automation-runs?projectId=${encodeURIComponent(project.id)}`;
+    const beforeRuns = await json(await request.get(runsPath));
+    const bulkPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/refresh`;
+    const exactPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(oldLink.id)}/refresh`;
+    const browserWrites: string[] = [];
+    page.context().on('request', sent => {
+      const { pathname } = new URL(sent.url());
+      if (pathname.startsWith('/api/') && !['GET', 'HEAD'].includes(sent.method())) browserWrites.push(`${sent.method()} ${pathname}`);
+    });
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+    const title = ticket.getByRole('textbox', { name: '제목', exact: true });
+    const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const gitlab = ticket.getByRole('region', { name: 'GitLab', exact: true });
+    const pipelines = gitlab.getByRole('region', { name: '파이프라인', exact: true });
+    const bulkTrigger = button(gitlab, 'GitLab에서 상태 확인');
+    await expect(bulkTrigger).toBeVisible();
+    expect(calls).toHaveLength(0);
+    await title.fill('저장하지 않은 티켓 제목');
+    await comment.fill('전송하지 않은 티켓 댓글');
+    const bulk = await refreshActivity(page, bulkTrigger, bulkPath);
+    expect(bulk.links.map(link => link.iid).sort((left, right) => left - right)).toEqual(newer.map(value => value.id));
+    expect(bulk).toMatchObject({ failures: [], skipped: 1 });
+    expect(calls.map(call => call.path).sort()).toEqual([projectRead, ...newer.map(value => pipelineRead(value.id))].sort());
+    await expect(bulkTrigger).toBeEnabled();
+    const afterBulk = await workspace();
+    expect(afterBulk.gitlabLinks.find(link => link.id === oldLink.id)).toEqual(oldLink);
+
+    const pages = pipelines.getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true });
+    await button(pages, '다음').click();
+    const oldRow = pipelines.locator('.gitlab-activity-row').filter({ has: page.getByText(`#${oldPipelineId}`, { exact: true }) });
+    await expect(oldRow).toHaveAttribute('data-gitlab-state', 'running');
+    const readsBeforeExact = calls.length;
+    const failed = await refreshActivity(page, button(oldRow, exactAction), exactPath);
+    expect(failed).toEqual({ links: [expect.objectContaining({ id: oldLink.id, state: 'failed' })], failures: [], skipped: 0 });
+    expect(calls.slice(readsBeforeExact).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
+    await expect(oldRow).toHaveAttribute('data-gitlab-state', 'failed');
+    await expect(title).toHaveValue('저장하지 않은 티켓 제목');
+    await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+
+    const development = await page.context().newPage();
+    try {
+      await development.setViewportSize({ width: 360, height: 820 });
+      const readsBeforeOpening = calls.length;
+      await development.goto(`/#/${project.id}/development`);
+      const feed = development.getByRole('region', { name: '연결된 개발 활동', exact: true });
+      const heading = feed.getByRole('heading', { name: /^연결된 개발 활동/u });
+      const scope = feed.getByRole('combobox', { name: '개발 활동 범위', exact: true });
+      const query = feed.getByRole('searchbox', { name: '개발 활동 검색', exact: true });
+      const settingDraft = development.getByLabel('읽기 API 토큰', { exact: true });
+      await expect(settingDraft).toBeEnabled();
+      await settingDraft.fill('저장하지 않은 GitLab 연결 초안');
+      await scope.selectOption('failed_pipelines');
+      await query.fill(marker);
+      await query.press('Enter');
+      const filtered = feed.locator('.gitlab-activity-row');
+      await expect(filtered).toHaveCount(1);
+      await expect(filtered).toHaveAttribute('data-gitlab-state', 'failed');
+      await expect(filtered.getByText(`#${oldPipelineId}`, { exact: true })).toBeVisible();
+      expect(calls).toHaveLength(readsBeforeOpening);
+      const hash = new URL(development.url()).hash;
+
+      remoteOld = pipeline(oldPipelineId, oldRef, 'success', 40);
+      const recovered = await refreshActivity(development, button(filtered, exactAction), exactPath);
+      expect(recovered).toEqual({ links: [expect.objectContaining({ id: oldLink.id, state: 'success' })], failures: [], skipped: 0 });
+      expect(calls.slice(readsBeforeOpening).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
+      await expect(filtered).toHaveCount(0);
+      await expect(feed.getByText('조건에 맞는 개발 활동이 없습니다.', { exact: true })).toBeVisible();
+      await expect(heading).toBeFocused();
+      await expect(query).toHaveValue(marker);
+      await expect(scope).toHaveValue('failed_pipelines');
+      await expect(development).toHaveURL(url => url.hash === hash);
+      await expect(settingDraft).toHaveValue('저장하지 않은 GitLab 연결 초안');
+
+      const after = await workspace();
+      expect(after.gitlabLinks.filter(link => link.issueId === issue.id)).toEqual(afterBulk.gitlabLinks.filter(link => link.issueId === issue.id)
+        .map(link => link.id === oldLink.id ? recovered.links[0] : link));
+      expect(after.issues.find(value => value.id === issue.id)).toEqual(before.issues.find(value => value.id === issue.id));
+      expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
+      expect(await settings()).toEqual(configured);
+    } finally { await development.close(); }
+
+    expect(browserWrites).toEqual([`POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`]);
+    expect(calls.every(call => call.method === 'GET' && call.credential === token)).toBe(true);
+  } finally {
+    try {
+      if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
+      const deleted = await request.delete(`/api/issues/${issue.id}`);
+      if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',
+      } }));
+    } finally {
+      remote.closeAllConnections();
+      await new Promise<void>((resolve, reject) => remote.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});

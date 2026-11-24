@@ -927,18 +927,32 @@ export class GitlabIntegrationService{
     return this.store.get<BranchCursor>('gitlab_branch_cursors',branchId)?.pipelineId ?? null;
   }
 
-  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string):Promise<GitlabIssueRefreshResult> {
+  async refreshIssueLinks(issueId:string, value:unknown, signal?:AbortSignal, actorId?:string, linkId?:string):Promise<GitlabIssueRefreshResult> {
     if (value !== undefined && (value === null || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).some(key => key !== 'actorId'))) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
     const issue = this.requireIssue(issueId);
     const captured = this.raw();
     const workspaceGeneration = this.store.setting('attachmentImportGeneration');
-    const rows = this.store.db.prepare(`SELECT json, COUNT(*) OVER() AS total FROM gitlab_links WHERE issue_id=?
-      AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline', 'branch')
-      ORDER BY julianday(json_extract(json, '$.updatedAt')) DESC, id LIMIT ?`)
-      .all(issue.id, ISSUE_REFRESH_LINK_LIMIT) as { json:string; total:number }[];
-    const result: GitlabIssueRefreshResult = { links:[], failures:[], skipped:Math.max(0, (rows[0]?.total ?? 0) - rows.length) };
-    if (!rows.length) return result;
+    const result: GitlabIssueRefreshResult = { links:[], failures:[], skipped:0 };
+    let selected: GitlabLink[];
+    if (linkId !== undefined) {
+      if (!linkId || linkId.length > 500) fail('갱신할 GitLab 활동을 선택해 주세요.');
+      const link = this.store.get<GitlabLink>('gitlab_links',linkId);
+      if (!link || link.issueId !== issueId) fail('업무에 연결된 GitLab 활동을 찾을 수 없습니다.',404);
+      if (link.kind !== 'merge_request' && link.kind !== 'pipeline' && (link.kind !== 'branch' || link.state !== 'active')) {
+        fail('연결된 MR, 파이프라인 또는 활성 브랜치를 선택해 주세요.');
+      }
+      selected = [link];
+    } else {
+      const rows = this.store.db.prepare(`SELECT json, COUNT(*) OVER() AS total FROM gitlab_links WHERE issue_id=?
+        AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline', 'branch')
+        ORDER BY julianday(json_extract(json, '$.updatedAt')) DESC, id LIMIT ?`)
+        .all(issue.id, ISSUE_REFRESH_LINK_LIMIT) as { json:string; total:number }[];
+      result.skipped = Math.max(0, (rows[0]?.total ?? 0) - rows.length);
+      selected = rows.map(({ json }) => JSON.parse(json) as GitlabLink);
+    }
+    if (!selected.length) return result;
+    const reviewActorId = linkId === undefined ? actorId : undefined;
 
     const instance = this.instance(captured);
     const token = captured.token ? this.store.unseal(captured.token) : null;
@@ -967,7 +981,7 @@ export class GitlabIntegrationService{
         const { object } = await read.workflow(link.projectId, target.kind, target.id, target.objectId);
         const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
-        return { link, kind:target.kind, draft, terminal:actorId && this.hooks.manualStatusReview ? terminalStatusRead(target.kind,object) : null };
+        return { link, kind:target.kind, draft, terminal:reviewActorId && this.hooks.manualStatusReview ? terminalStatusRead(target.kind,object) : null };
       } catch (error) {
         signal?.throwIfAborted();
         if (!(error instanceof GitlabReadError)) throw error;
@@ -979,10 +993,10 @@ export class GitlabIntegrationService{
     };
 
     const outcomes:ReadOutcome[] = [];
-    for (let offset = 0; offset < rows.length; offset += ISSUE_REFRESH_CONCURRENCY) {
+    for (let offset = 0; offset < selected.length; offset += ISSUE_REFRESH_CONCURRENCY) {
       signal?.throwIfAborted();
       assertSettingsVersion(captured.version, this.raw().version);
-      const batch = rows.slice(offset, offset + ISSUE_REFRESH_CONCURRENCY).map(({ json }) => readLinkRow(JSON.parse(json) as GitlabLink));
+      const batch = selected.slice(offset, offset + ISSUE_REFRESH_CONCURRENCY).map(readLinkRow);
       outcomes.push(...await Promise.all(batch));
     }
     signal?.throwIfAborted();
@@ -1034,7 +1048,7 @@ export class GitlabIntegrationService{
           result.failures.push({ linkId:link.id, message:'GitLab 파이프라인의 브랜치 또는 커밋이 기존 연결과 다릅니다.' });
           continue;
         }
-        const aliases = kind === 'pipeline' || actorId && this.hooks.manualStatusReview
+        const aliases = kind === 'pipeline' || reviewActorId && this.hooks.manualStatusReview
           ? this.workflowLinksForObject(instance,link.projectId,kind,observed.id) : [];
         const draft = kind==='pipeline' ? classifyPipelineDraft(observed,aliases) : observed;
         if (!draft) {
@@ -1053,19 +1067,19 @@ export class GitlabIntegrationService{
         }
         if (updated !== latest) this.store.put('gitlab_links',updated);
         result.links.push(updated);
-        if (actorId && this.hooks.manualStatusReview) {
+        if (reviewActorId && this.hooks.manualStatusReview) {
           const confirmation = confirmWorkflowRead(updated,draft,outcome.terminal,aliases);
           if (confirmation) checked.push(confirmation);
         }
       }
-      if (actorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.terminal)) {
+      if (reviewActorId && this.hooks.manualStatusReview && latestIssue.version === issue.version && checked.some(value => value.terminal)) {
         const current = this.store.db.prepare(`SELECT id FROM gitlab_links WHERE issue_id=?
           AND json_extract(json, '$.kind') IN ('merge_request', 'pipeline') LIMIT ?`)
           .all(issue.id, ISSUE_REFRESH_LINK_LIMIT + 1) as { id:string }[];
         const checkedIds = new Set(checked.map(({ link }) => link.id));
         if (current.length === checkedIds.size && current.every(({ id }) => checkedIds.has(id))) {
           const observations = currentTerminalObservations(checked,link => this.latestVerifiedPipelineId(link));
-          const review = this.hooks.manualStatusReview(latestIssue,observations,actorId,captured.version);
+          const review = this.hooks.manualStatusReview(latestIssue,observations,reviewActorId,captured.version);
           if (review) result.statusReview = review;
         }
       }
@@ -2094,19 +2108,22 @@ export class GitlabIntegrationService{
       } catch (error) { if (!controller.signal.aborted) throw error; }
       finally { res.off('close', disconnected); }
     });
-    app.post('/api/issues/:id/gitlab-links/refresh',async(req,res)=>{
+    const issueGitlabRefresh = (exact: boolean) => async (req: Request, res: Response) => {
+      res.set('Cache-Control','no-store');
       if (Object.keys(req.query).length) fail('GitLab 활동 갱신 요청을 확인해 주세요.');
       const actorId=hooks.actor(req);
-      res.set('Cache-Control','no-store');
       const controller=new AbortController();
       const disconnected=()=>{if(!res.writableEnded)controller.abort();};
       res.once('close',disconnected);
       try {
-        const result=await this.refreshIssueLinks(String(req.params.id),req.body,controller.signal,actorId);
+        const result=await this.refreshIssueLinks(String(req.params.id),req.body,controller.signal,actorId,
+          exact ? String(req.params.linkId) : undefined);
         if(!controller.signal.aborted)res.json(result);
       } catch(error) { if(!controller.signal.aborted)throw error; }
       finally { res.off('close',disconnected); }
-    });
+    };
+    app.post('/api/issues/:id/gitlab-links/refresh',issueGitlabRefresh(false));
+    app.post('/api/issues/:id/gitlab-links/:linkId/refresh',issueGitlabRefresh(true));
     app.post('/api/issues/:id/gitlab-links',async(req,res)=>{
       hooks.actor(req);
       const issueId=String(req.params.id),controller=new AbortController();
