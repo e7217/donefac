@@ -206,7 +206,7 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     await checkAttachments(source, importedReceipt, archives);
   } finally { await source.close(); }
 
-  await runRehearsal(['verify', root], 2); // Reproducing legacy project and space permissions remains a review item.
+  await runRehearsal(['verify', root], 2);
   const attempts = (await readdir(root)).filter(name => name.startsWith('verification-'));
   assert.equal(attempts.length, 1);
   const attempt = join(root, attempts[0]);
@@ -217,7 +217,9 @@ test('mixed Jira and Confluence migration at team backlog scale survives a physi
     const { workspace, checks, receipts } = observation.evidence;
     assert.equal(workspace.counts.issues, issueCount);
     assert.equal(workspace.counts.documents, pageCount);
-    assert.deepEqual(Object.entries(checks).filter(([, count]) => count !== 0), [['receiptsWithWarnings', 1]]);
+    assert.deepEqual(Object.entries(checks).filter(([, count]) => count !== 0), [
+      ['receiptsWithWarnings', 1], ['confluencePackagesWithoutFullPageCoverage', 1],
+    ]);
     assert.equal(receipts.length, 1);
     const [receipt] = receipts;
     assert.equal(receipt.id, importedReceipt.id);

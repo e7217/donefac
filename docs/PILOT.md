@@ -286,7 +286,7 @@ npm run pilot:rehearsal -- verify /absolute/path/rehearsal
 
 영수증의 `primaryRecords`에서 준비 단계에 분석한 Jira 업무·Confluence 현재 페이지 수(`records.expected`)와 영수증에서 대조한 수(`records.observed`)를 종류별로 확인한다. 두 수가 다르거나 대상 연결에 오류가 있으면 종료 코드 `1`을 반환한다. 원본 보관만 된 업무·페이지가 있고 다른 검증 실패가 없으면 종료 코드 `2`로 검토를 남긴다. 물리 복원 후 연결 상태와 `dispositionSha256`도 비교한다. 이 항목에는 원본 키나 제목이 들어가지 않는다.
 
-연결한 Confluence 검토 파일이 있으면 검증 보고서에 두 파일의 해시와 사유별 집계를 기록한다. 패키지를 적용한 영수증에서는 검토 페이지를 제외, 문서 연결 기록, 원본 보관만, 영수증 원본에 없음으로 집계하고 복원본의 건수와 해시를 대조한다. 명시적 제외와 상위 페이지로 인해 함께 제외된 항목을 모두 포함한다. 집계 보고서에서 페이지 ID는 생략한다. 검토 파일 상태가 `needs-review`이거나 `confluencePackagesWithoutFullPageCoverage`가 1 이상이면 복원본이 일치해도 종료 코드 `2`로 남는다. 무결성 실패가 있으면 종료 코드 `1`을 반환한다.
+연결한 Confluence 검토 파일이 있으면 검증 보고서에 두 파일의 해시와 사유별 집계를 기록한다. 패키지를 적용한 영수증에서는 검토 페이지를 제외, 문서 연결 기록, 원본 보관만, 영수증 원본에 없음으로 집계하고 복원본의 건수와 해시를 대조한다. 명시적 제외와 상위 페이지로 인해 함께 제외된 항목을 모두 포함한다. 집계 보고서에서 페이지 ID는 생략한다. Confluence XML에서 검토 파일을 제공하지 않았거나 현재 일반 페이지 전부의 읽기 제한 여부를 확인한 파일이 없으면 `confluencePackagesWithoutFullPageCoverage`에 집계한다. 이 값이 1 이상이거나 검토 파일 상태가 `needs-review`이면 복원본이 일치해도 종료 코드 `2`로 남는다. 무결성 실패가 있으면 종료 코드 `1`을 반환한다.
 
 영수증에서 읽기 제한이 확인된 페이지의 문서 연결을 찾으면 같은 인스턴스의 다른 ZIP으로 적용한 경우에도 종료 코드 `1`을 반환한다. `liveRestrictedCounts`에서 검토 파일별 처리 건수를, `receiptsWithLiveRestrictedConfluenceDocuments`에서 해당 문서가 연결된 영수증 수를 확인한다.
 

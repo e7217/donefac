@@ -10,6 +10,7 @@ import {
   confluenceFindingsProof, CONFLUENCE_FINDING_CODES, CONFLUENCE_FINDINGS_FORMAT, CONFLUENCE_FINDINGS_MAX_BYTES,
   CONFLUENCE_FINDINGS_VERSION, parseConfluenceFindings, validConfluenceFindingsProof,
 } from '../../scripts/pilot-migration-confluence-findings.mjs';
+import { collectMigrationEvidence } from '../../scripts/pilot-migration-evidence.mjs';
 import { startRehearsalPilot } from '../../scripts/pilot-migration-runtime.mjs';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
@@ -77,6 +78,31 @@ test('records aggregate ZIP coverage in the v2 proof without private page or sou
   const coverage = { ...partialCoverage, archivePages: 5, permissionCheckedPages: 3, unassignedPages: 0 };
   const matched = parseConfluenceFindings(coveredReport({ status: 'matched', findings: [], coverage }));
   assert.equal(validConfluenceFindingsProof(confluenceFindingsProof(matched, reportHash, packageId)), true);
+});
+
+test('staged Confluence packages require full permission coverage even without a findings file', async () => {
+  const packages = [
+    { packageId, product: 'confluence', format: 'confluence-xml', instanceKey: 'wiki', sha256: zipHash,
+      size: 13, errors: 0, warnings: 0, counts: { page: 1 } },
+    { packageId: '00000000-0000-4000-8000-000000000003', product: 'jira', format: 'jira-backup-xml',
+      instanceKey: 'jira', sha256: 'c'.repeat(64), size: 13, errors: 0, warnings: 0, counts: { issue: 1 } },
+  ];
+  const workspace = Object.fromEntries(['projects', 'users', 'issues', 'documents', 'workflows', 'issueSchemas',
+    'dependencies', 'resourceLinks', 'planningItems'].map(section => [section, []]));
+  async function call(path) {
+    if (path === '/source-imports') return [];
+    assert.equal(path, '/workspace');
+    return workspace;
+  }
+  const legacy = parseConfluenceFindings(report({ status: 'matched', findings: [] }));
+  const full = parseConfluenceFindings(coveredReport({ status: 'matched', findings: [], coverage: {
+    archivePages: 1, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0,
+  } }));
+  const review = findings => [{ findings, proof: confluenceFindingsProof(findings, reportHash, packageId) }];
+  for (const [reviews, uncovered] of [[[], 1], [review(legacy), 1], [review(full), 0]]) {
+    const { checks } = await collectMigrationEvidence(call, packages, reviews);
+    assert.equal(checks.confluencePackagesWithoutFullPageCoverage, uncovered);
+  }
 });
 
 test('rejects missing or inconsistent coverage in sidecars and their proofs', () => {
@@ -318,6 +344,7 @@ test('profile-bound rehearsal still requires explicit exclusion of restrictions 
   assert.equal(verified.comparison.matches, true);
   assert.equal(verified.profile.sha256, staged.profile.sha256);
   for (const snapshot of [verified.source, verified.restore]) {
+    assert.equal(snapshot.evidence.checks.confluencePackagesWithoutFullPageCoverage, 1);
     assert.equal(snapshot.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
     const [pages] = snapshot.evidence.receipts[0].primaryRecords;
     assert.equal(pages.packageId, staged.packages[0].packageId);

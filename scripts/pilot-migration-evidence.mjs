@@ -311,7 +311,9 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
   const restrictedPages = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
-  const withoutFullCoverage = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
+  const withoutFullCoverage = new Set(packages
+    .filter(pkg => pkg.product === 'confluence' && pkg.format === 'confluence-xml')
+    .map(pkg => pkg.packageId));
   for (const { proof: { packageId, coverage } } of confluenceReviews) {
     if (coverage && coverage.archivePages === coverage.permissionCheckedPages) withoutFullCoverage.delete(packageId);
   }
