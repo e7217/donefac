@@ -517,7 +517,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 브라우저의 `POST /api/projects/:id/decision-follow-ups/meeting-draft` 또는 `POST /api/decision-follow-ups/meeting-draft`에 `requestId`, 직전 GET의 `revision`, 제목 `title`, `destinationProjectId`와 현재 조회 조건을 보낸다. `requestId`는 UUID v4, 제목은 공백을 정리한 뒤 1~200자다. `destinationProjectId`는 저장할 프로젝트 ID 또는 팀 공통 문서를 뜻하는 `null`이다. `status`, `assigneeId`, `q`는 GET과 같은 조건을 사용한다. `unscheduledOnly`는 선택 불리언이고 `offset`은 정수다. 팀 경로에서만 `projectId`로 보고서의 프로젝트를 지정한다. `linkIds`는 같은 페이지에서 고른 결정 근거 ID 1~20개의 배열이다. 생략하면 페이지 전체를 포함한다. 중복 또는 빈 배열은 `400`으로, 현재 페이지 밖의 ID는 `422`로 응답한다.
 
-초안은 선택한 결정 근거를 보고서 순서대로 기록한다. 각 항목에 현재 티켓 상태·담당자·기한·계획 시작일과 종료일을 표시하고, 원문 저장본과 대조한 발췌를 복사한다. 확인할 수 없는 발췌는 안내를 표시한다. 선택한 근거의 원래 티켓과 문서 참조, 일정 미정 조건을 포함한 같은 조건과 페이지로 돌아가는 보고서 링크를 보관한다. 신규 응답은 `201`과 `{document,duplicate:false}`다. 같은 작업자·입력의 재시도는 `200`과 저장한 문서를 반환한다. 선택 ID의 입력 순서는 재시도 결과에 영향을 주지 않는다. 요청한 보고서 유형, 조회 조건이나 페이지가 바뀌면 `409`의 `details.reason`은 `stale_report`다. 빈 페이지 또는 사라진 저장 위치에는 `422`를 반환하며, 저장 위치 오류의 `details.reason`은 `destination_unavailable`이다. 생성은 팀 브라우저 세션에서 사용한다.
+초안은 선택한 결정 근거를 보고서 순서대로 기록한다. 각 항목에 현재 티켓 상태·담당자·기한·계획 시작일과 종료일을 표시한다. 발췌가 확인되면 복사한 문장과 함께 해당 문서 ID·저장본 ID의 `documentRevisionInclude`를 저장한다. 블록을 열 때 저장본을 읽으며, 원본이 휴지통에 있는 동안도 해당 저장본을 열 수 있다. 발췌를 확인할 수 없는 행에는 안내를 표시한다. 선택한 근거의 원래 티켓과 문서 참조, 일정 미정 조건을 포함한 같은 조건과 페이지로 돌아가는 보고서 링크를 보관한다. 신규 응답은 `201`과 `{document,duplicate:false}`다. 같은 작업자·입력의 재시도는 `200`과 저장한 문서를 반환한다. 선택 ID의 입력 순서는 재시도 결과에 영향을 주지 않는다. 요청한 보고서 유형, 조회 조건이나 페이지가 바뀌면 `409`의 `details.reason`은 `stale_report`다. 빈 페이지 또는 사라진 저장 위치에는 `422`를 반환하며, 저장 위치 오류의 `details.reason`은 `destination_unavailable`이다. 생성은 팀 브라우저 세션에서 사용한다.
 
 ## 문장 댓글
 

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Response } from '@playwright/test';
 import { documentNodes } from '../../shared/document-references';
 import type {
-  DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpPage, DocPage, DocumentIssueLinkResult,
+  DecisionFollowUpDraftRequest, DecisionFollowUpDraftResult, DecisionFollowUpPage, DocPage, DocRevision, DocumentIssueLinkResult,
   Issue, RichContent, WorkspaceSnapshot,
 } from '../../shared/types';
 
@@ -12,7 +12,9 @@ async function json<T>(response: APIResponse | Response, status = 200): Promise<
 }
 
 const workspace = async (request: APIRequestContext) => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
-const paragraph = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+const paragraphs = (...values: string[]): RichContent => ({
+  type: 'doc', content: values.map(text => ({ type: 'paragraph', content: [{ type: 'text', text }] })),
+});
 
 async function removeFixture(request: APIRequestContext, resource: 'issues' | 'documents', id: string) {
   const deleted = await request.delete(`/api/${resource}/${id}`);
@@ -30,6 +32,7 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
   const query = `결정 초안 검증 ${token}`;
   const title = `팀 결정 회의 초안 ${token}`;
   const firstText = `편집 전 합의한 검증 절차 ${token}`;
+  const historicalContext = `당시 기록의 별도 참고 문단 ${token}`;
   const secondText = `추가 회의에서 확정한 담당 범위 ${token}`;
   const amendedText = `원본 문서의 현재 문장 ${token}`;
   const oldPageText = `초안에 넣지 않을 이전 페이지 근거 ${token}`;
@@ -39,6 +42,7 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
   const issued: Issue[] = [];
   const sourceDocuments: DocPage[] = [];
   const attempts: DecisionFollowUpDraftRequest[] = [];
+  const archivedSources = new Map<string, string>();
   let committed: DocPage | undefined;
 
   async function createIssue(name: string, dueDate: string) {
@@ -49,8 +53,10 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
     return result;
   }
 
-  async function createSource(name: string, text: string, projectId: string | null) {
-    const result = await json<DocPage>(await request.post('/api/documents', { data: { title: `${query} ${name}`, projectId, content: paragraph(text) } }), 201);
+  async function createSource(name: string, text: string, projectId: string | null, ...context: string[]) {
+    const result = await json<DocPage>(await request.post('/api/documents', {
+      data: { title: `${query} ${name}`, projectId, content: paragraphs(text, ...context) },
+    }), 201);
     sourceDocuments.push(result);
     return result;
   }
@@ -75,7 +81,7 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
   try {
     const [priorSource, firstSource, secondSource, excludedSource] = await Promise.all([
       createSource('이전 페이지 문서', oldPageText, reportProject.id),
-      createSource('최초 결정 저장본', firstText, destination.id),
+      createSource('최초 결정 저장본', firstText, destination.id, historicalContext),
       createSource('팀 공통 결정 원본', secondText, null),
       createSource('별도 안건 저장본', excludedText, reportProject.id),
     ]);
@@ -86,8 +92,8 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
     const sources = await Promise.all([cite(issue, firstSource, firstText), cite(issue, secondSource, secondText)]);
     const excluded = await createIssue('이번 회의에서 제외할 업무', '2030-03-20');
     const excludedLink = await cite(excluded, excludedSource, excludedText);
-    await json<DocPage>(await request.patch(`/api/documents/${firstSource.id}`, { data: {
-      expectedVersion: firstSource.version, title: `${query} 편집된 파일`, content: paragraph(amendedText),
+    const amended = await json<DocPage>(await request.patch(`/api/documents/${firstSource.id}`, { data: {
+      expectedVersion: firstSource.version, title: `${query} 편집된 파일`, content: paragraphs(amendedText),
     } }));
 
     const filters = { status: 'all', assigneeId: assignee.id, q: query, scope: 'team', decisionProject: reportProject.id };
@@ -207,21 +213,53 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
     expect(document.plainText).not.toContain(excludedText);
     expect(document.plainText).not.toContain(excluded.title);
     expect(document.plainText).not.toContain(newlyVisible.title);
+    expect(document.plainText).not.toContain(historicalContext);
     const nodes = [...documentNodes(document.content)];
     expect(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId)).toEqual([issue.id]);
     expect(new Set(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId)))
       .toEqual(new Set([firstSource.id, secondSource.id]));
+    const pins = sources.map(link => ({ documentId: link.documentId, revisionId: link.documentSource!.revisionId }));
+    expect(nodes.filter(node => node.type === 'documentRevisionInclude').map(node => ({
+      documentId: node.attrs?.documentId, revisionId: node.attrs?.revisionId,
+    }))).toEqual(expect.arrayContaining(pins));
+    expect(nodes.filter(node => node.type === 'documentRevisionInclude')).toHaveLength(pins.length);
     const links = (await workspace(request)).resourceLinks.filter(link => link.documentId === document.id);
     expect(links.map(link => [link.issueId, link.documentSource])).toEqual([[issue.id, undefined]]);
 
+    const pinPaths = pins.map(({ documentId, revisionId }) => `/api/documents/${documentId}/include-revisions/${revisionId}`);
+    const revisionFetches: string[] = [];
+    page.on('request', request => {
+      const { pathname } = new URL(request.url());
+      if (request.method() === 'GET' && pinPaths.includes(pathname)) revisionFetches.push(pathname);
+    });
     await dialog.getByRole('button', { name: '문서 열기', exact: true }).click();
     await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(title);
+    const meetingHash = new URL(page.url()).hash;
     const body = page.locator('[aria-label="문서 본문"]');
     await expect(body.getByRole('heading', { name: '회의 메모', exact: true })).toBeVisible();
     await expect(body.locator('blockquote')).toHaveCount(2);
     await expect(body.locator('blockquote', { hasText: firstText })).toBeVisible();
     await expect(body.locator('blockquote', { hasText: secondText })).toBeVisible();
     await expect(body.getByText(excludedText, { exact: true })).toHaveCount(0);
+    const firstPin = body.getByRole('region', { name: `고정 포함 문서 ${firstSource.title}`, exact: true });
+    const openPin = firstPin.getByRole('button', { name: '고정 버전 내용 보기', exact: true });
+    async function verifyHistoricalBody() {
+      const fetched = page.waitForResponse(response => new URL(response.url()).pathname === pinPaths[0] && response.request().method() === 'GET');
+      await openPin.click();
+      expect(await json<DocRevision>(await fetched)).toMatchObject({
+        id: pins[0].revisionId, documentId: firstSource.id, version: firstSource.version, title: firstSource.title,
+      });
+      await expect(firstPin.getByText(firstText, { exact: true })).toBeVisible();
+      await expect(firstPin.getByText(historicalContext, { exact: true })).toBeVisible();
+      await expect(firstPin.getByText(amendedText, { exact: true })).toHaveCount(0);
+    }
+    await expect(openPin).toHaveAttribute('aria-expanded', 'false');
+    await expect(body.getByRole('region', { name: `고정 포함 문서 ${secondSource.title}`, exact: true }))
+      .toBeVisible();
+    expect(revisionFetches).toEqual([]);
+    await verifyHistoricalBody();
+    expect(revisionFetches).toEqual([pinPaths[0]]);
+    await firstPin.getByRole('button', { name: '고정 버전 내용 접기', exact: true }).click();
     await body.getByRole('button', { name: new RegExp(`참조 업무 열기 ${issue.key}`) }).click();
     const detail = page.getByRole('dialog', { name: changed.title, exact: true });
     await expect(detail.getByRole('region', { name: '연결된 문서', exact: true }).getByRole('button', { name: title, exact: true })).toBeVisible();
@@ -262,9 +300,28 @@ test('360px 팀 결정 후속 업무에서 선택한 근거만 새 위치에 한
     await expect(dialog.getByText('선택한 근거 중 1건이 현재 페이지에서 빠졌습니다.', { exact: false })).toBeVisible();
     await expect(submit).toBeDisabled();
     await expect(selection.getByRole('button', { name: '전체 선택', exact: true })).toBeFocused();
+
+    page.once('dialog', confirmation => confirmation.accept());
+    await dialog.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    const { trashEntryId } = await json<{ trashEntryId: string }>(await request.delete(`/api/documents/${firstSource.id}`, {
+      data: { expectedVersion: amended.version },
+    }));
+    archivedSources.set(firstSource.id, trashEntryId);
+    const state = await workspace(request);
+    expect(state.documents.some(item => item.id === firstSource.id)).toBe(false);
+    expect(state.resourceLinks.some(link => link.id === sources[0].id)).toBe(false);
+    await page.goto(`/${meetingHash}`);
+    await expect(openPin).toHaveAttribute('aria-expanded', 'false');
+    await verifyHistoricalBody();
+    expect(revisionFetches).toEqual([pinPaths[0], pinPaths[0]]);
   } finally {
     for (const document of await meetingDocuments()) await removeFixture(request, 'documents', document.id);
-    for (const source of sourceDocuments) await removeFixture(request, 'documents', source.id);
+    for (const source of sourceDocuments) {
+      const trashEntryId = archivedSources.get(source.id);
+      if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+      else await removeFixture(request, 'documents', source.id);
+    }
     for (const item of issued) await removeFixture(request, 'issues', item.id);
   }
 });

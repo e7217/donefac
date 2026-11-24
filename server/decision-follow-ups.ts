@@ -343,17 +343,17 @@ function createDraft(request: Request, dependencies: Dependencies, teamReport: b
     const items = selected ? page.items.filter(item => selected.has(item.linkId)) : page.items;
     if (selected && items.length !== selected.size) throw new DecisionFollowUpError(422, '현재 보고서 페이지에서 결정 근거를 다시 선택해 주세요.');
     if (!items.length) throw new DecisionFollowUpError(422, '회의 초안에 담을 결정 후속 업무가 없습니다.');
-    const excerpts = new Map<string, string>();
+    const sources = new Map<string, DecisionFollowUpSource>();
     const revisions = new Map<string, DocRevision | null>();
     for (const item of items) {
       try {
-        excerpts.set(item.linkId, readDecisionSource(dependencies, request, item.issue.projectId, item.linkId, scope, revisions).source.text);
+        sources.set(item.linkId, readDecisionSource(dependencies, request, item.issue.projectId, item.linkId, scope, revisions));
       } catch (error) {
         if (!(error instanceof DecisionFollowUpError) || error.status !== 404) throw error;
       }
     }
     const routeProject = reportProject ?? destination ?? page.items[0].issue.projectId;
-    const { content, issueIds } = buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, excerpts,
+    const { content, issueIds } = buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, sources,
       href: reportHref(routeProject, reportProject, filters, teamReport),
     });
     return dependencies.createDocument(request, { documentId: randomUUID(), projectId: destination, title, actorId, createdAt: page.generatedAt }, content, issueIds);

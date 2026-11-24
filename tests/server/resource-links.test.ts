@@ -586,6 +586,15 @@ test('project decision meeting draft preserves reviewed original excerpts and at
   const nodes = [...documentNodes(document.content)];
   assert.deepEqual(new Set(nodes.filter(node => node.type === 'blockquote')
     .map(node => node.content?.[0]?.content?.[0]?.text)), new Set([firstText, secondText]));
+  assert.ok(firstLink.documentSource && secondLink.documentSource);
+  assert.deepEqual(new Set(nodes.filter(node => node.type === 'documentRevisionInclude').map(node => node.attrs)), new Set([
+    { documentId: source.id, revisionId: firstLink.documentSource.revisionId, label: source.title },
+    { documentId: second.id, revisionId: secondLink.documentSource.revisionId, label: second.title },
+  ]));
+  const frozen = await f.call<DocRevision>(`/documents/${source.id}/include-revisions/${firstLink.documentSource.revisionId}`);
+  assert.equal(frozen.title, source.title);
+  assert.equal(frozen.plainText, firstText);
+  await f.call(`/documents/${second.id}/include-revisions/${firstLink.documentSource.revisionId}`, 404);
   assert.deepEqual(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), [issue.id]);
   assert.deepEqual(new Set(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId)),
     new Set([source.id, second.id]));
@@ -650,6 +659,10 @@ test('team decision meeting draft captures the reviewed offset and preserves val
   assert.ok(document.plainText.includes('저장된 결정 근거를 확인할 수 없습니다.'));
   assert.ok(!document.plainText.includes(corrupted));
   assert.ok(!document.plainText.includes(broken));
+  assert.ok(secondLink.documentSource);
+  assert.deepEqual([...documentNodes(document.content)].filter(node => node.type === 'documentRevisionInclude').map(node => node.attrs), [
+    { documentId: secondDocument.id, revisionId: secondLink.documentSource.revisionId, label: secondDocument.title },
+  ]);
   const link = draftReportUrl(document);
   assert.match(link.pathname, /^\/[^/]+\/reports\/decision-follow-ups$/u);
   assert.deepEqual(Object.fromEntries(link.searchParams), { q: query, offset: '1', scope: 'team' });

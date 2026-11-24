@@ -1,4 +1,4 @@
-import type { DecisionFollowUpDraftRequest, DecisionFollowUpPage, RichContent } from '../shared/types.js';
+import type { DecisionFollowUpDraftRequest, DecisionFollowUpPage, DecisionFollowUpSource, RichContent } from '../shared/types.js';
 
 type DraftDetails = {
   page: DecisionFollowUpPage;
@@ -6,7 +6,7 @@ type DraftDetails = {
   filters: { status: NonNullable<DecisionFollowUpDraftRequest['status']>; assigneeId: string | null; searchTerm: string; unscheduledOnly?: boolean };
   projectNames: ReadonlyMap<string, string>;
   assigneeNames: ReadonlyMap<string, string>;
-  excerpts: ReadonlyMap<string, string>;
+  sources: ReadonlyMap<string, DecisionFollowUpSource>;
   href: string;
 };
 
@@ -17,7 +17,7 @@ const paragraph = (value: string): RichContent => ({ type: 'paragraph', content:
 const heading = (value: string, level: 2 | 3 = 2): RichContent => ({ type: 'heading', attrs: { level }, content: [text(value)] });
 const documentLabel = (title: string) => title || '제목 없는 문서';
 
-export function buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, excerpts, href }: DraftDetails): {
+export function buildDecisionFollowUpDraftContent({ page, items, filters, projectNames, assigneeNames, sources, href }: DraftDetails): {
   content: RichContent; issueIds: string[];
 } {
   const issues = new Map<string, string>();
@@ -44,15 +44,21 @@ export function buildDecisionFollowUpDraftContent({ page, items, filters, projec
     const deadlineLabel = issue.deadlineSource === 'endDate' ? '계획 종료일' : '목표 마감일';
     const space = document.projectId === null ? '팀 공통 문서' : projectLabel(document.projectId);
     const issueLabel = `${issue.key} · ${issue.title}`;
-    const excerpt = excerpts.get(linkId);
+    const verified = sources.get(linkId);
     content.push(
       heading(issueLabel, 3),
       paragraph(`업무 프로젝트 ${projectLabel(issue.projectId)} · 상태 ${issue.statusLabel} · 담당자 ${assigneeLabel(issue.assigneeId)} · ${deadlineLabel} ${issue.deadline ?? '미정'}`),
       paragraph(`계획 시작일 ${issue.startDate ?? '미정'} · 계획 종료일 ${issue.endDate ?? '미정'}`),
       paragraph(`원문 문서 ${documentLabel(document.title)} · ${space}`),
       paragraph(`고정 저장본 ${documentLabel(source.title)} · 버전 ${source.version} · ${source.createdAt}`),
-      excerpt ? { type: 'blockquote', content: [paragraph(excerpt)] } : paragraph('저장된 결정 근거를 확인할 수 없습니다.'),
     );
+    if (verified) {
+      content.push({ type: 'blockquote', content: [paragraph(verified.source.text)] }, {
+        type: 'documentRevisionInclude', attrs: {
+          documentId: verified.documentId, revisionId: verified.source.revisionId, label: documentLabel(source.title).slice(0, 300),
+        },
+      });
+    } else content.push(paragraph('저장된 결정 근거를 확인할 수 없습니다.'));
     issues.set(issue.id, issueLabel);
     documents.set(document.id, documentLabel(document.title));
   }

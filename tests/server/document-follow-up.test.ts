@@ -146,6 +146,11 @@ test('meeting draft selection contains only approved decisions from the exact re
   const { document } = created;
   const nodes = [...documentNodes(document.content)];
   assert.deepEqual(nodes.filter(node => node.type === 'blockquote').map(node => node.content?.[0]?.content?.[0]?.text), [first.excerpt, last.excerpt]);
+  const pins = nodes.filter(node => node.type === 'documentRevisionInclude').map(node => node.attrs);
+  assert.deepEqual(pins, [first, last].map(item => {
+    assert.ok(item.link.documentSource);
+    return { documentId: item.source.id, revisionId: item.link.documentSource.revisionId, label: item.source.title };
+  }));
   assert.deepEqual(nodes.filter(node => node.type === 'documentReference').map(node => node.attrs?.documentId), [first.source.id, last.source.id]);
   assert.deepEqual(nodes.filter(node => node.type === 'issueReference').map(node => node.attrs?.issueId), [first.issue.id, last.issue.id]);
   assert.ok(document.plainText.includes(changed.title));
@@ -167,6 +172,24 @@ test('meeting draft selection contains only approved decisions from the exact re
   const conflict = await call<{ details?: { reason?: string } }>(draftPath, 'POST', { ...input, linkIds: [first.link.id] }, 409);
   assert.equal(conflict.details?.reason, 'request_conflict');
   assert.deepEqual(await call<WorkspaceSnapshot>('/workspace'), after);
+
+  assert.ok(first.link.documentSource);
+  const fixedSourcePath = `/documents/${first.source.id}/include-revisions/${first.link.documentSource.revisionId}`;
+  const fixed = await call<DocRevision>(fixedSourcePath);
+  assert.equal(fixed.title, first.source.title);
+  assert.equal(fixed.plainText, first.excerpt);
+  await call(`/documents/${first.source.id}`, 'DELETE');
+  assert.deepEqual(await call<DocRevision>(fixedSourcePath), fixed);
+  assert.deepEqual(await call<DecisionFollowUpDraftResult>(draftPath, 'POST', input), { ...created, duplicate: true });
+
+  const backup = await call<Backup>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  await call('/import', 'POST', { data: backup });
+  assert.deepEqual(await call<DocRevision>(fixedSourcePath), fixed);
+  const restored = (await call<WorkspaceSnapshot>('/workspace')).documents.find(item => item.id === document.id);
+  assert.deepEqual(restored?.content, document.content);
+  const replaced = await call<{ details?: { reason?: string } }>(draftPath, 'POST', input, 409);
+  assert.equal(replaced.details?.reason, 'result_unavailable');
 });
 
 test('checklist work reads exact item evidence across metadata revisions and skips partial and archived links', async t => {
