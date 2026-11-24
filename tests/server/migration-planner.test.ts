@@ -1017,6 +1017,10 @@ test('absolute Confluence body hrefs cross configured sources only through an un
       confluenceBodyHref(`${peer}/display/QA/Peer+target`, '확인한 상대 서버의 문서 제목'),
       confluenceBodyHref(`${peer}/pages/viewpage.action?pageId=200`, '확인한 상대 서버의 문서 ID'),
       confluenceBodyHref(`${peer}/x/y`, '확인한 상대 서버의 짧은 주소'),
+      confluenceBodyHref(`${peer}/display/QA/Peer+target#Peertarget-ReleaseNotes`, '상대 서버의 제목 주소로 연 절'),
+      confluenceBodyHref(`${peer}/pages/viewpage.action?pageId=200#ReleaseNotes`, '상대 서버의 페이지 ID로 연 절'),
+      confluenceBodyHref(`${peer}/x/y#ReleaseNotes`, '상대 서버의 짧은 주소로 연 절'),
+      confluenceBodyHref(`${peer}/pages/viewpage.action?pageId=200#Missing`, '상대 서버에 없는 절'),
       confluenceBodyHref('display/QA/Peer+target', '현재 서버에 없는 상대 경로'),
       confluenceBodyHref('/wiki/pages/viewpage.action?pageId=200', '현재 서버에 없는 상대 ID'),
       confluenceBodyHref(`${peer}/display/QA/Shared+title`, '원본 제목이 중복된 문서'),
@@ -1027,7 +1031,7 @@ test('absolute Confluence body hrefs cross configured sources only through an un
   ]);
   const peerSource = pkg('wiki-peer', 'confluence', [
     record('project', 'qa', { title: '상대 서버 공간', metadata: { spaceKey: 'QA' } }),
-    page('200', { title: 'Peer target', containerId: 'qa', authorId: null }),
+    page('200', { title: 'Peer target', containerId: 'qa', authorId: null, text: '<h2>Release Notes</h2>' }),
     page('201', { title: 'Shared title', containerId: 'qa', authorId: null }),
     page('202', { title: 'Shared title', containerId: 'qa', authorId: null }),
     page('203', { title: 'Excluded', containerId: 'qa', authorId: null }),
@@ -1048,10 +1052,19 @@ test('absolute Confluence body hrefs cross configured sources only through an un
   assert.equal(verified.preview.canApply, true, JSON.stringify(verified.preview.notices));
   const sourceContent = (plan: typeof verified) => plan.documents.find(document => document.title === '문서 100')!;
   const target = verified.documents.find(document => document.title === 'Peer target')!;
+  const sectionLabels = ['상대 서버의 제목 주소로 연 절', '상대 서버의 페이지 ID로 연 절', '상대 서버의 짧은 주소로 연 절'];
+  const inlineLink = (plan: typeof verified, label: string) => sourceContent(plan).content.content
+    ?.find(node => node.content?.some(child => child.text?.includes(label)))?.content
+    ?.flatMap(child => child.marks ?? []).find(mark => mark.type === 'link')?.attrs?.href;
   assert.deepEqual(contentReferences(sourceContent(verified).content).map(({ id, label }) => [id, label]), [
     [target.id, '확인한 상대 서버의 문서 제목'], [target.id, '확인한 상대 서버의 문서 ID'],
     [target.id, '확인한 상대 서버의 짧은 주소'],
   ]);
+  const section = target.content.content?.[0].attrs?.sectionId;
+  assert.equal(typeof section, 'string');
+  for (const label of sectionLabels) assert.equal(inlineLink(verified, label), documentSectionHash(target.id, section as string), label);
+  assert.equal(inlineLink(verified, '상대 서버에 없는 절'), undefined);
+  assert.match(sourceContent(verified).plainText, /상대 서버에 없는 절/u);
   for (const label of ['현재 서버에 없는 상대 경로', '현재 서버에 없는 상대 ID', '원본 제목이 중복된 문서', '제외한 원본 문서', '제한된 원본 문서', '제한된 원본 문서의 짧은 주소']) {
     assert.ok(sourceContent(verified).plainText.includes(label));
   }
@@ -1059,10 +1072,12 @@ test('absolute Confluence body hrefs cross configured sources only through an un
 
   const otherInstance = pkg('wiki-peer-other', 'confluence', [
     record('project', 'qa-other', { title: '같은 주소의 다른 인스턴스', metadata: { spaceKey: 'QA' } }),
-    page('200', { title: 'Peer target', containerId: 'qa-other', authorId: null }),
+    page('200', { title: 'Peer target', containerId: 'qa-other', authorId: null, text: '<h2>Release Notes</h2>' }),
   ]);
   const ambiguous = configured([peerSource, otherInstance], [...exclusions, 'wiki-peer/page:204']);
   assert.deepEqual(contentReferences(sourceContent(ambiguous).content), []);
+  for (const label of sectionLabels.slice(0, 2)) assert.equal(inlineLink(ambiguous, label), undefined, label);
+  assert.equal(inlineLink(ambiguous, sectionLabels[2]), `${peer}/x/y#ReleaseNotes`);
   assert.ok(notices(ambiguous).has('UNRESOLVED_REFERENCE'));
 });
 
@@ -1747,6 +1762,106 @@ test('Jira ADF anchors resolve exact original mounts and preserve unrelated, amb
   for (const [label, url] of Object.entries(bodyUrls).slice(2)) assert.ok(description.includes(`[${label}](${url})`));
   const ambiguous = verify(root).find(value => value.title === source.title)?.description;
   assert.ok(ambiguous?.includes(`[원래 업무](${bodyUrls['원래 업무']})`));
+});
+
+test('Jira descriptions link to proven Confluence pages and sections at exact configured mounts', () => {
+  const jiraPackage = jira();
+  const mount = 'https://wiki.example.test/tools/wiki';
+  const nestedMount = `${mount}/engineering`;
+  const numeric = (id: number) => `pages/viewpage.action?pageId=${id}`;
+  const pageUrl = `${mount}/${numeric(200)}`;
+  const nestedUrl = `${nestedMount}/${numeric(200)}`;
+  const nestedSectionUrl = `${nestedMount}/display/TEAM/Engineering+handbook#Engineeringhandbook-RollbackSteps`;
+  const originalUrls = {
+    '다른 서비스 경로': `${mount}-other/${numeric(200)}`,
+    '등록하지 않은 위키': `https://unconfirmed.example.test/wiki/${numeric(208)}`,
+    '패키지에 없는 페이지': `${mount}/${numeric(209)}`,
+    '제외한 페이지': `${mount}/${numeric(201)}`,
+    '접근 제한 페이지': `${mount}/${numeric(202)}`,
+    '확인할 수 없는 절': `${mount}/${numeric(200)}#Unknown`,
+    '특정 댓글': `${pageUrl}&focusedCommentId=55#comment-55`,
+    '이전 버전': `${pageUrl}&version=4`,
+  };
+  const adfIssue = jiraPackage.dataset.records.find(row => row.id === 'issue:1')!;
+  const wikiIssue = jiraPackage.dataset.records.find(row => row.id === 'issue:2')!;
+  const adfLink = (text: string, href: string) => ({ type: 'text', text, marks: [{ type: 'link', attrs: { href } }] });
+  const adfParagraph = (...content: object[]) => ({ type: 'paragraph', content });
+  adfIssue.textFormat = 'adf';
+  adfIssue.text = JSON.stringify({ type: 'doc', version: 1, content: [
+    adfParagraph(adfLink('기본 위키로 연 페이지', pageUrl)),
+    adfParagraph(adfLink('중첩 위키로 연 절', nestedSectionUrl)),
+    adfParagraph({ type: 'inlineCard', attrs: { url: nestedUrl } }),
+    ...Object.entries(originalUrls).map(([label, url]) => adfParagraph(adfLink(label, url))),
+    adfParagraph(adfLink('ADF 상위 경로', `${mount}/unrelated/../${numeric(200)}`)),
+  ] });
+  wikiIssue.textFormat = 'jira-wiki';
+  wikiIssue.text = `[위키 마크업 페이지|${nestedUrl}]\n\n[위키 마크업 절|${nestedSectionUrl}]\n\n` +
+    `[위키 마크업 상위 경로|${mount}/unrelated/%2e%2e/${numeric(200)}]`;
+  const rendered = issue('3', { title: 'Jira rendered description', textFormat: 'plain' });
+  rendered.metadata.descriptionFormat = 'search-rendered-html';
+  rendered.text = confluenceBodyHref(pageUrl, 'HTML 페이지') + confluenceBodyHref(nestedSectionUrl, 'HTML 절') +
+    confluenceBodyHref(originalUrls['이전 버전'], 'HTML 이전 버전') +
+    confluenceBodyHref(`${nestedMount}/unrelated/%2E%2E/${numeric(200)}`, 'HTML 상위 경로');
+  jiraPackage.dataset.records.push(rendered);
+  const wikiPackage = pkg('root-wiki', 'confluence', [
+    record('project', 's', { title: 'Release space', metadata: { spaceKey: 'TEAM' } }),
+    page('200', { title: 'Release handbook', authorId: null, text: '<h2>Deploy Checklist</h2>' }),
+    page('201', { title: 'Excluded handbook', authorId: null }),
+    page('202', { title: 'Restricted handbook', authorId: null, metadata: { version: '3', restricted: true } }),
+  ]);
+  const nestedPackage = pkg('nested-wiki', 'confluence', [
+    record('project', 's', { title: 'Engineering space', metadata: { spaceKey: 'TEAM' } }),
+    page('200', { title: 'Engineering handbook', authorId: null, text: '<h2>Rollback Steps</h2>' }),
+  ]);
+  const unconfirmed = pkg('unconfirmed-wiki', 'confluence', [
+    record('project', 's', { title: 'Unconfirmed space', metadata: { spaceKey: 'TEAM' } }),
+    page('208', { title: 'Unconfirmed handbook', authorId: null }),
+  ]);
+  const packages = [jiraPackage, wikiPackage, nestedPackage, unconfirmed];
+  const original = structuredClone(packages);
+  const request = input(packages);
+  request.configuration.sourceBaseUrls = { jira: 'https://jira.example.test/jira', 'root-wiki': mount, 'nested-wiki': nestedMount };
+  request.configuration.excludedRecords = ['root-wiki/page:201'];
+  const blocked = buildMigrationPlan(request);
+  assert.equal(blocked.preview.canApply, false);
+  assert.ok(notices(blocked).has('RESTRICTED_CONTENT'));
+
+  request.configuration.excludedRecords.push('root-wiki/page:202');
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  const release = plan.documents.find(document => document.title === 'Release handbook')!;
+  const engineering = plan.documents.find(document => document.title === 'Engineering handbook')!;
+  const section = engineering.content.content?.[0].attrs?.sectionId;
+  assert.equal(typeof section, 'string');
+  const releaseHref = `/#/all/documents/${release.id}`;
+  const engineeringHref = `/#/all/documents/${engineering.id}`;
+  const sectionHref = `/${documentSectionHash(engineering.id, section as string)}`;
+  const description = (result: typeof plan, row: LegacyRecord) => result.issues.find(issue => issue.title === row.title)!.description;
+  assert.ok(description(plan, adfIssue).includes(`[기본 위키로 연 페이지](${releaseHref})`));
+  assert.ok(description(plan, adfIssue).includes(`[중첩 위키로 연 절](${sectionHref})`));
+  assert.ok(description(plan, adfIssue).includes(`](${engineeringHref})`), 'ADF card opens the nested instance page');
+  assert.ok(description(plan, wikiIssue).includes(`[위키 마크업 페이지](${engineeringHref})`));
+  assert.ok(description(plan, wikiIssue).includes(`[위키 마크업 절](${sectionHref})`));
+  assert.ok(description(plan, rendered).includes(`[HTML 페이지](${releaseHref})`));
+  assert.ok(description(plan, rendered).includes(`[HTML 절](${sectionHref})`));
+  assert.ok(description(plan, rendered).includes(`[HTML 이전 버전](${originalUrls['이전 버전']})`));
+  for (const [label, url] of Object.entries(originalUrls)) assert.ok(description(plan, adfIssue).includes(`[${label}](${url})`), label);
+
+  for (const [row, label] of [[adfIssue, 'ADF 상위 경로'], [wikiIssue, '위키 마크업 상위 경로'], [rendered, 'HTML 상위 경로']] as const) {
+    const line = description(plan, row).split('\n').find(line => line.includes(label));
+    assert.ok(line, label);
+    assert.ok(!line.includes('/#/all/documents/'), label);
+    assert.equal(plan.sourceRecords.find(archive => archive.record.id === row.id)?.record.text, row.text);
+  }
+  assert.deepEqual(packages, original);
+  for (const sourceId of ['201', '202']) {
+    assert.equal(plan.sourceRecords.find(archive => archive.record.id === `page:${sourceId}`)?.targetId, null);
+  }
+
+  request.configuration.sourceBaseUrls['nested-wiki'] = mount;
+  const ambiguous = buildMigrationPlan(request);
+  assert.equal(ambiguous.preview.canApply, true, JSON.stringify(ambiguous.preview.notices));
+  assert.ok(description(ambiguous, adfIssue).includes(`[기본 위키로 연 페이지](${pageUrl})`));
 });
 
 test('Jira ADF links can open a verified retained issue outside the new export', () => {

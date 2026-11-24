@@ -44,6 +44,7 @@ export interface MigrationContentContext {
   legacyAnnotations?: boolean;
   preserveCommentWebLinks?: boolean;
   keepUnresolvedIssueUrls?: boolean;
+  resolvePageHref?: (href: string) => string | undefined;
   legacySectionBaseline?: boolean;
   legacyDocumentToc?: boolean;
   legacyDocumentHeadingLevels?: boolean;
@@ -373,6 +374,13 @@ class Converter {
     try { const parsed = new URL(url); return ['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol) && !parsed.username && !parsed.password ? url : null; } catch { return null; }
   }
   reference(input: MigrationReferenceInput, include = false, displayLabel = ''): RichContent[] {
+    if (input.kind === 'page' && input.url && this.context.resolvePageHref) {
+      const destination = this.context.resolvePageHref(input.url);
+      if (destination || /^https?:\/\//iu.test(input.url)) {
+        const title = destination && !displayLabel ? this.resolve(input)?.label : undefined;
+        return this.link(text(displayLabel || title || input.url), input.url);
+      }
+    }
     const found = this.resolve(input), label = displayLabel || found?.label || (input.spaceKey && input.title ? `${input.spaceKey}:${input.title}` : input.title) || input.sourceId || input.url || '원본 참조';
     if (!found) { const target = input.sourceId || (input.spaceKey && input.title ? `${input.spaceKey}:${input.title}` : input.title) || input.url; this.warn('UNRESOLVED_REFERENCE', '이관 대상이 없는 문서·업무 참조를 읽을 수 있는 텍스트로 보존했습니다.'); return text(`[${include ? '문서 포함' : input.kind === 'issue' ? '업무' : '문서'} 참조: ${label}${target && target !== label ? ` (${target})` : ''}]`); }
     if (label.length > 300) this.warn('REFERENCE_LABEL_NORMALIZED', '참조 표시 이름이 300자를 넘어 원본 보관 자료와 함께 확인해야 합니다.');
@@ -652,6 +660,9 @@ class Converter {
         const reference = this.urlReference(url);
         const hash = url.indexOf('#');
         const page = reference?.kind === 'page' ? reference : undefined;
+        if (page && this.context.resolvePageHref && (/^https?:\/\//iu.test(url) || this.context.resolvePageHref(url))) {
+          return this.link(values.length ? values : text(url), url);
+        }
         if (this.context.sectionLinks && hash >= 0 && (page || hash === 0 && !url.startsWith('#/'))) {
           const encoded = url.slice(hash + 1);
           let fragment = encoded;

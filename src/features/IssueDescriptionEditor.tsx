@@ -3,6 +3,7 @@
 import { useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Bold, Code2, Heading2, Link2, List, ListChecks } from 'lucide-react';
 import { lexer, type MarkedToken, type Token } from 'marked';
+import { parseDocumentHash } from '../../shared/document-sections';
 import type { IssueDescriptionFormat } from '../../shared/types';
 import './issue-description-editor.css';
 
@@ -106,9 +107,10 @@ function renderTokens(tokens: readonly Token[], budget: PreviewBudget, depth = 0
         </table></div>;
       case 'link': {
         const href = insideLink ? undefined : safeLink(token.href);
+        const documentLink = href?.startsWith('/#/') && parseDocumentHash(href.slice(1));
         const label = token.autolink ? token.text
           : token.tokens.length ? renderTokens(token.tokens, budget, depth + 1, true) : displayText(token.text) || '링크';
-        return href ? <a key={index} href={href} title={token.title ?? undefined} target="_blank" rel="noopener noreferrer">{label}</a>
+        return href ? <a key={index} href={href} title={token.title ?? undefined} target={documentLink ? undefined : '_blank'} rel="noopener noreferrer">{label}</a>
           : <span key={index}>{label}</span>;
       }
       case 'image': {

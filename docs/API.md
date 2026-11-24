@@ -978,13 +978,15 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 
 `options.identities[]`의 `email`은 수동 매핑에서 참고할 원본 표시 값이다. 선택적으로 제공하는 `emailEvidence`에는 비교 가능한 `email`을 담고, 원본 계정과 프로필 사이의 연결을 확인한 경우 `accountId`도 담는다. 주소 근거가 불명확하면 `null`을 반환한다. 브라우저는 후보를 열거나 반영할 때 현재 팀원 목록을 조회한다. 사용자가 확인한 항목은 기존 `configuration.users`에 팀원 ID로 저장하며 이후 기존 미리보기·적용 절차를 사용한다.
 
-Confluence 본문의 `/display/SPACE/제목`, `/pages/viewpage.action?pageId=…`, `/spaces/SPACE/pages/…` 주소는 `sourceBaseUrls`의 서버와 설치 경로로 대조한다. 상대 주소는 원래 패키지의 설정을 사용한다. 다른 원본을 가리키는 절대 주소는 입력한 서버·설치 경로에서 하나의 원본 페이지로 확인될 때 연결한다. 원본 관계에 페이지 ID가 명시됐으면 URL의 대상과도 일치해야 한다. 추가 이관이나 변경분 반영은 현재 연결을 확인한 기존 페이지도 대상으로 사용할 수 있다. 대상을 확인할 수 없으면 원본 주소와 진단을 남긴다. 페이지의 진단은 `UNRESOLVED_REFERENCE`, 절의 진단은 `SECTION_LINK_UNRESOLVED`다. Server·Data Center의 짧은 주소 `/x/…`도 대상 페이지를 확인하면 문서 참조로 옮긴다. 대상 페이지를 확인할 수 없는 짧은 주소에는 일반 본문 링크 규칙을 적용한다.
+Confluence 본문의 `/display/SPACE/제목`, `/pages/viewpage.action?pageId=…`, `/spaces/SPACE/pages/…` 주소는 `sourceBaseUrls`의 서버와 설치 경로로 대조한다. 상대 주소는 원래 패키지의 설정을 사용한다. 다른 원본을 가리키는 절대 주소는 입력한 서버·설치 경로에서 하나의 원본 페이지로 확인될 때 연결한다. 주소가 절을 지정하면 해당 대상 페이지에서 유일하게 확인한 제목이나 앵커로 연결한다. 원본 관계에 페이지 ID가 명시됐으면 URL의 대상과도 일치해야 한다. 추가 이관이나 변경분 반영은 현재 연결을 확인한 기존 페이지도 대상으로 사용할 수 있다. 대상을 확인할 수 없으면 원본 주소와 진단을 남긴다. 페이지의 진단은 `UNRESOLVED_REFERENCE`, 절의 진단은 `SECTION_LINK_UNRESOLVED`다. Server·Data Center의 짧은 주소 `/x/…`도 대상 페이지를 확인하면 문서 참조로 옮긴다. 대상 페이지를 확인할 수 없는 짧은 주소에는 일반 본문 링크 규칙을 적용한다. [Confluence 페이지 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
 Confluence 본문의 `/download/attachments/{pageId}/{filename}` 다운로드 링크와 이미지는 설정된 원본 설치 경로, 첨부 소유 페이지와 파일명을 확인해 저장한 파일에 연결한다. `version`이 있으면 그 원본 버전에 대응하는 파일을 사용한다. 과거 저장본에서 원본 버전이 확인되지 않는 주소나 대상이 모호한 주소는 원본 링크로 남긴다. [Confluence 첨부 다운로드 형식](https://developer.atlassian.com/server/confluence/rest/v932/intro/#download-an-attachment)
 
 `viewpdf`, `viewdoc`, `viewxls`, `viewppt`의 지원되는 저장 형식에서 파일명·소유 페이지와 명시된 첨부 ID가 일치하면 본문에 그 파일의 다운로드 링크를 넣는다. 화면 표시 방식이 바뀌는 경우 `CONFLUENCE_FILE_PREVIEW_LINKED`를 기록한다. 대상을 확정할 수 없으면 `UNRESOLVED_CONFLUENCE_FILE_PREVIEW`, 지원 범위를 벗어난 저장 형식이면 `CONFLUENCE_FILE_PREVIEW_UNSUPPORTED`를 기록하고 원본 매크로를 코드 블록으로 보존한다. 과거 페이지 저장본은 원래 첨부 버전을 확인할 수 있을 때만 연결한다. 변환은 새 이관과 검토 후 적용하는 원본 변경분에 사용한다. [Confluence 파일 매크로 저장 형식](https://confluence.atlassian.com/spaces/CONF53/pages/411108832/Confluence%2BStorage%2BFormat%2Bfor%2BMacros)
 
 Jira 설명의 ADF 텍스트에 붙은 절대 `/browse/{issueKey}` 링크는 설정된 원본 서버·설치 경로와 대상을 확인한 경우 글자와 서식을 유지해 현재 티켓으로 연결한다. 원본 댓글이나 다른 세부 위치가 붙은 주소는 원래 위치를 연다. 본문 링크 변환은 새 이관이나 검토한 원본 변경분을 적용할 때 사용한다. [Atlassian Document Format](https://developer.atlassian.com/cloud/jira/platform/apis/document/structure/)
+
+Jira 설명의 ADF 링크·카드, 위키 링크, 검색 결과의 렌더링 HTML에 들어 있는 Confluence 절대 주소도 검사한다. 같은 이관에서 설정한 서버·설치 경로와 페이지를 대조하고, 절이 있으면 해당 페이지의 고유한 제목이나 앵커를 추가로 확인한다. 매핑이 없거나 모호한 주소, 확인할 수 없는 절, 원본 댓글·버전을 지정한 주소는 유효한 원본 링크로 유지한다.
 
 이관 매핑 파일의 형식은 `teamspace-migration-mapping`, 버전은 `1`, 최대 크기는 16MiB다. 파일의 `packages`에는 당시 분석 ID와 원본 제품·인스턴스 식별값·내보내기 형식·SHA-256을 저장한다. 복원 시 네 원본 속성이 일치하는 현재 분석 패키지를 찾는다. 당시 ID가 같은 원본을 가리키면 이를 사용하고, 새 ID로 다시 분석했으면 일치 항목이 하나여야 한다. 패키지·매핑·제외 항목의 ID는 현재 분석 결과로 바꾼다. `mappedUsers`에는 매핑된 팀원 ID와 공백 제거·소문자 변환한 이메일의 SHA-256을 기록한다. 현재 팀원과 유일하게 일치해야 매핑을 복원한다. 기존 프로젝트 추가 설정은 현재 확인한 대상과 연결이 일치해야 복원한다.
 

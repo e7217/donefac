@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { contentReferences } from '../../shared/document-nodes';
+import { documentSectionHash } from '../../shared/document-sections';
 import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
@@ -1282,6 +1283,144 @@ test('360px에서 이관한 Confluence 제목·페이지 ID·짧은 주소로 �
     if (readerIssue) await request.delete(`/api/issues/${readerIssue.id}`);
     for (const document of importedDocuments) await request.delete(`/api/documents/${document.id}`);
     await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+  }
+});
+
+test('360px Jira 설명의 확인된 Confluence 문서·절 링크를 열고 티켓으로 돌아온다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), date = '2020-01-02T00:00:00Z';
+  const jiraBase = 'https://jira.example.test/tracker';
+  const homeBase = 'https://wiki.example.test/team/wiki';
+  const peerBase = 'https://wiki.example.test/ops/wiki';
+  const homeTitle = `팀 안내 ${id}`, peerTitle = `배포 지침 ${id}`, issueTitle = `문서 절을 참조하는 Jira 업무 ${id}`;
+  const heading = '배포 확인', sectionBody = '확인한 환경에서 검증 결과를 기록합니다.';
+  const introduction = '<p>배포를 시작하기 전에 원래 절차와 변경 내역을 확인합니다.</p>'.repeat(24);
+  const homeHref = `${homeBase}/pages/viewpage.action?pageId=200`;
+  const peerHref = `${peerBase}/pages/viewpage.action?pageId=200`;
+  const peerSectionHref = `${peerHref}#${encodeURIComponent(heading.replaceAll(' ', ''))}`;
+  const missingSectionHref = `${peerHref}#missing-section`;
+  const commentHref = `${peerHref}&focusedCommentId=77#comment-77`;
+  const links = [
+    ['팀 문서 열기', homeHref],
+    ['배포 확인 절 열기', peerSectionHref],
+    ['확인되지 않은 절', missingSectionHref],
+    ['원본의 특정 댓글', commentHref],
+  ] as const;
+  const wiki = (spaceKey: string, title: string, body: string) => zip([{
+    path: 'entities.xml', bytes: Buffer.from(`<hibernate-generic>
+      <object class="Space"><id name="id">42</id><property name="key">${spaceKey}</property><property name="name">${spaceKey}</property></object>
+      <object class="Page"><id name="id">200</id><property name="title">${title}</property><property name="version">1</property>
+        <property name="space" class="Space"><id name="id">42</id></property><property name="creationDate">${date}</property>
+        <property name="lastModificationDate">${date}</property></object>
+      <object class="BodyContent"><id name="id">300</id><property name="body"><![CDATA[${body}]]></property>
+        <property name="content" class="Page"><id name="id">200</id></property><property name="bodyType">2</property></object>
+    </hibernate-generic>`),
+  }]);
+  const sourceIssue = { issues: [{
+    id: '100', key: `JS${id}-1`, self: `${jiraBase}/rest/api/2/issue/100`, fields: {
+      project: { id: '10', key: `JS${id}`, name: `원본 Jira ${id}` }, summary: issueTitle,
+      created: date, updated: date, status: { id: '1', name: 'Ready' }, issuetype: { id: '3', name: 'Task' },
+      description: { type: 'doc', version: 1, content: links.map(([text, href]) => ({
+        type: 'paragraph', content: [{ type: 'text', text, marks: [{ type: 'link', attrs: { href } }] }],
+      })) },
+    },
+  }] };
+  const staged: LegacyPackageSummary[] = [];
+  const createdPaths: string[] = [];
+  const originalRequests: string[] = [];
+  const isOriginal = (url: URL) => url.hostname === 'jira.example.test' || url.hostname === 'wiki.example.test';
+  await page.context().route(isOriginal, route => {
+    originalRequests.push(route.request().url());
+    return route.abort();
+  });
+  try {
+    staged.push(await upload(request, `jira-section-${id}.json`, Buffer.from(JSON.stringify(sourceIssue)), `jira-section-${id}`));
+    staged.push(await upload(request, `wiki-team-${id}.zip`, wiki(`WT${id}`, homeTitle,
+      `<p><a href="${peerSectionHref}">다른 설치의 배포 확인 절</a></p>`), `wiki-team-${id}`));
+    staged.push(await upload(request, `wiki-ops-${id}.zip`, wiki(`WO${id}`, peerTitle,
+      `${introduction}<h2>${heading}</h2><p>${sectionBody}</p>`), `wiki-ops-${id}`));
+    const query = new URLSearchParams(staged.map(pkg => ['packageId', pkg.id]));
+    const options = await request.get(`/api/migrations/options?${query}`);
+    expect(options.ok(), await options.text()).toBe(true);
+    const { defaultConfiguration } = await options.json() as MigrationOptions;
+    const configuration = {
+      ...defaultConfiguration,
+      sourceBaseUrls: { [staged[0].id]: jiraBase, [staged[1].id]: homeBase, [staged[2].id]: peerBase },
+    };
+    const proposed = await request.post('/api/migrations/preview', { data: { configuration } });
+    expect(proposed.status(), await proposed.text()).toBe(201);
+    const plan = await proposed.json() as MigrationPreview;
+    expect(plan.canApply, JSON.stringify(plan.notices)).toBe(true);
+    expect(plan.counts).toMatchObject({ issues: 1, documents: 2 });
+    const applied = await request.post(`/api/migrations/previews/${plan.id}/apply`, { data: {
+      expectedVersion: plan.version, acknowledgements: plan.requiredAcknowledgements,
+    } });
+    expect(applied.status(), await applied.text()).toBe(201);
+    const { import: receipt } = await applied.json() as MigrationApplyResult;
+    const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const issue = snapshot.issues.find(item => receipt.projectIds.includes(item.projectId) && item.title === issueTitle);
+    const home = snapshot.documents.find(item => item.title === homeTitle);
+    const peer = snapshot.documents.find(item => item.title === peerTitle);
+    if (issue) createdPaths.push(`/api/issues/${issue.id}`);
+    for (const document of [home, peer]) if (document) createdPaths.push(`/api/documents/${document.id}`);
+    if (!issue || !home?.projectId || !peer?.projectId) throw new Error('합성 Jira 업무와 이관 문서를 찾을 수 없습니다.');
+    const sectionId = peer.content.content?.find(node => node.type === 'heading')?.attrs?.sectionId;
+    if (typeof sectionId !== 'string') throw new Error('이관된 제목에 절 ID가 없습니다.');
+    expect(home.content.content?.[0]?.content?.[0]).toMatchObject({
+      text: '다른 설치의 배포 확인 절',
+      marks: [{ type: 'link', attrs: { href: documentSectionHash(peer.id, sectionId) } }],
+    });
+
+    const ticketHash = `#/${issue.projectId}/issues?issue=${issue.id}`;
+    await page.goto(`/${ticketHash}`);
+    const panel = page.getByRole('dialog', { name: issueTitle, exact: true });
+    const description = panel.getByRole('region', { name: '설명 미리보기', exact: true });
+    const link = (name: typeof links[number][0]) => description.getByRole('link', { name, exact: true });
+    await expect(link('확인되지 않은 절')).toHaveAttribute('href', missingSectionHref);
+    await expect(link('원본의 특정 댓글')).toHaveAttribute('href', commentHref);
+
+    const title = panel.getByRole('textbox', { name: '제목', exact: true });
+    await title.fill('저장하지 않은 Jira 티켓 제목');
+    const prompt = page.waitForEvent('dialog');
+    const stay = link('팀 문서 열기').click();
+    const confirmation = await prompt;
+    expect(confirmation.type()).toBe('confirm');
+    await confirmation.dismiss();
+    await stay;
+    await expect(page).toHaveURL(url => url.hash === ticketHash);
+    await expect(title).toHaveValue('저장하지 않은 Jira 티켓 제목');
+    await title.fill(issueTitle);
+
+    await link('팀 문서 열기').click();
+    await expect(page).toHaveURL(url => url.hash === `#/${home.projectId}/documents/${home.id}`);
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(homeTitle);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === ticketHash);
+    await expect(panel).toBeVisible();
+
+    await link('배포 확인 절 열기').press('Enter');
+    await expect(page).toHaveURL(url => url.hash === documentSectionHash(peer.id, sectionId, peer.projectId!));
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(peerTitle);
+    const section = page.locator('.docs-prose').getByRole('heading', { name: heading, exact: true });
+    await expect(section).toHaveAttribute('data-document-section-id', sectionId);
+    await expect(section).toBeFocused();
+    await expect(section).toBeInViewport();
+    await expect(page.locator('.docs-prose')).toContainText(sectionBody);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === ticketHash);
+    await expect(link('배포 확인 절 열기')).toBeVisible();
+    expect(originalRequests).toEqual([]);
+    expect(page.context().pages()).toEqual([page]);
+  } finally {
+    for (const path of createdPaths) {
+      const removed = await request.delete(path);
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId?: string };
+        if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+    for (const pkg of staged) await request.delete(`/api/legacy-import/packages/${pkg.id}?expectedVersion=${pkg.version}`);
+    await page.context().unroute(isOriginal);
   }
 });
 

@@ -21,6 +21,7 @@ export function jiraRenderedHtmlDescription(record: LegacyRecord): boolean {
 
 interface ProjectionOptions {
   resolveReference: MigrationContentContext['resolveReference'];
+  resolvePageHref?: (href: string) => string | undefined;
   ownsAttachment(id: string): boolean;
 }
 
@@ -53,7 +54,7 @@ function hasMarkdownContent(body: RichContent, href: (value: string) => string |
 export function projectJiraDescription(record: LegacyRecord, options: ProjectionOptions): JiraDescriptionProjection {
   const renderedHtml = jiraRenderedHtmlDescription(record);
   const input = renderedHtml ? { ...record, textFormat: 'confluence-storage' as const } : record;
-  const converted = convertLegacyContent(input, { keepUnresolvedIssueUrls: true, resolveReference(request) {
+  const converted = convertLegacyContent(input, { keepUnresolvedIssueUrls: true, resolvePageHref: options.resolvePageHref, resolveReference(request) {
     const target = options.resolveReference(request);
     return request.kind === 'attachment' && target && !options.ownsAttachment(target.id) ? null : target;
   } });
@@ -63,11 +64,16 @@ export function projectJiraDescription(record: LegacyRecord, options: Projection
 
   const issueHref = (id: string) => `/#/all/issues?issue=${encodeURIComponent(id)}`;
   const href = (value: string) => {
-    const safe = linkDestination(value, options.ownsAttachment);
-    if (!safe) return undefined;
+    if (attachmentLink.test(value)) return linkDestination(value, options.ownsAttachment);
     const address = jiraMigrationIssueAddress(value);
-    const target = address && options.resolveReference({ kind: 'issue', url: address.url });
-    return target?.id ? issueHref(target.id) : safe;
+    if (address) {
+      const target = options.resolveReference({ kind: 'issue', url: address.url });
+      if (target?.id) return issueHref(target.id);
+    } else {
+      const pageHref = options.resolvePageHref?.(value);
+      if (pageHref) return pageHref;
+    }
+    return linkDestination(value, options.ownsAttachment);
   };
   if (!hasMarkdownContent(content, href)) return { description: plainText, diagnostics, reliable };
   const markdown = renderTicketDescriptionMarkdown(content, { href, reference(kind, id) {

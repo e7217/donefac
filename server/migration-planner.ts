@@ -7,6 +7,7 @@ import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelKey, MAX_DOCUMENT_LABELS, normalizeDocumentLabel, normalizeDocumentLabels } from '../shared/document-labels.js';
+import { documentSectionHash } from '../shared/document-sections.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { isJiraIssueKey } from '../shared/atlassian-links.js';
 import { readDocumentSelection } from './document-content.js';
@@ -755,6 +756,7 @@ class Planner{
   private jiraDescription(entry: Entry, issueId: string, row = entry.row) {
     return projectJiraDescription(row, {
       resolveReference: request => this.resolve(entry, request),
+      resolvePageHref: href => this.jiraConfluenceHref(entry, href),
       ownsAttachment: id => {
         const attachment = this.attachmentVersionsById.get(id);
         return attachment?.resourceType === 'issue' && attachment.resourceId === issueId;
@@ -2948,9 +2950,8 @@ class Planner{
   }
   private confluenceSectionPage(entry: Entry, request: MigrationReferenceInput) {
     if (!request.url) return this.confluencePage(entry, request);
-    const base = this.originBases.get(entry.pkg.summary.id);
-    const address = base && confluenceMigrationPageAddress(request.url, base);
-    return address ? this.confluencePage(entry, address.identity, `${address.origin}${address.contextPath}`) : null;
+    const target = this.confluenceHrefTarget(entry, request.url);
+    return target && !target.address.hasExtraQuery ? target.page : null;
   }
   private confluenceAbsolutePage(address: ConfluenceMigrationPageAddress): ResolvedConfluencePage | null {
     const origin = `${address.origin}${address.contextPath}`;
@@ -2969,9 +2970,11 @@ class Planner{
     const identities = new Set(candidates.map(candidate => sourceKey(candidate, candidate.row.sourceId)));
     if (identities.size !== 1 || candidates.some(candidate => this.restricted(candidate))) return null;
     const imported = candidates.filter(candidate => !this.excluded.has(candidate.key) && this.bindings.get(candidate.key)?.type === 'document');
-    return imported.length === 1 ? { sourceId: imported[0].row.sourceId, reference: this.resolvedReference(imported[0]) } : null;
+    if (imported.length !== 1) return null;
+    const [entry] = imported;
+    return { sourceId: entry.row.sourceId, entry, reference: this.resolvedReference(entry) };
   }
-  private confluencePageHref(entry: Entry, url: string, declaredSourceId?: string): ResolvedReference | null {
+  private confluenceHrefTarget(entry: Entry, url: string) {
     const base = entry.pkg.dataset.source.product === 'confluence' ? this.originBases.get(entry.pkg.summary.id) : undefined;
     const local = base && confluenceMigrationPageAddress(url, base);
     const address = local || confluenceMigrationPageAddress(url);
@@ -2979,7 +2982,39 @@ class Planner{
     const page = local
       ? this.confluencePage(entry, address.identity, `${address.origin}${address.contextPath}`)
       : this.confluenceAbsolutePage(address);
-    return page && (!declaredSourceId || page.sourceId === declaredSourceId) ? page.reference : null;
+    return page ? { address, page } : null;
+  }
+  private confluencePageHref(entry: Entry, url: string, declaredSourceId?: string): ResolvedReference | null {
+    const target = this.confluenceHrefTarget(entry, url);
+    return target && (!declaredSourceId || target.page.sourceId === declaredSourceId) ? target.page.reference : null;
+  }
+  private jiraConfluenceHref(entry: Entry, href: string): string | undefined {
+    const target = this.confluenceHrefTarget(entry, href);
+    if (!target || target.address.hasExtraQuery) return;
+    const { page, address: { fragment } } = target;
+    const { id } = page.reference;
+    if (!fragment) return `/#/all/documents/${encodeURIComponent(id)}`;
+    const sectionId = this.confluencePageSectionId(page, fragment, true);
+    return sectionId ? `/${documentSectionHash(id, sectionId)}` : undefined;
+  }
+  private confluencePageSectionId(target: ResolvedConfluencePage, fragment: string, fromUrl: boolean): string | undefined {
+    const { id, label } = target.reference;
+    const known = this.boundPagesByDocument.get(id);
+    const aliases = fromUrl ? confluenceSectionAliases(fragment, target.entry?.row.title || known?.sourceTitle || label) : [fragment];
+    const lookup = (sections: ReadonlyMap<string, string>) => aliases.map(alias => sections.get(alias)).filter((value): value is string => Boolean(value));
+    let matches: string[];
+    if (target.entry) matches = lookup(this.confluenceSectionProjection(target.entry, id));
+    else if (known?.sectionIds) {
+      const present = new Set(known.sectionIds);
+      matches = aliases.flatMap(alias => [legacySectionId(alias, 'heading'), legacySectionId(alias, 'anchor')]).filter(sectionId => present.has(sectionId));
+      // A simultaneous refresh can remove sections. Only link to IDs present in both versions.
+      for (const incoming of this.confluenceRefreshSections.get(id) ?? []) {
+        const incomingMatches = new Set(lookup(this.confluenceSectionProjection(incoming, id)));
+        matches = matches.filter(sectionId => incomingMatches.has(sectionId));
+      }
+    } else return;
+    const unique = new Set(matches);
+    return unique.size === 1 ? [...unique][0] : undefined;
   }
   private confluenceSectionLinks(entry: Entry, documentId: string) {
     return {
@@ -2987,23 +3022,8 @@ class Planner{
       resolvePageSection: (request: MigrationReferenceInput, fragment: string, fromUrl: boolean) => {
         const target = this.confluenceSectionPage(entry, request);
         if (!target) return null;
-        const { id, label } = target.reference;
-        const known = this.boundPagesByDocument.get(id);
-        const aliases = fromUrl ? confluenceSectionAliases(fragment, target.entry?.row.title || known?.sourceTitle || label) : [fragment];
-        const lookup = (sections: ReadonlyMap<string, string>) => aliases.map(alias => sections.get(alias)).filter((value): value is string => Boolean(value));
-        let matches: string[];
-        if (target.entry) matches = lookup(this.confluenceSectionProjection(target.entry, id));
-        else if (known?.sectionIds) {
-          const present = new Set(known.sectionIds);
-          matches = aliases.flatMap(alias => [legacySectionId(alias, 'heading'), legacySectionId(alias, 'anchor')]).filter(sectionId => present.has(sectionId));
-          // A simultaneous refresh can remove sections. Only link to IDs present in both versions.
-          for (const incoming of this.confluenceRefreshSections.get(id) ?? []) {
-            const incomingMatches = new Set(lookup(this.confluenceSectionProjection(incoming, id)));
-            matches = matches.filter(sectionId => incomingMatches.has(sectionId));
-          }
-        } else return null;
-        const unique = new Set(matches);
-        return unique.size === 1 ? { documentId: id, sectionId: [...unique][0] } : null;
+        const sectionId = this.confluencePageSectionId(target, fragment, fromUrl);
+        return sectionId ? { documentId: target.reference.id, sectionId } : null;
       },
     };
   }

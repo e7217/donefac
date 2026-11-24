@@ -17,6 +17,8 @@ export interface MigrationOriginBase {
 
 export interface ConfluenceMigrationPageAddress extends MigrationOriginBase {
   identity: { sourceId?: string; title?: string; spaceKey?: string };
+  fragment?: string;
+  hasExtraQuery?: true;
 }
 
 interface ConfluenceAttachmentDownload {
@@ -87,7 +89,8 @@ export function confluenceMigrationPageAddress(value: string, base?: MigrationOr
   }
   if (!result || (pageIds.length && pageIds[0] !== result.identity.sourceId) ||
       (base && (result.origin !== base.origin || result.contextPath !== base.contextPath))) return null;
-  return result;
+  return { ...result, ...(fragment ? { fragment } : {}),
+    ...([...url.searchParams.keys()].some(key => key !== 'pageId') ? { hasExtraQuery: true } : {}) };
 }
 
 export function isConfluenceAttachmentDownloadUrl(value: string): boolean {
