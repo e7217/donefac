@@ -23,6 +23,7 @@ type TargetType = SourceReconciliationTarget['type'];
 type SourceIdentity = Pick<SourceReconciliationRow, 'sourceRecordId' | 'kind' | 'sourceId' | 'sourceKey' | 'title' | 'product' | 'sourceInstance'>;
 type MatchRow = SourceIdentity & {
   originalRecordId: string; packageSha256: string; excluded: number | null;
+  invalidSourceIdBinding: number; invalidJiraKeyBinding: number;
   targetType: TargetType | null; targetId: string | null;
   targetLabel: string | null; targetProjectId: string | null; linked: number;
   ownerType: SourceReconciliationOwner['type'] | null; ownerId: string | null;
@@ -107,9 +108,62 @@ const auditProjection = `
     END AS targetColumns,`;
 const packagePredicate = `AND r.product=? AND r.source_instance=?
     AND CASE WHEN json_valid(r.json) THEN json_extract(r.json,'$.packageSha256') END=?`;
+
+function intactPrimaryRecord(record: 'r' | 'proof') {
+  return `(CASE WHEN json_valid(${record}.json) THEN
+    json_type(${record}.json,'$.excluded') IS NOT 'true'
+    AND json_extract(${record}.json,'$.sourceImportId')=${record}.import_id
+    AND json_extract(${record}.json,'$.source.product')=${record}.product
+    AND json_extract(${record}.json,'$.source.instanceKey')=${record}.source_instance
+    AND json_extract(${record}.json,'$.record.kind')=${record}.kind
+    AND json_extract(${record}.json,'$.record.sourceId')=${record}.source_id
+    AND json_extract(${record}.json,'$.targetType')=${record}.target_type
+    AND json_extract(${record}.json,'$.targetId')=${record}.target_id
+    AND json_extract(${record}.json,'$.ownerType')=${record}.owner_type
+    AND json_extract(${record}.json,'$.ownerId')=${record}.owner_id
+  END)`;
+}
+
+// Attribute alias failures only where the receipt still proves its indexed primary record.
+const primaryBindingTarget = `r.target_id IS NOT NULL AND (
+  (r.product='jira' AND r.kind='issue' AND r.target_type='issue') OR
+  (r.product='confluence' AND r.kind='page' AND r.target_type='document')) AND ${intactPrimaryRecord('r')}`;
+
+function archivedJiraKey(record: 'r' | 'proof') {
+  return `CASE WHEN ${record}.product='jira' AND ${record}.kind='issue' AND json_valid(${record}.json) THEN
+    CASE WHEN json_type(${record}.json,'$.record.metadata.key')='text'
+      THEN nullif(json_extract(${record}.json,'$.record.metadata.key'),'') END END`;
+}
+
+// A later import can reuse an alias established by an earlier receipt. Check that the receipt named by
+// the index can prove that alias for the same target, including a Jira key used as a CSV source ID.
+function primaryBindingExists(alias: string) {
+  return `EXISTS (
+    SELECT 1 FROM source_bindings AS binding
+    WHERE binding.product=r.product AND binding.source_instance=r.source_instance AND binding.kind=r.kind
+      AND binding.source_alias=${alias} AND binding.target_type=r.target_type AND binding.target_id=r.target_id
+      AND ((binding.import_id=r.import_id AND r.owner_type=r.target_type AND r.owner_id=r.target_id) OR EXISTS (
+        SELECT 1 FROM source_records AS proof INDEXED BY source_records_target
+        WHERE proof.target_type=binding.target_type AND proof.target_id=binding.target_id
+          AND proof.import_id=binding.import_id AND proof.product=binding.product
+          AND proof.source_instance=binding.source_instance AND proof.kind=binding.kind
+          AND proof.owner_type=proof.target_type AND proof.owner_id=proof.target_id
+          AND ${intactPrimaryRecord('proof')}
+          AND (proof.source_id=binding.source_alias OR (${archivedJiraKey('proof')})=binding.source_alias)
+      ))
+  )`;
+}
+
+const jiraBindingKey = archivedJiraKey('r');
+const primaryBindingsProjection = `
+    CASE WHEN ${primaryBindingTarget} THEN NOT ${primaryBindingExists('r.source_id')} ELSE 0 END AS invalidSourceIdBinding,
+    CASE WHEN ${primaryBindingTarget} AND (${jiraBindingKey})<>r.source_id
+      THEN NOT ${primaryBindingExists(`(${jiraBindingKey})`)} ELSE 0 END AS invalidJiraKeyBinding,`;
+
 const rowsSql = (audit: boolean, scoped = false) => `
   SELECT r.id AS sourceRecordId, r.kind, r.source_id AS sourceId, r.product, r.source_instance AS sourceInstance,
     ${audit ? auditProjection : ''}
+    ${primaryBindingsProjection}
     json_extract(r.json,'$.record.id') AS originalRecordId, json_extract(r.json,'$.packageSha256') AS packageSha256,
     json_type(r.json,'$.excluded')='true' AS excluded,
     coalesce(json_extract(r.json,'$.record.title'),'') AS title,
@@ -182,6 +236,10 @@ function invalidPrimaryTarget(row: MatchRow, status: SourceReconciliationStatus)
   const targetType = kind === 'issue' ? 'issue' : 'document';
   return row.kind === kind && (row.targetType !== null || row.targetId !== null) &&
     (status === 'excluded' || row.targetType !== targetType || !row.targetId);
+}
+
+function invalidPrimaryBinding(row: MatchRow, status: SourceReconciliationStatus): boolean {
+  return status !== 'excluded' && (row.invalidSourceIdBinding === 1 || row.invalidJiraKeyBinding === 1);
 }
 
 function archiveProjection(archive: TrashArchive, audit: boolean) {
@@ -269,14 +327,15 @@ function reconciliation(dependencies: Dependencies, importId: string, query: Rec
   let total = 0;
   const counts = scanReceipt(dependencies, receipt, false, (row, status, target, stagingId) => {
     if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) return;
-    const invalid = Boolean(stagingId) && invalidPrimaryTarget(row, status);
-    if (query.finding && !invalid) return;
+    const invalidTarget = Boolean(stagingId) && invalidPrimaryTarget(row, status);
+    const invalidBinding = Boolean(stagingId) && invalidPrimaryBinding(row, status);
+    if (query.finding && !invalidTarget && !invalidBinding) return;
     if (query.q && ![row.sourceId, row.sourceKey, row.title, row.sourceInstance, target?.label, target?.owner?.label]
       .some(value => value && casefold(value).includes(query.q))) return;
     if (total++ < query.offset || rows.length >= query.limit) return;
     const { sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance } = row;
     rows.push({ sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance, status, target,
-      ...(invalid ? { invalidPrimaryTarget: true } : {}) });
+      ...(invalidTarget ? { invalidPrimaryTarget: true } : {}), ...(invalidBinding ? { invalidPrimaryBinding: true } : {}) });
   }, scopedPackage);
   return { importId, receiptVersion: receipt.version, counts, rows, total, offset: query.offset, limit: query.limit };
 }
@@ -490,9 +549,11 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
     const primary = stagingId ? primaryByPackage.get(stagingId) : undefined;
     if (primary && row.kind === primary.kind) {
       primary.counts[status]++;
-      if (invalidPrimaryTarget(row, status)) primary.invalidTargets++;
+      const invalidBinding = invalidPrimaryBinding(row, status);
+      if (invalidPrimaryTarget(row, status) || invalidBinding) primary.invalidTargets++;
       primary.hash.update(JSON.stringify([row.sourceRecordId, row.originalRecordId, status,
-        row.targetType, row.targetId, target === null ? row.targetProjectId : target.projectId])).update('\n');
+        row.targetType, row.targetId, target === null ? row.targetProjectId : target.projectId,
+        ...(invalidBinding ? [row.invalidSourceIdBinding, row.invalidJiraKeyBinding] : [])])).update('\n');
     }
     if (collect && row.kind === 'attachment') orderedEntries.push({ order: auditRowOrder, entry: auditEntry(row, status, archivedFile) });
     if (!target) return;

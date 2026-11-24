@@ -223,6 +223,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
         <ul className="migration-reconciliation-list" aria-label="이관 결과 대조 목록">
           {result.rows.map(row => {
             const selectedRecord = record?.area === 'list' && record.sourceRecordId === row.sourceRecordId ? record : null;
+            const linkLookupFailed = row.status === 'linked' && row.invalidPrimaryBinding;
             return <li className="migration-reconciliation-row" key={row.sourceRecordId}>
               <div className="migration-reconciliation-source">
                 <small>{sourceRecordKindLabels[row.kind]} · {row.product === 'jira' ? 'Jira' : 'Confluence'} / {row.sourceInstance}</small>
@@ -233,8 +234,11 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
                 }}>보존 원본 열기</button>
               </div>
               <div className="migration-reconciliation-target">
-                <span className={`migration-reconciliation-status is-${row.status}`}>{statusLabels[row.status]}</span>
+                <span className={`migration-reconciliation-status${linkLookupFailed ? '' : ` is-${row.status}`}`}>
+                  {linkLookupFailed ? '현재 대상 있음' : statusLabels[row.status]}
+                </span>
                 {row.invalidPrimaryTarget && <span className="migration-audit-status is-mismatch">대상 연결 오류</span>}
+                {row.invalidPrimaryBinding && <span className="migration-audit-status is-mismatch">원본 주소·키 연결 오류</span>}
                 <Target row={row} data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh} notify={notify} />
                 {row.kind === 'attachment' && row.target?.type === 'attachment' && <FileCheck base={base} row={row} />}
               </div>

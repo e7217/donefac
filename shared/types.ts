@@ -551,6 +551,7 @@ export interface SourceReconciliationRow {
   title: string; product: LegacySource['product']; sourceInstance: string;
   status: SourceReconciliationStatus; target: SourceReconciliationTarget | null;
   invalidPrimaryTarget?: true;
+  invalidPrimaryBinding?: true;
 }
 export interface SourceReconciliationPage {
   importId: string; receiptVersion: number; counts: Record<SourceReconciliationStatus, number>;

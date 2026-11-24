@@ -122,6 +122,20 @@ test('Jira follow-up archives moved source rows while applying new tickets in th
   assert.equal(retained.length, 3, JSON.stringify(retained.map(item => item.record.id)));
   assert.ok(retained.every(item => item.targetId === null && item.targetProjectId === null && item.ownerId === null));
 
+  assert.ok(earlier);
+  const originalListPath = `/source-imports/${earlier.sourceImportId}/reconciliation`;
+  const readOriginal = () => f.call<SourceReconciliationPage>(`${originalListPath}?kind=issue&q=OLD-1`);
+  const moved = await readOriginal();
+  assert.equal(moved.status, 200);
+  assert.deepEqual(moved.data.rows.map(row => [row.target?.id, row.target?.projectId, row.invalidPrimaryBinding]),
+    [[issue.id, destination.projectId, undefined]]);
+  const pointJiraKeyAtReceipt = f.db.prepare(`UPDATE source_bindings SET import_id=?
+    WHERE product='jira' AND source_instance=? AND kind='issue' AND source_alias='OLD-1'`);
+  assert.equal(pointJiraKeyAtReceipt.run(related.data.import.id, instance).changes, 1);
+  assert.deepEqual((await readOriginal()).data.rows.map(row => [row.target?.id, row.invalidPrimaryBinding]), [[issue.id, true]],
+    'a receipt that merely archives the same Jira key has no evidence for its live binding');
+  assert.equal(pointJiraKeyAtReceipt.run(earlier.sourceImportId, instance).changes, 1);
+
   const unrelatedId = await applyFirst('another-project.json', [row(200, 'OTHER-1', anotherProject, '별도 Jira 업무')], 'UNRELATED');
   const conflict = await upload('incorrect-other.json', [row(100, 'OTHER-2', anotherProject, '다른 원본 프로젝트가 주장한 기존 ID')]);
   const blocked = await f.preview(await appendConfig(conflict, unrelatedId));
@@ -182,6 +196,17 @@ test('Jira rich descriptions survive initial HTTP apply and an accepted plain so
   assert.equal(backup.status, 200);
   assert.deepEqual(backup.data.sourceRecords.filter(row => row.targetId === imported.id).map(row => row.record.text).sort(),
     [JSON.stringify(rich), plain].sort());
+  const firstReceipt = applied.data.import;
+  const secondReceipt = refreshed.data.import;
+  const bindingReceipts = f.db.prepare(`SELECT DISTINCT import_id FROM source_bindings WHERE product='jira' AND source_instance=?
+    AND kind='issue' AND target_id=?`).all(instance, imported.id);
+  assert.deepEqual(bindingReceipts.map(row => row.import_id), [firstReceipt.id]);
+  for (const receipt of [firstReceipt, secondReceipt]) {
+    const report = await f.call<SourceReconciliationAudit>(`/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`);
+    assert.equal(report.status, 200, JSON.stringify(report.data));
+    assert.deepEqual(report.data.primaryRecords.map(row => [row.counts.linked, row.invalidTargets]), [[1, 0]],
+      'both receipts prove the same active target even though the alias points at the first receipt');
+  }
 });
 
 test('Jira HTTP migration projects only an explicit mapped reporter and updates it without overwriting local edits', async t => {
@@ -3619,6 +3644,8 @@ test('whole-receipt audit detects changed migrated target data with identical co
   changeIssueBinding(otherIssue);
   const rebound = await audit();
   assert.deepEqual(primary(rebound, jira).counts, originalIssueDisposition.counts);
+  assert.equal(rebound.integrity.status, 'mismatch');
+  assert.equal(rebound.integrity.columnMismatches, clean.integrity.columnMismatches + 1);
   assert.equal(primary(rebound, jira).invalidTargets, 0);
   assert.notEqual(primary(rebound, jira).dispositionSha256, originalIssueDisposition.dispositionSha256);
   assert.deepEqual(primary(rebound, wiki), primary(clean, wiki));

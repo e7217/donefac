@@ -395,7 +395,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.equal(pendingEvidence.restore, null);
 
   const review = launch(['review', root], env);
-  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding, importedDocument;
+  let importedIssueId, importedStatusHistory, importedReceipt, importedRelated, importedFinding, importedDocument, otherDocumentId;
   try {
     const base = await waitForReview(review);
     assert.equal((await fetch(base, { signal: AbortSignal.timeout(10_000) })).status, 200);
@@ -457,6 +457,14 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     const related = imported.issues.find(value => value.title === privateRelatedTitle);
     const [document] = imported.documents;
     assert.ok(issue && related && document);
+    assert.deepEqual(imported.issueAliases[issue.id], [{ key: 'SRC-1', source: 'jira' }]);
+    const resolve = url => json(base, `/atlassian-links/resolve?${new URLSearchParams({ url })}`);
+    assert.deepEqual(await resolve('https://jira.example.invalid/browse/SRC-1'), { targets: [{ targetType: 'issue', targetId: issue.id }] });
+    assert.deepEqual(await resolve('https://confluence.example.invalid/display/WIKI/Original%20page'),
+      { targets: [{ targetType: 'document', targetId: document.id }] });
+    const otherDocument = await json(base, '/documents', { method: 'POST', actor, status: 201,
+      body: { projectId: document.projectId, title: 'Independent alias verification fixture' } });
+    otherDocumentId = otherDocument.id;
     assert.deepEqual(document.content.content.map(block => block.type), ['paragraph', 'taskList']);
     assert.equal(document.content.content[1].content[0].attrs.checked, true);
     const expectedDocumentText = `${privateBody}\n@${confluenceAuthor} ${privateChecklistItem} ${checklistDue}`;
@@ -585,7 +593,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
   assert.deepEqual(report.restore.evidence.receipts[0].jiraStatusHistory, jiraStatusHistory);
   assert.equal(report.source.evidence.checks.receiptsWithJiraHistoryReview, 1);
   assert.equal(report.source.evidence.workspace.counts.issues, 2);
-  assert.equal(report.source.evidence.workspace.counts.documents, 1);
+  assert.equal(report.source.evidence.workspace.counts.documents, 2);
   assert.equal(report.source.evidence.workspace.counts.planningItems, 2);
   assert.equal(report.comparison.status, 'review');
   assert.equal(report.comparison.matches, true);
@@ -703,6 +711,58 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     await legacyPilot.close();
   }
 
+  // Break the locator of each primary record while keeping both live targets and the archived sources intact.
+  const issueAlias = ['jira', `${originalFrom}-jira`, 'issue', 'SRC-1'];
+  const pageAlias = ['confluence', `${originalFrom}-confluence`, 'page', '200'];
+  const aliasCondition = 'product=? AND source_instance=? AND kind=? AND source_alias=?';
+  function changeAliases(action) {
+    const db = new DatabaseSync(join(workspacePath, 'teamspace.sqlite'));
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      action(db);
+      db.exec('COMMIT');
+    } catch (error) {
+      if (db.isTransaction) db.exec('ROLLBACK');
+      throw error;
+    } finally { db.close(); }
+  }
+  changeAliases(db => {
+    const binding = db.prepare(`SELECT target_type, target_id, import_id FROM source_bindings WHERE ${aliasCondition}`);
+    assert.deepEqual({ ...binding.get(...issueAlias) }, { target_type: 'issue', target_id: importedIssueId, import_id: importedReceipt.id });
+    assert.deepEqual({ ...binding.get(...pageAlias) }, { target_type: 'document', target_id: importedDocument.id, import_id: importedReceipt.id });
+    assert.equal(db.prepare(`DELETE FROM source_bindings WHERE ${aliasCondition}`).run(...issueAlias).changes, 1);
+    assert.equal(db.prepare(`UPDATE source_bindings SET target_id=? WHERE ${aliasCondition}`).run(otherDocumentId, ...pageAlias).changes, 1);
+  });
+  try {
+    const invalid = await launch(['verify', root], env).exited;
+    assert.equal(invalid.code, 1, invalid.stdout + invalid.stderr);
+    const { attempt: failedAttempt, report: failedAliases } = await readReport(root, invalid);
+    assert.equal(failedAliases.status, 'failed');
+    assert.deepEqual(failedAliases.source.bundles, report.source.bundles);
+    assert.deepEqual(failedAliases.source.evidence.workspace, report.source.evidence.workspace);
+    assert.equal(failedAliases.source.evidence.checks.receiptsWithInvalidPrimaryTargets, 1);
+    assert.equal(failedAliases.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 0);
+    const [failedReceipt] = failedAliases.source.evidence.receipts;
+    assert.equal(failedReceipt.id, importedReceipt.id);
+    assert.deepEqual(failedReceipt.integrity, receipt.integrity);
+    assert.equal(failedReceipt.primaryRecords.length, coverage.size);
+    for (const primary of failedReceipt.primaryRecords) {
+      assert.equal(primary.packageId, coverage.get(primary.kind).packageId);
+      assert.deepEqual(primary.records, coverage.get(primary.kind).records);
+      assert.equal(primary.invalidTargets, 1);
+    }
+    assert.equal(failedAliases.restore, null);
+    assert.equal(failedAliases.comparison, null);
+    assert.equal(existsSync(join(failedAttempt, 'backup')), false);
+    assert.equal(existsSync(join(failedAttempt, 'restored')), false);
+  } finally {
+    changeAliases(db => {
+      db.prepare(`INSERT INTO source_bindings(product, source_instance, kind, source_alias, target_type, target_id, import_id)
+        VALUES(?,?,?,?,?,?,?)`).run(...issueAlias, 'issue', importedIssueId, importedReceipt.id);
+      db.prepare(`UPDATE source_bindings SET target_id=? WHERE ${aliasCondition}`).run(importedDocument.id, ...pageAlias);
+    });
+  }
+
   // Keep the source bundle and receipt intact while changing the staged issue count.
   try {
     const wrongCoverage = structuredClone(staged);
@@ -714,6 +774,7 @@ test('migration rehearsal binds Confluence reviews to profiled exports and check
     assert.equal(coverageFailure.status, 'failed');
     assert.ok(coverageFailure.source.bundles.every(bundle => bundle.status === 'verified'));
     assert.equal(coverageFailure.source.evidence.checks.receiptsWithPrimaryRecordCountMismatches, 1);
+    assert.equal(coverageFailure.source.evidence.checks.receiptsWithInvalidPrimaryTargets, 0);
     assert.deepEqual(coverageFailure.source.evidence.receipts[0].primaryRecords.find(entry => entry.kind === 'issue').records,
       { expected: 3, observed: 2 });
     assert.equal(coverageFailure.restore, null);

@@ -1072,7 +1072,7 @@ Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있�
 
 `GET /api/source-imports/:id/notices/:index/source`의 `index`는 영수증의 `notices`에서 0으로 시작하는 위치다. `expectedVersion`에는 조회한 영수증 버전을 보낸다. 일치하는 기록 하나를 `SourceRecordArchive`로 반환한다. 영수증 버전이 달라졌으면 `409`, 개별 기록이 없거나 같은 영수증과 패키지에서 원본을 하나로 확인할 수 없으면 `404`를 반환한다.
 
-`packageId`로 이 영수증의 원본 패키지 `stagingId`를 지정하면 제품·인스턴스·원본 SHA-256이 모두 일치하는 원본을 조회한다. 다른 영수증의 패키지나 알 수 없는 ID에는 `404`를 반환한다. `counts`는 선택한 패키지 전체의 상태별 건수이고, `total`과 `rows`에는 나머지 조건을 함께 적용한다. 패키지와 `finding=invalid-primary-target`을 보내면 전체 이관 검증의 `invalidTargets`에 해당하는 티켓·페이지를 조회한다. 해당 행에는 `invalidPrimaryTarget: true`가 표시된다.
+`packageId`로 이 영수증의 원본 패키지 `stagingId`를 지정하면 제품·인스턴스·원본 SHA-256이 모두 일치하는 원본을 조회한다. 다른 영수증의 패키지나 알 수 없는 ID에는 `404`를 반환한다. `counts`는 선택한 패키지 전체의 상태별 건수이고, `total`과 `rows`에는 나머지 조건을 함께 적용한다. 패키지와 `finding=invalid-primary-target`을 보내면 전체 이관 검증의 `invalidTargets`에 해당하는 티켓·페이지를 조회한다. 보존 원본의 대상 정보 오류는 `invalidPrimaryTarget: true`, 원본 ID·Jira 키의 연결 인덱스 오류는 `invalidPrimaryBinding: true`로 표시한다.
 
 `linked`는 현재 대상, `trashed`는 휴지통에 해당 대상이 보관된 상태, `missing`은 저장한 연결에 해당하는 현재나 휴지통의 대상이 없는 상태다. `archive-only`는 직접 연결 없이 보존한 원본이다. 새 이관의 `excluded`에는 명시적으로 제외한 원본과 함께 제외된 하위 원본이 포함된다. 원본 사용자·속성 등의 매핑 자료와 직접 연결 ID가 없는 관계 자료는 원본 보관으로 표시한다.
 
@@ -1082,7 +1082,7 @@ Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있�
 
 `integrity`의 `records`와 `boundAttachments`는 보존 원본 수와 대상 첨부 버전 ID가 연결된 원본 수의 이관 당시 기준(`expected`)과 검사값(`observed`)이다. `packages`는 이름·수량·원본 집합 SHA-256을 패키지별로 대조한다. `verified`는 저장된 원본 기준과 일치, `mismatch`는 불일치, `counts-only`는 당시 수량만 비교 가능, `unavailable`은 당시 기준을 읽을 수 없는 상태다. `unmatchedRecords`와 `columnMismatches`는 출처를 확인할 수 없는 기록과 저장 식별 정보 불일치를 보여준다. 원본 무결성 `verified`와 현재 대상·파일 상태는 독립된 결과다.
 
-`primaryRecords`는 패키지마다 `packageId`, 원본 종류 `kind` (`issue` 또는 `page`), 연결 상태별 `counts`, `invalidTargets`, `dispositionSha256`을 반환한다. Jira 업무와 Confluence 현재 페이지의 원본 행을 각각 센다. 여러 원본 행이 같은 Teamspace 대상을 가리켜도 각 원본 행을 해당 패키지에서 센다. 대상 종류가 다르거나 종류·ID 중 하나만 저장됐거나, 제외한 원본에 연결이 남으면 `invalidTargets`에 집계한다. `dispositionSha256`으로 같은 원본이 같은 대상과 상태로 복원됐는지 비교할 수 있다. 이 항목에는 원래 키, 제목, 본문이 들어가지 않는다.
+`primaryRecords`는 패키지마다 `packageId`, 원본 종류 `kind` (`issue` 또는 `page`), 연결 상태별 `counts`, `invalidTargets`, `dispositionSha256`을 반환한다. Jira 업무와 Confluence 현재 페이지의 원본 행을 각각 센다. 여러 원본 행이 같은 Teamspace 대상을 가리켜도 각 원본 행을 해당 패키지에서 센다. 대상 종류가 다르거나 종류·ID 중 하나만 저장됐거나, 제외한 원본에 연결이 남으면 `invalidTargets`에 집계한다. 대상이 연결된 각 행의 원본 ID와 저장된 Jira 원래 키가 같은 대상으로 이어지는지, 인덱스가 참조하는 영수증이 그 연결을 입증하는지도 대조한다. 인덱스 오류는 원본 행당 한 번 집계한다. `dispositionSha256`으로 같은 원본의 대상·상태와 인덱스 오류를 비교할 수 있다. 이 항목에는 원래 키, 제목, 본문이 들어가지 않는다.
 
 `targetContent`의 `version`은 `1`이다. `comments`, `revisions`, `worklogs`, `issueRelations`는 각각 저장된 대상의 `count`와 `sha256`을 반환한다. 원본에 연결된 댓글과 작업 기록은 보관 데이터가 남은 휴지통과 삭제 기록도 포함한다. 문서 이력은 직접 연결한 버전과 영수증에 연결한 문서의 저장 이력을 한 번씩 센다. 업무 관계는 영수증에 연결된 활성 업무가 양쪽 중 하나에 있는 관계를 센다. 이 값은 현재 대상의 복원 전후 대조에 쓰며, `targetContent`에는 본문이나 작성자 정보가 들어가지 않는다.
 
