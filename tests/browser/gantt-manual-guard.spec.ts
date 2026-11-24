@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Issue, SchedulePasteApplyResult, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
+import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
+import type { Issue, IssueRelation, SchedulePasteApplyResult, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 const previewPath = '/api/schedule/manual-preview';
 const applyPath = '/api/schedule/manual-apply';
@@ -17,10 +17,9 @@ async function workspace(request: APIRequestContext) {
 
 const schedule = ({ id, version, startDate, endDate }: Issue) => ({ id, version, startDate, endDate });
 
-async function makeFixture(request: APIRequestContext) {
-  const { projects: [project], users: [, peer] } = await workspace(request);
+async function makeFixture(request: APIRequestContext, baseDate = new Date()) {
+  const { projects: [project, otherProject], users: [, peer] } = await workspace(request);
   const prefix = `수동 일정 ${randomUUID()}`;
-  const baseDate = new Date();
   const date = (offset: number) => {
     const value = new Date(baseDate);
     value.setUTCDate(value.getUTCDate() + offset);
@@ -28,10 +27,10 @@ async function makeFixture(request: APIRequestContext) {
   };
   const issues: Issue[] = [];
   return {
-    peer, date,
-    async create(title: string, first: number | null, last: number | null) {
+    peer, date, otherProject,
+    async create(title: string, first: number | null, last: number | null, projectId = project.id) {
       const issue = await readJson<Issue>(await request.post('/api/issues', { data: {
-        projectId: project.id, title: `${prefix} ${title}`,
+        projectId, title: `${prefix} ${title}`,
         startDate: first === null ? null : date(first), endDate: last === null ? null : date(last),
       } }), 201);
       issues.push(issue);
@@ -52,8 +51,8 @@ async function makeFixture(request: APIRequestContext) {
   };
 }
 
-async function openChart(page: Page, issue: Issue) {
-  await page.goto(`/#/${issue.projectId}/gantt`);
+async function openChart(page: Page, issue: Issue, team = false) {
+  await page.goto(`/#/${issue.projectId}/gantt${team ? '?scope=team' : ''}`);
   await page.getByLabel('간트 업무 검색', { exact: true }).fill(issue.title);
   return {
     chart: page.getByRole('region', { name: '간트 차트', exact: true }),
@@ -65,6 +64,86 @@ async function openChart(page: Page, issue: Issue) {
 function nextPost(page: Page, path: string) {
   return page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
 }
+
+test('360px 팀 간트에서 직접 입력한 날짜를 숨은 다른 프로젝트 차단 업무와 비교하고 다시 검토한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const fixture = await makeFixture(request, new Date('2026-11-19T00:00:00Z'));
+  try {
+    const blocker = await fixture.create('팀 간트 검색에서 가려진 차단 업무', 0, 1, fixture.otherProject.id);
+    const target = await fixture.create('시작일을 직접 바꿀 차단 대상 업무', 7, 11);
+    await readJson<IssueRelation>(await request.post(`/api/issues/${blocker.id}/relations`, { data: {
+      otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+    } }), 201);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    const { chart, dialog } = await openChart(page, target, true);
+    await expect(page.getByRole('heading', { name: '전체 프로젝트 간트', exact: true })).toBeVisible();
+    await expect(chart.locator(`[data-issue-id="${blocker.id}"]`)).toHaveCount(0);
+    const start = chart.getByLabel(`${target.key} 시작일`, { exact: true });
+    const apply = dialog.getByRole('button', { name: '변경 적용', exact: true });
+    const proposedStart = fixture.date(1);
+    const firstPreview = nextPost(page, previewPath);
+    await start.fill(proposedStart);
+    await start.press('Enter');
+    const firstResponse = await firstPreview;
+    const input = { changes: [{ id: target.id, expectedVersion: target.version, startDate: proposedStart, endDate: target.endDate }] };
+    expect(firstResponse.request().postDataJSON()).toEqual(input);
+
+    async function verifyPreview(response: Response, minimum: string) {
+      const proposal = await readJson<SchedulePreview>(response);
+      expect(proposal.previewId).toBeTruthy();
+      expect(proposal.changes).toMatchObject([{ id: target.id, toStart: proposedStart, toEnd: target.endDate }]);
+      expect(proposal.teamBlockerWarnings).toEqual([expect.stringContaining(`${blocker.key} → ${target.key}`)]);
+      const warning = proposal.teamBlockerWarnings![0];
+      expect(proposal.warnings).toContain(warning);
+      expect(warning).toContain(`후행 업무 시작일은 ${minimum} 이후여야 합니다.`);
+      await expect(dialog.getByText(warning, { exact: true })).toBeVisible();
+      await expect(dialog.locator('.gantt-new-dates')).toContainText(proposedStart);
+      return proposal;
+    }
+
+    await verifyPreview(firstResponse, fixture.date(4));
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(start).toHaveValue(proposedStart);
+    await expect(start).toBeFocused();
+    expect(await fixture.stored()).toEqual([schedule(blocker), schedule(target)]);
+
+    const secondPreview = nextPost(page, previewPath);
+    await start.press('Enter');
+    const first = await verifyPreview(await secondPreview, fixture.date(4));
+
+    const changedBlocker = await readJson<Issue>(await request.patch(`/api/issues/${blocker.id}`, {
+      headers: { 'X-Actor-Id': fixture.peer.id },
+      data: { expectedVersion: blocker.version, endDate: fixture.date(5) },
+    }));
+    const rejected = nextPost(page, applyPath);
+    await apply.click();
+    const rejection = await rejected;
+    expect(rejection.status(), await rejection.text()).toBe(409);
+    expect(rejection.request().postDataJSON()).toEqual({ previewId: first.previewId });
+    await expect(dialog.getByRole('alert')).toBeVisible();
+    await expect(dialog.locator('.gantt-new-dates')).toContainText(proposedStart);
+    await expect(start).toHaveValue(proposedStart);
+    await expect(apply).toBeDisabled();
+    expect(await fixture.stored()).toEqual([schedule(changedBlocker), schedule(target)]);
+
+    const refreshed = nextPost(page, previewPath);
+    await dialog.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const refreshedResponse = await refreshed;
+    expect(refreshedResponse.request().postDataJSON()).toEqual(input);
+    const latest = await verifyPreview(refreshedResponse, fixture.date(6));
+    expect(latest.previewId).not.toBe(first.previewId);
+    await expect(apply).toBeEnabled();
+    const applied = nextPost(page, applyPath);
+    await apply.click();
+    const result = await readJson<SchedulePasteApplyResult>(await applied);
+    expect(result.updated).toMatchObject([{ id: target.id, startDate: proposedStart }]);
+    await expect(dialog).toHaveCount(0);
+    await expect(start).toHaveValue(proposedStart);
+    expect(await fixture.stored()).toEqual([schedule(changedBlocker), { ...schedule(target), startDate: proposedStart, version: target.version + 1 }]);
+  } finally { await fixture.close(); }
+});
 
 test('360px 간트에서 선택 밖의 선행 업무가 바뀌면 이동을 거절하고 새 검토에 반영한다', async ({ page, request }) => {
   const fixture = await makeFixture(request);

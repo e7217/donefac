@@ -387,12 +387,36 @@ test('a selected Jira blocker schedules across calendars and respects other prov
   assert.ok(premature.errors.some(({ message }) => message.includes(later.key) && message.includes('2026-11-30 이후')));
   const valid = await f.call<SchedulePastePreview>('/schedule/row-edit/preview', 'POST', rowInput(targetInput, '2026-11-30', '2026-12-01'));
   assert.ok(valid.previewId);
+  const ordinaryDates = (startDate: string) => f.call<SchedulePastePreview>('/schedule/bulk-dates/preview', 'POST', {
+    projectId: target.projectId, issues: [{ id: target.id, expectedVersion: targetInput.version }],
+    changes: { startDate, endDate: '2026-12-01' },
+  });
+  const verifyOrdinaryJiraWarnings = async () => {
+    const proposal = await ordinaryDates('2026-11-20');
+    assert.ok(proposal.previewId);
+    assert.deepEqual(proposal.errors, []);
+    const handoffWarnings = proposal.teamBlockerWarnings ?? [];
+    assert.equal(handoffWarnings.length, 2);
+    for (const [predecessor, earliest] of [[source, '2026-11-21'], [later, '2026-11-30']] as const) {
+      const pair = `프로젝트 간 차단 관계 ${predecessor.key} → ${target.key} · `;
+      const matches = handoffWarnings.filter(warning => warning.startsWith(pair));
+      assert.equal(matches.length, 1);
+      assert.ok(matches[0].includes(`후행 업무 시작일은 ${earliest} 이후여야 합니다.`));
+      assert.ok(proposal.warnings.includes(matches[0]));
+    }
+  };
+  await verifyOrdinaryJiraWarnings();
+  const ordinaryValid = await ordinaryDates('2026-11-30');
+  assert.ok(ordinaryValid.previewId);
+  assert.deepEqual(ordinaryValid.teamBlockerWarnings ?? [], []);
   const currentSuccessor = currentIssues.find(issue => issue.id === successor.id)!;
   const unproved = await f.call<SchedulePastePreview>('/schedule/row-edit/preview', 'POST', rowInput(currentSuccessor, '2026-11-18', '2026-11-18'));
   assert.ok(unproved.previewId);
 
   const native = await f.call<IssueRelation>(relationPath, 'POST', { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' }, 201);
   await f.call('/schedule/row-edit/apply', 'POST', { previewId: valid.previewId }, 409);
+  await f.call('/schedule/bulk-dates/apply', 'POST', { previewId: ordinaryValid.previewId }, 409);
+  await verifyOrdinaryJiraWarnings();
   const preferred = (await blockers()).filter(row => row.sourceIssueId === source.id && row.targetIssueId === target.id);
   assert.deepEqual(preferred, [{ id: native.id, sourceIssueId: source.id, targetIssueId: target.id, version: native.version }]);
   assert.deepEqual(plannedDates(await preview(native)), expected);

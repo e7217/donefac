@@ -16,6 +16,7 @@ import {
 } from '../../shared/types';
 import { issueSearchAliasLabel, searchIssueCandidates } from '../../shared/workspace-search';
 import { ApiError, api } from '../lib/api';
+import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { scheduleUndoHeaders } from './schedule-undo';
 import { errorMessage, todayDate } from './schedule-utils';
 import type { TeamIncomingBlocker } from './team-follow-up-choices';
@@ -29,6 +30,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
   incomingTeamBlockers?: readonly TeamIncomingBlocker[];
+  outgoingTeamBlockers?: readonly TeamFollowUpChoice[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
@@ -147,7 +149,7 @@ function definiteRejection(cause: unknown, recovering: boolean) {
 }
 
 export function GanttRowScheduleEdit({
-  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  issue, issues, issueAliases, dependencies, incomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
   notify, refresh, onClose, onDraftChange, onApplied,
 }: Props) {
   const uid = useId();
@@ -216,8 +218,10 @@ export function GanttRowScheduleEdit({
   const input = JSON.stringify({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
-    incoming: suggestionApplied ? incomingTeamBlockers.map(({ relation, source }) =>
+    incoming: changes.startDate !== undefined || suggestionApplied || rescheduleSuccessors ? incomingTeamBlockers.map(({ relation, source }) =>
       [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate]) : undefined,
+    outgoing: changes.endDate !== undefined || rescheduleSuccessors ? outgoingTeamBlockers.map(({ relation, target }) =>
+      [relation.id, relation.origin, relation.version, target.id, target.projectId, target.version, target.startDate]) : undefined,
   });
   const linksValid = resolvedDrafts.every(draft => draft.valid && !duplicateDraft(draft));
   const canPreview = Boolean(currentIssue && actorId && linksValid && (Object.keys(changes).length || edits.length) &&

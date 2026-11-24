@@ -1,5 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import type { Dependency, Issue, SchedulePasteApplyResult, WorkspaceSnapshot } from '../../shared/types';
+import type { Dependency, Issue, SchedulePasteApplyResult, SchedulePastePreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext) {
   return (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
@@ -21,6 +21,77 @@ async function createIssue(request: APIRequestContext, projectId: string, offset
   expect(response.ok()).toBeTruthy();
   return (await response.json()) as Issue;
 }
+
+test('팀 간트 일정 붙여넣기는 같은 일정표에서 수정한 양쪽 날짜를 비교한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  const { projects: [first, second] } = await workspace(request);
+  const created: Issue[] = [];
+  try {
+    const blocker = await createIssue(request, second.id, 0);
+    created.push(blocker);
+    const target = await createIssue(request, first.id, 17);
+    created.push(target);
+    const linked = await request.post(`/api/issues/${blocker.id}/relations`, { data: {
+      otherIssueId: target.id, type: 'blocks', direction: 'outgoing',
+    } });
+    expect(linked.status(), await linked.text()).toBe(201);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${first.id}/gantt?scope=team`);
+    await expect(page.getByRole('heading', { name: '전체 프로젝트 간트', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '일정 붙여넣기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
+    const preview = dialog.getByRole('button', { name: '붙여넣기 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '검토한 일정 적용', exact: true });
+    const targetStart = dateAt(9);
+    async function review(blockerEnd: string) {
+      const text = `key,startDate,endDate\n${blocker.key},,${blockerEnd}\n${target.key},${targetStart},`;
+      await input.fill(text);
+      const pending = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/paste-preview' &&
+        response.request().method() === 'POST');
+      await preview.click();
+      const response = await pending;
+      expect(response.status(), await response.text()).toBe(200);
+      expect(response.request().postDataJSON()).toEqual({ projectId: null, text });
+      const result = await response.json() as SchedulePastePreview;
+      expect(result.errors).toEqual([]);
+      expect(result.previewId).toBeTruthy();
+      expect(result.changes).toHaveLength(2);
+      expect(result.changes).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: blocker.id, toStart: blocker.startDate, toEnd: blockerEnd }),
+        expect.objectContaining({ id: target.id, toStart: targetStart, toEnd: target.endDate }),
+      ]));
+      return result;
+    }
+
+    const acceptable = await review(dateAt(4));
+    expect(acceptable.teamBlockerWarnings ?? []).toEqual([]);
+    const blockerEnd = dateAt(11);
+    const conflicting = await review(blockerEnd);
+    expect(conflicting.teamBlockerWarnings).toEqual([expect.stringContaining(`${blocker.key} → ${target.key}`)]);
+    const warning = conflicting.teamBlockerWarnings![0];
+    expect(conflicting.warnings).toContain(warning);
+    await expect(dialog.getByText(warning, { exact: true })).toBeVisible();
+    const original = (await workspace(request)).issues;
+    expect(original.find(issue => issue.id === blocker.id)?.endDate).toBe(blocker.endDate);
+    expect(original.find(issue => issue.id === target.id)?.startDate).toBe(target.startDate);
+
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    const stored = (await workspace(request)).issues;
+    expect(stored.find(issue => issue.id === blocker.id)).toMatchObject({ endDate: blockerEnd, version: blocker.version + 1 });
+    expect(stored.find(issue => issue.id === target.id)).toMatchObject({ startDate: targetStart, version: target.version + 1 });
+  } finally {
+    for (const issue of created.reverse()) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) {
+        const { trashEntryId } = await response.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+  }
+});
 
 test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변경을 적용·되돌린다', async ({ page, request }) => {
   const project = (await workspace(request)).projects[0];

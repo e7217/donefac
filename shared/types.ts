@@ -1852,6 +1852,7 @@ export interface ScheduleHierarchySkip {
 export interface SchedulePreview {
   changes: ScheduleChange[];
   warnings: string[];
+  teamBlockerWarnings?: string[];
   calendarVersions?: Record<string, number>;
   previewId?: string;
   blocking?: string[];
@@ -1956,6 +1957,7 @@ export interface SchedulePastePreview {
   retainedDependencies?: SchedulePasteDependencyChange[];
   keyMappings?: SchedulePasteKeyMapping[];
   warnings: string[];
+  teamBlockerWarnings?: string[];
   errors: SchedulePasteDiagnostic[];
   unchanged: number;
 }

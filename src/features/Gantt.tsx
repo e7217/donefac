@@ -66,16 +66,18 @@ import './gantt.css';
 import './gantt-deadline-markers.css';
 
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
-type InlineDateDraft = { source: Issue; startDate: string | null; endDate: string | null; accept: (saved: Issue) => void; owner: symbol };
-type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: Element | null };
-type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin; inlineDates?: InlineDateDraft[] };
+type InlineDateValues = { source: Issue; startDate: string | null; endDate: string | null };
+type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owner: symbol };
+type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
+type InlineScheduleOrigin = { issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener };
+type ManualReview = { input: ScheduleManualPreviewInput; preview: SchedulePreview; inline?: InlineScheduleOrigin & InlineDateValues; inlineDates?: InlineDateDraft[] };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
 type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
 type ShiftMode = 'selection' | 'hierarchy';
 function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
   return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
 }
-function inlineDateChange(draft: InlineDateDraft, issue = draft.source): ScheduleAnchorChange {
+function inlineDateChange(draft: InlineDateValues, issue = draft.source): ScheduleAnchorChange {
   return { id: issue.id, expectedVersion: issue.version,
     startDate: draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
     endDate: draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
@@ -250,7 +252,7 @@ function ProjectGantt(props: GanttProps) {
   const [manualReview, setManualReview] = useState<ManualReview | null>(null);
   const [manualProblem, setManualProblem] = useState<ManualReviewProblem | null>(null);
   const preview = manualReview?.preview ?? null;
-  const [datePreviewFocusTarget, setDatePreviewFocusTarget] = useState<HTMLButtonElement | null>(null);
+  const [datePreviewFocusTarget, setDatePreviewFocusTarget] = useState<DatePreviewOpener | null>(null);
   const [cascade, setCascade] = useState<CascadeReview | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [scheduleIssueCreation, setScheduleIssueCreation] = useState<{ link: ScheduleIssueLink; opener: HTMLButtonElement } | null>(null);
@@ -874,6 +876,7 @@ function ProjectGantt(props: GanttProps) {
   const previewCascade = !hierarchyPreview && !manualReview?.inlineDates && !manualReview?.input.rescheduleSuccessors &&
     singleChange && outgoingIssueIds.has(singleChange.id) ? singleChange : null;
   const batchDateInput = manualReview?.inlineDates && 'changes' in manualReview.input ? manualReview.input : null;
+  const hasInlineDateReview = Boolean(manualReview?.inline || manualReview?.inlineDates);
   const batchFollowUp = batchDateInput?.rescheduleSuccessors === true;
   const canReviewBatchFollowUp = batchDateInput && (batchFollowUp || batchDateInput.changes.some(change => outgoingIssueIds.has(change.id)));
   const batchAnchorIds = batchFollowUp ? new Set(batchDateInput.changes.map(change => change.id)) : null;
@@ -1450,6 +1453,7 @@ function ProjectGantt(props: GanttProps) {
         method: 'POST', headers: scheduleUndoHeaders(undoScope, props.actorId), body: JSON.stringify({ previewId }),
       });
     } catch (cause) {
+      if (review.inline) setDatePreviewFocusTarget(review.inline.focus);
       setManualReview(review);
       if (isUncertainScheduleResponse(cause)) {
         setManualProblem({ kind: 'uncertain', message: '일정 적용 응답을 받지 못했습니다. 같은 요청의 결과를 다시 확인해 주세요.' });
@@ -1501,10 +1505,11 @@ function ProjectGantt(props: GanttProps) {
   async function reviewManualAgain() {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
-    if (manualReview.inlineDates && 'changes' in input) {
+    const inlineDates = manualReview.inlineDates ?? (manualReview.inline ? [manualReview.inline] : undefined);
+    if (inlineDates && 'changes' in input) {
       const latest = new Map(data.issues.map(issue => [issue.id, issue]));
       const changes: ScheduleAnchorChange[] = [];
-      for (const draft of manualReview.inlineDates) {
+      for (const draft of inlineDates) {
         const issue = latest.get(draft.source.id);
         if (!issue || issue.projectId !== draft.source.projectId) {
           setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
@@ -1525,7 +1530,9 @@ function ProjectGantt(props: GanttProps) {
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
       const review = { ...manualReview, input, preview };
-      if (review.inlineDates && !preview.previewId && !preview.blocking?.length) {
+      if (inlineDates && !preview.previewId && !preview.blocking?.length) {
+        const current = review.inline && data.issues.find(issue => issue.id === review.inline?.issueId);
+        if (current) review.inline?.accept?.(current);
         settleInlineDates(review, []);
         setManualReview(null);
         restoreDatePreviewFocus();
@@ -1545,11 +1552,18 @@ function ProjectGantt(props: GanttProps) {
     markBusy(true);
     try {
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
+      const review = { input, preview, inline: { ...inline, source: issue, startDate, endDate } };
+      if (preview.teamBlockerWarnings?.length) {
+        setDatePreviewFocusTarget(inline.focus);
+        setManualReview(review);
+        setManualProblem(null);
+        return;
+      }
       if (!preview.previewId) {
         notify(preview.blocking?.join(' · ') || '변경할 일정이 없습니다.', 'error');
         return;
       }
-      await commitManualReview({ input, preview, inline });
+      await commitManualReview(review);
     } catch (cause) {
       notify(errorMessage(cause), 'error');
       if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) await refresh().catch(() => undefined);
@@ -1588,7 +1602,9 @@ function ProjectGantt(props: GanttProps) {
     if (!cascade) return;
     const { origin, anchorChange } = cascade;
     const anchor = result.updated.find(issue => issue.id === anchorChange.id);
-    if (anchor && origin.kind === 'inline') origin.accept(anchor);
+    const accept = origin.kind === 'inline' ? origin.accept : manualReview?.inline?.issueId === anchorChange.id
+      ? manualReview.inline.accept : undefined;
+    if (anchor) accept?.(anchor);
     rememberUndo(result.undoId);
     setScheduleWarnings(result.warnings ?? []);
     setManualReview(null);
@@ -1789,7 +1805,7 @@ function ProjectGantt(props: GanttProps) {
     const endDate = edge === 'end' ? moveDate(issue.endDate, delta) : issue.endDate;
     void previewIssueDates(issue, startDate, endDate, opener);
   }
-  function focusAfterDatePicking(opener: HTMLButtonElement) {
+  function focusAfterDatePicking(opener: DatePreviewOpener) {
     requestAnimationFrame(() => {
       if (opener.isConnected && !opener.disabled) { opener.focus(); return; }
       const scroll = scrollRef.current;
@@ -1802,7 +1818,8 @@ function ProjectGantt(props: GanttProps) {
   function restoreDatePreviewFocus(restore = true) {
     setDatePreviewFocusTarget(null);
     if (!restore || !datePreviewFocusTarget) return;
-    if (datePreviewFocusTarget === hierarchyShiftTrigger.current || datePreviewFocusTarget === selectionShiftTrigger.current) {
+    if (datePreviewFocusTarget instanceof HTMLButtonElement &&
+      (datePreviewFocusTarget === hierarchyShiftTrigger.current || datePreviewFocusTarget === selectionShiftTrigger.current)) {
       restoreShiftFocus(datePreviewFocusTarget);
     } else focusAfterDatePicking(datePreviewFocusTarget);
   }
@@ -2413,7 +2430,7 @@ function ProjectGantt(props: GanttProps) {
     </div>
     {preview && !cascade && !teamFollowUp && !teamFollowUpHandoff && <div className="issue-modal-overlay"><section ref={previewDialog} tabIndex={-1} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-busy={busy} aria-labelledby="schedule-preview-title" onKeyDown={event => {
       if (event.defaultPrevented || event.nativeEvent.isComposing) return;
-      if (manualReview?.inlineDates && event.key === 'Tab') {
+      if (hasInlineDateReview && event.key === 'Tab') {
         const controls = event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled)');
         const first = controls[0], last = controls[controls.length - 1];
         if (!first || event.target === event.currentTarget || event.target === (event.shiftKey ? first : last)) {
@@ -2421,7 +2438,7 @@ function ProjectGantt(props: GanttProps) {
           (event.shiftKey ? last : first)?.focus();
         }
       }
-      if ((!hierarchyPreview && !manualReview?.inlineDates) || busy || event.key !== 'Escape') return;
+      if ((!hierarchyPreview && !hasInlineDateReview) || busy || event.key !== 'Escape') return;
       event.preventDefault();
       event.stopPropagation();
       closePreview();
@@ -2542,6 +2559,7 @@ function ProjectGantt(props: GanttProps) {
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} issueAliases={data.issueAliases}
       incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}
+      outgoingTeamBlockers={teamBlockerChoices.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
       initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}

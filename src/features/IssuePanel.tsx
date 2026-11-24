@@ -1259,6 +1259,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       initialDateDraft={rowScheduleEdit.initialDateDraft}
       issues={data.issues} issueAliases={data.issueAliases}
       incomingTeamBlockers={teamBlockers.incoming.get(rowScheduleEdit.issue.id)}
+      outgoingTeamBlockers={teamBlockers.outgoing.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={data.calendars?.find(value => value.projectId === rowScheduleEdit.issue.projectId)}
       actorId={props.actorId} undoScope={scheduleUndoScope ?? undefined} notify={notify} refresh={refresh} onDraftChange={trackRowScheduleDraft}
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}

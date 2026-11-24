@@ -8,7 +8,8 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, SchedulePastePreview, ScheduleRowEditInput, WorkCalendar, WorkspaceSnapshot,
+  Dependency, Issue, IssueRelation, Project, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, ScheduleRowEditInput,
+  WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const reviewPath = '/schedule/row-edit/preview';
@@ -19,6 +20,13 @@ const otherActor = 'user-seo';
 const versionOf = ({ id, version }: Issue) => ({ id, expectedVersion: version });
 const dates = ({ startDate, endDate, dueDate }: Issue) => ({ startDate, endDate, dueDate });
 const linkFields = ({ type, lagDays }: Dependency) => ({ type, lagDays });
+const handoff = (source: Issue, target: Issue) => `프로젝트 간 차단 관계 ${source.key} → ${target.key} · `;
+function assertHandoffConflict(preview: Pick<SchedulePreview, 'warnings' | 'teamBlockerWarnings'>, source: Issue, target: Issue, date: string) {
+  const message = preview.teamBlockerWarnings?.find(warning => warning.startsWith(handoff(source, target)));
+  assert.ok(message, JSON.stringify(preview));
+  assert.ok(message.includes(`후행 업무 시작일은 ${date} 이후여야 합니다.`), message);
+  assert.ok(preview.warnings.includes(message));
+}
 
 async function fixture(t: TestContext) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-schedule-row-edit-'));
@@ -242,7 +250,7 @@ test('row edit checks open incoming cross-project blockers with the receiving ca
   const before = await f.workspace();
   const manual = await f.review({ ...premature, reviewIncomingTeamBlockers: false });
   assert.ok(reviewId(manual));
-  assert.deepEqual(manual.warnings, []);
+  assertHandoffConflict(manual, source, target, '2026-11-30');
   const conflict = await f.review({ ...premature, reviewIncomingTeamBlockers: true });
   assert.equal(conflict.previewId, null);
   assert.deepEqual(conflict.errors, [{ line: null, issueId: target.id, key: target.key,
@@ -251,7 +259,8 @@ test('row edit checks open incoming cross-project blockers with the receiving ca
   assert.deepEqual(await f.workspace(), before);
 
   const corrected = await f.review({ ...premature, changes: { startDate: '2026-11-30', endDate: '2026-12-01' }, reviewIncomingTeamBlockers: true });
-  assert.deepEqual(corrected.warnings, [`프로젝트 간 차단 관계 ${unknown.key} → ${target.key} · ${unknown.key}의 종료일을 확인해 주세요.`]);
+  assert.ok(corrected.warnings.includes(`${handoff(unknown, target)}${unknown.key}의 종료일을 확인해 주세요.`));
+  assertHandoffConflict(corrected, target, outgoing, '2026-12-02');
   const previewId = reviewId(corrected);
   const applied = await f.apply(previewId);
   assert.deepEqual(applied.warnings, corrected.warnings);
@@ -292,6 +301,101 @@ test('row edit invalidates reviewed incoming blockers after additions, source ch
 
   const refreshed = await f.apply(reviewId(await f.review(input)));
   assert.deepEqual(refreshed.updated.map(({ id }) => id), [target.id]);
+});
+
+test('ordinary date proposals report hidden cross-project blockers and preserve advisory warnings through apply and undo', async t => {
+  const f = await fixture(t);
+  const source = await f.issue('프로젝트 밖 선행 티켓', { projectId: 'project-neo', endDate: '2026-11-26' });
+  const target = await f.issue('검토 중인 후행 티켓', { startDate: null, endDate: '2026-12-01' });
+  const localSource = await f.issue('같은 프로젝트의 별도 선행 연결', { endDate: '2026-11-30' });
+  await f.blocker(source, target);
+  await f.link(localSource, target);
+  const calendarPath = `/projects/${target.projectId}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-27', isWorking: false, label: '후행 프로젝트 휴무' }],
+  });
+  const scope = { projectId: target.projectId };
+  const changes = { startDate: '2026-11-27' };
+  const requests = [
+    { preview: '/schedule/paste-preview', body: {
+      ...scope, text: `key\tstartDate\n${target.key}\t${changes.startDate}`,
+    } },
+    { preview: reviewPath, body: { ...scope, issue: versionOf(target), changes } },
+    { preview: '/schedule/bulk-dates/preview', body: { ...scope, issues: [versionOf(target)], changes } },
+    { preview: '/schedule/manual-preview', body: {
+      changes: [{ ...versionOf(target), ...changes, endDate: target.endDate }],
+    } },
+  ];
+  const before = await f.workspace();
+  const [pasted] = await Promise.all(requests.map(async ({ preview, body }) => {
+    const proposal = await f.call<SchedulePastePreview | SchedulePreview>(preview, 200, 'POST', body);
+    assert.ok(proposal.previewId, JSON.stringify(proposal));
+    assert.equal(proposal.teamBlockerWarnings?.length, 1);
+    assertHandoffConflict(proposal, source, target, '2026-11-30');
+    assert.ok(proposal.warnings.some(warning => warning.startsWith(`${localSource.key} → ${target.key}`)));
+    return { ...proposal, previewId: proposal.previewId };
+  }));
+  assert.deepEqual(await f.workspace(), before);
+
+  const dueOnly = await f.review({ ...scope, issue: versionOf(target), changes: { dueDate: '2026-12-04' } });
+  assert.ok(reviewId(dueOnly));
+  assert.deepEqual(dueOnly.teamBlockerWarnings ?? [], []);
+  const applied = await f.call<SchedulePasteApplyResult>('/schedule/paste-apply', 200, 'POST', { previewId: pasted.previewId });
+  assert.deepEqual(applied.warnings, pasted.warnings);
+  assert.deepEqual(applied.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), [[target.id, changes.startDate, target.endDate]]);
+  assert.deepEqual((await f.workspace()).issues.find(issue => issue.id === source.id), source);
+  const reverted = await f.undo(applied.undoId);
+  assert.deepEqual(reverted.updated.map(issue => [issue.id, dates(issue)]), [[target.id, dates(target)]]);
+});
+
+test('team TSV reviews both proposed dates, and a new or changed hidden handoff invalidates a previously reviewed edit', async t => {
+  const f = await fixture(t);
+  const source = await f.issue('편집할 선행 티켓', { endDate: '2026-11-23' });
+  const target = await f.issue('표 밖의 후행 티켓', { projectId: 'project-neo', startDate: '2026-11-24', endDate: '2026-11-26' });
+  const paste = (rows: [Issue, string | null, string | null][]) => f.call<SchedulePastePreview>('/schedule/paste-preview', 200, 'POST', {
+    projectId: null,
+    text: ['key\tstartDate\tendDate', ...rows.map(([issue, start, end]) => [issue.key, start, end].join('\t'))].join('\n'),
+  });
+  const sourceOnly = () => paste([[source, source.startDate, '2026-11-24']]);
+  const rejectStale = async (previewId: string) => {
+    const witnessed = await f.workspace();
+    await f.call('/schedule/paste-apply', 409, 'POST', { previewId });
+    assert.deepEqual(await f.workspace(), witnessed);
+  };
+
+  const originallyUnlinked = await sourceOnly();
+  assert.deepEqual(originallyUnlinked.teamBlockerWarnings ?? [], []);
+  const blocker = await f.blocker(source, target, otherActor);
+  await rejectStale(reviewId(originallyUnlinked));
+
+  const outgoingOnly = await sourceOnly();
+  assertHandoffConflict(outgoingOnly, source, target, '2026-11-25');
+  assert.deepEqual(outgoingOnly.changes.map(change => change.id), [source.id]);
+  const conflicting = await paste([[source, source.startDate, '2026-11-25'], [target, '2026-11-25', target.endDate]]);
+  assertHandoffConflict(conflicting, source, target, '2026-11-26');
+  const coordinated = await paste([[source, source.startDate, '2026-11-24'], [target, '2026-11-25', target.endDate]]);
+  assert.ok(reviewId(coordinated));
+  assert.deepEqual(coordinated.teamBlockerWarnings ?? [], []);
+  assert.deepEqual(new Set(coordinated.changes.map(change => change.id)), new Set([source.id, target.id]));
+
+  const currentTarget = await f.call<Issue>(`/issues/${target.id}`, 200, 'PATCH', {
+    expectedVersion: target.version, startDate: '2026-11-25',
+  }, otherActor);
+  await rejectStale(reviewId(outgoingOnly));
+  const beforeHoliday = await sourceOnly();
+  assert.deepEqual(beforeHoliday.teamBlockerWarnings ?? [], []);
+  const calendarPath = `/projects/${target.projectId}/calendar`;
+  const calendar = await f.call<WorkCalendar>(calendarPath);
+  await f.call(calendarPath, 200, 'PATCH', { expectedVersion: calendar.version,
+    exceptions: [{ date: '2026-11-25', isWorking: false, label: '표에 없는 후행 프로젝트 휴무' }],
+  }, otherActor);
+  await rejectStale(reviewId(beforeHoliday));
+  const active = await sourceOnly();
+  assertHandoffConflict(active, source, target, '2026-11-26');
+  await f.call(`/issues/${source.id}/relations/${blocker.id}?expectedVersion=${blocker.version}`, 200, 'DELETE', undefined, otherActor);
+  await rejectStale(reviewId(active));
+  assert.deepEqual((await f.workspace()).issues.find(issue => issue.id === target.id), currentTarget);
 });
 
 test('row edit preview cannot authorize invalid dates, self links, cycles, duplicate pairs or foreign references', async t => {

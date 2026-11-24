@@ -47,12 +47,16 @@ export function listIssueRelations(store: Store, issueId: string, allowedProject
   return rows.map(row => JSON.parse(row.json) as IssueRelation);
 }
 
-function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false, limit }: {
-  targetIds?: readonly string[]; allowedProjects?: readonly string[] | null; crossProjectOnly?: boolean; sameProjectOnly?: boolean; limit?: number;
+function teamspaceBlockers(store: Store, { targetIds, issueIds, allowedProjects = null, crossProjectOnly = false, sameProjectOnly = false, limit }: {
+  targetIds?: readonly string[]; issueIds?: readonly string[]; allowedProjects?: readonly string[] | null;
+  crossProjectOnly?: boolean; sameProjectOnly?: boolean; limit?: number;
 }): TeamScheduleBlocker[] {
-  if (targetIds?.length === 0 || allowedProjects?.length === 0 || limit === 0) return [];
+  if (targetIds?.length === 0 || issueIds?.length === 0 || allowedProjects?.length === 0 || limit === 0) return [];
   const scope = allowedProjects ? JSON.stringify(allowedProjects) : null;
   const targetSql = targetIds ? 'AND relation.target_issue_id IN (SELECT value FROM json_each(?))' : '';
+  const issueScope = issueIds ? JSON.stringify(issueIds) : undefined;
+  const incidentSql = issueScope === undefined ? '' : `AND (relation.source_issue_id IN (SELECT value FROM json_each(?))
+      OR relation.target_issue_id IN (SELECT value FROM json_each(?)))`;
   return store.db.prepare(`SELECT relation.id,
     relation.source_issue_id AS sourceIssueId, relation.target_issue_id AS targetIssueId,
     json_extract(relation.json, '$.version') AS version
@@ -60,12 +64,13 @@ function teamspaceBlockers(store: Store, { targetIds, allowedProjects = null, cr
     JOIN issues AS source ON source.id=relation.source_issue_id
     JOIN issues AS target ON target.id=relation.target_issue_id
     WHERE json_extract(relation.json, '$.origin')='teamspace' AND json_extract(relation.json, '$.type')='blocks'
-      AND source.id<>target.id ${targetSql}
+      AND source.id<>target.id ${targetSql} ${incidentSql}
       AND (?=0 OR source.project_id<>target.project_id)
       AND (?=0 OR source.project_id=target.project_id)
       AND (? IS NULL OR (source.project_id IN (SELECT value FROM json_each(?)) AND target.project_id IN (SELECT value FROM json_each(?))))
     ORDER BY relation.source_issue_id, relation.target_issue_id LIMIT ?`)
-    .all(...(targetIds ? [JSON.stringify(targetIds)] : []), Number(crossProjectOnly), Number(sameProjectOnly),
+    .all(...(targetIds ? [JSON.stringify(targetIds)] : []), ...(issueScope === undefined ? [] : [issueScope, issueScope]),
+      Number(crossProjectOnly), Number(sameProjectOnly),
       scope, scope, scope, limit ?? -1) as TeamScheduleBlocker[];
 }
 
@@ -132,8 +137,8 @@ export class IssueRelationsService {
     return mergeBlockers(native, imported, limit);
   }
 
-  teamScheduleBlockers(): TeamScheduleBlocker[] {
-    const scope = { crossProjectOnly: true };
+  teamScheduleBlockers(issueIds?: readonly string[]): TeamScheduleBlocker[] {
+    const scope = { crossProjectOnly: true, issueIds };
     return mergeBlockers(teamspaceBlockers(this.store, scope), this.sources.jiraIssueBlockers(scope));
   }
 

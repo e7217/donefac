@@ -1181,6 +1181,7 @@ export function createApp(options: {
     validateChange:validateScheduleChange,
     warnings:scheduleWarnings,
     projectBlockers:projectIds=>issueRelations.localScheduleBlockers(projectIds),
+    teamBlockers:issueIds=>issueRelations.teamScheduleBlockers(issueIds),
     directBlockers:targetId=>issueRelations.directBlockers([targetId]),
     isTerminal:isIssueTerminal,
     commitChanges:(request,changes,dependencies,linkChanges,origin)=>commitScheduleChanges(request,changes,dependencies,undefined,linkChanges,true,origin),
