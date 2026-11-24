@@ -25,7 +25,7 @@ import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecis
 import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
 import { appendWorkspaceSearchFilters, readWorkspaceSearchFilters, sameWorkspaceSearchFilters } from './lib/workspace-search-route';
 import { dispatchWorkspaceNavigation } from './lib/navigation';
-import { issueReviewPosition, type IssueReviewDirection, type OpenIssueForReview } from './lib/issue-review';
+import { issueReviewPosition, type GitlabIssueReviewSelection, type IssueReviewDirection, type OpenIssueForReview } from './lib/issue-review';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
@@ -244,6 +244,7 @@ type IssueReview = {
   actorId: string;
   projectScope: string | null;
   issueIds: readonly string[];
+  gitlabActivity?: GitlabIssueReviewSelection;
   focusDirection?: IssueReviewDirection;
 };
 function sameTeamGanttScheduleFilters(a?: TeamGanttScheduleFilters, b?: TeamGanttScheduleFilters): boolean {
@@ -859,12 +860,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const openIssueForReview: OpenIssueForReview = (id, source) => {
     const current = acceptedRouteRef.current;
+    const { gitlabActivity } = source;
     if (!current || current.issueId || !source.issueIds.includes(id) ||
         (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development')) {
-      openIssue(id);
+      if (!gitlabActivity) openIssue(id);
       return;
     }
-    if (!dataRef.current?.issues.some(issue => issue.id === id)) return;
+    const issue = dataRef.current?.issues.find(value => value.id === id);
+    if (gitlabActivity && (gitlabActivity.issueId !== id || current.view !== 'development' || issue?.projectId !== current.projectId)) {
+      notify('현재 프로젝트에서 이 활동의 티켓을 찾을 수 없습니다. 목록을 새로고침해 주세요.', 'error');
+      return;
+    }
+    if (!issue) return;
     const context = issueReviewContext(current);
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
       : current.view === 'gantt' && current.ganttScope === 'team' ? current.ganttProject ?? null : current.projectId;
@@ -872,7 +879,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
     boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
-    setIssueReview({ context, actorId, projectScope, issueIds: [...new Set(source.issueIds)] });
+    setIssueReview({ context, actorId, projectScope, issueIds: [...new Set(source.issueIds)], gitlabActivity });
     setSearchOpen(false);
   };
   const advanceIssueReview = (direction: IssueReviewDirection) => {
@@ -885,7 +892,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (target && requestRoute({ ...current, issueId: target.id, documentPreviewId: null }, 'replace', true)) {
       const opened = acceptedRouteRef.current;
       if (opened?.issueId === target.id && issueReviewContext(opened) === review.context) {
-        setIssueReview({ ...review, focusDirection: direction });
+        setIssueReview({ ...review, gitlabActivity: undefined, focusDirection: direction });
       }
     }
   };
@@ -1126,6 +1133,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openedIssue = data.issues.find(issue => issue.id === issueId);
   const reviewPosition = issueReview?.actorId === actorId && openedIssue
     ? issueReviewPosition(issueReview.issueIds, openedIssue.id, data.issues, issueReview.projectScope) : undefined;
+  const selectedGitlabActivity = issueReview?.gitlabActivity;
+  const gitlabActivitySelection = view === 'development' && reviewPosition && issueReview?.projectScope === projectId &&
+    openedIssue?.projectId === projectId && selectedGitlabActivity?.issueId === openedIssue.id ? selectedGitlabActivity : undefined;
   const teamGantt = view === 'gantt' && ganttScope === 'team';
   const teamBoard = view === 'teamboard';
   const teamDecisions = view === 'reports' && decisionFollowUpScope?.projectId !== undefined;
@@ -1271,6 +1281,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onOpenMilestone={openIssueMilestone} onClose={() => closeIssuePanel(openedIssue.id)}
       ganttDateDraftsRef={view === 'gantt' ? ganttDateDraftsRef : undefined}
       reviewPosition={reviewPosition && { ...reviewPosition, focusDirection: issueReview?.focusDirection }} onAdvanceReview={advanceIssueReview}
+      gitlabActivitySelection={gitlabActivitySelection}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}

@@ -38,7 +38,7 @@ import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
 import { FavoriteAction } from './FavoritesState';
 import { AtlassianLinks } from './AtlassianLinks';
-import type { IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
+import type { GitlabIssueReviewSelection, IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
@@ -78,6 +78,7 @@ type IssuePanelProps = FeatureProps & {
   previewDocumentId: string | null;
   commentFocus?: { commentId: string; activation: number };
   reviewPosition?: IssueReviewPosition;
+  gitlabActivitySelection?: GitlabIssueReviewSelection;
   ganttDateDraftsRef?: RefObject<GanttIssueDateDrafts | null>;
   onAdvanceReview?: (direction: IssueReviewDirection) => void;
   onClose: () => void;
@@ -151,8 +152,9 @@ export function IssuePanel(props: IssuePanelProps) {
 
 function IssuePanelContent(props: IssuePanelProps) {
   const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onOpenMilestone, onPreviewDocument, onCloseDocumentPreview,
-    reviewPosition, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
+    reviewPosition, gitlabActivitySelection, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
   const manageFocus = Boolean(documentOverlay || modalFocus);
+  const gitlabActivityFocusRef = useRef(false);
   const issue = data.issues.find(i => i.id === issueId);
   const linkedMilestones = useMemo(() => (data.milestones ?? [])
     .filter(item => item.projectId === issue?.projectId && item.issueIds.includes(issueId))
@@ -571,8 +573,8 @@ function IssuePanelContent(props: IssuePanelProps) {
     const reviewButton = reviewFocusDirection === 'previous' ? previousReviewButton.current
       : reviewFocusDirection === 'next' ? nextReviewButton.current : null;
     if (reviewButton && !reviewButton.disabled) reviewButton.focus({ preventScroll: true });
-    else if (manageFocus || reviewFocusDirection) closeButton.current?.focus({ preventScroll: true });
-  }, [manageFocus, reviewFocusDirection]);
+    else if ((manageFocus || reviewFocusDirection) && !gitlabActivitySelection) closeButton.current?.focus({ preventScroll: true });
+  }, [manageFocus, reviewFocusDirection, gitlabActivitySelection]);
   useEffect(() => {
     if (!commentFocus || loadedCommentActivation !== commentFocus.activation || handledCommentActivation.current === commentFocus.activation
       || previewDocumentId || nestedModalOpen) return;
@@ -1338,6 +1340,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
+        gitlabActivitySelection={gitlabActivitySelection} gitlabActivityFocusRef={gitlabActivityFocusRef}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} isCurrentStatusSuggestion={isCurrentGitlabStatusSuggestion}
         canPrepareStatusSuggestion={canPrepareGitlabStatusSuggestion} onPrepareStatusSuggestion={prepareGitlabStatusSuggestion} />
       <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}

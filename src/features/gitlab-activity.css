@@ -177,6 +177,16 @@
   border-top: 1px solid #e5eee8;
 }
 
+.gitlab-activity-row[data-gitlab-selected] {
+  background: #f0f7f3;
+  scroll-margin-block: 8px;
+}
+
+.gitlab-activity-row[data-gitlab-selected]:focus {
+  outline: 2px solid #38775b;
+  outline-offset: -2px;
+}
+
 .gitlab-activity-body {
   display: grid;
   justify-items: start;
@@ -226,6 +236,14 @@ a.gitlab-activity-target:hover {
   padding: 2px 5px;
   border-radius: 4px;
   background: #edf4ef;
+}
+
+.gitlab-activity-selection {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #dceee4;
+  color: #275741;
+  font-weight: 650;
 }
 
 .gitlab-merge-readiness { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 7px; max-width: 100%; margin: 2px 0 5px; }

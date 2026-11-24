@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
@@ -1125,9 +1125,10 @@ export function GitlabActivityRefresh({ refresh, notify, disabled }: Pick<Featur
   </button>;
 }
 
-type IssueContext = { keys: ReadonlyMap<string, string>; openIssue: (id: string, opener: HTMLButtonElement) => void };
+type IssueContext = { keys: ReadonlyMap<string, string>; openIssue: (link: GitlabLink, opener: HTMLButtonElement, selectActivity?: boolean) => void };
 type ActivityIssueReview = { keys: IssueContext['keys']; openIssue: OpenIssueForReview; fallbackRef: RefObject<HTMLElement | null> };
 type ActivityPagination = { pages: GitlabActivityFilters['pages']; onChangePage: (kind: GitlabLink['kind'], page: number) => void };
+type ActivitySelection = { link: GitlabLink; rowRef: RefObject<HTMLLIElement | null> };
 type ManualLinkActions = {
   disabled: boolean;
   verify: (link: GitlabLink, trigger: HTMLButtonElement) => void;
@@ -1145,9 +1146,10 @@ export type GitlabActivityStatusActions = {
   reviewStatus?: (link: GitlabLink, trigger: HTMLButtonElement) => void;
 };
 
-export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination }: {
+export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination, selection }: {
   links: readonly GitlabLink[]; issueReview?: ActivityIssueReview; issueVersions?: ReadonlyMap<string, number>;
   heading?: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
+  selection?: ActivitySelection;
 }) {
   const sharedPages = pagination !== undefined;
   const groups = useMemo(() => kinds.map(group => ({ group,
@@ -1156,23 +1158,28 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
   })), [links, sharedPages]);
   const issueContext: IssueContext | undefined = issueReview && {
     keys: issueReview.keys,
-    openIssue(id, opener) {
+    openIssue({ id, issueId, projectId, kind, iid, manualLinkId }, opener, selectActivity) {
       const issueIds = [...new Set(groups.flatMap(({ rows }) => rows.map(link => link.issueId)))];
-      issueReview.openIssue(id, { issueIds, opener, fallback: issueReview.fallbackRef.current });
+      issueReview.openIssue(issueId, { issueIds, opener, fallback: issueReview.fallbackRef.current,
+        gitlabActivity: selectActivity ? { id, issueId, projectId, kind, iid, manualLinkId } : undefined });
     },
   };
   return <div className="gitlab-activity-list">{groups.map(({ group, rows }) => rows.length > 0 &&
     <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} issueVersions={issueVersions}
-      heading={heading} manualActions={manualActions} statusActions={statusActions} pagination={pagination} />)}</div>;
+      heading={heading} manualActions={manualActions} statusActions={statusActions} pagination={pagination}
+      selection={selection?.link.kind === group.kind ? selection : undefined} />)}</div>;
 }
 
-function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination }: {
+function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination, selection }: {
   group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; issueVersions?: ReadonlyMap<string, number>;
   heading: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
+  selection?: ActivitySelection;
 }) {
-  const [localPage, setLocalPage] = useState(1);
+  const [localPage, setLocalPage] = useState<number>();
   const pageCount = Math.ceil(links.length / PAGE_SIZE);
-  const currentPage = Math.min(pagination ? pagination.pages[group.kind] ?? 1 : localPage, pageCount);
+  const selectedIndex = selection && localPage === undefined ? links.indexOf(selection.link) : 0;
+  const selectedPage = Math.floor(Math.max(0, selectedIndex) / PAGE_SIZE) + 1;
+  const currentPage = Math.min(pagination ? pagination.pages[group.kind] ?? 1 : localPage ?? selectedPage, pageCount);
   const offset = (currentPage - 1) * PAGE_SIZE;
   const Icon = group.Icon;
   function changePage(page: number) {
@@ -1183,7 +1190,8 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
     <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
-      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} />)}</ul>
+      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions}
+      selectedRowRef={selection?.link === link ? selection.rowRef : undefined} />)}</ul>
     {pageCount > 1 && <nav className="gitlab-activity-pages" aria-label={`${group.label} 페이지 이동`}>
       <button className="btn btn-ghost" type="button" disabled={currentPage === 1} onClick={() => changePage(currentPage - 1)}>이전</button>
       <span role="status">{currentPage} / {pageCount} 페이지</span>
@@ -1192,9 +1200,11 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   </section>;
 }
 
-function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions }: {
+function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, selectedRowRef }: {
   link: GitlabLink; issueContext?: IssueContext; issueVersion?: number; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions;
+  selectedRowRef?: RefObject<HTMLLIElement | null>;
 }) {
+  const selectedLabelId = useId();
   const url = gitlabActivityUrl(link.webUrl, link.kind);
   const pipeline = pipelineTarget(link, url);
   const pipelineRevision = JSON.stringify([link.state, link.updatedAt, link.pipelineObservedAt, link.sourceBranch, link.sourceSha]);
@@ -1223,8 +1233,11 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
     <strong>{title}</strong>
   </>;
 
-  return <li className="gitlab-activity-row" data-gitlab-link-id={link.id} data-gitlab-kind={link.kind} data-gitlab-state={state}>
+  return <li className="gitlab-activity-row" data-gitlab-link-id={link.id} data-gitlab-kind={link.kind} data-gitlab-state={state}
+    ref={selectedRowRef} tabIndex={selectedRowRef ? -1 : undefined} data-gitlab-selected={selectedRowRef ? '' : undefined}
+    aria-describedby={selectedRowRef ? selectedLabelId : undefined}>
     <div className="gitlab-activity-body">
+      {selectedRowRef && <span id={selectedLabelId} className="gitlab-activity-detail gitlab-activity-selection">선택한 GitLab 활동</span>}
       {url && !deleted
         ? <a className="gitlab-activity-target" href={url.href} target="_blank" rel="noreferrer">
             {titleContent}<ExternalLink aria-hidden="true" size={14} /><span className="sr-only">GitLab에서 새 탭으로 열기</span>
@@ -1236,7 +1249,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
       {link.manualLinkId && <span className="gitlab-activity-detail gitlab-activity-manual-label">수동 연결</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button"
-        onClick={event => issueContext.openIssue(link.issueId, event.currentTarget)}>{issueKey}</button>}
+        onClick={event => issueContext.openIssue(link, event.currentTarget)}>{issueKey}</button>}
     </div>
     <div className="gitlab-activity-status">
       <span className="gitlab-activity-state">{gitlabActivityStateLabel(state)}</span>
@@ -1254,7 +1267,11 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
     {mr && state === 'opened' && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
-    {(statusCheck || manual) && <div className="gitlab-activity-row-actions">
+    {(issueKey || statusCheck || manual) && <div className="gitlab-activity-row-actions">
+      {issueKey && issueContext && <button className="btn btn-ghost" type="button"
+        onClick={event => issueContext.openIssue(link, event.currentTarget, true)}>
+        <ArrowRight size={14} aria-hidden="true" />티켓에서 이 활동 보기
+      </button>}
       {statusCheck && <button className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
         disabled={statusActionDisabled} aria-busy={refreshing || undefined}
         onClick={event => statusCheck.checkStatus(link, event.currentTarget)}>

@@ -1,10 +1,12 @@
-import type { Issue } from '../../shared/types';
+import type { GitlabLink, Issue } from '../../shared/types';
 
 export type IssueReviewDirection = 'previous' | 'next';
+export type GitlabIssueReviewSelection = Pick<GitlabLink, 'id' | 'issueId' | 'projectId' | 'kind' | 'iid' | 'manualLinkId'>;
 export type IssueReviewSource = {
   issueIds: readonly string[];
   opener: HTMLElement;
   fallback: HTMLElement | null;
+  gitlabActivity?: GitlabIssueReviewSelection;
 };
 export type OpenIssueForReview = (id: string, source: IssueReviewSource) => void;
 type IssueReviewTarget = Pick<Issue, 'id' | 'key'>;

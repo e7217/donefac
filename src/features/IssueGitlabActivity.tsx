@@ -1,12 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
 import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
 import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
 import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
   type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabSettings,
   type GitlabStatusSuggestion } from '../../shared/types';
 import { api, ApiError, apiResponse, post, remove } from '../lib/api';
+import type { GitlabIssueReviewSelection } from '../lib/issue-review';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList,
   GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, gitlabMergeRequestPipelinePath, isGitlabLinkedStatusRefreshResult,
   matchesBranchMergeRequestLink, matchesMergeRequestPipelineLink,
@@ -19,6 +20,8 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   issueKey: string;
   issueVersion: number;
   links: readonly GitlabLink[];
+  gitlabActivitySelection?: GitlabIssueReviewSelection;
+  gitlabActivityFocusRef: RefObject<boolean>;
   disabled: boolean;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
   isCurrentStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
@@ -76,12 +79,27 @@ function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected:
     evidence.deployment.projectUrl === deployment.projectUrl && evidence.deployment.jobUrl === deployment.jobUrl;
 }
 
-export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, refresh, notify, disabled, onDraftChange,
+export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityFocusRef, refresh, notify, disabled, onDraftChange,
   isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
-  const formHeading = useId(), unlinkHeading = useId();
+  const formHeading = useId(), unlinkHeading = useId(), selectionMissingId = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
   const visibleLinks = view.source === links ? view.rows : links;
+  const selectedLink = gitlabActivitySelection && visibleLinks.find(link => link.issueId === issueId &&
+    link.issueId === gitlabActivitySelection.issueId && link.id === gitlabActivitySelection.id &&
+    link.projectId === gitlabActivitySelection.projectId && link.kind === gitlabActivitySelection.kind &&
+    link.iid === gitlabActivitySelection.iid && link.manualLinkId === gitlabActivitySelection.manualLinkId);
+  const selectionMissing = Boolean(gitlabActivitySelection && !selectedLink);
+  const activityHeading = useRef<HTMLHeadingElement>(null);
+  const selectedRow = useRef<HTMLLIElement>(null);
+  useLayoutEffect(() => {
+    if (!gitlabActivitySelection || gitlabActivityFocusRef.current) return;
+    const target = selectedRow.current ?? activityHeading.current;
+    if (!target) return;
+    gitlabActivityFocusRef.current = true;
+    target.scrollIntoView({ block: 'nearest' });
+    target.focus({ preventScroll: true });
+  }, [gitlabActivityFocusRef, gitlabActivitySelection]);
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [unlinkTarget, setUnlinkTarget] = useState<GitlabLink | null>(null);
@@ -416,7 +434,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
   }
 
   return <section className="issue-related-section" aria-label="GitLab">
-    <div className="gitlab-activity-header"><h3><GitMerge aria-hidden="true" size={16} />GitLab <span>{visibleLinks.length}</span></h3>
+    <div className="gitlab-activity-header"><h3 ref={activityHeading} tabIndex={-1}
+      aria-describedby={selectionMissing ? selectionMissingId : undefined}><GitMerge aria-hidden="true" size={16} />GitLab <span>{visibleLinks.length}</span></h3>
       <div className="gitlab-activity-actions">
         <GitlabActivityRefresh refresh={reloadSavedActivity} notify={notify} disabled={controlsDisabled} />
         {canCheckStatus && <button className="btn" type="button" aria-label="GitLab에서 상태 확인"
@@ -431,6 +450,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
           onClick={event => showBranchEditor(event.currentTarget)}><GitBranch aria-hidden="true" size={15} />GitLab 브랜치 만들기</button>
       </div>
     </div>
+    {selectionMissing && <p id={selectionMissingId} className="gitlab-activity-hint" role="status">
+      선택한 GitLab 활동을 이 티켓에서 찾을 수 없습니다.
+    </p>}
     {refreshFeedback && <div ref={statusReviewResult} tabIndex={-1} role="group" aria-label="GitLab 상태 확인 결과">
       <GitlabStatusFeedback feedback={refreshFeedback} />
       {statusReview?.kind === 'ambiguous' && <p className="gitlab-activity-hint" role="status">
@@ -486,6 +508,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, re
       </div>
     </div>}
     {visibleLinks.length ? <GitlabActivityList links={visibleLinks} issueVersions={new Map([[issueId, issueVersion]])}
+      selection={selectedLink ? { link: selectedLink, rowRef: selectedRow } : undefined}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,
