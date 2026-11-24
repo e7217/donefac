@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  Dependency, Issue, PlanningItem, PlanScheduleShiftPreview, PlanScheduleShiftResult,
+  Dependency, Issue, IssueRelation, PlanningItem, PlanScheduleShiftPreview, PlanScheduleShiftResult,
   Project, ProjectIssueSchema, ProjectWorkflow, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -85,6 +85,117 @@ function apply(f: Fixture, item: PlanningItem, proposal: PlanScheduleShiftPrevie
   return f.call<PlanScheduleShiftResult>(`/planning-items/${item.id}/schedule-apply`, 'POST', { previewId: proposal.previewId }, actor);
 }
 function dates(item: PlanningItem) { return { startDate: item.startDate, endDate: item.endDate, targetDate: item.targetDate }; }
+
+async function crossProjectBlocker(f: Fixture, source: Issue, target: Issue) {
+  const result = await f.call<IssueRelation>(`/issues/${source.id}/relations`, 'POST', {
+    type: 'blocks', direction: 'outgoing', otherIssueId: target.id,
+  });
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  return result.data;
+}
+
+test('linked plan shifts warn about incoming and outgoing cross-project blockers with each receiving calendar', async () => {
+  const f = await fixture();
+  try {
+    const local = await project(f), remote = await project(f);
+    const item = await plan(f, local.id, { kind: 'release' }), outside = await plan(f, remote.id);
+    const linked = await member(f, item);
+    const next = await member(f, outside, { startDate: '2026-11-23', endDate: '2026-11-25' });
+    const previous = await member(f, outside, { endDate: '2026-11-17' });
+    const undated = await member(f, outside, { endDate: null });
+    const closed = await member(f, outside, { status: 'done', endDate: '2026-11-30' });
+    for (const source of [previous, undated, closed]) await crossProjectBlocker(f, source, linked);
+    await crossProjectBlocker(f, linked, next);
+    for (const [project, date] of [[local, '2026-11-18'], [remote, '2026-11-23']] as const) {
+      const path = `/projects/${project.id}/calendar`;
+      const { data: calendar } = await f.call<WorkCalendar>(path);
+      const updated = await f.call(path, 'PATCH', { ...calendar, expectedVersion: calendar.version,
+        exceptions: [{ date, isWorking: false, label: '후행 업무 프로젝트 휴무' }],
+      });
+      assert.equal(updated.status, 200, JSON.stringify(updated.data));
+    }
+    const before = await state(f);
+
+    const reviewed = await preview(f, item);
+    assert.ok(reviewed.previewId);
+    assert.deepEqual(reviewed.blocking, []);
+    assert.deepEqual(reviewed.changes.map(change => [change.id, change.toStart, change.toEnd]), [[linked.id, '2026-11-18', '2026-11-20']]);
+    assert.ok(reviewed.warnings.some(warning => warning.includes(`${previous.key} → ${linked.key}`) && warning.includes('2026-11-19')));
+    assert.ok(reviewed.warnings.some(warning => warning.includes(`${linked.key} → ${next.key}`) && warning.includes('2026-11-24')));
+    assert.ok(reviewed.warnings.some(warning => warning.includes(`${undated.key} → ${linked.key}`) && warning.includes('종료일을 확인')));
+    assert.ok(reviewed.warnings.every(warning => !warning.includes(closed.key)));
+    assert.deepEqual(await state(f), before);
+
+    const applied = await apply(f, item, reviewed);
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.deepEqual(applied.data.warnings, reviewed.warnings);
+    assert.deepEqual(applied.data.updated.map(({ id }) => id), [linked.id]);
+    const after = await state(f);
+    assert.deepEqual(after.teamScheduleBlockers, before.teamScheduleBlockers);
+    for (const issue of [next, previous, undated, closed]) assert.deepEqual(after.issues.find(candidate => candidate.id === issue.id), issue);
+
+    const undo = await f.call<PlanScheduleShiftResult>('/schedule/undo', 'POST', { undoId: applied.data.undoId });
+    assert.equal(undo.status, 200, JSON.stringify(undo.data));
+    assert.deepEqual(dates(undo.data.plan), dates(item));
+    assert.deepEqual(undo.data.updated.map(issue => [issue.id, issue.startDate, issue.endDate]), [[linked.id, linked.startDate, linked.endDate]]);
+    assert.deepEqual((await state(f)).teamScheduleBlockers, before.teamScheduleBlockers);
+    assert.deepEqual(await apply(f, item, reviewed), applied);
+  } finally { await f.close(); f.remove(); }
+});
+
+test('linked plan shifts fence new and changed cross-project evidence while plan-only previews stay valid', async () => {
+  const f = await fixture();
+  try {
+    const local = await project(f), remote = await project(f);
+    const item = await plan(f, local.id), outside = await plan(f, remote.id);
+    const linked = await member(f, item);
+    const next = await member(f, outside, { startDate: '2026-11-23', endDate: '2026-11-25' });
+    const planOnly = await preview(f, item, { includeLinked: false });
+    const withoutLink = await preview(f, item);
+    const historical = await preview(f, item);
+    assert.ok(withoutLink.previewId && historical.previewId);
+    f.database.prepare("UPDATE plan_schedule_previews SET json=json_remove(json,'$.teamBlockerGuard') WHERE id=?").run(historical.previewId);
+
+    async function stale(proposal: PlanScheduleShiftPreview) {
+      assert.ok(proposal.previewId);
+      const before = await state(f);
+      const applied = await f.call<{ error: string }>(`/planning-items/${item.id}/schedule-apply`, 'POST', { previewId: proposal.previewId });
+      assert.equal(applied.status, 409, JSON.stringify(applied.data));
+      assert.match(applied.data.error, /프로젝트 간 차단 관계/);
+      assert.deepEqual(await state(f), before);
+      assert.equal(f.database.prepare('SELECT COUNT(*) AS count FROM schedule_undos').get()?.count, 0);
+    }
+
+    const blocker = await crossProjectBlocker(f, linked, next);
+    await stale(withoutLink);
+    await stale(historical);
+    const endpointReview = await preview(f, item);
+    const changed = await f.call(`/issues/${next.id}`, 'PATCH', { expectedVersion: next.version, startDate: '2026-11-24' }, 'user-seo');
+    assert.equal(changed.status, 200, JSON.stringify(changed.data));
+    await stale(endpointReview);
+
+    const calendarReview = await preview(f, item);
+    const path = `/projects/${remote.id}/calendar`;
+    const { data: calendar } = await f.call<WorkCalendar>(path);
+    const calendarChange = await f.call(path, 'PATCH', { ...calendar, expectedVersion: calendar.version,
+      exceptions: [{ date: '2026-11-23', isWorking: false, label: '변경한 원격 달력 휴무' }],
+    });
+    assert.equal(calendarChange.status, 200, JSON.stringify(calendarChange.data));
+    await stale(calendarReview);
+
+    const removedReview = await preview(f, item);
+    const removed = await f.call(`/issues/${linked.id}/relations/${blocker.id}?expectedVersion=${blocker.version}`, 'DELETE');
+    assert.equal(removed.status, 200, JSON.stringify(removed.data));
+    await stale(removedReview);
+
+    const planOnlyResult = await apply(f, item, planOnly);
+    assert.equal(planOnlyResult.status, 200, JSON.stringify(planOnlyResult.data));
+    assert.deepEqual(dates(planOnlyResult.data.plan), planOnly.plan.to);
+    assert.deepEqual(planOnlyResult.data.updated, []);
+    assert.deepEqual(planOnlyResult.data.warnings, []);
+    assert.deepEqual((await state(f)).issues.find(issue => issue.id === linked.id), linked);
+  } finally { await f.close(); f.remove(); }
+});
 
 test('combined preview has no canonical writes, shifts every known date and explicitly skips terminal/unscheduled members', async () => {
   const f = await fixture();

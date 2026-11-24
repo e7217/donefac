@@ -305,6 +305,11 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
   if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) && hasSameProjectGanttContext(previous, next)) {
     return dispatchWorkspaceNavigation({ preserveGantt: true });
   }
+  if (previous?.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === next.ganttScope && previous.projectId === next.projectId &&
+      (previous.planningId ?? null) === (next.planningId ?? null) && (previous.savedViewId ?? null) === (next.savedViewId ?? null) &&
+      (previous.ganttFocusIssueId ?? null) === (next.ganttFocusIssueId ?? null) && (previous.ganttFocusDate ?? null) === (next.ganttFocusDate ?? null)) {
+    return dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' });
+  }
   if (previous?.view === 'teamboard' && next.view === 'teamboard' && !previous.issueId && !next.issueId &&
       !previous.documentPreviewId && !next.documentPreviewId && previous.projectId === next.projectId) {
     return dispatchWorkspaceNavigation({ preserveTeamBoard: true });
@@ -798,7 +803,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     if (current?.view !== 'gantt' || current.ganttScope !== 'team' ||
       (id !== null && !dataRef.current?.projects.some(project => project.id === id))) return false;
-    // The chart has already confirmed any drafts this filter would hide.
+    // The chart has already checked open editors and retained row dates.
     const next = { ...current, ganttProject: id };
     if (routeHash(next) !== routeHash(current)) writeRoute(next, routeIndexRef.current + 1, 'push');
     return true;
@@ -807,7 +812,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     if (current?.view !== 'gantt' || current.ganttScope !== 'team' || current.issueId ||
       (typeof filters.assigneeId === 'string' && !dataRef.current?.users.some(user => user.id === filters.assigneeId))) return false;
-    // The chart has already confirmed any drafts this filter would hide.
+    // The chart has already checked open editors and retained row dates.
     const previous = current.ganttScheduleFilters;
     const next = { ...filters, query: readIssueFilterQuery(filters.query) };
     if (!sameTeamGanttScheduleFilters(previous, next)) {

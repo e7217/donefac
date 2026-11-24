@@ -134,6 +134,93 @@ test('프로젝트 간트에서 다른 날짜 칸으로 이동해도 두 행의 
   } finally { await data.close(); }
 });
 
+test('360px 팀 간트 검색과 새로고침에서 보기 밖 날짜 초안을 유지하고 선택한 행만 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const data = await fixture(request);
+  const dialogs: string[] = [];
+  const dismissUnexpected = (dialog: Dialog) => { dialogs.push(dialog.message()); void dialog.dismiss(); };
+  page.on('dialog', dismissUnexpected);
+  try {
+    const first = await data.issue(data.first, '검색에 남는 날짜', date(23), date(26));
+    const second = await data.issue(data.second, '검색 밖에 보존할 날짜', date(24), date(27));
+    const undrafted = await data.issue(data.second, '검색에서 빠지는 저장 업무', date(24), date(26));
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '?scope=team');
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    const review = button(page, '입력한 날짜 2건 검토');
+    const label = '현재 보기 조건 밖 · 날짜 입력 유지';
+    const retained = page.getByText(label, { exact: true });
+    const writes = scheduleWrites(page);
+    await chart.start(first).fill(date(24));
+    await chart.end(second).fill(date(30));
+    await expect(review).toBeEnabled();
+
+    async function expectPreservedOutsideSearch() {
+      await expect(search).toHaveValue(first.title);
+      await expect(chart.row(undrafted)).toHaveCount(0);
+      await expect(retained).toHaveCount(1);
+      await expect(chart.row(second).getByText(label, { exact: true })).toBeVisible();
+      await expect(chart.start(first)).toHaveValue(date(24));
+      await expect(chart.end(second)).toHaveValue(date(30));
+      await expect(review).toBeEnabled();
+      expect(dialogs).toEqual([]);
+    }
+
+    await search.fill(first.title);
+    await expectPreservedOutsideSearch();
+    expect(writes).toEqual([]);
+    await search.fill(data.prefix);
+    await expect(retained).toHaveCount(0);
+    await expect(chart.row(undrafted)).toBeVisible();
+    await expect(chart.start(first)).toHaveValue(date(24));
+    await expect(chart.end(second)).toHaveValue(date(30));
+
+    const teamScopeUrl = page.url();
+    const projectFilter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    await projectFilter.selectOption(data.first.id);
+    await expect(projectFilter).toHaveValue(data.first.id);
+    await expect(retained).toHaveCount(1);
+    await expect(chart.row(undrafted)).toHaveCount(0);
+    await expect(chart.end(second)).toHaveValue(date(30));
+    await page.goBack();
+    await expect(page).toHaveURL(teamScopeUrl);
+    await expect(projectFilter).toHaveValue('');
+    await expect(retained).toHaveCount(0);
+    await expect(chart.start(first)).toHaveValue(date(24));
+    await expect(chart.end(second)).toHaveValue(date(30));
+    expect(dialogs).toEqual([]);
+
+    await search.fill(first.title);
+    await expectPreservedOutsideSearch();
+    await page.reload();
+    await expectPreservedOutsideSearch();
+    const before = await workspace(request);
+    expect(before.issues.find(issue => issue.id === first.id)).toEqual(first);
+    expect(before.issues.find(issue => issue.id === second.id)).toEqual(second);
+    expect(writes).toEqual([]);
+
+    await search.fill(data.prefix);
+    await expect(retained).toHaveCount(0);
+    const previewRequest = nextPost(page, manualPreview), applyRequest = nextPost(page, manualApply);
+    await button(chart.row(first), `${first.key} 날짜 저장`).click();
+    const previewResponse = await previewRequest;
+    expect(previewResponse.request().postDataJSON()).toEqual({ changes: [{
+      id: first.id, expectedVersion: first.version, startDate: date(24), endDate: date(26),
+    }] });
+    const applied = await json<SchedulePasteApplyResult>(await applyRequest);
+    expect(applied.updated).toMatchObject([{ id: first.id, version: first.version + 1, startDate: date(24), endDate: date(26) }]);
+    await expect(button(chart.row(first), `${first.key} 날짜 저장`)).toHaveCount(0);
+    await expect(chart.end(second)).toHaveValue(date(30));
+    await expect(button(chart.row(second), `${second.key} 날짜 저장`)).toBeVisible();
+    expect(writes).toEqual([manualPreview, manualApply]);
+    expect(dialogs).toEqual([]);
+    const after = await workspace(request);
+    expect(after.issues.find(issue => issue.id === second.id)).toEqual(second);
+  } finally {
+    page.off('dialog', dismissUnexpected);
+    await data.close();
+  }
+});
+
 test('360px 프로젝트 간트의 날짜 초안을 티켓 일정 편집에서 연결과 함께 저장한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const data = await fixture(request);

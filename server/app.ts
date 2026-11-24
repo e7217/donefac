@@ -1301,12 +1301,8 @@ export function createApp(options: {
     },
   });
   planScheduleShift.registerRoutes(app,{
-    actor,calendar:projectId=>calendars.get(projectId),versions:scheduleVersions,
-    isTerminal(issue){
-      const category=workflows.get(issue.projectId).statuses.find(status=>status.id===issue.status)?.category;
-      return category==='done'||category==='cancelled';
-    },
-    validateChange:validateScheduleChange,warnings:scheduleWarnings,
+    ...scheduleReviewHooks,actor,validateChange:validateScheduleChange,
+    reviewTeamBlockerDates:(issues,changes)=>schedulePaste.reviewTeamBlockerDates(issues,changes,scheduleReviewHooks),
     commit(req,item,dates,changes,dependencies){
       const plan=planning.writeScheduleDates(item.id,item.version,dates);
       activity(req,'planning',plan.id,'계획 일정 변경',`${planScheduleLabel(item)} → ${planScheduleLabel(plan)}`);

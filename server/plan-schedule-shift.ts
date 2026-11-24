@@ -19,6 +19,7 @@ interface Hooks {
   isTerminal(issue: Issue): boolean;
   validateChange(issue: Issue, change: AutomaticScheduleMutation): string | null;
   warnings(issues: Issue[], dependencies: Dependency[]): string[];
+  reviewTeamBlockerDates(issues: readonly Issue[], changes: readonly AutomaticScheduleMutation[]): { guard: string; relationCount: number; warnings: string[] } | null;
   commit(request: Request, plan: PlanningItem, dates: PlanScheduleDates, changes: AutomaticScheduleMutation[], dependencies: Dependency[]): PlanScheduleShiftResult;
 }
 interface ProjectState { issues: Issue[]; members: Issue[]; dependencies: Dependency[] }
@@ -30,6 +31,7 @@ interface Proposal {
   workingDays: boolean;
   removeAfter: string;
   guard: string;
+  teamBlockerGuard?: string;
   dates: PlanScheduleDates;
   changes: AutomaticScheduleMutation[];
   result?: PlanScheduleShiftResult;
@@ -145,10 +147,13 @@ export class PlanScheduleShiftService {
         result.warnings = hooks.warnings(projected,incidentLinks(state,changes));
       }
       if (result.blocking.length) return result;
+      const team = changes.length ? hooks.reviewTeamBlockerDates(state.issues, changes) : null;
+      if (team?.warnings.length) result.warnings = [...new Set([...result.warnings, ...team.warnings])];
       const previewId = randomUUID(), expiresAt = AFTER(AUTO_PREVIEW_TTL_MS);
       const proposal: Proposal = {
         id:previewId,actorId,planId:item.id,includeLinked,workingDays,removeAfter:expiresAt,
         guard:this.guard(item,state,changes,this.guardedVersions(item,includeLinked,workingDays,hooks)),
+        ...(team ? { teamBlockerGuard:team.guard } : {}),
         dates:result.plan.to,changes,
       };
       this.store.put(table,proposal);
@@ -171,7 +176,12 @@ export class PlanScheduleShiftService {
       if (proposal.guard !== this.guard(plan,state,proposal.changes,versions)) {
         fail(409, '계획·연결 업무·선후행 관계 또는 일정 설정이 변경되었습니다. 다시 미리 검토해 주세요.');
       }
+      const team = proposal.includeLinked && proposal.changes.length ? hooks.reviewTeamBlockerDates(state.issues, proposal.changes) : null;
+      if (proposal.teamBlockerGuard ? team?.guard !== proposal.teamBlockerGuard : team?.relationCount) {
+        fail(409, '프로젝트 간 차단 관계·연결 업무 또는 작업 달력이 변경되었습니다. 다시 미리 검토해 주세요.');
+      }
       const result = hooks.commit(request,plan,proposal.dates,proposal.changes,incidentLinks(state,proposal.changes));
+      if (team?.warnings.length) result.warnings = [...new Set([...result.warnings, ...team.warnings])];
       this.store.put(table,{...proposal,result,removeAfter:AFTER(AUTO_RESULT_RETENTION_MS)});
       return result;
     });

@@ -13,7 +13,7 @@ import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
-import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
+import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, dispatchWorkspaceNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
 import { api, ApiError, post } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
@@ -605,7 +605,7 @@ function ProjectGantt(props: GanttProps) {
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
-          : keepDates ? '열린 간트 편집과 미리보기를 닫을까요? 행에 입력한 날짜는 유지됩니다.'
+          : keepDates && retainedDates.current.size > 0 ? '열린 간트 편집과 미리보기를 닫을까요? 행에 입력한 날짜는 유지됩니다.'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
         if (!window.confirm(confirmation)) event.preventDefault();
         else {
@@ -1254,7 +1254,8 @@ function ProjectGantt(props: GanttProps) {
   function canHideRows(nextIssues: Issue[]) {
     const visibleIds = new Set(nextIssues.map(issue => issue.id));
     const hidesDatePickerDraft = activeDatePicker?.firstDate && !visibleIds.has(activeDatePicker.issue.id);
-    return (!hidesDatePickerDraft && ![...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6)))) || canLeave();
+    const hidesInlineDateDraft = [...draftsRef.current.keys()].some(id => id.startsWith('dates:') && !visibleIds.has(id.slice(6)));
+    return !(hidesDatePickerDraft || hidesInlineDateDraft) || dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' });
   }
   function changeVisibility(nextQuery: string, nextHideDone: boolean) {
     if (allProjects && nextQuery !== query) {

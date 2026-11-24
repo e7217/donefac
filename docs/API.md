@@ -1361,6 +1361,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/planning-items/:id/schedule-preview`에 `{expectedPlanVersion, days, workingDays, includeLinked}`를 보낸다. `days`는 절댓값이 1~3,650인 정수다. `workingDays`가 참이면 프로젝트 달력을 적용한다. `includeLinked`가 참이면 현재 연결된 전체 업무를 대상으로 기존 일정 중 이동할 날짜를 계산한다. 프로젝트 업무 10,000개나 연결 업무 1,000개를 초과하면 `413`을 반환한다. 응답은 계획 날짜의 `plan.from`과 `plan.to`, 업무 `changes`, 제외 업무 `skipped`, 선후행 `warnings`, 적용 차단 사유 `blocking`을 담는다. 적용 가능한 변경이 있으면 30분 동안 사용할 `previewId`를 발급한다.
 
+연결 업무의 날짜를 옮기는 요청에서 `warnings`는 변경에 걸린 열린 프로젝트 간 차단 관계도 포함한다. Teamspace 관계와 확인된 Jira 관계를 읽고 후행 프로젝트의 달력으로 검토한다. 미리보기 이후 관련 관계·업무·달력이 달라지면 적용 요청에 `409`를 반환한다.
+
 `POST /api/planning-items/:id/schedule-apply`는 `{previewId}`를 받아 미리보기를 만든 작업자와 계획, 검토 이후 바뀐 연관 자료를 확인한다. 일정·변경 이력·되돌리기·적용 결과를 원자적으로 저장한다. 응답은 `{plan, undoId, updated, warnings}`다. 같은 ID의 적용 결과는 7일간 다시 받을 수 있다. `POST /api/schedule/undo`에 `{undoId}`를 보내면 검토 대상의 날짜를 함께 복원하며 복원된 `plan`도 응답에 포함한다. 이 작업의 미리보기·적용 결과·되돌리기 기록은 자체 백업 복원 시 초기화한다.
 
 

@@ -618,10 +618,11 @@ export class SchedulePasteService {
     }).sort((left, right) => left.relation.id.localeCompare(right.relation.id));
   }
 
-  private reviewTeamBlockerDates(state: ScheduleState, edits: ScheduleDateMutation[], hooks: ScheduleReviewHooks,
-    { kind, teamBlocker: proposed, issueSaveStatus }: Pick<ProposalDraft, 'kind' | 'teamBlocker' | 'issueSaveStatus'>) {
+  reviewTeamBlockerDates(knownIssues: readonly Issue[], edits: readonly ScheduleDateMutation[],
+    hooks: Pick<ScheduleReviewHooks, 'calendar' | 'teamBlockers' | 'isTerminal'>,
+    { kind, teamBlocker: proposed, issueSaveStatus }: Pick<ProposalDraft, 'kind' | 'teamBlocker' | 'issueSaveStatus'> = {}) {
     if (!edits.length && !proposed) return null;
-    const issues = new Map(state.issues.map(issue => [issue.id, issue]));
+    const issues = new Map(knownIssues.map(issue => [issue.id, issue]));
     const changes = new Map(edits.map(edit => [edit.id, edit]));
     const incomingTargets = new Set<string>(), outgoingSources = new Set<string>();
     const projectedStatus = (issue: Issue) => issue.id === edits[0]?.id && kind === 'issue-save' && issueSaveStatus !== undefined
@@ -767,7 +768,7 @@ export class SchedulePasteService {
   private saveProposal(scope: ScheduleScope, state: ScheduleState, proposal: ProposalDraft, hooks: ScheduleReviewHooks, warnings: string[]) {
     const id = randomUUID();
     const expiresAt = after(AUTO_PREVIEW_TTL_MS);
-    const team = this.reviewTeamBlockerDates(state, proposal.changes, hooks, proposal);
+    const team = this.reviewTeamBlockerDates(state.issues, proposal.changes, hooks, proposal);
     const reviewedWarnings = [...new Set([...warnings, ...(team?.warnings ?? [])])];
     const savedWarnings = proposal.teamBlocker ? reviewedWarnings : team?.warnings;
     this.store.put(table, {
@@ -830,7 +831,7 @@ export class SchedulePasteService {
         change.endDate !== proposed.endDate || (Object.hasOwn(change, 'dueDate') ? change.dueDate : before.dueDate ?? null) !== proposed.dueDate) throw stale();
     const state = this.issueScheduleState(before);
     if (this.guard(proposal, state, proposal.issueIds, hooks) !== proposal.guard ||
-        this.reviewTeamBlockerDates(state, proposal.changes, hooks, proposal)?.guard !== proposal.teamBlockerGuard) throw stale();
+        this.reviewTeamBlockerDates(state.issues, proposal.changes, hooks, proposal)?.guard !== proposal.teamBlockerGuard) throw stale();
     this.store.remove(table, previewId);
   }
 
@@ -1571,7 +1572,7 @@ export class SchedulePasteService {
           throw new SchedulePasteError(409, '프로젝트 간 선행 업무 또는 차단 관계가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.');
         }
       }
-      const team = this.reviewTeamBlockerDates(state, proposal.changes, hooks, proposal);
+      const team = this.reviewTeamBlockerDates(state.issues, proposal.changes, hooks, proposal);
       if (proposal.teamBlockerGuard ? team?.guard !== proposal.teamBlockerGuard : team?.relationCount) {
         throw new SchedulePasteError(409, '프로젝트 간 연결 업무 또는 차단 관계가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.');
       }

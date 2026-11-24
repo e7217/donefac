@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
+import { expect, test, type APIRequestContext, type APIResponse, type Dialog, type Page } from '@playwright/test';
 import type { Issue, Project, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, status = 200): Promise<T> {
@@ -129,15 +129,24 @@ test('360px 전체 프로젝트 간트에서 담당자의 미정 일정을 찾�
     await expect(anchorEnd).toHaveValue('');
     await anchorEnd.fill(endDate);
     await owners.focus();
-    const dismissed = page.waitForEvent('dialog', { timeout: 5_000 }).then(async confirmation => {
-      const message = confirmation.message();
-      await confirmation.dismiss();
-      expect(message).toContain('저장하지 않은 간트 입력');
-    });
-    await Promise.all([dismissed, owners.selectOption(`member:${alternate.id}`)]);
+    const dialogs: string[] = [];
+    const dismissUnexpected = (dialog: Dialog) => { dialogs.push(dialog.message()); void dialog.dismiss(); };
+    const retained = row(anchor).getByText('현재 보기 조건 밖 · 날짜 입력 유지', { exact: true });
+    page.on('dialog', dismissUnexpected);
+    try {
+      await owners.selectOption(`member:${alternate.id}`);
+      await expect.poll(() => location(page)).toEqual({ ...secondScope, assignee: alternate.id });
+      await expect(row(otherOwner)).toBeVisible();
+      await expect(row(next)).toHaveCount(0);
+      await expect(retained).toBeVisible();
+      await expect(anchorEnd).toHaveValue(endDate);
+      await owners.selectOption(memberValue);
+    } finally { page.off('dialog', dismissUnexpected); }
     await expect.poll(() => location(page)).toEqual(secondScope);
     await expect(owners).toHaveValue(memberValue);
+    await expect(retained).toHaveCount(0);
     await expect(anchorEnd).toHaveValue(endDate);
+    expect(dialogs).toEqual([]);
     expect(await stored(anchor.id)).toMatchObject({ version: anchor.version, endDate: null });
     expect(scheduleRequests).toHaveLength(0);
 

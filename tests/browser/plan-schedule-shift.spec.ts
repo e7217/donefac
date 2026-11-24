@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-import type { Issue, PlanningItem, PlanScheduleShiftPreview, PlanScheduleShiftResult, Project, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, PlanningItem, PlanScheduleShiftPreview, PlanScheduleShiftResult, Project, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const today = Date.now();
 const day = (offset: number) => new Date(today + offset * 86_400_000).toISOString().slice(0, 10);
@@ -98,5 +98,142 @@ test('360px에서 계획과 연결 업무를 미리 보고 적용 응답을 복�
     for (const issue of issues) await request.delete(`/api/issues/${issue.id}`);
     const current = (await snapshot()).planningItems?.find(item => item.id === plan.id);
     if (current) await request.delete(`/api/planning-items/${plan.id}?expectedVersion=${current.version}`);
+  }
+});
+
+test('360px에서 계획과 연결 업무를 이동할 때 다른 프로젝트의 작업 달력으로 차단을 검토한다', async ({ page, request }) => {
+  const suffix = randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
+  const projects: Project[] = [];
+  for (const key of [`PSA${suffix}`, `PSB${suffix}`]) {
+    const response = await request.post('/api/projects', { data: { key, name: `계획 차단 ${key}` } });
+    expect(response.status(), await response.text()).toBe(201);
+    projects.push(await response.json() as Project);
+  }
+  const [sourceProject, targetProject] = projects;
+  const planDates = { startDate: '2026-11-16', endDate: '2026-11-20', targetDate: '2026-11-23' };
+  const planResponse = await request.post('/api/planning-items', { data: {
+    projectId: sourceProject.id, kind: 'cycle', name: `차단 일정 사이클 ${suffix}`, ...planDates,
+  } });
+  expect(planResponse.status(), await planResponse.text()).toBe(201);
+  const plan = await planResponse.json() as PlanningItem;
+  const calendarPath = `/api/projects/${targetProject.id}/calendar`;
+  const initialCalendar = await request.get(calendarPath);
+  expect(initialCalendar.ok(), await initialCalendar.text()).toBe(true);
+  const calendar = await initialCalendar.json() as WorkCalendar;
+  const issues: Issue[] = [];
+  let calendarChanged: WorkCalendar | undefined;
+  async function createIssue(values: Partial<Issue>) {
+    const response = await request.post('/api/issues', { data: values });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    issues.push(issue);
+    return issue;
+  }
+  async function snapshot() {
+    const response = await request.get('/api/workspace');
+    expect(response.ok(), await response.text()).toBe(true);
+    return await response.json() as WorkspaceSnapshot;
+  }
+  function nextPost(path: string) {
+    return page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'POST');
+  }
+
+  try {
+    const source = await createIssue({ projectId: sourceProject.id, cycleId: plan.id, title: `옮길 선행 업무 ${suffix}`,
+      startDate: '2026-11-16', endDate: '2026-11-17' });
+    const target = await createIssue({ projectId: targetProject.id, title: `다른 프로젝트의 후행 업무 ${suffix}`,
+      startDate: '2026-11-19', endDate: '2026-11-26' });
+    const relation = await request.post(`/api/issues/${source.id}/relations`, {
+      data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' },
+    });
+    expect(relation.status(), await relation.text()).toBe(201);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${sourceProject.id}/gantt/${plan.id}`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(chart.locator(`[data-issue-id="${target.id}"]`)).toHaveCount(0);
+    await page.getByRole('button', { name: '계획 일정 함께 이동', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '계획 일정 함께 이동', exact: true });
+    const days = dialog.getByLabel('계획 이동 일수', { exact: true });
+    const includeLinked = dialog.getByLabel('연결된 업무도 함께 이동', { exact: true });
+    const warnings = dialog.getByRole('region', { name: '일정·의존성 경고', exact: true });
+    const apply = dialog.getByRole('button', { name: '계획 이동 적용', exact: true });
+    await days.fill('3');
+
+    async function preview() {
+      const pending = nextPost(`/api/planning-items/${plan.id}/schedule-preview`);
+      await dialog.getByRole('button', { name: '계획 이동 미리보기', exact: true }).click();
+      const response = await pending;
+      expect(response.status(), await response.text()).toBe(200);
+      return await response.json() as PlanScheduleShiftPreview;
+    }
+    await includeLinked.uncheck();
+    const planOnly = await preview();
+    expect(planOnly.previewId).toBeTruthy();
+    expect(planOnly.changes).toEqual([]);
+    expect(planOnly.warnings).toEqual([]);
+    await expect(warnings).toHaveCount(0);
+
+    await includeLinked.check();
+    const linked = await preview();
+    const warning = (required: string) =>
+      `프로젝트 간 차단 관계 ${source.key} → ${target.key} · 선행 업무 종료일 2026-11-20에 따라 후행 업무 시작일은 ${required} 이후여야 합니다.`;
+    expect(linked.changes).toMatchObject([{ id: source.id, toStart: '2026-11-19', toEnd: '2026-11-20' }]);
+    expect(linked.warnings).toEqual([warning('2026-11-23')]);
+    await expect(warnings.getByText(warning('2026-11-23'), { exact: true })).toBeVisible();
+    await expect(apply).toBeEnabled();
+
+    const { users: [, peer] } = await snapshot();
+    const changed = await request.patch(calendarPath, { headers: { 'X-Actor-Id': peer.id }, data: {
+      ...calendar, expectedVersion: calendar.version,
+      exceptions: [{ date: '2026-11-23', isWorking: false, label: '후행 프로젝트 휴무일' }],
+    } });
+    expect(changed.ok(), await changed.text()).toBe(true);
+    calendarChanged = await changed.json() as WorkCalendar;
+    const staleApply = nextPost(`/api/planning-items/${plan.id}/schedule-apply`);
+    await apply.click();
+    const rejected = await staleApply;
+    expect(rejected.status(), await rejected.text()).toBe(409);
+    expect(rejected.request().postDataJSON()).toEqual({ previewId: linked.previewId });
+    await expect(dialog.getByRole('alert')).toContainText('프로젝트 간 차단');
+    await expect(apply).toBeDisabled();
+    await expect(days).toHaveValue('3');
+    await expect(includeLinked).toBeChecked();
+    const unchanged = await snapshot();
+    expect(unchanged.planningItems?.find(item => item.id === plan.id)).toEqual(plan);
+    expect(unchanged.issues.find(issue => issue.id === source.id)).toEqual(source);
+
+    const reviewed = await preview();
+    expect(reviewed.warnings).toEqual([warning('2026-11-24')]);
+    await expect(warnings.getByText(warning('2026-11-24'), { exact: true })).toBeVisible();
+    const freshApply = nextPost(`/api/planning-items/${plan.id}/schedule-apply`);
+    await apply.click();
+    const confirmed = await freshApply;
+    expect(confirmed.status(), await confirmed.text()).toBe(200);
+    expect(confirmed.request().postDataJSON()).toEqual({ previewId: reviewed.previewId });
+    const result = await confirmed.json() as PlanScheduleShiftResult;
+    expect(result.updated).toMatchObject([{ id: source.id, version: source.version + 1, startDate: '2026-11-19', endDate: '2026-11-20' }]);
+    expect(result.warnings).toEqual([warning('2026-11-24')]);
+    await expect(dialog).toBeHidden();
+    expect((await snapshot()).issues.find(issue => issue.id === target.id)).toEqual(target);
+
+    const undoing = nextPost('/api/schedule/undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.ok(), await undone.text()).toBe(true);
+    const restored = await snapshot();
+    expect(restored.planningItems?.find(item => item.id === plan.id)).toMatchObject({ ...planDates, version: plan.version + 2 });
+    expect(restored.issues.find(issue => issue.id === source.id)).toMatchObject({
+      startDate: source.startDate, endDate: source.endDate, version: source.version + 2,
+    });
+    expect(restored.issues.find(issue => issue.id === target.id)).toEqual(target);
+    const restoredCalendar = await request.get(calendarPath);
+    expect(restoredCalendar.ok(), await restoredCalendar.text()).toBe(true);
+    expect(await restoredCalendar.json()).toEqual(calendarChanged);
+  } finally {
+    for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
+    const current = (await snapshot()).planningItems?.find(item => item.id === plan.id);
+    if (current) await request.delete(`/api/planning-items/${plan.id}?expectedVersion=${current.version}`);
+    if (calendarChanged) await request.patch(calendarPath, { data: { ...calendar, expectedVersion: calendarChanged.version } });
   }
 });
