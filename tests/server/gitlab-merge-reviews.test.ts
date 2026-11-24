@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { AutomationRule, GitlabLink, GitlabMergeRequestReview, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationRule, GitlabLink, GitlabMergeRequestDiscussions, GitlabMergeRequestReview, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const repositoryId = 42;
 const mergeRequestId = 811;
@@ -21,14 +21,25 @@ const repositoryPath = `/forge/api/v4/projects/${repositoryId}`;
 const mrPath = `${repositoryPath}/merge_requests/${mergeRequestIid}`;
 const reviewersPath = `${mrPath}/reviewers`;
 const approvalsPath = `${mrPath}/approvals`;
+const discussionsPath = `${mrPath}/discussions`;
 const route = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-review`;
+const discussionRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-discussions`;
 
-type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string> };
+type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal };
 type ResponseFixture = { status?: number; body: unknown; headers?: Record<string, string> };
 
 function gitlabUser(id: number, overrides: Record<string, unknown> = {}) {
   return { id, name: `Reviewer ${id}`, username: `reviewer${id}`, email: `${privatePayload}@example.test`,
     avatar_url: `https://example.test/${privatePayload}`, organization: privatePayload, ...overrides };
+}
+
+function note(id: number, overrides: Record<string, unknown> = {}) {
+  return { id, noteable_type: 'MergeRequest', noteable_id: mergeRequestId, noteable_iid: mergeRequestIid, project_id: repositoryId,
+    system: false, resolvable: true, resolved: false, body: '검토 의견', author: gitlabUser(id), ...overrides };
+}
+
+function discussion(id: number, notes: Record<string, unknown>[], overrides: Record<string, unknown> = {}) {
+  return { id: `discussion-${id}`, individual_note: false, notes, ...overrides };
 }
 
 async function fixture(t: TestContext) {
@@ -44,17 +55,21 @@ async function fixture(t: TestContext) {
   let reviewers: ResponseFixture = { body: [] };
   let approvals: ResponseFixture = { body: { approved_by: [] } };
   let holdApprovals: (() => Promise<void>) | undefined;
+  const discussionPages = new Map<number, ResponseFixture>();
+  let holdDiscussions: ((response: import('node:http').ServerResponse) => Promise<void>) | undefined;
 
   const mock = createServer(async (incoming, response) => {
     const url = new URL(incoming.url ?? '/', 'http://fixture.test');
     calls.push({ method: incoming.method, url, credential: incoming.headers['private-token'] });
     if (url.pathname === approvalsPath) await holdApprovals?.();
+    if (url.pathname === discussionsPath) await holdDiscussions?.(response);
     if (response.destroyed) return;
     let fixture: ResponseFixture;
     if (url.pathname === repositoryPath) fixture = { body: { id: repositoryId, path_with_namespace: 'team/app', web_url: repoUrl(), ...project } };
     else if (url.pathname === mrPath) fixture = { body: { web_url: mrUrl(), ...mr } };
     else if (url.pathname === reviewersPath) fixture = reviewers;
     else if (url.pathname === approvalsPath) fixture = approvals;
+    else if (url.pathname === discussionsPath) fixture = discussionPages.get(Number(url.searchParams.get('page'))) ?? { body: [] };
     else fixture = { status: 404, body: {} };
     response.writeHead(fixture.status ?? 200, { 'Content-Type': 'application/json', ...fixture.headers }).end(JSON.stringify(fixture.body));
   });
@@ -74,9 +89,9 @@ async function fixture(t: TestContext) {
     try { await Promise.all([close(server), close(mock)]); }
     finally { runtime.close(); rmSync(dataDir, { recursive: true, force: true }); }
   });
-  async function request<T = unknown>(path: string, { method = 'GET', body, headers }: RequestOptions = {}) {
+  async function request<T = unknown>(path: string, { method = 'GET', body, headers, signal }: RequestOptions = {}) {
     const response = await fetch(appUrl + path, { method, headers: { 'Content-Type': 'application/json', 'X-Actor-Id': 'user-seo', ...headers },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000) });
+      body: body === undefined ? undefined : JSON.stringify(body), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000) });
     return { status: response.status, headers: response.headers, data: await response.json() as T };
   }
   async function call<T = unknown>(path: string, options?: RequestOptions, status = 200) {
@@ -99,7 +114,7 @@ async function fixture(t: TestContext) {
   calls.length = 0;
 
   return { call, request, issue, link, createIssue, configure, baseUrl, calls, attach,
-    path: route(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
+    path: route(issue.id, link.id), discussionPath: discussionRoute(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
     runs: () => call(`/automation-runs?projectId=${projectId}`),
     unlink: (link: GitlabLink) => call(`${issueLinksPath}/${encodeURIComponent(link.id)}?${new URLSearchParams({ expectedManualLinkId: link.manualLinkId! })}`, { method: 'DELETE' }),
     setProject(value: Record<string, unknown>) { project = value; },
@@ -107,6 +122,8 @@ async function fixture(t: TestContext) {
     setReviewers(value: ResponseFixture) { reviewers = value; },
     setApprovals(value: ResponseFixture) { approvals = value; },
     setApprovalGate(gate?: () => Promise<void>) { holdApprovals = gate; },
+    setDiscussions(page: number, value: ResponseFixture) { discussionPages.set(page, value); },
+    setDiscussionGate(gate?: typeof holdDiscussions) { holdDiscussions = gate; },
   };
 }
 
@@ -251,4 +268,176 @@ test('discards review responses held across live head, connection or the precise
   assert.equal(replacement?.id, f.link.id);
   assert.notEqual(replacement?.manualLinkId, f.link.manualLinkId);
   assert.equal((await f.call<GitlabMergeRequestReview>(f.path)).linkId, f.link.id);
+});
+
+test('lists one visible unresolved note per linked MR thread with bounded, plain display metadata', async t => {
+  const f = await fixture(t);
+  const before = await f.snapshot(), beforeRuns = await f.runs();
+  f.setMr({ detailed_merge_status: 'discussions_not_resolved', blocking_discussions_resolved: false });
+  f.setDiscussions(1, { body: [
+    discussion(1, [note(11, { body: '첫 줄\n **검토** https://example.test/private', position: {
+      new_path: 'src/new.ts', old_path: 'old.ts', new_line: 42, old_line: 8,
+    }, web_url: `https://example.test/${privatePayload}`, suggestions: [privatePayload] }), note(12, { body: privatePayload })]),
+    discussion(2, [note(21, { system: true, body: privatePayload }), note(22, { resolved: true, body: privatePayload }),
+      note(23, { resolvable: false, body: privatePayload }), note(24, { confidential: true, body: privatePayload }),
+      note(25, { author: null, body: 'a'.repeat(350), position: { old_path: 'src/old.ts', old_line: 3 } })]),
+    discussion(3, [note(31, { internal: true, body: privatePayload }), note(32, { body: privatePayload })]),
+    discussion(4, [note(41, { confidential: true, body: privatePayload }), note(42, { body: privatePayload })]),
+    discussion(5, [note(51, { body: privatePayload })], { individual_note: true }),
+    discussion(6, [note(61, { body: privatePayload })], { internal: true }),
+    discussion(7, [note(71, { body: `token ${token}`, author: { name: token }, position: { new_path: token, new_line: 1 } })]),
+    discussion(8, [note(81, { author: { username: 'fallback' }, body: '파일 검토', position: {
+      new_path: 'file.txt', new_line: -1, old_path: 'https://example.test/private', old_line: 2,
+    } })]),
+  ] });
+  const result = await f.request<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.match(result.headers.get('cache-control') ?? '', /\bno-store\b/u);
+  const { checkedAt, ...data } = result.data;
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(data, { linkId: f.link.id, repositoryId, mergeRequestIid, hasMore: false, threads: [
+    { noteId: 11, author: 'Reviewer 11', excerpt: '첫 줄 **검토** [링크]', excerptTruncated: false, filePath: 'src/new.ts', line: 42, lineSide: 'new' },
+    { noteId: 25, author: null, excerpt: 'a'.repeat(300), excerptTruncated: true, filePath: 'src/old.ts', line: 3, lineSide: 'old' },
+    { noteId: 71, author: '[숨김]', excerpt: '[숨김]', excerptTruncated: false, filePath: null, line: null, lineSide: null },
+    { noteId: 81, author: 'fallback', excerpt: '파일 검토', excerptTruncated: false, filePath: 'file.txt', line: null, lineSide: null },
+  ] });
+  const serialized = JSON.stringify(result.data);
+  assert.ok(!serialized.includes(privatePayload) && !serialized.includes(token) && !serialized.includes('https://example.test/'));
+  assert.deepEqual(f.calls.map(call => [call.method, call.url.pathname, call.credential]), [
+    ['GET', repositoryPath, token], ['GET', mrPath, token], ['GET', discussionsPath, token], ['GET', mrPath, token],
+  ]);
+  assert.deepEqual(Object.fromEntries(f.calls[2].url.searchParams), { per_page: '50', page: '1' });
+  assert.deepEqual(await f.snapshot(), before);
+  assert.deepEqual(await f.runs(), beforeRuns);
+});
+
+test('bounds discussion pagination, verifies continuation metadata and distinguishes empty and partial results', async t => {
+  const f = await fixture(t);
+  const pages = () => f.calls.filter(call => call.url.pathname === discussionsPath).map(call => call.url.searchParams.get('page'));
+  f.setDiscussions(1, { body: [discussion(1, [note(11, { resolved: true })])],
+    headers: { Link: `<${discussionsPath}?per_page=50&page=2>; rel="next"` } });
+  f.setDiscussions(2, { body: [discussion(2, [note(21)])], headers: { 'X-Next-Page': '' } });
+  const secondPage = await f.call<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.deepEqual(secondPage.threads.map(thread => thread.noteId), [21]);
+  assert.equal(secondPage.hasMore, false);
+  assert.deepEqual(pages(), ['1', '2']);
+
+  f.calls.length = 0;
+  for (let page = 1; page <= 4; page++) f.setDiscussions(page, {
+    body: [discussion(page, [note(page, { resolved: true })])], headers: { 'X-Next-Page': String(page + 1) },
+  });
+  const capped = await f.call<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.deepEqual(capped.threads, []);
+  assert.equal(capped.hasMore, true);
+  assert.deepEqual(pages(), ['1', '2', '3', '4']);
+
+  f.calls.length = 0;
+  f.setDiscussions(1, { body: Array.from({ length: 31 }, (_, index) => discussion(index, [note(index + 1)])),
+    headers: { 'X-Next-Page': '2' } });
+  const limited = await f.call<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.equal(limited.threads.length, 30);
+  assert.equal(limited.hasMore, true);
+  assert.deepEqual(pages(), ['1']);
+
+  f.calls.length = 0;
+  f.setDiscussions(1, { body: [discussion(1, [note(11)])], headers: { Link: '<https://untrusted.test/page?page=2>; rel="next"' } });
+  await f.call(f.discussionPath, undefined, 502);
+  assert.deepEqual(pages(), ['1']);
+  f.setDiscussions(1, { body: [], headers: { 'X-Next-Page': '' } });
+  const empty = await f.call<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.deepEqual(empty.threads, []);
+  assert.equal(empty.hasMore, false);
+});
+
+test('checks linked MR discussions identity and reports access, unsupported, missing and invalid responses distinctly', async t => {
+  const f = await fixture(t);
+  const other = await f.createIssue('MR 연결이 없는 다른 업무');
+  for (const path of [discussionRoute(other.id, f.link.id), discussionRoute(f.issue.id, 'missing-link')]) {
+    const result = await f.request<{ error: string }>(path);
+    assert.equal(result.status, 404);
+    assert.equal(result.data.error, '업무에 연결된 GitLab MR을 찾을 수 없습니다.');
+    assert.match(result.headers.get('cache-control') ?? '', /\bno-store\b/u);
+  }
+  await f.call(`${f.discussionPath}?page=2`, undefined, 400);
+  const key = await f.call<{ token: string }>('/api-keys', { method: 'POST', body: {
+    name: 'MR 토론 읽기 범위 검증', access: 'read', projectIds: [projectId], expiresAt: null,
+  } }, 201);
+  await f.call(`/v1${f.discussionPath}`, { headers: { Authorization: `Bearer ${key.token}` } }, 403);
+  assert.equal(f.calls.length, 0);
+  f.setProject({ id: repositoryId + 1 });
+  await f.call(f.discussionPath, undefined, 502);
+  f.setProject({});
+  f.setMr({ id: mergeRequestId + 1 });
+  await f.call(f.discussionPath, undefined, 502);
+  assert.ok(!f.calls.some(call => call.url.pathname === discussionsPath));
+  f.setMr({ id: mergeRequestId });
+
+  for (const patch of [{ noteable_id: mergeRequestIid }, { noteable_iid: mergeRequestIid + 1 },
+    { noteable_type: 'Issue' }, { project_id: repositoryId + 1 }]) {
+    f.setDiscussions(1, { body: [discussion(1, [note(1, patch)])] });
+    await f.call(f.discussionPath, undefined, 502);
+  }
+  f.setDiscussions(1, { body: [discussion(1, [note(1)]), discussion(2, [note(1)])] });
+  await f.call(f.discussionPath, undefined, 502);
+
+  for (const [upstream, expected] of [[401, 403], [403, 403], [404, 404], [405, 501], [501, 501], [429, 429], [302, 502]]) {
+    f.setDiscussions(1, { status: upstream, body: { message: `${token} ${privatePayload}` },
+      headers: { Location: `${f.baseUrl}/redirected-discussion` } });
+    const result = await f.request<{ error: string }>(f.discussionPath);
+    assert.equal(result.status, expected);
+    assert.match(result.headers.get('cache-control') ?? '', /\bno-store\b/u);
+    assert.ok(!result.data.error.includes(token) && !result.data.error.includes(privatePayload));
+    if (expected === 404) assert.equal(result.data.error, 'GitLab에서 이 MR의 토론을 조회할 수 없습니다.');
+    if (expected === 501) assert.equal(result.data.error, '이 GitLab 연결에서는 MR 토론 조회를 지원하지 않습니다.');
+  }
+  assert.ok(!f.calls.some(call => call.url.pathname.includes('redirected-discussion')));
+  f.setDiscussions(1, { body: [discussion(1, [note(1)])], headers: { 'X-Next-Page': '2' } });
+  f.setDiscussions(2, { status: 404, body: {} });
+  await f.call(f.discussionPath, undefined, 502);
+});
+
+test('rejects stale linked discussions and cancels a GitLab fetch after browser disconnect', { timeout: 8_000 }, async t => {
+  const f = await fixture(t);
+  f.setMr({ blocking_discussions_resolved: false, detailed_merge_status: 'discussions_not_resolved' });
+  f.setDiscussions(1, { body: [discussion(1, [note(1)])] });
+  async function whileReading(change: () => void | Promise<void>) {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    f.setDiscussionGate(() => { entered.resolve(); return release.promise; });
+    const pending = f.request(f.discussionPath);
+    try {
+      await Promise.race([entered.promise, pending.then(response => assert.fail(`Discussions ended early (${response.status})`))]);
+      await change();
+    } finally {
+      release.resolve();
+      f.setDiscussionGate();
+    }
+    const result = await pending;
+    assert.equal(result.status, 409, JSON.stringify(result.data));
+    assert.ok(!Object.hasOwn(result.data as object, 'threads'));
+  }
+  await whileReading(() => f.setMr({ blocking_discussions_resolved: true }));
+  f.setMr({ blocking_discussions_resolved: false });
+  await whileReading(() => f.setMr({ detailed_merge_status: 'mergeable' }));
+  await whileReading(() => f.setMr({ sha: 'b'.repeat(40) }));
+  await whileReading(async () => { await f.configure({ token: 'rotated-synthetic-discussion-token' }); });
+  await whileReading(async () => { await f.unlink(f.link); await f.attach(); });
+
+  const entered = Promise.withResolvers<void>();
+  const closed = Promise.withResolvers<void>();
+  f.setDiscussionGate(response => {
+    response.once('close', () => closed.resolve());
+    entered.resolve();
+    return closed.promise;
+  });
+  const controller = new AbortController();
+  const pending = f.request(f.discussionPath, { signal: controller.signal });
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await entered.promise;
+  controller.abort();
+  await rejected;
+  await closed.promise;
+  f.setDiscussionGate();
+  const live = await f.call<GitlabMergeRequestDiscussions>(f.discussionPath);
+  assert.deepEqual(live.threads.map(thread => thread.noteId), [1]);
 });

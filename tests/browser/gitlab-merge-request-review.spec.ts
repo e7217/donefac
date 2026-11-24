@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test, type APIResponse } from '@playwright/test';
+import { expect, test, type APIResponse, type Page } from '@playwright/test';
 import type { GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, expected = 200): Promise<T> {
@@ -10,7 +10,26 @@ async function json<T>(response: APIResponse, expected = 200): Promise<T> {
   return response.json();
 }
 
-test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 확인된 승인 정보를 직접 조회한다', async ({ page, request }) => {
+async function holdNextResponse(page: Page, url: RegExp) {
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const finished = Promise.withResolvers<void>();
+  await page.route(url, async intercepted => {
+    try {
+      const response = await intercepted.fetch();
+      expect(response.status()).toBe(200);
+      started.resolve();
+      await release.promise;
+      await intercepted.fulfill({ response }).catch(() => undefined);
+    } catch (cause) {
+      started.reject(cause);
+      await intercepted.abort().catch(() => undefined);
+    } finally { finished.resolve(); }
+  }, { times: 1 });
+  return { started: started.promise, release: release.resolve, finished: finished.promise };
+}
+
+test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론을 원하는 시점에 조회한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const settingsPath = '/api/integrations/gitlab';
@@ -25,19 +44,32 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
   const repositoryId = 42, mrId = 872, iid = 8;
   const projectPath = `/forge/api/v4/projects/${repositoryId}`;
   const mrPath = `${projectPath}/merge_requests/${iid}`;
-  const reviewerPath = `${mrPath}/reviewers`, approvalPath = `${mrPath}/approvals`;
+  const reviewerPath = `${mrPath}/reviewers`, approvalPath = `${mrPath}/approvals`, discussionsPath = `${mrPath}/discussions`;
   const reviewer = { id: 81, name: '공정 검토자', username: 'reviewer' };
   const approver = { id: 82, name: '승인 담당자', username: 'approver' };
   const fallback = { id: 83, username: 'legacy-reviewer' };
   const withdrawn = { id: 84, name: '이전 승인자', username: 'former-approver' };
   const webhookSecret = `synthetic-gitlab-review-${unique}`;
   const remoteCalls: { path: string; query: string; method?: string; credential?: string | string[] }[] = [];
+  const discussionQueries = () => remoteCalls.filter(call => call.path === discussionsPath).map(call => call.query);
   let mode: 'detailed' | 'fallback' | 'empty' | 'unavailable' = 'detailed';
+  let discussionMode: 'detailed' | 'empty' | 'partial' | 'unsupported' = 'detailed';
   let baseUrl = '';
   let head = 'e'.repeat(40);
   let updatedAt = new Date(Date.now() - 60_000).toISOString();
   const repositoryUrl = () => `${baseUrl}/team/app`;
   const mrUrl = () => `${repositoryUrl()}/-/merge_requests/${iid}`;
+  const literalExcerpt = '<strong>측정값 초기화 조건 확인</strong>';
+  const unresolvedNote = {
+    id: 4401, noteable_type: 'MergeRequest', noteable_id: mrId, project_id: repositoryId,
+    system: false, confidential: false, resolvable: true, resolved: false, body: literalExcerpt, author: reviewer,
+    position: { new_path: 'src/measurement/value.ts', new_line: 27 }, web_url: 'https://candidate.invalid/elsewhere#note_9999',
+  };
+  const secondExcerptStart = '이전 입력의 경계값 확인';
+  const secondNote = {
+    ...unresolvedNote, id: 4402, body: `${secondExcerptStart} ${'추가'.repeat(165)} 미리보기 이후 내용`, author: approver,
+    position: { old_path: 'src/measurement/old-value.ts', old_line: 13 },
+  };
   const mr = () => ({ id: mrId, iid, project_id: repositoryId, target_project_id: repositoryId, state: 'opened',
     title: `${issue.key} 검토 기다리는 변경`, source_branch: `feature/${issue.key}`, sha: head,
     updated_at: updatedAt, web_url: mrUrl(), detailed_merge_status: 'not_approved',
@@ -49,7 +81,29 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
     response.setHeader('Content-Type', 'application/json');
     if (url.pathname === projectPath) response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: repositoryUrl() }));
     else if (url.pathname === mrPath) response.end(JSON.stringify(mr()));
-    else if (url.pathname === reviewerPath && mode === 'detailed') {
+    else if (url.pathname === discussionsPath) {
+      const page = Number(url.searchParams.get('page'));
+      if (discussionMode === 'detailed' && page === 1) {
+        response.setHeader('X-Next-Page', '2');
+        response.end(JSON.stringify([
+          { id: 'unresolved', individual_note: false, notes: [unresolvedNote, { ...unresolvedNote, id: 4403, body: '답글 전문은 표시하지 않음' }] },
+          { id: 'resolved', individual_note: false, notes: [{ ...unresolvedNote, id: 4404, body: '이미 해결된 토론', resolved: true }] },
+          { id: 'ordinary', individual_note: true, notes: [{ ...unresolvedNote, id: 4405, body: '일반 메모' }] },
+          { id: 'system', individual_note: false, notes: [{ ...unresolvedNote, id: 4406, body: '시스템 자동 기록', system: true }] },
+          { id: 'confidential', individual_note: false, notes: [{ ...unresolvedNote, id: 4407, body: '비공개 토론', confidential: true }] },
+          { id: 'non-resolvable', individual_note: false, notes: [{ ...unresolvedNote, id: 4408, body: '해결 표시가 없는 토론', resolvable: false }] },
+        ]));
+      } else if (discussionMode === 'detailed' && page === 2) {
+        response.end(JSON.stringify([{ id: 'second-page', individual_note: false, notes: [secondNote] }]));
+      } else if (discussionMode === 'partial') {
+        response.setHeader('X-Next-Page', String(page + 1));
+        response.end(JSON.stringify([{
+          id: `resolved-page-${page}`, individual_note: false,
+          notes: [{ ...unresolvedNote, id: 4500 + page, resolved: true }],
+        }]));
+      } else if (discussionMode === 'empty') response.end('[]');
+      else response.writeHead(discussionMode === 'unsupported' ? 501 : 500).end('{}');
+    } else if (url.pathname === reviewerPath && mode === 'detailed') {
       response.setHeader('X-Next-Page', '2');
       response.end(JSON.stringify([
         { user: reviewer, state: 'requested_changes' }, { user: approver, state: 'reviewed' }, { user: withdrawn, state: 'unapproved' },
@@ -100,23 +154,52 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
     await expect(review.getByRole('link', { name: 'GitLab', exact: true })).toHaveAttribute('href', mrUrl());
     expect(await review.evaluate(region => region.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
 
-    const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>(), finished = Promise.withResolvers<void>();
+    const openDiscussions = review.getByRole('button', { name: '미해결 토론 확인', exact: true });
+    await expect(openDiscussions).toBeVisible();
+    await expect(openDiscussions).toHaveAttribute('aria-expanded', 'false');
+    expect(discussionQueries()).toEqual([]);
+    const discussionRoute = /\/merge-request-discussions$/u;
+    const requestedDiscussions = page.waitForRequest(sent => discussionRoute.test(sent.url()));
+    await openDiscussions.press('Enter');
+    const sent = await requestedDiscussions;
+    expect(sent.method()).toBe('GET');
+    const requestPath = `/api/issues/${encodeURIComponent(issue.id)}/gitlab-links/${encodeURIComponent(initialLink.id)}/merge-request-discussions`;
+    expect(new URL(sent.url()).pathname).toBe(requestPath);
+    const discussions = review.getByRole('region', { name: 'GitLab 미해결 토론', exact: true });
+    const threadList = discussions.getByRole('list', { name: '미해결 토론', exact: true });
+    const threads = threadList.getByRole('listitem');
+    const visibleThread = threads.filter({ hasText: literalExcerpt });
+    await expect(threads).toHaveCount(2);
+    await expect(visibleThread).toContainText('공정 검토자');
+    await expect(visibleThread).toContainText('src/measurement/value.ts:27');
+    await expect(visibleThread).toContainText('변경 후');
+    await expect(visibleThread.locator('strong').filter({ hasText: '측정값 초기화 조건 확인' })).toHaveCount(0);
+    await expect(visibleThread.getByRole('link', { name: 'GitLab에서 토론 열기', exact: true })).toHaveAttribute('href', `${mrUrl()}#note_4401`);
+    const secondThread = threads.filter({ hasText: secondExcerptStart });
+    await expect(secondThread).toContainText('src/measurement/old-value.ts:13');
+    await expect(secondThread).toContainText('변경 전');
+    await expect(secondThread).toContainText('…');
+    await expect(secondThread).not.toContainText('미리보기 이후 내용');
+    await expect(secondThread.getByRole('link', { name: 'GitLab에서 토론 열기', exact: true })).toHaveAttribute('href', `${mrUrl()}#note_4402`);
+    await expect(discussions).not.toContainText(/답글 전문|이미 해결된 토론|일반 메모|시스템 자동 기록|비공개 토론|해결 표시가 없는 토론/u);
+    await expect(discussions.getByRole('link', { name: 'GitLab에서 MR 열기', exact: true })).toHaveAttribute('href', mrUrl());
+    expect(await discussions.evaluate(region => region.getBoundingClientRect().width)).toBeLessThanOrEqual(360);
+    expect(await threadList.evaluate(list => list.scrollWidth - list.clientWidth)).toBe(0);
+    expect(discussionQueries()).toEqual(['?per_page=50&page=1', '?per_page=50&page=2']);
+    await expect(title).toHaveValue('저장하지 않은 MR 검토 업무 제목');
+    await expect(comment).toHaveValue('작성 중인 MR 검토 메모');
+
     const reviewRoute = /\/merge-request-review$/u;
-    await page.route(reviewRoute, async intercepted => {
-      try {
-        const response = await intercepted.fetch();
-        expect(response.status()).toBe(200);
-        started.resolve();
-        await release.promise;
-        await intercepted.fulfill({ response }).catch(() => undefined);
-      } catch (cause) {
-        started.reject(cause);
-        await intercepted.abort().catch(() => undefined);
-      } finally { finished.resolve(); }
-    }, { times: 1 });
+    const pendingDiscussion = await holdNextResponse(page, discussionRoute);
+    const pendingReview = await holdNextResponse(page, reviewRoute);
     try {
+      await discussions.getByRole('button', { name: '미해결 토론 다시 확인', exact: true }).click();
+      await pendingDiscussion.started;
+      const discussionsAborted = page.waitForEvent('requestfailed', sent => discussionRoute.test(sent.url()));
       await review.getByRole('button', { name: 'MR 검토 다시 확인', exact: true }).click();
-      await started.promise;
+      expect((await discussionsAborted).failure()?.errorText).toContain('ERR_ABORTED');
+      await expect(discussions).toHaveCount(0);
+      await pendingReview.started;
       const aborted = page.waitForEvent('requestfailed', sent => reviewRoute.test(sent.url()));
       const countBefore = remoteCalls.length;
       head = 'f'.repeat(40);
@@ -126,8 +209,11 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
       await expect(review.getByRole('status')).toContainText('MR이 변경되었습니다.');
       expect((await aborted).failure()?.errorText).toContain('ERR_ABORTED');
       expect(remoteCalls).toHaveLength(countBefore);
-    } finally { release.resolve(); }
-    await finished.promise;
+    } finally {
+      pendingDiscussion.release();
+      pendingReview.release();
+    }
+    await Promise.all([pendingDiscussion.finished, pendingReview.finished]);
     await expect(reviewers).toHaveCount(0);
     await expect(title).toHaveValue('저장하지 않은 MR 검토 업무 제목');
     await expect(comment).toHaveValue('작성 중인 MR 검토 메모');
@@ -140,6 +226,7 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
     try {
       await development.setViewportSize({ width: 360, height: 820 });
       const before = remoteCalls.length;
+      const discussionCallsBefore = discussionQueries().length;
       await development.goto(`/#/${project.id}/development`);
       const activity = development.getByRole('region', { name: '연결된 개발 활동', exact: true });
       const trigger = activity.getByRole('button', { name: 'MR 검토 확인', exact: true });
@@ -151,6 +238,33 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
       await expect(details).toContainText('상태 미확인');
       await expect(details).toContainText('GitLab에서 승인 정보를 확인하지 못했습니다.');
       await expect(details).not.toContainText('남은 승인');
+
+      const showDiscussions = details.getByRole('button', { name: '미해결 토론 확인', exact: true });
+      await expect(showDiscussions).toBeVisible();
+      expect(discussionQueries()).toHaveLength(discussionCallsBefore);
+      discussionMode = 'empty';
+      await showDiscussions.click();
+      const discussionDetails = details.getByRole('region', { name: 'GitLab 미해결 토론', exact: true });
+      const refreshDiscussions = discussionDetails.getByRole('button', { name: '미해결 토론 다시 확인', exact: true });
+      await expect(discussionDetails).toContainText('표시할 수 있는 미해결 토론이 없습니다.');
+      expect(discussionQueries().slice(discussionCallsBefore)).toEqual(['?per_page=50&page=1']);
+
+      discussionMode = 'partial';
+      await refreshDiscussions.click();
+      await expect(discussionDetails).toContainText('조회 범위에서 미해결 토론을 찾지 못했습니다.');
+      await expect(discussionDetails).toContainText('조회 범위가 제한되었습니다. 전체 토론을 GitLab에서 확인해 주세요.');
+      await expect(discussionDetails).not.toContainText('미해결 토론이 없습니다.');
+      expect(discussionQueries().slice(discussionCallsBefore + 1)).toEqual([
+        '?per_page=50&page=1', '?per_page=50&page=2', '?per_page=50&page=3', '?per_page=50&page=4',
+      ]);
+
+      discussionMode = 'unsupported';
+      await refreshDiscussions.click();
+      await expect(discussionDetails).toContainText('이 GitLab 연결에서는 MR 토론 조회를 지원하지 않습니다.');
+      await expect(discussionDetails).not.toContainText('미해결 토론이 없습니다.');
+      await expect(discussionDetails.getByRole('link', { name: 'GitLab에서 MR 열기', exact: true })).toHaveAttribute('href', mrUrl());
+      await details.getByRole('button', { name: '미해결 토론 닫기', exact: true }).press('Enter');
+      await expect(showDiscussions).toBeFocused();
 
       const retry = details.getByRole('button', { name: 'MR 검토 다시 확인', exact: true });
       mode = 'empty';
@@ -167,7 +281,7 @@ test('360px 티켓과 개발 화면에서 연결한 GitLab MR의 검토자와 �
     expect(final.issues.find(item => item.id === issue.id)).toEqual(issue);
     expect(remoteCalls.filter(call => call.path === reviewerPath).map(call => call.query)).toEqual(Array<string>(5).fill('?per_page=50&page=1'));
     expect(remoteCalls.every(call => call.method === 'GET' && call.credential === undefined)).toBe(true);
-    expect(new Set(remoteCalls.map(call => call.path))).toEqual(new Set([projectPath, mrPath, reviewerPath, approvalPath]));
+    expect(new Set(remoteCalls.map(call => call.path))).toEqual(new Set([projectPath, mrPath, reviewerPath, approvalPath, discussionsPath]));
   } finally {
     try {
       const deleted = await request.delete(`/api/issues/${issue.id}`);

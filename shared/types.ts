@@ -1442,6 +1442,23 @@ export interface GitlabMergeRequestReview {
     hasMore: boolean;
   } | null;
 }
+export interface GitlabUnresolvedDiscussion {
+  noteId: number;
+  author: string | null;
+  excerpt: string;
+  excerptTruncated: boolean;
+  filePath: string | null;
+  line: number | null;
+  lineSide: 'old' | 'new' | null;
+}
+export interface GitlabMergeRequestDiscussions {
+  linkId: string;
+  repositoryId: number;
+  mergeRequestIid: number;
+  checkedAt: string;
+  threads: GitlabUnresolvedDiscussion[];
+  hasMore: boolean;
+}
 export interface GitlabBranchMergeRequests {
   linkId: string;
   branchRevision: string;

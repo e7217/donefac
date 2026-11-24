@@ -6,7 +6,7 @@ import { gitlabObjectSha, isGitlabBranchName, isRestorableGitlabLink } from '../
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type {
-  FeatureProps, GitlabBranchMergeRequests, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestReview, GitlabPipelineFailedTests,
+  FeatureProps, GitlabBranchMergeRequests, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestDiscussions, GitlabMergeRequestReview, GitlabPipelineFailedTests,
   GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabTestCounts,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
@@ -735,7 +735,10 @@ function MergeRequestReview({ target, revision }: { target: ReviewTarget; revisi
       {view.kind === 'loading' && <p role="status">GitLab MR 검토 정보를 확인하고 있습니다.</p>}
       {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 검토 정보를 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
-      {view.kind === 'ready' && <MergeRequestReviewResult result={view.result} url={target.url} />}
+      {view.kind === 'ready' && <>
+        <MergeRequestReviewResult result={view.result} url={target.url} />
+        <MergeRequestDiscussions target={target} revision={revision} />
+      </>}
       <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
         <RefreshCw aria-hidden="true" size={14} />MR 검토 다시 확인
       </button>
@@ -769,6 +772,87 @@ function MergeRequestReviewResult({ result, url }: { result: GitlabMergeRequestR
       </ul> : <p>확인된 승인자가 없습니다.</p>}
       {approvals.hasMore && <p>나머지 승인자는 <a href={url.href} target="_blank" rel="noopener noreferrer">GitLab</a>에서 확인하세요.</p>}
     </>}
+  </>;
+}
+
+function isMergeRequestDiscussionsResult(result: GitlabMergeRequestDiscussions | undefined, target: ReviewTarget): result is GitlabMergeRequestDiscussions {
+  if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId ||
+      result.mergeRequestIid !== target.mergeRequestIid || typeof result.checkedAt !== 'string' || !Number.isFinite(Date.parse(result.checkedAt)) ||
+      typeof result.hasMore !== 'boolean' || !Array.isArray(result.threads)) return false;
+  const ids = new Set<number>();
+  return result.threads.every(thread => {
+    if (!thread || !Number.isSafeInteger(thread.noteId) || thread.noteId < 1 || ids.has(thread.noteId) ||
+        (thread.author !== null && typeof thread.author !== 'string') ||
+        typeof thread.excerpt !== 'string' || typeof thread.excerptTruncated !== 'boolean' ||
+        (thread.filePath !== null && typeof thread.filePath !== 'string')) return false;
+    ids.add(thread.noteId);
+    if (thread.line === null) return thread.lineSide === null;
+    return Boolean(thread.filePath) && Number.isSafeInteger(thread.line) && thread.line > 0 &&
+      (thread.lineSide === 'old' || thread.lineSide === 'new');
+  });
+}
+
+function mergeRequestDiscussionsMessage(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 MR 토론 조회 권한을 확인해 주세요.';
+    if (cause.status === 404) return 'GitLab에서 이 MR의 토론을 조회할 수 없습니다.';
+    if (cause.status === 409) return 'MR 또는 GitLab 연결이 변경되었습니다. 미해결 토론을 다시 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
+    if (cause.status === 501) return '이 GitLab 연결에서는 MR 토론 조회를 지원하지 않습니다.';
+  }
+  return 'GitLab 미해결 토론을 불러오지 못했습니다. 다시 확인해 주세요.';
+}
+
+function MergeRequestDiscussions({ target, revision }: { target: ReviewTarget; revision: string }) {
+  const panelId = useId();
+  const { view, toggle, load } = useActivityLookup(revision, async signal => {
+    const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/merge-request-discussions`;
+    const result = await api<GitlabMergeRequestDiscussions | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    return isMergeRequestDiscussionsResult(result, target) ? result : null;
+  }, '연결된 MR의 미해결 토론 응답을 확인할 수 없습니다.', mergeRequestDiscussionsMessage);
+
+  return <div className="gitlab-review-discussions">
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+      {view ? '미해결 토론 닫기' : '미해결 토론 확인'}
+    </button>
+    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab 미해결 토론" aria-busy={view.kind === 'loading'}>
+      {view.kind === 'loading' && <p role="status">GitLab 미해결 토론을 확인하고 있습니다.</p>}
+      {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 미해결 토론을 다시 확인해 주세요.</p>}
+      {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
+      {view.kind === 'ready' && <MergeRequestDiscussionsResult result={view.result} url={target.url} />}
+      <div className="gitlab-discussion-actions">
+        <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+          <RefreshCw aria-hidden="true" size={14} />미해결 토론 다시 확인
+        </button>
+        <a className="gitlab-discussion-link" href={target.url.href} target="_blank" rel="noopener noreferrer">
+          GitLab에서 MR 열기 <ExternalLink aria-hidden="true" size={13} />
+        </a>
+      </div>
+    </section>}
+  </div>;
+}
+
+function MergeRequestDiscussionsResult({ result, url }: { result: GitlabMergeRequestDiscussions; url: URL }) {
+  return <>
+    <p className="gitlab-activity-inspection-meta">조회 시각 <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time></p>
+    {result.threads.length > 0 ? <ul className="gitlab-discussion-list" role="list" aria-label="미해결 토론" tabIndex={0}>
+      {result.threads.map(thread => {
+        const noteUrl = new URL(url.href);
+        noteUrl.hash = `note_${thread.noteId}`;
+        return <li className="gitlab-discussion" key={thread.noteId}>
+          {(thread.author || thread.filePath) && <div className="gitlab-activity-inspection-meta">
+            {thread.author && <strong>{thread.author}</strong>}
+            {thread.filePath && <code>{thread.filePath}{thread.line !== null && `:${thread.line}`}</code>}
+            {thread.lineSide && <span>{thread.lineSide === 'old' ? '변경 전' : '변경 후'}</span>}
+          </div>}
+          <p className="gitlab-discussion-excerpt">{thread.excerpt || '토론 미리보기가 없습니다.'}{thread.excerptTruncated && '…'}</p>
+          <a className="gitlab-discussion-link" href={noteUrl.href} target="_blank" rel="noopener noreferrer">
+            GitLab에서 토론 열기 <ExternalLink aria-hidden="true" size={13} />
+          </a>
+        </li>;
+      })}
+    </ul> : <p>{result.hasMore ? '조회 범위에서 미해결 토론을 찾지 못했습니다.' : '표시할 수 있는 미해결 토론이 없습니다.'}</p>}
+    {result.hasMore && <p>조회 범위가 제한되었습니다. 전체 토론을 GitLab에서 확인해 주세요.</p>}
   </>;
 }
 

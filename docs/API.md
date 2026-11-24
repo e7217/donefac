@@ -814,6 +814,14 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 조회 전후 MR의 확인 가능한 커밋·수정 시각·상태·검토자 배정, Teamspace의 연결 설정·업무 위치·저장된 링크를 비교한다. 이 중 하나가 바뀌면 `409`로 조회를 다시 요청하게 한다. 응답은 `Cache-Control: no-store`를 적용하고 조회 결과는 열린 검토 화면에서만 사용한다.
 
+### 연결된 MR 미해결 토론 확인
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-discussions`는 사용자가 요청할 때만 현재 티켓에 연결된 열린 MR의 토론을 읽는다. 저장된 저장소와 전역 MR ID·IID를 대조한 뒤 GitLab에서 50개씩 최대 4페이지를 읽는다. 응답의 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`에 `threads`와 `hasMore`를 더한다. 확인한 미해결 토론은 최대 30개까지 표시한다. 표시 한도를 넘었거나 다음 원본 페이지가 남으면 `hasMore`는 `true`다. [GitLab 토론 API](https://docs.gitlab.com/api/discussions/#list-all-merge-request-discussion-items)
+
+각 토론에서 표시할 수 있는 미해결 댓글 하나의 `noteId`, `author`, `excerpt`, `excerptTruncated`, `filePath`, `line`, `lineSide`를 반환한다. 발췌는 최대 300자의 평문이고 본문의 주소는 `[링크]`로 표시한다. 파일 위치와 작성자는 확인할 수 있을 때 제공한다. 개별 댓글, 시스템·내부·기밀 댓글은 조회 화면에서 제외한다. 화면에서 연결한 MR 주소에 숫자 댓글 ID를 붙여 GitLab 원문을 연다. [GitLab 댓글 주소](https://docs.gitlab.com/cli/mr/note/update/)
+
+조회 전후의 MR 변경과 Teamspace 연결 변경을 확인하고 변경이 감지되면 `409`를 반환한다. 토론 조회 권한 또는 API가 없으면 화면에 조회 불가를 표시한다. 응답은 `Cache-Control: no-store`를 적용한다.
+
 ## 상태별 담당자 자동 배정
 
 프로젝트의 **설정 → 상태별 담당자 자동 배정**에서 사용한다. 관리 경로는 브라우저용 `/api`에 있다. 기존 업무의 `/api/v1` 수정 요청으로 상태가 실제로 바뀌면 같은 배정 규칙을 적용한다.

@@ -38,7 +38,8 @@
 
 .gitlab-activity-inspection-panel p a,
 .gitlab-pipeline-job-link,
-.gitlab-test-report-link {
+.gitlab-test-report-link,
+.gitlab-discussion-link {
   color: #245846;
   text-decoration: underline;
 }
@@ -68,7 +69,8 @@
 }
 
 .gitlab-pipeline-job-list,
-.gitlab-test-suite-list {
+.gitlab-test-suite-list,
+.gitlab-discussion-list {
   display: grid;
   width: 100%;
   max-height: min(24rem, 55vh);
@@ -82,7 +84,8 @@
 }
 
 .gitlab-pipeline-job,
-.gitlab-test-suite {
+.gitlab-test-suite,
+.gitlab-discussion {
   display: grid;
   justify-items: start;
   gap: 4px;
@@ -91,12 +94,14 @@
 }
 
 .gitlab-pipeline-job + .gitlab-pipeline-job,
-.gitlab-test-suite + .gitlab-test-suite {
+.gitlab-test-suite + .gitlab-test-suite,
+.gitlab-discussion + .gitlab-discussion {
   border-top: 1px solid #e5eee8;
 }
 
 .gitlab-pipeline-job-link,
-.gitlab-test-report-link {
+.gitlab-test-report-link,
+.gitlab-discussion-link {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -104,12 +109,14 @@
 }
 
 .gitlab-pipeline-job-link svg,
-.gitlab-test-report-link svg {
+.gitlab-test-report-link svg,
+.gitlab-discussion-link svg {
   flex: none;
 }
 
 .gitlab-test-counts,
-.gitlab-test-report-actions {
+.gitlab-test-report-actions,
+.gitlab-discussion-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -121,9 +128,15 @@
   font-variant-numeric: tabular-nums;
 }
 
-.gitlab-failed-tests {
+.gitlab-failed-tests,
+.gitlab-review-discussions {
   width: 100%;
   min-width: 0;
+}
+
+.gitlab-discussion-excerpt {
+  min-width: 0;
+  white-space: pre-wrap;
 }
 
 .gitlab-pipeline-job-state {
@@ -155,7 +168,8 @@
 @media (max-width: 520px) {
   .gitlab-activity-inspection .btn,
   .gitlab-pipeline-job-link,
-  .gitlab-test-report-link {
+  .gitlab-test-report-link,
+  .gitlab-discussion-link {
     min-height: 44px;
   }
 }
