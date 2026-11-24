@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
-import type { AttachmentVersion, DocPage, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
+import type { AttachmentVersion, DocPage, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationConfluenceReviewCoverage, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
@@ -70,7 +70,8 @@ export class MigrationService {
   constructor(private readonly store: Store, private readonly dataDir: string, private readonly legacy: LegacyImportService,
     private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean,
     private readonly restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>,
-    private readonly confluenceReviews: readonly PilotConfluenceReview[] = []) {
+    private readonly confluenceReviews: readonly PilotConfluenceReview[] = [],
+    private readonly confluenceReviewCoverage: readonly MigrationConfluenceReviewCoverage[] = []) {
     this.append = new AttachmentAppend(dataDir);
     this.files = new AttachmentFiles(dataDir);
     const restrictions = [...(restrictedConfluencePages ?? [])]
@@ -990,6 +991,9 @@ export class MigrationService {
           summary.sha256 === archiveSha256 && summary.size === archiveBytes ? [review] : [];
       });
       if (reviews.length) options.confluenceReviews = reviews;
+      const coverage = this.confluenceReviewCoverage.filter(row => reviews.some(review =>
+        review.packageId === row.packageId && review.coverage?.archivePages === row.archivePages));
+      if (coverage.length) options.confluenceReviewCoverage = coverage;
     }
     return options;
   }

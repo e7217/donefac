@@ -395,12 +395,18 @@ export interface MigrationConfluenceReview {
   unidentifiedPages: number;
   coverage?: MigrationConfluenceCoverage;
 }
+export interface MigrationConfluenceReviewCoverage {
+  packageId: string;
+  archivePages: number;
+  permissionCheckedPages: number;
+}
 export interface MigrationOptions {
   packages:LegacyPackageSummary[];containers:MigrationContainerOption[];identities:MigrationIdentityOption[];
   statuses:MigrationValueOption[];issueTypes:MigrationValueOption[];fields:MigrationFieldOption[];
   defaultConfiguration:MigrationConfiguration;
   jiraWorkflowStatuses?: MigrationJiraWorkflowStatusOption[];
   confluenceReviews?: MigrationConfluenceReview[];
+  confluenceReviewCoverage?: MigrationConfluenceReviewCoverage[];
   appendTarget?: MigrationAppendTarget;
   appendPagesTarget?: MigrationPageAppendTarget;
 }

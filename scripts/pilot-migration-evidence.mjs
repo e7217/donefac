@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { confirmedConfluenceRestrictions } from './pilot-migration-confluence-findings.mjs';
+import { CONFLUENCE_FINDINGS_VERSION, confirmedConfluenceRestrictions } from './pilot-migration-confluence-findings.mjs';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const sha = /^[a-f0-9]{64}$/;
@@ -11,10 +11,11 @@ const sourceRecordPageSize = 100;
 const sourceRecordMaxOffset = 1_000_000;
 
 /** @typedef {'matched'|'needs-review'} ConfluenceReviewStatus */
-/** @typedef {{proof: {packageId: string, sha256: string, status: ConfluenceReviewStatus,
+/** @typedef {{proof: {packageId: string, sha256: string, status: ConfluenceReviewStatus, version?: number,
  * coverage?: {archivePages: number, permissionCheckedPages: number}},
  * findings: {status: ConfluenceReviewStatus, archive: {sha256: string, bytes: number},
  * findings: {pageId: string, codes: string[]}[]}}} ConfluenceReview */
+/** @typedef {{packageId: string, archivePages: number, permissionCheckedPages: number}} ConfluenceReviewCoverage */
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const count = value => Number.isSafeInteger(value) && value >= 0;
@@ -194,6 +195,20 @@ function validateConfluenceReviews(reviews, packages) {
   }
 }
 
+function reviewedConfluenceCoverage(reviews, coverage) {
+  const pageLevel = new Map(reviews.filter(({ proof }) => proof.version === CONFLUENCE_FINDINGS_VERSION)
+    .map(({ proof }) => [proof.packageId, proof.coverage?.archivePages]));
+  const invalid = 'Confluence 페이지별 검토의 합산 건수와 이관 원본의 연결을 확인할 수 없습니다.';
+  requireEvidence(Array.isArray(coverage), invalid);
+  return coverage.map(row => {
+    const { packageId, archivePages, permissionCheckedPages } = row ?? {};
+    requireEvidence(pageLevel.has(packageId) && count(archivePages) && pageLevel.get(packageId) === archivePages &&
+      count(permissionCheckedPages) && permissionCheckedPages <= archivePages, invalid);
+    pageLevel.delete(packageId);
+    return { packageId, archivePages, permissionCheckedPages };
+  }).sort((a, b) => a.packageId.localeCompare(b.packageId));
+}
+
 async function readReviewedPageDispositions(call, receipt, reviewedSources, restrictedSources, recordCount) {
   const invalid = 'Confluence 페이지별 검토의 영수증 원본 목록을 확인할 수 없습니다.';
   const configuredExclusions = receipt.configuration?.excludedRecords ?? [];
@@ -323,18 +338,23 @@ function failedAudit({ integrity, recordCounts, attachmentCounts, notices }) {
  * @param {(path: string, options?: {timeoutMs: number}) => Promise<unknown>} call
  * @param {{packageId: string, product: string, format: string, instanceKey: string, sha256: string, size: number, errors: number, warnings: number, counts: Record<string, number>}[]} packages
  * @param {ConfluenceReview[]} [confluenceReviews]
+ * @param {ConfluenceReviewCoverage[]} [confluenceReviewCoverage] Coverage combined against the verified ZIP's page inventory.
  */
-export async function collectMigrationEvidence(call, packages, confluenceReviews = []) {
+export async function collectMigrationEvidence(call, packages, confluenceReviews = [], confluenceReviewCoverage = []) {
   const expected = inputPackages(packages);
   validateConfluenceReviews(confluenceReviews, expected);
+  const pageCoverage = reviewedConfluenceCoverage(confluenceReviews, confluenceReviewCoverage);
   const restrictedPages = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const imports = await call('/source-imports');
   requireEvidence(Array.isArray(imports), '워크스페이스 이관 영수증 목록을 확인할 수 없습니다.');
   const withoutFullCoverage = new Set(packages
     .filter(pkg => pkg.product === 'confluence' && pkg.format === 'confluence-xml')
     .map(pkg => pkg.packageId));
-  for (const { proof: { packageId, coverage } } of confluenceReviews) {
-    if (coverage && coverage.archivePages === coverage.permissionCheckedPages) withoutFullCoverage.delete(packageId);
+  for (const { proof: { version, packageId, coverage } } of confluenceReviews) {
+    if (version === 2 && coverage && coverage.archivePages === coverage.permissionCheckedPages) withoutFullCoverage.delete(packageId);
+  }
+  for (const { packageId, archivePages, permissionCheckedPages } of pageCoverage) {
+    if (archivePages === permissionCheckedPages) withoutFullCoverage.delete(packageId);
   }
   const checks = { pendingPackages: 0, unexpectedReceipts: 0, unmatchedPackages: 0, sourceIdentityMismatches: 0,
     receiptsWithWarnings: 0, receiptsWithoutNotices: 0, receiptsWithJiraHistoryReview: 0,
@@ -399,7 +419,8 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>
     receipt.recordCounts.trashed > 0 || receipt.recordCounts.excluded > 0 || receipt.attachmentCounts.unbound > 0);
   const workspace = workspaceEvidence(await call('/workspace', { timeoutMs: 120_000 }));
-  return { status: failed ? 'failed' : review ? 'review' : 'verified', checks, packages: staged, receipts, workspace };
+  return { status: failed ? 'failed' : review ? 'review' : 'verified', checks, packages: staged, receipts, workspace,
+    ...(pageCoverage.length ? { confluenceReviewCoverage: pageCoverage } : {}) };
 }
 
 /** Physical restore may return a different receipt revision; the evidence itself must agree. */
@@ -412,7 +433,8 @@ export function compareMigrationEvidence(before, after) {
   const first = new Map(before.receipts.map(evidence => [evidence.id, comparable(evidence)]));
   const second = new Map(after.receipts.map(evidence => [evidence.id, comparable(evidence)]));
   const changedReceiptIds = [...new Set([...first.keys(), ...second.keys()])].filter(id => first.get(id) !== second.get(id)).sort();
-  const packagesMatch = JSON.stringify(before.packages) === JSON.stringify(after.packages);
+  const packagesMatch = JSON.stringify(before.packages) === JSON.stringify(after.packages) &&
+    JSON.stringify(before.confluenceReviewCoverage) === JSON.stringify(after.confluenceReviewCoverage);
   const workspaceMatches = before.workspace.sha256 === after.workspace.sha256;
   const matches = changedReceiptIds.length === 0 && packagesMatch && workspaceMatches &&
     JSON.stringify(before.checks) === JSON.stringify(after.checks) && before.status === after.status;

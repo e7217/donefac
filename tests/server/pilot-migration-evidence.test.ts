@@ -10,6 +10,11 @@ const wiki = {
   packageId: '00000000-0000-0000-0000-000000000012', product: 'confluence', format: 'confluence-xml', sha256: 'b'.repeat(64),
   instanceKey: 'never-emit-private-wiki-instance', size: 35, errors: 0, warnings: 0, counts: { page: 1 },
 };
+const completeWikiReview = {
+  proof: { packageId: wiki.packageId, version: 2, sha256: '9'.repeat(64), status: 'matched' as const,
+    coverage: { archivePages: 1, permissionCheckedPages: 1 } },
+  findings: { status: 'matched' as const, archive: { sha256: wiki.sha256, bytes: wiki.size }, findings: [] },
+};
 const receiptId = '00000000-0000-0000-0000-000000000020';
 const archivedId = '00000000-0000-0000-0000-000000000030';
 const fileId = '00000000-0000-0000-0000-000000000040';
@@ -71,7 +76,9 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
     projects: [{ id: 'project-synthetic', name: 'never-emit-private-project-name' }],
     users: [{ id: 'team-1', email: 'never-emit-private-email@example.test' }, { id: 'team-2' }],
     issues: [{ id: 'issue-1', assigneeId: 'team-1', description: 'never-emit-issue-description' }],
-    documents: [{ id: 'document-1', authorId: swappedAuthors ? 'team-2' : 'team-1', content: { text: 'never-emit-document-body' } }],
+    documents: [{ id: 'document-1', projectId: 'project-synthetic', parentId: null,
+      authorId: swappedAuthors ? 'team-2' : 'team-1', content: { text: 'never-emit-document-body' } }],
+    documentOrders: [{ projectId: 'project-synthetic', parentId: null, documentIds: ['document-1'] }],
     workflows: [], issueSchemas: [], dependencies: [], resourceLinks: [{ id: 'res-link', documentId: 'document-1', issueId: 'issue-1' }],
     planningItems: [{ id: 'plan-1', kind: 'release', name: 'never-emit-private-release', targetDate: '2026-01-01' }],
   };
@@ -84,7 +91,7 @@ function evidence(input: ReturnType<typeof sample>, observations: unknown = inpu
     if (path === '/workspace') return input.workspace;
     assert.equal(path, `/source-imports/${receiptId}/reconciliation/audit?expectedVersion=${input.receipt.version}`);
     return observations;
-  }, input.packages);
+  }, input.packages, [completeWikiReview]);
 }
 
 test('migration rehearsal proves package coverage and matching cold-restore evidence without emitting contents', async () => {
@@ -461,13 +468,13 @@ test('Confluence matched findings need coverage evidence before counting a packa
   assert.deepEqual(result.receipts[0].confluenceReviews?.[0].counts, emptyDispositions);
   assert.deepEqual(result.receipts[0].confluenceReviews?.[0].liveRestrictedCounts, emptyDispositions);
 
-  const partial = { ...matched, proof: { ...matched.proof, coverage: { archivePages: 2, permissionCheckedPages: 1 } } };
+  const partial = { ...matched, proof: { ...matched.proof, version: 2, coverage: { archivePages: 2, permissionCheckedPages: 1 } } };
   const separate = { ...partial, proof: { ...partial.proof, sha256: '7'.repeat(64) } };
   const partialResult = await confluenceEvidence([], [partial, separate], offsets);
   assert.equal(partialResult.status, 'review');
   assert.equal(partialResult.checks.confluencePackagesWithoutFullPageCoverage, 1);
 
-  const full = { ...matched, proof: { ...matched.proof, sha256: '6'.repeat(64), coverage: { archivePages: 2, permissionCheckedPages: 2 } } };
+  const full = { ...matched, proof: { ...matched.proof, version: 2, sha256: '6'.repeat(64), coverage: { archivePages: 2, permissionCheckedPages: 2 } } };
   const fullResult = await confluenceEvidence([], [partial, full], offsets);
   assert.equal(fullResult.status, 'verified');
   assert.equal(fullResult.checks.confluencePackagesWithoutFullPageCoverage, 0);

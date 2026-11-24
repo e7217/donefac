@@ -36,6 +36,21 @@ function isCurrentPage(row) {
     (status === undefined || status === '' || typeof status === 'string' && status.trim().toLowerCase() === 'current');
 }
 
+async function analyzeConfluenceArchive(bytes) {
+  const { dataset } = await analyzeLegacyPackageBytes({
+    bytes, filename: 'confluence-export.zip', instanceKey: 'confluence-pilot-audit', product: 'auto',
+  }).catch(() => {
+    throw new Error('Confluence ZIP의 XML 구조와 첨부 항목을 분석할 수 없습니다.');
+  });
+  if (dataset.source.product !== 'confluence') throw new Error('Confluence 공간 XML 내보내기 ZIP을 입력해야 합니다.');
+  return dataset;
+}
+
+export async function readConfluenceArchivePageIds(bytes) {
+  const { records } = await analyzeConfluenceArchive(bytes);
+  return new Set(records.filter(isCurrentPage).map(row => row.sourceId));
+}
+
 function sameHierarchy(row, expected, currentPages) {
   const ancestors = expected.ancestors;
   const declared = row.metadata.ancestorIds;
@@ -63,15 +78,10 @@ const permissionWarningCode = 'CONFLUENCE_SPACE_PERMISSION_REVIEW';
 const restrictedCode = 'CONFLUENCE_RESTRICTED_CONTENT';
 const unlinkedBinaryCode = 'CONFLUENCE_UNLINKED_ATTACHMENT_FILES';
 
-export async function compareConfluenceArchive(archivePath, inventory, addFinding) {
+export async function compareConfluenceArchive(archivePath, inventory, { addFinding, addPermissionCheckedPage } = {}) {
   const bytes = await readArchive(archivePath);
   const sha256 = createHash('sha256').update(bytes).digest('hex');
-  const { dataset } = await analyzeLegacyPackageBytes({
-    bytes, filename: 'confluence-export.zip', instanceKey: 'confluence-pilot-audit', product: 'auto',
-  }).catch(() => {
-    throw new Error('Confluence ZIP의 XML 구조와 첨부 항목을 분석할 수 없습니다.');
-  });
-  if (dataset.source.product !== 'confluence') throw new Error('Confluence 공간 XML 내보내기 ZIP을 입력해야 합니다.');
+  const dataset = await analyzeConfluenceArchive(bytes);
   const spaces = dataset.records.filter(row => row.kind === 'project' && row.metadata.sourceClass === 'Space');
   const matching = spaces.filter(row => row.metadata.spaceKey === inventory.spaceKey);
   if (matching.length !== 1) throw new Error('Confluence ZIP에서 요청한 공간을 하나로 확정할 수 없습니다.');
@@ -121,8 +131,9 @@ export async function compareConfluenceArchive(archivePath, inventory, addFindin
       hierarchyMismatches++;
       addFinding?.(id, 'HIERARCHY_MISMATCH');
     }
-    if (page.restriction !== 'unknown') {
+    if (page.restriction === 'clear' || page.restriction === 'restricted') {
       permissionCheckedPages++;
+      addPermissionCheckedPage?.(id);
       if ((row.metadata.restricted === true) !== (page.restriction === 'restricted')) {
         restrictionMismatches++;
         addFinding?.(id, 'RESTRICTION_MISMATCH');

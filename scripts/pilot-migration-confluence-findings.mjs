@@ -1,5 +1,5 @@
 export const CONFLUENCE_FINDINGS_FORMAT = 'teamspace-confluence-audit-findings';
-export const CONFLUENCE_FINDINGS_VERSION = 2;
+export const CONFLUENCE_FINDINGS_VERSION = 3;
 export const CONFLUENCE_FINDINGS_MAX_BYTES = 64 * 1024 * 1024;
 
 export const CONFLUENCE_FINDING_CODES = Object.freeze([
@@ -19,6 +19,7 @@ export const CONFLUENCE_FINDING_CODES = Object.freeze([
 const statuses = new Set(['matched', 'needs-review']);
 const selections = new Set(['explicit-pages', 'visible-space']);
 const knownCodes = new Set(CONFLUENCE_FINDING_CODES);
+const uncheckedCodes = new Set(['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE', 'LIVE_RESTRICTION_UNKNOWN', 'MISSING_FROM_ARCHIVE']);
 const hashPattern = /^[a-f0-9]{64}$/u;
 const uuidPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const pageIdPattern = /^[1-9]\d{0,19}$/u;
@@ -49,9 +50,10 @@ function isCount(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function hasVersionedKeys(value, keys) {
+function hasVersionedKeys(value, keys, versionThreeKeys = []) {
   if (value?.version === 1) return hasKeys(value, keys);
-  return value?.version === CONFLUENCE_FINDINGS_VERSION && hasKeys(value, [...keys, 'coverage']);
+  if (value?.version === 2) return hasKeys(value, [...keys, 'coverage']);
+  return value?.version === CONFLUENCE_FINDINGS_VERSION && hasKeys(value, [...keys, 'coverage', ...versionThreeKeys]);
 }
 
 function validCoverage(value) {
@@ -75,19 +77,50 @@ function validMetadata(value, pageCount) {
 }
 
 export function parseConfluenceFindings(raw) {
-  if (!hasVersionedKeys(raw, findingsKeys) || raw.format !== CONFLUENCE_FINDINGS_FORMAT || !Array.isArray(raw.findings) ||
+  if (!hasVersionedKeys(raw, findingsKeys, ['permissionCheckedPageIds']) || raw.format !== CONFLUENCE_FINDINGS_FORMAT || !Array.isArray(raw.findings) ||
       !validMetadata(raw, raw.findings.length)) throw new Error(invalidFindings);
 
+  const checked = new Set();
+  if (raw.version === CONFLUENCE_FINDINGS_VERSION) {
+    const checkedIds = raw.permissionCheckedPageIds;
+    if (!Array.isArray(checkedIds) || checkedIds.length !== raw.coverage.permissionCheckedPages) throw new Error(invalidFindings);
+    for (const id of checkedIds) {
+      if (typeof id !== 'string' || !pageIdPattern.test(id) || checked.has(id)) throw new Error(invalidFindings);
+      checked.add(id);
+    }
+  }
   const pageIds = new Set();
   for (const row of raw.findings) {
     if (!hasKeys(row, ['pageId', 'codes']) || typeof row.pageId !== 'string' || !pageIdPattern.test(row.pageId) ||
         pageIds.has(row.pageId) || !Array.isArray(row.codes) || !row.codes.length || row.codes.length > knownCodes.size ||
-        new Set(row.codes).size !== row.codes.length || Array.from(row.codes).some(code => !knownCodes.has(code))) {
+        new Set(row.codes).size !== row.codes.length || Array.from(row.codes).some(code => !knownCodes.has(code)) ||
+        (checked.has(row.pageId) && row.codes.some(code => uncheckedCodes.has(code)))) {
       throw new Error(invalidFindings);
     }
     pageIds.add(row.pageId);
   }
   return raw;
+}
+
+/** Merge validated page-level reviews after matching each one to the original ZIP's current pages. */
+export function combinedConfluenceCoverage(reviews, archivePageIds) {
+  const byPackage = new Map();
+  const invalidCoverage = 'Confluence 페이지별 검토의 확인 범위가 ZIP의 현재 페이지 목록과 다릅니다.';
+  for (const { proof, findings } of reviews) {
+    if (findings.version !== CONFLUENCE_FINDINGS_VERSION) continue;
+    const { packageId } = proof;
+    const archived = archivePageIds.get(packageId);
+    if (!archived || findings.coverage.archivePages !== archived.size) throw new Error(invalidCoverage);
+    const checked = byPackage.get(packageId) ?? new Set();
+    for (const pageId of findings.permissionCheckedPageIds) {
+      if (!archived.has(pageId)) throw new Error(invalidCoverage);
+      checked.add(pageId);
+    }
+    byPackage.set(packageId, checked);
+  }
+  return [...byPackage].sort(([left], [right]) => left.localeCompare(right)).map(([packageId, checked]) => ({
+    packageId, archivePages: archivePageIds.get(packageId).size, permissionCheckedPages: checked.size,
+  }));
 }
 
 export function confirmedConfluenceRestrictions(reviews, packages) {
@@ -114,7 +147,7 @@ export function confluenceFindingsProof(findings, sha256, packageId) {
   return {
     packageId, sha256, checkedAt, version, selection, status, archive: { sha256: archive.sha256, bytes: archive.bytes },
     spacePermissions, pageCount: findings.findings.length, unidentifiedPages, reasonCounts,
-    ...(version === CONFLUENCE_FINDINGS_VERSION ? { coverage: { ...coverage } } : {}),
+    ...(version >= 2 ? { coverage: { ...coverage } } : {}),
   };
 }
 

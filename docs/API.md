@@ -867,7 +867,7 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 | `GET /api/source-imports/:id/records` · `GET /api/source-imports/:id/records/:recordId` | 원본 목록과 전체 기록 |
 | `GET /api/resource-origins?resourceType=issue&resourceId=…` | 현재 업무·문서에 연결된 원본 기록 |
 
-오프라인 리허설 `review`에서 검토에 연결한 Confluence XML ZIP을 선택하면 옵션 조회와 매핑 불러오기의 `options.confluenceReviews`에 해당 검토의 범위·판정·건수와 공간 권한 수동 검토 표시가 포함된다. 형식 2에서만 `coverage`를 제공하며 각 검토의 확인 건수는 독립적이다. 집계에는 원본 페이지 ID나 자격 증명이 들어 있지 않다.
+오프라인 리허설 `review`에서 검토에 연결한 Confluence XML ZIP을 선택하면 옵션 조회와 매핑 불러오기의 `options.confluenceReviews`에 해당 검토의 범위·판정·건수와 공간 권한 수동 검토 표시가 포함된다. 형식 2와 3은 각 검토의 `coverage`를 제공한다. 형식 3의 확인 ID를 같은 ZIP의 현재 페이지 목록과 대조한 집계는 `options.confluenceReviewCoverage`에서 `{packageId,archivePages,permissionCheckedPages}` 배열로 제공한다. 같은 페이지는 한 번 집계한다. 원본 페이지 ID는 비공개 검토 파일에서 읽는다.
 | `GET /api/issues/:id/jira-status-history?offset=0&limit=50` | 현재 티켓의 이관된 Jira 상태 변경과 각 변경의 원본 기록 ID |
 | `GET` · `POST /api/issues/:id/jira-deadline-recovery` | 현재 티켓의 보존 Jira 마감일 검토와 확인한 날짜 복구 |
 | `GET /api/issues/:id/relations` | 이관한 관계와 팀에서 직접 만든 업무 관계 |

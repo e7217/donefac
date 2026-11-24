@@ -68,3 +68,28 @@ test('offline Confluence review stdin rejects inconsistent coverage and private 
   const needsReview = { ...review, status: 'needs-review', coverage: { ...coverage, permissionCheckedPages: 1 } };
   assert.deepEqual((await readPilotConfluenceReview(reviewEnv, false, payload(needsReview))).confluenceReviews, [needsReview]);
 });
+
+test('offline Confluence review stdin accepts ZIP-wide coverage assembled from same-archive reports', async () => {
+  const first = { ...review, coverage: { archivePages: 700, matchedPages: 500, permissionCheckedPages: 500,
+    outsideSelectionPages: 200, otherSpacePages: 0, unassignedPages: 0 } };
+  const second = { ...first, checkedAt: '2026-11-24T01:00:00.000Z',
+    coverage: { ...first.coverage, matchedPages: 250, permissionCheckedPages: 250, outsideSelectionPages: 450 } };
+  const aggregate = { packageId: review.packageId, archivePages: 700, permissionCheckedPages: 700 };
+  const payload = { restrictions: [], reviews: [versionOneReview, first, second], coverage: [aggregate] };
+  assert.deepEqual((await readPilotConfluenceReview(reviewEnv, false, stream(payload))).confluenceReviewCoverage, [aggregate]);
+
+  for (const invalid of [
+    { ...payload, coverage: [aggregate, aggregate] },
+    { ...payload, coverage: [{ ...aggregate, pageIds: ['111'] }] },
+    { ...payload, coverage: [{ ...aggregate, packageId: '00000000-0000-4000-8000-000000000002' }] },
+    { ...payload, coverage: [{ ...aggregate, archivePages: 699, permissionCheckedPages: 699 }] },
+    { ...payload, coverage: [{ ...aggregate, permissionCheckedPages: 701 }] },
+    { ...payload, coverage: [{ ...aggregate, permissionCheckedPages: 300 }] },
+    { ...payload, reviews: [versionOneReview] },
+    { ...payload, reviews: [first] },
+    { ...payload, reviews: [first, { ...second, archiveSha256: 'b'.repeat(64) }] },
+    { ...payload, reviews: [first, { ...second, archiveBytes: second.archiveBytes + 1 }] },
+  ]) {
+    await assert.rejects(readPilotConfluenceReview(reviewEnv, false, stream(invalid)), /검토 파일/);
+  }
+});

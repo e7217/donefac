@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { MigrationConfluenceReview } from '../shared/types.js';
+import type { MigrationConfluenceReview, MigrationConfluenceReviewCoverage } from '../shared/types.js';
 import { LEGACY_MAX_RECORDS } from './legacy-import-model.js';
 
 export type PilotConfluenceReview = MigrationConfluenceReview & { archiveSha256: string; archiveBytes: number };
@@ -13,9 +13,10 @@ const count = z.number().int().nonnegative();
 const archiveCount = count.max(LEGACY_MAX_RECORDS);
 const liveCount = count.max(maxLivePages);
 const isoTime = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const packageId = z.string().regex(/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/);
 
 const reviewSchema = z.object({
-  packageId: z.string().regex(/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/),
+  packageId,
   archiveSha256: z.string().regex(/^[a-f\d]{64}$/),
   archiveBytes: count.positive().max(maxArchiveBytes),
   checkedAt: z.string().regex(isoTime).refine(value =>
@@ -45,6 +46,11 @@ const reviewSchema = z.object({
     (status === 'needs-review' || (matchedPages > 0 && permissionCheckedPages === matchedPages &&
       matchedPages === scopedPages && unassignedPages === 0));
 });
+const reviewCoverageSchema = z.object({
+  packageId,
+  archivePages: archiveCount,
+  permissionCheckedPages: archiveCount,
+}).strict().refine(row => row.permissionCheckedPages <= row.archivePages);
 
 function readRestrictions(input: unknown, allowEmpty: boolean) {
   const result = new Map<string, ReadonlySet<string>>();
@@ -61,19 +67,39 @@ function readRestrictions(input: unknown, allowEmpty: boolean) {
 }
 
 function parseReviewInput(input: unknown) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).length !== 2 ||
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['restrictions', 'reviews', 'coverage'].includes(key)) ||
       !Object.hasOwn(input, 'restrictions') || !Object.hasOwn(input, 'reviews')) throw new Error(readError);
-  const { restrictions, reviews } = input as Record<string, unknown>;
+  const { restrictions, reviews, coverage } = input as Record<string, unknown>;
   if (!Array.isArray(reviews) || !reviews.length || reviews.length > 100) throw new Error(readError);
   const parsed = z.array(reviewSchema).safeParse(reviews);
   if (!parsed.success) throw new Error(readError);
-  return { restrictedConfluencePages: readRestrictions(restrictions, true), confluenceReviews: parsed.data };
+  const combined = coverage === undefined ? undefined : parseReviewCoverage(coverage, parsed.data);
+  return { restrictedConfluencePages: readRestrictions(restrictions, true), confluenceReviews: parsed.data,
+    ...(combined?.length ? { confluenceReviewCoverage: combined } : {}) };
+}
+
+function parseReviewCoverage(input: unknown, reviews: readonly PilotConfluenceReview[]): MigrationConfluenceReviewCoverage[] {
+  const parsed = z.array(reviewCoverageSchema).max(reviews.length).safeParse(input);
+  if (!parsed.success) throw new Error(readError);
+  const seen = new Set<string>();
+  for (const row of parsed.data) {
+    const reports = reviews.filter(review => review.packageId === row.packageId);
+    const first = reports[0];
+    if (!first || seen.has(row.packageId) || reports.some(review =>
+      review.archiveSha256 !== first.archiveSha256 || review.archiveBytes !== first.archiveBytes)) throw new Error(readError);
+    const eligible = reports.flatMap(review => review.coverage && review.coverage.archivePages === row.archivePages &&
+      review.coverage.permissionCheckedPages <= row.permissionCheckedPages ? [review.coverage.permissionCheckedPages] : []);
+    if (!eligible.length || eligible.reduce((total, checked) => total + checked, 0) < row.permissionCheckedPages) throw new Error(readError);
+    seen.add(row.packageId);
+  }
+  return parsed.data;
 }
 
 export async function readPilotConfluenceReview(env: Record<string, string | undefined>, teamAccess: boolean,
   stdin: AsyncIterable<string | Uint8Array>): Promise<{
     restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
     confluenceReviews?: readonly PilotConfluenceReview[];
+  confluenceReviewCoverage?: readonly MigrationConfluenceReviewCoverage[];
   }> {
   const { TEAMSPACE_PILOT_CONFLUENCE_RESTRICTIONS: restrictions, TEAMSPACE_PILOT_CONFLUENCE_REVIEW: review } = env;
   if (restrictions === undefined && review === undefined) return {};

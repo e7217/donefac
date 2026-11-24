@@ -249,7 +249,8 @@ function ActorMigration(props: MigrationApplyProps) {
   const existingDestination = issueDestination ?? pageDestination;
   const matching = Boolean(configuration && sameIds(selected, configuration.packageIds)), expired = Boolean(preview && Date.parse(preview.expiresAt) <= clock);
   const confluenceSourceReview = matching && options?.confluenceReviews?.length ? <ConfluenceSourceReview
-    reviews={options.confluenceReviews} packages={packages.filter(item => selected.includes(item.id))} /> : null;
+    reviews={options.confluenceReviews} coverage={options.confluenceReviewCoverage}
+    packages={packages.filter(item => selected.includes(item.id))} /> : null;
   const destinationReady = mode === 'new' ? Boolean(configuration?.projects.length) : Boolean(existingDestination);
   const previewDraftKey = preview ? `${preview.id}:${preview.version}` : null;
   const planningChanges = planningDraft?.key === previewDraftKey ? planningDraft.selections : undefined;

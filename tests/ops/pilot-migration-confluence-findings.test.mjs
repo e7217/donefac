@@ -33,7 +33,7 @@ const partialCoverage = Object.freeze({
 });
 
 function coveredReport(overrides = {}) {
-  return report({ version: CONFLUENCE_FINDINGS_VERSION, coverage: partialCoverage, ...overrides });
+  return report({ version: 2, coverage: partialCoverage, ...overrides });
 }
 
 test('projects a validated findings file into stable counts and no page details', () => {
@@ -108,7 +108,7 @@ test('staged Confluence packages require full permission coverage even without a
 test('rejects missing or inconsistent coverage in sidecars and their proofs', () => {
   const proof = confluenceFindingsProof(parseConfluenceFindings(coveredReport()), reportHash, packageId);
   for (const changes of [
-    { coverage: undefined }, { coverage: null }, { version: 1 }, { version: 3 }, { selection: 'visible-space' },
+    { coverage: undefined }, { coverage: null }, { version: 1 }, { version: 4 }, { selection: 'visible-space' },
     { coverage: { ...partialCoverage, archivePages: 100_001 } },
     { coverage: { ...partialCoverage, archivePages: 1000, matchedPages: 501 } },
     { coverage: { ...partialCoverage, archivePages: 5 } },
@@ -287,6 +287,83 @@ async function verification(root, exitCode) {
   assert.ok(!raw.includes(pageId) && !raw.includes(childPageId) && !raw.includes(publicPageId));
   return JSON.parse(raw);
 }
+
+test('split Confluence reviews prove distinct pages on the exact ZIP through stage, review and restore', { timeout: 150_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-split-coverage-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const ids = Array.from({ length: 503 }, (_, index) => String(9000000000000000000n + BigInt(index)));
+  const bytes = wikiArchive('MNY', ids.map((id, index) => ({ id, title: `Coverage page ${index}` })));
+  const unrelated = wikiArchive('OTH', [{ id: ids[0], title: 'Page from a different ZIP' }]);
+  const manifest = join(scratch, 'manifest.json');
+  await writeFile(join(scratch, 'wiki.zip'), bytes);
+  await writeFile(join(scratch, 'other.zip'), unrelated);
+  await writeFile(manifest, JSON.stringify({ packages: [
+    { file: 'wiki.zip', product: 'confluence', instanceKey: 'verified-wiki' },
+    { file: 'other.zip', product: 'confluence', instanceKey: 'other-wiki' },
+  ] }));
+  const archive = { sha256: digest(bytes), bytes: bytes.length };
+  async function writeReview(number, checked) {
+    const path = join(scratch, `coverage-${number}.json`);
+    const checkedPages = checked.length;
+    const raw = report({ version: CONFLUENCE_FINDINGS_VERSION, archive,
+      checkedAt: new Date(Date.parse(checkedAt) + number * 60000).toISOString(),
+      status: 'matched', findings: [], permissionCheckedPageIds: checked,
+      coverage: { archivePages: ids.length, matchedPages: checkedPages, permissionCheckedPages: checkedPages,
+        outsideSelectionPages: ids.length - checkedPages, otherSpacePages: 0, unassignedPages: 0 },
+    });
+    await writeFile(path, JSON.stringify(raw), { mode: 0o600 });
+    return path;
+  }
+  const first = await writeReview(1, ids.slice(0, 500));
+  const overlap = await writeReview(2, ids.slice(498, 502));
+  const last = await writeReview(3, ids.slice(502));
+  const foreign = '9111111111111111111';
+  const wrong = await writeReview(4, [foreign]);
+  function stage(root, paths) {
+    return rehearsal(['stage', manifest, root, ...paths.flatMap(path => ['--confluence-findings', path])]).exited;
+  }
+  const rejectedRoot = join(scratch, 'wrong');
+  const rejected = await stage(rejectedRoot, [wrong]);
+  assert.equal(rejected.code, 1, rejected.stdout + rejected.stderr);
+  assert.match(rejected.stderr, /ZIP의 현재 페이지 목록과 다릅니다/u);
+  assert.ok(!rejected.stderr.includes(foreign));
+  await assert.rejects(readFile(join(rejectedRoot, 'workspace', '.teamspace-rehearsal', 'stage.json')), { code: 'ENOENT' });
+
+  const partial = join(scratch, 'partial'), complete = join(scratch, 'complete');
+  for (const [root, sidecars, count] of [[partial, [first, overlap], 502], [complete, [first, overlap, last], 503]]) {
+    const outcome = await stage(root, sidecars);
+    assert.equal(outcome.code, 0, outcome.stdout + outcome.stderr);
+    const raw = await readFile(join(root, 'workspace', '.teamspace-rehearsal', 'stage.json'), 'utf8');
+    assert.ok(!raw.includes('permissionCheckedPageIds') && ids.every(id => !raw.includes(id)));
+    const { packages } = JSON.parse(raw);
+    const [wiki, other] = packages;
+    const coverage = [{ packageId: wiki.packageId, archivePages: 503, permissionCheckedPages: count }];
+    await withReview(root, async base => {
+      const options = await api(base, `/migrations/options?packageId=${wiki.packageId}`);
+      assert.deepEqual(options.confluenceReviewCoverage, coverage);
+      assert.equal(options.confluenceReviews.length, sidecars.length);
+      assert.ok(!JSON.stringify(options.confluenceReviewCoverage).includes(ids[0]));
+      const otherOptions = await api(base, `/migrations/options?packageId=${other.packageId}`);
+      assert.equal(otherOptions.confluenceReviewCoverage, undefined);
+      if (root === complete) {
+        const { actor, configuration } = await reviewConfiguration(base, packages);
+        const preview = await previewMigration(base, actor, configuration);
+        assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+        assert.equal(preview.counts.documents, 504);
+        await applyMigration(base, actor, preview);
+      }
+    });
+    const checked = await verification(root, 2);
+    assert.ok(ids.every(id => !JSON.stringify(checked).includes(id)));
+    assert.deepEqual(checked.source.evidence.confluenceReviewCoverage, coverage);
+    assert.equal(checked.source.evidence.checks.confluencePackagesWithoutFullPageCoverage, root === complete ? 1 : 2);
+    if (root === complete) {
+      assert.equal(checked.comparison.matches, true);
+      assert.deepEqual(checked.restore.evidence.confluenceReviewCoverage, coverage);
+      assert.equal(checked.restore.evidence.checks.confluencePackagesWithoutFullPageCoverage, 1);
+    }
+  }
+});
 
 test('profile-bound rehearsal still requires explicit exclusion of restrictions recorded in the Confluence XML', { timeout: 90_000 }, async t => {
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-archived-restriction-'));

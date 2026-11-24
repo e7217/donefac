@@ -156,16 +156,16 @@ function assertCounts(report, expected) {
   for (const [key, count] of Object.entries(expected)) assert.equal(report[key], count, key);
 }
 
-async function assertFindings(path, { directory, archive, status, selection, findings, unidentifiedPages = 0, coverage }) {
+async function assertFindings(path, { directory, archive, status, selection, findings, unidentifiedPages = 0, coverage, permissionCheckedPageIds }) {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   const raw = await readFile(path, 'utf8');
   assertPrivate({ stdout: raw, stderr: '' }, directory);
   const { checkedAt, ...report } = parseConfluenceFindings(JSON.parse(raw));
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
   assert.deepEqual(report, {
-    format: 'teamspace-confluence-audit-findings', version: 2, selection, status,
+    format: 'teamspace-confluence-audit-findings', version: 3, selection, status,
     archive: { sha256: createHash('sha256').update(archive).digest('hex'), bytes: archive.length },
-    spacePermissions: 'manual-review', unidentifiedPages, findings, coverage,
+    spacePermissions: 'manual-review', unidentifiedPages, findings, coverage, permissionCheckedPageIds,
   });
   return raw;
 }
@@ -203,6 +203,7 @@ test('native Confluence ZIP matches paged live metadata without reading document
   assert.equal(detailed.stdout, result.stdout);
   assertPrivate(detailed, directory);
   await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'visible-space', findings: [],
+    permissionCheckedPageIds: [root.id, child.id],
     coverage: { archivePages: 2, matchedPages: 2, permissionCheckedPages: 2, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 } });
   assert.deepEqual(await readFile(exportPath), archive);
 });
@@ -239,7 +240,9 @@ test('optional findings preserve aggregate stdout and list the selected page IDs
   assert.deepEqual(source.errors, []);
   assertPrivate(detailed, directory);
   assert.ok(!detailed.stdout.includes('"pageId"'));
+  assert.ok(!detailed.stdout.includes('"permissionCheckedPageIds"'));
   const raw = await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space', unidentifiedPages: 1,
+    permissionCheckedPageIds: [root.id, child.id],
     coverage: { archivePages: 4, matchedPages: 2, permissionCheckedPages: 2, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 }, findings: [
     { pageId: liveOnly.id, codes: ['MISSING_FROM_ARCHIVE'] },
     { pageId: root.id, codes: ['VERSION_MISMATCH'] },
@@ -272,6 +275,7 @@ test('explicit selection checks inherited restrictions outside the selection and
     assertCounts(report, { status: 'needs-review', selection: 'explicit-pages', visiblePages: 1, restrictedPages: 1, unknownRestrictions: 0 });
     assertCounts(report.archive, { outsideSelectionPages: 1, missingPages: 0, archiveOnlyPages: 0, restrictionMismatches });
     await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages',
+      permissionCheckedPageIds: [child.id],
       coverage: { archivePages: 2, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 1, otherSpacePages: 0, unassignedPages: 0 },
       findings: [{ pageId: child.id, codes }] });
   }
@@ -290,7 +294,8 @@ test('findings report uncovered ZIP pages even when the selection matches withou
   const result = await audit('--findings', findingsPath);
   assert.equal(result.code, 0, result.stderr);
   const expected = { archivePages: 3, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 1, otherSpacePages: 1, unassignedPages: 0 };
-  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'explicit-pages', findings: [], coverage: expected });
+  await assertFindings(findingsPath, { directory, archive, status: 'matched', selection: 'explicit-pages', findings: [],
+    permissionCheckedPageIds: [root.id], coverage: expected });
   assertCounts(JSON.parse(result.stdout).archive, { totalCurrentPages: 3, matchedPages: 1, permissionCheckedPages: 1,
     outsideSelectionPages: 1, otherSpacePages: 1, unassignedPages: 0 });
   assert.deepEqual(source.errors, []);
@@ -351,6 +356,7 @@ test('the audit counts an explicitly selected unreadable page without exposing i
   assertCounts(report.archive, { archiveOnlyPages: 1, outsideSelectionPages: 0, unassignedPages: 1 });
   assert.ok(!source.requests.some(({ url }) => url.pathname.startsWith(`${apiPath}/content/${child.id}/`)));
   await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'explicit-pages',
+    permissionCheckedPageIds: [],
     coverage: { archivePages: 3, matchedPages: 1, permissionCheckedPages: 0, outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 1 }, findings: [
     { pageId: root.id, codes: ['LIVE_RESTRICTION_UNKNOWN'] },
     { pageId: child.id, codes: ['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE'] },

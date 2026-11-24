@@ -10,6 +10,8 @@ const pageIdPattern = /^[1-9]\d{0,19}$/;
 const auditPath = /^rest\/api\/(?:space\/~?[A-Za-z0-9][A-Za-z0-9_.-]{0,119}\/content\/page|content\/[1-9]\d{0,19}(?:\/restriction\/byOperation\/(?:read|update))?)$/;
 const maxMetadataBytes = 5 * 1024 * 1024;
 
+const comparePageIds = (left, right) => left.length - right.length || left.localeCompare(right);
+
 async function readSmallText(path, maxBytes, description) {
   try {
     const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
@@ -132,13 +134,16 @@ try {
   const signal = interrupted.signal;
   const inventory = await readConfluenceInventory(configuration, createReader(configuration, signal));
   const pageFindings = new Map();
+  const permissionCheckedPageIds = [];
   function addFinding(pageId, code) {
     if (!findingsPath) return;
     if (!pageFindings.has(pageId)) pageFindings.set(pageId, new Set());
     pageFindings.get(pageId).add(code);
   }
   const archive = archivePath === undefined ? undefined
-    : await compareConfluenceArchive(archivePath, inventory, findingsPath ? addFinding : undefined);
+    : await compareConfluenceArchive(archivePath, inventory, findingsPath ? {
+      addFinding, addPermissionCheckedPage: pageId => permissionCheckedPageIds.push(pageId),
+    } : undefined);
   signal.throwIfAborted();
   let restrictedPages = 0;
   let unknownRestrictions = 0;
@@ -160,12 +165,12 @@ try {
   if (findingsPath) {
     for (const pageId of inventory.unreadableIds) addFinding(pageId, 'LIVE_PAGE_UNAVAILABLE');
     const findings = [...pageFindings].filter(([pageId]) => typeof pageId === 'string' && pageIdPattern.test(pageId))
-      .sort(([left], [right]) => left.length - right.length || left.localeCompare(right))
+      .sort(([left], [right]) => comparePageIds(left, right))
       .map(([pageId, codes]) => ({ pageId, codes: [...codes].sort() }));
     await writeFindings(findingsPath, {
       format: CONFLUENCE_FINDINGS_FORMAT, version: CONFLUENCE_FINDINGS_VERSION, checkedAt: new Date().toISOString(),
       selection, status, archive: { sha256: archive.sha256, bytes: archive.bytes }, spacePermissions,
-      unidentifiedPages: pageFindings.size - findings.length, findings,
+      unidentifiedPages: pageFindings.size - findings.length, findings, permissionCheckedPageIds: permissionCheckedPageIds.sort(comparePageIds),
       coverage: { archivePages: archive.totalCurrentPages, matchedPages: archive.matchedPages,
         permissionCheckedPages: archive.permissionCheckedPages, outsideSelectionPages: archive.outsideSelectionPages,
         otherSpacePages: archive.otherSpacePages, unassignedPages: archive.unassignedPages },

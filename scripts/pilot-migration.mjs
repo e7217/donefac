@@ -7,9 +7,10 @@ import { Worker } from 'node:worker_threads';
 import { safeFilename } from '../server/attachments.ts';
 import { LEGACY_MAX_RAW_BYTES } from '../server/legacy-import-archive.ts';
 import { PILOT_REHEARSAL_DIRECTORY } from '../server/pilot-rehearsal.ts';
+import { readConfluenceArchivePageIds } from './confluence-pilot-audit-archive.mjs';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
-import { CONFLUENCE_FINDINGS_MAX_BYTES, confirmedConfluenceRestrictions, confluenceFindingsProof, parseConfluenceFindings,
-  validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
+import { CONFLUENCE_FINDINGS_MAX_BYTES, CONFLUENCE_FINDINGS_VERSION, combinedConfluenceCoverage, confirmedConfluenceRestrictions,
+  confluenceFindingsProof, parseConfluenceFindings, validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
 
 const runFormat = 'teamspace-migration-rehearsal';
@@ -207,8 +208,10 @@ async function loadStageFindings(paths) {
     const sha256 = digest(raw);
     if (hashes.has(sha256)) throw new Error('동일한 Confluence 페이지별 검토 파일이 중복되었습니다.');
     hashes.add(sha256);
-    const proof = confluenceFindingsProof(readConfluenceFindings(raw), sha256, null);
-    results.push({ path, proof });
+    const findings = readConfluenceFindings(raw);
+    const proof = confluenceFindingsProof(findings, sha256, null);
+    const { version, coverage, permissionCheckedPageIds } = findings;
+    results.push({ path, proof, findings: { version, coverage, permissionCheckedPageIds } });
   }
   return results;
 }
@@ -222,8 +225,8 @@ function matchConfluenceArchive(archive, packages) {
 }
 
 async function saveStageFindings(root, reports, packages) {
-  const bound = reports.map(({ path, proof }) => ({
-    path, proof: { ...proof, packageId: matchConfluenceArchive(proof.archive, packages).packageId },
+  const bound = reports.map(({ path, proof, findings }) => ({
+    path, proof: { ...proof, packageId: matchConfluenceArchive(proof.archive, packages).packageId }, findings,
   }));
   const directory = join(root, findingsDirectory);
   await mkdir(directory, { mode: 0o700 });
@@ -234,7 +237,7 @@ async function saveStageFindings(root, reports, packages) {
     if (digest(raw) !== proof.sha256) throw new Error('읽는 동안 Confluence 페이지별 검토 파일이 바뀌었습니다.');
     await writeFile(join(directory, `${proof.sha256}.json`), raw, { mode: 0o600, flag: 'wx', flush: true });
   }
-  return bound.map(item => item.proof);
+  return bound.map(({ proof, findings }) => ({ proof, findings }));
 }
 
 async function loadRunFindings(root, proofs, packages) {
@@ -481,9 +484,10 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
       signal.throwIfAborted();
       const confluenceReviews = findings.length
         ? await saveStageFindings(stateDirectory, findings, results.filter((_item, index) => confluenceZips[index])) : [];
+      await verifiedConfluenceCoverage(workspace, results, confluenceReviews);
       await writeJson(join(stateDirectory, 'stage.json'), { format: runFormat, version: 1, createdAt: new Date().toISOString(), packages: results,
         ...(profiled ? { profile: profiled.proof } : {}),
-        ...(confluenceReviews.length ? { confluenceReviews } : {}) });
+        ...(confluenceReviews.length ? { confluenceReviews: confluenceReviews.map(({ proof }) => proof) } : {}) });
     });
   } catch (error) {
     await rm(root, { recursive: true, force: true });
@@ -492,7 +496,7 @@ async function stage(manifestPath, root, { profilePath, findingsPaths }) {
   console.log('검토할 워크스페이스를 준비했습니다. review 명령으로 열 수 있습니다.');
 }
 
-function pilotReviewOptions(packages, confluenceReviews) {
+function pilotReviewOptions(packages, confluenceReviews, coverage = []) {
   const restricted = confirmedConfluenceRestrictions(confluenceReviews, packages);
   const restrictions = [...restricted].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
   const reviews = confluenceReviews.map(({ proof }) => ({
@@ -501,17 +505,18 @@ function pilotReviewOptions(packages, confluenceReviews) {
     findingsPages: proof.pageCount, unidentifiedPages: proof.unidentifiedPages,
     ...(proof.coverage ? { coverage: proof.coverage } : {}),
   }));
-  return { restrictions, reviews };
+  return { restrictions, reviews, coverage };
 }
 
 async function review(directory) {
   const { workspace, packages, confluenceReviews } = await loadRun(directory);
   const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
   const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
-  const pilot = await startRehearsalPilot(workspace, { signal, ...pilotReviewOptions(reviewedPackages, confluenceReviews) });
+  const coverage = await verifiedConfluenceCoverage(workspace, reviewedPackages, confluenceReviews);
+  const pilot = await startRehearsalPilot(workspace, { signal, ...pilotReviewOptions(reviewedPackages, confluenceReviews, coverage) });
   try {
     if (confluenceReviews.length) {
-      const bundles = await verifyBundles(workspace, reviewedPackages);
+      const { bundles } = await verifyBundles(workspace, reviewedPackages);
       if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Confluence 대조에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
       const staged = new Map((await apiCall(pilot)('/legacy-import/packages')).map(item => [item.id, item]));
       for (const pkg of reviewedPackages) {
@@ -533,27 +538,49 @@ async function review(directory) {
   }
 }
 
-async function verifyBundles(directory, packages) {
-  const results = [];
+function exactCoveragePackageIds(reviews) {
+  return new Set(reviews.filter(({ proof }) => proof.version === CONFLUENCE_FINDINGS_VERSION).map(({ proof }) => proof.packageId));
+}
+
+async function verifyBundles(directory, packages, confluenceReviews = []) {
+  const bundles = [], archivePageIds = new Map();
+  const exactReviews = exactCoveragePackageIds(confluenceReviews);
   for (const item of packages) {
     signal.throwIfAborted();
-    let status;
+    let bytes;
     try {
-      const bytes = await readBoundedFile(join(directory, 'legacy-imports', `${item.packageId}.bundle`), LEGACY_MAX_RAW_BYTES);
-      status = bytes.length === item.size && digest(bytes) === item.sha256 ? 'verified' : 'mismatch';
+      bytes = await readBoundedFile(join(directory, 'legacy-imports', `${item.packageId}.bundle`), LEGACY_MAX_RAW_BYTES);
     } catch (error) {
       signal.throwIfAborted();
-      status = error.code === 'ENOENT' ? 'missing' : 'unreadable';
+      bundles.push({ packageId: item.packageId, status: error.code === 'ENOENT' ? 'missing' : 'unreadable' });
+      continue;
     }
-    results.push({ packageId: item.packageId, status });
+    const matches = bytes.length === item.size && digest(bytes) === item.sha256;
+    if (matches && exactReviews.has(item.packageId)) {
+      archivePageIds.set(item.packageId, await readConfluenceArchivePageIds(bytes));
+      signal.throwIfAborted();
+    }
+    bundles.push({ packageId: item.packageId, status: matches ? 'verified' : 'mismatch' });
   }
-  return results;
+  const confluenceReviewCoverage = bundles.every(bundle => bundle.status === 'verified')
+    ? combinedConfluenceCoverage(confluenceReviews, archivePageIds) : [];
+  return { bundles, confluenceReviewCoverage };
+}
+
+async function verifiedConfluenceCoverage(directory, packages, confluenceReviews) {
+  const exactIds = exactCoveragePackageIds(confluenceReviews);
+  if (!exactIds.size) return [];
+  const { bundles, confluenceReviewCoverage } = await verifyBundles(directory,
+    packages.filter(pkg => exactIds.has(pkg.packageId)), confluenceReviews);
+  if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Confluence 대조에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
+  return confluenceReviewCoverage;
 }
 
 async function inspectWorkspace(directory, packages, confluenceReviews) {
   return withPilot(directory, async call => {
-    const bundles = await verifyBundles(directory, packages);
-    const evidence = bundles.every(bundle => bundle.status === 'verified') ? await collectMigrationEvidence(call, packages, confluenceReviews) : null;
+    const { bundles, confluenceReviewCoverage } = await verifyBundles(directory, packages, confluenceReviews);
+    const evidence = bundles.every(bundle => bundle.status === 'verified')
+      ? await collectMigrationEvidence(call, packages, confluenceReviews, confluenceReviewCoverage) : null;
     return { bundles, evidence };
   }, pilotReviewOptions(packages, confluenceReviews));
 }
