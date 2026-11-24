@@ -143,10 +143,15 @@ test('GitLab 병합 후 열린 360px 팀 보드와 간트, 문서가 같은 업�
     const merge = detail.locator('.gitlab-activity-row[data-gitlab-kind="merge_request"][data-gitlab-state="merged"]');
     await expect(merge).toContainText(`${ticket.key} synthetic MR`);
     await button(detail, '간트에서 일정 보기').click();
-    await expect(page).toHaveURL(url => url.hash.startsWith(`#/${project.id}/gantt?`) && new URLSearchParams(url.hash.split('?')[1]).get('focusIssue') === ticket.id);
+    await expect(page).toHaveURL(url => {
+      const [path, search] = url.hash.split('?');
+      const params = new URLSearchParams(search);
+      return path === `#/${base.id}/gantt` && params.get('scope') === 'team' && params.get('ganttProject') === project.id &&
+        params.get('ganttAssignee') === actor.id && params.get('ganttQ') === query && params.get('focusIssue') === ticket.id;
+    });
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     await page.getByRole('checkbox', { name: '완료 업무 숨기기', exact: true }).uncheck();
-    await page.getByLabel('간트 업무 검색', { exact: true }).fill(query);
+    await expect(page.getByLabel('간트 업무 검색', { exact: true })).toHaveValue(query);
     const row = chart.locator(`[data-issue-id="${ticket.id}"]`);
     await expect(row.getByLabel(`${ticket.key} 시작일`, { exact: true })).toHaveValue(dates.startDate);
     await expect(row.getByLabel(`${ticket.key} 종료일`, { exact: true })).toHaveValue(dates.endDate);
@@ -428,7 +433,9 @@ test('360px 팀 보드의 GitLab 조건은 프로젝트·담당자·검색과 �
     await expect(detail.locator('.gitlab-activity-row[data-gitlab-kind="pipeline"][data-gitlab-state="failed"]')).toHaveCount(1);
     await expect.poll(filters).toEqual({ ...shared, issue: failed.id });
     await button(detail, '간트에서 일정 보기').click();
-    await expect(page).toHaveURL(value => value.hash === `#/${other.id}/gantt?focusIssue=${failed.id}`);
+    await expect(page).toHaveURL(value => value.hash.startsWith(`#/${base.id}/gantt?`));
+    await expect.poll(filters).toEqual({ scope: 'team', ganttProject: other.id, ganttAssignee: actor.id,
+      ganttQ: query, ganttGitlab: 'failed_pipeline', focusIssue: failed.id });
     const gantt = page.getByRole('region', { name: '간트 차트', exact: true });
     await expect(gantt.getByLabel(`${failed.key} 시작일`, { exact: true })).toHaveValue(dates.startDate);
     await page.goBack();
