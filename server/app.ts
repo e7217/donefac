@@ -2974,6 +2974,9 @@ export function createApp(options: {
     if (data.schemaVersion < 95 && importedFieldBreakdowns.some(preset => preset.query.comparisonFieldId !== undefined)) {
       fail('사용자 정의 비교 기준의 필드 집계가 포함된 백업은 schemaVersion 95가 필요합니다.');
     }
+    if (data.schemaVersion < 107 && importedFieldBreakdowns.some(preset => preset.query.measure !== undefined)) {
+      fail('숫자 합계 항목의 필드 집계가 포함된 백업은 schemaVersion 107이 필요합니다.');
+    }
     const importedProjectIds = new Set((data.projects as Project[]).map(project => project.id));
     const importedViewProjects = new Map(importedViews.map(view => [view.id, view.projectId]));
     const issueBlockTargets = { hasProject: (id: string) => importedProjectIds.has(id), viewProject: (id: string) => importedViewProjects.get(id) };

@@ -70,6 +70,98 @@ test('field breakdown uses the complete persisted view population and exposes re
   } finally { await f.close(); }
 });
 
+test('optional measures preserve exact counts and drilldown, bind saved-view scope, and invalidate stale bulk edits', async () => {
+  const f = await fixture();
+  try {
+    const patch = async (issue: Issue, fields: Partial<Issue>) => {
+      const response = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, ...fields });
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      return response.data;
+    };
+    const first = await patch(f.a, { plannedEffortMinutes: 0, estimate: 1.25 });
+    const second = await patch(f.e, { plannedEffortMinutes: 120, estimate: 3.75 });
+    await patch(f.c, { plannedEffortMinutes: 600, estimate: 40 });
+    const path = `/projects/${f.project.id}/field-breakdown`;
+    const summary = async (query: object) => {
+      const response = await f.call<IssueFieldBreakdown>(path, 'POST', query);
+      assert.equal(response.status, 200, JSON.stringify(response.data));
+      return response.data;
+    };
+    const scopes = { fieldId: 'tags', comparisonBy: 'assignee', savedViewId: f.view.id };
+    const query = { ...scopes, measure: { kind: 'plannedEffortMinutes' } } as const;
+    const plain = await summary(scopes);
+    const report = await summary(query);
+    assert.equal(plain.measure, undefined);
+    assert.deepEqual(report.groups, plain.groups);
+    assert.deepEqual(report.comparison, plain.comparison);
+    assert.equal(report.totalIssues, 2);
+    assert.notEqual(report.revision, plain.revision);
+    const red = group(report, 'value', '빨강');
+    const blue = group(report, 'value', '파랑');
+    const [assignee] = report.comparison?.columns ?? [];
+    assert.ok(assignee);
+    assert.deepEqual(report.measure?.source, query.measure);
+    assert.equal(report.measure?.label, '계획 작업 시간 (분)');
+    assert.deepEqual(report.measure?.total, { valueCount: 2, sum: 120 });
+    assert.deepEqual(report.measure?.rows[red.id], { valueCount: 2, sum: 120 });
+    assert.deepEqual(report.measure?.rows[blue.id], { valueCount: 1, sum: 0 });
+    assert.deepEqual(report.measure?.columns?.[assignee.id], { valueCount: 2, sum: 120 });
+    assert.deepEqual(report.measure?.cells?.[blue.id]?.[assignee.id], { valueCount: 1, sum: 0 });
+
+    const points = await summary({ ...scopes, measure: { kind: 'estimate' } });
+    assert.equal(points.measure?.label, '스토리 포인트');
+    assert.deepEqual(points.measure?.total, { valueCount: 2, sum: 5 });
+    assert.deepEqual(points.measure?.cells?.[blue.id]?.[assignee.id], { valueCount: 1, sum: 1.25 });
+    const numericRow = await summary({ fieldId: 'score', measure: { kind: 'custom', fieldId: 'score' } });
+    assert.deepEqual(numericRow.numeric, { min: 0, max: 30, average: 13, sum: 65 });
+    assert.equal(numericRow.measure?.label, '합성 점수');
+    assert.deepEqual(numericRow.measure?.total, { valueCount: 5, sum: 65 });
+    assert.deepEqual(numericRow.measure?.rows.missing, { valueCount: 0, sum: null });
+    assert.deepEqual(numericRow.measure?.rows['not-applicable'], { valueCount: 0, sum: null });
+    const missing = await f.call<IssueFieldBreakdownPage>(`${path}/issues`, 'POST', {
+      fieldId: 'score', measure: { kind: 'custom', fieldId: 'score' }, revision: numericRow.revision, bucketId: 'not-applicable',
+    });
+    assert.equal(missing.status, 200, JSON.stringify(missing.data));
+    assert.deepEqual(missing.data.issues.map(issue => [issue.id, issue.measureValue]), [[f.d.id, null]]);
+
+    const selection = { ...query, revision: report.revision, bucketId: red.id, comparisonBucketId: assignee.id };
+    const cell = await f.call<IssueFieldBreakdownPage>(`${path}/issues`, 'POST', selection);
+    assert.equal(cell.status, 200, JSON.stringify(cell.data));
+    assert.deepEqual(cell.data.issues.map(issue => [issue.id, issue.measureValue]), [[first.id, 0], [second.id, 120]]);
+    assert.equal((await f.call(`${path}/issues`, 'POST', { ...selection, measure: undefined })).status, 409);
+    assert.equal((await f.call(`${path}/issues`, 'POST', { ...selection, measure: { kind: 'estimate' } })).status, 409);
+    const bulkPath = `/projects/${f.project.id}/issues/bulk`;
+    const reviewed = await f.call<IssueBulkEditPreview>(`${bulkPath}-preview`, 'POST', {
+      issues: [{ id: second.id, expectedVersion: second.version }], changes: { priority: 'urgent' }, fieldBreakdown: selection,
+    });
+    assert.equal(reviewed.status, 200, JSON.stringify(reviewed.data));
+    assert.ok(reviewed.data.previewId);
+    await patch(first, { plannedEffortMinutes: 15 });
+    assert.equal((await f.call(`${path}/issues`, 'POST', selection)).status, 409);
+    const stale = await f.call<{ details: { reason: string } }>(`${bulkPath}-apply`, 'POST', { previewId: reviewed.data.previewId });
+    assert.equal(stale.status, 409, JSON.stringify(stale.data));
+    assert.equal(stale.data.details.reason, 'field_breakdown_stale');
+    const refreshed = await summary(query);
+    assert.deepEqual(refreshed.groups, report.groups);
+    assert.deepEqual(refreshed.comparison, report.comparison);
+    assert.deepEqual(refreshed.measure?.total, { valueCount: 2, sum: 135 });
+    assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.issues.find(issue => issue.id === second.id)?.priority, second.priority);
+
+    for (const measure of [{ kind: 'unknown' }, { kind: 'custom' }, { kind: 'custom', fieldId: 'approved' }, { kind: 'estimate', fieldId: 'score' }, []]) {
+      assert.equal((await f.call(path, 'POST', { ...scopes, measure })).status, 400, JSON.stringify(measure));
+    }
+    assert.equal((await f.call(path, 'POST', { ...scopes, measure: { kind: 'custom', fieldId: 'not-in-project' } })).status, 404);
+    const outsideSchemaPath = '/projects/project-team/issue-schema';
+    const { data: outsideSchema } = await f.call<ProjectIssueSchema>(outsideSchemaPath);
+    const foreignField = { ...f.schema.fields.find(field => field.id === 'score')!, id: 'foreign-score' };
+    const definedOutside = await f.call(outsideSchemaPath, 'PATCH', {
+      ...outsideSchema, expectedVersion: outsideSchema.version, fields: [...outsideSchema.fields, foreignField],
+    });
+    assert.equal(definedOutside.status, 200, JSON.stringify(definedOutside.data));
+    assert.equal((await f.call(path, 'POST', { ...scopes, measure: { kind: 'custom', fieldId: foreignField.id } })).status, 404);
+  } finally { await f.close(); }
+});
+
 test('missing and not-applicable partitions are exclusive; false stays present and multi-select value buckets overlap', async () => {
   const f = await fixture();
   try {

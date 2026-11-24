@@ -225,6 +225,79 @@ test('dense multi-select intersections count exact cohorts across bitset words',
   assert.deepEqual(buildIssueFieldBreakdown({ ...source, issues: [...issues].reverse() }).report, result.report);
 });
 
+test('dense comparison measures count each numeric value once in its applicable rows, columns and cells', () => {
+  const measureField = field('number', { id: 'score', issueTypes: ['incident'], options: [] });
+  const measure = { source: { kind: 'custom', fieldId: measureField.id } as const, label: measureField.name, field: measureField };
+  const issues = Array.from({ length: 133 }, (_, index) => issue(String(index + 1), {
+    attribute: index === 0 ? [] : index % 2 ? ['a', 'a', 'b'] : ['b'],
+    compared: index % 3 ? ['a'] : ['a', 'b', 'b'],
+    ...(index % 4 ? { score: index % 5 - 2 } : {}),
+  }, { type: index % 7 ? 'incident' : 'request' }));
+  const source = input('multi_select', issues, { comparison: { field: field('multi_select', { id: 'compared' }) } });
+  const ordinary = buildIssueFieldBreakdown(source);
+  const measured = buildIssueFieldBreakdown({ ...source, measure });
+  const totals = measured.report.measure;
+  assert.ok(totals);
+  assert.deepEqual(measured.report.groups, ordinary.report.groups);
+  assert.deepEqual(measured.report.comparison, ordinary.report.comparison);
+  const byId = new Map(issues.map(value => [value.id, value]));
+  const expected = (members: readonly { id: string }[]) => {
+    const values = members.flatMap(({ id }) => {
+      const issue = byId.get(id)!;
+      const score = issue.customFields?.score;
+      return issue.type === 'incident' && typeof score === 'number' ? [score] : [];
+    });
+    return { valueCount: values.length, sum: values.length ? values.reduce((total, value) => total + value, 0) : null };
+  };
+  assert.deepEqual(totals.total, expected(issues));
+  const columns = measured.report.comparison?.columns ?? [];
+  for (const column of columns) {
+    assert.deepEqual(totals.columns?.[column.id], expected(issues.filter(issue => measured.columnIdsByIssue.get(issue.id)?.has(column.id))));
+  }
+  for (const row of measured.report.groups) {
+    const members = measured.issuesByBucket.get(row.id)!;
+    assert.deepEqual(totals.rows[row.id], expected(members));
+    for (const column of columns) {
+      const cell = expected(members.filter(issue => measured.columnIdsByIssue.get(issue.id)?.has(column.id)));
+      assert.deepEqual(totals.cells?.[row.id]?.[column.id], cell.valueCount ? cell : undefined);
+    }
+  }
+  assert.deepEqual(buildIssueFieldBreakdown({ ...source, measure, issues: [...issues].reverse() }).report, measured.report);
+});
+
+test('measure totals distinguish overflow, cancellation, zero and review identity even when counts are unchanged', () => {
+  const score = field('number', { id: 'score', options: [] });
+  const measure = { source: { kind: 'custom', fieldId: score.id } as const, label: score.name, field: score };
+  const largest = Number.MAX_VALUE;
+  const source = input('select', [
+    issue('1', { attribute: 'a', compared: ['a', 'b'], score: largest }),
+    issue('2', { attribute: 'a', compared: ['a'], score: largest }),
+    issue('3', { attribute: 'a', compared: ['b'], score: -largest }),
+    issue('4', { attribute: 'b', compared: ['a'], score: 0 }),
+  ], { measure, comparison: { field: field('multi_select', { id: 'compared' }) } });
+  const built = buildIssueFieldBreakdown(source);
+  const first = values(built).find(group => group.label === '첫 선택')!;
+  const second = values(built).find(group => group.label === '보관된 선택')!;
+  const columns = built.report.comparison?.columns ?? [];
+  const a = columns.find(column => column.label === '첫 선택')!;
+  const b = columns.find(column => column.label === '보관된 선택')!;
+  const totals = built.report.measure!;
+  assert.deepEqual(totals.total, { valueCount: 4, sum: largest });
+  assert.deepEqual(totals.rows[first.id], { valueCount: 3, sum: largest });
+  assert.deepEqual(totals.rows[second.id], { valueCount: 1, sum: 0 });
+  assert.deepEqual(totals.columns?.[a.id], { valueCount: 3, sum: null });
+  assert.deepEqual(totals.cells?.[first.id], { [a.id]: { valueCount: 2, sum: null }, [b.id]: { valueCount: 2, sum: 0 } });
+
+  const swap = input('select', [issue('1', { attribute: 'a', score: 2 }), issue('2', { attribute: 'a', score: 3 })], { measure });
+  const before = buildIssueFieldBreakdown(swap).report;
+  const altered = buildIssueFieldBreakdown({ ...swap, issues: [
+    issue('1', { attribute: 'a', score: 3 }), issue('2', { attribute: 'a', score: 2 }),
+  ] }).report;
+  assert.deepEqual(altered.measure, before.measure);
+  assert.deepEqual(altered.groups, before.groups);
+  assert.notEqual(altered.revision, before.revision);
+});
+
 test('custom comparison accepts exactly 50,000 populated cells and rejects excess without truncation', () => {
   const options = Array.from({ length: 200 }, (_, index) => ({ id: `tag-${index}`, name: `태그 ${index}`, archived: false }));
   const compared = options.map(option => option.id);

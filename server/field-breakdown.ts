@@ -8,6 +8,9 @@ import type {
   IssueFieldBreakdownColumn,
   IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
+  IssueFieldBreakdownMeasure,
+  IssueFieldBreakdownMeasureResult,
+  IssueFieldBreakdownMeasureTotal,
   User,
 } from '../shared/types.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -27,6 +30,7 @@ interface BreakdownInput {
   generatedAt: string;
   groupBy?: IssueFieldBreakdownDimension;
   comparison?: BreakdownAxis;
+  measure?: { source: IssueFieldBreakdownMeasure; label: string; field?: CustomFieldDefinition };
   configuration?: { workflowVersion?: number; importGeneration: string | null };
 }
 
@@ -39,6 +43,8 @@ type Scalar = string | number | boolean;
 type SpecialBucketId = 'missing' | 'unknown' | 'not-applicable';
 type ColumnMemberships = ReadonlyMap<string, ReadonlySet<string>>;
 const MAX_CUSTOM_COMPARISON_CELLS = 50_000;
+const ZERO = BigInt(0), ONE = BigInt(1);
+const fractionUnit = ONE << BigInt(52);
 
 const collator = new Intl.Collator('ko-KR', { numeric: true, sensitivity: 'variant' });
 const compareText = (left: string, right: string) => collator.compare(left, right) || (left < right ? -1 : left > right ? 1 : 0);
@@ -195,40 +201,167 @@ function comparisonCounts(issuesByBucket: ReadonlyMap<string, IssueFieldBreakdow
   return counts;
 }
 
-/** Exact binary accumulation prevents intermediate overflow/cancellation from
- * corrupting a finite sum or mean. Every finite double is an integer * 2^-1074. */
+/** Every finite double is an integer * 2^-1074. Sum those integers before rounding. */
+function exactCoefficient(value: number, bits: DataView): bigint {
+  bits.setFloat64(0, value, false);
+  const high = bits.getUint32(0, false), low = bits.getUint32(4, false);
+  const exponent = (high >>> 20) & 0x7ff;
+  const fraction = (BigInt(high & 0xfffff) << BigInt(32)) | BigInt(low);
+  const coefficient = exponent ? (fractionUnit | fraction) << BigInt(exponent - 1) : fraction;
+  return high >>> 31 ? -coefficient : coefficient;
+}
+
+function roundCoefficient(total: bigint, count = 1): number {
+  if (total === ZERO) return 0;
+  const negative = total < ZERO, absolute = negative ? -total : total;
+  const divisor = BigInt(count);
+  const whole = absolute / divisor;
+  const shift = Math.max(0, whole.toString(2).length - 53);
+  const denominator = divisor << BigInt(shift);
+  let mantissa = absolute / denominator;
+  const remainder = absolute % denominator;
+  const comparison = remainder * BigInt(2) - denominator;
+  if (comparison > ZERO || (comparison === ZERO && (mantissa & ONE) === ONE)) mantissa++;
+  const value = Number(mantissa) * 2 ** (shift - 1074);
+  return negative ? -value : value;
+}
+
 function numericStatistics(values: number[]): IssueFieldBreakdown['numeric'] {
   if (!values.length) return null;
   const bits = new DataView(new ArrayBuffer(8));
-  const one = BigInt(1), fractionUnit = one << BigInt(52);
-  let total = BigInt(0), min = values[0], max = values[0];
+  let total = ZERO, min = values[0], max = values[0];
   for (const value of values) {
     min = Math.min(min, value);
     max = Math.max(max, value);
-    bits.setFloat64(0, value, false);
-    const high = bits.getUint32(0, false), low = bits.getUint32(4, false);
-    const exponent = (high >>> 20) & 0x7ff;
-    const fraction = (BigInt(high & 0xfffff) << BigInt(32)) | BigInt(low);
-    const coefficient = exponent ? (fractionUnit | fraction) << BigInt(exponent - 1) : fraction;
-    total += high >>> 31 ? -coefficient : coefficient;
+    total += exactCoefficient(value, bits);
   }
-  const rounded = (count: number): number => {
-    if (total === BigInt(0)) return 0;
-    const negative = total < BigInt(0), absolute = negative ? -total : total;
-    const divisor = BigInt(count);
-    const whole = absolute / divisor;
-    const shift = Math.max(0, whole.toString(2).length - 53);
-    const denominator = divisor << BigInt(shift);
-    let mantissa = absolute / denominator;
-    const remainder = absolute % denominator;
-    const comparison = remainder * BigInt(2) - denominator;
-    if (comparison > BigInt(0) || (comparison === BigInt(0) && (mantissa & one) === one)) mantissa++;
-    const value = Number(mantissa) * 2 ** (shift - 1074);
-    return negative ? -value : value;
-  };
-  const sum = rounded(1), average = rounded(values.length);
+  const sum = roundCoefficient(total), average = roundCoefficient(total, values.length);
   if (!Number.isFinite(average)) fail('숫자 평균을 유한한 값으로 계산할 수 없습니다.');
   return { min: min === 0 ? 0 : min, max: max === 0 ? 0 : max, average, sum: Number.isFinite(sum) ? sum : null };
+}
+
+type ExactMeasure = { valueCount: number; coefficient: bigint };
+const emptyMeasure = (): ExactMeasure => ({ valueCount: 0, coefficient: ZERO });
+function addMeasure(total: ExactMeasure, coefficient: bigint, valueCount = 1): void {
+  total.coefficient += coefficient;
+  total.valueCount += valueCount;
+}
+
+function summaryMeasure({ valueCount, coefficient }: ExactMeasure): IssueFieldBreakdownMeasureTotal {
+  const sum = valueCount ? roundCoefficient(coefficient) : null;
+  return { valueCount, sum: sum !== null && Number.isFinite(sum) ? sum : null };
+}
+
+function issueMeasure(issue: Issue, measure: NonNullable<BreakdownInput['measure']>): number | null {
+  const { source, field, label } = measure;
+  let value: unknown;
+  if (source.kind === 'custom') {
+    if (!field || field.id !== source.fieldId || field.kind !== 'number') fail('합산할 숫자 필드를 확인해 주세요.', 400);
+    if (!fieldApplies(field, issue.type)) return null;
+    const stored = ownValue(issue, field);
+    if (!hasCustomValue(stored)) return null;
+    value = stored;
+  } else value = issue[source.kind];
+  if (value == null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value)) fail(`${label}: 저장된 숫자는 유한해야 합니다.`);
+  return value === 0 ? 0 : value;
+}
+
+function sparseMeasureRow(issues: readonly IssueFieldBreakdownIssue[], values: ReadonlyMap<string, bigint>,
+  memberships: ColumnMemberships): Record<string, IssueFieldBreakdownMeasureTotal> {
+  const membershipTotals = new Map<ReadonlySet<string>, ExactMeasure>();
+  for (const { id } of issues) {
+    const coefficient = values.get(id);
+    if (coefficient === undefined) continue;
+    const columns = memberships.get(id)!;
+    let total = membershipTotals.get(columns);
+    if (!total) { total = emptyMeasure(); membershipTotals.set(columns, total); }
+    addMeasure(total, coefficient);
+  }
+  const cells = new Map<string, ExactMeasure>();
+  for (const [columns, { valueCount, coefficient }] of membershipTotals) {
+    for (const id of columns) {
+      let cell = cells.get(id);
+      if (!cell) { cell = emptyMeasure(); cells.set(id, cell); }
+      addMeasure(cell, coefficient, valueCount);
+    }
+  }
+  return Object.fromEntries([...cells].map(([id, total]) => [id, summaryMeasure(total)]));
+}
+
+function denseMeasureRows(values: ReadonlyMap<string, bigint>,
+  memberships: ColumnMemberships, comparison: NonNullable<IssueFieldBreakdown['comparison']>) {
+  const coefficients = [...values.values()];
+  const indexes = new Map([...values.keys()].map((id, index) => [id, index]));
+  const byteCount = Math.ceil(coefficients.length / 8);
+  const columns = new Map(comparison.columns.map(column => [column.id, new Uint8Array(byteCount)]));
+  for (const [id, index] of indexes) {
+    for (const column of memberships.get(id)!) columns.get(column)![index >>> 3] |= 1 << (index & 7);
+  }
+  // Cache a partial sum for each eight-issue mask encountered in a cell intersection.
+  const partials = Array.from({ length: byteCount }, () => new Array<ExactMeasure | undefined>(256));
+  function partial(byte: number, mask: number): ExactMeasure {
+    let result = partials[byte][mask];
+    if (result) return result;
+    const bit = mask & -mask;
+    const rest = mask ^ bit;
+    const selected = coefficients[byte * 8 + (31 - Math.clz32(bit))];
+    const previous = rest ? partial(byte, rest) : undefined;
+    result = { valueCount: (previous?.valueCount ?? 0) + 1, coefficient: (previous?.coefficient ?? ZERO) + selected };
+    partials[byte][mask] = result;
+    return result;
+  }
+  return (bucketId: string, issues: readonly IssueFieldBreakdownIssue[]) => {
+    const row = new Uint8Array(byteCount);
+    for (const { id } of issues) {
+      const index = indexes.get(id);
+      if (index !== undefined) row[index >>> 3] |= 1 << (index & 7);
+    }
+    const cells: [string, IssueFieldBreakdownMeasureTotal][] = [];
+    for (const columnId of Object.keys(comparison.counts[bucketId] ?? {})) {
+      const column = columns.get(columnId)!;
+      const total = emptyMeasure();
+      for (let byte = 0; byte < byteCount; byte++) {
+        const mask = row[byte] & column[byte];
+        if (mask) {
+          const { coefficient, valueCount } = partial(byte, mask);
+          addMeasure(total, coefficient, valueCount);
+        }
+      }
+      if (total.valueCount) cells.push([columnId, summaryMeasure(total)]);
+    }
+    return Object.fromEntries(cells);
+  };
+}
+
+function summarizeMeasure(measure: NonNullable<BreakdownInput['measure']>, values: ReadonlyMap<string, bigint>,
+  issuesByBucket: ReadonlyMap<string, IssueFieldBreakdownIssue[]>, memberships: ColumnMemberships,
+  comparison: IssueFieldBreakdown['comparison'], bothMultiple: boolean): IssueFieldBreakdownMeasureResult {
+  const total = emptyMeasure();
+  const columnTotals = new Map(comparison?.columns.map(column => [column.id, emptyMeasure()]));
+  for (const [id, value] of values) {
+    addMeasure(total, value);
+    for (const column of memberships.get(id) ?? []) addMeasure(columnTotals.get(column)!, value);
+  }
+  const rows = Object.fromEntries([...issuesByBucket].map(([id, issues]) => {
+    const sum = emptyMeasure();
+    for (const issue of issues) {
+      const value = values.get(issue.id);
+      if (value !== undefined) addMeasure(sum, value);
+    }
+    return [id, summaryMeasure(sum)];
+  }));
+  const result = { source: measure.source, label: measure.label, total: summaryMeasure(total), rows };
+  if (!comparison) return result;
+  const dense = bothMultiple && values.size > 64 && issuesByBucket.size * comparison.columns.length <= MAX_CUSTOM_COMPARISON_CELLS * 2;
+  const denseRow = dense ? denseMeasureRows(values, memberships, comparison) : null;
+  const cells = Object.fromEntries([...issuesByBucket].flatMap(([id, issues]) => {
+    if (!rows[id].valueCount) return [];
+    const row = denseRow ? denseRow(id, issues) : sparseMeasureRow(issues, values, memberships);
+    return Object.keys(row).length ? [[id, row]] : [];
+  }));
+  const columns = Object.fromEntries([...columnTotals].map(([id, total]) => [id, summaryMeasure(total)]));
+  return { ...result, columns, cells };
 }
 
 export function buildIssueFieldBreakdown(input: BreakdownInput): {
@@ -238,7 +371,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
 } {
   if (!Array.isArray(input.issues) || input.issues.length > 10000) fail('필드 분포는 최대 10,000개 업무까지 집계할 수 있습니다.', 413);
   if (!Number.isSafeInteger(input.schemaVersion) || input.schemaVersion < 1) fail('업무 스키마 버전을 확인해 주세요.', 400);
-  const { projectId, field, users, groupBy, comparison } = input;
+  const { projectId, field, users, groupBy, comparison, measure } = input;
   const rowAxis: BreakdownAxis = { by: groupBy, field };
   const rowId = axisIds(field);
   const comparisonId = comparison && axisIds(comparison.field);
@@ -257,13 +390,12 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     issuesByBucket.set(bucket.id, []);
   }
   const seen = new Set<string>(), numericValues: number[] = [];
-  const summaries = new Map<string, IssueFieldBreakdownIssue>();
+  const coefficients = new Map<string, bigint>();
+  const coefficientBits = new DataView(new ArrayBuffer(8));
   const fingerprints: unknown[][] = [];
   let applicableIssues = 0, populatedIssues = 0;
 
-  const add = (bucket: IssueFieldBreakdownBucket, issue: Issue) => {
-    let summary = summaries.get(issue.id);
-    if (!summary) { summary = { id: issue.id, key: issue.key, title: issue.title }; summaries.set(issue.id, summary); }
+  const add = (bucket: IssueFieldBreakdownBucket, summary: IssueFieldBreakdownIssue) => {
     bucket.count++;
     issuesByBucket.get(bucket.id)!.push(summary);
   };
@@ -272,6 +404,9 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     if (!issue.id || seen.has(issue.id)) fail('필드 분포에 중복되거나 비어 있는 업무 ID가 있습니다.', 400);
     if (!Number.isSafeInteger(issue.version) || issue.version < 1) fail('업무 버전을 확인해 주세요.', 400);
     seen.add(issue.id);
+    const measureValue = measure ? issueMeasure(issue, measure) : null;
+    if (measureValue !== null) coefficients.set(issue.id, exactCoefficient(measureValue, coefficientBits));
+    const summary = { id: issue.id, key: issue.key, title: issue.title, ...(measure ? { measureValue } : {}) };
     let columnFingerprint: string | undefined;
     if (comparison && comparisonId) {
       const { values, specialId } = axisValue(issue, comparison);
@@ -299,10 +434,10 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     const applicable = specialId !== 'not-applicable';
     const valueFingerprint = raw == null ? (emptyId === 'unknown' ? 'unknown' : null) : hash([field.kind, raw]);
     fingerprints.push([issue.id, issue.version, issue.key, issue.title, issue.type, applicable,
-      valueFingerprint, ...(columnFingerprint ? [columnFingerprint] : [])]);
-    if (!applicable) { add(notApplicable, issue); continue; }
+      valueFingerprint, ...(columnFingerprint ? [columnFingerprint] : []), ...(measure ? [measureValue] : [])]);
+    if (!applicable) { add(notApplicable, summary); continue; }
     applicableIssues++;
-    if (specialId) { add(buckets.get(specialId)!, issue); continue; }
+    if (specialId) { add(buckets.get(specialId)!, summary); continue; }
     populatedIssues++;
     if (field.kind === 'number') numericValues.push(raw as number);
     for (const distinct of values) {
@@ -313,7 +448,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
         buckets.set(id, bucket);
         issuesByBucket.set(id, []);
       }
-      add(bucket, issue);
+      add(bucket, summary);
     }
   }
   const compareIssues = (left: IssueFieldBreakdownIssue, right: IssueFieldBreakdownIssue) => compareText(left.key, right.key) || compareText(left.id, right.id);
@@ -325,11 +460,11 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
   groups.push(...specialBuckets);
   const numeric = field.kind === 'number' ? numericStatistics(numericValues) : null;
   const savedView = input.savedView ? { id: input.savedView.id, name: input.savedView.name, version: input.savedView.version } : null;
+  const bothMultiple = field.kind === 'multi_select' && comparison?.field.kind === 'multi_select';
   let comparisonResult: IssueFieldBreakdown['comparison'];
   if (comparison) {
     for (const { ids, count } of columnGroups.values()) for (const id of ids) columns.get(id)!.count += count;
-    const counts = comparisonCounts(issuesByBucket, columnIdsByIssue, columns, !comparison.by,
-      field.kind === 'multi_select' && comparison.field.kind === 'multi_select');
+    const counts = comparisonCounts(issuesByBucket, columnIdsByIssue, columns, !comparison.by, bothMultiple);
     distinguishLabels(columns);
     const workflowOrder = comparison.by === 'status'
       ? new Map(comparison.field.options.map((option, index) => [valueId(comparison.field, option.id), index]))
@@ -348,6 +483,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
       columns: orderedColumns, counts: orderedCounts,
     };
   }
+  const measureResult = measure && summarizeMeasure(measure, coefficients, issuesByBucket, columnIdsByIssue, comparisonResult, bothMultiple);
   const revision = hash({
     projectId, schemaVersion: input.schemaVersion,
     field: [field.id, field.name, field.description, field.kind, field.required, field.archived,
@@ -356,12 +492,14 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     issues: fingerprints.sort((left, right) => compareText(left[0] as string, right[0] as string)),
     groups: groups.map(bucket => [bucket.id, bucket.label, bucket.kind, bucket.count]),
     numeric,
-    ...(groupBy || comparisonResult ? { groupBy, comparison: comparisonResult, configuration: input.configuration } : {}),
+    ...(measure ? { measure: [measure.source, measure.label] } : {}),
+    ...(groupBy || comparisonResult || measure ? { groupBy, comparison: comparisonResult, configuration: input.configuration } : {}),
   });
   return {
     report: {
       projectId, field: { id: field.id, name: field.name, kind: field.kind, archived: field.archived },
       ...(groupBy ? { groupBy } : {}), ...(comparisonResult ? { comparison: comparisonResult } : {}),
+      ...(measureResult ? { measure: measureResult } : {}),
       savedView, revision, generatedAt: input.generatedAt, totalIssues: input.issues.length,
       applicableIssues, populatedIssues, missingIssues: missing.count + (unknown?.count ?? 0), notApplicableIssues: notApplicable.count,
       groups, numeric,

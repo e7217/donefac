@@ -208,6 +208,10 @@
   margin: 18px 0 0;
 }
 
+.field-breakdown-numeric h3 {
+  overflow-wrap: anywhere;
+}
+
 .field-breakdown-numeric dt {
   font-size: 13px;
   color: #516962;
@@ -264,6 +268,22 @@
   min-width: 100%;
   width: max-content;
   table-layout: auto;
+}
+
+.field-breakdown-groups .field-breakdown-measured-groups {
+  min-width: 570px;
+}
+
+.field-breakdown-measured-groups td {
+  overflow-wrap: anywhere;
+}
+
+.field-breakdown-measure-cell {
+  display: block;
+  margin-block-start: 3px;
+  color: #375c52;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .field-breakdown-matrix th:first-child,
@@ -460,6 +480,7 @@
 
 .field-breakdown-issue > small {
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .field-breakdown-issue:disabled {

@@ -83,7 +83,7 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   const team = Boolean(options?.team);
   const selection = report?.fieldBreakdown;
   const scope = JSON.stringify([team ? 'team' : projectId, actorId, report ? [selection?.fieldId, selection?.groupBy, selection?.savedViewId,
-    selection?.comparisonBy, selection?.comparisonFieldId, selection?.bucketId, selection?.comparisonBucketId] : null]);
+    selection?.comparisonBy, selection?.comparisonFieldId, selection?.measure, selection?.bucketId, selection?.comparisonBucketId] : null]);
   const [session, setSession] = useState<EditSession | null>(null);
   const [busy, setBusy] = useState(false);
   const pending = useRef<AbortController | null>(null);

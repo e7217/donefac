@@ -1722,10 +1722,13 @@ export interface SavedViewState {
 }
 export const ISSUE_FIELD_BREAKDOWN_DIMENSIONS = ['status', 'priority', 'assignee', 'type', 'reporter'] as const;
 export type IssueFieldBreakdownDimension = typeof ISSUE_FIELD_BREAKDOWN_DIMENSIONS[number];
+export const ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS = { estimate: '스토리 포인트', plannedEffortMinutes: '계획 작업 시간 (분)' } as const;
+export type IssueFieldBreakdownMeasure = { kind: keyof typeof ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS } | { kind: 'custom'; fieldId: string };
 export type IssueFieldBreakdownQuery = {
   savedViewId?: string;
   comparisonBy?: IssueFieldBreakdownDimension;
   comparisonFieldId?: string;
+  measure?: IssueFieldBreakdownMeasure;
 } & ({ fieldId: string; groupBy?: never } | { groupBy: IssueFieldBreakdownDimension; fieldId?: never });
 export interface SavedFieldBreakdown {
   id: string;
@@ -1740,6 +1743,7 @@ export type IssueFieldBreakdownSelection = {
   savedViewId?: string | null;
   comparisonBy?: IssueFieldBreakdownDimension | null;
   comparisonFieldId?: string | null;
+  measure?: IssueFieldBreakdownMeasure;
   revision: string;
   bucketId: string;
   comparisonBucketId?: string | null;
@@ -1760,12 +1764,22 @@ export interface IssueFieldBreakdownBucket {
   kind: 'value' | 'missing' | 'not_applicable';
   count: number;
 }
-export interface IssueFieldBreakdownIssue { id: string; key: string; title: string }
+export interface IssueFieldBreakdownMeasureTotal { valueCount: number; sum: number | null }
+export interface IssueFieldBreakdownMeasureResult {
+  source: IssueFieldBreakdownMeasure;
+  label: string;
+  total: IssueFieldBreakdownMeasureTotal;
+  rows: Record<string, IssueFieldBreakdownMeasureTotal>;
+  columns?: Record<string, IssueFieldBreakdownMeasureTotal>;
+  cells?: Record<string, Record<string, IssueFieldBreakdownMeasureTotal>>;
+}
+export interface IssueFieldBreakdownIssue { id: string; key: string; title: string; measureValue?: number | null }
 export interface IssueFieldBreakdown {
   projectId: string;
   field: IssueFieldBreakdownField;
   groupBy?: IssueFieldBreakdownDimension;
   comparison?: IssueFieldBreakdownComparison;
+  measure?: IssueFieldBreakdownMeasureResult;
   savedView: { id: string; name: string; version: number } | null;
   revision: string;
   generatedAt: string;

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { ArrowUpRight, BarChart3, Link2, ListChecks, RefreshCw } from 'lucide-react';
-import { ISSUE_BULK_EDIT_LIMIT, ISSUE_FIELD_BREAKDOWN_DIMENSIONS } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, ISSUE_FIELD_BREAKDOWN_DIMENSIONS, ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS } from '../../shared/types';
 import type {
   CustomFieldKind,
   FeatureProps,
@@ -12,6 +12,9 @@ import type {
   IssueFieldBreakdownComparison,
   IssueFieldBreakdownDimension,
   IssueFieldBreakdownIssue,
+  IssueFieldBreakdownMeasure,
+  IssueFieldBreakdownMeasureResult,
+  IssueFieldBreakdownMeasureTotal,
   IssueFieldBreakdownPage,
   IssueFieldBreakdownQuery,
   IssueFieldBreakdownSelection,
@@ -21,7 +24,9 @@ import type {
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { projectStatuses } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
-import { fieldBreakdownHash, sameFieldBreakdownScope, type FieldBreakdownScope } from '../lib/field-breakdown-route';
+import {
+  fieldBreakdownHash, fieldBreakdownMeasureParameter, readFieldBreakdownMeasure, sameFieldBreakdownScope, type FieldBreakdownScope,
+} from '../lib/field-breakdown-route';
 import { afterAcceptedNavigation, isReportPreservedByNavigation } from '../lib/navigation';
 import { IssueBulkEdit, useIssueBulkEdit } from './IssueBulkEdit';
 import { FieldBreakdownPresets } from './FieldBreakdownPresets';
@@ -29,7 +34,7 @@ import './field-breakdown.css';
 
 type ComparisonQuery = { comparisonBy?: IssueFieldBreakdownDimension; comparisonFieldId?: never }
   | { comparisonBy?: never; comparisonFieldId: string };
-type QueryScope = { savedViewId: string | null } & ComparisonQuery;
+type QueryScope = { savedViewId: string | null; measure?: IssueFieldBreakdownMeasure } & ComparisonQuery;
 type ConfirmedQuery = QueryScope & (
   | { fieldId: string; groupBy?: never }
   | { groupBy: IssueFieldBreakdownDimension; fieldId?: never }
@@ -64,14 +69,15 @@ const KIND_LABELS: Record<CustomFieldKind, string> = {
   url: 'URL',
 };
 const sameQuery = (a: Query, b: Query) => a.fieldId === b.fieldId && a.groupBy === b.groupBy &&
-  a.comparisonBy === b.comparisonBy && a.comparisonFieldId === b.comparisonFieldId && a.savedViewId === b.savedViewId;
+  a.comparisonBy === b.comparisonBy && a.comparisonFieldId === b.comparisonFieldId && a.savedViewId === b.savedViewId &&
+  fieldBreakdownMeasureParameter(a.measure) === fieldBreakdownMeasureParameter(b.measure);
 const comparisonQuery = (comparisonBy?: IssueFieldBreakdownDimension, comparisonFieldId?: string): ComparisonQuery =>
   comparisonFieldId ? { comparisonFieldId } : { comparisonBy };
 
 function linkedSelection(scope: FieldBreakdownScope | null, firstFieldId: string): { query: Query; automatic: boolean } {
   const valid = scope?.invalid ? null : scope;
   const savedViewId = valid?.savedViewId ?? null;
-  const filters = { savedViewId, ...comparisonQuery(valid?.comparisonBy, valid?.comparisonFieldId) };
+  const filters = { savedViewId, measure: valid?.measure, ...comparisonQuery(valid?.comparisonBy, valid?.comparisonFieldId) };
   if (valid?.fieldId) return { query: { fieldId: valid.fieldId, ...filters }, automatic: true };
   if (valid?.groupBy) return { query: { groupBy: valid.groupBy, ...filters }, automatic: true };
   if (savedViewId || scope?.invalid) return { query: { savedViewId }, automatic: false };
@@ -80,11 +86,11 @@ function linkedSelection(scope: FieldBreakdownScope | null, firstFieldId: string
 
 function scopeOf(query: Query): FieldBreakdownScope {
   return { fieldId: query.fieldId, groupBy: query.groupBy, savedViewId: query.savedViewId ?? undefined,
-    comparisonBy: query.comparisonBy, comparisonFieldId: query.comparisonFieldId };
+    comparisonBy: query.comparisonBy, comparisonFieldId: query.comparisonFieldId, measure: query.measure };
 }
 
 function reportQuery(report: IssueFieldBreakdown): ConfirmedQuery {
-  const filters = { savedViewId: report.savedView?.id ?? null,
+  const filters = { savedViewId: report.savedView?.id ?? null, ...(report.measure ? { measure: report.measure.source } : {}),
     ...comparisonQuery(report.comparison?.by, report.comparison?.field?.id) };
   return report.groupBy ? { groupBy: report.groupBy, ...filters } : { fieldId: report.field.id, ...filters };
 }
@@ -103,6 +109,8 @@ const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : '필드 집계를 불러오지 못했습니다.';
 const numberLabel = (value: number | null) =>
   value === null ? '집계값 없음' : value.toLocaleString('ko-KR', { maximumSignificantDigits: 12 });
+const measureTotalLabel = (total: IssueFieldBreakdownMeasureTotal | undefined) =>
+  !total?.valueCount ? '값 없음' : total.sum === null ? '합계값 범위 초과' : numberLabel(total.sum);
 const bucketKind = (bucket: IssueFieldBreakdownBucket) =>
   bucket.kind === 'missing' ? '값 없음' : bucket.kind === 'not_applicable' ? '유형에 미적용' : '값';
 
@@ -265,14 +273,14 @@ function ProjectFieldBreakdown(props: Props) {
 
   function choosePrimary(value: string) {
     const groupBy = ISSUE_FIELD_BREAKDOWN_DIMENSIONS.find(dimension => dimension === value);
-    const { savedViewId, comparisonBy, comparisonFieldId } = query;
-    if (groupBy) update({ groupBy, savedViewId, ...comparisonQuery(comparisonBy === groupBy ? undefined : comparisonBy, comparisonFieldId) });
+    const { savedViewId, comparisonBy, comparisonFieldId, measure } = query;
+    if (groupBy) update({ groupBy, savedViewId, measure, ...comparisonQuery(comparisonBy === groupBy ? undefined : comparisonBy, comparisonFieldId) });
     else if (value === 'custom' && firstFieldId) chooseCustomField(firstFieldId);
   }
 
   function chooseCustomField(fieldId: string) {
-    const { savedViewId, comparisonBy, comparisonFieldId } = query;
-    update({ fieldId, savedViewId, ...comparisonQuery(comparisonBy, comparisonFieldId === fieldId ? undefined : comparisonFieldId) });
+    const { savedViewId, comparisonBy, comparisonFieldId, measure } = query;
+    update({ fieldId, savedViewId, measure, ...comparisonQuery(comparisonBy, comparisonFieldId === fieldId ? undefined : comparisonFieldId) });
   }
 
   function chooseComparison(value: string) {
@@ -483,6 +491,8 @@ function ProjectFieldBreakdown(props: Props) {
   const selectedField = schema.fields.find((field) => field.id === query.fieldId);
   const selectedComparisonField = schema.fields.find(field => field.id === query.comparisonFieldId);
   const comparisonFields = schema.fields.filter(field => field.id !== query.fieldId);
+  const measureFields = schema.fields.filter(field => field.kind === 'number');
+  const selectedMeasureFieldId = query.measure?.kind === 'custom' ? query.measure.fieldId : undefined;
   const comparisonLabel = report?.comparison?.by ? DIMENSION_LABELS[report.comparison.by] : report?.comparison?.field?.name;
   const overlaps = report?.field.kind === 'multi_select' || report?.comparison?.field?.kind === 'multi_select';
   const drillBusy = pageLoading || reportLoading;
@@ -495,7 +505,11 @@ function ProjectFieldBreakdown(props: Props) {
         `${value.comparisonFieldId} · 현재 정의 없음` : undefined;
     const comparison = comparisonName ? ` × ${comparisonName}` : '';
     const view = value.savedViewId ? views.find(item => item.id === value.savedViewId)?.name ?? '저장된 보기 · 현재 목록 없음' : '프로젝트 전체 업무';
-    return `${primary}${comparison} · ${view}`;
+    const source = value.measure;
+    const measure = source?.kind === 'custom'
+      ? measureFields.find(field => field.id === source.fieldId)?.name ?? `${source.fieldId} · 현재 숫자 필드 없음`
+      : source ? ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS[source.kind] : undefined;
+    return `${primary}${comparison} · ${view}${measure ? ` · ${measure} 합계` : ''}`;
   };
   const bulkEditor = {
     ...bulk,
@@ -566,6 +580,23 @@ function ProjectFieldBreakdown(props: Props) {
                 {comparisonFields.length > 0 && <optgroup label="사용자 정의 필드">
                   {comparisonFields.map(field => <option key={field.id} value={`${CUSTOM_COMPARISON_PREFIX}${field.id}`}>
                     {field.name} · {KIND_LABELS[field.kind]}{field.archived ? ' · 보관됨' : ''}
+                  </option>)}
+                </optgroup>}
+              </select>
+            </label>
+            <label>
+              합계 항목
+              <select className="field" aria-label="합계 항목" value={fieldBreakdownMeasureParameter(query.measure) ?? ''}
+                onChange={event => update({ ...query, measure: readFieldBreakdownMeasure(event.currentTarget.value) })}>
+                <option value="">업무 수</option>
+                {Object.entries(ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS).map(([kind, label]) =>
+                  <option key={kind} value={kind}>{label}</option>)}
+                {selectedMeasureFieldId && !measureFields.some(field => field.id === selectedMeasureFieldId) &&
+                  <option value={fieldBreakdownMeasureParameter(query.measure)}>{selectedMeasureFieldId} · 현재 숫자 필드 없음</option>}
+                {measureFields.length > 0 && <optgroup label="사용자 정의 숫자 필드">
+                  {measureFields.map(field => <option key={field.id}
+                    value={fieldBreakdownMeasureParameter({ kind: 'custom', fieldId: field.id })}>
+                    {field.name}{field.archived ? ' · 보관됨' : ''}
                   </option>)}
                 </optgroup>}
               </select>
@@ -682,6 +713,14 @@ function ProjectFieldBreakdown(props: Props) {
               <Metric label="유형에 미적용" value={report.notApplicableIssues} />
             </>}
           </div>
+          {report.measure && <section className="card field-breakdown-numeric" aria-label="합계 항목 결과">
+            <h3>{report.measure.label} 합계</h3>
+            <dl>
+              <div><dt>전체 합계</dt><dd>{measureTotalLabel(report.measure.total)}</dd></div>
+              <div><dt>합계에 포함된 업무</dt><dd>{numberLabel(report.measure.total.valueCount)}개</dd></div>
+              <div><dt>합계 값이 없는 업무</dt><dd>{numberLabel(report.totalIssues - report.measure.total.valueCount)}개</dd></div>
+            </dl>
+          </section>}
           {report.numeric && (
             <section className="card field-breakdown-numeric" aria-label="숫자 필드 통계">
               <h3>입력된 숫자 통계</h3>
@@ -707,22 +746,26 @@ function ProjectFieldBreakdown(props: Props) {
           )}
           <section className="card field-breakdown-groups" aria-label="필드 값별 분포">
             <header>
-              <h3>{report.comparison ? '기준별 교차 집계' : '값별 업무 수'}</h3>
+              <h3>{report.comparison ? '기준별 교차 집계' : report.measure ? '값별 업무 수와 합계' : '값별 업무 수'}</h3>
               <span>{groups.length.toLocaleString()}개 그룹</span>
             </header>
             {(!report.comparison || overlaps) && <p>
               {!report.comparison && '막대는 조회 대상 전체 업무 대비 비율입니다.'}
               {overlaps && ' 여러 선택 필드는 값을 선택한 만큼 행이나 열에 포함됩니다. 조회 대상 전체 업무 수에는 각 업무를 한 번만 셉니다.'}
+              {overlaps && report.measure && ' 전체 합계에는 각 업무의 숫자 값을 한 번만 더합니다.'}
             </p>}
             {report.comparison ? <FieldBreakdownMatrix key={report.comparison.field ? report.revision : `${report.revision}:${report.generatedAt}`}
               rowLabel={report.field.name} rows={groups.slice(start, start + GROUP_PAGE_SIZE)} comparison={report.comparison} total={report.totalIssues}
-              page={page} disabled={stale || drillBusy || bulk.locked}
-              onOpen={(bucket, comparisonBucketId) => void loadBucket(bucket, 0, comparisonBucketId, true)} /> : <div className="field-breakdown-table-scroll">
-              <table aria-label="필드 값별 집계 표">
+              measure={report.measure} page={page} disabled={stale || drillBusy || bulk.locked}
+              onOpen={(bucket, comparisonBucketId) => void loadBucket(bucket, 0, comparisonBucketId, true)} /> : <div className="field-breakdown-table-scroll"
+              role={report.measure ? 'region' : undefined} aria-label={report.measure ? '필드 값별 집계 표 스크롤' : undefined}
+              tabIndex={report.measure ? 0 : undefined}>
+              <table className={report.measure ? 'field-breakdown-measured-groups' : undefined} aria-label="필드 값별 집계 표">
                 <thead>
                   <tr>
                     <th scope="col">값 또는 상태</th>
                     <th scope="col">업무 수</th>
+                    {report.measure && <th scope="col">합계</th>}
                     <th scope="col">전체 대비</th>
                   </tr>
                 </thead>
@@ -744,6 +787,7 @@ function ProjectFieldBreakdown(props: Props) {
                           </button>
                         </th>
                         <td>{bucket.count.toLocaleString()}</td>
+                        {report.measure && <td>{measureTotalLabel(report.measure.rows[bucket.id])}</td>}
                         <td>
                           <div className="field-breakdown-bar" aria-hidden="true">
                             <span style={{ width: `${Math.min(100, percent)}%` }} />
@@ -834,6 +878,7 @@ function ProjectFieldBreakdown(props: Props) {
                     >
                       <strong>{issue.key}</strong>
                       <span>{issue.title}</span>
+                      {report.measure && <small>{report.measure.label} · {issue.measureValue == null ? '값 없음' : numberLabel(issue.measureValue)}</small>}
                       {openingIssue === issue.id && <small>업무를 여는 중…</small>}
                     </button>
                   </li>;
@@ -893,11 +938,12 @@ function ProjectFieldBreakdown(props: Props) {
   );
 }
 
-function FieldBreakdownMatrix({ rowLabel, rows, comparison, total, page, disabled, onOpen }: {
+function FieldBreakdownMatrix({ rowLabel, rows, comparison, total, measure, page, disabled, onOpen }: {
   rowLabel: string;
   rows: IssueFieldBreakdownBucket[];
   comparison: IssueFieldBreakdownComparison;
   total: number;
+  measure?: IssueFieldBreakdownMeasureResult;
   page: IssueFieldBreakdownPage | null;
   disabled: boolean;
   onOpen: (bucket: IssueFieldBreakdownBucket, comparisonBucketId?: string) => void;
@@ -915,21 +961,29 @@ function FieldBreakdownMatrix({ rowLabel, rows, comparison, total, page, disable
         </tr></thead>
         <tbody>{rows.map(bucket => <tr key={bucket.id}>
           <th scope="row">{bucket.label}</th>
-          <td>{bucket.count ? <button type="button" className="field-breakdown-cell"
-            aria-label={`그룹 ${bucket.label} 업무 보기`} aria-pressed={page?.bucket.id === bucket.id && !page.comparisonBucket}
-            disabled={disabled} onClick={() => onOpen(bucket)}>{numberLabel(bucket.count)}</button> : 0}</td>
+          <td>
+            {bucket.count ? <button type="button" className="field-breakdown-cell"
+              aria-label={`그룹 ${bucket.label} 업무 보기`} aria-pressed={page?.bucket.id === bucket.id && !page.comparisonBucket}
+              disabled={disabled} onClick={() => onOpen(bucket)}>{numberLabel(bucket.count)}</button> : 0}
+            {measure && <MeasureCell total={measure.rows[bucket.id]} />}
+          </td>
           {columns.map(column => {
             const count = comparison.counts[bucket.id]?.[column.id] ?? 0;
             const selected = page?.bucket.id === bucket.id && page.comparisonBucket?.id === column.id;
-            return <td key={column.id}>{count ? <button type="button" className="field-breakdown-cell"
-              aria-label={`${bucket.label} × ${column.label} 업무 보기 · ${numberLabel(count)}개`} aria-pressed={selected}
-              disabled={disabled} onClick={() => onOpen(bucket, column.id)}>{numberLabel(count)}</button> : 0}</td>;
+            return <td key={column.id}>
+              {count ? <button type="button" className="field-breakdown-cell"
+                aria-label={`${bucket.label} × ${column.label} 업무 보기 · ${numberLabel(count)}개`} aria-pressed={selected}
+                disabled={disabled} onClick={() => onOpen(bucket, column.id)}>{numberLabel(count)}</button> : 0}
+              {measure && count > 0 && <MeasureCell total={measure.cells?.[bucket.id]?.[column.id]} />}
+            </td>;
           })}
         </tr>)}</tbody>
         <tfoot><tr>
           <th scope="row">전체 조회 범위</th>
-          <td>{numberLabel(total)}</td>
-          {columns.map(column => <td key={column.id}>{numberLabel(column.count)}</td>)}
+          <td>{numberLabel(total)}{measure && <MeasureCell total={measure.total} />}</td>
+          {columns.map(column => <td key={column.id}>
+            {numberLabel(column.count)}{measure && <MeasureCell total={measure.columns?.[column.id]} />}
+          </td>)}
         </tr></tfoot>
       </table>
     </div>
@@ -942,6 +996,10 @@ function FieldBreakdownMatrix({ rowLabel, rows, comparison, total, page, disable
         onClick={() => setOffset(offset + COMPARISON_PAGE_SIZE)}>다음 열</button>
     </div>}
   </>;
+}
+
+function MeasureCell({ total }: { total: IssueFieldBreakdownMeasureTotal | undefined }) {
+  return <small className="field-breakdown-measure-cell">합계 {measureTotalLabel(total)}</small>;
 }
 
 function Metric({ label, value }: { label: string; value: number }) {

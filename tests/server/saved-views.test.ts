@@ -104,7 +104,7 @@ test('saved views keep field priority, use rank for ties and restore native sort
     assert.equal(original[0], urgentSecond);
 
     const { data: backup } = await f.request('/export');
-    assert.equal(backup.schemaVersion, 106);
+    assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
     assert.equal((await f.request('/import', 'POST', { data: { ...backup, schemaVersion: 105 } })).status, 400);
     assert.deepEqual(await loadView(), renamed.data);
     assert.equal((await f.request('/import', 'POST', { data: backup })).status, 200);

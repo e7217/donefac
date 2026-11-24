@@ -233,3 +233,51 @@ test('native v95 restores custom comparison presets and their retained missing f
   });
   assert.equal((await f.run(fixed.query)).comparison?.field?.id, choice.id);
 });
+
+test('numeric measure presets preserve portable inputs and orphaned measures while rejecting an older format claim', async t => {
+  const f = await fixture(t);
+  const schemaPath = `/projects/${f.project.id}/issue-schema`;
+  const schema = await f.call<ProjectIssueSchema>(schemaPath);
+  const score = { id: 'score', name: '측정 점수', kind: 'number' as const, description: '', required: false, issueTypes: [], archived: false, options: [] };
+  const retired = { ...score, id: 'retired', name: '나중에 지울 측정값' };
+  const textField = { ...score, id: 'description', name: '측정할 수 없는 텍스트', kind: 'text' as const };
+  const defined = await f.call<ProjectIssueSchema>(schemaPath, 200, 'PATCH', { ...schema, expectedVersion: schema.version, fields: [score, retired, textField] });
+  const view = await f.view('배포 업무 보기', '배포');
+  await f.issue('배포 대상 업무', actorId, { score: 7 });
+  await f.issue('보기 외부 업무', actorId, { score: 99 });
+  const query: IssueFieldBreakdownQuery = { groupBy: 'status', comparisonBy: 'assignee', savedViewId: view.id, measure: { kind: 'custom', fieldId: score.id } };
+  const preset = await f.call<SavedFieldBreakdown>(f.path, 201, 'POST', { name: '배포 점수 합계', query });
+  assert.deepEqual(preset.query, query);
+  assert.deepEqual(await f.call<SavedFieldBreakdown>(f.path, 200, 'POST', { name: preset.name, query }, peerId), preset);
+  await f.call(f.path, 409, 'POST', { name: preset.name, query: { ...query, measure: { kind: 'estimate' } } });
+  await f.call(f.path, 409, 'POST', { name: preset.name, query: { ...query, measure: { kind: 'custom', fieldId: retired.id } } });
+  await f.call(f.path, 400, 'POST', { name: '잘못된 측정값', query: { ...query, measure: { kind: 'custom', fieldId: textField.id } } });
+  await f.call(f.path, 404, 'POST', { name: '이 프로젝트에 없는 측정값', query: { ...query, measure: { kind: 'custom', fieldId: 'missing' } } });
+  const orphan = await f.call<SavedFieldBreakdown>(f.path, 201, 'POST', {
+    name: '측정값을 포함한 이전 집계', query: { ...query, measure: { kind: 'custom', fieldId: retired.id } },
+  });
+  await f.call(schemaPath, 200, 'PATCH', { ...defined, expectedVersion: defined.version, fields: [score, textField] });
+  await f.run(orphan.query, 404);
+  const report = await f.run(preset.query);
+  assert.deepEqual(report.measure?.total, { valueCount: 1, sum: 7 });
+
+  const backup = await f.call<Backup>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  assert.ok(backup.schemaVersion >= 107);
+  assert.deepEqual(backup.savedFieldBreakdowns.find(value => value.id === preset.id), preset);
+  const path = `${f.path}/${preset.id}`;
+  const renamed = await f.call<SavedFieldBreakdown>(path, 200, 'PATCH', { expectedVersion: preset.version, name: '복원 전 다른 이름' });
+  const rejected = await f.call<{ error: string }>('/import', 400, 'POST', { data: { ...backup, schemaVersion: 106 } });
+  assert.match(rejected.error, /schemaVersion 107/u);
+  assert.deepEqual((await f.list()).find(value => value.id === preset.id), renamed);
+  await f.call('/import', 200, 'POST', { data: backup });
+  const restored = await f.list();
+  const measured = restored.find(value => value.id === preset.id);
+  const missing = restored.find(value => value.id === orphan.id);
+  assert.ok(measured && missing && measured.version > renamed.version);
+  assert.deepEqual(measured.query, query);
+  assert.deepEqual(missing.query, orphan.query);
+  assert.deepEqual((await f.run(measured.query)).measure?.total, report.measure?.total);
+  await f.run(missing.query, 404);
+  await f.call(path, 409, 'PATCH', { expectedVersion: renamed.version, name: '잘못된 이전 버전' });
+});

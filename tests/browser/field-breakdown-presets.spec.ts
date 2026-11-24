@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
 import type { CustomFieldDefinition, CustomFieldValue, Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueFieldBreakdown,
-  IssueFieldBreakdownPage, ProjectIssueSchema, SavedFieldBreakdown, SavedView, WorkspaceSnapshot } from '../../shared/types';
+  IssueFieldBreakdownPage, IssueFieldBreakdownQuery, ProjectIssueSchema, SavedFieldBreakdown, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse | Response, status = 200): Promise<T> {
   const body = await response.text();
@@ -48,9 +48,10 @@ async function fixture(request: APIRequestContext) {
   const presetApi = `${reportApi}-presets`;
   return {
     prefix, project, member, peer, reportPath, reportApi, presetApi,
-    async issue(suffix: string, assigneeId: string, customFields?: Record<string, CustomFieldValue>) {
+    async issue(suffix: string, assigneeId: string, customFields?: Record<string, CustomFieldValue>,
+      fields: Partial<Pick<Issue, 'priority' | 'estimate' | 'plannedEffortMinutes'>> = {}) {
       const created = await json<Issue>(await request.post('/api/issues', { data: {
-        projectId: project.id, title: `${prefix} ${suffix}`, status: 'in_progress', assigneeId, customFields,
+        projectId: project.id, title: `${prefix} ${suffix}`, status: 'in_progress', assigneeId, customFields, ...fields,
       } }), 201);
       issues.push(created);
       return created;
@@ -172,6 +173,129 @@ test('360px에서 프로젝트 필드 집계를 이름으로 저장한 뒤 최�
     await expect.poll(() => route(page)).toEqual(location);
     await expect(cell).toHaveAttribute('aria-pressed', 'true');
   } finally { await f.close(); }
+});
+
+test('360px 필드 집계에서 업무 수와 숫자 합계를 함께 보고 공유 링크와 저장 집계로 셀의 업무를 확인한다', async ({ page, context, request }) => {
+  test.setTimeout(95_000);
+  const f = await fixture(request);
+  const schemaPath = `/api/projects/${f.project.id}/issue-schema`;
+  const schema = await json<ProjectIssueSchema>(await request.get(schemaPath));
+  const metric: CustomFieldDefinition = {
+    id: `report-measure-${randomUUID().slice(0, 8)}`, name: '복잡도 점수', kind: 'number',
+    required: false, archived: false, issueTypes: [], options: [], description: '',
+  };
+  await json(await request.patch(schemaPath, { data: { ...schema, expectedVersion: schema.version, fields: [...schema.fields, metric] } }));
+  try {
+    const scored = await f.issue('숫자가 입력된 업무', f.member.id, { [metric.id]: 3.5 },
+      { priority: 'high', estimate: 0, plannedEffortMinutes: 90 });
+    const zero = await f.issue('복잡도가 0인 업무', f.member.id, { [metric.id]: 0 },
+      { priority: 'high', estimate: null, plannedEffortMinutes: 30 });
+    await f.issue('측정값이 없는 업무', f.member.id);
+    await f.issue('다른 담당자의 집계 범위 밖 업무', f.peer.id, { [metric.id]: 500 },
+      { priority: 'high', estimate: 25, plannedEffortMinutes: 360 });
+    const view = await f.view('측정 범위');
+    const axes = { groupBy: 'status', comparisonBy: 'priority', savedViewId: view.id } as const;
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/${f.reportPath}`);
+    const ui = report(page);
+    const measure = page.getByRole('combobox', { name: '합계 항목', exact: true });
+    await ui.field.selectOption(axes.groupBy);
+    await ui.comparison.selectOption(axes.comparisonBy);
+    await ui.view.selectOption(view.id);
+    await expect(measure).toHaveValue('');
+
+    const cell = (row: string, column: string, count: number) =>
+      ui.matrix.getByRole('button', { name: `${row} × ${column} 업무 보기 · ${count}개`, exact: true });
+    async function run(choice: string, source: NonNullable<IssueFieldBreakdownQuery['measure']>, label: string,
+      total: { valueCount: number; sum: number }) {
+      await measure.selectOption(choice);
+      const waiting = responseAt(page, 'POST', f.reportApi);
+      await ui.submit.click();
+      const response = await waiting;
+      expect(response.request().postDataJSON()).toEqual({ ...axes, measure: source });
+      const summary = await json<IssueFieldBreakdown>(response);
+      expect(summary).toMatchObject({ totalIssues: 3, measure: { source, label, total } });
+      const row = summary.groups.find(group => group.count === 3)!;
+      const high = summary.comparison!.columns.find(column => column.label === '높음')!;
+      const medium = summary.comparison!.columns.find(column => column.label === '보통')!;
+      expect(summary.comparison?.counts[row.id]).toMatchObject({ [high.id]: 2, [medium.id]: 1 });
+      expect(summary.measure?.rows[row.id]).toEqual(total);
+      expect(summary.measure?.columns?.[high.id]).toEqual(total);
+      expect(summary.measure?.cells?.[row.id]?.[high.id]).toEqual(total);
+      const highCell = cell(row.label, high.label, 2);
+      const mediumCell = cell(row.label, medium.label, 1);
+      await expect(highCell).toBeVisible();
+      await expect(highCell.locator('..').getByText(`합계 ${total.sum}`, { exact: true })).toBeVisible();
+      await expect(mediumCell.locator('..').getByText('합계 값 없음', { exact: true })).toBeVisible();
+      const totals = ui.main.getByRole('region', { name: '합계 항목 결과', exact: true });
+      await expect(totals.getByRole('heading', { name: `${label} 합계`, exact: true })).toBeVisible();
+      return { summary, row, high };
+    }
+
+    await run('estimate', { kind: 'estimate' }, '스토리 포인트', { valueCount: 1, sum: 0 });
+    await run('plannedEffortMinutes', { kind: 'plannedEffortMinutes' }, '계획 작업 시간 (분)', { valueCount: 2, sum: 120 });
+    const measureChoice = `custom:${metric.id}`;
+    const source = { kind: 'custom', fieldId: metric.id } as const;
+    const query = { ...axes, measure: source };
+    const initial = await run(measureChoice, source, metric.name, { valueCount: 2, sum: 3.5 });
+    const location = { path: f.reportPath, query: { groupBy: axes.groupBy, comparisonBy: axes.comparisonBy, savedView: view.id, measure: measureChoice } };
+    await expect.poll(() => route(page)).toEqual(location);
+    const name = `${f.prefix} 복잡도 합계`;
+    await ui.savePreset.click();
+    await ui.editName.fill(name);
+    const saving = responseAt(page, 'POST', f.presetApi);
+    await ui.saveEditor.click();
+    const saved = await saving;
+    expect(saved.request().postDataJSON()).toEqual({ name, query });
+    expect((await json<SavedFieldBreakdown>(saved, 201)).query).toEqual(query);
+
+    await ui.main.getByRole('button', { name: '필드 집계 링크 복사', exact: true }).click();
+    const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
+    await expect.poll(clipboard).toBe(page.url());
+    const sharedUrl = await clipboard();
+    await json<Issue>(await request.patch(`/api/issues/${scored.id}`, { data: {
+      expectedVersion: scored.version, customFields: { [metric.id]: 7.25 },
+    } }));
+
+    await page.goto('about:blank');
+    const loading = responseAt(page, 'POST', f.reportApi);
+    await page.goto(sharedUrl);
+    const linked = await loading;
+    expect(linked.request().postDataJSON()).toEqual(query);
+    const result = await json<IssueFieldBreakdown>(linked);
+    expect(result).toMatchObject({ totalIssues: 3, measure: { source, total: { valueCount: 2, sum: 7.25 } } });
+    expect(result.revision).not.toBe(initial.summary.revision);
+    await expect(measure).toHaveValue(measureChoice);
+    const drilling = responseAt(page, 'POST', `${f.reportApi}/issues`);
+    await cell(initial.row.label, initial.high.label, 2).click();
+    const drilled = await drilling;
+    expect(drilled.request().postDataJSON()).toMatchObject({ ...query, revision: result.revision,
+      bucketId: initial.row.id, comparisonBucketId: initial.high.id });
+    const group = await json<IssueFieldBreakdownPage>(drilled);
+    expect(group.issues.map(issue => [issue.id, issue.measureValue])).toEqual([[scored.id, 7.25], [zero.id, 0]]);
+    await expect(ui.drilldown.getByText(`${metric.name} · 0`, { exact: true })).toBeVisible();
+    await ui.drilldown.getByRole('button', { name: `${scored.key} ${scored.title} ${metric.name} · 7.25`, exact: true }).click();
+    const drawer = page.getByRole('dialog', { name: scored.title, exact: true });
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect.poll(() => route(page)).toEqual(location);
+
+    await page.goto('about:blank');
+    await page.goto(`/${f.reportPath}`);
+    const reopening = responseAt(page, 'POST', f.reportApi);
+    await ui.openPreset(name).click();
+    const reopened = await reopening;
+    expect(reopened.request().postDataJSON()).toEqual(query);
+    expect((await json<IssueFieldBreakdown>(reopened)).measure?.total).toEqual({ valueCount: 2, sum: 7.25 });
+    await expect.poll(() => route(page)).toEqual(location);
+  } finally {
+    try { await f.close(); }
+    finally {
+      const latest = await json<ProjectIssueSchema>(await request.get(schemaPath));
+      await json(await request.patch(schemaPath, { data: { ...schema, expectedVersion: latest.version } }));
+    }
+  }
 });
 
 test('삭제된 보기의 집계 이름을 유지하고 동시 변경을 확인한 뒤 새 조회 조건으로 고친다', async ({ page, request }) => {

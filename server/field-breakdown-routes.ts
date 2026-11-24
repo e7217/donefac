@@ -1,6 +1,6 @@
 import type { Express } from 'express';
-import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS, PRIORITY, type CustomFieldDefinition, type GitlabLink,
-  type Issue, type IssueFieldBreakdownDimension, type IssueFieldBreakdownPage, type IssueFieldBreakdownQuery, type IssueFieldBreakdownSelection,
+import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS, ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS, PRIORITY, type CustomFieldDefinition, type GitlabLink,
+  type Issue, type IssueFieldBreakdownDimension, type IssueFieldBreakdownMeasure, type IssueFieldBreakdownPage, type IssueFieldBreakdownQuery, type IssueFieldBreakdownSelection,
   type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type User } from '../shared/types.js';
 import { IssueFieldFilterError } from '../shared/issue-field-filter.js';
 import { createIssueViewMatcher } from '../shared/issue-view.js';
@@ -10,7 +10,7 @@ import type { Store } from './store.js';
 
 const issueLimit = 10_000;
 const pageSize = 50;
-const selectionFields = new Set(['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'comparisonFieldId', 'revision', 'bucketId', 'comparisonBucketId']);
+const selectionFields = new Set(['fieldId', 'groupBy', 'savedViewId', 'comparisonBy', 'comparisonFieldId', 'measure', 'revision', 'bucketId', 'comparisonBucketId']);
 
 function identifier(value: unknown, label: string): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 200) {
@@ -28,6 +28,17 @@ function dimension(value: unknown): IssueFieldBreakdownDimension {
   return value as IssueFieldBreakdownDimension;
 }
 
+function parseMeasure(value: unknown): IssueFieldBreakdownMeasure | undefined {
+  if (value == null) return undefined;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const { kind, fieldId } = value as Record<string, unknown>;
+    const count = Object.keys(value).length;
+    if (kind === 'custom' && count === 2) return { kind, fieldId: identifier(fieldId, '합산할 숫자 필드') };
+    if ((kind === 'estimate' || kind === 'plannedEffortMinutes') && count === 1) return { kind };
+  }
+  throw new FieldBreakdownError(400, '합산할 숫자 값을 하나 선택해 주세요.');
+}
+
 export function parseFieldBreakdownQuery(body: Record<string, unknown>): IssueFieldBreakdownQuery {
   if (Object.hasOwn(body, 'fieldId') === Object.hasOwn(body, 'groupBy')) {
     throw new FieldBreakdownError(400, '사용자 정의 필드 또는 기본 필드 중 하나를 선택해 주세요.');
@@ -41,7 +52,8 @@ export function parseFieldBreakdownQuery(body: Record<string, unknown>): IssueFi
     throw new FieldBreakdownError(400, '행과 열에 서로 다른 기준을 선택해 주세요.');
   }
   const savedViewId = body.savedViewId == null ? undefined : identifier(body.savedViewId, '저장된 보기');
-  return { ...(groupBy ? { groupBy } : { fieldId: fieldId! }), comparisonBy, comparisonFieldId, savedViewId };
+  const measure = parseMeasure(body.measure);
+  return { ...(groupBy ? { groupBy } : { fieldId: fieldId! }), comparisonBy, comparisonFieldId, savedViewId, ...(measure ? { measure } : {}) };
 }
 
 export function resolveFieldBreakdownSources(store: Store, schema: ProjectIssueSchema, query: IssueFieldBreakdownQuery) {
@@ -49,11 +61,19 @@ export function resolveFieldBreakdownSources(store: Store, schema: ProjectIssueS
   if (!query.groupBy && !field) throw new FieldBreakdownError(404, '이 프로젝트에서 집계할 필드를 찾을 수 없습니다.');
   const comparisonField = query.comparisonFieldId ? schema.fields.find(item => item.id === query.comparisonFieldId) : undefined;
   if (query.comparisonFieldId && !comparisonField) throw new FieldBreakdownError(404, '이 프로젝트에서 비교할 필드를 찾을 수 없습니다.');
+  const source = query.measure;
+  const measureFieldId = source?.kind === 'custom' ? source.fieldId : undefined;
+  const measureField = measureFieldId ? schema.fields.find(item => item.id === measureFieldId) : undefined;
+  if (measureFieldId && !measureField) throw new FieldBreakdownError(404, '이 프로젝트에서 합산할 필드를 찾을 수 없습니다.');
+  if (measureField && measureField.kind !== 'number') throw new FieldBreakdownError(400, '사용자 정의 숫자 필드만 합산할 수 있습니다.');
   const view = query.savedViewId ? store.get<SavedView>('saved_views', query.savedViewId) : undefined;
   if (query.savedViewId && view?.projectId !== schema.projectId) {
     throw new FieldBreakdownError(404, '이 프로젝트에서 저장된 보기를 찾을 수 없습니다.');
   }
-  return { field, comparisonField, view: view ?? null };
+  const measure = source && (source.kind === 'custom'
+    ? { source, label: measureField!.name, field: measureField }
+    : { source, label: ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS[source.kind] });
+  return { field, comparisonField, measure, view: view ?? null };
 }
 
 function breakdownGroup(body: Record<string, unknown>) {
@@ -94,7 +114,7 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const query = parseFieldBreakdownQuery(body);
     const { groupBy, comparisonBy } = query;
     const workflow = groupBy === 'status' || comparisonBy === 'status' ? lookupWorkflow(projectId) : undefined;
-    const { field: customField, comparisonField, view } = resolveFieldBreakdownSources(store, schema, query);
+    const { field: customField, comparisonField, measure, view } = resolveFieldBreakdownSources(store, schema, query);
     const field = groupBy ? builtinField(groupBy, schema, workflow) : customField!;
     const comparison = comparisonBy ? { by: comparisonBy, field: builtinField(comparisonBy, schema, workflow) }
       : comparisonField ? { field: comparisonField } : undefined;
@@ -117,8 +137,8 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const result = buildIssueFieldBreakdown({
       projectId,field,issues,users,schemaVersion:schema.version,generatedAt:new Date().toISOString(),
       savedView:view ? {id:view.id,name:view.name,version:view.version} : null,
-      groupBy, comparison,
-      ...(groupBy || comparison ? { configuration: { workflowVersion: workflow?.version, importGeneration: store.setting('attachmentImportGeneration') } } : {}),
+      groupBy, comparison, measure,
+      ...(groupBy || comparison || measure ? { configuration: { workflowVersion: workflow?.version, importGeneration: store.setting('attachmentImportGeneration') } } : {}),
     });
     return { ...result, matchedIssues: issues };
   }

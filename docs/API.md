@@ -1336,15 +1336,19 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 다중 선택은 한 업무를 각 선택값에 해당하는 여러 행·열에 포함할 수 있다. 각 행, 열과 셀에서는 해당 업무를 한 번씩 세며 `totalIssues`와 숫자 행의 통계도 업무마다 한 번 집계한다. 사용자 정의 열의 `missing`은 적용 유형에 값이 없는 경우, `not-applicable`은 적용 유형 밖의 업무다. 요청자 기준의 `missing`은 미지정, `unknown`은 기록 없음이며 각각 업무를 조회할 수 있다. 요청자를 행 기준으로 집계할 때 `missingIssues`는 두 건수의 합이다.
 
+선택 항목 `measure`에는 스토리 포인트의 `{kind:'estimate'}`, 계획 작업 시간의 `{kind:'plannedEffortMinutes'}`, 또는 사용자 정의 숫자 필드의 `{kind:'custom',fieldId}`를 보낸다. 행·열에 사용한 필드와 별도로 합산할 값을 고른다. 응답의 `measure`는 `source`·`label`과 `total`·`rows` 및 교차 집계일 때 `columns`·`cells`를 제공한다. 합계 항목은 `{valueCount,sum}`을 반환한다. `valueCount`는 숫자가 저장된 업무 수이며 0도 포함한다. 값이 없거나 합계가 유한한 범위를 넘으면 `sum`은 `null`이다. 숫자가 들어 있는 셀만 `cells`에 포함된다. 행·열·셀·전체 각각은 해당 범위의 업무별 값을 한 번씩 더한다. 전체 합계는 여러 행·열의 합계를 더한 값과 다를 수 있다.
+
 `POST /api/v1/projects/:id/field-breakdown/issues`에 집계 때 사용한 조건과 응답의 `revision`, 행의 `id`를 `bucketId`로 보낸다. `comparisonBucketId`에 열의 `id`를 추가하면 `comparisonBucket`에 열 정보를, `total`에 두 조건을 모두 충족하는 업무 수를 반환한다. 선택 항목인 `offset`은 기본값이 0이며 한 번에 최대 50개 업무의 `id`, `key`, `title`을 반환한다. 집계 뒤 업무·보기·필드 또는 비교 기준의 설정이 바뀌면 이전 `revision`의 조회는 `409`를 반환한다. 프로젝트에 없는 필드나 보기, 존재하지 않는 행이나 열은 `404`를 반환한다.
+
+합계 항목을 비교한 셀과 일괄 편집의 집계 조건에도 같은 `measure`를 보낸다. 업무 목록은 각 업무의 `measureValue`를 반환한다. 값이 비었거나 적용 유형 밖이면 `null`이다. 합계 종류나 업무별 숫자가 바뀐 경우에도 새 `revision`으로 검토한다.
 
 같은 업무 조회에서 `includeEditTargets: true`를 보내면 현재 페이지의 `id`, `version`, `labels`를 `editTargets`에 함께 반환한다. 일괄 편집에서 페이지를 넘겨 선택한 업무의 버전과 라벨을 확인할 때 사용한다. [업무 일괄 편집](#업무-일괄-편집)
 
 ### 이름으로 저장한 필드 집계
 
-브라우저의 `GET /api/projects/:id/field-breakdown-presets`로 프로젝트에 저장한 집계 목록을 읽는다. 같은 경로의 `POST`에 `{name,query}`를 보낸다. 이름은 공백을 정리한 뒤 최대 80자다. `query`에는 집계와 같은 `groupBy` 또는 `fieldId`, 선택한 `comparisonBy` 또는 `comparisonFieldId`, `savedViewId`가 들어간다. 새로운 이름은 `201`과 `{id,projectId,name,query,version,createdAt,updatedAt}`을 반환한다. 같은 이름과 조건의 요청은 기존 결과를 `200`으로 돌려주며, 같은 이름에 다른 조건을 보내면 `409`를 반환한다.
+브라우저의 `GET /api/projects/:id/field-breakdown-presets`로 프로젝트에 저장한 집계 목록을 읽는다. 같은 경로의 `POST`에 `{name,query}`를 보낸다. 이름은 공백을 정리한 뒤 최대 80자다. `query`에는 집계와 같은 `groupBy` 또는 `fieldId`, 선택한 `comparisonBy` 또는 `comparisonFieldId`, `savedViewId`, `measure`가 들어간다. 새로운 이름은 `201`과 `{id,projectId,name,query,version,createdAt,updatedAt}`을 반환한다. 같은 이름과 조건의 요청은 기존 결과를 `200`으로 돌려주며, 같은 이름에 다른 조건을 보내면 `409`를 반환한다.
 
-`PATCH /api/projects/:id/field-breakdown-presets/:presetId`에 `{expectedVersion,name?,query?}`를 보내 이름이나 조건을 바꾼다. 같은 경로의 `DELETE`는 `expectedVersion` 쿼리 매개변수를 검사한다. 목록에서 읽은 `query`로 현재 필드 집계 API를 호출한다. 저장 보기나 행·열의 필드가 삭제된 경우 기존 기록은 목록에 남고 집계 조회는 `404`를 반환한다. 유효한 조회 조건으로 교체할 수 있다. 자체 백업 형식 92부터 저장 집계를 복원하며, 사용자 정의 비교 기준이 포함된 집계는 형식 95부터 복원한다. 복원 뒤 이전 버전의 수정 요청을 거절한다.
+`PATCH /api/projects/:id/field-breakdown-presets/:presetId`에 `{expectedVersion,name?,query?}`를 보내 이름이나 조건을 바꾼다. 같은 경로의 `DELETE`는 `expectedVersion` 쿼리 매개변수를 검사한다. 목록에서 읽은 `query`로 현재 필드 집계 API를 호출한다. 저장 보기나 행·열·합계의 필드가 삭제된 경우 기존 기록은 목록에 남고 집계 조회는 `404`를 반환한다. 유효한 조회 조건으로 교체할 수 있다. 자체 백업 형식 92부터 저장 집계를, 형식 95부터 사용자 정의 비교 기준을, 형식 107부터 합계 항목을 복원한다. 복원 뒤 이전 버전의 수정 요청을 거절한다.
 
 ## 문서 검토·발행
 
