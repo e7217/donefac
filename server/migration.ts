@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import type { Express, Request } from 'express';
 import type { AttachmentVersion, Comment, DocPage, DocRevision, Issue, IssueRelation, LegacyDiagnostic, LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, LegacySource, MigrationApplyResult, MigrationConfiguration, MigrationConfluenceReviewCoverage, MigrationMappingFile, MigrationMappingRestore, MigrationOptions, MigrationPreview, PlanningItem, Project, ProjectIssueSchema, ProjectWorkflow, SourceImport, SourceRecordArchive, User } from '../shared/types.js';
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
-import { LegacyImportError } from './legacy-import-model.js';
+import { isJiraAttachmentPath, jiraAdminBackupPaths } from './legacy-import-archive.js';
+import { diagnostic, LegacyImportError } from './legacy-import-model.js';
 import { DocumentFollowUpError, validateDocumentDecisionSource } from './document-follow-up.js';
 import { projectJiraComponents } from './legacy-import-jira-components.js';
 import { buildMigrationOptions, confluenceInlineCommentPageId, confluencePageFieldDigest } from './migration-planner.js';
@@ -24,7 +25,7 @@ import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import { readMigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
 import type { Store } from './store.js';
-import type { LegacyImportService } from './legacy-import.js';
+import type { LegacyImportService, StoredLegacyPackageDetail } from './legacy-import.js';
 import type { PilotConfluenceReview } from './pilot-confluence-review.js';
 import { confluenceAttachmentOrigin, confluenceHistoryPage, confluenceHistoryVersion, parseJiraPlanSelections, parseMigrationAppendConfiguration, parseMigrationJiraWorkflows, parseMigrationPageAppendConfiguration, SourcePreservationError, type SourcePreservationService } from './source-preservation.js';
 
@@ -33,7 +34,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 18;
+const conversionVersion = 19;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -51,6 +52,17 @@ const changedPlanning = '이관을 검토하는 동안 대상 프로젝트의 �
 const changedCyclePlanning = '이관을 검토하는 동안 대상 프로젝트의 사이클이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 const changedRetainedResourceLinks = '이관을 검토하는 동안 기존 업무·문서 또는 원본 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 export const changedConfluenceReplyRoot = '답글을 추가할 문장 댓글이 변경되었습니다. 새 미리보기를 만들어 주세요.';
+
+function reviewStoredJiraBackup(detail: StoredLegacyPackageDetail, dataset: MigrationPackage['dataset']): void {
+  if (dataset.source.format !== 'jira-backup-xml' || detail.jiraBackupLayoutChecked === true) return;
+  const paths = detail.files.map(file => file.path);
+  const { entities, activeObjects } = jiraAdminBackupPaths(paths);
+  const xmlInputs = entities.length ? entities : paths.filter(path => /\.xml$/iu.test(path) &&
+    !isJiraAttachmentPath(path) && posix.basename(path).toLowerCase() !== 'activeobjects.xml');
+  const needsReview = xmlInputs.length !== 1 || activeObjects.some(path => posix.dirname(path) !== posix.dirname(xmlInputs[0]));
+  if (needsReview) diagnostic(dataset, { severity: 'error', code: 'JIRA_ADMIN_BACKUP_REANALYSIS_REQUIRED',
+    message: '이전 Jira 관리자 백업 분석에서 XML의 소속을 확인하지 못했습니다. ZIP 구성을 확인하고 원본 패키지를 다시 분석해 주세요.' });
+}
 
 export function isActiveConfluenceInlineCommentRoot(store: Store, documentId: string, commentId: string): boolean {
   const parent = store.get<Comment>('comments', commentId);
@@ -141,7 +153,10 @@ export class MigrationService {
         unsupported,
       },
     }));
-    for (const { dataset } of packages) projectJiraComponents(dataset);
+    for (const [index, { dataset }] of packages.entries()) {
+      if (!optionsOnly) reviewStoredJiraBackup(details[index], dataset);
+      projectJiraComponents(dataset);
+    }
     if (packages.reduce((sum, item) => sum + item.dataset.records.length, 0) > 100000) {
       fail(413, '한 번에 원본 객체 100000개까지 이관할 수 있습니다.');
     }

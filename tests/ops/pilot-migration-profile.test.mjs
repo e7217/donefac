@@ -274,6 +274,30 @@ test('offline profile continues after missing, malformed, oversized and duplicat
   assert.notEqual(cleanReport.packages[0].inputSha256, report.packages[5].inputSha256);
 });
 
+test('offline profile blocks a ZIP containing competing Jira administrator backups', { timeout: 45_000 }, async t => {
+  const f = await fixture(t);
+  const file = 'private-mixed-jira.zip';
+  const first = 'private-first-admin-root/entities.xml';
+  const second = 'private-second-admin-root/entities.xml';
+  await f.write(file, zip([xml(first, plainBackup), xml(second, plainBackup)]));
+  await f.manifest([source(file)]);
+
+  const result = await f.run();
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  const raw = await readFile(join(f.directory, 'profile.json'), 'utf8');
+  assertSanitized(raw + result.stdout + result.stderr, f.directory, [file, first, second]);
+  const report = JSON.parse(raw);
+  assert.equal(report.status, 'blocked');
+  assert.equal(report.packages[0].status, 'blocked');
+  assert.equal(report.packages[0].analysis.counts.issue, 0);
+  assert.deepEqual(report.packages[0].analysis.diagnostics.filter(item => item.code === 'JIRA_ADMIN_BACKUP_AMBIGUOUS'), [
+    { code: 'JIRA_ADMIN_BACKUP_AMBIGUOUS', severity: 'error', count: 1 },
+  ]);
+  const staged = await f.stage('blocked-stage');
+  assert.equal(staged.code, 1, staged.stdout + staged.stderr);
+  await assert.rejects(stat(join(f.directory, 'blocked-stage')), { code: 'ENOENT' });
+});
+
 test('offline profile bounds the manifest count and skips a file that exceeds the remaining aggregate buffer budget', { timeout: 45_000 }, async t => {
   const f = await fixture(t);
   const largeInput = 'private-sparse.zip';

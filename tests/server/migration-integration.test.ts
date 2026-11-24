@@ -51,6 +51,49 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
 
+test('previous Jira archive analyses and previews cannot bypass backup directory review', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const directory = 'synthetic-jira-backup';
+  const instance = 'synthetic-jira-archive-review';
+  const backup = Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="OLD" name="Synthetic Jira archive"/>
+    <Status id="1" pname="Open"/><IssueType id="3" pname="Task"/>
+    <Issue id="100" project="10" number="1" summary="Synthetic issue" status="1" issuetype="3"/>
+  </entity-engine-xml>`);
+  const bytes = zip([
+    { path: `${directory}/entities.xml`, bytes: backup },
+    { path: 'another-synthetic-backup/activeobjects.xml', bytes: Buffer.from('<backup/>') },
+  ]);
+  const upload = () => f.upload(bytes, 'synthetic-jira-archive-review.zip', 'jira', instance);
+  const pkg = await upload();
+  const config = await f.configuration(pkg, 'ARCHIVERC');
+  const reviewed = await f.preview(config);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  assert.ok(reviewed.requiredAcknowledgements.includes('SOURCE_JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT'));
+
+  // Reproduce what the previous parser and converter saved for this archive layout.
+  f.db.prepare(`UPDATE migration_previews SET json=json_set(json,'$.conversionVersion',
+    json_extract(json,'$.conversionVersion') - 1) WHERE id=?`).run(reviewed.id);
+  const rejected = await f.apply(reviewed);
+  assert.equal(rejected.status, 409);
+  assert.match(JSON.stringify(rejected.data), /원본 변환 규칙/);
+  f.db.prepare("UPDATE legacy_file_manifests SET json=json_remove(json, '$.jiraBackupLayoutChecked') WHERE package_id=?").run(pkg.id);
+  assert.equal(f.db.prepare(`DELETE FROM legacy_diagnostics WHERE package_id=? AND
+    json_extract(json,'$.code')='JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT'`).run(pkg.id).changes, 1);
+
+  const stale = await f.preview(config);
+  assert.equal(stale.canApply, false);
+  assert.ok(stale.notices.some(notice => notice.code === 'SOURCE_JIRA_ADMIN_BACKUP_REANALYSIS_REQUIRED' && notice.severity === 'error'));
+  assert.equal((await f.apply(stale)).status, 409);
+
+  assert.equal((await f.call(`/legacy-import/packages/${pkg.id}`, 'DELETE', { expectedVersion: pkg.version })).status, 200);
+  const fresh = await f.preview(await f.configuration(await upload(), 'ARCHIVERC'));
+  const applied = await f.apply(fresh);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal(fresh.counts.issues, 1);
+});
+
 test('Jira follow-up archives moved source rows while applying new tickets in the original project', async t => {
   const f = await fixture();
   t.after(() => f.close());

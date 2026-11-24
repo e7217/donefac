@@ -257,6 +257,8 @@ npm run pilot:rehearsal -- profile /absolute/path/manifest.json /absolute/path/s
 
 `profile`은 파일럿 빌드나 접속 없이 원본을 읽는다. 파일 순번, 원본 제품·형식, SHA-256·크기, 객체와 첨부 분석 건수, 진단 코드 집계를 새 JSON 보고서에 저장한다. 형식 2는 실제 파일의 바이트와 매니페스트의 순서·제품·인스턴스를 함께 계산한 해시도 기록한다. 원본 이름·경로·인스턴스 식별값·객체 식별자와 본문은 보고서에서 생략한다. 기존 보고서가 있으면 새 경로를 지정한다. 한 파일 64MiB, 최대 20개와 합계 512MiB를 검사한다. 종료 코드 `0`은 분석 완료, `2`는 경고나 확인할 범위가 남은 경우, `1`은 읽기·형식·한도·중복 오류 등으로 일부 파일 분석을 마칠 수 없었거나 실행에 실패한 경우다.
 
+Jira 관리자 백업마다 ZIP을 따로 준비한다. 첨부 디렉터리 밖에 `entities.xml`이 여러 개 있으면 `JIRA_ADMIN_BACKUP_AMBIGUOUS`를 기록하고 해당 패키지를 `blocked`로 표시한다. `activeobjects.xml`은 관리자 XML과 같은 디렉터리에 둔다. 다른 디렉터리의 파일은 `JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT` 경고로 표시한다.
+
 Confluence XML에서 접근 제한 대상이 정확한 원본 객체에 연결되면 `CONFLUENCE_RESTRICTED_CONTENT`는 오류로 기록하고 패키지 판정은 `review`로 남긴다. 이 경우 격리된 리허설을 준비할 수 있다. 제한 대상이나 권한 집합을 확인할 수 없거나 다른 원본 분석 오류가 있으면 `blocked`로 남는다.
 
 ```bash

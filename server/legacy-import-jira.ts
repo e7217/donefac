@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { atlassianContextPath, atlassianWebUrl, isConfluencePageId } from '../shared/atlassian-links.js';
 import type { JiraMigrationIssueField,LegacyDataset,LegacyRecord,LegacyRecordKind,LegacyReference,LegacyValue } from '../shared/types.js';
 import { addRecord,diagnostic,emptyDataset,record,LegacyImportError } from './legacy-import-model.js';
-import { decodeLegacyText,parseLegacyXml,type LegacyXmlNode } from './legacy-import-archive.js';
+import { decodeLegacyText, isJiraAttachmentPath, jiraAdminBackupPaths, parseLegacyXml, type LegacyXmlNode } from './legacy-import-archive.js';
 import { JiraActivityPages, type JiraActivityKind } from './legacy-import-jira-activity-pages.js';
 import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-import-jira-components.js';
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
@@ -1276,13 +1276,62 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
 }
 
 export function parseJira(files:Map<string,Buffer>,instanceKey:string):LegacyDataset{
-  const paths=[...files.keys()].filter(path=>!/(?:^|\/)attachments?\//i.test(path)),entities=paths.find(path=>posix.basename(path).toLowerCase()==='entities.xml');
-  const inputs=entities?[entities]:paths.filter(path=>/\.(?:csv|json|xml)$/i.test(path)&&posix.basename(path).toLowerCase()!=='activeobjects.xml').sort();
-  const first=inputs[0]||'',format:LegacyDataset['source']['format']=entities?'jira-backup-xml':/\.csv$/i.test(first)?'jira-csv':/\.json$/i.test(first)?'jira-json':'jira-search-xml',context=new Context(files,instanceKey,format);
-  if(!inputs.length){context.warn('JIRA_INPUT_NOT_FOUND','Jira XML·CSV·JSON 분석 파일을 찾지 못했습니다.',null,null,'error');return context.finish();}
-  if(entities)for(const path of paths)if(path!==entities&&/\.(?:json|csv|xml)$/i.test(path)&&posix.basename(path).toLowerCase()!=='activeobjects.xml'){context.warn('ADDITIONAL_METADATA_NOT_PARSED','관리자 XML 외의 추가 메타데이터 파일은 자동 병합하지 않았습니다.',null,path);context.unsupported('additional-input');}
-  for(const path of inputs){if(!entities&&((format==='jira-csv'&&!/\.csv$/i.test(path))||(format==='jira-json'&&!/\.json$/i.test(path))||(format==='jira-search-xml'&&!/\.xml$/i.test(path)))){context.warn('MIXED_DIALECT_NOT_COMBINED','서로 다른 입력 형식은 하나의 분석 결과로 자동 병합하지 않았습니다.',null,path);context.unsupported('mixed-input');continue;}const source=decodeLegacyText(files.get(path)!);if(/\.csv$/i.test(path))parseCsv(context,path,source);else if(/\.json$/i.test(path))parseJson(context,path,source);else{const root=parseLegacyXml(source);if(root.name==='entity-engine-xml'){context.dataset.source.format='jira-backup-xml';parseBackupXml(context,root,path);}else if(root.name==='rss'){context.dataset.source.format='jira-search-xml';parseSearchXml(context,root,path);}else{context.warn('XML_DIALECT_UNSUPPORTED','Jira 관리자 백업 또는 RSS 검색 XML 루트가 아닙니다.',null,path,'error');context.unsupported(`xml-root:${root.name}`);}}}
-  for (const path of paths.filter(path => posix.basename(path).toLowerCase() === 'activeobjects.xml')) {
+  const paths = [...files.keys()].filter(path => !isJiraAttachmentPath(path));
+  const { entities: [entities, conflictingEntities], activeObjects } = jiraAdminBackupPaths(paths);
+  const ambiguousBackup = () => {
+    const rejected = new Context(files, instanceKey, 'jira-backup-xml');
+    rejected.warn('JIRA_ADMIN_BACKUP_AMBIGUOUS', '한 패키지에 Jira 관리자 XML이 여러 개 있습니다. 백업별로 패키지를 나누어 분석해 주세요.', null, null, 'error');
+    return rejected.finish();
+  };
+  if (conflictingEntities) return ambiguousBackup();
+  const supplemental = new Set(activeObjects);
+  const metadataPaths = paths.filter(path => /\.(?:csv|json|xml)$/i.test(path) && !supplemental.has(path));
+  const inputs = entities ? [entities] : metadataPaths.sort();
+  const first = inputs[0] ?? '';
+  const format = entities ? 'jira-backup-xml' : /\.csv$/i.test(first) ? 'jira-csv' : /\.json$/i.test(first) ? 'jira-json' : 'jira-search-xml';
+  const context = new Context(files, instanceKey, format);
+  if (!inputs.length) {
+    context.warn('JIRA_INPUT_NOT_FOUND', 'Jira XML·CSV·JSON 분석 파일을 찾지 못했습니다.', null, null, 'error');
+    return context.finish();
+  }
+  if (entities) for (const path of metadataPaths) {
+    if (path === entities) continue;
+    context.warn('ADDITIONAL_METADATA_NOT_PARSED', '관리자 XML 외의 추가 메타데이터 파일은 자동 병합하지 않았습니다.', null, path);
+    context.unsupported('additional-input');
+  }
+  let backupXml: string | undefined;
+  for (const path of inputs) {
+    if (!entities && ((format === 'jira-csv' && !/\.csv$/i.test(path)) || (format === 'jira-json' && !/\.json$/i.test(path)) ||
+        (format === 'jira-search-xml' && !/\.xml$/i.test(path)))) {
+      context.warn('MIXED_DIALECT_NOT_COMBINED', '서로 다른 입력 형식은 하나의 분석 결과로 자동 병합하지 않았습니다.', null, path);
+      context.unsupported('mixed-input');
+      continue;
+    }
+    const source = decodeLegacyText(files.get(path)!);
+    if (/\.csv$/i.test(path)) parseCsv(context, path, source);
+    else if (/\.json$/i.test(path)) parseJson(context, path, source);
+    else {
+      const root = parseLegacyXml(source);
+      if (root.name === 'entity-engine-xml') {
+        if (backupXml) return ambiguousBackup();
+        backupXml = path;
+        context.dataset.source.format = 'jira-backup-xml';
+        parseBackupXml(context, root, path);
+      } else if (root.name === 'rss') {
+        context.dataset.source.format = 'jira-search-xml';
+        parseSearchXml(context, root, path);
+      } else {
+        context.warn('XML_DIALECT_UNSUPPORTED', 'Jira 관리자 백업 또는 RSS 검색 XML 루트가 아닙니다.', null, path, 'error');
+        context.unsupported(`xml-root:${root.name}`);
+      }
+    }
+  }
+  for (const path of activeObjects) {
+    if (!backupXml || posix.dirname(path) !== posix.dirname(backupXml)) {
+      context.warn('JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT', '관리자 XML과 같은 폴더에서 확인한 Active Objects 파일만 백업에 연결할 수 있습니다.', null, path);
+      context.unsupported('activeobjects.xml');
+      continue;
+    }
     const root = parseLegacyXml(decodeLegacyText(files.get(path)!));
     const sprintTables = root.name === 'backup' && context.dataset.source.format === 'jira-backup-xml'
       ? root.children.filter(node => context.sprints.readActiveObjects(node, path)) : [];

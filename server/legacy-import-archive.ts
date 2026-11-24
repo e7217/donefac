@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { posix } from 'node:path';
 import { crc32 } from 'node:zlib';
 import { XMLValidator } from 'fast-xml-parser';
 import { fromBufferPromise, getFileNameLowLevel, type Entry } from 'yauzl';
@@ -14,6 +15,23 @@ export const LEGACY_MAX_FILES = 5000;
 export const LEGACY_MAX_XML_DEPTH = 128;
 export const LEGACY_MAX_XML_NODES = 500000;
 export const LEGACY_MAX_XML_ATTRIBUTES = 128;
+
+export function isJiraAttachmentPath(path: string): boolean {
+  return /(?:^|\/)attachments?\//iu.test(path);
+}
+
+export function jiraAdminBackupPaths(paths: Iterable<string>): { entities: string[]; activeObjects: string[] } {
+  const entities: string[] = [];
+  const activeObjects: string[] = [];
+  for (const path of paths) {
+    if (isJiraAttachmentPath(path)) continue;
+    const name = posix.basename(path).toLowerCase();
+    if (name === 'entities.xml') entities.push(path);
+    if (name === 'activeobjects.xml') activeObjects.push(path);
+  }
+  return { entities, activeObjects };
+}
+
 const MAX_PATH_LENGTH = 1024, MAX_XML_NAME_LENGTH = 512, MAX_ATTRIBUTE_LENGTH = 1024 * 1024;
 function fail(message: string, status = 400): never { throw new LegacyArchiveError(status, message); }
 const xmlSpace = /^[\x20\t\r\n]*$/;

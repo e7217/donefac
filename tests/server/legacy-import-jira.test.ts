@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { analyzeLegacyPackageBytes } from '../../server/legacy-import-analysis.js';
 import { parseJira } from '../../server/legacy-import-jira.js';
 import { LegacyImportError } from '../../server/legacy-import-model.js';
 import type { LegacyDataset } from '../../shared/types.js';
+import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const parse=(name:string,value:string,extra:Map<string,Buffer>=new Map())=>parseJira(new Map([[name,Buffer.from(value)],...extra]),'jira-synthetic');
 const find=(data:LegacyDataset,id:string)=>{const item=data.records.find(item=>item.id===id);assert.ok(item,`Missing ${id}`);return item;};
@@ -96,6 +98,74 @@ test('administrator XML preserves allowlisted users, issues, typed fields, comme
   const data=parse('entities.xml',xml,new Map([['attachments/OLD/OLD-7/700',bytes],['activeobjects.xml',Buffer.from(active)]]));assert.equal(data.source.format,'jira-backup-xml');assert.equal(data.source.declaredVersion,'9.12');assert.equal(find(data,'identity:user-key-alice').title,'가상 작성자');assert.equal(find(data,'issue:300').authorId,'user-key-alice');assert.equal(find(data,'issue:300').metadata.key,'OLD-7');assert.equal(find(data,'issue:300').text,'원래 *위키* 본문');assert.equal(find(data,'issue:301').parentId,'300');assert.equal(find(data,'comment:500').metadata.level,'team-private');assert.deepEqual(find(data,'history:600').metadata.items,[{id:'601',field:'status',fieldtype:'jira',oldvalue:'1',oldstring:'열림',newvalue:'5',newstring:'종료'}]);assert.equal(find(data,'option:200').metadata.disabled,'Y');
   const attachment=find(data,'attachment:700');assert.equal(attachment.metadata.path,'attachments/OLD/OLD-7/700');assert.equal(attachment.metadata.sha256,createHash('sha256').update(bytes).digest('hex'));assert.equal(attachment.metadata.version,'2');assert.equal(find(data,'relation:remote:900').metadata.url,'https://wiki.example.test/pages/viewpage.action?pageId=777');assert.ok(find(data,'relation:remote:900').references.some(ref=>ref.kind==='page'&&ref.sourceId==='777'));
   assert.ok(!JSON.stringify(data).includes('NEVER_COPY'));assert.ok(data.unsupported.some(item=>item.type==='OSPropertyEntry'&&item.count===1));assert.ok(data.unsupported.some(item=>item.type==='activeobjects:AO_PLUGIN'));assert.ok(codes(data).has('WORKFLOW_DESCRIPTOR_NOT_CONVERTED'));assert.ok(codes(data).has('DATE_TIMEZONE_UNRESOLVED'));assert.ok(codes(data).has('PREVIEW_ONLY'));
+});
+
+test('Jira analysis refuses multiple administrator backups without selecting either source', () => {
+  const backup = (id: number, summary: string) => Buffer.from(
+    `<entity-engine-xml><Issue id="${id}" summary="${summary}"/></entity-engine-xml>`,
+  );
+  const exports: [string, Buffer][] = [
+    ['export-a/entities.xml', backup(10, 'first private source')],
+    ['export-b/ENTITIES.XML', backup(20, 'second private source')],
+  ];
+  const renamed = exports.map(([name, bytes]): [string, Buffer] => [name.replace(/entities\.xml$/i, 'backup.xml'), bytes]);
+  for (const entries of [exports, exports.slice().reverse(), renamed]) {
+    const data = parseJira(new Map(entries), 'ambiguous-jira-admin');
+    assert.equal(data.source.format, 'jira-backup-xml');
+    assert.deepEqual(data.records, []);
+    assert.deepEqual(data.diagnostics.filter(item => item.severity === 'error').map(({ code, path }) => [code, path]), [
+      ['JIRA_ADMIN_BACKUP_AMBIGUOUS', null],
+    ]);
+    assert.doesNotMatch(JSON.stringify(data), /first private source|second private source/);
+  }
+});
+
+test('Jira analysis uses only the sibling Active Objects file and keeps attachment XML as files', () => {
+  const entities = `<entity-engine-xml version="9.12">
+    <Project id="20" pkey="OLD"/><Issue id="10" project="20" number="1" summary="Wrapped issue"/>
+    <CustomField id="1000" cfname="Sprint" customfieldtypekey="com.pyxis.greenhopper.jira:gh-sprint"/>
+    <CustomFieldValue id="700" issue="10" customfield="1000" stringvalue="80"/>
+    <FileAttachment id="701" issue="10" filename="entities.xml"/>
+    </entity-engine-xml>`;
+  const active = (name: string) => Buffer.from(`<backup><data tableName="AO_60DB71_SPRINT">
+    <column name="ID"/><column name="NAME"/><row><integer>80</integer><string>${name}</string></row>
+    </data></backup>`);
+  const attachment = Buffer.from('attachment bytes');
+  for (const filename of ['entities.xml', 'jira-admin.xml']) {
+    const data = parse(`export/deep/${filename}`, entities, new Map([
+      ['outside/activeobjects.xml', active('Foreign sprint')],
+      ['activeobjects.xml', Buffer.from('foreign file without valid XML')],
+      ['export/deep/ACTIVEOBJECTS.XML', active('Verified sibling sprint')],
+      ['export/deep/Attachments/OLD/OLD-1/entities.xml', Buffer.from('attached XML is not a backup')],
+      ['export/deep/attachment/OLD/OLD-1/activeobjects.xml', Buffer.from('attached XML is not a registry')],
+      ['export/deep/attachments/OLD/OLD-1/701', attachment],
+    ]));
+    assert.equal(data.source.format, 'jira-backup-xml');
+    assert.equal(find(data, 'issue:10').title, 'Wrapped issue');
+    assert.equal(find(data, 'option:builtin:sprints:80').title, 'Verified sibling sprint');
+    assert.equal(find(data, 'option:builtin:sprints:80').metadata.jiraSprintAmbiguous, undefined);
+    assert.equal(find(data, 'attachment:701').metadata.sha256, createHash('sha256').update(attachment).digest('hex'));
+    assert.deepEqual(data.diagnostics.filter(item => item.code === 'JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT').map(item => item.path),
+      ['outside/activeobjects.xml', 'activeobjects.xml']);
+    assert.doesNotMatch(JSON.stringify(data), /Foreign sprint/);
+  }
+  const rest = parse('issue.json', JSON.stringify({ id: '10', key: 'OLD-1', fields: { summary: 'REST issue' } }), new Map([
+    ['activeobjects.xml', Buffer.from('not parsed without an administrator export')],
+  ]));
+  assert.equal(find(rest, 'issue:10').title, 'REST issue');
+  assert.ok(codes(rest).has('JIRA_ACTIVEOBJECTS_OUTSIDE_BACKUP_ROOT'));
+});
+
+test('automatic archive detection ignores XML metadata clues inside Jira attachment directories', async () => {
+  const attachmentPath = 'export/Attachments/OLD/OLD-1/entities.xml';
+  const { dataset, files } = await analyzeLegacyPackageBytes({ product: 'auto', filename: 'wrapped-jira.zip',
+    instanceKey: 'jira-auto-attachment', bytes: zip([
+      { path: 'export/entities.xml', bytes: Buffer.from('<entity-engine-xml><Issue id="10" summary="Administrator issue"/></entity-engine-xml>') },
+      { path: attachmentPath, bytes: Buffer.from('<hibernate-generic/>') },
+    ]) });
+  assert.equal(dataset.source.product, 'jira');
+  assert.equal(find(dataset, 'issue:10').title, 'Administrator issue');
+  assert.ok(files.some(file => file.path === attachmentPath));
 });
 
 test('RSS search XML is a separate dialect preserving authors/comments/options/links and reports partial snapshots',()=>{

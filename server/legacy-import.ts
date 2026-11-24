@@ -12,6 +12,7 @@ import type { LegacyAnalysis } from './legacy-import-analysis.js';
 
 const MAX_PACKAGES=20,MAX_STORED_BYTES=512*1024*1024;
 type Hooks={actor:(req:Request)=>string;activity:(req:Request,type:string,id:string,action:string,detail?:string)=>unknown};
+export type StoredLegacyPackageDetail = LegacyPackageDetail & { jiraBackupLayoutChecked?: true };
 const fail=(status:number,message:string):never=>{throw new LegacyImportError(status,message);};
 const scalar=(value:unknown,label:string,max=500):string=>typeof value==='string'&&value.trim()&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value)?value.trim():fail(400,`${label}을(를) 확인해 주세요.`);
 function pageOptions(query:Record<string,unknown>){const integer=(name:string,fallback:number,max:number)=>{const value=query[name];if(value===undefined)return fallback;if(typeof value!=='string'||!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)>max||name==='limit'&&Number(value)<1)fail(400,'페이지 범위를 확인해 주세요.');return Number(value);};return{offset:integer('offset',0,100000),limit:integer('limit',50,100)};}
@@ -35,7 +36,7 @@ export class LegacyImportService{
   }
   list():LegacyPackageSummary[]{return(this.store.db.prepare('SELECT json FROM legacy_packages ORDER BY rowid DESC').all() as {json:string}[]).map(row=>JSON.parse(row.json) as LegacyPackageSummary);}
   private get(id:string):LegacyPackageSummary{const row=this.store.db.prepare('SELECT json FROM legacy_packages WHERE id=?').get(id) as {json:string}|undefined;if(!row)return fail(404,'분석한 원본 패키지를 찾을 수 없습니다.');return JSON.parse(row.json) as LegacyPackageSummary;}
-  detail(id:string):LegacyPackageDetail{const summary=this.get(id),row=this.store.db.prepare('SELECT json FROM legacy_file_manifests WHERE package_id=?').get(id) as {json:string};return{summary,...JSON.parse(row.json)};}
+  detail(id:string):StoredLegacyPackageDetail{const summary=this.get(id),row=this.store.db.prepare('SELECT json FROM legacy_file_manifests WHERE package_id=?').get(id) as {json:string};return{summary,...JSON.parse(row.json)};}
   records(id:string,query:Record<string,unknown>):LegacyRecordPage{
     this.get(id);const {offset,limit}=pageOptions(query),params:(string|number)[]=[id];let where='package_id=?';
     if(query.kind!==undefined){where+=' AND kind=?';params.push(scalar(query.kind,'객체 종류',40));}
@@ -77,7 +78,9 @@ export class LegacyImportService{
         this.store.db.prepare('INSERT INTO legacy_packages(id,instance_key,sha256,json) VALUES(?,?,?,?)').run(id,instanceKey,sha256,JSON.stringify(summary));
         const putRecord=this.store.db.prepare('INSERT INTO legacy_records(package_id,record_id,kind,title,source_id,json) VALUES(?,?,?,?,?,?)');for(const value of analysis.dataset.records)putRecord.run(id,value.id,value.kind,value.title,value.sourceId,JSON.stringify(value));
         const putDiagnostic=this.store.db.prepare('INSERT INTO legacy_diagnostics(package_id,id,severity,json) VALUES(?,?,?,?)');for(const value of analysis.dataset.diagnostics)putDiagnostic.run(id,value.id,value.severity,JSON.stringify(value));
-        this.store.db.prepare('INSERT INTO legacy_file_manifests(package_id,json) VALUES(?,?)').run(id,JSON.stringify({files:analysis.files,unsupported:analysis.dataset.unsupported}));afterSave?.(summary);renameSync(pending,bundle);syncDirectory(this.root);
+        const manifest = { files: analysis.files, unsupported: analysis.dataset.unsupported,
+          ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true } : {}) };
+        this.store.db.prepare('INSERT INTO legacy_file_manifests(package_id,json) VALUES(?,?)').run(id, JSON.stringify(manifest));afterSave?.(summary);renameSync(pending,bundle);syncDirectory(this.root);
       });committed=true;return{summary,duplicate:false};
     }finally{this.busy=false;if(!committed){rmSync(pending,{force:true});rmSync(bundle,{force:true});}}
   }
@@ -90,7 +93,7 @@ export class LegacyImportService{
     const query=(req:Request,allowed:string[])=>{if(Object.keys(req.query).some(key=>!allowed.includes(key)))fail(400,'지원하지 않는 원본 분석 조회 조건입니다.');return req.query;};
     app.get('/api/legacy-import/packages',(req,res)=>{query(req,[]);res.json(this.list());});
     app.post('/api/legacy-import/packages',async(req,res)=>{const actorId=hooks.actor(req),input=query(req,['filename','instanceKey','product']);const result=await this.upload(req.body,{filename:input.filename,instanceKey:input.instanceKey,product:input.product},actorId,value=>hooks.activity(req,'legacy-package',value.id,'원본 패키지 분석',`${value.filename} · ${Object.values(value.counts).reduce((a,b)=>a+(b||0),0)}개 객체`));res.status(result.duplicate?200:201).json(result.summary);});
-    app.get('/api/legacy-import/packages/:id',(req,res)=>{query(req,[]);res.json(this.detail(String(req.params.id)));});
+    app.get('/api/legacy-import/packages/:id',(req,res)=>{query(req,[]);const { summary, files, unsupported } = this.detail(String(req.params.id));res.json({ summary, files, unsupported });});
     app.get('/api/legacy-import/packages/:id/records',(req,res)=>res.json(this.records(String(req.params.id),query(req,['kind','q','offset','limit']))));
     app.get('/api/legacy-import/packages/:id/records/:recordId',(req,res)=>{query(req,[]);res.json(this.record(String(req.params.id),String(req.params.recordId)));});
     app.get('/api/legacy-import/packages/:id/diagnostics',(req,res)=>res.json(this.diagnostics(String(req.params.id),query(req,['severity','offset','limit']))));
