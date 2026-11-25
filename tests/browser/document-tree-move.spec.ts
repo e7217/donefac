@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type Page } from '@playwright/test';
+import { documentLabelKey } from '../../shared/document-labels';
 import { documentSectionHash } from '../../shared/document-sections';
 import type { DocPage, DocumentTreeMovePreview, RichContent, WorkspaceSnapshot } from '../../shared/types';
 
@@ -20,6 +21,70 @@ async function purgeTestDocument(request: APIRequestContext, id: string, headers
     await request.delete(`/api/trash/${trashEntryId}`, { headers });
   }
 }
+
+test('360px에서 라벨로 가려진 문서 경로를 열고 상위 문서로 이동할 때 초안을 보존한다', async ({ page, request }) => {
+  const { projects: [project], users: [author] } = await snapshot(request);
+  const headers = { 'X-Actor-Id': author.id };
+  const prefix = `탐색 ${randomUUID().slice(0, 8)}`;
+  const filter = `${prefix} 라벨`;
+  const created: DocPage[] = [];
+  async function create(title: string, parentId: string | null, labels: string[] = []) {
+    const response = await request.post('/api/documents', { headers,
+      data: { title: `${prefix} ${title}`, projectId: null, parentId, labels } });
+    expect(response.status(), await response.text()).toBe(201);
+    const document = await response.json() as DocPage;
+    created.push(document);
+    return document;
+  }
+
+  try {
+    const root = await create('최상위', null);
+    const parent = await create('상위', root.id);
+    const leaf = await create('하위', parent.id, [filter]);
+    const query = new URLSearchParams({ label: documentLabelKey(filter) });
+    const address = (document: DocPage) => `#/${project.id}/documents/${document.id}?${query}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(`/${address(leaf)}`);
+    const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+    await expect(title).toHaveValue(leaf.title);
+    const tree = page.getByRole('complementary', { name: '문서 목록', exact: true });
+    await expect(tree.getByText(parent.title, { exact: true })).toHaveCount(0);
+
+    const path = page.getByRole('navigation', { name: '문서 위치', exact: true });
+    await expect(path).toContainText('팀 공통');
+    await expect(path.getByRole('link')).toHaveText([root.title, parent.title]);
+    await expect(path.locator('[aria-current="page"]')).toHaveText(leaf.title);
+    const parentLink = path.getByRole('link', { name: parent.title, exact: true });
+    await expect(parentLink).toHaveAttribute('href', address(parent));
+    const bounds = await parentLink.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+
+    const editor = page.locator('.docs-prose[contenteditable="true"]');
+    const draft = '이동 전에 작성하던 초안';
+    await editor.fill(draft);
+    page.once('dialog', dialog => dialog.dismiss());
+    await parentLink.press('Enter');
+    await expect(page).toHaveURL(url => url.hash === address(leaf));
+    await expect(editor).toHaveText(draft);
+
+    page.once('dialog', dialog => dialog.accept());
+    await parentLink.press('Enter');
+    await expect(page).toHaveURL(url => url.hash === address(parent));
+    await expect(title).toHaveValue(parent.title);
+    await expect(path.getByRole('link')).toHaveText([root.title]);
+    await expect(path).toBeFocused();
+    expect((await snapshot(request)).documents.find(document => document.id === leaf.id)?.plainText).toBe(leaf.plainText);
+
+    await page.goBack();
+    await expect(title).toHaveValue(leaf.title);
+    await expect(editor).toHaveText(draft);
+  } finally {
+    for (const document of created.reverse()) await purgeTestDocument(request, document.id, headers);
+  }
+});
 
 test('360px에서 하위 문서 변경을 다시 확인하고 트리를 옮긴 후 기존 절 링크를 연다', async ({ page, request }) => {
   test.setTimeout(85_000);

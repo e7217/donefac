@@ -104,6 +104,25 @@
   font-variant-numeric: tabular-nums;
 }
 
+.issue-board-column-leading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.issue-board-column-leading > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.issue-board-column-leading .issue-board-create {
+  flex: none;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
 .issue-board-grouped .issue-column-empty {
   padding: 12px 0;
   color: #63786a;
@@ -113,5 +132,10 @@
   .issue-board-group-picker select,
   .issue-board-empty-toggle {
     min-height: 44px;
+  }
+
+  .issue-board-column-leading .issue-board-create {
+    width: 44px;
+    height: 44px;
   }
 }

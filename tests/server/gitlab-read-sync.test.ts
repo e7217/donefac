@@ -475,11 +475,11 @@ test('direct GitLab reads verify nested project URLs and use the distinct MR and
   const connection = { baseUrl: `${origin}/gitlab/`, token };
 
   assert.deepEqual(await readGitlabManualObject(connection, 42, ` ${mergeRequest}/?diff_id=64#note_1 `), {
-    kind: 'merge_request', webUrl: mergeRequest,
+    kind: 'merge_request', webUrl: mergeRequest, repositoryId: 42,
     object: { id: 831, project_id: 42, target_project_id: 42, iid: 8, web_url: mergeRequest },
   });
   assert.deepEqual(await readGitlabManualObject(connection, 42, `${repository}/pipelines/764#jobs`), {
-    kind: 'pipeline', webUrl: pipeline,
+    kind: 'pipeline', webUrl: pipeline, repositoryId: 42,
     object: { id: 764, project_id: 42, iid: 5, web_url: pipeline },
   });
   assert.deepEqual(requests, [projectApiPath, `${projectApiPath}/merge_requests/8`, projectApiPath, `${projectApiPath}/pipelines/764`]);
@@ -546,12 +546,12 @@ test('direct GitLab branch and commit reads verify exact refs and preserve the c
   const unescapedBranchSlashes = branchName.split('/').map(encodeURIComponent).join('/');
   for (const pasted of [branchUrl, `${repository}/-/tree/${unescapedBranchSlashes}?ref_type=heads#files`]) {
     assert.deepEqual(await readGitlabManualObject({ baseUrl, token }, 42, pasted, undefined, resolveBranch), {
-      kind: 'branch', webUrl: branchUrl, object: { name: branchName, commit: { id: head }, web_url: branchUrl },
+      kind: 'branch', webUrl: branchUrl, repositoryId: 42, object: { name: branchName, commit: { id: head }, web_url: branchUrl },
     });
   }
   assert.deepEqual(await readGitlabManualObject({ baseUrl, token }, 42,
     `${repository}/-/commit/${sha.toUpperCase()}?view=parallel#note_1`, undefined, resolveBranch), {
-    kind: 'commit', webUrl: commitUrl, object: { id: sha, title: 'An existing non-keyed commit',
+    kind: 'commit', webUrl: commitUrl, repositoryId: 42, object: { id: sha, title: 'An existing non-keyed commit',
       committed_date: '2025-01-01T00:00:00Z', web_url: commitUrl },
   });
   assert.deepEqual(requests, [projectPath, branchPath, projectPath, branchPath, projectPath, commitPath]);

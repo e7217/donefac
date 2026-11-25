@@ -287,7 +287,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   }
 
   const noRepository = Boolean(settings && (!settings.baseUrl || !settings.projectIds.length));
-  const canSubmit = Boolean(draft?.url.trim() && settings?.baseUrl && settings.projectIds.includes(Number(draft.repositoryId)));
+  const canSubmit = Boolean(draft?.url.trim() && settings && !noRepository &&
+    (draft.repositoryId ? settings.projectIds.includes(Number(draft.repositoryId)) : !draft.existing));
   const target = unlinkTarget && visibleLinks.find(link => link.id === unlinkTarget.id);
   const staleTarget = unlinkTarget && target?.manualLinkId !== unlinkTarget.manualLinkId;
 
@@ -296,7 +297,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     if (!draft || !settings || !canSubmit || loading) return;
     void mutate(async () => {
       const link = await post<GitlabLink>(path, {
-        repositoryId: Number(draft.repositoryId), url: draft.url.trim(), expectedSettingsVersion: settings.version,
+        ...(draft.repositoryId ? { repositoryId: Number(draft.repositoryId) } : {}),
+        url: draft.url.trim(), expectedSettingsVersion: settings.version,
       });
       showLinkedActivity(link);
       await afterChange(draft.existing ? 'GitLab 연결을 다시 확인했습니다.' : 'GitLab 연결을 저장했습니다.');
@@ -523,18 +525,18 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       {settingsError && <p className="issue-form-error" role="alert">{settingsError}</p>}
       {noRepository && <p className="gitlab-activity-hint" role="status">개발 · GitLab에서 연결 주소와 저장소 ID를 저장해 주세요.</p>}
       {!noRepository && settings?.baseUrl && <p className="gitlab-activity-hint">연결 주소 {settings.baseUrl}</p>}
-      <label className="issue-form-label">GitLab 저장소
-        <select className="field" value={draft.repositoryId} disabled={controlsDisabled || loading || !settings || noRepository} required
-          onChange={event => setDraft({ ...draft, repositoryId: event.target.value })}>
-          <option value="">저장소 선택</option>
-          {settings?.projectIds.map(id => <option value={id} key={id}>저장소 #{id}</option>)}
-        </select>
-      </label>
       <label className="issue-form-label">GitLab URL
         <input ref={linkInput} className="field" type="url" value={draft.url} autoComplete="off" spellCheck={false} maxLength={4000} required disabled={controlsDisabled}
           aria-describedby={`${formHeading}-url-help`} onChange={event => setDraft({ ...draft, url: event.target.value })} />
       </label>
       <p id={`${formHeading}-url-help`} className="gitlab-activity-hint">브랜치, 전체 SHA가 포함된 커밋, MR, 파이프라인 주소를 연결할 수 있습니다.</p>
+      <label className="issue-form-label">GitLab 저장소
+        <select className="field" value={draft.repositoryId} disabled={controlsDisabled || loading || !settings || noRepository} required={Boolean(draft.existing)}
+          onChange={event => setDraft({ ...draft, repositoryId: event.target.value })}>
+          <option value="">{draft.existing ? '저장소 선택' : '주소로 저장소 확인'}</option>
+          {settings?.projectIds.map(id => <option value={id} key={id}>저장소 #{id}</option>)}
+        </select>
+      </label>
       {actionError && <p className="issue-form-error" role="alert">{actionError}</p>}
       <div className="gitlab-activity-actions">
         <button className="btn btn-ghost" type="button" disabled={busy} onClick={closeAction}>취소</button>

@@ -813,9 +813,13 @@ export class GitlabIntegrationService{
     if(Object.keys(input).some(key=>!['repositoryId','url','expectedSettingsVersion','actorId'].includes(key)))fail('GitLab 활동 연결 요청을 확인해 주세요.');
     const captured=this.raw();
     assertSettingsVersion(input.expectedSettingsVersion,captured.version);
-    const repositoryId=input.repositoryId;
-    if(typeof repositoryId!=='number'||!Number.isSafeInteger(repositoryId)||repositoryId<1)fail('GitLab 저장소를 선택해 주세요.');
-    if(!captured.baseUrl||!captured.projectIds.includes(repositoryId))fail('허용된 GitLab 저장소를 선택해 주세요.',403);
+    const requestedRepositoryId=input.repositoryId;
+    if(requestedRepositoryId!==undefined&&(typeof requestedRepositoryId!=='number'||!Number.isSafeInteger(requestedRepositoryId)||requestedRepositoryId<1)){
+      fail('GitLab 저장소를 선택해 주세요.');
+    }
+    if(!captured.baseUrl||!captured.projectIds.length||(requestedRepositoryId!==undefined&&!captured.projectIds.includes(requestedRepositoryId))){
+      fail('허용된 GitLab 저장소를 선택해 주세요.',403);
+    }
     const issue=this.requireIssue(issueId);
     const token=captured.token?this.store.unseal(captured.token):null;
     const startedAt=now();
@@ -824,7 +828,7 @@ export class GitlabIntegrationService{
     let branchCursorBeforeRead:PushObservation|undefined;
     let verified:VerifiedGitlabActivity;
     try {
-      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},repositoryId,input.url,signal,(name,webUrl)=>{
+      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},requestedRepositoryId??captured.projectIds,input.url,signal,(name,webUrl,repositoryId)=>{
         if(token&&(name.includes(token)||webUrl.includes(token)))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
         const id=pushCursorId(instance,repositoryId,name);
         const pending=this.pendingBranchReads.get(id);
@@ -837,7 +841,7 @@ export class GitlabIntegrationService{
       signal?.throwIfAborted();
       assertSettingsVersion(captured.version,this.raw().version);
       if(branchAttachment&&error instanceof GitlabManualUrlError)fail('GitLab 저장소 또는 브랜치 주소가 변경되었습니다. MR을 다시 확인해 주세요.',409);
-      if(error instanceof GitlabManualUrlError)fail(error.message,400);
+      if(error instanceof GitlabManualUrlError)fail(error.message,error.status);
       if(branchAttachment&&error instanceof GitlabReadError)failGitlabWorkflowRead(error);
       if(error instanceof GitlabReadError)fail(error.message,error.httpStatus===404?404:502,{stage:error.stage,httpStatus:error.httpStatus});
       throw error;
@@ -850,7 +854,7 @@ export class GitlabIntegrationService{
     }
     branchAttachment?.assertCurrent();
     signal?.throwIfAborted();
-    const {kind,object,webUrl}=verified;
+    const {kind,object,webUrl,repositoryId}=verified;
     if(token&&webUrl.includes(token))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
     const data={...object,web_url:webUrl};
     const targetBranch=kind==='merge_request'?readMergeTargetBranch(object,repositoryId,token,...this.webhookCredentials(captured)):undefined;

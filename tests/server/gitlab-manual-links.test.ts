@@ -51,6 +51,7 @@ async function fixture(t: TestContext) {
   let branchProof: Record<string, unknown> = {};
   let branchHead = sha;
   const projectPath = `/gitlab/api/v4/projects/${repositoryId}`;
+  const projectByPath = `/gitlab/api/v4/projects/${encodeURIComponent('team/subgroup/product')}`;
   const branchPath = `${projectPath}/repository/branches/${encodeURIComponent(sourceBranch)}`;
   const projectUrl = () => `${baseUrl}/team/subgroup/product`;
   const mrUrl = () => `${projectUrl()}/-/merge_requests/${mrIid}`;
@@ -76,7 +77,7 @@ async function fixture(t: TestContext) {
     const branch = { name: sourceBranch, commit: { id: branchHead }, web_url: branchUrl(), ...branchProof };
     const commitTitle = 'Existing repository changes';
     const commit = { id: commitSha, title: commitTitle, message: commitTitle, committed_date: instant(), web_url: commitUrl() };
-    if (path === projectPath) {
+    if (path === projectPath || path === projectByPath) {
       res.statusCode = projectRead.status;
       res.end(JSON.stringify(projectRead.status === 200 ? { id: projectRead.id, path_with_namespace: 'team/subgroup/product', web_url: projectUrl() }
         : { message: `fixture ${token}` }));
@@ -148,6 +149,7 @@ async function fixture(t: TestContext) {
   const settings = await configure();
   const issue = await call<Issue>('/issues', { method: 'POST', body: { projectId, title: 'Link existing code discussion' } }, 201);
   const attach = (url: string, expectedSettingsVersion = settings.version) => ({ method: 'POST', body: { url, repositoryId, expectedSettingsVersion } });
+  const attachByPath = (url: string, expectedSettingsVersion = settings.version) => ({ method: 'POST', body: { url, expectedSettingsVersion } });
   const links = async (id = issue.id) => (await call<{ links: GitlabLink[] }>(pathFor(id))).links;
   const webhook = (kind: 'merge_request' | 'pipeline', attributes: Record<string, unknown>) => call<{ linked: number }>('/integrations/gitlab/webhook', {
     method: 'POST', headers: { 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
@@ -158,7 +160,7 @@ async function fixture(t: TestContext) {
       object_kind: 'push', project_id: repositoryId, ref: `refs/heads/${branch}`, before, after, commits,
       project: { id: repositoryId, web_url: projectUrl(), path_with_namespace: 'team/subgroup/product' },
     } });
-  return { call, request, issue, attach, configure, links, webhook, push, instant, calls, pipelineListQueries, projectPath, branchPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
+  return { call, request, issue, attach, attachByPath, configure, links, webhook, push, instant, calls, pipelineListQueries, projectPath, projectByPath, branchPath, mrUrl: mrUrl(), pipelineUrl: pipelineUrl(),
     branchUrl: branchUrl(), secondaryBranchUrl: secondaryBranchUrl(), commitUrl: commitUrl(), setBranchHead(value: string) { branchHead = value; },
     holdBranchRead(gate?: () => Promise<void>) { branchGate = gate; },
     setProjectRead(patch: Partial<typeof projectRead>) { projectRead = { ...projectRead, ...patch }; },
@@ -1301,6 +1303,29 @@ test('manual GitLab links verify saved repositories and store one canonical reco
   assert.deepEqual(snapshot.issues.find(issue => issue.id === f.issue.id), f.issue);
   assert.equal(snapshot.activities.filter(event => event.action === 'GitLab 활동 수동 연결').length, 3);
   assert.equal(snapshot.activities.filter(event => event.action === 'GitLab 수동 연결 해제').length, 1);
+});
+
+test('pasted GitLab activity resolves the exact allowed repository before reading or saving the branch', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const read = (paths: string[]) => paths.map(path => ({ method: 'GET', path, credential: token }));
+  const copied = `${f.branchUrl.replace('%2F', '/')}?ref_type=heads#files`;
+  await f.call(path, f.attachByPath('https://unconfigured.example.test/team/product/-/tree/main'), 400);
+  assert.deepEqual(f.calls, []);
+
+  f.setProjectRead({ id: 77 });
+  await f.call(path, f.attachByPath(copied), 403);
+  assert.deepEqual(f.calls.splice(0), read([f.projectByPath]));
+  assert.deepEqual(await f.links(), []);
+
+  f.setProjectRead({ id: repositoryId });
+  const branch = await f.call<GitlabLink>(path, f.attachByPath(copied), 201);
+  assert.deepEqual(f.calls.splice(0), read([f.projectByPath, f.branchPath]));
+  assert.equal(branch.webUrl, f.branchUrl);
+  assert.equal(branch.projectId, repositoryId);
+  assert.deepEqual(await f.call(path, f.attach(copied)), branch);
+  assert.deepEqual(f.calls, read([f.projectPath, f.branchPath]));
+  assert.deepEqual(await f.links(), [branch]);
 });
 
 test('keyless branch and commit attachments reuse canonical activity and follow authenticated pushes', async t => {

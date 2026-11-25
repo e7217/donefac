@@ -38,6 +38,7 @@ type CycleBoardCycle = Pick<PlanningItem, 'id' | 'name' | 'status' | 'version'>;
 type CycleBoardCreation = { cycle: CycleBoardCycle | null; onCreated: (issue: Issue) => void };
 type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify' | 'openIssue'> & {
   initialStatus?: IssueStatus;
+  initialBoardAssigneeId?: string | null;
   selectingChecklist?: boolean;
   onReselectChecklist?: () => void;
   onClose: () => void;
@@ -178,7 +179,7 @@ function titleFromChecklist(text: string): string {
   return text.replace(/\s+/gu, ' ').trim().slice(0, 300).replace(/[\uD800-\uDBFF]$/u, '').trimEnd();
 }
 
-export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceDocument, selectingChecklist = false,
+export function NewIssueModal({ data, projectId, actorId, initialStatus, initialBoardAssigneeId, sourceDocument, selectingChecklist = false,
   onReselectChecklist, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue, cycleBoardCreation,
   onBlockedIssueCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
@@ -332,7 +333,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
       : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
       : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
   }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, blockedMode, sourceDocument, refresh, notify]);
-  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode || Boolean(cycleBoardCreation);
+  const fromBoard = initialBoardAssigneeId !== undefined;
+  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode || Boolean(cycleBoardCreation) || fromBoard;
 
   function close() {
     if (pendingRef.current) return;
@@ -817,7 +819,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
   }
 
   function keyboard(event: KeyboardEvent<HTMLElement>) {
-    if (!linkedCreation && !cycleBoardCreation) return;
+    if (!linkedCreation && !cycleBoardCreation && !fromBoard) return;
     if (event.key === 'Escape' || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's')) {
       event.preventDefault();
       event.stopPropagation();
@@ -879,7 +881,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
               <select name="projectId" className="field" value={selectedProject} autoFocus={blockedMode}
-                disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId) || Boolean(cycleBoardCreation)} onChange={event => {
+                disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId) || Boolean(cycleBoardCreation) || fromBoard} onChange={event => {
                 const next = event.target.value;
                 setSelectedProject(next);
                 setSelectedType(initialIssueType(data, next));
@@ -956,7 +958,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, sourceD
               <label className="issue-form-label">유형<IssueTypeSelect data={data} projectId={selectedProject} value={selectedType} onChange={setSelectedType} name="type" /></label>
               <label className="issue-form-label">상태<select name="status" aria-label="새 업무 상태" className="field" value={selectedStatus} onChange={event => setSelectedStatus(event.target.value)}>{states.map(value => <option key={value.id} value={value.id}>{value.label}</option>)}</select></label>
               <label className="issue-form-label">우선순위<select name="priority" className="field" value={priority} onChange={event => setPriority(event.target.value as Priority)}>{Object.entries(PRIORITY).map(([key, value]) => <option key={key} value={key}>{value}</option>)}</select></label>
-              <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+              <label className="issue-form-label">담당자<select className="field" name="assigneeId" defaultValue={cloneIssue?.assigneeId ?? initialBoardAssigneeId ?? ''}><option value="">미지정</option>{data.users.map(user => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
               {!scheduleMode && !blockedMode && dateFields}
               <label className="issue-form-label">요청자<IssueReporterSelect value={reporterId === undefined ? actorId || undefined : reporterId}
                 users={data.users} onChange={value => setReporterId(value === actorId ? undefined : value)} /></label>

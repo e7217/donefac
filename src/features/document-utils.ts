@@ -1,4 +1,4 @@
-import type { DocRevision, RichContent } from '../../shared/types';
+import type { DocPage, DocRevision, RichContent } from '../../shared/types';
 import { renderDocumentPropertiesMarkdown, renderStandaloneDocumentTableMarkdown } from '../../shared/document-export-markdown';
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
@@ -6,6 +6,20 @@ import { isDocumentSectionId, outlineHeadingTitle } from '../../shared/document-
 import { attachmentDownloadIdFromUrl } from '../../shared/inline-attachment';
 
 export function contentText(node: RichContent): string { return documentPlainText(node); }
+
+export function documentAncestors(page: DocPage, pages: ReadonlyMap<string, DocPage>): DocPage[] {
+  const parents: DocPage[] = [];
+  const seen = new Set([page.id]);
+  let parentId = page.parentId;
+  while (parentId && !seen.has(parentId)) {
+    const parent = pages.get(parentId);
+    if (!parent || parent.projectId !== page.projectId) break;
+    parents.push(parent);
+    seen.add(parentId);
+    parentId = parent.parentId;
+  }
+  return parents.reverse();
+}
 
 export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'confluenceSourceVersion'>): string {
   return revision.confluenceSourceVersion == null ? `버전 ${revision.version}` : `Confluence 원본 버전 ${revision.confluenceSourceVersion}`;

@@ -19,6 +19,7 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
   const renamed = 'Configuration schema ready';
   const route = `/api/issues/${issue.id}/gitlab-links`;
   const projectPath = `/lab/api/v4/projects/${repoId}`;
+  const projectByPath = `/lab/api/v4/projects/${encodeURIComponent('team/subgroup/repo')}`;
   const objectPath = `${projectPath}/merge_requests/11`;
   const calls: string[] = [];
   let baseUrl = '';
@@ -30,7 +31,7 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
     calls.push(`${req.method} ${req.url}`);
     const requestPath = new URL(req.url ?? '/', 'http://fixture.test').pathname;
     res.setHeader('Content-Type', 'application/json');
-    if (requestPath === projectPath) res.end(JSON.stringify({ id: repoId, path_with_namespace: 'team/subgroup/repo', web_url: projectUrl() }));
+    if (requestPath === projectPath || requestPath === projectByPath) res.end(JSON.stringify({ id: repoId, path_with_namespace: 'team/subgroup/repo', web_url: projectUrl() }));
     else if (requestPath === objectPath) res.end(JSON.stringify({ id: 444, iid: 11, project_id: repoId, target_project_id: repoId,
       title: merged ? renamed : title, state: merged ? 'merged' : 'opened', updated_at: new Date(epoch + (merged ? 1000 : 0)).toISOString(),
       source_branch: 'feature/configuration', web_url: canonicalUrl(), sha: '3'.repeat(40) }));
@@ -57,22 +58,24 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
     const repository = form.getByRole('combobox', { name: 'GitLab 저장소' });
     const url = form.getByRole('textbox', { name: 'GitLab URL', exact: true });
     await expect(url).toBeFocused();
-    await repository.selectOption(String(repoId));
     const copied = `${canonicalUrl()}?diff_id=7#note_80`;
     await url.fill(copied);
-    const changed = await request.patch('/api/integrations/gitlab', { data: { expectedVersion: settings.version, projectIds: [repoId] } });
+    const connect = form.getByRole('button', { name: 'GitLab 링크 연결', exact: true });
+    await expect(repository).toHaveValue('');
+    await expect(connect).toBeEnabled();
+    const changed = await request.patch('/api/integrations/gitlab', { data: { expectedVersion: settings.version, projectIds: [repoId, 78] } });
     expect(changed.ok(), await changed.text()).toBeTruthy();
     const waitForPost = () => page.waitForResponse(response => new URL(response.url()).pathname === route && response.request().method() === 'POST');
     const rejected = waitForPost();
-    await form.getByRole('button', { name: 'GitLab 링크 연결', exact: true }).click();
+    await connect.click();
     expect((await rejected).status()).toBe(409);
     await expect(form.getByRole('alert')).toContainText('GitLab 연결 설정이 변경되었습니다');
     await expect(url).toHaveValue(copied);
-    await expect(repository).toHaveValue(String(repoId));
+    await expect(repository).toHaveValue('');
     expect(calls).toEqual([]);
 
     const first = waitForPost();
-    await form.getByRole('button', { name: 'GitLab 링크 연결', exact: true }).click();
+    await connect.click();
     const attached = await first;
     expect(attached.status(), await attached.text()).toBe(201);
     const link = await attached.json() as GitlabLink;
@@ -105,7 +108,7 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
     await expect(add).toBeFocused();
     await expect(issueTitle).toHaveValue('저장 중인 티켓 제목 초안');
     await expect(comment).toHaveValue('전송 전 댓글 초안');
-    expect(calls).toEqual([`GET ${projectPath}`, `GET ${objectPath}`, `GET ${projectPath}`, `GET ${objectPath}`]);
+    expect(calls).toEqual([`GET ${projectByPath}`, `GET ${objectPath}`, `GET ${projectPath}`, `GET ${objectPath}`]);
   } finally {
     const removed = await request.delete(`/api/issues/${issue.id}`);
     if (removed.ok()) {

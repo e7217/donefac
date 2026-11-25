@@ -94,7 +94,7 @@ export class GitlabReadError extends Error {
 }
 
 export class GitlabManualUrlError extends Error {
-  readonly status = 400;
+  constructor(message: string, readonly status: 400 | 403 = 400) { super(message); }
 }
 
 export class GitlabRepositoryQueryError extends Error {}
@@ -436,7 +436,7 @@ function verifiedProjectRepository(project: unknown, projectId: number, base: UR
 async function readVerifiedProject(connection: Connection, repositoryId: number, signal?: AbortSignal) {
   const request = projectReadRequest(connection, repositoryId, 'project');
   const project = await readJson(request.projectUrl, request.headers, 'project', signal);
-  return { ...request, ...verifiedProjectRepository(project, repositoryId, request.base) };
+  return { ...request, ...verifiedProjectRepository(project, repositoryId, request.base), repositoryId };
 }
 
 function verifiedBranch(value: unknown, repositoryId: number, branch: string) {
@@ -1468,43 +1468,73 @@ async function readInspectedPipelineFailedTests({ context, observed, recheck }: 
   return { status: observed.status, cases, hasMore: omitted || hasNext || failed < expectedFailed || errors < expectedErrors };
 }
 
+async function readManualProjectByPath(connection: Connection, request: ReturnType<typeof projectsReadRequest>,
+  repositoryPath: string, allowed: readonly number[], signal?: AbortSignal) {
+  const { base, headers, projectsUrl } = request;
+  const scope = canonicalPath(base.pathname.replace(/\/+$/, '') + '/');
+  const namespace = scope === null ? '' : decodeURIComponent(repositoryPath.slice(scope.length + 1));
+  const expected = gitlabRepositoryUrl(base.href, { path_with_namespace: namespace });
+  if (!expected || canonicalPath(expected.pathname) !== repositoryPath || includesGitlabCredential(connection.token, [namespace])) {
+    throw new GitlabManualUrlError('GitLab 저장소의 활동 주소를 입력해 주세요.');
+  }
+  const lookup = new URL(projectsUrl);
+  lookup.pathname += `/${encodeURIComponent(namespace)}`;
+  const notAllowed = () => new GitlabManualUrlError('허용된 GitLab 저장소의 활동 주소를 입력해 주세요.', 403);
+  let project: unknown;
+  try { project = await readJson(lookup, headers, 'project', signal); }
+  catch (error) {
+    if (error instanceof GitlabReadError && error.httpStatus === 404) throw notAllowed();
+    throw error;
+  }
+  if (!isReadObject(project) || !positiveId(project.id)) throw new GitlabReadError('project', 'invalid-response');
+  const repositoryId = project.id;
+  if (!allowed.includes(repositoryId)) throw notAllowed();
+  const verified = verifiedProjectRepository(project, repositoryId, base);
+  if (verified.repositoryPath !== repositoryPath) throw new GitlabReadError('project', 'invalid-response');
+  const projectUrl = new URL(projectsUrl);
+  projectUrl.pathname += `/${repositoryId}`;
+  return { base, headers, projectUrl, ...verified, repositoryId };
+}
+
 export async function readGitlabManualObject(
-  connection: Connection, projectId: number, rawUrl: unknown, signal?: AbortSignal,
-  onResolvedBranch?: (name: string, webUrl: string) => void,
+  connection: Connection, repository: number | readonly number[], rawUrl: unknown, signal?: AbortSignal,
+  onResolvedBranch?: (name: string, webUrl: string, repositoryId: number) => void,
 ): Promise<{
   kind: ManualPage['kind'];
   object: GitlabReadObject;
   webUrl: string;
+  repositoryId: number;
 }> {
-  const { base, headers, projectUrl } = projectReadRequest(connection, projectId, 'project');
-  const page = manualPage(rawUrl, base, true);
+  const request = projectsReadRequest(connection, 'project');
+  const page = manualPage(rawUrl, request.base, true);
   if (!page) throw new GitlabManualUrlError('설정한 GitLab의 브랜치·커밋·MR·파이프라인 주소를 입력해 주세요.');
 
-  const project = await readJson(projectUrl, headers, 'project', signal);
-  const { repositoryPath, repository } = verifiedProjectRepository(project, projectId, base);
+  const context = typeof repository === 'number' ? await readVerifiedProject(connection, repository, signal)
+    : await readManualProjectByPath(connection, request, page.repositoryPath, repository, signal);
+  const { headers, projectUrl, repositoryPath, repositoryId } = context;
   if (page.repositoryPath !== repositoryPath) throw new GitlabManualUrlError('선택한 GitLab 저장소의 활동 주소를 입력해 주세요.');
 
   if (!isWorkflowPage(page)) {
-    const webUrl = gitlabPushLinkUrl(repository, page.kind === 'branch' ? 'tree' : 'commit', page.id);
+    const webUrl = gitlabPushLinkUrl(context.repository, page.kind === 'branch' ? 'tree' : 'commit', page.id);
     if (!webUrl) throw new GitlabManualUrlError('GitLab 활동 주소가 너무 깁니다.');
     if (page.kind === 'branch') {
-      onResolvedBranch?.(page.id, webUrl);
-      const { object } = await readBranchDetails({ base, headers, projectUrl }, projectId, page.id, signal);
-      return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+      onResolvedBranch?.(page.id, webUrl, repositoryId);
+      const { object } = await readBranchDetails(context, repositoryId, page.id, signal);
+      return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl, repositoryId };
     }
     const itemUrl = new URL(projectUrl);
     const stage = 'commits';
     itemUrl.pathname += `/repository/commits/${encodeURIComponent(page.id)}`;
     const object = await readJson(itemUrl, headers, stage, signal);
-    if (!isReadObject(object) || object.project_id !== undefined && object.project_id !== projectId) {
+    if (!isReadObject(object) || object.project_id !== undefined && object.project_id !== repositoryId) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
     if (gitlabObjectSha(object.id) !== page.id) {
       throw new GitlabReadError(stage, 'invalid-response');
     }
-    return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl };
+    return { kind: page.kind, object: { ...object, web_url: webUrl }, webUrl, repositoryId };
   }
-  return readExactWorkflowObject({ base, headers, projectUrl }, projectId, page, signal);
+  return { ...await readExactWorkflowObject(context, repositoryId, page, signal), repositoryId };
 }
 
 async function readGitlabActivityPage(url: URL, headers: Record<string, string>, stage: 'merge-requests' | 'pipelines',

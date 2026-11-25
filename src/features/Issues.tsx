@@ -39,6 +39,7 @@ const isAll = (id: string) => !id || id === 'all';
 const issueDragType = 'text/issue-id';
 type IssuePlacement = Pick<IssueOrderMove, 'anchorId' | 'position'>;
 type BoardCell = { status: IssueStatus; targetAssigneeId?: string | null };
+type IssueCreation = { status: IssueStatus; assigneeId?: string | null; opener: HTMLButtonElement };
 type BoardDrop = IssuePlacement & BoardCell;
 type BoardDrag = { issue: Issue; projectId: string; fieldSorted: boolean; orderVersion?: string };
 type BoardLane = { id: string | null; name: string; email?: string; color?: string; issues: Issue[] };
@@ -175,9 +176,8 @@ export function Issues(props: FeatureProps & {
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
   }, schema, actorId, viewDate), [filters,data.issueSchemas,data.users,data.gitlabLinks,schema,actorId,viewDate]);
-  const [creating, setCreating] = useState(false);
+  const [creation, setCreation] = useState<IssueCreation | null>(null);
   const [pasteScope, setPasteScope] = useState<string | null>(null);
-  const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');
   const [busy, setBusy] = useState<string | null>(null);
   const [orderEditProject, setOrderEditProject] = useState<string | null>(null);
   const [orderNotice, setOrderNotice] = useState<OrderNotice | null>(null);
@@ -218,7 +218,7 @@ export function Issues(props: FeatureProps & {
   const projectSelected = Boolean(project);
   const groupedBoard = projectSelected && view === 'board' && boardGrouping === 'assignee';
   const currentPasteScope = JSON.stringify([projectId, props.actorId]);
-  const refreshPaused = props.issueOverlayOpen || creating || pasteScope === currentPasteScope || bulk.active || Boolean(busy || statusEdit);
+  const refreshPaused = props.issueOverlayOpen || Boolean(creation) || pasteScope === currentPasteScope || bulk.active || Boolean(busy || statusEdit);
   const hasLocalInteraction = useCallback(() => Boolean(pendingMutation.current || statusChooserOpen.current || drag.current || filterEditors.current?.querySelector('form')), []);
   const { requestMode, feedback, manualRefresh, reconsider } = useWorkspaceRefresh(props.refreshIssues, refreshPaused, hasLocalInteraction);
   useLayoutEffect(() => {
@@ -264,7 +264,17 @@ export function Issues(props: FeatureProps & {
   }, [projectSelected, view, statuses, projectIssues]);
   const selectedCapacity = capacitySelection?.projectId === projectId ? capacities.get(capacitySelection.statusId) : undefined;
   const issueTypes = isAll(projectId) ? [...new Map(data.projects.flatMap(project => projectIssueTypes(data, project.id, { includeArchived: true })).map(item => [item.id, item])).values()] : projectIssueTypes(data, projectId, { includeArchived: true });
-  const beginCreate = (nextStatus: string) => { if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return; setCreateStatus(nextStatus); setCreating(true); };
+  function beginCreate(status: IssueStatus, opener: HTMLButtonElement, assigneeId?: string | null) {
+    if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    setCreation({ status, assigneeId, opener });
+  }
+  function closeCreation() {
+    const opener = creation?.opener;
+    setCreation(null);
+    if (opener) requestAnimationFrame(() => {
+      if (document.activeElement === document.body && opener.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+    });
+  }
   function beginPaste() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     setPasteScope(currentPasteScope);
@@ -514,7 +524,8 @@ export function Issues(props: FeatureProps & {
         <StatusDot color={state.color} /><strong>{capacity?.status.label ?? state.label}</strong>
         {capacity ? <span className="board-capacity-count" title="프로젝트 전체 업무 수 / 한도" role="status"
           aria-label={`프로젝트 전체 업무 ${capacity.issues.length}개, 한도 ${capacity.limit}개`}>{capacity.issues.length.toLocaleString()} / {capacity.limit.toLocaleString()}</span> : <span>{visible}</span>}
-        <button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} onClick={() => beginCreate(state.id)}><Plus size={15} /></button>
+        <button title={`${state.label} 업무 추가`} aria-label={`${state.label} 업무 추가`} aria-haspopup="dialog"
+          type="button" onClick={event => beginCreate(state.id, event.currentTarget)}><Plus size={15} aria-hidden="true" /></button>
       </div>
       {capacity && <BoardCapacityNote value={capacity} visible={visible} open={openCapacity} />}
     </>;
@@ -526,20 +537,30 @@ export function Issues(props: FeatureProps & {
     return excess > 0 ? 'over' : excess === 0 ? 'at' : 'under';
   }
 
-  function boardColumn(state: WorkflowStatus, laneIssues: Issue[], targetAssigneeId?: string | null) {
+  function boardColumn(state: WorkflowStatus, laneIssues: Issue[], lane?: BoardLane) {
+    const targetAssigneeId = lane?.id;
     const column = laneIssues.filter(issue => issue.status === state.id);
     const cell: BoardCell = { status: state.id, targetAssigneeId };
     const isCellTarget = (target: BoardDrop | null) => target?.status === state.id && target.targetAssigneeId === targetAssigneeId;
     const target = isCellTarget(dropTarget) ? dropTarget : null;
     const grouped = targetAssigneeId !== undefined;
     const capacity = grouped ? undefined : capacities.get(state.id);
+    const statusLabel = capacities.get(state.id)?.status.label ?? state.label;
+    const canCreateInLane = lane && (lane.id === null || data.users.some(user => user.id === lane.id));
+    const createLabel = lane && [lane.name, lane.email, `${statusLabel} 업무 추가`].filter(Boolean).join(' · ');
     return <section key={state.id} className={`issue-board-column ${target ? 'is-drag-over' : ''}`} data-status-id={state.id}
       aria-label={grouped ? (capacities.get(state.id)?.status.label ?? state.label) : undefined} data-capacity={capacityState(capacity)}
       onDragOver={event => boardDragOver(event, cell, column)}
       onDragLeave={event => { if (!(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget))) setDropTarget(current => isCellTarget(current) ? null : current); }}
       onDrop={event => dropOnBoard(event, cell, column)}>
-      {grouped ? <div className="issue-board-cell-heading">
-        <StatusDot color={state.color} /><span>{capacities.get(state.id)?.status.label ?? state.label}</span><span>{column.length}</span>
+      {lane ? <div className="issue-board-column-leading">
+        <div className="issue-board-cell-heading">
+          <StatusDot color={state.color} /><span>{statusLabel}</span><span>{column.length}</span>
+        </div>
+        {canCreateInLane && <button className="btn btn-ghost issue-board-create" type="button" title={createLabel} aria-label={createLabel}
+          aria-haspopup="dialog" disabled={Boolean(busy)} onClick={event => beginCreate(state.id, event.currentTarget, lane.id)}>
+          <Plus size={16} aria-hidden="true" />
+        </button>}
       </div> : boardHeading(state, column.length, capacity)}
       {column.map((issue, index) => {
         const user = data.users.find(user => user.id === issue.assigneeId);
@@ -607,7 +628,7 @@ export function Issues(props: FeatureProps & {
         {projectSelected && <NotificationSubscriptionButton actorId={props.actorId} targetType="project" targetId={projectId} notify={notify} />}
         {projectSelected && view === 'list' && <button className="btn" type="button" disabled={Boolean(busy) || bulk.busy}
           onClick={beginPaste}><ClipboardPaste size={15} aria-hidden="true" />업무 붙여넣기</button>}
-        <button className="btn btn-primary" onClick={() => beginCreate(createFromFilter)}><Plus size={16} /> 업무 만들기</button>
+        <button className="btn btn-primary" onClick={event => beginCreate(createFromFilter, event.currentTarget)}><Plus size={16} /> 업무 만들기</button>
       </div>
     </div>
     {feedback && <p className={`issue-refresh-feedback${feedback === 'failed' ? ' issue-form-error' : ''}`}
@@ -699,7 +720,7 @@ export function Issues(props: FeatureProps & {
         <td className="issue-date-cell">{dateLabel(issue.endDate || issue.dueDate)}</td>
         <td><div className="issue-labels">{issue.labels.slice(0, 2).map(l => <span className="issue-label" key={l}>{l}</span>)}{issue.labels.length > 2 && <span className="muted">+{issue.labels.length - 2}</span>}</div></td>
       </tr>;
-    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={() => beginCreate(createFromFilter)}><Plus size={15} /> 업무 만들기</button></div>}</div> : <>
+    })}</tbody></table>{issues.length === 0 && <div className="issue-empty"><Circle size={28} /><h3>{activeFilters ? '조건에 맞는 업무가 없습니다' : '첫 업무를 만들어 보세요'}</h3><p>{activeFilters ? '검색어나 필터를 변경해 보세요.' : '계획과 실행의 시작을 이곳에 기록하세요.'}</p><button className="btn btn-primary" onClick={event => beginCreate(createFromFilter, event.currentTarget)}><Plus size={15} /> 업무 만들기</button></div>}</div> : <>
       <BoardCapacitySummary columns={[...capacities.values()]} open={openCapacity} />
       {selectedCapacity && <BoardCapacityDetails key={selectedCapacity.status.id} value={selectedCapacity}
         visibleIds={new Set(issues.map(issue => issue.id))} users={data.users} heading={capacityHeading}
@@ -727,7 +748,7 @@ export function Issues(props: FeatureProps & {
               <span className="issue-board-lane-count">{lane.issues.length.toLocaleString()}개</span>
             </h3>
             <div className="issue-board-lane-columns">
-              {statuses.map(state => boardColumn(state, lane.issues, lane.id))}
+              {statuses.map(state => boardColumn(state, lane.issues, lane))}
             </div>
           </section>)}
         </div>
@@ -735,7 +756,7 @@ export function Issues(props: FeatureProps & {
     </>)}
     {project && pasteScope === currentPasteScope && <IssuePasteDialog project={project} actorId={props.actorId}
       refresh={refresh} notify={notify} onClose={() => setPasteScope(null)} />}
-    {creating && <NewIssueModal {...props} initialStatus={createStatus} onClose={() => setCreating(false)} />}
+    {creation && <NewIssueModal {...props} initialStatus={creation.status} initialBoardAssigneeId={creation.assigneeId} onClose={closeCreation} />}
     {statusEdit && <IssueStatusDialog edit={statusEdit} actorId={props.actorId} latest={data} refresh={refresh} notify={notify} onClose={closeStatusEdit}
       onOpenDetails={() => {
         const opener = view === 'board' ? boardCardControl(boardCanvas.current, statusEdit.issue.id, 'details')

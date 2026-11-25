@@ -66,7 +66,7 @@ import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { DOCUMENT_TEMPLATES, templateContent } from './document-built-in-templates';
-import { contentMarkdown, contentText, documentRevisionLabel, downloadDocument } from './document-utils';
+import { contentMarkdown, contentText, documentAncestors, documentRevisionLabel, downloadDocument } from './document-utils';
 import { Attachments, attachmentFileUrl, isInlineAttachmentImage, MAX_ATTACHMENT_BYTES, type AttachmentsProps } from './Attachments';
 import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
@@ -471,6 +471,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const liveDocument = liveState?.document;
   const remoteDocument = liveMode ? liveDocument : activeSession?.document;
   const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
+  const ancestors = useMemo(() => latestPage?.parentId ?
+    documentAncestors(latestPage, new Map(data.documents.map(page => [page.id, page]))) : [], [latestPage, data.documents]);
+  const spaceTitle = latestPage?.projectId ? data.projects.find(project => project.id === latestPage.projectId)?.name || '프로젝트' : '팀 공통';
+  const crumbQuery = documentLabel ? `?${new URLSearchParams({ label: documentLabel })}` : '';
   const liveLocationChanged = latestPage !== selectedPage &&
     (latestPage?.projectId !== selectedPage?.projectId || latestPage?.parentId !== selectedPage?.parentId);
   const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
@@ -2094,7 +2098,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       {draft && selectedPage ? <>
         <main className="docs-document">
           <div className="docs-document-topbar" inert={checklistReselecting}>
-            <div className="docs-breadcrumb"><FileText size={14} /><span>{selectedPage.projectId ? data.projects.find(project => project.id === selectedPage.projectId)?.name || '프로젝트' : '팀 공통'}</span><ChevronRight size={12} /><span>{draft.title || '제목 없는 문서'}</span></div>
+            <nav className="docs-breadcrumb" aria-label="문서 위치" tabIndex={-1}>
+              <FileText size={14} aria-hidden="true" /><span title={spaceTitle}>{spaceTitle}</span>
+              {ancestors.map(ancestor => <span className="docs-breadcrumb-step" key={ancestor.id}>
+                <ChevronRight size={12} aria-hidden="true" />
+                <a href={`#/${encodeURIComponent(ancestor.projectId ?? projectId)}/documents/${encodeURIComponent(ancestor.id)}${crumbQuery}`}
+                  title={documentTitleForSave(ancestor.title)} onClick={event => {
+                    if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+                    event.preventDefault();
+                    if (selectDocument(ancestor.id)) event.currentTarget.closest('nav')?.focus({ preventScroll: true });
+                  }}>{documentTitleForSave(ancestor.title)}</a>
+              </span>)}
+              <span className="docs-breadcrumb-step"><ChevronRight size={12} aria-hidden="true" />
+                <span aria-current="page" title={documentTitleForSave(draft.title)}>{documentTitleForSave(draft.title)}</span>
+              </span>
+            </nav>
             <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
               <FavoriteAction type="document" id={selectedPage.id} />
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />

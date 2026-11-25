@@ -822,7 +822,9 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 
 ### GitLab 수동 연결
 
-브라우저의 `POST /api/issues/:id/gitlab-links`에 `{repositoryId,url,expectedSettingsVersion}`을 보낸다. 저장한 `GET /api/integrations/gitlab` 설정의 `version`과 허용 저장소 ID를 사용한다. MR은 프로젝트의 MR IID, 파이프라인은 파이프라인 ID를 사용한다. 브랜치는 `/-/tree/` 뒤의 전체 이름, 커밋은 `/-/commit/` 뒤의 전체 SHA를 확인한다. 서버는 저장한 GitLab의 읽기 API에서 프로젝트와 해당 항목을 대조하고 순수 페이지 주소를 저장한다. 쿼리와 프래그먼트를 제거하며 브랜치 주소에 참조 유형이 있으면 `heads`를 확인한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline) · [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch) · [GitLab 커밋 조회](https://docs.gitlab.com/api/commits/#retrieve-a-commit)
+브라우저의 `POST /api/issues/:id/gitlab-links`에 `{url,expectedSettingsVersion}`과 선택 항목 `repositoryId`를 보낸다. 저장한 `GET /api/integrations/gitlab` 설정의 `version`을 사용한다. `repositoryId`를 생략하면 서버가 설정된 GitLab 안에서 주소의 프로젝트 경로를 조회한다. 확인한 저장소 ID가 등록 목록에 있으면 활동을 조회한다. 숫자 ID를 지정하면 등록 여부와 주소의 프로젝트 경로를 대조한다. [GitLab 프로젝트 조회](https://docs.gitlab.com/api/projects/#retrieve-a-project)
+
+MR은 프로젝트의 MR IID, 파이프라인은 파이프라인 ID를 사용한다. 브랜치는 `/-/tree/` 뒤의 전체 이름, 커밋은 `/-/commit/` 뒤의 전체 SHA를 확인한다. 서버는 저장한 GitLab의 읽기 API에서 프로젝트와 해당 항목을 대조하고 순수 페이지 주소를 저장한다. 쿼리와 프래그먼트를 제거하며 브랜치 주소에 참조 유형이 있으면 `heads`를 확인한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline) · [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch) · [GitLab 커밋 조회](https://docs.gitlab.com/api/commits/#retrieve-a-commit)
 
 응답은 저장한 `GitlabLink`다. 새 수동 연결은 `201`이며 같은 항목을 다시 확인하면 같은 ID의 `200`을 받는다. 조회 중 연결 설정이 바뀌거나 브랜치 조회가 기존 인증 푸시 기록과 다르면 `409`를 반환할 수 있다. 이 경우 마지막으로 확인된 링크를 유지한다. 인증 웹훅과 동기화는 같은 링크를 갱신하며, 티켓 키가 확인되면 기존 자동 연결 규칙을 적용한다. 브라우저에서 브랜치를 열 때는 `ref_type=heads`를 붙여 같은 이름의 태그와 구분한다. [GitLab의 브랜치·태그 주소 처리](https://gitlab.com/gitlab-org/gitlab/-/merge_requests/122237)
 

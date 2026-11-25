@@ -1952,23 +1952,39 @@ function ProjectGantt(props: GanttProps) {
   function showLinkEditor(opener: HTMLButtonElement, options: Omit<DependencyEditor, 'opener'> = {}, fromLinkPicker = false) {
     const keepDates = canKeepLinkDateDrafts(fromLinkPicker);
     if (!keepDates && !canLeave()) return;
-    if (keepDates && options.anchor) {
-      const { issueId, otherRole } = options.anchor;
-      const issue = projectIssues.find(value => value.id === issueId);
-      if (issue) {
-        const dateDrafts = rowDateDrafts(issue.projectId);
-        if (dateDrafts.size) {
-          openRowScheduleEdit(issue, opener, { dateDrafts, initialLink: { action: 'add', direction: otherRole } });
-          return;
-        }
-      }
-    }
+    if (keepDates && !options.removal && openLinkWithDateDrafts(opener, options, fromLinkPicker)) return;
     // An accepted draft discard is queued by the navigation guard first.
     queueMicrotask(() => {
       setLinkPicker(null);
       setDatePicker(null);
       setLinkEditor({ ...options, opener });
     });
+  }
+  function openLinkWithDateDrafts(opener: HTMLButtonElement, { dependency, prefill, anchor }: Omit<DependencyEditor, 'opener'>,
+    fromLinkPicker: boolean) {
+    if (anchor) {
+      const issue = projectIssues.find(value => value.id === anchor.issueId);
+      if (!issue) return false;
+      const dateDrafts = rowDateDrafts(issue.projectId);
+      if (!dateDrafts.size) return false;
+      openRowScheduleEdit(issue, opener, { dateDrafts, initialLink: { action: 'add', direction: anchor.otherRole }, fromLinkPicker });
+      return true;
+    }
+    const pair = dependency ?? prefill;
+    if (!pair) return false;
+    const predecessor = projectIssues.find(issue => issue.id === pair.predecessorId);
+    const successor = projectIssues.find(issue => issue.id === pair.successorId);
+    if (!predecessor || !successor || predecessor.projectId !== successor.projectId) return false;
+    const dateDrafts = rowDateDrafts(predecessor.projectId);
+    const editSuccessor = dateDrafts.has(successor.id);
+    if (!editSuccessor && !dateDrafts.has(predecessor.id)) return false;
+    const issue = editSuccessor ? successor : predecessor;
+    const relatedId = editSuccessor ? predecessor.id : successor.id;
+    const initialLink: GanttRowLinkDraft = dependency
+      ? { action: 'update', dependencyId: dependency.id, type: prefill?.type }
+      : { action: 'add', direction: editSuccessor ? 'predecessor' : 'successor', relatedId, type: prefill?.type ?? 'FS' };
+    openRowScheduleEdit(issue, opener, { dateDrafts, initialLink, relatedId, fromLinkPicker });
+    return true;
   }
   function canKeepInlineDateDrafts(fromLinkPicker = false) {
     return !busyRef.current && !otherScheduleEditorOpen && (!linkPicker || fromLinkPicker) && !issueOverlayOpen &&
@@ -2063,18 +2079,6 @@ function ProjectGantt(props: GanttProps) {
     const type = DEPENDENCY_TYPES.find(value => DEPENDENCY_ENDPOINTS[value].predecessor === pickedSource.endpoint &&
       DEPENDENCY_ENDPOINTS[value].successor === endpoint);
     const prefilledType = !dependency || pickedSource.explicit || explicit ? type : undefined;
-    if (canKeepLinkDateDrafts(true)) {
-      const anchor = inlineDateDrafts.current.has(target.id) ? target
-        : inlineDateDrafts.current.has(predecessorId) ? sourceRow.issue : undefined;
-      if (anchor) {
-        const initialLink: GanttRowLinkDraft = dependency
-          ? { action: 'update', dependencyId: dependency.id, type: prefilledType }
-          : { action: 'add', direction: anchor.id === target.id ? 'predecessor' : 'successor',
-            relatedId: anchor.id === target.id ? predecessorId : target.id, type: prefilledType ?? 'FS' };
-        openRowScheduleEdit(anchor, opener, { initialLink, relatedId: anchor.id === target.id ? predecessorId : target.id, fromLinkPicker: true });
-        return;
-      }
-    }
     showLinkEditor(opener, { dependency, prefill: { predecessorId, successorId: issueId, type: prefilledType } }, true);
   }
   function closeLinkEditor() {

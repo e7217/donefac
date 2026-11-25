@@ -1047,6 +1047,70 @@ test('전체 프로젝트 간트에서 날짜 초안을 같은 행의 연결 편
   } finally { await data.close(); }
 });
 
+test('360px 간트의 기존 연결 수정에서 두 업무의 날짜 초안을 검토해 함께 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const data = await fixture(request);
+  try {
+    const predecessor = await data.issue(data.first, '기존 연결 선행', date(20), date(24));
+    const successor = await data.issue(data.first, '기존 연결 후행', date(23), date(30));
+    const other = await data.issue(data.first, '연결과 무관한 날짜 초안', date(23), date(26));
+    const dependency = await json<Dependency>(await request.post('/api/dependencies', { data: {
+      predecessorId: predecessor.id, successorId: successor.id, type: 'FS', lagDays: 0,
+    } }), 201);
+    const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
+    const writes = scheduleWrites(page);
+    await chart.end(predecessor).fill(date(25));
+    await chart.start(successor).fill(date(27));
+    await chart.start(other).fill(date(24));
+
+    const list = page.getByRole('region', { name: '업무 연결 목록', exact: true });
+    const edit = button(list, `${predecessor.key}와 ${successor.key} 연결 수정`);
+    await edit.click();
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(date(27));
+    const peerDates = editor.getByRole('group', { name: '연결 업무의 날짜', exact: true });
+    await expect(peerDates).toContainText(predecessor.key);
+    await expect(peerDates.getByText(date(25), { exact: true })).toBeVisible();
+    await expect(peerDates.getByRole('checkbox', { name: '이 업무의 날짜도 저장', exact: true })).toBeChecked();
+    const link = editor.getByRole('group', { name: '연결 변경 1', exact: true });
+    await expect(link.getByLabel('편집할 연결', { exact: true })).toHaveValue(dependency.id);
+    await link.getByLabel('간격 (근무일)', { exact: true }).fill('1');
+    expect(writes).toEqual([]);
+
+    const review = nextPost(page, rowPreview);
+    await button(editor, '변경 미리보기').click();
+    const reviewed = await review;
+    expect(reviewed.request().postDataJSON()).toMatchObject({
+      issue: { id: successor.id, expectedVersion: successor.version }, changes: { startDate: date(27) },
+      relatedDates: { issue: { id: predecessor.id, expectedVersion: predecessor.version }, changes: { endDate: date(25) } },
+      dependency: { action: 'update', id: dependency.id, lagDays: 1 },
+    });
+    expect((await json<SchedulePastePreview>(reviewed)).errors).toEqual([]);
+    expect((await workspace(request)).issues.filter(issue => [predecessor.id, successor.id].includes(issue.id)))
+      .toEqual(expect.arrayContaining([predecessor, successor]));
+
+    const apply = nextPost(page, rowApply);
+    await button(editor, '일정과 연결 적용').click();
+    await json<SchedulePasteApplyResult>(await apply);
+    await expect(editor).toHaveCount(0);
+    await expect(edit).toBeFocused();
+    await expect(chart.start(other)).toHaveValue(date(24));
+    const after = await workspace(request);
+    expect(after.issues.find(issue => issue.id === predecessor.id)?.endDate).toBe(date(25));
+    expect(after.issues.find(issue => issue.id === successor.id)?.startDate).toBe(date(27));
+    expect(after.issues.find(issue => issue.id === other.id)).toEqual(other);
+    expect(after.dependencies.find(item => item.id === dependency.id)?.lagDays).toBe(1);
+
+    const undo = nextPost(page, undoPath);
+    await button(page, '되돌리기').click();
+    await json<SchedulePasteApplyResult>(await undo);
+    await expect(chart.end(predecessor)).toHaveValue(date(24));
+    await expect(chart.start(successor)).toHaveValue(date(23));
+    await expect(chart.start(other)).toHaveValue(date(24));
+    expect((await workspace(request)).dependencies.find(item => item.id === dependency.id)?.lagDays).toBe(0);
+  } finally { await data.close(); }
+});
+
 test('날짜 초안을 연결 편집으로 넘길 때 다른 작업자가 저장한 필드도 유지한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const data = await fixture(request);

@@ -7,6 +7,7 @@ import { TextSelection } from '@tiptap/pm/state';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import { normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import type { DocPage, Project } from '../../shared/types';
+import { documentAncestors } from './document-utils';
 import './document-page-suggestions.css';
 
 const maxQueryLength = 120;
@@ -35,17 +36,8 @@ type Token = NonNullable<ReturnType<typeof readToken>>;
 type Suggestion = { token: Token; top: number };
 
 function pagePath(page: DocPage, pages: ReadonlyMap<string, DocPage>, projectNames: ReadonlyMap<string, string>) {
-  const parents: string[] = [];
-  const seen = new Set([page.id]);
-  let parentId = page.parentId;
-  while (parentId && !seen.has(parentId)) {
-    seen.add(parentId);
-    const parent = pages.get(parentId);
-    if (!parent) break;
-    parents.push(parent.title);
-    parentId = parent.parentId;
-  }
-  return [page.projectId ? projectNames.get(page.projectId) ?? '프로젝트' : '팀 공통', ...parents.reverse()].join(' / ');
+  return [page.projectId ? projectNames.get(page.projectId) ?? '프로젝트' : '팀 공통',
+    ...documentAncestors(page, pages).map(parent => parent.title)].join(' / ');
 }
 
 export function DocumentPageSuggestions({ editor, wrap, documentId, documents, projects }: {
