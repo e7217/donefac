@@ -502,7 +502,7 @@ test('360px 전체 프로젝트 간트에서 초안을 유지하며 두 티켓�
   } finally { await data.close(); }
 });
 
-test('한 행의 첫 날짜 저장이 충돌하면 초안을 유지하고 동료가 바꾼 다른 날짜를 보존한다', async ({ page, request }) => {
+test('동료가 종료일을 늘렸으면 간트는 기존 기간과 충돌한 시작일 초안을 최신 일정으로 다시 검토한다', async ({ page, request }) => {
   const data = await fixture(request);
   try {
     const issue = await data.issue(data.first, '동시 편집할 날짜', date(23), date(26));
@@ -513,7 +513,19 @@ test('한 행의 첫 날짜 저장이 충돌하면 초안을 유지하고 동료
     const dialog = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
     const review = button(dialog, '다시 미리보기');
     const apply = button(dialog, '변경 적용');
-    await start.fill(date(24));
+    const proposedStart = date(28);
+    await start.fill(proposedStart);
+
+    const invalidPreview = nextPost(page, manualPreview);
+    await start.press('Enter');
+    const blocked = await json<SchedulePreview>(await invalidPreview);
+    expect(blocked.previewId).toBeUndefined();
+    await expect(dialog.getByRole('alert')).toContainText('종료일은 시작일보다 빠를 수 없습니다.');
+    await expect(apply).toBeDisabled();
+    expect((await workspace(request)).issues.find(candidate => candidate.id === issue.id)).toEqual(issue);
+    await button(dialog, '취소').click();
+    await expect(start).toBeFocused();
+    await expect(start).toHaveValue(proposedStart);
 
     const { users: [, peer] } = await workspace(request);
     const latest = await json<Issue>(await request.patch(`/api/issues/${issue.id}`, {
@@ -525,12 +537,12 @@ test('한 행의 첫 날짜 저장이 충돌하면 초안을 유지하고 동료
     await expect(dialog).toBeVisible();
     await expect(review).toBeFocused();
     await expect(apply).toBeDisabled();
-    expect(writes).toEqual([manualPreview]);
+    expect(writes).toEqual([manualPreview, manualPreview]);
 
     await review.press('Escape');
     await expect(dialog).toHaveCount(0);
     await expect(start).toBeFocused();
-    await expect(start).toHaveValue(date(24));
+    await expect(start).toHaveValue(proposedStart);
     expect((await workspace(request)).issues.find(candidate => candidate.id === issue.id)).toEqual(latest);
 
     const reopened = nextPost(page, manualPreview);
@@ -540,25 +552,25 @@ test('한 행의 첫 날짜 저장이 충돌하면 초안을 유지하고 동료
     await review.click();
     const response = await refreshed;
     expect(response.request().postDataJSON()).toEqual({ changes: [{
-      id: issue.id, expectedVersion: latest.version, startDate: date(24), endDate: date(29),
+      id: issue.id, expectedVersion: latest.version, startDate: proposedStart, endDate: date(29),
     }] });
     const preview = await json<SchedulePreview>(response);
     const row = dialog.getByRole('row').filter({ hasText: issue.key });
     await expect(row.getByRole('cell').nth(1)).toHaveText(`${date(23)}${date(29)}`);
-    await expect(row.locator('.gantt-new-dates')).toHaveText(`${date(24)}${date(29)}`);
+    await expect(row.locator('.gantt-new-dates')).toHaveText(`${proposedStart}${date(29)}`);
     expect((await workspace(request)).issues.find(candidate => candidate.id === issue.id)).toEqual(latest);
-    expect(writes).toEqual([manualPreview, manualPreview, manualPreview]);
+    expect(writes).toEqual([manualPreview, manualPreview, manualPreview, manualPreview]);
 
     const applied = nextPost(page, manualApply);
     await apply.click();
     const appliedResponse = await applied;
     expect(appliedResponse.request().postDataJSON()).toEqual({ previewId: preview.previewId });
     expect((await json<SchedulePasteApplyResult>(appliedResponse)).updated).toMatchObject([{
-      id: issue.id, version: latest.version + 1, startDate: date(24), endDate: date(29),
+      id: issue.id, version: latest.version + 1, startDate: proposedStart, endDate: date(29),
     }]);
     await expect(dialog).toHaveCount(0);
     await expect(save).toHaveCount(0);
-    await expect(start).toHaveValue(date(24));
+    await expect(start).toHaveValue(proposedStart);
     await expect(chart.end(issue)).toHaveValue(date(29));
   } finally { await data.close(); }
 });

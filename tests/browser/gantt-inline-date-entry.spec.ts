@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext, type Locator } from '@playwright/test';
+import { expect, test, type APIRequestContext, type Dialog, type Locator } from '@playwright/test';
 import type { Issue, WorkspaceSnapshot } from '../../shared/types';
 
 async function workspace(request: APIRequestContext) {
@@ -44,7 +44,16 @@ test('360px 간트의 날짜 입력은 업무 상세를 열지 않고 행에서 
     await expect(start(unscheduled)).toHaveValue('');
     await expect(end(unscheduled)).toHaveValue('');
     await start(unscheduled).fill(startDate);
-    await end(unscheduled).focus();
+    await chartAction(unscheduled).click();
+    await expectVisibleFocus(end(unscheduled));
+    const acceptReload = (dialog: Dialog) => { void dialog.accept(); };
+    page.on('dialog', acceptReload);
+    try { await page.reload(); }
+    finally { page.off('dialog', acceptReload); }
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(title);
+    await listAction(unscheduled).click();
+    await expectVisibleFocus(end(unscheduled));
+    await expect(start(unscheduled)).toHaveValue(startDate);
     expect((await stored(unscheduled.id))?.version).toBe(unscheduled.version);
     await end(unscheduled).fill(endDate);
     await end(unscheduled).press('Enter');
@@ -55,6 +64,13 @@ test('360px 간트의 날짜 입력은 업무 상세를 열지 않고 행에서 
     await expectVisibleFocus(end(hasStart));
     await expect(start(hasStart)).toHaveValue(startDate);
     await expect(end(hasStart)).toHaveValue('');
+    await start(hasStart).fill('');
+    await listAction(hasStart).click();
+    await expectVisibleFocus(start(hasStart));
+    await start(hasStart).press('Escape');
+    await expect(start(hasStart)).toHaveValue(startDate);
+    await chartAction(hasStart).click();
+    await expectVisibleFocus(end(hasStart));
     await end(hasStart).fill(endDate);
     await end(hasStart).press('Enter');
     await expect.poll(() => stored(hasStart.id)).toMatchObject({ startDate, endDate });

@@ -5,9 +5,9 @@ import { expect, request as apiRequest, test, type APIRequestContext, type Brows
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
 import { documentPlainText } from '../../shared/document-plain-text';
-import type { DocPage, DocRevision } from '../../shared/types';
+import type { DocPage, DocRevision, Issue } from '../../shared/types';
 import { prepareGitlabTraffic } from './gitlab-traffic';
-import { verifyWorkspaceTraffic } from './workspace-traffic';
+import { verifyWorkspaceTraffic, type ScheduledSuccessorPlan } from './workspace-traffic';
 
 interface Fixture {
   actorIds: string[];
@@ -235,6 +235,59 @@ async function openLatest(peer: Peer) {
   finally { peer.page.off('dialog', accept); }
 }
 
+async function createGanttSuccessor(peer: Peer, origin: string, jiraKey: string, plan: ScheduledSuccessorPlan): Promise<Issue> {
+  const { predecessor, calendarVersion, lagDays, startDate, endDate } = plan;
+  const title = `${predecessor.key} 후속 일정`;
+  const page = await peer.context.newPage();
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${predecessor.projectId}/gantt`, { waitUntil: 'domcontentloaded', timeout: SYNC_TIMEOUT });
+    await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(peer.actorId, { timeout: SYNC_TIMEOUT });
+    const search = page.getByLabel('간트 업무 검색', { exact: true });
+    await search.fill(jiraKey, { timeout: SYNC_TIMEOUT });
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const source = chart.locator(`[data-issue-id="${predecessor.id}"]`);
+    await expect(source.getByLabel(`${predecessor.key} 종료일`, { exact: true })).toHaveValue(predecessor.endDate!, { timeout: SYNC_TIMEOUT });
+    await source.getByRole('checkbox', { name: `${predecessor.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '새 후행 업무 추가', exact: true }).click();
+
+    const form = page.getByRole('dialog', { name: '후행 업무 만들기', exact: true });
+    const titleField = form.getByLabel('업무 제목', { exact: true });
+    await expect(form).toContainText(predecessor.key);
+    await titleField.fill(title);
+    await expect(form.getByLabel('연결 유형', { exact: true })).toHaveValue('FS');
+    await form.getByLabel('근무일 간격', { exact: true }).fill(String(lagDays));
+    const relation = form.getByRole('region', { name: '선행 일정 연결', exact: true });
+    await expect(relation).toContainText(`제안 시작일 ${startDate}`);
+    await relation.getByRole('button', { name: '제안 날짜 적용', exact: true }).click();
+    await expect(titleField).toHaveValue(title);
+    await expect(form.getByLabel('시작일', { exact: true })).toHaveValue(startDate);
+    await form.getByLabel('종료일', { exact: true }).fill(endDate);
+
+    const path = `/api/issues/${encodeURIComponent(predecessor.id)}/schedule-successors`;
+    const [response] = await Promise.all([
+      page.waitForResponse(value => new URL(value.url()).pathname === path && value.request().method() === 'POST', { timeout: SYNC_TIMEOUT }),
+      form.getByRole('button', { name: '업무 만들고 일정 연결', exact: true }).click(),
+    ]);
+    expect(response.status(), await response.text()).toBe(201);
+    const write = response.request();
+    expect(await write.headerValue('origin')).toBe(origin);
+    expect(await write.headerValue('x-actor-id')).toBe(peer.actorId);
+    expect(write.postDataJSON()).toMatchObject({ expectedPredecessorVersion: predecessor.version, expectedCalendarVersion: calendarVersion,
+      type: 'FS', lagDays, issue: { title, startDate, endDate } });
+    const successor = await response.json() as Issue;
+    const details = page.getByRole('dialog', { name: title, exact: true });
+    await expect(details).toBeVisible({ timeout: SYNC_TIMEOUT });
+    await details.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await search.fill('');
+    await expect(chart.getByLabel(`${successor.key} 시작일`, { exact: true })).toHaveValue(startDate, { timeout: SYNC_TIMEOUT });
+    await expect(chart.getByLabel(`${successor.key} 종료일`, { exact: true })).toHaveValue(endDate);
+    return successor;
+  } finally {
+    await page.close();
+  }
+}
+
 async function verifyGantt(context: BrowserContext, projectId: string, traffic: Awaited<ReturnType<typeof verifyWorkspaceTraffic>>) {
   const page = await context.newPage();
   try {
@@ -330,6 +383,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
           verifyWorkspaceTraffic(peers[0].context.request, {
             projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL,
             concurrentActor: { requests: peers[2].context.request, actorId: peers[2].actorId },
+            createScheduledSuccessor: plan => createGanttSuccessor(peers[0], baseURL, fixture.originalJiraKey, plan),
           }),
           verifyGitlabTraffic(),
         ]);
@@ -345,7 +399,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     if (!gitlabTraffic) throw new Error('The team pilot did not verify signed GitLab activity.');
     await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
     keepConnected();
-    console.log('The protected Gantt rendered the resolved dependency, and signed GitLab pipeline events refreshed links and applied one workflow transition.');
+    console.log('The protected Gantt saved a successor with reviewed dates and rendered the resolved dependency. Signed GitLab pipeline events applied one workflow transition.');
 
     const delayed = peers.at(-1)!;
     const onlinePeers = peers.slice(0, -1);

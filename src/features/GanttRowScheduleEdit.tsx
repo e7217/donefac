@@ -31,16 +31,16 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issueAliases?: WorkspaceSnapshot['issueAliases'];
   dependencies: readonly Dependency[];
   incomingTeamBlockers?: readonly TeamIncomingBlocker[];
-  relatedIncomingTeamBlockers?: readonly TeamIncomingBlocker[];
+  relatedIncomingTeamBlockers?: ReadonlyMap<string, readonly TeamIncomingBlocker[]>;
   outgoingTeamBlockers?: readonly TeamFollowUpChoice[];
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
   datesFromGantt?: boolean;
-  initialRelatedDates?: { source: Issue; changes: ScheduleBulkDateChanges };
+  relatedDateDrafts?: ReadonlyMap<string, { changes: ScheduleBulkDateChanges }>;
+  initialRelatedDateId?: string;
   initialLink?: GanttRowLinkDraft;
-  otherDateDrafts?: ReadonlySet<string>;
   undoScope?: ScheduleUndoScope;
   onClose: () => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean) => void;
@@ -162,15 +162,15 @@ const incomingBlockerVersions = ({ relation, source }: TeamIncomingBlocker) =>
   [relation.id, relation.origin, relation.version, source.id, source.projectId, source.version, source.endDate];
 
 export function GanttRowScheduleEdit({
-  issue, issues, workspaceProjects, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers = [], outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
-  initialRelatedDates, initialLink, otherDateDrafts, notify, refresh, onClose, onDraftChange, onApplied, datesFromGantt,
+  issue, issues, workspaceProjects, issueAliases, dependencies, incomingTeamBlockers = [], relatedIncomingTeamBlockers, outgoingTeamBlockers = [], calendar, focusDate, initialDates, initialDateDraft, actorId, undoScope,
+  relatedDateDrafts, initialRelatedDateId, initialLink, notify, refresh, onClose, onDraftChange, onApplied, datesFromGantt,
 }: Props) {
   const uid = useId();
   const [editedDates, setEditedDates] = useState<ScheduleBulkDateChanges>(() => initialDates ?? {});
   const [suggestionOverrides, setSuggestionOverrides] = useState<ScheduleBulkDateChanges>({});
   const [suggestionDuration, setSuggestionDuration] = useState('3');
   const [drafts, setDrafts] = useState<LinkDraft[]>(() => [{ ...linkDraft(1), ...initialLink }]);
-  const [includeRelatedDates, setIncludeRelatedDates] = useState(true);
+  const [relatedDateChoice, setRelatedDateChoice] = useState(initialRelatedDateId ?? '');
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const nextDraftId = useRef(2);
@@ -217,20 +217,24 @@ export function GanttRowScheduleEdit({
   }
 
   const resolvedDrafts = drafts.map(draft => resolveDraft(draft, anchor, projectIssues, links));
-  const relatedId = initialRelatedDates?.source.id;
-  const pairedIssue = relatedId && resolvedDrafts.some(({ related, selected }, index) => {
-    const action = drafts[index].action;
-    return action === 'add' && related?.id === relatedId || action === 'update' && selected?.other.id === relatedId;
-  }) ? projectIssues.get(relatedId) : undefined;
-  const relatedDates = includeRelatedDates && pairedIssue && initialRelatedDates
-    ? { issue: versionedIssue(pairedIssue), changes: initialRelatedDates.changes } : undefined;
+  const draftedPeers = new Map<string, Issue>();
+  const pairedDateOptions = new Map<string, { issue: Issue; changes: ScheduleBulkDateChanges }>();
+  for (const [index, { related, selected }] of resolvedDrafts.entries()) {
+    const other = related ?? selected?.other;
+    if (!other) continue;
+    const dateDraft = relatedDateDrafts?.get(other.id);
+    if (!dateDraft) continue;
+    draftedPeers.set(other.id, other);
+    if (drafts[index].action !== 'remove') pairedDateOptions.set(other.id, { issue: other, changes: dateDraft.changes });
+  }
+  const pairedChoice = pairedDateOptions.get(relatedDateChoice);
+  const shownRelatedDraft = pairedChoice ?? (pairedDateOptions.size === 1 ? pairedDateOptions.values().next().value : undefined);
+  const pairedIssue = pairedChoice?.issue;
+  const relatedDates = pairedChoice ? { issue: versionedIssue(pairedChoice.issue), changes: pairedChoice.changes } : undefined;
   function projectedRelatedIssue(other: Issue) {
     return relatedDates?.issue.id === other.id ? { ...other, ...relatedDates.changes } : other;
   }
-  const unreviewedKeys = new Set(resolvedDrafts.flatMap(({ related, selected }) => {
-    const other = related ?? selected?.other;
-    return other && other.id !== relatedDates?.issue.id && otherDateDrafts?.has(other.id) ? [other.key] : [];
-  }));
+  const unreviewedKeys = [...draftedPeers.values()].filter(other => other.id !== pairedIssue?.id).map(other => other.key);
   const targetCounts = new Map<string, number>();
   const edits: ScheduleRowDependencyEdit[] = [];
   const editGroups: number[] = [];
@@ -250,7 +254,7 @@ export function GanttRowScheduleEdit({
     payload, editGroups, calendarVersion: calendar?.version ?? 1,
     links: links.map(link => [dependencyGuardFields(link.dependency), link.other.version]),
     incoming: changes.startDate !== undefined || suggestionApplied || rescheduleSuccessors ? incomingTeamBlockers.map(incomingBlockerVersions) : undefined,
-    relatedIncoming: suggestionApplied && relatedDates ? relatedIncomingTeamBlockers.map(incomingBlockerVersions) : undefined,
+    relatedIncoming: suggestionApplied && pairedIssue ? relatedIncomingTeamBlockers?.get(pairedIssue.id)?.map(incomingBlockerVersions) : undefined,
     outgoing: changes.endDate !== undefined || rescheduleSuccessors ? outgoingTeamBlockers.map(({ relation, target }) =>
       [relation.id, relation.origin, relation.version, target.id, target.projectId, target.version, target.startDate]) : undefined,
   });
@@ -606,25 +610,33 @@ export function GanttRowScheduleEdit({
               invalidate();
             }} />
         </fieldset>
-        {pairedIssue && initialRelatedDates && <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
+        {pairedDateOptions.size > 0 && <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>연결 업무의 날짜</legend>
-          <div className="gantt-row-edit-diff">
-            <div className="gantt-row-edit-diff-title"><strong>{issueText(pairedIssue)}</strong></div>
-            <dl>{dates.filter(({ field }) => Object.hasOwn(initialRelatedDates.changes, field)).map(({ field, label }) =>
-              <div key={field}><dt>{label}</dt><dd>{pairedIssue[field] ?? '미정'} → <strong>{initialRelatedDates.changes[field] ?? '미정'}</strong></dd></div>)}</dl>
-          </div>
-          <label className="gantt-row-edit-date-toggle">
-            <input type="checkbox" checked={includeRelatedDates} onChange={event => {
-              setIncludeRelatedDates(event.currentTarget.checked);
+          {pairedDateOptions.size > 1 && <label className="issue-form-label">함께 저장할 업무 날짜
+            <select className="field" value={pairedIssue?.id ?? ''} onChange={event => {
+              setRelatedDateChoice(event.currentTarget.value);
               invalidate();
-            }} />
-            이 업무의 날짜도 저장
-          </label>
+            }}>
+              <option value="">날짜를 선택하지 않음</option>
+              {[...pairedDateOptions.values()].map(({ issue: peer }) => <option key={peer.id} value={peer.id}>{issueText(peer)}</option>)}
+            </select>
+          </label>}
+          {shownRelatedDraft && <div className="gantt-row-edit-diff">
+            <div className="gantt-row-edit-diff-title"><strong>{issueText(shownRelatedDraft.issue)}</strong></div>
+            <dl>{dates.filter(({ field }) => Object.hasOwn(shownRelatedDraft.changes, field)).map(({ field, label }) =>
+              <div key={field}><dt>{label}</dt><dd>{shownRelatedDraft.issue[field] ?? '미정'} → <strong>{shownRelatedDraft.changes[field] ?? '미정'}</strong></dd></div>)}</dl>
+          </div>}
+          {pairedDateOptions.size === 1 && shownRelatedDraft && <label className="gantt-row-edit-date-toggle">
+            <input type="checkbox" checked={Boolean(pairedChoice)} onChange={event => {
+              setRelatedDateChoice(event.currentTarget.checked ? shownRelatedDraft.issue.id : '');
+              invalidate();
+            }} />이 업무의 날짜도 저장
+          </label>}
         </fieldset>}
         <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>선후행 연결</legend>
-          {unreviewedKeys.size > 0 && <p className="gantt-row-edit-hint">
-            {[...unreviewedKeys].join(', ')}의 날짜 입력은 간트에 남습니다. 연결 미리보기에는 해당 업무의 저장된 날짜를 사용합니다.
+          {unreviewedKeys.length > 0 && <p className="gantt-row-edit-hint" role="status">
+            {unreviewedKeys.join(', ')}의 날짜 입력은 간트에 남습니다. 연결 미리보기에는 해당 업무의 저장된 날짜를 사용합니다.
           </p>}
           {links.length > 0 && <details className="gantt-row-edit-existing">
             <summary>현재 연결 {links.length}개</summary>

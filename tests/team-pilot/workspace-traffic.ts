@@ -3,11 +3,14 @@ import { defaultWorkCalendar, shiftWorkingDate, workingDateOnOrAfter } from '../
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import type {
-  AutomaticSchedulePreview, Dependency, DocPage, DocRevision, Issue, IssueChangeHistoryPage, IssueRelation, Project, ProjectWorkloadResult, RichContent,
+  AutomaticSchedulePreview, DocPage, DocRevision, Issue, IssueChangeHistoryPage, IssueRelation, Project, ProjectWorkloadResult, RichContent,
   SavedView, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, TeamWorkloadResult, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types';
 
 type ScheduleApplyResult = { updated: Issue[]; warnings: string[]; undoId: string };
+export interface ScheduledSuccessorPlan {
+  predecessor: Issue; calendarVersion: number; lagDays: number; startDate: string; endDate: string;
+}
 
 async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> {
   const response = await pending;
@@ -17,10 +20,11 @@ async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> 
 
 /** Exercise independent project work while the main document receives concurrent edits. */
 export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
-  projectId, issueId, actorId, concurrentActor, workingDate: providedDate, origin,
+  projectId, issueId, actorId, concurrentActor, workingDate: providedDate, origin, createScheduledSuccessor,
 }: {
   projectId: string; issueId: string; actorId: string; workingDate?: string; origin?: string;
   concurrentActor: { requests: APIRequestContext; actorId: string };
+  createScheduledSuccessor: (plan: ScheduledSuccessorPlan) => Promise<Issue>;
 }) {
   const headers = { 'X-Actor-Id': actorId, ...(origin ? { Origin: origin } : {}) };
   const concurrentHeaders = { ...headers, 'X-Actor-Id': concurrentActor.actorId };
@@ -56,13 +60,16 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
 
   const lagDays = 1;
   const firstAllowedSuccessor = shiftWorkingDate(initialDate, lagDays + 1, calendar);
-  const successor = await json<Issue>(requests.post('/api/issues', {
-    headers, data: { projectId, title: `${issue.key} 후속 일정`, startDate: firstAllowedSuccessor,
-      endDate: shiftWorkingDate(firstAllowedSuccessor, 1, calendar) },
-  }), 201);
+  const firstSuccessorEnd = shiftWorkingDate(firstAllowedSuccessor, 1, calendar);
+  const successor = await createScheduledSuccessor({ predecessor: updated, calendarVersion: calendar.version, lagDays,
+    startDate: firstAllowedSuccessor, endDate: firstSuccessorEnd });
+  expect(successor).toMatchObject({ projectId, startDate: firstAllowedSuccessor, endDate: firstSuccessorEnd });
+  const afterCreate = await json<WorkspaceSnapshot>(requests.get('/api/workspace', { headers }));
+  expect(afterCreate.issues.filter(value => value.title === successor.title)).toEqual([successor]);
   const link = { predecessorId: issueId, successorId: successor.id, type: 'FS' as const, lagDays };
-  const dependency = await json<Dependency>(requests.post('/api/dependencies', { headers, data: link }), 201);
-  expect(dependency).toMatchObject(link);
+  const outgoing = afterCreate.dependencies.filter(value => value.predecessorId === issueId && value.successorId === successor.id);
+  expect(outgoing).toEqual([expect.objectContaining(link)]);
+  const [dependency] = outgoing;
 
   const workingDate = shiftWorkingDate(initialDate, 2, calendar);
   const shift = await json<SchedulePreview>(requests.post('/api/schedule/preview', {

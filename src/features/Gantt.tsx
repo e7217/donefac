@@ -69,7 +69,8 @@ import './gantt.css';
 import './gantt-deadline-markers.css';
 
 type ApplyResult = { undoId: string; updated: Issue[]; warnings?: string[] };
-type InlineDateValues = { source: Issue; startDate: string | null; endDate: string | null };
+type ScheduleDatePair = Pick<Issue, 'startDate' | 'endDate'>;
+type InlineDateValues = ScheduleDatePair & { source: Issue };
 type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owner: symbol };
 type ChartDateDraft = { source: Issue; changes: ScheduleBulkDateChanges; owner?: symbol; stored?: StoredGanttDateDraft };
 type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartDateDraft; targetDraft?: ChartDateDraft };
@@ -97,7 +98,7 @@ function inlineDateChange(draft: InlineDateValues, issue = draft.source, picked?
     startDate: picked !== 'startDate' && draft.startDate === draft.source.startDate ? issue.startDate : draft.startDate,
     endDate: picked !== 'endDate' && draft.endDate === draft.source.endDate ? issue.endDate : draft.endDate };
 }
-function changedInlineDates(draft?: InlineDateValues): ScheduleBulkDateChanges {
+function changedInlineDates(draft?: ScheduleDatePair & { source: ScheduleDatePair }): ScheduleBulkDateChanges {
   if (!draft) return {};
   const changes: ScheduleBulkDateChanges = {};
   for (const field of ['startDate', 'endDate'] as const) {
@@ -179,11 +180,9 @@ type RowScheduleEdit = {
   issue: Issue;
   opener: HTMLButtonElement;
   focusDate?: 'dueDate';
-  inlineDraft?: InlineDateDraft;
-  relatedInlineDraft?: InlineDateDraft;
-  initialDates?: ScheduleBulkDateChanges;
+  dateDrafts: ReadonlyMap<string, ChartDateDraft>;
+  initialRelatedDateId?: string;
   initialLink?: GanttRowLinkDraft;
-  otherDateDrafts?: ReadonlySet<string>;
 };
 type ScheduleFocus = {
   kind: 'dependencies' | 'hierarchy';
@@ -257,8 +256,14 @@ function focusGanttDate(chart: Element | null, issueId: string, edge: 'start' | 
   return true;
 }
 
-function focusDateFromControl(control: HTMLButtonElement, issue: Issue, edge: 'start' | 'end' = issue.startDate ? 'end' : 'start') {
+function focusDateFromControl(control: HTMLButtonElement, issue: Issue, edge: 'start' | 'end') {
   focusGanttDate(control.closest('.gantt-feature'), issue.id, edge);
+}
+
+function firstMissingDate(issue: ScheduleDatePair, changes?: ScheduleBulkDateChanges): 'start' | 'end' {
+  const { startDate, endDate } = { startDate: issue.startDate, endDate: issue.endDate, ...changes };
+  const emptyEdge = !startDate ? 'start' : !endDate ? 'end' : undefined;
+  return emptyEdge ?? (issue.startDate ? 'end' : 'start');
 }
 
 function getFixedDateEdge({ startDate, endDate }: Partial<Pick<Issue, 'startDate' | 'endDate'>>): FixedDateEdge | undefined {
@@ -706,6 +711,9 @@ function ProjectGantt(props: GanttProps) {
     const source = { ...issue, version: stored.version, startDate: stored.startDate, endDate: stored.endDate };
     const changes = changedInlineDates({ source, startDate: stored.draftStart, endDate: stored.draftEnd });
     return Object.keys(changes).length ? { source, changes, stored } : undefined;
+  }
+  function focusMissingDate(issue: Issue, opener: HTMLButtonElement) {
+    focusDateFromControl(opener, issue, firstMissingDate(issue, chartDateDraft(issue)?.changes));
   }
   function acceptChartDateDraft(saved: Issue, draft: ChartDateDraft | undefined) {
     if (!draft) return;
@@ -1155,12 +1163,14 @@ function ProjectGantt(props: GanttProps) {
         scrollTimelineDate(scroll, (dayNumber(startDate) - range.start) * dayWidth);
         if (!issueOverlayOpen) row.querySelector<HTMLButtonElement>('.gantt-bar')?.focus({ preventScroll: true });
       } else if (!issueOverlayOpen) {
-        if (!focusGanttDate(scroll, id, startDate ? 'end' : 'start', 'nearest')) return;
+        const draft = recoverableDates(focusedIssue, inlineDateRecords.get(id));
+        const changes = draft && changedInlineDates({ source: draft, startDate: draft.draftStart, endDate: draft.draftEnd });
+        if (!focusGanttDate(scroll, id, firstMissingDate({ startDate, endDate }, changes), 'nearest')) return;
       }
       handledFocusRequest.current = focusRequest;
     });
     return () => cancelAnimationFrame(frame);
-  }, [dateRecoveryReady, dayWidth, focusDateEndpoint, focusRequest, focusedIssue, issueOverlayOpen, range.start]);
+  }, [dateRecoveryReady, dayWidth, focusDateEndpoint, focusRequest, focusedIssue, inlineDateRecords, issueOverlayOpen, range.start]);
   const selectedIssues = issues.filter(i => selected.has(i.id));
   const shiftIssues = shiftMode === 'hierarchy' ? hierarchyTrace?.issues ?? [] : selectedIssues;
   const shiftCanIncludeTeamBlockers = shiftIncludesTeamBlockers || shiftIssues.some(issue => reachesTeamBlockers.has(issue.id));
@@ -1828,12 +1838,12 @@ function ProjectGantt(props: GanttProps) {
   }
   async function saveDates(issue: Issue, startDate: string | null, endDate: string | null, inline: InlineScheduleOrigin) {
     if (startDate === issue.startDate && endDate === issue.endDate) return;
-    if (startDate && endDate && startDate > endDate) { notify('종료일은 시작일보다 빠를 수 없습니다.', 'error'); return; }
     if (busyRef.current || manualReview) { notify('진행 중인 일정 변경이 끝난 뒤 다시 시도하세요.', 'error'); return; }
     const input = manualDates(issue, startDate, endDate);
     const dateOrigin = { ...inline, source: issue, startDate, endDate };
     markBusy(true);
     try {
+      // The server checks the issue version before validating the date range.
       const preview = await post<SchedulePreview>('/schedule/manual-preview', input);
       const review = { input, preview, inline: dateOrigin };
       if (preview.warnings.length || preview.blocking?.length) {
@@ -1941,10 +1951,13 @@ function ProjectGantt(props: GanttProps) {
     if (!keepDates && !canLeave()) return;
     if (keepDates && options.anchor) {
       const { issueId, otherRole } = options.anchor;
-      const draft = inlineDateDrafts.current.get(issueId);
-      if (draft) {
-        openRowScheduleEdit(draft.source, opener, { initialLink: { action: 'add', direction: otherRole } });
-        return;
+      const issue = projectIssues.find(value => value.id === issueId);
+      if (issue) {
+        const dateDrafts = rowDateDrafts(issue.projectId);
+        if (dateDrafts.size) {
+          openRowScheduleEdit(issue, opener, { dateDrafts, initialLink: { action: 'add', direction: otherRole } });
+          return;
+        }
       }
     }
     // An accepted draft discard is queued by the navigation guard first.
@@ -1959,21 +1972,28 @@ function ProjectGantt(props: GanttProps) {
       [...draftsRef.current].every(([id, value]) => id.startsWith('dates:') && !value.pending && !value.awaitingResult);
   }
   function canKeepLinkDateDrafts(fromLinkPicker = false) {
-    return draftsRef.current.size > 0 && canKeepInlineDateDrafts(fromLinkPicker);
+    return (draftsRef.current.size > 0 || retainedDates.current.size > 0) && canKeepInlineDateDrafts(fromLinkPicker);
+  }
+  function rowDateDrafts(projectId: string) {
+    const result = new Map<string, ChartDateDraft>();
+    if (!inlineDateDrafts.current.size && !retainedDates.current.size) return result;
+    for (const issue of projectIssues) {
+      if (issue.projectId !== projectId || (!inlineDateDrafts.current.has(issue.id) && !retainedDates.current.has(issue.id))) continue;
+      const draft = chartDateDraft(issue);
+      if (draft) result.set(issue.id, draft);
+    }
+    return result;
   }
   function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement,
-    { focusDate, initialLink, relatedId, fromLinkPicker = false }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & {
-      relatedId?: string; fromLinkPicker?: boolean;
+    { focusDate, initialLink, relatedId, fromLinkPicker = false, dateDrafts }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & {
+      relatedId?: string; fromLinkPicker?: boolean; dateDrafts?: RowScheduleEdit['dateDrafts'];
     } = {}) {
     const canKeepDates = canKeepInlineDateDrafts(fromLinkPicker);
     if (!canKeepDates && !canLeave()) return;
-    const inlineDraft = canKeepDates ? inlineDateDrafts.current.get(issue.id) : undefined;
-    const relatedInlineDraft = canKeepDates && relatedId ? inlineDateDrafts.current.get(relatedId) : undefined;
-    const initialDates = changedInlineDates(inlineDraft);
-    const otherDateDrafts = initialLink ? new Set([...inlineDateDrafts.current.keys()].filter(id => id !== issue.id)) : undefined;
+    const snapshots = canKeepDates ? dateDrafts ?? rowDateDrafts(issue.projectId) : new Map<string, ChartDateDraft>();
     queueMicrotask(() => {
       setLinkPicker(null);
-      setRowScheduleEdit({ issue, opener, focusDate, inlineDraft, relatedInlineDraft, initialDates, initialLink, otherDateDrafts });
+      setRowScheduleEdit({ issue, opener, focusDate, dateDrafts: snapshots, initialRelatedDateId: relatedId, initialLink });
     });
   }
   function closeRowScheduleEdit(updated?: readonly Issue[]) {
@@ -2803,7 +2823,7 @@ function ProjectGantt(props: GanttProps) {
             {dragging && offset !== 0 && <small className="gantt-drag-label">{drag.mode === 'move' ? `${offset > 0 ? '+' : ''}${offset}일` : `${moveDate(issue.startDate!, startOffset)} ~ ${moveDate(issue.endDate!, endOffset)}`}</small>}
           </div> : hasSchedule ? <button className="gantt-jump-date" onClick={() => showDate(issue.startDate!)}>{issue.startDate} — {issue.endDate} · 일정으로 이동 →</button> : !linkPicker && <div className="gantt-date-range-actions">
             <button type="button" className="gantt-no-schedule gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
-              disabled={busy || Boolean(activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}><Plus size={12} aria-hidden="true" />날짜 입력</button>
+              disabled={busy || Boolean(activeDatePicker)} onClick={event => focusMissingDate(issue, event.currentTarget)}><Plus size={12} aria-hidden="true" />날짜 입력</button>
             <GanttDatePickerButton issue={issue} className="gantt-no-schedule gantt-missing-date-action"
               disabled={datePickingDisabled} onOpen={startDatePicking} />
           </div>}
@@ -2857,7 +2877,7 @@ function ProjectGantt(props: GanttProps) {
       return <div key={issue.id} className="gantt-unscheduled-row">
         <button type="button" onClick={event => openIssueRow(issue.id, event.currentTarget)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
         <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}
-          disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusDateFromControl(event.currentTarget, issue)}>날짜 입력</button>
+          disabled={busy || Boolean(linkPicker || activeDatePicker)} onClick={event => focusMissingDate(issue, event.currentTarget)}>날짜 입력</button>
         <GanttDatePickerButton issue={issue} className="btn gantt-missing-date-action" disabled={datePickingDisabled} onOpen={startDatePicking} />
         {(linkedIssueIds.has(issue.id) || incomingTeamBlockers.has(issue.id))
           ? <button type="button" className="btn gantt-missing-date-action" disabled={busy || Boolean(linkPicker || activeDatePicker)}
@@ -3042,13 +3062,12 @@ function ProjectGantt(props: GanttProps) {
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} workspaceProjects={data.projects} issueAliases={data.issueAliases}
       incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}
-      relatedIncomingTeamBlockers={rowScheduleEdit.relatedInlineDraft && incomingTeamBlockers.get(rowScheduleEdit.relatedInlineDraft.source.id)}
+      relatedIncomingTeamBlockers={incomingTeamBlockers}
       outgoingTeamBlockers={teamBlockerChoices.get(rowScheduleEdit.issue.id)}
       dependencies={data.dependencies} calendar={rowEditCalendar} focusDate={rowScheduleEdit.focusDate}
-      initialDates={rowScheduleEdit.initialDates} initialDateDraft={rowScheduleEdit.inlineDraft?.source}
-      initialRelatedDates={rowScheduleEdit.relatedInlineDraft && { source: rowScheduleEdit.relatedInlineDraft.source,
-        changes: changedInlineDates(rowScheduleEdit.relatedInlineDraft) }}
-      initialLink={rowScheduleEdit.initialLink} otherDateDrafts={rowScheduleEdit.otherDateDrafts}
+      initialDates={rowScheduleEdit.dateDrafts.get(rowScheduleEdit.issue.id)?.changes}
+      initialDateDraft={rowScheduleEdit.dateDrafts.get(rowScheduleEdit.issue.id)?.source}
+      relatedDateDrafts={rowScheduleEdit.dateDrafts} initialRelatedDateId={rowScheduleEdit.initialRelatedDateId} initialLink={rowScheduleEdit.initialLink}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
       onApplied={async (result, reviewedAnchorVersion, reviewedRelatedIssue) => {
         rememberUndo(result.undoId);
@@ -3056,12 +3075,11 @@ function ProjectGantt(props: GanttProps) {
         const reviewedRows = [{ id: rowScheduleEdit.issue.id, expectedVersion: reviewedAnchorVersion }, reviewedRelatedIssue];
         for (const row of reviewedRows) {
           if (!row) continue;
-          const draft = inlineDateDrafts.current.get(row.id);
-          const original = row.id === rowScheduleEdit.issue.id ? rowScheduleEdit.inlineDraft : rowScheduleEdit.relatedInlineDraft;
-          if (!draft || draft.owner !== original?.owner) continue;
+          const draft = rowScheduleEdit.dateDrafts.get(row.id);
+          if (!draft) continue;
           const saved = result.updated.find(issue => issue.id === row.id)
             ?? rowEditIssues.find(issue => issue.id === row.id && issue.version === row.expectedVersion);
-          if (saved) draft.accept(saved);
+          if (saved) acceptChartDateDraft(saved, draft);
         }
         await refresh();
         closeRowScheduleEdit(result.updated);

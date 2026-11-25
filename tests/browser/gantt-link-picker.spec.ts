@@ -271,6 +271,105 @@ test('선택 업무의 날짜를 유지해 숨은 업무를 찾고 독립 연결
   }
 });
 
+test('360px 간트에서 날짜 초안이 없는 기준 업무로 검색하고 골라 둔 상대 업무의 날짜만 연결과 함께 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const project = (await workspace(request)).projects[0];
+  const prefix = `간트 검색에서 상대 날짜 ${randomUUID().slice(0, 8)}`;
+  const issues: Issue[] = [];
+  try {
+    const anchor = await createIssue(request, project.id, `${prefix} 기준`, issues, dateAt(1), dateAt(12));
+    const peer = await createIssue(request, project.id, `${prefix} 첫 상대`, issues, dateAt(5), dateAt(30));
+    const other = await createIssue(request, project.id, `${prefix} 두 번째 상대`, issues, dateAt(6), dateAt(35));
+    const unrelated = await createIssue(request, project.id, `${prefix} 별도 업무`, issues, dateAt(7), dateAt(22));
+    const { chart } = await openChart(page, project.id, prefix);
+    const peerStart = chart.getByLabel(`${peer.key} 시작일`, { exact: true });
+    const otherStart = chart.getByLabel(`${other.key} 시작일`, { exact: true });
+    const unrelatedEnd = chart.getByLabel(`${unrelated.key} 종료일`, { exact: true });
+    const peerDraft = dateAt(20), otherDraft = dateAt(23), unrelatedDraft = dateAt(25);
+    await peerStart.fill(peerDraft);
+    await otherStart.fill(otherDraft);
+    await unrelatedEnd.fill(unrelatedDraft);
+    await chart.getByRole('checkbox', { name: `${anchor.key} 선택`, exact: true }).check();
+    const anchorLink = page.getByRole('button', { name: '선택 업무에서 연결', exact: true });
+    await anchorLink.click();
+
+    const dialog = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const search = dialog.getByRole('textbox', { name: '연결할 업무 검색', exact: true });
+    await expect(search).toBeFocused();
+    await search.fill(peer.key);
+    await search.press('Enter');
+    const relatedDates = dialog.getByRole('group', { name: '연결 업무의 날짜', exact: true });
+    await expect(relatedDates).toContainText(peerDraft);
+    const includePeer = relatedDates.getByRole('checkbox', { name: '이 업무의 날짜도 저장', exact: true });
+    await expect(includePeer).not.toBeChecked();
+    await expect(dialog.getByText(`${peer.key}의 날짜 입력은 간트에 남습니다.`, { exact: false })).toBeVisible();
+
+    const previewButton = dialog.getByRole('button', { name: '변경 미리보기', exact: true });
+    async function preview() {
+      const responsePromise = waitPost(page, '/api/schedule/row-edit/preview');
+      await previewButton.click();
+      const response = await responsePromise;
+      expect(response.ok(), await response.text()).toBeTruthy();
+      return { input: response.request().postDataJSON(), result: await response.json() as SchedulePastePreview };
+    }
+    const excluded = await preview();
+    expect(excluded.input).not.toHaveProperty('relatedDates');
+    expect(excluded.result.warnings.some(warning => warning.includes(anchor.key) && warning.includes(peer.key))).toBeTruthy();
+    await includePeer.check();
+    const included = await preview();
+    expect(included.input).toMatchObject({ issue: { id: anchor.id }, changes: {},
+      relatedDates: { issue: { id: peer.id, expectedVersion: peer.version }, changes: { startDate: peerDraft } } });
+    expect(included.result.warnings).toEqual([]);
+
+    await dialog.getByRole('button', { name: '연결 변경 추가', exact: true }).click();
+    const secondLink = dialog.getByRole('group', { name: '연결 변경 2', exact: true });
+    await secondLink.getByLabel('선후행 연결 작업', { exact: true }).selectOption('add');
+    const secondSearch = secondLink.getByRole('textbox', { name: '연결할 업무 검색', exact: true });
+    await secondSearch.fill(other.key);
+    await secondSearch.press('Enter');
+    await secondLink.getByLabel('연결 방향', { exact: true }).selectOption('successor');
+    const dateChoice = relatedDates.getByRole('combobox', { name: '함께 저장할 업무 날짜', exact: true });
+    await expect(dateChoice).toHaveValue(peer.id);
+    await dateChoice.selectOption(other.id);
+    await expect(relatedDates).toContainText(otherDraft);
+    await dateChoice.selectOption(peer.id);
+    await expect(relatedDates).toContainText(peerDraft);
+    await expect(dialog.getByText(`${other.key}의 날짜 입력은 간트에 남습니다.`, { exact: false })).toBeVisible();
+
+    const reviewed = await preview();
+    expect(reviewed.input).toMatchObject({ relatedDates: { issue: { id: peer.id }, changes: { startDate: peerDraft } },
+      dependencies: [{ relatedIssue: { id: peer.id }, direction: 'successor' }, { relatedIssue: { id: other.id }, direction: 'successor' }] });
+    expect(reviewed.result.changes.map(change => change.id)).toEqual([peer.id]);
+    const applyPromise = waitPost(page, '/api/schedule/row-edit/apply');
+    await dialog.getByRole('button', { name: '일정과 연결 적용', exact: true }).click();
+    const applied = await applyPromise;
+    expect(applied.ok(), await applied.text()).toBeTruthy();
+    await expect(dialog).toHaveCount(0);
+    await expect(anchorLink).toBeFocused();
+    await expect(otherStart).toHaveValue(otherDraft);
+    await expect(unrelatedEnd).toHaveValue(unrelatedDraft);
+    const saved = await workspace(request);
+    expect(saved.issues.find(issue => issue.id === anchor.id)).toEqual(anchor);
+    expect(saved.issues.find(issue => issue.id === peer.id)).toMatchObject({ startDate: peerDraft });
+    expect(saved.issues.find(issue => issue.id === other.id)).toEqual(other);
+    expect(saved.issues.find(issue => issue.id === unrelated.id)).toEqual(unrelated);
+    expect(saved.dependencies.filter(link => link.predecessorId === anchor.id).map(link => link.successorId).sort())
+      .toEqual([peer.id, other.id].sort());
+
+    const undoPromise = waitPost(page, '/api/schedule/undo');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    expect((await undoPromise).ok()).toBeTruthy();
+    await expect(peerStart).toHaveValue(peer.startDate!);
+    await expect(otherStart).toHaveValue(otherDraft);
+    await expect(unrelatedEnd).toHaveValue(unrelatedDraft);
+    const undone = await workspace(request);
+    expect(undone.dependencies.filter(link => link.predecessorId === anchor.id)).toEqual([]);
+  } finally {
+    for (const issue of issues.reverse()) await request.delete(`/api/issues/${issue.id}`);
+  }
+});
+
 test('전체 간트에서 프로젝트 간 차단을 검토하고 닫아도 행의 날짜 입력은 남는다', async ({ page, request }) => {
   const { projects: [first, second] } = await workspace(request);
   const prefix = `교차 연결 날짜 유지 ${randomUUID().slice(0, 8)}`;

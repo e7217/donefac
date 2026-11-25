@@ -105,6 +105,15 @@ test('360px 선택 업무에 날짜가 없으면 첫 빈 칸에 포커스하고 
     await expectVisibleFocus(start(empty));
     await expect(start(empty)).toHaveValue('');
     await expect(end(empty)).toHaveValue('');
+    await start(empty).fill(savedStart);
+    await page.reload();
+    await expectVisibleFocus(end(empty));
+    await expect(start(empty)).toHaveValue(savedStart);
+    await end(empty).press('Escape');
+    await expect(start(empty)).toHaveValue('');
+    await page.goto(`${focused(empty)}&focusDate=endDate`);
+    await expect(page).toHaveURL(url => url.hash === `${focused(empty).slice(1)}&focusDate=endDate`);
+    await expectVisibleFocus(end(empty));
     await page.goto(focused(withStart));
     await expectVisibleFocus(end(withStart));
     await expect(start(withStart)).toHaveValue(savedStart);
