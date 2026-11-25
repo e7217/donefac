@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { expect, test, type APIResponse, type Page } from '@playwright/test';
 import type { Issue, IssueRelation, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerPreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
@@ -15,7 +16,7 @@ function nextPost(page: Page, path: string) {
   return page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === path);
 }
 
-test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 함께 적용하고 되돌린다', async ({ page, request }) => {
+test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적용하고 차트에서 확인한 뒤 되돌린다', async ({ page, request }, testInfo) => {
   test.setTimeout(100_000);
   const snapshot = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const { projects: [first, second], users: [actor] } = await snapshot();
@@ -64,8 +65,12 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 함�
     await page.goto(`/${route}`);
     const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
     await expect(search).toHaveValue(prefix);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-16');
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const date = (issue: Issue, label: string) => chart.getByLabel(`${issue.key} ${label}`, { exact: true });
+    const showBlockers = page.getByRole('checkbox', { name: '프로젝트 간 차단 표시', exact: true });
+    await expect(showBlockers).toBeChecked();
+    await expect(chart.locator('path[data-team-blocker-id]')).toHaveCount(0);
     await date(source, '종료일').fill(sourceEnd);
     await date(target, '시작일').fill(targetStart);
     await date(target, '종료일').fill(targetEnd);
@@ -173,6 +178,33 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 함�
     await expect(search).toHaveValue(prefix);
     expect(await stored()).toEqual(applied);
 
+    const connector = chart.locator(`path[data-team-blocker-id="${committed!.relation!.id}"]`);
+    await expect(connector).toHaveCount(1);
+    await expect(connector).toHaveAttribute('data-dependency-conflict', 'true');
+    await expect(connector).toHaveAttribute('data-predecessor-anchor', 'endDate');
+    await expect(connector).toHaveAttribute('data-successor-anchor', 'startDate');
+    await expect(connector).not.toHaveCSS('stroke-dasharray', 'none');
+    await expect(chart.locator(`path[data-team-blocker-id="${knownRelation.id}"]`)).toHaveCount(0);
+    async function exportedBlockers(label: string) {
+      const pending = page.waitForEvent('download');
+      await page.getByRole('button', { name: '간트 HTML 내려받기', exact: true }).click();
+      const path = testInfo.outputPath(`team-blockers-${label}.html`);
+      await (await pending).saveAs(path);
+      const html = await readFile(path, 'utf8');
+      return page.evaluate(body => [...new DOMParser().parseFromString(body, 'text/html').querySelectorAll<HTMLTableRowElement>('tr.dependency-row')]
+        .filter(row => row.cells[2]?.textContent?.includes('프로젝트 간 차단'))
+        .map(row => [row.cells[0].textContent, row.cells[1].textContent]), html);
+    }
+    expect(await exportedBlockers('shown')).toEqual([[source.key, target.key]]);
+    await showBlockers.press('Space');
+    await expect(showBlockers).not.toBeChecked();
+    await expect(connector).toHaveCount(0);
+    await expect(date(unrelated, '종료일')).toHaveValue(unrelatedEnd);
+    expect(await exportedBlockers('hidden')).toEqual([]);
+    await showBlockers.check();
+    await expect(connector).toHaveCount(1);
+    expect(await stored()).toEqual(applied);
+
     const latestUnrelated = await readJson<Issue>(await request.patch(`/api/issues/${unrelated.id}`, {
       headers, data: { expectedVersion: unrelated.version, title: `${unrelated.title} 별도 변경` },
     }));
@@ -193,6 +225,7 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 함�
     await expect(date(target, '시작일')).toHaveValue(target.startDate!);
     await expect(date(target, '종료일')).toHaveValue(target.endDate!);
     await expect(date(unrelated, '종료일')).toHaveValue(unrelatedEnd);
+    await expect(connector).toHaveCount(0);
     await expect(search).toHaveValue(prefix);
     expect(separateWrites).toEqual([]);
   } finally {

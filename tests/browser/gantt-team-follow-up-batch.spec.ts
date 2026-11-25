@@ -238,7 +238,20 @@ test('360px에서는 간트의 날짜 초안과 고른 Jira 이관 관계를 함
     const nextEnd = '2026-11-24';
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const crossArrows = chart.locator('path[data-team-blocker-id]');
+    const teamScope = new URLSearchParams({ scope: 'team', ganttQ: prefix });
+    await page.goto(`/#/${source.projectId}/gantt?${teamScope}`);
+    await page.getByLabel('간트 표시 시작일', { exact: true }).fill('2026-11-16');
+    await expect(page.getByRole('checkbox', { name: '프로젝트 간 차단 표시', exact: true })).toBeChecked();
+    await expect(crossArrows).toHaveCount(3);
+    for (const link of jiraLinks) {
+      await expect(crossArrows.and(chart.locator(`[data-team-blocker-id="${link.id}"]`))).toHaveAttribute('data-dependency-conflict', 'true');
+    }
+    await page.getByRole('textbox', { name: '간트 업무 검색', exact: true }).fill(`${prefix} ${labels['100']}`);
+    await expect(crossArrows).toHaveCount(0);
     await page.goto(`/#/${source.projectId}/gantt`);
+    await expect(page.getByRole('checkbox', { name: '프로젝트 간 차단 표시', exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: '일정 충돌', exact: true }).click();
     const findings = page.getByRole('region', { name: '일정 충돌', exact: true });
     await expect(findings.getByText('프로젝트 간 차단 · Jira 원본', { exact: true })).toHaveCount(3);
