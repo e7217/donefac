@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIResponse, type Page } from '@playwright/test';
-import type { Issue, IssueRelation, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerPreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, IssueRelation, SchedulePasteApplyResult, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerPreview, WorkCalendar, WorkspaceSnapshot } from '../../shared/types';
 
 const previewPath = '/api/schedule/team-blocker-edit/preview';
 const applyPath = '/api/schedule/team-blocker-edit/apply';
@@ -179,8 +179,10 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     expect(await stored()).toEqual(applied);
 
     const connector = chart.locator(`path[data-team-blocker-id="${committed!.relation!.id}"]`);
+    const conflictLegend = page.getByText('저장 일정 충돌', { exact: true });
     await expect(connector).toHaveCount(1);
     await expect(connector).toHaveAttribute('data-dependency-conflict', 'true');
+    await expect(conflictLegend).toBeVisible();
     await expect(connector).toHaveAttribute('data-predecessor-anchor', 'endDate');
     await expect(connector).toHaveAttribute('data-successor-anchor', 'startDate');
     await expect(connector).not.toHaveCSS('stroke-dasharray', 'none');
@@ -199,10 +201,12 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     await showBlockers.press('Space');
     await expect(showBlockers).not.toBeChecked();
     await expect(connector).toHaveCount(0);
+    await expect(conflictLegend).toHaveCount(0);
     await expect(date(unrelated, '종료일')).toHaveValue(unrelatedEnd);
     expect(await exportedBlockers('hidden')).toEqual([]);
     await showBlockers.check();
     await expect(connector).toHaveCount(1);
+    await expect(conflictLegend).toBeVisible();
     expect(await stored()).toEqual(applied);
 
     const latestUnrelated = await readJson<Issue>(await request.patch(`/api/issues/${unrelated.id}`, {
@@ -226,6 +230,7 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     await expect(date(target, '종료일')).toHaveValue(target.endDate!);
     await expect(date(unrelated, '종료일')).toHaveValue(unrelatedEnd);
     await expect(connector).toHaveCount(0);
+    await expect(conflictLegend).toHaveCount(0);
     await expect(search).toHaveValue(prefix);
     expect(separateWrites).toEqual([]);
   } finally {
@@ -238,6 +243,145 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
     if (calendarChanged) {
       const latest = await readJson<WorkCalendar>(await request.get(calendarPath));
       await request.patch(calendarPath, { headers, data: { ...initialCalendar, expectedVersion: latest.version } });
+    }
+  }
+});
+
+test('팀 간트에서 선택한 차단 관계를 날짜 초안으로 검토하고 다른 업무의 초안을 보존한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const snapshot = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [first, second], users: [actor, peer] } = await snapshot();
+  const headers = { 'X-Actor-Id': actor.id };
+  const prefix = `정확한 차단 검토 ${randomUUID().slice(0, 8)}`;
+  const created: Issue[] = [];
+  const followUpPreviewPath = '/api/schedule/team-follow-up-preview';
+  const followUpApplyPath = '/api/schedule/team-follow-up-apply';
+  const stored = async () => (await snapshot()).issues.filter(issue => created.some(row => row.id === issue.id));
+
+  async function makeIssue(projectId: string, label: string, startDate: string, endDate: string) {
+    const issue = await readJson<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId, title: `${prefix} ${label}`, startDate, endDate },
+    }));
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const source = await makeIssue(first.id, '선행', '2026-11-19', '2026-11-20');
+    const selected = await makeIssue(second.id, '선택한 후행', '2026-11-18', '2026-11-19');
+    const otherSuccessor = await makeIssue(second.id, '다른 후행', '2026-11-30', '2026-12-03');
+    const relationsPath = `/api/issues/${source.id}/relations`;
+    const block = async (target: Issue) => readJson<IssueRelation>(await request.post(relationsPath, {
+      headers, data: { otherIssueId: target.id, type: 'blocks', direction: 'outgoing' },
+    }));
+    const relation = await block(selected);
+    await block(otherSuccessor);
+    const before = await stored();
+    const route = `#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/${route}`);
+
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const startDate = (issue: Issue) => chart.getByLabel(`${issue.key} 시작일`, { exact: true });
+    const endDate = (issue: Issue) => chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const rangeStart = page.getByLabel('간트 표시 시작일', { exact: true });
+    const connector = chart.locator(`path[data-team-blocker-id="${relation.id}"]`);
+    const conflictLegend = page.getByText('저장 일정 충돌', { exact: true });
+    await rangeStart.fill('2026-11-16');
+    await expect(connector).toHaveAttribute('data-dependency-conflict', 'true');
+    await expect(conflictLegend).toBeVisible();
+    await rangeStart.fill('2026-12-01');
+    await expect(connector).toHaveCount(0);
+    await expect(conflictLegend).toHaveCount(0);
+    await rangeStart.fill('2026-11-16');
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    await search.fill(source.title);
+    await expect(connector).toHaveCount(0);
+    await expect(conflictLegend).toHaveCount(0);
+    await search.fill(prefix);
+    await expect(connector).toHaveCount(1);
+    await expect(conflictLegend).toBeVisible();
+
+    const sourceEnd = '2026-11-24';
+    const otherEnd = '2026-12-09';
+    await endDate(source).fill(sourceEnd);
+    await endDate(otherSuccessor).fill(otherEnd);
+    const writes: string[] = [];
+    page.on('request', sent => {
+      const path = new URL(sent.url()).pathname;
+      if (['POST', 'PATCH', 'DELETE'].includes(sent.method()) && path.startsWith('/api/') && path !== followUpPreviewPath) writes.push(path);
+    });
+    await page.getByRole('button', { name: '일정 충돌', exact: true }).click();
+    const findings = page.getByRole('region', { name: '일정 충돌', exact: true });
+    const findingReview = findings.locator(`[data-team-blocker-id="${relation.id}"]`)
+      .getByRole('button', { name: '프로젝트 간 일정 검토', exact: true });
+    const review = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const apply = review.getByRole('button', { name: '함께 적용', exact: true });
+    const initial = nextPost(page, followUpPreviewPath);
+    await findingReview.press('Enter');
+    const initialPreview = await initial;
+    expect(initialPreview.request().postDataJSON()).toEqual({
+      relationId: relation.id, expectedVersion: relation.version,
+      anchorChange: { id: source.id, expectedVersion: source.version, startDate: source.startDate, endDate: sourceEnd },
+    });
+    expect((await readJson<AutomaticSchedulePreview>(initialPreview)).teamFollowUp).toMatchObject({
+      relationId: relation.id, expectedVersion: relation.version, targetIssueId: selected.id,
+    });
+    await expect(review.getByText(`${source.key} → ${selected.key}`, { exact: true })).toBeVisible();
+    await expect(review.getByLabel('선행 업무 종료일', { exact: true })).toHaveValue(sourceEnd);
+    await review.getByRole('button', { name: '돌아가기', exact: true }).click();
+    await expect(review).toHaveCount(0);
+    await expect(findingReview).toBeFocused();
+    await expect(endDate(source)).toHaveValue(sourceEnd);
+    await expect(endDate(otherSuccessor)).toHaveValue(otherEnd);
+    expect(await stored()).toEqual(before);
+    expect(writes).toEqual([]);
+
+    const peerSaved = await readJson<Issue>(await request.patch(`/api/issues/${source.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: source.version, startDate: '2026-11-18' },
+    }));
+    await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
+    const blockerReview = page.getByRole('region', { name: '프로젝트 간 차단', exact: true })
+      .getByRole('button', { name: `${source.key} → ${selected.key} 프로젝트 간 일정 검토`, exact: true });
+    const stale = nextPost(page, followUpPreviewPath);
+    await blockerReview.click();
+    expect((await stale).status()).toBe(409);
+    await review.getByRole('button', { name: '최신 일정 기준으로 다시 검토', exact: true }).click();
+    await expect(review.getByLabel('선행 업무 시작일', { exact: true })).toHaveValue(peerSaved.startDate!);
+    await expect(review.getByLabel('선행 업무 종료일', { exact: true })).toHaveValue(sourceEnd);
+    const rebased = nextPost(page, followUpPreviewPath);
+    await review.getByRole('button', { name: '미리보기 다시 계산', exact: true }).click();
+    const rebasedPreview = await rebased;
+    expect(rebasedPreview.request().postDataJSON()).toEqual({
+      relationId: relation.id, expectedVersion: relation.version,
+      anchorChange: { id: source.id, expectedVersion: peerSaved.version, startDate: peerSaved.startDate, endDate: sourceEnd },
+    });
+    const proposed = await readJson<AutomaticSchedulePreview>(rebasedPreview);
+    expect(proposed.blocking).toEqual([]);
+    expect(proposed.changes.map(change => change.id).sort()).toEqual([source.id, selected.id].sort());
+    const applying = nextPost(page, followUpApplyPath);
+    await apply.click();
+    const applied = await applying;
+    expect(applied.request().postDataJSON()).toEqual({ previewId: proposed.previewId });
+    await readJson<SchedulePasteApplyResult>(applied);
+    await expect(review).toHaveCount(0);
+    await expect(blockerReview).toBeFocused();
+    await expect(startDate(source)).toHaveValue(peerSaved.startDate!);
+    await expect(endDate(source)).toHaveValue(sourceEnd);
+    await expect(endDate(otherSuccessor)).toHaveValue(otherEnd);
+    const sourceRow = chart.locator(`[data-issue-id="${source.id}"]`);
+    await expect(sourceRow.getByRole('button', { name: `${source.key} 프로젝트 간 일정 검토`, exact: true })).toHaveCount(0);
+    const after = await stored();
+    expect(after.find(issue => issue.id === source.id)).toMatchObject({ startDate: peerSaved.startDate, endDate: sourceEnd });
+    expect(after.find(issue => issue.id === otherSuccessor.id)).toEqual(otherSuccessor);
+    expect(writes).toEqual([followUpApplyPath]);
+  } finally {
+    for (const issue of created.reverse()) {
+      const response = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (!response.ok()) continue;
+      const { trashEntryId } = await response.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers });
     }
   }
 });

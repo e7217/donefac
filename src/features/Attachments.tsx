@@ -14,6 +14,7 @@ export type AttachmentsProps = {
   onInsertImage?: (url: string) => void;
   onInsertFileLink?: (file: { filename: string; href: string }) => void;
   onChanged?: () => void | Promise<void>;
+  reloadKey?: string;
 };
 
 type Upload = {
@@ -33,15 +34,16 @@ type VersionPanel = {
   offset: number;
 };
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 const VERSIONS_PER_PAGE = 50;
 const INLINE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+export const isInlineAttachmentImage = (mimeType: string) => INLINE_MIME_TYPES.has(mimeType);
 const fileSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-const fileUrl = (versionId: string, inline = false) => `/api/attachments/${encodeURIComponent(versionId)}/content${inline ? '?inline=1' : ''}`;
+export const attachmentFileUrl = (versionId: string, inline = false) => `/api/attachments/${encodeURIComponent(versionId)}/content${inline ? '?inline=1' : ''}`;
 const message = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export function Attachments(props: AttachmentsProps) { return <ResourceAttachments key={`${props.resourceType}:${props.resourceId}:${props.actorId}`} {...props} />; }
-function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onInsertFileLink, onChanged }: AttachmentsProps) {
+function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onInsertFileLink, onChanged, reloadKey }: AttachmentsProps) {
   const [attachments, setAttachments] = useState<AttachmentHead[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -60,6 +62,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
   const batchBusyRef = useRef(false);
   const generationRef = useRef(0);
   const xhrRef = useRef<XMLHttpRequest | null>(null);
+  const previousReloadKey = useRef(reloadKey);
   const dragDepthRef = useRef(0);
   const queueCounterRef = useRef(0);
 
@@ -98,6 +101,13 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
       versionRequest.current?.abort();
     };
   }, [resourceType, resourceId, load]);
+
+  useEffect(() => {
+    if (reloadKey !== previousReloadKey.current) {
+      previousReloadKey.current = reloadKey;
+      void load();
+    }
+  }, [reloadKey, load]);
 
   function updateUpload(id: string, value: Partial<Upload>) {
     if (mountedRef.current) setUploads(previous => previous.map(item => item.id === id ? { ...item, ...value } : item));
@@ -158,7 +168,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
         if (!isActive()) break;
         const file = candidates[index];
         const item = batch[index];
-        if (file.size > MAX_FILE_BYTES) { updateUpload(item.id, { status: 'error', error: '파일당 최대 20 MB까지 첨부할 수 있어요.' }); continue; }
+        if (file.size > MAX_ATTACHMENT_BYTES) { updateUpload(item.id, { status: 'error', error: '파일당 최대 20 MB까지 첨부할 수 있어요.' }); continue; }
         updateUpload(item.id, { status: 'uploading' });
         try {
           const result = await uploadFile(file, item.id, attachment);
@@ -290,10 +300,10 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
     {loading && !attachments.length && <p className="attachments-empty"><Loader2 size={12} className="attachments-spin" /> 첨부파일을 불러오는 중…</p>}
     {!loading && !loadError && !attachments.length && <p className="attachments-empty">아직 첨부된 파일이 없어요.</p>}
     <div className="attachments-list">{attachments.map(attachment => {
-      const image = INLINE_MIME_TYPES.has(attachment.mimeType);
+      const image = isInlineAttachmentImage(attachment.mimeType);
       const history = versions?.attachmentId === attachment.id ? versions : null;
       const currentVersionId = attachment.currentVersionId;
-      const downloadUrl = fileUrl(currentVersionId);
+      const downloadUrl = attachmentFileUrl(currentVersionId);
       return <Fragment key={attachment.id}><article className="attachment-row">
         <div className={`attachment-symbol ${image ? 'is-image' : ''}`}>{image ? <ImageIcon size={17} /> : <File size={17} />}</div>
         <div className="attachment-description">
@@ -304,7 +314,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
               disabled={busy || loading} onClick={() => toggleVersions(attachment)}><History size={12} />버전 {attachment.versionCount}</button>}
             <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 새 버전 업로드`}
               disabled={busy || loading} onClick={() => selectVersionFile(attachment)}><Plus size={12} />새 버전</button>
-            {image && onInsertImage && <button type="button" className="attachment-insert" onClick={() => onInsertImage(fileUrl(currentVersionId, true))}><Plus size={10} />본문에 삽입</button>}
+            {image && onInsertImage && <button type="button" className="attachment-insert" onClick={() => onInsertImage(attachmentFileUrl(currentVersionId, true))}><Plus size={10} />본문에 삽입</button>}
             {onInsertFileLink && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 본문에 링크 삽입`}
               disabled={busy || loading} onMouseDown={event => event.preventDefault()}
               onClick={() => onInsertFileLink({ filename: attachment.filename, href: downloadUrl })}>
@@ -333,7 +343,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
             </div>
             {onInsertFileLink && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 버전 ${version.versionLabel} 본문에 링크 삽입`}
               disabled={busy || history.loading} onMouseDown={event => event.preventDefault()}
-              onClick={() => onInsertFileLink({ filename: version.filename, href: fileUrl(version.id) })}>
+              onClick={() => onInsertFileLink({ filename: version.filename, href: attachmentFileUrl(version.id) })}>
               <Link2 size={12} aria-hidden="true" />본문에 링크 삽입
             </button>}
             <a className="btn btn-ghost" href={`/api/attachment-versions/${encodeURIComponent(version.id)}/download`} download={version.filename}

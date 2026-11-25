@@ -502,15 +502,19 @@ test('360px 팀 간트에서 다른 프로젝트의 차단 일정과 후행 업�
 
     const initialStart = row(page, target).getByLabel(`${target.key} 시작일`, { exact: true });
     await initialStart.fill('2026-11-13');
+    const cancelledPreview = waitMutation(page, previewPath);
     await reviewAction.click();
-    await expect(page.getByText('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', { exact: true })).toBeVisible();
+    expect((await cancelledPreview).request().postDataJSON()).toEqual({ relationId: handoff.id, expectedVersion: handoff.version });
+    await expect(dialog).toBeVisible();
+    await button(dialog, '돌아가기').click();
     await expect(dialog).toHaveCount(0);
-    await expect(initialStart).toBeFocused();
+    await expect(reviewAction).toBeFocused();
     await expect(initialStart).toHaveValue('2026-11-13');
-    expect(issued).toEqual([]);
+    expect(issued).toEqual([previewPath]);
     expect(await f.schedule()).toEqual(before);
     await initialStart.press('Escape');
     await expect(initialStart).toHaveValue(target.startDate!);
+    issued.length = 0;
 
     const started = waitMutation(page, previewPath);
     await reviewAction.click();

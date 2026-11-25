@@ -6,7 +6,7 @@ import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BU
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
-import { checkDependencySchedule, checkTeamBlockerSchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, SCHEDULE_DATE_LABELS, TEAM_BLOCKER_SCHEDULE_RULE, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
+import { checkDependencySchedule, checkTeamBlockerSchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, TEAM_BLOCKER_SCHEDULE_RULE, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { renderGanttExport } from '../../shared/gantt-export';
 import { buildGanttExportReport } from '../../shared/gantt-export-model';
@@ -166,7 +166,7 @@ type DateRangePick = {
 };
 type CascadeOrigin = { kind: 'preview' } | { kind: 'inline'; opener: HTMLButtonElement; accept: (issue: Issue) => void };
 type CascadeReview = { projectId: string; anchorChange: CascadeAnchorChange; origin: CascadeOrigin };
-type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement; fallback: HTMLButtonElement | null } | { kind: 'preview' } |
+type TeamFollowUpOrigin = { kind: 'blockers'; opener: HTMLButtonElement; fallback: HTMLButtonElement | null; sourceDraft?: ChartDateDraft } | { kind: 'preview' } |
   (Extract<CascadeOrigin, { kind: 'inline' }> & { source: Issue });
 type TeamFollowUpReview = TeamFollowUpSelection & { origin: TeamFollowUpOrigin };
 type TeamFollowUpHandoff = {
@@ -724,10 +724,10 @@ function ProjectGantt(props: GanttProps) {
   }
   function closeTeamBlockerEdit() {
     const opener = teamBlockerEdit?.opener;
-    setTeamBlockerEdit(null);
-    requestAnimationFrame(() => {
+    pendingScheduleFocus.current = () => {
       if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
-    });
+    };
+    setTeamBlockerEdit(null);
   }
   async function applyTeamBlockerEdit(result: ScheduleTeamBlockerApplyResult) {
     rememberUndo(result.undoId);
@@ -744,10 +744,12 @@ function ProjectGantt(props: GanttProps) {
       notify(result.updated.length ? '날짜와 차단 관계를 함께 저장했습니다.' : '차단 관계를 저장했습니다.');
     }
     catch { notify('변경을 저장했습니다. 간트 목록을 다시 불러와 주세요.', 'error'); }
+    pendingScheduleFocus.current = () => {
+      (opener?.isConnected && !opener.disabled ? opener : teamBlockersTrigger.current)?.focus({ preventScroll: true });
+    };
     setTeamBlockerEdit(null);
     setTeamBlockerChartPair(undefined);
     setTeamBlockerListRevision(value => value + 1);
-    requestAnimationFrame(() => (opener?.isConnected && !opener.disabled ? opener : teamBlockersTrigger.current)?.focus({ preventScroll: true }));
   }
   function openBlockedIssueCreation(issue: Issue, opener: HTMLButtonElement) {
     if (busyRef.current || scheduleEditorOpen || issueOverlayOpen ||
@@ -768,11 +770,16 @@ function ProjectGantt(props: GanttProps) {
   }
   function reviewTeamBlockerSchedules(source: Issue, choices: readonly TeamFollowUpChoice[], opener: HTMLButtonElement,
     fallback = teamBlockersTrigger.current) {
-    if (busyRef.current || scheduleEditorOpen || issueOverlayOpen || draftsRef.current.size) {
+    if (!canKeepInlineDateDrafts()) {
       notify('작성 중인 간트 변경을 저장하거나 닫은 뒤 프로젝트 간 일정을 검토해 주세요.', 'error');
       return;
     }
-    if (choices.length) startTeamFollowUp({ source, choices, origin: { kind: 'blockers', opener, fallback } });
+    if (!choices.length) return;
+    const sourceDraft = chartDateDraft(source);
+    const baseline = sourceDraft?.source ?? source;
+    const { startDate = baseline.startDate, endDate = baseline.endDate } = sourceDraft?.changes ?? {};
+    const initialChange = sourceDraft && { id: baseline.id, expectedVersion: baseline.version, startDate, endDate };
+    startTeamFollowUp({ source: baseline, initialChange, choices, origin: { kind: 'blockers', opener, fallback, sourceDraft } });
   }
   function reviewTeamSuccessors(source: TeamFollowUpHandoff['source'], initialChange: ScheduleAnchorChange,
     origin: Exclude<TeamFollowUpOrigin, { kind: 'blockers' }>) {
@@ -831,9 +838,13 @@ function ProjectGantt(props: GanttProps) {
     const savedSource = result.updated.find(issue => issue.id === source.id);
     const accept = origin.kind === 'inline' ? origin.accept : origin.kind === 'preview' && manualReview?.inline?.issueId === source.id
       ? manualReview.inline.accept : undefined;
-    const original = origin.kind === 'inline' ? origin.source : data.issues.find(issue => issue.id === source.id);
+    const original = origin.kind === 'inline' ? origin.source
+      : (origin.kind === 'blockers' ? origin.sourceDraft?.source : undefined) ?? data.issues.find(issue => issue.id === source.id);
     const confirmedSource = savedSource ?? (original && unchangedSource ? { ...original, ...unchangedSource } : undefined);
-    if (confirmedSource) accept?.(confirmedSource);
+    if (confirmedSource) {
+      if (origin.kind === 'blockers') acceptChartDateDraft(confirmedSource, origin.sourceDraft);
+      else accept?.(confirmedSource);
+    }
     if (origin.kind === 'preview') {
       if (manualReview && confirmedSource) settlePickedDateDraft(manualReview, [confirmedSource]);
       setManualReview(null);
@@ -1263,6 +1274,9 @@ function ProjectGantt(props: GanttProps) {
     };
     return [{ relation, dependency, predecessor, successor, check: teamBlockerChecks.get(relation.id) }];
   }) : [];
+  const hasVisibleDependencyConflict =
+    dependencies.some(link => conflictingIds.has(link.dependency.id) && ganttConnectorIsVisible(link, range, drag)) ||
+    visibleTeamBlockerLinks.some(link => link.check?.kind === 'conflict' && ganttConnectorIsVisible(link, range, drag));
   const unscheduled = issues.filter(i => !i.startDate || !i.endDate);
   const ticks = Array.from({ length: rangeDays }, (_, index) => {
     const day = rangeStart + index;
@@ -2672,7 +2686,7 @@ function ProjectGantt(props: GanttProps) {
       <svg className="gantt-dependency-lines" width={timelineWidth} height={issues.length * ROW_HEIGHT} style={{ left: LEFT_WIDTH, top: HEADER_HEIGHT + planningRows.length * ROW_HEIGHT }} aria-hidden="true">
         <defs>
           <marker id="gantt-arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="#8a9b9b" /></marker>
-          {(conflictingIds.size > 0 || visibleTeamBlockerLinks.some(link => link.check?.kind === 'conflict')) &&
+          {hasVisibleDependencyConflict &&
             <marker id="gantt-arrow-conflict" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-dependency-conflict)" /></marker>}
           {analysisResult?.analysis && <marker id="gantt-arrow-analysis" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-analysis-accent)" /></marker>}
           {visibleTeamBlockerLinks.length > 0 && <marker id="gantt-arrow-team-blocker" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0L7 3.5L0 7" fill="var(--gantt-team-blocker-line)" /></marker>}
@@ -2829,7 +2843,7 @@ function ProjectGantt(props: GanttProps) {
     </div></div>
     {baseline && <details className="gantt-baseline-records"><summary>기준선 업무 기록 {baseline.issues.length}개 · 캡처된 이름과 날짜 확인</summary><div><table><thead><tr><th>기준선 업무</th><th>시작일</th><th>종료일</th><th>현재 상태</th></tr></thead><tbody>{baseline.issues.map(captured => <tr key={captured.issueId}><td><small>{captured.key}</small><strong>{captured.title}</strong></td><td><button disabled={!captured.startDate} onClick={() => captured.startDate && showDate(captured.startDate)}>{captured.startDate || '미정'}</button></td><td><button disabled={!captured.endDate} onClick={() => captured.endDate && showDate(captured.endDate)}>{captured.endDate || '미정'}</button></td><td>{projectIssues.some(issue => issue.id === captured.issueId) ? '현재 업무 있음' : '삭제된 업무 기록'}</td></tr>)}</tbody></table></div></details>}
     {scheduleWarnings.length > 0 && <div className="gantt-current-warnings" role="status"><AlertCircle size={16} /><div><strong>일정 의존성 확인</strong>{scheduleWarnings.map((warning, index) => <p key={index}>{warning}</p>)}</div><button className="issue-icon-button" onClick={() => setScheduleWarnings([])} aria-label="경고 닫기"><X size={14} /></button></div>}
-    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span>{hierarchyTrace?.span && <span><span className="gantt-hierarchy-span-key" />하위 업무 범위</span>}<span><span className="gantt-legend-line" />선행 → 후행</span>{conflictingIds.size > 0 && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span>{hasProject && <span><Diamond size={12} />마일스톤</span>}{calendarMath && <span><span className="gantt-nonworking-key" />비근무일</span>}{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
+    <div className="gantt-legend"><span><span className="gantt-mini-bar" />계획 일정</span>{hierarchyTrace?.span && <span><span className="gantt-hierarchy-span-key" />하위 업무 범위</span>}<span><span className="gantt-legend-line" />선행 → 후행</span>{hasVisibleDependencyConflict && <span><span className="gantt-legend-conflict" />저장 일정 충돌</span>}<span><span className="gantt-legend-today" />오늘</span>{hasProject && <span><Diamond size={12} />마일스톤</span>}{calendarMath && <span><span className="gantt-nonworking-key" />비근무일</span>}{baseline && <span><span className="gantt-baseline-key" />기준선</span>}{analysisResult?.analysis && <span className="gantt-analysis-legend" id="gantt-analysis-critical-help"><span className="gantt-analysis-key" />여유 0근무일</span>}<span className="muted">수기 계획에서는 의존성을 연결해도 날짜가 자동으로 바뀌지 않습니다.</span></div>
     <div className="gantt-bottom-grid"><section className="gantt-bottom-card"><div className="gantt-bottom-heading"><h3><CalendarDays size={16} />일정 미정 <span>{unscheduled.length}</span></h3><span className="muted">시작일과 종료일을 정해주세요</span></div>{unscheduled.length ? unscheduled.map(issue => {
       const stored = recoverableDates(issue, inlineDateRecords.get(issue.id));
       const draft = stored && !draftDatesAreSaved(issue, stored) ? stored : undefined;
@@ -3147,6 +3161,23 @@ function GanttResizeHandle({ issue, edge, disabled, onBegin, onMove, onFinish, o
     }} onClick={event => { if (event.detail === 0) onFocusDate(event.currentTarget, issue, edge); }}><span /></button>;
 }
 
+function ganttConnectorDay(issue: Issue, dateField: ScheduleDependencyEndpoint, range: TimelineRange, drag: DragState | null) {
+  if (!issue.startDate || !issue.endDate) return null;
+  const edge = dateField === 'endDate' ? 'end' : 'start';
+  const offset = drag?.issue.id === issue.id && (drag.mode === 'move' || drag.mode === edge) ? drag.delta : 0;
+  const day = dayNumber(issue[dateField]!) + offset;
+  return day >= range.start && day <= range.end ? day : null;
+}
+
+function ganttConnectorIsVisible({ dependency, predecessor, successor }: { dependency: Dependency; predecessor: IssueRow; successor: IssueRow },
+  range: TimelineRange, drag: DragState | null) {
+  const type = dependency.type ?? 'FS';
+  if (!isDependencyType(type)) return false;
+  const endpoints = DEPENDENCY_ENDPOINTS[type];
+  return ganttConnectorDay(predecessor.issue, endpoints.predecessor, range, drag) !== null &&
+    ganttConnectorDay(successor.issue, endpoints.successor, range, drag) !== null;
+}
+
 function GanttConnector({ dependency, predecessor, successor, range, dayWidth, drag, critical, conflict, teamBlockerId }: {
   dependency: Dependency; predecessor: IssueRow; successor: IssueRow;
   range: TimelineRange; dayWidth: number; drag: DragState | null; critical: boolean; conflict: boolean;
@@ -3155,13 +3186,10 @@ function GanttConnector({ dependency, predecessor, successor, range, dayWidth, d
   const type = dependency.type ?? 'FS';
   if (!isDependencyType(type)) return null;
   const endpoints = DEPENDENCY_ENDPOINTS[type];
-  function anchor({ issue, index }: IssueRow, dateField: keyof typeof SCHEDULE_DATE_LABELS) {
-    if (!issue.startDate || !issue.endDate) return null;
+  function anchor({ issue, index }: IssueRow, dateField: ScheduleDependencyEndpoint) {
+    const day = ganttConnectorDay(issue, dateField, range, drag);
+    if (day === null) return null;
     const end = dateField === 'endDate';
-    const edge = end ? 'end' : 'start';
-    const offset = drag?.issue.id === issue.id && (drag.mode === 'move' || drag.mode === edge) ? drag.delta : 0;
-    const day = dayNumber(issue[dateField]!) + offset;
-    if (day < range.start || day > range.end) return null;
     const x = (day - range.start + Number(end)) * dayWidth + (end ? -BAR_EDGE_INSET : BAR_EDGE_INSET);
     const side = end ? 1 : -1;
     const bend = Math.max(0, Math.min((range.end - range.start + 1) * dayWidth, x + side * 12));

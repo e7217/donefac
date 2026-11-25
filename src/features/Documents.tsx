@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
@@ -22,6 +22,7 @@ import { DOCUMENT_CONTENT_SCHEMA_VERSION, DOCUMENT_HEADING_LEVELS, contentRefere
 import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
 import { isDocumentSectionId } from '../../shared/document-sections';
 import { isRelationId } from '../../shared/issue-relations';
+import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { jiraMigratedTargetAddress, type MigratedJiraTarget } from '../../shared/jira-migration-address';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
@@ -44,6 +45,7 @@ import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentFindPanel } from './DocumentFindPanel';
 import { documentFindExtension } from './document-find';
+import { clipboardImageFiles, trackClipboardImagePosition } from './document-clipboard-image';
 import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlashRange } from './document-slash-insertion';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
@@ -54,13 +56,13 @@ import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentD
 import { DocumentLinkedWork } from './DocumentLinkedWork';
 import { ResourceLinkPicker } from './ResourceLinkPicker';
 import { NewIssueModal, type FollowUpSource } from './NewIssueModal';
-import { documentNotificationSpaceId, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSiblingOrder, type DocumentSourceSelection, type DocumentTemplateSummary, type FeatureProps, type RichContent } from '../../shared/types';
+import { documentNotificationSpaceId, type AttachmentHead, type Comment, type DocPage, type DocRevision, type DocumentPublicationTarget, type DocumentSiblingOrder, type DocumentSourceSelection, type DocumentTemplateSummary, type FeatureProps, type RichContent } from '../../shared/types';
 import { ApiError, api, post, relativeTime, remove } from '../lib/api';
 import { afterAcceptedNavigation, isDocumentPreservedByNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { DOCUMENT_TEMPLATES, templateContent } from './document-built-in-templates';
 import { contentMarkdown, contentText, documentRevisionLabel, downloadDocument } from './document-utils';
-import { Attachments, type AttachmentsProps } from './Attachments';
+import { Attachments, attachmentFileUrl, isInlineAttachmentImage, MAX_ATTACHMENT_BYTES, type AttachmentsProps } from './Attachments';
 import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
@@ -103,6 +105,7 @@ type Draft = DocumentMetadata & {
 type DocumentConflict = 'generic' | { document: DocPage; fields: DocumentMetadataField[]; parentContextChanged: boolean } | null;
 type ObservedDocument = { document: DocPage; live: boolean };
 type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
+type ClipboardImageScope = { editor: Editor; documentId: string; actorId: string; liveEpoch: string | null };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type MigratedIssueLinkState = { href: string; status: 'pending' | 'missing' | 'failed'; expectsComment: boolean };
 type CommentFilter = 'all' | 'open' | 'resolved';
@@ -351,6 +354,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
+  const clipboardImageScope = useRef<ClipboardImageScope | null>(null);
+  const clipboardImageGeneration = useRef(0);
+  const [clipboardImageUploads, setClipboardImageUploads] = useState<Record<string, number>>({});
+  const [clipboardAttachment, setClipboardAttachment] = useState<{ documentId: string; versionId: string } | null>(null);
   const [referenceSelection, setReferenceSelection] = useState<ReferenceSelection | null>(null);
   const closeReference = useCallback(() => setReferenceSelection(null), []);
   const [issueBlockSelection, setIssueBlockSelection] = useState<IssueBlockSelection | null>(null);
@@ -568,7 +575,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [observeDocument, storeDraft]);
 
   const receiveLiveEditor = useCallback((instance: Editor | null) => setLiveEditor(instance), []);
-  const receiveLiveState = useCallback((state: CollaborationView | null) => { liveStateRef.current = state; setLiveState(state); }, []);
+  const receiveLiveState = useCallback((state: CollaborationView | null) => {
+    const previous = liveStateRef.current;
+    if (previous?.phase === 'connected' && (state?.phase !== 'connected' || state.epoch !== previous.epoch ||
+        state.document.id !== previous.document.id)) {
+      clipboardImageGeneration.current++;
+    }
+    liveStateRef.current = state;
+    setLiveState(state);
+  }, []);
   const receiveLiveContent = useCallback((content: RichContent, plainText: string) => {
     const current = draftRef.current;
     if (!current) return;
@@ -612,6 +627,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const canFind = Boolean(editor && !editor.isDestroyed && draft?.id && draft.id === selectedPage?.id && (!liveMode || liveState?.ready));
   const findOpen = canFind && findScope === documentScope;
   const bodyReadOnly = restoring || manualRecovery || !activeSession || (liveMode && (!liveState?.ready || liveState.phase === 'recovery' || liveState.phase === 'error'));
+  const clipboardLiveEpoch = liveMode && liveState?.phase === 'connected' && liveState.document.id === selectedPageId ? liveState.epoch : null;
+  const clipboardWritable = !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting &&
+    !issueDrawerOpen && draft?.id === selectedPageId && (!liveMode || clipboardLiveEpoch !== null);
+  useLayoutEffect(() => {
+    if (!editor || !selectedPageId || !clipboardWritable) return;
+    const scope = { editor, documentId: selectedPageId, actorId, liveEpoch: clipboardLiveEpoch };
+    clipboardImageScope.current = scope;
+    const invalidate = () => { clipboardImageGeneration.current++; };
+    window.addEventListener('offline', invalidate);
+    return () => {
+      clipboardImageScope.current = null;
+      window.removeEventListener('offline', invalidate);
+    };
+  }, [actorId, editor, selectedPageId, clipboardWritable, clipboardLiveEpoch, liveReload]);
   const referenceDialog = !bodyReadOnly && referenceSelection?.editor === editor && referenceSelection.documentId === draft?.id ? referenceSelection : null;
   const issueBlockDialog = !bodyReadOnly && issueBlockSelection?.editor === editor && issueBlockSelection.documentId === draft?.id ? issueBlockSelection : null;
   const jiraCode = bodyReadOnly ? undefined : selectedCodeBlock(editor)?.node.textContent;
@@ -1343,6 +1372,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (captured.dirty) { notify('현재 편집을 먼저 저장하거나 새 문서로 보관해주세요.', 'error'); return; }
     if (liveStateRef.current?.pending || (sessionRef.current?.enabled && liveStateRef.current?.phase !== 'connected')) { notify('공동 편집을 서버에 동기화한 후 복구해주세요.', 'error'); return; }
     if (!window.confirm(`${documentRevisionLabel(revision)}의 내용으로 복구할까요? 현재 내용은 이력에 남습니다.`)) return;
+    clipboardImageGeneration.current++;
     savingRef.current = true; setSaving(true); setRestoring(true);
     // Toggling editability is UI state, not a content edit. Tiptap otherwise
     // emits onUpdate and would mark the newly restored revision dirty again.
@@ -1390,6 +1420,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (liveStateRef.current?.pending || commentBusy || isReplySending() || isCommentEditPending()) { notify('공동 편집과 댓글 저장이 끝난 후 휴지통으로 옮겨 주세요.', 'error'); return; }
     const hasDraft = captured.dirty || listDrafts.current.size || Boolean(commentDraftRef.current.body.trim()) || hasReplyDraft(capturedActor, captured.id) || hasCommentEditDraft();
     if (!window.confirm(`“${captured.title}” 문서를 휴지통으로 옮길까요?${hasDraft ? ' 저장하지 않은 편집과 댓글 초안은 사라집니다.' : ''}`)) return;
+    clipboardImageGeneration.current++;
     savingRef.current = true; setSaving(true);
     try {
       await remove(`/documents/${captured.id}?expectedVersion=${captured.expectedVersion}`);
@@ -1438,6 +1469,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   function discardLocal() {
     if (!selectedPage || !window.confirm('저장하지 않은 편집을 버리고 서버에 저장된 내용을 열까요?')) return;
+    clipboardImageGeneration.current++;
     const latest = latestPage ?? selectedPage;
     const current = draftRef.current;
     const next = { ...draftFromPage(latest), ...(sessionRef.current?.enabled && !manualRecoveryRef.current && current ? { content: current.content, plainText: current.plainText } : {}) };
@@ -1505,6 +1537,93 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       .command(({ tr }) => { tr.removeStoredMark(link); return true; }).run();
     if (!inserted) notify('이 위치에 첨부파일 링크를 삽입할 수 없습니다.', 'error');
   };
+
+  async function pasteClipboardImages(event: ReactClipboardEvent<HTMLDivElement>) {
+    if (!editor?.isEditable || editor.isDestroyed || event.defaultPrevented || !(event.target instanceof Element) ||
+        event.target.closest('[contenteditable]') !== editor.view.dom) return;
+    const files = clipboardImageFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const scope = clipboardImageScope.current;
+    const generation = clipboardImageGeneration.current;
+    const route = location.hash.split('?')[0];
+    if (!scope || scope.editor !== editor || !navigator.onLine) {
+      notify('문서를 편집할 수 있는 상태로 열고 연결을 확인한 뒤 이미지를 다시 붙여넣어 주세요.', 'error');
+      return;
+    }
+    const isCurrent = () => {
+      const activeSession = sessionRef.current;
+      const live = liveStateRef.current;
+      return clipboardImageScope.current === scope && clipboardImageGeneration.current === generation &&
+        activeActorRef.current === scope.actorId && actorRef.current === scope.actorId && draftRef.current?.id === scope.documentId &&
+        activeSession?.document.id === scope.documentId && !manualRecoveryRef.current && !archivedLiveRecoveryRef.current &&
+        (scope.liveEpoch === null ? !activeSession.enabled : activeSession.enabled && live?.phase === 'connected' &&
+          live.epoch === scope.liveEpoch && live.document.id === scope.documentId) &&
+        navigator.onLine && location.hash.split('?')[0] === route && !editor.isDestroyed && editor.isEditable &&
+        editor.view.dom.isConnected && !editor.view.dom.closest('[inert]');
+    };
+    const anchor = isCurrent() ? trackClipboardImagePosition(editor) : null;
+    if (!anchor) {
+      notify('이미지를 붙여넣을 문서 본문의 문단에 커서를 놓고 다시 시도해 주세요.', 'error');
+      return;
+    }
+
+    setClipboardImageUploads(previous => ({ ...previous, [documentScope]: (previous[documentScope] ?? 0) + 1 }));
+    let lastSavedVersion: string | undefined;
+    let problem: string | undefined;
+    const images: { src: string; alt: string }[] = [];
+    try {
+      for (const file of files) {
+        if (!isCurrent()) { problem ??= '편집 화면이 변경되어 남은 이미지는 첨부하지 못했습니다.'; break; }
+        if (!isInlineAttachmentImage(file.type)) { problem ??= 'PNG, JPEG, GIF, WebP 이미지를 붙여넣을 수 있습니다.'; continue; }
+        if (file.size > MAX_ATTACHMENT_BYTES) { problem ??= '이미지는 한 파일당 20 MB까지 첨부할 수 있습니다.'; continue; }
+        const filename = file.name || `clipboard-image.${file.type.slice('image/'.length)}`;
+        const query = new URLSearchParams({ resourceType: 'document', resourceId: scope.documentId, filename });
+        try {
+          const attachment = await api<AttachmentHead>(`/attachments?${query}`, {
+            method: 'POST', body: file, signal: AbortSignal.timeout(120_000),
+            headers: { 'Content-Type': 'application/octet-stream', 'X-File-Type': file.type, 'X-Actor-Id': scope.actorId },
+          });
+          const src = attachmentFileUrl(attachment.currentVersionId, true);
+          if (attachment.resourceType !== 'document' || attachment.resourceId !== scope.documentId || !inlineAttachmentIdFromUrl(src)) {
+            problem ??= '첨부 결과를 확인하지 못했습니다. 원래 문서의 파일 탭을 확인해 주세요.';
+            continue;
+          }
+          lastSavedVersion = attachment.currentVersionId;
+          if (isInlineAttachmentImage(attachment.mimeType)) images.push({ src, alt: attachment.filename });
+          else problem ??= '본문에 표시할 수 없는 형식입니다. 원래 문서의 파일 탭에서 확인해 주세요.';
+        } catch (error) {
+          problem ??= error instanceof ApiError
+            ? `이미지를 첨부하지 못했습니다. ${error.message}`
+            : '이미지 첨부를 확인하지 못했습니다. 연결과 원래 문서의 파일 탭을 확인한 뒤 다시 시도해 주세요.';
+        }
+      }
+      const inserted = images.length > 0 && isCurrent() && anchor.insert(images);
+      if (activeActorRef.current === scope.actorId) {
+        if (lastSavedVersion) {
+          if (editorWrap.current && draftRef.current?.id === scope.documentId) {
+            setClipboardAttachment({ documentId: scope.documentId, versionId: lastSavedVersion });
+          }
+          void refresh().catch(() => {});
+        }
+        if (images.length > 0 && !inserted) {
+          notify(`첨부한 이미지를 본문에 삽입하지 못했습니다. 원래 문서의 파일 탭에서 확인해 주세요.${problem ? ` ${problem}` : ''}`, 'error');
+        } else if (problem) {
+          notify(inserted ? `일부 이미지를 본문에 삽입했습니다. ${problem}` : problem, 'error');
+        } else if (inserted) notify('이미지를 본문에 삽입했습니다.');
+      }
+    } finally {
+      anchor.stop();
+      setClipboardImageUploads(previous => {
+        const next = { ...previous };
+        if (next[documentScope] > 1) next[documentScope]--;
+        else delete next[documentScope];
+        return next;
+      });
+    }
+  }
 
   async function refreshReferences() {
     if (referencesRefreshing) return; setReferencesRefreshing(true);
@@ -2032,7 +2151,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
                 sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
                 ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen && !checklistReselecting} />}
-              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={event => {
+              {clipboardImageUploads[documentScope] > 0 && <div className="docs-notice" role="status">이미지를 첨부하는 중입니다.</div>}
+              <div ref={editorWrap} className="docs-editor-wrap" onPasteCapture={event => void pasteClipboardImages(event)} onKeyDownCapture={event => {
                 if (!checklistReselecting && !event.defaultPrevented && !event.nativeEvent.isComposing && event.key === 'Enter' &&
                     !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.target instanceof HTMLAnchorElement &&
                     openMigratedIssueLink(event.target)) {
@@ -2235,6 +2355,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             </>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>첨부 링크나 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh}
+              reloadKey={clipboardAttachment?.documentId === draft.id ? clipboardAttachment.versionId : undefined}
               onInsertFileLink={bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
               onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
           </div>
