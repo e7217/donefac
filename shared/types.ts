@@ -824,6 +824,34 @@ export interface PlanningItem {
   status: PlanningStatus; ownerId: string | null; startDate: string | null; endDate: string | null; targetDate: string | null;
   version: number; createdAt: string; updatedAt: string;
 }
+export const MAX_CYCLE_COPY_ISSUES = 100;
+export const MAX_CYCLE_COPY_DEPENDENCIES = 1000;
+export const MAX_CYCLE_COPY_SHIFT_DAYS = 3650;
+export interface CycleCopyInput {
+  expectedVersion: number;
+  name: string;
+  dateShiftDays: number;
+  issues: { id: string; expectedVersion: number }[];
+}
+export interface CycleCopyPreview {
+  previewId: string | null;
+  expiresAt: string | null;
+  cycle: Pick<PlanningItem, 'name' | 'ownerId' | 'startDate' | 'endDate' | 'targetDate'>;
+  rows: (Pick<Issue, 'key' | 'title' | 'assigneeId' | 'startDate' | 'endDate' | 'dueDate'> & {
+    sourceIssueId: string;
+    parentKey: string | null;
+    statusId: string;
+  })[];
+  dependencies: (Pick<Dependency, 'type' | 'lagDays'> & { predecessorKey: string; successorKey: string; warning?: string })[];
+  omitted: { parents: number; dependencies: number };
+  errors: { key?: string; message: string }[];
+}
+export interface CycleCopyResult {
+  cycle: PlanningItem;
+  issues: (Pick<Issue, 'id' | 'key'> & { sourceIssueId: string })[];
+  dependencies: number;
+  duplicate: boolean;
+}
 export type CycleCompletionPlan = Pick<PlanningItem, 'id' | 'name' | 'version'>;
 export interface CycleCompletionCounts { carry: number; done: number; cancelled: number; blocked: number }
 export interface CycleCompletionIssue {

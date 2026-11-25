@@ -242,7 +242,7 @@ export function IssueLinkedDocumentCreate({ issue, data, actorId, refresh, onClo
           {teamTemplate && <option value="" disabled>팀 템플릿 사용 중</option>}
           {DOCUMENT_TEMPLATES.map(template => <option key={template.id} value={template.id}>{template.name}</option>)}
         </select></label>
-        <DocumentTemplatePicker catalog={catalog} reload={reloadTemplates} value={teamTemplate?.id ?? ''}
+        <DocumentTemplatePicker catalog={catalog} reload={reloadTemplates} value={teamTemplate} projectId={projectId} data={data}
           projectName={destination?.name} disabled={!editing || pending} onChoose={chooseTeamTemplate} />
         {teamTemplate && <p className="issue-linked-document-template">
           {teamTemplate.projectId === null ? '팀 공통' : data.projects.find(project => project.id === teamTemplate.projectId)?.name ?? '프로젝트'}

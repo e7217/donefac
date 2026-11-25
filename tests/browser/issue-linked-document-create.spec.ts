@@ -181,6 +181,14 @@ test('티켓에서 변경된 프로젝트 팀 템플릿을 확인하고 저장 �
     const submit = button(creator, '문서 만들기');
     await creator.getByRole('combobox', { name: '팀 템플릿', exact: true }).selectOption(template.id);
     await title.fill(documentTitle);
+    const previewToggle = button(creator, '템플릿 미리보기');
+    const preview = creator.getByRole('region', { name: '템플릿 저장본 미리보기', exact: true });
+    await previewToggle.click();
+    await expect(preview).toContainText(source.plainText);
+    await button(creator, '템플릿 미리보기 닫기').press('Escape');
+    await expect(preview).toHaveCount(0);
+    await expect(previewToggle).toBeFocused();
+    await expect(title).toHaveValue(documentTitle);
 
     const latest = await json<Template>(await request.patch(`/api/document-templates/${template.id}`, {
       headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: template.version,
@@ -214,6 +222,8 @@ test('티켓에서 변경된 프로젝트 팀 템플릿을 확인하고 저장 �
     await button(creator, '최신 템플릿 사용').click();
     await expect(title).toHaveValue(documentTitle);
     expect((await workspace(request)).documents.some(value => value.title === documentTitle)).toBe(false);
+    await previewToggle.click();
+    await expect(preview).toContainText(revisedBody);
 
     const savedResponse = waitForPost();
     await submit.click();

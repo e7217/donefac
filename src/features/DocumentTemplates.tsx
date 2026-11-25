@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent } from 'react';
 import { Archive, FileStack, Plus, RotateCcw, X } from 'lucide-react';
-import type { DocPage, DocumentTemplateSummary, FeatureProps } from '../../shared/types';
+import type { DocPage, DocumentTemplateSummary, FeatureProps, WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
+import { DocumentTemplatePreview } from './DocumentTemplatePreview';
 import './document-templates.css';
 
 type TemplateSource = Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'>;
@@ -49,36 +50,42 @@ export function useDocumentTemplates(projectId: string | null, enabled: boolean,
   return { catalog: current, reload };
 }
 
-export function DocumentTemplatePicker({ catalog, reload, value, projectName, disabled, onChoose }: {
+export function DocumentTemplatePicker({ catalog, reload, value, projectId, projectName, data, disabled, onChoose }: {
   catalog: ReturnType<typeof useDocumentTemplates>['catalog'];
   reload: () => void;
-  value: string;
+  value: DocumentTemplateSummary | null;
+  projectId: string | null;
   projectName?: string;
+  data: WorkspaceSnapshot;
   disabled: boolean;
   onChoose: (template: DocumentTemplateSummary | null) => void;
 }) {
   const templates = catalog?.state === 'ready' ? catalog.templates : [];
-  const selectedMissing = Boolean(value && !templates.some(template => template.id === value));
+  const selected = value && templates.find(template => template.id === value.id);
   const commonNames = new Set(templates.filter(template => template.projectId === null).map(template => template.name.normalize('NFC').toLowerCase()));
   const projectNames = new Set(templates.filter(template => template.projectId !== null).map(template => template.name.normalize('NFC').toLowerCase()));
   if (catalog?.state === 'error' && !disabled) return <div className="document-template-picker-status">
     <span role="status">{catalog.message}</span><button type="button" className="btn" onClick={reload}>팀 템플릿 다시 불러오기</button>
   </div>;
   if (!templates.length && !value) return null;
-  return <label className="docs-modal-label document-template-picker">팀 템플릿
-    <select className="field" value={value} disabled={disabled || !catalog} onChange={event => {
-      onChoose(templates.find(template => template.id === event.target.value) ?? null);
-    }}>
-      <option value="">선택하세요</option>
-      {selectedMissing && <option value={value} disabled>{catalog ? '현재 사용할 수 없는 템플릿' : '템플릿 확인 중…'}</option>}
-      {templates.map(template => {
-        const key = template.name.normalize('NFC').toLowerCase();
-        const disambiguated = commonNames.has(key) && projectNames.has(key);
-        const scope = template.projectId === null ? '팀 공통' : projectName ?? '프로젝트';
-        return <option value={template.id} key={template.id}>{template.name}{disambiguated ? ` · ${scope}` : ''}</option>;
-      })}
-    </select>
-  </label>;
+  return <div className="document-template-picker">
+    <label className="docs-modal-label">팀 템플릿
+      <select className="field" value={value?.id ?? ''} disabled={disabled || !catalog} onChange={event => {
+        onChoose(templates.find(template => template.id === event.target.value) ?? null);
+      }}>
+        <option value="">선택하세요</option>
+        {value && !selected && <option value={value.id} disabled>{catalog ? '현재 사용할 수 없는 템플릿' : '템플릿 확인 중…'}</option>}
+        {templates.map(template => {
+          const key = template.name.normalize('NFC').toLowerCase();
+          const disambiguated = commonNames.has(key) && projectNames.has(key);
+          const scope = template.projectId === null ? '팀 공통' : projectName ?? '프로젝트';
+          return <option value={template.id} key={template.id}>{template.name}{disambiguated ? ` · ${scope}` : ''}</option>;
+        })}
+      </select>
+    </label>
+    {value && selected?.version === value.version && <DocumentTemplatePreview key={JSON.stringify([projectId, value.id, value.version])}
+      template={value} projectId={projectId} data={data} disabled={disabled} reloadCatalog={reload} />}
+  </div>;
 }
 
 type ManagerProps = Pick<FeatureProps, 'actorId' | 'refresh' | 'notify'> & {

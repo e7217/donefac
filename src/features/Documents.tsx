@@ -2758,7 +2758,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             <span aria-hidden="true"><ArrowDownToLine size={18} /></span><strong>Markdown 가져오기</strong><small>파일 또는 붙여넣기</small>
           </button>
         </div>
-          <DocumentTemplatePicker catalog={teamCatalog} reload={reloadTeamTemplates} value={teamTemplate?.id ?? ''}
+          <DocumentTemplatePicker catalog={teamCatalog} reload={reloadTeamTemplates} value={teamTemplate} projectId={newProject || null} data={data}
             projectName={data.projects.find(project => project.id === newProject)?.name} disabled={createLocked}
             onChoose={chooseTeamTemplate} />
           {teamTemplate && <p className="document-template-selection">{teamTemplate.projectId === null ? '팀 공통' : data.projects.find(project => project.id === teamTemplate.projectId)?.name}

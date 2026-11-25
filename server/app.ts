@@ -15,6 +15,7 @@ import { SavedViewService, SavedViewError } from './saved-views.js';
 import { CollaborationService, CollaborationError, type CollaborationUpgradeGuard } from './collaboration.js';
 import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
+import { CycleCopyError, CycleCopyService } from './cycle-copy.js';
 import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-completion-records.js';
 import { cycleRetrospectiveDraft, cycleRetrospectiveId } from './cycle-retrospective.js';
 import { aggregateCycleProgress, CycleProgressError } from './cycle-progress.js';
@@ -509,7 +510,9 @@ export function createApp(options: {
     }
     if (hierarchy) for (const id of visited) hierarchy.validated.add(id);
   };
-  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & WorkflowValidationOptions & {allowHistoricalPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & WorkflowValidationOptions & {
+    allowHistoricalPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean;prospectiveCycle?:PlanningItem;
+  }) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -523,7 +526,7 @@ export function createApp(options: {
     i.startDate=date(i.startDate,'시작일');i.endDate=date(i.endDate,'종료일');i.dueDate=date(i.dueDate,'마감일');dateRange(i.startDate,i.endDate);
     if(i.estimate!==null&&(!Number.isFinite(i.estimate)||i.estimate<0||i.estimate>100000))fail('예상 작업량은 0 이상의 숫자여야 합니다.');
     validatePlannedEffortMinutes(i.plannedEffortMinutes);
-    planning.validateIssueReferences(i,previous,{allowHistorical:options?.allowHistoricalPlanning});
+    planning.validateIssueReferences(i,previous,{allowHistorical:options?.allowHistoricalPlanning,prospectiveCycle:options?.prospectiveCycle});
     validateIssueHierarchy(i, options);
     workflows.validateIssue(i,previous,options);return i;
   };
@@ -1849,13 +1852,17 @@ export function createApp(options: {
     });
     res.json(result);
   });
-  const prepareIssueCreation=(input:Record<string,unknown>,timestamp=now()):Issue=>{
+  const prepareIssueCreation=(input:Record<string,unknown>,timestamp=now(),prospective?: {
+    id:string; cycle:PlanningItem; parents:ReadonlyMap<string,IssueParent>;
+  }):Issue=>{
     const fields=['projectId','title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','customFields'];
     const projectId=text(input.projectId,'프로젝트',200);
     const activeTypes=issueSchemas.get(projectId).issueTypes.filter(type=>!type.archived);
-    const i:Issue={id:uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
-    Object.assign(i,planning.resolveIssueFields(input,i.projectId));
-    return validateIssue(i);
+    const i:Issue={id:prospective?.id??uid(),key:'',projectId:'',title:'',description:'',type:activeTypes.find(type=>type.id==='작업')?.id||activeTypes[0].id,status:workflows.get(projectId).initialStatusId,priority:'medium',assigneeId:null,collaboratorIds:[],parentId:null,labels:[],startDate:null,endDate:null,dueDate:null,estimate:null,plannedEffortMinutes:null,cycle:null,module:null,release:null,version:1,createdAt:timestamp,updatedAt:timestamp,completedAt:null,...Object.fromEntries(fields.filter(k=>Object.hasOwn(input,k)).map(k=>[k,input[k]]))};
+    Object.assign(i,planning.resolveIssueFields(input,i.projectId,undefined,prospective?.cycle));
+    return validateIssue(i,undefined,prospective && {
+      prospectiveCycle:prospective.cycle,hierarchy:{issues:prospective.parents,validated:new Set()},
+    });
   };
   // The caller owns the transaction, including any links created with the issue.
   const commitIssueCreation=(actorId:string,i:Issue,recurringName?:string):Issue=>{
@@ -1976,15 +1983,45 @@ export function createApp(options: {
     });
   }
 
+  const issueCreationValidationMessage = (error: unknown) => error instanceof ApiError || error instanceof IssueSchemaError ||
+    error instanceof WorkflowError || error instanceof PlanningError || error instanceof WorkloadError ? error.message : null;
   const issuePaste = new IssuePasteService(store, {
     schema: projectId => issueSchemas.get(projectId),
     workflow: projectId => workflows.get(projectId),
     calendar: projectId => calendars.get(projectId),
     prepare: prepareIssueCreation,
-    validationMessage(error) {
-      return error instanceof ApiError || error instanceof IssueSchemaError || error instanceof WorkflowError ||
-        error instanceof PlanningError || error instanceof WorkloadError ? error.message : null;
+    validationMessage: issueCreationValidationMessage,
+  });
+  const cycleCopy = new CycleCopyService(store, {
+    plan: (source, name, dates, timestamp) => planning.prepareCycleCopy(source, name, dates, timestamp),
+    issue(source, target, parents, cycle, dates) {
+      const { type, title, description, descriptionFormat, priority, assigneeId, collaboratorIds, labels, estimate, plannedEffortMinutes, customFields } = source;
+      return prepareIssueCreation({ projectId: cycle.projectId, cycleId: cycle.id, parentId: target.parentId,
+        type, title, description, ...(descriptionFormat && { descriptionFormat }), priority, assigneeId, collaboratorIds, labels,
+        estimate, plannedEffortMinutes, customFields, ...dates }, cycle.createdAt, { id: target.id, cycle, parents });
     },
+    order: projectId => issueOrders.get(projectId).issueIds,
+    versions(projectId) {
+      const workflow = workflows.get(projectId);
+      return { workflow: workflow.version, schema: issueSchemas.get(projectId).version, initialStatus: workflow.initialStatusId };
+    },
+    calendar: projectId => calendars.get(projectId),
+    validationMessage: issueCreationValidationMessage,
+  });
+  app.post('/api/planning-items/:id/copy-preview', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(cycleCopy.preview(String(req.params.id), actor(req), req.body));
+  });
+  app.post('/api/planning-items/:id/copy', (req, res) => {
+    const actorId = actor(req);
+    const result = cycleCopy.apply(String(req.params.id), actorId, req.body, {
+      cycle: item => {
+        planning.persistCycleCopy(item);
+        recordActivity(actorId, 'planning', item.id, '사이클 복제', item.name);
+      },
+      issue: issue => commitIssueCreation(actorId, issue),
+      dependency: (link, batch) => saveNewDependency(req, link, batch),
+    });
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
   app.post('/api/projects/:projectId/issues/paste-preview', (req, res) => {
     const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
@@ -2230,6 +2267,18 @@ export function createApp(options: {
       return fail('템플릿을 조회할 문서 공간과 보관함 조건을 확인해 주세요.');
     }
     res.set('Cache-Control','no-store').json(documentTemplates.list(projectId??null,includeArchived==='1'));
+  });
+  app.get('/api/document-templates/:id/preview', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const { projectId, expectedVersion } = req.query;
+    if (Object.keys(req.query).some(key => key !== 'projectId' && key !== 'expectedVersion') ||
+        (projectId !== undefined && (typeof projectId !== 'string' || !projectId.trim())) ||
+        typeof expectedVersion !== 'string' || !/^[1-9]\d{0,15}$/u.test(expectedVersion)) {
+      return fail('템플릿을 미리볼 공간과 버전을 확인해 주세요.');
+    }
+    if (projectId && !store.get('projects', projectId)) return fail('문서 공간을 찾을 수 없습니다.', 404);
+    const { id, version, content } = documentTemplates.forDraft(req.params.id, Number(expectedVersion), projectId ?? null);
+    res.json({ id, version, content });
   });
   const templateOrigins=(req:Request)=>[req.get('origin')??'',`${req.protocol}://${req.get('host')??''}`];
   app.post('/api/document-templates', (req,res) => {
@@ -3806,6 +3855,7 @@ export function createApp(options: {
       commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      cycleCopy.clearForImport();
       projectCreation.invalidateForImport();
       issueSave.invalidateForImport();
       documentSave.invalidateForImport();
@@ -3932,6 +3982,7 @@ export function createApp(options: {
     if(error instanceof GitlabProjectWebhookSetupError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof GitlabDeploymentError||error instanceof GitlabMergeRequestObservationError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CycleCopyError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCompletionRecordsError||error instanceof CycleProgressError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});

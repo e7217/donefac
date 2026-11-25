@@ -455,6 +455,8 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 빈 문서와 내장·팀 양식 만들기에도 같은 요청 ID 흐름을 사용한다. 생성이 확인된 뒤에는 저장한 문서 ID로 목록 갱신과 문서 열기를 재시도한다.
 
+브라우저의 팀 양식 선택창은 `GET /api/document-templates/:id/preview?expectedVersion=…&projectId=…`로 선택한 저장본의 `{id,version,content}`를 읽는다. 팀 공통 공간에서는 `projectId`를 생략한다. 프로젝트 전용 양식은 해당 공간에서, 팀 공통 양식은 모든 공간에서 읽을 수 있다. 선택 버전이 달라졌거나 보관된 양식이면 목록을 다시 읽어 선택한다.
+
 ## 문서 저장 결과 재확인
 
 `PATCH /api/documents/:id`에서 저장 응답을 다시 확인하려면 `requestId`에 UUID v4를 지정하고 `expectedRestoreGeneration`에 저장 시작 시 워크스페이스 세대를 보낸다. 같은 작업자가 같은 문서에 동일한 요청 본문을 다시 보내면 저장한 버전의 문서를 반환한다. 요청 ID를 다른 저장에 사용하거나 자체 JSON 백업을 가져오기 전 세대의 요청이 들어오면 `409`를 반환한다. 원래 저장본을 확인할 수 없는 경우에도 `409`를 반환한다. 영수증은 물리 백업에서 복원한다.
@@ -1468,6 +1470,12 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 여러 프로젝트를 함께 검토하려면 `{projectId:null,relations:[{id,version,projectId}]}`을 보낸다. 서버는 각 관계·버전·양쪽 업무의 소속을 확인해 행 오류를 반환한다. 팀 미리보기는 `projectIds`와 새로 추가하거나 유지하는 각 행의 `projectId`를 반환하고 프로젝트별 달력으로 경고를 계산한다.
 
 `POST /api/schedule/blocker-links/apply`에 `{previewId}`를 보낸다. 원래 관계나 확인한 원본 방향, 업무·소속·관련 연결·일정 규칙이 바뀌면 `409`를 반환한다. 모든 대상 프로젝트의 새 연결은 한 트랜잭션에 저장된다. 같은 작업자가 같은 ID로 저장 결과를 확인할 수 있다. 결과의 `{undoId}`를 `POST /api/schedule/undo`에 보내 추가한 일정 연결만 한 번에 해제한다.
+
+## 사이클과 업무 복제
+
+브라우저에서 `POST /api/planning-items/:id/copy-preview`에 `{expectedVersion,name,dateShiftDays,issues:[{id,expectedVersion}]}`을 보낸다. 같은 사이클의 활성 업무를 1~100개 지정하고 날짜 이동은 달력 일수 −3650~3650을 보낸다. 서버는 새 사이클 이름과 날짜, 새 티켓의 초기 상태와 날짜·상위 키, 선택 범위 안의 선후행 관계 최대 1,000개를 `cycle`, `rows`, `dependencies`로 돌려준다. `omitted`는 선택 범위 밖 상위 업무와 선후행 관계의 개수를 담는다. 잘못된 업무 양식과 순환은 `errors`에 보고하고 `previewId`는 `null`이다. 적용할 수 있는 미리보기는 30분간 유효하다.
+
+`POST /api/planning-items/:id/copy`에 `{previewId}`를 보낸다. 서버가 원본 사이클·업무·연결과 달력·양식·워크플로를 다시 확인한다. 첫 저장의 상태 코드는 `201`이며 `{cycle,issues:[{sourceIssueId,id,key}],dependencies,duplicate:false}`를 반환한다. 같은 작업자가 같은 사이클에서 7일 안에 저장 결과를 다시 확인하면 `200`과 `duplicate:true`를 받는다. 원본이 바뀐 미적용 미리보기는 `stale_preview`, 이미 저장했으나 생성한 항목을 확인할 수 없는 결과는 `result_unavailable` 사유의 `409`를 돌려준다. 자체 JSON 복원은 복제 미리보기와 저장 재확인 기록을 초기화한다.
 
 ## 사이클 완료와 업무 이월
 

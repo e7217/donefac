@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent } from 'react';
-import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, ClipboardCheck, Layers3, LoaderCircle, PackageCheck, Plus, RefreshCw, Save, Search, SquareChartGantt, Trash2 } from 'lucide-react';
+import { Archive, ArrowRight, CalendarRange, Check, CircleDashed, ClipboardCheck, Copy, Layers3, LoaderCircle, PackageCheck, Plus, RefreshCw, Save, Search, SquareChartGantt, Trash2 } from 'lucide-react';
 import type { FeatureProps, Issue, PlanningItem, PlanningKind, PlanningStatus } from '../../shared/types';
 import { isCalendarDate } from '../../shared/calendar';
 import { planningAssignmentBlock } from '../../shared/planning-helpers';
@@ -10,6 +10,7 @@ import { api, dateLabel, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { CycleCompletionHistory, CycleCompletionRecordView } from './CycleCompletionHistory';
 import { CycleCompletionPanel } from './CycleCompletionPanel';
+import { CycleCopyDialog } from './CycleCopyDialog';
 import { CycleProgress } from './CycleProgress';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
 import { errorMessage } from './schedule-utils';
@@ -139,12 +140,19 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
   const [issueQuery, setIssueQuery] = useState('');
   const [showCandidates, setShowCandidates] = useState(false);
   const [completionCycle, setCompletionCycle] = useState<PlanningItem | null>(null);
+  const [copyCycle, setCopyCycle] = useState<PlanningItem | null>(null);
   const completionButton = useRef<HTMLButtonElement>(null);
+  const copyButton = useRef<HTMLButtonElement>(null);
   const title = useRef<HTMLHeadingElement>(null);
   const pendingRef = useRef(false), dirtyRef = useRef(false);
   const closeCompletion = useCallback(() => setCompletionCycle(null), []);
+  const closeCopy = useCallback(() => setCopyCycle(null), []);
   const restoreCompletionFocus = useCallback(() => {
     const button = completionButton.current;
+    (button && !button.disabled ? button : title.current)?.focus({ preventScroll: true });
+  }, []);
+  const restoreCopyFocus = useCallback(() => {
+    const button = copyButton.current;
     (button && !button.disabled ? button : title.current)?.focus({ preventScroll: true });
   }, []);
   const acceptCycle = useCallback((latest: PlanningItem) => {
@@ -161,10 +169,14 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
   const hasUnsaved = dirty || selectedAssignments.length > 0;
   const remoteChanged = Boolean(item && item.version > version);
   const requiresCycleCompletion = Boolean(item && kind === 'cycle' && baseline.status === 'active');
+  const cycleActionsDisabled = busy || hasUnsaved || remoteChanged;
   function startCompletion() {
     if (item && requiresCycleCompletion && !pendingRef.current && !hasUnsaved && !remoteChanged) {
       setCompletionCycle({ ...item, ...baseline, version });
     }
+  }
+  function startCopy() {
+    if (item && kind === 'cycle' && !pendingRef.current && !cycleActionsDisabled) setCopyCycle(item);
   }
   if (item && remoteChanged && !hasUnsaved && !busy) { setDraft(draftOf(item)); setBaseline(draftOf(item)); setVersion(item.version); setError(''); }
   useEffect(() => { dirtyRef.current = hasUnsaved; }, [hasUnsaved]);
@@ -226,13 +238,18 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
   const Icon = KIND_ICONS[kind];
   return <section className="planning-editor" aria-label={`${PLAN_LABELS[kind]} 상세`}><div className="planning-editor-heading"><div><span className="feature-eyebrow">{existingId ? `PLAN · V${version}` : 'NEW PLAN'}</span><h2 ref={title} tabIndex={-1}><Icon size={21} />{existingId ? baseline.name : `새 ${PLAN_LABELS[kind]}`}</h2></div>{existingId && <button className="btn btn-ghost" disabled={busy} onClick={reload}><RefreshCw size={14} />최신 정보</button>}</div>
     {existingId && !item && <div className="issue-form-error" role="alert">이 항목이 현재 작업공간에 없습니다. 작성 내용은 유지됩니다. 최신 정보를 확인하세요.</div>}{remoteChanged && hasUnsaved && <div className="issue-form-error" role="alert">다른 작업자가 계획을 변경했습니다. 작성 중인 내용은 버전 {version} 기준으로 유지됩니다.</div>}
-    {requiresCycleCompletion && <div className="cycle-completion-launch">
-      <button ref={completionButton} className="btn btn-primary" type="button" disabled={busy || hasUnsaved || remoteChanged}
-        onClick={startCompletion}><Check size={15} />사이클 완료</button>
+    {item && kind === 'cycle' && <div className="cycle-completion-launch">
+      {requiresCycleCompletion && <button ref={completionButton} className="btn btn-primary" type="button" disabled={cycleActionsDisabled}
+        onClick={startCompletion}><Check size={15} />사이클 완료</button>}
+      <button ref={copyButton} className="btn" type="button" disabled={cycleActionsDisabled} onClick={startCopy}>
+        <Copy size={15} aria-hidden="true" />업무와 함께 복제
+      </button>
       {hasUnsaved && <p>계획 정보와 업무 연결 변경을 먼저 저장하거나 초기화해 주세요.</p>}
     </div>}
     {completionCycle && <CycleCompletionPanel cycle={completionCycle} plans={data.planningItems ?? []} actorId={actorId}
       refresh={refresh} notify={notify} onClose={closeCompletion} onSaved={acceptCycle} onOpenRecord={onOpenCompletionRecord} restoreFocus={restoreCompletionFocus} />}
+    {copyCycle && <CycleCopyDialog source={copyCycle} cycle={item} data={data} actorId={actorId}
+      refresh={refresh} notify={notify} onClose={closeCopy} onOpenCycle={onCreated} restoreFocus={restoreCopyFocus} />}
     {kind === 'cycle' && item && <CycleProgress cycle={{ ...item, version: Math.max(item.version, version) }}
       projectId={projectId} actorId={actorId} data={data} openIssue={openIssue} />}
     {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={actorId} issues={data.issues} openIssue={openIssue} refresh={refresh} onOpenCycleRetrospective={onOpenCycleRetrospective}

@@ -198,8 +198,17 @@ test('360px에서 원본이 삭제된 템플릿의 본문 이미지와 첨부를
     const form = await openNew(page);
     await form.select.selectOption({ label: templateName });
     await expect(form.dialog).toContainText('첨부 2개');
-    await expectFitsMobile(form.dialog);
     await form.title.fill(title);
+    const toggle = form.dialog.getByRole('button', { name: '템플릿 미리보기', exact: true });
+    await toggle.click();
+    const preview = form.dialog.getByRole('region', { name: '템플릿 저장본 미리보기', exact: true });
+    await expect(preview).toContainText(`이미지 · ${logoAlt}`);
+    await expect(preview).toContainText(linkLabel);
+    await expect(preview.getByRole('img')).toHaveCount(0);
+    await expect(preview.getByRole('link')).toHaveCount(0);
+    await expectFitsMobile(form.dialog);
+    await form.dialog.getByRole('button', { name: '템플릿 미리보기 닫기', exact: true }).click();
+    await expect(form.title).toHaveValue(title);
     const applied = waitForMutation(page, 'POST', '/api/documents');
     await form.submit.click();
     const applyResponse = await applied;
@@ -296,10 +305,33 @@ test('360px에서 저장한 문서 템플릿으로 독립 초안을 만들고 �
     const form = await openNew(page);
     const option = form.select.getByRole('option', { name: templateName, exact: true });
     await expect(option).toHaveCount(1);
+    const previewRequests: URL[] = [];
+    await page.route(`**/api/document-templates/${template.id}/preview?*`, async route => {
+      previewRequests.push(new URL(route.request().url()));
+      await route.continue();
+    });
     await form.select.selectOption({ label: templateName });
     await expect(form.title).toHaveValue(templateName);
     await form.title.fill(newTitle);
-    await form.dialog.getByRole('combobox', { name: '상위 문서', exact: true }).selectOption(parent.id);
+    const parentInput = form.dialog.getByRole('combobox', { name: '상위 문서', exact: true });
+    await parentInput.selectOption(parent.id);
+    const toggle = form.dialog.getByRole('button', { name: '템플릿 미리보기', exact: true });
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(previewRequests).toHaveLength(0);
+    await toggle.click();
+    const preview = form.dialog.getByRole('region', { name: '템플릿 저장본 미리보기', exact: true });
+    await expect(preview.getByRole('heading', { name: heading, exact: true })).toBeVisible();
+    await expect(preview.getByRole('table')).toContainText(cellText);
+    await expect(preview).not.toContainText(newSourceText);
+    await expect(preview.getByRole('link')).toHaveCount(0);
+    expect(previewRequests).toHaveLength(1);
+    expect(Object.fromEntries(previewRequests[0].searchParams)).toEqual({ expectedVersion: String(template.version), projectId: project.id });
+    await preview.press('Escape');
+    await expect(preview).toHaveCount(0);
+    await expect(toggle).toBeFocused();
+    await expect(form.title).toHaveValue(newTitle);
+    await expect(parentInput).toHaveValue(parent.id);
+    expect((await workspace(request)).documents.some(document => document.title === newTitle)).toBe(false);
     await expectFitsMobile(form.dialog);
 
     const attempts: { responseStatus: number; body: string | null; actor: string | undefined }[] = [];
@@ -410,22 +442,39 @@ test('프로젝트 템플릿의 범위를 지키고 최신 공통 템플릿을 �
     const latest = await json<DocumentTemplateSummary>(await request.patch(`/api/document-templates/${teamTemplate.id}`, { data: {
       expectedVersion: teamTemplate.version, sourceDocumentId: replacement.id, expectedDocumentVersion: replacement.version,
     } }));
-    const stale = waitForMutation(page, 'POST', '/api/documents');
-    await form.submit.click();
+    const stale = page.waitForResponse(response => new URL(response.url()).pathname === `/api/document-templates/${teamTemplate.id}/preview`);
+    const previewButton = form.dialog.getByRole('button', { name: '템플릿 미리보기', exact: true });
+    await previewButton.click();
     const staleResponse = await stale;
     expect(staleResponse.status(), await staleResponse.text()).toBe(409);
-    expect(staleResponse.request().postDataJSON()).toMatchObject({ expectedTemplateVersion: teamTemplate.version });
-    await expect(form.dialog.getByRole('alert')).toBeVisible();
+    expect(new URL(staleResponse.url()).searchParams.get('expectedVersion')).toBe(String(teamTemplate.version));
+    const preview = form.dialog.getByRole('region', { name: '템플릿 저장본 미리보기', exact: true });
+    await expect(preview.getByRole('alert')).toBeVisible();
+    await preview.getByRole('button', { name: '팀 템플릿 다시 불러오기', exact: true }).click();
     await form.dialog.getByRole('button', { name: '최신 템플릿 사용', exact: true }).click();
     await expect(form.title).toHaveValue(newTitle);
     await expect(form.space).toHaveValue(destination.id);
     expect((await workspace(request)).documents.some(value => value.title === newTitle)).toBe(false);
+    await previewButton.click();
+    await expect(preview).toContainText(updatedContent);
+    await expect(preview).not.toContainText('이전 팀 공통 양식');
+
+    const renamedTeam = await json<DocumentTemplateSummary>(await request.patch(`/api/document-templates/${latest.id}`, { data: {
+      expectedVersion: latest.version, name: `${teamTitle} 개정`,
+    } }));
+    const staleCreate = waitForMutation(page, 'POST', '/api/documents');
+    await form.submit.click();
+    const rejectedCreate = await staleCreate;
+    expect(rejectedCreate.status(), await rejectedCreate.text()).toBe(409);
+    expect(rejectedCreate.request().postDataJSON()).toMatchObject({ expectedTemplateVersion: latest.version });
+    await form.dialog.getByRole('button', { name: '최신 템플릿 사용', exact: true }).click();
+    await expect(form.title).toHaveValue(newTitle);
 
     const applied = waitForMutation(page, 'POST', '/api/documents');
     await form.submit.click();
     const appliedResponse = await applied;
     expect(appliedResponse.status(), await appliedResponse.text()).toBe(201);
-    expect(appliedResponse.request().postDataJSON()).toMatchObject({ templateId: latest.id, expectedTemplateVersion: latest.version });
+    expect(appliedResponse.request().postDataJSON()).toMatchObject({ templateId: renamedTeam.id, expectedTemplateVersion: renamedTeam.version });
     const created = await appliedResponse.json() as DocPage;
     expect(created).toMatchObject({ title: newTitle, projectId: destination.id, parentId: null, version: 1, status: 'draft' });
     expect(created.plainText).toContain(updatedContent);

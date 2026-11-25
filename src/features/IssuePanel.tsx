@@ -10,6 +10,8 @@ import { PlanningSelect } from './PlanningSelectors';
 import { issueTypeMeta, requiredFieldLabels } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { findIssueDocumentReferences } from '../../shared/document-references';
+import { commentWebLinkRanges } from '../../shared/comment-web-links';
+import { normalizeGitlabSearchInput } from '../../shared/gitlab-search';
 import { issueSearchAliasLabel, issueSearchAliases } from '../../shared/workspace-search';
 import type { IssueRelationScheduleMode } from '../../shared/issue-relations';
 import { CustomFields, IssueTypeSelect } from './CustomFields';
@@ -57,6 +59,7 @@ import './issue-decision-source.css';
 import './issue-review.css';
 
 const DocumentDecisionRevision = lazy(() => import('./DocumentBlocks').then(module => ({ default: module.DocumentDecisionRevision })));
+const ISSUE_COMMENT_LENGTH_LIMIT = 10_000;
 type RelationScheduleReview = { relation: IssueRelation; mode: IssueRelationScheduleMode; reload: () => Promise<void> };
 type IssueDependencyEditor =
   | { otherRole: RelatedIssueDirection; dependency?: Dependency; review?: never }
@@ -207,6 +210,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const commentDraftKey = issueCommentDraftKey(props.actorId, issueId, data.restoreGeneration);
   const [commentComposer, setCommentComposer] = useState(() => readIssueCommentDraft(commentDraftKey));
   const { draft: commentDraft, requestId: commentRequestId, stored: commentStored } = commentComposer;
+  const commentField = useRef<HTMLTextAreaElement>(null);
   const unstoredComment = useRef(Boolean(commentDraft.body.trim()) && !commentStored);
   const storeCommentDraft = useCallback((draft: CommentDraft, requestId: string | null = null) => {
     const stored = writeIssueCommentDraft(commentDraftKey, draft, requestId);
@@ -1015,6 +1019,33 @@ function IssuePanelContent(props: IssuePanelProps) {
     } catch (err) { setError({ message: errorMessage(err) }); }
     finally { savingRef.current = false; setSaving(false); }
   }
+  function appendGitlabActivityToComment(reference: { href: string; body: string }) {
+    if (commentingRef.current || commentRequestId) return;
+    const canonical = normalizeGitlabSearchInput(reference.href);
+    if (!canonical) return;
+    if (commentWebLinkRanges(commentDraft.body).some(link => normalizeGitlabSearchInput(link.href) === canonical)) {
+      notify('이 GitLab 활동 링크가 댓글 초안에 이미 있습니다.');
+      commentField.current?.focus();
+      return;
+    }
+    const current = commentDraft.body;
+    const separator = !current.trim() || current.endsWith('\n\n') ? '' : current.endsWith('\n') ? '\n' : '\n\n';
+    const body = `${current}${separator}${reference.body}`;
+    if (body.length > ISSUE_COMMENT_LENGTH_LIMIT) {
+      notify('댓글을 10,000자 이내로 줄인 뒤 GitLab 활동을 추가해 주세요.', 'error');
+      commentField.current?.focus();
+      return;
+    }
+    setCommentError('');
+    storeCommentDraft({ ...commentDraft, body });
+    requestAnimationFrame(() => {
+      const field = commentField.current;
+      if (field?.value !== body) return;
+      field.focus();
+      field.setSelectionRange(body.length, body.length);
+    });
+  }
+
   async function addComment(event: FormEvent) {
     event.preventDefault();
     const payload = commentDraftPayload(commentDraft);
@@ -1454,6 +1485,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       <IssueGitlabActivity key={gitlabActivityId} issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
         gitlabActivitySelection={gitlabActivitySelection} gitlabActivityId={gitlabActivityId} gitlabActivityFocusRef={gitlabActivityFocusRef}
         onCopyActivityLink={onCopyGitlabActivityLink}
+        commentActions={{ disabled: commenting || Boolean(commentRequestId), add: appendGitlabActivityToComment }}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} isCurrentStatusSuggestion={isCurrentGitlabStatusSuggestion}
         canPrepareStatusSuggestion={canPrepareGitlabStatusSuggestion} onPrepareStatusSuggestion={prepareGitlabStatusSuggestion} />
       <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}
@@ -1485,8 +1517,8 @@ function IssuePanelContent(props: IssuePanelProps) {
           <CommentEditBody comment={commentEditing.current.base} editing={commentEditing} users={data.users} />}
         {commentError && <div className="issue-form-error" role="alert">{commentError}</div>}
         <form onSubmit={addComment}>
-          <CommentMentionInput className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" draft={commentDraft}
-            onChange={value => { setCommentError(''); storeCommentDraft(value); }} users={data.users} rows={3} required maxLength={10000}
+          <CommentMentionInput className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" draft={commentDraft} textareaRef={commentField}
+            onChange={value => { setCommentError(''); storeCommentDraft(value); }} users={data.users} rows={3} required maxLength={ISSUE_COMMENT_LENGTH_LIMIT}
             readOnly={commenting || Boolean(commentRequestId)} />
           {commentDraft.body.trim() && !commentStored && <p className="issue-form-error" role="status">이 탭에 댓글 초안을 보관하지 못했습니다.</p>}
           <div className="issue-comment-submit"><button className="btn" disabled={!commentDraft.body.trim() || commenting} type="submit"><Plus size={14} />

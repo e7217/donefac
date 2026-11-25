@@ -9,10 +9,24 @@
 
 .document-template-heading-actions { justify-content: flex-end; }
 .document-template-picker { margin: 0 0 14px; }
-.document-template-picker, .document-templates-form .docs-modal-label { color: #4d5e74; }
+.document-template-picker > .docs-modal-label, .document-templates-form .docs-modal-label { color: #4d5e74; }
 .document-template-picker-status { margin: 10px 0; color: #54647a; font-size: 12px; }
 .document-template-selection { margin: -6px 0 14px; color: #54647a; font-size: 12px; }
 .document-template-review { margin: 10px 0 0; }
+
+.document-template-preview { margin-top: 5px; }
+.document-template-preview-region {
+  max-height: 15rem;
+  margin-top: 8px;
+  padding: 10px 12px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  color: #25354c;
+  background: #f7f9fc;
+  border: 1px solid #e7ebf2;
+  border-radius: 8px;
+}
+.document-template-preview-region > p { margin: 0; font-size: 13px; }
 
 .document-templates-dialog {
   box-sizing: border-box;

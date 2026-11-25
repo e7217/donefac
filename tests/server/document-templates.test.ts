@@ -116,6 +116,39 @@ async function expectBytes(f: Fixture, path: string, bytes: Buffer) {
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), bytes);
 }
 
+test('template previews read the exact saved body only in an allowed destination and never make a draft', async t => {
+  const f = await fixture(t);
+  const source = await createSource(f, '프로젝트 인수인계 저장본', project);
+  const common = await createSource(f, '팀 공통 인수인계 저장본', null);
+  const template = await f.call<DocumentTemplateSummary>(resource, 201, 'POST', captureRequest(source, '프로젝트 인수인계'));
+  const team = await f.call<DocumentTemplateSummary>(resource, 201, 'POST', captureRequest(common, '팀 공통 인수인계'));
+  const updatedSource = await saveBlocks(f, source, paragraph('템플릿 저장 뒤 원본에 추가한 내용').content!);
+  const previewPath = (summary: DocumentTemplateSummary, projectId = summary.projectId, version = summary.version) => (
+    `${resource}/${summary.id}/preview?${new URLSearchParams({ expectedVersion: String(version), ...(projectId === null ? {} : { projectId }) })}`
+  );
+  const before = await f.call<WorkspaceSnapshot>('/workspace');
+  const preview = await f.request(previewPath(template), { headers: { 'X-Actor-Id': teammate } });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.headers.get('Cache-Control'), 'no-store');
+  assert.deepEqual(await preview.json(), { id: template.id, version: template.version, content: source.content });
+  assert.deepEqual(await f.call(previewPath(team, otherProject)), { id: team.id, version: team.version, content: common.content });
+  assert.equal((await f.call<Failure>(previewPath(template, otherProject), 404)).details.reason, 'template_not_found');
+  assert.equal((await f.call<Failure>(previewPath(template, null), 404)).details.reason, 'template_not_found');
+  await f.call(previewPath(team, randomUUID()), 404);
+  await f.call(`${resource}/${template.id}/preview`, 400);
+  await f.call(`${previewPath(template)}&expectedVersion=2`, 400);
+  await f.call(`${previewPath(template)}&includeArchived=1`, 400);
+  assert.deepEqual(await f.call('/workspace'), before);
+
+  const updated = await f.call<DocumentTemplateSummary>(`${resource}/${template.id}`, 200, 'PATCH', {
+    expectedVersion: template.version, sourceDocumentId: updatedSource.id, expectedDocumentVersion: updatedSource.version,
+  });
+  assert.equal((await f.call<Failure>(previewPath(template), 409)).details.reason, 'template_version_conflict');
+  assert.deepEqual(await f.call(previewPath(updated)), { id: updated.id, version: updated.version, content: updatedSource.content });
+  const archived = await f.call<DocumentTemplateSummary>(`${resource}/${team.id}`, 200, 'PATCH', { expectedVersion: team.version, archived: true });
+  assert.equal((await f.call<Failure>(previewPath(archived, project), 409)).details.reason, 'template_archived');
+});
+
 test('team and project templates capture portable saved content and create an independent revision once', async t => {
   const f = await fixture(t);
   const common = await createSource(f, '팀 회의 양식', null);

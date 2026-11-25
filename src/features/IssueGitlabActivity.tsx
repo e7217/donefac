@@ -15,7 +15,7 @@ import type { GitlabIssueReviewSelection } from '../lib/issue-review';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList,
   GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, gitlabMergeRequestPipelinePath, isGitlabLinkedStatusRefreshResult,
   matchesBranchMergeRequestLink, matchesMergeRequestPipelineLink,
-  type BranchMergeRequest, type GitlabCheckedActivity, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
+  type BranchMergeRequest, type GitlabActivityCommentActions, type GitlabCheckedActivity, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { deploymentSource, gitlabDeploymentKey, gitlabDeploymentStatusLabels, IssueGitlabDeployments } from './GitlabDeployments';
 
@@ -28,6 +28,7 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   gitlabActivityId?: string | null;
   gitlabActivityFocusRef: RefObject<string | null>;
   onCopyActivityLink: (linkId: string) => void;
+  commentActions: GitlabActivityCommentActions;
   disabled: boolean;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
   isCurrentStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
@@ -115,7 +116,7 @@ function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected:
 }
 
 export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityId, gitlabActivityFocusRef,
-  onCopyActivityLink, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
+  onCopyActivityLink, commentActions, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
   const formHeading = useId(), unlinkHeading = useId(), selectionMissingId = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
@@ -647,6 +648,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
       checkedActivity={checkedActivity}
       onCopyActivityLink={onCopyActivityLink}
+      commentActions={{ ...commentActions, disabled: commentActions.disabled || controlsDisabled || actionOpen }}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,

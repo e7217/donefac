@@ -88,8 +88,9 @@ export class PlanningService{
       }
     });
   }
-  resolveIssueFields(input:unknown,projectId:string,previous?:Issue):PlanFields{
+  resolveIssueFields(input:unknown,projectId:string,previous?:Issue,prospectiveCycle?:PlanningItem):PlanFields{
     const source=object(input),result={} as PlanFields,items=this.all();this.project(projectId);
+    if(prospectiveCycle)items.push(prospectiveCycle);
     for(const kind of kinds){const {idField,labelField}=planningFields(kind);let id:string|null;
       if(Object.hasOwn(source,idField)){if(source[idField]!==null&&typeof source[idField]!=='string')fail(`${PLANNING_META[kind].label} ID를 확인해 주세요.`);id=source[idField];}
       else if(Object.hasOwn(source,labelField)){
@@ -104,8 +105,9 @@ export class PlanningService{
     return result;
   }
   /** Mutates both IDs and derived labels so every issue write has one canonical reference. */
-  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowHistorical?:boolean | ReadonlySet<string>}={}):void{
+  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowHistorical?:boolean | ReadonlySet<string>;prospectiveCycle?:PlanningItem}={}):void{
     const items=this.all();
+    if(options.prospectiveCycle)items.push(options.prospectiveCycle);
     for(const kind of kinds){const {idField,labelField}=planningFields(kind),id=issue[idField];if(id===undefined||id===null){(issue as any)[idField]=null;(issue as any)[labelField]=null;continue;}
       if(typeof id!=='string')fail(`${PLANNING_META[kind].label} ID가 올바르지 않습니다.`);
       const item=items.find(item=>item.id===id);if(!item||item.projectId!==issue.projectId||item.kind!==kind)fail(`${PLANNING_META[kind].label}의 프로젝트·종류·ID가 올바르지 않습니다.`);
@@ -178,6 +180,16 @@ export class PlanningService{
     const updated=this.parse({...old,startDate:dates.startDate,endDate:dates.endDate,targetDate:dates.targetDate,version:old.version+1,updatedAt:now()});
     this.put(updated);
     return updated;
+  }
+  prepareCycleCopy(source: PlanningItem, name: string, dates: PlanScheduleDates, timestamp: string): PlanningItem {
+    const copy = this.parse({ ...source, ...dates, id: randomUUID(), name, status: 'planned',
+      version: 1, createdAt: timestamp, updatedAt: timestamp });
+    this.unique(copy);
+    return copy;
+  }
+  persistCycleCopy(copy: PlanningItem): void {
+    if (!this.store.db.isTransaction) fail('사이클 복제에는 적용 트랜잭션이 필요합니다.', 500);
+    this.put(copy);
   }
   completeCycle(id: string, expectedVersion: number, updatedAt: string): PlanningItem {
     if (!this.store.db.isTransaction) fail('사이클 완료에는 적용 트랜잭션이 필요합니다.', 500);
