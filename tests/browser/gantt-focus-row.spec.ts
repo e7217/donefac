@@ -111,6 +111,17 @@ test('360px 선택 업무에 날짜가 없으면 첫 빈 칸에 포커스하고 
     await expect(start(empty)).toHaveValue(savedStart);
     await end(empty).press('Escape');
     await expect(start(empty)).toHaveValue('');
+
+    await start(empty).fill(savedStart);
+    await start(empty).press('Enter');
+    const storedEmpty = async () => (await workspace(request)).issues.find(value => value.id === empty.id);
+    await expect.poll(storedEmpty).toMatchObject({ startDate: savedStart, endDate: null });
+    await expectVisibleFocus(end(empty));
+    await end(empty).fill(endDate);
+    await end(empty).press('Enter');
+    await expect.poll(storedEmpty).toMatchObject({ startDate: savedStart, endDate });
+    await expect(end(empty)).toBeFocused();
+
     await page.goto(`${focused(empty)}&focusDate=endDate`);
     await expect(page).toHaveURL(url => url.hash === `${focused(empty).slice(1)}&focusDate=endDate`);
     await expectVisibleFocus(end(empty));

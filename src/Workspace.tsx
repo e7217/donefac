@@ -19,6 +19,7 @@ import { appendDocumentPublicationCriteria, defaultDocumentPublicationCriteria, 
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSearchAliasLabel, normalizeWorkspaceSearchInput, searchQuickDocuments, searchQuickIssues, type WorkspaceSearchFilters } from '../shared/workspace-search';
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
+import { cycleCompletionRecordParameter, readCycleCompletionRecordId } from '../shared/cycle-completion-address';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
 import { useAtlassianSearch } from './lib/use-atlassian-search';
 import { useIssueSubscriptions } from './lib/use-issue-subscriptions';
@@ -73,7 +74,9 @@ const navigation = [
 
 type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
+  completionRecordId?: string | null;
   issueCommentId?: string | null;
+  gitlabActivityId?: string | null;
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttScope?: 'team'; ganttProject?: string | null;
   ganttScheduleFilters?: TeamGanttScheduleFilters;
@@ -154,8 +157,10 @@ function routeHash(route: WorkspaceRoute) {
   if (route.issueId) {
     query.set('issue', route.issueId);
     if (route.issueCommentId) query.set('issueComment', route.issueCommentId);
+    else if (route.view === 'issues' && route.gitlabActivityId) query.set('gitlabActivity', route.gitlabActivityId);
   }
   if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
+  if (route.view === 'planning' && route.completionRecordId) query.set(cycleCompletionRecordParameter, route.completionRecordId);
   if (route.view === 'development' && route.gitlabActivityFilters) appendGitlabActivityFilters(query, route.gitlabActivityFilters);
   if (route.view === 'publication' && route.publicationCriteria) {
     appendDocumentPublicationCriteria(query, route.publicationCriteria, route.publicationTab ?? 'assigned', route.projectId);
@@ -404,6 +409,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issueCommentSelectors = parameters.getAll('issueComment');
   const issueCommentId = issueId && issueCommentSelectors.length === 1 && isRelationId(issueCommentSelectors[0])
     ? issueCommentSelectors[0] : null;
+  const gitlabActivitySelectors = parameters.getAll('gitlabActivity');
+  const gitlabActivityId = view === 'issues' && issueId && !issueCommentId && gitlabActivitySelectors.length === 1 &&
+    isRelationId(gitlabActivitySelectors[0]) ? gitlabActivitySelectors[0] : null;
   const requestedDocumentPreview = parameters.get('documentPreview');
   const documentPreviewId = issueId && requestedDocumentPreview &&
     canPreviewIssueDocument(snapshot, issueId, requestedDocumentPreview) ? requestedDocumentPreview : null;
@@ -447,6 +455,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     focusedIssue[planningFields(routePlan.kind).idField] === routePlan.id;
   const planningId = view === 'backlog' && projectId === parts[0] && isRelationId(parts[2]) ? parts[2]
     : view === 'planning' || keepGanttContext || linkedPlanFocus ? routePlan?.id ?? null : null;
+  const completionRecordId = view === 'planning' && projectId === parts[0] ? readCycleCompletionRecordId(parameters) : null;
   const savedViewId = (view === 'issues' || keepGanttContext) && (!issue || projectId === parts[0])
     ? parameters.get('savedView') || null : null;
   const publicationTab = view === 'publication' && (parts[2] === 'requested' || parts[2] === 'published') ? parts[2] : 'assigned';
@@ -488,9 +497,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   }
   return { projectId, view, documentId, issueId, issueCommentId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
-    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters,
+    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
-    gitlabActivityFilters: activityFilters };
+    gitlabActivityFilters: activityFilters, gitlabActivityId };
 }
 
 export default function Workspace({environmentLabel = '로컬 개발 환경', pilotAccess = false}: { environmentLabel?: string; pilotAccess?: boolean } = {}) {
@@ -503,6 +512,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const issueSubscriptions = useIssueSubscriptions(actorId);
   const [view, setView] = useState<View>('overview');
   const [issueId, setIssueId] = useState<string | null>(null);
+  const [gitlabActivityId, setGitlabActivityId] = useState<string | null>(null);
   const [issueReview, setIssueReview] = useState<IssueReview | null>(null);
   const [documentPreviewId, setDocumentPreviewId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
@@ -512,6 +522,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [decisionFollowUpScope, setDecisionFollowUpScope] = useState<DecisionFollowUpScope | null>(null);
   const [fieldBreakdownScope, setFieldBreakdownScope] = useState<FieldBreakdownScope | null>(null);
   const [planningId, setPlanningId] = useState<string | null>(null);
+  const [completionRecordId, setCompletionRecordId] = useState<string | null>(null);
   const [savedViewId, setSavedViewId] = useState<string | null>(null);
   const [ganttScope, setGanttScope] = useState<WorkspaceRoute['ganttScope']>();
   const [ganttProject, setGanttProject] = useState<string | null>(null);
@@ -731,8 +742,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     else history.replaceState(state, '', hash);
     acceptedRouteRef.current = route;
     routeIndexRef.current = index;
+    setGitlabActivityId(route.gitlabActivityId ?? null);
     setProjectId(route.projectId); setView(route.view);
     setDocumentId(route.documentId); setIssueId(route.issueId); setReportId(route.reportId || null); setPlanningId(route.planningId || null);
+    setCompletionRecordId(route.completionRecordId ?? null);
     setCommentFocus(focus => {
       if (linkedComment) return linkedComment;
       if (!focus) return null;
@@ -948,6 +961,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       projectId:view === 'teamoverview' || view === 'reports' ? projectId : issue.projectId,
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
+      completionRecordId: sameProject && view === 'planning' ? current?.completionRecordId : null,
       cycleQuery: view === 'backlog' && sameProject ? current?.cycleQuery : undefined,
       blockerScope:view === 'reports' ? current?.blockerScope : null,
       decisionFollowUpScope:view === 'reports' ? current?.decisionFollowUpScope : null,
@@ -1004,7 +1018,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const projectScope = current.view === 'teamboard' ? current.teamBoardFilters?.projectId ?? null
       : current.view === 'gantt' && current.ganttScope === 'team' ? (source.projectScope === undefined ? current.ganttProject ?? null : source.projectScope)
         : current.view === 'mywork' || current.view === 'documents' ? source.projectScope ?? null : current.projectId;
-    if (!requestRoute({ ...current, issueId: id, issueCommentId: null, documentPreviewId: null })) return;
+    if (!requestRoute({ ...current, issueId: id, issueCommentId: null, gitlabActivityId: null, documentPreviewId: null })) return;
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
     boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
@@ -1025,7 +1039,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!review || !latest || !current?.issueId || review.actorId !== actorId || issueReviewContext(current) !== review.context) return;
     const target = issueReviewPosition(review.issueIds, current.issueId, latest.issues, review.projectScope)?.[direction];
     // Replace the drawer's history slot so Back returns to the originating view.
-    if (target && requestRoute({ ...current, issueId: target.id, issueCommentId: null, documentPreviewId: null }, 'replace', true)) {
+    if (target && requestRoute({ ...current, issueId: target.id, issueCommentId: null, gitlabActivityId: null, documentPreviewId: null }, 'replace', true)) {
       const opened = acceptedRouteRef.current;
       if (opened?.issueId === target.id && issueReviewContext(opened) === review.context) {
         const nextReview = { ...review, gitlabActivity: undefined, focusDirection: direction };
@@ -1130,7 +1144,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const selectPlanning = (id: string | null) => {
     const current = acceptedRouteRef.current;
-    return current?.view === 'planning' && requestRoute({ ...current, planningId: id }, 'replace');
+    return current?.view === 'planning' && requestRoute({ ...current, planningId: id, completionRecordId: null }, 'replace');
   };
   const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) => {
     const current = acceptedRouteRef.current;
@@ -1174,6 +1188,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         setCommentFocus({ targetType: 'document', targetId: id, actorId: null, commentId: requestedCommentId, activation: ++commentFocusActivation.current });
       }
     }
+  };
+  const openCycleRetrospective = (id: string, recordId: string) => {
+    const current = acceptedRouteRef.current;
+    const document = dataRef.current?.documents.find(value => value.id === id);
+    if (current?.view !== 'planning' || !document) return;
+    requestRoute({ projectId: document.projectId || current.projectId, view: 'documents', documentId: id, issueId: null },
+      'push', false, { ...current, issueId: null, completionRecordId: recordId });
   };
   const openNotification = async (notification: TeamNotification) => {
     const request = ++notificationOpenRequest.current;
@@ -1261,6 +1282,20 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       notify('댓글 링크를 복사했습니다.');
     } catch {
       notify('댓글 링크를 복사하지 못했습니다.', 'error');
+    }
+  };
+  const copyGitlabActivityLink = async (linkId: string) => {
+    const currentIssueId = acceptedRouteRef.current?.issueId;
+    const issue = dataRef.current?.issues.find(value => value.id === currentIssueId);
+    if (!issue || !isRelationId(linkId)) return;
+    const url = new URL(location.origin);
+    url.pathname = location.pathname;
+    url.hash = routeHash({ projectId: issue.projectId, view: 'issues', documentId: null, issueId: issue.id, gitlabActivityId: linkId });
+    try {
+      await navigator.clipboard.writeText(url.href);
+      notify('티켓 활동 링크를 복사했습니다.');
+    } catch {
+      notify('티켓 활동 링크를 복사하지 못했습니다.', 'error');
     }
   };
 
@@ -1391,6 +1426,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onOpenSavedIssueView={id => requestRoute({projectId,view:'issues',documentId:null,issueId:null,savedViewId:id})}/>}
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
           <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}
+            completionRecordId={completionRecordId} onOpenCycleRetrospective={openCycleRetrospective}
+            onCloseCompletionRecord={() => openPlanIn('planning', planningId ?? undefined)}
             onSelectPlanning={selectPlanning} onOpenIssueSchedule={openPlannedIssueSchedule}
             onOpenCycleBoard={id => openPlanIn('backlog', id)} onOpenReleaseReadiness={openReleaseReadiness} />
         </Suspense>}
@@ -1425,7 +1462,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       issueId={openedIssue.id} onOpenIssueSchedule={openIssueSchedule} onOpenMilestone={openIssueMilestone} onClose={() => closeIssuePanel(openedIssue.id)}
       ganttDateDraftsRef={view === 'gantt' ? ganttDateDraftsRef : undefined}
       reviewPosition={reviewPosition && { ...reviewPosition, focusDirection: issueReview?.focusDirection }} onAdvanceReview={advanceIssueReview}
-      gitlabActivitySelection={gitlabActivitySelection}
+      gitlabActivitySelection={gitlabActivitySelection} gitlabActivityId={gitlabActivityId} onCopyGitlabActivityLink={copyGitlabActivityLink}
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} openIssue={openSearchIssue} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}

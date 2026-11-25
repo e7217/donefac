@@ -1766,14 +1766,23 @@ function ProjectGantt(props: GanttProps) {
     setManualReview(null);
     setManualProblem(null);
     setScheduleWarnings(result.warnings ?? []);
-    let completedFocus = false;
+    let movedFocus = false;
     try {
       await refresh();
-      if (review.inline?.returnToMissingRow ?? true) completedFocus = focusAfterCompletingMissingRows(result.updated, focusOrigin);
+      if (review.inline?.returnToMissingRow ?? true) movedFocus = focusAfterCompletingMissingRows(result.updated, focusOrigin);
+      if (!movedFocus && review.inline && !review.inline.source.startDate && !review.inline.source.endDate &&
+          inlineIssue && getFixedDateEdge(inlineIssue)) {
+        pendingScheduleFocus.current = () => {
+          const active = document.activeElement;
+          if (active && active !== document.body && active !== focusOrigin) return;
+          focusGanttDate(scrollRef.current, inlineIssue.id, firstMissingDate(inlineIssue), 'nearest');
+        };
+        movedFocus = true;
+      }
       notify(`${result.updated.length}개 업무의 일정을 변경했습니다.${result.warnings?.length ? ' 일정 경고를 확인하세요.' : ''}`);
     } catch {
       notify('일정을 저장했습니다. 간트 목록을 다시 불러와 주세요.', 'error');
-    } finally { restoreDatePreviewFocus(!completedFocus); }
+    } finally { restoreDatePreviewFocus(!movedFocus); }
   }
   async function applyManualReview() {
     if (busyRef.current || !manualReview?.preview.previewId ||

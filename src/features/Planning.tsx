@@ -8,7 +8,7 @@ import { planningAssignmentBlock } from '../../shared/planning-helpers';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, dateLabel, patch, post, remove } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
-import { CycleCompletionHistory } from './CycleCompletionHistory';
+import { CycleCompletionHistory, CycleCompletionRecordView } from './CycleCompletionHistory';
 import { CycleCompletionPanel } from './CycleCompletionPanel';
 import { CycleProgress } from './CycleProgress';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
@@ -25,6 +25,9 @@ function progress(data: FeatureProps['data'], issues: Issue[]) { const eligible 
 
 type PlanningProps = FeatureProps & {
   initialPlanningId?: string | null;
+  completionRecordId: string | null;
+  onOpenCycleRetrospective: (documentId: string, recordId: string) => void;
+  onCloseCompletionRecord: () => void;
   onSelectPlanning?: (id: string | null) => boolean;
   onOpenGantt?: (id: string) => void;
   onOpenCycleBoard?: (id?: string) => void;
@@ -84,6 +87,10 @@ function ProjectPlanning(props: PlanningProps) {
   function selectCreated(item: PlanningItem) {
     if (changeSelection(item.id, item.kind) && item.status === 'archived') setShowArchived(true);
   }
+  if (props.completionRecordId) return <div className="planning-feature">
+    <CycleCompletionRecordView {...props} id={props.completionRecordId} issues={data.issues}
+      onClose={props.onCloseCompletionRecord} />
+  </div>;
   const Icon = KIND_ICONS[kind];
   return <div className="planning-feature"><div className="feature-heading"><div><div className="feature-eyebrow">TURN PLANS INTO PROGRESS</div><h1>사이클 · 모듈 · 릴리스</h1><p>기간, 기능, 출시 목표에 맞춰 같은 업무를 함께 계획하세요.</p></div>
     <div className="planning-heading-actions">
@@ -105,15 +112,15 @@ function ProjectPlanning(props: PlanningProps) {
         <PlanningEditor key={`${creating ? `new:${kind}` : currentId}:${props.actorId}`} {...props} kind={kind} item={current} existingId={currentId}
           onCreated={selectCreated} onDeleted={() => changeSelection(null, kind)} />
       </div> : <div className="planning-detail-column">
-        {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={props.actorId} issues={data.issues} openIssue={props.openIssue}
-          refresh={props.refresh} openDocument={props.openDocument} />}
+        {kind === 'cycle' && <CycleCompletionHistory {...props} issues={data.issues} />}
         <div className="planning-welcome"><Icon size={35} /><h2>함께 실행할 계획을 세워보세요</h2><p>{KIND_DESCRIPTIONS[kind]}</p><button className="btn btn-primary" onClick={create}><Plus size={15} />{PLAN_LABELS[kind]} 만들기</button></div>
       </div>}
     </div></div>;
 }
 
-function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refresh, notify, openIssue, openDocument, onOpenIssueSchedule, onCreated, onDeleted }: FeatureProps & {
+function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refresh, notify, openIssue, onOpenCycleRetrospective, onOpenIssueSchedule, onCreated, onDeleted }: FeatureProps & {
   kind: PlanningKind; item?: PlanningItem; existingId: string | null;
+  onOpenCycleRetrospective: PlanningProps['onOpenCycleRetrospective'];
   onOpenIssueSchedule?: PlanningProps['onOpenIssueSchedule']; onCreated: (item: PlanningItem) => void; onDeleted: () => void;
 }) {
   const [draft, setDraft] = useState<PlanDraft>(() => draftOf(item));
@@ -223,7 +230,7 @@ function PlanningEditor({ data, projectId, actorId, kind, item, existingId, refr
       refresh={refresh} notify={notify} onClose={closeCompletion} onSaved={acceptCycle} restoreFocus={restoreCompletionFocus} />}
     {kind === 'cycle' && item && <CycleProgress cycle={{ ...item, version: Math.max(item.version, version) }}
       projectId={projectId} actorId={actorId} data={data} openIssue={openIssue} />}
-    {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={actorId} issues={data.issues} openIssue={openIssue} refresh={refresh} openDocument={openDocument}
+    {kind === 'cycle' && <CycleCompletionHistory projectId={projectId} actorId={actorId} issues={data.issues} openIssue={openIssue} refresh={refresh} onOpenCycleRetrospective={onOpenCycleRetrospective}
       cycle={item && { id: item.id, version: Math.max(item.version, version) }} />}
     <form onSubmit={save} aria-label="계획 정보 편집"><fieldset disabled={busy || selectedAssignments.length > 0}><label className="issue-form-label">이름<input className="field planning-name-input" aria-label="계획 이름" value={draft.name} onChange={event => update('name', event.target.value)} placeholder={`${PLAN_LABELS[kind]} 이름`} required maxLength={120} /></label><label className="issue-form-label">설명<textarea className="field" aria-label="계획 설명" value={draft.description} onChange={event => update('description', event.target.value)} rows={3} placeholder="목표와 범위를 간단히 적어주세요." /></label><div className="planning-form-grid"><label className="issue-form-label">상태<select className="field" aria-label="계획 상태" value={draft.status} onChange={event => {
       const value = event.target.value as PlanningStatus;

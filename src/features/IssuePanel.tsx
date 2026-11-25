@@ -87,6 +87,8 @@ type IssuePanelProps = FeatureProps & {
   commentFocus?: { commentId: string; activation: number };
   reviewPosition?: IssueReviewPosition;
   gitlabActivitySelection?: GitlabIssueReviewSelection;
+  gitlabActivityId?: string | null;
+  onCopyGitlabActivityLink: (linkId: string) => void;
   ganttDateDraftsRef?: RefObject<GanttIssueDateDrafts | null>;
   onAdvanceReview?: (direction: IssueReviewDirection) => void;
   onClose: () => void;
@@ -160,9 +162,9 @@ export function IssuePanel(props: IssuePanelProps) {
 
 function IssuePanelContent(props: IssuePanelProps) {
   const { data, issueId, documentOverlay, modalFocus, previewDocumentId, commentFocus, onClose, onOpenIssueSchedule, onOpenMilestone, onPreviewDocument, onCloseDocumentPreview,
-    reviewPosition, gitlabActivitySelection, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
+    reviewPosition, gitlabActivitySelection, gitlabActivityId, onCopyGitlabActivityLink, onAdvanceReview, refresh, notify, openIssue, openDocument } = props;
   const manageFocus = Boolean(documentOverlay || modalFocus);
-  const gitlabActivityFocusRef = useRef(false);
+  const gitlabActivityFocusRef = useRef<string | null>(null);
   const issue = data.issues.find(i => i.id === issueId);
   const linkedMilestones = useMemo(() => (data.milestones ?? [])
     .filter(item => item.projectId === issue?.projectId && item.issueIds.includes(issueId))
@@ -383,6 +385,11 @@ function IssuePanelContent(props: IssuePanelProps) {
     requestAnimationFrame(() => (opener?.isConnected && !opener.disabled ? opener : addPredecessorButton.current)?.focus({ preventScroll: true }));
   }, []);
   const [tab, setTab] = useState<'details' | 'activity' | 'source' | 'worklogs' | 'reservations'>('details');
+  const [tabActivityId, setTabActivityId] = useState(gitlabActivityId);
+  if (tabActivityId !== gitlabActivityId) {
+    setTabActivityId(gitlabActivityId);
+    if (gitlabActivityId) setTab('details');
+  }
   const [linking, setLinking] = useState(false);
   const [linkNotice, setLinkNotice] = useState<{ message: string; reload?: boolean } | null>(null);
   const linkingRef = useRef(false);
@@ -596,8 +603,8 @@ function IssuePanelContent(props: IssuePanelProps) {
     const reviewButton = reviewFocusDirection === 'previous' ? previousReviewButton.current
       : reviewFocusDirection === 'next' ? nextReviewButton.current : null;
     if (reviewButton && !reviewButton.disabled) reviewButton.focus({ preventScroll: true });
-    else if ((manageFocus || reviewFocusDirection) && !gitlabActivitySelection) closeButton.current?.focus({ preventScroll: true });
-  }, [manageFocus, reviewFocusDirection, gitlabActivitySelection]);
+    else if ((manageFocus || reviewFocusDirection) && !gitlabActivityId && !gitlabActivitySelection) closeButton.current?.focus({ preventScroll: true });
+  }, [manageFocus, reviewFocusDirection, gitlabActivityId, gitlabActivitySelection]);
   useEffect(() => {
     if (!commentFocus || loadedCommentActivation !== commentFocus.activation || handledCommentActivation.current === commentFocus.activation
       || previewDocumentId || nestedModalOpen) return;
@@ -1444,8 +1451,9 @@ function IssuePanelContent(props: IssuePanelProps) {
         {bodyOnlyReferences.map(({ document }) => <div key={document.id}>{linkedDocumentRow(document)}</div>)}
       </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
-      <IssueGitlabActivity issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
-        gitlabActivitySelection={gitlabActivitySelection} gitlabActivityFocusRef={gitlabActivityFocusRef}
+      <IssueGitlabActivity key={gitlabActivityId} issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
+        gitlabActivitySelection={gitlabActivitySelection} gitlabActivityId={gitlabActivityId} gitlabActivityFocusRef={gitlabActivityFocusRef}
+        onCopyActivityLink={onCopyGitlabActivityLink}
         disabled={saving || dependencyBusy} onDraftChange={trackGitlabDraft} isCurrentStatusSuggestion={isCurrentGitlabStatusSuggestion}
         canPrepareStatusSuggestion={canPrepareGitlabStatusSuggestion} onPrepareStatusSuggestion={prepareGitlabStatusSuggestion} />
       <IssueAutomationHistory issueId={issue.id} issueVersion={issue.version} links={gitlabLinks} users={data.users} refresh={refresh}

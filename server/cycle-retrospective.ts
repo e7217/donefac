@@ -1,4 +1,5 @@
 import type { CycleCompletionRecord, CycleCompletionRecordedIssue, RichContent } from '../shared/types.js';
+import { cycleCompletionRecordHash } from '../shared/cycle-completion-address.js';
 import { deterministicCreationId } from './creation-request.js';
 
 const groups = [
@@ -24,6 +25,8 @@ export function cycleRetrospectiveDraft(record: CycleCompletionRecord, hasActive
 
   const content: RichContent[] = [
     heading('사이클 완료 기록'),
+    { type: 'paragraph', content: [{ type: 'text', text: '원래 사이클 완료 기록 열기',
+      marks: [{ type: 'link', attrs: { href: cycleCompletionRecordHash(record.projectId, record.id), target: '_self' } }] }] },
     paragraph(`완료 시각 ${completed} (서울) · 완료 작업자 ${actorName}`),
     paragraph(`당시 일정 ${cycle.startDate ?? '미정'} ~ ${cycle.endDate ?? '미정'} · 목표일 ${cycle.targetDate ?? '미정'}`),
     paragraph(`이월 대상 ${destination?.name ?? '백로그 (사이클 미지정)'}`),

@@ -3,7 +3,8 @@
 .document-linked-work-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .document-linked-work-actions .docs-follow-up-button { margin-top: 0; }
 .document-linked-work-filters { display: grid; gap: 7px; margin-bottom: 12px; }
-.document-linked-work-filters > select { min-width: 0; width: 100%; }
+.document-linked-work-filters > .field { min-width: 0; width: 100%; }
+.document-linked-work-search-count { color: #53647c; font-size: 11px; line-height: 1.5; }
 .document-linked-work-evidence-filter { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; color: #53647c; font-size: 11px; line-height: 1.5; }
 .document-linked-work-evidence-filter label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
 .document-linked-work-evidence-filter input { margin: 0; }

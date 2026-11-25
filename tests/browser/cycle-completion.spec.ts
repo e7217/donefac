@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { CycleCompletionPreview, CycleCompletionResult, Issue, PlanningItem, WorkspaceSnapshot } from '../../shared/types';
+import type { CycleCompletionPreview, CycleCompletionResult, DocPage, Issue, PlanningItem, WorkspaceSnapshot } from '../../shared/types';
 
 async function read<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -317,6 +317,25 @@ test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당�
     await records.selectOption(first.recordId!);
     await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
     await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
+
+    const link = record.getByRole('link', { name: '이 완료 기록 열기', exact: true });
+    const sourceHash = `#/${project.id}/planning?completionRecord=${first.recordId}`;
+    await expect(link).toHaveAttribute('href', sourceHash);
+    let listReads = 0;
+    await page.route(`**/api/projects/${project.id}/cycle-completion-records?**`, route => {
+      listReads++;
+      return route.continue();
+    });
+    await page.goto(`/${sourceHash}`);
+    await page.reload();
+    await expect(page.getByRole('heading', { name: '사이클 완료 기록', level: 1, exact: true })).toBeVisible();
+    await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
+    expect(listReads).toBe(0);
+    await record.getByRole('button', { name: `${carried.key} ${carried.title}`, exact: true }).click();
+    await expect(issueDrawer).toBeVisible();
+    await issueDrawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === sourceHash);
+    await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
   } finally { await fixture.clean(); }
 });
 
@@ -384,9 +403,29 @@ test('360px에서 사이클 완료 기록을 회고 문서로 만들고 응답 �
     await record.getByRole('button', { name: '회고 문서 열기', exact: true }).click();
     await expect(page).toHaveURL(new RegExp(`/documents/${documentId}$`));
     await expect(page.getByRole('heading', { name: '다음 사이클에서 개선할 점', exact: true })).toBeVisible();
+    const source = page.getByRole('link', { name: '원래 사이클 완료 기록 열기', exact: true });
+    const sourceHash = `#/${project.id}/planning?completionRecord=${result.recordId}`;
+    await expect(source).toHaveAttribute('href', sourceHash);
+    await source.click();
+    await expect(page).toHaveURL(url => url.hash === sourceHash);
+    await expect(record.getByText(next.name, { exact: true })).toBeVisible();
     await page.goBack();
-    await page.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
+    await expect(source).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(url => new URLSearchParams(url.hash.split('?')[1]).get('completionRecord') === result.recordId);
     await expect(record.getByRole('button', { name: '회고 문서 열기', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '사이클 계획으로', exact: true }).click();
+    await expect(page.getByRole('region', { name: '사이클 상세', exact: true })).toBeVisible();
+
+    await read<DocPage>(await request.patch(`/api/documents/${documentId}`, {
+      headers, data: { expectedVersion: saved.version, projectId: otherProject.id },
+    }));
+    await page.goto(`/${sourceHash}`);
+    await record.getByRole('button', { name: '회고 문서 열기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === `#/${otherProject.id}/documents/${documentId}`);
+    await source.click();
+    await expect(page).toHaveURL(url => url.hash === sourceHash);
+    await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
 
     const archived = await read<{ trashEntryId: string }>(await request.delete(`/api/documents/${documentId}`));
     expect((await request.post(path, { headers, data: {} })).status()).toBe(409);

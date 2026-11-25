@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { parseConfluenceJiraList } from '../../shared/confluence-jira-list';
+import { readCycleCompletionRecordId } from '../../shared/cycle-completion-address';
 import { documentLabelKey, normalizeDocumentLabels } from '../../shared/document-labels';
 import { MAX_DOCUMENT_LABEL_LISTS } from '../../shared/document-label-list';
 import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
@@ -2006,8 +2007,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
         destination.username || destination.password) return false;
     const [path, query] = destination.hash.split('?');
-    const sectionLink = /^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(new URLSearchParams(query).get('section'));
-    if (!sectionLink && !parseDocumentHash(destination.hash, { allowLabel: true })) return false;
+    const parameters = new URLSearchParams(query);
+    const sectionLink = /^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(parameters.get('section'));
+    const completionLink = /^#\/[^/?#]+\/planning$/u.test(path) && readCycleCompletionRecordId(parameters);
+    if (!sectionLink && !completionLink && !parseDocumentHash(destination.hash, { allowLabel: true })) return false;
     window.location.hash = destination.hash;
     return true;
   }

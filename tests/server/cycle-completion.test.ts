@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import type {
-  ApiKeyCreated, CycleCompletionPreview, CycleCompletionRecord, CycleCompletionRecordsPage, CycleCompletionResult, Issue,
+  ApiKeyCreated, CycleCompletionPreview, CycleCompletionRecord, CycleCompletionRecordsPage, CycleCompletionResult, DocPage, Issue,
   PlanningItem, ProjectIssueOrder, ProjectWorkflow, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -93,13 +93,20 @@ test('a cycle completion record opens one retrospective across actors and native
     assert.equal(document.projectId, projectId);
     assert.match(document.plainText, /이월 업무 1건/u);
     assert.ok(JSON.stringify(document.content).includes(pending.id));
+    assert.ok(JSON.stringify(document.content).includes(`#/${projectId}/planning?completionRecord=${applied.data.recordId}`));
+    const edit = await app.call<DocPage>(`/documents/${documentId}`, 'PATCH', { expectedVersion: document.version, title: '팀이 정리한 회고' });
+    assert.equal(edit.status, 200, JSON.stringify(edit.data));
 
     const backup = await app.call<WorkspaceSnapshot>('/export');
     const restored = await app.call('/import', 'POST', { data: backup.data });
     assert.equal(restored.status, 200, JSON.stringify(restored.data));
     assert.equal((await app.call<{ retrospectiveDocumentId: string }>(recordPath)).data.retrospectiveDocumentId, documentId);
+    const restoredDocument = (await workspace(app)).documents.find(value => value.id === documentId)!;
+    assert.equal(restoredDocument.title, edit.data.title);
+    assert.ok(JSON.stringify(restoredDocument.content).includes(`#/${projectId}/planning?completionRecord=${applied.data.recordId}`));
     assert.deepEqual(await app.call(path, 'POST', {}), { status: 200, data: { id: documentId } });
-    assert.equal((await workspace(app)).documents.filter(value => value.title === document.title).length, 1);
+    const reopened = (await workspace(app)).documents.filter(value => value.id === documentId);
+    assert.deepEqual(reopened, [restoredDocument]);
   });
 });
 

@@ -820,6 +820,7 @@ test('360px 문서에서 직접 연결과 본문의 업무 상태와 결정 당�
     const panel = page.getByRole('region', { name: '연결된 업무', exact: true });
     const cards = panel.locator('.docs-linked-issue');
     const card = (issue: Issue) => cards.filter({ hasText: issue.title });
+    const search = panel.getByRole('searchbox', { name: '연결된 업무 검색', exact: true });
     const filters = panel.getByLabel('연결된 업무 상태', { exact: true });
     const onlyEvidence = panel.getByRole('checkbox', { name: '결정 근거가 있는 업무만', exact: true });
     await expect(cards).toHaveCount(4);
@@ -850,6 +851,20 @@ test('360px 문서에서 직접 연결과 본문의 업무 상태와 결정 당�
     await expect(card(ordinaryIssue).locator('time')).toHaveAttribute('datetime', ordinaryIssue.endDate!);
     await expect(card(closedIssue)).toContainText('후속 업무');
     await expect(card(closedIssue)).toContainText('기한 없음');
+
+    await search.fill(`  ${issueProject.name} ${decisionIssue.key.toLowerCase()}  `);
+    await expect(cards).toHaveCount(1);
+    await expect(card(decisionIssue)).toBeVisible();
+    await filters.selectOption('closed');
+    await expect(panel.getByRole('status')).toHaveText('조건에 맞는 업무가 없습니다.');
+    await filters.selectOption('all');
+    await search.fill('일반 연결');
+    await expect(card(ordinaryIssue)).toBeVisible();
+    await onlyEvidence.check();
+    await expect(cards).toHaveCount(0);
+    await onlyEvidence.uncheck();
+    await search.clear();
+    await expect(cards).toHaveCount(4);
 
     await card(bodyOnlyIssue).click();
     const referenceTicket = page.getByRole('dialog', { name: bodyOnlyIssue.title, exact: true });
@@ -955,12 +970,13 @@ test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 �
     const first = await createIssue(firstProject.id, '직접 연결과 본문 참조가 있는 첫 업무', '2027-05-07');
     const second = await createIssue(otherProject.id, '다른 프로젝트의 본문 참조 업무', '2027-05-09');
     const third = await createIssue(firstProject.id, '직접 연결만 있는 마지막 업무', '2027-05-11');
+    const unrelated = await createIssue(firstProject.id, '검색에서 제외할 메모', '2027-05-08');
     const closed = await createIssue(otherProject.id, '검토 필터에서 제외할 종료 업무', '2027-05-01', 'done');
     const reference = (issue: Issue): RichContent => ({ type: 'issueReference', attrs: { issueId: issue.id, label: issue.title } });
     document = await createDecision(request, null, originalTitle, { type: 'doc', content: [
       { type: 'heading', attrs: { level: 2, sectionId }, content: [{ type: 'text', text: '회의 후속 업무' }] },
       { type: 'paragraph', content: [{ type: 'text', text: originalText }] },
-      reference(first), reference(first), reference(second), reference(closed),
+      reference(first), reference(first), reference(second), reference(unrelated), reference(closed),
     ] });
     const documentId = document.id;
     for (const issue of [first, third]) {
@@ -988,6 +1004,7 @@ test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 �
     await page.getByRole('button', { name: '연결', exact: true }).click();
     const linked = page.getByRole('region', { name: '연결된 업무', exact: true });
     const linkedHeading = linked.getByRole('heading', { name: '연결된 업무', exact: true });
+    const linkedSearch = linked.getByRole('searchbox', { name: '연결된 업무 검색', exact: true });
     const linkedStatus = linked.getByLabel('연결된 업무 상태', { exact: true });
     const rows = page.locator('.document-linked-work .docs-linked-issue');
     const row = (issue: Issue) => rows.filter({ hasText: issue.title });
@@ -997,11 +1014,15 @@ test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 �
     const previous = (issue: Issue) => review(issue).getByRole('button', { name: '이전 업무', exact: true });
     const next = (issue: Issue) => review(issue).getByRole('button', { name: '다음 업무', exact: true });
     await linkedStatus.selectOption('open');
+    await expect(rows).toHaveCount(4);
+    await linkedSearch.fill('업무');
     await expect(rows).toHaveCount(3);
+    await expect(linked.getByRole('status')).toHaveText('검색 결과 3개');
     for (const [index, issue] of [first, second, third].entries()) await expect(rows.nth(index)).toContainText(issue.title);
     await expect(row(first)).toHaveCount(1);
     await expect(row(first)).toContainText('본문 참조 2곳');
     await expect(row(second)).toContainText(otherProject.name);
+    await expect(row(unrelated)).toHaveCount(0);
     await expect(row(closed)).toHaveCount(0);
 
     await row(first).click();
@@ -1036,6 +1057,7 @@ test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 �
     await expect(drawer(second)).toHaveCount(0);
     await expect(linkedHeading).toBeFocused();
     await expect(linkedStatus).toHaveValue('open');
+    await expect(linkedSearch).toHaveValue('업무');
     await expect(rows).toHaveCount(2);
     await expect(title).toHaveValue(draftTitle);
     await expect(editor).toContainText(draftText);
@@ -1069,6 +1091,10 @@ test('360px 문서의 연결된 업무를 순서대로 검토하고 문서의 �
     await expect(title).toHaveValue(draftTitle);
     await expect(editor).toContainText(draftText);
     await expect(linkedStatus).toHaveValue('open');
+    await expect(linkedSearch).toHaveValue('업무');
+    await linkedSearch.clear();
+    await expect(rows).toHaveCount(3);
+    await expect(row(unrelated)).toBeVisible();
     const saved = (await workspace(request)).documents.find(value => value.id === documentId);
     expect(saved).toMatchObject({ title: originalTitle, version: document.version, content: document.content });
   } finally {

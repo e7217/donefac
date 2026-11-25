@@ -1,16 +1,18 @@
 'use client';
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, FileText, History, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ArrowRight, ChevronDown, FileText, History, Link2, RefreshCw } from 'lucide-react';
 import type { CycleCompletionRecord, CycleCompletionRecordsPage, FeatureProps, PlanningItem } from '../../shared/types';
+import { cycleCompletionRecordHash } from '../../shared/cycle-completion-address';
 import { api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
 import './cycle-completion-history.css';
 
-type HistoryProps = Pick<FeatureProps, 'projectId' | 'actorId' | 'openIssue' | 'openDocument' | 'refresh'> & {
-  cycle?: Pick<PlanningItem, 'id' | 'version'>;
+type RecordProps = Pick<FeatureProps, 'projectId' | 'actorId' | 'openIssue' | 'refresh'> & {
+  onOpenCycleRetrospective: (id: string, recordId: string) => void;
   issues: FeatureProps['data']['issues'];
 };
+type HistoryProps = RecordProps & { cycle?: Pick<PlanningItem, 'id' | 'version'> };
 type RequestResult<T> = { key: string; data: T } | { key: string; error: string };
 type RecordedIssue = CycleCompletionRecord['issues'][number];
 type Disposition = RecordedIssue['disposition'];
@@ -23,10 +25,9 @@ const DISPOSITIONS = ['done', 'cancelled', 'carry'] as const satisfies readonly 
 const timestamp = (value: string) => new Date(value).toLocaleString('ko-KR');
 const size = (value: number) => `${value.toLocaleString('ko-KR')}건`;
 
-function useHistoryRequest<T>(path: string | null, key: string, actorId: string) {
+function useHistoryRequest<T>(path: string, key: string, actorId: string) {
   const [response, setResponse] = useState<RequestResult<T> | null>(null);
   useEffect(() => {
-    if (!path) return;
     const controller = new AbortController();
     void api<T>(path, { signal: controller.signal, headers: { 'X-Actor-Id': actorId } }).then(data => {
       if (!controller.signal.aborted) setResponse({ key, data });
@@ -61,13 +62,25 @@ export function CycleCompletionHistory(props: HistoryProps) {
   </section>;
 }
 
-function HistoryBody({ cycle, projectId, actorId, issues, openIssue, openDocument, refresh }: HistoryProps) {
+export function CycleCompletionRecordView({ id, onClose, ...props }: RecordProps & { id: string; onClose: () => void }) {
+  const headingId = useId();
+  return <section className="cycle-history-view" aria-labelledby={headingId}>
+    <div className="feature-heading">
+      <h1 id={headingId}>사이클 완료 기록</h1>
+      <button className="btn" type="button" onClick={onClose}><ArrowLeft size={15} aria-hidden="true" />사이클 계획으로</button>
+    </div>
+    <div className="cycle-history"><div className="cycle-history-body">
+      <CompletionRecord {...props} id={id} direct />
+    </div></div>
+  </section>;
+}
+
+function HistoryBody({ cycle, ...props }: HistoryProps) {
+  const { projectId, actorId } = props;
   const [scope, setScope] = useState<'cycle' | 'project'>(cycle ? 'cycle' : 'project');
   const [cursors, setCursors] = useState<string[]>([]);
   const [recordId, setRecordId] = useState<string | null>(null);
   const [listRetry, setListRetry] = useState(0);
-  const [recordRetry, setRecordRetry] = useState(0);
-  const liveIds = useMemo(() => new Set(issues.filter(issue => issue.projectId === projectId).map(issue => issue.id)), [issues, projectId]);
   const path = `/projects/${encodeURIComponent(projectId)}/cycle-completion-records`;
   const query = new URLSearchParams({ limit: String(RECORD_PAGE_SIZE) });
   if (scope === 'cycle' && cycle) query.set('cycleId', cycle.id);
@@ -78,15 +91,13 @@ function HistoryBody({ cycle, projectId, actorId, issues, openIssue, openDocumen
   const list = useHistoryRequest<CycleCompletionRecordsPage>(listPath, listKey, actorId);
   const page = list && 'data' in list ? list.data : null;
   const selected = page?.items.find(item => item.id === recordId) ?? page?.items[0];
-  const recordPath = selected ? `${path}/${encodeURIComponent(selected.id)}` : null;
-  const record = useHistoryRequest<RecordView>(recordPath, JSON.stringify([recordPath, recordRetry]), actorId);
 
   function changePage(next: string[]) {
     setCursors(next);
     setRecordId(null);
   }
 
-  return <div className="cycle-history-body" aria-busy={!list || Boolean(selected && !record)}>
+  return <div className="cycle-history-body" aria-busy={!list}>
     <div className="cycle-history-controls">
       {cycle && <label>완료 기록 범위
         <select className="field" value={scope} onChange={event => {
@@ -116,11 +127,20 @@ function HistoryBody({ cycle, projectId, actorId, issues, openIssue, openDocumen
         더 이전 기록<ArrowRight size={14} aria-hidden="true" />
       </button>
     </div>}
-    {selected && !record && <p role="status">당시 업무를 불러오는 중입니다.</p>}
-    {record && 'error' in record && <HistoryError message={record.error} onRetry={() => setRecordRetry(attempt => attempt + 1)} />}
-    {record && 'data' in record && recordPath && <RecordDetails key={record.data.id} record={record.data} liveIds={liveIds}
-      openIssue={openIssue} openDocument={openDocument} refresh={refresh} actorId={actorId} recordPath={recordPath} />}
+    {selected && <CompletionRecord {...props} id={selected.id} />}
   </div>;
+}
+
+function CompletionRecord({ id, direct = false, projectId, actorId, issues, openIssue, refresh, onOpenCycleRetrospective }:
+  RecordProps & { id: string; direct?: boolean }) {
+  const [retry, setRetry] = useState(0);
+  const path = `/projects/${encodeURIComponent(projectId)}/cycle-completion-records/${encodeURIComponent(id)}`;
+  const record = useHistoryRequest<RecordView>(path, JSON.stringify([path, actorId, retry]), actorId);
+  const liveIds = useMemo(() => new Set(issues.filter(issue => issue.projectId === projectId).map(issue => issue.id)), [issues, projectId]);
+  if (!record) return <p role="status">당시 업무를 불러오는 중입니다.</p>;
+  if ('error' in record) return <HistoryError message={record.error} onRetry={() => setRetry(attempt => attempt + 1)} />;
+  return <RecordDetails key={`${projectId}:${actorId}:${id}`} record={record.data} actorId={actorId} liveIds={liveIds} openIssue={openIssue}
+    refresh={refresh} openRetrospective={documentId => onOpenCycleRetrospective(documentId, id)} recordPath={path} direct={direct} />;
 }
 
 function HistoryError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -130,18 +150,25 @@ function HistoryError({ message, onRetry }: { message: string; onRetry: () => vo
   </div>;
 }
 
-function RecordDetails({ record, liveIds, openIssue, openDocument, refresh, actorId, recordPath }:
-  Pick<HistoryProps, 'openIssue' | 'openDocument' | 'refresh' | 'actorId'> & { record: RecordView; liveIds: ReadonlySet<string>; recordPath: string }) {
+function RecordDetails({ record, liveIds, openIssue, openRetrospective, refresh, actorId, recordPath, direct }:
+  Pick<RecordProps, 'openIssue' | 'refresh' | 'actorId'> & { record: RecordView; liveIds: ReadonlySet<string>; recordPath: string;
+    direct: boolean; openRetrospective: (id: string) => void }) {
   const groups = useMemo(() => {
     const result: Record<Disposition, RecordedIssue[]> = { done: [], cancelled: [], carry: [] };
     for (const issue of record.issues) result[issue.disposition].push(issue);
     return result;
   }, [record.issues]);
   const { cycle, completedAt, actorName, destination, counts } = record;
+  const Title = direct ? 'h2' : 'h4';
   return <article className="cycle-history-record" aria-label="선택한 사이클 완료 기록">
-    <h4>{cycle.name}</h4>
-    <RetrospectiveAction savedDocumentId={record.retrospectiveDocumentId} path={`${recordPath}/retrospective`}
-      actorId={actorId} refresh={refresh} openDocument={openDocument} />
+    <Title>{cycle.name}</Title>
+    <div className="cycle-history-record-actions">
+      <RetrospectiveAction savedDocumentId={record.retrospectiveDocumentId} path={`${recordPath}/retrospective`}
+        actorId={actorId} refresh={refresh} openDocument={openRetrospective} />
+      {!direct && <a className="btn" href={cycleCompletionRecordHash(record.projectId, record.id)}>
+        <Link2 size={15} aria-hidden="true" />이 완료 기록 열기
+      </a>}
+    </div>
     <p><time dateTime={completedAt}>{timestamp(completedAt)}</time> · {actorName}</p>
     {(cycle.startDate || cycle.endDate || cycle.targetDate) && <p className="cycle-history-dates">
       {(cycle.startDate || cycle.endDate) && <span>당시 일정 {cycle.startDate ?? '미정'} ~ {cycle.endDate ?? '미정'}</span>}
@@ -158,7 +185,7 @@ function RecordDetails({ record, liveIds, openIssue, openDocument, refresh, acto
 }
 
 function RetrospectiveAction({ savedDocumentId, path, actorId, refresh, openDocument }:
-  Pick<HistoryProps, 'actorId' | 'refresh' | 'openDocument'> & { savedDocumentId?: string; path: string }) {
+  Pick<RecordProps, 'actorId' | 'refresh'> & { savedDocumentId?: string; path: string; openDocument: (id: string) => void }) {
   const [createdId, setCreatedId] = useState<string>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);

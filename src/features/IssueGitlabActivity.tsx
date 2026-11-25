@@ -25,7 +25,9 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   issueVersion: number;
   links: readonly GitlabLink[];
   gitlabActivitySelection?: GitlabIssueReviewSelection;
-  gitlabActivityFocusRef: RefObject<boolean>;
+  gitlabActivityId?: string | null;
+  gitlabActivityFocusRef: RefObject<string | null>;
+  onCopyActivityLink: (linkId: string) => void;
   disabled: boolean;
   onDraftChange: (dirty: boolean, pending: boolean, discard: () => void) => void;
   isCurrentStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
@@ -112,8 +114,8 @@ function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected:
     evidence.deployment.projectUrl === deployment.projectUrl && evidence.deployment.jobUrl === deployment.jobUrl;
 }
 
-export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityFocusRef, refresh, notify, disabled, onDraftChange,
-  isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
+export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityId, gitlabActivityFocusRef,
+  onCopyActivityLink, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
   const formHeading = useId(), unlinkHeading = useId(), selectionMissingId = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
@@ -124,21 +126,26 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const matchingLinks = useMemo(() => filterGitlabActivityLinks(undefined, visibleLinks,
     { scope: activityScope, query: activitySearch.query, pages: {} }), [visibleLinks, activityScope, activitySearch.query]);
   const hasActivityFilters = activityScope !== 'all' || Boolean(activitySearch.input || activitySearch.query);
-  const selectedLink = gitlabActivitySelection && visibleLinks.find(link => link.issueId === issueId &&
-    link.issueId === gitlabActivitySelection.issueId && link.id === gitlabActivitySelection.id &&
-    link.projectId === gitlabActivitySelection.projectId && link.kind === gitlabActivitySelection.kind &&
-    link.iid === gitlabActivitySelection.iid && link.manualLinkId === gitlabActivitySelection.manualLinkId);
-  const selectionMissing = Boolean(gitlabActivitySelection && !selectedLink);
+  const selectionId = gitlabActivityId ?? gitlabActivitySelection?.id;
+  const selectedLink = selectionId && visibleLinks.find(link => link.issueId === issueId && link.id === selectionId &&
+    (!gitlabActivitySelection || (link.issueId === gitlabActivitySelection.issueId && link.projectId === gitlabActivitySelection.projectId &&
+      link.kind === gitlabActivitySelection.kind && link.iid === gitlabActivitySelection.iid && link.manualLinkId === gitlabActivitySelection.manualLinkId)));
+  const selectionMissing = Boolean(selectionId && !selectedLink);
+  const focusKey = selectionId ? `${gitlabActivityId ? 'permalink' : 'review'}:${selectionId}` : null;
   const activityHeading = useRef<HTMLHeadingElement>(null);
   const selectedRow = useRef<HTMLLIElement>(null);
   useLayoutEffect(() => {
-    if (!gitlabActivitySelection || gitlabActivityFocusRef.current) return;
+    if (!focusKey) {
+      gitlabActivityFocusRef.current = null;
+      return;
+    }
+    if (gitlabActivityFocusRef.current === focusKey) return;
     const target = selectedRow.current ?? activityHeading.current;
     if (!target) return;
-    gitlabActivityFocusRef.current = true;
+    gitlabActivityFocusRef.current = focusKey;
     target.scrollIntoView({ block: 'nearest' });
     target.focus({ preventScroll: true });
-  }, [gitlabActivityFocusRef, gitlabActivitySelection]);
+  }, [gitlabActivityFocusRef, focusKey]);
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [unlinkTarget, setUnlinkTarget] = useState<GitlabLink | null>(null);
@@ -621,6 +628,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     {matchingLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
       links={matchingLinks} issueVersions={new Map([[issueId, issueVersion]])}
       selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
+      onCopyActivityLink={onCopyActivityLink}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,

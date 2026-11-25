@@ -34,7 +34,7 @@ async function refreshActivity(page: Page, trigger: Locator, path: string) {
   return json<GitlabIssueRefreshResult>(response);
 }
 
-test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하고 해소된 실패 목록에 초점을 돌려준다', async ({ page, request }) => {
+test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태를 검토한다', async ({ browser, page, request }) => {
   test.setTimeout(90_000);
   const suffix = randomUUID();
   const marker = `old-triage-${suffix.slice(0, 8)}`;
@@ -92,6 +92,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     expect(result.linked).toBe(1);
   };
   let rule: AutomationRule | undefined;
+  let otherIssue: Issue | undefined;
 
   try {
     const configured = await json<GitlabSettings>(await request.patch(settingsPath, { data: {
@@ -124,7 +125,7 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     });
 
     await page.setViewportSize({ width: 360, height: 820 });
-    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    await page.goto(`/?reviewContext=ticket-filter#/${project.id}/issues?issue=${issue.id}`);
     const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
     const title = ticket.getByRole('textbox', { name: '제목', exact: true });
     const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
@@ -175,6 +176,41 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
 
     await button(pages, '다음').click();
     await expect(oldRow).toHaveAttribute('data-gitlab-state', 'running');
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    const expectedShare = new URL(`/#/${project.id}/issues`, page.url());
+    expectedShare.hash += `?${new URLSearchParams({ issue: issue.id, gitlabActivity: oldLink.id })}`;
+    const beforeSharing = page.url();
+    await button(oldRow, '티켓 활동 링크 복사').click();
+    const clipboard = () => page.evaluate(() => navigator.clipboard.readText());
+    await expect.poll(clipboard).toBe(expectedShare.href);
+    const sharedUrl = await clipboard();
+    await expect(page).toHaveURL(beforeSharing);
+    await expect(title).toHaveValue('저장하지 않은 티켓 제목');
+    await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+
+    const reader = await browser.newPage({ viewport: { width: 360, height: 820 } });
+    try {
+      otherIssue = await json<Issue>(await request.post('/api/issues', { data: {
+        projectId: project.id, title: `다른 티켓 GitLab 연결 범위 ${suffix.slice(0, 8)}`,
+      } }), 201);
+      await reader.goto(sharedUrl);
+      const sharedGitlab = reader.getByRole('dialog', { name: issue.title, exact: true }).getByRole('region', { name: 'GitLab', exact: true });
+      const selected = sharedGitlab.locator('[data-gitlab-selected]');
+      await expect(selected).toHaveCount(1);
+      await expect(selected).toHaveAttribute('data-gitlab-link-id', oldLink.id);
+      await expect(selected).toBeFocused();
+      await expect(sharedGitlab.getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true })).toContainText('2 / 2 페이지');
+
+      const wrongTicketShare = new URL(expectedShare);
+      wrongTicketShare.hash = `#/${project.id}/issues?${new URLSearchParams({ issue: otherIssue.id, gitlabActivity: oldLink.id })}`;
+      await reader.goto(wrongTicketShare.href);
+      const otherGitlab = reader.getByRole('dialog', { name: otherIssue.title, exact: true }).getByRole('region', { name: 'GitLab', exact: true });
+      await expect(otherGitlab.getByText('선택한 GitLab 활동을 이 티켓에서 찾을 수 없습니다.', { exact: true })).toBeVisible();
+      await expect(otherGitlab.locator('[data-gitlab-selected]')).toHaveCount(0);
+      await expect(otherGitlab.getByRole('heading', { name: /^GitLab/u })).toBeFocused();
+      expect(calls).toHaveLength(readsBeforeTicketFilter);
+    } finally { await reader.close(); }
+    await page.bringToFront();
     const readsBeforeExact = calls.length;
     const failed = await refreshActivity(page, button(oldRow, exactAction), exactPath);
     expect(failed).toEqual({ links: [expect.objectContaining({ id: oldLink.id, state: 'failed' })], failures: [], skipped: 0 });
@@ -288,8 +324,10 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
   } finally {
     try {
       if (rule) await request.delete(`${rulesPath}/${rule.id}?expectedVersion=${rule.version}`);
-      const deleted = await request.delete(`/api/issues/${issue.id}`);
-      if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
+      for (const ticket of [issue, otherIssue]) if (ticket) {
+        const deleted = await request.delete(`/api/issues/${ticket.id}`);
+        if (deleted.ok()) await request.delete(`/api/trash/${(await deleted.json() as { trashEntryId: string }).trashEntryId}`);
+      }
       const current = await settings();
       if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
         expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '', signingToken: '',

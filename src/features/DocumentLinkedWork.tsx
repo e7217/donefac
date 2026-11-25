@@ -5,6 +5,7 @@ import { ChevronRight, Link2, RefreshCw, SquareChartGantt } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import { buildDocumentLinkedWork } from '../../shared/document-linked-work';
 import type { DocPage, FeatureProps, WorkspaceSnapshot } from '../../shared/types';
+import { issueSearchAliases, normalizeWorkspaceSearchKey, WORKSPACE_SEARCH_QUERY_LIMIT } from '../../shared/workspace-search';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { DocumentDecisionRevision } from './DocumentBlocks';
 import './document-linked-work.css';
@@ -31,13 +32,20 @@ export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueForRe
   const refreshControl = useRef<HTMLButtonElement>(null);
   const issueOpener = useRef<HTMLButtonElement | null>(null);
   const mounted = useRef(false);
+  const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [evidenceOnly, setEvidenceOnly] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(false);
   const { rows, counts } = useMemo(() => buildDocumentLinkedWork(data, document.id), [data, document.id]);
-  const visible = rows.filter(({ closed, link }) =>
-    (statusFilter === 'all' || closed === (statusFilter === 'closed')) && (!evidenceOnly || link?.documentSource));
+  const terms = normalizeWorkspaceSearchKey(query).split(' ').filter(Boolean);
+  const visible = rows.filter(({ closed, issue, link, projectName }) => {
+    if ((statusFilter !== 'all' && closed !== (statusFilter === 'closed')) || (evidenceOnly && !link?.documentSource)) return false;
+    if (!terms.length) return true;
+    const aliases = issueSearchAliases(data, issue.id).map(alias => alias.key);
+    const text = normalizeWorkspaceSearchKey([issue.key, issue.title, projectName, ...aliases].join(' '));
+    return terms.every(term => text.includes(term));
+  });
 
   useEffect(() => {
     mounted.current = true;
@@ -78,7 +86,9 @@ export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueForRe
       </div>
     </div>
     {refreshError && <p className="docs-panel-error" role="alert">연결된 업무를 새로고치지 못했습니다.</p>}
-    {(rows.length > 0 || statusFilter !== 'all' || evidenceOnly) && <div className="document-linked-work-filters">
+    {(rows.length > 0 || query || statusFilter !== 'all' || evidenceOnly) && <div className="document-linked-work-filters">
+      <input className="field" type="search" aria-label="연결된 업무 검색" placeholder="업무 키, 제목, 프로젝트"
+        maxLength={WORKSPACE_SEARCH_QUERY_LIMIT} value={query} onChange={event => setQuery(event.currentTarget.value)} />
       <select ref={statusControl} className="field" aria-label="연결된 업무 상태" value={statusFilter}
         onChange={event => setStatusFilter(event.currentTarget.value as StatusFilter)}>
         <option value="all">전체 {rows.length}개</option>
@@ -89,6 +99,7 @@ export function DocumentLinkedWork({ data, document, openIssue, onOpenIssueForRe
         <label><input type="checkbox" checked={evidenceOnly} onChange={event => setEvidenceOnly(event.currentTarget.checked)} />결정 근거가 있는 업무만</label>
         <span>결정 근거 {counts.evidence}개</span>
       </div>
+      {terms.length > 0 && visible.length > 0 && <span className="document-linked-work-search-count" role="status">검색 결과 {visible.length}개</span>}
     </div>}
     {visible.length ? <ul className="document-linked-work-list">{visible.map(({ issue, link, referenceCount, projectName, assigneeName, status, deadline }) => <li key={issue.id}>
       <button type="button" className="docs-linked-issue" data-issue-review-id={issue.id} onClick={event => {

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { ArrowRight, ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Link2, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
@@ -1161,10 +1161,11 @@ export type GitlabActivityStatusActions = {
   reviewStatus?: (link: GitlabLink, trigger: HTMLButtonElement) => void;
 };
 
-export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination, selection }: {
+export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination, selection, onCopyActivityLink }: {
   links: readonly GitlabLink[]; issueReview?: ActivityIssueReview; issueVersions?: ReadonlyMap<string, number>;
   heading?: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
+  onCopyActivityLink?: (linkId: string) => void;
 }) {
   const sharedPages = pagination !== undefined;
   const groups = useMemo(() => kinds.map(group => ({ group,
@@ -1181,14 +1182,15 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
   };
   return <div className="gitlab-activity-list">{groups.map(({ group, rows }) => rows.length > 0 &&
     <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} issueVersions={issueVersions}
-      heading={heading} manualActions={manualActions} statusActions={statusActions} pagination={pagination}
+      heading={heading} manualActions={manualActions} statusActions={statusActions} pagination={pagination} onCopyActivityLink={onCopyActivityLink}
       selection={selection?.link.kind === group.kind ? selection : undefined} />)}</div>;
 }
 
-function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination, selection }: {
+function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination, selection, onCopyActivityLink }: {
   group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; issueVersions?: ReadonlyMap<string, number>;
   heading: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
+  onCopyActivityLink?: (linkId: string) => void;
 }) {
   const [localPage, setLocalPage] = useState<number>();
   const pageCount = Math.ceil(links.length / PAGE_SIZE);
@@ -1205,7 +1207,7 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
     <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
-      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions}
+      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} onCopyActivityLink={onCopyActivityLink}
       selectedRowRef={selection?.link === link ? selection.rowRef : undefined} />)}</ul>
     {pageCount > 1 && <nav className="gitlab-activity-pages" aria-label={`${group.label} 페이지 이동`}>
       <button className="btn btn-ghost" type="button" disabled={currentPage === 1} onClick={() => changePage(currentPage - 1)}>이전</button>
@@ -1215,9 +1217,10 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   </section>;
 }
 
-function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, selectedRowRef }: {
+function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, selectedRowRef, onCopyActivityLink }: {
   link: GitlabLink; issueContext?: IssueContext; issueVersion?: number; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions;
   selectedRowRef?: RefObject<HTMLLIElement | null>;
+  onCopyActivityLink?: (linkId: string) => void;
 }) {
   const selectedLabelId = useId();
   const url = gitlabActivityUrl(link.webUrl, link.kind);
@@ -1284,11 +1287,14 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
-    {(issueKey || statusCheck || manual) && <div className="gitlab-activity-row-actions">
+    {(issueKey || statusCheck || manual || onCopyActivityLink) && <div className="gitlab-activity-row-actions">
       {issueKey && issueContext && <button className="btn btn-ghost" type="button"
         data-gitlab-review-opener="activity"
         onClick={event => issueContext.openIssue(link, event.currentTarget, true)}>
         <ArrowRight size={14} aria-hidden="true" />티켓에서 이 활동 보기
+      </button>}
+      {onCopyActivityLink && <button className="btn btn-ghost" type="button" onClick={() => onCopyActivityLink(link.id)}>
+        <Link2 size={14} aria-hidden="true" />티켓 활동 링크 복사
       </button>}
       {statusCheck && <button className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
         disabled={statusActionDisabled} aria-busy={refreshing || undefined}

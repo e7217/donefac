@@ -49,7 +49,12 @@
   border-top: 1px solid var(--line);
 }
 
-.cycle-history-record h4 { margin: 0; font-size: 15px; }
+.cycle-history-record :is(h2, h4) { margin: 0; font-size: 15px; }
+.cycle-history-record-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px; }
+.cycle-history-view { max-width: 900px; }
+.cycle-history-view .feature-heading { align-items: center; flex-wrap: wrap; gap: 8px; }
+.cycle-history-view .cycle-history-body, .cycle-history-view .cycle-history-record { border-top: 0; }
+.cycle-history-view .cycle-history-record { padding-top: 0; }
 .cycle-history-record p + p { color: var(--muted); }
 .cycle-history-dates { display: flex; flex-wrap: wrap; gap: 2px 9px; }
 .cycle-history-counts { display: flex; flex-wrap: wrap; gap: 4px 6px; }

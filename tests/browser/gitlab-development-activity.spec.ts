@@ -281,6 +281,28 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await page.goForward();
     await expect(page).toHaveURL(url => url.hash === exactActivityHash);
     await expectSelected(firstPanel, oldestPipeline);
+
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await button(selectedActivity(firstPanel), '티켓 활동 링크 복사').click();
+    const permalink = new URL(`#/${project.id}/issues?${new URLSearchParams({ issue: first.id, gitlabActivity: oldestPipeline.id })}`, page.url());
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(permalink.href);
+    await page.evaluate(hash => { location.hash = hash; }, permalink.hash);
+    await expect(page).toHaveURL(permalink.href);
+    await expect(review(firstPanel)).toHaveCount(0);
+    await expectSelected(firstPanel, oldestPipeline);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === exactActivityHash);
+    await expect(review(firstPanel).getByRole('status')).toHaveText('3개 중 1번째');
+    await expectSelected(firstPanel, oldestPipeline);
+
+    await button(firstPanel, '작업 시간').click();
+    await expect(button(firstPanel, '작업 시간')).toHaveClass(/active/u);
+    await page.goForward();
+    await expect(page).toHaveURL(permalink.href);
+    await expectSelected(firstPanel, oldestPipeline);
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === exactActivityHash);
+
     await closeFirstPanel.click();
     await expect(firstPanel).toHaveCount(0);
     await expect(oldestOpener).toBeFocused();
