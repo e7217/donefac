@@ -194,8 +194,8 @@ test('공동 편집에서 스크린샷 업로드 중 동료가 앞에 문단을 
       const preceding = '동료가 추가한 앞 문단';
       await placeCaret(peer, peerEditor, lead, 'End');
       await peerEditor.evaluate((element, text) => {
-        const before = document.createElement('p');
-        const inserted = document.createElement('p');
+        const before = element.ownerDocument.createElement('p');
+        const inserted = element.ownerDocument.createElement('p');
         inserted.textContent = text;
         const clipboardData = new DataTransfer();
         clipboardData.setData('text/html', before.outerHTML + inserted.outerHTML);
