@@ -482,7 +482,7 @@ test('Jira deadline saved views match imported source dates and preserve native 
   assert.equal(invalid.canApply, false);
   assert.ok(invalid.notices.some(notice => notice.severity === 'error' && notice.code === 'DATE_UNRESOLVED'));
   const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 124);
+  assert.equal(backup.schemaVersion, 125);
   const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 123 } }, 400);
   assert.match(older.error, /schemaVersion 124/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
@@ -492,6 +492,51 @@ test('Jira deadline saved views match imported source dates and preserve native 
   assert.equal(restored.length, 2);
   assert.deepEqual(restored.find(saved => saved.id === view.id), view);
   assert.deepEqual(restored.find(saved => saved.id === missingView.id), missingView);
+});
+
+test('Jira rolling deadlines move at Seoul midnight and survive export without freezing the reviewed dates', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2024-02-28T14:59:00Z') });
+  const f = await fixture(t);
+  const dates = ['2024-02-27', '2024-02-28', '2024-02-29', '2024-03-01', null];
+  const tickets: Issue[] = [];
+  for (const dueDate of dates) {
+    tickets.push(await f.request<Issue>('/issues', 'POST', {
+      projectId: PROJECT_ID, title: `Rolling deadline ${dueDate ?? 'unset'}`, labels: ['rolling-deadline'], dueDate,
+    }, 201));
+  }
+  const scope = 'labels = "rolling-deadline" AND ';
+  const jql = scope + 'due < startOfDay()';
+  const review = await f.preview(jql);
+  assert.deepEqual(review.filters.planning, { dates: { mode: 'due_relative', toDays: -1 } });
+  assert.deepEqual(review.issues.map(issue => issue.id), [tickets[0].id]);
+  const range = await f.preview(scope + 'due >= startOfDay() AND due < endOfDay("+1d") AND due >= "2024/02/29"');
+  assert.deepEqual(range.filters.planning, { dates: { mode: 'due_relative', fromDays: 0, toDays: 1, from: '2024-02-29' } });
+  assert.deepEqual(range.issues.map(issue => issue.id), [tickets[2].id]);
+  const fromTomorrow = await f.preview(scope + 'due > endOfDay()');
+  assert.deepEqual(fromTomorrow.filters.planning, { dates: { mode: 'due_relative', fromDays: 1 } });
+  const today = await f.preview(scope + 'due = STARTOFDAY()');
+  assert.deepEqual(today.issues.map(issue => issue.id), [tickets[1].id]);
+
+  for (const invalid of ['due >= startOfDay("+1h")', 'due = endOfDay()', 'due >= startOfWeek()',
+    'due IS EMPTY AND due < startOfDay()', 'due > startOfDay() AND due < startOfDay()', 'due > startOfDay("+3650d")']) {
+    await f.request(PREVIEW, 'POST', { projectId: PROJECT_ID, jql: invalid }, 400);
+  }
+
+  const importView = { projectId: PROJECT_ID, jql, name: 'Jira rolling deadlines', layout: 'list', acceptProjectOrder: false };
+  t.mock.timers.setTime(Date.parse('2024-02-28T15:00:00Z'));
+  const stale = await f.request<{ details: unknown }>(IMPORT, 'POST', { ...importView, revision: review.revision }, 409);
+  assert.deepEqual(stale.details, STALE);
+  const afterMidnight = await f.preview(jql);
+  assert.deepEqual(afterMidnight.issues.map(issue => issue.id).sort(), [tickets[0].id, tickets[1].id].sort());
+  assert.deepEqual(afterMidnight.filters, review.filters);
+  const view = await f.request<SavedView>(IMPORT, 'POST', { ...importView, revision: afterMidnight.revision }, 201);
+  const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(backup.schemaVersion, 125);
+  const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 124 } }, 400);
+  assert.match(older.error, /schemaVersion 125/u);
+  await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
+  await f.request('/import', 'POST', { data: backup });
+  assert.deepEqual((await f.request<SavedView[]>(VIEWS)).find(saved => saved.id === view.id), view);
 });
 
 test('Jira multi-status saved views preserve original aliases while reviewing current workflow names', async t => {

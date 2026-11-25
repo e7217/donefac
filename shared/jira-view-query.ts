@@ -2,7 +2,7 @@ import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALEN
 import { MAX_FIELD_FILTER_RULES } from './issue-field-filter.js';
 import {
   ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
-  issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
+  isIssueViewRelativeDueDay, issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
 } from './issue-view.js';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueFieldFilter, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
 
@@ -55,7 +55,7 @@ type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
 type ComponentClause = (BasicClause & { field: 'component' }) | { field: 'component'; offset: number; branches: ComponentClause[][] };
 type PriorityClause = { offset: number; values: Token[] };
-type DueClause = { field: 'due'; offset: number; from?: string; to?: string; presence?: 'empty' | 'set' };
+type DueClause = { field: 'due'; offset: number; from?: string; to?: string; fromDays?: number; toDays?: number; presence?: 'empty' | 'set' };
 type CurrentUserClause = { field: 'assignee' | 'reporter'; offset: number; operator: 'current-user' };
 type ScalarCondition = { id: string | null; label: string };
 type Clause = BasicClause | StatusClause | ComponentClause | DueClause | CurrentUserClause;
@@ -291,6 +291,10 @@ class QueryParser {
       throw new JiraViewQueryError('목표 마감일에는 =, <, <=, >, >=, IS, IS NOT을 사용할 수 있습니다.', operator.offset);
     }
     this.index++;
+    const dateFunction = this.current();
+    if ((isBare(dateFunction, 'startofday') || isBare(dateFunction, 'endofday')) && isBare(this.tokens[this.index + 1], '(')) {
+      return this.relativeDueClause(clause, operator.value, dateFunction);
+    }
     const dateMessage = '목표 마감일은 따옴표로 감싼 유효한 YYYY-MM-DD 또는 YYYY/MM/DD 날짜여야 합니다.';
     const value = this.literal(dateMessage);
     const date = value.value.replace(/^(\d{4})\/(\d{2})\/(\d{2})$/u, '$1-$2-$3');
@@ -308,6 +312,35 @@ class QueryParser {
         break;
     }
     throw new JiraViewQueryError('목표 마감일 조건에 일치할 수 있는 날짜가 없습니다.', value.offset);
+  }
+
+  private relativeDueClause(clause: DueClause, operator: string, dateFunction: Token): DueClause {
+    this.index += 2;
+    let days = 0;
+    if (!this.consume(')')) {
+      const value = this.current();
+      if (value.kind !== 'quoted' || !/^[+-]?\d+d?$/u.test(value.value)) {
+        throw new JiraViewQueryError('목표 마감일 함수에는 따옴표로 감싼 정수 일 수를 입력해 주세요. 예를 들어 "+2d"를 사용할 수 있습니다.', value.offset);
+      }
+      days = Number(value.value.replace(/d$/u, ''));
+      this.index++;
+      this.expect(')', '목표 마감일 함수에 닫는 괄호가 필요합니다.');
+    }
+    if (!isIssueViewRelativeDueDay(days)) throw new JiraViewQueryError('목표 마감일의 상대 일 수가 지원 범위를 벗어났습니다.', dateFunction.offset);
+
+    // A stored due date has day precision. End of day is after that date's midnight.
+    const endOfDay = isBare(dateFunction, 'endofday');
+    if (operator === '=' && endOfDay) {
+      throw new JiraViewQueryError('종료 시각과 같은 날짜를 비교하려면 startOfDay()를 사용해 주세요.', dateFunction.offset);
+    }
+    const fromDays = operator === '=' || operator === '>=' || operator === '>'
+      ? days + Number(endOfDay || operator === '>') : undefined;
+    const toDays = operator === '=' || operator === '<=' || operator === '<'
+      ? days - Number(!endOfDay && operator === '<') : undefined;
+    if ((fromDays !== undefined && !isIssueViewRelativeDueDay(fromDays)) || (toDays !== undefined && !isIssueViewRelativeDueDay(toDays))) {
+      throw new JiraViewQueryError('목표 마감일의 상대 일 수가 지원 범위를 벗어났습니다.', dateFunction.offset);
+    }
+    return { ...clause, ...(fromDays === undefined ? {} : { fromDays }), ...(toDays === undefined ? {} : { toDays }) };
   }
 
   private list(label: string, limit: number): Token[] {
@@ -471,6 +504,8 @@ function dueFilter(clauses: readonly DueClause[]) {
   if (!clauses.length) return undefined;
   let from: string | undefined;
   let to: string | undefined;
+  let fromDays: number | undefined;
+  let toDays: number | undefined;
   let presence: DueClause['presence'];
   for (const clause of clauses) {
     if (clause.presence && presence && clause.presence !== presence) {
@@ -479,9 +514,18 @@ function dueFilter(clauses: readonly DueClause[]) {
     presence = clause.presence ?? presence;
     if (clause.from && (!from || from < clause.from)) from = clause.from;
     if (clause.to && (!to || to > clause.to)) to = clause.to;
-    if ((presence === 'empty' && (from || to)) || (from && to && from > to)) {
+    if (clause.fromDays !== undefined) fromDays = Math.max(fromDays ?? -Infinity, clause.fromDays);
+    if (clause.toDays !== undefined) toDays = Math.min(toDays ?? Infinity, clause.toDays);
+    if ((presence === 'empty' && (from || to || fromDays !== undefined || toDays !== undefined)) ||
+        (from && to && from > to) || (fromDays !== undefined && toDays !== undefined && fromDays > toDays)) {
       throw new JiraViewQueryError('목표 마감일 조건에 공통으로 일치할 수 있는 날짜가 없습니다.', clause.offset);
     }
+  }
+  if (fromDays !== undefined || toDays !== undefined) {
+    const dateLabels = [fromDays === undefined ? undefined : `${fromDays}일부터`, toDays === undefined ? undefined : `${toDays}일까지`,
+      from ? `${from}부터` : undefined, to ? `${to}까지` : undefined];
+    return { dates: { mode: 'due_relative' as const, ...(fromDays === undefined ? {} : { fromDays }), ...(toDays === undefined ? {} : { toDays }),
+      ...(from ? { from } : {}), ...(to ? { to } : {}) }, label: `${fieldLabels.due} · 서울 오늘 기준 ${dateLabels.filter(Boolean).join(' · ')}` };
   }
   if (!from && !to) return presence === 'empty' ? { dates: { mode: 'due_missing' as const }, label: '목표 마감일 없음' }
     : { dates: { mode: 'due_set' as const }, label: '목표 마감일 있음' };

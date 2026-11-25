@@ -638,7 +638,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `assignee = currentUser()`와 `reporter = currentUser()`는 **현재 사용자** 조건으로 옮긴다. 미리보기는 요청한 작업자의 업무로 계산하며, 저장한 보기는 열람할 때의 작업자로 다시 계산한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 서로 다른 필드를 잇는 `OR`, 이 범위 밖의 함수와 연산자, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
-`due`와 `dueDate`는 따옴표로 감싼 `YYYY-MM-DD` 또는 `YYYY/MM/DD` 날짜를 `=`, `<`, `<=`, `>`, `>=`로 비교한다. `AND`로 연결한 조건들의 공통 범위를 `filters.planning.dates`의 `{mode:'due',from?,to?}`로 반환한다. 양 끝은 포함하며 `<`와 `>`의 경계는 하루 앞뒤로 옮긴다. `IS EMPTY`와 `IS NOT EMPTY`는 각각 `{mode:'due_missing'}`과 `{mode:'due_set'}`으로 저장하며 `NULL`도 받는다. 입력 여부의 교집합이 비어 있거나 상대 날짜, 날짜 함수, 날짜 집합을 쓰면 변환 오류로 표시한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
+`due`와 `dueDate`는 따옴표로 감싼 `YYYY-MM-DD` 또는 `YYYY/MM/DD` 날짜를 `=`, `<`, `<=`, `>`, `>=`로 비교한다. `AND`로 연결한 조건들의 공통 범위를 `filters.planning.dates`의 `{mode:'due',from?,to?}`로 반환한다. 양 끝은 포함하며 `<`와 `>`의 경계는 하루 앞뒤로 옮긴다. `IS EMPTY`와 `IS NOT EMPTY`는 각각 `{mode:'due_missing'}`과 `{mode:'due_set'}`으로 저장하며 `NULL`도 받는다. 입력 여부가 서로 충돌하거나 날짜 집합을 쓰면 변환 오류로 표시한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
+
+`startOfDay()`와 `endOfDay()`는 서울의 날짜 기준으로 옮긴다. 인수는 생략하거나 따옴표로 감싼 정수 일 수를 사용한다. `due < startOfDay()`는 `{mode:'due_relative',toDays:-1}`, `due >= startOfDay() AND due < endOfDay("+2d")`는 `{mode:'due_relative',fromDays:0,toDays:2}`다. 숫자 경계는 −3,650~3,650 사이로 양 끝을 포함한다. `from`·`to`를 함께 저장하면 고정 날짜 범위와 상대 범위를 모두 적용한다. 자정을 넘긴 미리보기는 다시 검토해야 한다. 주·월·연 단위 함수와 시간 단위 인수, `= endOfDay()`는 변환을 보류한다. 이 조건을 포함한 자체 백업은 형식 125를 사용한다. [Atlassian JQL 날짜 함수](https://confluence.atlassian.com/jirasoftwareserver106/advanced-searching-functions-reference-1573490874.html)
 
 `priority`는 `=`와 `IN`을 지원하며 `AND`의 교집합을 원본 값에서 먼저 계산한다. 이관 기록으로 한 Jira 프로젝트를 확인하면 같은 패키지의 옵션과 업무에 남은 ID·이름을 대조한다. CSV에 이름만 있으면 확인한 같은 이름의 범위를 사용할 수 있다. 숫자 ID는 해당 ID가 확인된 원본 값을 선택한다. 원본 이름이 여러 ID를 가리키거나 최종 조건이 같은 Teamspace 우선순위에 대응하는 원본 값 일부만 선택하면 변환 오류로 표시한다. 이관한 업무의 현재 값이 확인된 원본 매핑에서 어긋나거나 확인할 근거가 없는 업무가 선택한 우선순위에 있으면 저장을 보류한다. Jira 이관 연결이 없는 프로젝트에서는 Teamspace의 우선순위 코드와 한글 이름을 사용한다. 저장한 `filters.priorities`는 이후 새 티켓도 현재 값으로 조회한다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
@@ -1069,6 +1071,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 자체 백업 schema9는 적용된 영수증, 원본 기록, 업무 관계, 첨부 버전 메타데이터와 바이트를 포함한다. 분석 패키지와 미리보기는 별도 보관 대상이다. 자체 백업 복원으로 미리보기가 무효화된다. 원본 이관 적용 중에는 발신 웹훅이 생성되지 않는다.
 
 Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있으면 미리보기와 영수증의 `counts.confluenceOrderedSiblingGroups`에 집계한다. 일부 위치의 누락·중복이나 범위 불일치로 순서를 적용할 수 없는 그룹은 `counts.confluenceUnresolvedSiblingGroups`와 `CONFLUENCE_SIBLING_ORDER_UNRESOLVED`에 표시한다. 적용한 순서는 문서의 [형제 순서 조회](#형제-문서-순서)에서 읽는다.
+
+Confluence 표의 `colgroup`에서 픽셀 단위 열 너비와 병합을 포함한 셀 위치를 대조해 편집 가능한 셀의 `colwidth`에 저장한다. 표현할 수 없는 단위나 맞지 않는 격자는 원본을 코드 블록으로 보존한다. 이미 이관한 문서는 현재 본문이 이전 변환값과 일치할 때 변경분 검토에 `CONFLUENCE_REFRESH_TABLE_COLUMNS_RESTORED`를 표시한다. 팀이 수정한 본문은 충돌 비교에서 검토한다.
 
 ### 새 Jira 프로젝트의 워크플로 지정
 

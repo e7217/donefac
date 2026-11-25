@@ -152,6 +152,53 @@ test('360px에서 간트 날짜를 키보드로 고르고 이미 저장한 날�
   }
 });
 
+test('간트에서 고른 두 날짜는 미리보기 요청이 실패해도 그대로 다시 검토할 수 있다', async ({ page, request }) => {
+  const { projects: [project] } = await workspace(request);
+  const prefix = `차트 날짜 검토 재시도 ${randomUUID()}`;
+  const date = datesNearToday();
+  const issues: Issue[] = [];
+  try {
+    const issue = await createIssue(request, issues, project.id, `${prefix} 미정 업무`);
+    const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+    const { picker, day, prompt, preview, undo } = await openChart(page, project.id, prefix, date(-2));
+    const inputs: unknown[] = [];
+    await page.route('**/api/schedule/manual-preview', async route => {
+      inputs.push(route.request().postDataJSON());
+      if (inputs.length === 1) {
+        await route.fulfill({ status: 503, json: { error: '일정 검토 서버에 연결하지 못했습니다.' } });
+      } else await route.continue();
+    });
+
+    await picker(issue).tap();
+    await day(issue, date(3)).tap();
+    await day(issue, date(1)).tap();
+    await expect(prompt).toHaveCount(0);
+    await expect(preview.getByRole('alert')).toContainText('선택한 날짜를 유지했습니다.');
+    const proposedDates = new RegExp(`^${date(1)}\\s*${date(3)}$`);
+    await expect(preview.locator('.gantt-new-dates')).toHaveText(proposedDates);
+    const apply = preview.getByRole('button', { name: '변경 적용', exact: true });
+    const retry = preview.getByRole('button', { name: '다시 미리보기', exact: true });
+    await expect(apply).toBeDisabled();
+    await expect(retry).toBeFocused();
+    expect(await stored()).toMatchObject({ startDate: null, endDate: null, version: issue.version });
+
+    await retry.press('Enter');
+    await expect(preview.locator('.gantt-new-dates')).toHaveText(proposedDates);
+    await expect(apply).toBeEnabled();
+    const expectedInput = { changes: [{ id: issue.id, expectedVersion: issue.version, startDate: date(1), endDate: date(3) }] };
+    expect(inputs).toEqual([expectedInput, expectedInput]);
+    expect(await stored()).toMatchObject({ startDate: null, endDate: null, version: issue.version });
+
+    await apply.click();
+    await expect(preview).toHaveCount(0);
+    await expect.poll(stored).toMatchObject({ startDate: date(1), endDate: date(3), version: issue.version + 1 });
+    await undo.click();
+    await expect.poll(stored).toMatchObject({ startDate: null, endDate: null, version: issue.version + 2 });
+  } finally {
+    await removeIssues(request, issues);
+  }
+});
+
 test('360px 간트에서 행에 입력한 날짜와 차트에서 고른 날짜를 함께 검토한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const { projects: [project] } = await workspace(request);

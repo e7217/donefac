@@ -11,23 +11,45 @@ import './issue-planning-filters.css';
 
 type Selections = Pick<IssueViewPlanningFilter, 'cycleId' | 'moduleId' | 'releaseId'>;
 type DateMode = keyof typeof ISSUE_FILTER_DATE_LABELS;
-type Draft = Selections & { mode: DateMode; from: string; to: string };
+type Draft = Selections & { mode: DateMode; from: string; to: string; fromDays: string; toDays: string };
 
 const hasDateRange = (mode: DateMode) => mode === 'overlap' || mode === 'due';
 const choice = (id: string | null | undefined) => id === undefined ? 'all' : id === null ? 'none' : `plan:${id}`;
 
 function fromFilter(value: IssueViewPlanningFilter | undefined): Draft {
   const dates = value?.dates;
-  const range = dates?.mode === 'overlap' || dates?.mode === 'due' ? dates : undefined;
+  const relative = dates?.mode === 'due_relative' ? dates : undefined;
+  const range = dates?.mode === 'overlap' || dates?.mode === 'due' ? dates : relative;
   return {
     cycleId: value?.cycleId, moduleId: value?.moduleId, releaseId: value?.releaseId,
     mode: dates?.mode ?? 'all', from: range?.from ?? '', to: range?.to ?? '',
+    fromDays: relative?.fromDays?.toString() ?? '', toDays: relative?.toDays?.toString() ?? '',
   };
 }
 
 function equalDraft(a: Draft, b: Draft): boolean {
-  return a.cycleId === b.cycleId && a.moduleId === b.moduleId && a.releaseId === b.releaseId && a.mode === b.mode
-    && (!hasDateRange(a.mode) || (a.from === b.from && a.to === b.to));
+  if (a.cycleId !== b.cycleId || a.moduleId !== b.moduleId || a.releaseId !== b.releaseId || a.mode !== b.mode) return false;
+  const equalRange = a.from === b.from && a.to === b.to;
+  if (a.mode === 'due_relative') return equalRange && a.fromDays === b.fromDays && a.toDays === b.toDays;
+  return !hasDateRange(a.mode) || equalRange;
+}
+
+function dayOffset(value: string): number | undefined {
+  const offset = value.trim();
+  if (!offset) return undefined;
+  if (!/^[+-]?\d+$/u.test(offset)) throw new Error('오늘 기준 일수는 정수로 입력하세요.');
+  return Number(offset);
+}
+
+function datesFromDraft({ mode, from, to, fromDays, toDays }: Draft) {
+  if (mode === 'all') return undefined;
+  const range = { ...(from ? { from } : {}), ...(to ? { to } : {}) };
+  if (mode === 'due_relative') {
+    const start = dayOffset(fromDays);
+    const end = dayOffset(toDays);
+    return { mode, ...range, ...(start === undefined ? {} : { fromDays: start }), ...(end === undefined ? {} : { toDays: end }) };
+  }
+  return hasDateRange(mode) ? { mode, ...range } : { mode };
 }
 
 export function IssuePlanningFilters({ projectId, planningItems, value, onApply }: {
@@ -92,10 +114,8 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
       const field = PLAN_ID_FIELDS[kind];
       if (draft[field] !== undefined) selections[field] = draft[field];
     }
-    const dates = draft.mode === 'all' ? undefined : hasDateRange(draft.mode) ? {
-      mode: draft.mode, ...(draft.from ? { from: draft.from } : {}), ...(draft.to ? { to: draft.to } : {}),
-    } : { mode: draft.mode };
     try {
+      const dates = datesFromDraft(draft);
       onApply(parseIssueViewPlanningFilter({ ...selections, ...(dates ? { dates } : {}) }, projectId, planningItems));
       close();
     } catch (cause) {
@@ -151,8 +171,21 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
             <label>조회 종료일<input type="date" className="field" value={draft.to} aria-describedby={`${panelId}-range`}
               onChange={event => update({ to: event.target.value })} /></label>
           </>}
+          {draft.mode === 'due_relative' && <>
+            <label>오늘 기준 시작 일수<input className="field" value={draft.fromDays} aria-describedby={`${panelId}-relative`}
+              onChange={event => update({ fromDays: event.target.value })} /></label>
+            <label>오늘 기준 종료 일수<input className="field" value={draft.toDays} aria-describedby={`${panelId}-relative`}
+              onChange={event => update({ toDays: event.target.value })} /></label>
+            <label>고정 시작일<input type="date" className="field" value={draft.from}
+              onChange={event => update({ from: event.target.value })} /></label>
+            <label>고정 종료일<input type="date" className="field" value={draft.to}
+              onChange={event => update({ to: event.target.value })} /></label>
+          </>}
         </div>
         {hasDateRange(draft.mode) && <p id={`${panelId}-range`} className="issue-planning-filter-hint">날짜는 하나 이상 입력하세요. 입력한 날짜도 범위에 포함합니다.</p>}
+        {draft.mode === 'due_relative' && <p id={`${panelId}-relative`} className="issue-planning-filter-hint">
+          서울 기준으로 0은 오늘, 음수는 이전, 양수는 이후입니다. 일수를 하나 이상 입력하세요. 고정 날짜를 입력하면 두 범위에 모두 해당하는 업무를 표시합니다.
+        </p>}
         {draft.mode === 'needs_dates' && <p className="issue-planning-filter-hint">계획 시작일과 종료일을 확인해야 하는 업무를 표시합니다.</p>}
         {error && <p className="issue-planning-filter-error" role="alert">{error}</p>}
         <footer>

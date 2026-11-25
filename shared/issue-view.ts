@@ -1,9 +1,10 @@
 import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewAssigneeFilter, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type IssueViewSortField, type IssueViewSortRule, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
-import { isCalendarDate } from './calendar.js';
+import { calendarDay, isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
 import { summarizeIssueGitlabLinks, type IssueGitlabSummary } from './issue-gitlab-view.js';
 import { PLANNING_FIELDS } from './planning-helpers.js';
+import { reservationLocalDateTime } from './time-reservations.js';
 import { issueSearchAliases, normalizeWorkspaceSearchKey } from './workspace-search.js';
 
 export class IssueViewPlanningFilterError extends Error {
@@ -217,17 +218,31 @@ export function issuePriorityLabelFilterLabels({ priorities, labels }: IssuePrio
   return summaries;
 }
 
+export const ISSUE_VIEW_RELATIVE_DUE_DAY_LIMIT = 3650;
+
+export function isIssueViewRelativeDueDay(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && Math.abs(value) <= ISSUE_VIEW_RELATIVE_DUE_DAY_LIMIT;
+}
+
+export function issueViewToday(now = new Date()): string {
+  return reservationLocalDateTime(now.toISOString()).slice(0, 10);
+}
+
 function parseDateFilter(value: unknown): IssueViewDateFilter {
-  const filter = checkedFilterObject(value, ['mode', 'from', 'to'], '날짜 조건');
+  const filter = checkedFilterObject(value, ['mode', 'from', 'to', 'fromDays', 'toDays'], '날짜 조건');
   const mode = Object.hasOwn(filter, 'mode') ? filter.mode : undefined;
   const hasFrom = Object.hasOwn(filter, 'from');
   const hasTo = Object.hasOwn(filter, 'to');
+  const hasFromDays = Object.hasOwn(filter, 'fromDays');
+  const hasToDays = Object.hasOwn(filter, 'toDays');
+  if (mode !== 'due_relative' && (hasFromDays || hasToDays)) {
+    throw new IssueViewPlanningFilterError('오늘 기준의 일 수는 상대 마감일에만 지정할 수 있습니다.');
+  }
   if (mode === 'planned' || mode === 'needs_dates' || mode === 'due_set' || mode === 'due_missing') {
     if (hasFrom || hasTo) throw new IssueViewPlanningFilterError('날짜 입력 여부 조건에 날짜 범위를 지정할 수 없습니다.');
     return { mode };
   }
-  if (mode !== 'overlap' && mode !== 'due') throw new IssueViewPlanningFilterError('날짜 조건 종류를 확인해 주세요.');
-  if (!hasFrom && !hasTo) throw new IssueViewPlanningFilterError('시작 또는 종료 날짜를 지정해 주세요.');
+  if (mode !== 'overlap' && mode !== 'due' && mode !== 'due_relative') throw new IssueViewPlanningFilterError('날짜 조건 종류를 확인해 주세요.');
   const from = hasFrom ? filter.from : undefined;
   const to = hasTo ? filter.to : undefined;
   if ((hasFrom && !isCalendarDate(from)) || (hasTo && !isCalendarDate(to))) {
@@ -236,7 +251,22 @@ function parseDateFilter(value: unknown): IssueViewDateFilter {
   if (typeof from === 'string' && typeof to === 'string' && from > to) {
     throw new IssueViewPlanningFilterError('종료 날짜는 시작 날짜보다 빠를 수 없습니다.');
   }
-  return { mode, ...(typeof from === 'string' ? { from } : {}), ...(typeof to === 'string' ? { to } : {}) };
+  const range = { ...(typeof from === 'string' ? { from } : {}), ...(typeof to === 'string' ? { to } : {}) };
+  if (mode === 'due_relative') {
+    const fromDays = hasFromDays ? filter.fromDays : undefined;
+    const toDays = hasToDays ? filter.toDays : undefined;
+    if (!hasFromDays && !hasToDays) throw new IssueViewPlanningFilterError('오늘 기준 시작 또는 종료 일 수를 지정해 주세요.');
+    if ((hasFromDays && !isIssueViewRelativeDueDay(fromDays)) || (hasToDays && !isIssueViewRelativeDueDay(toDays))) {
+      throw new IssueViewPlanningFilterError(`오늘 기준 일 수는 -${ISSUE_VIEW_RELATIVE_DUE_DAY_LIMIT}~${ISSUE_VIEW_RELATIVE_DUE_DAY_LIMIT} 사이의 정수여야 합니다.`);
+    }
+    if (typeof fromDays === 'number' && typeof toDays === 'number' && fromDays > toDays) {
+      throw new IssueViewPlanningFilterError('오늘 기준 종료 일 수는 시작 일 수보다 작을 수 없습니다.');
+    }
+    return { mode, ...range, ...(typeof fromDays === 'number' ? { fromDays: fromDays || 0 } : {}),
+      ...(typeof toDays === 'number' ? { toDays: toDays || 0 } : {}) };
+  }
+  if (!hasFrom && !hasTo) throw new IssueViewPlanningFilterError('시작 또는 종료 날짜를 지정해 주세요.');
+  return { mode, ...range };
 }
 
 export function parseIssueViewPlanningFilter(value: unknown, projectId: string, items: readonly PlanningItem[]): IssueViewPlanningFilter | undefined {
@@ -268,6 +298,18 @@ function matchesDateFilter(issue: Issue, filter: IssueViewDateFilter): boolean {
   if (filter.mode === 'planned') return complete;
   if (filter.mode === 'needs_dates') return !complete;
   return filter.mode === 'overlap' && complete && (!filter.from || endDate >= filter.from) && (!filter.to || startDate <= filter.to);
+}
+
+function createIssueDateMatcher(filter: IssueViewDateFilter, today?: string) {
+  if (filter.mode !== 'due_relative') return (issue: Issue) => matchesDateFilter(issue, filter);
+  const reference = calendarDay(today ?? issueViewToday());
+  const from = Math.max(filter.from ? calendarDay(filter.from) : -Infinity, reference + (filter.fromDays ?? -Infinity));
+  const to = Math.min(filter.to ? calendarDay(filter.to) : Infinity, reference + (filter.toDays ?? Infinity));
+  return ({ dueDate }: Issue) => {
+    if (!isCalendarDate(dueDate)) return false;
+    const day = calendarDay(dueDate);
+    return day >= from && day <= to;
+  };
 }
 
 export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: IssueGitlabSummary | undefined): boolean {
@@ -310,6 +352,7 @@ export function createIssueViewMatcher(
   data: Pick<WorkspaceSnapshot, 'issueSchemas' | 'users'> & Partial<Pick<WorkspaceSnapshot, 'gitlabLinks'>>,
   schema: ProjectIssueSchema,
   actorId?: string,
+  today?: string,
 ): (issue: Issue) => boolean {
   const {assignee,assigneeId,type,planning,gitlab,reporter} = filters;
   const currentUserId = issueViewUsesCurrentUser(filters) && actorId && data.users.some(user => user.id === actorId)
@@ -320,6 +363,7 @@ export function createIssueViewMatcher(
   const selectedStatuses = new Set(issueViewStatusIds(filters));
   const search = filters.query.toLowerCase();
   const matchFields = createIssueFieldMatcher(filters.fieldFilter, schema);
+  const matchDates = planning?.dates ? createIssueDateMatcher(planning.dates, today) : undefined;
   const matchPriorityLabels = createIssuePriorityLabelMatcher(filters);
   const gitlabSummaries = gitlab ? summarizeIssueGitlabLinks(data.gitlabLinks ?? []) : undefined;
   const planConditions = planning ? planSelectors.flatMap(([, { idField }]) => {
@@ -332,7 +376,7 @@ export function createIssueViewMatcher(
     (!reporter || matchesReporterFilter(reporter, issue.reporterId, currentUserId)) &&
     (type === 'all' || issue.type === type) &&
     planConditions.every(({ idField, selected }) => (issue[idField] ?? null) === selected) &&
-    (!planning?.dates || matchesDateFilter(issue, planning.dates)) &&
+    (!matchDates || matchDates(issue)) &&
     (!gitlab || matchesGitlabFilter(gitlab, gitlabSummaries?.get(issue.id))) &&
     matchPriorityLabels(issue) &&
     matchFields(issue) &&

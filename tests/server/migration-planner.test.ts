@@ -1528,6 +1528,54 @@ test('reviewed Confluence refresh repairs only untouched full-page checklist fal
   assert.equal(refresh(locallyEdited, fallbackReceipt, laterChanged).preview.documentRefresh?.[0].fields[0].decision, 'conflict');
 });
 
+test('Confluence refresh restores archived table widths through document review and preserves local edits', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const original = page('10', { authorId: null, text: '<p>Release</p><table class="wrapped">' +
+    '<colgroup><col style="width: 160.0px;"/><col style="width: 320.0px;"/></colgroup>' +
+    '<tbody><tr><th>버전</th><th>메모</th></tr><tr><td>1.2</td><td>확인 완료</td></tr></tbody></table>' });
+  const initialSource = pkg('original-table-width', 'confluence', [space, original]);
+  const initial = buildMigrationPlan(input([initialSource]));
+  assert.equal(initial.preview.canApply, true, JSON.stringify(initial.preview.notices));
+  const [project] = initial.projects, [current] = initial.documents;
+  const receipt = initial.sourceRecords.find(item => item.targetId === current.id)!;
+  const { plainText, content, diagnostics } = convertLegacyContent(original, { resolveReference: () => null, legacyConfluenceTableColumns: true });
+  assert.ok(diagnostics.some(item => item.code === 'LEGACY_CONFLUENCE_TABLE_COLUMNS'));
+  assert.deepEqual(content.content?.map(node => node.type), ['paragraph', 'codeBlock', 'table']);
+  const fallback = { ...current, plainText, content };
+  const legacyReceipt = { ...receipt, confluencePageFieldHashes: { ...receipt.confluencePageFieldHashes,
+    content: createHash('sha256').update(JSON.stringify(['content', JSON.stringify(content)])).digest('hex') } };
+  const refresh = (local: DocPage, previous: SourceRecordArchive = legacyReceipt, source = original) => {
+    const next = pkg('table-width-refresh', 'confluence', [space, source]);
+    next.dataset.source.instanceKey = initialSource.dataset.source.instanceKey;
+    const request = input([next]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = { project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'table-width-refresh',
+      knownPages: [{ sourceId: original.sourceId, documentId: current.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: current.title }],
+      refreshDocuments: [{ document: local, previous, previousTimezone: 'UTC' }] };
+    return buildMigrationPlan(request);
+  };
+  for (const previous of [legacyReceipt, { ...legacyReceipt, confluencePageBodySourceHash: undefined, confluencePageFieldHashes: undefined }]) {
+    const repaired = refresh(fallback, previous);
+    assert.equal(repaired.preview.canApply, true, JSON.stringify(repaired.preview.notices));
+    assert.ok(repaired.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_TABLE_COLUMNS_RESTORED'));
+    assert.deepEqual(repaired.preview.documentRefresh?.[0].fields.map(({ field, decision }) => [field, decision]), [['content', 'apply']]);
+    assert.deepEqual(repaired.documentUpdates?.[0].changes.content, current.content);
+    const checkpoint = repaired.sourceRecords.find(item => item.targetId === current.id)!;
+    assert.deepEqual(refresh(current, checkpoint).documentUpdates, []);
+  }
+  const local = { ...fallback, version: current.version + 1, plainText: `${plainText}\n팀 메모`, content: {
+    ...content, content: [...content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀 메모' }] }],
+  } };
+  const conflicted = refresh(local);
+  assert.equal(conflicted.preview.documentRefresh?.[0].fields[0].decision, 'conflict');
+  assert.deepEqual(conflicted.documentUpdates, []);
+
+  const changed = { ...original, text: original.text.replace('320.0px', '360.0px'), metadata: { ...original.metadata, version: '4' } };
+  const later = refresh(fallback, legacyReceipt, changed);
+  assert.deepEqual(later.documentUpdates?.[0].changes.content?.content?.[1].content?.[0].content?.[1].attrs?.colwidth, [360]);
+  assert.equal(later.preview.documentRefresh?.[0].fields[0].decision, 'apply');
+});
+
 test('reviewed Confluence refresh restores deeper headings only when the original whole-body projection matches', () => {
   const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
   const original = page('10', { authorId: null, text: '<ac:structured-macro ac:name="toc"/>' +

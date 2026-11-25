@@ -5,6 +5,7 @@ import { ArrowUpRight, ChartBar, ChevronRight, SlidersHorizontal, X } from 'luci
 import { DOCUMENT_ISSUE_LIST_LIMIT, ISSUE_SUMMARY_GROUP_LABELS, isIssueSummaryGroupBy, type DocumentIssueSummary } from '../../shared/document-nodes';
 import { PRIORITY, type Issue, type Priority, type SavedView, type WorkspaceSnapshot } from '../../shared/types';
 import { projectStatuses } from '../../shared/workflow-helpers';
+import { useIssueViewDate } from '../lib/use-issue-view-date';
 import { issueListAttrs, keepDocumentSelection, matchingDocumentIssues } from './DocumentIssueList';
 
 const number = new Intl.NumberFormat('ko-KR');
@@ -20,7 +21,7 @@ export function issueSummaryAttrs(attrs: Record<string, unknown> | undefined): D
   return { ...issueListAttrs(attrs), groupBy: isIssueSummaryGroupBy(attrs?.groupBy) ? attrs.groupBy : 'status' };
 }
 
-function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, groupBy: DocumentIssueSummary['groupBy'], actorId?: string) {
+function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, groupBy: DocumentIssueSummary['groupBy'], actorId?: string, viewDate?: string) {
   const statuses = groupBy === 'status' ? projectStatuses(data, projectId) : [];
   const people = groupBy === 'assignee' ? data.users : [];
   const statusGroups = statuses.map(status => [status.id, { label: status.label, color: status.color }] as const);
@@ -31,7 +32,7 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
   );
   const orderedIds = new Map([...definitions.keys()].map((id, index) => [id, index]));
   const groups = new Map<string, Group>();
-  const matching = matchingDocumentIssues(data, projectId, savedView, actorId);
+  const matching = matchingDocumentIssues(data, projectId, savedView, actorId, viewDate);
 
   for (const issue of matching) {
     const id = groupBy === 'status' ? issue.status : groupBy === 'assignee' ? (issue.assigneeId ?? '') : issue.priority;
@@ -139,9 +140,11 @@ export function IssueSummaryCard({ data, attrs, actorId, openIssue, limit = DOCU
   const { projectId, savedViewId, groupBy } = attrs;
   const project = data.projects.find(item => item.id === projectId);
   const savedView = data.savedViews?.find(item => item.projectId === projectId && item.id === savedViewId);
+  const viewDate = useIssueViewDate(savedView?.filters.planning?.dates?.mode === 'due_relative');
   const unavailable = !project ? '프로젝트를 찾을 수 없습니다.' : savedViewId && !savedView ? '공유 보기를 찾을 수 없습니다.' : '';
   const label = !unavailable && project ? `${project.name} · ${savedView?.name ?? '전체 업무'}` : attrs.label || '업무 현황';
-  const { groups, total } = useMemo(() => unavailable ? { groups: [], total: 0 } : summarize(data, projectId, savedView, groupBy, actorId), [data, projectId, savedView, groupBy, actorId, unavailable]);
+  const { groups, total } = useMemo(() => unavailable ? { groups: [], total: 0 } : summarize(data, projectId, savedView, groupBy, actorId, viewDate),
+    [data, projectId, savedView, groupBy, actorId, unavailable, viewDate]);
 
   return <section className="doc-issue-list doc-issue-summary" aria-label="업무 현황">
     <header className="doc-issue-list-heading">

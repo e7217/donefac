@@ -29,6 +29,7 @@ function viewSignature({ filters, sort }: Pick<SavedViewState, 'filters' | 'sort
 export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, initialQuery = '', onClose, onSaved }: Props) {
   const titleId = useId();
   const queryId = `${titleId}-query`;
+  const queryHintId = `${queryId}-hint`;
   const queryErrorId = `${queryId}-error`;
   const dialog = useRef<HTMLDialogElement>(null);
   const queryInput = useRef<HTMLTextAreaElement>(null);
@@ -224,8 +225,9 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
       <div className="jira-saved-view-content">
         <label className="form-label" htmlFor={queryId}>Jira 검색식 (JQL)</label>
         <textarea id={queryId} ref={queryInput} className="field" rows={4} spellCheck={false}
-          aria-invalid={queryTooLong || undefined} aria-describedby={queryTooLong ? queryErrorId : undefined}
+          aria-invalid={queryTooLong || undefined} aria-describedby={queryTooLong ? `${queryErrorId} ${queryHintId}` : queryHintId}
           value={query} onChange={event => changeQuery(event.currentTarget.value)} disabled={locked} />
+        <p id={queryHintId} className="muted">기한 초과는 <code>due &lt; startOfDay()</code>로 찾습니다. 서울 날짜가 바뀌면 저장한 보기의 결과도 갱신됩니다.</p>
         {queryTooLong && <p id={queryErrorId} className="issue-form-error" role="alert">
           Jira 검색식은 최대 {JIRA_SAVED_VIEW_QUERY_LIMIT.toLocaleString('ko-KR')}자까지 검토할 수 있습니다. 검색식을 줄여 주세요.
         </p>}

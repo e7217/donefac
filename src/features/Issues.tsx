@@ -7,6 +7,7 @@ import { formatIssueCsv } from '../../shared/issue-csv';
 import { ApiError, dateLabel, patch } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
+import { useIssueViewDate } from '../lib/use-issue-view-date';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { allowedNextStatuses, projectStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { issueTypeMeta, projectIssueSchema, projectIssueTypes } from '../../shared/issue-schema';
@@ -170,9 +171,10 @@ export function Issues(props: FeatureProps & {
   }), [query, status, statusIds, assigneeId, assigneeFilter, type, fieldFilter, planning, gitlab, priorities, labels, reporter]);
   const selectedStatuses = issueViewStatusIds(filters);
   const gitlabSummary = useMemo(() => summarizeIssueGitlabLinks(data.gitlabLinks), [data.gitlabLinks]);
+  const viewDate = useIssueViewDate(filters.planning?.dates?.mode === 'due_relative');
   const matchesIssue = useMemo(() => createIssueViewMatcher(filters, {
     issueSchemas:data.issueSchemas,users:data.users,gitlabLinks:data.gitlabLinks,
-  }, schema, actorId), [filters,data.issueSchemas,data.users,data.gitlabLinks,schema,actorId]);
+  }, schema, actorId, viewDate), [filters,data.issueSchemas,data.users,data.gitlabLinks,schema,actorId,viewDate]);
   const [creating, setCreating] = useState(false);
   const [pasteScope, setPasteScope] = useState<string | null>(null);
   const [createStatus, setCreateStatus] = useState<IssueStatus>('todo');

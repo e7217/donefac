@@ -1948,6 +1948,53 @@ test('360px에서 이관한 Confluence 담당 체크리스트를 편집하고 �
   }
 });
 
+test('360px에서 Confluence 표를 이관한 뒤 열 너비를 유지하며 편집한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), title = `배포 표 ${id}`, filename = `confluence-table-${id}.zip`;
+  const storage = '<table class="wrapped"><colgroup><col style="width: 160.0px;"/><col style="width: 320.0px;"/></colgroup>' +
+    '<tbody><tr><th>버전</th><th>메모</th></tr><tr><td>1.2</td><td>확인 완료</td></tr></tbody></table>';
+  const xml = `<hibernate-generic>
+    <object class="Space"><id name="id">42</id><property name="key">TBL${id}</property><property name="name">${title}</property></object>
+    <object class="Page"><id name="id">31001</id><property name="title">${title}</property>
+      <property name="space" class="Space"><id name="id">42</id></property>
+      <property name="creationDate">2020-01-02T00:00:00Z</property></object>
+    <object class="BodyContent"><id name="id">31301</id><property name="body"><![CDATA[${storage}]]></property>
+      <property name="content" class="Page"><id name="id">31001</id></property><property name="bodyType">2</property></object>
+  </hibernate-generic>`;
+  const source = await upload(request, filename, zip([{ path: 'entities.xml', bytes: Buffer.from(xml) }]), `confluence-table-${id}`);
+  let imported: DocPage | undefined;
+  try {
+    const applied = await importIntoProject(request, source, `TBL${id}`, title);
+    const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    imported = workspace.documents.find(document => document.projectId === applied.import.projectIds[0] && document.title === title);
+    expect(imported).toBeTruthy();
+    await page.goto(`/#/${imported!.projectId}/documents/${imported!.id}`);
+    const editor = page.locator('.docs-prose[contenteditable="true"]');
+    await expect(editor.locator('pre')).toHaveCount(0);
+    const columns = editor.locator('table colgroup col');
+    await expect(columns).toHaveCount(2);
+    await expect(columns.nth(0)).toHaveAttribute('style', /width: 160px/u);
+    await expect(columns.nth(1)).toHaveAttribute('style', /width: 320px/u);
+    const version = editor.getByRole('cell', { name: '1.2', exact: true });
+    const save = page.locator('.docs-save-button');
+    await version.click();
+    await page.keyboard.press('End');
+    await page.keyboard.insertText('.1');
+    const saved = page.waitForResponse(response => response.url().endsWith(`/api/documents/${imported!.id}`) && response.request().method() === 'PATCH');
+    await save.click();
+    expect((await saved).ok()).toBe(true);
+    await expect(save).toBeDisabled();
+    await page.reload();
+    await expect(editor.getByRole('cell', { name: '1.2.1', exact: true })).toBeVisible();
+    await expect(columns.nth(0)).toHaveAttribute('style', /width: 160px/u);
+    await expect(columns.nth(1)).toHaveAttribute('style', /width: 320px/u);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  } finally {
+    if (imported) await request.delete(`/api/documents/${imported.id}`);
+    await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
+  }
+});
+
 test('360px에서 Confluence 문서 변경을 검토하고 팀의 제목과 새 본문을 함께 보존한다', async ({ page, request }) => {
   test.setTimeout(120_000);
   await page.setViewportSize({ width: 360, height: 820 });

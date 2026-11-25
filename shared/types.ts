@@ -2021,7 +2021,9 @@ export interface ProjectWorkflow { id: string; projectId: string; version: numbe
 export type IssueFieldOperator = 'is_set' | 'is_empty' | 'equals' | 'not_equals' | 'contains' | 'gte' | 'lte' | 'includes' | 'excludes';
 export interface IssueFieldRule { fieldId: string; operator: IssueFieldOperator; value?: string | number | boolean }
 export interface IssueFieldFilter { match: 'all' | 'any'; rules: IssueFieldRule[] }
-export type IssueViewDateFilter = { mode: 'planned' | 'needs_dates' | 'due_set' | 'due_missing' } | { mode: 'overlap' | 'due'; from?: string; to?: string };
+export type IssueViewDateFilter = { mode: 'planned' | 'needs_dates' | 'due_set' | 'due_missing' }
+  | { mode: 'overlap' | 'due'; from?: string; to?: string }
+  | { mode: 'due_relative'; fromDays?: number; toDays?: number; from?: string; to?: string };
 export interface IssueViewPlanningFilter {
   cycleId?: string | null;
   moduleId?: string | null;

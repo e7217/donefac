@@ -3235,6 +3235,9 @@ export function createApp(options: {
     if (data.schemaVersion < 124 && importedViews.some(({ filters }) =>
       filters.planning?.dates?.mode === 'due_set' || filters.planning?.dates?.mode === 'due_missing'
     )) fail('목표 마감일 입력 여부 조건을 포함한 보기는 schemaVersion 124가 필요합니다.');
+    if (data.schemaVersion < 125 && importedViews.some(({ filters }) => filters.planning?.dates?.mode === 'due_relative')) {
+      fail('오늘 기준 마감일 조건을 포함한 보기는 schemaVersion 125가 필요합니다.');
+    }
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {
       fail('저장된 필드 집계가 포함된 백업은 schemaVersion 92가 필요합니다.');

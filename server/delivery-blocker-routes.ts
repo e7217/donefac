@@ -6,7 +6,7 @@ import {
   type PlanningItem, type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
 } from '../shared/types.js';
 import { isRelationId } from '../shared/issue-relations.js';
-import { createIssueViewMatcher, issueViewUsesCurrentUser } from '../shared/issue-view.js';
+import { createIssueViewMatcher, issueViewToday, issueViewUsesCurrentUser } from '../shared/issue-view.js';
 import type { CalendarService } from './calendars.js';
 import { buildDeliveryBlockers, hasGitlabDeliveryBlocker } from './delivery-blockers.js';
 import { buildDeliveryBlockerDraftContent } from './delivery-blocker-draft-content.js';
@@ -97,7 +97,8 @@ function reportFor(
   };
   const users = store.all<User>('users');
   const issueSchemas = [schema];
-  const candidateMatch = view ? createIssueViewMatcher({ ...view.filters, gitlab: undefined }, { issueSchemas, users }, schema, viewerId) : null;
+  const viewDate = view?.filters.planning?.dates?.mode === 'due_relative' ? issueViewToday() : undefined;
+  const candidateMatch = view ? createIssueViewMatcher({ ...view.filters, gitlab: undefined }, { issueSchemas, users }, schema, viewerId, viewDate) : null;
   const candidates: Issue[] = [];
   for (const result of store.db.prepare(`SELECT json FROM issues WHERE project_id=?
     AND (? IS NULL OR json_extract(json,'$.releaseId')=?)`).iterate(projectId, selection.releaseId, selection.releaseId)) {
@@ -114,7 +115,7 @@ function reportFor(
   if (gitlabRows.length > GITLAB_LIMIT) throw new DeliveryBlockerQueryError(413, '업무에 연결된 GitLab 활동이 100,000개를 넘습니다. 저장된 보기로 대상을 좁혀 주세요.');
   const gitlabLinks = gitlabRows.map(row => decode<GitlabLink>(row));
   const targets = view?.filters.gitlab
-    ? candidates.filter(createIssueViewMatcher(view.filters, { issueSchemas, users, gitlabLinks }, schema, viewerId))
+    ? candidates.filter(createIssueViewMatcher(view.filters, { issueSchemas, users, gitlabLinks }, schema, viewerId, viewDate))
     : candidates;
   const targetIssueIds = targets.map(issue => issue.id);
   const blockers = issueRelations.directBlockers(targetIssueIds, allowedProjects, CONNECTION_LIMIT + 1);

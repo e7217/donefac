@@ -450,6 +450,10 @@ function hasConfluenceColumnLayout(record: LegacyRecord): boolean {
   return /<ac:layout(?=[\s/>])|<ac:(?:structured-macro|macro)\s[^<>]*\bac:name\s*=\s*(?:"section"|'section')/u.test(record.text);
 }
 
+function hasConfluenceTableColumns(record: LegacyRecord): boolean {
+  return /<colgroup(?=[\s/>])/u.test(record.text);
+}
+
 function confluencePageBodySourceHash(record: LegacyRecord): string | undefined {
   return hasConfluenceBody(record) ? hash('confluence-source-body', record.text) : undefined;
 }
@@ -507,6 +511,7 @@ function previousConfluencePageFieldDigests(archive: SourceRecordArchive, curren
       const legacyOptions = [
         ...(legacyProperties.legacyDocumentProperties ? [legacyProperties] : []),
         ...(legacyLayout.legacyDocumentLayout ? [legacyLayout] : []),
+        ...(hasConfluenceTableColumns(record) ? [{ legacyConfluenceTableColumns: true }] : []),
         ...(hasConfluenceExcerptMacro(record) ? [{ ...legacyLayout, legacyDocumentExcerpt: true }] : []),
         ...[{ legacyDocumentChildList: true }, earlierContent, { ...earlierContent, legacyAnnotations: true }]
           .map(options => ({ ...options, ...legacyLayout, legacyDocumentExcerpt: true })),
@@ -1490,10 +1495,11 @@ class Planner{
           }
         }
       }
-      let recoveredBody: { baseline: string; projection: ReturnType<typeof convertLegacyContent>; jiraAnchors: boolean } | undefined;
+      let recoveredBody: { baseline: string; projection: ReturnType<typeof convertLegacyContent>; diagnostics: Set<string> } | undefined;
       const mayHaveLegacyReport = canCheckFormerBody && hasConfluencePropertyReportMacro(row.text);
       const mayHaveLegacyJiraLink = canCheckFormerBody && row.text.includes('/browse/');
-      if (mayHaveLegacyReport || mayHaveLegacyJiraLink) {
+      const mayHaveLegacyTableColumns = canCheckFormerBody && hasConfluenceTableColumns(row);
+      if (mayHaveLegacyReport || mayHaveLegacyJiraLink || mayHaveLegacyTableColumns) {
         const projection = convertLegacyContent(row, contentContext);
         const baseline = previous.confluencePageFieldHashes?.content ?? confluencePageFieldDigest('content', document.content);
         if (usableConfluenceBody(projection) && confluencePageFieldDigest('content', projection.content) !== baseline) {
@@ -1505,8 +1511,14 @@ class Planner{
           if (mayHaveLegacyJiraLink) {
             recoveries.push({ options: { legacyConfluenceJiraAnchorProjection: true }, diagnostic: 'LEGACY_CONFLUENCE_JIRA_ANCHOR' });
           }
-          const candidates = recoveries.map(recovery => [recovery]);
-          if (recoveries.length > 1) candidates.push(recoveries);
+          if (mayHaveLegacyTableColumns) {
+            recoveries.push({ options: { legacyConfluenceTableColumns: true }, diagnostic: 'LEGACY_CONFLUENCE_TABLE_COLUMNS' });
+          }
+          const candidates: (typeof recoveries)[] = [];
+          for (const recovery of recoveries) {
+            candidates.push([recovery], ...candidates.map(candidate => [...candidate, recovery]));
+          }
+          candidates.sort((a, b) => a.length - b.length);
           for (const candidate of candidates) {
             const options = Object.assign({}, ...candidate.map(item => item.options)) as Partial<MigrationContentContext>;
             const former = convertLegacyContent(row, { ...contentContext, ...options });
@@ -1514,7 +1526,7 @@ class Planner{
             if (!candidate.every(item => former.diagnostics.some(diagnostic => diagnostic.code === item.diagnostic))) continue;
             const diagnostics = former.diagnostics.filter(item => !allowed.has(item.code));
             if (usableConfluenceBody({ ...former, diagnostics }) && confluencePageFieldDigest('content', former.content) === baseline) {
-              recoveredBody = { baseline, projection, jiraAnchors: allowed.has('LEGACY_CONFLUENCE_JIRA_ANCHOR') };
+              recoveredBody = { baseline, projection, diagnostics: allowed };
               break;
             }
           }
@@ -1636,8 +1648,10 @@ class Planner{
             '같은 원본 버전의 하위 문서 목록에 수동 순서가 있으면 반영합니다.', 'info', entry);
           if (field === 'content' && sameRevision && headingDepthBaseline) this.notice('CONFLUENCE_REFRESH_HEADING_DEPTH_RESTORED',
             '같은 원본 버전에서 확인한 제목 단계와 목차 범위를 복원합니다.', 'warning', entry, true);
-          if (field === 'content' && recoveredBody?.jiraAnchors) this.notice('CONFLUENCE_REFRESH_JIRA_ANCHORS_RESTORED',
+          if (field === 'content' && recoveredBody?.diagnostics.has('LEGACY_CONFLUENCE_JIRA_ANCHOR')) this.notice('CONFLUENCE_REFRESH_JIRA_ANCHORS_RESTORED',
             '글자로 남아 있던 Jira 주소를 원본 링크로 복원합니다.', 'warning', entry, true);
+          if (field === 'content' && recoveredBody?.diagnostics.has('LEGACY_CONFLUENCE_TABLE_COLUMNS')) this.notice('CONFLUENCE_REFRESH_TABLE_COLUMNS_RESTORED',
+            '표 앞의 열 너비 XML 코드를 제거하고 편집 가능한 표에 열 너비를 반영합니다.', 'warning', entry, true);
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
           if (field === 'content') acceptedBody = incomingBody;

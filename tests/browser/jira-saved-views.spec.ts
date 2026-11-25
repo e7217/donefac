@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIResponse } from '@playwright/test';
+import { calendarDate, calendarDay } from '../../shared/calendar';
+import { reservationLocalDateTime } from '../../shared/time-reservations';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT } from '../../shared/types';
 import type {
   Issue, JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview,
@@ -246,6 +248,110 @@ test('Jira 마감일 미입력 보기를 공유하고 계획 날짜와 마감일
     await page.reload();
     await expect(chart.locator(`[data-issue-id="${open.id}"]`)).toHaveCount(0);
     await expect(page.getByRole('list', { name: '간트에 적용된 계획·일정 조건' })).toContainText('목표 마감일 없음');
+  } finally {
+    if (view) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+    for (const issue of issues) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+  }
+});
+
+test('Jira 상대 마감일을 저장하고 서울 날짜가 바뀌면 공유 업무 목록과 간트 범위를 갱신한다', async ({ page, request }) => {
+  test.setTimeout(85_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const token = `relative-due-${randomUUID().slice(0, 8)}`;
+  const { projects: [project] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const seoulDay = calendarDay(reservationLocalDateTime(new Date().toISOString()).slice(0, 10));
+  const date = (days: number) => calendarDate(seoulDay + days);
+  const list = `/#/${project.id}/issues`;
+  const issues: Issue[] = [];
+  let view: SavedView | undefined;
+  async function makeIssue(title: string, dueDate: string | null) {
+    const created = await json<Issue>(await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${title} ${token}`, labels: [token], startDate: date(0), endDate: date(0), dueDate,
+    } }), 201);
+    issues.push(created);
+    return created;
+  }
+  const listRow = (issue: Issue) => page.locator(`.issue-table tbody tr[data-issue-id="${issue.id}"]`);
+  const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+  const ganttRow = (issue: Issue) => chart.locator(`[data-issue-id="${issue.id}"]`);
+
+  try {
+    const overdue = await makeIssue('기한 초과', date(-1));
+    const today = await makeIssue('오늘 마감', date(0));
+    const twoDays = await makeIssue('이틀 후 마감', date(2));
+    const threeDays = await makeIssue('사흘 후 마감', date(3));
+    const noDue = await makeIssue('마감일 미입력', null);
+    await page.clock.install({ time: new Date(`${date(-1)}T15:01:00Z`) });
+    await page.goto(list);
+    await page.getByRole('button', { name: 'Jira 필터 옮기기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Jira 필터 옮기기', exact: true });
+    const input = dialog.getByLabel('Jira 검색식 (JQL)', { exact: true });
+    async function preview(condition: string) {
+      await input.fill(`project = ${project.key} AND labels = "${token}" AND ${condition}`);
+      const response = page.waitForResponse(value => value.url().endsWith('/api/views/jira/preview'));
+      await dialog.getByRole('button', { name: '조건 미리보기', exact: true }).click();
+      return json<JiraSavedViewPreview>(await response);
+    }
+
+    const past = await preview('due < startOfDay()');
+    expect(past.filters.planning?.dates).toEqual({ mode: 'due_relative', toDays: -1 });
+    expect(past.issues.map(issue => issue.id)).toEqual([overdue.id]);
+    const next = await preview('due >= startOfDay() AND due < endOfDay("+2d")');
+    expect(next.filters.planning?.dates).toEqual({ mode: 'due_relative', fromDays: 0, toDays: 2 });
+    expect(next.issues.map(issue => issue.id).sort()).toEqual([today.id, twoDays.id].sort());
+    await dialog.getByLabel('보기 이름', { exact: true }).fill(`서울 날짜 기준 ${token}`);
+    const saving = page.waitForResponse(value => value.url().endsWith('/api/views/jira/import'));
+    await dialog.getByRole('button', { name: '공유 보기 저장', exact: true }).click();
+    view = await json<SavedView>(await saving, 201);
+    expect(view.filters.planning?.dates).toEqual(next.filters.planning?.dates);
+    await expect(dialog).toHaveCount(0);
+
+    const savedViewPicker = page.getByLabel('저장된 업무 보기', { exact: true });
+    await expect(savedViewPicker).toHaveValue(view.id);
+    await expect(listRow(today)).toBeVisible();
+    await expect(listRow(twoDays)).toBeVisible();
+    await expect(listRow(threeDays)).toHaveCount(0);
+    await expect(listRow(noDue)).toHaveCount(0);
+    await page.getByRole('button', { name: '계획·일정 필터', exact: true }).click();
+    const editor = page.getByRole('region', { name: '계획·일정 필터', exact: true });
+    await expect(editor.getByLabel('일정 조건', { exact: true })).toHaveValue('due_relative');
+    await expect(editor.getByLabel('오늘 기준 시작 일수', { exact: true })).toHaveValue('0');
+    const upper = editor.getByLabel('오늘 기준 종료 일수', { exact: true });
+    const apply = editor.getByRole('button', { name: '적용', exact: true });
+    await expect(upper).toHaveValue('2');
+    await upper.fill('1.5');
+    await apply.click();
+    await expect(editor.getByRole('alert')).toContainText('정수');
+    await upper.fill('+2');
+    await editor.getByLabel('고정 종료일', { exact: true }).fill(date(0));
+    await apply.click();
+    const applied = page.getByRole('list', { name: '적용된 계획·일정 조건', exact: true });
+    await expect(applied).toContainText(`고정 ${date(0)}까지`);
+    await expect(listRow(today)).toBeVisible();
+    await expect(listRow(twoDays)).toHaveCount(0);
+
+    await page.reload();
+    await expect(savedViewPicker).toHaveValue(view.id);
+    await expect(listRow(today)).toBeVisible();
+    await expect(listRow(threeDays)).toHaveCount(0);
+    await page.clock.setSystemTime(new Date(`${date(0)}T14:59:50Z`));
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.clock.fastForward(11_000);
+    await expect(listRow(twoDays)).toBeVisible();
+    await expect(listRow(threeDays)).toBeVisible();
+    await expect(listRow(today)).toHaveCount(0);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    await expect(ganttRow(twoDays)).toBeVisible();
+    await expect(ganttRow(threeDays)).toBeVisible();
+    await expect(ganttRow(today)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '간트에 적용된 계획·일정 조건' })).toContainText('오늘부터 2일 후까지 (서울 기준)');
+    await page.reload();
+    await expect(ganttRow(twoDays)).toBeVisible();
+    await expect(ganttRow(threeDays)).toBeVisible();
+    await expect(ganttRow(today)).toHaveCount(0);
   } finally {
     if (view) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
     for (const issue of issues) {

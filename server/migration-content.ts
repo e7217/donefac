@@ -57,6 +57,7 @@ export interface MigrationContentContext {
   legacyDocumentProperties?: boolean;
   legacyMultiSpacePropertyReports?: boolean;
   legacyConfluenceJiraAnchorProjection?: boolean;
+  legacyConfluenceTableColumns?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   resolvePropertyReportSpaceProject?: (sourceSpaceKey: string | null) => string | null;
@@ -148,6 +149,38 @@ function flow(nodes: RichContent[], type = 'paragraph', attrs?: Record<string, u
 }
 const codeBlock = (value: string, language = ''): RichContent => ({ type: 'codeBlock', ...(language ? { attrs: { language } } : {}), content: text(value) });
 class ConversionLimit extends Error {}
+const MAX_CONFLUENCE_TABLE_COLUMNS = 100;
+const MAX_CONFLUENCE_COLUMN_WIDTH = 10000;
+
+function confluenceTableColumns(table: XmlNode, tick: () => void) {
+  const parts = table.children.filter(part => typeof part !== 'string' || part.trim());
+  const [first, second] = parts;
+  const group = typeof first !== 'string' && first?.name === 'caption' ? second : first;
+  if (!group || typeof group === 'string' || group.name !== 'colgroup' || Object.keys(group.attrs).length ||
+      parts.some(part => typeof part !== 'string' && part !== group && part.name === 'colgroup')) return;
+  const widths: number[] = [];
+  for (const column of group.children) {
+    tick();
+    if (typeof column === 'string' && !column.trim()) continue;
+    if (typeof column === 'string' || column.name !== 'col' ||
+        column.children.some(part => typeof part !== 'string' || part.trim()) ||
+        Object.keys(column.attrs).some(key => !['style', 'width', 'span'].includes(key))) return;
+    const { style, width, span = '1' } = column.attrs;
+    const spanCount = Number(span);
+    if (!/^\d+$/u.test(span) || spanCount < 1 || widths.length + spanCount > MAX_CONFLUENCE_TABLE_COLUMNS ||
+        style !== undefined && width !== undefined) return;
+    let pixels = 0;
+    if (style !== undefined || width !== undefined) {
+      const size = style !== undefined ? /^\s*width\s*:\s*(\d+(?:\.\d+)?)px\s*;?\s*$/iu.exec(style)
+        : /^\s*(\d+(?:\.\d+)?)(?:px)?\s*$/iu.exec(width ?? '');
+      pixels = Math.round(Number(size?.[1]));
+      if (!Number.isSafeInteger(pixels) || pixels < 1 || pixels > MAX_CONFLUENCE_COLUMN_WIDTH) return;
+    }
+    widths.push(...Array<number>(spanCount).fill(pixels));
+  }
+  if (widths.length) return { group, widths };
+}
+
 function pageIdentity(node: XmlNode): MigrationPageIdentity {
   return { sourceId: node.attrs['ri:content-id'] || node.attrs['ri:page-id'], title: node.attrs['ri:content-title'], spaceKey: node.attrs['ri:space-key'] };
 }
@@ -600,6 +633,62 @@ class Converter {
     };
     return children.flatMap((child, index) => blockLayout && typeof child === 'string' && !child.trim() && (isBlock(children[index - 1]) || isBlock(children[index + 1])) ? [] : this.xml(child, depth + 1));
   }
+  private tableColumnAssignments(rows: RichContent[], widths: number[]) {
+    const occupiedUntil = new Uint32Array(widths.length);
+    const assignments: [RichContent, number[]][] = [];
+    for (const [index, row] of rows.entries()) {
+      let column = 0;
+      this.tick();
+      for (const cell of row.content ?? []) {
+        this.tick();
+        if (cell.type !== 'tableCell' && cell.type !== 'tableHeader') return;
+        const { colspan, rowspan } = cell.attrs as { colspan: number; rowspan: number };
+        while (occupiedUntil[column] > index) column++;
+        const end = column + colspan;
+        if (end > widths.length || index + rowspan > rows.length) return;
+        const cellWidths = widths.slice(column, end);
+        for (; column < end; column++) {
+          if (occupiedUntil[column] > index) return;
+          occupiedUntil[column] = index + rowspan;
+        }
+        if (cellWidths.some(Boolean)) assignments.push([cell, cellWidths]);
+      }
+      while (occupiedUntil[column] > index) column++;
+      if (column !== widths.length) return;
+    }
+    return assignments;
+  }
+  private table(node: XmlNode, depth: number): RichContent[] {
+    const columns = this.richDocument ? confluenceTableColumns(node, () => this.tick()) : undefined;
+    const rows: RichContent[] = [], extras: RichContent[] = [];
+    let columnBlockIndex = 0;
+    const collect = (values: (XmlNode | string)[], nested: number) => {
+      this.tick(nested);
+      for (const value of values) {
+        if (typeof value === 'string' && !value.trim()) continue;
+        if (value === columns?.group) columnBlockIndex = extras.length;
+        else if (typeof value !== 'string' && ['tbody', 'thead', 'tfoot'].includes(value.name)) collect(value.children, nested + 1);
+        else if (typeof value !== 'string' && value.name === 'tr') rows.push(...this.xml(value, nested + 1));
+        else extras.push(...this.xml(value, nested + 1));
+      }
+    };
+    collect(node.children, depth + 1);
+    if (!rows.length) return this.fallback('행이 없는 XML 표', serializeXml(node));
+    if (columns) {
+      const assignments = this.tableColumnAssignments(rows, columns.widths);
+      if (assignments && !this.context.legacyConfluenceTableColumns) {
+        for (const [cell, colwidth] of assignments) cell.attrs = { ...cell.attrs, colwidth };
+      } else {
+        const raw = serializeXml(columns.group);
+        if (assignments) {
+          this.warn('LEGACY_CONFLUENCE_TABLE_COLUMNS', '이전 이관에서 열 너비를 XML 코드 블록으로 보관한 표를 확인했습니다.');
+          extras.splice(columnBlockIndex, 0, codeBlock(`[XML colgroup]\n${raw}`));
+        } else extras.splice(columnBlockIndex, 0, ...this.fallback('XML colgroup', raw));
+      }
+    }
+    if (extras.length) this.warn('TABLE_EXTRA_CONTENT_PRESERVED', '표의 캡션·비정형 내용은 표 앞의 별도 블록으로 보존했습니다.');
+    return [...(extras.length ? flow(extras) : []), { type: 'table', content: rows }];
+  }
   xml(node: XmlNode | string, depth = 0): RichContent[] {
     this.tick(depth); if (typeof node === 'string') return text(node);
     if (this.sections?.bound.has(node)) return [];
@@ -642,20 +731,7 @@ class Converter {
         }
         return [{ type: type === 'ul' ? 'bulletList' : 'orderedList', ...(type === 'ol' ? { attrs: { start: /^\d+$/.test(node.attrs.start || '') && Number(node.attrs.start) > 0 ? Number(node.attrs.start) : 1 } } : {}), content: items.length ? items : [{ type: 'listItem', content: [paragraph()] }] }];
       }
-      case 'table': {
-        const rows: RichContent[] = [], extras: RichContent[] = [];
-        const collect = (values: (XmlNode | string)[], nested: number) => {
-          this.tick(nested); for (const value of values) {
-            if (typeof value === 'string' && !value.trim()) continue;
-            if (typeof value !== 'string' && ['tbody', 'thead', 'tfoot'].includes(value.name)) collect(value.children, nested + 1);
-            else if (typeof value !== 'string' && value.name === 'tr') rows.push(...this.xml(value, nested + 1));
-            else extras.push(...this.xml(value, nested + 1));
-          }
-        }; collect(node.children, depth + 1);
-        if (!rows.length) return this.fallback('행이 없는 XML 표', serializeXml(node));
-        if (extras.length) this.warn('TABLE_EXTRA_CONTENT_PRESERVED', '표의 캡션·비정형 내용은 표 앞의 별도 블록으로 보존했습니다.');
-        return [...(extras.length ? flow(extras) : []), { type: 'table', content: rows }];
-      }
+      case 'table': return this.table(node, depth);
       case 'tr': return [{ type: 'tableRow', content: node.children.filter(value => !(typeof value === 'string' && !value.trim())).flatMap(value => this.xml(value, depth + 1)) }];
       case 'td': case 'th': return [{ type: type === 'td' ? 'tableCell' : 'tableHeader', attrs: { colspan: this.span(node.attrs.colspan), rowspan: this.span(node.attrs.rowspan) }, content: flow(this.xmlParts(node.children, depth, true)) }];
       case 'a': {

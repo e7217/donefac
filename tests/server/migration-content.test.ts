@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { TableMap } from '@tiptap/pm/tables';
 import type { LegacyRecord, RichContent } from '../../shared/types.js';
 import { contentReferences, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
 import { documentSectionHash } from '../../shared/document-sections.js';
 import { locateDocumentSelection } from '../../shared/document-selection-highlight.js';
+import { createEditorSchema } from '../../shared/editor-schema.js';
 import { normalizeDocumentContent, readDocumentSelection } from '../../server/document-content.js';
 import { convertLegacyContent, extractJiraOriginalCommentLinks, MAX_JIRA_ORIGINAL_COMMENT_LINKS, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
@@ -108,6 +110,44 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
   assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, code); assert.equal(nodes(result.content, 'codeBlock')[0].attrs?.language, 'javascript');
   assert.equal(nodes(result.content, 'tableHeader')[0].attrs?.colspan, 2); assert.equal(nodes(result.content, 'taskItem')[0].attrs?.checked, true);
   assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 3); assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '펼쳐 보기'); assert.ok(result.plainText.includes('접힌 내용'));
+});
+
+test('Confluence table column declarations become native widths across merged cells and saved revisions', () => {
+  const fixture = `<table class="wrapped">
+    <colgroup><col style="width: 160.4px;"/><col/><col width="320"/></colgroup>
+    <thead><tr><th colspan="2">Version</th><th>Notes</th></tr></thead>
+    <tbody><tr><td rowspan="2">1.2</td><td>A</td><td>Release A</td></tr>
+    <tr><td colspan="2">Release B</td></tr></tbody>
+  </table><table><colgroup><col span="2"/></colgroup><tr><td>Left</td><td>Right</td></tr></table>`;
+  const schema = createEditorSchema();
+  for (const kind of ['page', 'revision'] as const) {
+    const result = convertLegacyContent({ ...source('confluence-storage', fixture), kind }, resolver());
+    canonical(result);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.content.content?.map(node => node.type), ['table', 'table']);
+    assert.equal(result.plainText, 'Version\tNotes\n1.2\tA\tRelease A\nRelease B\nLeft\tRight');
+    const [fixed, flexible] = nodes(result.content, 'table');
+    const widths = (table: RichContent) => table.content?.map(row => row.content?.map(cell => cell.attrs?.colwidth));
+    assert.deepEqual(widths(fixed), [[[160, 0], [320]], [[160], null, [320]], [[0, 320]]]);
+    assert.deepEqual(widths(flexible), [[null, null]]);
+    assert.equal(TableMap.get(schema.nodeFromJSON(fixed)).problems, null);
+  }
+});
+
+test('unsupported or unmatched column declarations remain inert without assigning partial widths', () => {
+  const tables = [
+    '<table><colgroup><col style="width: 40%;"/><col width="155"/></colgroup><tr><td>One</td><td>Two</td></tr></table>',
+    '<table><colgroup><col style="width: 155px; background-image: url(example.test);"/></colgroup><tr><td>One</td></tr></table>',
+    '<table><colgroup><col style="width: 155px;"/></colgroup><tr><td>One</td><td>Two</td></tr></table>',
+  ];
+  for (const fixture of tables) {
+    const result = convertLegacyContent(source('confluence-storage', fixture), resolver());
+    canonical(result);
+    assert.deepEqual(result.content.content?.map(node => node.type), ['codeBlock', 'table']);
+    assert.match(result.plainText, /\[XML colgroup\]/u);
+    assert.ok(result.diagnostics.some(item => item.code === 'UNSUPPORTED_CONTENT'));
+    assert.ok(nodes(result.content, 'tableCell').every(cell => cell.attrs?.colwidth === null));
+  }
 });
 
 const storageTask = (id: number, checked: boolean, body: string) => `<ac:task><ac:task-id>${id}</ac:task-id>` +

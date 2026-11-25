@@ -9,9 +9,21 @@ export const ISSUE_FILTER_DATE_LABELS = {
   needs_dates: '일정 미정',
   overlap: '계획 기간 겹침',
   due: '목표 마감일 범위',
+  due_relative: '오늘 기준 목표 마감일',
   due_set: '목표 마감일 있음',
   due_missing: '목표 마감일 없음',
 } as const;
+
+function dayLabel(days: number): string {
+  if (days === 0) return '오늘';
+  return `${Math.abs(days)}일 ${days < 0 ? '전' : '후'}`;
+}
+
+function rangeLabel(from: string | undefined, to: string | undefined): string {
+  if (from && to) return `${from}부터 ${to}까지`;
+  if (from) return `${from}부터`;
+  return to ? `${to}까지` : '';
+}
 
 export function issuePlanningFilterLabels(filter: IssueViewPlanningFilter | undefined, planningItems: readonly PlanningItem[]): string[] {
   if (!filter) return [];
@@ -30,7 +42,12 @@ export function issuePlanningFilterLabels(filter: IssueViewPlanningFilter | unde
   }
   const dates = filter.dates;
   if (!dates) return labels;
-  if (dates.mode === 'overlap' || dates.mode === 'due') {
+  if (dates.mode === 'due_relative') {
+    const range = rangeLabel(dates.fromDays === undefined ? undefined : dayLabel(dates.fromDays),
+      dates.toDays === undefined ? undefined : dayLabel(dates.toDays));
+    const fixed = rangeLabel(dates.from, dates.to);
+    labels.push(`목표 마감일 · ${range} (서울 기준)${fixed ? ` · 고정 ${fixed}` : ''}`);
+  } else if (dates.mode === 'overlap' || dates.mode === 'due') {
     const label = dates.mode === 'due' ? '목표 마감일' : ISSUE_FILTER_DATE_LABELS.overlap;
     const range = dates.from && dates.to ? `${dates.from} ~ ${dates.to}` : dates.from ? `${dates.from}부터` : `${dates.to}까지`;
     labels.push(`${label} · ${range}`);

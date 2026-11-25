@@ -17,6 +17,7 @@ import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, dispa
 import { api, ApiError, post } from '../lib/api';
 import { downloadText } from '../lib/download';
 import type { OpenIssueForReview } from '../lib/issue-review';
+import { useIssueViewDate } from '../lib/use-issue-view-date';
 import { useWorkspaceRefresh, type WorkspaceRefresh } from '../lib/workspace-refresh';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
 import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
@@ -942,10 +943,11 @@ function ProjectGantt(props: GanttProps) {
   const sheetScope: ScheduleProjectScope | null = project ?? filteredProject ?? (allProjects && !chartProjectFilter && data.projects.length ? 'team' : null);
   const sharedViews = useMemo(() => allProjects ? [] : (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [allProjects, data.savedViews, projectId]);
-  const { sharedView, matchSharedView } = useMemo(() => {
-    const view = data.savedViews?.find(view => view.id === ganttViewId && view.projectId === projectId);
-    return { sharedView: view, matchSharedView: view ? createIssueViewMatcher(view.filters, data, projectIssueSchema(data, projectId), props.actorId) : null };
-  }, [data, ganttViewId, projectId, props.actorId]);
+  const sharedView = data.savedViews?.find(view => view.id === ganttViewId && view.projectId === projectId);
+  const viewDate = useIssueViewDate(sharedView?.filters.planning?.dates?.mode === 'due_relative');
+  const matchSharedView = useMemo(() => sharedView
+    ? createIssueViewMatcher(sharedView.filters, data, projectIssueSchema(data, projectId), props.actorId, viewDate) : null,
+  [data, sharedView, projectId, props.actorId, viewDate]);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
   const sharedFilters = sharedView?.filters;
   const sharedSortLabels = issueViewSortLabels(sharedView?.sort);
@@ -2156,15 +2158,12 @@ function ProjectGantt(props: GanttProps) {
       setManualReview({ input, preview, chartDates });
       setManualProblem(null);
     } catch (cause) {
+      setDatePreviewFocusTarget(opener);
+      setManualReview({ input, chartDates, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
+        fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings: [] } });
+      setManualProblem({ kind: 'stale', message: `${errorMessage(cause)} 선택한 날짜를 유지했습니다. 다시 미리보기로 확인해 주세요.` });
       if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
-        setDatePreviewFocusTarget(opener);
-        setManualReview({ input, chartDates, preview: { changes: [{ id: issue.id, key: issue.key, title: issue.title, version: issue.version,
-          fromStart: issue.startDate, fromEnd: issue.endDate, toStart, toEnd }], warnings: [] } });
-        setManualProblem({ kind: 'stale', message: errorMessage(cause) });
         await refresh().catch(() => undefined);
-      } else {
-        notify(errorMessage(cause), 'error');
-        focusAfterDatePicking(opener);
       }
     } finally { markBusy(false); }
   }
@@ -2937,7 +2936,8 @@ function ProjectGantt(props: GanttProps) {
           ? '입력한 날짜를 유지하고, 후행 프로젝트마다 근무일을 적용해 필요한 일정만 늦춥니다.'
           : '입력한 날짜를 기준으로 같은 프로젝트의 후행 일정을 필요한 만큼 늦춥니다.'}</p>
       </div>}
-      <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects} startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />
+      {(!manualProblem || preview.previewId) && <GanttWorkloadPreviewSummary data={data} projectId={projectId} allProjects={allProjects}
+        startDate={isoDay(range.start)} endDate={isoDay(range.end)} preview={preview} />}
       {preview.warnings.length > 0 && <div className="gantt-preview-warnings"><AlertCircle size={17} /><div><strong>적용 전에 확인하세요</strong>{preview.warnings.map((warning, index) => <p key={index}>{warning}</p>)}</div></div>}
       {(manualProblem || missingHierarchyAnchor || Boolean(preview.blocking?.length)) && <div className="issue-form-error gantt-preview-error" role="alert">
         {missingHierarchyAnchor && (!manualProblem || manualProblem.kind === 'stale') ? '현재 프로젝트에서 상위 업무를 찾을 수 없습니다.'

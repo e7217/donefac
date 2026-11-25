@@ -8,7 +8,7 @@ import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import {
   IssueViewAssigneeFilterError, IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewSortError, IssueViewStatusFilterError,
-  createIssueViewMatcher, issueViewUsesCurrentUser, orderIssueView, parseIssueViewAssigneeFilter, parseIssueViewGitlabFilter, parseIssueViewLabelFilter,
+  createIssueViewMatcher, issueViewToday, issueViewUsesCurrentUser, orderIssueView, parseIssueViewAssigneeFilter, parseIssueViewGitlabFilter, parseIssueViewLabelFilter,
   parseIssueViewPlanningFilter, issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewSort, parseIssueViewStatusIds,
 } from '../shared/issue-view.js';
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
@@ -194,13 +194,14 @@ export class SavedViewService {
     const { criteria, orderBy, requiresProjectOrderAcceptance } = translated;
     const actorId = hooks.actor(request);
     const viewerId = issueViewUsesCurrentUser(filters) ? hooks.viewer(request) ?? null : undefined;
-    const matches = createIssueViewMatcher(filters, { users }, schema, viewerId ?? undefined);
+    const matchDate = filters.planning?.dates?.mode === 'due_relative' ? issueViewToday() : undefined;
+    const matches = createIssueViewMatcher(filters, { users }, schema, viewerId ?? undefined, matchDate);
     const rows = this.store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as { json: string }[];
     const matchingIssues = orderIssueView(rows.map(row => JSON.parse(row.json) as Issue).filter(matches), hooks.issueOrder(projectId), sort);
     const cohort = matchingIssues.map(({ id, key, title, version }) => [id, key, title, version]);
     const revision = createHash('sha256').update(JSON.stringify([
       projectId, actorId, jql, aliases, sourceMatches, filters, criteria, orderBy, sort, requiresProjectOrderAcceptance, cohort,
-      this.store.setting('attachmentImportGeneration'), ...(viewerId === undefined ? [] : [viewerId]),
+      this.store.setting('attachmentImportGeneration'), ...(viewerId === undefined ? [] : [viewerId]), ...(matchDate ? [matchDate] : []),
     ])).digest('hex');
     return {
       filters, criteria, orderBy, ...(sort ? { sort } : {}), ...(requiresProjectOrderAcceptance ? { requiresProjectOrderAcceptance } : {}),

@@ -4,7 +4,7 @@ import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import {
   createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT, IssueViewAssigneeFilterError, IssueViewPlanningFilterError, IssueViewReporterFilterError,
   IssueViewStatusFilterError, issueViewStatusCriteria, issueViewStatusIds, issueViewUsesCurrentUser, parseIssueViewAssigneeFilter, parseIssueViewPlanningFilter,
-  parseIssueViewReporterFilter, parseIssueViewStatusIds,
+  issueViewToday, parseIssueViewReporterFilter, parseIssueViewStatusIds,
 } from '../../shared/issue-view.js';
 import type { Issue, PlanningItem, SavedViewState } from '../../shared/types.js';
 
@@ -25,6 +25,23 @@ function issue(extra: Partial<Issue> = {}): Issue {
 }
 
 const matcher = (criteria: Partial<SavedViewState['filters']> = {}) => createIssueViewMatcher({ ...defaultFilters, ...criteria }, { users: [] }, schema);
+
+test('rolling deadline filters intersect fixed bounds and use Seoul civil dates', () => {
+  const planning = parseIssueViewPlanningFilter({ dates: { mode: 'due_relative', fromDays: -1, toDays: 1, from: '2024-02-29' } }, projectId, []);
+  const before = issueViewToday(new Date('2024-02-29T14:59:59Z'));
+  const after = issueViewToday(new Date('2024-02-29T15:00:00Z'));
+  assert.deepEqual([before, after], ['2024-02-29', '2024-03-01']);
+  const matches = (date: string) => createIssueViewMatcher({ ...defaultFilters, planning }, { users: [] }, schema, undefined, date);
+  const tickets = ['2024-02-28', '2024-02-29', '2024-03-01', '2024-03-02', null]
+    .map(dueDate => issue({ dueDate, startDate: '2024-02-29', endDate: '2024-03-01' }));
+  assert.deepEqual(tickets.filter(matches(before)), [tickets[1], tickets[2]]);
+  assert.deepEqual(tickets.filter(matches(after)), [tickets[1], tickets[2], tickets[3]]);
+  for (const dates of [
+    { mode: 'due_relative', from: '2024-02-29' }, { mode: 'due_relative', fromDays: '0' },
+    { mode: 'due_relative', fromDays: 0.5 }, { mode: 'due_relative', toDays: 3651 },
+    { mode: 'due_relative', fromDays: 1, toDays: 0 }, { mode: 'due_set', toDays: 0 },
+  ]) assert.throws(() => parseIssueViewPlanningFilter({ dates }, projectId, []), IssueViewPlanningFilterError);
+});
 
 test('saved status sets use exact IDs, canonical form, and compose with every other issue condition', () => {
   assert.equal(parseIssueViewStatusIds([]), undefined);
