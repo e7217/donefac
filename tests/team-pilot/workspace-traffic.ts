@@ -3,9 +3,10 @@ import { defaultWorkCalendar, shiftWorkingDate, workingDateOnOrAfter } from '../
 import { projectIssueSchema } from '../../shared/issue-schema';
 import { createIssueViewMatcher } from '../../shared/issue-view';
 import type {
-  AutomaticSchedulePreview, DocPage, DocRevision, Issue, IssueChangeHistoryPage, IssueRelation, Project, ProjectWorkloadResult, RichContent,
+  AutomaticSchedulePreview, DocPage, DocRevision, Issue, IssueChangeHistoryEntry, IssueChangeHistoryPage, IssueRelation, Project, ProjectWorkloadResult, RichContent,
   SavedView, SchedulePasteApplyResult, SchedulePastePreview, SchedulePreview, TeamWorkloadResult, WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types';
+import type { IssueHandoffPlan } from './issue-handoff';
 
 type ScheduleApplyResult = { updated: Issue[]; warnings: string[]; undoId: string };
 export interface ScheduledSuccessorPlan {
@@ -20,10 +21,11 @@ async function json<T>(pending: Promise<APIResponse>, status = 200): Promise<T> 
 
 /** Exercise independent project work while the main document receives concurrent edits. */
 export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
-  projectId, issueId, actorId, concurrentActor, workingDate: providedDate, origin, createScheduledSuccessor,
+  projectId, issueId, actorId, observerId, concurrentActor, workingDate: providedDate, origin, handOffIssue, createScheduledSuccessor,
 }: {
-  projectId: string; issueId: string; actorId: string; workingDate?: string; origin?: string;
+  projectId: string; issueId: string; actorId: string; observerId: string; workingDate?: string; origin?: string;
   concurrentActor: { requests: APIRequestContext; actorId: string };
+  handOffIssue: (plan: IssueHandoffPlan) => Promise<{ updated: Issue; history: IssueChangeHistoryEntry }>;
   createScheduledSuccessor: (plan: ScheduledSuccessorPlan) => Promise<Issue>;
 }) {
   const headers = { 'X-Actor-Id': actorId, ...(origin ? { Origin: origin } : {}) };
@@ -38,21 +40,23 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   const calendar = before.calendars?.find(item => item.projectId === projectId) ?? defaultWorkCalendar(projectId);
   const initialDate = workingDateOnOrAfter(providedDate ?? issue.startDate ?? new Date().toISOString().slice(0, 10), calendar);
   const workflow = before.workflows?.find(item => item.projectId === projectId);
-  const progress = workflow?.statuses.find(item => item.category === 'in_progress' && item.id !== issue.status);
-  if (!progress) throw new Error('The migrated project needs a different in-progress status for the ticket pilot.');
+  const previousStatus = workflow?.statuses.find(item => item.id === issue.status);
+  const nextStatus = workflow?.statuses.find(item => item.category === 'in_progress' && item.id !== issue.status);
+  if (!previousStatus || !nextStatus) throw new Error('The migrated project needs an initial and a different in-progress status for the ticket pilot.');
+  const actor = before.users.find(user => user.id === actorId);
+  const observer = before.users.find(user => user.id === observerId);
+  if (!actor || !observer) throw new Error('Both team members must exist for the ticket handoff.');
   const plannedEffortMinutes = 95;
   const changes = {
-    status: progress.id,
-    assigneeId: actorId,
+    status: nextStatus.id,
+    assigneeId: observerId,
     startDate: initialDate,
     endDate: initialDate,
     plannedEffortMinutes,
   };
   const issuePath = `/api/issues/${encodeURIComponent(issueId)}`;
-  const updated = await json<Issue>(requests.patch(issuePath, {
-    headers, data: { ...changes, expectedVersion: issue.version },
-  }));
-  expect(updated).toMatchObject({ id: issueId, projectId, ...changes, version: issue.version + 1 });
+  const { updated, history: statusHistory } = await handOffIssue({ issue, actor, observer, previousStatus, nextStatus,
+    startDate: initialDate, endDate: initialDate, plannedEffortMinutes });
   const rejected = await requests.patch(issuePath, {
     headers, data: { expectedVersion: issue.version, plannedEffortMinutes: plannedEffortMinutes + 1 },
   });
@@ -206,7 +210,7 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   ]);
 
   const dateQuery = new URLSearchParams({ startDate: workingDate, endDate: workingDate });
-  const filters = { query: issue.key, status: changes.status, assigneeId: actorId, type: 'all' };
+  const filters = { query: issue.key, status: changes.status, assigneeId: observerId, type: 'all' };
   const [projectWorkload, teamWorkload, view] = await Promise.all([
     json<ProjectWorkloadResult>(requests.get(`/api/projects/${encodeURIComponent(projectId)}/workload?${dateQuery}`, { headers })),
     json<TeamWorkloadResult>(requests.get(`/api/workload?${dateQuery}&projectId=${encodeURIComponent(projectId)}`, { headers })),
@@ -214,8 +218,8 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
       headers, data: { projectId, name: `${issue.key} 파일럿 계획`, layout: 'list', filters },
     }), 201),
   ]);
-  const projectDay = projectWorkload.rows.find(row => row.userId === actorId)?.days.find(day => day.date === workingDate);
-  const teamDay = teamWorkload.rows.find(row => row.userId === actorId)?.days.find(day => day.date === workingDate);
+  const projectDay = projectWorkload.rows.find(row => row.userId === observerId)?.days.find(day => day.date === workingDate);
+  const teamDay = teamWorkload.rows.find(row => row.userId === observerId)?.days.find(day => day.date === workingDate);
   expect(projectDay?.allocations.filter(allocation => allocation.issueId === issueId)).toEqual([{ issueId, minutes: plannedEffortMinutes }]);
   expect(teamWorkload.projectIds).toEqual([projectId]);
   expect(teamDay?.allocations.filter(allocation => allocation.issueId === issueId)).toEqual([{ issueId, projectId, minutes: plannedEffortMinutes }]);
@@ -251,6 +255,7 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
 
   return {
     issueId, issueVersion: moved.updated[0].version + 1, issueListDocumentId: document.id, plannedEffortMinutes, workingDate,
+    statusHandoff: { observerId, history: statusHistory },
     bulkDates: { previewId: bulk.previewId, undoId: batch.undoId, dueDate: successorEnd,
       otherProjectId: otherProject.id, otherIssueId: otherIssue.id, otherIssueVersion: competingIssue.version + 1,
       competingEdit: { actorId: concurrentActor.actorId, date: workingDate, version: competingIssue.version,

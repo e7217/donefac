@@ -635,6 +635,70 @@ test('previous Jira packages can be reanalyzed in place without publishing Servi
   assert.ok(preserved.find(row => row.record.id === 'attachment:302')?.targetId);
 });
 
+test('reanalyzing the same Jira ZIP makes catalog-backed historical workflow states selectable', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const filename = 'synthetic-historical-workflow.zip', instanceKey = 'synthetic-historical-workflow';
+  const date = '2024-01-02T00:00:00Z';
+  const archive = zip([{ path: 'entities.xml', bytes: Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="OLD" name="Synthetic workflow"/>
+    <Status id="1" pname="Open" statuscategory="2"/>
+    <Status id="2" pname="Approval" statuscategory="4"/>
+    <Status id="3" pname="Closed" statuscategory="3"/><IssueType id="8" pname="Task"/>
+    <Issue id="100" project="10" number="1" summary="Synthetic historical request" status="3" issuetype="8" created="${date}"/>
+    <Issue id="101" project="10" number="2" summary="Synthetic open request" status="1" issuetype="8" created="${date}"/>
+    <ChangeGroup id="300" issue="100" created="${date}"/>
+    <ChangeItem id="400" group="300" field="status" fieldtype="jira" oldvalue="1" newvalue="2"/>
+    <ChangeGroup id="301" issue="100" created="${date}"/>
+    <ChangeItem id="401" group="301" field="status" fieldtype="jira" oldvalue="2" newvalue="3"/>
+  </entity-engine-xml>`) }]);
+  const uploaded = await f.upload(archive, filename, 'jira', instanceKey);
+  const config = await f.configuration(uploaded, 'WORKFLOW');
+  f.db.prepare(`UPDATE legacy_file_manifests SET json=json_remove(json,'$.jiraHistoricalWorkflowEvidenceChecked') WHERE package_id=?`).run(uploaded.id);
+  f.db.prepare(`UPDATE legacy_records SET json=json_remove(json,'$.metadata.jiraWorkflowStatusLabel','$.metadata.jiraWorkflowStatusChangePositions')
+    WHERE package_id=?`).run(uploaded.id);
+  const before = await f.preview(config);
+  assert.equal(before.canApply, true, JSON.stringify(before.notices));
+  assert.equal(before.jiraObservedWorkflows, undefined);
+
+  const params = new URLSearchParams({ filename, product: 'jira', instanceKey });
+  const reupload = () => fetch(`${f.base}/legacy-import/packages?${params}`, { method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(archive) });
+  const result = await reupload();
+  assert.equal(result.status, 200);
+  const refreshed = await result.json() as LegacyPackageSummary;
+  assert.deepEqual([refreshed.id, refreshed.sha256, refreshed.version], [uploaded.id, uploaded.sha256, uploaded.version + 1]);
+  const duplicate = await reupload();
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), refreshed);
+  assert.equal((await f.apply(before)).status, 409);
+
+  const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${refreshed.id}`);
+  const approval = options.jiraWorkflowStatuses?.find(row => row.label === 'Approval');
+  const open = options.jiraWorkflowStatuses?.find(row => row.label === 'Open');
+  assert.ok(approval && open);
+  const observed = await f.preview(config);
+  assert.equal(observed.canApply, true, JSON.stringify(observed.notices));
+  assert.ok(observed.jiraObservedWorkflows?.[0].transitions.some(edge => edge.from === open.id && edge.to === approval.id));
+  config.jiraWorkflows = { WORKFLOW: { initialStatusId: open.id, transitions: [{ from: open.id, to: approval.id }] } };
+  const saved = await f.call('/migrations/mapping/export', 'POST', { configuration: config });
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  const restored = await f.call<{ configuration: MigrationConfiguration }>('/migrations/mapping/import', 'POST', { mapping: saved.data });
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  assert.deepEqual(restored.data.configuration.jiraWorkflows, config.jiraWorkflows);
+  const reviewed = await f.preview(restored.data.configuration);
+  assert.equal(reviewed.canApply, true, JSON.stringify(reviewed.notices));
+  const applied = await f.apply(reviewed);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const { data: workspace } = await f.call<WorkspaceSnapshot>('/workspace');
+  const [projectId] = applied.data.import.projectIds;
+  const graph = workspace.workflows?.find(row => row.projectId === projectId);
+  assert.ok(graph);
+  assert.ok(graph.statuses.some(row => row.id === approval.id && row.label === 'Approval'));
+  assert.deepEqual(graph.transitions, [{ from: open.id, to: approval.id, issueTypes: [], requiredFields: [] }]);
+  assert.ok(workspace.issues.every(row => row.projectId !== projectId || row.status !== approval.id));
+});
+
 test('previous Jira archive analyses and previews cannot bypass backup directory review', async t => {
   const f = await fixture();
   t.after(() => f.close());

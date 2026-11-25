@@ -40,7 +40,7 @@ import { hasRestrictedJiraServiceDeskComment, isRestrictedJiraAttachment, isRest
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
-import type { JiraMigrationCommentReview, JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
+import type { JiraMigrationCommentReview, JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationJiraWorkflowStatus, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
 const MAX_COMMENT_CORRECTION_REVIEW = 1000;
@@ -133,6 +133,82 @@ function containerFor(pkg:MigrationPackage,row:LegacyRecord,index=packageIndex(p
   const pending=[row],seen=new Set<string>();for(let cursor=0;cursor<pending.length;cursor++){const current=pending[cursor];if(seen.has(current.id))continue;seen.add(current.id);if(current.kind==='project')return current.sourceId;const declared=current.references.find(ref=>ref.kind==='project');if(declared)return declared.sourceId;if(current.containerId&&index.get(`project:${current.containerId}`))return current.containerId;for(const ref of current.references)if(['container-content','current-version','original-version','body-owner','attachedTo','commentOn','historyOf','worklogOf'].includes(ref.relation)){const owner=index.get(`${ref.kind}:${ref.sourceId}`);if(owner)pending.push(owner);}if(current.kind==='issue'||current.kind==='page')return current.containerId||'__unassigned__';}return'__unassigned__';
 }
 function proposedKey(value:string,id:string):string{const key=value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);return/^[A-Z][A-Z0-9]{1,11}$/.test(key)?key:`MIG${hash(id).slice(0,6).toUpperCase()}`;}
+
+type HistoricalJiraStatus = { id: string; label: string; category?: JiraStatusCategory; catalog: Map<string, JiraStatusCategory | undefined> };
+type HistoricalJiraTransition = { ownerKey: string; historyKey: string; group: string; containerId: string; from: HistoricalJiraStatus; to: HistoricalJiraStatus };
+type HistoricalJiraWorkflow = { statuses: Map<string, MigrationJiraWorkflowStatus>; transitions: Map<string, Pick<MigrationJiraObservedTransition, 'from' | 'to'>[]> };
+
+function historicalJiraTransitions(packages: MigrationPackage[]): HistoricalJiraTransition[] {
+  if (!packages.some(pkg => pkg.dataset.source.format === 'jira-backup-xml')) return [];
+  const scope = (source: LegacySource, id: string) => JSON.stringify([source.instanceKey, id]);
+  const catalogs = new Map<string, HistoricalJiraStatus | null>();
+  const owners = new Map<string, { key: string; containerId: string; verified: boolean } | null>();
+  for (const pkg of packages) {
+    if (pkg.dataset.source.product !== 'jira') continue;
+    const { source, records } = pkg.dataset;
+    const native = source.format === 'jira-backup-xml';
+    const projects = new Set(records.filter(row => row.kind === 'project' && row.metadata.jiraComponentProjectAmbiguous !== true).map(row => row.sourceId));
+    for (const row of records) {
+      if (row.kind === 'issue' && row.metadata.syntheticId !== true && isJiraHierarchyIssueId(row.sourceId)) {
+        const key = scope(source, row.sourceId), project = row.containerId ?? '';
+        const references = row.references.filter(ref => ref.kind === 'project');
+        const verified = native && isJiraHierarchyIssueId(project) && projects.has(project) &&
+          row.metadata.jiraComponentProjectAmbiguous !== true && !isRestrictedJiraHistoryOwner(row) &&
+          references.length === 1 && references[0].relation === 'project' && references[0].sourceId === project;
+        owners.set(key, owners.has(key) ? null : { key: qualified(pkg.summary.id, row), containerId: optionId(pkg.summary.id, 'container', project), verified });
+      }
+      const prefix = 'builtin:status:';
+      if (!native || row.kind !== 'option' || row.containerId !== 'builtin:status' || !row.sourceId.startsWith(prefix)) continue;
+      const id = row.sourceId.slice(prefix.length);
+      if (!isJiraHierarchyIssueId(id)) continue;
+      const key = scope(source, id), previous = catalogs.get(key);
+      const { jiraWorkflowStatusLabel, jiraStatusCategory } = row.metadata;
+      if (jiraWorkflowStatusLabel === undefined) continue;
+      const label = jiraWorkflowStatusLabel;
+      const category = readJiraStatusCategory(jiraStatusCategory, undefined);
+      if (previous === null || jiraStatusCategory === null || row.metadata.id !== id || typeof label !== 'string' ||
+          !label.length || label.length > 40 || label === id || label !== label.trim() || !label.isWellFormed() || /\p{Cc}/u.test(label) ||
+          previous && (previous.label !== label || previous.category && category && previous.category !== category)) {
+        catalogs.set(key, null);
+        continue;
+      }
+      const status: HistoricalJiraStatus = previous ?? { id: importedStatusId(source, id), label, catalog: new Map() };
+      status.category ??= category ?? undefined;
+      status.catalog.set(qualified(pkg.summary.id, row), category ?? undefined);
+      catalogs.set(key, status);
+    }
+  }
+  if (!catalogs.size) return [];
+
+  const observations: HistoricalJiraTransition[] = [];
+  const groups = new Map<string, string | null>();
+  for (const pkg of packages) {
+    const { source, records } = pkg.dataset;
+    if (source.format !== 'jira-backup-xml') continue;
+    for (const row of records) {
+      if (row.kind !== 'history' || !isJiraHierarchyIssueId(row.sourceId) || row.metadata.syntheticId === true) continue;
+      const aliases = jiraStatusHistoryOwnerAliases(row);
+      const positions = row.metadata.jiraWorkflowStatusChangePositions;
+      const exactPositions = new Set(Array.isArray(positions) ? positions : []);
+      const changes = jiraStatusTransitions(row).filter(change => exactPositions.has(change.position));
+      const group = scope(source, row.sourceId);
+      const signature = JSON.stringify([aliases, changes.map(change => [change.from.id, change.to.id])]);
+      const prior = groups.get(group);
+      groups.set(group, prior === undefined || prior === signature ? signature : null);
+      if (aliases?.length !== 1 || !isJiraHierarchyIssueId(aliases[0])) continue;
+      const owner = owners.get(scope(source, aliases[0]));
+      if (!owner?.verified) continue;
+      const historyKey = qualified(pkg.summary.id, row);
+      for (const change of changes) {
+        const from = change.from.id && catalogs.get(scope(source, change.from.id));
+        const to = change.to.id && catalogs.get(scope(source, change.to.id));
+        if (!from || !to || from.id === to.id) continue;
+        observations.push({ ownerKey: owner.key, historyKey, group, containerId: owner.containerId, from, to });
+      }
+    }
+  }
+  return observations.filter(({ group }) => groups.get(group) !== null);
+}
 
 function migrationOptionDetails(packages: MigrationPackage[]) {
   const containers:MigrationOptions['containers']=[],identities:MigrationOptions['identities']=[],statuses:MigrationValueOption[]=[],issueTypes:MigrationValueOption[]=[],fields:MigrationOptions['fields']=[];
@@ -228,10 +304,16 @@ function migrationOptionDetails(packages: MigrationPackage[]) {
     defaultStatuses[state.id] = nameSuggestions.size === 1 && statusFamily[suggestion] === category ? suggestion : categoryDefaults[category];
   }
   const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:defaultStatuses,issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};
+  const historicalTransitions = historicalJiraTransitions(packages);
+  for (const { containerId, from, to } of historicalTransitions) for (const { id, label } of [from, to]) {
+    const state = jiraWorkflowStates.get(id) ?? { label, containerIds: new Set<string>() };
+    state.containerIds.add(containerId);
+    jiraWorkflowStates.set(id, state);
+  }
   const jiraWorkflowStatuses = [...jiraWorkflowStates].map(([id, { label, containerIds }]) => ({ id, label, containerIds: [...containerIds] }));
   const options: MigrationOptions = { packages: packages.map(pkg=>structuredClone(pkg.summary)), containers, identities, statuses, issueTypes, fields,
     defaultConfiguration, ...(jiraWorkflowStatuses.length ? { jiraWorkflowStatuses } : {}) };
-  return { options, nativeCategories };
+  return { options, nativeCategories, historicalTransitions };
 }
 
 export function buildMigrationOptions(packages: MigrationPackage[]): MigrationOptions {
@@ -676,10 +758,12 @@ class Planner{
   private restrictedJiraServiceDeskEntries = new Set<string>();
   private labelListProjectScopes?: Map<string, LabelListProjectScope | null>;
   private readonly nativeJiraStatusCategories: ReadonlyMap<string, JiraStatusCategory | null>;
+  private readonly historicalJiraTransitions: readonly HistoricalJiraTransition[];
   constructor(readonly input:MigrationPlanningInput, private readonly confirmedConfluenceRestrictions?: ReadonlyMap<string, ReadonlySet<string>>){
-    const { options, nativeCategories } = migrationOptionDetails(input.packages);
+    const { options, nativeCategories, historicalTransitions } = migrationOptionDetails(input.packages);
     this.options = options;
     this.nativeJiraStatusCategories = nativeCategories;
+    this.historicalJiraTransitions = historicalTransitions;
     const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
@@ -2233,6 +2317,7 @@ class Planner{
         if(row.textFormat!=='plain'&&row.textFormat!=='none')this.notice('ISSUE_DESCRIPTION_PLAIN_TEXT','업무 설명은 현재 일반 텍스트로 변환합니다. 원래 서식·본문은 원본 보관함에 유지합니다.','warning',entry,true);
       }
     }
+    const historicalWorkflows = this.eligibleHistoricalJiraWorkflows();
     const overrides = this.configuration.jiraWorkflows ?? {};
     const reviewedProjects = new Set<string>();
     for (const project of this.result.projects) {
@@ -2240,7 +2325,7 @@ class Planner{
       if (!schema.issueTypes.length) schema.issueTypes = defaultIssueSchema(project.id).issueTypes;
       if (Object.hasOwn(overrides, project.key)) {
         reviewedProjects.add(project.key);
-        this.reviewJiraWorkflow(project.key, workflow, overrides[project.key]);
+        this.reviewJiraWorkflow(project.key, workflow, overrides[project.key], historicalWorkflows.get(project.id)?.statuses);
       } else if (!workflow.statuses.length) {
         Object.assign(workflow, defaultWorkflow(project.id, this.input.now));
       } else {
@@ -2271,9 +2356,40 @@ class Planner{
         this.notice('JIRA_WORKFLOW_PROJECT_INVALID', `${key}의 워크플로는 Jira 업무를 옮길 새 프로젝트에 지정해 주세요.`, 'error');
       }
     }
-    if (!append && !this.input.appendPages) this.observeJiraWorkflows();
+    if (!append && !this.input.appendPages) this.observeJiraWorkflows(historicalWorkflows);
   }
-  private observeJiraWorkflows(): void {
+  private eligibleHistoricalJiraWorkflows(): Map<string, HistoricalJiraWorkflow> {
+    const results = new Map<string, HistoricalJiraWorkflow>();
+    if (this.input.append || this.input.appendPages) return results;
+    const catalog = new Map<HistoricalJiraStatus, MigrationJiraWorkflowStatus | null>();
+    const status = (value: HistoricalJiraStatus): MigrationJiraWorkflowStatus | null => {
+      if (!catalog.has(value)) {
+        const evidence = [...value.catalog].filter(([key]) => !this.excluded.has(key));
+        const native = evidence.find(([, category]) => category !== undefined)?.[1];
+        const suggested = suggestCategory(value.label);
+        const category = native && statusFamily[suggested] !== native ? categoryDefaults[native] : suggested;
+        catalog.set(value, evidence.length ? { id: value.id, label: value.label, category } : null);
+      }
+      return catalog.get(value) ?? null;
+    };
+    for (const { ownerKey, historyKey, from, to } of this.historicalJiraTransitions) {
+      const owner = this.entryByKey.get(ownerKey), history = this.entryByKey.get(historyKey), binding = this.bindings.get(ownerKey);
+      if (!owner || !history || !binding || binding.type !== 'issue' || !binding.projectId ||
+          this.skip(owner) || this.skip(history) || this.restricted(owner) || this.restricted(history)) continue;
+      const fromStatus = status(from), toStatus = status(to);
+      if (!fromStatus || !toStatus) continue;
+      const workflow: HistoricalJiraWorkflow = results.get(binding.projectId) ?? { statuses: new Map(), transitions: new Map() };
+      workflow.statuses.set(fromStatus.id, fromStatus);
+      workflow.statuses.set(toStatus.id, toStatus);
+      const transitions = workflow.transitions.get(ownerKey) ?? [];
+      transitions.push({ from: fromStatus.id, to: toStatus.id });
+      workflow.transitions.set(ownerKey, transitions);
+      results.set(binding.projectId, workflow);
+    }
+    return results;
+  }
+
+  private observeJiraWorkflows(historical: ReadonlyMap<string, HistoricalJiraWorkflow>): void {
     const history = this.entries.filter(entry => entry.pkg.dataset.source.product === 'jira' && entry.row.kind === 'history' && !this.skip(entry));
     if (!history.length) return;
     const keyFor = (instance: string, sourceId: string) => JSON.stringify([instance, sourceId]);
@@ -2329,49 +2445,66 @@ class Planner{
 
     // The new-project planner rejects overlapping live source issue IDs for
     // the same source instance before binding. Deduplicate only within each owner.
-    for (const [owner, records] of historyByOwner) {
-      const { statusIds, transitions } = destinations.get(owners.get(owner)!.projectId)!;
+    for (const [owner, issue] of owners) {
+      const records = historyByOwner.get(owner) ?? [];
+      const { statusIds, transitions } = destinations.get(issue.projectId)!;
       const instance = owner.pkg.dataset.source.instanceKey;
       const seen = new Set<string>();
+      const count = ({ from, to }: Pick<MigrationJiraObservedTransition, 'from' | 'to'>) => {
+        const pair = JSON.stringify([from, to]);
+        if (seen.has(pair)) return;
+        seen.add(pair);
+        const transition = transitions.get(pair);
+        if (transition) transition.issueCount++;
+        else transitions.set(pair, { from, to, issueCount: 1 });
+      };
       for (const row of records) {
         for (const change of jiraStatusTransitions(row)) {
           const from = change.from.id && statusIds.get(keyFor(instance, change.from.id));
           const to = change.to.id && statusIds.get(keyFor(instance, change.to.id));
           if (!from || !to || from === to) continue;
-          const pair = JSON.stringify([from, to]);
-          if (seen.has(pair)) continue;
-          seen.add(pair);
-          const transition = transitions.get(pair);
-          if (transition) transition.issueCount++;
-          else transitions.set(pair, { from, to, issueCount: 1 });
+          count({ from, to });
         }
       }
+      for (const edge of historical.get(issue.projectId)?.transitions.get(owner.key) ?? []) count(edge);
     }
 
     const observed: MigrationJiraObservedWorkflow[] = [];
-    for (const { projectKey, workflow, transitions } of destinations.values()) {
+    for (const [projectId, { projectKey, workflow, transitions }] of destinations) {
       const { initialStatusId, statuses } = workflow;
       if (!transitions.size) continue;
+      const observedStatuses = new Map(historical.get(projectId)?.statuses);
+      for (const { id, label, category } of statuses) observedStatuses.set(id, { id, label, category });
       observed.push({ projectKey, initialStatusId,
-        statuses: statuses.map(({ id, label, category }) => ({ id, label, category })).sort((left, right) => left.id.localeCompare(right.id)),
+        statuses: [...observedStatuses.values()].sort((left, right) => left.id.localeCompare(right.id)),
         transitions: [...transitions.values()]
           .sort((left, right) => right.issueCount - left.issueCount || left.from.localeCompare(right.from) || left.to.localeCompare(right.to)),
       });
     }
     if (observed.length) this.result.preview.jiraObservedWorkflows = observed.sort((left, right) => left.projectKey.localeCompare(right.projectKey));
   }
-  private reviewJiraWorkflow(projectKey: string, workflow: ProjectWorkflow, review: MigrationJiraWorkflow): void {
+  private reviewJiraWorkflow(projectKey: string, workflow: ProjectWorkflow, review: MigrationJiraWorkflow,
+    historical?: ReadonlyMap<string, MigrationJiraWorkflowStatus>): void {
     if (!workflow.statuses.length) {
       this.notice('JIRA_WORKFLOW_PROJECT_INVALID', `${projectKey}의 워크플로를 구성할 이관 대상 Jira 업무가 없습니다.`, 'error');
       return;
     }
     const additional = review.additionalStatuses ?? [];
-    if (workflow.statuses.length + additional.length > 40) {
+    const statusIds = new Set(workflow.statuses.map(status => status.id));
+    const selected = new Set([review.initialStatusId, ...review.transitions.flatMap(({ from, to }) => [from, to])]);
+    const observed = [...selected].flatMap(id => {
+      const status = historical?.get(id);
+      return status && !statusIds.has(id) ? [status] : [];
+    });
+    if (workflow.statuses.length + observed.length + additional.length > 40) {
       this.notice('JIRA_WORKFLOW_STATUS_LIMIT', `${projectKey} 워크플로의 이관·추가 상태는 모두 40개까지 설정할 수 있습니다.`, 'error');
       return;
     }
-    const statusIds = new Set(workflow.statuses.map(status => status.id));
     const statuses = [...workflow.statuses];
+    for (const status of observed) {
+      statusIds.add(status.id);
+      statuses.push({ ...status, color: '#668899' });
+    }
     for (const { id, label, category } of additional) {
       const name = label.trim();
       if (!/^s_new_(?:[1-9]|[1-3][0-9]|40)$/.test(id) || !name || name.length > 40 ||

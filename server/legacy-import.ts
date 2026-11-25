@@ -16,6 +16,7 @@ export type StoredLegacyPackageDetail = LegacyPackageDetail & {
   jiraBackupLayoutChecked?: true;
   sourceEvidenceChecked?: true;
   jiraServiceDeskOwnerEvidenceChecked?: true;
+  jiraHistoricalWorkflowEvidenceChecked?: true;
 };
 const fail=(status:number,message:string):never=>{throw new LegacyImportError(status,message);};
 const scalar=(value:unknown,label:string,max=500):string=>typeof value==='string'&&value.trim()&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value)?value.trim():fail(400,`${label}을(를) 확인해 주세요.`);
@@ -82,7 +83,8 @@ export class LegacyImportService{
     if (previous) {
       if (product !== 'auto' && product !== previous.source.product) fail(400,'동일한 원본의 기존 분석 제품과 선택값이 다릅니다.');
       const detail = this.detail(previous.id);
-      const nativeJiraCurrent = previous.source.format !== 'jira-backup-xml' || detail.jiraServiceDeskOwnerEvidenceChecked === true;
+      const nativeJiraCurrent = previous.source.format !== 'jira-backup-xml' ||
+        detail.jiraServiceDeskOwnerEvidenceChecked === true && detail.jiraHistoricalWorkflowEvidenceChecked === true;
       if (detail.sourceEvidenceChecked === true && nativeJiraCurrent) return { summary: previous, duplicate: true };
       filename = previous.filename;
     } else {
@@ -108,7 +110,8 @@ export class LegacyImportService{
         const putRecord=this.store.db.prepare('INSERT INTO legacy_records(package_id,record_id,kind,title,source_id,json) VALUES(?,?,?,?,?,?)');for(const value of analysis.dataset.records)putRecord.run(id,value.id,value.kind,value.title,value.sourceId,JSON.stringify(value));
         const putDiagnostic=this.store.db.prepare('INSERT INTO legacy_diagnostics(package_id,id,severity,json) VALUES(?,?,?,?)');for(const value of analysis.dataset.diagnostics)putDiagnostic.run(id,value.id,value.severity,JSON.stringify(value));
         const manifest = { files: analysis.files, unsupported: analysis.dataset.unsupported, sourceEvidenceChecked: true,
-          ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true, jiraServiceDeskOwnerEvidenceChecked: true } : {}) };
+          ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true, jiraServiceDeskOwnerEvidenceChecked: true,
+            jiraHistoricalWorkflowEvidenceChecked: true } : {}) };
         this.store.db.prepare('INSERT INTO legacy_file_manifests(package_id,json) VALUES(?,?)').run(id, JSON.stringify(manifest));afterSave?.(summary);renameSync(pending,bundle);syncDirectory(this.root);
       });committed=true;return{summary,duplicate:Boolean(previous)};
     }finally{this.busy=false;if(!committed){rmSync(pending,{force:true});if(!previous)rmSync(bundle,{force:true});}}

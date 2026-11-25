@@ -2,7 +2,7 @@
 
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import type { FeatureProps, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
+import type { FeatureProps, Issue, IssueChangeHistoryPage, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
 import { allowedNextStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError, patch } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -150,22 +150,43 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   }
 
   async function verify() {
-    let snapshot: WorkspaceSnapshot;
     try {
-      snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
+      const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
       if (!Array.isArray(snapshot?.issues)) throw new Error(unknownResult);
-    }
-    catch { setRecovery('verify'); setError(`${unknownResult} 최신 업무를 확인해 주세요.`); return; }
-    const confirmed = snapshot.issues.find(issue => issue.id === edit.issue.id && issue.projectId === edit.issue.projectId);
-    if (matchesChange(confirmed)) { await committed(); return; }
-    if (confirmed?.version === edit.issue.version && confirmed.status === edit.issue.status && confirmed.assigneeId === edit.issue.assigneeId &&
-      projectWorkflow(snapshot, edit.issue.projectId).version === edit.workflowVersion) {
-      setRecovery(null);
-      setError('서버의 업무가 변경되지 않았습니다. 다시 적용할 수 있습니다.');
-    } else {
+      const confirmed = snapshot.restoreGeneration === restoreGeneration
+        ? snapshot.issues.find(issue => issue.id === edit.issue.id && issue.projectId === edit.issue.projectId)
+        : undefined;
+      if (confirmed?.version === edit.issue.version && confirmed.status === edit.issue.status && confirmed.assigneeId === edit.issue.assigneeId &&
+        projectWorkflow(snapshot, edit.issue.projectId).version === edit.workflowVersion) {
+        setRecovery(null);
+        setError('서버의 업무가 변경되지 않았습니다. 다시 적용할 수 있습니다.');
+        return;
+      }
+
+      let message = STALE;
+      if (confirmed && confirmed.version > edit.issue.version) {
+        const appliedVersion = edit.issue.version + 1;
+        const history = await api<IssueChangeHistoryPage>(`/issues/${encodeURIComponent(edit.issue.id)}/change-history?beforeVersion=${appliedVersion + 1}`,
+          { cache: 'no-store' });
+        if (!Array.isArray(history?.entries)) throw new Error(unknownResult);
+        const entry = history.entries.find(row => row.issueId === edit.issue.id && row.issueVersion === appliedVersion &&
+          row.projectId === edit.issue.projectId && row.previousProjectId === edit.issue.projectId);
+        const statusChange = entry?.changes.find(change => change.field === 'status');
+        const assigneeChange = entry?.changes.find(change => change.field === 'assigneeId');
+        const transitioned = statusChange?.before.value === edit.issue.status && statusChange.after.value === selected;
+        const assigned = assigneeId === undefined || (assigneeChange ? assigneeChange.after.value : edit.issue.assigneeId) === assigneeId;
+        if (transitioned && assigned && entry) {
+          if (entry.origin === 'user' && entry.actorId === actorId) { await committed(); return; }
+          message = '선택한 변경을 다른 작업자가 먼저 저장했습니다. 최신 업무를 불러와 주세요.';
+        } else if (confirmed.status === selected && assigneeId !== undefined && confirmed.assigneeId !== assigneeId) {
+          message = '업무 상태가 바뀌었고 실제 담당자가 선택한 값과 다릅니다. 최신 업무를 확인해 주세요.';
+        }
+      }
       setRecovery('conflict');
-      setError(confirmed && confirmed.version > edit.issue.version && confirmed.status === selected && assigneeId !== undefined && confirmed.assigneeId !== assigneeId
-        ? '업무 상태가 바뀌었고 실제 담당자가 선택한 값과 다릅니다. 최신 업무를 확인해 주세요.' : STALE);
+      setError(message);
+    } catch {
+      setRecovery('verify');
+      setError(`${unknownResult} 최신 업무를 확인해 주세요.`);
     }
   }
 

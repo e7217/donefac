@@ -267,7 +267,7 @@ async function applyPilotSourceMigration(request, actorId, authorId) {
   };
 }
 
-async function verifyPilotSourceMigration(request, migration) {
+async function verifyPilotSourceMigration(request, migration, expectedAssigneeId = migration.authorId) {
   const {receipt, authorId, expectedFiles} = migration;
   assert.equal(receipt.projectIds.length, 1);
   const [projectId] = receipt.projectIds;
@@ -282,7 +282,7 @@ async function verifyPilotSourceMigration(request, migration) {
   const workflow = workspace.workflows.find(item => item.projectId === projectId);
   const nextStatus = workflow?.statuses.find(status => status.category === 'in_progress')?.id;
   assert.ok(issue && otherIssue && nextStatus);
-  assert.equal(issue.assigneeId, authorId);
+  assert.equal(issue.assigneeId, expectedAssigneeId);
   assert.match(issue.description, /보관할 원본 내용/);
   assert.ok(document && sameSpaceDocument && remoteDocument);
   assert.equal(sameSpaceDocument.title, remoteDocument.title);
@@ -539,6 +539,12 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.equal(issue.plannedEffortMinutes, traffic.plannedEffortMinutes);
   assert.equal(issue.startDate, traffic.workingDate);
   assert.equal(issue.endDate, traffic.workingDate);
+  const statusHandoff = traffic.statusHandoff;
+  assert.equal(statusHandoff.observerId, fixture.actorIds[1]);
+  assert.equal(issue.assigneeId, statusHandoff.observerId);
+  const { entries: issueHistory } = await api(`/issues/${encodeURIComponent(issue.id)}/change-history`);
+  const statusRevision = issueHistory.find(entry => entry.id === statusHandoff.history.id);
+  assert.deepEqual(statusRevision, statusHandoff.history);
   const bulk = traffic.bulkDates;
   const otherIssue = workspace.issues.find(value => value.id === bulk.otherIssueId && value.projectId === bulk.otherProjectId);
   assert.ok(otherIssue && otherIssue.projectId !== issue.projectId);
@@ -629,13 +635,13 @@ async function teamSnapshot(api, fixture, evidence) {
     documentVersion: current.version, epoch: state.epoch, recoveryVersion: recovery.version, issueVersion: issue.version,
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
-      otherCalendar, successor, dependency, issueList, view, competingReplay, competingRevision, dueDateRevision,
+      otherCalendar, successor, dependency, issueList, view, statusRevision, competingReplay, competingRevision, dueDateRevision,
       gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
   };
 }
 
 async function verifyTeamMigration(pilot, migration, dataDir, fixture) {
-  const audit = await verifyPilotSourceMigration(pilot.request, migration);
+  const audit = await verifyPilotSourceMigration(pilot.request, migration, fixture.actorIds[1]);
   assert.equal(audit.issue.id, fixture.issueId);
   assert.equal(audit.document.id, fixture.documentId);
   assert.equal(audit.otherIssue.id, fixture.gitlabIssueId);
@@ -728,6 +734,15 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.ok(Number.isSafeInteger(evidence.editCount) && evidence.editCount >= actorIds.length);
   assert.ok(Number.isFinite(evidence.elapsedMs) && evidence.elapsedMs >= seconds * 1_000);
   assert.ok(evidence.workspaceTraffic, 'The browser must verify issue and issue-list changes during editing.');
+  const { statusHandoff } = evidence.workspaceTraffic;
+  const { history } = statusHandoff;
+  assert.equal(history.issueId, issue.id);
+  assert.equal(history.issueVersion, issue.version + 1);
+  assert.equal(history.actorId, actorIds[0]);
+  assert.equal(statusHandoff.observerId, actorIds[1]);
+  const handoffChanges = Object.fromEntries(history.changes.map(change => [change.field, [change.before.value, change.after.value]]));
+  assert.deepEqual(handoffChanges.status, [issue.status, imported.nextStatus]);
+  assert.deepEqual(handoffChanges.assigneeId, [actorIds[0], actorIds[1]]);
   const baseline = await teamSnapshot(pilot.api, fixture, evidence);
   const migrationBaseline = await verifyTeamMigration(pilot, migration, source, fixture);
   await stop(pilot);

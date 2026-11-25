@@ -21,6 +21,105 @@ async function removeIssues(request: APIRequestContext, issueIds: Iterable<strin
   }
 }
 
+test('360px 간트 날짜 초안을 티켓 후행 검토에서 수정해 저장하고 동료의 시작일도 보존한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [first, second], users: [actor, peer] } = await workspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const prefix = `간트 후행 초안 ${randomUUID().slice(0, 8)}`;
+  const created: string[] = [];
+  const previewPath = '/api/schedule/team-follow-up-preview';
+  const applyPath = '/api/schedule/team-follow-up-apply';
+  async function issue(project: Project, label: string, startDate: string, endDate: string) {
+    const saved = await json<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId: project.id, title: `${prefix} ${label}`, startDate, endDate },
+    }), 201);
+    created.push(saved.id);
+    return saved;
+  }
+
+  try {
+    const source = await issue(first, '선행', '2026-11-23', '2026-11-24');
+    const target = await issue(second, '후행', '2026-11-25', '2026-11-26');
+    const other = await issue(first, '별도 초안', '2026-11-23', '2026-11-25');
+    const blocker = await json<IssueRelation>(await request.post(`/api/issues/${source.id}/relations`, {
+      headers, data: { type: 'blocks', direction: 'outgoing', otherIssueId: target.id },
+    }), 201);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const row = (value: Issue) => chart.locator(`[data-issue-id="${value.id}"]`);
+    const anchorEnd = row(source).getByLabel(`${source.key} 종료일`, { exact: true });
+    const otherEnd = row(other).getByLabel(`${other.key} 종료일`, { exact: true });
+    await anchorEnd.fill('2026-11-27');
+    await otherEnd.fill('2026-11-30');
+    await row(source).locator('.gantt-issue-name').click();
+
+    const ticket = page.getByRole('dialog', { name: source.title, exact: true });
+    const title = ticket.getByLabel('제목', { exact: true });
+    const comment = ticket.getByLabel('댓글 내용', { exact: true });
+    const titledDraft = `${source.title} 제목 초안`;
+    const commentDraft = '함께 저장할 때 보존할 댓글';
+    await title.fill(titledDraft);
+    await comment.fill(commentDraft);
+    const launch = ticket.getByRole('button', { name: '프로젝트 간 일정 검토', exact: true });
+    const review = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const sourceStart = review.getByLabel('선행 업무 시작일', { exact: true });
+    const sourceEnd = review.getByLabel('선행 업무 종료일', { exact: true });
+    const apply = review.getByRole('button', { name: '함께 적용', exact: true });
+    const anchorChange = { id: source.id, expectedVersion: source.version, startDate: source.startDate, endDate: '2026-11-27' };
+    async function openReview() {
+      const [response] = await Promise.all([scheduleResponse(page, previewPath), launch.click()]);
+      expect(response.request().postDataJSON()).toEqual({ relationId: blocker.id, expectedVersion: blocker.version, anchorChange });
+      await json<AutomaticSchedulePreview>(response);
+      await expect(sourceEnd).toHaveValue(anchorChange.endDate);
+    }
+
+    await openReview();
+    await review.getByRole('button', { name: '돌아가기', exact: true }).click();
+    await expect(launch).toBeFocused();
+    expect((await workspace()).issues.find(value => value.id === source.id)).toEqual(source);
+
+    await openReview();
+    const changed = await json<Issue>(await request.patch(`/api/issues/${source.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: source.version, startDate: '2026-11-24' },
+    }));
+    const [stale] = await Promise.all([scheduleResponse(page, applyPath), apply.click()]);
+    expect(stale.status()).toBe(409);
+    await review.getByRole('button', { name: '최신 일정 기준으로 다시 검토', exact: true }).click();
+    await expect(sourceStart).toHaveValue(changed.startDate!);
+    await expect(sourceEnd).toHaveValue(anchorChange.endDate);
+    const finalEnd = '2026-11-30';
+    await sourceEnd.fill(finalEnd);
+    const [recalculated] = await Promise.all([scheduleResponse(page, previewPath),
+      review.getByRole('button', { name: '미리보기 다시 계산', exact: true }).click()]);
+    expect(recalculated.request().postDataJSON().anchorChange).toEqual({
+      ...anchorChange, expectedVersion: changed.version, startDate: changed.startDate, endDate: finalEnd,
+    });
+    const proposal = await json<AutomaticSchedulePreview>(recalculated);
+    expect(proposal.changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: source.id, toStart: changed.startDate, toEnd: finalEnd }),
+      expect.objectContaining({ id: target.id, toStart: '2026-12-01', toEnd: '2026-12-02' }),
+    ]));
+    const [applied] = await Promise.all([scheduleResponse(page, applyPath), apply.click()]);
+    const result = await json<SchedulePasteApplyResult>(applied);
+    expect(result.updated.map(value => value.id).sort()).toEqual([source.id, target.id].sort());
+    await expect(review).toHaveCount(0);
+    await expect(launch).toBeFocused();
+    await expect(title).toHaveValue(titledDraft);
+    await expect(comment).toHaveValue(commentDraft);
+    const leave = page.waitForEvent('dialog').then(dialog => dialog.accept());
+    await Promise.all([leave, ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click()]);
+    await expect(anchorEnd).toHaveValue(finalEnd);
+    await expect(row(source).getByRole('button', { name: `${source.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await expect(otherEnd).toHaveValue('2026-11-30');
+    await expect(row(other).getByRole('button', { name: `${other.key} 날짜 저장`, exact: true })).toBeVisible();
+    expect((await workspace()).issues.find(value => value.id === other.id)).toEqual(other);
+  } finally { await removeIssues(request, created, headers); }
+});
+
 test('360px 차단 목록에서 고른 여러 프로젝트의 후행 일정만 함께 적용하고 되돌린다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const readWorkspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));

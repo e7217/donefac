@@ -70,7 +70,11 @@ type IssueScheduleSaveInput = {
 };
 type ScheduleSaveReview = { preview: SchedulePreview; input: IssueScheduleSaveInput; staleMessage?: string };
 type ScheduleDraftFields = 'none' | 'due-date' | 'all';
-type TicketTeamFollowUp = Omit<TeamFollowUpSelection, 'source'> & { source: Issue; choosing: boolean };
+type TicketTeamFollowUp = Omit<TeamFollowUpSelection, 'source'> & {
+  source: Issue;
+  choosing: boolean;
+  ganttDateDraft?: StoredGanttDateDraft;
+};
 type IssuePanelProps = FeatureProps & {
   issueId: string;
   documentOverlay?: boolean;
@@ -681,10 +685,15 @@ function IssuePanelContent(props: IssuePanelProps) {
       return;
     }
     const hasDateDraft = draft.startDate !== baseDraft.startDate || draft.endDate !== baseDraft.endDate;
+    const ganttDateDraft = hasDateDraft ? undefined : props.ganttDateDraftsRef?.current?.read(savedRelationIssue);
     // The original dates let the review retain just the edited endpoint if the other endpoint changed on the server.
-    const source = hasDateDraft ? baseDraft : savedRelationIssue;
-    const initialChange = hasDateDraft ? { id: source.id, expectedVersion: source.version, startDate: draft.startDate, endDate: draft.endDate } : undefined;
-    setTeamFollowUp({ source, initialChange, choices: teamFollowUpChoices, choosing: teamFollowUpChoices.length > 1 });
+    const source = hasDateDraft ? baseDraft : ganttDateDraft ? {
+      ...savedRelationIssue, version: ganttDateDraft.version, startDate: ganttDateDraft.startDate, endDate: ganttDateDraft.endDate,
+    } : savedRelationIssue;
+    const initialDates = hasDateDraft ? { startDate: draft.startDate, endDate: draft.endDate }
+      : ganttDateDraft && { startDate: ganttDateDraft.draftStart, endDate: ganttDateDraft.draftEnd };
+    const initialChange = initialDates && { id: source.id, expectedVersion: source.version, ...initialDates };
+    setTeamFollowUp({ source, initialChange, ganttDateDraft, choices: teamFollowUpChoices, choosing: teamFollowUpChoices.length > 1 });
   }
   function chooseTeamFollowUps(choices: readonly TeamFollowUpChoice[]) {
     setTeamFollowUp(current => current && { ...current, choices, choosing: false });
@@ -709,8 +718,13 @@ function IssuePanelContent(props: IssuePanelProps) {
     notify(datesChanged && linksChanged ? '업무 일정과 선후행 연결을 변경했습니다.'
       : datesChanged ? '업무 일정을 변경했습니다.' : '선후행 연결을 변경했습니다.');
   }
-  async function reflectTeamFollowUp(result: ScheduleApplyResult, reviewedSource?: Pick<Issue, 'version'>) {
+  async function reflectTeamFollowUp(result: ScheduleApplyResult, reviewedSource?: Pick<Issue, 'version' | 'startDate' | 'endDate'>) {
     rememberScheduleUndo(result.undoId);
+    if (teamFollowUp?.ganttDateDraft) {
+      const confirmed = result.updated.find(value => value.id === issueId) ??
+        (reviewedSource && { ...teamFollowUp.source, ...reviewedSource });
+      if (confirmed) props.ganttDateDraftsRef?.current?.acceptSaved(teamFollowUp.ganttDateDraft, confirmed, { replaceDraft: true });
+    }
     await reflectScheduleChange(result, 'due-date', reviewedSource?.version);
     closeTeamFollowUp();
     notify(`${result.updated.length}개 업무의 일정을 변경했습니다.`);

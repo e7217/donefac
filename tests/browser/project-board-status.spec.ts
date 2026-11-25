@@ -283,3 +283,54 @@ test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실�
     expect(new URL(page.url()).hash).toBe(location.slice(1));
   } finally { await f.close(); }
 });
+
+test('보드는 응답이 끊겼을 때 해당 업무 버전을 저장한 작업자를 확인한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const f = await fixture(request);
+  try {
+    const { issue, location } = await f.setup();
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    const dialog = chooser(page);
+    await statusAction(page, issue).tap();
+    await destination(page).selectOption(f.review.id);
+    await assigneeChoice(page).selectOption(`user:${f.newAssignee.id}`);
+    await page.route(`**${issuePath(issue)}`, async route => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      expect(route.request().headers()['x-actor-id']).toBe(f.actor.id);
+      await json<Issue>(await request.patch(issuePath(issue), {
+        headers: { 'X-Actor-Id': f.newAssignee.id }, data: route.request().postDataJSON(),
+      }));
+      await route.abort('failed');
+    });
+
+    await button(dialog, '상태 변경 적용').tap();
+    await expect(dialog.getByRole('alert')).toContainText('다른 작업자가 먼저 저장했습니다.');
+    await expect(destination(page)).toHaveValue(f.review.id);
+    await expect(assigneeChoice(page)).toHaveValue(`user:${f.newAssignee.id}`);
+    expect(await f.read(issue)).toMatchObject({ status: f.review.id, assigneeId: f.newAssignee.id, version: issue.version + 1 });
+
+    await button(dialog, '최신 업무 불러오기').tap();
+    await expect(dialog).toHaveCount(0);
+    const board = page.getByRole('region', { name: '업무 보드', exact: true });
+    await expect(board.locator(`[data-status-id="${f.review.id}"]`).locator(card(page, issue))).toBeVisible();
+
+    await page.unroute(`**${issuePath(issue)}`);
+    await statusAction(page, issue).tap();
+    await expect(destination(page)).toHaveValue(f.finished.id);
+    await assigneeChoice(page).selectOption(`user:${f.actor.id}`);
+    await page.route(`**${issuePath(issue)}`, async route => {
+      if (route.request().method() !== 'PATCH') return route.continue();
+      const saved = await json<Issue>(await route.fetch());
+      expect(saved).toMatchObject({ status: f.finished.id, assigneeId: f.actor.id, version: issue.version + 2 });
+      await json<Issue>(await request.patch(issuePath(issue), {
+        headers: { 'X-Actor-Id': f.newAssignee.id }, data: { expectedVersion: saved.version, assigneeId: f.newAssignee.id },
+      }));
+      await route.abort('failed');
+    });
+    await button(dialog, '상태 변경 적용').tap();
+    await expect(dialog).toHaveCount(0);
+    await expect(board.locator(`[data-status-id="${f.finished.id}"]`).locator(card(page, issue))).toBeVisible();
+    expect(await f.read(issue)).toMatchObject({ status: f.finished.id, assigneeId: f.newAssignee.id, version: issue.version + 3 });
+  } finally { await f.close(); }
+});

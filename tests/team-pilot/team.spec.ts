@@ -7,6 +7,7 @@ import type { CollaborationClientMessage, CollaborationServerMessage, Collaborat
 import { documentPlainText } from '../../shared/document-plain-text';
 import type { DocPage, DocRevision, Issue } from '../../shared/types';
 import { prepareGitlabTraffic } from './gitlab-traffic';
+import { verifyIssueHandoff } from './issue-handoff';
 import { verifyWorkspaceTraffic, type ScheduledSuccessorPlan } from './workspace-traffic';
 
 interface Fixture {
@@ -381,8 +382,9 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
         [current, workspaceTraffic, gitlabTraffic] = await Promise.all([
           wave(request, current, originalEpoch, peers, edits, fixture),
           verifyWorkspaceTraffic(peers[0].context.request, {
-            projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, origin: baseURL,
+            projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, observerId: peers[1].actorId, origin: baseURL,
             concurrentActor: { requests: peers[2].context.request, actorId: peers[2].actorId },
+            handOffIssue: plan => verifyIssueHandoff(peers[0].context, peers[1].context, baseURL, fixture.originalJiraKey, plan),
             createScheduledSuccessor: plan => createGanttSuccessor(peers[0], baseURL, fixture.originalJiraKey, plan),
           }),
           verifyGitlabTraffic(),
@@ -399,6 +401,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     if (!gitlabTraffic) throw new Error('The team pilot did not verify signed GitLab activity.');
     await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
     keepConnected();
+    console.log('Independent HTTPS sessions handed off a migrated Jira issue and verified the board, assignee and change history.');
     console.log('The protected Gantt saved a successor with reviewed dates and rendered the resolved dependency. Signed GitLab pipeline events applied one workflow transition.');
 
     const delayed = peers.at(-1)!;

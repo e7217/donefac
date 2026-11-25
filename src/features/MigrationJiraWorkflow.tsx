@@ -72,7 +72,7 @@ export function MigrationJiraWorkflowEditor({ options, configuration, onChange }
   }
 
   return <>
-    <p>새 프로젝트에서 새 업무가 시작할 상태와 허용할 방향을 지정할 수 있습니다. 이관하는 업무에는 매핑한 현재 상태를 보존합니다.</p>
+    <p>새 프로젝트에서 새 업무의 초기 상태와 허용할 방향을 지정할 수 있습니다. 원본 이력에서만 확인한 상태는 초기 상태나 허용 전이로 선택할 수 있습니다.</p>
     {!groups.size && <p>워크플로를 지정할 Jira 프로젝트의 키를 확인해 주세요.</p>}
     {[...groups.values()].map(group => <WorkflowEditor key={group.key} group={group} value={drafts[group.key]}
       allStatusLabels={allStatusLabels} onChange={value => changeDraft(group.key, value)} />)}

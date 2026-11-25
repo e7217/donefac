@@ -416,6 +416,78 @@ test('observed Jira workflow directions also use exact original IDs from an admi
   assert.deepEqual(group.transitions, [{ from: byLabel.get('Open'), to: byLabel.get('Done'), issueCount: 1 }]);
 });
 
+test('catalog-backed Jira history statuses remain scoped to the proven project and require explicit adoption', () => {
+  const instance = 'native-historical-workflow';
+  const make = (id: string, rows: string, instanceKey = instance) => {
+    const dataset = parseJira(new Map([['entities.xml', Buffer.from(`<entity-engine-xml>
+      <IssueType id="8" pname="Task"/>${rows}</entity-engine-xml>`)]]), instanceKey);
+    const { summary } = pkg(id, 'jira', dataset.records, dataset.diagnostics);
+    return { summary: { ...summary, source: dataset.source }, dataset };
+  };
+  const project = (id: string, key: string) => `<Project id="${id}" pkey="${key}" name="${key} source"/>`;
+  const issue = (id: string, projectId: string, status: string, extra = '') => `<Issue id="${id}" project="${projectId}" number="${id}"
+    summary="Workflow case ${id}" status="${status}" issuetype="8" created="${created}" ${extra}/>`;
+  const status = (id: string, name: string, category: string) => `<Status id="${id}" pname="${name}" statuscategory="${category}"/>`;
+  const history = (id: string, owner: string, from: string, to: string, groupExtra = '', itemExtra = '') => `
+    <ChangeGroup id="${id}" issue="${owner}" created="${created}" ${groupExtra}></ChangeGroup>
+    <ChangeItem id="${id}" group="${id}" field="status" fieldtype="jira" oldvalue="${from}" newvalue="${to}">${itemExtra}</ChangeItem>`;
+  const content = make('workflow-issues', `${project('10', 'OLD')}${issue('101', '10', '3')}${issue('102', '10', '1')}
+    ${status('1', 'Open', '2')}${status('3', 'Closed', '3')}`);
+  const evidence = make('workflow-history', `${project('20', 'OTHER')}${issue('201', '20', '1')}
+    ${status('1', 'Open', '2')}${status('2', 'Review', '4')}${status('3', 'Closed', '3')}
+    ${status('4', 'Restricted state', '4')}${status('5', 'Ambiguous endpoint', '4')}
+    ${history('301', '101', '1', '2')}${history('302', '101', '2', '3')}
+    ${history('303', '101', '1', '4', 'level="internal"')}${history('304', '101', '1', '5', '', '<newvalue>4</newvalue>')}`);
+  const other = make('workflow-other-instance', `${project('10', 'FOREIGN')}${issue('101', '10', '1')}
+    ${status('1', 'Open', '2')}${status('2', 'Unrelated same ID', '4')}`, 'other-workflow-instance');
+  const request = input([content, evidence, other]);
+  const options = buildMigrationOptions(request.packages);
+  const container = options.containers.find(row => row.sourceProjectId === '10' && row.packageId === content.summary.id)!;
+  request.configuration.projects = options.containers.map(row => ({ containerId: row.id, key: row.proposedKey, name: row.name }));
+  request.configuration.excludedRecords = [`${evidence.summary.id}/history:303`];
+  const ids = new Map(options.jiraWorkflowStatuses!.filter(row => row.containerIds.includes(container.id)).map(row => [row.label, row.id]));
+  const open = ids.get('Open')!, review = ids.get('Review')!, closed = ids.get('Closed')!;
+  assert.ok(open && review && closed);
+  assert.deepEqual(options.jiraWorkflowStatuses!.find(row => row.id === review)?.containerIds, [container.id]);
+  assert.ok(![...ids.keys()].some(label => /Restricted|Ambiguous|Unrelated/.test(label)));
+  const oldWorkflow = buildMigrationPlan(request);
+  assert.equal(oldWorkflow.preview.canApply, true, JSON.stringify(oldWorkflow.preview.notices));
+  assert.deepEqual(oldWorkflow.preview.jiraObservedWorkflows?.map(group => group.projectKey), ['OLD']);
+  const observed = oldWorkflow.preview.jiraObservedWorkflows![0];
+  assert.deepEqual(new Set(observed.transitions.map(edge => JSON.stringify(edge))), new Set([
+    JSON.stringify({ from: open, to: review, issueCount: 1 }), JSON.stringify({ from: review, to: closed, issueCount: 1 }),
+  ]));
+  assert.deepEqual(observed.statuses.find(row => row.id === review), { id: review, label: 'Review', category: 'review' });
+  const oldProjectId = oldWorkflow.projects.find(row => row.key === 'OLD')!.id;
+  const defaultGraph = oldWorkflow.workflows.find(row => row.projectId === oldProjectId)!;
+  assert.ok(defaultGraph.statuses.every(row => row.id !== review));
+  assert.ok(defaultGraph.transitions.every(edge => edge.from !== review && edge.to !== review));
+
+  request.configuration.jiraWorkflows = { OLD: { initialStatusId: open, transitions: [{ from: open, to: review }] } };
+  const adopted = buildMigrationPlan(request);
+  assert.equal(adopted.preview.canApply, true, JSON.stringify(adopted.preview.notices));
+  const appliedGraph = adopted.preview.jiraWorkflows![0];
+  assert.deepEqual(appliedGraph.transitions, [{ from: open, to: review }]);
+  assert.equal(appliedGraph.statuses.find(row => row.id === review)?.category, 'review');
+  request.configuration.jiraWorkflows = { OLD: { initialStatusId: review, transitions: [] } };
+  const initialOnly = buildMigrationPlan(request);
+  assert.equal(initialOnly.preview.canApply, true, JSON.stringify(initialOnly.preview.notices));
+  assert.equal(initialOnly.preview.jiraWorkflows![0].initialStatusId, review);
+  assert.deepEqual(initialOnly.preview.jiraWorkflows![0].transitions, []);
+
+  for (const excluded of [[`${evidence.summary.id}/history:301`, `${evidence.summary.id}/history:302`],
+    [`${evidence.summary.id}/option:builtin:status:2`], [`${content.summary.id}/issue:101`]]) {
+    request.configuration.excludedRecords = [`${evidence.summary.id}/history:303`, ...excluded];
+    const unsupported = buildMigrationPlan(request).preview;
+    assert.equal(unsupported.canApply, false);
+    assert.ok(unsupported.notices.some(notice => notice.code === 'JIRA_WORKFLOW_INITIAL_STATUS_INVALID'));
+    assert.equal(unsupported.jiraObservedWorkflows, undefined);
+  }
+  const conflict = make('workflow-conflict', `${project('30', 'THIRD')}${issue('301', '30', '1')}
+    ${status('1', 'Open', '2')}${status('2', 'Review', '3')}`);
+  assert.ok(!buildMigrationOptions([...request.packages, conflict]).jiraWorkflowStatuses?.some(row => row.id === review));
+});
+
 test('Jira descriptions retain Markdown annotations while comments stay plain and documents retain native nodes', () => {
   const taskSource = jira(), documentSource = confluence();
   const adf = JSON.stringify({ type: 'doc', version: 1, content: [

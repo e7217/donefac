@@ -321,6 +321,88 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
   }
 });
 
+test('360px Jira 관리자 백업의 현재 업무가 없는 승인 상태를 이력에서 선택해 적용한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const id = suffix(), key = `EMP${id}`, filename = `historical-approval-${id}.zip`;
+  const date = '2020-01-02T03:04:05Z', changedAt = '2020-01-03T03:04:05Z';
+  const firstTitle = `대기 중인 업무 ${id}`, lastTitle = `완료된 업무 ${id}`;
+  const archive = Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="${key}" name="승인 이력 프로젝트 ${id}"/>
+    <Status id="11" pname="Open"/><Status id="12" pname="Approval"/><Status id="13" pname="Closed"/>
+    <IssueType id="3" pname="Task"/>
+    <Issue id="101" project="10" number="1" summary="${firstTitle}" status="11" issuetype="3" created="${date}"/>
+    <Issue id="102" project="10" number="2" summary="${lastTitle}" status="13" issuetype="3" created="${date}"/>
+    <ChangeGroup id="201" issue="102" created="${changedAt}"/>
+    <ChangeGroup id="202" issue="102" created="${changedAt}"/>
+    <ChangeItem id="301" group="201" field="status" fieldtype="jira" oldvalue="11" oldstring="Open" newvalue="12" newstring="Approval"/>
+    <ChangeItem id="302" group="202" field="status" fieldtype="jira" oldvalue="12" oldstring="Approval" newvalue="13" newstring="Closed"/>
+  </entity-engine-xml>`);
+  const staged = await upload(request, filename, zip([{ path: 'entities.xml', bytes: archive }]), `jira-historical-approval-${id}`);
+  const createdIssueIds: string[] = [];
+  try {
+    const { settings } = await open(page, request);
+    await selectPackage(settings, filename);
+    const first = await preview(page, settings);
+    expect(first.canApply, JSON.stringify(first.notices)).toBe(true);
+    expect(first.configuration.jiraWorkflows?.[key]).toBeUndefined();
+    const observed = first.jiraObservedWorkflows?.find(workflow => workflow.projectKey === key);
+    const state = (label: string) => observed?.statuses.find(status => status.label === label)?.id;
+    const openId = state('Open'), approvalId = state('Approval'), closedId = state('Closed');
+    expect([openId, approvalId, closedId].every(Boolean)).toBe(true);
+    expect(observed?.transitions).toEqual(expect.arrayContaining([
+      { from: openId, to: approvalId, issueCount: 1 }, { from: approvalId, to: closedId, issueCount: 1 },
+    ]));
+
+    const review = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
+    const suggestions = review.getByRole('region', { name: 'Jira 이력에서 확인한 전이', exact: true });
+    const fromOpen = suggestions.getByRole('checkbox', { name: 'Open → Approval', exact: true });
+    const fromApproval = suggestions.getByRole('checkbox', { name: 'Approval → Closed', exact: true });
+    await expect(fromOpen).not.toBeChecked();
+    await expect(fromApproval).not.toBeChecked();
+    await fromOpen.check();
+    await fromApproval.check();
+    await suggestions.getByRole('button', { name: '선택한 전이를 매핑에 추가', exact: true }).click();
+
+    const reviewed = await preview(page, settings);
+    expect(reviewed.canApply, JSON.stringify(reviewed.notices)).toBe(true);
+    const workflow = reviewed.jiraWorkflows?.find(value => value.projectKey === key);
+    expect(workflow?.statuses).toContainEqual(expect.objectContaining({ id: approvalId, label: 'Approval' }));
+    expect(workflow?.transitions).toHaveLength(2);
+    expect(workflow?.transitions).toEqual(expect.arrayContaining([
+      { from: openId, to: approvalId }, { from: approvalId, to: closedId },
+    ]));
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    await acknowledge(review, reviewed);
+    const applied = page.waitForResponse(response => response.url().endsWith(`/api/migrations/previews/${reviewed.id}/apply`));
+    page.once('dialog', dialog => dialog.accept());
+    await review.getByRole('button', { name: '검토한 이관 실제 적용', exact: true }).click();
+    const response = await applied;
+    expect(response.status(), await response.text()).toBe(201);
+    const { import: receipt } = await response.json() as MigrationApplyResult;
+    const { issues } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+    const migrated = issues.filter(issue => receipt.projectIds.includes(issue.projectId));
+    createdIssueIds.push(...migrated.map(issue => issue.id));
+    const firstIssue = migrated.find(issue => issue.title === firstTitle)!;
+    expect(firstIssue.status).toBe(openId);
+    expect(migrated.find(issue => issue.title === lastTitle)?.status).toBe(closedId);
+    const path = `/api/issues/${firstIssue.id}`;
+    const blocked = await request.patch(path, { data: { expectedVersion: firstIssue.version, status: closedId } });
+    expect(blocked.status(), await blocked.text()).toBe(422);
+    const allowed = await request.patch(path, { data: { expectedVersion: firstIssue.version, status: approvalId } });
+    expect(allowed.status(), await allowed.text()).toBe(200);
+    expect(await allowed.json()).toMatchObject({ status: approvalId });
+  } finally {
+    for (const issueId of createdIssueIds) {
+      const deleted = await request.delete(`/api/issues/${issueId}`);
+      if (!deleted.ok()) continue;
+      const { trashEntryId } = await deleted.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`);
+    }
+    await request.delete(`/api/legacy-import/packages/${staged.id}?expectedVersion=${staged.version}`);
+  }
+});
+
 test('360px Jira 이력 전이에서 선택한 방향만 기존 매핑에 추가하고 새 프로젝트에 적용한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

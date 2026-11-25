@@ -572,9 +572,10 @@ function ProjectGantt(props: GanttProps) {
       const draft = recoverableDates(issue, retainedDates.current.get(issue.id));
       return draft && !draftDatesAreSaved(issue, draft) ? draft : undefined;
     },
-    acceptSaved(draft, saved) {
+    acceptSaved(draft, saved, options) {
       if (retainedDates.current.get(draft.id) !== draft || saved.id !== draft.id ||
-          saved.projectId !== draft.projectId || !draftDatesAreSaved(saved, draft)) return;
+          saved.projectId !== draft.projectId || saved.version < draft.version) return;
+      if (!options?.replaceDraft && !draftDatesAreSaved(saved, draft)) return;
       const live = inlineDateDrafts.current.get(saved.id);
       if (live) live.accept(saved);
       else {

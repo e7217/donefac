@@ -13,7 +13,7 @@ export type StoredGanttDateDraft = {
 
 export type GanttIssueDateDrafts = {
   read: (issue: Issue) => StoredGanttDateDraft | undefined;
-  acceptSaved: (draft: StoredGanttDateDraft, saved: Issue) => void;
+  acceptSaved: (draft: StoredGanttDateDraft, saved: Issue, options?: { replaceDraft: true }) => void;
 };
 
 export const GANTT_DATE_DRAFT_PREFIX = 'teamspace:gantt-date-drafts:';

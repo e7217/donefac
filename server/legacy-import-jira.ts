@@ -1332,11 +1332,21 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       context.field(fieldId, name, 'jira-builtin');
       const option = context.ensure('option', `${fieldId}:${id}`, { title, containerId: fieldId,
         metadata: selected(v, ['id','description','sequence','style']), references: ref('field', fieldId, 'field') });
-      if (name === 'Status' && option && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id) {
-        const rawCategory = adminXmlScalar(node, 'statuscategory');
-        const category = rawCategory === null ? null : readJiraStatusCategory(undefined, rawCategory);
-        const previous = option.metadata.jiraStatusCategory;
-        if (category !== undefined) option.metadata.jiraStatusCategory = previous === undefined || previous === category ? category : null;
+      if (name === 'Status' && option) {
+        const names = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
+        const labels = new Set(names.filter((label): label is string => typeof label === 'string' && !!label.trim()).map(label => label.trim()));
+        const [label] = labels;
+        const exactId = isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id;
+        const previousLabel = option.metadata.jiraWorkflowStatusLabel;
+        option.metadata.jiraWorkflowStatusLabel = exactId && !names.includes(null) && labels.size === 1 &&
+          (previousLabel === undefined || previousLabel === label) ? label : null;
+        if (exactId) {
+          const rawCategory = adminXmlScalar(node, 'statuscategory');
+          const category = rawCategory === null ? null : readJiraStatusCategory(undefined, rawCategory);
+          if (rawCategory !== undefined && rawCategory !== '1' && !category) option.metadata.jiraWorkflowStatusLabel = null;
+          const previous = option.metadata.jiraStatusCategory;
+          if (category !== undefined) option.metadata.jiraStatusCategory = previous === undefined || previous === category ? category : null;
+        }
       }
       if (name === 'IssueType' && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id) {
         const labels = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
@@ -1406,16 +1416,30 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   // Jira can retain multiple Epic link styles after a failed configuration change. A style with competing IDs cannot prove membership.
   if ([...epicTypeClaims].filter(isJiraHierarchyIssueId).length > 1) verifiedEpicTypes.clear();
   const groups = new Map<string, ObjectValue>();
+  const exactWorkflowOwners = new Set<string>();
   const historyItems = new Map<string, LegacyValue[]>();
-  for (const { name, value } of values) {
+  const exactWorkflowItems = new Map<string, number[]>();
+  for (const { name, value, node } of values) {
     if (name === 'ChangeGroup') {
       const groupId = str(value.id);
       if (groups.has(groupId)) throw new LegacyImportError(400, 'Jira 백업에 중복된 ChangeGroup ID가 있습니다.');
       groups.set(groupId, value);
+      const owner = adminXmlScalar(node, 'issue');
+      if (isJiraHierarchyIssueId(groupId) && adminXmlScalar(node, 'id') === groupId && typeof owner === 'string' && isJiraHierarchyIssueId(owner)) {
+        exactWorkflowOwners.add(groupId);
+      }
     } else if (name === 'ChangeItem') {
       const { group, ...item } = value;
       const groupId = str(group);
       const items = historyItems.get(groupId) ?? [];
+      const from = adminXmlScalar(node, 'oldvalue'), to = adminXmlScalar(node, 'newvalue');
+      if (adminXmlScalar(node, 'group') === groupId && typeof from === 'string' && isJiraHierarchyIssueId(from) &&
+          typeof to === 'string' && isJiraHierarchyIssueId(to) &&
+          ['field', 'fieldId', 'fieldtype', 'fieldType'].every(name => adminXmlScalar(node, name) !== null)) {
+        const positions = exactWorkflowItems.get(groupId) ?? [];
+        positions.push(items.length);
+        exactWorkflowItems.set(groupId, positions);
+      }
       items.push({ ...selected(item, ['id', 'field', 'fieldtype', 'fieldId', 'fieldType', 'oldvalue', 'oldstring', 'newvalue', 'newstring']),
         ...jiraVisibilityMetadata(item, false) });
       historyItems.set(groupId, items);
@@ -1425,7 +1449,8 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     const authorId = resolveActor(value.author);
     context.put('history', groupId, { title: '변경 이력', containerId: str(value.issue) || null, authorId,
       createdAt: context.date(value.created, `history:${groupId}`),
-      metadata: { ...jiraVisibilityMetadata(value, !stableHistoryId(value.id)), items: historyItems.get(groupId) ?? [] },
+      metadata: { ...jiraVisibilityMetadata(value, !stableHistoryId(value.id)), items: historyItems.get(groupId) ?? [],
+        jiraWorkflowStatusChangePositions: exactWorkflowOwners.has(groupId) ? exactWorkflowItems.get(groupId) ?? [] : [] },
       references: [...ref('issue', value.issue, 'historyOf'), ...ref('identity', authorId, 'author')] });
   }
   for(const[groupId]of historyItems)if(!groups.has(groupId)){context.warn('CHANGE_GROUP_MISSING','변경 항목의 ChangeGroup이 없습니다.',null,path,'error');context.unsupported('orphan:ChangeItem',(historyItems.get(groupId)||[]).length);}
