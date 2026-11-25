@@ -1576,6 +1576,53 @@ test('Confluence refresh restores archived table widths through document review 
   assert.equal(later.preview.documentRefresh?.[0].fields[0].decision, 'apply');
 });
 
+test('Confluence refresh repairs an untouched raw page with engineering symbols through explicit review', () => {
+  const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
+  const original = page('10', { authorId: null, text: '<h2>설치 치수</h2><p><strong>기준</strong> 50 &times; 20 mm &plusmn; 1 mm</p>' });
+  const initialSource = pkg('original-engineering-symbols', 'confluence', [space, original]);
+  const initial = buildMigrationPlan(input([initialSource]));
+  assert.equal(initial.preview.canApply, true, JSON.stringify(initial.preview.notices));
+  const [project] = initial.projects, [current] = initial.documents;
+  const receipt = initial.sourceRecords.find(item => item.targetId === current.id)!;
+  const fallback = { ...current, plainText: original.text, content: { type: 'doc', content: [
+    { type: 'codeBlock', attrs: { language: null }, content: [{ type: 'text', text: original.text }] },
+  ] } };
+  const rawHash = createHash('sha256').update(JSON.stringify(['content', JSON.stringify(fallback.content)])).digest('hex');
+  const rawReceipt = { ...receipt, confluencePageFieldHashes: { ...receipt.confluencePageFieldHashes, content: rawHash } };
+  const refresh = (local: DocPage, previous: SourceRecordArchive = rawReceipt, source = original) => {
+    const next = pkg('engineering-symbols-refresh', 'confluence', [space, source]);
+    next.dataset.source.instanceKey = initialSource.dataset.source.instanceKey;
+    const request = input([next]);
+    request.configuration.appendPagesTo = { projectId: project.id, refreshExisting: true };
+    request.appendPages = { project, sourceSpaceId: 's', sourceSpaceKey: 'TEAM', token: 'engineering-symbols-refresh',
+      knownPages: [{ sourceId: original.sourceId, documentId: current.id, projectId: project.id, sourceSpaceId: 's', sourceTitle: current.title }],
+      refreshDocuments: [{ document: local, previous, previousTimezone: 'UTC' }] };
+    return buildMigrationPlan(request);
+  };
+  const legacyReceipt = { ...rawReceipt, confluencePageBodySourceHash: undefined, confluencePageFieldHashes: undefined };
+  for (const previous of [rawReceipt, legacyReceipt]) {
+    const repaired = refresh(fallback, previous);
+    assert.equal(repaired.preview.canApply, true, JSON.stringify(repaired.preview.notices));
+    assert.ok(repaired.preview.requiredAcknowledgements.includes('CONFLUENCE_REFRESH_ENGINEERING_ENTITIES_RESTORED'));
+    assert.deepEqual(repaired.preview.documentRefresh?.[0].fields.map(({ field, decision }) => [field, decision]), [['content', 'apply']]);
+    assert.deepEqual(repaired.documentUpdates?.[0].changes.content, current.content);
+    assert.match(current.plainText, /50 × 20 mm ± 1 mm/u);
+  }
+  const local = { ...current, version: current.version + 1, plainText: '팀에서 편집한 본문', content: {
+    type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '팀에서 편집한 본문' }] }],
+  } };
+  assert.deepEqual(refresh(local).documentUpdates, []);
+  const changedSameRevision = { ...original, text: original.text.replace('20 mm', '21 mm') };
+  assert.deepEqual(refresh(fallback, rawReceipt, changedSameRevision).documentUpdates, []);
+  const changedNewer = { ...changedSameRevision, metadata: { ...original.metadata, version: '4' } };
+  assert.equal(refresh(fallback, legacyReceipt, changedNewer).preview.documentRefresh?.[0].fields[0].decision, 'apply');
+  const conflict = refresh(local, rawReceipt, changedNewer);
+  assert.equal(conflict.preview.documentRefresh?.[0].fields[0].decision, 'conflict');
+  assert.deepEqual(conflict.documentUpdates, []);
+  const unrecognized = { ...changedNewer, text: `${changedNewer.text}<p>&unrecognized;</p>` };
+  assert.deepEqual(refresh(fallback, rawReceipt, unrecognized).documentUpdates, []);
+});
+
 test('reviewed Confluence refresh restores deeper headings only when the original whole-body projection matches', () => {
   const space = record('project', 's', { title: '원본 공간', metadata: { spaceKey: 'TEAM' } });
   const original = page('10', { authorId: null, text: '<ac:structured-macro ac:name="toc"/>' +

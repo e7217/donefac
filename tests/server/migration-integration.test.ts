@@ -491,7 +491,8 @@ test('migration content review exposes accepted Jira and Confluence body changes
   assert.equal((await f.apply(jiraPreview)).status, 201);
   assert.equal((await snapshot()).issues.find(row => row.id === issues.find(item => item.title === 'Synthetic issue 1')?.id)?.description, jiraDetail.description);
 
-  const deltaWiki = await wikiPack(2, ['<p>New <strong>body</strong></p>', '<p>Incoming page conflict</p>', '<p>Unchanged</p>']);
+  const engineeringBody = '<p>New <strong>dimension</strong> 50 &times; 20 mm &plusmn; 1 mm at 25 &deg;C.</p>';
+  const deltaWiki = await wikiPack(2, [engineeringBody, '<p>Incoming page conflict</p>', '<p>Unchanged</p>']);
   const wikiPreview = await f.preview({ ...await f.configuration(deltaWiki), appendPagesTo: { projectId, refreshExisting: true } });
   assert.equal(wikiPreview.canApply, true, JSON.stringify(wikiPreview.notices));
   const wikiRecord = `${deltaWiki.id}/page:301`;
@@ -499,9 +500,17 @@ test('migration content review exposes accepted Jira and Confluence body changes
   assert.deepEqual(wikiList.rows.map(row => [row.recordId, row.change]), [[wikiRecord, 'update']]);
   const { data: wikiDetail } = await f.call<MigrationContentReviewDetail>(contentPath(wikiPreview, wikiRecord));
   assert.equal(wikiDetail.content?.content?.[0].content?.[1].marks?.[0].type, 'bold');
+  assert.equal(wikiDetail.content?.content?.[0].content?.[2].text, ' 50 × 20 mm ± 1 mm at 25 °C.');
   for (const id of [302, 303]) assert.equal((await f.call(contentPath(wikiPreview, `${deltaWiki.id}/page:${id}`))).status, 404);
-  assert.equal((await f.apply(wikiPreview)).status, 201);
+  const wikiApply = await f.apply(wikiPreview);
+  assert.equal(wikiApply.status, 201);
   assert.deepEqual((await snapshot()).documents.find(row => row.id === pages.find(item => item.title === 'Synthetic page 1')?.id)?.content, wikiDetail.content);
+  const archivePath = `/source-imports/${wikiApply.data.import.id}/records`;
+  const { data: archives } = await f.call<SourceRecordPage>(archivePath);
+  const originalPage = archives.records.find(item => item.record.id === 'page:301');
+  assert.ok(originalPage);
+  const { data: original } = await f.call<SourceRecordArchive>(`${archivePath}/${originalPage.id}`);
+  assert.equal(original.record.text, engineeringBody);
 });
 
 test('Confluence user keys support reviewed author mapping across exported files', async t => {

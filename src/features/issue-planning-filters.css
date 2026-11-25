@@ -68,6 +68,40 @@
   font-size: 0.875rem;
 }
 
+.issue-planning-release-choices {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin: 0;
+  padding: 6px 10px 8px;
+  border: 1px solid #cbded2;
+  border-radius: 6px;
+}
+
+.issue-planning-release-choices legend {
+  padding-inline: 4px;
+  font-size: 0.875rem;
+}
+
+.issue-planning-release-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: 2px 8px;
+  max-height: 13rem;
+  overflow: auto;
+}
+
+.issue-planning-release-options label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  overflow-wrap: anywhere;
+}
+
+.issue-planning-release-options input {
+  flex: none;
+}
+
 .issue-planning-filter-hint,
 .issue-planning-filter-error {
   margin: 10px 0 0;

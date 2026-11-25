@@ -2,14 +2,14 @@
 
 import { useCallback, useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { CalendarRange, Check } from 'lucide-react';
-import { parseIssueViewPlanningFilter } from '../../shared/issue-view';
+import { ISSUE_VIEW_RELEASE_LIMIT, parseIssueViewPlanningFilter } from '../../shared/issue-view';
 import type { IssueViewPlanningFilter, PlanningItem } from '../../shared/types';
 import { afterAcceptedNavigation } from '../lib/navigation';
-import { ISSUE_FILTER_DATE_LABELS, ISSUE_FILTER_PLAN_KINDS, issuePlanningFilterLabels } from './issue-planning-filter-labels';
+import { ISSUE_FILTER_DATE_LABELS, ISSUE_FILTER_PLAN_KINDS, issuePlanningFilterLabels, planningFilterItemLabel } from './issue-planning-filter-labels';
 import { PLAN_ID_FIELDS, PLAN_LABELS } from './PlanningSelectors';
 import './issue-planning-filters.css';
 
-type Selections = Pick<IssueViewPlanningFilter, 'cycleId' | 'moduleId' | 'releaseId'>;
+type Selections = Pick<IssueViewPlanningFilter, 'cycleId' | 'moduleId' | 'releaseId' | 'releaseFilter'>;
 type DateMode = keyof typeof ISSUE_FILTER_DATE_LABELS;
 type Draft = Selections & { mode: DateMode; from: string; to: string; fromDays: string; toDays: string };
 
@@ -21,7 +21,7 @@ function fromFilter(value: IssueViewPlanningFilter | undefined): Draft {
   const relative = dates?.mode === 'due_relative' ? dates : undefined;
   const range = dates?.mode === 'overlap' || dates?.mode === 'due' ? dates : relative;
   return {
-    cycleId: value?.cycleId, moduleId: value?.moduleId, releaseId: value?.releaseId,
+    cycleId: value?.cycleId, moduleId: value?.moduleId, releaseId: value?.releaseId, releaseFilter: value?.releaseFilter,
     mode: dates?.mode ?? 'all', from: range?.from ?? '', to: range?.to ?? '',
     fromDays: relative?.fromDays?.toString() ?? '', toDays: relative?.toDays?.toString() ?? '',
   };
@@ -29,6 +29,11 @@ function fromFilter(value: IssueViewPlanningFilter | undefined): Draft {
 
 function equalDraft(a: Draft, b: Draft): boolean {
   if (a.cycleId !== b.cycleId || a.moduleId !== b.moduleId || a.releaseId !== b.releaseId || a.mode !== b.mode) return false;
+  if (a.releaseFilter?.kind !== b.releaseFilter?.kind) return false;
+  if (a.releaseFilter?.kind === 'any' && b.releaseFilter?.kind === 'any') {
+    const ids = b.releaseFilter.ids;
+    if (a.releaseFilter.ids.length !== ids.length || !a.releaseFilter.ids.every(id => ids.includes(id))) return false;
+  }
   const equalRange = a.from === b.from && a.to === b.to;
   if (a.mode === 'due_relative') return equalRange && a.fromDays === b.fromDays && a.toDays === b.toDays;
   return !hasDateRange(a.mode) || equalRange;
@@ -65,6 +70,12 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
   const toggle = useRef<HTMLButtonElement>(null);
   const dirty = useRef(false);
   const labels = issuePlanningFilterLabels(value, planningItems);
+  const releases = planningItems.filter(item => item.projectId === projectId && item.kind === 'release');
+  const releaseIds = draft.releaseFilter?.kind === 'any' ? draft.releaseFilter.ids : undefined;
+  const releaseChoices = releaseIds ? [
+    ...releases.map(item => ({ id: item.id, label: planningFilterItemLabel(item) })),
+    ...releaseIds.filter(id => !releases.some(item => item.id === id)).map(id => ({ id, label: planningFilterItemLabel() })),
+  ] : [];
 
   const discard = useCallback(() => {
     dirty.current = false;
@@ -98,6 +109,17 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
     setError('');
   }
 
+  function selectPlan(kind: typeof ISSUE_FILTER_PLAN_KINDS[number], choice: string) {
+    if (kind === 'release' && (choice === 'assigned' || choice === 'any')) {
+      const releaseFilter = choice === 'assigned' ? { kind: 'assigned' as const }
+        : { kind: 'any' as const, ids: draft.releaseId ? [draft.releaseId] : [] };
+      update({ releaseId: undefined, releaseFilter });
+      return;
+    }
+    const id = choice === 'all' ? undefined : choice === 'none' ? null : choice.slice('plan:'.length);
+    update({ [PLAN_ID_FIELDS[kind]]: id, ...(kind === 'release' ? { releaseFilter: undefined } : {}) });
+  }
+
   function close() {
     discard();
     toggle.current?.focus({ preventScroll: true });
@@ -115,6 +137,9 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
       if (draft[field] !== undefined) selections[field] = draft[field];
     }
     try {
+      if (releaseIds?.length === 0) throw new Error('릴리스를 하나 이상 선택하세요.');
+      if (releaseIds?.length === 1) selections.releaseId = releaseIds[0];
+      else if (draft.releaseFilter) selections.releaseFilter = draft.releaseFilter;
       const dates = datesFromDraft(draft);
       onApply(parseIssueViewPlanningFilter({ ...selections, ...(dates ? { dates } : {}) }, projectId, planningItems));
       close();
@@ -146,20 +171,38 @@ export function IssuePlanningFilters({ projectId, planningItems, value, onApply 
           {ISSUE_FILTER_PLAN_KINDS.map(kind => {
             const field = PLAN_ID_FIELDS[kind];
             const selectedId = draft[field];
-            const options = planningItems.filter(item => item.projectId === projectId && item.kind === kind);
+            const options = kind === 'release' ? releases : planningItems.filter(item => item.projectId === projectId && item.kind === kind);
             return <label key={kind}>{PLAN_LABELS[kind]}
-              <select className="field" aria-label={`${PLAN_LABELS[kind]} 필터`} value={choice(selectedId)}
-                onChange={event => {
-                  const selected = event.target.value;
-                  update({ [field]: selected === 'all' ? undefined : selected === 'none' ? null : selected.slice('plan:'.length) });
-                }}>
+              <select className="field" aria-label={`${PLAN_LABELS[kind]} 필터`}
+                value={kind === 'release' && draft.releaseFilter ? draft.releaseFilter.kind : choice(selectedId)}
+                onChange={event => selectPlan(kind, event.target.value)}>
                 <option value="all">전체</option>
                 <option value="none">미지정</option>
+                {kind === 'release' && <>
+                  <option value="assigned">지정됨</option>
+                  <option value="any">여러 릴리스</option>
+                </>}
                 {selectedId && !options.some(item => item.id === selectedId) && <option value={choice(selectedId)}>현재 항목 없음</option>}
-                {options.map(item => <option key={item.id} value={choice(item.id)}>{item.name}{item.status === 'archived' ? ' (보관됨)' : ''}</option>)}
+                {options.map(item => <option key={item.id} value={choice(item.id)}>{planningFilterItemLabel(item)}</option>)}
               </select>
             </label>;
           })}
+          {releaseIds && <fieldset className="issue-planning-release-choices">
+            <legend>선택할 릴리스</legend>
+            <div className="issue-planning-release-options">
+              {releaseChoices.map(({ id, label }) => {
+                const checked = releaseIds.includes(id);
+                return <label key={id}>
+                  <input type="checkbox" checked={checked} disabled={!checked && releaseIds.length >= ISSUE_VIEW_RELEASE_LIMIT}
+                    onChange={event => update({ releaseFilter: { kind: 'any', ids: event.target.checked
+                      ? [...releaseIds, id] : releaseIds.filter(entry => entry !== id) } })} />
+                  <span>{label}</span>
+                </label>;
+              })}
+            </div>
+            {releaseChoices.length === 0 && <p className="issue-planning-filter-hint">선택할 릴리스가 없습니다.</p>}
+            {releaseIds.length >= ISSUE_VIEW_RELEASE_LIMIT && <p className="issue-planning-filter-hint" role="status">최대 {ISSUE_VIEW_RELEASE_LIMIT}개를 선택했습니다.</p>}
+          </fieldset>}
           <label>일정 조건
             <select className="field" aria-label="일정 조건" value={draft.mode} onChange={event => update({ mode: event.target.value as DateMode })}>
               {Object.entries(ISSUE_FILTER_DATE_LABELS).map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}

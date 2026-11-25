@@ -646,6 +646,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 `component`는 원본 Jira 프로젝트와 매핑을 확인한 뒤 `filters.fieldFilter`로 변환한다. 원본 이름이나 따옴표 없는 숫자 ID로 `=`, `IN`, `!=`, `NOT IN`을 사용하고, `IS EMPTY`와 `IS NOT EMPTY`로 값 유무를 확인한다. 제외 비교는 값이 있는 업무에 적용한다. `AND`와 컴포넌트끼리의 `OR`는 최대 8개 규칙을 담은 하나의 `all` 또는 `any` 그룹으로 표현할 수 있는 경우 변환한다. 원본에 이름만 있는 CSV는 확인한 이름으로 조회할 수 있다. 이관 근거가 불충분해 값 유무나 제외를 판단할 수 없거나 원본 값이 여러 현재 선택지로 연결되면 오류를 표시한다. [Atlassian JQL 컴포넌트](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Component)
 
+`fixVersion`에는 `=`, `IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `NULL`은 `EMPTY`와 같다. 원래 Jira 프로젝트에 속한 이름 또는 따옴표 없는 숫자 ID를 현재 릴리스 ID와 대조한다. 대표 릴리스 하나로 표현할 때 활성 이관 업무의 원본 수정 버전 집합과 같은 결과가 나오는지 확인한다. 복수 버전 중 누락된 버전 때문에 후보가 달라지거나 원본 필드가 누락된 경우 변환을 보류한다. 명확한 단일 조건과 미지정은 `filters.planning.releaseId`에 넣는다. 복수 조건은 `releaseFilter:{kind:'any',ids:[...]}`, 지정됨은 `releaseFilter:{kind:'assigned'}`로 저장한다. 복수는 같은 프로젝트의 서로 다른 릴리스 ID 2~40개를 지정하며 `releaseId`와 함께 보내면 오류다. 공유 보기에서 사용하는 릴리스는 삭제 전에 보기에서 해제한다. 새 조건을 담은 백업은 형식 126을 사용한다. [Atlassian Jira 수정 버전](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Fixversion)
+
 미리보기는 적용할 `filters`, 읽을 수 있는 `criteria`, 입력한 `orderBy`, 조건에 맞는 업무 `total`과 처음 20개 `issues`, 검토 `revision`을 반환한다. `due`·`dueDate`, `created`·`createdDate`, `updated`·`updatedDate`에 `ASC` 또는 `DESC`를 명시하고 정렬 필드가 서로 다르면 같은 순서의 `sort`를 반환한다. Teamspace의 현재 날짜를 사용하고 비어 있는 날짜는 뒤에 표시한다. `Rank`, `priority`, 방향이 생략된 기준이나 지원하지 않는 기준이 섞인 정렬은 `requiresProjectOrderAcceptance: true`를 반환한다. [Atlassian JQL 정렬](https://support.atlassian.com/jira-software-cloud/docs/jql-keywords/) · [Atlassian Jira 우선순위 순서](https://confluence.atlassian.com/adminjiraserver/associating-priorities-with-projects-939514001.html)
 
 `POST /api/views/jira/import`에 `{projectId,jql,name,layout,revision,acceptProjectOrder}`를 보낸다. `layout`은 `list` 또는 `board`다. `requiresProjectOrderAcceptance`가 있으면 `acceptProjectOrder:true`로 프로젝트 순서 적용을 확인한다. 변환 결과나 검토 업무가 바뀌면 `409`와 `details.code: 'stale_jira_view_preview'`를 반환한다. 성공 시 일반 공유 보기와 같은 형식으로 `filters`와 적용할 `sort`를 저장한다.
@@ -1073,6 +1075,8 @@ Jira 상태 변경 내역은 브라우저 API에서 `{entries,total,offset,limit
 Confluence XML에서 원본 위치가 확인된 새 형제 문서 그룹이 있으면 미리보기와 영수증의 `counts.confluenceOrderedSiblingGroups`에 집계한다. 일부 위치의 누락·중복이나 범위 불일치로 순서를 적용할 수 없는 그룹은 `counts.confluenceUnresolvedSiblingGroups`와 `CONFLUENCE_SIBLING_ORDER_UNRESOLVED`에 표시한다. 적용한 순서는 문서의 [형제 순서 조회](#형제-문서-순서)에서 읽는다.
 
 Confluence 표의 `colgroup`에서 픽셀 단위 열 너비와 병합을 포함한 셀 위치를 대조해 편집 가능한 셀의 `colwidth`에 저장한다. 표현할 수 없는 단위나 맞지 않는 격자는 원본을 코드 블록으로 보존한다. 이미 이관한 문서는 현재 본문이 이전 변환값과 일치할 때 변경분 검토에 `CONFLUENCE_REFRESH_TABLE_COLUMNS_RESTORED`를 표시한다. 팀이 수정한 본문은 충돌 비교에서 검토한다.
+
+Confluence 저장 본문의 승인된 이름 참조는 `×`, `±`, `°`, `²` 같은 문자로 변환한다. 원본 기록에는 참조 표기를 보관한다. 원본 전체를 코드 블록으로 보관한 문서는 현재 본문이 그 블록과 일치하면 변경분 검토의 `CONFLUENCE_REFRESH_ENGINEERING_ENTITIES_RESTORED`에서 편집 가능한 본문으로 복원할 수 있다.
 
 ### 새 Jira 프로젝트의 워크플로 지정
 

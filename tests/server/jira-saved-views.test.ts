@@ -28,6 +28,7 @@ type JiraSourceIssue = {
   fields?: {
     summary?: string; updated?: string; status?: JiraRestValue; issuetype?: JiraRestValue; duedate?: string | null; priority?: JiraRestValue;
     assignee?: JiraRestProfile; reporter?: JiraRestProfile; creator?: JiraRestProfile; components?: JiraRestValue[];
+    fixVersions?: JiraRestValue[];
   };
 };
 
@@ -482,7 +483,7 @@ test('Jira deadline saved views match imported source dates and preserve native 
   assert.equal(invalid.canApply, false);
   assert.ok(invalid.notices.some(notice => notice.severity === 'error' && notice.code === 'DATE_UNRESOLVED'));
   const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 125);
+  assert.equal(backup.schemaVersion, 126);
   const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 123 } }, 400);
   assert.match(older.error, /schemaVersion 124/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
@@ -531,12 +532,26 @@ test('Jira rolling deadlines move at Seoul midnight and survive export without f
   assert.deepEqual(afterMidnight.filters, review.filters);
   const view = await f.request<SavedView>(IMPORT, 'POST', { ...importView, revision: afterMidnight.revision }, 201);
   const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 125);
+  assert.equal(backup.schemaVersion, 126);
   const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 124 } }, 400);
   assert.match(older.error, /schemaVersion 125/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
   await f.request('/import', 'POST', { data: backup });
   assert.deepEqual((await f.request<SavedView[]>(VIEWS)).find(saved => saved.id === view.id), view);
+});
+
+test('Jira release filters distinguish an omitted REST field from an explicitly empty version list', async t => {
+  const f = await fixture(t);
+  const project = { id: '24510', key: 'FIXMISS' };
+  const projectId = await f.migrateJira('fix-version-incomplete', [
+    { ...project, issueId: '2001', fields: { summary: 'Known release', fixVersions: [{ id: '3001', name: 'Known version' }] } },
+    { ...project, issueId: '2002', fields: { summary: 'Explicit empty', fixVersions: [] } },
+    { ...project, issueId: '2003', fields: { summary: 'Omitted field' } },
+  ], 'TEAMFIX');
+  for (const jql of ['fixVersion = 3001', 'fixVersion IS EMPTY', 'fixVersion IS NOT EMPTY']) {
+    const error = await f.request<{ error: string }>(PREVIEW, 'POST', { projectId, jql }, 400);
+    assert.match(error.error, /전체 배정을 확인할 수 없습니다/u);
+  }
 });
 
 test('Jira multi-status saved views preserve original aliases while reviewing current workflow names', async t => {

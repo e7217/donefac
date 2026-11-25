@@ -60,8 +60,9 @@ type LinkDraft = {
   query: string;
   relatedId: string;
   dependencyId: string;
-  type: DependencyType;
-  lag: string;
+  targetDirection?: Direction;
+  type?: DependencyType;
+  lag?: string;
 };
 type LinkDraftChanges = Partial<Omit<LinkDraft, 'id'>>;
 export type GanttRowLinkDraft = (
@@ -74,6 +75,8 @@ type DraftResolution = {
   edit?: ScheduleRowDependencyEdit;
   target?: string;
   predecessor?: Issue;
+  type: DependencyType;
+  lag: string;
   lagDays: number;
   duplicateExisting: boolean;
   valid: boolean;
@@ -100,17 +103,21 @@ const ruleText = (rule: Pick<Dependency, 'type' | 'lagDays'> | null) =>
 const hasChanges = (result: SchedulePastePreview) => Boolean(result.changes.length || result.dependencyChanges?.length);
 const currentTime = () => Date.now();
 const defaultLinkDraft: Omit<LinkDraft, 'id'> = {
-  action: 'none', direction: 'predecessor', query: '', relatedId: '', dependencyId: '', type: 'FS', lag: '0',
+  action: 'none', direction: 'predecessor', query: '', relatedId: '', dependencyId: '',
+  targetDirection: undefined, type: undefined, lag: undefined,
 };
 const linkDraft = (id: number): LinkDraft => ({ ...defaultLinkDraft, id });
+const oppositeDirection = (direction: Direction): Direction => direction === 'predecessor' ? 'successor' : 'predecessor';
 
 function resolveDraft(draft: LinkDraft, anchor: Issue, projectIssues: ReadonlyMap<string, Issue>, links: readonly ExistingLink[]): DraftResolution {
-  const { action, direction, relatedId, dependencyId, lag, type } = draft;
+  const { action, direction, relatedId, dependencyId, targetDirection } = draft;
   const selected = links.find(({ dependency }) => dependency.id === dependencyId);
   const related = projectIssues.get(relatedId);
+  const type = draft.type ?? selected?.dependency.type ?? 'FS';
+  const lag = draft.lag ?? String(selected?.dependency.lagDays ?? 0);
   const lagDays = lag.trim() ? Number(lag) : NaN;
   const duplicateExisting = action === 'add' && links.some(link => link.other.id === relatedId && link.role === direction);
-  const resolution: DraftResolution = { selected, related, lagDays, duplicateExisting, valid: action === 'none' };
+  const resolution: DraftResolution = { selected, related, type, lag, lagDays, duplicateExisting, valid: action === 'none' };
 
   if (action === 'add' && related) {
     resolution.target = JSON.stringify(direction === 'predecessor' ? [related.id, anchor.id] : [anchor.id, related.id]);
@@ -126,9 +133,11 @@ function resolveDraft(draft: LinkDraft, anchor: Issue, projectIssues: ReadonlyMa
     const existing = { id: dependency.id, expectedVersion: dependency.version ?? 1, relatedIssue: versionedIssue(selected.other) };
     if (action === 'remove') resolution.edit = { action, ...existing };
     else if (resolution.valid) {
-      if (selected.role === 'predecessor') resolution.predecessor = selected.other;
-      if (type !== dependency.type || lagDays !== dependency.lagDays) {
-        resolution.edit = { action, ...existing, type, lagDays };
+      const role = targetDirection ?? selected.role;
+      const reverse = role !== selected.role;
+      if (role === 'predecessor') resolution.predecessor = selected.other;
+      if (reverse || type !== dependency.type || lagDays !== dependency.lagDays) {
+        resolution.edit = { action, ...existing, type, lagDays, ...(reverse ? { reverse: true } : {}) };
       }
     }
   }
@@ -146,7 +155,8 @@ function linksForDateSuggestion(links: readonly ExistingLink[], edits: readonly 
     } else if (edit.action === 'remove') byId.delete(edit.id);
     else {
       const link = byId.get(edit.id);
-      if (link) byId.set(edit.id, { ...link, type: edit.type, lagDays: edit.lagDays });
+      if (link) byId.set(edit.id, { ...link, type: edit.type, lagDays: edit.lagDays,
+        role: edit.reverse ? oppositeDirection(link.role) : link.role });
     }
   }
   return [...byId.values(), ...added];
@@ -277,10 +287,10 @@ export function GanttRowScheduleEdit({
   const showMissingDateSuggestion = (!nextDates.startDate || !nextDates.endDate) &&
     (links.length > 0 || incomingTeamBlockers.length > 0 || resolvedDrafts.some(({ edit }) => edit?.action === 'add'));
   const earliestDates: Partial<Record<keyof typeof SCHEDULE_DATE_LABELS, string>> = {};
-  for (const [index, resolved] of resolvedDrafts.entries()) {
+  for (const resolved of resolvedDrafts) {
     if (!resolved.predecessor || duplicateDraft(resolved)) continue;
     try {
-      const candidate = dependencyBound({ type: drafts[index].type, lagDays: resolved.lagDays }, projectedRelatedIssue(resolved.predecessor), calendarMath);
+      const candidate = dependencyBound({ type: resolved.type, lagDays: resolved.lagDays }, projectedRelatedIssue(resolved.predecessor), calendarMath);
       if (candidate && candidate.date > (nextDates[candidate.endpoint] ?? '') && candidate.date > (earliestDates[candidate.endpoint] ?? '')) {
         earliestDates[candidate.endpoint] = candidate.date;
       }
@@ -720,6 +730,7 @@ export function GanttRowScheduleEdit({
           {result.dependencyChanges?.map(change => <div className="gantt-row-edit-link-diff" key={change.line}>
             {reviewGroup(change.line) && <small className="gantt-row-edit-hint">{reviewGroup(change.line)}</small>}
             <h4>{change.predecessorKey} → {change.successorKey}</h4>
+            {change.beforeDirection && <p>이전 방향 {change.beforeDirection.predecessorKey} → {change.beforeDirection.successorKey}</p>}
             <p>{ruleText(change.before)} → <strong>{ruleText(change.after)}</strong></p>
           </div>)}
           {result.warnings.length > 0 && <div className="schedule-paste-warnings">
@@ -794,8 +805,8 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, issueA
   const searchInput = useRef<HTMLInputElement>(null);
   const directionSelect = useRef<HTMLSelectElement>(null);
   const resultsList = useRef<HTMLUListElement>(null);
-  const { action, direction, query, relatedId, dependencyId, type, lag } = draft;
-  const { related, selected, duplicateExisting } = resolved;
+  const { action, direction, query, relatedId, dependencyId, targetDirection } = draft;
+  const { related, selected, type, lag, duplicateExisting } = resolved;
   const candidates = useMemo(() => {
     if (action !== 'add' || related) return [];
     const available = [...projectIssues.values()].filter(item => item.id !== anchorId)
@@ -807,8 +818,7 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, issueA
     (!exactMatches.length && candidates.length > 1 && candidates.some(candidate => candidate.matchedAliases.length > 0));
 
   function chooseLink(id: string) {
-    const link = links.find(entry => entry.dependency.id === id);
-    onChange({ dependencyId: id, type: link?.dependency.type ?? 'FS', lag: String(link?.dependency.lagDays ?? 0) });
+    onChange({ dependencyId: id, targetDirection: undefined, type: undefined, lag: undefined });
   }
 
   function chooseRelated(item: Issue) {
@@ -889,6 +899,14 @@ function GanttRowDependencyFields({ draft, name, anchorId, projectIssues, issueA
         {links.map(({ dependency, other, role }) => <option key={dependency.id} value={dependency.id}>
           {issueText(other)} · {role === 'predecessor' ? '선행' : '후행'}
         </option>)}
+      </select>
+    </div>}
+    {action === 'update' && selected && <div className="gantt-row-edit-control">
+      <label htmlFor={`${uid}-direction`}>연결 방향</label>
+      <select id={`${uid}-direction`} className="field" value={targetDirection ?? selected.role}
+        onChange={event => onChange({ targetDirection: event.currentTarget.value as Direction })}>
+        <option value="predecessor">상대 업무가 선행</option>
+        <option value="successor">상대 업무가 후행</option>
       </select>
     </div>}
     {(action === 'add' || action === 'update' && selected) && <div className="gantt-row-edit-columns">

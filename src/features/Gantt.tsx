@@ -2068,7 +2068,7 @@ function ProjectGantt(props: GanttProps) {
         : inlineDateDrafts.current.has(predecessorId) ? sourceRow.issue : undefined;
       if (anchor) {
         const initialLink: GanttRowLinkDraft = dependency
-          ? { action: 'update', dependencyId: dependency.id, type: prefilledType ?? dependency.type, lag: String(dependency.lagDays) }
+          ? { action: 'update', dependencyId: dependency.id, type: prefilledType }
           : { action: 'add', direction: anchor.id === target.id ? 'predecessor' : 'successor',
             relatedId: anchor.id === target.id ? predecessorId : target.id, type: prefilledType ?? 'FS' };
         openRowScheduleEdit(anchor, opener, { initialLink, relatedId: anchor.id === target.id ? predecessorId : target.id, fromLinkPicker: true });

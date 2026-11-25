@@ -2024,10 +2024,12 @@ export interface IssueFieldFilter { match: 'all' | 'any'; rules: IssueFieldRule[
 export type IssueViewDateFilter = { mode: 'planned' | 'needs_dates' | 'due_set' | 'due_missing' }
   | { mode: 'overlap' | 'due'; from?: string; to?: string }
   | { mode: 'due_relative'; fromDays?: number; toDays?: number; from?: string; to?: string };
+export type IssueViewReleaseFilter = { kind: 'assigned' } | { kind: 'any'; ids: string[] };
 export interface IssueViewPlanningFilter {
   cycleId?: string | null;
   moduleId?: string | null;
   releaseId?: string | null;
+  releaseFilter?: IssueViewReleaseFilter;
   dates?: IssueViewDateFilter;
 }
 export const ISSUE_VIEW_GITLAB_FILTERS = ['open_merge_request', 'merge_blocked', 'failed_pipeline', 'running_pipeline', 'manual_pipeline', 'no_activity'] as const;

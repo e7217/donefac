@@ -343,6 +343,26 @@ function confluenceDate(value: string): boolean {
   const timestamp = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?$/u.exec(value);
   return Boolean(timestamp && isCalendarDate(timestamp[1]));
 }
+
+const confluenceStorageLiteralOrEntity = /<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|&([A-Za-z][A-Za-z0-9]*);/gu;
+const confluenceProseEntities: Readonly<Record<string, number>> = {
+  nbsp: 160, mdash: 8212, ndash: 8211, hellip: 8230, copy: 169, reg: 174, trade: 8482, euro: 8364,
+  lsquo: 8216, rsquo: 8217, ldquo: 8220, rdquo: 8221, laquo: 171, raquo: 187, bull: 8226, middot: 183,
+};
+const confluenceEngineeringEntities: Readonly<Record<string, number>> = {
+  deg: 176, plusmn: 177, sup1: 185, sup2: 178, sup3: 179, micro: 181, frac14: 188, frac12: 189, frac34: 190,
+  times: 215, divide: 247, minus: 8722, radic: 8730, infin: 8734, permil: 8240, asymp: 8776, ne: 8800,
+  le: 8804, ge: 8805, larr: 8592, uarr: 8593, rarr: 8594, darr: 8595, harr: 8596,
+  alpha: 945, beta: 946, Delta: 916, delta: 948, theta: 952, lambda: 955, mu: 956, pi: 960, sigma: 963, Omega: 937, omega: 969,
+};
+
+export function hasConfluenceEngineeringEntity(source: string): boolean {
+  for (const [, , name] of source.matchAll(confluenceStorageLiteralOrEntity)) {
+    if (name && Object.hasOwn(confluenceEngineeringEntities, name)) return true;
+  }
+  return false;
+}
+
 function decodeXml(value: string): string {
   const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', apos: "'", quot: '"' };
   return value.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|apos|quot);/g, (_, entity: string) => entity.startsWith('#') ? String.fromCodePoint(entity[1] === 'x' ? Number.parseInt(entity.slice(2), 16) : Number(entity.slice(1))) : named[entity]);
@@ -1227,11 +1247,12 @@ class Converter {
     return [{ type: 'documentToc', attrs: { minLevel, maxLevel: Math.min(maxLevel, legacy ? 3 : 6), layout } }];
   }
   storage(title: string): RichContent[] {
-    const htmlEntities: Record<string, string> = { nbsp: '160', mdash: '8212', ndash: '8211', hellip: '8230', copy: '169', reg: '174', trade: '8482', euro: '8364', lsquo: '8216', rsquo: '8217', ldquo: '8220', rdquo: '8221', laquo: '171', raquo: '187', bull: '8226', middot: '183' };
     const rawCdata: string[] = [];
-    const source = this.source.replace(/<!--[\s\S]*?-->|<!\[CDATA\[([\s\S]*?)\]\]>|&([a-zA-Z]+);/g, (match, cdata: string | undefined, entity: string | undefined) => {
+    const source = this.source.replace(confluenceStorageLiteralOrEntity, (match, cdata: string | undefined, entity: string | undefined) => {
       if (cdata !== undefined) { rawCdata.push(cdata); return match; }
-      return entity && htmlEntities[entity] ? `&#${htmlEntities[entity]};` : match;
+      if (entity && Object.hasOwn(confluenceProseEntities, entity)) return `&#${confluenceProseEntities[entity]};`;
+      if (entity && Object.hasOwn(confluenceEngineeringEntities, entity)) return `&#${confluenceEngineeringEntities[entity]};`;
+      return match;
     });
     if (source.includes('<?')) return this.fallback('XML 처리 지시문이 있는 저장 본문', this.source);
     const wrapped = `<migration-root>${source}</migration-root>`; parseLegacyXml(wrapped);

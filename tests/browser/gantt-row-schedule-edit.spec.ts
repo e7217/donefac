@@ -60,6 +60,99 @@ async function openRow(page: Page, issue: Issue, actorId: string) {
   return { search, opener, dialog };
 }
 
+test('360px 간트에서 날짜 초안과 기존 연결 방향을 함께 저장하고 동료의 연결 편집까지 보존한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  try {
+    const anchor = await f.issue('날짜 초안과 방향을 바꾸는 업무', { startDate: date(16), endDate: date(17) });
+    const other = await f.issue('이전에는 후행이었던 업무', { startDate: date(20), endDate: date(23) });
+    const dependency = await json<Dependency>(await request.post('/api/dependencies', { headers: f.headers, data: {
+      predecessorId: anchor.id, successorId: other.id, type: 'FS', lagDays: 0,
+    } }), 201);
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(`/#/${f.project.id}/gantt`);
+    const search = page.getByRole('textbox', { name: '간트 업무 검색', exact: true });
+    await expect(search).toBeVisible({ timeout: 35_000 });
+    await search.fill(anchor.title);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const rowStart = chart.getByLabel(`${anchor.key} 시작일`, { exact: true });
+    const rowEnd = chart.getByLabel(`${anchor.key} 종료일`, { exact: true });
+    const draft = { startDate: date(27), endDate: date(30) };
+    await rowStart.fill(draft.startDate);
+    await rowEnd.fill(draft.endDate);
+    const opener = chart.getByRole('button', { name: `${anchor.key} 일정과 연결 편집`, exact: true });
+    await opener.click();
+    const dialog = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    const role = dialog.getByLabel('연결 방향', { exact: true });
+    await dialog.getByLabel('선후행 연결 작업', { exact: true }).selectOption('update');
+    await dialog.getByLabel('편집할 연결', { exact: true }).selectOption(dependency.id);
+    await expect(role).toHaveValue('successor');
+    await role.selectOption('predecessor');
+    await expect(dialog.getByLabel('시작일', { exact: true })).toHaveValue(draft.startDate);
+    await expect(dialog.getByLabel('종료일', { exact: true })).toHaveValue(draft.endDate);
+
+    const apply = dialog.getByRole('button', { name: '일정과 연결 적용', exact: true });
+    async function preview() {
+      const pending = waitPost(page, previewPath);
+      await dialog.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+      const response = await pending;
+      return { input: response.request().postDataJSON() as ScheduleRowEditInput, result: await json<SchedulePastePreview>(response) };
+    }
+    const first = await preview();
+    expect(first.input.changes).toEqual(draft);
+    expect(first.input.dependency).toMatchObject({ action: 'update', id: dependency.id, expectedVersion: dependency.version, reverse: true, type: 'FS', lagDays: 0 });
+    expect(first.result.warnings).toEqual([]);
+    expect(first.result.dependencyChanges).toMatchObject([{ predecessorKey: other.key, successorKey: anchor.key,
+      beforeDirection: { predecessorKey: anchor.key, successorKey: other.key } }]);
+    const review = dialog.getByRole('region', { name: '일정과 연결 미리보기', exact: true });
+    await expect(review).toContainText(`이전 방향 ${anchor.key} → ${other.key}`);
+    await expect(review.getByRole('heading', { name: `${other.key} → ${anchor.key}`, exact: true })).toBeVisible();
+
+    const peer = (await load(request)).users.find(user => user.id !== f.actor.id)!;
+    const changedByPeer = await json<Dependency>(await request.patch(`/api/dependencies/${dependency.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: dependency.version, type: 'FF', lagDays: 2 },
+    }));
+    const rejected = waitPost(page, applyPath);
+    await apply.click();
+    expect((await rejected).status()).toBe(409);
+    await expect(apply).toBeDisabled();
+    const afterConflict = await load(request);
+    expect(afterConflict.issues.find(issue => issue.id === anchor.id)).toEqual(anchor);
+    expect(afterConflict.dependencies.find(link => link.id === dependency.id)).toEqual(changedByPeer);
+
+    await dialog.getByRole('button', { name: '최신 업무 불러오기', exact: true }).click();
+    await expect(role).toHaveValue('predecessor');
+    await expect(dialog.getByLabel('연결 유형', { exact: true })).toHaveValue('FF');
+    await expect(dialog.getByLabel('간격 (근무일)', { exact: true })).toHaveValue('2');
+    await expect(dialog.getByLabel('시작일', { exact: true })).toHaveValue(draft.startDate);
+    await expect(dialog.getByLabel('종료일', { exact: true })).toHaveValue(draft.endDate);
+    const latest = await preview();
+    expect(latest.input.changes).toEqual(draft);
+    expect(latest.input.dependency).toMatchObject({ action: 'update', id: dependency.id, expectedVersion: changedByPeer.version, reverse: true, type: 'FF', lagDays: 2 });
+    expect(latest.result.warnings).toEqual([]);
+    const saving = waitPost(page, applyPath);
+    await apply.click();
+    const receipt = await json<SchedulePasteApplyResult>(await saving);
+    expect(receipt.dependencyChanges).toBe(1);
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    const saved = await load(request);
+    expect(saved.dependencies.find(link => link.id === dependency.id)).toMatchObject({ predecessorId: other.id, successorId: anchor.id, type: 'FF', lagDays: 2 });
+    expect(saved.issues.find(issue => issue.id === anchor.id)).toMatchObject({ ...draft, version: anchor.version + 1 });
+
+    const undoing = waitPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.request().postDataJSON()).toEqual({ undoId: receipt.undoId });
+    expect(await json<{ dependencyChanges: number }>(undone)).toMatchObject({ dependencyChanges: 1 });
+    const restored = await load(request);
+    expect(restored.dependencies.find(link => link.id === dependency.id)).toMatchObject({ predecessorId: anchor.id, successorId: other.id, type: 'FF', lagDays: 2 });
+    await expect(rowStart).toHaveValue(anchor.startDate!);
+    await expect(rowEnd).toHaveValue(anchor.endDate!);
+  } finally { await f.close(); }
+});
+
 test('360px 간트에서 날짜와 숨은 선행 업무를 저장하고 화면을 다시 연 뒤 같은 변경을 되돌린다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const f = await fixture(request);

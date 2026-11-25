@@ -13,7 +13,7 @@ import { documentSectionHash } from '../shared/document-sections.js';
 import { contentReferences } from '../shared/document-nodes.js';
 import { isJiraIssueKey } from '../shared/atlassian-links.js';
 import { readDocumentSelection } from './document-content.js';
-import { convertLegacyContent } from './migration-content.js';
+import { convertLegacyContent, hasConfluenceEngineeringEntity } from './migration-content.js';
 import { confluenceParentEvidence, confluencePositionEvidence } from './migration-confluence-hierarchy.js';
 import { confluenceSectionAliases, legacySectionId } from './migration-confluence-sections.js';
 import { hasConfluencePropertyMacro, hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
@@ -430,8 +430,8 @@ function hasConfluenceHeadingDepth(record: LegacyRecord): boolean {
   return hasConfluenceBody(record) && /<h[4-6](?=[\s/>])|<ac:(?:structured-macro|macro)\s[^<>]*\bac:name\s*=\s*(?:"toc"|'toc')/u.test(record.text);
 }
 
-function hasOriginalConfluenceChecklistFallback(record: LegacyRecord, current: DocPage['content']): boolean {
-  if (!hasConfluenceBody(record) || !/<ac:task-list(?=[\s/>])/u.test(record.text) || current.content?.length !== 1) return false;
+function hasOriginalConfluenceRawFallback(record: LegacyRecord, current: DocPage['content']): boolean {
+  if (!hasConfluenceBody(record) || current.content?.length !== 1) return false;
   const [block] = current.content;
   const [value] = block.content ?? [];
   return block.type === 'codeBlock' && block.attrs?.language == null && block.content?.length === 1 &&
@@ -1459,7 +1459,10 @@ class Planner{
       seen.add(document.id);
       const timezone = this.configuration.timezone;
       const newer = newerConfluencePage(row, previous.record, timezone, previousTimezone);
-      const originalChecklistFallback = hasOriginalConfluenceChecklistFallback(previous.record, document.content);
+      const originalRawFallback = hasOriginalConfluenceRawFallback(previous.record, document.content);
+      const originalChecklistFallback = originalRawFallback && /<ac:task-list(?=[\s/>])/u.test(previous.record.text);
+      const originalEngineeringFallback = originalRawFallback && hasConfluenceEngineeringEntity(previous.record.text);
+      const canRepairRawFallback = originalChecklistFallback || originalEngineeringFallback;
       const propertiesProjection = hasConfluenceBody(row) && hasConfluencePropertyMacro(row.text);
       const sameSourceRevision = !newer && !sourceBodyErrors.has(entry.key) &&
         sameConfluencePageRevision(row, previous.record, timezone, previousTimezone);
@@ -1532,7 +1535,7 @@ class Planner{
           }
         }
       }
-      const sameRevision = sameSourceRevision && (row.metadata.labelSetComplete === true || originalChecklistFallback ||
+      const sameRevision = sameSourceRevision && (row.metadata.labelSetComplete === true || canRepairRawFallback ||
         propertiesProjection || childListBaseline !== undefined || headingDepthBaseline !== undefined || recoveredBody !== undefined);
       const sourceParent = confluenceParentEvidence(row);
       const reviewParent = sourceParent !== undefined && (newer || laterConfluenceHierarchy(row, previous.record, timezone, previousTimezone));
@@ -1545,7 +1548,7 @@ class Planner{
       if (newer && (!title || title.length > 300)) {
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
-      const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (originalChecklistFallback ||
+      const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (canRepairRawFallback ||
         childListBaseline !== undefined || headingDepthBaseline !== undefined || recoveredBody !== undefined ||
         incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
@@ -1590,7 +1593,7 @@ class Planner{
       if (headingDepthBaseline) hashes.content = headingDepthBaseline;
       if (recoveredBody) hashes.content = recoveredBody.baseline;
       if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = confluencePageFieldDigest('parentId', initialParentId);
-      if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
+      if (canRepairRawFallback && !previous.confluencePageFieldHashes?.content) {
         // For old receipts, the full original code block is the only proven baseline.
         hashes.content = confluencePageFieldDigest('content', document.content);
       }
@@ -1642,6 +1645,8 @@ class Planner{
         if (decision === 'apply') {
           if (field === 'content' && sameRevision && originalChecklistFallback) this.notice('CONFLUENCE_REFRESH_CHECKLIST_RESTORED',
             '원문 블록으로 보관된 본문을 편집 가능한 체크리스트가 있는 본문으로 바꿉니다.', 'warning', entry, true);
+          if (field === 'content' && sameRevision && originalEngineeringFallback) this.notice('CONFLUENCE_REFRESH_ENGINEERING_ENTITIES_RESTORED',
+            '원문 블록으로 보관된 기호와 단위 표기가 편집 가능한 본문에 표시됩니다.', 'warning', entry, true);
           if (field === 'content' && sameRevision && propertiesProjection && !childListBaseline) this.notice('CONFLUENCE_REFRESH_DOCUMENT_PROPERTIES_RESTORED',
             '같은 원본 버전의 속성 표나 보고서를 편집 가능한 문서 블록으로 바꿉니다.', 'warning', entry, true);
           if (field === 'content' && sameRevision && childListBaseline) this.notice('CONFLUENCE_REFRESH_CHILD_LIST_ORDER_RESTORED',

@@ -383,6 +383,34 @@ test('shared planning filters validate exact project and kind, allow archived pl
   } finally { await f.close(); rmSync(f.dir, {recursive: true, force: true}); }
 });
 
+test('saved multi-release views validate each ID and protect unused referenced releases', async () => {
+  const f = await fixture();
+  try {
+    const first = await addPlanningItem(f, 'release', '첫 릴리스');
+    const second = await addPlanningItem(f, 'release', '둘째 릴리스');
+    const foreign = await addPlanningItem(f, 'release', '다른 프로젝트 릴리스', 'project-team');
+    const create = (planning: unknown) => f.request('/views', 'POST', { ...definition, filters: { ...definition.filters, planning } });
+    for (const invalid of [
+      { releaseFilter: { kind: 'any', ids: [first.id] } },
+      { releaseFilter: { kind: 'any', ids: [first.id, first.id] } },
+      { releaseFilter: { kind: 'any', ids: [first.id, foreign.id] } },
+      { releaseFilter: { kind: 'assigned', ids: [] } },
+      { releaseFilter: { kind: 'assigned' }, releaseId: null },
+    ]) assert.equal((await create(invalid)).status, 400);
+    const view = await create({ releaseFilter: { kind: 'any', ids: [second.id, first.id] } });
+    assert.equal(view.status, 201, JSON.stringify(view.data));
+    assert.deepEqual(view.data.filters.planning, { releaseFilter: { kind: 'any', ids: [first.id, second.id].sort() } });
+    const path = `/planning-items/${second.id}?expectedVersion=${second.version}`;
+    const blocked = await f.request(path, 'DELETE');
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.data.details.viewId, view.data.id);
+    const updated = await f.request(`/views/${view.data.id}`, 'PATCH', { expectedVersion: view.data.version,
+      filters: { ...definition.filters, planning: { releaseFilter: { kind: 'assigned' } } } });
+    assert.equal(updated.status, 200);
+    assert.equal((await f.request(path, 'DELETE')).status, 200);
+  } finally { await f.close(); rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('native restore validates planning views against the imported workspace and protects legacy format boundaries', async () => {
   const f = await fixture();
   try {

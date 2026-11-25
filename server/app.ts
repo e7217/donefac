@@ -3238,6 +3238,9 @@ export function createApp(options: {
     if (data.schemaVersion < 125 && importedViews.some(({ filters }) => filters.planning?.dates?.mode === 'due_relative')) {
       fail('오늘 기준 마감일 조건을 포함한 보기는 schemaVersion 125가 필요합니다.');
     }
+    if (data.schemaVersion < 126 && importedViews.some(({ filters }) => filters.planning?.releaseFilter)) {
+      fail('릴리스 지정 또는 여러 릴리스 조건을 포함한 보기는 schemaVersion 126이 필요합니다.');
+    }
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {
       fail('저장된 필드 집계가 포함된 백업은 schemaVersion 92가 필요합니다.');

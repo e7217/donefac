@@ -25,6 +25,10 @@ function rangeLabel(from: string | undefined, to: string | undefined): string {
   return to ? `${to}까지` : '';
 }
 
+export function planningFilterItemLabel(item?: PlanningItem): string {
+  return item ? `${item.name}${item.status === 'archived' ? ' (보관됨)' : ''}` : '현재 항목 없음';
+}
+
 export function issuePlanningFilterLabels(filter: IssueViewPlanningFilter | undefined, planningItems: readonly PlanningItem[]): string[] {
   if (!filter) return [];
   const labels: string[] = [];
@@ -36,9 +40,15 @@ export function issuePlanningFilterLabels(filter: IssueViewPlanningFilter | unde
       labels.push(`${label} 미지정`);
     } else {
       const item = planningItems.find(value => value.id === id && value.kind === kind);
-      const name = item ? item.name + (item.status === 'archived' ? ' (보관됨)' : '') : '현재 항목 없음';
-      labels.push(`${label} · ${name}`);
+      labels.push(`${label} · ${planningFilterItemLabel(item)}`);
     }
+  }
+  const release = filter.releaseFilter;
+  if (release?.kind === 'assigned') {
+    labels.push('릴리스 지정됨');
+  } else if (release?.kind === 'any') {
+    const names = release.ids.map(id => planningFilterItemLabel(planningItems.find(item => item.id === id && item.kind === 'release')));
+    labels.push(`릴리스 · ${names.join(', ')}`);
   }
   const dates = filter.dates;
   if (!dates) return labels;

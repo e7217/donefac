@@ -1,10 +1,10 @@
 import { calendarDate, calendarDay, isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from './calendar.js';
 import { MAX_FIELD_FILTER_RULES } from './issue-field-filter.js';
 import {
-  ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_STATUS_LIMIT,
+  ISSUE_VIEW_LABEL_FILTER_LIMIT, ISSUE_VIEW_LABEL_MAX_LENGTH, ISSUE_VIEW_RELEASE_LIMIT, ISSUE_VIEW_STATUS_LIMIT,
   isIssueViewRelativeDueDay, issuePriorityLabelFilterLabels, issueViewStatusCriteria, parseIssueViewLabelFilter, parseIssueViewPriorities,
 } from './issue-view.js';
-import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueFieldFilter, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
+import { JIRA_SAVED_VIEW_QUERY_LIMIT, PRIORITY, type IssueFieldFilter, type IssueTypeDefinition, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewSortRule, type JiraSavedViewPreview, type Priority, type Project, type User, type WorkflowStatus } from './types.js';
 
 export interface JiraViewComponentField {
   fieldId: string;
@@ -12,6 +12,12 @@ export interface JiraViewComponentField {
   resolve: (value: string, quoted: boolean) => { kind: 'mapped'; targetId: string; label: string }
     | { kind: 'ambiguous' | 'unmapped' } | undefined;
   hasCompleteCoverage: boolean;
+}
+
+export interface JiraViewReleaseField {
+  resolve(value: string, quoted: boolean): { kind: 'mapped'; sourceId: string; targetId: string; label: string }
+    | { kind: 'ambiguous' | 'unmapped' };
+  verify(matchesSource: (ids: ReadonlySet<string>) => boolean, matchesCurrent: (id: string | null) => boolean): 'exact' | 'unknown' | 'different';
 }
 
 export interface JiraViewQueryContext {
@@ -23,6 +29,7 @@ export interface JiraViewQueryContext {
   users: readonly Pick<User, 'id' | 'name' | 'email'>[];
   prepareSourceAliases?: (fields: readonly JiraViewAliasField[]) => JiraViewSourceAliasResolver | undefined;
   prepareComponentField?: () => JiraViewComponentField | undefined;
+  prepareReleaseField?: () => JiraViewReleaseField | undefined;
 }
 
 export class JiraViewQueryError extends Error {
@@ -45,7 +52,7 @@ export type JiraViewSourceAlias = {
 } | { kind: 'ambiguous' | 'unmapped' };
 export type JiraViewSourceAliasResolver = (field: JiraViewAliasField, value: string) => JiraViewSourceAlias | undefined;
 type ScalarField = 'project' | Exclude<JiraViewAliasField, 'priority'>;
-type Field = ScalarField | 'priority' | 'labels' | 'due' | 'component';
+type Field = ScalarField | 'priority' | 'labels' | 'due' | 'component' | 'fixVersion';
 type Token = { kind: 'word' | 'quoted' | 'symbol' | 'end'; value: string; offset: number };
 type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
   | { operator: '=' | '!=' | 'in' | 'not in'; values: Token[] }
@@ -54,6 +61,7 @@ type BasicClause = { field: Exclude<Field, 'due'>; offset: number } & (
 type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
 type ComponentClause = (BasicClause & { field: 'component' }) | { field: 'component'; offset: number; branches: ComponentClause[][] };
+type FixVersionClause = BasicClause & { field: 'fixVersion' };
 type PriorityClause = { offset: number; values: Token[] };
 type DueClause = { field: 'due'; offset: number; from?: string; to?: string; fromDays?: number; toDays?: number; presence?: 'empty' | 'set' };
 type CurrentUserClause = { field: 'assignee' | 'reporter'; offset: number; operator: 'current-user' };
@@ -66,6 +74,10 @@ function isStatusClause(clause: Clause): clause is StatusClause {
 
 function isComponentClause(clause: Clause): clause is ComponentClause {
   return clause.field === 'component';
+}
+
+function isFixVersionClause(clause: Clause): clause is FixVersionClause {
+  return clause.field === 'fixVersion';
 }
 
 const MAX_TOKENS = 512;
@@ -82,7 +94,7 @@ const reservedWords = new Set([
 const dueOperators = ['=', '<', '<=', '>', '>='];
 const fieldLabels: Record<Field, string> = {
   project: '프로젝트', status: '상태', type: '이슈 유형', assignee: '담당자', reporter: '요청자', priority: '우선순위',
-  labels: '라벨', due: '목표 마감일', component: 'Jira 컴포넌트',
+  labels: '라벨', due: '목표 마감일', component: 'Jira 컴포넌트', fixVersion: 'Jira 수정 버전',
 };
 const disjunctionMessage = 'OR는 상태 조건끼리 또는 컴포넌트 조건끼리 연결할 수 있습니다. 다른 조건과 AND로 연결할 때는 OR 조건을 괄호로 묶어 주세요.';
 const priorities = (Object.keys(PRIORITY) as Priority[]).map(id => ({ id, label: PRIORITY[id] }));
@@ -157,6 +169,8 @@ function parseField(token: Token): Field {
       return 'type';
     case 'duedate':
       return 'due';
+    case 'fixversion':
+      return 'fixVersion';
     default:
       throw new JiraViewQueryError('이 JQL 필드는 이슈 보기에서 지원되지 않습니다.', token.offset);
   }
@@ -255,6 +269,7 @@ class QueryParser {
     }
     if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
     if (base.field === 'priority' && this.consume('in')) return { ...base, operator: 'in', values: this.list(fieldLabels.priority, MAX_TOKENS) };
+    if (field === 'fixVersion' && this.consume('in')) return { ...base, operator: 'in', values: this.list(fieldLabels.fixVersion, ISSUE_VIEW_RELEASE_LIMIT) };
     const isMultiValue = field === 'labels' || field === 'component';
     if (isMultiValue) {
       const label = fieldLabels[field];
@@ -269,8 +284,8 @@ class QueryParser {
         return { ...base, operator: 'not in', values: this.list(label, limit) };
       }
     }
-    if ((field === 'assignee' || field === 'reporter' || isMultiValue) && this.consume('is')) {
-      const operator = isMultiValue && this.consume('not') ? 'set' : 'empty';
+    if ((field === 'assignee' || field === 'reporter' || field === 'fixVersion' || isMultiValue) && this.consume('is')) {
+      const operator = (isMultiValue || field === 'fixVersion') && this.consume('not') ? 'set' : 'empty';
       if (!this.consume('empty') && !this.consume('null')) throw new JiraViewQueryError('값이 비어 있는지 확인하려면 EMPTY 또는 NULL을 사용해 주세요.', this.current().offset);
       return { ...base, operator };
     }
@@ -698,6 +713,53 @@ function componentFilter(clauses: readonly ComponentClause[], context: JiraViewQ
   return { filter, label: `${field.name} · ${label}` };
 }
 
+function fixVersionFilter(clauses: readonly FixVersionClause[], context: JiraViewQueryContext) {
+  if (!clauses.length) return undefined;
+  const offset = clauses[0].offset;
+  const field = context.prepareReleaseField?.();
+  if (!field) throw new JiraViewQueryError('선택한 프로젝트에서 이관한 Jira 릴리스의 범위를 확인할 수 없습니다.', offset);
+
+  let presence: 'empty' | 'set' | undefined;
+  const groups: Set<string>[] = [];
+  const mapped = new Map<string, { targetId: string; label: string }>();
+  for (const clause of clauses) {
+    if (!('values' in clause)) {
+      if (presence && clause.operator !== presence) throw new JiraViewQueryError('수정 버전 지정 여부 조건이 서로 충돌합니다.', clause.offset);
+      presence = clause.operator;
+      continue;
+    }
+    const group = new Set<string>();
+    for (const value of clause.values) {
+      const result = field.resolve(value.value, value.kind === 'quoted');
+      if (result.kind !== 'mapped') {
+        const detail = result.kind === 'ambiguous' ? '원본 수정 버전을 하나로 구분할 수 없습니다.' : '이관한 릴리스와 대응하는 원본 수정 버전을 찾을 수 없습니다.';
+        throw new JiraViewQueryError(detail, value.offset);
+      }
+      mapped.set(result.sourceId, result);
+      group.add(result.sourceId);
+    }
+    groups.push(group);
+  }
+  if (presence === 'empty' && groups.length) throw new JiraViewQueryError('미지정 수정 버전과 릴리스 선택을 함께 사용할 수 없습니다.', offset);
+  const selected = [...(groups[0] ?? [])].filter(id => groups.every(group => group.has(id))).sort();
+  if (groups.length && !selected.length) throw new JiraViewQueryError('서로 다른 수정 버전을 동시에 선택하는 조건은 대표 릴리스 보기로 표현할 수 없습니다.', offset);
+  const current = selected.map(id => mapped.get(id)!);
+  const targets = new Set(current.map(({ targetId }) => targetId));
+  const matchesSource = (ids: ReadonlySet<string>) => presence === 'empty' ? ids.size === 0
+    : ids.size > 0 && groups.every(group => [...group].some(id => ids.has(id)));
+  const matchesCurrent = (id: string | null) => presence === 'empty' ? id === null
+    : id !== null && (!targets.size || targets.has(id));
+  const coverage = field.verify(matchesSource, matchesCurrent);
+  if (coverage === 'unknown') throw new JiraViewQueryError('원본 수정 버전의 전체 배정을 확인할 수 없습니다. 이관 원본의 수정 버전 필드를 확인해 주세요.', offset);
+  if (coverage === 'different') throw new JiraViewQueryError('원본 수정 버전과 현재 대표 릴리스의 결과가 다릅니다. 복수 버전의 대표 선택 또는 팀에서 변경한 릴리스를 확인해 주세요.', offset);
+
+  const filter: Pick<IssueViewPlanningFilter, 'releaseId' | 'releaseFilter'> = presence === 'empty' ? { releaseId: null }
+    : current.length === 1 ? { releaseId: current[0].targetId }
+    : { releaseFilter: { ...(current.length ? { kind: 'any', ids: [...targets].sort() } : { kind: 'assigned' }) } };
+  const label = current.length ? current.map(value => value.label).join(' 또는 ') : presence === 'empty' ? '미지정' : '지정됨';
+  return { filter, label: `릴리스 · ${label}` };
+}
+
 /** Translate only conditions the normal project issue matcher can evaluate without approximation. */
 export function translateJiraViewQuery(query: unknown, context: JiraViewQueryContext): Translation {
   if (typeof query !== 'string') throw new JiraViewQueryError('JQL을 입력해 주세요.');
@@ -708,7 +770,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   const aliasFields = new Set<JiraViewAliasField>();
   if (context.prepareSourceAliases) for (const clause of clauses) {
     if (('values' in clause || 'branches' in clause) &&
-        clause.field !== 'project' && clause.field !== 'labels' && clause.field !== 'component') aliasFields.add(clause.field);
+        clause.field !== 'project' && clause.field !== 'labels' && clause.field !== 'component' && clause.field !== 'fixVersion') aliasFields.add(clause.field);
   }
   const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
@@ -723,7 +785,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
       continue;
     }
     const { field } = clause;
-    if (field === 'component') continue;
+    if (field === 'component' || field === 'fixVersion') continue;
     if (field === 'labels') {
       labelClauses.push(clause);
       continue;
@@ -766,7 +828,8 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   if (selectedPriorities) filters.priorities = selectedPriorities;
   const [priorityLabel] = issuePriorityLabelFilterLabels({ priorities: selectedPriorities });
   const due = dueFilter(dueClauses);
-  if (due) filters.planning = { dates: due.dates };
+  const release = fixVersionFilter(clauses.filter(isFixVersionClause), context);
+  if (due || release) filters.planning = { ...(due ? { dates: due.dates } : {}), ...release?.filter };
   const component = componentFilter(clauses.filter(isComponentClause), context);
   if (component) filters.fieldFilter = component.filter;
   const fields = new Set(clauses.map(clause => clause.field));
@@ -775,7 +838,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     ...[...fields].flatMap(field => {
       if (field === 'project' || field === 'labels') return [];
       const label = field === 'status' ? statusLabel : field === 'due' ? due?.label : field === 'priority' ? priorityLabel
-        : field === 'component' ? component?.label : conditions.get(field)?.label;
+        : field === 'component' ? component?.label : field === 'fixVersion' ? release?.label : conditions.get(field)?.label;
       return label === undefined ? [] : [{ field, label }];
     }),
     ...issuePriorityLabelFilterLabels({ labels }).map(label => ({ field: 'labels', label })),

@@ -333,3 +333,134 @@ test('릴리스와 일정 조건을 공유 보기에 저장해 보드·간트·�
     for (const item of items) await request.delete(`/api/planning-items/${item.id}?expectedVersion=${item.version}`);
   }
 });
+
+test('여러 릴리스와 지정 여부 필터를 업무에서 편집하고 간트 공유 보기에서 그대로 연다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const prefix = `릴리스 보기 ${randomUUID().slice(0, 8)}`;
+  const { projects: [project] } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const releases: PlanningItem[] = [];
+  const issues: Issue[] = [];
+  let view: SavedView | undefined;
+  const list = page.locator('.issue-table');
+  const listRow = (issue: Issue) => list.locator(`[data-issue-id="${issue.id}"]`);
+  const gantt = page.getByRole('region', { name: '간트 차트', exact: true });
+  const ganttRow = (issue: Issue) => gantt.locator(`[data-issue-id="${issue.id}"]`);
+  async function createRelease(label: string) {
+    const response = await request.post('/api/planning-items', { data: { projectId: project.id, kind: 'release', name: `${prefix} ${label}` } });
+    expect(response.status(), await response.text()).toBe(201);
+    const release = await response.json() as PlanningItem;
+    releases.push(release);
+    return release;
+  }
+  async function createIssue(label: string, releaseId: string | null, dueDate: string | null) {
+    const response = await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${prefix} ${label}`, releaseId, dueDate, startDate: '2026-11-25', endDate: '2026-11-26',
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    issues.push(issue);
+    return issue;
+  }
+
+  try {
+    const alpha = await createRelease('A');
+    const beta = await createRelease('B');
+    const gamma = await createRelease('C');
+    const a = await createIssue('첫째 업무', alpha.id, '2026-11-26');
+    const b = await createIssue('둘째 업무', beta.id, null);
+    const c = await createIssue('셋째 업무', gamma.id, '2026-11-26');
+    const unassigned = await createIssue('릴리스 미지정 업무', null, '2026-11-26');
+    view = await createView(request, project.id, `${prefix} 공유`, {
+      query: prefix, status: 'all', assigneeId: 'all', type: 'all', planning: { releaseFilter: { kind: 'any', ids: [alpha.id, beta.id] } },
+    });
+    await page.goto(`/#/${project.id}/issues`);
+    const viewPicker = page.getByRole('combobox', { name: '저장된 업무 보기', exact: true });
+    await viewPicker.selectOption(view.id);
+    await expect(listRow(a)).toBeVisible();
+    await expect(listRow(b)).toBeVisible();
+    await expect(listRow(c)).toHaveCount(0);
+    await expect(listRow(unassigned)).toHaveCount(0);
+
+    const toggle = page.getByRole('button', { name: '계획·일정 필터', exact: true });
+    const editor = page.getByRole('region', { name: '계획·일정 필터', exact: true });
+    const selector = editor.getByRole('combobox', { name: '릴리스 필터', exact: true });
+    const schedule = editor.getByRole('combobox', { name: '일정 조건', exact: true });
+    const apply = editor.getByRole('button', { name: '적용', exact: true });
+    const selection = editor.getByRole('group', { name: '선택할 릴리스', exact: true });
+    const choice = (release: PlanningItem) => selection.getByRole('checkbox', { name: release.name, exact: true });
+    await toggle.click();
+    await expect(selector).toHaveValue('any');
+    await expect(choice(alpha)).toBeChecked();
+    await expect(choice(beta)).toBeChecked();
+    await expect(choice(gamma)).not.toBeChecked();
+    await choice(beta).uncheck();
+    await apply.click();
+    await expect(listRow(a)).toBeVisible();
+    await expect(listRow(b)).toHaveCount(0);
+    await toggle.click();
+    await expect(selector).toHaveValue(`plan:${alpha.id}`);
+    await selector.selectOption({ label: '여러 릴리스' });
+    await expect(choice(alpha)).toBeChecked();
+    await choice(beta).check();
+    await schedule.selectOption('due_set');
+    await apply.click();
+    await expect(listRow(a)).toBeVisible();
+    await expect(listRow(b)).toHaveCount(0);
+    await expect(listRow(c)).toHaveCount(0);
+
+    await toggle.click();
+    await expect(choice(alpha)).toBeChecked();
+    await expect(choice(beta)).toBeChecked();
+    await choice(alpha).uncheck();
+    await choice(gamma).check();
+    await schedule.selectOption('all');
+    await apply.click();
+    await expect(listRow(b)).toBeVisible();
+    await expect(listRow(c)).toBeVisible();
+    await expect(listRow(a)).toHaveCount(0);
+    await expect(listRow(unassigned)).toHaveCount(0);
+
+    const savePath = `/api/views/${view.id}`;
+    await page.getByRole('button', { name: '보기 수정', exact: true }).click();
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname === savePath && response.request().method() === 'PATCH');
+    await page.getByRole('dialog', { name: '저장된 보기 수정', exact: true }).getByRole('button', { name: '저장', exact: true }).click();
+    const savedResponse = await saved;
+    expect(savedResponse.ok(), await savedResponse.text()).toBe(true);
+    view = await savedResponse.json() as SavedView;
+    expect(view.filters.planning?.releaseFilter).toEqual({ kind: 'any', ids: [beta.id, gamma.id].sort() });
+    expect(view.filters.planning?.releaseId).toBeUndefined();
+
+    await toggle.click();
+    await selector.selectOption({ label: '지정됨' });
+    await apply.click();
+    const applied = page.getByRole('list', { name: '적용된 계획·일정 조건', exact: true });
+    await expect(applied).toContainText('릴리스 지정됨');
+    await expect(listRow(a)).toBeVisible();
+    await expect(listRow(b)).toBeVisible();
+    await expect(listRow(c)).toBeVisible();
+    await expect(listRow(unassigned)).toHaveCount(0);
+
+    await page.reload();
+    await expect(viewPicker).toHaveValue(view.id);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    await expect(ganttRow(b)).toBeVisible();
+    await expect(ganttRow(c)).toBeVisible();
+    await expect(ganttRow(a)).toHaveCount(0);
+    await expect(ganttRow(unassigned)).toHaveCount(0);
+    const criteria = page.getByRole('list', { name: '간트에 적용된 계획·일정 조건', exact: true });
+    await expect(criteria).toContainText(beta.name);
+    await expect(criteria).toContainText(gamma.name);
+    await page.reload();
+    await expect(ganttRow(b)).toBeVisible();
+    await expect(ganttRow(c)).toBeVisible();
+    await expect(ganttRow(unassigned)).toHaveCount(0);
+  } finally {
+    if (view) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+    for (const issue of issues) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json()).trashEntryId}`);
+    }
+    for (const release of releases) await request.delete(`/api/planning-items/${release.id}?expectedVersion=${release.version}`);
+  }
+});

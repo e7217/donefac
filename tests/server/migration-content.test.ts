@@ -7,7 +7,7 @@ import { documentSectionHash } from '../../shared/document-sections.js';
 import { locateDocumentSelection } from '../../shared/document-selection-highlight.js';
 import { createEditorSchema } from '../../shared/editor-schema.js';
 import { normalizeDocumentContent, readDocumentSelection } from '../../server/document-content.js';
-import { convertLegacyContent, extractJiraOriginalCommentLinks, MAX_JIRA_ORIGINAL_COMMENT_LINKS, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
+import { convertLegacyContent, extractJiraOriginalCommentLinks, hasConfluenceEngineeringEntity, MAX_JIRA_ORIGINAL_COMMENT_LINKS, type MigrationContentContext, type MigrationContentResult, type MigrationReferenceInput } from '../../server/migration-content.js';
 
 const source = (textFormat: LegacyRecord['textFormat'], text: string): LegacyRecord => ({ id: 'page:old-page', kind: 'page', sourceId: 'old-page', title: '합성 원본', containerId: 'old-space', parentId: null, authorId: null, createdAt: null, updatedAt: null, text, textFormat, metadata: {}, references: [] });
 function resolver(calls: MigrationReferenceInput[] = []): MigrationContentContext {
@@ -110,6 +110,26 @@ test('Confluence mixed inline order, core formatting, code CDATA, tables, tasks 
   assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, code); assert.equal(nodes(result.content, 'codeBlock')[0].attrs?.language, 'javascript');
   assert.equal(nodes(result.content, 'tableHeader')[0].attrs?.colspan, 2); assert.equal(nodes(result.content, 'taskItem')[0].attrs?.checked, true);
   assert.equal(nodes(result.content, 'orderedList')[0].attrs?.start, 3); assert.equal(nodes(result.content, 'detailsSummary')[0].content?.[0].text, '펼쳐 보기'); assert.ok(result.plainText.includes('접힌 내용'));
+});
+
+test('Confluence engineering character references keep ordinary page and revision content editable', () => {
+  const literal = '<!-- &minus; --><ac:structured-macro ac:name="code">' +
+    '<ac:plain-text-body><![CDATA[raw = "&times; &sup2; &bogus;";]]></ac:plain-text-body></ac:structured-macro>';
+  const fixture = '<h2>Installation</h2><p><strong>Dimension</strong> 50 &times; 20 mm &plusmn; 1 mm at 25 &deg;C.' +
+    ' Area 10 cm&sup2;; current &le; 50 &micro;A; resistance 20 &Omega;; &frac12; turn.</p>' +
+    '<ul><li>Step 1 &rarr; Step 2 &amp; literal &amp;times;</li></ul>' + literal;
+  for (const kind of ['page', 'revision'] as const) {
+    const result = convertLegacyContent({ ...source('confluence-storage', fixture), kind }, resolver());
+    canonical(result);
+    assert.deepEqual(result.diagnostics, []);
+    assert.deepEqual(result.content.content?.map(block => block.type), ['heading', 'paragraph', 'bulletList', 'codeBlock']);
+    assert.match(result.plainText, /50 × 20 mm ± 1 mm at 25 °C\. Area 10 cm²; current ≤ 50 µA; resistance 20 Ω; ½ turn\./u);
+    assert.match(result.plainText, /Step 1 → Step 2 & literal &times;/u);
+    assert.deepEqual(nodes(result.content, 'text').find(node => node.text === 'Dimension')?.marks, [{ type: 'bold' }]);
+    assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, 'raw = "&times; &sup2; &bogus;";');
+  }
+  assert.equal(hasConfluenceEngineeringEntity(fixture), true);
+  assert.equal(hasConfluenceEngineeringEntity(`${literal}<p>&amp;times; &nbsp;</p>`), false);
 });
 
 test('Confluence table column declarations become native widths across merged cells and saved revisions', () => {
@@ -608,7 +628,7 @@ test('Confluence lists preserve Jira query markup for explicit document review a
 });
 
 test('malformed storage, XXE/DOCTYPE, unknown HTML entities and invalid ADF fall back to the complete inert original', () => {
-  const inputs: [LegacyRecord['textFormat'], string][] = [['confluence-storage', '<p>unclosed'], ['confluence-storage', '<!DOCTYPE p [<!ENTITY x SYSTEM "http://127.0.0.1:9/never">]><p>&x;</p>'], ['confluence-storage', '<p>&unrecognized;</p>'], ['adf', '{bad json'], ['adf', JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: 'MALFORMED_BUT_PRESERVED' }] })]];
+  const inputs: [LegacyRecord['textFormat'], string][] = [['confluence-storage', '<p>unclosed'], ['confluence-storage', '<!DOCTYPE p [<!ENTITY x SYSTEM "http://127.0.0.1:9/never">]><p>&deg; &x;</p>'], ['confluence-storage', '<p>&times; &unrecognized;</p>'], ['confluence-storage', '<p>&constructor;</p>'], ['adf', '{bad json'], ['adf', JSON.stringify({ type: 'doc', version: 1, content: [{ type: 'paragraph', content: 'MALFORMED_BUT_PRESERVED' }] })]];
   for (const [format, raw] of inputs) { const result = convertLegacyContent(source(format, raw), resolver()); canonical(result); assert.equal(nodes(result.content, 'codeBlock')[0].content?.[0].text, raw); assert.ok(result.diagnostics.some(value => value.code === 'RAW_CONTENT_FALLBACK')); }
 });
 

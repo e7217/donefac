@@ -15,6 +15,7 @@ import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-
 import { planningFields } from '../shared/planning-helpers.js';
 import type { IssueSchemaService } from './issue-schema.js';
 import { jiraSavedViewComponents } from './jira-saved-view-components.js';
+import { jiraSavedViewReleases } from './jira-saved-view-releases.js';
 import { jiraSavedViewSourceAliases } from './jira-saved-view-sources.js';
 import { Store } from './store.js';
 
@@ -113,7 +114,9 @@ export class SavedViewService {
   findPlanningItemReference(item: PlanningItem): Pick<SavedView, 'id' | 'name'> | undefined {
     const path = `$.filters.planning.${planningFields(item.kind).idField}`;
     return this.store.db.prepare(`SELECT id,name FROM saved_views
-      WHERE project_id=? AND json_extract(json,?)=? ORDER BY name LIMIT 1`).get(item.projectId, path, item.id) as Pick<SavedView, 'id' | 'name'> | undefined;
+      WHERE project_id=? AND (json_extract(json,?)=? OR (?='release' AND EXISTS (
+        SELECT 1 FROM json_each(saved_views.json,'$.filters.planning.releaseFilter.ids') WHERE value=?
+      ))) ORDER BY name LIMIT 1`).get(item.projectId, path, item.id, item.kind, item.id) as Pick<SavedView, 'id' | 'name'> | undefined;
   }
   private project(id: unknown) {
     return typeof id === 'string' && this.store.get<Project>('projects', id) || fail('프로젝트를 찾을 수 없습니다.', 404);
@@ -161,6 +164,7 @@ export class SavedViewService {
     const users = this.store.all<User>('users');
     const schema = this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId);
     const workflow = hooks.workflow(projectId);
+    const planningItems = hooks.planningItems(projectId);
     const aliases = this.jiraProjectAliases(projectId);
     const sourceMatches: [string, string, string, ...(readonly string[])[]][] = [];
     let blockedPriorities: ReadonlySet<Issue['priority']> | undefined;
@@ -170,6 +174,11 @@ export class SavedViewService {
         if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
         return jiraSavedViewComponents(this.store, schema, aliases.sourceInstance, aliases.sourceProjectAliases,
           (sourceId, targetId) => sourceMatches.push(['component', sourceId, targetId]));
+      },
+      prepareReleaseField: () => {
+        if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
+        return jiraSavedViewReleases(this.store, projectId, aliases.sourceInstance, aliases.sourceProjectAliases, planningItems,
+          (sourceId, targetId) => sourceMatches.push(['fixVersion', sourceId, targetId]));
       },
       prepareSourceAliases: fields => {
         if (!aliases.sourceInstance || !aliases.sourceProjectAliases) return undefined;
@@ -188,7 +197,7 @@ export class SavedViewService {
     if (translated.filters.priorities?.some(priority => blockedPriorities?.has(priority))) {
       throw new JiraViewQueryError('우선순위 · 이관한 업무의 원본 값과 현재 우선순위가 일치하지 않아 같은 결과를 저장할 수 없습니다.');
     }
-    const selected = state({ layout: 'list', filters: translated.filters, sort: translated.sort }, schema, users, hooks.planningItems(projectId));
+    const selected = state({ layout: 'list', filters: translated.filters, sort: translated.sort }, schema, users, planningItems);
     this.validateAssignee(selected, users);
     const { filters, sort } = selected;
     const { criteria, orderBy, requiresProjectOrderAcceptance } = translated;

@@ -68,7 +68,45 @@ function references(source: ReleaseIssue): { ids: string[]; unresolved: boolean 
 }
 
 function identity(source: ReleaseSource, id: string): string {
-  return 'jira_release_' + createHash('sha256').update(JSON.stringify([source.instanceKey, id, source.projectId])).digest('hex');
+  return jiraReleasePlanningId(source.instanceKey, id, source.projectId);
+}
+
+export function jiraReleasePlanningId(instanceKey: string, id: string, projectId: string): string {
+  return 'jira_release_' + createHash('sha256').update(JSON.stringify([instanceKey, id, projectId])).digest('hex');
+}
+
+/** Undefined means a partial issue export omitted the field. Null means it reported an unresolved value. */
+export function jiraArchivedIssueFixVersions(record: LegacyRecord, format: string): Set<string> | null | undefined {
+  const { jiraFixVersionIds, jiraFixVersionUnresolved } = record.metadata;
+  if (jiraFixVersionUnresolved === true) return null;
+  if (Array.isArray(jiraFixVersionIds)) {
+    const ids = jiraFixVersionIds.map(versionId);
+    return ids.every(id => id !== null) ? new Set(ids) : null;
+  }
+  if (jiraFixVersionIds !== undefined) return null;
+  if (format !== 'jira-json') return undefined;
+
+  // Older JSON analyses had raw ID-bearing values before the common membership metadata existed.
+  const fields = details(record.metadata.fields);
+  const declared = ['fixVersions', 'fixedVersions'].filter(key => Object.hasOwn(fields, key));
+  let observed: Set<string> | undefined;
+  for (const key of declared) {
+    const values = fields[key];
+    if (!Array.isArray(values)) return null;
+    const ids = new Set<string>();
+    for (const value of values) {
+      const raw = details(value);
+      const id = versionId(raw.id);
+      const project = details(raw.project);
+      const owner = raw.projectId ?? project.id ?? project.key ?? raw.project;
+      if (!id || owner !== undefined && versionId(owner) !== record.containerId) return null;
+      ids.add(id);
+    }
+    const prior = observed;
+    if (prior && (prior.size !== ids.size || [...ids].some(id => !prior.has(id)))) return null;
+    observed = ids;
+  }
+  return observed;
 }
 
 function claimedProject(source: ReleaseSource, value: unknown): boolean {

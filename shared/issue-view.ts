@@ -103,7 +103,8 @@ export function parseIssueViewGitlabFilter(value: unknown): IssueViewGitlabFilte
 }
 
 const planSelectors = Object.entries(PLANNING_FIELDS);
-const planningFilterKeys = [...planSelectors.map(([, fields]) => fields.idField), 'dates'];
+const planningFilterKeys = [...planSelectors.map(([, fields]) => fields.idField), 'dates', 'releaseFilter'];
+export const ISSUE_VIEW_RELEASE_LIMIT = 40;
 
 function checkedFilterObject(
   value: unknown,
@@ -281,6 +282,21 @@ export function parseIssueViewPlanningFilter(value: unknown, projectId: string, 
     }
     filter[idField] = id;
   }
+  if (Object.hasOwn(input, 'releaseFilter')) {
+    if (Object.hasOwn(input, 'releaseId')) throw new IssueViewPlanningFilterError('릴리스 조건은 한 방식으로 지정해 주세요.');
+    const raw = checkedFilterObject(input.releaseFilter, ['kind', 'ids'], '릴리스 조건');
+    if (raw.kind === 'assigned' && !Object.hasOwn(raw, 'ids')) {
+      filter.releaseFilter = { kind: 'assigned' };
+    } else if (raw.kind === 'any' && Array.isArray(raw.ids) && raw.ids.length >= 2 && raw.ids.length <= ISSUE_VIEW_RELEASE_LIMIT) {
+      const releases = new Set(items.filter(item => item.projectId === projectId && item.kind === 'release').map(item => item.id));
+      if (new Set(raw.ids).size !== raw.ids.length || raw.ids.some(id => typeof id !== 'string' || !releases.has(id))) {
+        throw new IssueViewPlanningFilterError('이 프로젝트의 서로 다른 릴리스를 지정해 주세요.');
+      }
+      filter.releaseFilter = { kind: 'any', ids: [...raw.ids].sort() };
+    } else {
+      throw new IssueViewPlanningFilterError(`릴리스 조건은 지정 여부 또는 2~${ISSUE_VIEW_RELEASE_LIMIT}개의 릴리스를 선택할 수 있습니다.`);
+    }
+  }
   if (Object.hasOwn(input, 'dates')) filter.dates = parseDateFilter(input.dates);
   return Object.keys(filter).length ? filter : undefined;
 }
@@ -370,12 +386,15 @@ export function createIssueViewMatcher(
     const selected = planning[idField];
     return selected === undefined ? [] : [{ idField, selected }];
   }) : [];
+  const releaseFilter = planning?.releaseFilter;
+  const selectedReleases = releaseFilter?.kind === 'any' ? new Set(releaseFilter.ids) : undefined;
   return issue =>
     (selectedStatuses.size === 0 || selectedStatuses.has(issue.status)) &&
     matchAssignee(issue) &&
     (!reporter || matchesReporterFilter(reporter, issue.reporterId, currentUserId)) &&
     (type === 'all' || issue.type === type) &&
     planConditions.every(({ idField, selected }) => (issue[idField] ?? null) === selected) &&
+    (!releaseFilter || Boolean(issue.releaseId && (!selectedReleases || selectedReleases.has(issue.releaseId)))) &&
     (!matchDates || matchDates(issue)) &&
     (!gitlab || matchesGitlabFilter(gitlab, gitlabSummaries?.get(issue.id))) &&
     matchPriorityLabels(issue) &&

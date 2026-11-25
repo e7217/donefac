@@ -7,8 +7,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { test, type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type {
-  LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview,
-  PlanningItem, SourceImport, WorkspaceSnapshot,
+  JiraSavedViewPreview, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview,
+  PlanningItem, SavedView, SourceImport, WorkspaceSnapshot,
 } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
@@ -138,12 +138,33 @@ test('Jira release links and choices survive native restore and reviewed append 
   assert.equal((await issue('복수 버전 업무')).releaseId, release.id);
   assert.equal((await issue('과거 버전 업무')).releaseId, historical.id);
   assert.equal((await issue('영향 버전 업무')).releaseId, null);
+  const reviewView = (jql: string) => f.call<JiraSavedViewPreview>('/views/jira/preview', 'POST', { projectId, jql });
+  assert.deepEqual((await reviewView('project = JIRA AND fixVersion = 4301')).filters.planning, { releaseId: release.id });
+  assert.deepEqual((await reviewView('fixVersion = "배포 예정"')).issues.map(row => row.title).sort(), ['복수 버전 업무', '한 버전 업무']);
+  assert.deepEqual((await reviewView('fixVersion IS NULL')).issues.map(row => row.title), ['영향 버전 업무']);
+  assert.deepEqual((await reviewView('fixVersion IS NOT EMPTY')).filters.planning, { releaseFilter: { kind: 'assigned' } });
+  const loss = await f.call<{ error: string }>('/views/jira/preview', 'POST', { projectId, jql: 'fixVersion = 4302' }, 400);
+  assert.match(loss.error, /대표 릴리스의 결과가 다릅니다/u);
+  const jql = 'fixVersion IN (4301, "과거 배포") AND due IS EMPTY';
+  const viewInput = { projectId, jql, name: '릴리스 공유 보기', layout: 'list', acceptProjectOrder: false };
+  const viewReview = await reviewView(jql);
+  assert.deepEqual(viewReview.filters.planning, { releaseFilter: { kind: 'any', ids: [release.id, historical.id].sort() }, dates: { mode: 'due_missing' } });
+  assert.equal(viewReview.total, 3);
   const existing = await issue('한 버전 업무');
   await f.call(`/issues/${existing.id}`, 'PATCH', { expectedVersion: existing.version, releaseId: historical.id }, 422);
   await f.call(`/planning-items/${release.id}`, 'PATCH', { expectedVersion: release.version, name: '팀의 배포 계획' });
+  await f.call('/views/jira/import', 'POST', { ...viewInput, revision: viewReview.revision }, 409);
+  const freshViewReview = await reviewView(jql);
+  assert.equal(freshViewReview.total, 3);
+  assert.match(freshViewReview.criteria.find(criterion => criterion.field === 'fixVersion')!.label, /팀의 배포 계획/u);
+  const saved = await f.call<SavedView>('/views/jira/import', 'POST', { ...viewInput, revision: freshViewReview.revision }, 201);
+  assert.deepEqual(saved.filters, freshViewReview.filters);
 
-  const backup = await f.call('/export');
+  const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(backup.schemaVersion, 126);
+  await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 125 } }, 400);
   await f.call('/import', 'POST', { data: backup });
+  assert.deepEqual((await f.call<SavedView[]>(`/views?projectId=${projectId}`)).find(view => view.id === saved.id)?.filters, saved.filters);
   const imports = await f.call<SourceImport[]>('/source-imports');
   assert.deepEqual(imports.find(value => value.id === applied.import.id)?.configuration.jiraReleaseSelections, { [choice]: '4301' });
   const renamed = await item('팀의 배포 계획');
@@ -176,9 +197,14 @@ test('Jira release links and choices survive native restore and reviewed append 
   assert.equal(additionalIssue.releaseId, release.id);
   assert.equal(additionalIssue.release, '팀의 배포 계획');
   assert.equal((await issue('보관 릴리스에 추가할 업무')).releaseId, null);
+  await f.call('/views/jira/preview', 'POST', { projectId, jql }, 400);
+  assert.equal((await reviewView('fixVersion = 4301')).total, 3);
   const final = await item('팀의 배포 계획');
   assert.equal(final.targetDate, '2025-03-02');
   assert.equal(final.status, 'planned');
+  await f.call(`/issues/${additionalIssue.id}`, 'PATCH', { expectedVersion: additionalIssue.version, releaseId: null });
+  const changedLocally = await f.call<{ error: string }>('/views/jira/preview', 'POST', { projectId, jql: 'fixVersion = 4301' }, 400);
+  assert.match(changedLocally.error, /팀에서 변경한 릴리스/u);
 });
 
 test('a Jira migration rolls back new release plans when an issue write fails', async t => {
