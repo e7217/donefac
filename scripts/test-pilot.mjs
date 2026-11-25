@@ -12,10 +12,12 @@ import { fileURLToPath } from 'node:url';
 import { COLLABORATION_SCHEMA } from '../shared/collaboration.ts';
 import { zip } from '../tests/fixtures/legacy-export-zip.mjs';
 import { startPilotTestProxy } from './pilot-test-proxy.mjs';
+import { prepareNativeTeamPilot, verifyNativeTeamData } from './pilot-native-fixture.mjs';
 
 const mode = process.argv[2];
-assert.ok(process.argv.length === 2 || (process.argv.length === 3 && mode === '--team'), 'Usage: node scripts/test-pilot.mjs [--team]');
-const teamSeconds = mode === '--team' ? Number(process.env.TEAMSPACE_PILOT_TEAM_SECONDS ?? 75) : null;
+assert.ok(process.argv.length === 2 || (process.argv.length === 3 && ['--team', '--team-native'].includes(mode)),
+  'Usage: node scripts/test-pilot.mjs [--team|--team-native]');
+const teamSeconds = mode ? Number(process.env.TEAMSPACE_PILOT_TEAM_SECONDS ?? 75) : null;
 if (teamSeconds !== null) {
   assert.ok(Number.isSafeInteger(teamSeconds) && teamSeconds >= 30 && teamSeconds <= 1800,
     'TEAMSPACE_PILOT_TEAM_SECONDS must be an integer from 30 to 1800.');
@@ -673,30 +675,33 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   }
   assert.equal(new Set(actorIds).size, 20);
   const headers = { 'X-Actor-Id': actorIds[0] };
-  const migration = await applyPilotSourceMigration(pilot.request, actorIds[0], actorIds[0]);
-  const imported = await verifyPilotSourceMigration(pilot.request, migration);
-  assert.notEqual(imported.issue.status, imported.nextStatus);
-  assert.equal(imported.otherIssue.status, imported.nextStatus);
-  const workflowPath = `/projects/${imported.issue.projectId}/workflow`;
+  const native = mode === '--team-native' ? await prepareNativeTeamPilot(pilot, actorIds) : null;
+  const migration = native ? null : await applyPilotSourceMigration(pilot.request, actorIds[0], actorIds[0]);
+  const imported = migration ? await verifyPilotSourceMigration(pilot.request, migration) : null;
+  const { issue: originalIssue, document: originalDocument, nextStatus } = native ?? imported;
+  const gitlabIssue = native ? native.gitlabIssue : imported.otherIssue;
+  assert.notEqual(originalIssue.status, nextStatus);
+  assert.equal(gitlabIssue.status, nextStatus);
+  const workflowPath = `/projects/${originalIssue.projectId}/workflow`;
   const workflow = await pilot.api(workflowPath);
   const review = { id: 'pilot_review', label: '검토', category: 'review', color: '#668899' };
   await pilot.api(workflowPath, { method: 'PATCH', headers, body: {
     ...workflow, expectedVersion: workflow.version, statuses: [...workflow.statuses, review],
-    transitions: [...workflow.transitions, { from: imported.nextStatus, to: review.id, issueTypes: [], requiredFields: [] }],
+    transitions: [...workflow.transitions, { from: nextStatus, to: review.id, issueTypes: [], requiredFields: [] }],
   } });
   const planned = new Date();
   do { planned.setUTCDate(planned.getUTCDate() + 1); } while ([0, 6].includes(planned.getUTCDay()));
   const workingDate = planned.toISOString().slice(0, 10);
-  const issue = await pilot.api(`/issues/${imported.issue.id}`, {
+  const issue = await pilot.api(`/issues/${originalIssue.id}`, {
     method: 'PATCH', headers, body: {
-      expectedVersion: imported.issue.version, startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
+      expectedVersion: originalIssue.version, startDate: workingDate, endDate: workingDate, plannedEffortMinutes: 30,
     },
   });
   const editingParagraph = '파일럿 공동 편집 기록';
-  const document = await pilot.api(`/documents/${imported.document.id}`, {
+  const document = await pilot.api(`/documents/${originalDocument.id}`, {
     method: 'PATCH', headers, body: {
-      expectedVersion: imported.document.version,
-      content: { type: 'doc', content: [...imported.document.content.content,
+      expectedVersion: originalDocument.version,
+      content: { type: 'doc', content: [...originalDocument.content.content,
         { type: 'paragraph', content: [{ type: 'text', text: editingParagraph }] }] },
     },
   });
@@ -708,11 +713,13 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   const fixture = {
     actorIds, projectId: issue.projectId, documentId: document.id, issueId: issue.id,
     title: document.title, initialText: session.document.plainText, editingParagraph,
-    migratedIssueKey: issue.key, originalJiraKey: 'OLD-1', gitlabIssueId: imported.otherIssue.id,
-    gitlabOriginalJiraKey: 'OLD-2', gitlabJiraInstanceKey: 'pilot-jira',
+    issueKey: issue.key, gitlabIssueId: gitlabIssue.id,
+    ...(native ? { source: 'native', intakeId: native.intake.id } : {
+      source: 'migrated', originalJiraKey: 'OLD-1', gitlabOriginalJiraKey: 'OLD-2', gitlabJiraInstanceKey: 'pilot-jira',
+    }),
     initialEpoch: session.epoch, seconds, evidencePath,
   };
-  console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing on migrated content.`);
+  console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing on ${fixture.source} content.`);
   await browser(proxy.origin, { teamFixture: fixture, accessFile: access.file });
 
   const browserEvidence = readFileSync(evidencePath, 'utf8');
@@ -720,8 +727,8 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   const evidence = JSON.parse(browserEvidence);
   assert.deepEqual(evidence.authentication, { transport: 'https', browserSessions: actorIds.length });
   assert.equal(evidence.documentId, document.id);
-  assert.deepEqual(evidence.migrationReference, {projectId: fixture.projectId, issueId: issue.id, documentId: document.id,
-    currentIssueKey: issue.key, originalJiraKey: fixture.originalJiraKey});
+  assert.deepEqual(evidence.issueReference, { projectId: fixture.projectId, issueId: issue.id, documentId: document.id,
+    currentIssueKey: issue.key, ...(fixture.originalJiraKey ? { originalJiraKey: fixture.originalJiraKey } : {}) });
   assert.equal(evidence.originalEpoch, session.epoch);
   assert.ok(typeof evidence.finalEpoch === 'string' && evidence.finalEpoch !== session.epoch);
   assert.ok(Number.isSafeInteger(evidence.documentVersion) && evidence.documentVersion > session.document.version);
@@ -741,16 +748,19 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(history.actorId, actorIds[0]);
   assert.equal(statusHandoff.observerId, actorIds[1]);
   const handoffChanges = Object.fromEntries(history.changes.map(change => [change.field, [change.before.value, change.after.value]]));
-  assert.deepEqual(handoffChanges.status, [issue.status, imported.nextStatus]);
+  assert.deepEqual(handoffChanges.status, [issue.status, nextStatus]);
   assert.deepEqual(handoffChanges.assigneeId, [actorIds[0], actorIds[1]]);
   const baseline = await teamSnapshot(pilot.api, fixture, evidence);
-  const migrationBaseline = await verifyTeamMigration(pilot, migration, source, fixture);
+  const verifyDetails = native
+    ? running => verifyNativeTeamData(running, native, evidence.knowledge)
+    : (running, dataDir) => verifyTeamMigration(running, migration, dataDir, fixture);
+  const dataBaseline = await verifyDetails(pilot, source);
   await stop(pilot);
   proxy.setBackendPort(null);
 
   const reopened = await openTeamPilot(proxy, access, source, retiredCookies);
   assert.deepEqual(await teamSnapshot(reopened.api, fixture, evidence), baseline, 'The source changed across a restart.');
-  assert.equal(await verifyTeamMigration(reopened, migration, source, fixture), migrationBaseline, 'Migration evidence changed across a restart.');
+  assert.equal(await verifyDetails(reopened, source), dataBaseline, 'Team workflow evidence changed across a restart.');
   await stop(reopened);
   proxy.setBackendPort(null);
 
@@ -759,18 +769,22 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   for (const entry of readdirSync(backup, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue;
     const bytes = readFileSync(join(entry.parentPath, entry.name));
-    assert.ok(!bytes.includes(access.code) && [...retiredCookies].every(cookie => !bytes.includes(cookie.split('=')[1])),
-      'The pilot backup must exclude the access key and active session tokens.');
+    assert.ok(!bytes.includes(access.code) && (!native || !bytes.includes(native.key.token)) &&
+      [...retiredCookies].every(cookie => !bytes.includes(cookie.split('=')[1])),
+      'The pilot backup must exclude raw API keys, the access key, and active session tokens.');
   }
   const recovery = cli('restore', backup, restored);
   assert.equal(recovery.status, 0, recovery.stderr);
   const copy = await openTeamPilot(proxy, access, restored, retiredCookies);
   assert.deepEqual(await teamSnapshot(copy.api, fixture, evidence), baseline, 'The separate restoration changed the saved data.');
-  assert.equal(await verifyTeamMigration(copy, migration, restored, fixture), migrationBaseline, 'The separate restoration changed migration evidence.');
+  assert.equal(await verifyDetails(copy, restored), dataBaseline, 'The separate restoration changed the team workflow evidence.');
   await stop(copy);
+  const records = native
+    ? 'native intake, published and draft documents, attachment bytes, member email, revoked API key and GitLab links by Teamspace key'
+    : 'Jira and Confluence records, attachment bytes and GitLab links by original Jira key';
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
-    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched Jira and Confluence records and attachment bytes, ` +
-    'documents, cross-project schedules and receipts, GitLab pipeline links by original Jira key, and the single automation transition.');
+    `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched ${records}, ` +
+    'cross-project schedules and receipts, and the single automation transition.');
 }
 
 async function runStandardPilot() {

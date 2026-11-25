@@ -85,7 +85,10 @@ test('유형·속성 초안은 외부 갱신·버전 충돌과 복합 탐색 취
     const editor = page.getByRole('region', { name: '업무 유형·사용자 정의 속성 설정' }), name = editor.getByLabel('유형 1 이름', { exact: true });
     await expect(name).toBeEnabled(); await name.fill('보존할 업무 유형 초안');
     const remote = await request.patch(`/api/projects/${project.id}/issue-schema`, { data: { ...original, expectedVersion: original.version, issueTypes: original.issueTypes.map((value, index) => index === 0 ? { ...value, name: '다른 작업자의 유형 이름' } : value) } }); expect(remote.ok()).toBeTruthy();
-    page.once('dialog', value => value.accept(`schema-${Date.now()}@example.test`)); await page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true }).click();
+    await page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true }).click();
+    const emailDialog = page.getByRole('dialog', { name: '팀원 이메일 변경' });
+    await emailDialog.getByLabel('새 이메일').fill(`schema-${Date.now()}@example.test`);
+    await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
     await expect(editor.getByRole('alert')).toContainText('다른 작업자가 유형·속성 설정'); await expect(name).toHaveValue('보존할 업무 유형 초안');
     const rejected = page.waitForResponse(value => value.url().endsWith(`/projects/${project.id}/issue-schema`) && value.request().method() === 'PATCH');
     await editor.getByRole('button', { name: '유형·속성 저장', exact: true }).click(); expect((await rejected).status()).toBe(409); await expect(name).toHaveValue('보존할 업무 유형 초안');

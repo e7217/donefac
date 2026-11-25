@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, ClipboardList, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Star, Trash2, Users, X } from 'lucide-react';
-import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, IssueIntakeRequest, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, IssueIntakeRequest, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, User, WorkspaceSnapshot } from '../shared/types';
 import { DELIVERY_BLOCKER_REASONS, INTAKE_NOTIFICATION_KIND_BY_STATUS, RELEASE_BLOCKER_REASONS, isIntakeNotificationKind, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { isCalendarDate } from '../shared/calendar';
@@ -20,7 +20,7 @@ import { DEFAULT_WORKSPACE_SEARCH_FILTERS, WORKSPACE_SEARCH_INPUT_LIMIT, issueSe
 import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies';
 import { isRelationId } from '../shared/issue-relations';
 import { cycleCompletionRecordParameter, readCycleCompletionRecordId } from '../shared/cycle-completion-address';
-import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
+import { api, apiResponse, post, relativeTime, setActor } from './lib/api';
 import { useAtlassianSearch } from './lib/use-atlassian-search';
 import { useIssueSubscriptions } from './lib/use-issue-subscriptions';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
@@ -38,6 +38,7 @@ import { clearGanttDateDrafts, type GanttIssueDateDrafts } from './features/gant
 import { IssuePanel } from './features/IssuePanel';
 import { MyWork } from './features/MyWork';
 import { ProjectCreationDialog } from './features/ProjectCreationDialog';
+import { WorkspaceMemberEmailDialog } from './features/WorkspaceMemberEmailDialog';
 import { FavoritesPage, FavoritesProvider } from './features/FavoritesState';
 import type { PrepareMigration } from './features/MigrationApplySettings';
 import TeamNotifications from './features/TeamNotifications';
@@ -1768,6 +1769,7 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
 
 function WorkspaceSettings(props:FeatureProps) {
   const [name,setName]=useState('');const [email,setEmail]=useState('');const [busy,setBusy]=useState(false);const [importData,setImportData]=useState<unknown>(null);const [importName,setImportName]=useState('');
+  const [emailEdit, setEmailEdit] = useState<{ user: User; restoreGeneration?: string; opener: HTMLButtonElement } | null>(null);
   const [packageInventoryVersion, setPackageInventoryVersion] = useState(0);
   const prepareMigrationRef = useRef<PrepareMigration>(null);
   const packageInventoryChanged = useCallback(() => setPackageInventoryVersion(version => version + 1), []);
@@ -1792,7 +1794,19 @@ function WorkspaceSettings(props:FeatureProps) {
     } catch (error) { props.notify((error as Error).message, 'error'); }
     finally { setBusy(false); }
   }
-  return <div className="page settings-page"><div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>팀의 작업 공간</h1><p>간단한 팀원 관리와 데이터 이동 기능을 제공합니다.</p></div></div><section className="card settings-card"><div className="card-heading"><h2><Users size={19}/>팀원</h2><span className="badge">{props.data.users.length}명</span></div><p className="muted">상단의 작업자를 선택하면 변경 이력에 해당 팀원이 기록됩니다. 현재는 별도의 로그인 기능을 사용하지 않습니다.</p><div className="team-list">{props.data.users.map(user=><div className="team-row" key={user.id}><span className="avatar" style={{background:user.color}}>{user.name.slice(0,1)}</span><strong>{user.name}</strong><span>{user.email}</span><button className="btn btn-ghost" onClick={async()=>{const next=window.prompt('변경할 이메일 주소',user.email);if(next===null||next===user.email)return;try{await patch(`/users/${user.id}`,{email:next});await props.refresh();props.notify('이메일 주소를 변경했습니다.');}catch(e){props.notify((e as Error).message,'error');}}}>이메일 변경</button></div>)}</div><form className="invite-form" onSubmit={async e=>{e.preventDefault();setBusy(true);try{await post('/users',{name,email,color:'#6785b5'});setName('');setEmail('');await props.refresh();props.notify('팀원을 추가했습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}><input className="field" aria-label="새 팀원 이름" placeholder="이름" value={name} onChange={e=>setName(e.target.value)} required/><input type="email" className="field" aria-label="새 팀원 이메일" placeholder="이메일" value={email} onChange={e=>setEmail(e.target.value)} required/><button disabled={busy} className="btn btn-primary"><Plus size={16}/>팀원 추가</button></form></section>
+  return <div className="page settings-page"><div className="page-heading"><div><div className="eyebrow">WORKSPACE</div><h1>팀의 작업 공간</h1><p>간단한 팀원 관리와 데이터 이동 기능을 제공합니다.</p></div></div><section className="card settings-card"><div className="card-heading"><h2><Users size={19}/>팀원</h2><span className="badge">{props.data.users.length}명</span></div><p className="muted">상단의 작업자를 선택하면 변경 이력에 해당 팀원이 기록됩니다. 현재는 별도의 로그인 기능을 사용하지 않습니다.</p>
+    <div className="team-list">{props.data.users.map(user => <div className="team-row" key={user.id}>
+      <span className="avatar" style={{ background: user.color }}>{user.name.slice(0, 1)}</span><strong>{user.name}</strong><span>{user.email}</span>
+      <button type="button" className="btn btn-ghost" onClick={event =>
+        setEmailEdit({ user, restoreGeneration: props.data.restoreGeneration, opener: event.currentTarget })}>이메일 변경</button>
+    </div>)}</div><form className="invite-form" onSubmit={async e=>{e.preventDefault();setBusy(true);try{await post('/users',{name,email,color:'#6785b5'});setName('');setEmail('');await props.refresh();props.notify('팀원을 추가했습니다.');}catch(e){props.notify((e as Error).message,'error');}finally{setBusy(false);}}}><input className="field" aria-label="새 팀원 이름" placeholder="이름" value={name} onChange={e=>setName(e.target.value)} required/><input type="email" className="field" aria-label="새 팀원 이메일" placeholder="이메일" value={email} onChange={e=>setEmail(e.target.value)} required/><button disabled={busy} className="btn btn-primary"><Plus size={16}/>팀원 추가</button></form></section>
+    {emailEdit && <WorkspaceMemberEmailDialog user={emailEdit.user} restoreGeneration={emailEdit.restoreGeneration}
+      actorId={props.actorId} refresh={props.refresh} notify={props.notify}
+      onClose={() => {
+        const { opener } = emailEdit;
+        setEmailEdit(null);
+        requestAnimationFrame(() => { if (opener.isConnected) opener.focus(); });
+      }}/>}
     {props.actorId && <Suspense fallback={<div className="card settings-card"><p>마감 알림 설정을 불러오는 중입니다.</p></div>}>
       <DeadlineReminderSettings key={props.actorId} actorId={props.actorId}
         actorName={props.data.users.find(user => user.id === props.actorId)?.name ?? '현재 작업자'} notify={props.notify}/>
@@ -1803,7 +1817,8 @@ function WorkspaceSettings(props:FeatureProps) {
     <Suspense fallback={<div className="card settings-card"><p>업무 템플릿을 불러오는 중입니다.</p></div>}><IssueTemplateSettings {...props}/></Suspense>
     <Suspense fallback={<div className="card settings-card"><p>반복 업무를 불러오는 중입니다.</p></div>}><RecurringIssueSettings {...props}/></Suspense>
     <Suspense fallback={<div className="card settings-card"><p>업무 달력을 불러오는 중입니다.</p></div>}><CalendarSettings {...props}/></Suspense>
-    <Suspense fallback={<div className="card settings-card"><p>API 키를 불러오는 중입니다.</p></div>}><ApiKeysSettings actorId={props.actorId} projects={props.data.projects} notify={props.notify}/></Suspense>
+    <Suspense fallback={<div className="card settings-card"><p>API 키를 불러오는 중입니다.</p></div>}><ApiKeysSettings actorId={props.actorId}
+      projects={props.data.projects} restoreGeneration={props.data.restoreGeneration} refreshWorkspace={props.refresh} notify={props.notify}/></Suspense>
     <Suspense fallback={<div className="card settings-card"><p>원본 이관 분석을 불러오는 중입니다.</p></div>}>
       <LegacyImportSettings {...props} onPackageInventoryChange={packageInventoryChanged} onPrepareMigration={prepareMigration}/>
     </Suspense>

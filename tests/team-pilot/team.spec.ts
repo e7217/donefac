@@ -5,20 +5,18 @@ import { expect, request as apiRequest, test, type APIRequestContext, type Brows
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
 import { documentPlainText } from '../../shared/document-plain-text';
-import type { DocPage, DocRevision, Issue } from '../../shared/types';
+import type { DocPage, DocRevision, Issue, TeamNotificationPage } from '../../shared/types';
 import { prepareGitlabTraffic } from './gitlab-traffic';
 import { verifyIssueHandoff } from './issue-handoff';
 import { verifyWorkspaceTraffic, type ScheduledSuccessorPlan } from './workspace-traffic';
+import { verifyNativeKnowledge } from './native-knowledge';
 
-interface Fixture {
+type Fixture = {
   actorIds: string[];
   projectId: string;
   issueId: string;
-  migratedIssueKey: string;
-  originalJiraKey: string;
+  issueKey: string;
   gitlabIssueId: string;
-  gitlabOriginalJiraKey: string;
-  gitlabJiraInstanceKey: string;
   documentId: string;
   title: string;
   initialText: string;
@@ -26,7 +24,10 @@ interface Fixture {
   initialEpoch: string;
   seconds: number;
   evidencePath: string;
-}
+} & (
+  { source: 'native'; intakeId: string } |
+  { source: 'migrated'; originalJiraKey: string; gitlabOriginalJiraKey: string; gitlabJiraInstanceKey: string }
+);
 
 interface Peer {
   actorId: string;
@@ -55,12 +56,13 @@ const issueReference = (page: Page, issueId: string) => editor(page)
 
 function loadFixture(): Fixture {
   const raw = process.env.TEAMSPACE_PILOT_TEAM_FIXTURE;
-  if (!raw) throw new Error('Run npm run test:pilot:team to create an isolated team pilot.');
+  if (!raw) throw new Error('Use a team pilot command to create an isolated HTTPS fixture.');
   const fixture = JSON.parse(raw) as Fixture;
   if (!Array.isArray(fixture.actorIds) || fixture.actorIds.length !== TEAM_SIZE || new Set(fixture.actorIds).size !== TEAM_SIZE ||
     fixture.actorIds.some(id => typeof id !== 'string' || !id) || !Number.isSafeInteger(fixture.seconds) || fixture.seconds < 1 ||
-    !fixture.projectId || !fixture.issueId || !fixture.migratedIssueKey || !fixture.originalJiraKey ||
-    !fixture.gitlabIssueId || !fixture.gitlabOriginalJiraKey || !fixture.gitlabJiraInstanceKey ||
+    !fixture.projectId || !fixture.issueId || !fixture.issueKey || !fixture.gitlabIssueId ||
+    !(fixture.source === 'native' ? fixture.intakeId : fixture.source === 'migrated' &&
+      fixture.originalJiraKey && fixture.gitlabOriginalJiraKey && fixture.gitlabJiraInstanceKey) ||
     !fixture.documentId || !fixture.initialEpoch || !fixture.title || !fixture.initialText || !fixture.editingParagraph || !fixture.evidencePath) {
     throw new Error('The isolated team pilot fixture is invalid.');
   }
@@ -173,7 +175,7 @@ async function matchesRendered(peers: Peer[], current: DocPage, epoch: string, f
     await expect.poll(() => renderedParagraph.innerText({ timeout: SYNC_TIMEOUT }), {
       message: `player ${peer.ordinal} editing paragraph matches durable content`, timeout: SYNC_TIMEOUT,
     }).toBe(paragraphText);
-    await expect(issueReference(peer.page, fixture.issueId), `player ${peer.ordinal} renders the migrated issue reference`)
+    await expect(issueReference(peer.page, fixture.issueId), `player ${peer.ordinal} renders the issue reference`)
       .toBeVisible({ timeout: SYNC_TIMEOUT });
   }));
 }
@@ -197,39 +199,66 @@ function expectEdits(document: DocPage, original: string, edits: string[]) {
   expect((document.plainText.match(/\[team-edit-\d+-\d+\]/g) ?? []).sort()).toEqual([...edits].sort());
 }
 
-async function verifyMigratedReference(page: Page, fixture: Fixture) {
+async function verifyDocumentIssueReference(page: Page, fixture: Fixture) {
+  const originalJiraKey = fixture.source === 'migrated' ? fixture.originalJiraKey : null;
   const currentRoute = () => {
     const [path, query] = new URL(page.url()).hash.split('?');
     return { path, issueId: new URLSearchParams(query).get('issue') };
   };
   const documentPath = `#/${fixture.projectId}/documents/${fixture.documentId}`;
   const reference = issueReference(page, fixture.issueId);
-  await expect(reference.getByText(fixture.migratedIssueKey, { exact: true })).toBeVisible();
+  await expect(reference.getByText(fixture.issueKey, { exact: true })).toBeVisible();
   await reference.click();
   const ticket = page.getByRole('dialog').filter({ has: page.getByRole('button', { name: '업무 상세 닫기', exact: true }) });
-  await expect(ticket.getByRole('list', { name: '이전 티켓 번호', exact: true })).toHaveText(`Jira 원래 키 ${fixture.originalJiraKey}`);
+  const aliases = ticket.getByRole('list', { name: '이전 티켓 번호', exact: true });
+  if (originalJiraKey) {
+    expect(fixture.issueKey).not.toBe(originalJiraKey);
+    await expect(aliases).toHaveText(`Jira 원래 키 ${originalJiraKey}`);
+  } else await expect(aliases).toHaveCount(0);
   await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: fixture.issueId });
   await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
   await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: null });
 
   await page.getByRole('button', { name: '통합 검색', exact: true }).click();
   const quickSearch = page.getByRole('dialog', { name: '통합 검색', exact: true });
-  await quickSearch.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(fixture.originalJiraKey);
+  await quickSearch.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(originalJiraKey ?? fixture.issueKey);
   const result = quickSearch.locator('button.search-result-issue').filter({
-    has: page.getByText(fixture.migratedIssueKey, { exact: true }),
+    has: page.getByText(fixture.issueKey, { exact: true }),
   });
-  await expect(result).toContainText(`Jira 원래 키 ${fixture.originalJiraKey}`);
+  if (originalJiraKey) await expect(result).toContainText(`Jira 원래 키 ${originalJiraKey}`);
+  else await expect(result).toHaveCount(1);
   await result.click();
   await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: fixture.issueId });
   await ticket.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
   await expect.poll(currentRoute).toEqual({ path: documentPath, issueId: null });
   return {
     projectId: fixture.projectId, issueId: fixture.issueId, documentId: fixture.documentId,
-    currentIssueKey: fixture.migratedIssueKey, originalJiraKey: fixture.originalJiraKey,
+    currentIssueKey: fixture.issueKey, ...(originalJiraKey ? { originalJiraKey } : {}),
   };
 }
 
-async function createGanttSuccessor(peer: Peer, origin: string, jiraKey: string, plan: ScheduledSuccessorPlan): Promise<Issue> {
+async function verifyNativeIntake(peer: Peer, fixture: Extract<Fixture, { source: 'native' }>) {
+  const page = await peer.context.newPage();
+  try {
+    await page.goto(`/#/${fixture.projectId}/overview`, { waitUntil: 'domcontentloaded', timeout: SYNC_TIMEOUT });
+    await page.getByRole('button', { name: '알림', exact: true }).click();
+    const inbox = page.getByRole('dialog', { name: '팀 알림', exact: true });
+    await inbox.getByRole('button', { name: /접수 업무 등록/ }).click();
+    await expect(page).toHaveURL(url => url.hash === `#/${fixture.projectId}/intake?request=${fixture.intakeId}`);
+    const review = page.getByRole('dialog', { name: '접수 요청 검토', exact: true });
+    await expect(review.getByRole('region', { name: '처리 결과', exact: true })).toContainText(fixture.issueKey);
+    await expect.poll(async () => {
+      const response = await peer.context.request.get('/api/notifications', { headers: { 'X-Actor-Id': peer.actorId } });
+      expect(response.status()).toBe(200);
+      const inbox = await response.json() as TeamNotificationPage;
+      return inbox.items.find(item => item.targetId === fixture.intakeId)?.readAt;
+    }).toEqual(expect.any(String));
+  } finally {
+    await page.close();
+  }
+}
+
+async function createGanttSuccessor(peer: Peer, origin: string, lookupKey: string, plan: ScheduledSuccessorPlan): Promise<Issue> {
   const { predecessor, calendarVersion, lagDays, startDate, endDate } = plan;
   const title = `${predecessor.key} 후속 일정`;
   const page = await peer.context.newPage();
@@ -238,7 +267,7 @@ async function createGanttSuccessor(peer: Peer, origin: string, jiraKey: string,
     await page.goto(`/#/${predecessor.projectId}/gantt`, { waitUntil: 'domcontentloaded', timeout: SYNC_TIMEOUT });
     await expect(page.getByLabel('작업자 선택', { exact: true })).toHaveValue(peer.actorId, { timeout: SYNC_TIMEOUT });
     const search = page.getByLabel('간트 업무 검색', { exact: true });
-    await search.fill(jiraKey, { timeout: SYNC_TIMEOUT });
+    await search.fill(lookupKey, { timeout: SYNC_TIMEOUT });
     const chart = page.getByRole('region', { name: '간트 차트', exact: true });
     const source = chart.locator(`[data-issue-id="${predecessor.id}"]`);
     await expect(source.getByLabel(`${predecessor.key} 종료일`, { exact: true })).toHaveValue(predecessor.endDate!, { timeout: SYNC_TIMEOUT });
@@ -343,10 +372,19 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     }
     expect(sessionTokens.size, 'Distinct HTTPS browser sessions').toBe(TEAM_SIZE);
     await matchesRendered(peers, initial.document, originalEpoch, fixture);
-    const migrationReference = await verifyMigratedReference(peers[0].page, fixture);
+    const issueReferenceEvidence = await verifyDocumentIssueReference(peers[0].page, fixture);
+    let knowledge: Awaited<ReturnType<typeof verifyNativeKnowledge>> | undefined;
+    if (fixture.source === 'native') {
+      await verifyNativeIntake(peers[1], fixture);
+      knowledge = await verifyNativeKnowledge(peers[0].context, peers[1].context, baseURL, {
+        projectId: fixture.projectId, issueId: fixture.issueId, issueKey: fixture.issueKey, authorId: peers[0].actorId, reviewerId: peers[1].actorId,
+      });
+    }
+    const lookupKey = fixture.source === 'migrated' ? fixture.originalJiraKey : fixture.issueKey;
     const verifyGitlabTraffic = await prepareGitlabTraffic(peers[1].context, {
       origin: baseURL, projectId: fixture.projectId, actorId: peers[1].actorId,
-      issueId: fixture.gitlabIssueId, jiraIssueKey: fixture.gitlabOriginalJiraKey, jiraInstanceKey: fixture.gitlabJiraInstanceKey,
+      issueId: fixture.gitlabIssueId, ...(fixture.source === 'migrated'
+        ? { jiraIssueKey: fixture.gitlabOriginalJiraKey, jiraInstanceKey: fixture.gitlabJiraInstanceKey } : {}),
     });
     const startedAt = performance.now();
     const keepConnected = () => {
@@ -377,8 +415,8 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
           verifyWorkspaceTraffic(peers[0].context.request, {
             projectId: fixture.projectId, issueId: fixture.issueId, actorId: peers[0].actorId, observerId: peers[1].actorId, origin: baseURL,
             concurrentActor: { requests: peers[2].context.request, actorId: peers[2].actorId },
-            handOffIssue: plan => verifyIssueHandoff(peers[0].context, peers[1].context, baseURL, fixture.originalJiraKey, plan),
-            createScheduledSuccessor: plan => createGanttSuccessor(peers[0], baseURL, fixture.originalJiraKey, plan),
+            handOffIssue: plan => verifyIssueHandoff(peers[0].context, peers[1].context, baseURL, lookupKey, plan),
+            createScheduledSuccessor: plan => createGanttSuccessor(peers[0], baseURL, lookupKey, plan),
           }),
           verifyGitlabTraffic(),
         ]);
@@ -394,7 +432,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     if (!gitlabTraffic) throw new Error('The team pilot did not verify signed GitLab activity.');
     await verifyGantt(peers[0].context, fixture.projectId, workspaceTraffic);
     keepConnected();
-    console.log('Independent HTTPS sessions handed off a migrated Jira issue and verified the board, assignee and change history.');
+    console.log(`Independent HTTPS sessions handed off a ${fixture.source} issue and verified the board, assignee and change history.`);
     console.log('The protected Gantt saved a successor with reviewed dates and rendered the resolved dependency. Signed GitLab pipeline events applied one workflow transition.');
 
     const delayed = peers.at(-1)!;
@@ -474,7 +512,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await writeFile(fixture.evidencePath, JSON.stringify({
       documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
       plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
-      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, migrationReference, workspaceTraffic, gitlabTraffic,
+      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, issueReference: issueReferenceEvidence, knowledge, workspaceTraffic, gitlabTraffic,
       authentication: { transport: 'https', browserSessions: sessionTokens.size },
     }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');

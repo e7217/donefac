@@ -16,11 +16,10 @@ const timeout = 25_000;
 const board = (page: Page) => page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
 const boardSearch = (page: Page) => page.getByLabel('보드 업무 검색', { exact: true });
 
-export async function verifyIssueHandoff(writer: BrowserContext, reader: BrowserContext, origin: string, jiraKey: string, plan: IssueHandoffPlan) {
+export async function verifyIssueHandoff(writer: BrowserContext, reader: BrowserContext, origin: string, lookupKey: string, plan: IssueHandoffPlan) {
   const { issue, actor, observer, previousStatus, nextStatus, startDate, endDate, plannedEffortMinutes } = plan;
   expect(writer).not.toBe(reader);
   expect(actor.id).not.toBe(observer.id);
-  expect(issue.key).not.toBe(jiraKey);
   const route = `/#/${issue.projectId}/teamboard?${new URLSearchParams({ boardProject: issue.projectId })}`;
   const issuePath = `/api/issues/${encodeURIComponent(issue.id)}`;
   const openIssue = `${issue.key} 업무 열기`;
@@ -29,7 +28,7 @@ export async function verifyIssueHandoff(writer: BrowserContext, reader: Browser
   try {
     await Promise.all([source, receiving].map(async page => {
       await page.goto(route, { waitUntil: 'domcontentloaded', timeout });
-      await boardSearch(page).fill(jiraKey, { timeout });
+      await boardSearch(page).fill(lookupKey, { timeout });
       await expect(board(page).locator('[data-issue-id]')).toHaveCount(1, { timeout });
       await expect(board(page).getByRole('button', { name: openIssue, exact: true })).toBeVisible({ timeout });
     }));
@@ -74,7 +73,7 @@ export async function verifyIssueHandoff(writer: BrowserContext, reader: Browser
     expect(refreshed.status()).toBe(200);
     expect(await refreshed.request().headerValue('x-actor-id')).toBe(observer.id);
     await expect(receiving.getByRole('status').filter({ hasText: '팀 보드를 새로고침했습니다.' })).toBeVisible({ timeout });
-    await expect(boardSearch(receiving)).toHaveValue(jiraKey, { timeout });
+    await expect(boardSearch(receiving)).toHaveValue(lookupKey, { timeout });
     const nextCard = board(receiving).locator(`[data-status-category="${nextStatus.category}"]`).locator(`[data-issue-id="${issue.id}"]`);
     await expect(nextCard.locator(`[data-board-status="${nextStatus.id}"]`)).toHaveText(nextStatus.label, { timeout });
     await expect(nextCard.locator('.team-board-card-footer')).toContainText(observer.name, { timeout });

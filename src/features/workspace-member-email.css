@@ -1,0 +1,23 @@
+.workspace-member-email-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(470px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.workspace-member-email-dialog::backdrop {
+  background: #172b2345;
+  backdrop-filter: blur(3px);
+}
+
+.workspace-member-email-dialog .modal-actions {
+  flex-wrap: wrap;
+}
+
+.workspace-member-email-error {
+  color: #913c40;
+  font-size: 0.875rem;
+}

@@ -9,7 +9,7 @@ import { request as httpRequest } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { createApp } from '../../server/app.js';
 import { ApiKeyService } from '../../server/api-keys.js';
-import type { ApiKeyCreated, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, Issue, IssueRelation, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, ApiKeyIssuanceResult, ApiKeyRecord, AttachmentHead, AttachmentVersion, Comment, Dependency, DocPage, Issue, IssueRelation, PlanningItem, Project, User, WorkspaceSnapshot } from '../../shared/types.js';
 
 async function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-api-key-test-'));
@@ -56,6 +56,73 @@ test('API keys store hashes only, list owner metadata, revoke by CAS and reject 
     assert.equal(JSON.stringify(backup.data).includes(created.token), false);
     assert.equal(JSON.stringify(backup.data).includes(expiring.token), false);
     assert.equal('apiKeys' in backup.data, false);
+  } finally { database.close(); await f.close(); }
+});
+
+test('guarded issuance recovers the exact key without returning its secret and fences native restores', async () => {
+  const f = await fixture();
+  const database = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+  const owner = { 'X-Actor-Id': 'user-seo' };
+  type Refusal = { details: { reason: string } };
+  try {
+    const snapshot = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+    const input = { name: '응답 복구 합성 키', access: 'read', projectIds: snapshot.projects.map(project => project.id),
+      expiresAt: new Date(Date.now() + 86_400_000).toISOString(), requestId: randomUUID(), restoreGeneration: snapshot.restoreGeneration };
+    assert.equal((await f.call('/api-keys', 'POST', input)).status, 400);
+    assert.equal((await f.call<Refusal>('/api-keys', 'POST', { ...input, requestId: 'invalid' }, owner)).data.details.reason, 'invalid_request');
+    for (const settings of [{ expiresAt: '2000-01-01T00:00:00.000Z' }, { projectIds: ['missing-project'] }]) {
+      const invalid = await f.call<Refusal>('/api-keys', 'POST', { ...input, ...settings }, owner);
+      assert.equal(invalid.status, 400);
+      assert.equal(invalid.data.details.reason, 'invalid_settings');
+    }
+    database.exec("CREATE TRIGGER reject_key_receipt BEFORE INSERT ON api_key_issuance_requests BEGIN SELECT RAISE(ABORT,'synthetic issuance receipt failure'); END");
+    try { assert.equal((await f.call('/api-keys', 'POST', input, owner)).status, 500); }
+    finally { database.exec('DROP TRIGGER reject_key_receipt'); }
+    assert.deepEqual((await f.call<ApiKeyRecord[]>('/api-keys', 'GET', undefined, owner)).data, []);
+    assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.activities.some(activity => activity.detail === input.name), false);
+
+    const results = await Promise.all([
+      f.call<ApiKeyIssuanceResult>('/api-keys', 'POST', input, owner),
+      f.call<ApiKeyIssuanceResult>('/api-keys', 'POST', { ...input, requestId: input.requestId.toUpperCase(), projectIds: input.projectIds.slice().reverse() }, owner),
+    ]);
+    assert.deepEqual(results.map(result => result.status).sort(), [200, 201]);
+    const created = results.find(result => result.status === 201)!.data as ApiKeyCreated;
+    assert.match(created.token, /^ts_[A-Za-z0-9_-]{43}$/);
+    assert.deepEqual(results.find(result => result.status === 200)!.data, { key: created.key, duplicate: true });
+    assert.equal((await f.call<WorkspaceSnapshot>('/workspace')).data.activities.filter(activity => activity.resourceId === created.key.id).length, 1);
+    const receipt = database.prepare('SELECT * FROM api_key_issuance_requests WHERE id=?').get(input.requestId);
+    assert.equal(receipt?.key_id, created.key.id);
+    assert.equal(JSON.stringify(receipt).includes(created.token), false);
+
+    for (const [body, headers] of [[{ ...input, name: '다른 설정' }, owner], [input, { 'X-Actor-Id': 'user-min' }]] as const) {
+      const result = await f.call<Refusal>('/api-keys', 'POST', body, headers);
+      assert.equal(result.status, 409);
+      assert.equal(result.data.details.reason, 'request_conflict');
+    }
+    assert.equal((await f.call<Project[]>('/v1/projects', 'GET', undefined, bearer(created.token))).status, 200);
+    const current = (await f.call<ApiKeyRecord[]>('/api-keys', 'GET', undefined, owner)).data[0];
+    assert.ok(current.lastUsedAt);
+    assert.deepEqual((await f.call('/api-keys', 'POST', input, owner)).data, { key: current, duplicate: true });
+    const revokePath = `/api-keys/${created.key.id}/revoke`;
+    assert.equal((await f.call<Refusal>(revokePath, 'POST', { expectedVersion: current.version, restoreGeneration: 'obsolete' }, owner)).data.details.reason, 'workspace_changed');
+    assert.equal((await f.call(revokePath, 'POST', { expectedVersion: current.version + 1, restoreGeneration: input.restoreGeneration }, owner)).status, 409);
+    const revoke = { expectedVersion: current.version, restoreGeneration: input.restoreGeneration };
+    const revoked = await f.call<ApiKeyRecord>(revokePath, 'POST', revoke, owner);
+    assert.ok(revoked.data.revokedAt);
+    assert.deepEqual(await f.call(revokePath, 'POST', revoke, owner), revoked);
+    assert.deepEqual((await f.call('/api-keys', 'POST', input, owner)).data, { key: revoked.data, duplicate: true });
+    assert.equal((await f.call<Project[]>('/v1/projects', 'GET', undefined, bearer(created.token))).status, 401);
+
+    const replacement = await f.call<ApiKeyCreated>('/api-keys', 'POST', { ...input, requestId: randomUUID() }, owner);
+    assert.equal(replacement.status, 201);
+    assert.notEqual(replacement.data.key.id, created.key.id);
+    assert.notEqual(replacement.data.token, created.token);
+    const backup = (await f.call<WorkspaceSnapshot>('/export')).data;
+    assert.equal(JSON.stringify(backup).includes(replacement.data.token), false);
+    assert.equal((await f.call('/import', 'POST', { data: backup })).status, 200);
+    assert.equal(database.prepare('SELECT 1 FROM api_key_issuance_requests').get(), undefined);
+    assert.equal((await f.call<Refusal>('/api-keys', 'POST', input, owner)).data.details.reason, 'workspace_changed');
+    assert.deepEqual((await f.call<ApiKeyRecord[]>('/api-keys', 'GET', undefined, owner)).data, []);
   } finally { database.close(); await f.close(); }
 });
 

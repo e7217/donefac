@@ -22,7 +22,9 @@ npm run dev
 
 ## 팀 파일럿 실행
 
-Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `TEAMSPACE_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. 기존 HTTPS 프록시와 공용 접속 키 파일을 지정하면 같은 팀 주소에서 접속할 수 있습니다. `npm run test:pilot`으로 브라우저 흐름과 전체 데이터 복원을, `npm run test:pilot:team`으로 합성 팀원 20명의 동시 사용과 복구를, `npm run test:pilot:access`로 HTTPS 팀 접속을 검증할 수 있습니다. [파일럿 실행과 복원](docs/PILOT.md)
+Linux에서 `npm run build:pilot`로 파일럿 번들을 만들고, 절대 데이터 경로를 `TEAMSPACE_DATA_DIR`로 지정해 `npm run start:pilot`을 실행합니다. 웹·API·공동 편집은 기본 `127.0.0.1:5190`의 같은 주소를 사용합니다. 기존 HTTPS 프록시와 공용 접속 키 파일을 지정하면 같은 팀 주소에서 접속할 수 있습니다.
+
+`npm run test:pilot:team-native`는 빈 워크스페이스에서 합성 팀원 20명의 동시 사용과 복원을 검증합니다. `npm run test:pilot:team`은 합성 Jira·Confluence 이관 자료로 동시 사용을 재현합니다. `npm run test:pilot`은 기본 브라우저 흐름과 전체 데이터 복원을, `npm run test:pilot:access`는 HTTPS 팀 접속을 검사합니다. [파일럿 실행과 복원](docs/PILOT.md)
 
 Jira·Confluence 내보내기 파일은 `npm run pilot:rehearsal`로 별도 워크스페이스에서 검토할 수 있습니다. `stage --profile`로 검토한 파일과 원본 인스턴스를 대조하고, `--confluence-findings`로 페이지별 검토 파일을 정확한 Confluence ZIP에 연결할 수 있습니다. 브라우저에서 매핑과 적용을 확인한 뒤 원본과 첨부파일의 해시, 업무·문서와 영수증을 별도 복원본과 비교합니다. [오프라인 이관 리허설](docs/PILOT.md#오프라인-원본-이관-리허설)
 

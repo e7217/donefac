@@ -42,7 +42,7 @@ export async function verifyWorkspaceTraffic(requests: APIRequestContext, {
   const workflow = before.workflows?.find(item => item.projectId === projectId);
   const previousStatus = workflow?.statuses.find(item => item.id === issue.status);
   const nextStatus = workflow?.statuses.find(item => item.category === 'in_progress' && item.id !== issue.status);
-  if (!previousStatus || !nextStatus) throw new Error('The migrated project needs an initial and a different in-progress status for the ticket pilot.');
+  if (!previousStatus || !nextStatus) throw new Error('The project needs an initial and a different in-progress status for the ticket pilot.');
   const actor = before.users.find(user => user.id === actorId);
   const observer = before.users.find(user => user.id === observerId);
   if (!actor || !observer) throw new Error('Both team members must exist for the ticket handoff.');

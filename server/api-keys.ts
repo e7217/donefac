@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { Express, NextFunction, Request, Response } from 'express';
-import type { ApiKeyCreated, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, ResourceLink, RichContent, User } from '../shared/types.js';
+import type { ApiKeyCreated, ApiKeyIssuanceInput, ApiKeyIssuanceResult, ApiKeyRecord, Attachment, AttachmentVersion, Comment, Dependency, DocPage, DocRevision, Issue, IssueRelation, PlanningItem, Project, ResourceLink, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
-import { creationRequestId } from './creation-request.js';
+import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import { normalizeDocumentContent } from './document-content.js';
 import { DECISION_FOLLOW_UP_QUERY_PARAMETERS, TEAM_DECISION_FOLLOW_UP_QUERY_PARAMETERS } from './decision-follow-ups.js';
 import { contentReferences, documentIssueBlocks } from '../shared/document-nodes.js';
@@ -10,15 +10,19 @@ import { documentChildLists } from '../shared/document-child-list.js';
 import { documentLabelLists } from '../shared/document-label-list.js';
 import { documentPropertyReportProjectIds, documentPropertyReports } from '../shared/document-properties.js';
 import { documentNodes } from '../shared/document-references.js';
+import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
 export class ApiKeyError extends Error {
   constructor(public status: number, message: string, public details?: unknown) { super(message); }
 }
 const fail = (status: number, message: string): never => { throw new ApiKeyError(status, message); };
+const invalidIssuanceSettings = (message: string): never => { throw new ApiKeyError(400, message, { reason: 'invalid_settings' }); };
 const unauthorized = (): never => fail(401, '유효한 Bearer API 키가 필요합니다.');
 const metadata = (row: { json: string } | undefined) => row ? JSON.parse(row.json) as ApiKeyRecord : undefined;
 type Hooks = { actor: (request: Request) => string; activity: (request: Request, type: string, id: string, action: string, detail?: string) => unknown };
 type Context = { id: string; version: number; actorId: string; path: string; projectIds: readonly string[] | null };
+type IssuanceSettings = Pick<ApiKeyIssuanceInput, 'name' | 'access' | 'projectIds' | 'expiresAt'>;
+type IssuanceReceipt = { keyId: string; fingerprint: string };
 
 /** The existing /api browser surface remains local/trusted. Only /api/v1 is a
  * strict Bearer gateway; it reuses the application's normal mutation routes. */
@@ -30,7 +34,12 @@ export class ApiKeyService {
       actor_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       token_hash TEXT NOT NULL UNIQUE,
       json TEXT NOT NULL
-    ); CREATE INDEX IF NOT EXISTS api_keys_actor ON api_keys(actor_id);`);
+    ); CREATE INDEX IF NOT EXISTS api_keys_actor ON api_keys(actor_id);
+    CREATE TABLE IF NOT EXISTS api_key_issuance_requests(
+      id TEXT PRIMARY KEY,
+      key_id TEXT NOT NULL UNIQUE REFERENCES api_keys(id) ON DELETE CASCADE,
+      fingerprint TEXT NOT NULL
+    );`);
   }
 
   list(actorId: string): ApiKeyRecord[] {
@@ -50,30 +59,79 @@ export class ApiKeyService {
     return this.valid(metadata(this.store.db.prepare('SELECT json FROM api_keys WHERE token_hash=?').get(hash) as { json: string } | undefined));
   }
 
-  create(actorId: string, input: unknown): ApiKeyCreated {
-    if (!this.store.get('users', actorId)) fail(400, '작업자를 확인해 주세요.');
-    if (!input || typeof input !== 'object' || Array.isArray(input)) fail(400, 'API 키 설정을 확인해 주세요.');
-    const value = input as Record<string, unknown>;
-    if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120) fail(400, 'API 키 이름은 1~120자여야 합니다.');
-    if (!['read', 'write'].includes(value.access as string)) fail(400, '읽기 또는 읽기·쓰기 권한을 선택해 주세요.');
+  private issuanceSettings(value: Record<string, unknown>): IssuanceSettings {
+    if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120) invalidIssuanceSettings('API 키 이름은 1~120자여야 합니다.');
+    if (!['read', 'write'].includes(value.access as string)) invalidIssuanceSettings('읽기 또는 읽기·쓰기 권한을 선택해 주세요.');
     let projectIds: string[] | null = null;
     if (value.projectIds !== null) {
-      if (!Array.isArray(value.projectIds) || !value.projectIds.length || value.projectIds.length > 10000 || !value.projectIds.every(id => typeof id === 'string' && this.store.get('projects', id))) fail(400, '허용할 프로젝트를 확인해 주세요.');
+      if (!Array.isArray(value.projectIds) || !value.projectIds.length || value.projectIds.length > 10000 || !value.projectIds.every(id => typeof id === 'string' && id)) invalidIssuanceSettings('허용할 프로젝트를 확인해 주세요.');
       projectIds = [...new Set(value.projectIds as string[])];
     }
     let expiresAt: string | null = null;
     if (value.expiresAt !== null && value.expiresAt !== undefined) {
-      if (typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt)) || Date.parse(value.expiresAt) <= Date.now()) fail(400, '만료일은 현재보다 미래여야 합니다.');
+      if (typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt))) invalidIssuanceSettings('만료일은 현재보다 미래여야 합니다.');
       expiresAt = new Date(value.expiresAt as string).toISOString();
     }
+    return { name: (value.name as string).trim(), access: value.access as ApiKeyRecord['access'], projectIds, expiresAt };
+  }
+
+  private create(actorId: string, settings: IssuanceSettings): ApiKeyCreated {
+    if (!this.store.get('users', actorId)) fail(400, '작업자를 확인해 주세요.');
+    if (settings.projectIds?.some(id => !this.store.get('projects', id))) invalidIssuanceSettings('허용할 프로젝트를 확인해 주세요.');
+    if (settings.expiresAt !== null && Date.parse(settings.expiresAt) <= Date.now()) invalidIssuanceSettings('만료일은 현재보다 미래여야 합니다.');
     const token = `ts_${randomBytes(32).toString('base64url')}`;
-    const key: ApiKeyRecord = { id: randomUUID(), name: (value.name as string).trim(), prefix: token.slice(0, 11), actorId, access: value.access as ApiKeyRecord['access'], projectIds, version: 1, createdAt: new Date().toISOString(), expiresAt, lastUsedAt: null, revokedAt: null };
+    const key: ApiKeyRecord = { ...settings, id: randomUUID(), prefix: token.slice(0, 11), actorId,
+      version: 1, createdAt: new Date().toISOString(), lastUsedAt: null, revokedAt: null };
     this.store.db.prepare('INSERT INTO api_keys(id,actor_id,token_hash,json) VALUES(?,?,?,?)').run(key.id, actorId, createHash('sha256').update(token).digest('hex'), JSON.stringify(key));
     return { key, token };
   }
 
-  revoke(id: string, actorId: string, expectedVersion: unknown, onRevoked?: (record: ApiKeyRecord) => void): ApiKeyRecord {
+  private requireRestoreGeneration(generation: unknown) {
+    if (typeof generation !== 'string' || !generation || generation.length > 100) {
+      throw new ApiKeyError(400, '확인한 작업 공간 버전을 보내 주세요.', { reason: 'invalid_request' });
+    }
+    if (generation !== workspaceRestoreGeneration(this.store)) {
+      throw new ApiKeyError(409, '작업 공간이 복원되었습니다. API 키 목록을 다시 확인해 주세요.', { reason: 'workspace_changed' });
+    }
+  }
+
+  private issue(actorId: string, value: Record<string, unknown>, onIssued: (key: ApiKeyRecord) => void): ApiKeyIssuanceResult {
     return this.store.transaction(() => {
+      const guarded = ['requestId', 'restoreGeneration'].some(field => Object.hasOwn(value, field));
+      let receiptInput: { id: string; fingerprint: string } | undefined;
+      if (guarded) {
+        if (typeof value.requestId !== 'string' || !creationRequestId.test(value.requestId) ||
+            Object.keys(value).some(field => !['name', 'access', 'projectIds', 'expiresAt', 'requestId', 'restoreGeneration'].includes(field))) {
+          throw new ApiKeyError(400, 'API 키 발급 요청을 확인해 주세요.', { reason: 'invalid_request' });
+        }
+        this.requireRestoreGeneration(value.restoreGeneration);
+      }
+      const settings = this.issuanceSettings(value);
+      if (guarded) {
+        receiptInput = { id: (value.requestId as string).toLowerCase(),
+          fingerprint: creationRequestFingerprint({ ...settings, projectIds: settings.projectIds?.slice().sort() ?? null, restoreGeneration: value.restoreGeneration }) };
+        const receipt = this.store.db.prepare(`SELECT key_id AS keyId,fingerprint
+          FROM api_key_issuance_requests WHERE id=?`).get(receiptInput.id) as IssuanceReceipt | undefined;
+        if (receipt) {
+          const key = this.get(receipt.keyId);
+          if (!key || key.actorId !== actorId || receipt.fingerprint !== receiptInput.fingerprint) {
+            throw new ApiKeyError(409, '이미 사용한 API 키 발급 요청입니다. 키 목록을 확인해 주세요.', { reason: 'request_conflict' });
+          }
+          return { key, duplicate: true };
+        }
+      }
+      const created = this.create(actorId, settings);
+      onIssued(created.key);
+      if (receiptInput) this.store.db.prepare('INSERT INTO api_key_issuance_requests(id,key_id,fingerprint) VALUES(?,?,?)')
+        .run(receiptInput.id, created.key.id, receiptInput.fingerprint);
+      return created;
+    });
+  }
+
+  revoke(id: string, actorId: string, expectedVersion: unknown, onRevoked?: (record: ApiKeyRecord) => void,
+    restoreGeneration?: unknown): ApiKeyRecord {
+    return this.store.transaction(() => {
+      if (restoreGeneration !== undefined) this.requireRestoreGeneration(restoreGeneration);
       const key = this.get(id);
       if (!key || key.actorId !== actorId) fail(404, 'API 키를 찾을 수 없습니다.');
       if (!Number.isSafeInteger(expectedVersion) || (expectedVersion as number) < 1) fail(400, 'expectedVersion이 필요합니다.');
@@ -636,18 +694,21 @@ export class ApiKeyService {
   }
 
   registerManagementRoutes(app: Express, hooks: Hooks) {
-    app.get('/api/api-keys', (request, response) => response.json(this.list(hooks.actor(request))));
+    app.get('/api/api-keys', (request, response) => response.set('Cache-Control', 'no-store').json(this.list(hooks.actor(request))));
     app.post('/api/api-keys', (request, response) => {
-      const result = this.store.transaction(() => {
-        const created = this.create(hooks.actor(request), request.body);
-        hooks.activity(request, 'api-key', created.key.id, 'API 키 발급', created.key.name);
-        return created;
-      });
-      response.status(201).json(result);
+      const body = request.body as Record<string, unknown>;
+      if ((Object.hasOwn(body, 'requestId') || Object.hasOwn(body, 'restoreGeneration')) && !request.header('X-Actor-Id')) {
+        fail(400, '등록된 작업자를 선택해 주세요.');
+      }
+      const result = this.issue(hooks.actor(request), body, key => hooks.activity(request, 'api-key', key.id, 'API 키 발급', key.name));
+      response.set('Cache-Control', 'no-store').status('token' in result ? 201 : 200).json(result);
     });
     app.post('/api/api-keys/:id/revoke', (request, response) => {
-      const result = this.revoke(String(request.params.id), hooks.actor(request), request.body.expectedVersion, record => hooks.activity(request, 'api-key', record.id, 'API 키 폐기', record.name));
-      response.json(result);
+      const { expectedVersion, restoreGeneration } = request.body;
+      if (restoreGeneration !== undefined && !request.header('X-Actor-Id')) fail(400, '등록된 작업자를 선택해 주세요.');
+      const result = this.revoke(String(request.params.id), hooks.actor(request), expectedVersion,
+        record => hooks.activity(request, 'api-key', record.id, 'API 키 폐기', record.name), restoreGeneration);
+      response.set('Cache-Control', 'no-store').json(result);
     });
   }
 }

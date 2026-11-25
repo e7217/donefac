@@ -48,6 +48,7 @@ import { jiraCommentBodyHash, validRestoredJiraCommentCorrections } from './jira
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { ProjectCreationError, ProjectCreationService } from './project-creation.js';
+import { nextUserVersion, UserEmailChangeError, UserEmailChangeService } from './user-email-change.js';
 import { IssueSaveError, IssueSaveService } from './issue-save.js';
 import { DocumentSaveError, DocumentSaveService } from './document-save.js';
 import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
@@ -264,6 +265,7 @@ export function createApp(options: {
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const projectCreation = new ProjectCreationService(store);
+  const userEmailChange = new UserEmailChangeService(store);
   const issueSave = new IssueSaveService(store);
   const documentSave = new DocumentSaveService(store);
   const issueStatusChanges = new IssueStatusChangeService(store);
@@ -490,8 +492,13 @@ export function createApp(options: {
       documentSpaceHomes: documentSpaceHomes.snapshot(),
     } as unknown as WorkspaceSnapshot;
   };
-  const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
-  const validateUser = (u: any) => { u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.'); return u; };
+  const validateEmail = (email: unknown) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
+  const validateUser = (u: User) => {
+    u.name=text(u.name,'이름',80);u.email=validateEmail(u.email);
+    if(!/^#[a-f\d]{6}$/i.test(u.color))fail('색상은 #RRGGBB 형식이어야 합니다.');
+    if(u.version!==undefined&&(!Number.isSafeInteger(u.version)||u.version<1))fail('팀원 정보 버전을 확인해 주세요.');
+    return u;
+  };
   const validateProject = (p: any) => { p.name=text(p.name,'프로젝트 이름',100);p.key=text(p.key,'프로젝트 키',12).toUpperCase();if(!/^[A-Z][A-Z0-9]{1,11}$/.test(p.key))fail('프로젝트 키는 영문 대문자로 시작하는 2~12자리 영문·숫자입니다.');if(typeof p.description!=='string')fail('설명을 확인해 주세요.');if(!/^#[a-f\d]{6}$/i.test(p.color))fail('색상을 확인해 주세요.');return p; };
   type IssueParent = Pick<Issue, 'id' | 'projectId' | 'parentId'>;
   type ProjectedIssueHierarchy = { issues: ReadonlyMap<string, IssueParent>; validated: Set<string> };
@@ -1579,7 +1586,26 @@ export function createApp(options: {
     res.set('Cache-Control','no-store').json(result);
   });
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
-  app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
+  app.patch('/api/users/:id',(req,res)=>{
+    const id = String(req.params.id);
+    const body = req.body as Record<string, unknown>;
+    if (['requestId', 'expectedVersion', 'restoreGeneration'].some(key => Object.hasOwn(body, key))) {
+      const actorId = requireSelectedActor(req);
+      const result = userEmailChange.change(id, actorId, body, validateEmail, () => recordActivity(actorId, 'user', id, '팀원 정보 변경'));
+      res.set('Cache-Control', 'no-store').json(result);
+      return;
+    }
+    const updated = store.transaction(() => {
+      const user = get<User>('users', id);
+      const next = validateUser({ ...user, ...Object.fromEntries(['name', 'email', 'color'].filter(key => Object.hasOwn(body, key)).map(key => [key, body[key]])) });
+      if (next.name === user.name && next.email === user.email && next.color === user.color) return user;
+      next.version = nextUserVersion(user);
+      store.put('users', next);
+      activity(req, 'user', id, '팀원 정보 변경');
+      return next;
+    });
+    res.set('Cache-Control', 'no-store').json(updated);
+  });
   app.post('/api/projects', (req, res) => {
     const input = req.body;
     if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('프로젝트 입력을 확인해 주세요.');
@@ -4083,6 +4109,7 @@ export function createApp(options: {
     if(error instanceof CommentEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof ProjectCreationError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof UserEmailChangeError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueSaveError||error instanceof DocumentSaveError)return res.status(error.status).json({error:error.message});

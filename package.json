@@ -18,6 +18,7 @@
     "pilot:confluence:audit": "node --import tsx scripts/confluence-pilot-audit.mjs",
     "test:pilot": "npm run build:pilot && node --test tests/ops/pilot-backup.test.mjs && node scripts/test-pilot.mjs",
     "test:pilot:team": "npm run build:pilot && node scripts/test-pilot.mjs --team",
+    "test:pilot:team-native": "npm run build:pilot && node scripts/test-pilot.mjs --team-native",
     "test:pilot:access": "npm run build:pilot && node scripts/test-pilot-access.mjs",
     "test:pilot:rehearsal": "npm run build:pilot && node --test tests/ops/pilot-migration.test.mjs tests/ops/pilot-migration-profile.test.mjs tests/ops/pilot-migration-confluence-findings.test.mjs tests/ops/jira-pilot-collect-plan-rehearsal.test.mjs",
     "test:pilot:rehearsal:scale": "npm run build:pilot && node --test tests/ops/pilot-migration-scale.test.mjs",

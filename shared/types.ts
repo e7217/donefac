@@ -276,7 +276,8 @@ export type IssueStatus = string;
 export const PRIORITY = { urgent: '긴급', high: '높음', medium: '보통', low: '낮음' } as const;
 export type Priority = keyof typeof PRIORITY;
 export const ISSUE_TYPES = ['큰틀', '작업', '부작업', '버그', '개선', '신규', '요구사항', '회의', '기획'] as const;
-export interface User { id: string; name: string; email: string; color: string }
+export interface User { id: string; name: string; email: string; color: string; version?: number }
+export interface UserEmailChangeResult { user: User; appliedVersion: number; duplicate: boolean }
 export type LegacyFormat = 'jira-backup-xml' | 'jira-search-xml' | 'jira-csv' | 'jira-json' | 'confluence-xml';
 export type LegacyRecordKind = 'identity' | 'project' | 'issue' | 'page' | 'comment' | 'revision' | 'history' | 'attachment' | 'relation' | 'field' | 'option' | 'workflow';
 export type LegacyValue = string | number | boolean | null | LegacyValue[] | {[key:string]:LegacyValue};
@@ -906,6 +907,11 @@ export interface ApiKeyRecord {
   version: number; createdAt: string; expiresAt: string | null; lastUsedAt: string | null; revokedAt: string | null;
 }
 export interface ApiKeyCreated { key: ApiKeyRecord; token: string }
+export interface ApiKeyIssuanceInput {
+  name: string; access: ApiKeyAccess; projectIds: string[] | null; expiresAt: string | null;
+  requestId: string; restoreGeneration: string;
+}
+export type ApiKeyIssuanceResult = ApiKeyCreated | { key: ApiKeyRecord; duplicate: true };
 export interface CalendarException { date: string; isWorking: boolean; label: string }
 export interface WorkCalendar { id: string; projectId: string; name: string; workingWeekdays: number[]; exceptions: CalendarException[]; version: number; updatedAt: string }
 export interface WorkloadCapacityValues {

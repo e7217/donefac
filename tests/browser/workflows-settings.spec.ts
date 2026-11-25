@@ -113,14 +113,18 @@ test('작업공간 새로고침은 깨끗한 설정을 갱신하고 작성 중�
     const first = await request.patch(`/api/projects/${project.id}/workflow`, { data: { ...original, expectedVersion: original.version, statuses: original.statuses.map((status, index) => index === 0 ? { ...status, label: '새로고침으로 반영된 이름' } : status) } });
     expect(first.ok()).toBeTruthy();
     const updated = await first.json() as ProjectWorkflow;
-    page.once('dialog', dialog => dialog.accept(`workflow-${Date.now()}@example.test`));
-    await page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true }).click();
+    const editEmail = page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true });
+    const emailDialog = page.getByRole('dialog', { name: '팀원 이메일 변경' });
+    await editEmail.click();
+    await emailDialog.getByLabel('새 이메일').fill(`workflow-${Date.now()}@example.test`);
+    await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
     await expect(name).toHaveValue('새로고침으로 반영된 이름');
     await name.fill('새로고침에도 유지할 작성 내용');
     const second = await request.patch(`/api/projects/${project.id}/workflow`, { data: { ...updated, expectedVersion: updated.version, statuses: updated.statuses.map((status, index) => index === 0 ? { ...status, label: '동시에 바뀐 서버 이름' } : status) } });
     expect(second.ok()).toBeTruthy();
-    page.once('dialog', dialog => dialog.accept(user.email));
-    await page.locator('.team-row').filter({ hasText: user.name }).getByRole('button', { name: '이메일 변경', exact: true }).click();
+    await editEmail.click();
+    await emailDialog.getByLabel('새 이메일').fill(user.email);
+    await emailDialog.getByRole('button', { name: '이메일 저장' }).click();
     await expect(settings.getByRole('alert')).toContainText('서버 워크플로가 버전');
     await expect(name).toHaveValue('새로고침에도 유지할 작성 내용');
   } finally {
