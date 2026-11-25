@@ -1524,6 +1524,10 @@ export function createApp(options: {
     }else get(targetType==='issue'?'issues':targetType==='document'?'documents':'projects',targetId);
     return {targetType,targetId} as const;
   }
+  app.get('/api/notifications/subscriptions/issues',(req,res)=>{
+    if (Object.keys(req.query).length) return fail('구독 업무의 조회 조건을 확인해 주세요.');
+    res.set('Cache-Control','no-store').json({issueIds:subscriptions.activeIssueIds(requireSelectedActor(req))});
+  });
   app.get('/api/notifications/subscriptions/:targetType/:targetId',(req,res)=>{
     const userId=requireSelectedActor(req), {targetType,targetId}=subscriptionTarget(req);
     res.set('Cache-Control','no-store').json({subscribed:subscriptions.isSubscribed(userId,targetType,targetId)});

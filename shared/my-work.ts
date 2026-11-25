@@ -2,7 +2,8 @@ import { calendarDay, isCalendarDate } from './calendar.js';
 import { PRIORITY, type Issue, type Priority, type Project, type StatusCategory, type WorkflowStatus, type WorkspaceSnapshot } from './types.js';
 import { statusMeta } from './workflow-helpers.js';
 
-export type MyWorkRole = 'assigned' | 'collaborating' | 'reported';
+type DirectMyWorkRole = 'assigned' | 'collaborating' | 'reported';
+export type MyWorkRole = DirectMyWorkRole | 'subscribed';
 export type MyWorkRoleFilter = 'all' | MyWorkRole;
 export type MyWorkGrouping = 'deadline' | 'status';
 
@@ -17,6 +18,7 @@ export interface MyWorkItem {
   status: WorkflowStatus;
   role: MyWorkRole;
   reported: boolean;
+  subscribed: boolean;
   date: { value: string; source: 'dueDate' | 'endDate' } | null;
 }
 
@@ -32,7 +34,7 @@ type MyWorkData = Pick<WorkspaceSnapshot, 'projects' | 'issues' | 'workflows' | 
 const priorities = Object.keys(PRIORITY) as Priority[];
 const issueKeys = new Intl.Collator('ko', { numeric: true });
 
-export function myWorkMembership(issue: Pick<Issue, 'assigneeId' | 'collaboratorIds' | 'reporterId'>, actorId: string): MyWorkRole | null {
+export function myWorkMembership(issue: Pick<Issue, 'assigneeId' | 'collaboratorIds' | 'reporterId'>, actorId: string): DirectMyWorkRole | null {
   if (!actorId.trim()) return null;
   if (issue.assigneeId === actorId) return 'assigned';
   if (issue.collaboratorIds.includes(actorId)) return 'collaborating';
@@ -43,9 +45,10 @@ function isClosed(status: StatusCategory): boolean {
   return status === 'done' || status === 'cancelled';
 }
 
-export function countActiveMyWork(data: MyWorkData, actorId: string): number {
+export function countActiveMyWork(data: MyWorkData, actorId: string, subscriptions?: ReadonlySet<string>): number {
+  if (!actorId.trim()) return 0;
   const projects = new Set(data.projects.map(project => project.id));
-  return data.issues.filter(issue => myWorkMembership(issue, actorId) && projects.has(issue.projectId) &&
+  return data.issues.filter(issue => (myWorkMembership(issue, actorId) || subscriptions?.has(issue.id)) && projects.has(issue.projectId) &&
     !isClosed(statusMeta(data, issue.projectId, issue.status).category)).length;
 }
 
@@ -80,7 +83,7 @@ function compareOpen(left: MyWorkItem, right: MyWorkItem): number {
   return priority || compareRecent(left.issue, right.issue) || compareKeys(left.issue, right.issue);
 }
 
-export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: string, options: MyWorkFilters) {
+export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: string, options: MyWorkFilters, subscriptions?: ReadonlySet<string>) {
   const groups = (options.grouping === 'deadline' ? deadlineGroups : statusGroups)
     .map(id => ({ id, items: [] as MyWorkItem[] }));
   const groupById = new Map<MyWorkGroupId, MyWorkItem[]>(groups.map(group => [group.id, group.items]));
@@ -88,9 +91,10 @@ export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: strin
   const todayDay = calendarDay(today);
   let total = 0;
   for (const issue of data.issues) {
-    const role = myWorkMembership(issue, actorId);
+    const subscribed = Boolean(actorId.trim() && subscriptions?.has(issue.id));
+    const role = myWorkMembership(issue, actorId) ?? (subscribed ? 'subscribed' : null);
     const reported = issue.reporterId === actorId;
-    const matchesRole = options.role === 'all' || (options.role === 'reported' ? reported : role === options.role);
+    const matchesRole = options.role === 'all' || (options.role === 'reported' ? reported : options.role === 'subscribed' ? subscribed : role === options.role);
     if (!role || !matchesRole ||
         (options.projectId !== null && issue.projectId !== options.projectId)) continue;
 
@@ -99,7 +103,7 @@ export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: strin
     const status = statusMeta(data, issue.projectId, issue.status);
     if (!options.includeClosed && isClosed(status.category)) continue;
 
-    const item: MyWorkItem = { issue, project, status, role, reported, date: issueDeadline(issue) };
+    const item: MyWorkItem = { issue, project, status, role, reported, subscribed, date: issueDeadline(issue) };
     const groupId = options.grouping === 'deadline' ? deadlineGroup(item, todayDay) : status.category;
     groupById.get(groupId)!.push(item);
     total++;

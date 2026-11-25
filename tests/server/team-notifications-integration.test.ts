@@ -325,6 +325,9 @@ test('individual ticket subscriptions are idempotent and deliver committed comme
   const f = await fixture(t);
   const ticket = await issue(f, reviewer, '구독하는 업무');
   const path = subscriptionPath('issue', ticket.id);
+  const active = '/notifications/subscriptions/issues';
+  await expectStatus(f.call(active, 'GET', undefined, null), 400);
+  await expectStatus(f.call(active + '?userId=user-seo', 'GET', undefined, other), 400);
   await expectStatus(f.call(path, 'GET', undefined, null), 400);
   await expectStatus(f.call(path + '?userId=user-min', 'GET', undefined, reviewer), 400);
   await expectStatus(f.call(path, 'PUT', { subscribed: true, userId: other }, reviewer), 400);
@@ -332,6 +335,8 @@ test('individual ticket subscriptions are idempotent and deliver committed comme
   assert.deepEqual(await checkSubscription(f, path, reviewer, true), { subscribed: true });
   assert.deepEqual(await checkSubscription(f, path, reviewer, true), { subscribed: true });
   assert.deepEqual(await checkSubscription(f, path, other), { subscribed: false });
+  assert.deepEqual(await expectStatus(f.call(active, 'GET', undefined, reviewer)), { issueIds: [ticket.id] });
+  assert.deepEqual(await expectStatus(f.call(active, 'GET', undefined, other)), { issueIds: [] });
   await checkSubscription(f, path, other, true);
   await comment(f, 'issue', ticket.id, editor);
 
@@ -471,6 +476,8 @@ test('individual subscriptions survive restart, trash and native backup; invalid
   await checkSubscription(f, documentPath, reviewer, true);
   const archived = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
   await expectStatus(f.call(issuePath, 'GET', undefined, other), 404);
+  const active = () => expectStatus(f.call('/notifications/subscriptions/issues', 'GET', undefined, other));
+  assert.deepEqual(await active(), { issueIds: [] });
   const backup = await expectStatus(f.call<Backup>('/export'));
   assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(backup.notificationSubscriptions, [
@@ -490,9 +497,11 @@ test('individual subscriptions survive restart, trash and native backup; invalid
   assert.deepEqual(await checkSubscription(f, documentPath, other), { subscribed: false });
   await expectStatus(f.call(`/trash/${archived.trashEntryId}/restore`, 'POST'));
   assert.deepEqual(await checkSubscription(f, issuePath, other), { subscribed: true });
+  assert.deepEqual(await active(), { issueIds: [ticket.id] });
   assert.equal((await inbox(f, other)).unreadCount, 0);
   const deletedAgain = await expectStatus(f.call<{ trashEntryId: string }>(`/issues/${ticket.id}`, 'DELETE'));
   await expectStatus(f.call(`/trash/${deletedAgain.trashEntryId}`, 'DELETE'));
+  assert.deepEqual(await active(), { issueIds: [] });
   const afterPurge = await expectStatus(f.call<Backup>('/export'));
   assert.deepEqual(afterPurge.notificationSubscriptions, backup.notificationSubscriptions.slice(0, 1));
 

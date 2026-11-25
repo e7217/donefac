@@ -21,6 +21,7 @@ import type { ScheduleDependencyEndpoint } from '../shared/schedule-dependencies
 import { isRelationId } from '../shared/issue-relations';
 import { api, apiResponse, patch, post, relativeTime, setActor } from './lib/api';
 import { useAtlassianSearch } from './lib/use-atlassian-search';
+import { useIssueSubscriptions } from './lib/use-issue-subscriptions';
 import { DEFAULT_DECISION_FOLLOW_UP_SCOPE, decisionFollowUpParameters, readDecisionFollowUpScope, sameDecisionFollowUpScope, type DecisionFollowUpScope } from './lib/decision-follow-up-route';
 import { fieldBreakdownParameters, readFieldBreakdownScope, sameFieldBreakdownScope, type FieldBreakdownScope } from './lib/field-breakdown-route';
 import { appendWorkspaceSearchFilters, readWorkspaceSearchFilters, sameWorkspaceSearchFilters } from './lib/workspace-search-route';
@@ -492,6 +493,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [projectId, setProjectId] = useState('');
   const [actorId, setActorId] = useState('');
   const actorRef = useRef('');
+  const issueSubscriptions = useIssueSubscriptions(actorId);
   const [view, setView] = useState<View>('overview');
   const [issueId, setIssueId] = useState<string | null>(null);
   const [issueReview, setIssueReview] = useState<IssueReview | null>(null);
@@ -1280,7 +1282,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         <button type="button" className={`nav-item ${teamDecisions ? 'active' : ''}`} aria-current={teamDecisions ? 'page' : undefined} disabled={!project}
           data-gantt-focus-control={view === 'gantt' ? '' : undefined} onPointerDown={view === 'gantt' ? keepGanttDateFocus : undefined}
           onClick={openTeamDecisionFollowUps}><ClipboardList size={18}/><span>팀 결정 후속 업무</span></button>
-        <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId)}</span></button>
+        <button className={`nav-item ${view === 'mywork' ? 'active' : ''}`} aria-current={view === 'mywork' ? 'page' : undefined} onClick={() => navigate('mywork')}><CircleDot size={18}/><span>내 업무</span><span className="nav-count">{countActiveMyWork(data, actorId, issueSubscriptions.ids)}</span></button>
         <button type="button" className={`nav-item ${view === 'favorites' ? 'active' : ''}`} aria-current={view === 'favorites' ? 'page' : undefined}
           data-gantt-focus-control={view === 'gantt' ? '' : undefined} onPointerDown={view === 'gantt' ? keepGanttDateFocus : undefined}
           onClick={() => navigate('favorites')}><Star size={18} aria-hidden="true"/><span>즐겨찾기</span></button>
@@ -1333,7 +1335,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenIssueForReview={openIssueForReview}
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
-        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue} onOpenIssueForReview={openIssueForReview}/>}
+        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}
+          subscriptions={issueSubscriptions} onOpenIssueForReview={openIssueForReview}/>}
         {view === 'favorites' && <FavoritesPage data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh}/>}
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
           <WorkspaceSearch data={data} filters={searchFilters} onChange={changeSearchFilters} refresh={refresh} openIssue={openSearchIssue} openDocument={openDocument}/>

@@ -90,6 +90,71 @@ test('360px 간트의 날짜 입력은 업무 상세를 열지 않고 행에서 
   }
 });
 
+test('간트에서 날짜 일부를 비운 입력은 마지막 유효값을 유지하고 날짜 전체 지우기는 저장한다', async ({ page, request }) => {
+  const { projects: [project] } = await workspace(request);
+  const title = `간트 미완성 날짜 입력 ${Date.now()}`;
+  const original = { startDate: '2026-11-24', endDate: '2026-11-27' };
+  const dates = { startDate: '2026-11-25', endDate: '2026-11-28' };
+  const created = await request.post('/api/issues', { data: { projectId: project.id, title, ...original } });
+  expect(created.status(), await created.text()).toBe(201);
+  const issue = await created.json() as Issue;
+  const current = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+  try {
+    await page.setViewportSize({ width: 360, height: 760 });
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(title, { timeout: 35_000 });
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const start = chart.getByLabel(`${issue.key} 시작일`, { exact: true });
+    const end = chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const save = chart.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true });
+    const requests: unknown[] = [];
+    page.on('request', request => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/schedule/manual-preview') {
+        requests.push(request.postDataJSON());
+      }
+    });
+
+    await start.press('Delete');
+    await expect(start).toHaveValue('');
+    expect(await start.evaluate(input => (input as HTMLInputElement).validity.badInput)).toBe(true);
+    await end.press('Enter');
+    await expect(start).toBeFocused();
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
+    expect(requests).toEqual([]);
+    expect(await current()).toMatchObject({ ...original, version: issue.version });
+
+    await start.fill(dates.startDate);
+    await end.fill(dates.endDate);
+    await start.press('Delete');
+    await save.click();
+    await expect(start).toBeFocused();
+    expect(requests).toEqual([]);
+    await chart.getByRole('button', { name: `${issue.key} 일정과 연결 편집`, exact: true }).click();
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(dates.startDate);
+    await expect(editor.getByLabel('종료일', { exact: true })).toHaveValue(dates.endDate);
+    await editor.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
+
+    await start.fill(dates.startDate);
+    await expect(start).not.toHaveAttribute('aria-invalid', 'true');
+    await start.press('Enter');
+    await expect.poll(current).toMatchObject({ ...dates, version: issue.version + 1 });
+    expect(requests).toEqual([{ changes: [{ id: issue.id, expectedVersion: issue.version, ...dates }] }]);
+
+    await end.focus();
+    await start.focus();
+    for (const key of ['Delete', 'ArrowRight', 'Delete', 'ArrowRight', 'Delete']) await page.keyboard.press(key);
+    await expect(start).toHaveValue('');
+    expect(await start.evaluate(input => (input as HTMLInputElement).validity.badInput)).toBe(false);
+    await expect(start).not.toHaveAttribute('aria-invalid', 'true');
+    await start.press('Enter');
+    await expect.poll(current).toMatchObject({ startDate: null, endDate: dates.endDate, version: issue.version + 2 });
+    expect(requests.at(-1)).toEqual({ changes: [{ id: issue.id, expectedVersion: issue.version + 1, startDate: null, endDate: dates.endDate }] });
+  } finally { await request.delete(`/api/issues/${issue.id}`); }
+});
+
 test('간트 날짜 초안을 저장하지 않고 유지하거나 확인 후 전체 프로젝트 보드로 이동한다', async ({ page, request }) => {
   const { projects: [project] } = await workspace(request);
   const title = `팀 보드 이동 전 간트 날짜 입력 ${Date.now()}`;

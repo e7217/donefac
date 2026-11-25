@@ -1649,6 +1649,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 브라우저의 `GET /api/notifications/subscriptions/:targetType/:targetId`는 `X-Actor-Id`로 선택한 작업자의 `{ "subscribed": true }` 또는 `{ "subscribed": false }`를 반환한다. 같은 경로의 `PUT`에 `subscribed` 불리언을 보내 구독 상태를 지정한다.
 
+`GET /api/notifications/subscriptions/issues`는 `X-Actor-Id` 작업자가 직접 구독한 활성 티켓의 `{issueIds}`를 반환한다. 휴지통에서 복원한 티켓의 기존 구독도 목록에 다시 나타난다. 쿼리 조건은 받지 않으며 `Cache-Control: no-store`를 사용한다.
+
 | `targetType` | `targetId` | 알림 대상 |
 | --- | --- | --- |
 | `issue` | 업무 ID | 해당 업무의 상태 변경과 댓글 |

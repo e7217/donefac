@@ -54,6 +54,16 @@
   margin: 12px 0 8px;
 }
 
+.my-work-subscriptions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-block: 12px;
+  color: #52655e;
+  font-size: 12px;
+}
+
 .my-work-empty {
   margin: 0;
   padding: 24px;

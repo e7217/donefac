@@ -3431,6 +3431,13 @@ function InlineIssueForm({ data, projectId, chooseProject, actorId, projects, us
   </form>;
 }
 
+type InlineDateInput = { value: string; lastValid: string; incomplete: boolean };
+
+function inlineDateInput(date: string | null): InlineDateInput {
+  const value = date ?? '';
+  return { value, lastValid: value, incomplete: false };
+}
+
 function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange }: {
   issue: Issue;
   recovered?: StoredGanttDateDraft;
@@ -3443,46 +3450,65 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
 }) {
   const [source, setSource] = useState(() => recovered
     ? { ...issue, version: recovered.version, startDate: recovered.startDate, endDate: recovered.endDate } : issue);
-  const [start, setStart] = useState((recovered ? recovered.draftStart : issue.startDate) ?? '');
-  const [end, setEnd] = useState((recovered ? recovered.draftEnd : issue.endDate) ?? '');
+  const [startInput, setStart] = useState(() => inlineDateInput(recovered ? recovered.draftStart : issue.startDate));
+  const [endInput, setEnd] = useState(() => inlineDateInput(recovered ? recovered.draftEnd : issue.endDate));
   const [owner] = useState(() => Symbol());
   const [pending, setPending] = useState(false);
   const pendingRef = useRef(false);
   const startField = useRef<HTMLInputElement>(null);
   const endField = useRef<HTMLInputElement>(null);
   const draftId = `dates:${issue.id}`;
+  const start = startInput.lastValid, end = endInput.lastValid;
+  const incomplete = startInput.incomplete || endInput.incomplete;
   const dirty = start !== (source.startDate || '') || end !== (source.endDate || '');
-  const conflict = issue.version > source.version && dirty;
-  if (issue.version > source.version && !dirty && !pending) { setSource(issue); setStart(issue.startDate || ''); setEnd(issue.endDate || ''); }
+  const editing = dirty || incomplete;
+  const conflict = issue.version > source.version && editing;
+  if (issue.version > source.version && !editing && !pending) {
+    setSource(issue);
+    setStart(inlineDateInput(issue.startDate));
+    setEnd(inlineDateInput(issue.endDate));
+  }
   const accept = useCallback((saved: Issue) => {
     onInlineDraftChange(issue.id, null, owner);
     setSource(saved);
-    setStart(saved.startDate || '');
-    setEnd(saved.endDate || '');
+    // The native control can display a partial date even when its DOM value is empty.
+    if (startField.current?.validity.badInput) startField.current.value = saved.startDate ?? '';
+    if (endField.current?.validity.badInput) endField.current.value = saved.endDate ?? '';
+    setStart(inlineDateInput(saved.startDate));
+    setEnd(inlineDateInput(saved.endDate));
   }, [issue.id, onInlineDraftChange, owner]);
   useLayoutEffect(() => {
-    onDraftChange(draftId, dirty, pending);
+    onDraftChange(draftId, editing, pending);
     onInlineDraftChange(issue.id, dirty ? { source, startDate: start || null, endDate: end || null, accept, owner } : null, owner);
-  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, dirty, pending, source, start, end, accept, owner]);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, editing, dirty, pending, source, start, end, accept, owner]);
   useLayoutEffect(() => () => {
     onDraftChange(draftId, false);
     onInlineDraftChange(issue.id, null, owner, true);
   }, [onDraftChange, onInlineDraftChange, draftId, issue.id, owner]);
 
-  const editedField = start !== (source.startDate || '') ? startField : endField;
+  const editedField = startInput.incomplete || (!endInput.incomplete && start !== (source.startDate || '')) ? startField : endField;
   function reset(restoreField = false) {
     if (pendingRef.current) return;
     if (restoreField) editedField.current?.focus({ preventScroll: true });
     accept(issue);
   }
   async function commit(opener: HTMLInputElement | HTMLButtonElement) {
-    if (disabled || pendingRef.current || !dirty) return;
+    if (disabled || pendingRef.current) return;
+    const incompleteField = [startField.current, endField.current].find(field => field?.validity.badInput);
+    if (incompleteField) {
+      incompleteField.focus({ preventScroll: true });
+      incompleteField.reportValidity();
+      return;
+    }
+    const startDate = startField.current?.value || null;
+    const endDate = endField.current?.value || null;
+    if (startDate === source.startDate && endDate === source.endDate) return;
     const focusTarget = opener instanceof HTMLInputElement ? opener : editedField.current;
     pendingRef.current = true;
     setPending(true);
     onDraftChange(draftId, true, true);
     try {
-      await onSave(source, start || null, end || null, {
+      await onSave(source, startDate, endDate, {
         issueId: issue.id, accept, returnToMissingRow: true, focus: opener,
       });
     } finally {
@@ -3498,13 +3524,24 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
   }
   const title = conflict ? '일정과 연결 편집에서 저장값과 입력을 비교하세요. Esc로 최신 날짜 불러오기' : 'Enter로 저장 · Esc로 최신 날짜 불러오기';
   function dateInput(edge: 'start' | 'end') {
+    const state = edge === 'start' ? startInput : endInput;
+    const setInput = edge === 'start' ? setStart : setEnd;
+    const readInput = (input: HTMLInputElement) => {
+      const value = input.value;
+      const incomplete = input.validity.badInput;
+      setInput(previous => previous.value === value && previous.incomplete === incomplete
+        ? previous : { value, incomplete, lastValid: incomplete ? previous.lastValid : value });
+    };
     return <input ref={edge === 'start' ? startField : endField}
-      className={`gantt-inline-date ${conflict ? 'has-conflict' : ''}`} type="date" title={title}
+      className={`gantt-inline-date ${conflict ? 'has-conflict' : ''}`} type="date"
+      title={state.incomplete ? '날짜의 모든 항목을 입력하거나 날짜 전체를 비우세요.' : title}
       data-schedule-owner={issue.id} data-schedule-edge={edge}
-      aria-describedby="gantt-editing-help" aria-invalid={conflict || undefined}
+      aria-describedby="gantt-editing-help" aria-invalid={conflict || state.incomplete || undefined}
       aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'}`}
-      value={edge === 'start' ? start : end} disabled={disabled || pending}
-      onChange={event => edge === 'start' ? setStart(event.target.value) : setEnd(event.target.value)}
+      value={state.value} disabled={disabled || pending}
+      onInput={event => readInput(event.currentTarget)}
+      // Clearing the last segment can change validity without dispatching an input event.
+      onKeyUp={event => readInput(event.currentTarget)} onBlur={event => readInput(event.currentTarget)}
       onKeyDown={event => {
         if (event.nativeEvent.isComposing) return;
         if (event.key === 'Escape') { event.preventDefault(); reset(); }
@@ -3514,16 +3551,16 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
   return <div className="gantt-inline-date-controls">
     {dateInput('start')}
     {dateInput('end')}
-    {dirty && <div className="gantt-inline-draft-actions">
+    {editing && <div className="gantt-inline-draft-actions">
       <button type="button" className="gantt-inline-save" aria-label={`${issue.key} 날짜 저장`} disabled={disabled || pending}
         onClick={event => void commit(event.currentTarget)}>저장</button>
       <button type="button" aria-label={`${issue.key} 날짜 변경 취소`} disabled={disabled || pending}
         onClick={() => reset(true)}>취소</button>
-      {onReview && !conflict && (!start || !end || start <= end) && <button type="button"
+      {onReview && !incomplete && !conflict && (!start || !end || start <= end) && <button type="button"
         aria-label={`${issue.key} 후행 일정 검토`} title="후행 일정 검토" disabled={disabled || pending}
         onClick={event => onReview({ id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
           { kind: 'inline', opener: event.currentTarget, accept })}>{onReviewTeam ? '후행 검토' : '후행 일정 검토'}</button>}
-      {onReviewTeam && (!start || !end || start <= end) && <button type="button"
+      {onReviewTeam && !incomplete && (!start || !end || start <= end) && <button type="button"
         aria-label={`${issue.key} 프로젝트 간 일정 검토`} title="프로젝트 간 일정 검토" disabled={disabled || pending}
         onClick={event => onReviewTeam(source, { id: source.id, expectedVersion: source.version, startDate: start || null, endDate: end || null },
           { kind: 'inline', opener: event.currentTarget, accept })}>{onReview && !conflict ? '프로젝트 간 검토' : '프로젝트 간 일정 검토'}</button>}

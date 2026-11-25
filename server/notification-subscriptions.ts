@@ -70,6 +70,13 @@ export class NotificationSubscriptionsService {
     return rows.map(row => row.user_id);
   }
 
+  activeIssueIds(userId: string): string[] {
+    const rows = this.store.db.prepare(`SELECT subscription.target_id FROM notification_subscriptions AS subscription
+      JOIN issues AS issue ON issue.id=subscription.target_id
+      WHERE subscription.user_id=? AND subscription.target_type='issue' ORDER BY subscription.target_id`).all(userId);
+    return rows.map(row => String(row.target_id));
+  }
+
   removeTarget(targetType: NotificationSubscriptionTarget, targetId: string): void {
     this.store.db.prepare('DELETE FROM notification_subscriptions WHERE target_type=? AND target_id=?').run(targetType, targetId);
   }

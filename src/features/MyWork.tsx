@@ -19,10 +19,11 @@ const groupLabels: Record<MyWorkGroupId, string> = {
   closed: '완료·취소',
 };
 const pageSize = 20;
-const roleLabels: Record<MyWorkRole, string> = { assigned: '담당', collaborating: '협력', reported: '요청' };
+const roleLabels: Record<MyWorkRole, string> = { assigned: '담당', collaborating: '협력', reported: '요청', subscribed: '구독' };
 
-export function MyWork({ data, actorId, openIssue, onOpenIssueForReview }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'> & {
+export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscriptions }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'> & {
   onOpenIssueForReview?: OpenIssueForReview;
+  subscriptions: { ids: ReadonlySet<string>; ready: boolean; failed: boolean; reload: () => void };
 }) {
   const [today, setToday] = useState(todayDate);
   const [projectId, setProjectId] = useState('');
@@ -57,7 +58,9 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview }: Pick<
 
   const { groups, total } = useMemo(() => buildMyWorkQueue(data, actorId, today, {
     projectId: selectedProject || null, role, includeClosed, grouping,
-  }), [data, actorId, today, selectedProject, role, includeClosed, grouping]);
+  }, subscriptions.ids), [data, actorId, today, selectedProject, role, includeClosed, grouping, subscriptions.ids]);
+  const usesSubscriptions = role === 'all' || role === 'subscribed';
+  const waitingForSubscriptions = usesSubscriptions && !subscriptions.ready && total === 0;
 
   function openWorkIssue(id: string, opener: HTMLButtonElement) {
     if (!onOpenIssueForReview) { openIssue(id); return; }
@@ -86,10 +89,11 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview }: Pick<
         <label className="my-work-filter">
           참여 범위
           <select className="field" value={role} onChange={event => setRole(event.target.value as MyWorkRoleFilter)}>
-            <option value="all">담당·협력·요청 업무</option>
+            <option value="all">전체 참여 업무</option>
             <option value="assigned">담당 업무</option>
             <option value="collaborating">협력 업무</option>
             <option value="reported">내가 요청한 업무</option>
+            <option value="subscribed">구독한 업무</option>
           </select>
         </label>
         <label className="my-work-filter">
@@ -105,8 +109,13 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview }: Pick<
         </label>
       </div>
 
-      <p className="my-work-total" role="status">업무 {total.toLocaleString('ko-KR')}개</p>
-      {total === 0 && <p className="card my-work-empty">표시할 업무가 없습니다.</p>}
+      {usesSubscriptions && subscriptions.failed && <div className="my-work-subscriptions" role="status">
+        <span>구독 업무를 불러오지 못했습니다.</span>
+        <button className="btn" type="button" onClick={subscriptions.reload}>구독 업무 다시 불러오기</button>
+      </div>}
+      {waitingForSubscriptions && !subscriptions.failed && <p className="my-work-total" role="status">구독 업무를 불러오는 중입니다.</p>}
+      {!waitingForSubscriptions && <p className="my-work-total" role="status">업무 {total.toLocaleString('ko-KR')}개</p>}
+      {!waitingForSubscriptions && total === 0 && <p className="card my-work-empty">표시할 업무가 없습니다.</p>}
       <div className="my-work-groups" ref={queue} key={JSON.stringify([today, selectedProject, role, includeClosed, grouping])}>
         {groups.map(({ id, items }) => items.length > 0 && <WorkGroup key={id} id={id} items={items} openIssue={openWorkIssue} />)}
       </div>
@@ -131,7 +140,7 @@ function WorkGroup({ id, items, openIssue }: {
         <span>{items.length.toLocaleString('ko-KR')}개</span>
       </header>
       <ul className="my-work-list">
-        {items.slice(start, end).map(({ issue, project, status, role, reported, date }) => (
+        {items.slice(start, end).map(({ issue, project, status, role, reported, subscribed, date }) => (
           <li key={issue.id}>
             <button className="my-work-row" type="button" data-issue-review-id={issue.id}
               onClick={event => openIssue(issue.id, event.currentTarget)}>
@@ -139,6 +148,7 @@ function WorkGroup({ id, items, openIssue }: {
                 <span className="my-work-item-title"><span className="issue-key">{issue.key}</span> <strong>{issue.title}</strong></span>
                 <span className="my-work-item-project">{project.name}<span aria-hidden="true">·</span>{roleLabels[role]}
                   {reported && role !== 'reported' && <><span aria-hidden="true">·</span>{roleLabels.reported}</>}
+                  {subscribed && role !== 'subscribed' && <><span aria-hidden="true">·</span>{roleLabels.subscribed}</>}
                 </span>
               </span>
               <span className="my-work-item-status">

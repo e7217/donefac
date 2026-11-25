@@ -5,6 +5,7 @@ import { Bell, BellRing, RefreshCw } from 'lucide-react';
 import { documentNotificationSpaceId } from '../../shared/types';
 import type { FeatureProps, NotificationSubscriptionState, NotificationSubscriptionTarget } from '../../shared/types';
 import { api } from '../lib/api';
+import { ISSUE_SUBSCRIPTIONS_CHANGED } from '../lib/use-issue-subscriptions';
 import './notification-subscription.css';
 
 type Props = Pick<FeatureProps, 'actorId' | 'notify'> & {
@@ -88,11 +89,15 @@ function SubscriptionButton({ actorId, targetType, targetId, notify }: Props) {
         body: JSON.stringify({ subscribed: !subscribed }),
         signal: controller.signal,
       });
-      if (!controller.signal.aborted) setSubscribed(result.subscribed);
+      if (!controller.signal.aborted) {
+        setSubscribed(result.subscribed);
+        if (targetType === 'issue') window.dispatchEvent(new Event(ISSUE_SUBSCRIPTIONS_CHANGED));
+      }
     } catch (error) {
       if (!controller.signal.aborted) {
         setSubscribed(null);
         refresh = true;
+        if (targetType === 'issue') window.dispatchEvent(new Event(ISSUE_SUBSCRIPTIONS_CHANGED));
         notify(error instanceof Error ? error.message : '구독 상태를 변경하지 못했습니다.', 'error');
       }
     } finally {

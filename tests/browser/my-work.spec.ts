@@ -4,6 +4,84 @@ import type { Issue, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'Asia/Seoul' });
 
+test('구독한 업무는 현재 작업자별로 모아 보고 상세에서 해제하면 즉시 반영된다', async ({ page, request }) => {
+  test.setTimeout(70_000);
+  const { projects: [projectA, projectB], users: [actor, peer] } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const prefix = `구독한 내 업무 ${randomUUID().slice(0, 8)}`;
+  const headers = (id: string) => ({ 'X-Actor-Id': id });
+  const created: Issue[] = [];
+  async function create(label: string, projectId: string, subscriberId: string, assigneeId: string | null = null) {
+    const response = await request.post('/api/issues', { headers: headers(peer.id), data: {
+      title: `${prefix} ${label}`, projectId, assigneeId, reporterId: null,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    const subscription = await request.put(`/api/notifications/subscriptions/issue/${issue.id}`, {
+      headers: headers(subscriberId), data: { subscribed: true },
+    });
+    expect(subscription.ok()).toBe(true);
+    return issue;
+  }
+
+  try {
+    const watched = await create('구독만 하는 업무', projectB.id, actor.id, peer.id);
+    const assigned = await create('담당하면서 구독한 업무', projectA.id, actor.id, actor.id);
+    const other = await create('동료가 구독한 업무', projectB.id, peer.id);
+    await page.addInitScript(id => window.localStorage.setItem('teamspace.actor', id), actor.id);
+    let rejectReads = true;
+    await page.route('**/api/notifications/subscriptions/issues', route => rejectReads
+      ? route.fulfill({ status: 503, json: { error: '합성 구독 조회 오류' } }) : route.continue());
+    await page.goto(`/#/${projectA.id}/mywork`);
+    const participation = page.getByRole('combobox', { name: '참여 범위', exact: true });
+    const selection = page.getByRole('combobox', { name: '프로젝트', exact: true });
+    const row = (issue: Issue) => page.locator(`[data-issue-review-id="${issue.id}"]`);
+    const badge = page.locator('.sidebar .nav-item').filter({ hasText: '내 업무' }).locator('.nav-count');
+    await participation.selectOption('subscribed');
+    const retry = page.getByRole('button', { name: '구독 업무 다시 불러오기', exact: true });
+    await expect(retry).toBeVisible();
+    await expect(page.getByText('표시할 업무가 없습니다.', { exact: true })).toHaveCount(0);
+    rejectReads = false;
+    await retry.click();
+    await expect(row(watched).locator('.my-work-item-project')).toContainText('구독');
+    await expect(row(assigned).locator('.my-work-item-project')).toContainText('담당');
+    await expect(row(assigned).locator('.my-work-item-project')).toContainText('구독');
+    const beforeCount = Number(await badge.textContent());
+    await expect(row(other)).toHaveCount(0);
+    await participation.selectOption('all');
+    await expect(row(assigned)).toHaveCount(1);
+    await participation.selectOption('subscribed');
+    await selection.selectOption(projectB.id);
+    await expect(row(assigned)).toHaveCount(0);
+
+    await row(watched).click();
+    const detail = page.getByRole('dialog', { name: watched.title, exact: true });
+    const refresh = page.waitForResponse(response => response.url().endsWith('/api/notifications/subscriptions/issues') && response.ok());
+    await detail.getByRole('button', { name: '업무 구독 해제', exact: true }).click();
+    const refreshed = await refresh;
+    expect(await refreshed.json()).toEqual({ issueIds: [assigned.id] });
+    await detail.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(selection).toHaveValue(projectB.id);
+    await expect(participation).toHaveValue('subscribed');
+    await expect(row(watched)).toHaveCount(0);
+    await expect(badge).toHaveText(String(beforeCount - 1));
+
+    await page.getByLabel('작업자 선택', { exact: true }).selectOption(peer.id);
+    await participation.selectOption('subscribed');
+    await expect(row(other)).toBeVisible();
+    await expect(row(assigned)).toHaveCount(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+  } finally {
+    for (const issue of created) {
+      const response = await request.delete(`/api/issues/${issue.id}`, { headers: headers(actor.id) });
+      if (response.ok()) {
+        const { trashEntryId } = await response.json() as { trashEntryId: string };
+        if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`, { headers: headers(actor.id) });
+      }
+    }
+  }
+});
+
 test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한을 확인하고 원래 티켓을 연다', async ({ page, request }) => {
   test.setTimeout(65_000);
   const prefix = `내 업무 검사 ${randomUUID()}`;
@@ -114,7 +192,7 @@ test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한�
 
     await actorPicker.selectOption(otherActor.id);
     await expect(project).toHaveValue(allProjects);
-    await expect(scope.locator('option:checked')).toHaveText('담당·협력·요청 업무');
+    await expect(scope.locator('option:checked')).toHaveText('전체 참여 업무');
     await expect(row(other)).toBeVisible();
     await expect(row(today)).toBeVisible();
     await expect(row(priorityDate)).toHaveCount(0);
