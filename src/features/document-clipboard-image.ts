@@ -2,8 +2,9 @@ import type { Editor, EditorEvents } from '@tiptap/core';
 import { Fragment, Slice } from '@tiptap/pm/model';
 import { closeHistory } from '@tiptap/pm/history';
 import { Selection, TextSelection } from '@tiptap/pm/state';
-import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap';
+import { ySyncPluginKey, yUndoPluginKey } from '@tiptap/y-tiptap';
 import { compareRelativePositions, createAbsolutePositionFromRelativePosition, XmlElement, XmlText } from 'yjs';
+import { collaborationAbsolutePosition, collaborationRelativePosition } from '../lib/collaboration-order-positions';
 
 export function clipboardImageFiles(clipboard: DataTransfer): File[] {
   if (clipboard.getData('text/plain') || clipboard.getData('text/html') || clipboard.getData('text/uri-list')) return [];
@@ -28,16 +29,16 @@ export function trackClipboardImagePosition(editor: Editor) {
   if (sync) {
     // A remote Yjs update can replace the entire ProseMirror projection. Resolve within the original Yjs block.
     try {
-      const anchor = absolutePositionToRelativePosition(start, sync.type, sync.binding.mapping);
+      const anchor = collaborationRelativePosition(start, sync);
       const type = createAbsolutePositionFromRelativePosition(anchor, sync.doc)?.type;
       const block = type instanceof XmlText ? type.parent : type;
       if (!(block instanceof XmlElement) || sync.binding.mapping.get(block) !== $to.parent) return null;
       resolve = () => {
         const current = ySyncPluginKey.getState(editor.state);
         if (!current || current.doc !== sync.doc || current.snapshot || current.prevSnapshot) return null;
-        const position = relativePositionToAbsolutePosition(current.doc, current.type, anchor, current.binding.mapping);
+        const position = collaborationAbsolutePosition(anchor, current);
         if (position === null || current.binding.mapping.get(block) !== editor.state.doc.resolve(position).parent) return null;
-        const resolved = absolutePositionToRelativePosition(position, current.type, current.binding.mapping);
+        const resolved = collaborationRelativePosition(position, current);
         return compareRelativePositions(anchor, resolved) ? position : null;
       };
     } catch {

@@ -129,6 +129,48 @@ test('ACK of a restored snapshot cannot remove the original writer’s newer pen
   assert.equal(storage.size, 1);
 });
 
+test('schema 17 pending text rejoins its retained epoch and stays recoverable across an epoch replacement', t => {
+  const { current, storage, welcome } = fixture(t);
+  const source = new Y.Doc();
+  const paragraph = new Y.XmlElement('paragraph');
+  const text = new Y.XmlText();
+  text.insert(0, '이전 버전에서 미저장한 본문');
+  paragraph.insert(0, [text]);
+  source.getXmlFragment('default').push([paragraph]);
+  const update = encodeBytes(Y.encodeStateAsUpdate(source));
+  source.destroy();
+  const oldKey = `teamspace:collaboration-pending:${self.actorId}:${snapshot.id}:${epoch}:17:fixture`;
+  const oldCache = JSON.stringify({ epoch, schemaVersion: 17, update, pending: true, updatedAt: '2026-11-25T00:00:00Z' });
+  storage.set(oldKey, oldCache);
+  const joined = new CollaborationClient({ enabled: true, epoch, schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => {}, () => {});
+  try {
+    assert.equal(joined.view.phase, 'connecting');
+    assert.equal(joined.view.pending, true);
+    assert.equal(storage.get(oldKey), oldCache);
+    const replacement = [...storage.values()].find(value => value !== oldCache);
+    assert.ok(replacement);
+    assert.equal(JSON.parse(replacement).schemaVersion, COLLABORATION_SCHEMA);
+    joined.start();
+    const socket = current();
+    socket.open();
+    socket.receive(welcome);
+    const pending = socket.sent.find(message => message.type === 'update');
+    assert.ok(pending);
+    assert.match(joined.doc.getXmlFragment('default').toString(), /이전 버전에서 미저장한 본문/u);
+    socket.receive({ type: 'ack', epoch, requestId: pending.requestId, stateVector: encodeBytes(Y.encodeStateVector(joined.doc)), document: snapshot });
+    assert.equal(storage.size, 0);
+  } finally { joined.destroy(); }
+
+  storage.set(oldKey, oldCache);
+  const archived = new CollaborationClient({ enabled: true, epoch: 'new-epoch', schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => {}, () => {});
+  try {
+    assert.equal(archived.view.phase, 'recovery');
+    assert.equal(archived.view.epoch, epoch);
+    assert.equal(archived.view.pending, true);
+    assert.equal(storage.size, 1);
+  } finally { archived.destroy(); }
+});
+
 test('session replacement waits for composition and keeps the resulting unpublished transaction', async t => {
   let composing = true;
   let reconnected = false;

@@ -113,38 +113,84 @@ test('360px에서 표와 제목 블록을 이동하고 선택·절 링크·저�
   } finally { await cleanup(request, document.id); }
 });
 
-test('공동 편집에서는 블록 이동 없이 같은 문단을 계속 편집한다', async ({ page, browser, baseURL, request }) => {
-  test.setTimeout(75_000);
+test('공동 편집에서 블록을 옮겨도 같은 절의 동료 입력과 커서가 유지된다', async ({ page, browser, baseURL, request }) => {
+  test.setTimeout(120_000);
   await page.setViewportSize(viewport);
   const { document, section, users } = await fixture(request);
-  const context = await browser.newContext({ baseURL, viewport });
+  const peerContext = await browser.newContext({ baseURL, viewport: { width: 1050, height: 840 } });
+  const offlineContext = await browser.newContext({ baseURL, viewport });
   try {
-    await context.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[1].id);
-    const peer = await context.newPage();
+    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[0].id);
+    await peerContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[1].id);
+    await offlineContext.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[2].id);
+    const peer = await peerContext.newPage(), offline = await offlineContext.newPage();
     const enabled = await request.post(`/api/documents/${document.id}/collaboration/enable`, { data: { expectedVersion: document.version } });
     expect(enabled.ok(), await enabled.text()).toBe(true);
-    await Promise.all([open(page, document), open(peer, document)]);
-    await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
-    await expect(peer.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
-    await expect.poll(() => order(peer)).toEqual(original);
-    for (const browserPage of [page, peer]) {
-      await browserPage.locator('.docs-live-prose').getByRole('heading', { name: headingText, exact: true }).click();
-      await expect(browserPage.getByRole('group', { name: '본문 블록 순서', exact: true })).toHaveCount(0);
+    const browsers = [page, peer, offline];
+    const state = (tab: Page) => tab.locator('.docs-collaboration-state');
+    const heading = (tab: Page) => tab.locator('.docs-live-prose').getByRole('heading', { name: new RegExp(headingText) });
+    await Promise.all(browsers.map(tab => open(tab, document)));
+    for (const tab of browsers) {
+      await expect(state(tab)).toHaveText('서버에 동기화됨');
+      await expect.poll(() => order(tab)).toEqual(original);
     }
-    const updatedHeading = `${headingText} 공동 편집`;
-    await peer.keyboard.press('End');
-    await peer.keyboard.insertText(' 공동 편집');
-    const edited = [introText, updatedHeading, tableText, checklistText];
-    await expect.poll(() => order(page)).toEqual(edited);
-    await expect(peer.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+
+    await heading(offline).click();
+    await offline.keyboard.press('End');
+    await offlineContext.setOffline(true);
+    await expect(state(offline)).toHaveText('연결 끊김');
+    await offline.keyboard.insertText(' 오프라인 편집');
+    await expect(state(offline)).toHaveText('연결 끊김 · 편집 보관 중');
+    await heading(peer).click();
+    await peer.keyboard.press('Home');
+    await heading(page).click();
+    await expect(action(page, '아래로')).toBeEnabled();
+    await action(page, '아래로').press('Enter');
+    await expect.poll(() => order(peer)).toEqual([introText, tableText, headingText, checklistText]);
+    const selection = (tab: Page) => tab.evaluate(() => ({
+      block: window.getSelection()?.anchorNode?.parentElement?.closest('h2')?.textContent,
+      offset: window.getSelection()?.anchorOffset,
+    }));
+    await expect.poll(() => selection(peer)).toEqual({ block: headingText, offset: 0 });
+    await peer.keyboard.insertText('동료 입력 ');
+    const onlineHeading = `동료 입력 ${headingText}`;
+    await expect(heading(page)).toHaveText(onlineHeading);
+    await offlineContext.setOffline(false);
+    const mergedHeading = `${onlineHeading} 오프라인 편집`;
+    const moved = [introText, tableText, mergedHeading, checklistText];
+    await expect(state(offline)).toHaveText('서버에 동기화됨');
+    for (const tab of browsers) await expect.poll(() => order(tab)).toEqual(moved);
+
+    const toolbar = page.getByRole('toolbar', { name: '문서 서식' });
+    await toolbar.getByRole('button', { name: '실행 취소', exact: true }).press('Enter');
+    await expect.poll(() => order(peer)).toEqual([introText, mergedHeading, tableText, checklistText]);
+    await toolbar.getByRole('button', { name: '다시 실행', exact: true }).press('Enter');
+    await expect.poll(() => order(peer)).toEqual(moved);
+
+    // Top-level insertion still uses the visible order after a block move.
+    await heading(page).click();
+    await heading(page).evaluate(node => {
+      const range = window.document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    });
+    await page.keyboard.press('Enter');
+    await page.keyboard.insertText('옮긴 절 아래의 새 문단');
+    const final = [introText, tableText, mergedHeading, '옮긴 절 아래의 새 문단', checklistText];
+    for (const tab of browsers) await expect.poll(() => order(tab)).toEqual(final);
+    await expect(state(page)).toHaveText('서버에 동기화됨');
     await expect.poll(async () => {
       const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
-      return workspace.documents.find(item => item.id === document.id)?.content.content?.[1].attrs?.sectionId;
-    }).toBe(section);
+      const body = workspace.documents.find(item => item.id === document.id)?.content.content ?? [];
+      return body.slice(0, 5).map(block => [block.type, block.attrs?.sectionId ?? null]);
+    }).toEqual([['paragraph', null], ['table', null], ['heading', section], ['paragraph', null], ['taskList', null]]);
     await peer.reload();
-    await expect.poll(() => order(peer)).toEqual(edited);
+    await expect.poll(() => order(peer)).toEqual(final);
   } finally {
-    await context.close();
+    await Promise.all([peerContext.close(), offlineContext.close()]);
     await cleanup(request, document.id);
   }
 });

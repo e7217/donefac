@@ -158,7 +158,6 @@ test('공동 편집에서 링크 입력 중 동료가 선택 양쪽에 글을 �
     await Promise.all([synced(author), synced(peer)]);
     await expect(author.locator('.docs-collaboration-presence')).toContainText('2명 접속');
     const editor = author.locator('.docs-live-prose');
-    await editor.click();
     await editor.press('Control+Home');
     await author.keyboard.press('Shift+End');
     await expect.poll(() => author.evaluate(() => window.getSelection()?.toString())).toBe(fixture.initialText);
@@ -168,7 +167,6 @@ test('공동 편집에서 링크 입력 중 동료가 선택 양쪽에 글을 �
     await url.fill(href);
 
     const peerEditor = peer.locator('.docs-live-prose');
-    await peerEditor.click();
     await peerEditor.press('Control+Home');
     const prefix = '동료가 추가한 글 ';
     await peer.keyboard.insertText(prefix);

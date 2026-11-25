@@ -1,10 +1,11 @@
 import { Extension } from '@tiptap/core';
 import { Plugin, PluginKey, TextSelection, type EditorState } from '@tiptap/pm/state';
 import { Decoration, DecorationSet, type EditorView } from '@tiptap/pm/view';
-import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey } from '@tiptap/y-tiptap';
+import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import * as Y from 'yjs';
 import { MAX_COLLABORATION_CURSOR_BYTES, type CollaborationPeer } from '../../shared/collaboration';
 import { decodeBytes, encodeBytes, type CollaborationClient } from '../lib/collaboration-client';
+import { collaborationAbsolutePosition, collaborationRelativePosition } from '../lib/collaboration-order-positions';
 
 const cursorKey = new PluginKey<DecorationSet>('teamspace-remote-cursors');
 const rootName = 'default';
@@ -39,7 +40,7 @@ function resolveRemotePositions(state: EditorState, client: CollaborationClient)
       const anchor = decodePosition(selection.anchor);
       const head = decodePosition(selection.head);
       if (!anchor || !head) continue;
-      const resolve = (position: Y.RelativePosition) => relativePositionToAbsolutePosition(sync.doc, sync.type, position, sync.binding.mapping);
+      const resolve = (position: Y.RelativePosition) => collaborationAbsolutePosition(position, sync);
       const anchorOffset = resolve(anchor);
       const headOffset = resolve(head);
       if (!textPosition(state, anchorOffset) || !textPosition(state, headOffset)) continue;
@@ -87,7 +88,7 @@ export function publishEditorCursor(view: EditorView, client: CollaborationClien
   }
   try {
     const encode = (position: number) => {
-      const bytes = Y.encodeRelativePosition(absolutePositionToRelativePosition(position, sync.type, sync.binding.mapping));
+      const bytes = Y.encodeRelativePosition(collaborationRelativePosition(position, sync));
       return bytes.length <= MAX_COLLABORATION_CURSOR_BYTES ? encodeBytes(bytes) : null;
     };
     const anchor = encode(selection.anchor);

@@ -10,6 +10,7 @@ import {
   type CollaborationServerMessage,
   type CollaborationSession,
 } from '../../shared/collaboration';
+import { COLLABORATION_BLOCK_ORDER_ROOT, validateCollaborationBlockOrder } from '../../shared/collaboration-block-order';
 import {
   DOCUMENT_TOC_DEFAULTS, documentNodeSchemaVersion, isDocumentHeadingLevel, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, MAX_DOCUMENT_ISSUE_BLOCKS,
 } from '../../shared/document-nodes';
@@ -41,7 +42,7 @@ const sameSelection = (a: CollaborationCursorSelection | null, b: CollaborationC
   a === b || (a !== null && b !== null && a.anchor === b.anchor && a.head === b.head);
 /** A known old cache is rendered only after validation in a disposable document.
  * Its original bytes remain untouched until an explicit discard or saved copy. */
-function validateLegacyPending(update: string, schemaVersion: Exclude<CollaborationSchemaVersion, typeof COLLABORATION_SCHEMA>): Uint8Array {
+function validateLegacyPending(update: string, schemaVersion: CollaborationSchemaVersion): Uint8Array {
   if (typeof update !== 'string' || !update.length || update.length > Math.ceil(MAX_CACHE_STATE / 3) * 4) throw new Error('편집 보관 데이터 크기가 올바르지 않습니다.');
   const bytes = decodeBytes(update);
   if (bytes.length > MAX_CACHE_STATE || encodeBytes(bytes) !== update) throw new Error('편집 보관 데이터 형식이 올바르지 않습니다.');
@@ -152,16 +153,30 @@ export function decodeBytes(value: string): Uint8Array {
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
-function readPendingEntry(snapshot: PendingSnapshot): PendingEntry {
+function canUpgradePendingOrder(schemaVersion: number) {
+  return Number(COLLABORATION_SCHEMA) === 18 && schemaVersion === 17;
+}
+
+function readPendingEntry(snapshot: PendingSnapshot, upgradeEpoch?: string): PendingEntry {
   try {
     const cache = JSON.parse(snapshot.value) as PendingCache;
     if (!cache || cache.pending !== true || typeof cache.epoch !== 'string' || !cache.epoch || cache.epoch.length > 200 ||
         !Number.isSafeInteger(cache.schemaVersion) || typeof cache.updatedAt !== 'string' ||
         typeof cache.update !== 'string' || !cache.update || cache.update.length > MAX_CACHE_STATE) return { snapshot, cache: null };
-    if (cache.schemaVersion !== COLLABORATION_SCHEMA) return { snapshot, cache };
+    if (cache.schemaVersion !== COLLABORATION_SCHEMA) {
+      if (cache.epoch === upgradeEpoch && canUpgradePendingOrder(cache.schemaVersion)) {
+        return { snapshot, cache, update: validateLegacyPending(cache.update, 17) };
+      }
+      return { snapshot, cache };
+    }
     const update = decodeBytes(cache.update);
     // A damaged entry must stay separately recoverable alongside usable same-epoch snapshots.
-    Y.decodeUpdate(update);
+    const candidate = new Y.Doc();
+    try {
+      Y.applyUpdate(candidate, update);
+      for (const name of candidate.share.keys()) if (name !== 'default' && name !== COLLABORATION_BLOCK_ORDER_ROOT) throw new Error('지원하지 않는 공동 편집 루트입니다.');
+      validateCollaborationBlockOrder(candidate);
+    } finally { candidate.destroy(); }
     return { snapshot, cache, update };
   } catch { return { snapshot, cache: null }; }
 }
@@ -244,7 +259,8 @@ export class CollaborationClient {
 
   private loadPending(enabled: boolean) {
     try {
-      const entries = pendingSnapshots(this.actorId, this.documentId).map(readPendingEntry)
+      const entries = pendingSnapshots(this.actorId, this.documentId)
+        .map(snapshot => readPendingEntry(snapshot, enabled ? this.state.epoch : undefined))
         .sort((a, b) => (b.cache?.updatedAt ?? '').localeCompare(a.cache?.updatedAt ?? ''));
       const isCurrent = (entry: PendingEntry) => enabled && entry.update && entry.cache?.epoch === this.state.epoch;
       const current = entries.filter(isCurrent);
@@ -262,7 +278,7 @@ export class CollaborationClient {
 
       const candidate = first.cache;
       if (!candidate) throw new Error('이전 편집 보관 정보가 올바르지 않습니다.');
-      if (supportsCollaborationSchema(candidate.schemaVersion) && candidate.schemaVersion !== COLLABORATION_SCHEMA) {
+      if (!first.update && supportsCollaborationSchema(candidate.schemaVersion) && candidate.schemaVersion !== COLLABORATION_SCHEMA) {
         Y.applyUpdate(this.doc, validateLegacyPending(candidate.update, candidate.schemaVersion), CACHE);
         this.legacyRecovery = true;
         this.localSequence = 1;
@@ -278,6 +294,10 @@ export class CollaborationClient {
       Y.applyUpdate(this.doc, updates.length === 1 ? first.update : Y.mergeUpdates(updates), CACHE);
       this.localSequence = 1;
       this.state.pending = true;
+      if (group.some(entry => entry.cache && canUpgradePendingOrder(entry.cache.schemaVersion))) {
+        this.snapshotNeedsWrite = true;
+        this.persistPending();
+      }
       if (!enabled || candidate.epoch !== this.state.epoch) {
         this.state = { ...this.state, epoch: candidate.epoch, phase: 'recovery', ready: true, error: '문서가 복구되거나 교체되어 이전 편집을 자동으로 합치지 않았습니다.' };
       }

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import { COLLABORATION_SCHEMA } from '../../shared/collaboration.js';
+import { COLLABORATION_BLOCK_ORDER_ROOT, collaborationBlockId, moveCollaborationBlock, projectCollaborationBlocks } from '../../shared/collaboration-block-order.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { TeamNotificationPage } from '../../shared/types.js';
 import assert from 'node:assert/strict';
@@ -56,6 +57,103 @@ function content(p:Peer){return yDocToProsemirrorJSON(p.doc,'default');}
 async function sendUpdate(p:Peer,epoch:string,update:Uint8Array,requestId=randomUUID()){
   p.send({type:'update',epoch,requestId,update:Buffer.from(update).toString('base64')});return p.next('ack',requestId);
 }
+
+test('block reorder commits projected snapshots while concurrent and offline edits keep their XML identity through backup', async () => {
+  const f = await fixture();
+  const peers: Peer[] = [];
+  const offline = new Y.Doc();
+  try {
+    const paragraph = (value: string) => ({ type: 'paragraph', content: [{ type: 'text', text: value }] });
+    const created = await f.request('/documents', 'POST', { projectId: 'project-neo', title: '공동 블록 순서 검증',
+      content: { type: 'doc', content: [paragraph('첫째'), paragraph('둘째'), paragraph('셋째')] } });
+    assert.equal(created.status, 201);
+    const { id } = created.data;
+    const enabled = await f.request(`/documents/${id}/collaboration/enable`, 'POST', { expectedVersion: created.data.version });
+    assert.equal(enabled.status, 200);
+    const { epoch } = enabled.data;
+    const { p: mover } = await connected(f, id, 'user-min', epoch);
+    const { p: writer } = await connected(f, id, 'user-seo', epoch);
+    peers.push(mover, writer);
+    const baseline = Y.encodeStateAsUpdate(mover.doc);
+    Y.applyUpdate(offline, baseline);
+    const vector = Y.encodeStateVector(offline);
+    const root = mover.doc.getXmlFragment('default');
+    const first = root.get(0) as Y.XmlElement, second = root.get(1) as Y.XmlElement;
+    const firstId = collaborationBlockId(first), secondId = collaborationBlockId(second);
+    assert.ok(firstId && secondId);
+    const movedText = (second.get(0) as Y.XmlText);
+    const position = Y.createRelativePositionFromTypeIndex(movedText, 1);
+    assert.equal(moveCollaborationBlock(root, secondId, firstId, 'before'), true);
+
+    const writerBlock = writer.doc.getXmlFragment('default').get(1) as Y.XmlElement;
+    const writerText = writerBlock.get(0) as Y.XmlText;
+    writerText.insert(writerText.length, ' 팀 입력');
+    const offlineText = (offline.getXmlFragment('default').get(1) as Y.XmlElement).get(0) as Y.XmlText;
+    offlineText.insert(0, '오프라인 ');
+    const move = Y.encodeStateAsUpdate(mover.doc, vector);
+    const update = Y.encodeStateAsUpdate(writer.doc, vector);
+    await sendUpdate(writer, epoch, update);
+    const moved = await sendUpdate(mover, epoch, move);
+    assert.deepEqual(moved.document.content.content, [paragraph('둘째 팀 입력'), paragraph('첫째'), paragraph('셋째')]);
+    Y.applyUpdate(mover.doc, Buffer.from((await mover.next('update')).update, 'base64'));
+    assert.equal(root.get(1), second);
+    assert.equal(projectCollaborationBlocks(root)[0], second);
+    assert.equal(Y.createAbsolutePositionFromRelativePosition(position, mover.doc)?.type, movedText);
+
+    const { p: reconnect } = await connected(f, id, 'user-jun', epoch);
+    peers.push(reconnect);
+    const finished = await sendUpdate(reconnect, epoch, Y.encodeStateAsUpdate(offline, vector));
+    const expected = [paragraph('오프라인 둘째 팀 입력'), paragraph('첫째'), paragraph('셋째')];
+    assert.deepEqual(finished.document.content.content, expected);
+    assert.match(finished.document.plainText, /^오프라인 둘째 팀 입력/u);
+    const checkpoint = await f.request(`/documents/${id}/checkpoint`, 'POST', { summary: '현재 순서' });
+    assert.equal(checkpoint.status, 200);
+    assert.deepEqual(checkpoint.data.content.content, expected);
+
+    const backup = await f.request('/export');
+    const downgraded = structuredClone(backup.data);
+    downgraded.collabStates.find((state: { documentId: string }) => state.documentId === id).schemaVersion = 17;
+    assert.equal((await f.request('/import', 'POST', { data: downgraded })).status, 422);
+    assert.deepEqual((await f.request(`/documents/${id}/collaboration`)).data.document.content.content, expected);
+    const imported = await f.request('/import', 'POST', { data: backup.data });
+    assert.equal(imported.status, 200);
+    const restored = (await f.request(`/documents/${id}/collaboration`)).data;
+    assert.notEqual(restored.epoch, epoch);
+    assert.deepEqual(restored.document.content.content, expected);
+    const { p: afterRestore } = await connected(f, id, 'user-seo', restored.epoch);
+    peers.push(afterRestore);
+    const restoredRoot = afterRestore.doc.getXmlFragment('default');
+    assert.equal(collaborationBlockId(projectCollaborationBlocks(restoredRoot)[0]), secondId);
+  } finally { offline.destroy(); peers.forEach(p => p.dispose()); await f.close(); f.remove(); }
+});
+
+test('schema 17 startup upgrade keeps the epoch, XML state and late pending edits', async () => {
+  const f = await fixture();
+  let reopened: typeof f | undefined;
+  let client: Peer | undefined;
+  const offline = new Y.Doc();
+  try {
+    const session = await make(f), id = session.document.id;
+    ({ p: client } = await connected(f, id, 'user-min', session.epoch));
+    const state = Y.encodeStateAsUpdate(client.doc), vector = Y.encodeStateVector(client.doc);
+    Y.applyUpdate(offline, state);
+    const paragraph = offline.getXmlFragment('default').get(0) as Y.XmlElement;
+    (paragraph.get(0) as Y.XmlText).insert(0, '설치 전 ');
+    client.dispose(); client = undefined;
+    await f.close();
+    const disk = new DatabaseSync(join(f.dir, 'teamspace.sqlite'));
+    try { disk.prepare('UPDATE collaboration_documents SET schema_version=17 WHERE document_id=?').run(id); }
+    finally { disk.close(); }
+    reopened = await fixture(f.dir);
+    const upgraded = (await reopened.request(`/documents/${id}/collaboration`)).data;
+    assert.equal(upgraded.epoch, session.epoch);
+    assert.equal(upgraded.document.version, session.document.version);
+    assert.equal(upgraded.schemaVersion, COLLABORATION_SCHEMA);
+    ({ p: client } = await connected(reopened, id, 'user-min', upgraded.epoch));
+    const ack = await sendUpdate(client, upgraded.epoch, Y.encodeStateAsUpdate(offline, vector));
+    assert.equal(ack.document.plainText, '설치 전 원본');
+  } finally { offline.destroy(); client?.dispose(); await reopened?.close(); await f.close(); f.remove(); }
+});
 
 test('recovery copy retries share one durable document while retaining each actor and recovered generation', async () => {
   const f = await fixture();
@@ -210,7 +308,7 @@ test('invalid, oversized and unsupported-schema edits never mutate the canonical
     const s=await make(f),a=await connected(f,s.document.id,'user-min',s.epoch);peers.push(a.p);const initial=Y.encodeStateAsUpdate(a.p.doc),vector=Y.encodeStateVector(a.p.doc);
     const invalidBinary=randomUUID();a.p.send({type:'update',epoch:s.epoch,requestId:invalidBinary,update:Buffer.from([255,1]).toString('base64')});assert.equal((await a.p.next('error')).code,'INVALID_UPDATE');
     a.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.alloc(MAX_COLLABORATION_UPDATE+1).toString('base64')});assert.equal((await a.p.next('error')).code,'UPDATE_TOO_LARGE');
-    for(const mutate of [(d:Y.Doc)=>d.getXmlFragment('default').push([new Y.XmlElement('unsupportedWidget')]),(d:Y.Doc)=>(d.getXmlFragment('default').get(0) as Y.XmlElement).setAttribute('unknownAttribute','bad'),(d:Y.Doc)=>d.getMap('other-root').set('bad',true)]){
+    for(const mutate of [(d:Y.Doc)=>d.getXmlFragment('default').push([new Y.XmlElement('unsupportedWidget')]),(d:Y.Doc)=>(d.getXmlFragment('default').get(0) as Y.XmlElement).setAttribute('unknownAttribute','bad'),(d:Y.Doc)=>d.getMap('other-root').set('bad',true),(d:Y.Doc)=>d.getMap(COLLABORATION_BLOCK_ORDER_ROOT).set('invalid',true),(d:Y.Doc)=>d.getArray(COLLABORATION_BLOCK_ORDER_ROOT).push(['invalid'])]){
       const bad=new Y.Doc();Y.applyUpdate(bad,initial);mutate(bad);a.p.send({type:'update',epoch:s.epoch,requestId:randomUUID(),update:Buffer.from(Y.encodeStateAsUpdate(bad,vector)).toString('base64')});assert.equal((await a.p.next('error')).code,'INVALID_SCHEMA');bad.destroy();
     }
     const unchanged=(await f.request(`/documents/${s.document.id}/collaboration`)).data;assert.equal(unchanged.document.version,s.document.version);assert.equal(unchanged.document.plainText,'원본');

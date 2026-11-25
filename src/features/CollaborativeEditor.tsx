@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
-import Collaboration from '@tiptap/extension-collaboration';
 import Placeholder from '@tiptap/extension-placeholder';
 import { Download, Loader2, RotateCcw, Users, WifiOff } from 'lucide-react';
 import type { CollaborationSession } from '../../shared/collaboration';
@@ -13,6 +12,7 @@ import { documentFindExtension } from './document-find';
 import { createEditorExtensions } from '../../shared/editor-schema';
 import { api, ApiError } from '../lib/api';
 import { CollaborationClient, hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
+import { OrderedCollaboration } from '../lib/collaboration-order-binding';
 import { collaborativeCursors, publishEditorCursor } from './CollaborationCursors';
 import { downloadDocument } from './document-utils';
 
@@ -144,7 +144,7 @@ function LiveBinding({ client, connected, readOnly, onEditor, onContent }: Colla
     extensions: [
       ...decorateDocumentExtensions(createEditorExtensions({ collaboration: true })),
       documentFindExtension,
-      Collaboration.configure({ document: client.doc, field: 'default' }),
+      OrderedCollaboration.configure({ document: client.doc, field: 'default' }),
       collaborativeCursors(client),
       Placeholder.configure({ placeholder: '함께 내용을 작성하세요. /로 블록을 추가하고 @로 문서를 연결하세요.' }),
     ],

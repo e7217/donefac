@@ -4,8 +4,9 @@ import { useCallback, useLayoutEffect, useRef } from 'react';
 import type { Editor, EditorEvents, JSONContent } from '@tiptap/core';
 import { Fragment, type Node as ProseMirrorNode } from '@tiptap/pm/model';
 import { Selection, type Transaction } from '@tiptap/pm/state';
-import { absolutePositionToRelativePosition, relativePositionToAbsolutePosition, ySyncPluginKey } from '@tiptap/y-tiptap';
+import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import { compareRelativePositions, createAbsolutePositionFromRelativePosition, type Doc, type RelativePosition, XmlElement, XmlText } from 'yjs';
+import { collaborationAbsolutePosition, collaborationRelativePosition } from '../lib/collaboration-order-positions';
 
 export type DocumentSlashRange = { from: number; to: number; text: string };
 export type DocumentSlashAnchor = {
@@ -53,7 +54,7 @@ export function captureDocumentSlashAnchor(editor: Editor, range: DocumentSlashR
   if (!sync) return anchor;
   if (sync.snapshot || sync.prevSnapshot) return null;
   try {
-    const relativeAt = (position: number) => absolutePositionToRelativePosition(position, sync.type, sync.binding.mapping);
+    const relativeAt = (position: number) => collaborationRelativePosition(position, sync);
     // The left endpoint follows the original slash character as content before the block moves.
     const afterSlash = relativeAt(range.from + 1);
     const end = relativeAt(range.to);
@@ -77,9 +78,9 @@ function resolveCollaborativeRange(editor: Editor, anchor: DocumentSlashAnchor):
   if (saved.block.parent !== saved.parent || saved.block.prevSibling !== saved.previous || saved.block.nextSibling !== saved.next) return null;
   try {
     const resolve = (position: RelativePosition) => {
-      const absolute = relativePositionToAbsolutePosition(sync.doc, sync.type, position, sync.binding.mapping);
+      const absolute = collaborationAbsolutePosition(position, sync);
       if (absolute === null) return null;
-      const current = absolutePositionToRelativePosition(absolute, sync.type, sync.binding.mapping);
+      const current = collaborationRelativePosition(absolute, sync);
       return compareRelativePositions(position, current) ? absolute : null;
     };
     const afterSlash = resolve(saved.afterSlash), to = resolve(saved.end);

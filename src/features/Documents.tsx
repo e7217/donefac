@@ -2337,8 +2337,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   disabled={saving || manualRecovery || Boolean(metadataReview)} onClick={() => void saveDraft()}>
                   <Save size={15} aria-hidden="true" />본문 저장
                 </button>}
-                {editor && manualSession && !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting && !issueDrawerOpen && draft.id === selectedPageId &&
-                  <DocumentBlockOrder editor={editor} />}
+                {editor && (manualSession || liveMode) && !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting && !issueDrawerOpen && draft.id === selectedPageId &&
+                  <DocumentBlockOrder editor={editor} collaborative={liveMode} />}
                 <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable} issueUnavailable={selectionIssueUnavailable}
                   onCreate={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }}
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}

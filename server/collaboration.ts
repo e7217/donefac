@@ -6,10 +6,12 @@ import * as Y from 'yjs';
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from 'y-prosemirror';
 import { createEditorSchema } from '../shared/editor-schema.js';
 import {
-  COLLABORATION_CURSOR_PROTOCOL, COLLABORATION_SCHEMA, MAX_COLLABORATION_CURSOR_BYTES, supportsCollaborationSchema, type CollaborationClientMessage,
+  COLLABORATION_BLOCK_ORDER_SCHEMA, COLLABORATION_CURSOR_PROTOCOL, COLLABORATION_SCHEMA, MAX_COLLABORATION_CURSOR_BYTES,
+  supportsCollaborationSchema, type CollaborationClientMessage,
   type CollaborationCursor, type CollaborationCursorSelection, type CollaborationPeer,
   type CollaborationServerMessage, type CollaborationSession,
 } from '../shared/collaboration.js';
+import { COLLABORATION_BLOCK_ORDER_ROOT, projectCollaborationBlocks } from '../shared/collaboration-block-order.js';
 import { documentContentSchemaVersion } from '../shared/document-nodes.js';
 import type { DocPage, DocRevision, RichContent, User } from '../shared/types.js';
 import { Store } from './store.js';
@@ -56,11 +58,26 @@ function validateStateSchema(content: RichContent, version: number) {
     invalid('이전 공동 편집 스키마에 지원하지 않는 문서 블록이 포함되어 있습니다.', 422, 'SCHEMA_MISMATCH');
   }
 }
-function inspect(doc:Y.Doc) {
-  for(const name of doc.share.keys())if(name!=='default')invalid('지원하지 않는 공동 편집 루트입니다.',422,'INVALID_SCHEMA');
+function inspect(doc:Y.Doc, version: number) {
+  const hasBlockOrder = doc.share.has(COLLABORATION_BLOCK_ORDER_ROOT);
+  for(const name of doc.share.keys())if(name!=='default' && name!==COLLABORATION_BLOCK_ORDER_ROOT)invalid('지원하지 않는 공동 편집 루트입니다.',422,'INVALID_SCHEMA');
+  if (hasBlockOrder && version < COLLABORATION_BLOCK_ORDER_SCHEMA) invalid('이전 공동 편집 형식에서 블록 순서를 읽을 수 없습니다.',422,'SCHEMA_MISMATCH');
   const root=doc.getXmlFragment('default');
   if((root as unknown as {_map:Map<unknown,unknown>})._map.size)invalid('문서 루트에 지원하지 않는 데이터가 있습니다.',422,'INVALID_SCHEMA');
-  try{return normalizeContent(yDocToProsemirrorJSON(doc,'default'));}
+  try{
+    const json = yDocToProsemirrorJSON(doc,'default');
+    if (hasBlockOrder) {
+      const physical = root.toArray();
+      const logical = projectCollaborationBlocks(root);
+      if (!Array.isArray(json.content) || json.content.length !== physical.length || logical.length !== physical.length ||
+          physical.some(block => !(block instanceof Y.XmlElement))) {
+        invalid('문서 본문과 블록 순서가 일치하지 않습니다.',422,'INVALID_SCHEMA');
+      }
+      const byBlock = new Map(physical.map((block, index) => [block, json.content[index]]));
+      json.content = logical.map(block => byBlock.get(block));
+    }
+    return normalizeContent(json);
+  }
   catch(error){if(error instanceof CollaborationError)throw error;return invalid('공동 편집 문서 형식을 읽을 수 없습니다.',422,'INVALID_SCHEMA');}
 }
 function decodeState(bytes:Buffer) {
@@ -97,7 +114,7 @@ export class CollaborationService {
         if (!supportsCollaborationSchema(state.schemaVersion)) invalid('지원하지 않는 영속 공동 편집 스키마입니다.',409,'SCHEMA_MISMATCH');
         const doc = decodeState(state.state);
         try {
-          const normalized = inspect(doc);
+          const normalized = inspect(doc, state.schemaVersion);
           validateStateSchema(normalized.content, state.schemaVersion);
           candidates.set(state.documentId, {...this.document(state.documentId), ...normalized});
         } finally { doc.destroy(); }
@@ -107,6 +124,11 @@ export class CollaborationService {
       for (const state of states) {
         if (state.schemaVersion === COLLABORATION_SCHEMA) continue;
         const document = candidates.get(state.documentId)!;
+        // 17→18 adds an optional order log. The persisted XML identities and pending text remain compatible.
+        if (state.schemaVersion === 17 && COLLABORATION_SCHEMA === COLLABORATION_BLOCK_ORDER_SCHEMA) {
+          this.write({...state, schemaVersion:COLLABORATION_SCHEMA});
+          continue;
+        }
         this.write({...state, epoch:randomUUID(), schemaVersion:COLLABORATION_SCHEMA});
         this.store.put('documents', {...document, version:document.version+1, updatedAt:iso()});
         this.store.db.prepare('DELETE FROM collaboration_requests WHERE document_id=?').run(document.id);
@@ -159,7 +181,7 @@ export class CollaborationService {
   }
   deriveSnapshot(document:DocPage):DocPage {
     const state=this.state(document.id);if(!state)return document;
-    const doc=decodeState(state.state);try{return{...document,...inspect(doc)};}finally{doc.destroy();}
+    const doc=decodeState(state.state);try{return{...document,...inspect(doc, state.schemaVersion)};}finally{doc.destroy();}
   }
   private send(peer:Peer,message:CollaborationServerMessage){if(peer.socket.readyState===WebSocket.OPEN)peer.socket.send(JSON.stringify(message));}
   private ready(documentId:string){return[...this.peers].filter(peer=>peer.ready&&peer.documentId===documentId&&peer.socket.readyState===WebSocket.OPEN);}
@@ -249,7 +271,7 @@ export class CollaborationService {
       const bytes = base64(item.state, MAX_STATE);
       const ydoc = decodeState(bytes);
       try {
-        const normalized = inspect(ydoc);
+        const normalized = inspect(ydoc, item.schemaVersion);
         validateStateSchema(normalized.content, item.schemaVersion);
         if (JSON.stringify(normalized.content) !== JSON.stringify(document.content)) {
           invalid('공동 편집 상태와 문서 JSON 내용이 일치하지 않습니다.', 422, 'SNAPSHOT_MISMATCH');
@@ -300,7 +322,7 @@ export class CollaborationService {
     const candidate=decodeState(state.state);
     try{
       if(!prior)try{Y.applyUpdate(candidate,update);}catch{return invalid('Yjs 업데이트가 올바르지 않습니다.',422,'INVALID_UPDATE');}
-      const normalized=inspect(candidate),encoded=Buffer.from(Y.encodeStateAsUpdate(candidate));if(encoded.length>MAX_STATE)invalid('공동 편집 문서 상태가 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
+      const normalized=inspect(candidate, state.schemaVersion),encoded=Buffer.from(Y.encodeStateAsUpdate(candidate));if(encoded.length>MAX_STATE)invalid('공동 편집 문서 상태가 크기 한도를 초과했습니다.',413,'DOCUMENT_TOO_LARGE');
       const changed=!encoded.equals(state.state);let document=this.document(peer.documentId);
       // Even an idempotent request is acknowledged only after the request receipt commits.
       this.store.transaction(()=>{
