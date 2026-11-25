@@ -247,6 +247,145 @@ test('360px 팀 간트에서 두 프로젝트의 날짜와 차단 관계를 적�
   }
 });
 
+test('360px 차단 관계 검토에서 저장값과 간트 입력을 날짜별로 선택하고 최신 동료 날짜를 보존한다', async ({ page, request }) => {
+  test.setTimeout(100_000);
+  const snapshot = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [first, second], users: [actor, peer] } = await snapshot();
+  const headers = { 'X-Actor-Id': actor.id };
+  const prefix = `차단 날짜 충돌 ${randomUUID().slice(0, 8)}`;
+  const created: Issue[] = [];
+  async function makeIssue(projectId: string, label: string, startDate: string, endDate: string) {
+    const issue = await readJson<Issue>(await request.post('/api/issues', {
+      headers, data: { projectId, title: `${prefix} ${label}`, startDate, endDate },
+    }));
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const source = await makeIssue(first.id, '차단 원인', '2026-11-19', '2026-11-20');
+    const target = await makeIssue(second.id, '차단 대상', '2026-11-23', '2026-11-29');
+    const unrelated = await makeIssue(second.id, '다른 날짜 초안', '2026-11-25', '2026-11-27');
+    const dates = { sourceStart: '2026-11-17', sourceEnd: '2026-11-23', targetStart: '2026-11-24', unrelatedEnd: '2026-11-30' };
+    const savePeer = async (issue: Issue, changes: Partial<Pick<Issue, 'startDate' | 'endDate'>>) => readJson<Issue>(await request.patch(`/api/issues/${issue.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: issue.version, ...changes },
+    }));
+    const route = `#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/${route}`);
+
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const date = (issue: Issue, label: string) => chart.getByLabel(`${issue.key} ${label}`, { exact: true });
+    await date(source, '시작일').fill(dates.sourceStart);
+    await date(source, '종료일').fill(dates.sourceEnd);
+    await date(target, '시작일').fill(dates.targetStart);
+    await date(unrelated, '종료일').fill(dates.unrelatedEnd);
+    await page.getByRole('button', { name: '차트에서 연결', exact: true }).click();
+    await chart.getByRole('button', { name: `${source.key} 선행 업무 선택`, exact: true }).click();
+    await chart.getByRole('button', { name: `${target.key} 후행 업무 선택`, exact: true }).click();
+    const form = page.getByRole('form', { name: '프로젝트 간 차단 관계 추가', exact: true });
+    const openReview = form.getByRole('button', { name: '날짜와 차단 관계 검토', exact: true });
+    const dialog = page.getByRole('dialog', { name: '프로젝트 간 날짜와 차단 관계 검토', exact: true });
+    const preview = dialog.getByRole('button', { name: '날짜와 차단 관계 미리보기', exact: true });
+    const apply = dialog.getByRole('button', { name: '날짜와 차단 관계 적용', exact: true });
+    const reload = dialog.getByRole('button', { name: '최신 업무 다시 불러오기', exact: true });
+    const sourceSaved = dialog.getByRole('radio', { name: `${source.key} 종료일 저장값 사용`, exact: true });
+    const sourceDraft = dialog.getByRole('radio', { name: `${source.key} 종료일 간트 입력 사용`, exact: true });
+    const targetSaved = dialog.getByRole('radio', { name: `${target.key} 시작일 저장값 사용`, exact: true });
+    const followUp = dialog.getByRole('checkbox', { name: '후행 일정 함께 검토', exact: true });
+    async function readPreview() {
+      const response = nextPost(page, previewPath);
+      await preview.click();
+      const outcome = await response;
+      return { request: outcome.request().postDataJSON(), result: await readJson<ScheduleTeamBlockerPreview>(outcome) };
+    }
+
+    await openReview.click();
+    const peerSource = await savePeer(source, { endDate: '2026-11-26' });
+    const peerTarget = await savePeer(target, { startDate: '2026-11-25' });
+    await reload.click();
+    await expect(sourceSaved).toBeFocused();
+    await expect(preview).toBeDisabled();
+    await expect(dialog.getByRole('region', { name: '차단하는 업무', exact: true })).toContainText(peerSource.endDate!);
+    await expect(dialog.getByRole('region', { name: '차단하는 업무', exact: true })).toContainText(dates.sourceEnd);
+    await sourceSaved.check();
+    await expect(preview).toBeDisabled();
+    await targetSaved.check();
+    await followUp.check();
+    const fixed = await readPreview();
+    expect(fixed.request.target).toEqual({ id: target.id, expectedVersion: peerTarget.version, dates: { startDate: peerTarget.startDate } });
+    expect(fixed.result.previewId).toBeNull();
+    expect(fixed.result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ message: expect.stringContaining(target.key) })]));
+    await expect(apply).toBeDisabled();
+    await sourceDraft.check();
+    const keptInput = await readPreview();
+    expect(keptInput.request.source.dates).toEqual({ startDate: dates.sourceStart, endDate: dates.sourceEnd });
+    expect(keptInput.result.previewId).toBeTruthy();
+
+    await dialog.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(date(source, '종료일')).toHaveValue(dates.sourceEnd);
+    await expect(date(target, '시작일')).toHaveValue(dates.targetStart);
+    await expect(date(unrelated, '종료일')).toHaveValue(dates.unrelatedEnd);
+    await openReview.click();
+    await sourceDraft.check();
+    await targetSaved.check();
+    await followUp.check();
+    expect((await readPreview()).result.previewId).toBeTruthy();
+
+    const newerSource = await savePeer(peerSource, { endDate: '2026-11-24' });
+    const rejected = nextPost(page, applyPath);
+    await apply.click();
+    expect((await rejected).status()).toBe(409);
+    await reload.click();
+    await expect(sourceSaved).toBeFocused();
+    await expect(sourceDraft).not.toBeChecked();
+    await expect(targetSaved).toBeChecked();
+    await expect(preview).toBeDisabled();
+    await sourceSaved.check();
+    const latest = await readPreview();
+    expect(latest.request.source).toEqual({ id: source.id, expectedVersion: newerSource.version, dates: { startDate: dates.sourceStart, endDate: newerSource.endDate } });
+    expect(latest.result.changes).toEqual([expect.objectContaining({ id: source.id, fromEnd: newerSource.endDate, toEnd: newerSource.endDate, toStart: dates.sourceStart })]);
+    expect(latest.result.previewId).toBeTruthy();
+
+    let committed: ScheduleTeamBlockerApplyResult | undefined;
+    await page.route(url => url.pathname === applyPath, async intercepted => {
+      committed = await readJson<ScheduleTeamBlockerApplyResult>(await intercepted.fetch());
+      await intercepted.abort('failed');
+    }, { times: 1 });
+    await apply.click();
+    const retry = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    const retrying = nextPost(page, applyPath);
+    await retry.click();
+    expect(await readJson<ScheduleTeamBlockerApplyResult>(await retrying)).toEqual(committed);
+    await expect(dialog).toHaveCount(0);
+    await expect(date(source, '시작일')).toHaveValue(dates.sourceStart);
+    await expect(date(source, '종료일')).toHaveValue(newerSource.endDate!);
+    await expect(date(target, '시작일')).toHaveValue(peerTarget.startDate!);
+    await expect(date(unrelated, '종료일')).toHaveValue(dates.unrelatedEnd);
+
+    const undo = nextPost(page, undoPath);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await readJson(await undo);
+    await expect(date(source, '시작일')).toHaveValue(source.startDate!);
+    await expect(date(source, '종료일')).toHaveValue(newerSource.endDate!);
+    await expect(date(target, '시작일')).toHaveValue(peerTarget.startDate!);
+    await expect(date(unrelated, '종료일')).toHaveValue(dates.unrelatedEnd);
+    const restored = await snapshot();
+    expect(restored.issues.find(issue => issue.id === source.id)).toMatchObject({ version: newerSource.version + 2, endDate: newerSource.endDate });
+    expect(restored.issues.find(issue => issue.id === target.id)).toEqual(peerTarget);
+    expect(await readJson<IssueRelation[]>(await request.get(`/api/issues/${source.id}/relations`))).toEqual([]);
+  } finally {
+    for (const issue of created.reverse()) {
+      const response = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (!response.ok()) continue;
+      const { trashEntryId } = await response.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers });
+    }
+  }
+});
+
 test('팀 간트에서 선택한 차단 관계를 날짜 초안으로 검토하고 다른 업무의 초안을 보존한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const snapshot = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));

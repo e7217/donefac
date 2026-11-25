@@ -4,7 +4,7 @@ import { useEffect, useEffectEvent, useId, useLayoutEffect, useRef, useState } f
 import { Check, Link2, Loader2, RefreshCw, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import type {
-  Issue, Project, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerInput, ScheduleTeamBlockerPreview, ScheduleUndoScope,
+  Issue, Project, ScheduleBulkLinkDateEdit, ScheduleTeamBlockerApplyResult, ScheduleTeamBlockerInput, ScheduleTeamBlockerPreview, ScheduleUndoScope,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { isUncertainScheduleResponse, scheduleUndoHeaders } from './schedule-undo';
@@ -13,6 +13,11 @@ import './schedule-paste.css';
 import './gantt-team-blocker-edit.css';
 
 type Dates = Pick<Issue, 'startDate' | 'endDate'>;
+type DateField = keyof Dates;
+const dateOptions = { saved: '저장값 사용', draft: '간트 입력 사용' } as const;
+type DateOption = keyof typeof dateOptions;
+type DateChoices = Partial<Record<DateField, { saved: string | null; option: DateOption }>>;
+type DateConflict = { saved: string | null; draft: string | null; option: DateOption | undefined };
 export type TeamBlockerDateDraft = {
   source: Pick<Issue, 'id' | 'version'> & Dates;
   changes: Partial<Dates>;
@@ -29,11 +34,12 @@ type Props = {
   refresh: () => Promise<void>;
   onDraftChange: (dirty: boolean, pending: boolean, awaitingResult?: boolean) => void;
   onClose: () => void;
-  onApplied: (result: ScheduleTeamBlockerApplyResult) => Promise<void>;
+  onApplied: (result: ScheduleTeamBlockerApplyResult, reviewedDates: readonly ScheduleBulkLinkDateEdit[]) => Promise<void>;
 };
 
 type Pending = 'preview' | 'apply' | 'recover' | 'refresh' | 'reflect';
-type Review = { key: string; result: ScheduleTeamBlockerPreview };
+type Review = { key: string; result: ScheduleTeamBlockerPreview; reviewedDates: readonly ScheduleBulkLinkDateEdit[] };
+type Receipt = { result: ScheduleTeamBlockerApplyResult; reviewedDates: readonly ScheduleBulkLinkDateEdit[] };
 const endpoint = '/schedule/team-blocker-edit';
 const fields = [
   { field: 'startDate', label: '시작일' },
@@ -47,14 +53,24 @@ const pendingLabel: Record<Pending, string> = {
   reflect: '적용 결과를 화면에 반영하는 중입니다.',
 };
 
-function dateChange(issue: Issue, draft: TeamBlockerDateDraft | undefined, include: boolean) {
+function reviewDates(issue: Issue, draft: TeamBlockerDateDraft | undefined, included: boolean, choices: DateChoices) {
   const dates: Partial<Dates> = {};
-  if (!include || draft?.source.id !== issue.id) return dates;
-  for (const { field } of fields) {
-    const value = draft.changes[field];
-    if (value !== undefined && value !== issue[field]) dates[field] = value;
+  const conflicts: Partial<Record<DateField, DateConflict>> = {};
+  if (included && draft?.source.id === issue.id) {
+    for (const { field } of fields) {
+      const value = draft.changes[field];
+      if (value === undefined) continue;
+      const saved = issue[field];
+      const decision = choices[field];
+      if (saved !== value && (saved !== draft.source[field] || decision)) {
+        const option = decision?.saved === saved ? decision?.option : undefined;
+        conflicts[field] = { saved, draft: value, option };
+        if (!option) continue;
+        dates[field] = option === 'saved' ? saved : value;
+      } else dates[field] = value;
+    }
   }
-  return dates;
+  return { dates, conflicts, unresolved: Object.values(conflicts).some(conflict => !conflict.option) };
 }
 
 function versionedIssue(issue: Issue, dates: Partial<Dates>): ScheduleTeamBlockerInput['source'] {
@@ -77,11 +93,13 @@ export function GanttTeamBlockerEdit({
   const followUpHelpId = useId();
   const [includeSource, setIncludeSource] = useState(true);
   const [includeTarget, setIncludeTarget] = useState(true);
+  const [sourceChoices, setSourceChoices] = useState<DateChoices>({});
+  const [targetChoices, setTargetChoices] = useState<DateChoices>({});
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [review, setReview] = useState<Review | null>(null);
   const [pending, setPending] = useState<Pending | null>(null);
   const [retryId, setRetryId] = useState<string | null>(null);
-  const [receipt, setReceipt] = useState<ScheduleTeamBlockerApplyResult | null>(null);
+  const [receipt, setReceipt] = useState<Receipt | null>(null);
   const [reloadNeeded, setReloadNeeded] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -95,15 +113,16 @@ export function GanttTeamBlockerEdit({
   const focusAfter = useRef<'review' | 'error' | 'retry' | 'preview' | null>(null);
   const request = useRef<AbortController | null>(null);
 
-  const sourceDates = dateChange(source, sourceDraft, includeSource);
-  const targetDates = dateChange(target, targetDraft, includeTarget);
+  const sourceReview = reviewDates(source, sourceDraft, includeSource, sourceChoices);
+  const targetReview = reviewDates(target, targetDraft, includeTarget, targetChoices);
   const input: ScheduleTeamBlockerInput = {
-    source: versionedIssue(source, sourceDates), target: versionedIssue(target, targetDates),
+    source: versionedIssue(source, sourceReview.dates), target: versionedIssue(target, targetReview.dates),
     ...(rescheduleSuccessors ? { rescheduleSuccessors: true } : {}),
   };
   const key = JSON.stringify([source.projectId, target.projectId, input]);
   const problem = source.projectId === target.projectId ? '서로 다른 프로젝트의 업무를 선택해 주세요.'
-    : dateProblem(source, sourceDates) || dateProblem(target, targetDates);
+    : sourceReview.unresolved || targetReview.unresolved ? '저장값이 바뀐 날짜마다 반영할 값을 고르세요.'
+      : dateProblem(source, sourceReview.dates) || dateProblem(target, targetReview.dates);
   const projectNames = new Map(projects.map(project => [project.id, project.name]));
   const followUpIssueIds = new Set(review?.result.followUpIssueIds);
   const reviewErrors = review?.result.errors ?? [];
@@ -145,7 +164,7 @@ export function GanttTeamBlockerEdit({
     if (target === 'review') reviewHeading.current?.focus();
     else if (target === 'error') errorNotice.current?.focus();
     else if (target === 'retry') retryButton.current?.focus();
-    else if (target === 'preview') previewButton.current?.focus();
+    else if (target === 'preview') (modal.current?.querySelector<HTMLInputElement>('[data-unresolved-date]') ?? previewButton.current)?.focus();
   }, [pending]);
 
   function begin(kind: Pending) {
@@ -195,7 +214,9 @@ export function GanttTeamBlockerEdit({
         throw new Error('검토할 날짜와 차단 관계를 확인하지 못했습니다.');
       }
       setClock(Date.now());
-      setReview({ key, result });
+      const reviewedDates = [input.source, input.target].flatMap(({ id, expectedVersion, dates }) =>
+        dates ? [{ issue: { id, expectedVersion }, changes: dates }] : []);
+      setReview({ key, result, reviewedDates });
       focusAfter.current = 'review';
     } catch (cause) {
       if (controller.signal.aborted) return;
@@ -222,8 +243,8 @@ export function GanttTeamBlockerEdit({
     } finally { finish(controller); }
   }
 
-  async function reflect(result: ScheduleTeamBlockerApplyResult, controller: AbortController) {
-    try { await onApplied(result); }
+  async function reflect({ result, reviewedDates }: Receipt, controller: AbortController) {
+    try { await onApplied(result, reviewedDates); }
     catch (cause) {
       if (controller.signal.aborted) return;
       setError(`날짜와 차단 관계를 적용했습니다. ${errorMessage(cause)} 화면에 다시 반영할 수 있습니다.`);
@@ -248,10 +269,11 @@ export function GanttTeamBlockerEdit({
           JSON.stringify(result.followUpIssueIds ?? []) !== JSON.stringify(review.result.followUpIssueIds ?? []) ||
           result.relation?.sourceIssueId !== review.result.sourceId || result.relation.targetIssueId !== review.result.targetId ||
           result.relation.type !== 'blocks') throw new Error('적용 결과를 확인하지 못했습니다.');
-      setReceipt(result);
+      const receipt = { result, reviewedDates: review.reviewedDates };
+      setReceipt(receipt);
       setRetryId(null);
       onDraftChange(false, true, false);
-      await reflect(result, controller);
+      await reflect(receipt, controller);
     } catch (cause) {
       if (controller.signal.aborted) return;
       const errorStatus = cause instanceof ApiError ? cause.status : undefined;
@@ -288,10 +310,14 @@ export function GanttTeamBlockerEdit({
     <div className="schedule-paste-input">
       <fieldset disabled={locked}>
         <div className="gantt-team-blocker-edit-rows">
-          <PairDates label="차단하는 업무" issue={source} projectName={projectNames.get(source.projectId)} draft={sourceDraft} included={includeSource}
-            onInclude={value => { setIncludeSource(value); resetReview(); }} />
-          <PairDates label="차단되는 업무" issue={target} projectName={projectNames.get(target.projectId)} draft={targetDraft} included={includeTarget}
-            onInclude={value => { setIncludeTarget(value); resetReview(); }} />
+          <PairDates label="차단하는 업무" issue={source} projectName={projectNames.get(source.projectId)} draft={sourceDraft}
+            included={includeSource} conflicts={sourceReview.conflicts}
+            onInclude={value => { setIncludeSource(value); resetReview(); }}
+            onChoose={(field, saved, option) => { setSourceChoices(choices => ({ ...choices, [field]: { saved, option } })); resetReview(); }} />
+          <PairDates label="차단되는 업무" issue={target} projectName={projectNames.get(target.projectId)} draft={targetDraft}
+            included={includeTarget} conflicts={targetReview.conflicts}
+            onInclude={value => { setIncludeTarget(value); resetReview(); }}
+            onChoose={(field, saved, option) => { setTargetChoices(choices => ({ ...choices, [field]: { saved, option } })); resetReview(); }} />
         </div>
         <div className="schedule-paste-follow-up">
           <label><input type="checkbox" checked={rescheduleSuccessors} aria-describedby={followUpHelpId}
@@ -356,25 +382,37 @@ export function GanttTeamBlockerEdit({
   </dialog>;
 }
 
-function PairDates({ label, issue, projectName, draft, included, onInclude }: {
+function PairDates({ label, issue, projectName, draft, included, conflicts, onInclude, onChoose }: {
   label: string; issue: Issue; projectName?: string; draft?: TeamBlockerDateDraft; included: boolean; onInclude: (value: boolean) => void;
+  conflicts: Partial<Record<DateField, DateConflict>>;
+  onChoose: (field: DateField, saved: string | null, option: DateOption) => void;
 }) {
   const headingId = useId();
   const currentDraft = draft?.source.id === issue.id ? draft : undefined;
   const hasInput = currentDraft && fields.some(({ field }) => currentDraft.changes[field] !== undefined);
-  const showPeerChange = included && hasInput && currentDraft.source.version !== issue.version &&
-    fields.some(({ field }) => currentDraft.changes[field] !== undefined && currentDraft.changes[field] !== issue[field] &&
-      currentDraft.source[field] !== issue[field]);
 
   return <section className="gantt-team-blocker-edit-row" aria-labelledby={headingId}>
     <h3 id={headingId}>{label}</h3>
     <p><strong>{issue.key}</strong> {issue.title}</p>
     {projectName && <small>{projectName}</small>}
     <dl>{fields.map(({ field, label: fieldLabel }) => {
+      const conflict = conflicts[field];
+      if (conflict) {
+        const group = `${headingId}-${field}`;
+        return <div key={field}><dt>{fieldLabel}</dt><dd>
+          <span id={`${group}-values`}>저장값 <strong>{conflict.saved ?? '미정'}</strong> · 간트 입력 <strong>{conflict.draft ?? '미정'}</strong></span>
+          <fieldset className="gantt-team-blocker-date-choices" aria-describedby={`${group}-values`}>
+            <legend className="sr-only">{issue.key} {fieldLabel} 선택</legend>
+            <label><input type="radio" name={group} checked={conflict.option === 'saved'} aria-label={`${issue.key} ${fieldLabel} ${dateOptions.saved}`}
+              data-unresolved-date={!conflict.option || undefined} onChange={() => onChoose(field, conflict.saved, 'saved')} />{dateOptions.saved}</label>
+            <label><input type="radio" name={group} checked={conflict.option === 'draft'} aria-label={`${issue.key} ${fieldLabel} ${dateOptions.draft}`}
+              onChange={() => onChoose(field, conflict.saved, 'draft')} />{dateOptions.draft}</label>
+          </fieldset>
+        </dd></div>;
+      }
       const next = included ? currentDraft?.changes[field] : undefined;
       return <DateComparison key={field} label={fieldLabel} before={issue[field]} after={next} />;
     })}</dl>
-    {showPeerChange && <p className="gantt-team-blocker-peer-date">작성 중 저장값이 바뀌었습니다. 현재 저장값과 입력한 날짜를 확인해 주세요.</p>}
     {hasInput && <label className="gantt-team-blocker-include">
       <input type="checkbox" checked={included} onChange={event => onInclude(event.currentTarget.checked)} />
       {issue.key} 날짜 입력 포함

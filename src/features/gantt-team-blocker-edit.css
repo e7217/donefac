@@ -56,8 +56,22 @@
   font-variant-numeric: tabular-nums;
 }
 
-.gantt-team-blocker-peer-date {
-  color: #79490f;
+.schedule-paste-input .gantt-team-blocker-date-choices {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 0.6rem;
+  margin-block: 0.2rem 0.45rem;
+}
+
+.schedule-paste-input .gantt-team-blocker-date-choices label {
+  display: inline-flex;
+  gap: 0.25rem;
+  align-items: center;
+  margin: 0;
+}
+
+.gantt-team-blocker-date-choices input {
+  accent-color: #177c72;
 }
 
 .gantt-team-blocker-edit .gantt-team-blocker-include {

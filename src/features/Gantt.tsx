@@ -762,15 +762,11 @@ function ProjectGantt(props: GanttProps) {
     };
     setTeamBlockerEdit(null);
   }
-  async function applyTeamBlockerEdit(result: ScheduleTeamBlockerApplyResult) {
+  async function applyTeamBlockerEdit(result: ScheduleTeamBlockerApplyResult, reviewedDates: readonly ScheduleBulkLinkDateEdit[]) {
     rememberUndo(result.undoId);
     setScheduleWarnings(result.warnings);
-    const adjusted = new Set(result.followUpIssueIds);
-    for (const saved of result.updated) {
-      if (adjusted.has(saved.id)) continue;
-      const selected = [teamBlockerEdit?.sourceDraft, teamBlockerEdit?.targetDraft].find(draft => draft?.source.id === saved.id);
-      acceptChartDateDraft(saved, selected);
-    }
+    const drafts = [teamBlockerEdit?.sourceDraft, teamBlockerEdit?.targetDraft].filter((draft): draft is ChartDateDraft => Boolean(draft));
+    acceptReviewedDateDrafts(drafts, reviewedDates, result.updated);
     const opener = teamBlockerChartPair?.opener;
     try {
       await refresh();

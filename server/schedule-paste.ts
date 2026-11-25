@@ -1656,7 +1656,8 @@ export class SchedulePasteService {
       const state = this.scopeState(scope);
       const changes = new Map<string, ScheduleDateMutation>();
       const review: TeamFollowUpReview = { changes: [], errors: [] };
-      for (const [issue, endpoint] of [[source, pair.source], [target, pair.target]] as const) {
+      const endpoints = [[source, pair.source], [target, pair.target]] as const;
+      for (const [issue, endpoint] of endpoints) {
         const edit = proposeDateEdit(issue, endpoint.dates ?? {});
         if (!edit) continue;
         const { change, summary } = edit;
@@ -1668,7 +1669,14 @@ export class SchedulePasteService {
         review.changes.push(omitUnchangedDueDate({ ...summary, projectId: issue.projectId }));
       }
       const followUp = rescheduleSuccessors
-        ? this.reviewTeamScheduleFollowUps(review, new Map([[source.id, source], [target.id, target]]), changes, [], hooks, { proposedBlocker: pair })
+        ? this.reviewTeamScheduleFollowUps(review, new Map([[source.id, source], [target.id, target]]), changes, [], hooks, {
+          proposedBlocker: pair,
+          fixedDates: endpoints.flatMap(([issue, endpoint]) => {
+            if (!Object.keys(endpoint.dates ?? {}).length) return [];
+            const { startDate, endDate } = changes.get(issue.id) ?? issue;
+            return [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }];
+          }),
+        })
         : null;
       const reviewState = followUp ? mergeScheduleState(state, followUp.state) : state;
       const edits = [...changes.values()];
