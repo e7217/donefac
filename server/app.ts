@@ -3332,6 +3332,9 @@ export function createApp(options: {
     if (data.schemaVersion < 101 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
       links => links.some((link: GitlabLink) => Object.hasOwn(link, 'pipelineSource') || Object.hasOwn(link, 'pipelineTag')),
     )) fail('GitLab 파이프라인 실행 유형을 포함한 백업은 schemaVersion 101이 필요합니다.');
+    if (data.schemaVersion < 122 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
+      links => links.some((link: GitlabLink) => Object.hasOwn(link, 'pipelineTicketEvidence')),
+    )) fail('GitLab 파이프라인의 티켓 연결 근거를 포함한 백업은 schemaVersion 122가 필요합니다.');
     const readBranchLinks = [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].flatMap(
       (links: GitlabLink[]) => links.filter(link => link.branchObservationSource === 'read'),
     );

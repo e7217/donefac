@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
-import { gitlabObjectSha } from '../shared/gitlab-links.js';
+import { gitlabObjectSha, verifiedGitlabPipelineTicketEvidence } from '../shared/gitlab-links.js';
 import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabDeploymentStatusBinding, type GitlabLink } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl } from './gitlab-push.js';
 import type { Store } from './store.js';
@@ -236,6 +236,10 @@ function matchesDeploymentLink(link: GitlabLink, deployment: GitlabDeployment): 
     !!deployment.mergeRequests?.some(({ id, iid }) => id === mergeRequest.id && iid === mergeRequest.iid);
 }
 
+function eligibleAutomaticDeploymentLink(link: GitlabLink): boolean {
+  return !link.manualLinkId && (link.kind !== 'pipeline' || verifiedGitlabPipelineTicketEvidence(link));
+}
+
 export class GitlabDeployments {
   constructor(private readonly store: Store) {
     store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_deployments (
@@ -329,7 +333,7 @@ export class GitlabDeployments {
   }
 
   reviewLink(links: readonly GitlabLink[], freshlyRead: GitlabDeployment): GitlabLink | undefined {
-    return links.find(link => !link.manualLinkId && matchesDeploymentLink(link, freshlyRead));
+    return links.find(link => eligibleAutomaticDeploymentLink(link) && matchesDeploymentLink(link, freshlyRead));
   }
 
   private latestOtherSuccess(deployment: GitlabDeployment, webhook: boolean) {
@@ -373,7 +377,7 @@ export class GitlabDeployments {
     const deployment = publicRow(row);
     const { finishedAt, mergeRequests } = JSON.parse(row.statusReviewEvidence) as { finishedAt: string; mergeRequests: GitlabDeploymentMergeRequest[] };
     const link = this.store.get<GitlabLink>('gitlab_links', linkId);
-    if (finishedAt !== occurredAt || !link || link.issueId !== issueId || link.manualLinkId ||
+    if (finishedAt !== occurredAt || !link || link.issueId !== issueId || !eligibleAutomaticDeploymentLink(link) ||
         !matchesDeploymentLink(link, { ...deployment, mergeRequests }) || !matchesDeploymentLink(link, deployment)) return null;
     const competing = this.competingSuccesses(deployment);
     if (competing.webhook && competing.webhook.changedAt >= occurredAt || competing.reviewed && competing.reviewed.finishedAt >= occurredAt) return null;
@@ -392,6 +396,7 @@ export class GitlabDeployments {
       ) ORDER BY id`).all(`${prefix}:`, `${prefix};`, sha) as { json: string }[];
     return rows.flatMap(({ json }) => {
       const link = JSON.parse(json) as GitlabLink;
+      if (!eligibleAutomaticDeploymentLink(link)) return [];
       const scope = linkScope(link);
       if (!scope || scope.instance !== instance || scope.repositoryId !== repositoryId) return [];
       const mergeRequest = mergeRequestLinkEvidence(link, scope);

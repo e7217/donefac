@@ -746,6 +746,8 @@ MR 생명주기 이벤트는 정확한 MR ID와 저장소 내 번호를 확인�
 
 배포 성공 규칙의 `environment`는 GitLab의 정확한 환경 이름이며 대소문자를 구분한다. 공백으로 시작하거나 끝나는 문자열과 제어 문자를 제외한 1~255자를 받는다. 미리보기 `sample`은 `{trigger:'deployment.succeeded',gitlabProjectId,environment}`다. 실제 실행은 활성화 이후 발생한 인증 성공 이벤트에서 같은 저장소의 전체 SHA나 포함 MR ID·IID가 자동 업무 연결과 일치할 때만 평가한다. 첫 성공 이벤트의 처리는 배포 ID별로 한 번 기록하며 상태 이력 동기화는 읽은 배포와 MR 근거를 보관한다. 실행 기록에는 `context.objectKind: 'deployment'`, `context.objectId`, `context.environment`가 남는다. 자체 백업 형식 75는 배포 규칙과 실행 기록을 보존하며 규칙을 비활성 상태로 복원한다.
 
+배포 성공의 자동 전이와 상태 변경 제안에서 파이프라인 연결을 쓰려면 `pipelineTicketEvidence`가 필요하다. `direct-key`는 원본 파이프라인의 티켓 키, `verified-merge-request`는 같은 저장소·브랜치·전체 head SHA로 확인한 MR 연결이다. 형식 122 자체 백업은 활성·휴지통 파이프라인의 이 근거를 보존한다. 이전 링크도 활동과 배포 기록에서 열 수 있다. 동기화·상태 확인·인증 웹훅에서 같은 파이프라인의 근거를 확인하면 기존 연결 ID에 보완한다. 먼저 처리한 배포의 재전송에는 새 근거를 소급 적용하지 않는다.
+
 브라우저용 `GET /api/issues/:id/automation-runs`는 해당 티켓에 저장된 최근 실행을 20건씩 반환한다. `nextCursor`를 `before`로 보내 이전 기록을 연다. `issueVersion`은 조회 시점의 티켓 버전이고, `latestBlockedRunId`는 가장 최근 유효 실행이 차단됐으며 현재 출발 상태와 전이가 맞을 때 표시한다. 새 실행의 `context`에 저장소·객체·브랜치, 규칙 이름과 당시 상태 표시 이름을 담는다. 목표 상태를 사용한 편집은 일반 티켓 저장 API의 버전·전이·필수 필드 검사를 거친다.
 
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.

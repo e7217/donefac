@@ -36,6 +36,26 @@ function isCanonicalLinkUrl(webUrl: unknown, suffix: string): boolean {
     url.href === webUrl && url.pathname.length > suffix.length && url.pathname.endsWith(suffix);
 }
 
+function isCanonicalPipelineObservation(observedAt: unknown, updatedAt: unknown, state: unknown): boolean {
+  if (typeof observedAt !== 'string' || observedAt !== updatedAt ||
+      typeof state !== 'string' || !state || state === 'unknown' || state.length > 100) return false;
+  const time = Date.parse(observedAt);
+  return Number.isFinite(time) && time <= Date.now() && new Date(time).toISOString() === observedAt;
+}
+
+export function verifiedGitlabPipelineTicketEvidence(link: GitlabLink): boolean {
+  const { pipelineTicketEvidence, pipelineObservedAt, sourceSha, iid } = link;
+  if (link.kind !== 'pipeline' || Object.hasOwn(link, 'manualLinkId') ||
+      pipelineTicketEvidence !== 'direct-key' && pipelineTicketEvidence !== 'verified-merge-request') return false;
+  const identity = gitlabPipelineLinkIdentity(link);
+  const sha = gitlabObjectSha(sourceSha);
+  if (!identity || !Number.isSafeInteger(iid) || iid < 1 || !sha || /^0+$/u.test(sha) ||
+      !isCanonicalLinkUrl(link.webUrl, `/-/pipelines/${identity.objectId}`) ||
+      !isCanonicalPipelineObservation(pipelineObservedAt, link.updatedAt, link.state)) return false;
+  return pipelineTicketEvidence === 'direct-key' || (
+    isGitlabBranchName(link.sourceBranch) && (link.pipelineTag === undefined || link.pipelineTag === false));
+}
+
 function isRestorableBranchLink(link: Record<string, unknown>): boolean {
   const { iid, projectId, title, sourceBranch, sourceSha, state, updatedAt, webUrl } = link;
   const sha = gitlabObjectSha(sourceSha);
@@ -81,14 +101,10 @@ export function isRestorableGitlabLink(value: unknown): boolean {
        (hasTag && typeof link.pipelineTag !== 'boolean'))) return false;
   if (Object.hasOwn(link, 'pipelineObservedAt')) {
     const { pipelineObservedAt, updatedAt, kind, state } = link;
-    if (kind !== 'pipeline') return false;
-    if (pipelineObservedAt !== null) {
-      if (typeof pipelineObservedAt !== 'string' || pipelineObservedAt !== updatedAt ||
-          typeof state !== 'string' || !state || state === 'unknown' || state.length > 100) return false;
-      const time = Date.parse(pipelineObservedAt);
-      if (!Number.isFinite(time) || time > Date.now() || new Date(time).toISOString() !== pipelineObservedAt) return false;
-    }
+    if (kind !== 'pipeline' ||
+        (pipelineObservedAt !== null && !isCanonicalPipelineObservation(pipelineObservedAt, updatedAt, state))) return false;
   }
+  if (Object.hasOwn(link, 'pipelineTicketEvidence') && !verifiedGitlabPipelineTicketEvidence(value as GitlabLink)) return false;
   if (Object.hasOwn(link, 'mergeReadiness') &&
       (link.kind !== 'merge_request' || link.state !== 'opened' || !isGitlabMergeReadiness(link.mergeReadiness))) return false;
   if (Object.hasOwn(link, 'mergeRequestSourceProjectId')) {

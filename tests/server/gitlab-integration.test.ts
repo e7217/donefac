@@ -140,22 +140,77 @@ test('pipeline webhooks cannot inherit a ticket from a fork targeting the reposi
   assert.deepEqual(f.events.at(-1)?.issueIds, []);
   assert.equal(deliver(301, 2000, { title: 'NEO-1 Direct pipeline evidence' }).linked, 1);
   assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-1']);
+  assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 301)?.pipelineTicketEvidence, 'direct-key');
   assert.equal(deliver(301, 3000, { status: 'failed' }).linked, 1);
   assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 301)?.state, 'failed');
+  assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 301)?.pipelineTicketEvidence, 'direct-key');
   assert.deepEqual(f.events.at(-1)?.issueIds, []);
 
   merge(102, 8, 'NEO-2', 42, 4000);
   assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 8)?.mergeRequestSourceProjectId, 42);
   assert.equal(deliver(302, 5000).linked, 1);
   assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-2']);
+  assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 302)?.pipelineTicketEvidence, 'verified-merge-request');
   assert.equal(deliver(303, 6000, { tag: true }).linked, 0);
   assert.deepEqual(f.events.at(-1)?.issueIds, []);
 
   merge(101, 7, 'NEO-1', 42, 7000);
   assert.equal(f.events.at(-1)?.disposition, 'unverified');
   assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 7)?.mergeRequestSourceProjectId, 73);
-  assert.equal(deliver(304, 8000).linked, 1);
+  assert.equal(deliver(304, 8000, { tag: undefined }).linked, 1);
   assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-2']);
+  const tagged = () => links(f).find(link => link.kind === 'pipeline' && link.iid === 304);
+  assert.equal(tagged()?.pipelineTicketEvidence, 'verified-merge-request');
+  assert.equal(deliver(304, 9000, { tag: true }).linked, 1);
+  assert.equal(tagged()?.pipelineTicketEvidence, undefined);
+  assert.equal(tagged()?.pipelineTag, true);
+  assert.ok(isRestorableGitlabLink(tagged()));
+  assert.equal(deliver(304, 10_000, { tag: true, title: 'NEO-2 explicit tag' }).linked, 1);
+  assert.equal(tagged()?.pipelineTicketEvidence, 'direct-key');
+  assert.ok(isRestorableGitlabLink(tagged()));
+});
+
+test('exact ticket evidence can certify a legacy pipeline while sparse or stale status alone cannot', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const base = Date.now() - 30_000;
+  const time = (offset: number) => new Date(base + offset).toISOString();
+  const sha = 'a'.repeat(40);
+  let exact: Record<string, unknown> = {};
+  let repository = '';
+  const mock = await mockServer((path, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const project = { id: 42, path_with_namespace: 'team/repo', web_url: repository };
+    res.end(JSON.stringify(path.endsWith('/projects/42/pipelines/200') ? exact : path.endsWith('/projects/42') ? project : []));
+  });
+  t.after(mock.close);
+  f.configure({ baseUrl: mock.url });
+  repository = `${mock.url}/team/repo`;
+  const send = (attributes: Record<string, unknown>, commit?: Record<string, unknown>) => f.service.webhook(request({
+    object_kind: 'pipeline', project: { id: 42, web_url: repository },
+    object_attributes: { id: 200, project_id: 42, ref: 'main', sha, ...attributes }, commit,
+  }));
+  const path = `${repository}/-/pipelines/200`;
+  assert.equal(send({ updated_at: time(0), status: 'running' }, { id: 'b'.repeat(40), message: 'NEO-1 unrelated commit' }).linked, 1);
+  const onlyLink = () => links(f).find(link => link.iid === 200);
+  assert.equal(onlyLink()?.pipelineTicketEvidence, undefined);
+  assert.equal(send({ finished_at: time(2000), status: 'success' }).linked, 1);
+  assert.equal(onlyLink()?.pipelineTicketEvidence, undefined);
+  assert.equal(send({ finished_at: time(1000), status: 'success', title: 'NEO-1 stale proof' }).linked, 0);
+  assert.equal(onlyLink()?.pipelineTicketEvidence, undefined);
+  exact = { id: 200, iid: 20, project_id: 42, ref: 'main', sha, status: 'success', updated_at: time(2000), web_url: path };
+  assert.deepEqual((await f.service.refreshIssueLinks('issue-1', {}, undefined, undefined, onlyLink()?.id)).failures, []);
+  assert.equal(onlyLink()?.pipelineTicketEvidence, undefined);
+  exact = { ...exact, title: 'NEO-1 exact pipeline confirmation' };
+  assert.deepEqual((await f.service.refreshIssueLinks('issue-1', {}, undefined, undefined, onlyLink()?.id)).failures, []);
+  assert.equal(onlyLink()?.pipelineTicketEvidence, 'direct-key');
+  assert.ok(isRestorableGitlabLink(onlyLink()));
+  exact = { ...exact, status: 'failed', updated_at: time(2500), web_url: `${repository}/pipelines/200` };
+  assert.deepEqual((await f.service.refreshIssueLinks('issue-1', {}, undefined, undefined, onlyLink()?.id)).failures, []);
+  assert.deepEqual([onlyLink()?.state, onlyLink()?.webUrl, onlyLink()?.pipelineTicketEvidence], ['failed', path, 'direct-key']);
+  const wrongRepository = `${mock.url}/team/unrelated/-/pipelines/201`;
+  assert.equal(send({ id: 201, finished_at: time(3000), status: 'success', title: 'NEO-1 mismatched repository', url: wrongRepository }).linked, 1);
+  assert.equal(links(f).find(link => link.iid === 201)?.pipelineTicketEvidence, undefined);
 });
 
 test('pipeline webhook freshness compares compatible ref, source and tag evidence across sparse updates', t => {
@@ -334,6 +389,7 @@ test('repository sync and keyless webhooks refresh an existing automatic pipelin
   assert.equal(original.issueId, 'issue-1');
   assert.equal(original.state, 'running');
   assert.equal(original.manualLinkId, undefined);
+  assert.equal(original.pipelineTicketEvidence, 'direct-key');
 
   const failed = { id: 200, project_id: 42, ref: 'main', sha, status: 'failed', updated_at: time(1000),
     source: 'schedule', tag: true, web_url: `${repositoryUrl}/-/pipelines/200` };
@@ -1028,6 +1084,7 @@ test('GitLab sync and preview only inherit MR matches for the verified source re
   await f.service.sync();
   const saved = () => links(f).filter(link => link.kind === 'pipeline').map(link => [link.iid, link.issueId]);
   assert.deepEqual(saved(), [[201, 'issue-2']]);
+  assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 201)?.pipelineTicketEvidence, 'verified-merge-request');
   const fork = links(f).find(link => link.kind === 'merge_request' && link.iid === 7);
   assert.equal(fork?.mergeRequestSourceProjectId, 73);
   assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 8)?.mergeRequestSourceProjectId, undefined);

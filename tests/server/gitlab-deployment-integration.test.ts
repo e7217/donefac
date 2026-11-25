@@ -496,6 +496,96 @@ test('exact deployment status review verifies membership before reading and fenc
   assert.ok(remote.requests.every(request => request.method === 'GET' && request.token === readToken));
 });
 
+test('legacy pipeline links remain visible but require exact ticket evidence for deployment rules and review', async t => {
+  const pipelineId = 481;
+  const deploymentId = 482;
+  const environment = 'production/reconfirmed';
+  const list = deploymentListPath(repositoryId);
+  let finishedAt = '';
+  const exact = () => ({
+    id: deploymentId, sha: branchSha, status: 'success', updated_at: finishedAt,
+    environment: { name: environment }, deployable: { id: deploymentId + 800, status: 'success', finished_at: finishedAt },
+  });
+  const remote = await mockGitlab(t, (path, response) => {
+    if (path === list) response.end(JSON.stringify([exact()]));
+    else if (path === `${list}/${deploymentId}`) response.end(JSON.stringify(exact()));
+    else if (path === `${list}/${deploymentId}/merge_requests`) response.end('[]');
+    else response.writeHead(404).end('{}');
+  });
+  const f = await fixture(t, { baseUrl: remote.root, token: 'synthetic-pipeline-deployment-proof' });
+  const workspace = () => f.json<WorkspaceSnapshot>('/api/workspace');
+  const { projects: [project], users: [user] } = await workspace();
+  const headers = { 'X-Actor-Id': user.id };
+  const issue = await f.json<Issue>('/api/issues', 'POST', { projectId: project.id, title: 'Confirm a legacy release pipeline' }, headers, 201);
+  const issuePath = `/api/issues/${issue.id}`;
+  const issueLinks = () => f.json<{ links: GitlabLink[] }>(`${issuePath}/gitlab-links?kind=pipeline`);
+  const currentStatus = async () => (await workspace()).issues.find(row => row.id === issue.id)?.status;
+  const pipeline = (key: string, at: string) => ({
+    object_kind: 'pipeline', project: { id: repositoryId, web_url: remote.remoteProject, path_with_namespace: 'team/repo' },
+    object_attributes: { id: pipelineId, project_id: repositoryId, ref: 'feature/release-shared', sha: branchSha,
+      status: 'success', tag: false, source: 'push', finished_at: at, url: `${remote.remoteProject}/-/pipelines/${pipelineId}` },
+    commit: { id: branchSha, message: key ? `${key} deployment evidence` : 'No ticket key in this event' },
+  });
+  const sendPipeline = async (key: string, at = new Date().toISOString()) => {
+    const response = await f.send(pipeline(key, at), 'Pipeline Hook');
+    assert.equal(response.status, 200);
+    return response.json() as Promise<{ linked: number; runs: AutomationRun[] }>;
+  };
+  assert.equal((await sendPipeline(issue.key, timestamp())).linked, 1);
+  const [current] = (await issueLinks()).links;
+  assert.equal(current.pipelineTicketEvidence, 'direct-key');
+
+  const backup = await f.json<{ schemaVersion: number; gitlabLinks: GitlabLink[] }>('/api/export');
+  const historical = structuredClone(backup);
+  historical.schemaVersion = 121;
+  const oldPipeline = historical.gitlabLinks.find(link => link.id === current.id)!;
+  delete oldPipeline.pipelineTicketEvidence;
+  await f.json('/api/import', 'POST', { data: historical }, headers);
+  assert.deepEqual((await issueLinks()).links, [oldPipeline]);
+
+  await f.json('/api/automation-rules', 'POST', { projectId: project.id, name: 'Confirmed production deployment', enabled: true,
+    trigger: 'deployment.succeeded', gitlabProjectIds: [repositoryId], environment, issueTypes: [], fromStatuses: [issue.status],
+    toStatusId: 'done', actorId: user.id }, headers, 201);
+  const delivery = (id: number, at: string) => {
+    const body = deployment(id, branchSha, 'success', 0, environment);
+    return { ...body, status_changed_at: at, environment_tier: 'production',
+      project: { ...body.project, web_url: remote.remoteProject },
+      commit_url: `${remote.remoteProject}/-/commit/${branchSha}`, deployable_url: `${remote.remoteProject}/-/jobs/${body.deployable_id}` };
+  };
+  const sendDeployment = async (body: ReturnType<typeof delivery>) => {
+    const response = await f.send(body);
+    assert.equal(response.status, 200);
+    return response.json() as Promise<{ runs: AutomationRun[]; deploymentUpdated?: boolean }>;
+  };
+  await sendPipeline('');
+  assert.equal((await issueLinks()).links[0].pipelineTicketEvidence, undefined);
+  finishedAt = new Date().toISOString();
+  const originalDelivery = delivery(deploymentId, finishedAt);
+  assert.deepEqual(await sendDeployment(originalDelivery), { ok: true, duplicate: false, linked: 0, runs: [], deploymentUpdated: true });
+  assert.equal(await currentStatus(), issue.status);
+  const { items: [selected] } = await f.deployments(issue.id);
+  assert.equal(selected.deploymentId, deploymentId);
+  const reviewPath = `${issuePath}/gitlab-deployments/${selected.instance}/${repositoryId}/${deploymentId}/status-review`;
+  const review = () => f.json<GitlabDeploymentReviewResult>(reviewPath, 'POST', {}, headers);
+  const unverified = await review();
+  assert.equal(unverified.state, 'link-unverified');
+  assert.equal(unverified.statusReview, undefined);
+
+  assert.equal((await sendPipeline(issue.key)).linked, 1);
+  const [reproved] = (await issueLinks()).links;
+  assert.equal(reproved.id, current.id);
+  assert.equal(reproved.pipelineTicketEvidence, 'direct-key');
+  const ready = await review();
+  assert.equal(ready.state, 'ready');
+  assert.ok(ready.statusReview?.kind === 'suggestion');
+  assert.equal(ready.statusReview.suggestion.evidence.link.id, current.id);
+  assert.deepEqual((await sendDeployment(originalDelivery)).runs, []);
+  assert.equal(await currentStatus(), issue.status);
+  const next = await sendDeployment(delivery(deploymentId + 1, new Date().toISOString()));
+  assert.deepEqual(next.runs.map(run => [run.issueId, run.outcome]), [[issue.id, 'changed']]);
+  assert.equal(await currentStatus(), 'done');
+});
+
 test('an association-only deployment review requires the exact current included MR ID and IID', async t => {
   const id = 475;
   const sha = 'd'.repeat(40);

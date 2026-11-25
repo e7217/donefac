@@ -146,6 +146,35 @@ test('issue deployment history joins exact current revisions, deduplicates multi
   assert.equal(deployments.repositoryPage(instance, repositoryId, 0).total, 55);
 });
 
+test('deployment ticket review proof stops accepting an existing pipeline link when its ticket evidence is absent', t => {
+  const { store, deployments } = fixture(t);
+  const issueId = 'team-issue';
+  const link: GitlabLink = {
+    id: `gitlab:${instance}:${repositoryId}:pipeline:411:${issueId}`,
+    issueId, projectId: repositoryId, iid: 411, kind: 'pipeline',
+    title: 'Verified pipeline', state: 'success', updatedAt: started, pipelineObservedAt: started,
+    sourceSha: sha, sourceBranch: 'feature/release',
+    webUrl: `${base}/${namespace}/-/pipelines/411`, pipelineTicketEvidence: 'verified-merge-request',
+  };
+  store.put('gitlab_links', link);
+  assert.equal(deployments.observe(instance, base, repositoryId, event()), true);
+  const binding = { instance, repositoryId, deploymentId: 15, linkId: link.id, occurredAt: completed };
+  const deployment = deployments.deployment(binding)!;
+  deployments.recordReviewEvidence(deployment, completed);
+  assert.ok(deployments.statusReviewProof(issueId, binding));
+  assert.deepEqual(deployments.reviewLink([link], deployment), link);
+  assert.deepEqual(deployments.matchingAutomaticLinks(deployment), [link]);
+
+  const legacy = { ...link };
+  delete legacy.pipelineTicketEvidence;
+  store.put('gitlab_links', legacy);
+  assert.deepEqual(deployments.issuePage(issueId, 0).items, [deployment]);
+  assert.deepEqual(deployments.issueReviewTarget(issueId, binding)?.links, [legacy]);
+  assert.deepEqual(deployments.matchingAutomaticLinks(deployment), []);
+  assert.equal(deployments.reviewLink([legacy], deployment), undefined);
+  assert.equal(deployments.statusReviewProof(issueId, binding), null);
+});
+
 test('deployment records restore old instance scopes without trusting malformed links or partial backups', t => {
   const { dir, store, deployments } = fixture(t);
   assert.equal(deployments.observe(instance, base, repositoryId, event()), true);

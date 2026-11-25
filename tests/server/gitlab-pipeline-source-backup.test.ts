@@ -72,10 +72,12 @@ test('pipeline execution metadata survives native backup and archived issue rest
   assert.equal(data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   const activeLinks = data.gitlabLinks.filter(link => link.issueId === active.id);
   assert.deepEqual(activeLinks.map(link => [link.pipelineSource, link.pipelineTag]), [['merge_request_event', false], ['push', false], ['schedule', false]]);
+  assert.ok(activeLinks.every(link => link.pipelineTicketEvidence === 'direct-key'));
   const entry = data.trashEntries.find(item => item.id === trashEntryId);
   assert.ok(entry);
   const [archivedLink] = entry.gitlabLinks;
   assert.deepEqual([archivedLink.pipelineSource, archivedLink.pipelineTag], ['push', true]);
+  assert.equal(archivedLink.pipelineTicketEvidence, 'direct-key');
 
   const invalidActive = [
     { ...activeLinks[0], pipelineSource: 'invalid source' },
@@ -83,6 +85,11 @@ test('pipeline execution metadata survives native backup and archived issue rest
     { ...activeLinks[0], kind: 'merge_request' },
     { ...activeLinks[0], id: activeLinks[0].id.replace(':42:', ':43:') },
     { ...activeLinks[0], id: activeLinks[0].id.replace(':101:', ':9007199254740992:') },
+    { ...activeLinks[0], pipelineTicketEvidence: 'unknown' },
+    { ...activeLinks[0], manualLinkId: randomUUID() },
+    { ...activeLinks[0], pipelineObservedAt: null },
+    { ...activeLinks[0], sourceSha: 'c'.repeat(7) },
+    { ...activeLinks[0], webUrl: `${webUrl}/-/pipelines/999` },
   ];
   for (const invalid of invalidActive) {
     const result = await call<{ error: string }>('/import', 'POST', {
@@ -95,6 +102,8 @@ test('pipeline execution metadata survives native backup and archived issue rest
   await call('/import', 'POST', { data: invalidArchive }, 400);
   const legacyWithFields = await call<{ error: string }>('/import', 'POST', { data: { ...data, schemaVersion: 100 } }, 400);
   assert.match(legacyWithFields.error, /schemaVersion 101/);
+  const priorFormat = await call<{ error: string }>('/import', 'POST', { data: { ...data, schemaVersion: 121 } }, 400);
+  assert.match(priorFormat.error, /schemaVersion 122/);
   assert.deepEqual((await call<Backup>('/export')).gitlabLinks, data.gitlabLinks);
 
   await call('/import', 'POST', { data });
@@ -111,12 +120,13 @@ test('pipeline execution metadata survives native backup and archived issue rest
   for (const link of [...legacy.gitlabLinks, ...legacy.trashEntries.flatMap(item => item.gitlabLinks)]) {
     delete link.pipelineSource;
     delete link.pipelineTag;
+    delete link.pipelineTicketEvidence;
   }
   await call('/import', 'POST', { data: legacy });
   const exportedLegacy = await call<Backup>('/export');
   assert.equal(exportedLegacy.gitlabLinks.filter(link => link.issueId === active.id).length, 3);
   assert.ok([...exportedLegacy.gitlabLinks, ...exportedLegacy.trashEntries.flatMap(item => item.gitlabLinks)]
-    .every(link => !Object.hasOwn(link, 'pipelineSource') && !Object.hasOwn(link, 'pipelineTag')));
+    .every(link => !Object.hasOwn(link, 'pipelineSource') && !Object.hasOwn(link, 'pipelineTag') && !Object.hasOwn(link, 'pipelineTicketEvidence')));
   const legacyReport = await call<DeliveryBlockerReport>(`${reportPath}?reason=gitlab`);
   assert.deepEqual(legacyReport.items.find(item => item.issue.id === active.id)?.gitlab,
     { blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 1 });

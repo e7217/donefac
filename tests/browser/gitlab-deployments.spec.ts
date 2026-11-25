@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test, type APIResponse, type Locator, type Response } from '@playwright/test';
-import type { AutomationRule, GitlabDeploymentPage, GitlabDeploymentReviewResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Response } from '@playwright/test';
+import { createApp } from '../../server/app.js';
+import type { AutomationRule, AutomationRun, GitlabDeploymentPage, GitlabDeploymentReviewResult, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const integration = '/api/integrations/gitlab';
 const sha = 'ab'.repeat(20);
@@ -14,6 +18,30 @@ async function json<T>(response: APIResponse | Response, status = 200): Promise<
   expect(response.status(), await response.text()).toBe(status);
   return response.json();
 }
+
+const legacyDeploymentTest = test.extend<{ legacyWorkspace: { origin: string; request: APIRequestContext } }>({
+  legacyWorkspace: async ({ playwright }, provide) => {
+    // Native backup restore replaces only this API's disposable SQLite workspace.
+    const dataDir = await mkdtemp(join(tmpdir(), 'teamspace-legacy-deployment-browser-'));
+    const service = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
+    const server = service.app.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    const request = await playwright.request.newContext({ baseURL: origin });
+    try {
+      await provide({ origin, request });
+    } finally {
+      try {
+        await request.dispose();
+        server.closeAllConnections();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      } finally {
+        service.close();
+        await rm(dataDir, { force: true, recursive: true });
+      }
+    }
+  },
+});
 
 test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 뒤 정확한 티켓에 표시된다', async ({ page, request }) => {
   test.setTimeout(90_000);
@@ -404,6 +432,153 @@ test('360px 저장소에서 과거 배포를 동기화해 서로 다른 MR의 �
         data: { expectedVersion: current.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '' },
       }));
     }
+    mock.closeAllConnections();
+    await new Promise<void>(resolve => mock.close(() => resolve()));
+  }
+});
+
+legacyDeploymentTest('360px에서 이전 파이프라인 배포를 보면서 티켓 연결을 확인한 뒤 다음 배포로 상태를 변경한다', async ({ page, legacyWorkspace }) => {
+  legacyDeploymentTest.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { origin, request } = legacyWorkspace;
+  const workspace = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
+  const { projects: [project], users: [actor] } = await workspace();
+  const settings = await json<GitlabSettings>(await request.get(integration));
+  const headers = { 'X-Actor-Id': actor.id };
+  const token = 'synthetic-legacy-read';
+  const secret = 'synthetic-legacy-hook';
+  const repositoryId = 42;
+  const pipelineId = 950;
+  const deploymentId = 951;
+  const jobId = 1951;
+  const environment = 'production';
+  const ref = 'release/cached-pipeline';
+  const repoPath = `/gitlab/api/v4/projects/${repositoryId}`;
+  const deploymentsPath = `${repoPath}/deployments`;
+  const exactDeploymentPath = `${deploymentsPath}/${deploymentId}`;
+  let firstSuccess = '';
+
+  const mock = createServer((incoming, response) => {
+    const path = new URL(incoming.url ?? '/', 'http://fixture.test').pathname;
+    if (incoming.method !== 'GET' || incoming.headers['private-token'] !== token) return response.writeHead(401).end();
+    response.setHeader('Content-Type', 'application/json');
+    if (path === repoPath) return response.end(JSON.stringify({ id: repositoryId, web_url: projectUrl, path_with_namespace: 'team/legacy' }));
+    const deployment = { id: deploymentId, sha, status: 'success', updated_at: firstSuccess, environment: { name: environment },
+      deployable: { id: jobId, status: 'success', finished_at: firstSuccess, web_url: `${projectUrl}/-/jobs/${jobId}` } };
+    if (path === exactDeploymentPath) return response.end(JSON.stringify(deployment));
+    if (path === deploymentsPath) return response.end(JSON.stringify([deployment]));
+    if (path === `${exactDeploymentPath}/merge_requests`) return response.end('[]');
+    return response.writeHead(404).end('{}');
+  });
+  mock.listen(0, '127.0.0.1');
+  await once(mock, 'listening');
+  const baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/gitlab`;
+  const projectUrl = `${baseUrl}/team/legacy`;
+  const pipelineUrl = `${projectUrl}/-/pipelines/${pipelineId}`;
+  const repo = { id: repositoryId, web_url: projectUrl, path_with_namespace: 'team/legacy' };
+  const send = (event: string, data: object) => request.post(`${integration}/webhook`, {
+    headers: { 'X-Gitlab-Event': event, 'X-Gitlab-Token': secret, 'X-Gitlab-Event-UUID': randomUUID() }, data,
+  }).then(response => json<{ linked: number; runs: AutomationRun[]; deploymentUpdated?: true }>(response));
+  const pipeline = (status: string, updatedAt: string, message?: string) => send('Pipeline Hook', {
+    object_kind: 'pipeline', project: repo, ...(message ? { commit: { id: sha, message } } : {}),
+    object_attributes: { id: pipelineId, project_id: repositoryId, status, ref, sha, url: pipelineUrl, source: 'push', tag: false,
+      updated_at: updatedAt },
+  });
+  const finishedDeployment = (id: number, finishedAt: string) => send('Deployment Hook', {
+    object_kind: 'deployment', project: repo, deployment_id: id, environment, environment_tier: environment,
+    status: 'success', status_changed_at: finishedAt, short_sha: sha.slice(0, 8), commit_url: `${projectUrl}/-/commit/${sha}`,
+    deployable_id: jobId + id - deploymentId, deployable_url: `${projectUrl}/-/jobs/${jobId + id - deploymentId}`,
+  });
+
+  try {
+    await json<GitlabSettings>(await request.patch(integration, { headers,
+      data: { expectedVersion: settings.version, baseUrl, projectIds: [repositoryId], token, webhookSecret: secret },
+    }));
+    const issue = await json<Issue>(await request.post('/api/issues', { headers,
+      data: { projectId: project.id, title: '이전 파이프라인에서 가져온 배포' },
+    }), 201);
+    const issuePath = `/api/issues/${issue.id}`;
+    const issueState = async () => (await workspace()).issues.find(value => value.id === issue.id);
+    const readLinks = async () => (await workspace()).gitlabLinks.filter(link => link.issueId === issue.id);
+    const startedAt = new Date(Date.now() - 60_000).toISOString();
+    const previouslyLinked = await pipeline('running', startedAt, `${issue.key} 첫 파이프라인`);
+    expect(previouslyLinked.linked).toBe(1);
+    const [original] = await readLinks();
+    expect(original).toMatchObject({ kind: 'pipeline', iid: pipelineId, webUrl: pipelineUrl, pipelineTicketEvidence: 'direct-key' });
+
+    const backup = await json<WorkspaceSnapshot & { schemaVersion: number }>(await request.get('/api/export'));
+    const legacyLink = backup.gitlabLinks.find(link => link.id === original.id)!;
+    expect(legacyLink.pipelineTicketEvidence).toBe('direct-key');
+    delete legacyLink.pipelineTicketEvidence;
+    backup.schemaVersion = 121;
+    await json(await request.post('/api/import', { headers, data: { confirm: 'REPLACE', data: backup } }));
+    expect(await readLinks()).toEqual([legacyLink]);
+    const restoredIssue = (await issueState())!;
+    expect(restoredIssue.status).toBe(issue.status);
+
+    const rule = await json<AutomationRule>(await request.post('/api/automation-rules', { headers, data: {
+      projectId: project.id, name: '확인한 파이프라인 배포만 완료 처리', enabled: true, trigger: 'deployment.succeeded',
+      gitlabProjectIds: [repositoryId], environment, branchPattern: '', issueTypes: [], fromStatuses: [issue.status], toStatusId: 'done',
+    } }), 201);
+    const keyless = await pipeline('failed', new Date().toISOString());
+    expect(keyless).toMatchObject({ linked: 1, runs: [] });
+    const [refreshed] = await readLinks();
+    expect(refreshed).toMatchObject({ id: original.id, state: 'failed' });
+    expect(refreshed).not.toHaveProperty('pipelineTicketEvidence');
+
+    firstSuccess = new Date().toISOString();
+    expect(await finishedDeployment(deploymentId, firstSuccess)).toMatchObject({ deploymentUpdated: true, runs: [] });
+    expect(await issueState()).toEqual(restoredIssue);
+    const listing = await json<GitlabDeploymentPage>(await request.get(`${issuePath}/gitlab-deployments`));
+    expect(listing.items).toEqual([expect.objectContaining({ deploymentId, environment, status: 'success' })]);
+    const reviewPath = `${issuePath}/gitlab-deployments/${listing.items[0].instance}/${repositoryId}/${deploymentId}/status-review`;
+
+    await page.route('**/api/**', async route => {
+      const url = new URL(route.request().url());
+      const response = await route.fetch({ url: `${origin}${url.pathname}${url.search}` });
+      await route.fulfill({ response });
+    });
+    await page.goto(`/#/${project.id}/issues?issue=${issue.id}`);
+    const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+    const activity = panel.getByRole('region', { name: 'GitLab', exact: true });
+    await expect(activity.locator(`a[href="${pipelineUrl}"]`)).toBeVisible();
+    const row = panel.getByRole('region', { name: '연결된 GitLab 배포', exact: true }).getByRole('listitem')
+      .and(panel.locator(`[data-deployment-id="${deploymentId}"]`));
+    await expect(row).toHaveAttribute('data-deployment-status', 'success');
+    const trigger = row.getByRole('button', { name: '이 배포로 상태 검토', exact: true });
+    const feedback = panel.getByRole('group', { name: 'GitLab 상태 확인 결과', exact: true });
+    const suggestion = feedback.getByRole('region', { name: 'GitLab 상태 변경 제안', exact: true });
+    const status = panel.locator('form.issue-detail-form').getByRole('combobox', { name: '상태', exact: true });
+    const review = async () => {
+      const reviewed = page.waitForResponse(response => new URL(response.url()).pathname === reviewPath && response.request().method() === 'POST');
+      await trigger.click();
+      return json<GitlabDeploymentReviewResult>(await reviewed);
+    };
+    const unverified = await review();
+    expect(unverified.state).toBe('link-unverified');
+    expect(unverified.statusReview).toBeUndefined();
+    await expect(feedback).toContainText('이 배포와 티켓의 자동 연결을 확인할 수 없습니다.');
+    await expect(suggestion).toHaveCount(0);
+    await expect(status).toHaveValue(issue.status);
+
+    const reverified = await pipeline('success', new Date().toISOString(), `${issue.key} 같은 파이프라인 확인`);
+    expect(reverified).toMatchObject({ linked: 1, runs: [] });
+    const [confirmed] = await readLinks();
+    expect(confirmed).toMatchObject({ id: original.id, state: 'success', pipelineTicketEvidence: 'direct-key' });
+    const ready = await review();
+    expect(ready).toMatchObject({ state: 'ready', statusReview: { kind: 'suggestion', suggestion: { issueId: issue.id, toStatus: 'done' } } });
+    await expect(suggestion.getByText('선택한 GitLab 배포 기준', { exact: true })).toBeVisible();
+    expect(await finishedDeployment(deploymentId, firstSuccess)).toMatchObject({ runs: [] });
+    expect(await issueState()).toEqual(restoredIssue);
+
+    const next = await finishedDeployment(deploymentId + 1, new Date().toISOString());
+    expect(next).toMatchObject({ deploymentUpdated: true, runs: [{
+      issueId: issue.id, ruleId: rule.id, outcome: 'changed', context: { environment, objectId: String(deploymentId + 1) },
+    }] });
+    await page.reload();
+    await expect(status).toHaveValue('done');
+    await expect(row).toHaveAttribute('data-deployment-status', 'success');
+  } finally {
     mock.closeAllConnections();
     await new Promise<void>(resolve => mock.close(() => resolve()));
   }

@@ -86,6 +86,7 @@ type TicketMatcher={match:(keys:string[],inherited?:TicketMatch[])=>TicketMatch[
 type MergeObservation=Pick<GitlabMergeReadiness,'source'|'observedAt'>&{invalidate?:boolean; repositoryId?:number; targetBranch?:string|null; trackState?:boolean};
 type ExactMergeRequestRead = { repositoryId: number; objectId: number; iid: number; state: GitlabMergeRequestReadState; updatedAt: string };
 type PipelineClassification = Pick<GitlabLink, 'pipelineSource' | 'pipelineTag'>;
+type PipelineTicketEvidence = NonNullable<GitlabLink['pipelineTicketEvidence']>;
 const approvalActions=new Set(['approval','approved','unapproval','unapproved']);
 const mergeRequestLifecycle = {
   open: { state: 'opened', trigger: 'merge_request.opened' },
@@ -221,7 +222,7 @@ function readLink(kind:GitlabLink['kind'],object:Obj,explicitKeys:string[],readK
       ?{...observation,evidence:parseGitlabMergeReadiness(object,observation.observedAt,observation.source)}:undefined,
   };
 }
-type LinkDraft=ReturnType<typeof readLink>;
+type LinkDraft=ReturnType<typeof readLink> & { pipelineScopeVerified?: true };
 type OpenedMergeRequestStatusRead = { trigger: 'merge_request.opened'; occurredAt: string; sourceProjectId: number };
 type WorkflowStatusRead = OpenedMergeRequestStatusRead |
   { trigger: Exclude<GitlabWorkflowStatusSuggestionTrigger, 'merge_request.opened'>; occurredAt: string | null };
@@ -387,6 +388,12 @@ function makeTicketMatcher(issues:IssueMatch[],route:GitlabJiraRoute|undefined,o
     ambiguousKeys,
   };
 }
+function pipelineMatchEvidence(matcher: TicketMatcher, directKeys: string[], inherited: TicketMatch[]) {
+  const result = new Map<string, PipelineTicketEvidence>();
+  for (const { issue } of inherited) result.set(issue.id, 'verified-merge-request');
+  for (const { issue } of matcher.match(directKeys)) result.set(issue.id, 'direct-key');
+  return result;
+}
 function keepNewerLink(existing:GitlabLink,draft:LinkDraft):boolean{
   return !draft.incomingTime||Date.parse(existing.updatedAt)>=Date.parse(draft.incomingTime);
 }
@@ -402,6 +409,22 @@ function conflictingMergeSource(link: GitlabLink, draft: Pick<LinkDraft, 'mergeR
 function pipelineObservedAt(draft: LinkDraft): string | null {
   return draft.id === draft.numericId && draft.numericId && draft.state !== 'unknown' && bound(draft.state,100)
     ? draft.incomingTime : null;
+}
+function scopedPipelineAddress(draft: LinkDraft, repositoryId: number, baseUrl: string, repository?: URL | null): boolean {
+  if (!baseUrl || repository === null || !draft.numericId || draft.id !== draft.numericId || !draft.webUrl ||
+      !isExactGitlabPipelineListRow({ id: Number(draft.id), project_id: repositoryId, web_url: draft.webUrl }, repositoryId, baseUrl)) return false;
+  const url = new URL(draft.webUrl);
+  const suffix = `/-/pipelines/${draft.id}`;
+  return !url.search && !url.hash && (repository ? url.pathname === `${repository.pathname}${suffix}` : url.pathname.endsWith(suffix));
+}
+function withPipelineTicketEvidence(link: GitlabLink, draft: LinkDraft, evidence: PipelineTicketEvidence | undefined): GitlabLink {
+  const sourceSha = gitlabObjectSha(draft.sourceSha);
+  if (!evidence || link.kind !== 'pipeline' || link.manualLinkId || link.pipelineTicketEvidence === 'direct-key' ||
+      link.pipelineTicketEvidence === evidence || !pipelineObservedAt(draft) || link.pipelineObservedAt !== draft.incomingTime ||
+      link.state !== draft.state || !sourceSha || !samePipelineRevision(link,draft)) return link;
+  const verified = { ...link, webUrl: draft.webUrl, sourceSha, ...(draft.sourceBranch ? { sourceBranch: draft.sourceBranch } : {}),
+    pipelineTicketEvidence: evidence };
+  return isRestorableGitlabLink(verified) ? verified : link;
 }
 function samePipelineRevision(link: Pick<GitlabLink, 'sourceBranch' | 'sourceSha'>, draft: Pick<LinkDraft,'sourceBranch'|'sourceSha'>): boolean {
   const storedSha = gitlabObjectSha(link.sourceSha) ?? link.sourceSha;
@@ -501,6 +524,14 @@ function matchesManualLink(existing:GitlabLink,draft:LinkDraft):boolean{
 function manualTitle(title:string,token:string|null):string{
   return safePreviewValue(title.replace(/[\u0000-\u001f\u007f]/gu,' '),token).slice(0,500).toWellFormed().trim();
 }
+function classifyStoredPipeline(link: GitlabLink, evidence: PipelineClassification): GitlabLink {
+  const classified = addPipelineClassification(link, evidence);
+  if (classified.pipelineTag !== true || classified.pipelineTicketEvidence !== 'verified-merge-request') return classified;
+  // GitLab list reads can omit tag identity. A later exact tag observation disproves branch-based lineage.
+  const corrected = { ...classified };
+  delete corrected.pipelineTicketEvidence;
+  return corrected;
+}
 function refreshExistingLink(existing:GitlabLink,draft:LinkDraft,token:string|null,approvalAt?:string):GitlabLink{
   const pipeline=existing.kind==='pipeline';
   const observedAt=pipeline?pipelineObservedAt(draft):null;
@@ -510,7 +541,7 @@ function refreshExistingLink(existing:GitlabLink,draft:LinkDraft,token:string|nu
     if(existing.pipelineObservedAt!==null&&keepNewerLink(existing,draft)){
       if(existing.updatedAt!==observedAt||existing.state!==draft.state)return existing;
       const verified=existing.pipelineObservedAt===undefined?{...existing,pipelineObservedAt:observedAt}:existing;
-      return addPipelineClassification(verified,draft.pipelineClassification);
+      return classifyStoredPipeline(verified,draft.pipelineClassification);
     }
   }
   const next=!draft.incomingTime||!pipeline&&keepNewerLink(existing,draft)?existing:{...existing,
@@ -521,17 +552,21 @@ function refreshExistingLink(existing:GitlabLink,draft:LinkDraft,token:string|nu
     ...(draft.sourceBranch?{sourceBranch:safePreviewValue(draft.sourceBranch,token).slice(0,512)}:{}),
     ...(draft.sourceSha?{sourceSha:safePreviewValue(draft.sourceSha,token).slice(0,128)}:{}),
   };
-  return pipeline?addPipelineClassification(next,draft.pipelineClassification):applyMergeObservation(next,existing,draft,approvalAt);
+  return pipeline?classifyStoredPipeline(next,draft.pipelineClassification):applyMergeObservation(next,existing,draft,approvalAt);
 }
-function automaticLinkForAttached(existing:GitlabLink,draft:LinkDraft,originalJiraKey:string|undefined,token:string|null):GitlabLink{
-  return promoteAttachedLink(refreshExistingLink(existing,draft,token),originalJiraKey);
+function automaticLinkForAttached(existing:GitlabLink,draft:LinkDraft,matched:GitlabLink,token:string|null):GitlabLink{
+  return withPipelineTicketEvidence(promoteAttachedLink(refreshExistingLink(existing,draft,token),matched.originalJiraKey),
+    draft,matched.pipelineTicketEvidence);
 }
 function refreshAutomaticPipeline(existing:GitlabLink,draft:LinkDraft,matched:GitlabLink):GitlabLink{
   const refreshed=refreshExistingLink(existing,draft,null);
+  const webUrl = existing.pipelineTicketEvidence && !matched.pipelineTicketEvidence ? existing.webUrl : matched.webUrl;
   if(refreshed.pipelineObservedAt!==existing.pipelineObservedAt){
-    return {...refreshed,webUrl:matched.webUrl,...(matched.originalJiraKey?{originalJiraKey:matched.originalJiraKey}:{})};
+    return withPipelineTicketEvidence({ ...refreshed,webUrl,...(matched.originalJiraKey?{originalJiraKey:matched.originalJiraKey}:{}) },
+      draft,matched.pipelineTicketEvidence);
   }
-  return !existing.originalJiraKey&&matched.originalJiraKey?{...refreshed,originalJiraKey:matched.originalJiraKey}:refreshed;
+  const next = !existing.originalJiraKey&&matched.originalJiraKey?{...refreshed,originalJiraKey:matched.originalJiraKey}:refreshed;
+  return withPipelineTicketEvidence(next,draft,matched.pipelineTicketEvidence);
 }
 function promoteAttachedLink(link:GitlabLink,originalJiraKey?:string):GitlabLink{
   const verified={...link};
@@ -612,10 +647,10 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
       object.target_project_id===undefined||numericObjectId(object.target_project_id)===String(projectId)
         ?{...observation,targetBranch,trackState:scoped}:undefined);
   });
-  const pipelines=scan.pipelines.map(object=>{
-    const classification=isExactGitlabPipelineListRow(object,projectId,connection.baseUrl)
-      ? readPipelineClassification(object,false,connection.token) : undefined;
-    return readLink('pipeline',object,[],readKeys,undefined,classification);
+  const pipelines=scan.pipelines.map((object): LinkDraft => {
+    const scoped = isExactGitlabPipelineListRow(object,projectId,connection.baseUrl);
+    const draft = readLink('pipeline',object,[],readKeys,undefined,scoped ? readPipelineClassification(object,false,connection.token) : undefined);
+    return scoped && scopedPipelineAddress(draft, projectId, connection.baseUrl) ? { ...draft, pipelineScopeVerified: true } : draft;
   });
   if(!scan.history)return {projectId,mergeRequests,pipelines};
   const repository=gitlabRepositoryUrl(connection.baseUrl,scan.history.project);
@@ -1323,6 +1358,7 @@ export class GitlabIntegrationService{
     const token = captured.token ? this.store.unseal(captured.token) : null;
     const startedAt = now();
     const read = gitlabLinkedActivityReader({ baseUrl:captured.baseUrl, token }, signal);
+    const ticketRouteFor = (repositoryId: number) => captured.jiraRoutes?.find(route => route.repositoryId === repositoryId);
     type ReadOutcome = { link:GitlabLink; kind:WorkflowGitlabKind; draft:LinkDraft; status:WorkflowStatusRead|null; freshness?: GitlabWorkflowPipelineFreshness } |
       { link:GitlabLink; kind:'branch'; branch:string; cursorId:string; cursor:PushObservation|undefined; aliases:GitlabLink[]; sourceSha:string; webUrl:string } |
       { link:GitlabLink; message:string };
@@ -1345,7 +1381,8 @@ export class GitlabIntegrationService{
         if (!target) return { link, message:'현재 GitLab 연결에서 이 활동의 식별자를 확인할 수 없습니다.' };
         const { object } = await read.workflow(link.projectId, target.kind, target.id, target.objectId);
         const targetBranch = target.kind === 'merge_request' ? readMergeTargetBranch(object, link.projectId, token, ...this.webhookCredentials(captured)) : undefined;
-        const draft = readLink(target.kind, object, [], keys, { source:'read', observedAt:startedAt, repositoryId:link.projectId, targetBranch, trackState:true },
+        const readKeys = target.kind === 'pipeline' && ticketRouteFor(link.projectId) ? routedKeys : keys;
+        const draft = readLink(target.kind, object, [], readKeys, { source:'read', observedAt:startedAt, repositoryId:link.projectId, targetBranch, trackState:true },
           target.kind==='pipeline'?readPipelineClassification(object,true,token):undefined);
         const status = reviewActorId && this.hooks.manualStatusReview ? workflowStatusRead(target.kind,object,targetBranch) : null;
         let freshness: GitlabWorkflowPipelineFreshness | undefined;
@@ -1383,6 +1420,8 @@ export class GitlabIntegrationService{
       if (latestIssue.projectId !== issue.projectId || latestIssue.key !== issue.key) fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 확인해 주세요.',409);
       const checked: ConfirmedWorkflowRead[] = [];
       const freshnessByLink = new Map<string, GitlabWorkflowPipelineFreshness>();
+      const ticketMatchers = new Map<number, TicketMatcher>();
+      let issuesForMatching: IssueMatch[] | undefined;
       for (const outcome of outcomes) {
         const { link } = outcome;
         if ('message' in outcome) {
@@ -1443,8 +1482,22 @@ export class GitlabIntegrationService{
             continue;
           }
         }
-        const webUrl = latest.webUrl===link.webUrl ? draft.webUrl : latest.webUrl;
-        const updated = this.verifiedWorkflowAttachment(kind, instance, { ...latest, webUrl }, draft, latest, token, startedAt);
+        const scoped = kind === 'pipeline' && scopedPipelineAddress(draft, link.projectId, captured.baseUrl);
+        const retainAddress = latest.webUrl !== link.webUrl || latest.pipelineTicketEvidence && !scoped;
+        const webUrl = retainAddress ? latest.webUrl : draft.webUrl;
+        let updated = this.verifiedWorkflowAttachment(kind, instance, { ...latest, webUrl }, draft, latest, token, startedAt);
+        if (scoped && !updated.manualLinkId && updated.pipelineTicketEvidence !== 'direct-key' && draft.matchedKeys.length &&
+            !includesGitlabCredential(token, [draft.webUrl, draft.sourceSha, draft.sourceBranch])) {
+          let matcher = ticketMatchers.get(link.projectId);
+          if (!matcher) {
+            issuesForMatching ??= this.syncIssues();
+            matcher = this.ticketMatcher(issuesForMatching, ticketRouteFor(link.projectId));
+            ticketMatchers.set(link.projectId, matcher);
+          }
+          if (matcher.match(draft.matchedKeys).some(match => match.issue.id === issueId)) {
+            updated = withPipelineTicketEvidence(updated,draft,'direct-key');
+          }
+        }
         if (!isRestorableGitlabLink(updated)) {
           result.failures.push({ linkId:link.id, message:'GitLab 활동의 저장 정보를 확인할 수 없습니다.' });
           continue;
@@ -1637,15 +1690,16 @@ export class GitlabIntegrationService{
       return match?[{link,match}]:[];
     });
   }
-  private upsert(instance:string,projectId:number,kind:WorkflowGitlabKind,draft:LinkDraft,matches:TicketMatch[],preserveExisting:boolean,token:string|null):number{
+  private upsert(instance:string,projectId:number,kind:WorkflowGitlabKind,draft:LinkDraft,matches:TicketMatch[],preserveExisting:boolean,token:string|null,
+    pipelineMatches?: ReadonlyMap<string, PipelineTicketEvidence>):number{
     let linked=0;
     for(const match of matches){
-      const link=linkForIssue(instance,projectId,kind,match,draft);
+      const link=withPipelineTicketEvidence(linkForIssue(instance,projectId,kind,match,draft),draft,pipelineMatches?.get(match.issue.id));
       const existing=this.store.get<GitlabLink>('gitlab_links',link.id);
       if(preserveExisting&&existing)continue;
       if(existing?.manualLinkId){
         if(!matchesManualLink(existing,draft))continue;
-        this.store.put('gitlab_links',automaticLinkForAttached(existing,draft,match.originalJiraKey,token));
+        this.store.put('gitlab_links',automaticLinkForAttached(existing,draft,link,token));
       }else{
         if(!draft.webUrl)continue;
         let next=retainOriginalJiraKey(link,existing);
@@ -1943,9 +1997,24 @@ export class GitlabIntegrationService{
       const direct=canUpsert?draft.matchedKeys:readKeys(attributes.title,attributes.description,branch,attributes.ref,...extra);
       const byMatchId=new Map((id?matcher.match(direct,inherited):[]).map(match=>[match.issue.id,match]));
       const matches=issues.flatMap(issue=>{const match=byMatchId.get(issue.id);return match?[match]:[];});
+      const reportedProject = body.project_id === undefined || numericObjectId(body.project_id) === String(projectId);
+      let pipelineMatches: ReadonlyMap<string, PipelineTicketEvidence> | undefined;
+      const pipelineRepository = kind === 'pipeline' && (project.web_url !== undefined || project.path_with_namespace !== undefined)
+        ? gitlabRepositoryUrl(raw.baseUrl, project) : undefined;
+      if (exactPipelineId && !pipelineIncompatible && disposition === 'fresh' && reportedProject &&
+          scopedPipelineAddress(draft, projectId, raw.baseUrl, pipelineRepository) &&
+          ![readToken, req.header('X-Gitlab-Token')].some(secret => includesGitlabCredential(secret, [draft.webUrl, draft.sourceSha, draft.sourceBranch]))) {
+        const fullHead = gitlabObjectSha(attributes.sha);
+        const sameCommit = (value: unknown) => fullHead && gitlabObjectSha(record(value).id) === fullHead;
+        const commits = Array.isArray(body.commits) ? body.commits.filter(sameCommit) : [];
+        if (sameCommit(body.commit)) commits.push(body.commit);
+        const directKeys = readKeys(attributes.title, attributes.name, attributes.description, attributes.source_branch, attributes.ref,
+          ...commits.map(commit => record(commit).message));
+        pipelineMatches = pipelineMatchEvidence(matcher, directKeys, inherited);
+      }
       const attached=objectDisposition==='fresh'?this.manualLinksForObject(instance,projectId,kind,draft):[];
       const token=attached.length&&raw.token?(readToken??this.store.unseal(raw.token)):null;
-      let linked=canUpsert?this.upsert(instance,projectId,kind,draft,matches,objectDisposition==='unverified',token):0;
+      let linked=canUpsert?this.upsert(instance,projectId,kind,draft,matches,objectDisposition==='unverified',token,pipelineMatches):0;
       for(const prior of attached){
         if(byMatchId.has(prior.issueId))continue;
         const updated=refreshExistingLink(prior,draft,token);
@@ -2017,6 +2086,7 @@ export class GitlabIntegrationService{
       let approvalAt:string|undefined;
       let pipelineAliases:Map<string,GitlabLink>|undefined;
       let pipelineCandidates:GitlabLink[]|undefined;
+      let pipelineMatches: ReadonlyMap<string, PipelineTicketEvidence> | undefined;
       if(kind==='branch'||kind==='commit'){
         const identity=`${kind}:${draft.id}`;
         if(kind==='branch')observation=this.store.get<PushObservation>('gitlab_push_cursors',`gitlab:${instance}:${projectId}:branch:${draft.id}`);
@@ -2060,6 +2130,10 @@ export class GitlabIntegrationService{
           if(!classified){counts.skipped++;continue;}
           const head = branchHead(classified.sourceBranch, classified.sourceSha);
           const inheritedKeys = head && classified.pipelineClassification.pipelineTag !== true ? keysByMergeHead.get(head) : undefined;
+          if (classified.pipelineScopeVerified &&
+              !includesGitlabCredential(token, [classified.webUrl, classified.sourceSha, classified.sourceBranch])) {
+            pipelineMatches = pipelineMatchEvidence(matcher, classified.matchedKeys, inheritedKeys ? matcher.match([...inheritedKeys]) : []);
+          }
           draft=inheritedKeys ? { ...classified, matchedKeys: [...new Set([...classified.matchedKeys, ...inheritedKeys])] } : classified;
         }
       }
@@ -2077,7 +2151,7 @@ export class GitlabIntegrationService{
       counts.matched++;
       const matchedIssueIds=new Set(matched.map(match=>match.issue.id));
       for(const match of matched){
-        const link=linkForIssue(instance,projectId,kind,match,draft);
+        const link=withPipelineTicketEvidence(linkForIssue(instance,projectId,kind,match,draft),draft,pipelineMatches?.get(match.issue.id));
         if(observation){
           Object.assign(link,branchLinkFields(observation));
         }else if(kind==='branch')link.branchObservationSource='sync';
@@ -2096,7 +2170,7 @@ export class GitlabIntegrationService{
           if(!matchesManualLink(existing,draft))continue;
           const next=kind==='branch'
             ?promoteAttachedLink(refreshAttachedBranch(existing,{...link,updatedAt:observation?.updatedAt??new Date(startedAt).toISOString()}),match.originalJiraKey)
-            :kind==='commit'?promoteAttachedLink(existing,match.originalJiraKey):automaticLinkForAttached(existing,draft,match.originalJiraKey,token);
+            :kind==='commit'?promoteAttachedLink(existing,match.originalJiraKey):automaticLinkForAttached(existing,draft,link,token);
           counts.update++;
           remember(next);
           visit(next,match,'update',kind,draft.id);

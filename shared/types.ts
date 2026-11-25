@@ -1549,6 +1549,7 @@ export interface GitlabLink {
   originalJiraKey?: string; manualLinkId?: string;
   mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[]; mergeRequestSourceProjectId?: number;
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
+  pipelineTicketEvidence?: 'direct-key' | 'verified-merge-request';
 }
 export interface GitlabIssueRefreshResult {
   links: GitlabLink[];
