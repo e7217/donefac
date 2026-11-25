@@ -1,8 +1,10 @@
 'use client';
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
-import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw } from 'lucide-react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type RefObject } from 'react';
+import { ArrowRight, ExternalLink, GitBranch, GitMerge, Link2, RefreshCw, Search } from 'lucide-react';
 import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
+import { GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SCOPE_LABELS, filterGitlabActivityLinks,
+  normalizeGitlabActivityQuery, type GitlabActivityScope } from '../../shared/gitlab-activity-filter';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName } from '../../shared/gitlab-links';
 import { gitlabPipelineSource } from '../../shared/gitlab-pipeline-source';
 import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
@@ -116,6 +118,12 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
   const visibleLinks = view.source === links ? view.rows : links;
+  const [activityScope, setActivityScope] = useState<GitlabActivityScope>('all');
+  const [activitySearch, setActivitySearch] = useState({ input: '', query: '', invalid: false });
+  const activitySearchInput = useRef<HTMLInputElement>(null);
+  const matchingLinks = useMemo(() => filterGitlabActivityLinks(undefined, visibleLinks,
+    { scope: activityScope, query: activitySearch.query, pages: {} }), [visibleLinks, activityScope, activitySearch.query]);
+  const hasActivityFilters = activityScope !== 'all' || Boolean(activitySearch.input || activitySearch.query);
   const selectedLink = gitlabActivitySelection && visibleLinks.find(link => link.issueId === issueId &&
     link.issueId === gitlabActivitySelection.issueId && link.id === gitlabActivitySelection.id &&
     link.projectId === gitlabActivitySelection.projectId && link.kind === gitlabActivitySelection.kind &&
@@ -160,7 +168,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const activityAttachment = useRef<AbortController | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
-  const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean } | null>(null);
+  const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean; fallbackToActivity?: boolean } | null>(null);
   const statusReviewResult = useRef<HTMLDivElement>(null);
   const linkInput = useRef<HTMLInputElement>(null);
   const cancelUnlink = useRef<HTMLButtonElement>(null);
@@ -199,14 +207,30 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   }, [dirty, busy, branchDraft, discard, onDraftChange]);
   useLayoutEffect(() => {
     if (draft || unlinkTarget || branchOpen || busy || disabled || !focusAfterClose.current) return;
-    const { target, revealStatusReview } = focusAfterClose.current;
+    const { target, revealStatusReview, fallbackToActivity } = focusAfterClose.current;
     focusAfterClose.current = null;
     if (revealStatusReview && statusReviewResult.current) {
       statusReviewResult.current.focus();
       return;
     }
-    (target?.isConnected && !target.disabled ? target : addButton.current)?.focus({ preventScroll: true });
+    (target?.isConnected && !target.disabled ? target : fallbackToActivity ? activityHeading.current : addButton.current)?.focus({ preventScroll: true });
   }, [draft, unlinkTarget, branchOpen, busy, disabled]);
+
+  function searchActivity(event: FormEvent) {
+    event.preventDefault();
+    const query = normalizeGitlabActivityQuery(activitySearch.input);
+    if (activitySearch.input.trim() && !query) {
+      setActivitySearch(current => ({ ...current, invalid: true }));
+      return;
+    }
+    setActivitySearch({ input: query, query, invalid: false });
+  }
+
+  function resetActivityFilters() {
+    setActivityScope('all');
+    setActivitySearch({ input: '', query: '', invalid: false });
+    activitySearchInput.current?.focus({ preventScroll: true });
+  }
 
   const trackBranchDraft = useCallback((dirty: boolean, pending: boolean) => {
     setBranchDraft(current => current.dirty === dirty && current.pending === pending ? current : { dirty, pending });
@@ -408,7 +432,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       pending.current = false;
       if (!controller.signal.aborted) {
         if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
-          focusAfterClose.current = { target: trigger, revealStatusReview: check.action === 'status-review' };
+          focusAfterClose.current = { target: trigger, revealStatusReview: check.action === 'status-review', fallbackToActivity: true };
         }
         setBusy(false);
       }
@@ -572,8 +596,31 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         <button className="btn issue-btn-danger" type="button" disabled={controlsDisabled || Boolean(staleTarget)} onClick={unlink}>연결 해제</button>
       </div>
     </div>}
-    {visibleLinks.length ? <GitlabActivityList links={visibleLinks} issueVersions={new Map([[issueId, issueVersion]])}
-      selection={selectedLink ? { link: selectedLink, rowRef: selectedRow } : undefined}
+    {visibleLinks.length > 0 && <div className="gitlab-ticket-activity-filters" role="group" aria-label="GitLab 활동 필터">
+      <label className="issue-form-label">GitLab 활동 범위
+        <select className="field" value={activityScope} disabled={controlsDisabled} onChange={event => {
+          const scope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
+          if (scope) setActivityScope(scope);
+        }}>
+          {GITLAB_ACTIVITY_SCOPES.map(value => <option value={value} key={value}>{GITLAB_ACTIVITY_SCOPE_LABELS[value]}</option>)}
+        </select>
+      </label>
+      <form className="gitlab-ticket-activity-search" onSubmit={searchActivity}>
+        <label className="issue-form-label">GitLab 활동 검색
+          <input ref={activitySearchInput} type="search" className="field" value={activitySearch.input} maxLength={GITLAB_ACTIVITY_QUERY_LIMIT}
+            placeholder="MR·실행 번호, 브랜치, 커밋, 주소" disabled={controlsDisabled} aria-invalid={activitySearch.invalid || undefined}
+            onChange={event => setActivitySearch({ ...activitySearch, input: event.currentTarget.value, invalid: false })} />
+        </label>
+        <button type="submit" className="btn" disabled={controlsDisabled}><Search size={15} aria-hidden="true" />검색</button>
+        {activitySearch.invalid && <p role="alert" className="issue-form-error">GitLab 활동 주소 또는 검색어를 확인해 주세요.</p>}
+      </form>
+      {hasActivityFilters && <button type="button" className="btn btn-ghost" disabled={controlsDisabled} onClick={resetActivityFilters}>
+        활동 필터 초기화
+      </button>}
+    </div>}
+    {matchingLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
+      links={matchingLinks} issueVersions={new Map([[issueId, issueVersion]])}
+      selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,
@@ -586,7 +633,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         attachMergeRequest: attachBranchMergeRequest,
         findMergeRequestPipeline: (mr, pipeline) => visibleLinks.find(link => matchesMergeRequestPipelineLink(link, mr, pipeline)),
         attachMergeRequestPipeline }} />
-      : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
+      : visibleLinks.length ? <p className="issue-section-empty" role="status">조건에 맞는 GitLab 활동이 없습니다.</p>
+        : <p className="issue-section-empty">연결된 개발 기록이 없습니다. 브랜치 이름이나 커밋 메시지에 {issueKey}를 넣어 자동으로 연결할 수 있습니다.</p>}
     <IssueGitlabDeployments issueId={issueId} links={links} review={{ disabled: controlsDisabled || actionOpen,
       pendingKey: refreshFeedback?.kind === 'checking' ? refreshFeedback.deploymentKey : undefined,
       check: (deployment, trigger, refreshPage) => void checkDeploymentStatus(deployment, trigger, refreshPage) }} />

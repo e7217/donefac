@@ -145,8 +145,35 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     expect(afterBulk.gitlabLinks.find(link => link.id === oldLink.id)).toEqual(oldLink);
 
     const pages = pipelines.getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true });
-    await button(pages, '다음').click();
     const oldRow = pipelines.locator('.gitlab-activity-row').filter({ has: page.getByText(`#${oldPipelineId}`, { exact: true }) });
+    await expect(oldRow).toHaveCount(0);
+    const activitySearch = gitlab.getByRole('searchbox', { name: 'GitLab 활동 검색', exact: true });
+    const activityScope = gitlab.getByRole('combobox', { name: 'GitLab 활동 범위', exact: true });
+    const resetActivityFilters = button(gitlab, '활동 필터 초기화');
+    const readsBeforeTicketFilter = calls.length;
+    await activitySearch.fill(`#${oldPipelineId}`);
+    await activitySearch.press('Enter');
+    await expect(oldRow).toBeVisible();
+    await expect(gitlab.locator('.gitlab-activity-row')).toHaveCount(1);
+    await expect(pages).toHaveCount(0);
+    await activitySearch.fill('https://example.test/settings');
+    await activitySearch.press('Enter');
+    await expect(activitySearch).toHaveAttribute('aria-invalid', 'true');
+    await expect(oldRow).toBeVisible();
+    const objectUrl = `${repositoryUrl()}/-/pipelines/${oldPipelineId}`;
+    await activitySearch.fill(`${objectUrl}?ref=review#details`);
+    await activitySearch.press('Enter');
+    await expect(activitySearch).toHaveValue(objectUrl);
+    await expect(oldRow).toBeVisible();
+    await activityScope.selectOption('merge_request');
+    await expect(gitlab.getByText('조건에 맞는 GitLab 활동이 없습니다.', { exact: true })).toBeVisible();
+    await resetActivityFilters.click();
+    await expect(activitySearch).toHaveValue('');
+    await expect(activityScope).toHaveValue('all');
+    await expect(pages).toContainText('1 / 2 페이지');
+    expect(calls).toHaveLength(readsBeforeTicketFilter);
+
+    await button(pages, '다음').click();
     await expect(oldRow).toHaveAttribute('data-gitlab-state', 'running');
     const readsBeforeExact = calls.length;
     const failed = await refreshActivity(page, button(oldRow, exactAction), exactPath);
@@ -155,6 +182,11 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     await expect(oldRow).toHaveAttribute('data-gitlab-state', 'failed');
     await expect(title).toHaveValue('저장하지 않은 티켓 제목');
     await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+    await activityScope.selectOption('failed_pipelines');
+    await expect(oldRow).toBeVisible();
+    await expect(gitlab.locator('.gitlab-activity-row')).toHaveCount(1);
+    await resetActivityFilters.click();
+    await expect(pages).toContainText('1 / 2 페이지');
 
     const development = await page.context().newPage();
     try {
@@ -200,7 +232,8 @@ test('360px에서 최근 확인 범위 밖 GitLab 연결로 상태를 검토하�
     } finally { await development.close(); }
 
     await page.bringToFront();
-    if (await oldRow.count() === 0) await button(pages, '이전').click();
+    await activitySearch.fill(oldRef);
+    await activitySearch.press('Enter');
     const selectedReview = button(oldRow, selectedReviewAction);
     await expect(selectedReview).toBeEnabled();
     const issueForm = ticket.locator('form.issue-detail-form');

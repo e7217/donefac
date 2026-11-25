@@ -25,6 +25,33 @@
   gap: 6px;
 }
 
+.gitlab-ticket-activity-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.gitlab-ticket-activity-filters > label { flex: 1 1 10rem; }
+
+.gitlab-ticket-activity-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 6px;
+  flex: 2 1 14rem;
+  min-width: 0;
+}
+
+.gitlab-ticket-activity-search p { grid-column: 1 / -1; margin: 0; }
+.gitlab-ticket-activity-filters :is(label, .field) { min-width: 0; }
+.gitlab-ticket-activity-filters .field { width: 100%; }
+
+@media (max-width: 640px) {
+  .gitlab-ticket-activity-filters :is(.field, .btn) { min-height: 44px; }
+}
+
 .gitlab-activity-feedback {
   display: grid;
   gap: 7px;

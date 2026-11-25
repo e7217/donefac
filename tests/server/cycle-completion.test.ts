@@ -72,6 +72,37 @@ async function review(app: Fixture, cycle: PlanningItem, destination: PlanningIt
 async function workspace(app: Fixture) { return (await app.call<WorkspaceSnapshot>('/workspace')).data; }
 function findIssue(state: WorkspaceSnapshot, id: string) { return state.issues.find(value => value.id === id)!; }
 
+test('a cycle completion record opens one retrospective across actors and native backup restore', async () => {
+  await withFixture(async app => {
+    const source = await plan(app, '회고 원본');
+    const pending = await issue(app, '완료 당시 이월 업무', { cycleId: source.id });
+    const preview = await review(app, source, null);
+    const applied = await app.call<CycleCompletionResult>(completion(source), 'POST', { previewId: preview.previewId });
+    assert.equal(applied.status, 200, JSON.stringify(applied.data));
+    assert.ok(applied.data.recordId);
+    const recordPath = `/projects/${projectId}/cycle-completion-records/${applied.data.recordId}`;
+    const path = `${recordPath}/retrospective`;
+    const [first, second] = await Promise.all([
+      app.call<{ id: string }>(path, 'POST', {}, { 'X-Actor-Id': 'user-min' }),
+      app.call<{ id: string }>(path, 'POST', {}, { 'X-Actor-Id': 'user-seo' }),
+    ]);
+    assert.deepEqual([first.status, second.status].sort(), [200, 201], JSON.stringify([first, second]));
+    assert.deepEqual(first.data, second.data);
+    const documentId = first.data.id;
+    const document = (await workspace(app)).documents.find(value => value.id === documentId)!;
+    assert.equal(document.projectId, projectId);
+    assert.match(document.plainText, /이월 업무 1건/u);
+    assert.ok(JSON.stringify(document.content).includes(pending.id));
+
+    const backup = await app.call<WorkspaceSnapshot>('/export');
+    const restored = await app.call('/import', 'POST', { data: backup.data });
+    assert.equal(restored.status, 200, JSON.stringify(restored.data));
+    assert.equal((await app.call<{ retrospectiveDocumentId: string }>(recordPath)).data.retrospectiveDocumentId, documentId);
+    assert.deepEqual(await app.call(path, 'POST', {}), { status: 200, data: { id: documentId } });
+    assert.equal((await workspace(app)).documents.filter(value => value.title === document.title).length, 1);
+  });
+});
+
 test('cycle completion follows workflow categories and carries live tickets without changing their dates or hierarchy', async () => {
   await withFixture(async app => {
     const source = await plan(app, '이번 사이클', { startDate: '2026-11-02', endDate: '2026-11-13' });

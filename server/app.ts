@@ -16,6 +16,7 @@ import { CollaborationService, CollaborationError, type CollaborationUpgradeGuar
 import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
 import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-completion-records.js';
+import { cycleRetrospectiveDraft, cycleRetrospectiveId } from './cycle-retrospective.js';
 import { aggregateCycleProgress, CycleProgressError } from './cycle-progress.js';
 import { ApiKeyService, ApiKeyError } from './api-keys.js';
 import { CalendarService, CalendarError } from './calendars.js';
@@ -1642,7 +1643,35 @@ export function createApp(options: {
     const { id } = get<Project>('projects', req.params.projectId);
     const record = cycleCompletionRecords.get(id, req.params.recordId);
     if (!record) return fail('사이클 완료 기록을 찾을 수 없습니다.', 404);
-    res.set('Cache-Control', 'no-store').json(record);
+    const retrospective = store.get<DocPage>('documents', cycleRetrospectiveId(id, record.id));
+    const scope = apiKeys.projectScope(req);
+    const retrospectiveDocumentId = retrospective && (!scope || retrospective.projectId && scope.includes(retrospective.projectId))
+      ? retrospective.id : undefined;
+    res.set('Cache-Control', 'no-store').json({ ...record, ...(retrospectiveDocumentId ? { retrospectiveDocumentId } : {}) });
+  });
+  app.post(`${cycleCompletionRecordsPath}/:recordId/retrospective`, (req, res) => {
+    if (Object.keys(req.query).length || !req.body || typeof req.body !== 'object' || Array.isArray(req.body) || Object.keys(req.body).length) {
+      return fail('사이클 회고 문서 요청을 확인해 주세요.');
+    }
+    const project = get<Project>('projects', req.params.projectId);
+    const record = cycleCompletionRecords.get(project.id, req.params.recordId);
+    if (!record) return fail('사이클 완료 기록을 찾을 수 없습니다.', 404);
+    const id = cycleRetrospectiveId(project.id, record.id);
+    const result = store.transaction(() => {
+      const existing = store.get<DocPage>('documents', id);
+      if (existing) return { document: existing, created: false };
+      if (trash.find('document', id)) return fail('회고 문서가 휴지통에 있습니다. 복원한 뒤 열어 주세요.', 409);
+      const { title, content } = cycleRetrospectiveDraft(record, issueId => store.get<Issue>('issues', issueId)?.projectId === project.id);
+      const authorId = actor(req), timestamp = now();
+      const document = validateDocument({ id, projectId: project.id, parentId: null, title, content, plainText: '', icon: '📝',
+        status: 'draft', version: 1, authorId, createdAt: timestamp, updatedAt: timestamp });
+      store.put('documents', document);
+      revision(document, authorId, '사이클 완료 기록에서 회고 문서 생성');
+      activity(req, 'document', document.id, '문서 생성', document.title);
+      notifyDocumentCreated(document);
+      return { document, created: true };
+    });
+    res.set('Cache-Control', 'no-store').status(result.created ? 201 : 200).json({ id: result.document.id });
   });
   app.get('/api/projects/:projectId/cycles/:cycleId/progress', (req, res) => {
     const { projectId, cycleId } = req.params;

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
 import type { CycleCompletionPreview, CycleCompletionResult, Issue, PlanningItem, WorkspaceSnapshot } from '../../shared/types';
 
-async function read<T>(response: APIResponse, status = 200): Promise<T> {
+async function read<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
   return response.json();
 }
@@ -318,4 +318,85 @@ test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당�
     await expect(record.getByRole('heading', { name: cycle.name, exact: true })).toBeVisible();
     await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
   } finally { await fixture.clean(); }
+});
+
+test('360px에서 사이클 완료 기록을 회고 문서로 만들고 응답 유실 뒤 같은 문서를 연다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project, otherProject], users: [actor, peer] } = await workspace(request);
+  const fixture = cycleFixture(request);
+  const headers = { 'X-Actor-Id': actor.id };
+  let documentId: string | undefined;
+  try {
+    const cycle = await fixture.plan(project.id, '회고를 남길 사이클', 'active');
+    const next = await fixture.plan(project.id, '회고 당시 다음 사이클', 'planned');
+    const done = await fixture.issue(cycle, '완료 당시 업무', 'done');
+    const carried = await fixture.issue(cycle, '이월 당시 업무', 'in_progress');
+    const cancelled = await fixture.issue(cycle, '취소 당시 업무', 'cancelled');
+    const preview = await read<CycleCompletionPreview>(await request.post(`/api/planning-items/${cycle.id}/complete/preview`, {
+      headers, data: { expectedVersion: cycle.version, destinationId: next.id },
+    }));
+    const result = await read<CycleCompletionResult>(await request.post(`/api/planning-items/${cycle.id}/complete`, {
+      headers, data: { previewId: preview.previewId },
+    }));
+    await read<Issue>(await request.patch(`/api/issues/${carried.id}`, { data: { expectedVersion: carried.version + 1, title: '현재 변경한 업무 제목' } }));
+    const removed = await read<{ trashEntryId: string }>(await request.delete(`/api/issues/${cancelled.id}`));
+    await read(await request.delete(`/api/trash/${removed.trashEntryId}`));
+
+    const recordPath = `/api/projects/${project.id}/cycle-completion-records/${result.recordId}`;
+    const path = `${recordPath}/retrospective`;
+    expect((await request.post(path.replace(project.id, otherProject.id), { headers, data: {} })).status()).toBe(404);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/planning/${cycle.id}`);
+    await page.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
+    const record = page.getByRole('article', { name: '선택한 사이클 완료 기록', exact: true });
+    const create = record.getByRole('button', { name: '회고 문서 만들기', exact: true });
+    await expect(create).toBeVisible();
+    await page.route(`**${path}`, async route => {
+      const response = await route.fetch();
+      documentId = (await read<{ id: string }>(response, 201)).id;
+      await route.abort('failed');
+    }, { times: 1 });
+    await create.click();
+    await expect(record.getByRole('alert')).toBeVisible();
+    expect(documentId).toBeTruthy();
+    const replay = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === path);
+    await create.click();
+    expect(await read<{ id: string }>(await replay)).toEqual({ id: documentId });
+    const readRecord = await read<{ retrospectiveDocumentId: string }>(await request.get(recordPath));
+    expect(readRecord.retrospectiveDocumentId).toBe(documentId);
+    expect(await read<{ id: string }>(await request.post(path, { headers: { 'X-Actor-Id': peer.id }, data: {} }))).toEqual({ id: documentId });
+
+    const { documents } = await workspace(request);
+    const saved = documents.find(document => document.id === documentId)!;
+    expect(saved).toMatchObject({ projectId: project.id, authorId: actor.id, version: 1 });
+    expect(saved.plainText).toContain(next.name);
+    expect(saved.plainText).toContain(done.title);
+    expect(saved.plainText).toContain(carried.title);
+    expect(saved.plainText).toContain(cancelled.title);
+    expect(saved.plainText).not.toContain('현재 변경한 업무 제목');
+    const references = JSON.stringify(saved.content);
+    expect(references).toContain(carried.id);
+    expect(references).not.toContain(cancelled.id);
+    const history = await read<unknown[]>(await request.get(`/api/documents/${documentId}/revisions`));
+    expect(history).toHaveLength(1);
+
+    await record.getByRole('button', { name: '회고 문서 열기', exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/documents/${documentId}$`));
+    await expect(page.getByRole('heading', { name: '다음 사이클에서 개선할 점', exact: true })).toBeVisible();
+    await page.goBack();
+    await page.getByRole('button', { name: '사이클 완료 기록', exact: true }).click();
+    await expect(record.getByRole('button', { name: '회고 문서 열기', exact: true })).toBeVisible();
+
+    const archived = await read<{ trashEntryId: string }>(await request.delete(`/api/documents/${documentId}`));
+    expect((await request.post(path, { headers, data: {} })).status()).toBe(409);
+    await request.delete(`/api/trash/${archived.trashEntryId}`);
+    documentId = undefined;
+  } finally {
+    if (documentId) {
+      const removed = await request.delete(`/api/documents/${documentId}`);
+      if (removed.ok()) await request.delete(`/api/trash/${(await removed.json()).trashEntryId}`);
+    }
+    await fixture.clean();
+  }
 });

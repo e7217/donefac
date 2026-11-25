@@ -13,6 +13,18 @@ export const GITLAB_ACTIVITY_SCOPES = [
 ] as const;
 export type GitlabActivityScope = typeof GITLAB_ACTIVITY_SCOPES[number];
 
+export const GITLAB_ACTIVITY_SCOPE_LABELS = {
+  all: '전체 활동',
+  merge_request: 'MR',
+  open_merge_requests: '열린 MR',
+  blocked_merge_requests: '검토가 막힌 MR',
+  pipeline: '파이프라인',
+  failed_pipelines: '실패 파이프라인',
+  manual_pipelines: '수동 실행 대기 파이프라인',
+  branch: '브랜치',
+  commit: '커밋',
+} satisfies Record<GitlabActivityScope, string>;
+
 export interface GitlabActivityFilters {
   scope: GitlabActivityScope;
   query: string;
@@ -104,10 +116,10 @@ function matchesScope(link: GitlabLink, scope: GitlabActivityScope, latest: Read
 type ActivitySearchData = Pick<WorkspaceSnapshot, 'issues' | 'issueAliases'>;
 
 export function filterGitlabActivityLinks(
-  data: ActivitySearchData, links: readonly GitlabLink[], filters: GitlabActivityFilters,
+  data: ActivitySearchData | undefined, links: readonly GitlabLink[], filters: GitlabActivityFilters,
 ): GitlabLink[] {
   const { memberId } = filters;
-  const memberIssues = memberId ? new Set(data.issues.filter(issue => {
+  const memberIssues = memberId ? new Set(data?.issues.filter(issue => {
     const participation = myWorkMembership(issue, memberId);
     return participation === 'assigned' || participation === 'collaborating';
   }).map(issue => issue.id)) : null;
@@ -120,7 +132,7 @@ export function filterGitlabActivityLinks(
   if (httpUrlStart.test(query)) return scoped.filter(link => canonicalLinkAddress(link)?.canonical === query);
 
   const terms = normalizeWorkspaceSearchKey(query).split(' ');
-  const issues = new Map(data.issues.map(issue => [issue.id, issue]));
+  const issues = new Map(data?.issues.map(issue => [issue.id, issue]));
   return scoped.filter(link => {
     const issue = issues.get(link.issueId);
     const address = canonicalLinkAddress(link);
@@ -129,8 +141,9 @@ export function filterGitlabActivityLinks(
     const hasNumber = Number.isSafeInteger(link.iid) && link.iid > 0;
     const number = hasNumber && link.kind === 'merge_request' ? `!${link.iid}` : hasNumber && link.kind === 'pipeline' ? `#${link.iid}` : null;
     const shorthand = address && link.kind === 'merge_request' ? `${address.repository}${number}` : null;
+    const aliases = data ? issueSearchAliases(data, link.issueId).map(alias => alias.key) : [];
     const searchText = normalizeWorkspaceSearchKey([
-      issue?.key, issue?.title, ...issueSearchAliases(data, link.issueId).map(alias => alias.key), link.originalJiraKey,
+      issue?.key, issue?.title, ...aliases, link.originalJiraKey,
       link.title, address?.repository, repositoryWithHost, address?.ref, number, shorthand,
       branch, branch && `refs/heads/${branch}`, gitlabObjectSha(link.sourceSha), link.projectId,
     ].join(' '));

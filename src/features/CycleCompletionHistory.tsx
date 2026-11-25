@@ -1,19 +1,20 @@
 'use client';
 
-import { useEffect, useId, useMemo, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, History, RefreshCw } from 'lucide-react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { ArrowLeft, ArrowRight, ChevronDown, FileText, History, RefreshCw } from 'lucide-react';
 import type { CycleCompletionRecord, CycleCompletionRecordsPage, FeatureProps, PlanningItem } from '../../shared/types';
 import { api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
 import './cycle-completion-history.css';
 
-type HistoryProps = Pick<FeatureProps, 'projectId' | 'actorId' | 'openIssue'> & {
+type HistoryProps = Pick<FeatureProps, 'projectId' | 'actorId' | 'openIssue' | 'openDocument' | 'refresh'> & {
   cycle?: Pick<PlanningItem, 'id' | 'version'>;
   issues: FeatureProps['data']['issues'];
 };
 type RequestResult<T> = { key: string; data: T } | { key: string; error: string };
 type RecordedIssue = CycleCompletionRecord['issues'][number];
 type Disposition = RecordedIssue['disposition'];
+type RecordView = CycleCompletionRecord & { retrospectiveDocumentId?: string };
 
 const RECORD_PAGE_SIZE = 12;
 const ISSUE_PAGE_SIZE = 25;
@@ -60,7 +61,7 @@ export function CycleCompletionHistory(props: HistoryProps) {
   </section>;
 }
 
-function HistoryBody({ cycle, projectId, actorId, issues, openIssue }: HistoryProps) {
+function HistoryBody({ cycle, projectId, actorId, issues, openIssue, openDocument, refresh }: HistoryProps) {
   const [scope, setScope] = useState<'cycle' | 'project'>(cycle ? 'cycle' : 'project');
   const [cursors, setCursors] = useState<string[]>([]);
   const [recordId, setRecordId] = useState<string | null>(null);
@@ -78,7 +79,7 @@ function HistoryBody({ cycle, projectId, actorId, issues, openIssue }: HistoryPr
   const page = list && 'data' in list ? list.data : null;
   const selected = page?.items.find(item => item.id === recordId) ?? page?.items[0];
   const recordPath = selected ? `${path}/${encodeURIComponent(selected.id)}` : null;
-  const record = useHistoryRequest<CycleCompletionRecord>(recordPath, JSON.stringify([recordPath, recordRetry]), actorId);
+  const record = useHistoryRequest<RecordView>(recordPath, JSON.stringify([recordPath, recordRetry]), actorId);
 
   function changePage(next: string[]) {
     setCursors(next);
@@ -117,7 +118,8 @@ function HistoryBody({ cycle, projectId, actorId, issues, openIssue }: HistoryPr
     </div>}
     {selected && !record && <p role="status">당시 업무를 불러오는 중입니다.</p>}
     {record && 'error' in record && <HistoryError message={record.error} onRetry={() => setRecordRetry(attempt => attempt + 1)} />}
-    {record && 'data' in record && <RecordDetails key={record.data.id} record={record.data} liveIds={liveIds} openIssue={openIssue} />}
+    {record && 'data' in record && recordPath && <RecordDetails key={record.data.id} record={record.data} liveIds={liveIds}
+      openIssue={openIssue} openDocument={openDocument} refresh={refresh} actorId={actorId} recordPath={recordPath} />}
   </div>;
 }
 
@@ -128,7 +130,8 @@ function HistoryError({ message, onRetry }: { message: string; onRetry: () => vo
   </div>;
 }
 
-function RecordDetails({ record, liveIds, openIssue }: { record: CycleCompletionRecord; liveIds: ReadonlySet<string>; openIssue: HistoryProps['openIssue'] }) {
+function RecordDetails({ record, liveIds, openIssue, openDocument, refresh, actorId, recordPath }:
+  Pick<HistoryProps, 'openIssue' | 'openDocument' | 'refresh' | 'actorId'> & { record: RecordView; liveIds: ReadonlySet<string>; recordPath: string }) {
   const groups = useMemo(() => {
     const result: Record<Disposition, RecordedIssue[]> = { done: [], cancelled: [], carry: [] };
     for (const issue of record.issues) result[issue.disposition].push(issue);
@@ -137,6 +140,8 @@ function RecordDetails({ record, liveIds, openIssue }: { record: CycleCompletion
   const { cycle, completedAt, actorName, destination, counts } = record;
   return <article className="cycle-history-record" aria-label="선택한 사이클 완료 기록">
     <h4>{cycle.name}</h4>
+    <RetrospectiveAction savedDocumentId={record.retrospectiveDocumentId} path={`${recordPath}/retrospective`}
+      actorId={actorId} refresh={refresh} openDocument={openDocument} />
     <p><time dateTime={completedAt}>{timestamp(completedAt)}</time> · {actorName}</p>
     {(cycle.startDate || cycle.endDate || cycle.targetDate) && <p className="cycle-history-dates">
       {(cycle.startDate || cycle.endDate) && <span>당시 일정 {cycle.startDate ?? '미정'} ~ {cycle.endDate ?? '미정'}</span>}
@@ -150,6 +155,49 @@ function RecordDetails({ record, liveIds, openIssue }: { record: CycleCompletion
       name={GROUP_NAMES[disposition]} issues={groups[disposition]} liveIds={liveIds} openIssue={openIssue} />)}
     {!record.issues.length && <p>완료 당시 연결된 업무가 없었습니다.</p>}
   </article>;
+}
+
+function RetrospectiveAction({ savedDocumentId, path, actorId, refresh, openDocument }:
+  Pick<HistoryProps, 'actorId' | 'refresh' | 'openDocument'> & { savedDocumentId?: string; path: string }) {
+  const [createdId, setCreatedId] = useState<string>();
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const request = useRef<AbortController | null>(null);
+  const documentId = savedDocumentId ?? createdId;
+  useEffect(() => () => request.current?.abort(), []);
+
+  async function act() {
+    if (request.current) return;
+    const controller = new AbortController();
+    request.current = controller;
+    setBusy(true);
+    setError('');
+    try {
+      if (documentId) {
+        await refresh();
+        if (!controller.signal.aborted) openDocument(documentId);
+      } else {
+        const result = await api<{ id: string }>(path, { method: 'POST', body: '{}', signal: controller.signal,
+          headers: { 'X-Actor-Id': actorId } });
+        if (typeof result?.id !== 'string' || !result.id) throw new Error('회고 문서를 확인하지 못했습니다.');
+        if (!controller.signal.aborted) setCreatedId(result.id);
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(errorMessage(cause));
+    } finally {
+      if (request.current === controller) {
+        request.current = null;
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    }
+  }
+
+  return <div>
+    <button className="btn" type="button" disabled={busy} aria-busy={busy} onClick={() => void act()}>
+      <FileText size={15} aria-hidden="true" />{documentId ? '회고 문서 열기' : '회고 문서 만들기'}
+    </button>
+    {error && <p className="issue-form-error" role="alert">{error}</p>}
+  </div>;
 }
 
 function RecordedIssueGroup({ name, issues, liveIds, openIssue }: { name: string; issues: RecordedIssue[]; liveIds: ReadonlySet<string>; openIssue: HistoryProps['openIssue'] }) {

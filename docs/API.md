@@ -1449,6 +1449,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 `GET /api/projects/:projectId/cycle-completion-records/:recordId`는 해당 기록의 `issues`를 포함한다. 기록에는 당시 사이클 이름·버전·기간, `destination`의 ID·이름·버전 또는 백로그를 뜻하는 `null`, 완료한 작업자와 시각, 분류별 건수를 저장한다. 각 업무에는 당시 업무 키·제목·상태·담당자와 `done`, `cancelled`, `carry` 중 하나의 결과를 저장한다. 해당 프로젝트에서 보관한 기록은 원래 사이클이나 업무가 사라진 뒤에도 조회할 수 있다. `/api/v1`의 같은 경로는 해당 프로젝트의 읽기 또는 쓰기 키를 사용한다. 자체 백업 형식 80의 `cycleCompletionRecords`가 이 기록을 보존한다.
 
+브라우저의 `POST /api/projects/:projectId/cycle-completion-records/:recordId/retrospective`에 빈 객체를 보내면 회고 문서의 `{id}`와 `201`을 받는다. 같은 완료 기록에 이미 활성 회고 문서가 있으면 같은 문서 ID와 `200`을 반환한다. 문서가 휴지통에 있으면 `409`, 프로젝트에 기록이 없으면 `404`를 반환한다. 완료 기록 상세의 `retrospectiveDocumentId`에는 현재 조회 범위에서 열 수 있는 활성 회고 문서 ID를 포함한다. 문서는 일반 문서 및 버전 이력과 같은 백업에 저장한다.
+
 ### 사이클 진행 추이
 
 `GET /api/projects/:projectId/cycles/:cycleId/progress`와 `GET /api/v1/projects/:projectId/cycles/:cycleId/progress`는 해당 프로젝트의 사이클을 서울 날짜별로 조회한다. 자동화 경로에서는 해당 프로젝트의 읽기 또는 쓰기 키를 사용한다. `throughDate`를 생략하면 마지막 날짜에서 최대 92일을 반환한다. 그보다 이전 기간은 원하는 마지막 날짜를 `YYYY-MM-DD`로 보낸다. 시작일을 지정하지 않은 사이클은 생성일을 첫 날짜로 사용한다. 완료 기록에서 현재 완료 상태를 저장한 시각을 확인할 수 있으면 당시 완료 시각까지 조회한다. 자체 백업 복원에서 버전만 갱신된 경우에도 이 시각을 보존한다. 이 조건을 만족하는 기록이 없으면 조회 시각까지의 관측을 반환한다.

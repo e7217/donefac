@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
-import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters, type GitlabActivityScope } from '../../shared/gitlab-activity-filter';
+import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SCOPE_LABELS, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
 import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
@@ -79,18 +79,6 @@ type DevelopmentActivityProps = {
   onChangeActivityFilters: (filters: GitlabActivityFilters, mode?: 'push' | 'replace') => void;
   onOpenIssueForReview: OpenIssueForReview;
 };
-const scopeLabels = {
-  all: '전체 활동',
-  merge_request: 'MR',
-  open_merge_requests: '열린 MR',
-  blocked_merge_requests: '검토가 막힌 MR',
-  pipeline: '파이프라인',
-  failed_pipelines: '실패 파이프라인',
-  manual_pipelines: '수동 실행 대기 파이프라인',
-  branch: '브랜치',
-  commit: '커밋',
-} satisfies Record<GitlabActivityScope, string>;
-
 export function Development(props: FeatureProps & DevelopmentActivityProps) {
   const {notify}=props;
   const [settings,setSettings]=useState<GitlabSettings|null>(null),[draft,setDraft]=useState< Draft>(empty),[baseline,setBaseline]=useState< Draft>(empty);
@@ -471,7 +459,7 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
           const nextScope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
           if (nextScope) onChangeActivityFilters({ ...activityFilters, scope: nextScope, pages: {} }, 'push');
         }}>
-          {GITLAB_ACTIVITY_SCOPES.map(value => <option key={value} value={value}>{scopeLabels[value]}</option>)}
+          {GITLAB_ACTIVITY_SCOPES.map(value => <option key={value} value={value}>{GITLAB_ACTIVITY_SCOPE_LABELS[value]}</option>)}
         </select>
       </label>
       <label className="form-label development-activity-member">팀원

@@ -2670,7 +2670,7 @@ function ProjectGantt(props: GanttProps) {
       onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue}
       onOpenMilestoneCandidateIssue={openChartIssue} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 칸에 YYYY-MM-DD를 붙여넣을 수 있습니다. 행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 칸에 YYYY-MM-DD를 붙여넣거나, 시작일 칸에 스프레드시트의 시작일·종료일 두 칸을 붙여넣을 수 있습니다. 행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
     {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}
     {unavailableDateIds.length > 0 && <div className="gantt-hint">
       <span role="status">원래 업무와 연결할 수 없는 날짜 초안이 {unavailableDateIds.length}건 있습니다.</span>
@@ -3562,8 +3562,21 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
       value={state.value} disabled={disabled || pending}
       onInput={event => readInput(event.currentTarget)}
       onPaste={event => {
-        const value = event.clipboardData.getData('text/plain').trim();
-        if (disabled || pendingRef.current || !isCalendarDate(value)) return;
+        if (disabled || pendingRef.current) return;
+        const text = event.clipboardData.getData('text/plain');
+        if (text.includes('\t')) {
+          event.preventDefault();
+          if (edge !== 'start') return;
+          const row = text.replace(/(?:\r\n|\r|\n)$/u, '');
+          if (/[\r\n]/u.test(row)) return;
+          const dates = row.split('\t').map(cell => cell.trim());
+          if (dates.length !== 2 || !dates.every(isCalendarDate)) return;
+          setStart(inlineDateInput(dates[0]));
+          setEnd(inlineDateInput(dates[1]));
+          return;
+        }
+        const value = text.trim();
+        if (!isCalendarDate(value)) return;
         event.preventDefault();
         setInput(inlineDateInput(value));
       }}

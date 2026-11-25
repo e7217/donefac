@@ -45,6 +45,7 @@ import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFai
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentTreeCopy } from './DocumentTreeCopy';
 import { DocumentSiblingOrderDialog } from './DocumentSiblingOrderDialog';
+import { useDocumentTreeExpansion } from './document-tree-expansion';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentFindPanel } from './DocumentFindPanel';
@@ -257,7 +258,6 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const reply = useDocumentCommentReply(actorId, draft?.id, reportReplyStorageProblem);
   const { isSending: isReplySending, hasDraft: hasReplyDraft, clearDocument: clearReplyDrafts } = reply;
   const [search, setSearch] = useState('');
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sideTab, setSideTab] = useState<SideTab>('comments');
   const linksTab = useRef<HTMLButtonElement>(null);
@@ -481,6 +481,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
   const ancestors = useMemo(() => latestPage?.parentId ?
     documentAncestors(latestPage, new Map(data.documents.map(page => [page.id, page]))) : [], [latestPage, data.documents]);
+  const { collapsed, toggleBranch } = useDocumentTreeExpansion(actorId, data.restoreGeneration, selectedDocumentId, ancestors);
   const spaceTitle = latestPage?.projectId ? data.projects.find(project => project.id === latestPage.projectId)?.name || '프로젝트' : '팀 공통';
   const crumbQuery = documentLabel ? `?${new URLSearchParams({ label: documentLabel })}` : '';
   const liveLocationChanged = latestPage !== selectedPage &&
@@ -1868,13 +1869,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (visited.has(page.id)) return null;
       const nextVisited = new Set(visited); nextVisited.add(page.id);
       const children = pages.some(other => other.parentId === page.id);
+      const canToggle = children && !filtersActive;
+      const branchCollapsed = collapsed.has(page.id);
+      const selected = selectedDocumentId === page.id;
       return <div key={page.id}>
-        <div className={`docs-tree-row ${draft?.id === page.id ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}>
-          <button type="button" className="docs-tree-toggle" aria-label={`${page.title} ${collapsed.has(page.id) ? '펼치기' : '접기'}`} disabled={!children || filtersActive} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(page.id)) next.delete(page.id); else next.add(page.id); return next; })}>{children && !filtersActive ? collapsed.has(page.id) ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}</button>
-          <button type="button" className="docs-tree-link" onClick={() => selectDocument(page.id)}><span className="docs-page-icon">{page.icon || '📄'}</span><span>{page.title || '제목 없는 문서'}</span>{page.status === 'draft' && <span className="docs-draft-dot" title="초안" />}</button>
+        <div className={`docs-tree-row ${selected ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}>
+          <button type="button" className="docs-tree-toggle" aria-label={`${page.title} ${branchCollapsed ? '펼치기' : '접기'}`}
+            aria-expanded={canToggle ? !branchCollapsed : undefined} disabled={!canToggle} onClick={() => toggleBranch(page.id)}>
+            {canToggle ? branchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}
+          </button>
+          <button type="button" className="docs-tree-link" aria-current={selected ? 'page' : undefined} onClick={() => selectDocument(page.id)}><span className="docs-page-icon">{page.icon || '📄'}</span><span>{page.title || '제목 없는 문서'}</span>{page.status === 'draft' && <span className="docs-draft-dot" title="초안" />}</button>
           <button type="button" className="docs-tree-add" title="하위 문서 만들기" aria-label={`${page.title} 하위 문서 만들기`} onClick={() => openNew(page.id)}><Plus size={13} /></button>
         </div>
-        {!filtersActive && !collapsed.has(page.id) && tree(pages, page.id, level + 1, nextVisited)}
+        {!filtersActive && !branchCollapsed && tree(pages, page.id, level + 1, nextVisited)}
       </div>;
     });
 

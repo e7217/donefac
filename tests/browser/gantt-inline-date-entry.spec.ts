@@ -155,7 +155,7 @@ test('간트에서 날짜 일부를 비운 입력은 마지막 유효값을 유�
   } finally { await request.delete(`/api/issues/${issue.id}`); }
 });
 
-test('360px 간트의 날짜 칸에 붙여넣은 날짜는 저장 전까지 초안으로 유지된다', async ({ page, context, request }) => {
+test('360px 간트에서 날짜 한 개와 스프레드시트의 날짜 두 칸을 행 초안으로 붙여넣는다', async ({ page, context, request }) => {
   const { projects: [project] } = await workspace(request);
   const title = `간트 날짜 칸 붙여넣기 ${Date.now()}`;
   const before = { startDate: '2026-11-23', endDate: '2026-11-27' };
@@ -189,7 +189,31 @@ test('360px 간트의 날짜 칸에 붙여넣은 날짜는 저장 전까지 초�
     await expect(end).toHaveValue(before.endDate);
     await paste(end, after.endDate);
     await expect(end).toHaveValue(after.endDate);
+
+    await paste(start, `${before.startDate}\t${before.endDate}\r\n`);
+    await expect(start).toHaveValue(before.startDate);
+    await expect(end).toHaveValue(before.endDate);
+    await paste(start, `${after.startDate}\t${after.endDate}`);
+    await expect(start).toHaveValue(after.startDate);
+    await expect(end).toHaveValue(after.endDate);
+
+    for (const invalid of [
+      `${before.startDate}\t2027-02-29`, `${before.startDate}\t`,
+      `${before.startDate}\t${before.endDate}\n${after.startDate}\t${after.endDate}`,
+      `${before.startDate}\t${before.endDate}\t${after.endDate}`,
+    ]) {
+      await paste(start, invalid);
+      await expect(start).toHaveValue(after.startDate);
+      await expect(end).toHaveValue(after.endDate);
+    }
+
     expect(await stored()).toMatchObject({ ...before, version: issue.version });
+
+    await chart.getByRole('button', { name: `${issue.key} 일정과 연결 편집`, exact: true }).click();
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(after.startDate);
+    await expect(editor.getByLabel('종료일', { exact: true })).toHaveValue(after.endDate);
+    await editor.getByRole('button', { name: '닫기', exact: true }).click();
 
     await end.press('Enter');
     await expect.poll(stored).toMatchObject({ ...after, version: issue.version + 1 });
