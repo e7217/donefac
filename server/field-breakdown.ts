@@ -32,6 +32,7 @@ interface BreakdownInput {
   comparison?: BreakdownAxis;
   measure?: { source: IssueFieldBreakdownMeasure; label: string; field?: CustomFieldDefinition };
   configuration?: { workflowVersion?: number; importGeneration: string | null };
+  viewerId?: string | null;
 }
 
 interface BreakdownAxis {
@@ -489,6 +490,7 @@ export function buildIssueFieldBreakdown(input: BreakdownInput): {
     field: [field.id, field.name, field.description, field.kind, field.required, field.archived,
       [...field.issueTypes].sort(compareText), [...field.options].sort((left, right) => compareText(left.id, right.id)).map(option => [option.id, option.name, option.archived])],
     savedView,
+    ...(input.viewerId === undefined ? {} : { viewerId: input.viewerId }),
     issues: fingerprints.sort((left, right) => compareText(left[0] as string, right[0] as string)),
     groups: groups.map(bucket => [bucket.id, bucket.label, bucket.kind, bucket.count]),
     numeric,

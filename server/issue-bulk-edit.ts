@@ -22,7 +22,7 @@ export class IssueBulkEditError extends Error {
 type IssueSelection = IssueBulkEditPreviewInput['issues'][number];
 type TeamIssueSelection = TeamIssueBulkEditPreviewInput['issues'][number];
 type IssueUpdate = Partial<IssueBulkEditValues>;
-type FieldBreakdownMatches = (projectId: string, selection: IssueFieldBreakdownSelection, issueIds: readonly string[]) => boolean;
+type FieldBreakdownMatches = (projectId: string, selection: IssueFieldBreakdownSelection, issueIds: readonly string[], request: Request) => boolean;
 interface BulkEditHooks<T extends { issue: Issue }> {
   actor(request: Request): string;
   configurationToken(projectId: string, changes: IssueBulkEditChanges): string;
@@ -215,8 +215,8 @@ function parseTeamPreview(raw: unknown): TeamIssueBulkEditPreviewInput {
     ...(entries.length ? { statuses, workflowVersions } : {}) };
 }
 
-function verifyFieldBreakdown(projectId: string, { issues, fieldBreakdown }: IssueBulkEditPreviewInput, matches?: FieldBreakdownMatches) {
-  if (fieldBreakdown && !matches?.(projectId, fieldBreakdown, issues.map(issue => issue.id))) {
+function verifyFieldBreakdown(projectId: string, { issues, fieldBreakdown }: IssueBulkEditPreviewInput, request: Request, matches?: FieldBreakdownMatches) {
+  if (fieldBreakdown && !matches?.(projectId, fieldBreakdown, issues.map(issue => issue.id), request)) {
     fail(409, '집계 이후 업무·보기·속성이 변경되었습니다. 필드 집계를 다시 조회해 주세요.', { reason: 'field_breakdown_stale' });
   }
 }
@@ -476,7 +476,7 @@ export class IssueBulkEditService {
     return this.store.transaction(() => {
       this.prune();
       if (!this.store.get('projects', projectId)) fail(404, '프로젝트를 찾을 수 없습니다.');
-      verifyFieldBreakdown(projectId, input, hooks.fieldBreakdownMatches);
+      verifyFieldBreakdown(projectId, input, request, hooks.fieldBreakdownMatches);
       const issues = this.loadIssues(input.issues.map(issue => ({ ...issue, projectId })), 404);
       return this.review({ ...input, projectId, actorId }, issues, hooks);
     });
@@ -528,7 +528,7 @@ export class IssueBulkEditService {
       }
       if (proposal.removeAfter <= after(0)) fail(409, '미리보기가 만료되었습니다. 다시 확인해 주세요.');
       if (proposal.result) return proposal.result;
-      verifyFieldBreakdown(projectId, proposal, hooks.fieldBreakdownMatches);
+      verifyFieldBreakdown(projectId, proposal, request, hooks.fieldBreakdownMatches);
       if (!this.store.get('projects', projectId) || proposal.configurationToken !== hooks.configurationToken(projectId, proposal.changes)) fail(409, STALE_MESSAGE);
 
       // The migration preview represents the whole active source status, so an issue newly entering or leaving it also invalidates the review.

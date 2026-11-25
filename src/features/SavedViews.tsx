@@ -204,7 +204,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
           name, ...editing.state, boardGrouping: editing.state.boardGrouping ?? null, sort: editing.state.sort ?? null, filters: {
             ...editing.state.filters, planning: editing.state.filters.planning ?? {}, gitlab: editing.state.filters.gitlab ?? null,
             priorities: editing.state.filters.priorities ?? [], labels: editing.state.filters.labels ?? {},
-            reporter: editing.state.filters.reporter ?? null, statusIds: editing.state.filters.statusIds ?? [],
+            assignee: editing.state.filters.assignee ?? null, reporter: editing.state.filters.reporter ?? null, statusIds: editing.state.filters.statusIds ?? [],
           }, expectedVersion: editing.target.version,
         })
         : await post<SavedView>('/views', {projectId, name, ...editing.state});
@@ -328,6 +328,7 @@ function ProjectSavedViews({projectId, project, actorId, planningItems, statuses
       <label className="form-label">보기 이름<input autoFocus className="field" aria-label="보기 이름" value={name} onChange={event => setName(event.target.value)} disabled={busy} required maxLength={80} placeholder="예: 이번 주 검토할 업무"/></label>
       <div className="saved-view-definition"><span>{editorState.layout === 'board' ? '보드' : '목록'}</span>{editorState.boardGrouping === 'assignee' && <span>담당자별</span>}<span>{issueStatusFilterLabel(editorState.filters, statuses) ?? '모든 상태'}</span>{editorState.filters.query && <span>검색: {editorState.filters.query}</span>}{editorState.filters.type !== 'all' && <span>유형: {editorState.filters.type}</span>}{editorState.filters.fieldFilter && <span>사용자 정의 필드 {editorState.filters.fieldFilter.rules.length}개</span>}
         {issuePlanningFilterLabels(editorState.filters.planning, planningItems).map(label => <span key={label}>{label}</span>)}
+        {editorState.filters.assignee?.kind === 'current-user' && <span>담당자 · 현재 사용자</span>}
         {editorState.filters.reporter && <span>{issueReporterFilterLabel(editorState.filters.reporter, users)}</span>}
         {editorState.filters.gitlab && <span>{ISSUE_GITLAB_FILTER_LABELS[editorState.filters.gitlab]}</span>}
         {issuePriorityLabelFilterLabels(editorState.filters).map(label => <span key={label}>{label}</span>)}

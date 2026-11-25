@@ -7,9 +7,9 @@ import type {
 import { defaultIssueSchema } from '../shared/issue-schema.js';
 import { parseIssueFieldFilter } from '../shared/issue-field-filter.js';
 import {
-  IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewSortError, IssueViewStatusFilterError,
-  createIssueViewMatcher, orderIssueView, parseIssueViewGitlabFilter, parseIssueViewLabelFilter, parseIssueViewPlanningFilter,
-  issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewSort, parseIssueViewStatusIds,
+  IssueViewAssigneeFilterError, IssueViewGitlabFilterError, IssueViewPlanningFilterError, IssueViewPriorityLabelFilterError, IssueViewReporterFilterError, IssueViewSortError, IssueViewStatusFilterError,
+  createIssueViewMatcher, issueViewUsesCurrentUser, orderIssueView, parseIssueViewAssigneeFilter, parseIssueViewGitlabFilter, parseIssueViewLabelFilter,
+  parseIssueViewPlanningFilter, issueViewStatusCriteria, parseIssueViewPriorities, parseIssueViewReporterFilter, parseIssueViewSort, parseIssueViewStatusIds,
 } from '../shared/issue-view.js';
 import { JiraViewQueryError, translateJiraViewQuery } from '../shared/jira-view-query.js';
 import { planningFields } from '../shared/planning-helpers.js';
@@ -55,14 +55,17 @@ function state(value: unknown, schema: ProjectIssueSchema, users: User[], planni
     const gitlab = previous && gitlabInput === null ? undefined : parseIssueViewGitlabFilter(gitlabInput);
     const priorities = Object.hasOwn(filters, 'priorities') ? parseIssueViewPriorities(filters.priorities) : previous?.priorities;
     const labels = Object.hasOwn(filters, 'labels') ? parseIssueViewLabelFilter(filters.labels) : previous?.labels;
+    const assignee = parseIssueViewAssigneeFilter(Object.hasOwn(filters, 'assignee') ? filters.assignee
+      : assigneeId === 'all' ? previous?.assignee : undefined);
+    if (assignee && assigneeId !== 'all') return fail('현재 사용자와 고정 담당자를 함께 지정할 수 없습니다.');
     const reporter = parseIssueViewReporterFilter(Object.hasOwn(filters, 'reporter') ? filters.reporter : previous?.reporter, users);
     return { layout, ...(layout === 'board' && boardGrouping === 'assignee' ? { boardGrouping } : {}), ...(sort ? { sort } : {}), filters: {
       query, ...statusCriteria, assigneeId, type, ...(fieldFilter ? {fieldFilter} : {}), ...(planning ? {planning} : {}), ...(gitlab ? {gitlab} : {}),
-      ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(reporter ? { reporter } : {}),
+      ...(priorities ? { priorities } : {}), ...(labels ? { labels } : {}), ...(assignee ? { assignee } : {}), ...(reporter ? { reporter } : {}),
     } };
   } catch (error) {
     if (error instanceof IssueViewPlanningFilterError || error instanceof IssueViewGitlabFilterError ||
-        error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewReporterFilterError ||
+        error instanceof IssueViewPriorityLabelFilterError || error instanceof IssueViewAssigneeFilterError || error instanceof IssueViewReporterFilterError ||
         error instanceof IssueViewSortError || error instanceof IssueViewStatusFilterError) return fail(error.message, error.status);
     throw error;
   }
@@ -73,6 +76,7 @@ const nameKey = (projectId: string, name: string) => JSON.stringify([projectId, 
 
 interface SavedViewRouteHooks {
   actor: (request: Request) => string;
+  viewer: (request: Request) => string | undefined;
   activity: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => unknown;
   planningItems: (projectId: string) => readonly PlanningItem[];
   issueOrder: (projectId: string) => ProjectIssueOrder;
@@ -152,7 +156,7 @@ export class SavedViewService {
     }
     return { sourceProjectAliases: allAliases, sourceInstance: targetRows[0].sourceInstance };
   }
-  private previewJiraView(project: Project, jql: unknown, actorId: string, hooks: SavedViewRouteHooks): JiraSavedViewPreview {
+  private previewJiraView(project: Project, jql: unknown, request: Request, hooks: SavedViewRouteHooks): JiraSavedViewPreview {
     const projectId = project.id;
     const users = this.store.all<User>('users');
     const schema = this.issueSchemas?.get(projectId) || defaultIssueSchema(projectId);
@@ -188,13 +192,15 @@ export class SavedViewService {
     this.validateAssignee(selected, users);
     const { filters, sort } = selected;
     const { criteria, orderBy, requiresProjectOrderAcceptance } = translated;
-    const matches = createIssueViewMatcher(filters, { users }, schema);
+    const actorId = hooks.actor(request);
+    const viewerId = issueViewUsesCurrentUser(filters) ? hooks.viewer(request) ?? null : undefined;
+    const matches = createIssueViewMatcher(filters, { users }, schema, viewerId ?? undefined);
     const rows = this.store.db.prepare('SELECT json FROM issues WHERE project_id=? ORDER BY rowid').all(projectId) as { json: string }[];
     const matchingIssues = orderIssueView(rows.map(row => JSON.parse(row.json) as Issue).filter(matches), hooks.issueOrder(projectId), sort);
     const cohort = matchingIssues.map(({ id, key, title, version }) => [id, key, title, version]);
     const revision = createHash('sha256').update(JSON.stringify([
       projectId, actorId, jql, aliases, sourceMatches, filters, criteria, orderBy, sort, requiresProjectOrderAcceptance, cohort,
-      this.store.setting('attachmentImportGeneration'),
+      this.store.setting('attachmentImportGeneration'), ...(viewerId === undefined ? [] : [viewerId]),
     ])).digest('hex');
     return {
       filters, criteria, orderBy, ...(sort ? { sort } : {}), ...(requiresProjectOrderAcceptance ? { requiresProjectOrderAcceptance } : {}),
@@ -264,7 +270,7 @@ export class SavedViewService {
     }));
     app.post('/api/views/jira/preview', route((req, res) => {
       const preview = this.store.transaction(() =>
-        this.previewJiraView(this.project(req.body.projectId), req.body.jql, hooks.actor(req), hooks));
+        this.previewJiraView(this.project(req.body.projectId), req.body.jql, req, hooks));
       res.set('Cache-Control', 'no-store').json(preview);
     }));
     app.post('/api/views/jira/import', route((req, res) => {
@@ -278,7 +284,7 @@ export class SavedViewService {
         const actorId = hooks.actor(req);
         let preview: JiraSavedViewPreview;
         try {
-          preview = this.previewJiraView(project, jql, actorId, hooks);
+          preview = this.previewJiraView(project, jql, req, hooks);
         } catch (error) {
           if (error instanceof JiraViewQueryError) return staleJiraPreview();
           throw error;

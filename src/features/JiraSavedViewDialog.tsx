@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { ISSUE_VIEW_SORT_LABELS } from '../../shared/issue-view';
+import { ISSUE_VIEW_SORT_LABELS, issueViewUsesCurrentUser } from '../../shared/issue-view';
 import { JIRA_SAVED_VIEW_QUERY_LIMIT, type FeatureProps, type JiraSavedViewPreview, type Project, type SavedView, type SavedViewState } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -236,6 +236,8 @@ export function JiraSavedViewDialog({ actorId, project, notify, currentLayout, i
         {error && <p ref={alert} className="issue-form-error" role="alert" tabIndex={-1}>{error}</p>}
         {review && <section className="jira-saved-view-review" aria-label="Jira 필터 미리보기">
           <h3 ref={previewHeading} tabIndex={-1}>일치 업무 {review.total.toLocaleString('ko-KR')}개</h3>
+          {issueViewUsesCurrentUser(review.filters) &&
+            <p>미리보기는 지금 선택한 작업자를 기준으로 계산합니다. 저장한 보기는 열어 본 작업자의 업무를 표시합니다.</p>}
           {criteria.length ? <ul className="jira-saved-view-criteria" aria-label="적용할 검색 조건">
             {criteria.map(({ field, label }, index) => <li key={`${field}-${index}`}>{label}</li>)}
           </ul> : <p>이 프로젝트의 모든 업무가 조건에 해당합니다.</p>}

@@ -1,9 +1,9 @@
-import type { Express } from 'express';
+import type { Express, Request } from 'express';
 import { ISSUE_FIELD_BREAKDOWN_DIMENSIONS, ISSUE_FIELD_BREAKDOWN_MEASURE_LABELS, PRIORITY, type CustomFieldDefinition, type GitlabLink,
   type Issue, type IssueFieldBreakdownDimension, type IssueFieldBreakdownMeasure, type IssueFieldBreakdownPage, type IssueFieldBreakdownQuery, type IssueFieldBreakdownSelection,
   type ProjectIssueSchema, type ProjectWorkflow, type SavedView, type User } from '../shared/types.js';
 import { IssueFieldFilterError } from '../shared/issue-field-filter.js';
-import { createIssueViewMatcher } from '../shared/issue-view.js';
+import { createIssueViewMatcher, issueViewUsesCurrentUser } from '../shared/issue-view.js';
 import { buildIssueFieldBreakdown, FieldBreakdownError } from './field-breakdown.js';
 import { IssueSchemaError, type IssueSchemaService } from './issue-schema.js';
 import type { Store } from './store.js';
@@ -108,8 +108,8 @@ function builtinField(by: IssueFieldBreakdownDimension, schema: ProjectIssueSche
 }
 
 export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas: IssueSchemaService,
-  lookupWorkflow: (projectId: string) => ProjectWorkflow) {
-  function breakdown(projectId: string, body: Record<string,unknown>) {
+  lookupWorkflow: (projectId: string) => ProjectWorkflow, viewer: (request: Request) => string | undefined) {
+  function breakdown(projectId: string, body: Record<string,unknown>, viewerId: string | undefined) {
     const schema = schemas.get(projectId);
     const query = parseFieldBreakdownQuery(body);
     const { groupBy, comparisonBy } = query;
@@ -124,7 +124,7 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
           JOIN issues AS issue ON issue.id = link.issue_id WHERE issue.project_id = ?`)
         .all(projectId).map(row => JSON.parse(String(row.json)) as GitlabLink)
       : [];
-    const match = view ? createIssueViewMatcher(view.filters,{issueSchemas:[schema],users,gitlabLinks},schema) : undefined;
+    const match = view ? createIssueViewMatcher(view.filters,{issueSchemas:[schema],users,gitlabLinks},schema,viewerId) : undefined;
     const issues: Issue[] = [];
     for (const row of store.db.prepare('SELECT json FROM issues WHERE project_id=?').iterate(projectId)) {
       const issue = JSON.parse(String(row.json)) as Issue;
@@ -137,15 +137,16 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
     const result = buildIssueFieldBreakdown({
       projectId,field,issues,users,schemaVersion:schema.version,generatedAt:new Date().toISOString(),
       savedView:view ? {id:view.id,name:view.name,version:view.version} : null,
+      ...(view && issueViewUsesCurrentUser(view.filters) ? { viewerId: viewerId ?? null } : {}),
       groupBy, comparison, measure,
       ...(groupBy || comparison || measure ? { configuration: { workflowVersion: workflow?.version, importGeneration: store.setting('attachmentImportGeneration') } } : {}),
     });
     return { ...result, matchedIssues: issues };
   }
 
-  function cohort(projectId: string, body: Record<string, unknown>,
+  function cohort(projectId: string, body: Record<string, unknown>, viewerId: string | undefined,
     { revision, bucketId, comparisonBucketId }: Pick<IssueFieldBreakdownSelection, 'revision' | 'bucketId' | 'comparisonBucketId'>) {
-    const { report, issuesByBucket, columnIdsByIssue, matchedIssues } = breakdown(projectId, body);
+    const { report, issuesByBucket, columnIdsByIssue, matchedIssues } = breakdown(projectId, body, viewerId);
     if (report.revision !== revision) {
       throw new FieldBreakdownError(409, '집계 이후 업무·보기·속성이 변경되었습니다. 필드 집계를 다시 조회해 주세요.');
     }
@@ -160,8 +161,8 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
 
   const path = '/api/projects/:id/field-breakdown';
   app.post(path,(req,res)=>{
-    const report = store.transaction(() => breakdown(req.params.id,req.body).report);
-    res.json(report);
+    const report = store.transaction(() => breakdown(req.params.id,req.body,viewer(req)).report);
+    res.set('Cache-Control', 'no-store').json(report);
   });
   app.post(`${path}/issues`,(req,res)=>{
     const group = breakdownGroup(req.body);
@@ -174,7 +175,7 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
       throw new FieldBreakdownError(400, '일괄 편집 대상 정보를 포함할지 확인해 주세요.');
     }
     const page = store.transaction((): IssueFieldBreakdownPage => {
-      const { bucket, comparisonBucket, issues, matchedIssues } = cohort(req.params.id, req.body, group);
+      const { bucket, comparisonBucket, issues, matchedIssues } = cohort(req.params.id, req.body, viewer(req), group);
       const visible = issues.slice(offset, offset + pageSize);
       const result = { bucket, ...(comparisonBucket ? { comparisonBucket } : {}), total: issues.length, offset, issues: visible };
       if (!includeEditTargets) return result;
@@ -184,12 +185,12 @@ export function registerFieldBreakdownRoutes(app: Express, store: Store, schemas
         return { id, version, labels };
       }) };
     });
-    res.json(page);
+    res.set('Cache-Control', 'no-store').json(page);
   });
 
-  return (projectId: string, selection: IssueFieldBreakdownSelection, selectedIds: readonly string[]): boolean => {
+  return (projectId: string, selection: IssueFieldBreakdownSelection, selectedIds: readonly string[], request: Request): boolean => {
     try {
-      const { issues } = cohort(projectId, { ...selection }, selection);
+      const { issues } = cohort(projectId, { ...selection }, viewer(request), selection);
       const memberIds = new Set(issues.map(issue => issue.id));
       return selectedIds.every(id => memberIds.has(id));
     } catch (error) {

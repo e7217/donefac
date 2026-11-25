@@ -20,7 +20,7 @@ export function issueSummaryAttrs(attrs: Record<string, unknown> | undefined): D
   return { ...issueListAttrs(attrs), groupBy: isIssueSummaryGroupBy(attrs?.groupBy) ? attrs.groupBy : 'status' };
 }
 
-function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, groupBy: DocumentIssueSummary['groupBy']) {
+function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, groupBy: DocumentIssueSummary['groupBy'], actorId?: string) {
   const statuses = groupBy === 'status' ? projectStatuses(data, projectId) : [];
   const people = groupBy === 'assignee' ? data.users : [];
   const statusGroups = statuses.map(status => [status.id, { label: status.label, color: status.color }] as const);
@@ -31,7 +31,7 @@ function summarize(data: WorkspaceSnapshot, projectId: string, savedView: SavedV
   );
   const orderedIds = new Map([...definitions.keys()].map((id, index) => [id, index]));
   const groups = new Map<string, Group>();
-  const matching = matchingDocumentIssues(data, projectId, savedView);
+  const matching = matchingDocumentIssues(data, projectId, savedView, actorId);
 
   for (const issue of matching) {
     const id = groupBy === 'status' ? issue.status : groupBy === 'assignee' ? (issue.assigneeId ?? '') : issue.priority;
@@ -127,9 +127,10 @@ function SummaryGroups({ groups, total, limit, openIssue }: { groups: Group[]; t
   </>;
 }
 
-export function IssueSummaryCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_LIST_LIMIT, onEdit, onDelete }: {
+export function IssueSummaryCard({ data, attrs, actorId, openIssue, limit = DOCUMENT_ISSUE_LIST_LIMIT, onEdit, onDelete }: {
   data: WorkspaceSnapshot;
   attrs: DocumentIssueSummary;
+  actorId?: string;
   openIssue: (id: string) => void;
   limit?: number;
   onEdit?: () => void;
@@ -140,7 +141,7 @@ export function IssueSummaryCard({ data, attrs, openIssue, limit = DOCUMENT_ISSU
   const savedView = data.savedViews?.find(item => item.projectId === projectId && item.id === savedViewId);
   const unavailable = !project ? '프로젝트를 찾을 수 없습니다.' : savedViewId && !savedView ? '공유 보기를 찾을 수 없습니다.' : '';
   const label = !unavailable && project ? `${project.name} · ${savedView?.name ?? '전체 업무'}` : attrs.label || '업무 현황';
-  const { groups, total } = useMemo(() => unavailable ? { groups: [], total: 0 } : summarize(data, projectId, savedView, groupBy), [data, projectId, savedView, groupBy, unavailable]);
+  const { groups, total } = useMemo(() => unavailable ? { groups: [], total: 0 } : summarize(data, projectId, savedView, groupBy, actorId), [data, projectId, savedView, groupBy, actorId, unavailable]);
 
   return <section className="doc-issue-list doc-issue-summary" aria-label="업무 현황">
     <header className="doc-issue-list-heading">

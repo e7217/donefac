@@ -77,6 +77,31 @@ test('JQL original aliases resolve to current options without overriding conflic
   assert.throws(() => translateJiraViewQuery('assignee = old-login OR status = 14', sourceContext), JiraViewQueryError);
 });
 
+test('JQL currentUser() preserves symbolic member equality and resolves only for the actual viewer', () => {
+  const result = translateJiraViewQuery('project = OLD AND (assignee = CurrentUser ( ) AND reporter = currentuser()) AND status = review', {
+    ...context,
+    prepareSourceAliases: fields => {
+      assert.deepEqual(fields, ['status']);
+      return undefined;
+    },
+  });
+  assert.deepEqual(result.filters, { ...noFilters, status: 'review', assignee: { kind: 'current-user' }, reporter: { kind: 'current-user' } });
+  assert.deepEqual(result.criteria.slice(1), [
+    { field: 'assignee', label: '담당자 · 현재 사용자' }, { field: 'reporter', label: '요청자 · 현재 사용자' },
+    { field: 'status', label: '상태 · In Review' },
+  ]);
+  const data = { users: context.users.map(user => ({ ...user, color: '#123456' })) };
+  const assigned = issue({ assigneeId: 'member-a', reporterId: 'member-a' });
+  assert.equal(createIssueViewMatcher(result.filters, data, schema, 'member-a')(assigned), true);
+  assert.equal(createIssueViewMatcher(result.filters, data, schema, 'member-b')(assigned), false);
+  assert.equal(createIssueViewMatcher(result.filters, data, schema)(assigned), false);
+  assert.deepEqual(translateJiraViewQuery('assignee = currentUser() AND assignee = CURRENTUSER() AND reporter = member-b', context).filters,
+    { ...noFilters, assignee: { kind: 'current-user' }, reporter: { kind: 'member', memberId: 'member-b' } });
+
+  const quoted = translateJiraViewQuery('assignee = "currentUser()"', { ...context, users: [{ ...context.users[0], name: 'currentUser()' }] });
+  assert.deepEqual(quoted.filters, { ...noFilters, assigneeId: 'member-a' });
+});
+
 test('JQL status lists and status-only OR groups form exact unions and AND intersections', () => {
   const multi = 'project = OLD AND status IN (review, done, "In Review") AND labels = release';
   const equivalent = 'project = OLD AND (status = 완료 OR (status IN (review))) AND labels = release';
@@ -389,7 +414,11 @@ test('unsupported, contradictory and ambiguous JQL cannot silently become a broa
     'status = review OR (status = done AND labels = a)', 'status IN ()', 'status IN (review,)',
     'status IN (currentUser())', 'status IN (review, unknown)', 'issuetype IN (bug, task)',
     'status != done', 'status WAS "In Review"', 'status CHANGED', 'priority = High', 'text = foo', 'key = TEAM-5',
-    'assignee = currentUser()', 'labels IN (membersOf("team"))', 'reporter = NULL', 'assignee IS NOT EMPTY',
+    'assignee = currentUser(member-a)', 'assignee = currentUser(', 'reporter = currentUser(currentUser())',
+    'assignee = "currentUser"()', 'assignee = "currentUser()"', 'assignee != currentUser()', 'reporter IN (currentUser())',
+    'project = currentUser()', 'status = currentUser()', 'labels = currentUser()', 'assignee = currentUser() OR reporter = currentUser()',
+    'assignee = currentUser() AND assignee = member-a', 'reporter = currentUser() AND reporter IS EMPTY',
+    'labels IN (membersOf("team"))', 'reporter = NULL', 'assignee IS NOT EMPTY',
     'status = review AND status = done', 'reporter IS EMPTY AND reporter = member-a', 'assignee = unknown',
     'status = " in review"', 'status = rev', 'type = Retired', 'labels = a AND labels != a',
     'labels IS EMPTY AND labels IS NOT EMPTY', 'labels IS EMPTY AND labels NOT IN (b)', 'labels IN (a, b) AND labels NOT IN (a, b)',

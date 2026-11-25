@@ -1412,7 +1412,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       <IssueJiraStatusHistory issueId={issue.id} />
     </>}</div>
     </aside></div>
-    {previewDocument && <IssueDocumentPreview key={previewDocument.id} data={data} document={previewDocument}
+    {previewDocument && <IssueDocumentPreview key={previewDocument.id} data={data} actorId={props.actorId} document={previewDocument}
       referenceIssueId={bodyReferences.has(previewDocument.id) ? issueId : undefined}
       onClose={onCloseDocumentPreview} onOpenDocument={() => navigateDocument(previewDocument.id)}
       openIssue={id => { if (id === issueId) onCloseDocumentPreview(); else navigateIssue(id); }} openDocument={navigateDocument} />}

@@ -352,6 +352,11 @@ export function createApp(options: {
     return store.all<User>('users')[0]?.id ?? null;
   };
   const actor = (req: Request) => resolveActor(req) ?? fail('먼저 팀원을 등록해 주세요.');
+  const viewActor = (req: Request): string | undefined => {
+    // API authorization replaces this header with the key's actor when applicable.
+    const selected = req.header('X-Actor-Id');
+    return selected && store.get<User>('users', selected) ? selected : undefined;
+  };
   const recordActivity = (actorId: string, resourceType: string, resourceId: string, action: string, detail = '', createdAt = now()) =>
     store.put('activities', { id: uid(), resourceType, resourceId, actorId, action, detail, createdAt });
   const activity = (req: Request, resourceType: string, resourceId: string, action: string, detail = '') =>
@@ -1252,7 +1257,7 @@ export function createApp(options: {
   });
   worklogs.registerRoutes(app,{actor,activity});
   timeReservations.registerRoutes(app,{actor,activity});
-  const fieldBreakdownMatches = registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId));
+  const fieldBreakdownMatches = registerFieldBreakdownRoutes(app,store,issueSchemas,projectId=>workflows.get(projectId),viewActor);
   function createReportDocument(
     req: Request, capture: Pick<ReportSnapshot, 'documentId' | 'title' | 'actorId' | 'createdAt'> & { projectId: string | null },
     content: RichContent, issueIds: string[], kind: '주간 보고서' | '진행 차단 회의' | '결정 후속 업무 회의' = '주간 보고서',
@@ -1270,7 +1275,7 @@ export function createApp(options: {
     return document;
   }
   registerDeliveryBlockerRoutes(app, {
-    store, schemas: issueSchemas, calendars, issueRelations, actor, documentCreation, projectScope: req => apiKeys.projectScope(req),
+    store, schemas: issueSchemas, calendars, issueRelations, actor, viewer: viewActor, documentCreation, projectScope: req => apiKeys.projectScope(req),
     createDocument: (req, capture, content, issueIds) => createReportDocument(req, capture, content, issueIds, '진행 차단 회의'),
   });
   reports.registerRoutes(app,{
@@ -1284,7 +1289,7 @@ export function createApp(options: {
     return validateIssue(dueDate ? { ...proposed, dueDate } : proposed, before);
   }});
   workflows.registerRoutes(app,{actor,activity});savedViews.registerRoutes(app,{
-    actor, activity, planningItems: projectId => planning.forProject(projectId),
+    actor, viewer: viewActor, activity, planningItems: projectId => planning.forProject(projectId),
     issueOrder: projectId => issueOrders.get(projectId), workflow: projectId => workflows.get(projectId),
   });
   savedFieldBreakdowns.registerRoutes(app, { actor, activity });
@@ -3220,6 +3225,11 @@ export function createApp(options: {
     if (data.schemaVersion < 106 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
       view && typeof view === 'object' && Object.hasOwn(view, 'sort')
     )) fail('저장된 보기의 필드 정렬을 포함한 백업은 schemaVersion 106이 필요합니다.');
+    if (data.schemaVersion < 123 && Array.isArray(data.savedViews) && data.savedViews.some((view: unknown) =>
+      view && typeof view === 'object' && 'filters' in view && view.filters && typeof view.filters === 'object' &&
+      ('assignee' in view.filters || ('reporter' in view.filters && view.filters.reporter && typeof view.filters.reporter === 'object' &&
+        'kind' in view.filters.reporter && view.filters.reporter.kind === 'current-user'))
+    )) fail('현재 사용자 조건을 포함한 보기는 schemaVersion 123이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {

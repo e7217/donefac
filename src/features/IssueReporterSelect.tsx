@@ -3,7 +3,7 @@
 import type { Issue, IssueViewReporterFilter, User } from '../../shared/types';
 
 const memberPrefix = 'member:';
-const reporterKinds = { unset: '미지정', unknown: '기록 없음' } as const;
+const reporterKinds = { 'current-user': '현재 사용자', unset: '미지정', unknown: '기록 없음' } as const;
 
 function reporterMemberLabel(user: User, users: readonly User[]) {
   return users.some(other => other.id !== user.id && other.name === user.name) ? `${user.name} (${user.email})` : user.name;
@@ -28,10 +28,11 @@ export function IssueReporterFilterSelect({ filter, users, disabled, onChange }:
     <select aria-label="요청자 필터" value={selected} disabled={disabled} onChange={event => {
       const next = event.currentTarget.value;
       if (next.startsWith(memberPrefix)) onChange({ kind: 'member', memberId: next.slice(memberPrefix.length) });
-      else if (next === 'unset' || next === 'unknown') onChange({ kind: next });
+      else if (next === 'current-user' || next === 'unset' || next === 'unknown') onChange({ kind: next });
       else onChange(undefined);
     }}>
       <option value="">전체 요청자</option>
+      <option value="current-user">{reporterKinds['current-user']}</option>
       <option value="unset">{reporterKinds.unset}</option>
       <option value="unknown">{reporterKinds.unknown}</option>
       {missingMember && <option value={selected} disabled>현재 팀원 없음</option>}

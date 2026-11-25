@@ -1,4 +1,4 @@
-import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type IssueViewSortField, type IssueViewSortRule, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
+import { isIssueViewGitlabFilter, PRIORITY, type Issue, type IssueViewAssigneeFilter, type IssueViewDateFilter, type IssueViewGitlabFilter, type IssueViewLabelFilter, type IssueViewPlanningFilter, type IssueViewReporterFilter, type IssueViewSortField, type IssueViewSortRule, type PlanningItem, type Priority, type Project, type ProjectIssueOrder, type ProjectIssueSchema, type SavedViewState, type User, type WorkspaceSnapshot } from './types.js';
 import { isCalendarDate } from './calendar.js';
 import { createIssueFieldMatcher } from './issue-field-filter.js';
 import { issueSearchText } from './issue-schema.js';
@@ -15,6 +15,10 @@ export class IssueViewGitlabFilterError extends Error {
 }
 
 export class IssueViewPriorityLabelFilterError extends Error {
+  readonly status = 400;
+}
+
+export class IssueViewAssigneeFilterError extends Error {
   readonly status = 400;
 }
 
@@ -122,6 +126,13 @@ function checkedFilterObject(
   return value as Record<string, unknown>;
 }
 
+export function parseIssueViewAssigneeFilter(value: unknown): IssueViewAssigneeFilter | undefined {
+  if (value === undefined || value === null) return undefined;
+  const input = checkedFilterObject(value, ['kind'], '담당자 조건', IssueViewAssigneeFilterError);
+  if (Object.hasOwn(input, 'kind') && input.kind === 'current-user') return { kind: 'current-user' };
+  throw new IssueViewAssigneeFilterError('담당자 조건을 확인해 주세요.');
+}
+
 export function parseIssueViewReporterFilter(value: unknown, users: readonly Pick<User, 'id'>[]): IssueViewReporterFilter | undefined {
   if (value === undefined || value === null) return undefined;
   const input = checkedFilterObject(value, ['kind', 'memberId'], '요청자 조건', IssueViewReporterFilterError);
@@ -131,7 +142,7 @@ export function parseIssueViewReporterFilter(value: unknown, users: readonly Pic
     if (!users.some(user => user.id === memberId)) throw new IssueViewReporterFilterError('요청자 필터의 팀원을 찾을 수 없습니다.');
     return { kind, memberId };
   }
-  if ((kind === 'unset' || kind === 'unknown') && !Object.hasOwn(input, 'memberId')) return { kind };
+  if ((kind === 'unset' || kind === 'unknown' || kind === 'current-user') && !Object.hasOwn(input, 'memberId')) return { kind };
   throw new IssueViewReporterFilterError('요청자 조건을 확인해 주세요.');
 }
 
@@ -278,9 +289,17 @@ export function createTeamIssueSearchMatcher(query?: string) {
   };
 }
 
-function matchesReporterFilter(filter: IssueViewReporterFilter, reporterId: Issue['reporterId']): boolean {
-  if (filter.kind === 'member') return reporterId === filter.memberId;
-  return filter.kind === 'unset' ? reporterId === null : reporterId === undefined;
+function matchesReporterFilter(filter: IssueViewReporterFilter, reporterId: Issue['reporterId'], currentUserId?: string): boolean {
+  switch (filter.kind) {
+    case 'member': return reporterId === filter.memberId;
+    case 'unset': return reporterId === null;
+    case 'unknown': return reporterId === undefined;
+    case 'current-user': return currentUserId !== undefined && reporterId === currentUserId;
+  }
+}
+
+export function issueViewUsesCurrentUser(filters: SavedViewState['filters']): boolean {
+  return filters.assignee?.kind === 'current-user' || filters.reporter?.kind === 'current-user';
 }
 
 /** The same criteria drive the issue screen and snapshots of a shared view. */
@@ -288,8 +307,14 @@ export function createIssueViewMatcher(
   filters: SavedViewState['filters'],
   data: Pick<WorkspaceSnapshot, 'issueSchemas' | 'users'> & Partial<Pick<WorkspaceSnapshot, 'gitlabLinks'>>,
   schema: ProjectIssueSchema,
+  actorId?: string,
 ): (issue: Issue) => boolean {
-  const {assigneeId,type,planning,gitlab,reporter} = filters;
+  const {assignee,assigneeId,type,planning,gitlab,reporter} = filters;
+  const currentUserId = issueViewUsesCurrentUser(filters) && actorId && data.users.some(user => user.id === actorId)
+    ? actorId : undefined;
+  const matchAssignee = assignee
+    ? (issue: Issue) => currentUserId !== undefined && issue.assigneeId === currentUserId
+    : (issue: Issue) => assigneeId === 'all' || (assigneeId === 'none' ? !issue.assigneeId : issue.assigneeId === assigneeId);
   const selectedStatuses = new Set(issueViewStatusIds(filters));
   const search = filters.query.toLowerCase();
   const matchFields = createIssueFieldMatcher(filters.fieldFilter, schema);
@@ -301,8 +326,8 @@ export function createIssueViewMatcher(
   }) : [];
   return issue =>
     (selectedStatuses.size === 0 || selectedStatuses.has(issue.status)) &&
-    (assigneeId === 'all' || (assigneeId === 'none' ? !issue.assigneeId : issue.assigneeId === assigneeId)) &&
-    (!reporter || matchesReporterFilter(reporter, issue.reporterId)) &&
+    matchAssignee(issue) &&
+    (!reporter || matchesReporterFilter(reporter, issue.reporterId, currentUserId)) &&
     (type === 'all' || issue.type === type) &&
     planConditions.every(({ idField, selected }) => (issue[idField] ?? null) === selected) &&
     (!planning?.dates || matchesDateFilter(issue, planning.dates)) &&

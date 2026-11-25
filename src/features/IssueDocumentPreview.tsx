@@ -7,6 +7,7 @@ import './issue-document-preview.css';
 
 type DocumentReaderProps = {
   data: WorkspaceSnapshot;
+  actorId: string;
   document: DocPage;
   openIssue: (id: string) => void;
   openDocument: (id: string) => void;
@@ -15,11 +16,11 @@ type DocumentReaderProps = {
 
 const DocumentReader = lazy(async () => {
   const { DocumentBlocksProvider, ReadonlyDocumentContent } = await import('./DocumentBlocks');
-  const DocumentReader = memo(function DocumentReader({ data, document, openIssue, openDocument, referenceIssueId, onReady }: DocumentReaderProps & {
+  const DocumentReader = memo(function DocumentReader({ data, actorId, document, openIssue, openDocument, referenceIssueId, onReady }: DocumentReaderProps & {
     onReady: () => void;
   }) {
     useLayoutEffect(onReady, [onReady]);
-    return <DocumentBlocksProvider data={data} documentId={document.id} content={document.content}
+    return <DocumentBlocksProvider data={data} actorId={actorId} documentId={document.id} content={document.content}
       openIssue={openIssue} openDocument={openDocument}>
       <ReadonlyDocumentContent content={document.content} documentId={document.id} nodeBudget={30_000} showOutline referenceIssueId={referenceIssueId} />
     </DocumentBlocksProvider>;
@@ -27,7 +28,7 @@ const DocumentReader = lazy(async () => {
   return { default: DocumentReader };
 });
 
-export function IssueDocumentPreview({ data, document, onClose, onOpenDocument, openIssue, openDocument, referenceIssueId }: DocumentReaderProps & {
+export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenDocument, openIssue, openDocument, referenceIssueId }: DocumentReaderProps & {
   onClose: () => void;
   onOpenDocument: () => void;
 }) {
@@ -119,7 +120,7 @@ export function IssueDocumentPreview({ data, document, onClose, onOpenDocument, 
     </header>
     <div ref={body} className="issue-document-preview-body" role="region" aria-label="미리보기 본문" tabIndex={0}>
       <Suspense fallback={<p role="status">문서를 불러오는 중…</p>}>
-        <DocumentReader data={data} document={document} openIssue={openIssue} openDocument={openDocument}
+        <DocumentReader data={data} actorId={actorId} document={document} openIssue={openIssue} openDocument={openDocument}
           referenceIssueId={referenceIssueId} onReady={markBodyReady} />
       </Suspense>
     </div>

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { defaultIssueSchema } from '../../shared/issue-schema.js';
 import {
-  createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT, IssueViewPlanningFilterError, IssueViewReporterFilterError,
-  IssueViewStatusFilterError, issueViewStatusCriteria, issueViewStatusIds, parseIssueViewPlanningFilter,
+  createIssueViewMatcher, ISSUE_VIEW_STATUS_LIMIT, IssueViewAssigneeFilterError, IssueViewPlanningFilterError, IssueViewReporterFilterError,
+  IssueViewStatusFilterError, issueViewStatusCriteria, issueViewStatusIds, issueViewUsesCurrentUser, parseIssueViewAssigneeFilter, parseIssueViewPlanningFilter,
   parseIssueViewReporterFilter, parseIssueViewStatusIds,
 } from '../../shared/issue-view.js';
 import type { Issue, PlanningItem, SavedViewState } from '../../shared/types.js';
@@ -56,13 +56,50 @@ test('reporter filter admits exact member IDs, explicit unset and missing data',
   assert.deepEqual(parse({ kind: 'member', memberId: 'all' }), { kind: 'member', memberId: 'all' });
   assert.deepEqual(parse({ kind: 'unset' }), { kind: 'unset' });
   assert.deepEqual(parse({ kind: 'unknown' }), { kind: 'unknown' });
+  assert.deepEqual(parse({ kind: 'current-user' }), { kind: 'current-user' });
   for (const invalid of [
     [], {}, 'owner', { kind: 'all' }, { kind: 'member' }, { kind: 'member', memberId: 2 },
     { kind: 'member', memberId: 'owner ' }, { kind: 'member', memberId: 'missing' },
     { kind: 'member', memberId: 'owner', extra: true }, { kind: 'unset', memberId: undefined },
-    { kind: 'unknown', memberId: null }, Object.create({ kind: 'unset' }),
+    { kind: 'unknown', memberId: null }, { kind: 'current-user', memberId: 'owner' }, Object.create({ kind: 'unset' }),
     { get kind() { throw new Error('unexpected reporter getter'); } },
   ]) assert.throws(() => parse(invalid), IssueViewReporterFilterError);
+});
+
+test('current-user assignee admits only a symbolic condition', () => {
+  assert.equal(parseIssueViewAssigneeFilter(null), undefined);
+  assert.equal(parseIssueViewAssigneeFilter(undefined), undefined);
+  const currentUser = { kind: 'current-user' };
+  assert.deepEqual(parseIssueViewAssigneeFilter(currentUser), currentUser);
+  for (const invalid of [
+    [], {}, 'current-user', { kind: 'member', memberId: 'owner' }, { ...currentUser, memberId: 'owner' },
+    { ...currentUser, extra: undefined }, Object.create(currentUser),
+    { get kind() { throw new Error('unexpected assignee getter'); } },
+  ]) assert.throws(() => parseIssueViewAssigneeFilter(invalid), IssueViewAssigneeFilterError);
+});
+
+test('a shared current-user criterion follows the actual viewer and composes with fixed and other viewer filters', () => {
+  const owner = { id: 'owner', name: 'Owner', email: 'owner@example.test', color: '#123456' };
+  const teammate = { id: 'teammate', name: 'Teammate', email: 'teammate@example.test', color: '#abcdef' };
+  const data = { users: [owner, teammate] };
+  const currentUser = { kind: 'current-user' } as const;
+  const selfAssigned = issue({ assigneeId: owner.id, reporterId: owner.id, status: 'review' });
+  const assigned = issue({ assigneeId: owner.id, reporterId: teammate.id, status: 'review' });
+  const reported = issue({ assigneeId: teammate.id, reporterId: owner.id, status: 'review' });
+  const removed = issue({ assigneeId: 'missing', reporterId: 'missing', status: 'review' });
+  const issues = [selfAssigned, assigned, reported, removed, issue({ status: 'review' }), issue({ assigneeId: owner.id })];
+  const filters = { ...defaultFilters, status: 'review', assignee: currentUser };
+  assert.equal(issueViewUsesCurrentUser(filters), true);
+  assert.equal(issueViewUsesCurrentUser({ ...defaultFilters, assigneeId: owner.id }), false);
+  assert.deepEqual(issues.filter(createIssueViewMatcher(filters, data, schema, owner.id)), [selfAssigned, assigned]);
+  assert.deepEqual(issues.filter(createIssueViewMatcher(filters, data, schema, teammate.id)), [reported]);
+  for (const missing of [undefined, 'missing']) {
+    assert.deepEqual(issues.filter(createIssueViewMatcher(filters, data, schema, missing)), []);
+    assert.deepEqual(issues.filter(createIssueViewMatcher({ ...defaultFilters, reporter: currentUser }, data, schema, missing)), []);
+  }
+  assert.deepEqual(issues.filter(createIssueViewMatcher({ ...filters, reporter: currentUser }, data, schema, owner.id)), [selfAssigned]);
+  assert.deepEqual(issues.filter(createIssueViewMatcher({ ...filters, reporter: currentUser }, data, schema, teammate.id)), []);
+  assert.deepEqual(issues.filter(createIssueViewMatcher({ ...defaultFilters, assigneeId: teammate.id, reporter: currentUser }, data, schema, owner.id)), [reported]);
 });
 
 test('saved reporter criteria compose with status and assignee without merging missing and unset', () => {

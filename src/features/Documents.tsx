@@ -1941,7 +1941,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     navigateSlash(event);
   }
 
-  return <DocumentBlocksProvider data={data} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
+  return <DocumentBlocksProvider data={data} actorId={actorId} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     editorReadOnly={bodyReadOnly || archivedLiveRecovery}
     openIssueBlock={bodyReadOnly || checklistReselecting ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
     <DocumentAnnotationProvider value={bodyReadOnly || checklistReselecting ? undefined : openAnnotation}><section className="documents-feature">

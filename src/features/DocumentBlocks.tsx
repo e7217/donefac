@@ -39,6 +39,7 @@ export type ReferenceSelection = {
 const MAX_INCLUDE_DEPTH = 5, TOTAL_INCLUDE_NODES = 4000;
 type Context = {
   data: WorkspaceSnapshot;
+  actorId?: string;
   documentId: string | null;
   openIssue: (id: string) => void;
   openDocument: (id: string) => void;
@@ -53,12 +54,12 @@ type DocumentBlocksProviderProps = Omit<Context, 'includeBudget' | 'editorReadOn
   editorReadOnly?: boolean;
   children: ReactNode;
 };
-export function DocumentBlocksProvider({ data, documentId, content, openIssue, openDocument, openIssueBlock, onListDraftChange,
+export function DocumentBlocksProvider({ data, actorId, documentId, content, openIssue, openDocument, openIssueBlock, onListDraftChange,
   editorReadOnly = true, children }: DocumentBlocksProviderProps) {
   const count = content ? contentReferences(content).filter(reference => reference.kind === 'include').length : 0;
-  const value = useMemo(() => ({ data, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange,
+  const value = useMemo(() => ({ data, actorId, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange,
     editorReadOnly, includeBudget: Math.floor(TOTAL_INCLUDE_NODES / Math.max(1, count)) }),
-    [data, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange, editorReadOnly, count]);
+    [data, actorId, documentId, openIssue, openDocument, openIssueBlock, onListDraftChange, editorReadOnly, count]);
   return <BlockContext.Provider value={value}>{children}</BlockContext.Provider>;
 }
 function contextOf(value: Context | null): Context { if (!value) throw new Error('문서 블록을 표시할 문맥이 없습니다.'); return value; }
@@ -359,7 +360,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     if (limit < DOCUMENT_ISSUE_LIST_LIMIT) state.exhausted = true;
     if (limit <= 0) return null;
     state.remaining -= limit;
-    const props = { data: context.data, openIssue: context.openIssue, limit };
+    const props = { data: context.data, actorId: context.actorId, openIssue: context.openIssue, limit };
     return node.type === 'issueSummary'
       ? <IssueSummaryCard key={key} {...props} attrs={issueSummaryAttrs(node.attrs)} />
       : <IssueListCard key={key} {...props} attrs={issueListAttrs(node.attrs)} />;
@@ -539,6 +540,7 @@ function IssueBlockNodeView({ node, selected, getPos, deleteNode, editor }: Node
   const canEdit = editor.isEditable && Boolean(context.openIssueBlock);
   const props = {
     data: context.data,
+    actorId: context.actorId,
     openIssue: context.openIssue,
     onEdit: canEdit ? () => { if (editor.isEditable) context.openIssueBlock?.(editor, nodeType, { getPos, attrs }); } : undefined,
     onDelete: canEdit ? () => { if (editor.isEditable) deleteNode(); } : undefined,

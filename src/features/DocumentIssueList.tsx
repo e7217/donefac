@@ -51,16 +51,17 @@ export function keepDocumentSelection(event: MouseEvent<HTMLButtonElement>) {
   event.stopPropagation();
 }
 
-export function matchingDocumentIssues(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined) {
-  const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, projectId)) : null;
+export function matchingDocumentIssues(data: WorkspaceSnapshot, projectId: string, savedView: SavedView | undefined, actorId?: string) {
+  const match = savedView ? createIssueViewMatcher(savedView.filters, data, projectIssueSchema(data, projectId), actorId) : null;
   const matching = data.issues.filter(issue => issue.projectId === projectId && (!match || match(issue)));
   const projectOrder = data.issueOrders?.find(candidate => candidate.projectId === projectId);
   return orderIssueView(matching, projectOrder, savedView?.sort);
 }
 
-export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_LIST_LIMIT, onEdit, onDelete }: {
+export function IssueListCard({ data, attrs, actorId, openIssue, limit = DOCUMENT_ISSUE_LIST_LIMIT, onEdit, onDelete }: {
   data: WorkspaceSnapshot;
   attrs: IssueListAttrs;
+  actorId?: string;
   openIssue: (id: string) => void;
   limit?: number;
   onEdit?: () => void;
@@ -73,9 +74,9 @@ export function IssueListCard({ data, attrs, openIssue, limit = DOCUMENT_ISSUE_L
   const listId = useId();
   const { issues, count } = useMemo(() => {
     if (unavailable) return { issues: [], count: 0 };
-    const matching = matchingDocumentIssues(data, attrs.projectId, savedView);
+    const matching = matchingDocumentIssues(data, attrs.projectId, savedView, actorId);
     return { issues: matching.slice(0, limit), count: matching.length };
-  }, [unavailable, savedView, data, attrs.projectId, limit]);
+  }, [unavailable, savedView, data, attrs.projectId, actorId, limit]);
   const people = useMemo(() => new Map(data.users.map(person => [person.id, person.name])), [data.users]);
 
   return <section className="doc-issue-list" aria-label="업무 목록">

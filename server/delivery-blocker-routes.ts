@@ -6,7 +6,7 @@ import {
   type PlanningItem, type ProjectWorkflow, type ReportSnapshot, type RichContent, type SavedView, type User,
 } from '../shared/types.js';
 import { isRelationId } from '../shared/issue-relations.js';
-import { createIssueViewMatcher } from '../shared/issue-view.js';
+import { createIssueViewMatcher, issueViewUsesCurrentUser } from '../shared/issue-view.js';
 import type { CalendarService } from './calendars.js';
 import { buildDeliveryBlockers, hasGitlabDeliveryBlocker } from './delivery-blockers.js';
 import { buildDeliveryBlockerDraftContent } from './delivery-blocker-draft-content.js';
@@ -31,6 +31,7 @@ type Sources = {
   issueRelations: Pick<IssueRelationsService, 'directBlockers'>;
   projectScope: (request: Request) => readonly string[] | null;
   actor: (request: Request) => string;
+  viewer: (request: Request) => string | undefined;
   documentCreation: DocumentCreationService;
   createDocument: (request: Request, capture: DocumentCapture, content: RichContent, issueIds: string[]) => DocPage;
 };
@@ -77,7 +78,7 @@ function matchesReason(row: DeliveryBlockerRow, reason: DeliveryBlockerReason | 
 const decode = <T>(row: { json?: unknown }): T => JSON.parse(String(row.json)) as T;
 
 function reportFor(
-  projectId: string, selection: Selection, allowedProjects: readonly string[] | null,
+  projectId: string, selection: Selection, allowedProjects: readonly string[] | null, viewerId: string | undefined,
   { store, schemas, calendars, issueRelations }: Sources,
 ): DeliveryBlockerReport {
   const schema = schemas.get(projectId);
@@ -96,7 +97,7 @@ function reportFor(
   };
   const users = store.all<User>('users');
   const issueSchemas = [schema];
-  const candidateMatch = view ? createIssueViewMatcher({ ...view.filters, gitlab: undefined }, { issueSchemas, users }, schema) : null;
+  const candidateMatch = view ? createIssueViewMatcher({ ...view.filters, gitlab: undefined }, { issueSchemas, users }, schema, viewerId) : null;
   const candidates: Issue[] = [];
   for (const result of store.db.prepare(`SELECT json FROM issues WHERE project_id=?
     AND (? IS NULL OR json_extract(json,'$.releaseId')=?)`).iterate(projectId, selection.releaseId, selection.releaseId)) {
@@ -113,7 +114,7 @@ function reportFor(
   if (gitlabRows.length > GITLAB_LIMIT) throw new DeliveryBlockerQueryError(413, '업무에 연결된 GitLab 활동이 100,000개를 넘습니다. 저장된 보기로 대상을 좁혀 주세요.');
   const gitlabLinks = gitlabRows.map(row => decode<GitlabLink>(row));
   const targets = view?.filters.gitlab
-    ? candidates.filter(createIssueViewMatcher(view.filters, { issueSchemas, users, gitlabLinks }, schema))
+    ? candidates.filter(createIssueViewMatcher(view.filters, { issueSchemas, users, gitlabLinks }, schema, viewerId))
     : candidates;
   const targetIssueIds = targets.map(issue => issue.id);
   const blockers = issueRelations.directBlockers(targetIssueIds, allowedProjects, CONNECTION_LIMIT + 1);
@@ -136,7 +137,9 @@ function reportFor(
   const savedView = view ? { id: view.id, name: view.name, version: view.version } : null;
   const releaseRevision = release ? [release, targets.map(({ id, version }) => [id, version] as const)
     .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)] : [];
-  const revision = createHash('sha256').update(JSON.stringify([projectId, savedView, selection.reason, counts, rows, ...releaseRevision])).digest('hex');
+  const viewerRevision = view && issueViewUsesCurrentUser(view.filters) ? [viewerId ?? null] : [];
+  const revision = createHash('sha256').update(JSON.stringify([projectId, savedView, selection.reason, counts, rows,
+    ...releaseRevision, ...viewerRevision])).digest('hex');
   if (selection.revision && selection.revision !== revision) {
     throw new DeliveryBlockerQueryError(409, '조회 이후 진행 차단 내용이 바뀌었습니다. 첫 페이지부터 다시 조회해 주세요.', { reason: 'stale_report' });
   }
@@ -162,7 +165,7 @@ function createDraft(req: Request, projectId: string, sources: Sources): Deliver
     requestId, projectId, title, savedViewId: selection.savedViewId, reason: selection.reason, revision: selection.revision,
     ...(selection.releaseId ? { releaseId: selection.releaseId } : {}),
   }, () => {
-    const report = reportFor(projectId, selection, sources.projectScope(req), sources);
+    const report = reportFor(projectId, selection, sources.projectScope(req), sources.viewer(req), sources);
     if (!report.total) throw new DeliveryBlockerQueryError(422, '회의 초안에 담을 차단 업무가 없습니다.');
     const filters = new URLSearchParams();
     if (selection.releaseId) filters.set('release', selection.releaseId);
@@ -185,7 +188,7 @@ export function registerDeliveryBlockerRoutes(app: Express, sources: Sources) {
       const projectId = String(req.params.projectId);
       const selection = selectionFor(req.query);
       const allowedProjects = sources.projectScope(req);
-      const report = sources.store.transaction(() => reportFor(projectId, selection, allowedProjects, sources));
+      const report = sources.store.transaction(() => reportFor(projectId, selection, allowedProjects, sources.viewer(req), sources));
       res.json(report);
     } catch (error) {
       if (!(error instanceof DeliveryBlockerQueryError)) throw error;

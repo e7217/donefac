@@ -56,7 +56,9 @@ type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
 type ComponentClause = (BasicClause & { field: 'component' }) | { field: 'component'; offset: number; branches: ComponentClause[][] };
 type PriorityClause = { offset: number; values: Token[] };
 type DueClause = { field: 'due'; offset: number; from?: string; to?: string };
-type Clause = BasicClause | StatusClause | ComponentClause | DueClause;
+type CurrentUserClause = { field: 'assignee' | 'reporter'; offset: number; operator: 'current-user' };
+type ScalarCondition = { id: string | null; label: string };
+type Clause = BasicClause | StatusClause | ComponentClause | DueClause | CurrentUserClause;
 
 function isStatusClause(clause: Clause): clause is StatusClause {
   return clause.field === 'status' && ('branches' in clause || clause.operator === '=' || clause.operator === 'in');
@@ -243,7 +245,14 @@ class QueryParser {
     const field = parseField(start);
     if (field === 'due') return this.dueClause(start.offset);
     const base = { field, offset: start.offset };
-    if (this.consume('=')) return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
+    if (this.consume('=')) {
+      if ((field === 'assignee' || field === 'reporter') && isBare(this.current(), 'currentuser') && isBare(this.tokens[this.index + 1], '(')) {
+        this.index += 2;
+        this.expect(')', 'currentUser()에는 인수를 지정할 수 없습니다.');
+        return { field, offset: start.offset, operator: 'current-user' };
+      }
+      return { ...base, operator: '=', values: [this.literal('비교할 값을 입력해 주세요.')] };
+    }
     if (base.field === 'status' && this.consume('in')) return { ...base, operator: 'in', values: this.list('상태', ISSUE_VIEW_STATUS_LIMIT) };
     if (base.field === 'priority' && this.consume('in')) return { ...base, operator: 'in', values: this.list(fieldLabels.priority, MAX_TOKENS) };
     const isMultiValue = field === 'labels' || field === 'component';
@@ -372,8 +381,9 @@ function projectCriterion(context: JiraViewQueryContext, value?: Token) {
   return `프로젝트 · ${project.key} ${project.name}`;
 }
 
-function scalarCondition(field: Exclude<ScalarField, 'status'>, clause: BasicClause, context: JiraViewQueryContext,
-  resolveSourceAlias?: JiraViewSourceAliasResolver): { id: string; label: string } {
+function scalarCondition(field: Exclude<ScalarField, 'status'>, clause: BasicClause | CurrentUserClause, context: JiraViewQueryContext,
+  resolveSourceAlias?: JiraViewSourceAliasResolver): ScalarCondition {
+  if (clause.operator === 'current-user') return { id: null, label: `${fieldLabels[field]} · 현재 사용자` };
   if (!('values' in clause)) return { id: '', label: `${fieldLabels[field]} 없음` };
   const [value] = clause.values;
   if (field === 'project') return { id: context.project.id, label: projectCriterion(context, value) };
@@ -644,7 +654,7 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
   }
   const resolveSourceAlias = aliasFields.size ? context.prepareSourceAliases?.([...aliasFields]) : undefined;
   const filters: Translation['filters'] = { query: '', status: 'all', assigneeId: 'all', type: 'all' };
-  const conditions = new Map<ScalarField, { id: string; label: string }>();
+  const conditions = new Map<ScalarField, ScalarCondition>();
   const labelClauses: BasicClause[] = [];
   const statusClauses: StatusClause[] = [];
   const priorityClauses: PriorityClause[] = [];
@@ -674,12 +684,14 @@ export function translateJiraViewQuery(query: unknown, context: JiraViewQueryCon
     const previous = conditions.get(field);
     if (previous && previous.id !== condition.id) throw new JiraViewQueryError(`${fieldLabels[field]}에 서로 충돌하는 조건이 있습니다.`, clause.offset);
     conditions.set(field, condition);
-    switch (field) {
-      case 'type': filters.type = condition.id; break;
-      case 'assignee': filters.assigneeId = condition.id || 'none'; break;
-      case 'reporter': filters.reporter = condition.id ? { kind: 'member', memberId: condition.id } : { kind: 'unset' }; break;
-    }
   }
+  filters.type = conditions.get('type')?.id ?? 'all';
+  const assignee = conditions.get('assignee');
+  if (assignee?.id === null) filters.assignee = { kind: 'current-user' };
+  else if (assignee) filters.assigneeId = assignee.id || 'none';
+  const reporter = conditions.get('reporter');
+  if (reporter) filters.reporter = reporter.id === null ? { kind: 'current-user' }
+    : reporter.id ? { kind: 'member', memberId: reporter.id } : { kind: 'unset' };
   let statusLabel: string | undefined;
   if (statusClauses.length) {
     const statuses = statusIntersection(statusClauses, context, resolveSourceAlias);

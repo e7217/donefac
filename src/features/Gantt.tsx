@@ -935,14 +935,15 @@ function ProjectGantt(props: GanttProps) {
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [allProjects, data.savedViews, projectId]);
   const { sharedView, matchSharedView } = useMemo(() => {
     const view = data.savedViews?.find(view => view.id === ganttViewId && view.projectId === projectId);
-    return { sharedView: view, matchSharedView: view ? createIssueViewMatcher(view.filters, data, projectIssueSchema(data, projectId)) : null };
-  }, [data, ganttViewId, projectId]);
+    return { sharedView: view, matchSharedView: view ? createIssueViewMatcher(view.filters, data, projectIssueSchema(data, projectId), props.actorId) : null };
+  }, [data, ganttViewId, projectId, props.actorId]);
   const sharedViewUnavailable = ganttViewId !== null && !sharedView;
   const sharedFilters = sharedView?.filters;
   const sharedSortLabels = issueViewSortLabels(sharedView?.sort);
   const sharedIssueOrder = sharedView && data.issueOrders?.find(order => order.projectId === projectId);
   const sharedStatusLabel = sharedFilters ? issueStatusFilterLabel(sharedFilters, projectStatuses(data, projectId)) : undefined;
   const sharedGitlabFilter = sharedFilters?.gitlab;
+  const sharedAssigneeLabel = sharedFilters?.assignee?.kind === 'current-user' ? '담당자 · 현재 사용자' : undefined;
   const sharedReporterLabel = sharedFilters?.reporter ? issueReporterFilterLabel(sharedFilters.reporter, data.users) : undefined;
   const sharedPlanningFilter = sharedFilters?.planning;
   const sharedPlanningLabels = issuePlanningFilterLabels(sharedPlanningFilter, projectPlans);
@@ -1306,7 +1307,8 @@ function ProjectGantt(props: GanttProps) {
         const label = projectIssueTypes(data, projectId, { includeArchived: true }).find(value => value.id === type)?.name;
         filters.push(`유형 · ${label ?? '현재 유형 없음'}`);
       }
-      if (assigneeId !== 'all') {
+      if (sharedAssigneeLabel) filters.push(sharedAssigneeLabel);
+      else if (assigneeId !== 'all') {
         const name = assigneeId === 'none' ? '미지정' : data.users.find(value => value.id === assigneeId)?.name;
         filters.push(`담당자 · ${name ?? '현재 담당자 없음'}`);
       }
@@ -2379,6 +2381,9 @@ function ProjectGantt(props: GanttProps) {
       </ul>}
       {sharedStatusLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 상태 조건">
         <li>{sharedStatusLabel}</li>
+      </ul>}
+      {sharedAssigneeLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 담당자 조건">
+        <li>{sharedAssigneeLabel}</li>
       </ul>}
       {sharedReporterLabel && <ul className="gantt-shared-view-criteria" aria-label="간트에 적용된 요청자 조건">
         <li>{sharedReporterLabel}</li>

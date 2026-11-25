@@ -636,7 +636,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 선택한 Teamspace 프로젝트가 Jira 원본 프로젝트 하나와 연결되면 현재 프로젝트의 이관 업무와 적용 영수증에서 원래 상태·업무 유형의 이름과 ID, 담당자·요청자 계정의 사용자 이름·사용자 키·계정 ID·확인된 이메일을 찾는다. Jira에서 담당자나 요청자로 확인한 같은 계정은 두 조건 모두에 사용할 수 있다. 여러 원본 값이 하나의 Teamspace 값에 합쳐졌거나, 하나의 검색값이 서로 다른 현재 값에 해당하면 변환을 보류한다. 미리보기에는 현재 이름을 표시하고, 저장한 보기에는 Teamspace ID를 사용한다. [Atlassian Jira Data Center JQL 필드](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html)
 
-최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 서로 다른 필드를 잇는 `OR`, `currentUser()` 같은 동적 함수, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
+최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `assignee = currentUser()`와 `reporter = currentUser()`는 **현재 사용자** 조건으로 옮긴다. 미리보기는 요청한 작업자의 업무로 계산하며, 저장한 보기는 열람할 때의 작업자로 다시 계산한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 서로 다른 필드를 잇는 `OR`, 이 범위 밖의 함수와 연산자, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
 `due`와 `dueDate`는 따옴표로 감싼 `YYYY-MM-DD` 또는 `YYYY/MM/DD` 날짜를 `=`, `<`, `<=`, `>`, `>=`로 비교한다. `AND`로 연결한 조건들의 공통 범위를 `filters.planning.dates`의 `{mode:'due',from?,to?}`로 반환한다. 양 끝은 포함하며 `<`와 `>`의 경계는 하루 앞뒤로 옮긴다. 목표 마감일이 없는 업무는 결과에서 빠진다. 비어 있는 교집합, 상대 날짜나 날짜 함수, 날짜 집합과 빈 값 비교는 변환 오류로 표시한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
@@ -1548,6 +1548,12 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 브라우저의 `POST /api/views`와 `PATCH /api/views/:id`에 선택적으로 `filters.reporter`를 보낸다. `{ "kind": "member", "memberId": "팀원 ID" }`는 저장된 요청자가 해당 팀원인 업무를 조회한다. `{ "kind": "unset" }`은 `reporterId: null`인 미지정 업무, `{ "kind": "unknown" }`은 요청자 기록이 없는 업무를 조회한다.
 
 상태·담당자·유형·검색 등 나머지 조건과 함께 적용하며 목록·보드·간트, 문서 업무 블록, 필드 집계와 진행 차단 보고서에서 같은 저장 조건을 사용한다. 수정에서 `filters.reporter`를 생략하면 이전 조건을 유지한다. 전체 요청자 범위로 바꾸려면 `null`을 보낸다. 자체 백업 형식 85는 요청자 조건을 복원하고 팀원 ID는 복원할 데이터의 팀원과 대조한다.
+
+### 현재 사용자 조건
+
+담당자의 **현재 사용자**는 `filters`에 `{ "assigneeId": "all", "assignee": { "kind": "current-user" } }`로, 요청자의 **현재 사용자**는 `{ "reporter": { "kind": "current-user" } }`로 저장한다. 수정 요청에서 `assignee: null`을 보내면 담당자의 현재 사용자 조건을 해제한다. `assignee`를 생략하고 고정 팀원 또는 `none`을 보내도 새 담당자 조건을 적용한다. 담당자와 요청자의 현재 사용자 조건은 백업 형식 123에 포함한다.
+
+보고서에서는 브라우저가 선택한 작업자나 API 키에 연결된 작업자를 사용한다. 작업자를 확인할 수 없으면 현재 사용자 조건에서 업무가 0건이다. 조회 버전은 작업자를 포함하며 다른 작업자가 확인한 버전으로 페이지 조회, 필드 집계의 일괄 편집 또는 진행 차단 회의 초안을 요청하면 다시 조회해야 한다.
 
 ## 업무 필드 집계
 

@@ -2022,7 +2022,8 @@ export interface IssueViewLabelFilter {
   presence?: 'set' | 'empty';
 }
 
-export type IssueViewReporterFilter = { kind: 'member'; memberId: string } | { kind: 'unset' } | { kind: 'unknown' };
+export type IssueViewAssigneeFilter = { kind: 'current-user' };
+export type IssueViewReporterFilter = { kind: 'member'; memberId: string } | { kind: 'unset' } | { kind: 'unknown' } | { kind: 'current-user' };
 
 export type IssueViewSortField = 'dueDate' | 'startDate' | 'endDate' | 'priority' | 'createdAt' | 'updatedAt' | 'key' | 'title';
 export interface IssueViewSortRule { field: IssueViewSortField; direction: 'asc' | 'desc' }
@@ -2035,6 +2036,7 @@ export interface SavedViewState {
     query: string;
     status: string;
     assigneeId: string;
+    assignee?: IssueViewAssigneeFilter;
     type: string;
     fieldFilter?: IssueFieldFilter;
     planning?: IssueViewPlanningFilter;
