@@ -7,7 +7,7 @@ export type IssueReviewSource = {
   opener: HTMLElement;
   fallback: HTMLElement | null;
   projectScope?: string | null;
-  gitlabActivity?: GitlabIssueReviewSelection;
+  gitlabActivity?: { link: GitlabIssueReviewSelection; selectActivity: boolean };
 };
 export type OpenIssueForReview = (id: string, source: IssueReviewSource) => void;
 type IssueReviewTarget = Pick<Issue, 'id' | 'key'>;

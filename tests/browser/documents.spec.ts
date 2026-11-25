@@ -298,6 +298,51 @@ test('문서 이동을 취소할 수 있고 승인한 이동 후에도 로컬 �
   await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
 });
 
+test('문서 이동과 뒤로 가기에서 실행 취소가 다른 문서 내용을 가져오지 않는다', async ({ page, syntheticDocument }) => {
+  const { document, requests, initialText } = syntheticDocument;
+  const otherBody = '별도로 저장된 두 번째 문서 본문';
+  const response = await requests.post('/api/documents', { data: {
+    projectId: document.projectId, title: `${document.title} 두 번째`, content: richParagraph(otherBody),
+  } });
+  expect(response.status()).toBe(201);
+  const other = await response.json() as DocPage;
+  await page.setViewportSize({ width: 360, height: 820 });
+  await openDocument(page, document);
+  const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+  const editor = page.locator('.docs-prose[contenteditable="true"]');
+  const firstDraft = `${initialText} 첫 번째 초안`;
+  await editor.fill(firstDraft);
+  await expect(editor).toHaveText(firstDraft);
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('.docs-tree-link').getByText(other.title, { exact: true }).click();
+  await expect(title).toHaveValue(other.title);
+  await expect(editor).toHaveText(otherBody);
+  await editor.press('Control+z');
+  await expect(editor).toHaveText(otherBody);
+  await expect(page.locator('.docs-save-button')).toBeDisabled();
+
+  const secondDraft = `${otherBody} 두 번째 초안`;
+  await editor.fill(secondDraft);
+  await editor.press('Control+z');
+  await expect(editor).toHaveText(otherBody);
+  await editor.press('Control+z');
+  await expect(editor).toHaveText(otherBody);
+  await editor.press('Control+Shift+z');
+  await expect(editor).toHaveText(secondDraft);
+
+  page.once('dialog', dialog => dialog.accept());
+  await page.goBack();
+  await expect(title).toHaveValue(document.title);
+  await expect(editor).toHaveText(firstDraft);
+  await editor.press('Control+z');
+  await expect(editor).toHaveText(firstDraft);
+  await editor.press('Control+Shift+z');
+  await expect(editor).toHaveText(firstDraft);
+  const state = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  expect(state.documents.find(value => value.id === document.id)?.plainText).toBe(initialText);
+  expect(state.documents.find(value => value.id === other.id)?.plainText).toBe(otherBody);
+});
+
 test('보내지 않은 문서 댓글은 이동을 막고 문서·작업자별로 따로 복원된다', async ({ page, syntheticDocument }) => {
   const { document, requests } = syntheticDocument;
   const second = await (await requests.post('/api/documents', {

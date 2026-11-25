@@ -266,6 +266,26 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     await closeFirstPanel.click();
     await expect(button(feedRow(oldestPipeline), first.key)).toBeFocused();
 
+    await draft.fill('');
+    await oldestOpener.click();
+    await expectSelected(firstPanel, oldestPipeline);
+    const exactActivityHash = new URL(page.url()).hash;
+    await page.reload();
+    await expect(page).toHaveURL(url => url.hash === exactActivityHash);
+    await expectSelected(firstPanel, oldestPipeline);
+    await expect(review(firstPanel).getByRole('status')).toHaveText('3개 중 1번째');
+    await page.goBack();
+    await expect(firstPanel).toHaveCount(0);
+    await expect(page).toHaveURL(url => url.hash === feedHash);
+    await expect(oldestOpener).toBeFocused();
+    await page.goForward();
+    await expect(page).toHaveURL(url => url.hash === exactActivityHash);
+    await expectSelected(firstPanel, oldestPipeline);
+    await closeFirstPanel.click();
+    await expect(firstPanel).toHaveCount(0);
+    await expect(oldestOpener).toBeFocused();
+    await draft.fill('티켓 검토 중 보존할 연결 초안');
+
     await oldestOpener.click();
     await expectSelected(firstPanel, oldestPipeline);
     const pipelinePages = gitlabRegion(firstPanel).getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true });

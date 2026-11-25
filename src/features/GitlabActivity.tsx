@@ -1173,10 +1173,10 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
   })), [links, sharedPages]);
   const issueContext: IssueContext | undefined = issueReview && {
     keys: issueReview.keys,
-    openIssue({ id, issueId, projectId, kind, iid, manualLinkId }, opener, selectActivity) {
+    openIssue({ id, issueId, projectId, kind, iid, manualLinkId }, opener, selectActivity = false) {
       const issueIds = [...new Set(groups.flatMap(({ rows }) => rows.map(link => link.issueId)))];
       issueReview.openIssue(issueId, { issueIds, opener, fallback: issueReview.fallbackRef.current,
-        gitlabActivity: selectActivity ? { id, issueId, projectId, kind, iid, manualLinkId } : undefined });
+        gitlabActivity: { link: { id, issueId, projectId, kind, iid, manualLinkId }, selectActivity } });
     },
   };
   return <div className="gitlab-activity-list">{groups.map(({ group, rows }) => rows.length > 0 &&
@@ -1264,6 +1264,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       {link.originalJiraKey && <span className="gitlab-activity-detail">원본 Jira 키 <code>{link.originalJiraKey}</code></span>}
       {link.manualLinkId && <span className="gitlab-activity-detail gitlab-activity-manual-label">수동 연결</span>}
       {issueKey && issueContext && <button className="text-link gitlab-activity-issue" type="button"
+        data-gitlab-review-opener="issue"
         onClick={event => issueContext.openIssue(link, event.currentTarget)}>{issueKey}</button>}
     </div>
     <div className="gitlab-activity-status">
@@ -1285,6 +1286,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
     {(issueKey || statusCheck || manual) && <div className="gitlab-activity-row-actions">
       {issueKey && issueContext && <button className="btn btn-ghost" type="button"
+        data-gitlab-review-opener="activity"
         onClick={event => issueContext.openIssue(link, event.currentTarget, true)}>
         <ArrowRight size={14} aria-hidden="true" />티켓에서 이 활동 보기
       </button>}

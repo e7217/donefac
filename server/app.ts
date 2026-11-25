@@ -35,6 +35,7 @@ import { DocumentTreeCopyError, DocumentTreeCopyService } from './document-tree-
 import { DocumentFollowUpError, DocumentFollowUpService, readDocumentChecklistWork, resolveDocumentDecisionSource, resolveDocumentFollowUpComment, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
 import { DocumentCommentReplyError, DocumentCommentReplyService } from './document-comment-replies.js';
+import { CommentCreationError, CommentCreationService } from './comment-creation.js';
 import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersions, updateDocumentCommentResolution, validateDocumentCommentResolution } from './document-comment-resolution.js';
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { CommentEditError, CommentEditingService, validateCommentEdit } from './comment-editing.js';
@@ -250,6 +251,7 @@ export function createApp(options: {
   const documentFollowUp=new DocumentFollowUpService(store);
   const documentSelectionComments=new DocumentSelectionCommentService(store);
   const documentCommentReplies=new DocumentCommentReplyService(store);
+  const commentCreation = new CommentCreationService(store);
   const commentEditing = new CommentEditingService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
@@ -2563,6 +2565,12 @@ export function createApp(options: {
     if (Object.hasOwn(req.body, 'parentCommentId')) return fail('문장 댓글 답글 경로를 사용해 주세요.');
     const draft = prepareOrdinaryComment(req.body.body, req.body.mentions);
     const authorId = actor(req);
+    if (resourceType === 'issue' && Object.hasOwn(req.body, 'requestId')) {
+      if (typeof resourceId !== 'string' || !resourceId) return fail('댓글 대상을 확인해 주세요.');
+      const result = commentCreation.create({ requestId: req.body.requestId, generation: req.body.expectedRestoreGeneration,
+        actorId: authorId, resourceId, draft }, () => saveOrdinaryComment(authorId, 'issue', resourceId, draft));
+      return res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.comment);
+    }
     const comment = store.transaction(() => saveOrdinaryComment(authorId, resourceType, resourceId, draft));
     res.status(201).json(comment);
   });
@@ -3695,6 +3703,7 @@ export function createApp(options: {
       documentFollowUp.clearForImport();
       documentSelectionComments.clearForImport();
       documentCommentReplies.clearForImport();
+      commentCreation.invalidateForImport();
       commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
@@ -3805,6 +3814,7 @@ export function createApp(options: {
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentResolutionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCommentReplyError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof CommentCreationError)return res.status(error.status).json({error:error.message});
     if(error instanceof CommentEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});

@@ -132,6 +132,51 @@ test('regular issue and document comments notify selected IDs once and preserve 
   assert.deepEqual((await f.inbox(reviewer, issue.id)).map(item => item.kind), ['issue-comment', 'issue-comment-mentioned']);
 });
 
+test('ticket comment request receipts save alerts once and reject replay across native restore', async t => {
+  const f = await fixture(t);
+  const issue = await f.issue('댓글 등록 확인');
+  const otherIssue = await f.issue('다른 업무의 댓글 등록');
+  const { restoreGeneration } = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.ok(restoreGeneration);
+  const input = { requestId: randomUUID(), expectedRestoreGeneration: restoreGeneration, resourceType: 'issue',
+    resourceId: issue.id, ...compose(f.user(reviewer), ' 등록 결과를 확인합니다.') };
+  const post = (body: unknown, status: number, actor = writer) => f.call<Comment>('/comments', { method: 'POST', body, status, actor });
+
+  const db = new DatabaseSync(join(f.directory, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER fail_ticket_comment_notification BEFORE INSERT ON team_notifications WHEN new.kind='issue-comment-mentioned'
+      BEGIN SELECT RAISE(ABORT, 'synthetic ticket comment notification failure'); END`);
+    await post(input, 500);
+    assert.deepEqual(await f.list('issue', issue.id), []);
+    assert.deepEqual(await f.inbox(reviewer, issue.id), []);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS fail_ticket_comment_notification');
+    db.close();
+  }
+  const created = await post(input, 201);
+  assert.deepEqual(await post(input, 200), created);
+  await post(input, 409, collaborator);
+  await post({ ...input, body: `${input.body} 다시` }, 409);
+  await post({ ...input, resourceId: otherIssue.id }, 409);
+  assert.deepEqual(await f.list('issue', otherIssue.id), []);
+  assert.deepEqual((await f.inbox(reviewer, issue.id)).map(item => item.commentId), [created.id]);
+
+  await f.restore(await f.call<Backup>('/export'));
+  const restored = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.notEqual(restored.restoreGeneration, restoreGeneration);
+  await post(input, 409);
+  await post({ ...input, requestId: randomUUID() }, 409);
+  await post({ ...input, expectedRestoreGeneration: restored.restoreGeneration }, 409);
+  assert.deepEqual(await f.list('issue', issue.id), [created]);
+  assert.deepEqual((await f.inbox(reviewer, issue.id)).map(item => item.commentId), [created.id]);
+
+  const retry = { ...input, requestId: randomUUID(), expectedRestoreGeneration: restored.restoreGeneration };
+  const deleted = await post(retry, 201);
+  await f.call(`/comments/${deleted.id}`, { method: 'DELETE' });
+  await post(retry, 409);
+  assert.deepEqual(await f.list('issue', issue.id), [created]);
+});
+
 test('a pinned comment saves mention alerts with its receipt and replays after a member is renamed', async t => {
   const f = await fixture(t);
   const document = await f.document('원문 문장 멘션');

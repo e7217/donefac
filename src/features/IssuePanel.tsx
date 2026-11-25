@@ -20,7 +20,8 @@ import { JiraOriginalCommentLinks } from './JiraOriginalCommentLinks';
 import { IssueRelations, type IssueRelationsHandle } from './IssueRelations';
 import { Attachments } from './Attachments';
 import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
-import { CommentMentionInput, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
+import { CommentMentionInput, commentDraftPayload, emptyCommentDraft, type CommentDraft } from './CommentMentions';
+import { issueCommentDraftKey, readIssueCommentDraft, writeIssueCommentDraft } from './issue-comment-draft';
 import { CommentEditBody, CommentEditButton, CommentEditedMark, useCommentEditing } from './CommentEdit';
 import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
@@ -40,6 +41,7 @@ import { FavoriteAction } from './FavoritesState';
 import { AtlassianLinks } from './AtlassianLinks';
 import type { GitlabIssueReviewSelection, IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { newRequestId } from '../lib/request-id';
 import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
@@ -198,7 +200,15 @@ function IssuePanelContent(props: IssuePanelProps) {
       ? { ...saved, ...(item.jiraOriginalLinksAvailable ? { jiraOriginalLinksAvailable: item.jiraOriginalLinksAvailable } : {}) } : item)),
   });
   const { discard: discardCommentEdit, hasDraft: hasCommentEditDraft, isPending: isCommentEditPending } = commentEditing;
-  const [commentDraft, setCommentDraft] = useState(emptyCommentDraft);
+  const commentDraftKey = issueCommentDraftKey(props.actorId, issueId, data.restoreGeneration);
+  const [commentComposer, setCommentComposer] = useState(() => readIssueCommentDraft(commentDraftKey));
+  const { draft: commentDraft, requestId: commentRequestId, stored: commentStored } = commentComposer;
+  const unstoredComment = useRef(Boolean(commentDraft.body.trim()) && !commentStored);
+  const storeCommentDraft = useCallback((draft: CommentDraft, requestId: string | null = null) => {
+    const stored = writeIssueCommentDraft(commentDraftKey, draft, requestId);
+    unstoredComment.current = Boolean(draft.body.trim()) && !stored;
+    setCommentComposer({ draft, requestId, stored });
+  }, [commentDraftKey]);
   const [loadingComments, setLoadingComments] = useState(true);
   const [loadedCommentActivation, setLoadedCommentActivation] = useState<number>();
   const handledCommentActivation = useRef<number>(undefined);
@@ -414,7 +424,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     window.addEventListener('teamspace:focus-issue-comment', focusCommentTab);
     return () => window.removeEventListener('teamspace:focus-issue-comment', focusCommentTab);
   }, [issueId, switchTab]);
-  useEffect(() => { dirtyRef.current = dirty || Boolean(commentDraft.body.trim()); }, [dirty, commentDraft.body]);
+  useEffect(() => { dirtyRef.current = dirty; }, [dirty]);
   if (loadedVersion !== issue?.version) {
     setLoadedVersion(issue?.version);
     if (!dirty) { setDraft(issue); setBaseDraft(issue); setStagedGitlabStatus(null); setLabels(issue?.labels.join(', ') || ''); setError(null); setConflict(false); setDeleteConfirm(false); }
@@ -450,8 +460,9 @@ function IssuePanelContent(props: IssuePanelProps) {
   }
   const confirmDiscard = useCallback(() => {
     if (savingRef.current) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
-    if (!dirtyRef.current) return true;
-    if (!window.confirm('저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?')) return false;
+    if (!dirtyRef.current && !unstoredComment.current) return true;
+    const pending = unstoredComment.current ? '저장하지 않은 업무 변경사항이나 보관하지 못한 댓글이 있습니다.' : '저장하지 않은 업무 변경사항이 있습니다.';
+    if (!window.confirm(`${pending} 내용을 버리고 최신 버전을 불러올까요?`)) return false;
     dirtyRef.current = false;
     return true;
   }, [notify]);
@@ -479,15 +490,16 @@ function IssuePanelContent(props: IssuePanelProps) {
       if (hasCommentEditDraft()) childNames.push('댓글 수정 입력');
       const moveGuard = projectMoveGuard.current;
       const moveDiscard = moveGuard.uncertain ? '이동 결과를 아직 확인하지 못했습니다. 다른 화면으로 이동할까요?' : '작성 중인 프로젝트 이동 설정을 버릴까요?';
-      if (moveGuard.dirty && !dirtyRef.current && !childNames.length && !window.confirm(moveDiscard)) {
+      const hasUnsavedFields = dirtyRef.current || unstoredComment.current;
+      if (moveGuard.dirty && !hasUnsavedFields && !childNames.length && !window.confirm(moveDiscard)) {
         event.preventDefault();
         return;
       }
-      if (moveGuard.dirty && (dirtyRef.current || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
-      if (dirtyRef.current || childNames.length || documentGuard.uncertain || followUpGuard.outcomeUnknown) {
-        const hasUnsavedInput = dirtyRef.current || childNames.length > 0;
-        const draftMessage = childNames.length ? `저장하지 않은 업무·댓글·${childNames.join('·')}을 버리고 이동할까요?`
-          : '저장하지 않은 업무 변경사항이나 작성 중인 댓글이 있습니다. 내용을 버리고 이동할까요?';
+      if (moveGuard.dirty && (hasUnsavedFields || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
+      if (hasUnsavedFields || childNames.length || documentGuard.uncertain || followUpGuard.outcomeUnknown) {
+        const hasUnsavedInput = hasUnsavedFields || childNames.length > 0;
+        const unsavedNames = [...(dirtyRef.current ? ['업무 변경사항'] : []), ...(unstoredComment.current ? ['보관하지 못한 댓글'] : []), ...childNames];
+        const draftMessage = `저장하지 않은 ${unsavedNames.join('·')}이 있습니다. 내용을 버리고 이동할까요?`;
         const unconfirmedSave = documentGuard.uncertain ? '연결 문서가 이미 저장됐을 수 있습니다.'
           : followUpGuard.outcomeUnknown ? '프로젝트 간 일정이 이미 저장됐을 수 있습니다.' : '';
         const message = unconfirmedSave ? `${unconfirmedSave} ${hasUnsavedInput ? draftMessage : '저장 결과 확인을 닫고 이동할까요?'}` : draftMessage;
@@ -498,7 +510,8 @@ function IssuePanelContent(props: IssuePanelProps) {
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
           setStagedGitlabStatus(null);
-          setCommentDraft(emptyCommentDraft()); setError(null); setConflict(false);
+          if (unstoredComment.current) storeCommentDraft(emptyCommentDraft());
+          setError(null); setConflict(false);
         });
       }
       if (rowScheduleEdit) afterAcceptedNavigation(event, () => closeRowScheduleEdit(false));
@@ -509,7 +522,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !savingRef.current && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
+      if (!dirtyRef.current && !unstoredComment.current && !savingRef.current && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
           !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
           !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !teamFollowUpGuard.current.dirty && !teamFollowUpGuard.current.pending &&
           !teamFollowUpGuard.current.outcomeUnknown && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
@@ -519,7 +532,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
   }, [issue, notify, tab, projectMove, rowScheduleEdit, teamFollowUp, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeTeamFollowUp,
-    closeLinkedDocumentCreation, scheduleSaveReview, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending]);
+    closeLinkedDocumentCreation, scheduleSaveReview, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending, storeCommentDraft]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -917,7 +930,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     const hadUnsaved = dirtyRef.current;
     if (!confirmDiscard()) return;
     savingRef.current = true; setSaving(true);
-    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setStagedGitlabStatus(null); setLabels(latest.labels.join(', ')); setCommentDraft(emptyCommentDraft()); setConflict(false); setError(null); dirtyRef.current = false; await refresh(); }
+    try { const snapshot = await api<WorkspaceSnapshot>('/workspace'); const latest = snapshot.issues.find(value => value.id === issueId); if (!latest) throw new Error('업무가 삭제되었거나 더 이상 존재하지 않습니다.'); setDraft(latest); setBaseDraft(latest); setStagedGitlabStatus(null); setLabels(latest.labels.join(', ')); if (unstoredComment.current) storeCommentDraft(emptyCommentDraft()); setConflict(false); setError(null); dirtyRef.current = false; await refresh(); }
     catch (err) { dirtyRef.current = hadUnsaved; setError({ message: errorMessage(err) }); } finally { savingRef.current = false; setSaving(false); }
   }
   async function deleteIssue() {
@@ -928,6 +941,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       await remove(`/issues/${issueId}?expectedVersion=${draft?.version ?? issue.version}`);
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       dirtyRef.current = false;
+      storeCommentDraft(emptyCommentDraft());
       discardCommentEdit();
       try {
         await refresh();
@@ -944,17 +958,30 @@ function IssuePanelContent(props: IssuePanelProps) {
     event.preventDefault();
     const payload = commentDraftPayload(commentDraft);
     if (!payload.body || commentingRef.current) return;
+    const generation = data.restoreGeneration;
+    const requestId = generation ? commentRequestId ?? newRequestId() : null;
     commentingRef.current = true;
     setCommenting(true); setCommentError('');
+    if (requestId) storeCommentDraft(commentDraft, requestId);
     try {
       const value = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': props.actorId },
-        body: JSON.stringify({ resourceType: 'issue', resourceId: issueId, ...payload }) });
+        body: JSON.stringify({ resourceType: 'issue', resourceId: issueId, ...payload,
+          ...(requestId ? { requestId, expectedRestoreGeneration: generation } : {}) }) });
+      if (!value?.id || value.resourceType !== 'issue' || value.resourceId !== issueId || value.authorId !== props.actorId) {
+        throw new Error('등록한 댓글 응답을 확인할 수 없습니다.');
+      }
       setComments(previous => previous.some(item => item.id === value.id) ? previous : [...previous, value]);
-      setCommentDraft(emptyCommentDraft());
+      storeCommentDraft(emptyCommentDraft());
       window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
-      await refresh();
+      await refresh().catch(() => setCommentError('댓글을 등록했습니다. 티켓 목록을 다시 불러와 주세요.'));
+    } catch (err) {
+      if (err instanceof ApiError && [400, 404, 409, 422].includes(err.status)) {
+        storeCommentDraft(commentDraft);
+        setCommentError(errorMessage(err));
+      } else {
+        setCommentError(requestId ? '댓글 등록 결과를 확인하지 못했습니다. 같은 요청으로 다시 확인해 주세요.' : errorMessage(err));
+      }
     }
-    catch (err) { setCommentError(errorMessage(err)); }
     finally { commentingRef.current = false; setCommenting(false); }
   }
   async function linkDocument(documentId: string) {
@@ -1397,8 +1424,11 @@ function IssuePanelContent(props: IssuePanelProps) {
         {commentError && <div className="issue-form-error" role="alert">{commentError}</div>}
         <form onSubmit={addComment}>
           <CommentMentionInput className="field" placeholder="댓글을 작성하세요…" aria-label="댓글 내용" draft={commentDraft}
-            onChange={setCommentDraft} users={data.users} rows={3} required maxLength={10000} readOnly={commenting} />
-          <div className="issue-comment-submit"><button className="btn" disabled={!commentDraft.body.trim() || commenting} type="submit"><Plus size={14} />{commenting ? '등록 중…' : '댓글 등록'}</button></div>
+            onChange={value => { setCommentError(''); storeCommentDraft(value); }} users={data.users} rows={3} required maxLength={10000}
+            readOnly={commenting || Boolean(commentRequestId)} />
+          {commentDraft.body.trim() && !commentStored && <p className="issue-form-error" role="status">이 탭에 댓글 초안을 보관하지 못했습니다.</p>}
+          <div className="issue-comment-submit"><button className="btn" disabled={!commentDraft.body.trim() || commenting} type="submit"><Plus size={14} />
+            {commenting ? '등록 중…' : commentRequestId ? '등록 결과 다시 확인' : '댓글 등록'}</button></div>
         </form>
       </section>
       <section className="issue-danger-zone">{deleteConfirm ? <><p><strong>{issue.key} 업무를 휴지통으로 옮길까요?</strong><br /><span>휴지통에서 업무를 복원할 수 있습니다. 이미 기록한 작업 시간은 프로젝트 보고서에 남습니다.{(dirty || commentDraft.body.trim() || commentEditing.dirty) && ' 저장하지 않은 편집과 보내지 않은 댓글은 사라집니다.'}</span></p><div><button className="btn btn-ghost" onClick={() => setDeleteConfirm(false)} disabled={saving}>취소</button><button className="btn issue-btn-danger" onClick={deleteIssue} disabled={saving || commenting || Boolean(commentEditing.operation)}>휴지통으로 이동</button></div></> : <button className="btn btn-ghost" onClick={() => setDeleteConfirm(true)}><Trash2 size={14} /> 업무 삭제</button>}</section>

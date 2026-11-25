@@ -6,6 +6,7 @@ import { getMarkRange, type EditorEvents, type MappablePosition } from '@tiptap/
 import { CollaborationMappablePosition } from '@tiptap/extension-collaboration';
 import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
+import { history } from '@tiptap/pm/history';
 import { NodeSelection, type Transaction } from '@tiptap/pm/state';
 import { createAbsolutePositionFromRelativePosition, createRelativePositionFromTypeIndex } from 'yjs';
 import {
@@ -163,6 +164,19 @@ const draftFromPage = (page: DocPage): Draft => {
   };
 };
 const sameBody = (left: RichContent, right: RichContent) => left === right || JSON.stringify(left) === JSON.stringify(right);
+const manualHistoryKey = history().spec.key;
+
+function loadManualBody(editor: Editor | null, content: RichContent) {
+  if (!editor || editor.isDestroyed) return;
+  editor.chain().setMeta('addToHistory', false).setContent(content, { emitUpdate: false }).run();
+  const state = editor.state;
+  const historyPlugin = manualHistoryKey?.get(state);
+  if (!historyPlugin) return;
+  // Reinitialize the undo and redo stacks without resetting the other editor plugins.
+  const withoutHistory = state.reconfigure({ plugins: state.plugins.filter(plugin => plugin !== historyPlugin) });
+  editor.view.updateState(withoutHistory.reconfigure({ plugins: state.plugins }));
+}
+
 function draftAfterSave(captured: Draft, current: Draft, saved: DocPage, live: boolean): Draft {
   const next = draftFromPage(saved);
   const savedMetadata = documentMetadata(saved);
@@ -534,7 +548,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     setDraft(next);
     rememberDraft(next);
     if (syncManualBody && old && !sameBody(old.content, next.content)) {
-      manualEditorRef.current?.commands.setContent(next.content, { emitUpdate: false });
+      loadManualBody(manualEditorRef.current, next.content);
     }
   }, [rememberDraft]);
 
@@ -713,7 +727,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       editSequence: previous.editSequence, dirty: true,
     } : {}) };
     draftRef.current = next; setDraft(next); rememberDraft(next);
-    manualEditor?.commands.setContent(next.content, { emitUpdate: false });
+    loadManualBody(manualEditor, next.content);
     sessionRef.current = current; setSession(current);
     archivedLiveRecoveryRef.current = false; setArchivedLiveRecovery(false);
     manualRecoveryRef.current = false; setManualRecovery(false);
@@ -792,7 +806,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     } catch { /* A malformed local draft must not prevent opening a saved document. */ }
     draftRef.current = next;
     setDraft(next);
-    manualEditor.commands.setContent(next.content, { emitUpdate: false });
+    loadManualBody(manualEditor, next.content);
     setConflict(next.dirty && next.expectedVersion !== selectedPage.version ? 'generic' : null);
     setShowLatest(false);
     setReferenceSelection(null);
@@ -1396,7 +1410,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
         const next = draftFromPage(result); draftRef.current = next; setDraft(next); rememberDraft(next, capturedActor);
         if (sessionRef.current?.enabled) setLiveReload(value => value + 1);
-        else manualEditor?.commands.setContent(next.content, { emitUpdate: false });
+        else loadManualBody(manualEditor, next.content);
         setReferenceSelection(null); setIssueBlockSelection(null); setConflict(null);
       }
       await refresh(); notify('이전 내용을 새 버전으로 복구했습니다.', 'success');
@@ -1488,7 +1502,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const current = draftRef.current;
     const next = { ...draftFromPage(latest), ...(sessionRef.current?.enabled && !manualRecoveryRef.current && current ? { content: current.content, plainText: current.plainText } : {}) };
     draftRef.current = next; setDraft(next); rememberDraft(next);
-    if (!sessionRef.current?.enabled || manualRecoveryRef.current) manualEditor?.commands.setContent(next.content, { emitUpdate: false });
+    if (!sessionRef.current?.enabled || manualRecoveryRef.current) loadManualBody(manualEditor, next.content);
     manualRecoveryRef.current = false; setManualRecovery(false);
     setConflict(null);
   }

@@ -119,7 +119,7 @@ function draftDatesAreSaved(issue: Issue, draft: StoredGanttDateDraft) {
 }
 type DragMode = 'move' | 'start' | 'end';
 type DragState = { issue: Issue; initialX: number; delta: number; mode: DragMode };
-type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
+type TrackDraft = (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean, incompleteDate?: boolean) => void;
 type GanttProps = FeatureProps & {
   refreshGantt: WorkspaceRefresh;
   allProjects?: boolean;
@@ -427,7 +427,7 @@ function ProjectGantt(props: GanttProps) {
   const restoreBatchFollowUpFocus = useRef<'follow-up' | 'team-blockers' | null>(null);
   const teamFollowUpPreviewButton = useRef<HTMLButtonElement>(null);
   const busyRef = useRef(false), previewRef = useRef<SchedulePreview | null>(null);
-  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean }>());
+  const draftsRef = useRef(new Map<string, { dirty: boolean; pending: boolean; awaitingResult: boolean; incompleteDate: boolean }>());
   const inlineDateDrafts = useRef(new Map<string, InlineDateDraft>());
   const retainedDates = useRef(new Map<string, StoredGanttDateDraft>());
   const storageKey = ganttDateDraftKey(props.actorId, allProjects ? null : projectId, data.restoreGeneration);
@@ -524,9 +524,9 @@ function ProjectGantt(props: GanttProps) {
     if (opener.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
     else scrollRef.current?.focus({ preventScroll: true });
   }, [busy, linkEditor]);
-  const trackDraft = useCallback<TrackDraft>((id, dirty, pending = false, awaitingResult = false) => {
+  const trackDraft = useCallback<TrackDraft>((id, dirty, pending = false, awaitingResult = false, incompleteDate = false) => {
     const hadDraft = draftsRef.current.size > 0;
-    if (dirty || pending || awaitingResult) draftsRef.current.set(id, { dirty, pending, awaitingResult });
+    if (dirty || pending || awaitingResult) draftsRef.current.set(id, { dirty, pending, awaitingResult, incompleteDate });
     else draftsRef.current.delete(id);
     const next = draftsRef.current.size > 0;
     if (next !== hadDraft) {
@@ -616,7 +616,8 @@ function ProjectGantt(props: GanttProps) {
       }
       if (isGanttPreservedByNavigation(event)) return;
       const keepDates = areGanttDateDraftsPreservedByNavigation(event);
-      const discardableDrafts = [...draftsRef.current].filter(([id]) => !keepDates || !id.startsWith('dates:'));
+      // A native date input exposes only its last complete value for recovery.
+      const discardableDrafts = [...draftsRef.current].filter(([id, value]) => !keepDates || !id.startsWith('dates:') || value.incompleteDate);
       if (previewRef.current || discardableDrafts.some(([, value]) => value.dirty)) {
         const awaitingCreationResult = draftsRef.current.get(CREATE_ISSUE_DRAFT)?.awaitingResult;
         const awaitingLinkResult = draftsRef.current.get('dependency')?.awaitingResult ||
@@ -629,6 +630,8 @@ function ProjectGantt(props: GanttProps) {
           : awaitingScheduleResult ? '일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫고 이동할까요?'
           : awaitingCreationResult
           ? '업무가 이미 추가됐을 수 있습니다. 간트 목록에서 결과를 확인할 수 있습니다. 현재 입력을 닫을까요?'
+          : keepDates && discardableDrafts.some(([, value]) => value.incompleteDate)
+          ? '완성하지 않은 날짜 입력과 열린 간트 편집을 닫을까요? 완성한 날짜 입력은 유지됩니다.'
           : keepDates && retainedDates.current.size > 0 ? '열린 간트 편집과 미리보기를 닫을까요? 행에 입력한 날짜는 유지됩니다.'
           : '저장하지 않은 간트 입력과 미리보기를 버리고 이동할까요?';
         if (!window.confirm(confirmation)) event.preventDefault();
@@ -667,7 +670,7 @@ function ProjectGantt(props: GanttProps) {
     };
     const unload = (event: BeforeUnloadEvent) => {
       const needsConfirmation = [...draftsRef.current].some(([id, draft]) =>
-        !id.startsWith('dates:') || draft.pending || draft.awaitingResult || dateStorageError);
+        !id.startsWith('dates:') || draft.pending || draft.awaitingResult || draft.incompleteDate || dateStorageError);
       if (busyRef.current || previewRef.current || needsConfirmation) { event.preventDefault(); event.returnValue = ''; }
     };
     const importReset = () => {
@@ -1464,7 +1467,7 @@ function ProjectGantt(props: GanttProps) {
     });
   }
   function openScheduleFocus(kind: ScheduleFocus['kind'], issue: Issue, opener: HTMLButtonElement) {
-    if (scheduleFocus || !canChangeScheduleFocus(kind)) return;
+    if (scheduleFocus || !canChangeScheduleFocus()) return;
     const next: ScheduleFocus = {
       kind, opener, teamScope: teamFocusScope, issueId: issue.id, projectId: issue.projectId,
       previousSelection: selected, previousWindowStart: windowStart,
@@ -1484,7 +1487,7 @@ function ProjectGantt(props: GanttProps) {
     });
   }
   function closeScheduleFocus() {
-    if (!scheduleFocus || !canChangeScheduleFocus(scheduleFocus.kind)) return;
+    if (!scheduleFocus || !canChangeScheduleFocus()) return;
     queueMicrotask(() => {
       restoringScheduleFocus.current = scheduleFocus;
       setScheduleFocus(null);
@@ -1496,17 +1499,17 @@ function ProjectGantt(props: GanttProps) {
       setShiftMode(null);
     });
   }
-  function canChangeScheduleFocus(kind: ScheduleFocus['kind']) {
-    return allProjects && kind === 'dependencies' ? dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' }) : canLeave();
+  function canChangeScheduleFocus() {
+    return dispatchWorkspaceNavigation({ preserveGantt: 'dateDrafts' });
   }
   function changeTraceTeamBlockers(includeTeamBlockers: boolean) {
-    if (scheduleFocus?.kind !== 'dependencies' || !canChangeScheduleFocus(scheduleFocus.kind)) return;
+    if (scheduleFocus?.kind !== 'dependencies' || !canChangeScheduleFocus()) return;
     setScheduleFocus({ ...scheduleFocus, includeTeamBlockers });
   }
   function locateFindingDate(issueId: string, endpoint: ScheduleDependencyEndpoint) {
     const row = focusedTrace && issueRows.get(issueId);
     if (!row) return onLocateIssueDate(issueId, endpoint);
-    if (!scheduleFocus || !canChangeScheduleFocus(scheduleFocus.kind)) return false;
+    if (!scheduleFocus || !canChangeScheduleFocus()) return false;
     locateScheduleFocusRow(row.issue, { endpoint });
     return true;
   }
@@ -3482,9 +3485,9 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
     setEnd(inlineDateInput(saved.endDate));
   }, [issue.id, onInlineDraftChange, owner]);
   useLayoutEffect(() => {
-    onDraftChange(draftId, editing, pending);
+    onDraftChange(draftId, editing, pending, false, incomplete);
     onInlineDraftChange(issue.id, dirty ? { source, startDate: start || null, endDate: end || null, accept, owner } : null, owner);
-  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, editing, dirty, pending, source, start, end, accept, owner]);
+  }, [onDraftChange, onInlineDraftChange, draftId, issue.id, editing, dirty, pending, incomplete, source, start, end, accept, owner]);
   useLayoutEffect(() => () => {
     onDraftChange(draftId, false);
     onInlineDraftChange(issue.id, null, owner, true);

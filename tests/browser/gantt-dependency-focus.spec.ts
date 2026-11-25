@@ -117,6 +117,8 @@ test('360px 간트에서 가려진 선후행 업무를 단계별로 보고 일�
     await g.select(anchor).check();
     await expect(g.open).toHaveCount(0);
     await g.select(independent).uncheck();
+    const elsewhereEnd = g.row(independent).getByLabel(`${independent.key} 종료일`, { exact: true });
+    await elsewhereEnd.fill(d(6));
     await g.open.press('Enter');
     await expect(g.flow).toBeVisible();
     await expect(g.flow.getByRole('checkbox', { name: '프로젝트 간 차단 포함', exact: true })).toHaveCount(0);
@@ -182,6 +184,8 @@ test('360px 간트에서 가려진 선후행 업무를 단계별로 보고 일�
     await expect(g.rows).toHaveCount(2);
     await expect(g.row(anchor)).toBeVisible();
     await expect(g.row(independent)).toBeVisible();
+    await expect(elsewhereEnd).toHaveValue(d(6));
+    expect((await workspace(request)).issues.find(issue => issue.id === independent.id)?.endDate).toBeNull();
     await expect(g.search).toHaveValue('현재 표시');
     await expect(hideDone).toBeChecked();
     await expect(viewPicker).toHaveValue(view.id);
@@ -348,7 +352,7 @@ test('360px 팀 간트에서 프로젝트 간 차단 경로를 보고 검색·�
   }
 });
 
-test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연결을 해제하면 후행 범위를 다시 계산한다', async ({ page, request }) => {
+test('간트 흐름의 미완성 입력을 보호하고 연결을 해제하면 후행 범위를 다시 계산한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const f = await fixture(request);
@@ -372,33 +376,37 @@ test('간트 흐름 전환을 취소하면 미저장 날짜를 보호하고 연�
     await page.goto(`/#/${f.project.id}/gantt`);
     await g.search.fill(anchor.title);
     await g.select(anchor).check();
+    const start = g.row(anchor).getByLabel(`${anchor.key} 시작일`, { exact: true });
     const end = g.row(anchor).getByLabel(`${anchor.key} 종료일`, { exact: true });
     await end.fill(d(4));
-    const dismissOpen = page.waitForEvent('dialog').then(async dialog => {
-      expect(dialog.type()).toBe('confirm');
+    await start.press('Delete');
+    const dismissOpen = page.waitForEvent('dialog', { timeout: 8000 }).then(async dialog => {
+      const message = dialog.message();
       await dialog.dismiss();
+      expect(dialog.type()).toBe('confirm');
+      expect(message).toContain('완성하지 않은 날짜 입력');
     });
     await g.open.click();
     await dismissOpen;
     await expect(g.flow).toHaveCount(0);
+    await expect(start).toBeFocused();
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
     await expect(end).toHaveValue(d(4));
     expect((await workspace(request)).issues.find(issue => issue.id === anchor.id)?.endDate).toBe(d(3));
-    await end.press('Escape');
+    await start.press('Escape');
     await expect(end).toHaveValue(d(3));
 
     await g.open.click();
     await expect(g.flow).toBeVisible();
     const nextStart = g.row(next).getByLabel(`${next.key} 시작일`, { exact: true });
     await nextStart.fill(d(4));
-    const dismissClose = page.waitForEvent('dialog').then(async dialog => {
-      expect(dialog.type()).toBe('confirm');
-      await dialog.dismiss();
-    });
     await g.close.click();
-    await dismissClose;
-    await expect(g.flow).toBeVisible();
+    await expect(g.flow).toHaveCount(0);
+    await expect(g.row(next)).toContainText('현재 보기 조건 밖');
     await expect(nextStart).toHaveValue(d(4));
     expect((await workspace(request)).issues.find(issue => issue.id === next.id)?.startDate).toBeNull();
+    await g.open.click();
+    await expect(g.flow).toBeVisible();
 
     const links = page.getByRole('region', { name: '업무 연결 목록', exact: true });
     const unlink = links.getByRole('button', { name: `${anchor.key}와 ${next.key} 연결 해제`, exact: true });

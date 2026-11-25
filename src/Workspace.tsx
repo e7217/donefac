@@ -250,6 +250,7 @@ type IssueReview = {
   projectScope: string | null;
   issueIds: readonly string[];
   gitlabActivity?: GitlabIssueReviewSelection;
+  gitlabOpener?: { linkId: string; action: 'issue' | 'activity' };
   openerIssueId?: string;
   focusDirection?: IssueReviewDirection;
 };
@@ -261,6 +262,7 @@ function isDocumentLinkedWorkRoute(route: WorkspaceRoute): boolean {
 
 function issueReviewHistoryKey(route: WorkspaceRoute) {
   if (route.view === 'mywork') return 'teamspaceMyWorkReview';
+  if (route.view === 'development') return 'teamspaceDevelopmentIssueReview';
   if (isDocumentLinkedWorkRoute(route)) return 'teamspaceDocumentIssueReview';
 }
 
@@ -268,6 +270,11 @@ function readIssueReviewHistory(value: unknown, route: WorkspaceRoute, index: nu
   if (!value || typeof value !== 'object' || !route.issueId) return;
   const entry = value as Partial<IssueReviewHistory>;
   const review = entry.review;
+  if (route.view === 'development' && (review?.projectScope !== route.projectId ||
+      typeof review.gitlabOpener?.linkId !== 'string' ||
+      (review.gitlabOpener.action !== 'issue' && review.gitlabOpener.action !== 'activity') ||
+      (review.gitlabActivity && (review.gitlabActivity.issueId !== route.issueId ||
+        review.gitlabActivity.id !== review.gitlabOpener.linkId)))) return;
   if (entry.index === index && entry.issueId === route.issueId && review?.actorId === actorId &&
       review.context === issueReviewContext(route) && Array.isArray(review.issueIds) &&
       review.issueIds.every(id => typeof id === 'string') && review.issueIds.includes(route.issueId) &&
@@ -542,6 +549,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const workspaceMain = useRef<HTMLElement>(null);
   const ganttDateDraftsRef = useRef<GanttIssueDateDrafts>(null);
   const boardIssueOpener = useRef<{ opener: HTMLElement; fallback: HTMLElement | null; reviewContext?: string } | null>(null);
+  const restoredDevelopmentReview = useRef<IssueReview | null>(null);
   const [boardDialogIssueId, setBoardDialogIssueId] = useState<string | null>(null);
 
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => setToast({ message, kind }), []);
@@ -621,8 +629,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const previous = acceptedRouteRef.current;
     const reviewHistoryKey = issueReviewHistoryKey(route);
     const sameReviewSource = previous && (route.view === 'mywork' ? previous.view === 'mywork' : hasSameDocumentContext(previous, route));
-    const historyReview = mode === 'replace' && reviewHistoryKey && sameReviewSource
+    const historyReview = mode === 'replace' && reviewHistoryKey && (route.view === 'development' || sameReviewSource)
       ? readIssueReviewHistory(history.state?.[reviewHistoryKey], route, index, actorRef.current) : undefined;
+    const previousDevelopmentReview = restoredDevelopmentReview.current;
+    restoredDevelopmentReview.current = route.view === 'development' ? historyReview?.review ?? null : null;
     setIssueReview(review => {
       const id = route.issueId;
       if (review?.actorId === actorRef.current && id && review.context === issueReviewContext(route) && review.issueIds.includes(id)) return review;
@@ -645,7 +655,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       linkedComment = { targetType: 'document', targetId: documentId, actorId: null, commentId: documentCommentId, activation: ++commentFocusActivation.current };
     }
     const openerIssueId = historyReview?.review.openerIssueId;
-    if (historyReview && openerIssueId && !boardIssueOpener.current && !previous?.issueId) {
+    if (route.view !== 'development' && historyReview && openerIssueId && !boardIssueOpener.current && !previous?.issueId) {
       const documentQueue = route.view === 'documents';
       const list = workspaceMain.current?.querySelector(documentQueue ? '.document-linked-work' : '.my-work-page');
       const fallback = list?.querySelector<HTMLElement>(documentQueue ? '.document-linked-work-header h3' : '.my-work-heading h1');
@@ -683,12 +693,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       } else if (previous.issueId && !route.issueId) {
         const opener = overlayIssueOpener.current;
         overlayIssueOpener.current = null;
+        const savedDevelopmentOpener = route.view === 'development' && previousDevelopmentReview?.actorId === actorRef.current &&
+          previousDevelopmentReview.context === issueReviewContext(route) ? previousDevelopmentReview.gitlabOpener : undefined;
         const focusMain = route.view === 'teamboard' || route.view === 'search' || route.view === 'favorites' ||
           route.view === 'development' || route.view === 'mywork';
         if (!boardTrigger && (opener || focusMain)) requestAnimationFrame(() => {
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
-          if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
+          const restoredFeed = savedDevelopmentOpener && workspaceMain.current?.querySelector('.linked-development');
+          const restoredOpener = savedDevelopmentOpener && restoredFeed?.querySelector<HTMLElement>(
+            `[data-gitlab-link-id="${CSS.escape(savedDevelopmentOpener.linkId)}"] [data-gitlab-review-opener="${savedDevelopmentOpener.action}"]`);
+          const target = opener?.isConnected ? opener : restoredOpener ?? restoredFeed?.querySelector<HTMLElement>('h2');
+          if (target && !target.closest('[inert]')) target.focus({ preventScroll: true });
           else if (focusMain || opener && route.view === 'documents') workspaceMain.current?.focus({ preventScroll: true });
         });
       }
@@ -698,6 +714,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const state = { ...(history.state && typeof history.state === 'object' ? history.state : {}), teamspaceRouteIndex: index };
     delete state.teamspaceMyWorkReview;
     delete state.teamspaceDocumentIssueReview;
+    delete state.teamspaceDevelopmentIssueReview;
     if (reviewHistoryKey && historyReview) state[reviewHistoryKey] = historyReview;
     const returnFocus = route.view === 'publication' && !route.issueId && mode === 'replace' && hash === location.hash
       ? publicationHistoryFocus(state.teamspacePublicationReturnFocus, hash, index) : null;
@@ -970,7 +987,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const openIssueForReview: OpenIssueForReview = (id, source) => {
     const current = acceptedRouteRef.current;
-    const { gitlabActivity } = source;
+    const gitlabActivity = source.gitlabActivity?.link;
     if (!current || current.issueId || !source.issueIds.includes(id) ||
         (current.view !== 'issues' && current.view !== 'teamboard' && current.view !== 'gantt' && current.view !== 'development' &&
           current.view !== 'mywork' && !isDocumentLinkedWorkRoute(current))) {
@@ -991,7 +1008,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const opened = acceptedRouteRef.current;
     if (!opened || opened.issueId !== id || issueReviewContext(opened) !== context) return;
     boardIssueOpener.current = { opener: source.opener, fallback: source.fallback, reviewContext: context };
-    const review = { context, actorId, projectScope, issueIds: [...new Set(source.issueIds)], gitlabActivity,
+    const review: IssueReview = { context, actorId, projectScope, issueIds: [...new Set(source.issueIds)],
+      ...(gitlabActivity && source.gitlabActivity && {
+        gitlabActivity: source.gitlabActivity.selectActivity ? gitlabActivity : undefined,
+        gitlabOpener: { linkId: gitlabActivity.id, action: source.gitlabActivity.selectActivity ? 'activity' : 'issue' },
+      }),
       ...(issueReviewHistoryKey(opened) && { openerIssueId: id }) };
     setIssueReview(review);
     rememberIssueReview(opened, routeIndexRef.current, review);
@@ -1010,6 +1031,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         const nextReview = { ...review, gitlabActivity: undefined, focusDirection: direction };
         setIssueReview(nextReview);
         rememberIssueReview(opened, routeIndexRef.current, nextReview);
+        if (opened.view === 'development') restoredDevelopmentReview.current = nextReview;
       }
     }
   };

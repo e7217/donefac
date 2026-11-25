@@ -48,6 +48,57 @@ async function dispose(request: APIRequestContext, path: string) {
   }
 }
 
+test('360px 티켓 댓글 초안을 다시 열고 응답이 끊긴 등록을 한 번만 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const { projects: [project], users: [author, recipient] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const suffix = randomUUID().slice(0, 8);
+  const issue = await json<Issue>(await request.post('/api/issues', {
+    headers: actor(author), data: { projectId: project.id, title: `댓글 초안 ${suffix}` },
+  }), 201);
+  const url = `/#/${project.id}/issues?issue=${issue.id}`;
+  const confirmations: string[] = [];
+  page.on('dialog', async dialog => { confirmations.push(dialog.message()); await dialog.dismiss(); });
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(url);
+    const panel = page.getByRole('dialog', { name: issue.title, exact: true });
+    const field = panel.getByRole('textbox', { name: '댓글 내용', exact: true });
+    await addMention(page, field, recipient, '초안 검토 ');
+    const text = await field.inputValue();
+    await panel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect.poll(() => confirmations).toEqual([]);
+    await expect(panel).toHaveCount(0);
+    await page.goto(url);
+    await expect(field).toHaveValue(text);
+
+    let original: Comment | undefined;
+    await page.route('**/api/comments', async route => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      const sent = await route.fetch();
+      original = await json<Comment>(sent, 201);
+      await route.abort('failed');
+    }, { times: 1 });
+    await panel.getByRole('button', { name: '댓글 등록', exact: true }).click();
+    await expect(panel.getByRole('button', { name: '등록 결과 다시 확인', exact: true })).toBeEnabled();
+    expect(original?.mentions?.map(mention => mention.userId)).toEqual([recipient.id]);
+    await page.reload();
+    await expect(field).toHaveValue(text);
+    await expect(field).toHaveAttribute('readonly');
+    const replay = page.waitForResponse(response => new URL(response.url()).pathname === '/api/comments' && response.request().method() === 'POST');
+    await panel.getByRole('button', { name: '등록 결과 다시 확인', exact: true }).click();
+    expect((await json<Comment>(await replay)).id).toBe(original?.id);
+    await expect(field).toHaveValue('');
+    await expect(panel.locator(`#issue-comment-${original?.id}`)).toHaveCount(1);
+    await expect.poll(async () => (await inbox(request, recipient)).filter(item => item.commentId === original?.id && item.targetId === issue.id)).toHaveLength(1);
+    await panel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await page.goto(url);
+    await expect(field).toHaveValue('');
+    expect(confirmations).toEqual([]);
+  } finally {
+    await dispose(request, `/api/issues/${issue.id}`);
+  }
+});
+
 test('360px 업무 댓글에서 동명이인을 이메일로 구분하고 멘션 알림에서 해당 댓글을 연다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const { projects: [project], users: [author] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));

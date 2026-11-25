@@ -76,14 +76,15 @@ function gantt(page: Page) {
   };
 }
 
-async function dismissDiscard(page: Page, action: () => Promise<void>) {
-  const dismissal = page.waitForEvent('dialog', { timeout: 8_000 }).then(async dialog => {
+async function confirmIncompleteDate(page: Page, action: () => Promise<void>, accept: boolean) {
+  const answer = page.waitForEvent('dialog', { timeout: 8_000 }).then(async dialog => {
     const message = dialog.message();
-    await dialog.dismiss();
+    if (accept) await dialog.accept();
+    else await dialog.dismiss();
     expect(dialog.type()).toBe('confirm');
-    expect(message).toContain('저장하지 않은 간트 입력');
+    expect(message).toContain('완성하지 않은 날짜 입력');
   });
-  await Promise.all([dismissal, action()]);
+  await Promise.all([answer, action()]);
 }
 
 test('360px 프로젝트 간트에서 검색 밖의 하위 일정을 고치고 상위 업무와 원래 보기를 유지한다', async ({ page, request }) => {
@@ -327,7 +328,7 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
   }
 });
 
-test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하면 날짜 초안을 지키고 원래 필터로 돌아간다', async ({ page, request }) => {
+test('전체 프로젝트 간트에서 하위 업무 일정과 원래 보기 사이에 완성한 날짜 초안을 유지한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const f = await fixture(request);
   const d = dateInNextWeek;
@@ -359,13 +360,14 @@ test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하�
 
     const parentEnd = g.date(parent, '종료일');
     await parentEnd.fill(d(4));
-    await dismissDiscard(page, () => g.open.click());
+    await g.open.click();
+    await expect(g.panel).toBeVisible();
+    await expect(parentEnd).toHaveValue(d(4));
+    await g.close.click();
     await expect(g.panel).toHaveCount(0);
-    await expect(parentEnd).toBeFocused();
+    await expect(g.open).toBeFocused();
     await expect(parentEnd).toHaveValue(d(4));
     expect((await f.stored(parent))?.endDate).toBeNull();
-    await parentEnd.press('Escape');
-    await expect(parentEnd).toHaveValue('');
 
     await g.select(parent).uncheck();
     const rowOpener = g.row(parent).getByRole('button', { name: `${parent.key} 하위 업무 일정 보기`, exact: true });
@@ -382,18 +384,24 @@ test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하�
 
     const childEnd = g.date(child, '종료일');
     await childEnd.fill(d(6));
-    await dismissDiscard(page, () => g.close.click());
+    const childStart = g.date(child, '시작일');
+    await childStart.press('Delete');
+    await expect(childStart).toHaveAttribute('aria-invalid', 'true');
+    await confirmIncompleteDate(page, () => g.close.click(), false);
     await expect(g.panel).toBeVisible();
-    await expect(childEnd).toBeFocused();
+    await expect(childStart).toBeFocused();
+    await expect(childStart).toHaveAttribute('aria-invalid', 'true');
     await expect(childEnd).toHaveValue(d(6));
     await expect(g.span(parent, d(2), d(3))).toBeVisible();
     expect((await f.stored(child))?.endDate).toBe(d(3));
-    await childEnd.press('Escape');
-    await expect(childEnd).toHaveValue(d(3));
-    await g.close.click();
+    await confirmIncompleteDate(page, () => g.close.click(), true);
 
     await expect(rowOpener).toBeFocused();
-    await expect(g.rows).toHaveCount(1);
+    await expect(g.rows).toHaveCount(2);
+    await expect(parentEnd).toHaveValue(d(4));
+    await expect(childStart).toHaveValue(d(2));
+    await expect(childEnd).toHaveValue(d(6));
+    await expect(g.row(child)).toContainText('현재 보기 조건 밖 · 날짜 입력 유지');
     await expect(g.select(parent)).not.toBeChecked();
     await expect(project).toHaveValue(f.project.id);
     await expect(assignee).toHaveValue(`member:${f.actor.id}`);
@@ -407,6 +415,8 @@ test('전체 프로젝트 간트에서 하위 업무 일정 전환을 취소하�
     await expect(g.row(predecessor)).toBeVisible();
     await expect(g.row(child)).toHaveCount(0);
     await dependency.getByRole('button', { name: '선후행 흐름 닫기', exact: true }).click();
+    await expect(childEnd).toHaveValue(d(6));
+    await childEnd.press('Escape');
     await expect(g.rows).toHaveCount(1);
     expect(scheduleWrites).toBe(0);
   } finally {
