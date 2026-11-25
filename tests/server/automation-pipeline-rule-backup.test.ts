@@ -7,9 +7,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
-import type { AutomationRule, AutomationRun, GitlabSettings } from '../../shared/types.js';
+import type { AutomationRule, AutomationRun, GitlabLink, GitlabSettings } from '../../shared/types.js';
 
-type Backup = { schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[] };
+type Backup = { schemaVersion: number; automationRules: AutomationRule[]; automationRuns: AutomationRun[]; gitlabLinks: GitlabLink[] };
 
 test('native backup retains pipeline rule filters and decision metadata and restores rules disabled', async t => {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-pipeline-rule-backup-'));
@@ -71,7 +71,11 @@ test('native backup retains pipeline rule filters and decision metadata and rest
   delete legacyContext.pipelineSource;
   delete legacyContext.pipelineTag;
   const legacyRun = { ...run, context: legacyContext };
-  const legacy = { ...backup, schemaVersion: 111, automationRules: [legacyRule], automationRuns: [legacyRun] };
+  const legacy = structuredClone(backup);
+  legacy.schemaVersion = 111;
+  legacy.automationRules = [legacyRule];
+  legacy.automationRuns = [legacyRun];
+  for (const link of legacy.gitlabLinks) delete link.pipelineTicketEvidence;
 
   for (const data of [
     { ...legacy, automationRules: [{ ...legacyRule, pipelineSources: rule.pipelineSources }] },
