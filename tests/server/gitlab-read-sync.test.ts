@@ -141,7 +141,49 @@ test('GitLab read scans preserve a configured subpath and cap MR pages and pipel
   assert.equal(result.mergeRequests.length, 1_000);
   assert.deepEqual(result.mergeRequests.at(-1), { id: 1_000 });
   assert.equal(result.pipelines.length, 50);
+  assert.deepEqual(result.coverage, { mergeRequests: 'unverified', pipelines: 'unverified' });
   assert.equal(Object.hasOwn(result, 'history'), false);
+});
+
+test('GitLab activity reports collection coverage without fetching beyond its bounded pages', async t => {
+  const calls: string[] = [];
+  const origin = await upstream(t, (request, response) => {
+    const url = new URL(request.url!, 'http://localhost');
+    const page = Number(url.searchParams.get('page') || '1');
+    const pipelines = url.pathname.endsWith('/pipelines');
+    calls.push(url.pathname);
+    response.setHeader('Content-Type', 'application/json');
+    if (url.pathname.includes('/42/')) {
+      if (pipelines) response.setHeader('Link', '<?per_page=50&page=2>; rel="next"');
+      else response.setHeader('X-Next-Page', page === 1 ? '2' : '');
+    } else if (url.pathname.includes('/43/')) {
+      response.setHeader('X-Next-Page', pipelines ? '' : String(page + 1));
+    } else {
+      response.setHeader('X-Next-Page', pipelines ? '' : '2');
+      response.setHeader('Link', pipelines ? '<?per_page=50&page=2>; rel="next"' : '<?scope=assigned_to_me&per_page=100&page=2>; rel="next"');
+    }
+    const count = pipelines ? 50 : url.pathname.includes('/43/') ? 100 : 1;
+    response.end(JSON.stringify(Array.from({ length: count }, (_, index) => ({ id: (page - 1) * count + index + 1 }))));
+  });
+
+  const at = (repositoryId: number) => readGitlabSyncProject({ baseUrl: origin }, repositoryId);
+  const finished = await at(42);
+  assert.deepEqual(finished.coverage, { mergeRequests: 'complete', pipelines: 'limited' });
+  assert.deepEqual(finished.mergeRequests, [{ id: 1 }, { id: 2 }]);
+  assert.equal(finished.pipelines.length, 50);
+  assert.deepEqual(calls.splice(0), ['/api/v4/projects/42/merge_requests', '/api/v4/projects/42/merge_requests', '/api/v4/projects/42/pipelines']);
+
+  const capped = await at(43);
+  assert.deepEqual(capped.coverage, { mergeRequests: 'limited', pipelines: 'complete' });
+  assert.equal(capped.mergeRequests.length, 1_000);
+  assert.equal(capped.pipelines.length, 50);
+  assert.deepEqual(calls.splice(0), [...Array<string>(10).fill('/api/v4/projects/43/merge_requests'), '/api/v4/projects/43/pipelines']);
+
+  const uncertain = await at(44);
+  assert.deepEqual(uncertain.coverage, { mergeRequests: 'unverified', pipelines: 'unverified' });
+  assert.deepEqual(uncertain.mergeRequests, [{ id: 1 }]);
+  assert.equal(uncertain.pipelines.length, 50);
+  assert.deepEqual(calls, ['/api/v4/projects/44/merge_requests', '/api/v4/projects/44/pipelines']);
 });
 
 test('GitLab pipeline freshness requires ordered, exact and bounded evidence across repository pages', async t => {

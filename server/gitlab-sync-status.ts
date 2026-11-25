@@ -56,7 +56,8 @@ export class GitlabManualSyncStatus {
     for (const result of results) {
       const { projectId, counts, historyLimits } = result;
       const summary = { projectId, counts, ...(historyLimits ? { historyLimits } : {}) };
-      const outcome: GitlabSyncRepositoryResult = result.status === 'ok' ? { ...summary, status: 'ok', error: null }
+      const outcome: GitlabSyncRepositoryResult = result.status === 'ok'
+        ? { ...summary, status: 'ok', error: null, ...(result.coverage ? { coverage: result.coverage } : {}) }
         : { ...summary, status: 'error', error: result.error };
       this.save(projectId, 'activity', sequence, { completedAt, lastSuccessfulAt: null, includeHistory, result: outcome }, result.status === 'ok');
     }

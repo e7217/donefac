@@ -3,7 +3,7 @@ import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
 import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
-  GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabTestCounts, GitlabUnresolvedDiscussion } from '../shared/types.js';
+  GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabTestCounts, GitlabUnresolvedDiscussion } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 
@@ -957,36 +957,44 @@ function invalidPipelineJobs(): never {
   throw new GitlabReadError('pipeline-jobs', 'invalid-response');
 }
 
-function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number | undefined,
-  stage: 'pipelines' | 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage): boolean {
-  const invalid = () => { throw new GitlabReadError(stage, 'invalid-response'); };
+type OffsetPageStage = 'pipelines' | 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage;
+
+function gitlabReportedNextPage(headers: Headers, url: URL, page: number, rowCount: number,
+  verifyFilters: boolean): 'next' | 'end' | 'missing' | 'invalid' {
   const next = headers.get('x-next-page');
-  if (next !== null && next !== '' && next !== String(page + 1)) invalid();
+  if (next !== null && next !== '' && next !== String(page + 1)) return 'invalid';
   const links = headers.get('link');
   let nextLink = false;
   if (links) for (const item of links.split(/,(?=\s*<)/u)) {
     const match = /^\s*<([^<>]+)>\s*;\s*rel\s*=\s*(?:"([^"<>]+)"|([\w-]+))\s*$/iu.exec(item);
-    if (!match) return invalid();
+    if (!match) return 'invalid';
     if (!(match[2] ?? match[3]).toLowerCase().split(/\s+/u).includes('next')) continue;
-    if (nextLink) invalid();
+    if (nextLink) return 'invalid';
     let target: URL;
     try { target = new URL(match[1], url); }
-    catch { return invalid(); }
+    catch { return 'invalid'; }
     const pages = target.searchParams.getAll('page');
     if (target.origin !== url.origin || target.pathname !== url.pathname || target.username || target.password || target.hash ||
-      pages.length !== 1 || pages[0] !== String(page + 1)) invalid();
-    if (stage === 'pipelines') {
+      pages.length !== 1 || pages[0] !== String(page + 1)) return 'invalid';
+    if (verifyFilters) {
       const filters = (value: URL) => new URLSearchParams([...value.searchParams].filter(([name]) => name !== 'page'));
       const expected = filters(url), reported = filters(target);
       expected.sort();
       reported.sort();
-      if (reported.toString() !== expected.toString()) invalid();
+      if (reported.toString() !== expected.toString()) return 'invalid';
     }
     nextLink = true;
   }
-  const reportedNext = next !== null ? next !== '' : links !== null ? nextLink : rowCount === pageSize;
-  if ((next === '' && nextLink) || (rowCount === 0 && reportedNext)) invalid();
-  return reportedNext;
+  if ((next === '' && nextLink) || (rowCount === 0 && (Boolean(next) || nextLink))) return 'invalid';
+  if (next || nextLink) return 'next';
+  return next !== null || links !== null ? 'end' : 'missing';
+}
+
+function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number | undefined,
+  stage: OffsetPageStage): boolean {
+  const next = gitlabReportedNextPage(headers, url, page, rowCount, stage === 'pipelines');
+  if (next === 'invalid') throw new GitlabReadError(stage, 'invalid-response');
+  return next === 'next' || (next === 'missing' && rowCount === pageSize);
 }
 
 function gitlabDisplayLabel(value: string, limit: number, token: string | null | undefined, fallback: string): string {
@@ -1487,23 +1495,36 @@ export async function readGitlabManualObject(
   return readExactWorkflowObject({ base, headers, projectUrl }, projectId, page, signal);
 }
 
+async function readGitlabActivityPage(url: URL, headers: Record<string, string>, stage: 'merge-requests' | 'pipelines',
+  page: number, pageSize: number, signal?: AbortSignal): Promise<{ rows: GitlabReadObject[]; coverage: GitlabSyncCoverageState }> {
+  let pagination = new Headers();
+  const rows = await readPage(url, headers, stage, pageSize, signal, value => { pagination = value; });
+  const next = gitlabReportedNextPage(pagination, url, page, rows.length, true);
+  const coverage = next === 'next' ? 'limited' : next === 'end' || (next === 'missing' && rows.length < pageSize)
+    ? 'complete' : 'unverified';
+  return { rows, coverage };
+}
+
 export async function readGitlabSyncProject(
   connection: Connection, projectId: number, options: { signal?: AbortSignal; includeHistory?: boolean } = {},
-): Promise<{ mergeRequests: GitlabReadObject[]; pipelines: GitlabReadObject[]; history?: RepositoryHistory }> {
+): Promise<{ mergeRequests: GitlabReadObject[]; pipelines: GitlabReadObject[]; coverage: GitlabSyncCoverage; history?: RepositoryHistory }> {
   const { projectUrl, headers } = projectReadRequest(connection, projectId, 'merge-requests');
   const history = options.includeHistory ? await readRepositoryHistory(projectUrl, projectId, headers, options.signal) : undefined;
   const mergeRequestsUrl = new URL(projectUrl);
   mergeRequestsUrl.pathname += '/merge_requests';
   const mergeRequests: GitlabReadObject[] = [];
+  let mergeRequestCoverage: GitlabSyncCoverageState = 'unverified';
   for (let page = 1; page <= MAX_MERGE_REQUEST_PAGES; page++) {
     mergeRequestsUrl.search = new URLSearchParams({ scope: 'all', per_page: String(MERGE_REQUEST_PAGE_SIZE), page: String(page) }).toString();
-    const rows = await readPage(mergeRequestsUrl, headers, 'merge-requests', MERGE_REQUEST_PAGE_SIZE, options.signal);
-    mergeRequests.push(...rows);
-    if (rows.length < MERGE_REQUEST_PAGE_SIZE) break;
+    const result = await readGitlabActivityPage(mergeRequestsUrl, headers, 'merge-requests', page, MERGE_REQUEST_PAGE_SIZE, options.signal);
+    mergeRequests.push(...result.rows);
+    mergeRequestCoverage = result.coverage;
+    if (result.coverage === 'complete' || (result.coverage === 'unverified' && result.rows.length < MERGE_REQUEST_PAGE_SIZE)) break;
   }
   const pipelinesUrl = new URL(projectUrl);
   pipelinesUrl.pathname += '/pipelines';
   pipelinesUrl.search = new URLSearchParams({ per_page: String(PIPELINE_PAGE_SIZE) }).toString();
-  const pipelines = await readPage(pipelinesUrl, headers, 'pipelines', PIPELINE_PAGE_SIZE, options.signal);
-  return { mergeRequests, pipelines, ...(history ? { history } : {}) };
+  const pipelines = await readGitlabActivityPage(pipelinesUrl, headers, 'pipelines', 1, PIPELINE_PAGE_SIZE, options.signal);
+  return { mergeRequests, pipelines: pipelines.rows, coverage: { mergeRequests: mergeRequestCoverage, pipelines: pipelines.coverage },
+    ...(history ? { history } : {}) };
 }

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { GitBranch, RefreshCw, Search } from 'lucide-react';
 import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters, type GitlabActivityScope } from '../../shared/gitlab-activity-filter';
-import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
+import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
@@ -30,6 +30,22 @@ const maxGitlabRepositories = 100;
 function HistoryLimitNote({ limits }: { limits?: GitlabHistoryLimits }) {
   const capped = [limits?.branches && '브랜치 500개', limits?.commits && '커밋 100개'].filter(Boolean);
   return capped.length > 0 && <p className="help-text gitlab-history-limits">{capped.join(' · ')} 조회 한도에 도달했습니다.</p>;
+}
+
+const activityCoverageLabel: Record<GitlabSyncCoverageState, string> = {
+  complete: '마지막 페이지까지 조회',
+  limited: '추가 페이지 있음',
+  unverified: '추가 페이지 확인 불가',
+};
+
+function ActivityCoverageNote({ coverage }: { coverage?: GitlabSyncCoverage }) {
+  if (!coverage) return null;
+  return <>
+    <p className="help-text">MR {activityCoverageLabel[coverage.mergeRequests]} · 파이프라인 {activityCoverageLabel[coverage.pipelines]}</p>
+    {(coverage.mergeRequests !== 'complete' || coverage.pipelines !== 'complete') && <p className="help-text">
+      빠진 활동의 주소를 알고 있다면 티켓의 <strong>GitLab 링크 추가</strong>에서 연결할 수 있습니다.
+    </p>}
+  </>;
 }
 
 function readProjectIds(input: string): number[] {
@@ -633,6 +649,7 @@ function GitlabSyncReport({ read, busy, onReload, onRetry }: {
             </>}
             {result?.status === 'ok' && <>
               <RepositoryCounts counts={result.counts} />
+              <ActivityCoverageNote coverage={result.coverage} />
               <HistoryLimitNote limits={result.historyLimits} />
             </>}
           </section>
@@ -668,6 +685,7 @@ function GitlabPreview({ preview, projects, openIssue }: { preview: PreviewState
               {route && <p className="help-text">연결 범위 {projects.find(project => project.id === route.projectId)?.name ?? route.projectId} · Jira 원본 {route.jiraInstanceKey}</p>}
               {repository.error ? <RepositoryReadError error={repository.error} /> : <>
                   <RepositoryCounts counts={repository.counts} />
+                  <ActivityCoverageNote coverage={repository.coverage} />
                   {ambiguousKeys.length > 0 && <div className="gitlab-preview-ambiguity">
                     <p>여러 티켓과 일치한 키</p>
                     <ul aria-label="연결이 보류된 키">{ambiguousKeys.map(key => <li key={key}><code>{key}</code></li>)}</ul>

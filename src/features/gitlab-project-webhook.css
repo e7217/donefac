@@ -52,6 +52,10 @@
 
 .gitlab-project-webhook-result > p:first-child { font-weight: 650; }
 
+.gitlab-project-webhook-manual { margin-top: 12px; }
+.gitlab-project-webhook-manual ol { margin: 4px 0 0; padding-inline-start: 22px; list-style: decimal; }
+.gitlab-project-webhook-manual li + li { margin-top: 4px; }
+
 .gitlab-project-webhook-hooks {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));

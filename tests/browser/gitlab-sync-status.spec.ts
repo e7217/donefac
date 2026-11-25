@@ -7,6 +7,7 @@ import type { GitlabSettings, GitlabSyncStatus, Issue, WorkspaceSnapshot } from 
 
 const integration = '/api/integrations/gitlab';
 const activity = `${integration}/sync`;
+const preview = `${integration}/sync-preview`;
 const deployments = `${integration}/deployments/sync`;
 const diagnostics = `${integration}/sync-status`;
 
@@ -16,8 +17,8 @@ async function json<T>(response: APIResponse | Response, expected = 200): Promis
   return JSON.parse(body) as T;
 }
 
-function responseAt(page: Page, pathname: string, method = 'POST') {
-  return page.waitForResponse(response => new URL(response.url()).pathname === pathname && response.request().method() === method);
+function responseAt(page: Page, pathname: string, method = 'POST', timeout?: number) {
+  return page.waitForResponse(response => new URL(response.url()).pathname === pathname && response.request().method() === method, { timeout });
 }
 
 test('360px GitLab에서 저장소별 활동과 배포 실패를 다시 열고 이전 모드로 조회한다', async ({ page, request }) => {
@@ -46,6 +47,10 @@ test('360px GitLab에서 저장소별 활동과 배포 실패를 다시 열고 �
       id: id * 100, iid: 1, title: `${issue.key} 합성 MR`, state: 'opened', source_branch: `feature/${issue.key}`,
       target_project_id: id, updated_at: at, web_url: `${repository}/-/merge_requests/1`,
     }]));
+    if (stage === 'pipelines' && id === 42) {
+      response.setHeader('X-Next-Page', '2');
+      return response.end(JSON.stringify(Array.from({ length: 50 }, (_, index) => ({ id: index + 2, ref: 'main' }))));
+    }
     response.end('[]');
   });
   mock.listen(0, '127.0.0.1');
@@ -72,13 +77,19 @@ test('360px GitLab에서 저장소별 활동과 배포 실패를 다시 열고 �
     } }));
     const version = saved.version;
     await page.setViewportSize({ width: 360, height: 820 });
-    const mounting = responseAt(page, diagnostics, 'GET');
-    await page.goto(`/#/${project.id}/development`);
-    expect((await json<GitlabSyncStatus>(await mounting)).repositories.every(row => !row.activity && !row.deployments)).toBeTruthy();
+    const [mounting] = await Promise.all([responseAt(page, diagnostics, 'GET', 30_000), page.goto(`/#/${project.id}/development`)]);
+    expect((await json<GitlabSyncStatus>(mounting)).repositories.every(row => !row.activity && !row.deployments)).toBeTruthy();
     expect(intercepted).toHaveLength(0);
     const history = page.getByRole('checkbox', { name: '기존 브랜치·커밋 포함', exact: true });
     const report = page.getByRole('region', { name: 'GitLab 동기화 결과', exact: true });
     const row = (id: number) => report.getByRole('region', { name: `저장소 ${id}`, exact: true });
+    const previewing = responseAt(page, preview);
+    await page.getByRole('button', { name: '연결 미리보기', exact: true }).click();
+    expect((await previewing).status()).toBe(200);
+    const previewRepository = page.getByRole('region', { name: 'GitLab 연결 미리보기', exact: true })
+      .getByRole('region', { name: '저장소 42', exact: true });
+    await expect(previewRepository).toContainText('파이프라인 추가 페이지 있음');
+    await expect(previewRepository).toContainText('GitLab 링크 추가');
     await history.check();
     const syncing = responseAt(page, activity);
     await page.getByRole('button', { name: '지금 동기화', exact: true }).click();
@@ -86,6 +97,7 @@ test('360px GitLab에서 저장소별 활동과 배포 실패를 다시 열고 �
     expect(initialSync.request().postDataJSON()).toEqual({ expectedVersion: version, includeHistory: true });
     expect(initialSync.status(), await initialSync.text()).toBe(200);
     await expect(row(42)).toContainText('신규 연결 1개');
+    await expect(row(42)).toContainText('MR 마지막 페이지까지 조회 · 파이프라인 추가 페이지 있음');
     await expect(row(77)).toContainText('GitLab HTTP 403 응답');
     await expect(row(99)).toContainText('GitLab HTTP 503 응답');
 
@@ -113,6 +125,7 @@ test('360px GitLab에서 저장소별 활동과 배포 실패를 다시 열고 �
     expect(await json<GitlabSyncStatus>(await loading)).toEqual(beforeReload);
     await expect(history).not.toBeChecked();
     await expect(row(42)).toContainText('신규 연결 1개');
+    await expect(row(42)).toContainText('파이프라인 추가 페이지 있음');
     await expect(row(77)).toContainText('MR·파이프라인');
     await expect(row(99)).toContainText('브랜치·커밋 포함');
     await expect(row(99)).toContainText('최근 시도');

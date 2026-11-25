@@ -1053,6 +1053,44 @@ test('draft sync preview is read-only and predicts actual MR and exact branch/he
   } finally { await mock.close(); f.close(); }
 });
 
+test('GitLab sync preview and apply use the current key of a ticket that moved out of the routed project', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const route = { repositoryId: 42, projectId: 'project-neo', jiraInstanceKey: 'synthetic-jira' };
+  const service = new GitlabIntegrationService(f.store, {
+    processEvent: () => { throw new Error('GitLab activity sync must not run rules'); },
+    onConnectionChanged: () => 0,
+    jiraSources: () => [route],
+    previousIssueKeys: () => new Map([['issue-1', [{ projectId: 'project-neo', key: 'NEO-1' }]]]),
+  });
+  const issue = f.store.get('issues', 'issue-1');
+  assert.ok(issue);
+  f.store.put('issues', { ...issue, projectId: 'project-team', key: 'TEAM-901' });
+  f.store.put('issues', { ...issue, id: 'unrelated-destination-issue', projectId: 'project-team', key: 'TEAM-902' });
+  const at = new Date(Date.now() - 1000).toISOString();
+  let repositoryUrl = '';
+  const mock = await mockServer((path, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    const rows = path.includes('/merge_requests?') ? [901, 902].map(id => ({
+      id, iid: id, source_project_id: 42, target_project_id: 42, title: '브랜치 이름에서 업무 찾기',
+      source_branch: `feature/team-${id}`, state: 'opened', updated_at: at, web_url: `${repositoryUrl}/-/merge_requests/${id}`,
+    })) : [{ id: 1101, project_id: 42, ref: 'feature/TEAM-901', sha: 'a'.repeat(40), status: 'success',
+      updated_at: at, web_url: `${repositoryUrl}/-/pipelines/1101` }];
+    res.end(JSON.stringify(rows));
+  });
+  t.after(mock.close);
+  repositoryUrl = `${mock.url}/team/repo`;
+  const settings = service.configure({ expectedVersion: 1, baseUrl: mock.url, projectIds: [42], jiraRoutes: [route] });
+  const preview = await service.previewSync({ expectedVersion: settings.version });
+  assert.deepEqual(preview.candidates.map(({ objectId, issueId, issueKey, originalJiraKey }) => [objectId, issueId, issueKey, originalJiraKey]), [
+    ['901', 'issue-1', 'TEAM-901', undefined], ['1101', 'issue-1', 'TEAM-901', undefined],
+  ]);
+  assert.deepEqual(links(f), []);
+  assert.equal((await service.sync()).linked, 2);
+  assert.deepEqual(new Set(links(f).map(link => link.issueId)), new Set(['issue-1']));
+  assert.equal(links(f).find(link => link.kind === 'pipeline')?.pipelineTicketEvidence, 'direct-key');
+});
+
 test('GitLab sync and preview only inherit MR matches for the verified source repository and exact full HEAD', async t => {
   const f = fixture();
   t.after(f.close);

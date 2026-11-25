@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { GitlabDeploymentSyncResult, GitlabSettings, GitlabSyncResult, GitlabSyncStatus, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { GitlabDeploymentSyncResult, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, GitlabSyncStatus, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const integration = '/api/integrations/gitlab';
 const statusPath = `${integration}/sync-status`;
@@ -89,6 +89,10 @@ async function remoteGitlab(t: TestContext) {
       id: repositoryId * 100, iid: 1, title: `${issueKey} 저장소 연결`, state: 'opened', source_branch: `feature/${issueKey}`,
       target_project_id: repositoryId, updated_at: at, web_url: `${projectUrl}/-/merge_requests/1`,
     }]));
+    if (stage === 'pipelines' && repositoryId === 42) {
+      response.setHeader('X-Next-Page', '2');
+      return response.end(JSON.stringify(Array.from({ length: 50 }, (_, index) => ({ id: index + 2, ref: 'main' }))));
+    }
     response.end('[]');
   });
   remote.listen(0, '127.0.0.1');
@@ -127,6 +131,13 @@ test('durable GitLab status restores independently completed activity and deploy
   assert.deepEqual(await read(), { settingsVersion: expectedVersion, repositories: emptyRows });
   assert.equal(remote.calls.length, 0);
 
+  const { data: preview } = await f.call<GitlabSyncPreview>(`${integration}/sync-preview`, 'POST', { expectedVersion });
+  const previewResult = preview.repositories[0];
+  assert.ok(previewResult.status === 'ok');
+  assert.deepEqual(previewResult.coverage, { mergeRequests: 'complete', pipelines: 'limited' });
+  assert.deepEqual(await read(), { settingsVersion: expectedVersion, repositories: emptyRows });
+  assert.equal((await f.snapshot()).gitlabLinks.length, 0);
+
   const { data: synced } = await pull({ includeHistory: true });
   assert.equal(synced.partial, true);
   assert.equal(synced.linked, 1);
@@ -135,6 +146,8 @@ test('durable GitLab status restores independently completed activity and deploy
   assert.ok(first.activity && second.activity && third.activity);
   assert.deepEqual([first.activity.result.status, second.activity.result.status, third.activity.result.status], ['ok', 'error', 'error']);
   assert.deepEqual(first.activity.result, synced.repositories[0]);
+  assert.ok(first.activity.result.status === 'ok');
+  assert.deepEqual(first.activity.result.coverage, previewResult.coverage);
   assert.equal(first.activity.includeHistory, true);
   assert.equal(first.activity.lastSuccessfulAt, first.activity.completedAt);
   assert.ok(Number.isFinite(Date.parse(first.activity.completedAt)));

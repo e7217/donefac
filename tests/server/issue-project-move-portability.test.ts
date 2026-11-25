@@ -104,7 +104,7 @@ async function importJiraProject(call: Awaited<ReturnType<typeof open>>, instanc
   return { project, issue, jiraKey, imported };
 }
 
-test('portable backup keeps moved issue identity, both ledger scopes, permissions, and new GitLab matches by the previous native key', async t => {
+test('portable backup keeps moved issue identity, both ledger scopes, permissions, and GitLab matches by the previous and current keys', async t => {
   const from = await open(t);
   const to = await open(t);
   const instanceKey = 'move-portability-native-route';
@@ -183,11 +183,12 @@ test('portable backup keeps moved issue identity, both ledger scopes, permission
   const newlyLinked = await mr(to, original.key, 5002);
   assert.equal(newlyLinked.linked, 1);
   assert.equal(newlyLinked.duplicate, false);
-  const links = (await to<WorkspaceSnapshot>('/workspace')).gitlabLinks.filter(link => link.iid === 5002);
-  assert.equal(links.length, 1);
-  assert.equal(links[0].issueId, moved.id);
-  assert.equal(links[0].originalJiraKey, undefined);
-  assert.equal((await mr(to, moved.key, 5004)).linked, 0);
+  assert.equal((await mr(to, moved.key, 5004, { title: '이동 후 새 브랜치의 MR' })).linked, 1);
+  assert.equal((await mr(to, other.key, 5005)).linked, 0);
+  const links = (await to<WorkspaceSnapshot>('/workspace')).gitlabLinks
+    .filter(link => [5002, 5004, 5005].includes(link.iid)).sort((left, right) => left.iid - right.iid);
+  assert.deepEqual(links.map(link => [link.iid, link.issueId, link.originalJiraKey]),
+    [[5002, moved.id, undefined], [5004, moved.id, undefined]]);
 });
 
 test('a moved Jira ticket keeps immutable origins, routed GitLab links and second-level worklogs through native backup', async t => {
@@ -238,6 +239,7 @@ test('a moved Jira ticket keeps immutable origins, routed GitLab links and secon
   assert.deepEqual(await call(sourceLinks), originLinks);
   assert.deepEqual((await call<GitlabSettings>(integration)).jiraRoutes, jiraRoutes);
   assert.equal((await mr(call, jiraKey, 5033)).linked, 1);
+  assert.equal((await mr(call, moved.key, 5035, { title: '이관 업무의 새 브랜치', source_branch: `feature/${moved.key.toLowerCase()}` })).linked, 1);
   assert.equal((await call<ProjectWorklogReport>(report(projectId))).minutes, 0);
   const movedReport = await call<ProjectWorklogReport>(report(target.id));
   assert.equal(movedReport.minutes, 91 / 60);
@@ -259,6 +261,36 @@ test('a moved Jira ticket keeps immutable origins, routed GitLab links and secon
   assert.deepEqual(await restore(sourceLinks), originLinks);
   await configureGitlab(restore, jiraRoutes);
   assert.equal((await mr(restore, jiraKey, 5034)).linked, 1);
-  assert.ok((await restore<WorkspaceSnapshot>('/workspace')).gitlabLinks.some(value =>
-    value.iid === 5034 && value.issueId === issue.id && value.originalJiraKey === jiraKey));
+  assert.equal((await mr(restore, moved.key, 5036, { title: '복원 뒤 새 브랜치의 MR' })).linked, 1);
+  const links = (await restore<WorkspaceSnapshot>('/workspace')).gitlabLinks
+    .filter(value => [5033, 5034, 5035, 5036].includes(value.iid)).sort((left, right) => left.iid - right.iid);
+  assert.deepEqual(links.map(value => [value.iid, value.issueId, value.originalJiraKey]), [
+    [5033, issue.id, jiraKey], [5034, issue.id, jiraKey], [5035, issue.id, undefined], [5036, issue.id, undefined],
+  ]);
+});
+
+test('a moved current key does not disambiguate a different Jira issue in the routed repository', async t => {
+  const call = await open(t);
+  const instanceKey = 'move-portability-key-collision';
+  const { project: source, issue: imported, jiraKey } = await importJiraProject(call, instanceKey, 'KEYFROM');
+  const target = await call<Project>('/projects', 201, 'POST', { key: 'ORIG', name: '이관 키와 충돌하는 도착 프로젝트' });
+  const native = await call<Issue>('/issues', 201, 'POST', {
+    projectId: source.id, status: imported.status, type: imported.type, title: '이동할 Teamspace 업무',
+  });
+  const targetSchema = await call<ProjectIssueSchema>(`/projects/${target.id}/issue-schema`);
+  const path = `/issues/${native.id}/project-move`;
+  const input: IssueProjectMoveInput = { expectedVersion: native.version, projectId: target.id, includeConnected: false,
+    mappings: [{ issueId: native.id, status: 'review', type: targetSchema.issueTypes.find(value => !value.archived)!.id }] };
+  const preview = await call<IssueProjectMovePreview>(`${path}/preview`, 200, 'POST', input);
+  assert.ok(preview.token, JSON.stringify(preview.blockers));
+  const { issues: [moved] } = await call<IssueProjectMoveResult>(`${path}/apply`, 200, 'POST', { ...input, token: preview.token });
+  assert.equal(moved.key, jiraKey);
+
+  await configureGitlab(call, [{ repositoryId: repository, projectId: source.id, jiraInstanceKey: instanceKey }]);
+  assert.equal((await mr(call, moved.key, 5037)).linked, 0);
+  assert.equal((await mr(call, native.key, 5038)).linked, 1);
+  assert.equal((await mr(call, imported.key, 5039)).linked, 1);
+  const links = (await call<WorkspaceSnapshot>('/workspace')).gitlabLinks.sort((left, right) => left.iid - right.iid);
+  assert.deepEqual(links.map(link => [link.iid, link.issueId, link.originalJiraKey]),
+    [[5038, moved.id, undefined], [5039, imported.id, undefined]]);
 });

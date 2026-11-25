@@ -1873,6 +1873,8 @@ export interface GitlabSyncPreviewCandidate {
   issueId: string; issueKey: string; issueTitle: string; action: 'create' | 'update' | 'unchanged'; originalJiraKey?: string;
 }
 export interface GitlabHistoryLimits { branches: boolean; commits: boolean }
+export type GitlabSyncCoverageState = 'complete' | 'limited' | 'unverified';
+export interface GitlabSyncCoverage { mergeRequests: GitlabSyncCoverageState; pipelines: GitlabSyncCoverageState }
 interface GitlabSyncRepositoryCounts {
   projectId: number; counts: GitlabSyncPreviewCounts; historyLimits?: GitlabHistoryLimits; ambiguousKeys?: string[];
 }
@@ -1881,7 +1883,7 @@ export interface GitlabSyncRepositoryFailure extends GitlabSyncRepositoryCounts 
   error: { stage: 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'save'; httpStatus: number | null; message: string };
 }
 export type GitlabSyncRepositoryResult = GitlabSyncRepositoryFailure | (GitlabSyncRepositoryCounts & {
-  status: 'ok'; error: null;
+  status: 'ok'; error: null; coverage?: GitlabSyncCoverage;
 });
 export interface GitlabSyncFailure {
   settingsVersion: number; reason: string; repositories: GitlabSyncRepositoryFailure[];

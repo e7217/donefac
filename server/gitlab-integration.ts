@@ -22,7 +22,7 @@ import { GitlabManualSyncStatus } from './gitlab-sync-status.js';
 import { GitlabMergeRequestObservations, isGitlabMergeRequestReadState, type GitlabMergeRequestReadState } from './gitlab-merge-request-observations.js';
 import { readGitlabWorkflowPipelineFreshness, type GitlabWorkflowPipelineFreshness } from './gitlab-workflow-pipeline-freshness.js';
 import type { ManualPipelineStatusCandidate } from './automation.js';
-import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabMergeRequestStatusBinding, GitlabPipelineStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
+import type { GitlabBranchMergeRequests, GitlabDeployment, GitlabDeploymentPreviewResult, GitlabDeploymentReviewResult, GitlabDeploymentStatusBinding, GitlabDeploymentSyncResult, GitlabMergeRequestStatusBinding, GitlabPipelineStatusBinding, GitlabStatusObservation, GitlabStatusReview, GitlabSyncCoverage, GitlabSyncStatus, GitlabWorkflowStatusSuggestionTrigger } from '../shared/types.js';
 import type { Store } from './store.js';
 import type { PreviousIssueKey } from './reporting-ledger.js';
 
@@ -310,7 +310,7 @@ function currentWorkflowObservations(checked: readonly ConfirmedWorkflowRead[], 
 }
 
 type ProjectReadPlan={
-  projectId:number;mergeRequests:LinkDraft[];pipelines:LinkDraft[];
+  projectId:number;mergeRequests:LinkDraft[];pipelines:LinkDraft[];coverage:GitlabSyncCoverage;
   history?:{branches:LinkDraft[];commits:LinkDraft[];limits:GitlabHistoryLimits};
 };
 type ProjectReadOutcome={projectId:number;plan:ProjectReadPlan}|{projectId:number;failure:GitlabSyncRepositoryFailure};
@@ -338,19 +338,24 @@ function retainOriginalJiraKey(link:GitlabLink,existing?:GitlabLink):GitlabLink{
 }
 
 function makeTicketMatcher(issues:IssueMatch[],route:GitlabJiraRoute|undefined,originals:Map<string,JiraKeyBinding|null>):TicketMatcher{
-  const scoped=route?issues.filter(issue=>issue.projectId===route.projectId):issues;
   const normalizeKey = (key: string) => route ? key.toUpperCase() : key;
-  const byId=new Map(scoped.map(issue=>[issue.id,issue]));
-  const byKey=new Map(scoped.map(issue=>[normalizeKey(issue.key),issue]));
+  const byId = new Map<string, IssueMatch>();
+  const byKey = new Map<string, IssueMatch | null>();
   const previousByKey = new Map<string, IssueMatch | null>();
+
+  function indexKey(index: Map<string, IssueMatch | null>, value: string, issue: IssueMatch) {
+    const key = normalizeKey(value);
+    const existing = index.get(key);
+    index.set(key, existing === undefined || existing?.id === issue.id ? issue : null);
+  }
+
   for (const issue of issues) {
-    for (const previous of issue.previousKeys ?? []) {
-      if (route && previous.projectId !== route.projectId) continue;
-      const key = normalizeKey(previous.key);
-      const existing = previousByKey.get(key);
-      previousByKey.set(key, existing === undefined || existing?.id === issue.id ? issue : null);
-      byId.set(issue.id, issue);
-    }
+    const previousKeys = issue.previousKeys ?? [];
+    const priorKeysInScope = route ? previousKeys.filter(previous => previous.projectId === route.projectId) : previousKeys;
+    if (route && issue.projectId !== route.projectId && priorKeysInScope.length === 0) continue;
+    byId.set(issue.id, issue);
+    indexKey(byKey, issue.key, issue);
+    for (const previous of priorKeysInScope) indexKey(previousByKey, previous.key, issue);
   }
   const ambiguousKeys=new Set<string>();
 
@@ -358,7 +363,7 @@ function makeTicketMatcher(issues:IssueMatch[],route:GitlabJiraRoute|undefined,o
     const normalized = normalizeKey(key);
     const current = byKey.get(normalized), previous = previousByKey.get(normalized), alias = originals.get(normalized);
     const identities = new Set([current?.id, previous?.id, alias?.issueId].filter(Boolean));
-    if (previous === null || alias === null || identities.size > 1) {
+    if (current === null || previous === null || alias === null || identities.size > 1) {
       if(ambiguousKeys.size<AMBIGUOUS_KEY_LIMIT)ambiguousKeys.add(normalized);
       return;
     }
@@ -652,11 +657,12 @@ async function readProjectPlan(connection:SyncConnection,projectId:number,option
     const draft = readLink('pipeline',object,[],readKeys,undefined,scoped ? readPipelineClassification(object,false,connection.token) : undefined);
     return scoped && scopedPipelineAddress(draft, projectId, connection.baseUrl) ? { ...draft, pipelineScopeVerified: true } : draft;
   });
-  if(!scan.history)return {projectId,mergeRequests,pipelines};
+  const activity={projectId,mergeRequests,pipelines,coverage:scan.coverage};
+  if(!scan.history)return activity;
   const repository=gitlabRepositoryUrl(connection.baseUrl,scan.history.project);
   if(!repository)throw new GitlabReadError('project','invalid-response');
   const {branches,commits,branchesLimited,commitsLimited}=scan.history;
-  return {projectId,mergeRequests,pipelines,history:{
+  return {...activity,history:{
     branches:branches.map(object=>repositoryBranchDraft({...object,web_url:gitlabPushLinkUrl(repository,'tree',string(object.name))},readKeys)),
     commits:commits.map(object=>repositoryCommitDraft({...object,web_url:gitlabPushLinkUrl(repository,'commit',gitlabObjectSha(object.id)??'')},readKeys)),
     limits:{branches:branchesLimited,commits:commitsLimited},
@@ -2495,7 +2501,7 @@ export class GitlabIntegrationService{
         });
       });
       for(const key of Object.keys(counts) as (keyof GitlabSyncPreviewCounts)[])counts[key]=(counts[key]??0)+(projectCounts[key]??0);
-      return {projectId,status:'ok',counts:projectCounts,error:null,...(read.plan.history?{historyLimits:read.plan.history.limits}:{}),...(matcher.ambiguousKeys.size?{ambiguousKeys:[...matcher.ambiguousKeys].map(key=>safePreviewValue(key,token))}:{})};
+      return {projectId,status:'ok',counts:projectCounts,error:null,coverage:read.plan.coverage,...(read.plan.history?{historyLimits:read.plan.history.limits}:{}),...(matcher.ambiguousKeys.size?{ambiguousKeys:[...matcher.ambiguousKeys].map(key=>safePreviewValue(key,token))}:{})};
     });
     return {settingsVersion:saved.version,baseUrl:address,projectIds:repositories,repositories:outcomes,counts,candidates,
       candidatesTruncated:counts.create+counts.update+counts.unchanged>candidates.length};
@@ -2539,7 +2545,7 @@ export class GitlabIntegrationService{
           const {plan}=read;
           const matcher=this.ticketMatcher(issues,current.jiraRoutes?.find(route=>route.repositoryId===plan.projectId));
           const counts=this.visitProjectLinks(instance,plan,startedAt,matcher,connection.token,(link,_match,action)=>{if(action!=='unchanged')this.store.put('gitlab_links',link);},true);
-          repositories.push({projectId:read.projectId,status:'ok',counts,error:null,...(plan.history?{historyLimits:plan.history.limits}:{})});
+          repositories.push({projectId:read.projectId,status:'ok',counts,error:null,coverage:plan.coverage,...(plan.history?{historyLimits:plan.history.limits}:{})});
           scanned+=counts.mergeRequests+counts.pipelines+(counts.branches??0)+(counts.commits??0);
           linked+=counts.create+counts.update;
           if(plan.history){

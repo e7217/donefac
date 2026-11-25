@@ -30,6 +30,8 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
   const calls: { action: 'review' | 'register'; body: Record<string, unknown> }[] = [];
   const reviewed = new Set<number>();
   const registered = new Set<number>();
+  let pending = false;
+  let reviewUnavailable = false;
   let deploymentEvents: boolean | null = true;
   const result = (repositoryId: number, state: GitlabProjectWebhookReview['state']): GitlabProjectWebhookReview => ({
     settingsVersion: saved.version,
@@ -62,6 +64,9 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
       expect(new URL(route.request().url()).search).toBe('');
       const repositoryId = Number(body.repositoryId);
       reviewed.add(repositoryId);
+      if (repositoryId === 99 && pending) {
+        return reviewUnavailable ? route.fulfill({ status: 502, json: {} }) : route.fulfill({ json: result(repositoryId, 'unknown') });
+      }
       const existing = deploymentEvents === true ? 'configured' : 'review';
       await route.fulfill({ json: result(repositoryId, registered.has(repositoryId) ? existing : 'missing') });
     });
@@ -73,8 +78,13 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
       const repositoryId = Number(body.repositoryId);
       expect(reviewed.has(repositoryId)).toBe(true);
       expect(registered.has(repositoryId)).toBe(false);
+      if (repositoryId === 99) {
+        expect(pending).toBe(false);
+        pending = true;
+        return route.fulfill({ json: result(repositoryId, 'unknown') });
+      }
       registered.add(repositoryId);
-      await route.fulfill({ json: result(repositoryId, repositoryId === 99 ? 'unknown' : 'created') });
+      await route.fulfill({ json: result(repositoryId, 'created') });
     });
 
     await page.goto(`/#/${project.id}/development`);
@@ -151,16 +161,33 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
     await credential.fill(webhookSecret);
     await register.click();
     await expect(setup).toContainText('GitLab에서 웹훅 설정을 확인하지 못했습니다.');
-    await expect(setup).toContainText('다시 점검하거나 GitLab의 웹훅 목록에서 등록 상태를 직접 확인해 주세요.');
+    const manual = setup.getByRole('region', { name: 'GitLab 웹훅 수동 등록', exact: true });
+    await expect(manual).toContainText('저장소 99에서 Settings → Webhooks');
+    await expect(manual).toContainText('주소가 없을 때만 Add new webhook');
+    await expect(manual).toContainText('Secret token에 Teamspace에 저장한 값을 입력하세요.');
+    await expect(manual).toContainText('Deployment events와 SSL 검증');
+    await expect(manual).not.toContainText(webhookSecret);
     await expect(register).toHaveCount(0);
     await expect(credential).toHaveCount(0);
     await expect(manager).toHaveValue(managementToken);
     await recheck.click();
+    await expect(manual).toBeVisible();
+    await expect(register).toHaveCount(0);
+    reviewUnavailable = true;
+    await recheck.click();
+    await expect(setup.getByRole('alert')).toContainText('웹훅 설정을 점검하지 못했습니다.');
+    await expect(manual).toBeVisible();
+    pending = false;
+    registered.add(99);
+    await recheck.click();
     await expect(setup).toContainText('GitLab에 필요한 웹훅 설정이 등록되어 있습니다.');
     await expect(setup.getByRole('heading', { name: '웹훅 #199', exact: true })).toBeVisible();
+    await expect(manual).toHaveCount(0);
     expect(calls.slice(2)).toEqual([
       { action: 'review', body: { expectedVersion: saved.version, repositoryId: 99, managementToken } },
       { action: 'register', body: { expectedVersion: saved.version, repositoryId: 99, reviewId: 'review-99', managementToken, webhookCredential: webhookSecret } },
+      { action: 'review', body: { expectedVersion: saved.version, repositoryId: 99, managementToken } },
+      { action: 'review', body: { expectedVersion: saved.version, repositoryId: 99, managementToken } },
       { action: 'review', body: { expectedVersion: saved.version, repositoryId: 99, managementToken } },
     ]);
     for (const [value, label] of [[false, '꺼짐'], [null, '확인 불가']] as const) {
@@ -185,4 +212,33 @@ test('360px에서 저장한 저장소의 웹훅을 점검하고 한 번 등록�
       }));
     }
   }
+});
+
+test('등록 응답을 받지 못한 서명 웹훅의 수동 등록 안내는 저장된 인증 방식을 사용한다', async ({ page, request }) => {
+  const { projects: [project] } = await readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const initial = await readJson<GitlabSettings>(await request.get(settingsPath));
+  const receiverUrl = `https://teamspace-project-webhook.test${receiverPath}`;
+  const repositoryId = 42;
+  const settings: GitlabSettings = { ...initial, baseUrl: 'https://gitlab-signing.test', projectIds: [repositoryId],
+    signingTokenConfigured: true, webhookSecretConfigured: true, webhookReceiverUrl: receiverUrl };
+  const result = { settingsVersion: settings.version, receiverUrl, repositoryId, authMode: 'signature', state: 'missing',
+    reviewId: 'signed-review', hooks: [] } satisfies GitlabProjectWebhookReview;
+  const signingToken = `whsec_${Buffer.alloc(32, 3).toString('base64')}`;
+  await page.route(`**${settingsPath}`, route => route.fulfill({ json: settings }));
+  await page.route(`**${reviewPath}`, route => route.fulfill({ json: result }));
+  await page.route(`**${registerPath}`, route => route.abort('connectionreset'));
+
+  await page.goto(`/#/${project.id}/development`);
+  const setup = page.getByRole('region', { name: 'GitLab 프로젝트 웹훅 설정', exact: true });
+  await setup.getByRole('button', { name: '웹훅 설정 점검', exact: true }).click();
+  await setup.getByLabel('GitLab 관리 API 토큰', { exact: true }).fill('synthetic-manager');
+  await setup.getByLabel('웹훅 Signing Token 다시 입력', { exact: true }).fill(signingToken);
+  const register = setup.getByRole('button', { name: 'GitLab에 웹훅 등록', exact: true });
+  await register.click();
+  const manual = setup.getByRole('region', { name: 'GitLab 웹훅 수동 등록', exact: true });
+  await expect(manual).toContainText('Signing token에 Teamspace에 저장한 값을 입력하세요.');
+  await expect(manual).toContainText('Generate signing token');
+  await expect(manual).not.toContainText('Secret token');
+  await expect(manual).not.toContainText(signingToken);
+  await expect(register).toHaveCount(0);
 });

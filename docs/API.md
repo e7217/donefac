@@ -734,6 +734,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 미리보기와 동기화는 GitLab 저장소마다 최근 MR 최대 1,000개와 최근 파이프라인 50개를 읽는다. 파이프라인 기록의 직접 티켓 키를 적용한다. MR의 키를 사용하려면 MR의 소스와 대상 저장소가 모두 파이프라인의 저장소로 확인되고 브랜치와 전체 head SHA가 각각 일치해야 한다. 인증된 파이프라인 웹훅도 같은 기준으로 이미 연결된 MR을 대조한다. 조회당 10초와 디코딩된 응답 16MiB 한도가 적용된다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/), [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/)
 
+조회에 성공한 저장소는 미리보기, 동기화, 저장된 활동 요약의 `coverage.mergeRequests`와 `coverage.pipelines`에 조회 범위를 담는다. `complete`는 마지막 페이지에 도달한 경우, `limited`는 한도에서 다음 페이지가 확인된 경우, `unverified`는 꽉 찬 페이지에서 다음 페이지 정보를 받지 못했거나 응답의 페이지 근거를 검증할 수 없는 경우다. 이전 저장 결과는 `coverage`가 생략될 수 있다. `partial`은 저장소별 성공과 실패가 섞인 경우에 표시한다. [GitLab API 페이지 처리](https://docs.gitlab.com/api/rest/#pagination)
+
 규칙에는 프로젝트, 이름, `enabled`, `trigger`, 비어 있지 않은 `gitlabProjectIds`·`fromStatuses`, `issueTypes`(빈 목록은 모든 유형), `toStatusId`, 실행 팀원 `actorId`, `priority`(0~10000)가 필요하다. `branchPattern`은 MR의 소스 브랜치 또는 파이프라인의 참조 이름에 적용하는 최대 128자 패턴이며 `*`·`?`를 와일드카드로 사용한다. 낮은 우선순위 숫자, 같은 값이면 ID 순으로 첫 조건 일치 규칙 하나만 적용한다. 미리보기는 입력 규칙과 현재 티켓으로 결과를 계산하며 티켓·규칙·이력을 저장하지 않는다.
 
 MR 규칙의 선택 필드 `targetBranchPattern`은 같은 패턴 문법으로 대상 브랜치를 검사한다. 두 패턴을 지정하면 소스와 대상이 각각 일치해야 한다. PATCH에서 생략하면 현재 값을 유지하며, `null`을 보내거나 MR 외 트리거로 변경하면 대상 조건을 해제한다. 미리보기 `sample`은 `{trigger,gitlabProjectId,branch,targetBranch?}`이며 `targetBranch`는 실제 브랜치 이름이다. 인증된 수신과 티켓 단건 조회에서 대상 브랜치 정보가 없거나 확인되지 않으면 이 조건을 지정한 규칙은 적용하지 않는다. 확인한 값은 MR 연결과 실행 기록의 `context.targetBranch`에 남을 수 있다. 자체 백업 형식 113은 대상 조건과 MR 연결·실행 근거를 보존하고, 복원한 규칙은 비활성으로 시작한다. [GitLab MR 웹훅](https://docs.gitlab.com/user/project/integrations/webhook_events/#merge-request-events) · [GitLab MR 단건 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request)
@@ -796,7 +798,7 @@ GitLab 인스턴스·저장소·이벤트·수신 주소 범위에서 `webhook-i
 
 `jiraRoutes`는 `{repositoryId, projectId, jiraInstanceKey}`의 배열이다. 허용한 GitLab 저장소당 Jira 원본 하나와 대상 Teamspace 프로젝트 하나를 지정한다. PATCH와 미리보기에서 전체 배열을 보내며 빈 배열로 매핑을 해제한다. 필드를 생략하면 같은 주소와 허용 저장소의 저장된 매핑을 사용한다. 처음 설정하는 저장소는 현재 Teamspace 키로 연결한다.
 
-매핑한 저장소는 지정한 프로젝트의 현재 키와 지정한 Jira 원본의 이관 키를 대소문자 구분 없이 찾는다. Jira 키를 사용하면 연결 후보와 저장 링크에 `originalJiraKey`를 기록한다. 한 객체가 동일 티켓의 현재 키와 원래 키를 함께 포함하면 링크를 한 건 저장한다. 서로 다른 티켓을 가리키는 키는 보류하고 미리보기의 저장소별 `ambiguousKeys`에 최대 20개를 표시한다.
+매핑한 저장소는 지정한 프로젝트의 현재 키와 지정한 Jira 원본의 이관 키를 대소문자 구분 없이 찾는다. 지정한 프로젝트에서 이동한 이력이 있는 활성 티켓은 그 프로젝트에 있을 때의 키와 현재 키로 연결한다. 현재 프로젝트만 같은 다른 티켓은 지정한 프로젝트의 이동 이력이 있어야 이 범위에 들어간다. Jira 키를 사용하면 연결 후보와 저장 링크에 `originalJiraKey`를 기록한다. 한 객체가 동일 티켓의 현재 키와 원래 키를 함께 포함하면 링크를 한 건 저장한다. 서로 다른 티켓을 가리키는 키는 보류하고 미리보기의 저장소별 `ambiguousKeys`에 최대 20개를 표시한다.
 
 수동 동기화는 개발 활동 링크만 저장한다. 인증된 MR·파이프라인 이벤트는 활성 규칙의 기존 전이·필수 입력·시각 검증을 거친다. 매핑을 바꾸면 해당 저장소에 연결된 활성 자동화 규칙을 비활성화한다. 저장한 링크의 원래 키는 자체 백업 형식 35와 물리 백업에 들어간다. 연결 설정의 매핑은 서버에 저장되며 물리 백업에 포함된다. 자체 백업을 가져오면 복원한 데이터에 원본 프로젝트가 있는 매핑을 유지한다.
 

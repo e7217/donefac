@@ -11,6 +11,7 @@ import './gitlab-project-webhook.css';
 type Action = 'review' | 'register';
 type Hook = GitlabProjectWebhookReview['hooks'][number];
 type HistoryRead = { hookId: number; value: GitlabProjectWebhookHistory | null; error?: string };
+type SetupError = { message: string; offerManualSetup?: boolean };
 
 const receiverPath = '/api/integrations/gitlab/webhook';
 const staleReviewMessage = '연결 설정이나 점검 결과가 변경되었습니다. 최신 설정을 확인하고 다시 점검해 주세요.';
@@ -150,13 +151,14 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
   const [result, setResult] = useState<GitlabProjectWebhookReview | null>(null);
   const [activeAction, setActiveAction] = useState<Action | 'history' | null>(null);
   const [history, setHistory] = useState<HistoryRead | null>(null);
-  const [error, setError] = useState('');
+  const [error, setError] = useState<SetupError | null>(null);
   const [copyStatus, setCopyStatus] = useState('');
   const receiver = useRef<HTMLInputElement>(null);
   const request = useRef<AbortController | null>(null);
   const busy = activeAction !== null;
   const reviewAvailable = Boolean(webhookReceiverUrl && baseUrl && projectIds.includes(repositoryId));
   const registrationAvailable = result?.state === 'missing' && Boolean(result.reviewId && result.authMode && !result.configurationChanged);
+  const manualSetupAvailable = !result?.configurationChanged && (result?.state === 'unknown' || error?.offerManualSetup);
   const management = managementToken.trim();
   const hasCredential = Boolean(webhookCredential.trim());
   const credentialLabel = result?.authMode === 'signature' ? 'Signing Token' : 'Secret Token';
@@ -183,7 +185,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
     setResult(null);
     setHistory(null);
     setWebhookCredential('');
-    setError('');
+    setError(null);
   }
 
   async function runAction(event: FormEvent<HTMLFormElement>, action: Action) {
@@ -196,7 +198,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
     if (action === 'review') setResult(null);
     setHistory(null);
     setWebhookCredential('');
-    setError('');
+    setError(null);
     try {
       const value = await api<GitlabProjectWebhookReview>(`/integrations/gitlab/project-webhook-${action}`, {
         method: 'POST',
@@ -211,14 +213,17 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
       if (value.repositoryId !== repositoryId || value.receiverUrl !== webhookReceiverUrl ||
           (value.settingsVersion !== version && !value.configurationChanged)) {
         setResult(null);
-        setError(staleReviewMessage);
+        setError({ message: staleReviewMessage });
         return;
       }
       setResult(value);
     } catch (cause) {
       if (request.current === controller) {
+        const status = cause instanceof ApiError ? cause.status : null;
+        const uncertainRegistration = action === 'register' && (status === null || status >= 500);
         setResult(null);
-        setError(operationError(cause, action));
+        setError({ message: operationError(cause, action), offerManualSetup: status !== 409 &&
+          (uncertainRegistration || manualSetupAvailable) });
       }
     } finally {
       if (request.current === controller) {
@@ -293,7 +298,7 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
         점검은 저장한 읽기 토큰으로 시도할 수 있습니다. 등록하려면 저장소의 웹훅을 관리할 수 있는 <code>api</code> 토큰을 입력하세요.
       </p>
       {activeAction && activeAction !== 'history' && <p role="status">{activeAction === 'review' ? '웹훅 설정을 점검하고 있습니다.' : 'GitLab에 웹훅을 등록하고 있습니다.'}</p>}
-      {error && <p className="error-text" role="alert">{error}</p>}
+      {error && <p className="error-text" role="alert">{error.message}</p>}
       {result && <div className="gitlab-project-webhook-result">
         <p role="status">{resultMessages[result.state]}</p>
         {result.configurationChanged && <p className="error-text">Teamspace 연결 설정이 바뀌었습니다. 최신 설정을 불러온 뒤 다시 점검해 주세요.</p>}
@@ -310,7 +315,6 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
             </>}
           </ExistingHook>)}
         </ul>}
-        {result.state === 'unknown' && <p>다시 점검하거나 GitLab의 웹훅 목록에서 등록 상태를 직접 확인해 주세요.</p>}
         {result.state === 'missing' && !result.authMode && !result.configurationChanged &&
           <p>GitLab 연결에서 웹훅 인증 값을 먼저 저장해 주세요.</p>}
         {(result.state === 'created' || result.state === 'configured') &&
@@ -330,6 +334,20 @@ export function GitlabProjectWebhookPanel({ settings }: { settings: GitlabSettin
           </p>
         </>}
       </div>}
+      {manualSetupAvailable && <section className="gitlab-project-webhook-manual" aria-labelledby={`${id}-manual`}>
+        <h3 id={`${id}-manual`}>GitLab 웹훅 수동 등록</h3>
+        <p>GitLab의 저장소 {repositoryId}에서 <strong>Settings → Webhooks</strong>를 열고 위의 웹훅 수신 주소를 찾으세요. 같은 주소가 목록에 있으면 Teamspace에서 <strong>다시 점검</strong>을 누르세요.</p>
+        {(settings.signingTokenConfigured || settings.webhookSecretConfigured) ? <ol>
+          <li>주소가 없을 때만 <strong>Add new webhook</strong>을 열고 위에서 복사한 수신 주소를 URL에 붙여 넣으세요.</li>
+          <li>{settings.signingTokenConfigured ? <>
+            <strong>Signing token</strong>에 Teamspace에 저장한 값을 입력하세요. <strong>Generate signing token</strong> 버튼이 보이면 버튼을 누른 뒤 생성된 값을 Teamspace에 저장한 값으로 바꾸세요.
+          </> : <>
+            <strong>Secret token</strong>에 Teamspace에 저장한 값을 입력하세요.
+          </>}</li>
+          <li>Push, Merge Request, Pipeline, Deployment events와 SSL 검증을 켜세요. Push는 모든 브랜치를 선택하고 기본 전송 본문을 사용하세요.</li>
+          <li>GitLab에서 웹훅을 저장한 뒤 Teamspace에서 <strong>다시 점검</strong>을 누르세요.</li>
+        </ol> : <p>GitLab 연결에서 웹훅 인증 값을 먼저 저장하고 다시 점검하세요.</p>}
+      </section>}
     </>}
     {webhookReceiverUrl && !reviewAvailable && <p>GitLab 주소와 프로젝트 ID를 입력하고 연결 설정을 저장해 주세요.</p>}
   </section>;

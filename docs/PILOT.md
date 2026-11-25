@@ -48,9 +48,11 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 같은 연결 화면에서 **배포 조회 저장소**를 고른 뒤 **배포 조회 미리보기**를 누르면 현재 입력으로 배포와 포함 MR의 조회 범위를 확인한다. 배포 목록이 비어 있는 경우와 성공한 배포가 없어 포함 MR을 확인할 수 없는 경우가 구분된다. 포함 MR 일부를 읽지 못했다면 권한·요청 한도·조회 범위 안내를 확인한다. 미리보기는 연결 저장과 배포 동기화 전에 사용할 수 있다. [GitLab 환경별 배포](API.md#gitlab-환경별-배포)
 
-동기화 후 화면을 다시 열고 **GitLab 동기화 결과**에서 저장소별 완료 시각과 마지막 성공 시각을 확인한다. 실패하면 표시된 조회 단계를 확인하고 해당 저장소만 다시 시도한다. **GitLab 배포 기록**에서도 저장소를 바꿔 최근 배포 동기화 결과와 부분 조회 여부를 확인한다.
+동기화 후 화면을 다시 열고 **GitLab 동기화 결과**에서 저장소별 완료 시각과 마지막 성공 시각을 확인한다. 활동 미리보기와 동기화 결과는 MR·파이프라인별로 마지막 페이지까지 읽었는지 표시한다. 추가 페이지가 있거나 확인할 수 없으면 GitLab에서 항목을 찾아 티켓의 **GitLab 링크 추가**로 연결할 수 있다. 실패하면 표시된 조회 단계를 확인하고 해당 저장소만 다시 시도한다. **GitLab 배포 기록**에서도 저장소를 바꿔 최근 배포 동기화 결과와 부분 조회 여부를 확인한다.
 
 **개발 · GitLab → GitLab 웹훅 수신 확인**에서 저장소별 **이벤트별 수신**을 펼친다. Push·Merge Request·Pipeline·배포 이벤트의 최근 인증 시각과 업무 연결 또는 배포 반영 여부를 각각 확인할 수 있다. 업무 연결이 0건이어도 수신을 표시한다. 재전송은 최근 수신에 표시하며 이벤트별로는 이전 처리 결과를 유지한다. GitLab에서 이벤트를 보낸 뒤 **수신 상태 새로고침**을 누른다.
+
+Teamspace에서 등록 결과를 확인할 수 없으면 **GitLab 웹훅 수동 등록** 안내를 연다. GitLab 저장소의 **Settings → Webhooks**에서 Teamspace에 표시된 수신 주소를 먼저 대조한다. 같은 주소가 없을 때만 수신 주소를 복사해 안내된 인증 방식으로 웹훅을 추가한다. GitLab에서 저장한 뒤 Teamspace의 **다시 점검**으로 등록과 이벤트 설정을 확인한다. [GitLab 웹훅 만들기](https://docs.gitlab.com/user/project/integrations/webhooks/#create-a-webhook)
 
 수신이 대기 상태면 **GitLab 프로젝트 웹훅 설정 → 웹훅 설정 점검 → 최근 전송 확인**을 연다. 각 GitLab 전송의 HTTP 상태와 **같은 메시지 인증 수신**을 확인한다. **미확인**은 현재 보관한 인증 수신에서 그 메시지를 찾지 못했다는 뜻이다. **대조 불가**는 GitLab 응답에서 메시지 근거를 확인할 수 없는 경우다. 저장소 전체의 마지막 인증 수신은 목록 아래에 표시된다. 401·403은 수신 인증과 프록시 접근을, 404·리다이렉트는 수신 주소와 프록시 경로를 확인한다. HTTP 응답이 없으면 GitLab의 전송 상세에서 주소·TLS·연결을 확인한다. API 조회는 GitLab 17.3 이상과 웹훅 조회 권한이 필요하다. GitLab에서도 **Settings → Webhooks → Edit → Recent events**를 열 수 있다. [GitLab 전송 이력 API](https://docs.gitlab.com/api/project_webhooks/#list-project-webhook-events) · [GitLab 웹훅 전송 이력 화면](https://docs.gitlab.com/user/project/integrations/webhooks/#view-webhook-request-history)
 
