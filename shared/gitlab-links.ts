@@ -3,6 +3,8 @@ import { isGitlabMergeReadiness } from './gitlab-merge-readiness.js';
 import { gitlabPipelineSource } from './gitlab-pipeline-source.js';
 import type { GitlabLink } from './types.js';
 
+export const GITLAB_REPOSITORY_ADDRESS_LIMIT = 4_000;
+
 export function gitlabObjectSha(value: unknown): string | null {
   return typeof value === 'string' && /^(?:[a-f\d]{40}|[a-f\d]{64})$/i.test(value) ? value.toLowerCase() : null;
 }

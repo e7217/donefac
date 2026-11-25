@@ -607,22 +607,34 @@ function searchedRepository(project: GitlabReadObject, base: URL): GitlabReposit
   return { id, name: name.trim(), pathWithNamespace, webUrl: canonical.href };
 }
 
+function repositoryAddressNamespace(query: string, base: URL): string {
+  const address = gitlabPageAddress(query, base, false);
+  const path = address && gitlabPathInScope(address.pathname, address.scope);
+  if (!path) throw new GitlabRepositoryQueryError('설정한 GitLab 주소에 속한 저장소 주소를 입력해 주세요.');
+  // GitLab project slugs cannot end in .git, which identifies an HTTP clone address.
+  return decodeURIComponent(path.slice(address.scope.length + 1)).replace(/\.git$/u, '');
+}
+
 export async function readGitlabRepositorySearch(
   connection: Connection, query: string, page: number, signal?: AbortSignal,
 ): Promise<Pick<GitlabRepositorySearch, 'repositories' | 'hasNextPage'>> {
   const { base, headers, projectsUrl } = projectsReadRequest(connection, 'project');
+  const namespace = /^https?:\/\//iu.test(query) ? repositoryAddressNamespace(query, base) : query;
+  if (includesGitlabCredential(connection.token, [query, namespace])) {
+    throw new GitlabRepositoryQueryError('GitLab 저장소 검색어를 확인해 주세요.');
+  }
   const exact = query.includes('/');
   let rows: GitlabReadObject[];
   let nextPage: string | null = null;
   let links: string | null = null;
   if (exact) {
-    if (page !== 1 || !gitlabRepositoryUrl(base.href, { path_with_namespace: query })) {
+    if (page !== 1 || !gitlabRepositoryUrl(base.href, { path_with_namespace: namespace })) {
       throw new GitlabRepositoryQueryError('저장소 경로는 그룹/저장소 형식으로 입력해 주세요.');
     }
-    projectsUrl.pathname += `/${encodeURIComponent(query)}`;
+    projectsUrl.pathname += `/${encodeURIComponent(namespace)}`;
     try {
       const project = await readJson(projectsUrl, headers, 'project', signal);
-      if (!isReadObject(project) || project.path_with_namespace !== query) throw new GitlabReadError('project', 'invalid-response');
+      if (!isReadObject(project) || project.path_with_namespace !== namespace) throw new GitlabReadError('project', 'invalid-response');
       rows = [project];
     } catch (error) {
       if (!(error instanceof GitlabReadError) || error.httpStatus !== 404) throw error;

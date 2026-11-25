@@ -20,6 +20,8 @@ TEAMSPACE_DATA_DIR="$HOME/teamspace-pilot/workspace" npm run start:pilot
 - 복원 직후의 티켓 건수와 예약을 대조할 때 `TEAMSPACE_PILOT_RECURRING_ISSUES=0`으로 실행하면 반복 업무의 예약 확인을 일시 중지할 수 있다. 예약 규칙과 실행 기록은 조회할 수 있다.
 - `TEAMSPACE_PILOT_DEADLINE_REMINDERS=0`을 지정하면 마감 알림의 자동 확인을 일시 중지한다. 이미 저장된 알림은 그대로 조회한다.
 
+`npm run test:pilot`은 빈 데이터 디렉터리에서 합성 팀원과 첫 프로젝트를 화면으로 등록한다. 간트에서 선후행이 있는 업무를 만들고 티켓에서 연결 문서를 저장한다. 다른 브라우저에서 읽기 주소를 연 뒤 담당 업무의 상태와 인수인계 댓글을 저장한다. 이 검사는 임시 루프백 파일럿에서 수행한다.
+
 ## 팀 접속 주소
 
 기존 HTTPS 리버스 프록시에서 팀 주소의 루트 경로를 같은 호스트의 `http://127.0.0.1:5190`으로 연결한다. 원래 `Host`와 `Origin`을 전달하고 `/api/collaboration`에서 WebSocket 업그레이드를 지원한다. 첨부와 원본 패키지를 올릴 경우 프록시에서 최대 64MiB 요청 본문을 받도록 설정한다. [Nginx WebSocket 프록시 문서](https://nginx.org/en/docs/http/websocket.html)
@@ -44,7 +46,7 @@ TEAMSPACE_PILOT_ACCESS_FILE="$HOME/teamspace-pilot/team-access.key" npm run star
 
 ## GitLab 웹훅 수신 확인
 
-처음 연결할 때는 **개발 · GitLab → GitLab 저장소 찾기**를 사용한다. GitLab 서비스 주소와 읽기 토큰을 입력하고 저장소 이름이나 `group/subgroup/repository` 전체 경로로 검색한다. 결과의 **추가**를 누르면 GitLab 프로젝트 ID 입력에 반영된다. 알고 있는 숫자 ID도 직접 입력할 수 있다. **연결 미리보기**에서 티켓 연결을 확인한 뒤 **연결 설정 저장**과 **지금 동기화**를 실행한다. [GitLab 저장소 조회](https://docs.gitlab.com/api/projects/#list-all-projects)
+처음 연결할 때는 **개발 · GitLab → GitLab 저장소 찾기**를 사용한다. GitLab 서비스 주소와 읽기 토큰을 입력하고 저장소 이름, `group/subgroup/repository` 전체 경로, 같은 서버의 저장소 웹·HTTP(S) 복제 주소로 검색한다. 결과의 **추가**를 누르면 GitLab 프로젝트 ID 입력에 반영된다. 알고 있는 숫자 ID도 직접 입력할 수 있다. **연결 미리보기**에서 티켓 연결을 확인한 뒤 **연결 설정 저장**과 **지금 동기화**를 실행한다. [GitLab 저장소 조회](https://docs.gitlab.com/api/projects/#retrieve-a-project)
 
 같은 연결 화면에서 **배포 조회 저장소**를 고른 뒤 **배포 조회 미리보기**를 누르면 현재 입력으로 배포와 포함 MR의 조회 범위를 확인한다. 배포 목록이 비어 있는 경우와 성공한 배포가 없어 포함 MR을 확인할 수 없는 경우가 구분된다. 포함 MR 일부를 읽지 못했다면 권한·요청 한도·조회 범위 안내를 확인한다. 미리보기는 연결 저장과 배포 동기화 전에 사용할 수 있다. [GitLab 환경별 배포](API.md#gitlab-환경별-배포)
 

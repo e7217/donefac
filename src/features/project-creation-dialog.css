@@ -1,0 +1,39 @@
+.project-creation-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(470px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+}
+
+.project-creation-dialog::backdrop {
+  background: #172b2345;
+  backdrop-filter: blur(3px);
+}
+
+.project-creation-dialog .card-heading {
+  padding: 0;
+  margin-bottom: 14px;
+}
+
+.project-creation-dialog fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.project-creation-dialog .modal-actions {
+  flex-wrap: wrap;
+}
+
+.project-creation-message,
+.project-creation-error {
+  margin: 12px 0 0;
+  font-size: 0.875rem;
+}
+
+.project-creation-error {
+  color: #913c40;
+}

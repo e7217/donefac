@@ -446,7 +446,7 @@ async function verifyPilotCrossProjectJiraRelation(url, { receipt, sourceIssueId
   return { relation, blocker, reported, evidence: audit.targetContent.issueRelations };
 }
 
-async function browser(url, teamFixture, accessFile) {
+async function browser(url, { teamFixture, accessFile, spec } = {}) {
   interruption.signal.throwIfAborted();
   const playwright = fileURLToPath(new URL('../node_modules/@playwright/test/cli.js', import.meta.url));
   const env = { ...process.env, TEAMSPACE_PILOT_TEST_URL: url };
@@ -459,7 +459,7 @@ async function browser(url, teamFixture, accessFile) {
     delete env.PWDEBUG;
     delete env.NODE_DEBUG;
   }
-  const child = spawn(process.execPath, [playwright, 'test', '--config=playwright.pilot.config.ts', `--output=${join(scratch,'browser')}`, '--reporter=line'], {
+  const child = spawn(process.execPath, [playwright, 'test', '--config=playwright.pilot.config.ts', `--output=${join(scratch,'browser')}`, '--reporter=line', ...(spec ? [spec] : [])], {
     cwd: repo, stdio: 'inherit', env, detached: process.platform !== 'win32',
   });
   browserChild = child;
@@ -713,7 +713,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
     initialEpoch: session.epoch, seconds, evidencePath,
   };
   console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing on migrated content.`);
-  await browser(proxy.origin, fixture, access.file);
+  await browser(proxy.origin, { teamFixture: fixture, accessFile: access.file });
 
   const browserEvidence = readFileSync(evidencePath, 'utf8');
   assert.ok(!browserEvidence.includes(access.code), 'The browser evidence must exclude the access key.');
@@ -778,10 +778,11 @@ async function runStandardPilot() {
   const emptyWorkspace = await (await call(empty.url, '/workspace')).json();
   assert.deepEqual(emptyWorkspace.users, []);
   assert.deepEqual(emptyWorkspace.projects, []);
+  await browser(empty.url, { spec: 'pilot-workspace.spec.ts' });
   await stop(empty);
 
   const pilot = await start(source, true);
-  await browser(pilot.url);
+  await browser(pilot.url, { spec: 'pilot.spec.ts' });
   const workspace = await (await call(pilot.url, '/workspace')).json();
   const projectId = workspace.projects[0].id;
   const assigneeId = workspace.users[0].id;

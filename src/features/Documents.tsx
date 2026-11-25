@@ -51,6 +51,7 @@ import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorHistory } from './DocumentEditorHistory';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentFindPanel } from './DocumentFindPanel';
+import { DocumentReadFindPanel } from './DocumentReadFindPanel';
 import { documentFindExtension } from './document-find';
 import { clipboardImageFiles, trackClipboardImagePosition } from './document-clipboard-image';
 import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlashRange } from './document-slash-insertion';
@@ -232,8 +233,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [findScope, setFindScope] = useState<string | null>(null);
   const findOpener = useRef<HTMLButtonElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
+  const [readingFindScope, setReadingFindScope] = useState<string | null>(null);
+  const readingFindOpener = useRef<HTMLButtonElement>(null);
+  const readingFindInput = useRef<HTMLInputElement>(null);
+  const readingBody = useRef<HTMLDivElement>(null);
   const documentScope = JSON.stringify([actorId, selectedDocumentId]);
   if (findScope !== null && findScope !== documentScope) setFindScope(null);
+  if (readingFindScope !== null && (!reading || readingFindScope !== documentScope)) setReadingFindScope(null);
   const [migratedIssueLink, setMigratedIssueLink] = useState<MigratedIssueLinkState | null>(null);
   const migratedIssueRequest = useRef<{ anchor: HTMLAnchorElement; controller: AbortController } | null>(null);
   const draftRef = useRef<Draft | null>(null);
@@ -2160,6 +2166,25 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   const readingPage = reading ? latestPage : null;
+  const readingFindOpen = Boolean(readingPage && readingFindScope === documentScope);
+  function openReadingFind() {
+    if (readingFindOpen) {
+      readingFindInput.current?.focus({ preventScroll: true });
+      readingFindInput.current?.select();
+    } else setReadingFindScope(documentScope);
+  }
+  function closeReadingFind() {
+    setReadingFindScope(null);
+    readingFindOpener.current?.focus({ preventScroll: true });
+  }
+  function handleReadingFindShortcut(event: ReactKeyboardEvent<HTMLElement>) {
+    if (!readingPage || issueDrawerOpen || event.defaultPrevented || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey ||
+        event.nativeEvent.isComposing || event.key.toLowerCase() !== 'f' || !(event.target instanceof Node) ||
+        !event.currentTarget.contains(event.target)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openReadingFind();
+  }
   const breadcrumbTitle = documentTitleForSave(readingPage?.title ?? draft?.title ?? '');
   const readingEditPending = readingPage && ((draft?.id === readingPage.id && draft.dirty) ||
     (liveState?.document.id === readingPage.id && liveState.pending));
@@ -2237,7 +2262,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       </aside>
 
       {draft && selectedPage ? <>
-        <main className="docs-document">
+        <main className="docs-document" onKeyDown={handleReadingFindShortcut}>
           <div className="docs-document-topbar" inert={checklistReselecting}>
             <nav className="docs-breadcrumb" aria-label="문서 위치" tabIndex={-1}>
               <FileText size={14} aria-hidden="true" /><span title={spaceTitle}>{spaceTitle}</span>
@@ -2266,6 +2291,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 disabled={referencesRefreshing} onClick={() => void refreshReferences()}>
                 <RefreshCw size={15} aria-hidden="true" className={referencesRefreshing ? 'docs-spin' : undefined} />
               </button>}
+              {readingPage && <button ref={readingFindOpener} type="button" className="btn btn-ghost docs-icon-button"
+                aria-label="저장본 본문에서 찾기" title="저장본 본문에서 찾기" aria-expanded={readingFindOpen} aria-keyshortcuts="Control+F Meta+F"
+                onClick={() => readingFindOpen ? closeReadingFind() : openReadingFind()}><Search size={15} aria-hidden="true" /></button>}
               {readingPage && <button type="button" className="btn btn-ghost docs-icon-button" aria-label="읽기 링크 복사" title="읽기 링크 복사"
                 onClick={() => void copyReadingLink(readingPage)}><Link2 size={15} aria-hidden="true" /></button>}
               {!reading && <>
@@ -2320,6 +2348,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
           {manualRecovery && !confirmingSave && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
           </>}
+          {readingPage && readingFindOpen && <DocumentReadFindPanel inputRef={readingFindInput} contentRef={readingBody}
+            content={readingPage.content} onClose={closeReadingFind} />}
           {readingPage && <div className="docs-paper-scroll">
             <article className="docs-paper docs-reading-paper" aria-label="저장본 읽기" key={readingPage.id}
               onClickCapture={event => {
@@ -2337,7 +2367,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {migratedIssueNotice}
               <DocumentBlocksProvider data={data} actorId={actorId} documentId={readingPage.id} content={readingPage.content}
                 openIssue={openIssue} openDocument={openDocument}>
-                <ReadonlyDocumentContent content={readingPage.content} documentId={readingPage.id} nodeBudget={30_000} showOutline sectionId={sectionId}
+                <ReadonlyDocumentContent content={readingPage.content} documentId={readingPage.id} nodeBudget={30_000} showOutline sectionId={sectionId} findContentRef={readingBody}
                   sectionLinkHref={id => documentReadingHash(readingPage.id, readingPage.projectId ?? projectId, id)} />
               </DocumentBlocksProvider>
             </article>

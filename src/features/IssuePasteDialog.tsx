@@ -9,7 +9,11 @@ import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import './issue-paste.css';
 
-type Props = Pick<FeatureProps, 'actorId' | 'refresh' | 'notify'> & { project: Project; onClose: () => void };
+type Props = Pick<FeatureProps, 'actorId' | 'refresh' | 'notify'> & {
+  project: Project;
+  onClose: () => void;
+  onCreated?: (result: IssuePasteResult) => void;
+};
 type Pending = 'preview' | 'apply';
 type Recovery = { kind: 'request' } | { kind: 'refresh'; receipt: IssuePasteResult } | { kind: 'unavailable' };
 
@@ -57,7 +61,7 @@ function allowDiscard(text: string, recovery: Recovery | null, prompt: string) {
   return !text || recovery?.kind === 'unavailable' || window.confirm(`붙여넣은 입력이 삭제됩니다. ${prompt}`);
 }
 
-export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }: Props) {
+export function IssuePasteDialog({ actorId, project, refresh, notify, onClose, onCreated }: Props) {
   const titleId = useId();
   const inputId = `${titleId}-input`;
   const dialog = useRef<HTMLDialogElement>(null);
@@ -228,6 +232,7 @@ export function IssuePasteDialog({ actorId, project, refresh, notify, onClose }:
       if (signal.aborted) return;
       onClose();
       notify(`${issueAndLinkCounts(receipt.issues.length, receipt.dependencies?.length ?? 0)}를 만들었습니다.`);
+      onCreated?.(receipt);
     });
   }
 

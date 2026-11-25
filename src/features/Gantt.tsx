@@ -31,6 +31,7 @@ import { issueViewSortLabels } from './IssueViewSort';
 import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from './CustomFields';
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
+import { IssuePasteDialog } from './IssuePasteDialog';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { dayNumber, dependencyLabel, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
@@ -333,6 +334,8 @@ function ProjectGantt(props: GanttProps) {
   const [hideDone, setHideDone] = useState(false);
   const [autoOpen, setAutoOpen] = useState(false);
   const [pasteScope, setPasteScope] = useState<ScheduleProjectScope | null>(null);
+  const [newIssuePasteProject, setNewIssuePasteProject] = useState<Project | null>(null);
+  const [pastedIssueIds, setPastedIssueIds] = useState<string[]>([]);
   const [bulkDateSelection, setBulkDateSelection] = useState<BulkDateSelection | null>(null);
   const [bulkLinkSelection, setBulkLinkSelection] = useState<BulkLinkSelection | null>(null);
   const [blockerLinksScope, setBlockerLinksScope] = useState<ScheduleProjectScope | null>(null);
@@ -441,7 +444,7 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const otherScheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || preview || cascade ||
-    shiftMode || autoOpen || pasteScope || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
+    shiftMode || autoOpen || pasteScope || newIssuePasteProject || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
     createOpen || scheduleIssueCreation || blockedIssueCreation || teamBlockerEdit || linkEditor || planAssignment || planShift);
   const scheduleEditorOpen = otherScheduleEditorOpen || Boolean(linkPicker);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
@@ -687,6 +690,8 @@ function ProjectGantt(props: GanttProps) {
       setTeamBlockerChartPair(undefined);
       setTeamBlockerEdit(null);
       setPasteScope(null);
+      setNewIssuePasteProject(null);
+      setPastedIssueIds([]);
       setBulkLinkSelection(null);
       setBlockerLinksScope(null);
       setManualReview(null); setManualProblem(null); setDatePreviewFocusTarget(null);
@@ -960,6 +965,7 @@ function ProjectGantt(props: GanttProps) {
   const project = allProjects ? undefined : projectsById.get(projectId);
   const hasProject = Boolean(project);
   const sheetScope: ScheduleProjectScope | null = project ?? filteredProject ?? (allProjects && !chartProjectFilter && data.projects.length ? 'team' : null);
+  const newIssuePasteTarget = project ?? filteredProject;
   const sharedViews = useMemo(() => allProjects ? [] : (data.savedViews ?? []).filter(view => view.projectId === projectId)
     .sort((a, b) => a.name.localeCompare(b.name, 'ko')), [allProjects, data.savedViews, projectId]);
   const sharedView = data.savedViews?.find(view => view.id === ganttViewId && view.projectId === projectId);
@@ -1220,6 +1226,7 @@ function ProjectGantt(props: GanttProps) {
   const automaticProjectId = allProjects ? selectedProjectId ?? (!selectedIssues.length ? chartProjectFilter : null) : projectId;
   const automaticNeedsSelection = teamScheduleFilterActive && !selectedIssues.length;
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
+  const hiddenPastedIssues = pastedIssueIds.filter(id => !issueRows.has(id) && projectIssues.some(issue => issue.id === id));
   const savedFindings = useMemo(() => [...findings, ...teamBlockerFindings], [findings, teamBlockerFindings]);
   const activeFindings = scheduleFocus ? savedFindings.filter(finding => {
     if (teamDependencyTrace) return 'relation' in finding
@@ -1578,6 +1585,15 @@ function ProjectGantt(props: GanttProps) {
     setPasteScope(null);
     if (updated && focusAfterCompletingMissingRows(updated)) return;
     requestAnimationFrame(() => pasteTrigger.current?.focus({ preventScroll: true }));
+  }
+  function openNewIssuePaste() {
+    if (!newIssuePasteTarget || (!canKeepInlineDateDrafts() && !canLeave())) return;
+    queueMicrotask(() => setNewIssuePasteProject(newIssuePasteTarget));
+  }
+  function showPastedIssues(created: readonly Issue[]) {
+    const first = !scheduleFocus && sharedViewRows(locallyVisibleIssues(query, hideDone, planningScope, [...created]))[0];
+    setPastedIssueIds(created.map(issue => issue.id));
+    if (first) locateScheduleFocusRow(first, { showIssueNames: true });
   }
   function openBulkDates() {
     if (busyRef.current || !canEditBulkDates || activeDatePicker || !selectedIssues.length || bulkDatesOverLimit) return;
@@ -2364,6 +2380,10 @@ function ProjectGantt(props: GanttProps) {
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} onClick={openSchedulePaste}>
         <ClipboardPaste size={15} aria-hidden="true" />일정 붙여넣기
       </button>}
+      {newIssuePasteTarget && <button type="button" className="btn" data-gantt-focus-control=""
+        disabled={busy || scheduleEditorOpen || issueOverlayOpen} onPointerDown={keepInlineDateFocus} onClick={openNewIssuePaste}>
+        <ClipboardPaste size={15} aria-hidden="true" />새 업무 붙여넣기
+      </button>}
       {automaticProjectId && <button className="btn" disabled={busy || sharedViewUnavailable || automaticNeedsSelection || Boolean((planningScope || scheduleFocus) && !automaticScheduleIssues.length)}
         title={automaticNeedsSelection ? '현재 보기에서 자동 일정을 검토할 업무를 선택하세요.' : undefined}
         onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button>}
@@ -2372,6 +2392,13 @@ function ProjectGantt(props: GanttProps) {
     </div></div>
     {refreshFeedback && <p className={`gantt-refresh-feedback${refreshFeedback === 'failed' ? ' issue-form-error' : ''}`}
       role={refreshFeedback === 'failed' ? 'alert' : 'status'}>{REFRESH_FEEDBACK[refreshFeedback]}</p>}
+    {hiddenPastedIssues.length > 0 && <div className="gantt-pasted-issues">
+      <p role="status">추가한 업무 중 {hiddenPastedIssues.length}개가 현재 간트의 보기 범위 밖에 있습니다.</p>
+      <button type="button" className="btn btn-ghost" disabled={scheduleEditorOpen || busy || issueOverlayOpen}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
+        onClick={event => openChartIssue(hiddenPastedIssues[0], event.currentTarget, hiddenPastedIssues)}>보기 범위 밖 업무 열기</button>
+      <button type="button" className="issue-icon-button" aria-label="새 업무 안내 닫기" onClick={() => setPastedIssueIds([])}><X size={14} aria-hidden="true" /></button>
+    </div>}
     {reservationsOpen && hasProject && <TimeReservations key={draftEpoch} projectId={projectId} issues={projectIssues}
       initialIssue={selectedIssues.length === 1 ? selectedIssues[0] : undefined} actorId={props.actorId} users={data.users}
       notify={notify} openIssue={openIssue} onDraftChange={trackReservationDraft} onChanged={refresh} refreshVersion={refreshCount} />}
@@ -3087,6 +3114,8 @@ function ProjectGantt(props: GanttProps) {
         notify(result.updated.length ? `계획과 ${result.updated.length}개 업무의 일정을 이동했습니다.` : '계획 일정을 이동했습니다.');
       }} />}
   </div>
+    {newIssuePasteProject && <IssuePasteDialog project={newIssuePasteProject} actorId={props.actorId}
+      refresh={refresh} notify={notify} onClose={() => setNewIssuePasteProject(null)} onCreated={result => showPastedIssues(result.issues)} />}
     {rowScheduleEdit && <GanttRowScheduleEdit key={rowScheduleEdit.issue.id}
       issue={rowScheduleEdit.issue} issues={rowEditIssues} workspaceProjects={data.projects} issueAliases={data.issueAliases}
       incomingTeamBlockers={incomingTeamBlockers.get(rowScheduleEdit.issue.id)}

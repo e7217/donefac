@@ -19,7 +19,7 @@ function searchForm(page: Page) {
   const region = page.getByRole('region', { name: 'GitLab 저장소 찾기', exact: true });
   return {
     region,
-    query: region.getByLabel('저장소 이름 또는 전체 경로', { exact: true }),
+    query: region.getByLabel('저장소 이름·전체 경로·주소', { exact: true }),
     search: region.getByRole('button', { name: '저장소 검색', exact: true }),
     next: region.getByRole('button', { name: '저장소 다음 페이지', exact: true }),
     result: (path: string) => region.getByRole('button', { name: `${path} 저장소 추가`, exact: true }),
@@ -52,7 +52,7 @@ function repositoryJson(baseUrl: string, item = repository) {
   return { id: item.id, name: item.name, path_with_namespace: item.path, web_url: `${baseUrl}/${item.path}` };
 }
 
-test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 미리보기와 동기화를 진행한다', async ({ page, request }) => {
+test('360px에서 하위 그룹 주소로 저장소를 추가하고 수동 ID를 유지한 채 미리보기와 동기화를 진행한다', async ({ page, request }) => {
   test.setTimeout(70_000);
   const settings = async () => (await (await request.get(integration)).json()) as GitlabSettings;
   const workspace = async () => (await (await request.get('/api/workspace')).json()) as WorkspaceSnapshot;
@@ -88,9 +88,6 @@ test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 �
   });
 
   try {
-    const configured = await request.patch(integration, { data: { expectedVersion: original.version, baseUrl: mock.baseUrl, projectIds: [21] } });
-    expect(configured.ok(), await configured.text()).toBeTruthy();
-    const savedBefore = await configured.json() as GitlabSettings;
     await page.setViewportSize({ width: 360, height: 820 });
     await page.goto(`/#/${project.id}/development`);
     const form = searchForm(page);
@@ -98,8 +95,10 @@ test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 �
     const ids = page.getByLabel(/^GitLab 프로젝트 ID/);
     const readToken = page.getByLabel(/읽기 API 토큰/);
     const hookSecret = page.getByLabel('웹훅 Secret Token', { exact: true });
-    await expect(address).toHaveValue(mock.baseUrl);
-    await expect(ids).toHaveValue('21');
+    await expect(address).toBeEnabled();
+    await expect(address).toHaveValue('');
+    await expect(ids).toHaveValue('');
+    await address.fill(mock.baseUrl);
     await ids.fill('21, 34');
     await readToken.fill(token);
     await hookSecret.fill(secret);
@@ -110,7 +109,7 @@ test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 �
     await form.search.click();
     const initialResult = await first;
     expect(initialResult.ok(), await initialResult.text()).toBeTruthy();
-    expect(initialResult.request().postDataJSON()).toMatchObject({ expectedVersion: savedBefore.version, baseUrl: mock.baseUrl, query: 'engine', page: 1 });
+    expect(initialResult.request().postDataJSON()).toMatchObject({ expectedVersion: original.version, baseUrl: mock.baseUrl, query: 'engine', page: 1 });
     expect(initialResult.request().postDataJSON()).not.toHaveProperty('webhookSecret');
     await expect(form.result(other.path)).toBeVisible();
     const bounds = await form.region.boundingBox();
@@ -122,18 +121,29 @@ test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 �
     const nextPage = await second;
     expect(nextPage.ok(), await nextPage.text()).toBeTruthy();
     expect(nextPage.request().postDataJSON()).toMatchObject({ query: 'engine', page: 2 });
-    await form.result(repository.path).click();
-    await expect(ids).toHaveValue(/21\s*,\s*34\s*,\s*42/);
-    await expect(hookSecret).toHaveValue(secret);
-    await expect(readToken).toHaveValue(token);
-    expect(await settings()).toEqual(savedBefore);
+    await expect(form.result(repository.path)).toBeVisible();
 
-    await form.query.fill(repository.path);
+    await form.query.fill(`${mock.baseUrl}-other/${repository.path}`);
+    const outsideScope = responseAt(page, searchEndpoint);
+    await form.search.click();
+    expect((await outsideScope).status()).toBe(400);
+    await expect(form.region.getByRole('alert')).toContainText('설정한 GitLab 주소');
+    await expect(ids).toHaveValue('21, 34');
+
+    const cloneUrl = `${mock.baseUrl}/${repository.path}.git`;
+    await form.query.fill(cloneUrl);
     const exact = responseAt(page, searchEndpoint);
     await form.query.press('Enter');
     const exactResult = await exact;
     expect(exactResult.ok(), await exactResult.text()).toBeTruthy();
+    expect(exactResult.request().postDataJSON()).toMatchObject({ query: cloneUrl, page: 1 });
+    await expect(form.region.getByRole('link', { name: /^Engine GitLab/ })).toHaveAttribute('href', `${mock.baseUrl}/${repository.path}`);
+    await form.result(repository.path).click();
     await expect(form.added(repository.path)).toBeVisible();
+    await expect(ids).toHaveValue(/21\s*,\s*34\s*,\s*42/);
+    await expect(hookSecret).toHaveValue(secret);
+    await expect(readToken).toHaveValue(token);
+    expect(await settings()).toEqual(original);
     expect(mock.calls.map(({ url }) => url.pathname)).toEqual([
       projectEndpoint, projectEndpoint, `${projectEndpoint}/${encodeURIComponent(repository.path)}`,
     ]);
@@ -145,7 +155,7 @@ test('360px에서 하위 그룹 저장소를 찾고 수동 ID를 유지한 채 �
     expect(preview.request().postDataJSON()).toMatchObject({ projectIds: [21, 34, 42] });
     expect((await preview.json() as GitlabSyncPreview).candidates).toMatchObject([{ issueId: issue.id, projectId: repository.id }]);
     await expect(page.getByRole('region', { name: '티켓 연결 후보', exact: true })).toContainText(mrTitle);
-    expect(await settings()).toEqual(savedBefore);
+    expect(await settings()).toEqual(original);
     expect((await workspace()).gitlabLinks.filter(link => link.issueId === issue.id)).toHaveLength(0);
 
     const saving = responseAt(page, integration, 'PATCH');

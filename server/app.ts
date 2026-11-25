@@ -44,6 +44,7 @@ import { JiraOriginalCommentLinks } from './jira-original-comment-links.js';
 import { jiraCommentBodyHash, validRestoredJiraCommentCorrections } from './jira-comment-corrections.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { ProjectCreationError, ProjectCreationService } from './project-creation.js';
 import { IssueSaveError, IssueSaveService } from './issue-save.js';
 import { DocumentSaveError, DocumentSaveService } from './document-save.js';
 import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
@@ -258,6 +259,7 @@ export function createApp(options: {
   const commentEditing = new CommentEditingService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
+  const projectCreation = new ProjectCreationService(store);
   const issueSave = new IssueSaveService(store);
   const documentSave = new DocumentSaveService(store);
   const issueStatusChanges = new IssueStatusChangeService(store);
@@ -1569,7 +1571,14 @@ export function createApp(options: {
   });
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
-  app.post('/api/projects',(req,res)=>{const p=validateProject({id:uid(),key:req.body.key,name:req.body.name,description:req.body.description||'',color:req.body.color||'#5879ed',createdAt:now()});store.transaction(()=>{store.put('projects',p);store.db.prepare('INSERT INTO issue_sequences VALUES(?,1)').run(p.id);activity(req,'project',p.id,'프로젝트 생성',p.name);});res.status(201).json(p);});
+  app.post('/api/projects', (req, res) => {
+    const input = req.body;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) return fail('프로젝트 입력을 확인해 주세요.');
+    const result = projectCreation.create(input, () => actor(req), () => validateProject({ id: uid(), key: input.key,
+      name: input.name, description: input.description || '', color: input.color || '#5879ed', createdAt: now() }),
+    (project, actorId) => recordActivity(actorId, 'project', project.id, '프로젝트 생성', project.name));
+    res.status(result.duplicate ? 200 : 201).json(result.project);
+  });
   const prepareIssueUpdate = (old: Issue, values: Record<string, unknown>, options?: IssueChangeOptions, updatedAt = now()) => {
     if(values.projectId&&values.projectId!==old.projectId)fail('다른 프로젝트로 옮기려면 업무 상세에서 프로젝트 이동 미리보기를 사용해 주세요.');
     const fields=['title','description','descriptionFormat','type','status','priority','assigneeId','reporterId','collaboratorIds','parentId','labels','startDate','endDate','dueDate','estimate','plannedEffortMinutes','cycle','module','release','cycleId','moduleId','releaseId','customFields'].filter(k=>k in values);
@@ -3797,6 +3806,7 @@ export function createApp(options: {
       commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      projectCreation.invalidateForImport();
       issueSave.invalidateForImport();
       documentSave.invalidateForImport();
       issueStatusChanges.clearForImport();
@@ -3909,6 +3919,7 @@ export function createApp(options: {
     if(error instanceof CommentCreationError)return res.status(error.status).json({error:error.message});
     if(error instanceof CommentEditError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof ProjectCreationError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueSaveError||error instanceof DocumentSaveError)return res.status(error.status).json({error:error.message});

@@ -2,6 +2,7 @@
 
 import { useEffect, useId, useRef, useState } from 'react';
 import { Search } from 'lucide-react';
+import { GITLAB_REPOSITORY_ADDRESS_LIMIT } from '../../shared/gitlab-links';
 import type { GitlabRepositoryCandidate, GitlabRepositorySearch } from '../../shared/types';
 import { api } from '../lib/api';
 
@@ -89,8 +90,8 @@ export function GitlabRepositoryPicker({ baseUrl, token, settingsVersion, select
   return <section className="gitlab-repository-picker" aria-labelledby={headingId}>
     <h3 id={headingId}>GitLab 저장소 찾기</h3>
     <div className="gitlab-repository-search-controls">
-      <label className="form-label">저장소 이름 또는 전체 경로
-        <input className="field" type="search" value={query} autoComplete="off" maxLength={200}
+      <label className="form-label">저장소 이름·전체 경로·주소
+        <input className="field" type="search" value={query} autoComplete="off" maxLength={GITLAB_REPOSITORY_ADDRESS_LIMIT}
           onChange={event => changeQuery(event.target.value)} onKeyDown={event => {
             if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
             event.preventDefault();

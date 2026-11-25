@@ -205,6 +205,12 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 브라우저의 `GET /api/documents/:id/include-revisions/:revisionId/files/:fileId`는 문서 저장본의 본문 링크가 정확히 가리킨 파일 버전을 내려준다. 링크가 없거나 파일을 찾을 수 없으면 `404`다. 활성 파일을 우선 찾아 그 버전을 내려준다. 휴지통에서는 저장본과 같은 문서가 소유한 버전만 읽는다. 응답은 다운로드로 제공하며, 저장본의 인라인 이미지는 별도의 `/images/:fileId` 경로를 사용한다.
 
+## 브라우저에서 프로젝트 생성
+
+`POST /api/projects`는 `{key,name,description?,color?,requestId?,restoreGeneration?}`을 받는다. `key`는 영문자로 시작하는 영숫자 2~12자이며 대문자로 저장한다. `requestId`에 UUID v4를 보내면 최초 생성은 `201`, 같은 작업자·요청 ID·입력의 결과 확인은 `200`으로 같은 프로젝트를 돌려준다. 프로젝트·첫 티켓 번호·이력·요청 결과를 같은 트랜잭션에 저장한다. 현재 워크스페이스의 `restoreGeneration`을 함께 보내면 오래된 복원 세대의 요청을 거절한다.
+
+사용 중인 접두어나 다른 작업자·입력에서 재사용한 요청 ID는 `409`를 반환한다. 자체 JSON 복원 이전의 생성 기록은 이전 요청으로 프로젝트를 다시 만들지 못하도록 처리한다. 재시작과 물리 백업은 같은 요청의 결과를 보존한다. `requestId`를 생략하면 프로젝트를 만들고 `201`을 반환하는 기존 호출 방식을 쓴다.
+
 ## 업무 생성·수정
 
 프로젝트 ID와 상태·유형·팀원·계획 ID는 조회 응답으로 확인한다. 유형·필드·선택지는 표시 이름 대신 `issue-schema`의 고유 ID를 전달한다. 기본 상태는 프로젝트 워크플로에 따르며, 같은 필수 입력·상태 전이 규칙을 적용한다.
@@ -733,7 +739,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 | `GET /api/integrations/gitlab` | 주소·허용 저장소·자격 증명 설정 여부·버전·저장한 `jiraRoutes` |
 | `GET /api/integrations/gitlab/jira-sources` | Jira 원본 키를 보관한 `{projectId, jiraInstanceKey}` 목록 |
 | `PATCH /api/integrations/gitlab` | `expectedVersion`, `baseUrl`, `projectIds`, 선택한 자격 증명과 `jiraRoutes` 변경 |
-| `POST /api/integrations/gitlab/repository-search` | 저장 전 주소와 읽기 토큰으로 프로젝트 이름·네임스페이스 검색 또는 전체 경로 조회 |
+| `POST /api/integrations/gitlab/repository-search` | 저장 전 주소와 읽기 토큰으로 프로젝트 이름·네임스페이스 검색 또는 전체 경로·저장소 주소 조회 |
 | `POST /api/integrations/gitlab/sync-preview` | 저장 전 입력으로 저장소별 조회 결과와 MR·파이프라인 및 선택한 저장소 이력의 티켓 연결 후보 확인 |
 | `POST /api/integrations/gitlab/sync` | 저장한 연결로 MR·파이프라인과 선택한 저장소 이력을 읽어 업무 링크 저장 |
 | `GET /api/integrations/gitlab/sync-status` | 저장한 연결 설정 버전과 저장소별 최근 활동·배포 수동 동기화 결과 |
@@ -750,7 +756,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 자격 증명 `token`·`webhookSecret`·`signingToken`은 서버에 암호화한다. PATCH에서 빈 문자열을 보내면 해당 값을 지운다. 웹훅 인증 값을 생략하면 유지한다. 주소를 유지하면 생략한 읽기 토큰을 유지하고, 다른 주소를 저장할 때는 새로 제공한 토큰을 사용하거나 기존 읽기 토큰을 해제한다. 다른 주소를 저장하면 마지막 조회 결과도 초기화한다. GET은 설정 여부만 반환한다. 초기 설정 버전은 1이다. 주소·허용 저장소 변경 또는 웹훅 인증 해제 시 규칙을 비활성화하고 버전을 올린다. 설정 변경 중인 동기화와 미리보기 결과는 폐기한다.
 
-**저장소 검색**은 `{expectedVersion,query,page?,baseUrl?,token?}`을 받는다. 검색어는 1~200자이고 페이지는 1~20이다. 프로젝트 이름이나 그룹 이름으로 검색하면 페이지당 최대 20개를 응답한다. `group/subgroup/repository`처럼 전체 경로를 입력하면 첫 페이지에서 해당 프로젝트를 조회한다. 보관된 저장소는 제외한다. 입력한 주소가 저장한 주소와 같을 때만 생략한 읽기 토큰을 재사용한다. 결과는 `settingsVersion`, `page`, `hasNextPage`와 검증한 저장소의 `id`, `name`, `pathWithNamespace`, `webUrl`을 담는다. GitLab에는 읽기 요청을 보내며 Teamspace 연결 설정·업무·활동을 저장하지 않는다. [GitLab Projects API](https://docs.gitlab.com/api/projects/#list-all-projects)
+**저장소 검색**은 `{expectedVersion,query,page?,baseUrl?,token?}`을 받는다. 이름과 경로는 1~200자이고 페이지는 1~20이다. 프로젝트 이름이나 그룹 이름으로 검색하면 페이지당 최대 20개를 응답한다. `group/subgroup/repository` 전체 경로와 최대 4,000자의 저장소 웹·HTTP(S) 복제 주소는 1페이지에서 저장소를 정확히 조회한다. 주소의 서버와 설치 경로는 현재 GitLab 연결 설정과 일치해야 한다. 보관된 저장소는 제외한다. 입력한 주소가 저장한 주소와 같을 때만 생략한 읽기 토큰을 재사용한다. 결과는 `settingsVersion`, `page`, `hasNextPage`와 검증한 저장소의 `id`, `name`, `pathWithNamespace`, `webUrl`을 담는다. 검색은 GitLab 읽기 요청으로 수행한다. [GitLab Projects API](https://docs.gitlab.com/api/projects/#retrieve-a-project)
 
 **연결 미리보기**는 현재 `expectedVersion`과 선택적인 `baseUrl`, `projectIds`, `token`, `jiraRoutes`를 받는다. 저장한 주소와 입력 주소가 일치하면 생략한 읽기 토큰을 재사용한다. 주소가 달라지면 새로 입력한 토큰이나 익명 읽기를 사용한다. 미리보기 결과에는 저장소별 조회 성공·오류, 조회한 MR·파이프라인 수, 새 연결·갱신·유지 예상 건수와 최대 100개 연결 후보가 포함된다. 설정, 티켓, 연결과 자동화 실행 기록을 읽기 전용으로 처리한다.
 

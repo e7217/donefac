@@ -54,6 +54,27 @@
 .docs-find-replace input { flex: 1 1 10rem; }
 .docs-find-message { margin: 0; }
 
+.docs-reader-find-panel {
+  flex: none;
+  margin: 5px 18px 0;
+}
+
+::highlight(teamspace-document-reader-find) {
+  background-color: #fff0bd;
+  color: #302511;
+}
+
+::highlight(teamspace-document-reader-find-current) {
+  background-color: #ffcf85;
+  color: #302511;
+  text-decoration: underline;
+}
+
+.docs-reading-paper [data-document-reader-find-current="block"] {
+  outline: 2px solid #9a4e13;
+  outline-offset: 2px;
+}
+
 .docs-prose [data-document-find-match] {
   border-radius: 2px;
   background: #fff0bd;

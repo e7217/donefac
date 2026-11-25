@@ -5,7 +5,7 @@ import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranc
 import { GITLAB_DEPLOYMENT_STATES, GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabDeploymentFilters, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
-import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
+import { GITLAB_REPOSITORY_ADDRESS_LIMIT, gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
@@ -2367,13 +2367,14 @@ export class GitlabIntegrationService{
     const address = Object.hasOwn(input, 'baseUrl') ? baseUrl(input.baseUrl) : saved.baseUrl;
     if (!address) fail('GitLab 주소를 입력해 주세요.');
     const query = typeof input.query === 'string' && input.query.isWellFormed() && !/\p{Cc}/u.test(input.query) ? input.query.trim() : '';
-    if (!query || query.length > 200) fail('GitLab 저장소 검색어를 1~200자로 입력해 주세요.');
+    if (/^https?:\/\//iu.test(query)) {
+      if (query.length > GITLAB_REPOSITORY_ADDRESS_LIMIT) fail('GitLab 저장소 주소가 너무 깁니다.');
+    } else if (!query || query.length > 200) fail('GitLab 저장소 검색어를 1~200자로 입력해 주세요.');
     const page = Object.hasOwn(input, 'page') ? input.page : 1;
     if (typeof page !== 'number' || !Number.isSafeInteger(page) || page < 1 || page > GITLAB_REPOSITORY_SEARCH_MAX_PAGE) {
       fail('GitLab 저장소 검색 페이지를 1~20 사이로 지정해 주세요.');
     }
     const token = this.draftReadToken(input, address, saved);
-    if (token && query.includes(token)) fail('GitLab 저장소 검색어를 확인해 주세요.');
     signal?.throwIfAborted();
     const result = await readGitlabRepositorySearch({ baseUrl: address, token }, query, page, signal).catch(error => {
       signal?.throwIfAborted();

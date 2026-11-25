@@ -36,6 +36,7 @@ import { Gantt } from './features/Gantt';
 import { clearGanttDateDrafts, type GanttIssueDateDrafts } from './features/gantt-date-draft-storage';
 import { IssuePanel } from './features/IssuePanel';
 import { MyWork } from './features/MyWork';
+import { ProjectCreationDialog } from './features/ProjectCreationDialog';
 import { FavoritesPage, FavoritesProvider } from './features/FavoritesState';
 import type { PrepareMigration } from './features/MigrationApplySettings';
 import TeamNotifications from './features/TeamNotifications';
@@ -642,7 +643,10 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           setSearchOpen(value => !value);
         }
       }
-      if (event.key === 'Escape') { setSearchOpen(false); setProjectModal(false); setSidebarOpen(false); }
+      if (event.key === 'Escape' && !document.querySelector('.project-creation-dialog:modal')) {
+        setSearchOpen(false);
+        setSidebarOpen(false);
+      }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -1520,7 +1524,13 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       commentFocus={activeCommentFocus?.targetType === 'issue' && activeCommentFocus.targetId === openedIssue.id ? activeCommentFocus : undefined}
       previewDocumentId={activeDocumentPreviewId} onPreviewDocument={previewIssueDocument} onCloseDocumentPreview={closeIssueDocumentPreview}/>}
     {searchOpen && <SearchDialog {...props} openIssue={openSearchIssue} openDocument={openDocument} onClose={() => setSearchOpen(false)} onShowAll={showSearchResults}/>}
-    {projectModal && <ProjectDialog refresh={refresh} notify={notify} onClose={() => setProjectModal(false)} onCreated={id => navigate('overview', id)}/>}
+    {projectModal && <ProjectCreationDialog actorId={actorId} restoreGeneration={data.restoreGeneration} refresh={refresh} notify={notify}
+      onClose={() => setProjectModal(false)} onOpenProject={id => {
+        if (!dataRef.current?.projects.some(project => project.id === id) ||
+            !requestRoute({ projectId: id, view: 'overview', documentId: null, issueId: null })) return false;
+        requestAnimationFrame(() => workspaceMain.current?.querySelector<HTMLElement>('.overview-page h1')?.focus());
+        return true;
+      }}/>}
     {toast && <div role="status" className={`toast ${toast.kind}`}>{toast.kind === 'success' ? <Check size={18}/> : <Bell size={18}/>}<span>{toast.message}</span><button onClick={() => setToast(null)} className="icon-btn" aria-label="알림 닫기"><X size={15}/></button></div>}
   </div></FavoritesProvider>;
 }
@@ -1578,7 +1588,7 @@ function Overview(props: FeatureProps & {navigate: (view: View) => void}) {
   const percent = tracked.length ? Math.round(completed / tracked.length * 100) : 0;
   const recentIds = new Set([...issues.map(i => i.id), ...documents.map(d => d.id), projectId]);
   const activities = data.activities.filter(a => recentIds.has(a.resourceId)).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)).slice(0,8);
-  return <div className="page overview-page"><div className="page-heading"><div><div className="eyebrow">PROJECT OVERVIEW</div><h1>{project.name}</h1><p>{project.description || '팀의 목표를 업무와 문서로 연결하는 공간입니다.'}</p></div><button className="btn btn-primary" onClick={() => navigate('issues')}><Plus size={16}/>업무 관리</button></div>
+  return <div className="page overview-page"><div className="page-heading"><div><div className="eyebrow">PROJECT OVERVIEW</div><h1 tabIndex={-1}>{project.name}</h1><p>{project.description || '팀의 목표를 업무와 문서로 연결하는 공간입니다.'}</p></div><button className="btn btn-primary" onClick={() => navigate('issues')}><Plus size={16}/>업무 관리</button></div>
     <div className="project-summary-strip"><span className="project-key">{project.key}</span><span>{data.users.length}명의 팀원</span><span className="summary-separator"/><span>{documents.length}개의 문서</span><div className="team-avatars">{data.users.slice(0,5).map(u => <span key={u.id} className="avatar" style={{background:u.color}} title={u.name}>{u.name.slice(0,1)}</span>)}</div></div>
     <div className="metric-grid"><Metric label="전체 업무" value={issues.length} icon={<ListTodo/>} caption={`${completed}개 완료`}/><Metric label="진행 중" value={active.length} icon={<CircleDot/>} caption="개발 · 검토 중인 업무"/><Metric label="일정 초과" value={overdue.length} icon={<SquareChartGantt/>} caption={overdue.length ? '일정을 확인해주세요' : '차근차근 진행하고 있어요'} warning={overdue.length > 0}/><Metric label="프로젝트 문서" value={documents.length} icon={<BookOpen/>} caption="팀의 지식이 쌓이고 있어요"/></div>
     <div className="overview-grid"><section className="card progress-card"><div className="card-heading"><h2>프로젝트 진행 현황</h2><button className="text-link" onClick={() => navigate('issues')}>전체 업무 <ArrowUpRight size={15}/></button></div><div className="progress-headline"><strong>{percent}<small>%</small></strong><span>{tracked.length}개 업무 중 {completed}개 완료 · 취소 제외</span></div><div className="segmented-progress">{statuses.filter(meta => meta.category !== 'cancelled').map(meta => {const count = tracked.filter(i => i.status === meta.id).length;return count ? <span key={meta.id} title={`${meta.label} ${count}개`} style={{width:`${count / tracked.length * 100}%`,background:meta.color}}/> : null;})}</div><div className="status-breakdown">{statuses.filter(meta => meta.category !== 'cancelled').map(meta => <div key={meta.id}><span className="status-dot" style={{background:meta.color}}/><span>{meta.label}</span><strong>{issues.filter(i => i.status === meta.id).length}</strong></div>)}</div></section>
@@ -1653,11 +1663,6 @@ function SearchDialog({ data, refresh, openIssue, openDocument, onClose, onShowA
       </div>
     </div>
   </div>;
-}
-
-function ProjectDialog({refresh,notify,onClose,onCreated}:{refresh:()=>Promise<void>;notify:FeatureProps['notify'];onClose:()=>void;onCreated:(id:string)=>void}) {
-  const [name,setName]=useState('');const [key,setKey]=useState('');const [description,setDescription]=useState('');const [busy,setBusy]=useState(false);
-  return <div className="modal-backdrop"><form className="modal-card" onSubmit={async e=>{e.preventDefault();setBusy(true);try{const p=await post<{id:string}>('/projects',{name,key,description,color:'#177c72'});await refresh();notify('프로젝트를 만들었습니다.');onClose();onCreated(p.id);}catch(error){notify((error as Error).message,'error');}finally{setBusy(false);}}}><div className="card-heading"><h2>새 프로젝트</h2><button type="button" className="icon-btn" onClick={onClose} aria-label="닫기"><X size={19}/></button></div><p className="muted">새로운 목표를 팀의 업무와 문서로 연결하세요.</p><label className="form-label">프로젝트 이름<input className="field" required value={name} onChange={e=>setName(e.target.value)} placeholder="예: 제품 개발"/></label><label className="form-label">티켓 접두어<input className="field" required value={key} onChange={e=>setKey(e.target.value.toUpperCase())} placeholder="예: DEV" pattern="[A-Z][A-Z0-9]{1,9}" minLength={2} maxLength={10}/><span className="help-text">영문 대문자와 숫자 2~10자 · DEV-1처럼 사용합니다.</span></label><label className="form-label">프로젝트 소개<textarea className="field" value={description} onChange={e=>setDescription(e.target.value)} rows={3}/></label><div className="modal-actions"><button type="button" className="btn" onClick={onClose}>취소</button><button disabled={busy} className="btn btn-primary">{busy ? '생성 중…' : '프로젝트 만들기'}</button></div></form></div>;
 }
 
 function WorkspaceSettings(props:FeatureProps) {

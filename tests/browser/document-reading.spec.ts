@@ -211,3 +211,89 @@ test('공유한 읽기 주소는 편집 연결 없이 열리고 열린 공동 �
     await cleanup(request, created.id);
   }
 });
+
+test('360px 저장본에서 서식과 접힌 본문의 검색 결과를 이동하고 새 저장본을 다시 찾는다', async ({ page, request }) => {
+  const { projects, users } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const projectId = projects[0].id;
+  const query = 'READ(+)';
+  const nested = await createDocument(request, projectId, [paragraph('포함된 원문의 READ(+) 문장')]);
+  const created = await createDocument(request, projectId, [
+    { type: 'paragraph', content: [{ type: 'text', text: 'read' }, { type: 'text', text: '(+)', marks: [{ type: 'bold' }] }] },
+    { type: 'paragraph', content: [{ type: 'text', text: 'READ' }, { type: 'hardBreak' }, { type: 'text', text: '(+)' }] },
+    { type: 'codeBlock', content: [{ type: 'text', text: `코드 앞\n${query} 코드 뒤` }] },
+    { type: 'details', content: [
+      { type: 'detailsSummary', content: [{ type: 'text', text: '접힌 검색 내용' }] },
+      { type: 'detailsContent', content: [paragraph(`접힌 본문의 ${query}`)] },
+    ] },
+    { type: 'documentInclude', attrs: { documentId: nested.id, label: nested.title } },
+    paragraph('반복단어 '.repeat(1001)),
+  ]);
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(actor => localStorage.setItem('teamspace.actor', actor), users[0].id);
+    await page.goto(`/#/${projectId}/documents/${created.id}`);
+    const editorParagraph = page.locator('.docs-prose').getByText('read(+)', { exact: true });
+    await expect(editorParagraph).toBeVisible();
+    await placeCursor(editorParagraph, false);
+    await page.keyboard.insertText(' 검색에 제외할 편집 초안');
+    await page.getByRole('button', { name: '저장본 읽기', exact: true }).press('Enter');
+    const reader = page.getByRole('article', { name: '저장본 읽기', exact: true });
+    const find = page.getByRole('button', { name: '저장본 본문에서 찾기', exact: true });
+    const panel = page.getByRole('search', { name: '저장본 본문 찾기' });
+    const input = panel.getByRole('textbox', { name: '찾을 텍스트' });
+    const result = panel.getByRole('status');
+    const currentBlock = reader.locator('[data-document-reader-find-current]');
+    const exactRange = () => page.evaluate(() => [...(CSS.highlights.get('teamspace-document-reader-find-current') ?? [])][0]?.toString());
+    const details = reader.locator('details');
+    await expect(details).toHaveCount(1);
+    await details.locator('summary').press('Enter');
+    await expect(details).not.toHaveAttribute('open', '');
+    await find.press('Control+f');
+    await expect(input).toBeFocused();
+    await expect(reader.getByText('포함된 원문의 READ(+) 문장')).toBeVisible();
+
+    await input.fill('검색에 제외할 편집 초안');
+    await expect(result).toHaveText('검색 결과 없음');
+    await input.fill(query);
+    await expect(result).toHaveText('3개 중 1번째');
+    await expect.poll(exactRange).toBe('read(+)');
+    await expect(currentBlock.locator('strong')).toHaveText('(+)');
+    await input.press('Enter');
+    await expect(result).toHaveText('3개 중 2번째');
+    await expect(currentBlock).toContainText('코드 뒤');
+    await expect.poll(exactRange).toBe(query);
+    await input.press('Enter');
+    await expect(result).toHaveText('3개 중 3번째');
+    await expect(details).toHaveAttribute('open', '');
+    await expect(currentBlock).toContainText('접힌 본문');
+    await expect(input).toBeFocused();
+    await input.press('Shift+Enter');
+    await expect(result).toHaveText('3개 중 2번째');
+    await panel.getByRole('checkbox', { name: '대소문자 구분' }).check();
+    await expect(result).toHaveText('2개 중 1번째');
+    await expect(currentBlock).toContainText('코드 뒤');
+    await input.fill('반복단어');
+    await expect(result).toHaveText('1,000개 이상 중 1번째');
+    await input.fill(query);
+
+    const updated = await request.patch(`/api/documents/${created.id}`, {
+      headers: { 'X-Actor-Id': users[1].id },
+      data: { expectedVersion: created.version, content: { type: 'doc', content: [paragraph(`동료가 저장한 ${query}`)] } },
+    });
+    expect(updated.status(), await updated.text()).toBe(200);
+    await page.getByRole('button', { name: '저장본 새로고침', exact: true }).press('Enter');
+    await expect(result).toHaveText('1개 중 1번째');
+    await expect(currentBlock).toContainText('동료가 저장한');
+    await expect(panel.getByRole('button', { name: '모두 바꾸기' })).toHaveCount(0);
+    await input.press('Escape');
+    await expect(panel).toHaveCount(0);
+    await expect(find).toBeFocused();
+    await expect(currentBlock).toHaveCount(0);
+    await expect.poll(exactRange).toBeUndefined();
+    await page.getByRole('button', { name: '편집으로 돌아가기', exact: true }).press('Enter');
+    await expect(page.locator('.docs-prose')).toContainText('검색에 제외할 편집 초안');
+  } finally {
+    await cleanup(request, created.id);
+    await cleanup(request, nested.id);
+  }
+});

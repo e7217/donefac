@@ -23,12 +23,18 @@ function singleLineText(value: string, limit: number) {
   return value.length <= limit && value.isWellFormed() && !value.includes('\0') && !lineBreak.test(value);
 }
 
+export function documentFindPattern(query: string, caseSensitive: boolean) {
+  return query && singleLineText(query, DOCUMENT_FIND_QUERY_LIMIT)
+    ? new RegExp(query.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), caseSensitive ? 'gu' : 'giu')
+    : null;
+}
+
 export function findDocumentText(doc: EditorNode, query: string, caseSensitive: boolean) {
   const matches: DocumentFindMatch[] = [];
   let truncated = false;
-  if (!query || !singleLineText(query, DOCUMENT_FIND_QUERY_LIMIT)) return { matches, truncated };
-
-  const literal = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), caseSensitive ? 'gu' : 'giu');
+  const pattern = documentFindPattern(query, caseSensitive);
+  if (!pattern) return { matches, truncated };
+  const literal = pattern;
   doc.descendants((node, position) => {
     if (truncated || node.isAtom) return false;
     if (!node.isTextblock) return true;

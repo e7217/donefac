@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { NodeViewContent, NodeViewWrapper, ReactNodeViewRenderer, type Editor, type JSONContent, type NodeViewProps } from '@tiptap/react';
 import { Fragment } from '@tiptap/pm/model';
 import { TextSelection, type SelectionBookmark, type Transaction } from '@tiptap/pm/state';
@@ -80,7 +80,7 @@ function safeUrl(value: unknown, image = false): string | undefined {
 }
 type PinnedSource = { documentId: string; revisionId: string };
 type RenderedExcerpt = DocumentSelectionHighlight & { anchorRendered: boolean };
-type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned' | 'preview'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt };
+type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned' | 'preview'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt; findSource?: boolean };
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -276,6 +276,7 @@ function excerptMark(content: ReactNode, state: RenderState, key: string) {
 }
 function renderNode(node: RichContent, context: Context, state: RenderState, key: string): ReactNode {
   if (state.remaining-- <= 0 || state.structuralDepth >= 60) { state.exhausted = true; return null; }
+  const findSource = state.findSource && state.includeDepth === 0 ? '' : undefined;
   if (node.type === 'text' || node.type === 'statusBadge') {
     const text = node.text || '';
     const excerpt = state.excerpt?.marks.get(key);
@@ -300,7 +301,8 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       }
     }
     if (wholeNodeSelected) result = excerptMark(result, state, key);
-    return <span key={key}>{result}</span>;
+    return <span key={key} data-document-find-text={node.type === 'text' ? findSource : undefined}
+      data-document-find-separator={node.type === 'statusBadge' ? findSource : undefined}>{result}</span>;
   }
   if (node.type === 'documentRevisionInclude' && (!state.mode || state.mode === 'history')) {
     return pinnedRevision(textAttr(node, 'documentId'), textAttr(node, 'revisionId'), textAttr(node, 'label'), Math.min(state.remaining, context.includeBudget), key);
@@ -371,7 +373,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
   const attrs = node.attrs || {};
   switch (node.type) {
     case 'doc': return <div key={key}>{children}</div>;
-    case 'paragraph': return <p key={key}>{children.length ? children : <br />}</p>;
+    case 'paragraph': return <p key={key} data-document-find-block={findSource}>{children.length ? children : <br />}</p>;
     case 'heading': {
       const level = isDocumentHeadingLevel(attrs.level) ? attrs.level : 3;
       const Heading = `h${level}` as const;
@@ -380,7 +382,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       const sectionId = state.includeDepth === 0 && isDocumentSectionId(attrs.sectionId) ? attrs.sectionId : undefined;
       if (state.section && sectionId === state.section.id) state.section.target = key;
       if (title) state.outline.push({ target: key, level, title, sectionId });
-      return <Heading key={key} data-document-outline-target={title || sectionId ? key : undefined}
+      return <Heading key={key} data-document-outline-target={title || sectionId ? key : undefined} data-document-find-block={findSource}
         data-document-section-id={sectionId} tabIndex={title || sectionId ? -1 : undefined}>{children}</Heading>;
     }
     case 'bulletList': return <ul key={key}>{children}</ul>;
@@ -405,7 +407,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
         <div className="document-excerpt-body">{children}</div>
       </aside>
       : <div key={key}>{children}</div>;
-    case 'codeBlock': return <pre key={key}><code>{children}</code></pre>;
+    case 'codeBlock': return <pre key={key} data-document-find-block={findSource}><code>{children}</code></pre>;
     case 'hardBreak': return <br key={key} />;
     case 'horizontalRule': return <hr key={key} />;
     case 'image': {
@@ -424,12 +426,12 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       return <Cell key={key} colSpan={span(attrs.colspan)} rowSpan={span(attrs.rowspan)}>{children}</Cell>;
     }
     case 'details': return <details key={key} className="doc-readonly-details" open>{children}</details>;
-    case 'detailsSummary': return <summary key={key}>{children}</summary>;
+    case 'detailsSummary': return <summary key={key} data-document-find-block={findSource}>{children}</summary>;
     case 'detailsContent': return <div key={key} className="doc-details-content">{children}</div>;
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId, selectionHighlight, canRevealExcerpt }: {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId, selectionHighlight, canRevealExcerpt, findContentRef }: {
   content: RichContent;
   documentId?: string;
   nodeBudget?: number;
@@ -441,14 +443,19 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   referenceIssueId?: string;
   selectionHighlight?: DocumentSelectionHighlight | null;
   canRevealExcerpt?: () => boolean;
+  findContentRef?: RefObject<HTMLDivElement | null>;
 }) {
   const context = contextOf(useContext(BlockContext));
   const contentRoot = useRef<HTMLDivElement>(null);
+  const attachContentRoot = useCallback((node: HTMLDivElement | null) => {
+    contentRoot.current = node;
+    if (findContentRef) findContentRef.current = node;
+  }, [findContentRef]);
   const lastSection = useRef<{ documentId?: string; sectionId: string } | null>(null);
   const outline: DocumentOutlineEntry[] = [];
   const sourceDocumentId = documentId ?? context.documentId;
   const excerpt = mode === 'pinned' ? selectionHighlight : undefined;
-  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined };
+  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined, findSource: findContentRef !== undefined };
   const body = renderNode(content, context, state, 'readonly');
   const sectionTarget = state.section?.target;
   const excerptTarget = state.excerpt?.anchorRendered ? state.excerpt.anchor : undefined;
@@ -480,7 +487,7 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
     {excerptTarget && <button type="button" className="btn btn-ghost doc-excerpt-jump" onClick={goToExcerpt}>발췌 위치로 이동</button>}
     {excerpt !== undefined && !excerptTarget && <p className="doc-pinned-message" role="status">저장본에서 발췌 위치를 찾을 수 없습니다.</p>}
     {showOutline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
-    <div className="doc-readonly-content" data-document-outline-root="" data-static-document-content={mode ? '' : undefined} ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
+    <div className="doc-readonly-content" data-document-outline-root="" data-static-document-content={mode ? '' : undefined} ref={attachContentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }
 function ReferenceNodeView({ node, selected, deleteNode, updateAttributes, editor }: NodeViewProps) {

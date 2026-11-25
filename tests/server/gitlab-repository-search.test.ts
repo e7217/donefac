@@ -145,6 +145,46 @@ test('discovery never forwards stored credentials to a new address and rejects r
   assert.deepEqual(await app.settings(), changed);
 });
 
+test('repository and HTTP clone addresses use one scoped exact lookup with a verified response', async t => {
+  const app = await fixture(t);
+  const requests: string[] = [];
+  const origin = await source(t, (request, response) => {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host}`);
+    const requestedPath = decodeURIComponent(url.pathname.slice(listPath.length + 1));
+    requests.push(`${request.method} ${url.pathname}${url.search}`);
+    assert.equal(request.headers['private-token'], draftToken);
+    const wrongPath = 'different/subgroup/engine';
+    const returnedPath = requestedPath === wrongPath ? pathWithNamespace : requestedPath;
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ id: 42, name: 'Engine', path_with_namespace: returnedPath,
+      web_url: `${url.origin}${contextPath}/${returnedPath}` }));
+  });
+  const before = await app.settings();
+  const baseUrl = `${origin}${contextPath}`;
+  const webUrl = `${baseUrl}/${pathWithNamespace}`;
+  const body = { expectedVersion: before.version, baseUrl, token: draftToken };
+  for (const query of [webUrl, `${webUrl}/`, `${webUrl}.git`, `${baseUrl}/%70latform/subgroup/engine`]) {
+    const result = await app.call<GitlabRepositorySearch>(searchPath, { ...body, query });
+    assert.deepEqual(result.data, { settingsVersion: before.version, page: 1, hasNextPage: false,
+      repositories: [{ id: 42, name: 'Engine', pathWithNamespace, webUrl }] });
+  }
+  assert.deepEqual(requests, Array(4).fill(`GET ${listPath}/${encodeURIComponent(pathWithNamespace)}`));
+
+  const encodedToken = `%${draftToken.charCodeAt(0).toString(16)}${draftToken.slice(1)}`;
+  for (const query of [webUrl.replace('http://', 'http://user:password@'), `${webUrl}?private_token=${draftToken}`, `${webUrl}#readme`,
+    `${webUrl}/-/tree/main`, `${baseUrl}-other/${pathWithNamespace}`, `${origin}/other/${pathWithNamespace}`,
+    `${baseUrl}/platform/subgroup/%2E%2E/engine`, `${baseUrl}/platform%2Fsubgroup/engine`, `${baseUrl}/platform/${encodedToken}`]) {
+    const result = await app.call(searchPath, { ...body, query }, 'POST', 400);
+    assert.ok(!JSON.stringify(result.data).includes(draftToken));
+  }
+  await app.call(searchPath, { ...body, query: webUrl, page: 2 }, 'POST', 400);
+  assert.equal(requests.length, 4);
+
+  await app.call(searchPath, { ...body, query: `${baseUrl}/different/subgroup/engine` }, 'POST', 502);
+  assert.equal(requests.at(-1), `GET ${listPath}/${encodeURIComponent('different/subgroup/engine')}`);
+  assert.deepEqual(await app.settings(), before);
+});
+
 test('repository discovery rejects invalid scope, unexpected responses and redirects without exposing the token', async t => {
   const app = await fixture(t);
   let outsideRequests = 0, upstreamRequests = 0;
