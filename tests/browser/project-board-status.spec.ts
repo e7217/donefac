@@ -71,8 +71,9 @@ async function fixture(request: APIRequestContext) {
 
   return {
     project, actor, newAssignee, prefix, ready, review, guarded, finished, restoreGeneration, fieldId,
-    async setup({ grouped = false, layout = 'board', handoffFields = false, guardedField = 'description' }: {
-      grouped?: boolean; layout?: 'board' | 'list'; handoffFields?: boolean; guardedField?: 'description' | 'dueDate';
+    async setup({ grouped = false, layout = 'board', handoffFields = false, guardedField = 'description', automaticDueDays }: {
+      grouped?: boolean; layout?: 'board' | 'list'; handoffFields?: boolean; guardedField?: 'description' | 'dueDate' | 'labels';
+      automaticDueDays?: number;
     } = {}) {
       const needsAssignee = layout === 'list';
       let schema: ProjectIssueSchema | undefined;
@@ -88,7 +89,8 @@ async function fixture(request: APIRequestContext) {
         } }));
       }
       const workflow = await json<ProjectWorkflow>(await request.patch(path, { headers, data: {
-        ...baseline, expectedVersion: baseline.version, statuses: [...baseline.statuses, ready, review, guarded, finished],
+        ...baseline, expectedVersion: baseline.version, statuses: [...baseline.statuses, ready, review,
+          { ...guarded, ...(automaticDueDays === undefined ? {} : { defaultDueWorkdays: automaticDueDays }) }, finished],
         transitions: [...baseline.transitions,
           { from: ready.id, to: review.id, issueTypes: ['작업'], requiredFields: needsAssignee ? ['assigneeId'] : [] },
           { from: ready.id, to: guarded.id, issueTypes: ['작업'], requiredFields: handoffFields
@@ -300,11 +302,120 @@ test('동료가 채운 필수 속성을 재검토하고 업무 설명과 인수�
   } finally { await f.close(); }
 });
 
+test('360px 보드에서 변경된 우선순위와 목표 마감일을 검토하고 인수인계 요청을 한 번 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  try {
+    const { issue, workflow, location } = await f.setup({ guardedField: 'dueDate' });
+    const form = chooser(page);
+    const apply = button(form, '상태 변경 적용');
+    const priority = form.getByRole('combobox', { name: '우선순위', exact: true });
+    const dateMode = form.getByRole('combobox', { name: '목표 마감일 처리', exact: true });
+    const date = form.getByLabel('목표 마감일', { exact: true });
+    const note = form.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    const action = statusAction(page, issue);
+    await action.tap();
+    await destination(page).selectOption(f.guarded.id);
+    await expect(form.getByText('이 상태는 목표 마감일이 필요합니다.')).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await dateMode.selectOption('clear');
+    await expect(apply).toBeDisabled();
+    await dateMode.selectOption('set');
+    await expect(apply).toBeDisabled();
+    await priority.selectOption('urgent');
+    await date.fill('2026-12-08');
+    await note.fill('검토 일정과 함께 전달할 메모');
+    await expect(apply).toBeEnabled();
+
+    const peer = await json<Issue>(await request.patch(issuePath(issue), {
+      headers: { 'X-Actor-Id': f.newAssignee.id },
+      data: { expectedVersion: issue.version, priority: 'low', dueDate: '2026-12-07' },
+    }));
+    const stale = nextStatusChange(page, issue);
+    await apply.tap();
+    await json(await stale, 409);
+    await button(form, '최신 업무 불러오기').tap();
+    await expect(priority).toHaveValue('urgent');
+    await expect(date).toHaveValue('2026-12-08');
+    await expect(note).toHaveValue('검토 일정과 함께 전달할 메모');
+    await expect(form.getByText('2026-12-07', { exact: true })).toBeVisible();
+    await destination(page).selectOption(f.guarded.id);
+    await expect(apply).toBeDisabled();
+    await button(form, '우선순위 저장값 사용').tap();
+    await expect(priority).toHaveValue('low');
+    await expect(apply).toBeDisabled();
+    await button(form, '목표 마감일 입력값 사용').tap();
+    await expect(apply).toBeEnabled();
+
+    const sent: IssueStatusChangeRequest[] = [];
+    let saved: IssueStatusChangeResult | undefined;
+    await page.route(`**${statusPath(issue)}`, async route => {
+      sent.push(route.request().postDataJSON() as IssueStatusChangeRequest);
+      const response = await route.fetch();
+      if (sent.length === 1) {
+        saved = await json<IssueStatusChangeResult>(response);
+        await route.abort('failed');
+      } else await route.fulfill({ response });
+    });
+    await apply.tap();
+    const retry = verifyAction(page);
+    await expect(retry).toBeFocused();
+    await expect(date).toHaveValue('2026-12-08');
+    await expect(note).toHaveValue('검토 일정과 함께 전달할 메모');
+    const confirmation = nextStatusChange(page, issue);
+    await retry.tap();
+    const response = await confirmation;
+    const input = checkStatusRequest(response, { restoreGeneration: f.restoreGeneration, expectedVersion: peer.version,
+      expectedWorkflowVersion: workflow.version, status: f.guarded.id, dueDate: '2026-12-08', comment: { body: '검토 일정과 함께 전달할 메모' } });
+    expect(sent).toEqual([input, input]);
+    expect(await json<IssueStatusChangeResult>(response)).toEqual({ ...saved, duplicate: true });
+    expect(saved).toMatchObject({ issue: { priority: 'low', dueDate: '2026-12-08', version: peer.version + 1 },
+      receipt: { dueDate: '2026-12-08', commentId: expect.any(String) } });
+    const comments = await json<Comment[]>(await request.get(`/api/comments?resourceType=issue&resourceId=${issue.id}`));
+    expect(comments.map(comment => comment.id)).toEqual([saved?.receipt.commentId]);
+    await expect(form).toHaveCount(0);
+    await expect(search(page)).toHaveValue(f.prefix);
+  } finally { await f.close(); }
+});
+
+test('360px 보드에서 필수 목표 마감일에도 기본 근무일 자동 지정을 선택할 수 있다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const f = await fixture(request);
+  try {
+    const { issue, workflow, location } = await f.setup({ guardedField: 'dueDate', automaticDueDays: 2 });
+    const form = chooser(page);
+    const apply = button(form, '상태 변경 적용');
+    const priority = form.getByRole('combobox', { name: '우선순위', exact: true });
+    const dateMode = form.getByRole('combobox', { name: '목표 마감일 처리', exact: true });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    await statusAction(page, issue).tap();
+    await destination(page).selectOption(f.guarded.id);
+    await expect(form.getByText('프로젝트 달력으로 2근무일 뒤의 날짜를 지정합니다.')).toBeVisible();
+    await expect(apply).toBeEnabled();
+    await dateMode.selectOption('clear');
+    await expect(apply).toBeDisabled();
+    await dateMode.selectOption('');
+    await priority.selectOption('high');
+    await expect(apply).toBeEnabled();
+    const applying = nextStatusChange(page, issue);
+    await apply.tap();
+    const applied = await applying;
+    checkStatusRequest(applied, { restoreGeneration: f.restoreGeneration, expectedVersion: issue.version,
+      expectedWorkflowVersion: workflow.version, status: f.guarded.id, priority: 'high' });
+    expect(await json<IssueStatusChangeResult>(applied)).toMatchObject({ issue: { priority: 'high', dueDate: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u) },
+      receipt: { priority: 'high' } });
+    await expect(form).toHaveCount(0);
+  } finally { await f.close(); }
+});
+
 test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만 변경한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const f = await fixture(request);
   try {
-    const { issue, workflow, location } = await f.setup({ guardedField: 'dueDate' });
+    const { issue, workflow, location } = await f.setup({ guardedField: 'labels' });
     const rank = await f.rank();
     const writes = changes(page);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
@@ -323,8 +434,8 @@ test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만
     await destination(page).selectOption(f.guarded.id);
     const blocked = nextStatusChange(page, issue);
     await button(chooser(page), '상태 변경 적용').tap();
-    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['dueDate'] } });
-    await expect(chooser(page).getByRole('alert')).toContainText('마감일');
+    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['labels'] } });
+    await expect(chooser(page).getByRole('alert')).toContainText('라벨');
     await expect(button(chooser(page), '업무 상세에서 확인')).toBeVisible();
     expect(await f.read(issue)).toEqual(issue);
     await page.keyboard.press('Escape');
@@ -372,7 +483,7 @@ test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실�
   test.setTimeout(75_000);
   const f = await fixture(request);
   try {
-    const { issue, workflow, location } = await f.setup({ grouped: true, guardedField: 'dueDate' });
+    const { issue, workflow, location } = await f.setup({ grouped: true, guardedField: 'labels' });
     const rank = await f.rank();
     const writes = changes(page);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);

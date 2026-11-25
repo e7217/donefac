@@ -206,17 +206,31 @@ test('reports a manual-only GitLab blocker in progress and release readiness unt
     assert.deepEqual(report.items.map(row => [row.issue.id, row.gitlab]), [[target.id, {
       blockedMergeRequests: 0, failedPipelines: 0, manualPipelines: 2,
     }]]);
+    assert.deepEqual(report.items[0].gitlabEvidence, [
+      { id: `gitlab:123abc123abc:17:pipeline:10:${target.id}`, repositoryId: 17, kind: 'pipeline', state: 'manual', number: 10, source: 'merge_request_event' },
+      { id: `gitlab:123abc123abc:17:pipeline:11:${target.id}`, repositoryId: 17, kind: 'pipeline', state: 'manual', number: 11, source: 'push', tag: true },
+    ]);
     assert.doesNotMatch(JSON.stringify(report), /숨겨야 할 파이프라인 제목|hidden-manual-log/);
   }
 
-  pipeline(target, 15, 'running', 'merge_request_event');
+  pipeline(target, 15, 'manual', 'merge_request_event');
   const stale = await request<Conflict>(`${releasePath}&revision=${readiness.revision}`, 409);
   assert.equal(stale.result.details.reason, 'stale_report');
+  const staleDraft = await request<Conflict>(draftRoute, 409, { method: 'POST', body: {
+    savedViewId: view.id, releaseId: release.id, reason: 'gitlab', revision: readiness.revision,
+    title: '원인 활동이 바뀐 회의', requestId: randomUUID(),
+  } });
+  assert.equal(staleDraft.result.details.reason, 'stale_report');
+  const replacement = (await request<DeliveryBlockerReport>(releasePath)).result;
+  assert.deepEqual(replacement.items[0].gitlab, readiness.items[0].gitlab);
+  assert.deepEqual(replacement.items[0].gitlabEvidence?.map(item => item.number), [11, 15]);
+
+  pipeline(target, 16, 'running', 'merge_request_event');
   const stillWaiting = (await request<DeliveryBlockerReport>(releasePath)).result;
   assert.equal(stillWaiting.total, 1);
   assert.equal(stillWaiting.items[0].gitlab.manualPipelines, 1);
 
-  pipeline(target, 16, 'success', 'push', true);
+  pipeline(target, 17, 'success', 'push', true);
   await request(`${releasePath}&revision=${stillWaiting.revision}`, 409);
   const cleared = (await request<DeliveryBlockerReport>(releasePath)).result;
   assert.equal(cleared.counts.open, 0);

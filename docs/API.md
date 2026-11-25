@@ -183,6 +183,8 @@ Jira 이관 원본에서 양쪽 업무와 방향을 확인하면 응답에 `veri
 
 `gitlab` 원인은 각 업무의 `gitlab.blockedMergeRequests`, `gitlab.failedPipelines`, `gitlab.manualPipelines` 중 하나 이상이 양수일 때 한 번 집계한다. `manualPipelines`는 업무 보드와 같은 기준으로 확인한 최신 파이프라인 중 상태가 `manual`인 건수다. 식별할 수 있는 파이프라인은 GitLab 인스턴스·저장소·참조·실행 유형·태그 구분이 같은 실행끼리 묶는다. 같은 그룹에서 실행이 시작되거나 새 파이프라인이 성공하면 이전 대기 건수는 빠진다. 진행 차단과 릴리스 준비 점검의 회의 초안에는 조회 당시 건수를 기록한다.
 
+응답 행의 선택적 `gitlabEvidence`에는 병합 차단 MR, 실패 파이프라인과 수동 실행 대기 파이프라인의 저장 근거가 각 최대 다섯 건 들어간다. 항목에 `id`, `repositoryId`, `kind`, `state`와 표시 번호 `number`를 반환한다. 주소 경로가 정확한 번호와 일치하는 항목에는 `repository`와 `href`를, 확인한 파이프라인 유형이나 태그에는 `source`와 `tag`를 함께 반환한다. 근거가 바뀌면 보고서 버전도 바뀐다.
+
 브라우저의 `POST /api/projects/:id/delivery-blockers/meeting-draft`는 `requestId`, `revision`, 1~200자의 `title`과 선택한 `savedViewId`·`releaseId`·`reason`을 받는다. 같은 조건의 처음 20개 업무와 집계를 문서 초안으로 생성한다. 릴리스 범위에서는 기준일과 일정 근거를 함께 기록하고 문서 링크로 같은 릴리스의 현재 보고서를 연다. 검토한 릴리스·연결 업무·결과가 바뀌면 `409`의 `details.reason`이 `stale_report`로 표시된다. 저장 응답을 받지 못하면 같은 요청 ID와 입력을 보내 `{document, duplicate}`로 확인한다.
 
 ## 담당자 작업량
@@ -399,7 +401,9 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 ## 상태 변경과 인수인계 댓글
 
-브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,description?,customFields?,expectedIssueSchemaVersion?,comment?:{body,mentions?}}`를 보낸다. `requestId`는 저장을 시도할 때 발급한 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`를 보내면 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 이력, 알림, 선택한 댓글을 함께 저장한다.
+브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,priority?,dueDate?,description?,customFields?,expectedIssueSchemaVersion?,comment?:{body,mentions?}}`를 보낸다. `requestId`는 저장을 시도할 때 발급한 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`를 보내면 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 이력, 알림, 선택한 댓글을 함께 저장한다.
+
+`priority`는 업무 우선순위 중 하나다. `dueDate`는 유효한 `YYYY-MM-DD`와 마감일을 비우는 `null`을 받는다. 생략하면 기존 마감일과 현재 상태 전이의 자동 지정 규칙을 사용한다. 직접 보낸 값에는 워크플로의 마감일 필수 입력 규칙도 적용한다. 요청에서 지정한 우선순위와 목표 마감일은 당시 저장값으로 `receipt`에도 포함된다.
 
 `description`에는 현재 설명 형식으로 작성한 본문을 보낸다. `customFields`에는 저장할 사용자 정의 필드 ID와 값만 보내며 `expectedIssueSchemaVersion`을 함께 지정한다. 최신 양식 버전과 다르면 `409`와 `schema_changed`를 반환한다. 현재 양식과 일반 업무 저장 규칙으로 값을 검증하고 기존 필드에 합친다. 설명과 필드 입력은 대상을 변경할 때와 재시도할 때 같은 요청의 일부로 확인한다.
 

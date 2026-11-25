@@ -1,3 +1,6 @@
+import {
+  DELIVERY_BLOCKER_DRAFT_GITLAB_EXAMPLES, deliveryBlockerGitlabCount, deliveryBlockerGitlabLabel, deliveryBlockerGitlabState,
+} from '../shared/delivery-blocker-gitlab.js';
 import { DEPENDENCY_LABELS, SCHEDULE_DATE_LABELS } from '../shared/schedule-dependencies.js';
 import {
   PRIORITY, type DeliveryBlockerIssue, type DeliveryBlockerReason, type DeliveryBlockerReport, type RichContent,
@@ -65,7 +68,7 @@ export function buildDeliveryBlockerDraftContent(
   ];
   if (omitted > 0) content.push(paragraph(`초안에서 생략한 업무 ${numberLabel(omitted)}개`));
 
-  for (const { issue, deadline, priority, blockers, scheduleConflicts, gitlab, releaseSchedule } of rows) {
+  for (const { issue, deadline, priority, blockers, scheduleConflicts, gitlab, gitlabEvidence, releaseSchedule } of rows) {
     const sourceLabel = deadline?.source === 'endDate' ? '종료일' : '목표 마감일';
     content.push(
       heading(issueLabel(issue), 3),
@@ -90,6 +93,20 @@ export function buildDeliveryBlockerDraftContent(
     if (gitlab.failedPipelines) gitlabActions.push(`실패한 파이프라인 ${numberLabel(gitlab.failedPipelines)}건`);
     if (gitlab.manualPipelines) gitlabActions.push(`수동 실행 대기 파이프라인 ${numberLabel(gitlab.manualPipelines)}건`);
     if (gitlabActions.length) content.push(paragraph(`${REASON_LABELS.gitlab} · ${gitlabActions.join(' · ')}`));
+    const gitlabExamples = gitlabEvidence?.slice(0, DELIVERY_BLOCKER_DRAFT_GITLAB_EXAMPLES) ?? [];
+    if (gitlabExamples.length) {
+      content.push({
+        type: 'bulletList',
+        content: gitlabExamples.map(evidence => {
+          const label = text(deliveryBlockerGitlabLabel(evidence));
+          const reference = evidence.href
+            ? { ...label, marks: [{ type: 'link', attrs: { href: evidence.href, target: '_blank' } }] } : label;
+          return { type: 'listItem', content: [{ type: 'paragraph', content: [reference, text(` · ${deliveryBlockerGitlabState(evidence)}`)] }] };
+        }),
+      });
+      const additional = deliveryBlockerGitlabCount(gitlab) - gitlabExamples.length;
+      if (additional > 0) content.push(paragraph(`GitLab 예시 외 ${numberLabel(additional)}건`));
+    }
     if (releaseSchedule) {
       content.push(paragraph(`계획 일정 · 시작일 ${releaseSchedule.startDate ?? '미정'} · 종료일 ${releaseSchedule.endDate ?? '미정'}`));
       if (releaseSchedule.afterDeadline && release?.deadline) {

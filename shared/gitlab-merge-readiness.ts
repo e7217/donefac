@@ -1,5 +1,22 @@
 import type { GitlabMergeReadiness, GitlabMergeReadinessState } from './types.js';
 
+export const GITLAB_MERGE_READINESS_LABELS: Readonly<Record<GitlabMergeReadinessState, string>> = {
+  ready: '병합 가능',
+  checking: '병합 상태 검사 중',
+  draft: '초안',
+  conflict: '충돌 해결 필요',
+  approval_required: '승인 대기',
+  changes_requested: '수정 요청',
+  discussions_unresolved: '미해결 토론',
+  ci_required: '파이프라인 통과 필요',
+  ci_running: '파이프라인 실행 중',
+  rebase_required: '리베이스 필요',
+  dependency: '선행 병합 요청 대기',
+  policy: '정책 또는 상태 검사 확인',
+  blocked: '병합 차단',
+  unknown: '병합 상태 미확인',
+};
+
 const detailedMergeStates: Readonly<Record<string, GitlabMergeReadinessState>> = {
   mergeable: 'ready',
   approvals_syncing: 'checking',

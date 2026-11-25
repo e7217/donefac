@@ -162,6 +162,17 @@ export interface DeliveryScheduleConflict {
   requiredDate: string;
 }
 
+export type DeliveryBlockerGitlabEvidence = {
+  id: string;
+  repositoryId: number;
+  number: number | null;
+  repository?: string;
+  href?: string;
+} & (
+  | { kind: 'merge_request'; state: GitlabMergeReadinessState }
+  | { kind: 'pipeline'; state: 'failed' | 'manual'; source?: string; tag?: true }
+);
+
 export interface DeliveryBlockerRow {
   issue: DeliveryBlockerIssue;
   priority: Priority;
@@ -169,6 +180,7 @@ export interface DeliveryBlockerRow {
   blockers: { total: number; items: DeliveryBlockerCause[] };
   scheduleConflicts: { total: number; items: DeliveryScheduleConflict[] };
   gitlab: { blockedMergeRequests: number; failedPipelines: number; manualPipelines: number };
+  gitlabEvidence?: DeliveryBlockerGitlabEvidence[];
   releaseSchedule?: {
     startDate: string | null;
     endDate: string | null;
@@ -1435,6 +1447,8 @@ export interface IssueStatusChangeRequest {
   restoreGeneration: string;
   status: Issue['status'];
   assigneeId?: Issue['assigneeId'];
+  priority?: Issue['priority'];
+  dueDate?: Issue['dueDate'];
   description?: Issue['description'];
   customFields?: NonNullable<Issue['customFields']>;
   expectedIssueSchemaVersion?: number;
@@ -1447,6 +1461,8 @@ export interface IssueStatusChangeReceipt {
   appliedVersion: number;
   status: Issue['status'];
   assigneeId: Issue['assigneeId'];
+  priority?: Issue['priority'];
+  dueDate?: Issue['dueDate'];
   commentId: string | null;
 }
 export interface IssueStatusChangeResult {

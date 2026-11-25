@@ -207,6 +207,21 @@ test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확�
     const report = page.getByRole('tabpanel', { name: '진행 차단', exact: true });
     const releaseCard = report.getByRole('article', { name: `준비 확인 업무 ${issue.key}`, exact: true });
     await expect(releaseCard.getByText('수동 실행 대기 파이프라인 2건', { exact: true })).toBeVisible();
+    const activity = releaseCard.getByRole('list', { name: 'GitLab 원인 활동', exact: true });
+    const pushLink = activity.getByRole('link', { name: /파이프라인 #602/u });
+    const scheduledLink = activity.getByRole('link', { name: /파이프라인 #603/u });
+    const pushUrl = `${baseUrl}/team/release/-/pipelines/602`;
+    const scheduledUrl = `${baseUrl}/team/release/-/pipelines/603`;
+    await expect(pushLink).toHaveAttribute('href', pushUrl);
+    await expect(scheduledLink).toHaveAttribute('href', scheduledUrl);
+    await expect(activity.getByRole('link', { name: /파이프라인 #601/u })).toHaveCount(0);
+    await expect(activity.getByText('수동 실행 대기 · 예약', { exact: true })).toBeVisible();
+    await page.context().route(`${baseUrl}/**`, route => route.fulfill({ status: 200, body: 'synthetic GitLab pipeline' }));
+    const [popup] = await Promise.all([page.waitForEvent('popup'), pushLink.click()]);
+    await expect(popup).toHaveURL(pushUrl);
+    await popup.close();
+    expect(new URL(page.url()).hash).toBe(reportHash);
+
     const openIssue = releaseCard.getByRole('button', { name: `${issue.key} ${issue.title} 업무 열기`, exact: true });
     await openIssue.click();
     const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
@@ -219,6 +234,7 @@ test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확�
     const draft = page.getByRole('dialog', { name: '회의 초안 만들기', exact: true });
     await draft.getByText('요약에 포함할 업무 1개', { exact: true }).click();
     await expect(draft.getByText('수동 실행 대기 파이프라인 2건', { exact: true })).toBeVisible();
+    await expect(draft.getByText(/파이프라인 #602 .* 수동 실행 대기 · 푸시/u)).toBeVisible();
     await draft.getByRole('textbox', { name: '회의 초안 제목', exact: true }).fill(draftTitle);
     const capture = page.waitForResponse(response => new URL(response.url()).pathname === `${reportPath}/meeting-draft` &&
       response.request().method() === 'POST');
@@ -228,6 +244,8 @@ test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확�
     const { document } = await readJson<DeliveryBlockerDraftResult>(response, 201);
     draftId = document.id;
     expect(document.plainText).toContain('수동 실행 대기 파이프라인 2건');
+    expect(document.plainText).toContain('파이프라인 #602');
+    expect(JSON.stringify(document.content)).toContain(pushUrl);
     await draft.getByRole('button', { name: '문서 열기', exact: true }).click();
     await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(draftTitle);
     const documentUrl = page.url();
@@ -241,6 +259,8 @@ test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확�
     expect(live.revision).not.toBe(release.revision);
     expect(live.counts.reasons.gitlab).toBe(1);
     await expect(releaseCard.getByText('수동 실행 대기 파이프라인 1건', { exact: true })).toBeVisible();
+    await expect(pushLink).toHaveCount(0);
+    await expect(scheduledLink).toBeVisible();
 
     const projectRequest = readReport(page, reportPath, null, 'gitlab', savedView.id);
     await page.goto(`/#/${project.id}/reports/blockers?savedView=${savedView.id}&reason=gitlab`);
@@ -248,6 +268,7 @@ test('360px 릴리스와 진행 차단에서 GitLab 수동 실행 대기를 확�
     expect(projectReport.counts.reasons.gitlab).toBe(1);
     const projectCard = report.getByRole('article', { name: `차단된 업무 ${issue.key}`, exact: true });
     await expect(projectCard.getByText('수동 실행 대기 파이프라인 1건', { exact: true })).toBeVisible();
+    await expect(projectCard.getByRole('link', { name: /파이프라인 #603/u })).toHaveAttribute('href', scheduledUrl);
 
     await pipeline(issue, 605, 'schedule', 'success');
     const refreshed = readReport(page, reportPath, null, 'gitlab', savedView.id);

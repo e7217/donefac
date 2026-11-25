@@ -1,5 +1,8 @@
 'use client';
 
+import {
+  DELIVERY_BLOCKER_DRAFT_GITLAB_EXAMPLES, deliveryBlockerGitlabLabel, deliveryBlockerGitlabState,
+} from '../../shared/delivery-blocker-gitlab';
 import type { DeliveryBlockerReport, FeatureProps } from '../../shared/types';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { ReportMeetingDraftDialog } from './ReportMeetingDraftDialog';
@@ -55,6 +58,10 @@ function DeliveryBlockerDraftPreview({ scope, reasonLabel }: { scope: DeliveryBl
           row.releaseSchedule?.missing.includes('endDate') ? '종료일 미정' : '',
           row.releaseSchedule?.afterDeadline ? `릴리스 기한 초과 · 종료일 ${row.releaseSchedule.endDate}` : '',
         ].filter(Boolean).join(' · ')}</p>
+        {!!row.gitlabEvidence?.length && <ul>
+          {row.gitlabEvidence.slice(0, DELIVERY_BLOCKER_DRAFT_GITLAB_EXAMPLES).map(evidence =>
+            <li key={evidence.id}>{deliveryBlockerGitlabLabel(evidence)} · {deliveryBlockerGitlabState(evidence)}</li>)}
+        </ul>}
       </li>)}</ol>
     </details>}
   </>;

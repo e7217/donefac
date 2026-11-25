@@ -87,7 +87,7 @@ test('간트 업무 위치 이동을 취소하면 초안을 유지하고 뒤로 
     await expect.poll(hash).toBe(previousPath);
     await expect(drawer).toBeVisible();
     await expect(title).toHaveValue(target.title);
-    await expect(comment).toHaveValue('');
+    await expect(comment).toHaveValue('아직 보내지 않은 간트 이동 검사 댓글');
     await expect(picker).toHaveValue(view.id);
     await expect(siblingRow).toHaveCount(0);
 
@@ -112,6 +112,7 @@ test('간트 업무 위치 이동을 취소하면 초안을 유지하고 뒤로 
 
     const siblingComment = siblingDrawer.getByLabel('댓글 내용', { exact: true });
     await siblingComment.fill('브라우저 뒤로 가기에서 보호할 댓글');
+    await siblingDrawer.getByLabel('제목', { exact: true }).fill('브라우저 뒤로 가기에서 보호할 제목');
     const declineBack = page.waitForEvent('dialog').then(dialog => dialog.dismiss());
     await page.goBack();
     await declineBack;

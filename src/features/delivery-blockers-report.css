@@ -205,6 +205,23 @@
 .delivery-blockers-causes h5 > span { margin-inline-start: 0.2rem; color: #526c65; font-weight: 500; }
 .delivery-blockers-causes ul { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
 .delivery-blockers-causes p { margin: 0.2rem 0 0; color: #526c65; }
+.delivery-blockers-causes .delivery-blockers-gitlab-evidence {
+  margin-top: 0.55rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid #e3ede7;
+  gap: 0.55rem;
+}
+.delivery-blockers-gitlab-evidence a {
+  color: #156c5e;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+.delivery-blockers-gitlab-evidence a svg {
+  display: inline;
+  margin-inline-start: 0.3em;
+  vertical-align: text-bottom;
+}
 .delivery-blockers-origin {
   display: block;
   width: fit-content;

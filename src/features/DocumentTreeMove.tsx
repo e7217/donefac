@@ -10,6 +10,7 @@ interface Props {
   document: DocPage;
   documents: DocPage[];
   projects: Project[];
+  destination?: Pick<DocPage, 'projectId' | 'parentId'>;
   refreshWorkspace?: () => Promise<void>;
   onClose: () => void;
   onMoved: () => void;
@@ -35,14 +36,14 @@ function subtreeIds(rootId: string, documents: DocPage[]) {
 }
 
 export function DocumentTreeMove({
-  document: page, documents, projects, refreshWorkspace, onClose, onMoved, beforeApply,
+  document: page, documents, projects, destination, refreshWorkspace, onClose, onMoved, beforeApply,
 }: Props) {
   const titleId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const spaceInput = useRef<HTMLSelectElement>(null);
   const pending = useRef<AbortController | null>(null);
-  const [projectId, setProjectId] = useState(page.projectId);
-  const [parentId, setParentId] = useState(page.parentId);
+  const [projectId, setProjectId] = useState(() => destination ? destination.projectId : page.projectId);
+  const [parentId, setParentId] = useState(() => destination ? destination.parentId : page.parentId);
   const [preview, setPreview] = useState<DocumentTreeMovePreview | null>(null);
   const [previewPage, setPreviewPage] = useState(0);
   const [busy, setBusy] = useState<RequestKind | null>(null);

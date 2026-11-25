@@ -1,7 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CalendarRange, FileText, PackageCheck, RefreshCw } from 'lucide-react';
+import { CalendarRange, ExternalLink, FileText, PackageCheck, RefreshCw } from 'lucide-react';
+import { deliveryBlockerGitlabCount, deliveryBlockerGitlabLabel, deliveryBlockerGitlabState } from '../../shared/delivery-blocker-gitlab';
 import {
   DELIVERY_BLOCKER_REASONS, PRIORITY, RELEASE_BLOCKER_REASONS, type DeliveryBlockerDraftScope, type DeliveryBlockerIssue, type DeliveryBlockerReason,
   type DeliveryBlockerReport, type DeliveryBlockerRow, type FeatureProps,
@@ -299,8 +300,9 @@ function BlockerIssueButton({ issue, linkBusy, open }: IssueAction & { issue: De
 }
 
 function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: DeliveryBlockerRow; affectedLabel: string }) {
-  const { issue, deadline, blockers, scheduleConflicts, gitlab, releaseSchedule } = row;
+  const { issue, deadline, blockers, scheduleConflicts, gitlab, gitlabEvidence = [], releaseSchedule } = row;
   const manualPipelines = gitlab.manualPipelines ?? 0;
+  const omittedGitlab = deliveryBlockerGitlabCount(gitlab) - gitlabEvidence.length;
   return <article className="card delivery-blockers-card" aria-label={`${affectedLabel} ${issue.key}`}>
     <h4><BlockerIssueButton issue={issue} {...action} /></h4>
     <dl className="delivery-blockers-properties">
@@ -343,6 +345,18 @@ function BlockerCard({ row, affectedLabel, ...action }: IssueAction & { row: Del
           {gitlab.failedPipelines > 0 && <li>실패한 파이프라인 {numberLabel(gitlab.failedPipelines)}건</li>}
           {manualPipelines > 0 && <li>{ISSUE_GITLAB_FILTER_LABELS.manual_pipeline} {numberLabel(manualPipelines)}건</li>}
         </ul>
+        {gitlabEvidence.length > 0 && <ul className="delivery-blockers-gitlab-evidence" aria-label="GitLab 원인 활동">
+          {gitlabEvidence.map(evidence => {
+            const label = deliveryBlockerGitlabLabel(evidence);
+            return <li key={evidence.id}>
+              {evidence.href
+                ? <a href={evidence.href} target="_blank" rel="noopener noreferrer">{label}<ExternalLink size={13} aria-hidden="true" /></a>
+                : <strong>{label}</strong>}
+              <p>{deliveryBlockerGitlabState(evidence)}</p>
+            </li>;
+          })}
+        </ul>}
+        {gitlabEvidence.length > 0 && omittedGitlab > 0 && <p>표시된 활동 외 {numberLabel(omittedGitlab)}건</p>}
       </section>}
     </div>
   </article>;

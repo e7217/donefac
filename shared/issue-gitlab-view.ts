@@ -18,6 +18,12 @@ export function isGitlabPipelineRunning(state: string): boolean {
   return activePipelineStates.has(state);
 }
 
+export function isBlockedGitlabMergeRequest(link: GitlabLink): link is GitlabLink & {
+  kind: 'merge_request'; mergeReadiness: NonNullable<GitlabLink['mergeReadiness']>;
+} {
+  return link.kind === 'merge_request' && link.state === 'opened' && isGitlabMergeReadinessBlocked(link.mergeReadiness?.state);
+}
+
 export function gitlabPipelineGroup(link: GitlabLink) {
   if (!isGitlabBranchName(link.sourceBranch)) return null;
   const identity = gitlabPipelineLinkIdentity(link);
@@ -62,7 +68,7 @@ export function summarizeIssueGitlabLinks(links: readonly GitlabLink[]): Readonl
     summary.activityCount++;
     if (link.kind === 'merge_request' && link.state === 'opened') {
       summary.openMergeRequests++;
-      if (isGitlabMergeReadinessBlocked(link.mergeReadiness?.state)) summary.blockedMergeRequests++;
+      if (isBlockedGitlabMergeRequest(link)) summary.blockedMergeRequests++;
     }
   }
   for (const link of latestGitlabPipelineLinks(links)) {

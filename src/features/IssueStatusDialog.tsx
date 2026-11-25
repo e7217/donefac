@@ -2,7 +2,9 @@
 
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import type { CustomFieldDefinition, CustomFieldValue, FeatureProps, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
+import { isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar';
+import { PRIORITY, type CustomFieldDefinition, type CustomFieldValue, type FeatureProps, type Issue,
+  type IssueStatusChangeRequest, type IssueStatusChangeResult, type User, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
 import { fieldApplies, fieldValueLabel, hasCustomValue, projectIssueSchema, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
@@ -18,6 +20,7 @@ type Recovery = 'conflict' | 'verify' | 'refresh';
 type StatusChangeAttempt = { actorId: string; input: IssueStatusChangeRequest };
 type PropertyDraft<Value> = { base: Value; value: Value };
 type CustomDraft = PropertyDraft<CustomFieldValue> & { label: string; kind: CustomFieldDefinition['kind'] };
+type DueDateDraft = { base: Issue['dueDate']; mode: 'set' | 'clear'; date: string };
 
 const STALE = '업무, 워크플로 또는 업무 양식이 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
 const REFRESH = '변경 사항을 저장했습니다. 화면에 반영하려면 최신 업무를 불러와 주세요.';
@@ -30,10 +33,11 @@ function confirmedStatusChange(result: IssueStatusChangeResult, edit: IssueStatu
   return Boolean(receipt && issue && typeof duplicate === 'boolean' && receipt.requestId === input.requestId &&
     receipt.issueId === edit.issue.id && receipt.projectId === edit.issue.projectId && receipt.appliedVersion === input.expectedVersion + 1 &&
     receipt.status === input.status && (receipt.assigneeId === null || typeof receipt.assigneeId === 'string') &&
-    (input.assigneeId === undefined || receipt.assigneeId === input.assigneeId) &&
+    (input.assigneeId === undefined || receipt.assigneeId === input.assigneeId) && receipt.priority === input.priority && receipt.dueDate === input.dueDate &&
     (input.comment ? typeof receipt.commentId === 'string' && receipt.commentId.length > 0 : receipt.commentId === null) &&
     issue.id === receipt.issueId && issue.projectId === receipt.projectId && Number.isSafeInteger(issue.version) &&
-    (issue.version === receipt.appliedVersion ? issue.status === receipt.status && issue.assigneeId === receipt.assigneeId :
+    (issue.version === receipt.appliedVersion ? issue.status === receipt.status && issue.assigneeId === receipt.assigneeId &&
+      (receipt.priority === undefined || issue.priority === receipt.priority) && (receipt.dueDate === undefined || issue.dueDate === receipt.dueDate) :
       duplicate && issue.version > receipt.appliedVersion));
 }
 
@@ -76,6 +80,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const { edit, restoreGeneration, schemaVersion } = review;
   const heading = useId();
   const errorId = useId();
+  const dueDateHintId = useId();
   const commentId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const statusField = useRef<HTMLSelectElement>(null);
@@ -86,6 +91,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(edit.choices.length === 1 ? edit.choices[0].id : '');
   const [assigneeId, setAssigneeId] = useState<Issue['assigneeId'] | undefined>();
+  const [priority, setPriority] = useState<PropertyDraft<Issue['priority']>>();
+  const [dueDate, setDueDate] = useState<DueDateDraft>();
   const [description, setDescription] = useState<PropertyDraft<string>>();
   const [customFields, setCustomFields] = useState<Record<string, CustomDraft>>({});
   const [reportedRequired, setReportedRequired] = useState<string[]>([]);
@@ -116,13 +123,25 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const descriptionValue = description?.value ?? edit.issue.description;
   const missingDescription = required.has('description') && !descriptionValue.trim();
   const descriptionConflict = propertyConflict(description, edit.issue.description);
-  const incompleteProperties = missingDescription || propertyFields.some(field => customRequired(field) && !hasCustomValue(customValue(field)));
-  const unresolvedProperties = descriptionConflict || unavailable.length > 0 ||
+  const priorityValue = priority?.value ?? edit.issue.priority;
+  const priorityConflict = propertyConflict(priority, edit.issue.priority);
+  const savedDueDate = edit.issue.dueDate;
+  const dueDateValue = dueDate ? (dueDate.mode === 'set' ? dueDate.date : null) : savedDueDate;
+  const automaticDueDays = !dueDate && savedDueDate === null ? edit.choices.find(status => status.id === selected)?.defaultDueWorkdays : null;
+  const missingDueDate = required.has('dueDate') && !dueDateValue && automaticDueDays == null;
+  const invalidDueDate = dueDate?.mode === 'set' && !isCalendarDate(dueDate.date);
+  const dueDateConflict = propertyConflict(dueDate && { base: dueDate.base, value: dueDateValue }, savedDueDate);
+  const dueDateHint = missingDueDate ? '이 상태는 목표 마감일이 필요합니다.' :
+    automaticDueDays != null ? `프로젝트 달력으로 ${automaticDueDays}근무일 뒤의 날짜를 지정합니다.` :
+      dueDate ? `현재 목표 마감일 ${savedDueDate ?? '미지정'}` : '';
+  const incompleteProperties = missingDescription || missingDueDate || invalidDueDate ||
+    propertyFields.some(field => customRequired(field) && !hasCustomValue(customValue(field)));
+  const unresolvedProperties = descriptionConflict || priorityConflict || dueDateConflict || unavailable.length > 0 ||
     propertyFields.some(field => propertyConflict(customFields[field.id], storedCustom(field.id)));
-  const hasPropertiesDraft = Boolean(description || Object.keys(customFields).length);
+  const hasPropertiesDraft = Boolean(priority || dueDate || description || Object.keys(customFields).length);
   const assigneeUnavailable = typeof assigneeId === 'string' && !latest.users.some(user => user.id === assigneeId);
   const assigneeOption = assigneeId === undefined ? '' : assigneeId === null ? UNASSIGNED : `${USER_OPTION}${assigneeId}`;
-  const unknownResult = comment.body.trim() ? UNKNOWN_HANDOFF :
+  const unknownResult = comment.body.trim() ? UNKNOWN_HANDOFF : (priority || dueDate) ? '상태와 업무 속성의 변경 결과를 확인하지 못했습니다.' :
     `${assigneeId === undefined ? '상태' : '상태와 담당자'} 변경 결과를 확인하지 못했습니다.`;
   const discardPrompt = recovery === 'verify' ? `${unknownResult} 닫을까요?` :
     hasPropertiesDraft ? '작성 중인 업무 내용과 인수인계 입력을 버리고 닫을까요?' :
@@ -191,6 +210,16 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     clearValidation();
   }
 
+  function changePriority(value: Issue['priority'], useLatest = false) {
+    setPriority(value === edit.issue.priority ? undefined : { base: useLatest ? edit.issue.priority : priority?.base ?? edit.issue.priority, value });
+    clearValidation();
+  }
+
+  function changeDueDate(mode: DueDateDraft['mode'] | '', date = dueDate?.date ?? savedDueDate ?? '', useLatest = false) {
+    setDueDate(mode ? { base: useLatest || !dueDate ? savedDueDate : dueDate.base, mode, date } : undefined);
+    clearValidation();
+  }
+
   function changeCustom(field: CustomFieldDefinition, value: CustomFieldValue, useLatest = false) {
     const saved = storedCustom(field.id);
     if (sameProperty(value, saved)) return forgetCustom(field.id);
@@ -234,7 +263,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setAssigneeRequired(missingAssignee);
     if (cause.status === 422) setReportedRequired(requiredFields);
     setShowDetails(cause.status === 422 && (!requiredFields.length || requiredFields.some(field =>
-      field !== 'assigneeId' && field !== 'description' && !applicable.some(definition => field === `custom:${definition.id}`))));
+      !['assigneeId', 'description', 'dueDate'].includes(field) && !applicable.some(definition => field === `custom:${definition.id}`))));
   }
 
   async function applyStatusChange(attempt: StatusChangeAttempt) {
@@ -250,6 +279,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       if (!confirmedStatusChange(result, edit, attempt.input)) throw new Error(unknownResult);
       changeAttempt.current = null;
       setComment(emptyCommentDraft());
+      setPriority(undefined);
+      setDueDate(undefined);
       setDescription(undefined);
       setCustomFields({});
       setCommentSaved(withComment);
@@ -309,6 +340,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       const changes = Object.fromEntries(Object.entries(draftCustom).filter(([id, value]) => !sameProperty(value, storedCustom(id))));
       const attempt = { actorId, input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
         expectedWorkflowVersion: edit.workflowVersion, status: selected, ...(assigneeId === undefined ? {} : { assigneeId }),
+        ...(priority && priorityValue !== edit.issue.priority ? { priority: priorityValue } : {}),
+        ...(dueDate ? { dueDate: dueDateValue } : {}),
         ...(description && descriptionValue !== edit.issue.description ? { description: descriptionValue } : {}),
         ...(Object.keys(changes).length ? { customFields: changes, expectedIssueSchemaVersion: schemaVersion } : {}),
         ...(note.body ? { comment: note } : {}) } };
@@ -363,6 +396,32 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
             {assigneeUnavailable && <option value={assigneeOption} disabled>팀원 확인 불가</option>}
           </select>
         </label>
+        <fieldset className="issue-status-properties" disabled={fieldsDisabled}>
+          <legend>우선순위와 목표 마감일</legend>
+          <label>우선순위
+            <select className="field" value={priorityValue} onChange={event => changePriority(event.currentTarget.value as Issue['priority'])}>
+              {Object.entries(PRIORITY).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </select>
+          </label>
+          {priorityConflict && <PropertyConflict label="우선순위" saved={PRIORITY[edit.issue.priority]}
+            onUseSaved={() => changePriority(edit.issue.priority)} onUseInput={() => changePriority(priorityValue, true)} />}
+          <label>목표 마감일 처리
+            <select className="field" value={dueDate?.mode ?? ''}
+              aria-invalid={missingDueDate || undefined} aria-describedby={dueDateHint ? dueDateHintId : undefined}
+              onChange={event => changeDueDate(event.currentTarget.value as DueDateDraft['mode'] | '')}>
+              <option value="">{savedDueDate ? `${savedDueDate} 유지` : '현재 값과 자동 지정 규칙 적용'}</option>
+              <option value="set">날짜 지정</option>
+              <option value="clear">마감일 비우기</option>
+            </select>
+          </label>
+          {dueDate?.mode === 'set' && <label>목표 마감일
+            <input className="field" type="date" min={MIN_CALENDAR_DATE} max={MAX_CALENDAR_DATE} required value={dueDate.date}
+              onChange={event => changeDueDate('set', event.currentTarget.value)} />
+          </label>}
+          {dueDateHint && <p id={dueDateHintId} role="status">{dueDateHint}</p>}
+          {dueDateConflict && <PropertyConflict label="목표 마감일" saved={savedDueDate ?? '미지정'}
+            onUseSaved={() => changeDueDate('')} onUseInput={() => { if (dueDate) changeDueDate(dueDate.mode, dueDate.date, true); }} />}
+        </fieldset>
         {(description || missingDescription || propertyFields.length > 0 || unavailable.length > 0) &&
           <fieldset className="issue-status-properties" disabled={fieldsDisabled}>
             <legend>상태와 함께 저장할 속성</legend>

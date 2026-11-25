@@ -118,7 +118,45 @@ test('delivery blockers aggregate only active targets and authorize sources inde
     }],
   });
   assert.deepEqual(row.gitlab, { blockedMergeRequests: 2, failedPipelines: 1, manualPipelines: 1 });
+  assert.deepEqual(row.gitlabEvidence?.map(evidence => [evidence.kind, evidence.state, evidence.number]), [
+    ['merge_request', 'conflict', 1], ['merge_request', 'approval_required', 1], ['pipeline', 'failed', 15], ['pipeline', 'manual', 22],
+  ]);
   assert.doesNotMatch(JSON.stringify(result), /PRIVATE_|private@example|SECRET-1|https:\/\//);
+});
+
+test('GitLab blocker evidence is per category and publishes only exact credential-free object links', () => {
+  const target = issue('TEAM-44');
+  const repo = 'https://git.example.test:8443/install/team/release';
+  const mrs = Array.from({ length: 6 }, (_, index) => link(target, {
+    id: `merge-request:${index}`,
+    iid: index + 1,
+    webUrl: index === 1 ? 'https://someone:private@git.example.test/install/team/release/-/merge_requests/2'
+      : `${repo}/-/merge_requests/${index + 1}?private_token=unpublished#private-anchor`,
+  }));
+  const failed = (id: number, href: string) => ({
+    ...pipeline(target, id, `branch/${id}`, 'failed'), webUrl: href, pipelineSource: 'push',
+  });
+  const manual = { ...pipeline(target, 202, 'release', 'manual'), webUrl: `${repo}/-/pipelines/202?secret=remove`,
+    pipelineSource: 'schedule', pipelineTag: true };
+  const links = [...mrs, failed(103, `${repo}/-/pipelines/999`), failed(104, `${repo}/-/pipelines/104?private_token=unpublished`), manual];
+  const [result] = buildDeliveryBlockers(input({ targets: [target], gitlabLinks: links })).rows;
+  assert.deepEqual(result, buildDeliveryBlockers(input({ targets: [target], gitlabLinks: [...links].reverse() })).rows[0]);
+  assert.deepEqual(result.gitlab, { blockedMergeRequests: 6, failedPipelines: 2, manualPipelines: 1 });
+  assert.ok(result.gitlabEvidence);
+  const evidence = (number: number) => result.gitlabEvidence?.find(value => value.number === number);
+  assert.equal(result.gitlabEvidence.filter(value => value.kind === 'merge_request').length, 5);
+  assert.deepEqual(evidence(1), {
+    id: 'merge-request:0', kind: 'merge_request', repositoryId: 42, state: 'conflict', number: 1,
+    repository: 'git.example.test:8443/install/team/release', href: `${repo}/-/merge_requests/1`,
+  });
+  assert.equal(evidence(2)?.href, undefined);
+  assert.equal(evidence(103)?.href, undefined);
+  assert.equal(evidence(104)?.href, `${repo}/-/pipelines/104`);
+  assert.deepEqual(evidence(202), {
+    id: manual.id, kind: 'pipeline', repositoryId: 42, state: 'manual', number: 202, source: 'schedule', tag: true,
+    repository: 'git.example.test:8443/install/team/release', href: `${repo}/-/pipelines/202`,
+  });
+  assert.doesNotMatch(JSON.stringify(result), /private_token|private-anchor|unpublished|someone|\?secret|\/pipelines\/999|PRIVATE_GITLAB_TITLE/u);
 });
 
 test('delivery blockers caps ordered examples while preserving distinct counts', () => {

@@ -5,12 +5,14 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { DocPage, DocumentSiblingOrder, Project } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { reorderDocumentPlacement, type DocumentOrderPlacement } from './document-tree-drag';
 import './document-sibling-order.css';
 
 interface Props {
   documentId: string;
   documents: readonly DocPage[];
   projects: readonly Project[];
+  placement?: DocumentOrderPlacement;
   refreshWorkspace: () => Promise<void>;
   onClose: () => void;
 }
@@ -27,7 +29,7 @@ function sameIds(first: readonly string[], second: readonly string[]) {
   return first.length === second.length && first.every((id, index) => id === second[index]);
 }
 
-export function DocumentSiblingOrderDialog({ documentId, documents, projects, refreshWorkspace, onClose }: Props) {
+export function DocumentSiblingOrderDialog({ documentId, documents, projects, placement, refreshWorkspace, onClose }: Props) {
   const headingId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -112,16 +114,22 @@ export function DocumentSiblingOrderDialog({ documentId, documents, projects, re
     void requestOrder(controller.signal).then(async order => {
       if (controller.signal.aborted) return;
       adopt(order);
+      if (placement) {
+        const proposed = reorderDocumentPlacement(order, documentId, placement);
+        if (proposed) setDraft(proposed);
+        else setFeedback({ kind: 'conflict', message: CONFLICT });
+      }
       try {
         await refreshWorkspace();
       } catch {
-        if (!controller.signal.aborted) setFeedback({ kind: 'error', message: '최신 문서 제목을 불러오지 못했습니다.' });
+        if (!controller.signal.aborted) setFeedback(previous => previous?.kind === 'conflict' ? previous :
+          { kind: 'error', message: '최신 문서 제목을 불러오지 못했습니다.' });
       }
     }).catch(cause => {
       if (!controller.signal.aborted) setFeedback({ kind: 'error', message: cause instanceof Error ? cause.message : '문서 순서를 불러오지 못했습니다.' });
     }).finally(() => end(controller));
     return () => controller.abort();
-  }, [adopt, end, requestOrder, refreshWorkspace]);
+  }, [adopt, documentId, end, placement, requestOrder, refreshWorkspace]);
 
   useLayoutEffect(() => {
     const control = updatedDocumentFocus.current;
@@ -235,8 +243,8 @@ export function DocumentSiblingOrderDialog({ documentId, documents, projects, re
             const page = pages.get(id);
             const title = page?.title || '제목을 확인할 수 없는 문서';
             return <li key={id} data-document-id={id}>
-              <span className="docs-sibling-order-title" aria-current={id === documentId ? 'page' : undefined}>
-                <strong>{title}</strong>{id === documentId && <small>현재 문서</small>}
+              <span className="docs-sibling-order-title" aria-current={id === documentId ? placement ? 'true' : 'page' : undefined}>
+                <strong>{title}</strong>{id === documentId && <small>{placement ? '선택한 문서' : '현재 문서'}</small>}
               </span>
               <div className="docs-sibling-order-arrows">
                 <button type="button" className="btn btn-ghost docs-icon-button" aria-label={`${title} 위로 이동`}

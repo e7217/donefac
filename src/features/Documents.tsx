@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import { getMarkRange, type EditorEvents, type MappablePosition } from '@tiptap/core';
 import { CollaborationMappablePosition } from '@tiptap/extension-collaboration';
@@ -11,7 +11,7 @@ import { NodeSelection, type Transaction } from '@tiptap/pm/state';
 import { createAbsolutePositionFromRelativePosition, createRelativePositionFromTypeIndex } from 'yjs';
 import {
   ArrowDownToLine, Bold, BookOpen, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, GripVertical, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Pencil, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   RotateCcw, Table2, TableOfContents, TableProperties, Tag, Trash2, Unlink, X,
@@ -46,6 +46,7 @@ import { DocumentTemplatePicker, DocumentTemplatesManager, isDefiniteTemplateFai
 import { DocumentTreeMove } from './DocumentTreeMove';
 import { DocumentTreeCopy } from './DocumentTreeCopy';
 import { DocumentSiblingOrderDialog } from './DocumentSiblingOrderDialog';
+import { reorderDocumentPlacement, useDocumentTreeDrag, type DocumentOrderPlacement } from './document-tree-drag';
 import { useDocumentTreeExpansion } from './document-tree-expansion';
 import { DocumentPublication } from './DocumentPublication';
 import { DocumentEditorHistory } from './DocumentEditorHistory';
@@ -274,12 +275,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const titleInput = useRef<HTMLInputElement>(null);
   const manualEditorRef = useRef<Editor | null>(null);
   const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
-  const [moveDocumentId, setMoveDocumentId] = useState<string | null>(null);
-  const closeMove = useCallback(() => setMoveDocumentId(null), []);
+  const [moveRequest, setMoveRequest] = useState<{ source: DocPage; destination?: Pick<DocPage, 'projectId' | 'parentId'> } | null>(null);
+  const closeMove = useCallback(() => setMoveRequest(null), []);
   const [copyDocumentId, setCopyDocumentId] = useState<string | null>(null);
   const closeCopy = useCallback(() => setCopyDocumentId(null), []);
-  const [orderDocumentId, setOrderDocumentId] = useState<string | null>(null);
-  const closeOrder = useCallback(() => setOrderDocumentId(null), []);
+  const [orderRequest, setOrderRequest] = useState<{ documentId: string; placement?: DocumentOrderPlacement } | null>(null);
+  const closeOrder = useCallback(() => setOrderRequest(null), []);
   const publicationOpener = useRef<HTMLButtonElement>(null);
   const closePublication = useCallback(() => {
     setPublicationDocumentId(null);
@@ -512,10 +513,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     void resolveMigratedIssue(anchor, href, Boolean(address.commentId));
     return true;
   }
-  const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
+  const moveOpen = Boolean(moveRequest);
   const copyOpen = Boolean(selectedPage && selectedPage.id === copyDocumentId);
-  const orderOpen = Boolean(selectedPage && selectedPage.id === orderDocumentId);
+  const orderOpen = Boolean(orderRequest);
   const currentProject = data.projects.find(project => project.id === projectId);
+  const pagesById = useMemo(() => new Map(data.documents.map(page => [page.id, page])), [data.documents]);
+  const moveSource = moveRequest && (pagesById.get(moveRequest.source.id) ?? moveRequest.source);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = editorSessionNeeded && session?.document.id === selectedPageId ? session : null;
   const manualSession = activeSession?.enabled === false;
@@ -524,8 +527,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const liveDocument = liveState?.document;
   const remoteDocument = liveMode ? liveDocument : activeSession?.document;
   const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
-  const ancestors = useMemo(() => latestPage?.parentId ?
-    documentAncestors(latestPage, new Map(data.documents.map(page => [page.id, page]))) : [], [latestPage, data.documents]);
+  const ancestors = useMemo(() => latestPage?.parentId ? documentAncestors(latestPage, pagesById) : [], [latestPage, pagesById]);
   const { collapsed, toggleBranch } = useDocumentTreeExpansion(actorId, data.restoreGeneration, selectedDocumentId, ancestors);
   const spaceTitle = latestPage?.projectId ? data.projects.find(project => project.id === latestPage.projectId)?.name || '프로젝트' : '팀 공통';
   const crumbParameters = new URLSearchParams();
@@ -1057,14 +1059,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     return () => window.removeEventListener('keydown', handler);
   }, [saveDraft, reading, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, referenceDialog, issueBlockDialog]);
 
-  const moveBlocker = () => {
+  const moveBlocker = (sourceId: string) => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
-    if (draftRef.current?.dirty || listDrafts.current.size) return '문서 편집과 목록 설정을 저장한 뒤 이동해 주세요.';
-    if (liveStateRef.current?.pending || manualRecoveryRef.current || archivedLiveRecoveryRef.current ||
-        (selectedDocumentId && hasPendingCollaboration(actorId, selectedDocumentId))) {
+    const affectsOpenDocument = sourceId === selectedDocumentId || ancestors.some(page => page.id === sourceId);
+    if (affectsOpenDocument && (draftRef.current?.dirty || listDrafts.current.size)) return '문서 편집과 목록 설정을 저장한 뒤 이동해 주세요.';
+    if ((affectsOpenDocument && (liveStateRef.current?.pending || manualRecoveryRef.current || archivedLiveRecoveryRef.current ||
+        (selectedDocumentId && hasPendingCollaboration(actorId, selectedDocumentId)))) || hasPendingCollaboration(actorId, sourceId)) {
       return '이 브라우저의 공동 편집을 동기화하거나 복구한 뒤 문서를 이동해 주세요.';
     }
     return null;
+  };
+  const openMove = (source: DocPage, destination?: Pick<DocPage, 'projectId' | 'parentId'>) => {
+    const blocker = moveBlocker(source.id);
+    if (blocker) { notify(blocker, 'error'); return; }
+    setExportOpen(false);
+    setMoveRequest({ source, destination });
   };
   const moveSaved = () => {
     closeMove();
@@ -2009,6 +2018,24 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     reconcileDraft({ document: latest.document, live: liveMode }, choices);
     if (!conflictRef.current) titleInput.current?.focus({ preventScroll: true });
   }
+
+  const dragAvailable = !filtersActive && !checklistReselecting && !moveOpen && !orderOpen && !copyOpen &&
+    !saving && !restoring && !publicationOpen && !issueDrawerOpen;
+  const helpId = useId();
+  const treeDrag = useDocumentTreeDrag(JSON.stringify([actorId, projectId, data.restoreGeneration]), dragAvailable, pagesById, (id, target) => {
+    if (target.kind === 'move') {
+      const page = pagesById.get(id);
+      if (page) openMove(page, target.destination);
+    } else {
+      const { placement } = target;
+      const order = data.documentOrders?.find(order => order.projectId === placement.projectId && order.parentId === placement.parentId);
+      const next = order && reorderDocumentPlacement(order, id, placement);
+      if (next?.every((id, index) => id === order?.documentIds[index])) return;
+      setExportOpen(false);
+      setOrderRequest({ documentId: id, placement });
+    }
+  });
+
   const tree = (pages: DocPage[], parentId: string | null = null, level = 0, visited = new Set<string>()): React.ReactNode => pages
     .filter(page => filtersActive ? level === 0 : (page.parentId === parentId || (parentId === null && !pages.some(other => other.id === page.parentId))))
     .map(page => {
@@ -2019,13 +2046,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const branchCollapsed = collapsed.has(page.id);
       const selected = selectedDocumentId === page.id;
       return <div key={page.id}>
-        <div className={`docs-tree-row ${selected ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}>
+        <div className={`docs-tree-row ${selected ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}
+          data-dragging={treeDrag.draggedId === page.id ? '' : undefined} {...treeDrag.row(page)}>
           <button type="button" className="docs-tree-toggle" aria-label={`${page.title} ${branchCollapsed ? '펼치기' : '접기'}`}
             aria-expanded={canToggle ? !branchCollapsed : undefined} disabled={!canToggle} onClick={() => toggleBranch(page.id)}>
             {canToggle ? branchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}
           </button>
           <button type="button" className="docs-tree-link" aria-current={selected ? 'page' : undefined} onClick={() => selectDocument(page.id)}><span className="docs-page-icon">{page.icon || '📄'}</span><span>{page.title || '제목 없는 문서'}</span>{page.status === 'draft' && <span className="docs-draft-dot" title="초안" />}</button>
           <button type="button" className="docs-tree-add" title="하위 문서 만들기" aria-label={`${page.title} 하위 문서 만들기`} onClick={() => openNew(page.id)}><Plus size={13} /></button>
+          {dragAvailable && <span className="docs-tree-grip" draggable aria-hidden="true" title="끌어서 문서 배치"
+            onDragStart={event => treeDrag.start(event, page, data.documentOrders?.find(order =>
+              order.projectId === page.projectId && order.parentId === page.parentId)?.version)}
+            onDragEnd={treeDrag.clear}><GripVertical size={14} /></span>}
         </div>
         {!filtersActive && !branchCollapsed && tree(pages, page.id, level + 1, nextVisited)}
       </div>;
@@ -2229,7 +2261,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         event.stopPropagation();
         cancelChecklistReselect();
       }}>
-      <aside className="docs-tree" aria-label="문서 목록" inert={checklistReselecting}>
+      <aside className="docs-tree" aria-label="문서 목록" aria-describedby={helpId} inert={checklistReselecting}>
+        <p id={helpId} className="sr-only">순서나 위치를 바꾸려면 문서의 순서 편집 또는 이동 버튼을 사용하세요. 문서 목록의 손잡이를 끌어 배치할 수도 있습니다.</p>
         <label className="docs-tree-search"><Search size={14} /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="문서 찾기" aria-label="문서 찾기" /></label>
         {onChangeDocumentLabel && <div className="docs-label-filters">
           <select aria-label="문서 라벨 필터" value={documentLabel ?? ''} onChange={event => onChangeDocumentLabel(event.target.value || null)}>
@@ -2241,7 +2274,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         </div>}
         {filtersActive && <p role="status" className="docs-filter-count">{activeLabel && <>{activeLabel} · </>}문서 {visible.length}개</p>}
         <div className="docs-tree-content">
-          <div className="docs-tree-group"><span>{currentProject?.name || '프로젝트 문서'}</span>
+          <div className="docs-tree-group" {...(currentProject && treeDrag.space(currentProject.id))}><span>{currentProject?.name || '프로젝트 문서'}</span>
             <div className="docs-tree-group-actions">
               {currentProject && <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(currentProject.id)} notify={notify} />}
               <button type="button" className="docs-tree-group-add" aria-label="프로젝트 문서 추가" onClick={() => openNew()}><Plus size={14} /></button>
@@ -2249,7 +2282,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           </div>
           {tree(treePages.filter(page => page.projectId !== null))}
           {!filtersActive && !visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">첫 문서를 작성해보세요.</p>}
-          <div className="docs-tree-group docs-tree-common"><span>팀 공통 문서</span>
+          <div className="docs-tree-group docs-tree-common" {...treeDrag.space(null)}><span>팀 공통 문서</span>
             <div className="docs-tree-group-actions">
               <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(null)} notify={notify} />
               <button type="button" className="docs-tree-group-add" aria-label="팀 공통 문서 추가" onClick={() => { openNew(); setNewProject(''); }}><Plus size={14} /></button>
@@ -2310,18 +2343,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   <button onClick={() => openOfflineExport('subtree', exportMenuTrigger.current)}>문서 트리 ZIP 내보내기</button>
                 </div>}
               </div>
-              <button type="button" className="btn btn-ghost docs-icon-button" title="문서 이동" aria-label="문서 이동" onClick={() => {
-                const blocker = moveBlocker();
-                if (blocker) { notify(blocker, 'error'); return; }
-                setExportOpen(false);
-                setMoveDocumentId(selectedPage.id);
-              }}><FolderInput size={16} aria-hidden="true" /></button>
+              <button type="button" className="btn btn-ghost docs-icon-button" title="문서 이동" aria-label="문서 이동"
+                onClick={() => openMove(selectedPage)}><FolderInput size={16} aria-hidden="true" /></button>
               <button type="button" className="btn btn-ghost docs-icon-button" title="문서 복제" aria-label="문서 복제"
                 disabled={saving || restoring} onClick={() => { setExportOpen(false); setCopyDocumentId(selectedPage.id); }}>
                 <Copy size={16} aria-hidden="true" />
               </button>
               <button type="button" className="btn btn-ghost docs-icon-button" title="문서 순서 편집" aria-label="문서 순서 편집"
-                disabled={saving || restoring} onClick={() => { setExportOpen(false); setOrderDocumentId(selectedPage.id); }}>
+                disabled={saving || restoring} onClick={() => { setExportOpen(false); setOrderRequest({ documentId: selectedPage.id }); }}>
                 <ListOrdered size={16} aria-hidden="true" />
               </button>
               </>}
@@ -2705,13 +2734,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       document={{ ...selectedPage, version: draft.expectedVersion }} actorId={actorId} canRequest={canRequestPublication}
       initialSnapshot={publicationLink} projectId={selectedPage.projectId ?? projectId} sectionId={publicationLink ? sectionId : null} covered={issueDrawerOpen}
       onClose={closePublication} notify={notify} refreshDocument={refresh} />}
-    {moveOpen && selectedPage && <DocumentTreeMove key={selectedPage.id} document={selectedPage} documents={data.documents}
-      projects={data.projects} beforeApply={moveBlocker} refreshWorkspace={refresh}
+    {moveRequest && moveSource && <DocumentTreeMove key={moveSource.id} document={moveSource} documents={data.documents}
+      projects={data.projects} destination={moveRequest.destination} beforeApply={() => moveBlocker(moveSource.id)} refreshWorkspace={refresh}
       onClose={closeMove} onMoved={moveSaved} />}
     {copyOpen && latestPage && <DocumentTreeCopy key={latestPage.id} source={latestPage} documents={data.documents}
       projects={data.projects} actorId={actorId} refreshWorkspace={refresh} onClose={closeCopy} onOpenCopy={selectDocument} />}
-    {orderOpen && selectedPage && <DocumentSiblingOrderDialog key={selectedPage.id} documentId={selectedPage.id} documents={data.documents}
-      projects={data.projects} refreshWorkspace={refresh} onClose={closeOrder} />}
+    {orderRequest && <DocumentSiblingOrderDialog key={orderRequest.documentId} documentId={orderRequest.documentId} documents={data.documents}
+      projects={data.projects} placement={orderRequest.placement} refreshWorkspace={refresh} onClose={closeOrder} />}
     {referenceDialog && <ReferenceChooser selection={referenceDialog} onClose={closeReference} notify={notify} />}
     {issueBlockDialog && <IssueBlockChooser selection={issueBlockDialog} data={data} preferredProjectId={selectedPage?.projectId ?? currentProject?.id ?? null}
       actorId={actorId} notify={notify} refreshWorkspace={refresh} onClose={closeIssueBlock} />}

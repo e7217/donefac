@@ -1,4 +1,6 @@
-import type { Comment, Issue, IssueStatusChangeReceipt, IssueStatusChangeRequest, IssueStatusChangeResult, ProjectIssueSchema } from '../shared/types.js';
+import { isCalendarDate } from '../shared/calendar.js';
+import { PRIORITY, type Comment, type Issue, type IssueStatusChangeReceipt, type IssueStatusChangeRequest,
+  type IssueStatusChangeResult, type ProjectIssueSchema } from '../shared/types.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store } from './store.js';
 import { workspaceRestoreGeneration } from './workspace-revisions.js';
@@ -14,11 +16,13 @@ export class IssueStatusChangeError extends Error {
   readonly details?: { reason: StatusChangeReason };
 }
 
-type StoredReceipt = Omit<IssueStatusChangeReceipt, 'requestId'> & { actorId: string; fingerprint: string };
-type CommentDraft = Pick<Comment, 'body' | 'mentions'>;
-type TransitionInput = Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion' | 'description'> & {
-  customFields?: Record<string, unknown>;
+type StatusProperties = Pick<IssueStatusChangeRequest, 'priority' | 'dueDate'>;
+type StoredReceipt = Omit<IssueStatusChangeReceipt, 'requestId' | keyof StatusProperties> & {
+  actorId: string; fingerprint: string; properties: string | null;
 };
+type CommentDraft = Pick<Comment, 'body' | 'mentions'>;
+type TransitionInput = Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion' | 'description'> &
+  StatusProperties & { customFields?: Record<string, unknown> };
 type StatusChangeHooks = {
   parseComment: (body: unknown, mentions: unknown) => CommentDraft;
   transition: (before: Issue, input: TransitionInput) => Issue;
@@ -26,7 +30,7 @@ type StatusChangeHooks = {
 };
 
 const statusChangeFields = new Set(['requestId', 'expectedVersion', 'expectedWorkflowVersion', 'restoreGeneration', 'status', 'assigneeId',
-  'description', 'customFields', 'expectedIssueSchemaVersion', 'comment']);
+  'priority', 'dueDate', 'description', 'customFields', 'expectedIssueSchemaVersion', 'comment']);
 const receiptLifetimeMs = 7 * 24 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -41,11 +45,15 @@ function isVersion(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
+function isPriority(value: unknown): value is Issue['priority'] {
+  return typeof value === 'string' && Object.hasOwn(PRIORITY, value);
+}
+
 function parseStatusChange(value: unknown) {
   if (!isRecord(value) || Object.keys(value).some(key => !statusChangeFields.has(key))) {
     throw new IssueStatusChangeError(400, '업무 상태 변경 요청을 확인해 주세요.');
   }
-  const { requestId, expectedVersion, expectedWorkflowVersion, restoreGeneration, status, assigneeId, description,
+  const { requestId, expectedVersion, expectedWorkflowVersion, restoreGeneration, status, assigneeId, priority, dueDate, description,
     customFields, expectedIssueSchemaVersion, comment } = value;
   if (typeof requestId !== 'string' || !creationRequestId.test(requestId) || !isVersion(expectedVersion) ||
       !isVersion(expectedWorkflowVersion) || !isIdentifier(restoreGeneration) || !isIdentifier(status) ||
@@ -58,6 +66,12 @@ function parseStatusChange(value: unknown) {
   if (description !== undefined && (typeof description !== 'string' || description.length > 200000)) {
     throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 설명을 확인해 주세요.');
   }
+  if (priority !== undefined && !isPriority(priority)) {
+    throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 우선순위를 확인해 주세요.');
+  }
+  if (dueDate !== undefined && dueDate !== null && !isCalendarDate(dueDate)) {
+    throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 목표 마감일을 확인해 주세요.');
+  }
   if (customFields === undefined ? expectedIssueSchemaVersion !== undefined :
     !isRecord(customFields) || Object.keys(customFields).length > 100 || !isVersion(expectedIssueSchemaVersion)) {
     throw new IssueStatusChangeError(400, '사용자 정의 속성과 확인한 업무 양식 버전을 보내 주세요.');
@@ -65,25 +79,33 @@ function parseStatusChange(value: unknown) {
   return {
     requestId: requestId.toLowerCase(), restoreGeneration, comment, expectedIssueSchemaVersion,
     transition: { expectedVersion, expectedWorkflowVersion, status, ...(assigneeId === undefined ? {} : { assigneeId }),
+      ...(priority === undefined ? {} : { priority }), ...(dueDate === undefined ? {} : { dueDate }),
       ...(description === undefined ? {} : { description }), ...(isRecord(customFields) ? { customFields } : {}) },
   };
 }
 
 export class IssueStatusChangeService {
   constructor(private readonly store: Store) {
-    store.db.exec(`CREATE TABLE IF NOT EXISTS issue_status_change_requests (
-      id TEXT PRIMARY KEY,
-      issue_id TEXT NOT NULL,
-      project_id TEXT NOT NULL,
-      actor_id TEXT NOT NULL,
-      fingerprint TEXT NOT NULL,
-      applied_version INTEGER NOT NULL,
-      status TEXT NOT NULL,
-      assignee_id TEXT,
-      comment_id TEXT NOT NULL,
-      expires_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS issue_status_change_requests_expiry ON issue_status_change_requests(expires_at)`);
+    store.transaction(() => {
+      store.db.exec(`CREATE TABLE IF NOT EXISTS issue_status_change_requests (
+        id TEXT PRIMARY KEY,
+        issue_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        applied_version INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        assignee_id TEXT,
+        comment_id TEXT NOT NULL,
+        properties_json TEXT,
+        expires_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS issue_status_change_requests_expiry ON issue_status_change_requests(expires_at)`);
+      const columns = store.db.prepare('PRAGMA table_info(issue_status_change_requests)').all();
+      if (!columns.some(column => column.name === 'properties_json')) {
+        store.db.exec('ALTER TABLE issue_status_change_requests ADD COLUMN properties_json TEXT');
+      }
+    });
   }
 
   apply(issueId: string, actorId: string, value: unknown, hooks: StatusChangeHooks): IssueStatusChangeResult {
@@ -98,7 +120,8 @@ export class IssueStatusChangeService {
       this.store.db.prepare('DELETE FROM issue_status_change_requests WHERE expires_at <= ?').run(new Date(now).toISOString());
       // Existing databases require a text value in comment_id. An empty value stores a receipt without a comment.
       const stored = this.store.db.prepare(`SELECT issue_id AS issueId, project_id AS projectId, actor_id AS actorId,
-        fingerprint, applied_version AS appliedVersion, status, assignee_id AS assigneeId, NULLIF(comment_id, '') AS commentId
+        fingerprint, applied_version AS appliedVersion, status, assignee_id AS assigneeId, NULLIF(comment_id, '') AS commentId,
+        properties_json AS properties
         FROM issue_status_change_requests WHERE id=?`).get(requestId) as StoredReceipt | undefined;
       if (stored) {
         if (stored.issueId !== issueId || stored.actorId !== actorId || stored.fingerprint !== fingerprint) {
@@ -108,8 +131,9 @@ export class IssueStatusChangeService {
         if (!current || current.projectId !== stored.projectId || current.version < stored.appliedVersion) {
           throw new IssueStatusChangeError(409, '상태를 변경한 업무를 현재 프로젝트에서 확인할 수 없습니다.', 'receipt_unavailable');
         }
-        const { issueId: savedIssueId, projectId, appliedVersion, status, assigneeId, commentId } = stored;
-        return { issue: current, receipt: { requestId, issueId: savedIssueId, projectId, appliedVersion, status, assigneeId, commentId }, duplicate: true };
+        const { issueId: savedIssueId, projectId, appliedVersion, status, assigneeId, commentId, properties } = stored;
+        const confirmed: StatusProperties = properties === null ? {} : JSON.parse(properties) as StatusProperties;
+        return { issue: current, receipt: { requestId, issueId: savedIssueId, projectId, appliedVersion, status, assigneeId, ...confirmed, commentId }, duplicate: true };
       }
 
       const previous = this.store.get<Issue>('issues', issueId);
@@ -121,14 +145,18 @@ export class IssueStatusChangeService {
         ...(transition.customFields && { customFields: { ...previous.customFields, ...transition.customFields } }),
       });
       const commentId = draft === null ? null : hooks.saveComment(issue, draft).id;
+      const properties: StatusProperties = {
+        ...(transition.priority === undefined ? {} : { priority: issue.priority }),
+        ...(transition.dueDate === undefined ? {} : { dueDate: issue.dueDate }),
+      };
       const receipt: IssueStatusChangeReceipt = {
         requestId, issueId, projectId: issue.projectId, appliedVersion: issue.version,
-        status: issue.status, assigneeId: issue.assigneeId, commentId,
+        status: issue.status, assigneeId: issue.assigneeId, ...properties, commentId,
       };
       this.store.db.prepare(`INSERT INTO issue_status_change_requests(id, issue_id, project_id, actor_id, fingerprint,
-        applied_version, status, assignee_id, comment_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        applied_version, status, assignee_id, comment_id, properties_json, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(requestId, issueId, receipt.projectId, actorId, fingerprint, receipt.appliedVersion, receipt.status, receipt.assigneeId,
-          receipt.commentId ?? '', new Date(now + receiptLifetimeMs).toISOString());
+          receipt.commentId ?? '', Object.keys(properties).length ? JSON.stringify(properties) : null, new Date(now + receiptLifetimeMs).toISOString());
       return { issue, receipt, duplicate: false };
     });
   }

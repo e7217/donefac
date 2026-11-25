@@ -18,23 +18,37 @@ type TransitionError = { details?: { reason?: string; currentVersion?: number; r
 
 async function fixture(t: TestContext) {
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-issue-status-comment-'));
-  const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
-  const listener = runtime.app.listen(0, '127.0.0.1');
-  await once(listener, 'listening');
-  const address = listener.address();
-  assert.ok(address && typeof address !== 'string');
-  const base = `http://127.0.0.1:${address.port}/api`;
-  t.after(async () => {
+  async function start() {
+    const runtime = createApp({ dataDir, outboundWorker: false, deadlineReminderWorker: false, recurringIssueWorker: false });
+    const listener = runtime.app.listen(0, '127.0.0.1');
+    await once(listener, 'listening');
+    const address = listener.address();
+    assert.ok(address && typeof address !== 'string');
+    return { runtime, listener, base: `http://127.0.0.1:${address.port}/api` };
+  }
+  let service = await start();
+  let stopped = false;
+  async function stop() {
+    if (stopped) return;
+    stopped = true;
+    const { runtime, listener } = service;
     listener.closeAllConnections();
     try { await new Promise<void>((resolve, reject) => listener.close(error => error ? reject(error) : resolve())); }
-    finally {
-      runtime.close();
-      rmSync(dataDir, { recursive: true, force: true });
-    }
+    finally { runtime.close(); }
+  }
+  async function restart(beforeStart?: () => void) {
+    await stop();
+    beforeStart?.();
+    service = await start();
+    stopped = false;
+  }
+  t.after(async () => {
+    try { await stop(); }
+    finally { rmSync(dataDir, { recursive: true, force: true }); }
   });
 
   async function call<T = unknown>(status: number, path: string, method = 'GET', body?: unknown, headers: Record<string, string> = {}) {
-    const response = await fetch(base + path, {
+    const response = await fetch(service.base + path, {
       method,
       headers: { 'Content-Type': 'application/json', 'X-Actor-Id': writer, ...headers },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -66,7 +80,7 @@ async function fixture(t: TestContext) {
     const { items } = await call<TeamNotificationPage>(200, '/notifications', 'GET', undefined, { 'X-Actor-Id': actorId });
     return items.filter(item => item.targetId === issue.id);
   }
-  return { call, dataDir, project, workflowPath, workspace, createIssue, update, requestFor, path, transition, comments, history, live, inbox };
+  return { call, dataDir, project, workflowPath, workspace, createIssue, update, requestFor, path, transition, comments, history, live, inbox, restart };
 }
 
 test('a handoff saves status, assignee, an ordinary comment and notifications exactly once across retries', async t => {
@@ -293,6 +307,67 @@ test('workflow validation and a late receipt write error roll back every side ef
   assert.equal((await f.comments(ready))[0]?.id, saved.receipt.commentId);
   assert.equal((await f.transition(ready, attempted)).duplicate, true);
   assert.equal((await f.comments(ready)).length, 1);
+});
+
+test('status handoff validates priority and target dates, records explicit values, and preserves old receipts', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-20T16:30:00Z') });
+  const f = await fixture(t);
+  const workflow = await f.call<ProjectWorkflow>(200, f.workflowPath);
+  await f.call<ProjectWorkflow>(200, f.workflowPath, 'PATCH', {
+    ...workflow, expectedVersion: workflow.version,
+    statuses: workflow.statuses.map(status => ['in_progress', 'review'].includes(status.id) ? { ...status, defaultDueWorkdays: 1 } : status),
+    transitions: workflow.transitions.map(edge => edge.from === 'todo' && edge.to === 'review'
+      ? { ...edge, requiredFields: ['dueDate'] } : edge),
+  });
+  const automatic = await f.createIssue('워크플로의 자동 날짜');
+  const automaticInput = await f.requestFor(automatic, { status: 'review', comment: undefined });
+  const automaticSaved = await f.transition(automatic, automaticInput);
+  assert.equal(automaticSaved.issue.dueDate, '2026-11-23');
+  assert.equal(Object.hasOwn(automaticSaved.receipt, 'dueDate'), false);
+  await f.restart(() => {
+    const database = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+    try { database.exec('ALTER TABLE issue_status_change_requests DROP COLUMN properties_json'); }
+    finally { database.close(); }
+  });
+  assert.deepEqual(await f.transition(automatic, automaticInput), { ...automaticSaved, duplicate: true });
+
+  const issue = await f.createIssue('팀에서 선택한 우선순위와 마감일');
+  const input = await f.requestFor(issue, { status: 'review', priority: 'urgent', dueDate: '2026-12-01' });
+  const before = await f.workspace();
+  for (const changes of [{ priority: 'critical' }, { priority: null }, { dueDate: '' }, { dueDate: '2026-02-30' }]) {
+    await f.call(400, f.path(issue), 'POST', { ...input, ...changes });
+  }
+  const missing = await f.call<TransitionError>(422, f.path(issue), 'POST', { ...input, dueDate: null });
+  assert.deepEqual(missing.details?.requiredFields, ['dueDate']);
+  assert.deepEqual(await f.workspace(), before);
+  assert.deepEqual(await f.comments(issue), []);
+  const saved = await f.transition(issue, input);
+  assert.equal(saved.issue.dueDate, input.dueDate);
+  assert.equal(saved.issue.priority, input.priority);
+  assert.equal(saved.receipt.dueDate, input.dueDate);
+  assert.equal(saved.receipt.priority, input.priority);
+  assert.ok(saved.receipt.commentId);
+  const { entries } = await f.history(issue);
+  assert.deepEqual(Object.fromEntries(entries[0].changes.map(change => [change.field, change.after.value])),
+    { status: 'review', dueDate: '2026-12-01', priority: 'urgent' });
+
+  const peer = await f.update(saved.issue, { dueDate: '2026-12-03', priority: 'low' }, assignee);
+  await f.restart();
+  assert.deepEqual(await f.transition(issue, input), { issue: peer, receipt: saved.receipt, duplicate: true });
+  for (const changes of [{ priority: 'high' }, { dueDate: '2026-12-03' }]) {
+    const rejected = await f.call<TransitionError>(409, f.path(issue), 'POST', { ...input, ...changes });
+    assert.equal(rejected.details?.reason, 'request_reused');
+  }
+  assert.deepEqual((await f.comments(issue)).map(comment => comment.id), [saved.receipt.commentId]);
+
+  for (const date of [null, '2026-12-08']) {
+    const clearIssue = await f.createIssue('명시적으로 목표 마감일을 비우는 업무', { dueDate: date });
+    const clearInput = await f.requestFor(clearIssue, { dueDate: null, comment: undefined });
+    const cleared = await f.transition(clearIssue, clearInput);
+    assert.equal(cleared.issue.dueDate, null);
+    assert.equal(cleared.receipt.dueDate, null);
+    assert.deepEqual(await f.transition(clearIssue, clearInput), { ...cleared, duplicate: true });
+  }
 });
 
 test('portable import preserves committed comments and rejects an outdated generation even with current versions', async t => {
