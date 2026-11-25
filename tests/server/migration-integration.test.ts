@@ -1829,7 +1829,8 @@ async function localGitlab(t: TestContext, respond: (path: string, base: string)
 }
 
 function gitlabMr(base: string, projectId: number, iid: number, title: string, branch = historicalBranch, sha = historicalHash, date = historicAt) {
-  return { id: iid, iid, title, state: 'merged', source_branch: branch, last_commit: { id: sha }, updated_at: date, web_url: `${base}/team/repo-${projectId}/-/merge_requests/${iid}` };
+  return { id: iid, iid, title, state: 'merged', source_project_id: projectId, target_project_id: projectId,
+    source_branch: branch, last_commit: { id: sha }, updated_at: date, web_url: `${base}/team/repo-${projectId}/-/merge_requests/${iid}` };
 }
 
 async function gitlabHook(f: MigrationFixture, body: unknown, secret = syntheticSecret, id = randomUUID()) {
@@ -1991,7 +1992,8 @@ test('explicit repository routes match imported Jira keys only for their selecte
   assert.equal(pushed.data.linked, 2);
   assert.deepEqual(pushed.data.runs, []);
   const liveLinks = (await f.call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks;
-  assert.ok(liveLinks.some(link => link.iid === 502 && link.kind === 'pipeline' && link.issueId === targetA.id && link.originalJiraKey === 'OLD-1'));
+  assert.equal(liveLinks.find(link => link.iid === 502 && link.kind === 'pipeline' && link.issueId === targetA.id &&
+    link.originalJiraKey === 'OLD-1')?.pipelineTicketEvidence, 'verified-merge-request');
   assert.equal(liveLinks.filter(link => link.sourceBranch === 'feature/OLD-1-live' && link.issueId === targetA.id && link.originalJiraKey === 'OLD-1').length, 2);
   const observed = await push(namedBranch, '0'.repeat(40), historicalHash);
   assert.equal(observed.status, 200, JSON.stringify(observed.data));
@@ -2047,6 +2049,10 @@ test('explicit repository routes match imported Jira keys only for their selecte
   delete legacy.automationRuns;
   for (const record of legacy.sourceRecords) if (record.jiraIssueFieldHashes) delete record.jiraIssueFieldHashes.parentId;
   for (const receipt of legacy.sourceImports) delete receipt.integrity;
+  for (const link of legacy.gitlabLinks) {
+    delete link.mergeRequestSourceProjectId;
+    delete link.pipelineTicketEvidence;
+  }
   assert.equal((await f.call('/import', 'POST', { data: legacy })).status, 400);
   assert.equal((await f.call('/import', 'POST', { data: backup.data })).status, 200);
   assert.deepEqual((await f.call<GitlabSettings>(gitlabPath)).data.jiraRoutes, otherRoute);
