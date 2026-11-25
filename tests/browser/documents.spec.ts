@@ -116,6 +116,58 @@ test('문서 편집·댓글이 저장되고 이전 내용 복구는 새 버전�
   expect(errors).toEqual([]);
 });
 
+test('360px에서 문서 링크를 삽입하고 선택한 글의 서식을 유지하며 주소를 수정한다', async ({ page, syntheticDocument }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { document, requests, initialText } = syntheticDocument;
+  const linkedTitle = '설치 안내', inserted = 'https://example.test/guide', initial = 'https://example.test/draft', edited = 'https://example.test/release';
+  const seeded = await requests.patch(`/api/documents/${document.id}`, { data: { expectedVersion: document.version, content: {
+    type: 'doc', content: [
+      { type: 'paragraph', content: [{ type: 'text', text: initialText }] },
+      { type: 'paragraph', content: [{ type: 'text', text: linkedTitle, marks: [{ type: 'bold' }] }] },
+    ],
+  } } });
+  expect(seeded.ok(), await seeded.text()).toBe(true);
+  await openDocument(page, document);
+  const editor = page.locator('.docs-prose[contenteditable="true"]');
+  const linkButton = page.getByRole('toolbar', { name: '문서 서식' }).getByRole('button', { name: '링크', exact: true });
+  const url = page.getByRole('textbox', { name: '링크 URL', exact: true });
+  const insert = page.getByRole('button', { name: '삽입', exact: true });
+  await editor.locator('p').first().click();
+  await editor.press('Control+Home');
+  await linkButton.click();
+  await url.fill(inserted);
+  await insert.click();
+  await expect(editor.getByRole('link', { name: inserted, exact: true })).toHaveAttribute('href', inserted);
+  await page.keyboard.insertText(' 이어 쓴 문장 ');
+  await expect(editor.locator('p').first()).toHaveText(`${inserted} 이어 쓴 문장 ${initialText}`);
+  await expect(editor.locator('p').first().getByRole('link')).toHaveText(inserted);
+
+  await editor.press('Control+End');
+  await page.keyboard.press('Shift+Home');
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(linkedTitle);
+  await linkButton.click();
+  await url.fill(initial);
+  await insert.click();
+  const titleLink = editor.getByRole('link', { name: linkedTitle, exact: true });
+  await expect(titleLink).toHaveAttribute('href', initial);
+  await expect(editor.locator('p').last().locator('strong')).toHaveText(linkedTitle);
+  await editor.press('Control+End');
+  await page.keyboard.press('ArrowLeft');
+  await linkButton.click();
+  await expect(url).toHaveValue(initial);
+  await url.fill(edited);
+  await insert.click();
+  await expect(titleLink).toHaveAttribute('href', edited);
+
+  const saved = page.waitForResponse(response => response.url().endsWith(`/api/documents/${document.id}`) && response.request().method() === 'PATCH');
+  await page.locator('.docs-save-button').click();
+  expect((await saved).ok()).toBe(true);
+  await page.reload();
+  await expect(editor.getByRole('link')).toHaveCount(2);
+  await expect(titleLink).toHaveAttribute('href', edited);
+  await expect(editor.locator('p').last().locator('strong')).toHaveText(linkedTitle);
+});
+
 test('수동 문서의 제목 초안은 다른 사용자가 저장한 본문·상태와 함께 보존된다', async ({ page, syntheticDocument }) => {
   const { document, requests } = syntheticDocument;
   const { users } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;

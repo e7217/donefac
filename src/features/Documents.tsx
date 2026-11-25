@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
+import { getMarkRange, type EditorEvents, type MappablePosition } from '@tiptap/core';
+import { CollaborationMappablePosition } from '@tiptap/extension-collaboration';
 import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
 import { NodeSelection, type Transaction } from '@tiptap/pm/state';
+import { createAbsolutePositionFromRelativePosition, createRelativePositionFromTypeIndex } from 'yjs';
 import {
   ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
   Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
@@ -50,6 +53,7 @@ import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlas
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentTableTools } from './DocumentTableTools';
+import { DocumentBlockOrder } from './DocumentBlockOrder';
 import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
@@ -104,6 +108,10 @@ type Draft = DocumentMetadata & {
 };
 type DocumentConflict = 'generic' | { document: DocPage; fields: DocumentMetadataField[]; parentContextChanged: boolean } | null;
 type ObservedDocument = { document: DocPage; live: boolean };
+type DocumentLinkTarget = {
+  editor: Editor; documentId: string; actorId: string;
+  from: MappablePosition; to: MappablePosition; selectedText: string;
+};
 type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
 type ClipboardImageScope = { editor: Editor; documentId: string; actorId: string; liveEpoch: string | null };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
@@ -354,6 +362,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
   const [insertKind, setInsertKind] = useState<'link' | 'image' | null>(null);
   const [insertUrl, setInsertUrl] = useState('');
+  const documentLinkTarget = useRef<DocumentLinkTarget | null>(null);
   const clipboardImageScope = useRef<ClipboardImageScope | null>(null);
   const clipboardImageGeneration = useRef(0);
   const [clipboardImageUploads, setClipboardImageUploads] = useState<Record<string, number>>({});
@@ -1511,14 +1520,85 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     }).catch(cause => notify(cause instanceof Error ? cause.message : '사본 목록을 불러오지 못했습니다.', 'error'));
   }, [refresh, onSelectDocument, notify, confirmCommentEditExit, discardCommentEdit]);
 
+  useLayoutEffect(() => {
+    if (!editor || insertKind !== 'link') return;
+    const mapLinkTarget = ({ transaction, appendedTransactions }: EditorEvents['transaction']) => {
+      const target = documentLinkTarget.current;
+      if (target?.editor !== editor) return;
+      for (const change of [transaction, ...appendedTransactions]) {
+        if (!change.docChanged) continue;
+        try {
+          // The collaboration extension resolves the same anchors in the new Yjs projection.
+          const from = editor.utils.getUpdatedPosition(target.from, change);
+          const to = target.from === target.to ? from : editor.utils.getUpdatedPosition(target.to, change);
+          if (change.getMeta('preventUpdate') || from.mapResult?.deleted || to.mapResult?.deleted ||
+              from.position.position < 1 || to.position.position < from.position.position) {
+            documentLinkTarget.current = null;
+            return;
+          }
+          target.from = from.position;
+          target.to = to.position;
+        } catch {
+          documentLinkTarget.current = null;
+          return;
+        }
+      }
+    };
+    editor.on('transaction', mapLinkTarget);
+    return () => {
+      editor.off('transaction', mapLinkTarget);
+      if (documentLinkTarget.current?.editor === editor) documentLinkTarget.current = null;
+    };
+  }, [editor, insertKind]);
+
+  function openDocumentLink() {
+    if (bodyReadOnly || !editor?.isEditable || editor.isDestroyed || !selectedPageId || draftRef.current?.id !== selectedPageId) return;
+    const { selection, schema, doc } = editor.state;
+    const existingRange = getMarkRange(selection.$from, schema.marks.link);
+    const range = existingRange && existingRange.from <= selection.from && existingRange.to >= selection.to ? existingRange : selection;
+    let from = editor.utils.createMappablePosition(range.from);
+    const sync = ySyncPluginKey.getState(editor.state);
+    if (range.from < range.to && sync && from instanceof CollaborationMappablePosition && from.yRelativePosition) {
+      const absolute = createAbsolutePositionFromRelativePosition(from.yRelativePosition, sync.doc);
+      // A selection's start follows its first character, while the end follows its last.
+      if (absolute) from = new CollaborationMappablePosition(range.from, createRelativePositionFromTypeIndex(absolute.type, absolute.index, 0));
+    }
+    const to = range.from === range.to ? from : editor.utils.createMappablePosition(range.to);
+    documentLinkTarget.current = { editor, documentId: selectedPageId, actorId, from, to,
+      selectedText: doc.textBetween(range.from, range.to, '\n', '\ufffc') };
+    setInsertKind('link');
+    setInsertUrl(String(editor.getAttributes('link').href || ''));
+  }
+
   function insertUrlBlock(event: React.FormEvent) {
     event.preventDefault();
-    if (!editor?.isEditable) return;
+    if (bodyReadOnly || !editor?.isEditable || editor.isDestroyed || !insertKind) return;
     let url: URL;
     try { url = new URL(insertUrl); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); }
     catch { notify('http 또는 https 주소를 입력해주세요.', 'error'); return; }
-    if (insertKind === 'image') editor?.chain().focus().setImage({ src: url.href, alt: '문서 이미지' }).run();
-    else editor?.chain().focus().extendMarkRange('link').setLink({ href: url.href }).run();
+    if (insertKind === 'image') editor.chain().focus().setImage({ src: url.href, alt: '문서 이미지' }).run();
+    else {
+      const target = documentLinkTarget.current;
+      const { doc, schema } = editor.state;
+      const from = target?.from.position ?? 0, to = target?.to.position ?? 0;
+      if (!target || target.editor !== editor || target.actorId !== actorId ||
+          target.documentId !== selectedPageId || target.documentId !== draftRef.current?.id ||
+          from < 1 || to < from || to > doc.content.size || doc.textBetween(from, to, '\n', '\ufffc') !== target.selectedText) {
+        notify('링크를 적용할 본문 위치가 바뀌었습니다. 본문에서 다시 선택해 주세요.', 'error');
+        return;
+      }
+      const link = schema.marks.link;
+      const position = doc.resolve(from);
+      if (from === to && (!position.parent.isTextblock || !position.parent.type.allowsMarkType(link))) {
+        notify('본문에서 링크를 삽입할 위치를 먼저 선택해 주세요.', 'error');
+        return;
+      }
+      const edit = editor.chain().focus().setTextSelection({ from, to });
+      const applied = from !== to ? edit.setLink({ href: url.href }).run()
+        : edit.insertContentAt(from, schema.text(url.href, link.create({ href: url.href }).addToSet(position.marks())).toJSON())
+          .command(({ tr }) => { tr.removeStoredMark(link); return true; }).run();
+      if (!applied) { notify('이 위치에 링크를 적용할 수 없습니다.', 'error'); return; }
+    }
     setInsertKind(null); setInsertUrl('');
   }
 
@@ -2083,7 +2163,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('굵게', <Bold size={15} />, () => editor?.chain().focus().toggleBold().run(), editor?.isActive('bold'))}
                 {button('기울임', <Italic size={15} />, () => editor?.chain().focus().toggleItalic().run(), editor?.isActive('italic'))}
                 {button('취소선', <Strikethrough size={15} />, () => editor?.chain().focus().toggleStrike().run(), editor?.isActive('strike'))}
-                {button('링크', <Link2 size={15} />, () => { setInsertKind('link'); setInsertUrl(String(editor?.getAttributes('link').href || '')); }, editor?.isActive('link'))}
+                {button('링크', <Link2 size={15} />, openDocumentLink, editor?.isActive('link'))}
                 {editor?.isActive('link') && button('링크 해제', <Unlink size={14} />, () => editor?.chain().focus().unsetLink().run())}
                 <span className="docs-toolbar-separator" />
                 {button('글머리 목록', <List size={16} />, () => editor?.chain().focus().toggleBulletList().run(), editor?.isActive('bulletList'))}
@@ -2122,6 +2202,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   disabled={saving || manualRecovery || Boolean(metadataReview)} onClick={() => void saveDraft()}>
                   <Save size={15} aria-hidden="true" />본문 저장
                 </button>}
+                {editor && manualSession && !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting && !issueDrawerOpen && draft.id === selectedPageId &&
+                  <DocumentBlockOrder editor={editor} />}
                 <DocumentSelectionActions key={`${draft.id}:${liveMode}`} editor={editor} unavailable={selectionUnavailable} issueUnavailable={selectionIssueUnavailable}
                   onCreate={(selection, opener) => { if (selectionDocument) openFollowUp(selectionDocument, opener, selection); }}
                   onLink={(selection, opener) => { if (selectionDocument) openDecisionLink(selectionDocument, opener, selection); }}

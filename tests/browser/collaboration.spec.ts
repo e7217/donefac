@@ -95,6 +95,48 @@ test('두 브라우저의 실제 공동 편집이 중복 초기화 없이 합쳐
   } finally { await Promise.all(contexts.map(context => context.close())); }
 });
 
+test('공동 편집에서 링크 입력 중 동료가 선택 양쪽에 글을 추가해도 원래 선택에만 링크를 적용한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 360, height: 820 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [author, peer] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(author, fixture.document), open(peer, fixture.document)]);
+    await Promise.all([synced(author), synced(peer)]);
+    await expect(author.locator('.docs-collaboration-presence')).toContainText('2명 접속');
+    const editor = author.locator('.docs-live-prose');
+    await editor.click();
+    await editor.press('Control+Home');
+    await author.keyboard.press('Shift+End');
+    await expect.poll(() => author.evaluate(() => window.getSelection()?.toString())).toBe(fixture.initialText);
+    await author.getByRole('toolbar', { name: '문서 서식' }).getByRole('button', { name: '링크', exact: true }).click();
+    const href = 'https://example.test/guide';
+    const url = author.getByRole('textbox', { name: '링크 URL', exact: true });
+    await url.fill(href);
+
+    const peerEditor = peer.locator('.docs-live-prose');
+    await peerEditor.click();
+    await peerEditor.press('Control+Home');
+    const prefix = '동료가 추가한 글 ';
+    await peer.keyboard.insertText(prefix);
+    await peerEditor.press('Control+End');
+    const suffix = ' 뒤에 붙인 글';
+    await peer.keyboard.insertText(suffix);
+    await expect(editor).toHaveText(prefix + fixture.initialText + suffix);
+    await expect(url).toHaveValue(href);
+    await author.getByRole('button', { name: '삽입', exact: true }).click();
+    for (const view of [editor, peerEditor]) {
+      await expect(view.getByRole('link')).toHaveText(fixture.initialText);
+      await expect(view.getByRole('link')).toHaveAttribute('href', href);
+      await expect(view).toHaveText(prefix + fixture.initialText + suffix);
+    }
+    await synced(author);
+    await author.reload();
+    await synced(author);
+    await expect(editor.getByRole('link')).toHaveText(fixture.initialText);
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
 test('360px 공동 편집에서 슬래시 삽입을 취소하거나 동료가 편집한 뒤 원래 위치에 적용한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
   const created = await fixture.requests.post('/api/documents', { data: {
     projectId: fixture.document.projectId, title: `${fixture.document.title} 참조 대상`,
