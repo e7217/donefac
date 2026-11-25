@@ -1534,7 +1534,7 @@ export interface GitlabLink {
   title: string; webUrl: string; state: string; updatedAt: string;
   sourceBranch?: string; targetBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' | 'read';
   originalJiraKey?: string; manualLinkId?: string;
-  mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[];
+  mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[]; mergeRequestSourceProjectId?: number;
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
 }
 export interface GitlabIssueRefreshResult {

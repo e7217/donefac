@@ -3284,6 +3284,9 @@ export function createApp(options: {
     if (data.schemaVersion < 113 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
       links => links.some((link: GitlabLink) => link.targetBranch !== undefined)
     )) fail('GitLab MR 대상 브랜치 정보가 있는 연결을 포함한 백업은 schemaVersion 113이 필요합니다.');
+    if (data.schemaVersion < 120 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
+      links => links.some((link: GitlabLink) => link.mergeRequestSourceProjectId !== undefined)
+    )) fail('GitLab MR 소스 저장소를 확인한 연결을 포함한 백업은 schemaVersion 120이 필요합니다.');
     if (data.schemaVersion < 101 && [data.gitlabLinks, ...importedTrash.map(entry => entry.gitlabLinks)].some(
       links => links.some((link: GitlabLink) => Object.hasOwn(link, 'pipelineSource') || Object.hasOwn(link, 'pipelineTag')),
     )) fail('GitLab 파이프라인 실행 유형을 포함한 백업은 schemaVersion 101이 필요합니다.');

@@ -3377,7 +3377,7 @@ test('Confluence multi-space property reports recover from the same archived sou
   };
   assertReport(await docs());
   const native = (await f.call<WorkspaceSnapshot & { schemaVersion: number; sourceRecords: SourceRecordArchive[] }>('/export')).data;
-  assert.equal(native.schemaVersion, 119);
+  assert.equal(native.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.equal(native.sourceRecords.find(record => record.sourceImportId === initialReceipt.data.import.id && record.targetId === original.id)?.record.text, report);
   const imported = await restored.call('/import', 'POST', { data: native });
   assert.equal(imported.status, 200, JSON.stringify(imported.data));

@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { GitlabMergeRequestReadObservation } from '../../server/gitlab-merge-request-observations.js';
+import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import type { GitlabIssueRefreshResult, GitlabLink, GitlabSettings, Issue } from '../../shared/types.js';
 
 const repositoryId = 42;
@@ -104,7 +105,7 @@ test('scoped MR reads establish a monotone baseline that survives restart and va
   assert.deepEqual(conflicted.failures.map(failure => failure.linkId), [link.id]);
   const saved = await exportBackup();
   const conflict = { ...closed, state: null };
-  assert.equal(saved.schemaVersion, 117);
+  assert.equal(saved.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(saved.gitlabMergeRequestObservations, [conflict, standaloneEvidence]);
 
   await workspace.close();

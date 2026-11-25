@@ -91,6 +91,15 @@ export function isRestorableGitlabLink(value: unknown): boolean {
   }
   if (Object.hasOwn(link, 'mergeReadiness') &&
       (link.kind !== 'merge_request' || link.state !== 'opened' || !isGitlabMergeReadiness(link.mergeReadiness))) return false;
+  if (Object.hasOwn(link, 'mergeRequestSourceProjectId')) {
+    const binding = typeof id === 'string' && /^gitlab:([a-f\d]{12}):([1-9]\d*):merge_request:([1-9]\d*):/u.exec(id);
+    const { mergeRequestSourceProjectId, iid } = link;
+    if (kind !== 'merge_request' || !binding || binding[2] !== String(projectId) || !Number.isSafeInteger(projectId) ||
+        !Number.isSafeInteger(Number(binding[3])) || typeof issueId !== 'string' || !issueId || id !== `${binding[0]}${issueId}` ||
+        typeof iid !== 'number' || !Number.isSafeInteger(iid) || iid < 1 ||
+        typeof mergeRequestSourceProjectId !== 'number' || !Number.isSafeInteger(mergeRequestSourceProjectId) ||
+        mergeRequestSourceProjectId < 1) return false;
+  }
   if (Object.hasOwn(link, 'mergeCommitShas')) {
     const { id, projectId, issueId, iid, mergeCommitShas } = link;
     const objectKey = typeof id === 'string' && /^gitlab:([a-f\d]{12}):([1-9]\d*):merge_request:([1-9]\d*):/u.exec(id);

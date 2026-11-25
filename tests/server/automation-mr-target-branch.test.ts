@@ -170,7 +170,10 @@ test('MR automation matches targets independently from the source and preserves 
   const legacy = { ...structuredClone(backup), schemaVersion: 112 };
   for (const value of legacy.automationRules) delete value.targetBranchPattern;
   for (const run of legacy.automationRuns) if (run.context) delete run.context.targetBranch;
-  for (const link of legacy.gitlabLinks) delete link.targetBranch;
+  for (const link of legacy.gitlabLinks) {
+    delete link.targetBranch;
+    delete link.mergeRequestSourceProjectId;
+  }
   await f.call('/import', 'POST', { data: legacy });
   const older = (await f.call<AutomationRule[]>(rulesPath)).find(value => value.id === rule.id);
   assert.ok(older);

@@ -168,19 +168,28 @@ test('저장 전 GitLab 연결을 확인하고 접근 가능한 저장소를 동
   const token = `synthetic-browser-read-${randomUUID()}`;
   const received: { method:string|undefined; token:string|string[]|undefined; path:string }[] = [];
   const at = new Date(Date.now()-5_000).toISOString();
+  const head = 'a'.repeat(40), previousHead = 'b'.repeat(40);
   let denied = true;
   const mock = createServer((req,res) => {
-    received.push({method:req.method,token:req.headers['private-token'],path:req.url ?? ''});
+    const path = req.url ?? '';
+    const repositoryId = Number(/\/projects\/(\d+)\//u.exec(path)?.[1]);
+    const repositoryUrl = `${url}/team/project-${repositoryId}`;
+    const firstPipelineId = repositoryId === 42 ? 801 : 811;
+    received.push({method:req.method,token:req.headers['private-token'],path});
     res.setHeader('Content-Type','application/json');
-    if (denied && req.url?.includes('/projects/99/')) {
+    if (denied && repositoryId === 99) {
       res.statusCode = 404;
       res.end(JSON.stringify({message:'synthetic access denial'}));
-    } else if (req.url?.includes('/merge_requests?')) {
-      res.end(JSON.stringify([{id:701,iid:1,title:`${issue.key} MR 연결`,source_branch:'feature/reused',sha:'head-new',state:'opened',updated_at:at,web_url:'https://git.example.test/mr/1'}]));
+    } else if (path.includes('/merge_requests?')) {
+      res.end(JSON.stringify([{ id: repositoryId === 42 ? 701 : 711, iid: 1, title: `${issue.key} MR 연결`, source_branch: 'feature/reused',
+        project_id: repositoryId, source_project_id: repositoryId, target_project_id: repositoryId,
+        sha: head, state: 'opened', updated_at: at, web_url: `${repositoryUrl}/-/merge_requests/1` }]));
     } else {
       res.end(JSON.stringify([
-        {id:801,ref:'feature/reused',sha:'head-new',status:'success',updated_at:at,web_url:'https://git.example.test/pipelines/801'},
-        {id:802,ref:'feature/reused',sha:'head-old',status:'failed',updated_at:at,web_url:'https://git.example.test/pipelines/802'},
+        { id: firstPipelineId, project_id: repositoryId, ref: 'feature/reused', sha: head, status: 'success', updated_at: at,
+          web_url: `${repositoryUrl}/-/pipelines/${firstPipelineId}` },
+        { id: firstPipelineId + 1, project_id: repositoryId, ref: 'feature/reused', sha: previousHead, status: 'failed', updated_at: at,
+          web_url: `${repositoryUrl}/-/pipelines/${firstPipelineId + 1}` },
       ]));
     }
   });

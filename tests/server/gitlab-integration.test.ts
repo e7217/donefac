@@ -112,11 +112,50 @@ test('verified MR reads fence only the exact lifecycle event while a matching fi
 });
 
 test('pipeline branch ordering prevents late older results and MR inheritance requires identical branch/head SHA',()=>{
-  const f=fixture();try{f.configure();const base=Date.now()-10000;f.service.webhook(request(mr({source_branch:'feature/reused',title:'NEO-1 연결',last_commit:{id:'head-a'},updated_at:new Date(base).toISOString()})));f.service.webhook(request(pipeline({id:300,ref:'feature/reused',sha:'head-a',finished_at:new Date(base+1000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,['issue-1']);
-    f.service.webhook(request(pipeline({id:301,ref:'feature/reused',sha:'head-b',status:'failed',finished_at:new Date(base+2000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,[]);assert.equal(f.events.at(-1)!.trigger,'pipeline.failed');
-    f.service.webhook(request(pipeline({id:299,ref:'feature/reused',sha:'head-a',finished_at:new Date(base+3000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'stale');assert.ok(links(f).some(link=>link.kind==='pipeline'&&link.iid===299));
-    f.service.webhook(request(pipeline({id:999999,ref:'feature/reused',sha:'head-a',finished_at:new Date(Date.now()+60000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'unverified');f.service.webhook(request(pipeline({id:302,ref:'feature/reused',sha:'head-a',finished_at:new Date(base+4000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'fresh');
+  const f=fixture();const head='a'.repeat(40);try{f.configure();const base=Date.now()-10000;f.service.webhook(request(mr({source_project_id:42,target_project_id:42,source_branch:'feature/reused',title:'NEO-1 연결',last_commit:{id:head},updated_at:new Date(base).toISOString()})));f.service.webhook(request(pipeline({id:300,ref:'feature/reused',sha:head,finished_at:new Date(base+1000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,['issue-1']);
+    f.service.webhook(request(pipeline({id:301,ref:'feature/reused',sha:'b'.repeat(40),status:'failed',finished_at:new Date(base+2000).toISOString()})));assert.deepEqual(f.events.at(-1)!.issueIds,[]);assert.equal(f.events.at(-1)!.trigger,'pipeline.failed');
+    f.service.webhook(request(pipeline({id:299,ref:'feature/reused',sha:head,finished_at:new Date(base+3000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'stale');assert.ok(links(f).some(link=>link.kind==='pipeline'&&link.iid===299));
+    f.service.webhook(request(pipeline({id:999999,ref:'feature/reused',sha:head,finished_at:new Date(Date.now()+60000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'unverified');f.service.webhook(request(pipeline({id:302,ref:'feature/reused',sha:head,finished_at:new Date(base+4000).toISOString()})));assert.equal(f.events.at(-1)!.disposition,'fresh');
   }finally{f.close();}
+});
+
+test('pipeline webhooks cannot inherit a ticket from a fork targeting the repository or from an unverified old MR', t => {
+  const f = fixture();
+  t.after(f.close);
+  f.configure();
+  const time = Date.now() - 30_000;
+  const at = (offset: number) => new Date(time + offset).toISOString();
+  const ref = 'feature/shared-with-fork', head = 'a'.repeat(40);
+  const merge = (id: number, iid: number, key: string, source: number | undefined, offset = 0) =>
+    f.service.webhook(request(mr({ id, iid, target_project_id: 42, source_project_id: source, source_branch: ref,
+      last_commit: { id: head }, title: `${key} MR`, url: `https://git.example.test/team/repo/-/merge_requests/${iid}`, updated_at: at(offset) })));
+  const deliver = (id: number, offset: number, fields: Record<string, unknown> = {}) => f.service.webhook(request(pipeline({
+    id, project_id: 42, ref, sha: head, source: 'push', tag: false, finished_at: at(offset), ...fields,
+  })));
+  merge(101, 7, 'NEO-1', 73);
+  merge(102, 8, 'NEO-2', undefined);
+  assert.deepEqual(links(f).map(link => [link.issueId, link.mergeRequestSourceProjectId]), [['issue-1', 73], ['issue-2', undefined]]);
+
+  assert.equal(deliver(300, 1000).linked, 0);
+  assert.deepEqual(f.events.at(-1)?.issueIds, []);
+  assert.equal(deliver(301, 2000, { title: 'NEO-1 Direct pipeline evidence' }).linked, 1);
+  assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-1']);
+  assert.equal(deliver(301, 3000, { status: 'failed' }).linked, 1);
+  assert.equal(links(f).find(link => link.kind === 'pipeline' && link.iid === 301)?.state, 'failed');
+  assert.deepEqual(f.events.at(-1)?.issueIds, []);
+
+  merge(102, 8, 'NEO-2', 42, 4000);
+  assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 8)?.mergeRequestSourceProjectId, 42);
+  assert.equal(deliver(302, 5000).linked, 1);
+  assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-2']);
+  assert.equal(deliver(303, 6000, { tag: true }).linked, 0);
+  assert.deepEqual(f.events.at(-1)?.issueIds, []);
+
+  merge(101, 7, 'NEO-1', 42, 7000);
+  assert.equal(f.events.at(-1)?.disposition, 'unverified');
+  assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 7)?.mergeRequestSourceProjectId, 73);
+  assert.equal(deliver(304, 8000).linked, 1);
+  assert.deepEqual(f.events.at(-1)?.issueIds, ['issue-2']);
 });
 
 test('pipeline webhook freshness compares compatible ref, source and tag evidence across sparse updates', t => {
@@ -894,6 +933,8 @@ test('draft sync preview is read-only and predicts actual MR and exact branch/he
   const at = new Date(Date.now() - 30_000).toISOString();
   let mrTime = at;
   let mrState = 'opened';
+  let repositoryUrl = '';
+  const head = 'a'.repeat(40);
   const calls: { method:string|undefined; token:string|string[]|undefined }[] = [];
   const mock = await mockServer((path, res, req) => {
     calls.push({method:req.method,token:req.headers['private-token']});
@@ -903,18 +944,19 @@ test('draft sync preview is read-only and predicts actual MR and exact branch/he
       res.end(JSON.stringify({message:`synthetic remote diagnostic ${draftToken}`}));
     } else if (path.includes('/merge_requests?')) {
       res.end(JSON.stringify([
-        {id:101,iid:7,title:'NEO-1 원본 브랜치',description:'synthetic remote body not displayed',source_branch:'feature/reused',sha:'head-a',state:mrState,updated_at:mrTime,web_url:'https://git.example.test/mr/7'},
+        {id:101,iid:7,project_id:42,target_project_id:42,source_project_id:42,title:'NEO-1 원본 브랜치',description:'synthetic remote body not displayed',source_branch:'feature/reused',sha:head,state:mrState,updated_at:mrTime,web_url:`${repositoryUrl}/-/merge_requests/7`},
         {id:102,iid:8,title:'OLD-999 없는 업무',updated_at:at,web_url:'https://git.example.test/mr/8'},
         {id:103,iid:9,title:'NEO-1 URL 없음',updated_at:at},
       ]));
     } else {
       res.end(JSON.stringify([
-        {id:201,ref:'feature/reused',sha:'head-a',status:'success',updated_at:at,web_url:'https://git.example.test/pipelines/201'},
+        {id:201,project_id:42,ref:'feature/reused',sha:head,status:'success',updated_at:at,web_url:`${repositoryUrl}/-/pipelines/201`},
         {id:202,ref:'feature/reused',sha:'head-b',status:'failed',updated_at:at,web_url:'https://git.example.test/pipelines/202'},
         {id:203,ref:'fix/NEO-2',sha:'head-c',status:'running',updated_at:at,web_url:'https://git.example.test/pipelines/203'},
       ]));
     }
   });
+  repositoryUrl = `${mock.url}/team/repo`;
   try {
     const original = f.configure({token:'synthetic-saved-token'});
     const originalRow = f.store.setting('gitlab');
@@ -953,6 +995,50 @@ test('draft sync preview is read-only and predicts actual MR and exact branch/he
     assert.equal(links(f).find(link => link.id.includes(':101:'))?.state, 'opened');
     assert.deepEqual(f.service.settings(), actual.settings);
   } finally { await mock.close(); f.close(); }
+});
+
+test('GitLab sync and preview only inherit MR matches for the verified source repository and exact full HEAD', async t => {
+  const f = fixture();
+  t.after(f.close);
+  const at = new Date(Date.now() - 30_000).toISOString();
+  const ref = 'feature/shared-with-fork', head = 'a'.repeat(40);
+  let repositoryUrl = '';
+  let forkSource = 73;
+  const mock = await mockServer((path, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    const mr = (id: number, iid: number, source: number | undefined, key: string) => ({
+      id, iid, project_id: 42, target_project_id: 42, source_project_id: source, state: 'opened', title: `${key} changes`,
+      source_branch: ref, sha: head, updated_at: at, web_url: `${repositoryUrl}/-/merge_requests/${iid}`,
+    });
+    const pipeline = (id: number, sha: string) => ({
+      id, project_id: 42, ref, sha, source: 'push', status: 'success', updated_at: at, web_url: `${repositoryUrl}/-/pipelines/${id}`,
+    });
+    response.end(JSON.stringify(path.includes('/merge_requests?')
+      ? [mr(101, 7, forkSource, 'NEO-1'), mr(102, 8, undefined, 'NEO-1'), mr(103, 9, 42, 'NEO-2')]
+      : [pipeline(201, head), pipeline(202, 'a'.repeat(12))]));
+  });
+  t.after(mock.close);
+  repositoryUrl = `${mock.url}/team/repo`;
+  const settings = f.configure({ baseUrl: mock.url });
+  const preview = await f.service.previewSync({ expectedVersion: settings.version });
+  const pipelineCandidates = (result: typeof preview) => result.candidates.filter(item => item.kind === 'pipeline').map(item => [item.objectId, item.issueKey]);
+  assert.deepEqual(pipelineCandidates(preview), [['201', 'NEO-2']]);
+  assert.deepEqual(links(f), []);
+
+  await f.service.sync();
+  const saved = () => links(f).filter(link => link.kind === 'pipeline').map(link => [link.iid, link.issueId]);
+  assert.deepEqual(saved(), [[201, 'issue-2']]);
+  const fork = links(f).find(link => link.kind === 'merge_request' && link.iid === 7);
+  assert.equal(fork?.mergeRequestSourceProjectId, 73);
+  assert.equal(links(f).find(link => link.kind === 'merge_request' && link.iid === 8)?.mergeRequestSourceProjectId, undefined);
+
+  forkSource = 42;
+  const contradictory = await f.service.previewSync({ expectedVersion: f.service.settings().version });
+  assert.deepEqual(pipelineCandidates(contradictory), [['201', 'NEO-2']]);
+  await f.service.sync();
+  assert.deepEqual(saved(), [[201, 'issue-2']]);
+  assert.deepEqual(links(f).find(link => link.id === fork?.id), fork);
+  assert.deepEqual(f.events, []);
 });
 
 test('sync commits complete healthy repositories, rolls back audit failures, and retries only saved repositories', async () => {
