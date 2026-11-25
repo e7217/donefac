@@ -5395,7 +5395,9 @@ test('retained source verification distinguishes archival loss from deleted live
   for (const row of clean.primaryRecords) {
     assert.equal(row.invalidTargets, 0);
     assert.match(row.dispositionSha256, /^[a-f0-9]{64}$/);
-    assert.deepEqual(Object.keys(row).sort(), ['counts', 'dispositionSha256', 'hierarchy', 'invalidTargets', 'kind', 'packageId']);
+    assert.deepEqual(Object.keys(row).sort(), ['counts', 'dispositionSha256', 'fields', 'hierarchy', 'invalidTargets', 'kind', 'packageId']);
+    assert.ok(row.fields);
+    assert.match(row.fields.sha256, /^[a-f0-9]{64}$/);
   }
   assert.doesNotMatch(JSON.stringify(clean.primaryRecords), /OLD-1|Synthetic versioned page|original\.author/);
   assert.deepEqual(clean.recordCounts, page.data.counts);
