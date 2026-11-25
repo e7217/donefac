@@ -1,12 +1,13 @@
 'use client';
 
 import { X } from 'lucide-react';
-import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'react';
 import type { DocPage, DocumentTreeCopyOptions, DocumentTreeCopyPreview, Project } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { isDefiniteTemplateFailure, templateErrorReason } from './DocumentTemplates';
+import { documentDestinationLabel, documentParentLabels } from './document-utils';
 import './document-tree-copy.css';
 
 interface Props {
@@ -55,7 +56,8 @@ export function DocumentTreeCopy({ source, documents, projects, actorId, refresh
   const [busy, setBusy] = useState<Task | null>(null);
   const [error, setError] = useState('');
   const title = fields.title.trim();
-  const parents = documents.filter(page => page.projectId === fields.projectId);
+  const parents = useMemo(() => documents.filter(page => page.projectId === fields.projectId), [documents, fields.projectId]);
+  const parentLabels = useMemo(() => documentParentLabels(parents, documents), [documents, parents]);
   const spaceMissing = fields.projectId !== null && !projects.some(project => project.id === fields.projectId);
   const parentMissing = fields.parentId !== null && !parents.some(parent => parent.id === fields.parentId);
   const reviewable = Boolean(title && title.length <= TITLE_LIMIT && !spaceMissing && !parentMissing);
@@ -254,7 +256,7 @@ export function DocumentTreeCopy({ source, documents, projects, actorId, refresh
           <select className="field" value={fields.parentId ?? ''} onChange={event => update({ parentId: event.currentTarget.value || null })}>
             <option value="">최상위 문서</option>
             {parentMissing && <option value={fields.parentId ?? ''} disabled>선택한 상위 문서를 찾을 수 없음</option>}
-            {parents.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}
+            {parents.map(page => <option key={page.id} value={page.id}>{parentLabels.get(page.id)}</option>)}
           </select>
         </label>
         <label className="docs-copy-include">
@@ -264,6 +266,7 @@ export function DocumentTreeCopy({ source, documents, projects, actorId, refresh
       </fieldset>
       {(error || stalePreview && !attempt) && <p className="issue-form-error" role="alert">{error || STALE}</p>}
       {preview && !stalePreview && <section className="docs-move-preview" aria-label="복제 대상 문서">
+        <h3>{documentDestinationLabel(preview.destination, parentLabels)}</h3>
         <p role="status"><strong>문서 {preview.documents.length}개</strong> · 첨부파일 {preview.attachmentCount}개 ({preview.attachmentBytes.toLocaleString('ko-KR')}바이트)</p>
         <ul className="docs-move-list" role="list">
           {preview.documents.slice(previewPage * PAGE_SIZE, (previewPage + 1) * PAGE_SIZE)

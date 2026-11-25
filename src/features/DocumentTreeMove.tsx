@@ -5,6 +5,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from 'rea
 import type { DocPage, DocumentTreeMovePreview, Project } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
+import { documentDestinationLabel, documentParentLabels } from './document-utils';
 
 interface Props {
   document: DocPage;
@@ -50,7 +51,8 @@ export function DocumentTreeMove({
   const [error, setError] = useState('');
   const [uncertain, setUncertain] = useState(false);
   const subtree = useMemo(() => subtreeIds(page.id, documents), [page.id, documents]);
-  const parents = documents.filter(document => document.projectId === projectId && !subtree.has(document.id));
+  const parents = useMemo(() => documents.filter(document => document.projectId === projectId && !subtree.has(document.id)), [documents, projectId, subtree]);
+  const parentLabels = useMemo(() => documentParentLabels(parents, documents), [documents, parents]);
   const projectUnavailable = projectId !== null && !projects.some(project => project.id === projectId);
   const parentUnavailable = parentId !== null && !parents.some(parent => parent.id === parentId);
   const pageCount = Math.ceil((preview?.documents.length ?? 0) / PREVIEW_PAGE_SIZE);
@@ -202,7 +204,7 @@ export function DocumentTreeMove({
           }}>
             <option value="">최상위 문서</option>
             {parentUnavailable && <option value={parentId ?? ''} disabled>선택한 상위 문서를 찾을 수 없음</option>}
-            {parents.map(parent => <option key={parent.id} value={parent.id}>{parent.title || '제목 없는 문서'}</option>)}
+            {parents.map(parent => <option key={parent.id} value={parent.id}>{parentLabels.get(parent.id)}</option>)}
           </select>
         </label>
         <button type="submit" className="btn" disabled={projectUnavailable || parentUnavailable}>
@@ -212,7 +214,7 @@ export function DocumentTreeMove({
       {error && <p className="issue-form-error" role="alert">{error}</p>}
       {preview && <section className="docs-move-preview" aria-label="이동 대상 문서">
         {!preview.changed ? <p role="status">선택한 위치가 현재 문서 위치와 같습니다.</p> : <>
-          <h3>{locationName(preview.sourceProjectId, preview.sourceParentId)} → {locationName(preview.projectId, preview.parentId)}</h3>
+          <h3>{locationName(preview.sourceProjectId, preview.sourceParentId)} → {documentDestinationLabel(preview.destination, parentLabels)}</h3>
           <p role="status"><strong>문서 {preview.documents.length}개를 이동합니다.</strong> 하위 문서의 계층은 유지됩니다.</p>
           <ul className="docs-move-list">
             {preview.documents.slice(previewPage * PREVIEW_PAGE_SIZE, (previewPage + 1) * PREVIEW_PAGE_SIZE)

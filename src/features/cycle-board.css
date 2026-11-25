@@ -35,6 +35,18 @@
   flex: none;
 }
 
+.cycle-board-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.cycle-board-bulk-controls {
+  display: flex;
+  margin-bottom: 8px;
+}
+
 .cycle-board-toolbar {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 16rem));
@@ -174,6 +186,15 @@
 
 .cycle-board-row[data-drop-position='after'] {
   box-shadow: 0 3px #438a74;
+}
+
+.cycle-board-row[data-bulk-selected='true'] {
+  border-color: #9dc6b3;
+  background: #f1f9f5;
+}
+
+.cycle-board-row-select {
+  flex: none;
 }
 
 .cycle-board-row-copy {
@@ -318,6 +339,10 @@
 
   .cycle-board-heading h1 {
     font-size: 1.35rem;
+  }
+
+  .cycle-board-heading {
+    flex-wrap: wrap;
   }
 
   .cycle-board-lanes,

@@ -296,6 +296,84 @@ test('팀 공통으로 이동한 응답이 유실되면 미리보기로 확인�
   }
 });
 
+test('360px에서 같은 제목의 상위 문서를 경로로 구분해 이동하고 복제한다', async ({ page, request }) => {
+  const { projects: [source, destination], users: [author, other] } = await snapshot(request);
+  const headers = { 'X-Actor-Id': author.id };
+  const prefix = `문서 경로 ${randomUUID().slice(0, 8)}`;
+  const created: DocPage[] = [];
+  async function create(title: string, projectId: string, parentId: string | null = null) {
+    const response = await request.post('/api/documents', { headers, data: { title, projectId, parentId } });
+    expect(response.status(), await response.text()).toBe(201);
+    const document = await response.json() as DocPage;
+    created.push(document);
+    return document;
+  }
+
+  try {
+    const firstBranch = await create(`${prefix} 생산`, destination.id);
+    const secondBranch = await create(`${prefix} 검증`, destination.id);
+    const repeatedTitle = `${prefix} 현장 절차`;
+    const firstParent = await create(repeatedTitle, destination.id, firstBranch.id);
+    const samePathParent = await create(repeatedTitle, destination.id, firstBranch.id);
+    const secondParent = await create(repeatedTitle, destination.id, secondBranch.id);
+    const original = await create(`${prefix} 원본 문서`, source.id);
+    const firstPath = `${firstBranch.title} / ${repeatedTitle}`;
+    const firstChoice = `${firstPath} · ${firstParent.id}`;
+    const secondPath = `${secondBranch.title} / ${repeatedTitle}`;
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(`/#/${source.id}/documents/${original.id}`);
+    await page.getByRole('button', { name: '문서 이동', exact: true }).click();
+    const move = page.getByRole('dialog', { name: '문서 이동', exact: true });
+    await move.getByRole('combobox', { name: '이동할 공간', exact: true }).selectOption(destination.id);
+    const moveParent = move.getByRole('combobox', { name: '이동할 상위 문서', exact: true });
+    await expect(moveParent.locator(`option[value="${firstParent.id}"]`)).toHaveText(firstChoice);
+    await expect(moveParent.locator(`option[value="${samePathParent.id}"]`)).toHaveText(`${firstPath} · ${samePathParent.id}`);
+    await expect(moveParent.locator(`option[value="${secondParent.id}"]`)).toHaveText(secondPath);
+    await moveParent.selectOption({ label: secondPath });
+    const newBranchName = `${secondBranch.title} 개정`;
+    const renamed = await request.patch(`/api/documents/${secondBranch.id}`, { headers: { 'X-Actor-Id': other.id },
+      data: { expectedVersion: secondBranch.version, title: newBranchName } });
+    expect(renamed.status(), await renamed.text()).toBe(200);
+    const movePreview = moveResponse(page, `/api/documents/${original.id}/move-preview`);
+    await move.getByRole('button', { name: '이동 미리보기', exact: true }).click();
+    const reviewedMove = await movePreview;
+    expect(reviewedMove.request().postDataJSON()).toMatchObject({ projectId: destination.id, parentId: secondParent.id });
+    expect(await reviewedMove.json()).toMatchObject({ destination: { projectName: destination.name,
+      parents: [{ id: secondBranch.id, title: newBranchName }, { id: secondParent.id, title: repeatedTitle }] } });
+    await expect(move.getByRole('region', { name: '이동 대상 문서', exact: true }))
+      .toContainText(`${destination.name} / ${newBranchName} / ${repeatedTitle}`);
+    const moveApplied = moveResponse(page, `/api/documents/${original.id}/move`);
+    await move.getByRole('button', { name: '문서 이동 적용', exact: true }).click();
+    expect((await moveApplied).status()).toBe(200);
+    await expect(move).toBeHidden();
+    expect((await snapshot(request)).documents.find(value => value.id === original.id)).toMatchObject({ parentId: secondParent.id });
+
+    await page.getByRole('button', { name: '문서 복제', exact: true }).click();
+    const copy = page.getByRole('dialog', { name: '문서 복제', exact: true });
+    const copyParent = copy.getByRole('combobox', { name: '복제할 상위 문서', exact: true });
+    await expect(copyParent.locator(`option[value="${firstParent.id}"]`)).toHaveText(firstChoice);
+    await expect(copyParent.locator(`option[value="${secondParent.id}"]`)).toHaveText(`${newBranchName} / ${repeatedTitle}`);
+    await copyParent.selectOption({ label: firstChoice });
+    const copyPreview = moveResponse(page, `/api/documents/${original.id}/copy-preview`);
+    await copy.getByRole('button', { name: '복제 미리보기', exact: true }).click();
+    const reviewedCopy = await copyPreview;
+    expect(reviewedCopy.request().postDataJSON()).toMatchObject({ projectId: destination.id, parentId: firstParent.id });
+    expect(await reviewedCopy.json()).toMatchObject({ destination: { projectName: destination.name,
+      parents: [{ id: firstBranch.id, title: firstBranch.title }, { id: firstParent.id, title: repeatedTitle }] } });
+    await expect(copy.getByRole('region', { name: '복제 대상 문서', exact: true })).toContainText(`${destination.name} / ${firstChoice}`);
+    const copied = moveResponse(page, `/api/documents/${original.id}/copy`);
+    await copy.getByRole('button', { name: '문서 복제 적용', exact: true }).click();
+    const response = await copied;
+    expect(response.status(), await response.text()).toBe(201);
+    const copyDocument = await response.json() as DocPage;
+    created.push(copyDocument);
+    expect(copyDocument).toMatchObject({ projectId: destination.id, parentId: firstParent.id });
+  } finally {
+    for (const document of created.reverse()) await purgeTestDocument(request, document.id, headers);
+  }
+});
+
 test('다른 사용자가 문서를 옮겨도 공동 편집 연결과 열린 초안을 유지한다', async ({ page, request }) => {
   test.setTimeout(70_000);
   const initial = await snapshot(request);

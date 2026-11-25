@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { Comment, CycleBoardMoveInput, CycleBoardMoveResult, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, PlanningItem, ProjectIssueOrder, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, CycleBoardMoveInput, CycleBoardMoveResult, Issue, IssueBulkEditPreview, IssueBulkEditResult, IssueStatusChangeRequest, IssueStatusChangeResult, PlanningItem, ProjectIssueOrder, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200) {
   expect(response.status(), await response.text()).toBe(status);
@@ -717,5 +717,104 @@ test('응답을 잃은 뒤 업무가 다시 옮겨졌으면 재확인에서 현�
     await expect(board.selectedCycle).toHaveValue(laterCycle.id);
     await expect(board.lane.getByRole('button', { name: `${source.key} · ${source.title}`, exact: true })).toBeFocused();
     await expect(board.search).toHaveValue(f.suffix);
+  } finally { await f.close(); }
+});
+
+test('360px 백로그에서 표시된 업무를 한 번에 사이클에 배정하고 재시도에도 보드 문맥을 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('함께 배정할 사이클');
+    const first = await f.issue(`계획 대상 첫 업무 ${f.suffix}`, { startDate: '2026-11-24', assigneeId: f.actor.id });
+    const second = await f.issue(`계획 대상 둘째 업무 ${f.suffix}`, { endDate: '2026-11-27' });
+    const hidden = await f.issue('검색 밖 백로그 업무');
+    const existing = await f.issue('검색 밖 사이클 업무', { cycleId: cycle.id });
+    const order = await f.order();
+    const read = async (id: string) => (await workspace(request)).issues.find(issue => issue.id === id);
+    const board = await openBoard(page, f, 'backlog', cycle);
+    await board.search.fill(f.suffix);
+    const boardAddress = new URL(page.url()).hash;
+    const toggle = page.getByRole('button', { name: '일괄 편집', exact: true });
+    await toggle.click();
+    const editor = page.getByRole('region', { name: '업무 일괄 편집', exact: true });
+    const selectVisible = page.getByRole('checkbox', { name: '표시된 업무 전체 선택', exact: true });
+    await expect(selectVisible).toBeFocused();
+    await selectVisible.check();
+    const selected = (issue: Issue) => board.backlog.getByRole('checkbox', { name: `${issue.key} 업무 선택`, exact: true });
+    await expect(selected(first)).toBeChecked();
+    await expect(selected(second)).toBeChecked();
+    await expect(selected(hidden)).toHaveCount(0);
+    await expect(board.backlog.getByRole('button', { name: '백로그에 업무 만들기', exact: true })).toBeDisabled();
+    const target = editor.getByRole('combobox', { name: '일괄 변경 사이클', exact: true });
+    await target.selectOption(`plan:${cycle.id}`);
+
+    const bulkPath = `/api/projects/${f.project.id}/issues/bulk`;
+    const applied = () => page.waitForResponse(response => new URL(response.url()).pathname === `${bulkPath}-apply`);
+    const preview = editor.getByRole('region', { name: '일괄 변경 미리보기', exact: true });
+    async function checkPreview() {
+      const reviewing = page.waitForResponse(response => new URL(response.url()).pathname === `${bulkPath}-preview`);
+      await editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+      const response = await reviewing;
+      const { previewId, rows } = await json<IssueBulkEditPreview>(response);
+      expect(previewId).toBeTruthy();
+      expect(response.request().postDataJSON().changes).toEqual({ cycleId: cycle.id });
+      expect(rows.map(row => row.id)).toEqual([first.id, second.id]);
+      for (const issue of [first, second]) {
+        const row = preview.getByRole('listitem').filter({ hasText: `${issue.key} ${issue.title}` });
+        await expect(row).toContainText(`사이클 없음 → ${cycle.name}`);
+      }
+      return previewId;
+    }
+
+    const outdated = await checkPreview();
+    const changed = await json<Issue>(await request.patch(`/api/issues/${second.id}`, {
+      headers: { 'X-Actor-Id': f.peer.id }, data: { expectedVersion: second.version, assigneeId: f.peer.id },
+    }));
+    const rejected = applied();
+    await preview.getByRole('button', { name: '일괄 적용', exact: true }).click();
+    expect((await rejected).status()).toBe(409);
+    expect(await read(first.id)).toEqual(first);
+    expect(await read(second.id)).toEqual(changed);
+    await editor.getByRole('button', { name: '최신 업무 불러오기', exact: true }).click();
+    await expect(selected(first)).toBeChecked();
+    await expect(selected(second)).toBeChecked();
+    await expect(target).toHaveValue(`plan:${cycle.id}`);
+    const reviewed = await checkPreview();
+    expect(reviewed).not.toBe(outdated);
+
+    const requests: string[] = [];
+    await page.route(`**${bulkPath}-apply`, async route => {
+      requests.push(route.request().postDataJSON().previewId);
+      if (requests.length > 1) return route.continue();
+      const committed = await json<IssueBulkEditResult>(await route.fetch());
+      expect(committed.updated.map(issue => issue.id)).toEqual([first.id, second.id]);
+      await route.abort('failed');
+    });
+    await preview.getByRole('button', { name: '일괄 적용', exact: true }).click();
+    const retry = preview.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    await expect(retry).toBeVisible();
+    await expect(board.selectedCycle).toBeDisabled();
+    await expect(board.search).toBeDisabled();
+    const replay = applied();
+    await retry.click();
+    await json<IssueBulkEditResult>(await replay);
+    expect(requests).toEqual([reviewed, reviewed]);
+    await expect(board.lane.locator(rowSelector(first))).toBeVisible();
+    await expect(board.lane.locator(rowSelector(second))).toBeVisible();
+    await expect(board.backlog.locator(rowSelector(first))).toHaveCount(0);
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.search).toHaveValue(f.suffix);
+    expect(new URL(page.url()).hash).toBe(boardAddress);
+    expect((await f.order()).issueIds).toEqual(order.issueIds);
+    for (const issue of [first, changed]) expect(await read(issue.id)).toMatchObject({
+      version: issue.version + 1, cycleId: cycle.id, status: issue.status, assigneeId: issue.assigneeId,
+      startDate: issue.startDate, endDate: issue.endDate,
+    });
+    expect(await read(hidden.id)).toEqual(hidden);
+    expect(await read(existing.id)).toEqual(existing);
+    await editor.getByRole('button', { name: '일괄 편집 닫기', exact: true }).click();
+    await expect(toggle).toBeFocused();
+    expect(await page.locator('body').evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(362);
   } finally { await f.close(); }
 });

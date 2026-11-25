@@ -70,6 +70,33 @@ async function fixture(t: TestContext) {
   };
 }
 
+test('guarded relative previews require the exact selected IDs and keep their original projects', async t => {
+  const f = await fixture(t);
+  const other = await f.call<Project>('/projects', 201, 'POST', { key: 'SHIFT2', name: '일정 이동 범위 대조' });
+  const first = await f.issue('첫 프로젝트의 선택 업무');
+  const second = await f.issue('두 번째 프로젝트의 선택 업무', {}, other.id);
+  const input = shift([first, second]);
+  const [one, two] = [first, second].map(({ id, projectId }) => ({ id, projectId }));
+  const before = await f.state();
+  for (const expectedProjects of [[], [one], [one, one], [one, { ...two, id: 'unselected' }]]) {
+    await f.readPreview({ ...input, expectedProjects }, 400);
+  }
+  const guarded = { ...input, expectedProjects: [one, { ...two, projectId: first.projectId }] };
+  const failure = await f.call<{ details: { reason: string }; previewId?: string }>(previewPath, 409, 'POST', guarded);
+  assert.equal(failure.details.reason, 'project_changed');
+  assert.equal(failure.previewId, undefined);
+
+  const hierarchy = { hierarchy: { id: first.id, expectedVersion: first.version }, days: 1, workingDays: false };
+  await f.readPreview({ ...hierarchy, expectedProjects: [one, two] }, 400);
+  const oldRoot = await f.call<{ details: { reason: string } }>(previewPath, 409, 'POST', {
+    ...hierarchy, expectedProjects: [{ ...one, projectId: second.projectId }],
+  });
+  assert.equal(oldRoot.details.reason, 'project_changed');
+  assert.deepEqual((await f.review({ ...hierarchy, expectedProjects: [one] })).changes.map(({ id }) => id), [first.id]);
+  assert.deepEqual((await f.review({ ...input, expectedProjects: [two, one] })).changes.map(({ id }) => id).sort(), [first.id, second.id].sort());
+  assert.deepEqual(await f.state(), before);
+});
+
 test('date edits and a cross-project blocker share guarded apply, rollback, restart reuse and undo', async t => {
   const f = await fixture(t);
   const targetProject = await f.call<Project>('/projects', 201, 'POST', { key: 'BLOCK', name: '후행 업무 달력' });

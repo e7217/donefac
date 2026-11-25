@@ -1771,10 +1771,12 @@ function ProjectGantt(props: GanttProps) {
       ...(shiftSuccessors && shiftIncludesTeamBlockers ? { includeTeamBlockers: true } : {}) };
     if (shiftMode === 'hierarchy') {
       if (!hierarchyTrace) return;
-      const { id, version } = hierarchyTrace.anchor;
-      void requestShiftPreview({ ...shift, hierarchy: { id, expectedVersion: version } }, hierarchyShiftTrigger.current);
+      const { id, version, projectId: anchorProjectId } = hierarchyTrace.anchor;
+      void requestShiftPreview({ ...shift, hierarchy: { id, expectedVersion: version }, expectedProjects: [{ id, projectId: anchorProjectId }] },
+        hierarchyShiftTrigger.current);
     } else {
-      void requestShiftPreview({ ...shift, issueIds: selectedIssues.map(issue => issue.id) }, selectionShiftTrigger.current);
+      void requestShiftPreview({ ...shift, issueIds: selectedIssues.map(issue => issue.id), expectedProjects: selectedIssues.map(({ id, projectId }) => ({ id, projectId })) },
+        selectionShiftTrigger.current);
     }
   }
   async function requestShiftPreview(input: ScheduleShiftInput, opener: HTMLButtonElement | null) {
@@ -1789,7 +1791,7 @@ function ProjectGantt(props: GanttProps) {
       setManualProblem(null);
       setShiftMode(null);
     } catch (cause) {
-      if ('hierarchy' in input && cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
+      if (cause instanceof ApiError && (cause.status === 404 || cause.status === 409)) {
         setDatePreviewFocusTarget(opener);
         setManualReview({ input, preview: { changes: [], warnings: [] } });
         setManualProblem({ kind: 'stale', message: errorMessage(cause) });
@@ -2431,7 +2433,12 @@ function ProjectGantt(props: GanttProps) {
   }
   function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
-    if (current.delta) { if (current.mode === 'move') void requestShiftPreview({ issueIds: [current.issue.id], days: current.delta, workingDays: false }, event.currentTarget); else previewResize(current.issue, current.mode, current.delta, event.currentTarget); }
+    if (current.delta) {
+      if (current.mode === 'move') {
+        const { id, projectId: issueProjectId } = current.issue;
+        void requestShiftPreview({ issueIds: [id], expectedProjects: [{ id, projectId: issueProjectId }], days: current.delta, workingDays: false }, event.currentTarget);
+      } else previewResize(current.issue, current.mode, current.delta, event.currentTarget);
+    }
     else if (current.mode === 'move') openIssueRow(current.issue.id, event.currentTarget);
     else focusDateFromControl(event.currentTarget, current.issue, current.mode);
   }

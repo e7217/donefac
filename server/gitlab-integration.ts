@@ -822,7 +822,7 @@ export class GitlabIntegrationService{
   async attachLink(issueId:string,value:unknown,afterAttach?:(link:GitlabLink)=>void,signal?:AbortSignal,
     branchAttachment?: BranchMergeRequestAttachment):Promise<{link:GitlabLink;created:boolean}>{
     const input=record(value);
-    if(Object.keys(input).some(key=>!['repositoryId','url','expectedSettingsVersion','actorId'].includes(key)))fail('GitLab 활동 연결 요청을 확인해 주세요.');
+    if(Object.keys(input).some(key=>!['repositoryId','url','expectedSettingsVersion','actorId','expectedLinkId','expectedManualLinkId'].includes(key)))fail('GitLab 활동 연결 요청을 확인해 주세요.');
     const captured=this.raw();
     assertSettingsVersion(input.expectedSettingsVersion,captured.version);
     const requestedRepositoryId=input.repositoryId;
@@ -836,11 +836,30 @@ export class GitlabIntegrationService{
     const token=captured.token?this.store.unseal(captured.token):null;
     const startedAt=now();
     const instance=this.instance(captured);
+    let expected: { linkId: string; manualLinkId: string } | undefined;
+    if (Object.hasOwn(input, 'expectedLinkId') || Object.hasOwn(input, 'expectedManualLinkId')) {
+      const { expectedLinkId, expectedManualLinkId } = input;
+      if (typeof expectedLinkId !== 'string' || !expectedLinkId || expectedLinkId.length > 4_000 || !isGitlabManualLinkId(expectedManualLinkId)) {
+        fail('다시 확인할 GitLab 수동 연결을 선택해 주세요.');
+      }
+      expected = { linkId: expectedLinkId, manualLinkId: expectedManualLinkId };
+    }
+    const assertCurrentLink = () => {
+      if (!expected) return;
+      const link = this.store.get<GitlabLink>('gitlab_links', expected.linkId);
+      if (!link || link.issueId !== issueId || link.manualLinkId !== expected.manualLinkId ||
+          !link.id.startsWith(gitlabLinkObjectKey(instance, link.projectId, link.kind, '')) || !captured.projectIds.includes(link.projectId) ||
+          (requestedRepositoryId !== undefined && link.projectId !== requestedRepositoryId)) {
+        fail('GitLab 수동 연결이 변경되었습니다. 최신 활동에서 다시 선택해 주세요.', 409, { reason: 'gitlab_manual_link_changed' });
+      }
+      return link;
+    };
+    const repositoryForRead = assertCurrentLink()?.projectId ?? requestedRepositoryId ?? captured.projectIds;
     let pendingBranchId:string|undefined;
     let branchCursorBeforeRead:PushObservation|undefined;
     let verified:VerifiedGitlabActivity;
     try {
-      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},requestedRepositoryId??captured.projectIds,input.url,signal,(name,webUrl,repositoryId)=>{
+      verified=await readGitlabManualObject({baseUrl:captured.baseUrl,token},repositoryForRead,input.url,signal,(name,webUrl,repositoryId)=>{
         if(token&&(name.includes(token)||webUrl.includes(token)))fail('GitLab 활동의 주소를 확인할 수 없습니다.',502);
         const id=pushCursorId(instance,repositoryId,name);
         const pending=this.pendingBranchReads.get(id);
@@ -852,6 +871,7 @@ export class GitlabIntegrationService{
       branchAttachment?.assertCurrent();
       signal?.throwIfAborted();
       assertSettingsVersion(captured.version,this.raw().version);
+      assertCurrentLink();
       if(branchAttachment&&error instanceof GitlabManualUrlError)fail('GitLab 저장소 또는 브랜치 주소가 변경되었습니다. MR을 다시 확인해 주세요.',409);
       if(error instanceof GitlabManualUrlError)fail(error.message,error.status);
       if(branchAttachment&&error instanceof GitlabReadError)failGitlabWorkflowRead(error);
@@ -879,11 +899,13 @@ export class GitlabIntegrationService{
       assertSettingsVersion(captured.version,this.raw().version);
       const currentIssue=this.requireIssue(issueId);
       if(currentIssue.projectId!==issue.projectId)fail('업무가 다른 프로젝트로 이동했습니다. 최신 업무에서 다시 연결해 주세요.',409);
+      const checkedLink = assertCurrentLink();
       const draft=kind==='pipeline'
         ? this.classifyReadPipeline(instance,repositoryId,observedDraft,this.workflowLinksForObject(instance,repositoryId,kind,observedDraft.id)) : observedDraft;
       if(!draft)fail('GitLab 파이프라인의 실행 정보가 기존 연결과 다릅니다. 최신 활동을 다시 확인해 주세요.',409);
       const snapshot=linkForIssue(instance,repositoryId,kind,{issue:currentIssue},draft);
-      const existing=this.store.get<GitlabLink>('gitlab_links',snapshot.id);
+      if (checkedLink && checkedLink.id !== snapshot.id) fail('다시 확인할 같은 GitLab 활동의 주소를 입력해 주세요.', 409);
+      const existing=checkedLink ?? this.store.get<GitlabLink>('gitlab_links',snapshot.id);
       branchAttachment?.assertMergeRequest(verified,existing);
       if(existing?.manualLinkId&&!matchesManualLink(existing,draft))fail('저장한 GitLab 활동의 식별자와 일치하지 않습니다.',409);
       if(kind==='merge_request'){

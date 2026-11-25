@@ -1285,6 +1285,10 @@ export interface DocumentTemplateSummary {
   updatedBy: string;
 }
 export interface DocumentTemplate extends DocumentTemplateSummary { content: RichContent }
+export interface DocumentTreeDestination {
+  projectName: string | null;
+  parents: Pick<DocPage, 'id' | 'title'>[];
+}
 export interface DocumentTreeMovePreview {
   token: string;
   documentId: string;
@@ -1292,6 +1296,7 @@ export interface DocumentTreeMovePreview {
   sourceParentId: string | null;
   projectId: string | null;
   parentId: string | null;
+  destination: DocumentTreeDestination;
   documents: { id: string; title: string }[];
   archivedCount: number;
   changed: boolean;
@@ -1312,6 +1317,7 @@ export interface DocumentSiblingOrder {
 export interface DocumentTreeCopyPreview extends DocumentTreeCopyOptions {
   sourceDocumentId: string;
   token: string;
+  destination: DocumentTreeDestination;
   documents: Pick<DocPage, 'id' | 'title' | 'version'>[];
   attachmentCount: number;
   attachmentBytes: number;
@@ -1659,6 +1665,13 @@ export interface GitlabLink {
   mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[]; mergeRequestSourceProjectId?: number;
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
   pipelineTicketEvidence?: 'direct-key' | 'verified-merge-request';
+}
+export interface GitlabManualLinkRequest {
+  url: string;
+  repositoryId?: number;
+  expectedSettingsVersion: number;
+  expectedLinkId?: string;
+  expectedManualLinkId?: string;
 }
 export interface GitlabIssueRefreshResult {
   links: GitlabLink[];
@@ -2362,8 +2375,9 @@ export interface SchedulePreview {
 }
 export interface ScheduleAnchorChange { id: string; expectedVersion: number; startDate: string | null; endDate: string | null }
 export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
-export type ScheduleManualPreviewInput = ({ issueIds: string[]; days: number; workingDays: boolean } |
-  { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'>; days: number; workingDays: boolean } |
+export type ScheduleManualPreviewInput = (({ issueIds: string[] } | { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'> }) & {
+    days: number; workingDays: boolean; expectedProjects?: { id: string; projectId: string }[];
+  } |
   { changes: ScheduleAnchorChange[] }) & { rescheduleSuccessors?: boolean; includeTeamBlockers?: boolean };
 export const MAX_TEAM_FOLLOW_UP_RELATIONS = 100;
 export interface TeamFollowUpRelationReference { relationId: string; expectedVersion: number }

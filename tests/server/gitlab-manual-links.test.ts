@@ -1541,6 +1541,49 @@ test('manual MR readiness rechecks the same revision and discards a response hel
   assert.equal(waitingForApproval.manualLinkId, original.manualLinkId);
 });
 
+test('manual GitLab rechecks preserve the chosen attachment if it changes during the read', async t => {
+  const f = await fixture(t);
+  const path = pathFor(f.issue.id);
+  const original = await f.call<GitlabLink>(path, f.attach(f.mrUrl), 201);
+  const check = (url: string) => ({ method: 'POST', body: {
+    ...f.attach(url).body, expectedLinkId: original.id, expectedManualLinkId: original.manualLinkId,
+  } });
+  f.setMr({ state: 'merged', updated_at: f.instant(2) });
+  const confirmed = await f.call<GitlabLink>(path, check(f.mrUrl));
+  assert.deepEqual({ id: confirmed.id, manualLinkId: confirmed.manualLinkId, state: confirmed.state },
+    { id: original.id, manualLinkId: original.manualLinkId, state: 'merged' });
+  await f.call(path, check(f.pipelineUrl), 409);
+  assert.deepEqual(await f.links(), [confirmed]);
+
+  const reached = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  f.holdRead(() => {
+    f.holdRead(() => Promise.resolve());
+    reached.resolve();
+    return release.promise;
+  });
+  type LinkConflict = { details?: { reason?: string } };
+  const pending = f.request<LinkConflict>(path, check(f.mrUrl));
+  await Promise.race([reached.promise, pending.then(value => assert.fail(`Recheck ended before its read: ${value.status}`))]);
+  let replacement: GitlabLink;
+  try {
+    const headers = { 'X-Actor-Id': 'user-min' };
+    await f.call(deletePath(f.issue.id, original), { method: 'DELETE', headers });
+    replacement = await f.call<GitlabLink>(path, { ...f.attach(f.mrUrl), headers }, 201);
+  } finally { release.resolve(); }
+  const conflict = await pending;
+  assert.equal(conflict.status, 409);
+  assert.equal(conflict.data.details?.reason, 'gitlab_manual_link_changed');
+  assert.equal(replacement.id, original.id);
+  assert.notEqual(replacement.manualLinkId, original.manualLinkId);
+  assert.deepEqual(await f.links(), [replacement]);
+  const readCount = f.calls.length;
+  await f.call(path, check(f.mrUrl), 409);
+  await f.call(path, { method: 'POST', body: { ...f.attach(f.mrUrl).body, expectedLinkId: replacement.id } }, 400);
+  assert.equal(f.calls.length, readCount);
+  assert.deepEqual(await f.links(), [replacement]);
+});
+
 test('GitLab link verification discards changed settings and restores manual links with a new unlink guard', async t => {
   const f = await fixture(t);
   const path = pathFor(f.issue.id);

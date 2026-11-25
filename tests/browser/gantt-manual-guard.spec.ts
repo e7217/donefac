@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page, type Response } from '@playwright/test';
 import type { Issue, IssueRelation, SchedulePasteApplyResult, SchedulePreview, WorkspaceSnapshot } from '../../shared/types';
+import type { IssueProjectMoveInput, IssueProjectMovePreview, IssueProjectMoveResult } from '../../shared/issue-project-move';
 
 const previewPath = '/api/schedule/manual-preview';
 const applyPath = '/api/schedule/manual-apply';
@@ -167,7 +168,8 @@ test('360px 간트에서 선택 밖의 선행 업무가 바뀌면 이동을 거�
     const originalPreview = nextPost(page, previewPath);
     await review.click();
     const proposalResponse = await originalPreview;
-    expect(proposalResponse.request().postDataJSON()).toEqual({ issueIds: [successor.id], days: 2, workingDays: false });
+    expect(proposalResponse.request().postDataJSON()).toEqual({ issueIds: [successor.id], days: 2, workingDays: false,
+      expectedProjects: [{ id: successor.id, projectId: successor.projectId }] });
     const proposal = await readJson<SchedulePreview>(proposalResponse);
     expect(proposal.previewId).toBeTruthy();
     expect(proposal.changes).toMatchObject([{ id: successor.id, toStart: fixture.date(5), toEnd: fixture.date(6) }]);
@@ -203,6 +205,59 @@ test('360px 간트에서 선택 밖의 선행 업무가 바뀌면 이동을 거�
     await expect(dialog).toBeFocused();
     await dialog.getByRole('button', { name: '취소', exact: true }).click();
     expect(await fixture.stored()).toEqual([schedule(changedPredecessor), schedule(successor)]);
+  } finally { await fixture.close(); }
+});
+
+test('간트 일정 이동을 다시 검토할 때 다른 프로젝트로 이동한 업무를 자동으로 포함하지 않는다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const fixture = await makeFixture(request);
+  try {
+    const original = await fixture.create('다른 프로젝트로 이동할 업무', 3, 4);
+    await page.setViewportSize({ width: 360, height: 820 });
+    const { chart, dialog } = await openChart(page, original);
+    const startShift = async (issue: Issue) => {
+      await chart.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true }).check();
+      await page.getByRole('button', { name: '1개 일정 이동', exact: true }).click();
+      await page.getByLabel('이동 일수', { exact: true }).fill('2');
+      await page.getByRole('checkbox', { name: '근무일 기준', exact: true }).uncheck();
+      const preview = nextPost(page, previewPath);
+      await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+      return preview;
+    };
+    const first = await readJson<SchedulePreview>(await startShift(original));
+    expect(first.previewId).toBeTruthy();
+
+    const movePath = `/api/issues/${original.id}/project-move`;
+    const headers = { 'X-Actor-Id': fixture.peer.id };
+    const movement: IssueProjectMoveInput = { expectedVersion: original.version, projectId: fixture.otherProject.id, includeConnected: false, mappings: [] };
+    const movePreview = await readJson<IssueProjectMovePreview>(await request.post(`${movePath}/preview`, { headers, data: movement }));
+    expect(movePreview.token, JSON.stringify(movePreview.blockers)).toBeTruthy();
+    const { issues: [moved] } = await readJson<IssueProjectMoveResult>(await request.post(`${movePath}/apply`, {
+      headers, data: { ...movement, token: movePreview.token },
+    }));
+    expect(moved).toMatchObject({ id: original.id, projectId: fixture.otherProject.id, startDate: original.startDate, endDate: original.endDate });
+
+    const apply = dialog.getByRole('button', { name: '변경 적용', exact: true });
+    const stale = nextPost(page, applyPath);
+    await apply.click();
+    expect((await stale).status()).toBe(409);
+    const retry = nextPost(page, previewPath);
+    await dialog.getByRole('button', { name: '다시 미리보기', exact: true }).click();
+    const rejected = await retry;
+    expect(rejected.status(), await rejected.text()).toBe(409);
+    await expect(dialog.getByRole('alert')).toContainText('다른 프로젝트');
+    await expect(apply).toBeDisabled();
+    expect(await fixture.stored()).toEqual([schedule(moved)]);
+
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(chart.locator(`[data-issue-id="${moved.id}"]`)).toHaveCount(0);
+    await openChart(page, moved);
+    const confirmed = await readJson<SchedulePreview>(await startShift(moved));
+    expect(confirmed.changes).toMatchObject([{ id: moved.id, toStart: fixture.date(5), toEnd: fixture.date(6) }]);
+    const applied = nextPost(page, applyPath);
+    await apply.click();
+    expect((await applied).status()).toBe(200);
+    expect(await fixture.stored()).toEqual([{ ...schedule(moved), startDate: fixture.date(5), endDate: fixture.date(6), version: moved.version + 1 }]);
   } finally { await fixture.close(); }
 });
 

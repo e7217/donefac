@@ -171,7 +171,8 @@ test('360px에서 선택한 두 일정과 숨겨진 공유 후행을 옮기고 �
     const previewDateOnly = responseAt(page, 'manual-preview');
     await review.click();
     const dateOnlyResponse = await previewDateOnly;
-    const baseInput = { issueIds: expect.arrayContaining([first.id, second.id]), days: 3, workingDays: true };
+    const baseInput = { issueIds: expect.arrayContaining([first.id, second.id]), days: 3, workingDays: true,
+      expectedProjects: expect.arrayContaining([first, second].map(({ id, projectId }) => ({ id, projectId }))) };
     expect(dateOnlyResponse.request().postDataJSON()).toEqual(baseInput);
     expect(dateOnlyResponse.request().postDataJSON().issueIds).toHaveLength(2);
     const dateOnly = await payload<SchedulePreview>(dateOnlyResponse);
@@ -266,7 +267,8 @@ test('360px 막대와 일정 이동에서 다른 프로젝트의 후행을 검�
     await page.mouse.move(center.x + 32, center.y, { steps: 5 });
     await page.mouse.up();
     const dragged = await dragPreview;
-    expect(dragged.request().postDataJSON()).toMatchObject({ issueIds: [anchor.id], days: 1 });
+    expect(dragged.request().postDataJSON()).toMatchObject({ issueIds: [anchor.id], days: 1,
+      expectedProjects: [{ id: anchor.id, projectId: anchor.projectId }] });
     await payload<SchedulePreview>(dragged);
     const teamPreview = responseAt(page, 'team-follow-up-preview');
     await crossReview.click();
@@ -294,6 +296,7 @@ test('360px 막대와 일정 이동에서 다른 프로젝트의 후행을 검�
     await shift.getByRole('button', { name: '변경 미리보기', exact: true }).click();
     const response = await submission;
     expect(response.request().postDataJSON()).toEqual({ issueIds: [anchor.id], days: 2, workingDays: false,
+      expectedProjects: [{ id: anchor.id, projectId: anchor.projectId }],
       rescheduleSuccessors: true, includeTeamBlockers: true });
     const combined = await payload<SchedulePreview>(response);
     const moved: Dates[] = [[date(2), date(3)], [date(4), date(7)]];

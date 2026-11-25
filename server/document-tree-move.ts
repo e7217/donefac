@@ -86,6 +86,7 @@ export class DocumentTreeMoveService {
     ])).digest('hex');
     const preview: DocumentTreeMovePreview = {
       ...target, token, documentId, sourceProjectId: root.projectId, sourceParentId: root.parentId,
+      destination: { projectName: targetProject?.name ?? null, parents: ancestors.toReversed().map(({ id, title }) => ({ id, title })) },
       documents: documents.map(({ id, title }) => ({ id, title })), archivedCount: archived.length, changed,
     };
     return { preview, affected, archived };

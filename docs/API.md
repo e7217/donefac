@@ -507,6 +507,8 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 브라우저의 `POST /api/documents/:id/copy-preview`에 `{title,projectId,parentId,includeDescendants,expectedSourceVersion}`을 보낸다. `projectId: null`은 팀 공통 공간이고 `parentId: null`은 최상위다. 미리보기에는 선택한 문서와 버전, 복제할 파일 수와 바이트, 확인이 필요한 첨부 주소, `token`을 담는다. 활성 문서 최대 100개, 본문 합계 64MiB와 복제할 첨부 합계 64MiB·1,500개를 지원한다.
 
+이 미리보기와 `POST /api/documents/:id/move-preview` 응답은 `destination`에 검토 시점의 `projectName`과 `parents`를 담는다. `projectName: null`은 팀 공통 공간이다. `parents`의 `{id,title}`은 최상위부터 선택한 상위 문서까지 순서대로 들어간다. 공간의 최상위로 이동하거나 복제하면 빈 배열을 반환한다.
+
 `POST /api/documents/:id/copy`에 같은 옵션과 `token`, 새 UUID v4 `requestId`를 보낸다. 서버는 작업자·원본 버전·하위 트리 구성·대상 위치와 첨부 목록을 검증한다. 변경이 생기면 `409` 및 `details.reason: "copy_preview_stale"`로 새 미리보기를 요청한다. 성공하면 새 루트 `DocPage`를 `201`로 반환한다. 이후 같은 작업자와 요청 입력으로 다시 보내면 저장한 루트 문서를 `200`으로 돌려준다.
 
 각 복제본은 새 ID, 현재 작업자, 버전 1과 새 첫 저장본을 갖는다. 복제 대상 문서의 최신 첨부와 그 문서들이 소유한 파일 중 복제할 본문이 직접 가리키는 버전을 새 첨부로 저장한다. 함께 복제한 페이지와 절의 현재 링크는 새 ID를 사용한다. 고정 저장본의 링크는 원래 저장본을 가리킨다. 본문·버전·활동·알림·파일과 재시도 기록을 함께 저장한다. 물리 백업은 재시도 기록을 보관하며, 자체 JSON 백업으로 작업 공간을 교체하면 이전 생성 요청을 무효화한다.
@@ -899,6 +901,8 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 MR은 프로젝트의 MR IID, 파이프라인은 파이프라인 ID를 사용한다. 브랜치는 `/-/tree/` 뒤의 전체 이름, 커밋은 `/-/commit/` 뒤의 전체 SHA를 확인한다. 서버는 저장한 GitLab의 읽기 API에서 프로젝트와 해당 항목을 대조하고 순수 페이지 주소를 저장한다. 쿼리와 프래그먼트를 제거하며 브랜치 주소에 참조 유형이 있으면 `heads`를 확인한다. [GitLab MR 조회](https://docs.gitlab.com/api/merge_requests/#retrieve-a-merge-request) · [GitLab 파이프라인 조회](https://docs.gitlab.com/api/pipelines/#retrieve-a-single-pipeline) · [GitLab 브랜치 조회](https://docs.gitlab.com/api/branches/#retrieve-a-repository-branch) · [GitLab 커밋 조회](https://docs.gitlab.com/api/commits/#retrieve-a-commit)
 
 응답은 저장한 `GitlabLink`다. 새 수동 연결은 `201`이며 같은 항목을 다시 확인하면 같은 ID의 `200`을 받는다. 조회 중 연결 설정이 바뀌거나 브랜치 조회가 기존 인증 푸시 기록과 다르면 `409`를 반환할 수 있다. 이 경우 마지막으로 확인된 링크를 유지한다. 인증 웹훅과 동기화는 같은 링크를 갱신하며, 티켓 키가 확인되면 기존 자동 연결 규칙을 적용한다. 브라우저에서 브랜치를 열 때는 `ref_type=heads`를 붙여 같은 이름의 태그와 구분한다. [GitLab의 브랜치·태그 주소 처리](https://gitlab.com/gitlab-org/gitlab/-/merge_requests/122237)
+
+기존 수동 연결을 다시 확인하는 요청은 선택한 행의 `expectedLinkId`와 `expectedManualLinkId`를 함께 보낸다. 조회 전과 저장 직전에 같은 연결인지 대조한다. 동료가 연결을 해제하거나 다시 생성했으면 `409`와 `gitlab_manual_link_changed`를 반환한다. 다시 확인할 때는 원래 저장소의 같은 활동 주소를 사용한다.
 
 수동 연결을 해제하려면 `DELETE /api/issues/:id/gitlab-links/:linkId?expectedManualLinkId=…`에 현재 행의 `manualLinkId`를 보낸다. 자체 백업 형식 52는 활성·휴지통의 MR·파이프라인 수동 연결을, 형식 60은 브랜치·커밋 수동 연결도 저장한다. 복원한 연결에는 새 `manualLinkId`를 부여한다.
 
@@ -1370,6 +1374,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 프로젝트 간 검토는 기준과 후행을 합해 1,000개 업무, 워크스페이스는 전체 업무 10,000개와 연결 50,000개까지 지원한다. 순환이나 필수 날짜 누락, 고정 일정과의 충돌 또는 계산 범위 한도는 `blocking`에 표시하며 적용 ID를 발급하지 않는다. 적용 직전에 해당 업무·들어오는 연결·열린 차단과 각 프로젝트의 달력·워크플로·업무 양식을 대조한다. 검토 조건이 달라지면 `409`를 반환한다. 프로젝트 간 날짜와 적용 결과 및 되돌리기 기록은 기존 수동 변경 요청에서 함께 저장한다.
 
 상위 업무와 하위 업무를 함께 이동할 때는 `{hierarchy:{id,expectedVersion},days,workingDays}`를 보낸다. 서버가 기준 업무와 같은 프로젝트의 전체 하위 단계에서 최대 1,000개까지 계산한다. 완료·취소 상태와 시작일·종료일이 모두 없는 업무는 `skipped`의 `{id,key,title,reason}`에 기록된다. `reason`은 각각 `closed`, `unscheduled`다. 한쪽 날짜만 저장한 업무는 그 날짜를 이동한다. 적용 시 하위 업무 구성과 각 업무의 상위 연결도 확인한다.
+
+선택 업무나 상위·하위 업무를 일수로 이동할 때 `expectedProjects: [{id,projectId}]`를 보낼 수 있다. `issueIds`의 각 업무를 한 번씩 지정하고, `hierarchy`에서는 기준 업무 한 건만 지정한다. 다른 프로젝트로 이동한 업무가 있으면 `409`와 `project_changed`를 반환한다. 다시 미리볼 때도 처음 선택한 소속을 확인한다.
 
 응답은 `changes`, 관련 업무의 `warnings`와 적용 가능한 경우 `previewId`·`expiresAt`을 반환한다. 변경할 날짜가 없거나 `blocking`에 확인할 이유가 있으면 적용 ID를 발급하지 않는다. `POST /api/schedule/manual-apply`에는 `{previewId}`를 보내며, 같은 작업자의 미리보기와 선택 업무·관련 업무·선후행 연결·프로젝트 규칙을 확인한다. 검토한 조건이 달라지면 `409`로 응답하고 날짜는 유지한다.
 

@@ -236,7 +236,8 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     const inspected = nextPost(previewPath);
     await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();
     const inspectedResponse = await inspected;
-    expect(inspectedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: parent.version }, days: 2, workingDays: false });
+    expect(inspectedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: parent.version }, days: 2, workingDays: false,
+      expectedProjects: [{ id: parent.id, projectId: parent.projectId }] });
     const first = await json<SchedulePreview>(inspectedResponse);
     expect(first.previewId).toBeTruthy();
     expect(first.changes.map(change => change.id)).toEqual(members.map(issue => issue.id));
@@ -265,7 +266,8 @@ test('360px 하위 업무 전체 이동을 최신 구성으로 다시 검토하�
     const inspectedAgain = nextPost(previewPath);
     await dialog.getByRole('button', { name: '다시 미리보기', exact: true }).click();
     const updatedResponse = await inspectedAgain;
-    expect(updatedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: changedParent.version }, days: 2, workingDays: false });
+    expect(updatedResponse.request().postDataJSON()).toEqual({ hierarchy: { id: parent.id, expectedVersion: changedParent.version }, days: 2, workingDays: false,
+      expectedProjects: [{ id: parent.id, projectId: parent.projectId }] });
     const fresh = await json<SchedulePreview>(updatedResponse);
     expect(fresh.previewId).toBeTruthy();
     expect(fresh.previewId).not.toBe(first.previewId);

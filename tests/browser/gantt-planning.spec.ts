@@ -116,7 +116,8 @@ test('업무 달력의 날짜 예외를 저장하고 근무일 이동은 달력 
     await page.getByRole('button', { name: '변경 미리보기', exact: true }).click();
     const reviewed = await previewResponse;
     expect(reviewed.ok(), await reviewed.text()).toBeTruthy();
-    expect(reviewed.request().postDataJSON()).toEqual({ issueIds: [item.id], days: 2, workingDays: true });
+    expect(reviewed.request().postDataJSON()).toEqual({ issueIds: [item.id], days: 2, workingDays: true,
+      expectedProjects: [{ id: item.id, projectId: item.projectId }] });
     const proposal = await reviewed.json() as SchedulePreview;
     expect(proposal.previewId).toBeTruthy();
     const preview = page.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });

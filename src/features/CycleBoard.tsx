@@ -1,16 +1,17 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
-import { ArrowDown, ArrowDownUp, ArrowRightLeft, ArrowUp, CalendarRange, ListTodo, Loader2, Plus, Search, X } from 'lucide-react';
+import { ArrowDown, ArrowDownUp, ArrowRightLeft, ArrowUp, CalendarRange, ListChecks, ListTodo, Loader2, Plus, Search, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import { orderProjectIssues } from '../../shared/issue-view';
-import { PRIORITY, type CycleBoardMoveInput, type CycleBoardMoveResult, type FeatureProps, type Issue, type PlanningItem, type WorkflowStatus } from '../../shared/types';
+import { ISSUE_BULK_EDIT_LIMIT, PRIORITY, type CycleBoardMoveInput, type CycleBoardMoveResult, type FeatureProps, type Issue, type PlanningItem, type WorkflowStatus } from '../../shared/types';
 import { allowedNextStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CycleProgress } from './CycleProgress';
+import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
 import { NewIssueModal } from './NewIssueModal';
 import { errorMessage } from './schedule-utils';
@@ -66,6 +67,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const held = useRef<Hold | null>(null);
   const moveOpener = useRef<HTMLButtonElement | null>(null);
   const searchInput = useRef<HTMLInputElement>(null);
+  const bulkToggle = useRef<HTMLButtonElement>(null);
+  const bulkControls = useRef<HTMLDivElement>(null);
   const rowOpeners = useRef(new Map<string, HTMLButtonElement>());
   const dragSource = useRef<DragSource | null>(null);
   const focusTarget = useRef<string | null>(null);
@@ -87,12 +90,14 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const cycleId = cycle?.id;
   const backlog = issues.filter(issue => cycleIdOf(issue) === null);
   const members = cycleId ? issues.filter(issue => cycleIdOf(issue) === cycleId) : [];
-  const writable = Boolean(order && actorId && !pending && !hold && !creation && !statusEdit);
-  const canEditStatus = Boolean(actorId && !pending && !hold && !moveIssue && !creation && !statusEdit);
   const terms = query.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
   const matchesSearch = (issue: Issue) => terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
   const lanes = [{ items: backlog, targetCycle: undefined }, ...(cycle ? [{ items: members, targetCycle: cycle }] : [])]
     .map(lane => ({ ...lane, visible: lane.items.filter(matchesSearch) }));
+  const visibleIssues = lanes.flatMap(lane => lane.visible);
+  const bulk = useIssueBulkEdit({ data, projectId, actorId, refresh, notify }, visibleIssues);
+  const writable = Boolean(order && actorId && !pending && !hold && !creation && !statusEdit && !bulk.active);
+  const canEditStatus = Boolean(actorId && !pending && !hold && !moveIssue && !creation && !statusEdit && !bulk.active);
   const created = feedback?.created && (issues.find(issue => issue.id === feedback.created?.id) ?? feedback.created);
   const createdMatchesSearch = created && matchesSearch(created);
   const createdInLane = created && (cycleIdOf(created) === null || cycleIdOf(created) === cycleId);
@@ -197,8 +202,24 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
 
   function reviewIssue(issue: Issue, opener: HTMLButtonElement) {
     if (!onOpenIssueForReview) { openIssue(issue.id); return; }
-    const issueIds = lanes.flatMap(lane => lane.visible.map(item => item.id));
+    const issueIds = visibleIssues.map(item => item.id);
     onOpenIssueForReview(issue.id, { issueIds, opener, fallback: searchInput.current });
+  }
+
+  function closeBulkEdit() {
+    if (!bulk.close()) return;
+    const target = visibleIssues.length ? bulkToggle.current : searchInput.current;
+    target?.focus({ preventScroll: true });
+  }
+
+  function toggleBulkEdit() {
+    if (bulk.active) { closeBulkEdit(); return; }
+    setFeedback(null);
+    bulk.open();
+    requestAnimationFrame(() => {
+      const checkbox = bulkControls.current?.querySelector<HTMLInputElement>('input:not(:disabled)');
+      (checkbox ?? bulkControls.current)?.focus({ preventScroll: true });
+    });
   }
 
   function openStatusEdit(issue: Issue, current: WorkflowStatus, choices: WorkflowStatus[], opener: HTMLButtonElement) {
@@ -376,18 +397,23 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   return <><section className="cycle-board" aria-labelledby={`${uid}-title`} inert={Boolean(creation || statusEdit)}>
     <header className="cycle-board-heading">
       <div><h1 id={`${uid}-title`}>백로그 · 사이클</h1><p>{project.name}</p></div>
-      <button type="button" className="btn" onClick={onOpenIssues}><ListTodo size={16} aria-hidden="true" /> 업무 목록</button>
+      <div className="cycle-board-heading-actions">
+        <button type="button" className="btn issue-bulk-toggle" ref={bulkToggle} aria-pressed={bulk.active}
+          disabled={!actorId || pending || Boolean(hold || moveIssue || creation || statusEdit) || bulk.busy || (!bulk.active && !visibleIssues.length)}
+          onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" /> 일괄 편집</button>
+        <button type="button" className="btn" onClick={onOpenIssues}><ListTodo size={16} aria-hidden="true" /> 업무 목록</button>
+      </div>
     </header>
     <div className="cycle-board-toolbar">
       <div>
         <label htmlFor={`${uid}-search`}>업무 검색</label>
         <div className="cycle-board-search"><Search size={16} aria-hidden="true" />
           <input id={`${uid}-search`} className="field" type="text" ref={searchInput} value={query} maxLength={200}
-            placeholder="업무 키 또는 제목" onChange={event => onQueryChange(event.currentTarget.value)} /></div>
+            placeholder="업무 키 또는 제목" disabled={bulk.locked} onChange={event => onQueryChange(event.currentTarget.value)} /></div>
       </div>
       <div>
         <label htmlFor={`${uid}-cycle`}>보고 있는 사이클</label>
-        <select id={`${uid}-cycle`} className="field" value={cycleId ?? ''} disabled={pending || !cycles.length}
+        <select id={`${uid}-cycle`} className="field" value={cycleId ?? ''} disabled={pending || bulk.locked || !cycles.length}
           onChange={event => { if (event.currentTarget.value) onChangeCycle(event.currentTarget.value); }}>
           {!cycle && <option value="">{cycles.length ? '다른 사이클 선택' : '선택할 사이클 없음'}</option>}
           {cycles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.status === 'active' ? '진행 중' : '계획'}</option>)}
@@ -403,6 +429,13 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         onClick={() => void submit(hold.attempt, true)}>이동 결과 다시 확인</button> : hold && <button className="btn btn-primary" type="button" disabled={pending}
         onClick={() => void retryRefresh()}>{hold.stage === 'conflict' ? '최신 업무 불러오기' : '화면에 다시 반영'}</button>}
     </div>}
+    {bulk.active && <>
+      <div className="cycle-board-bulk-controls" ref={bulkControls} tabIndex={-1}>
+        <IssueBulkSelectVisible editor={bulk} label="표시된 업무 전체 선택" />
+      </div>
+      <IssueBulkEdit editor={bulk} statuses={projectWorkflow(data, projectId).statuses} users={data.users} onClose={closeBulkEdit}
+        selectionNote="현재 백로그와 선택한 사이클에 표시된 업무를 선택할 수 있습니다." />
+    </>}
     {cycle && <CycleProgress cycle={cycle} actorId={actorId} data={data} projectId={projectId} openIssue={openIssue} />}
     <div className="cycle-board-lanes">
       {lanes.map(({ items, targetCycle, visible }) => {
@@ -425,7 +458,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
               </div>
               <div className="cycle-board-lane-actions">
                 {targetCycle && <button className="btn btn-ghost" type="button" onClick={() => onOpenPlanning(targetCycle.id)}>사이클 상세</button>}
-                <button className="btn btn-primary" type="button" aria-haspopup="dialog" disabled={!actorId || pending || Boolean(hold || moveIssue)}
+                <button className="btn btn-primary" type="button" aria-haspopup="dialog" disabled={!actorId || pending || bulk.active || Boolean(hold || moveIssue)}
                   onClick={event => {
                     setFeedback(null);
                     setCreation({ cycle: targetCycle ?? null, opener: event.currentTarget });
@@ -434,7 +467,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
             </div>
             {visible.length ? <ol className="cycle-board-rows">{visible.map((issue, index) => {
               const status = statusMeta(data, projectId, issue.status);
-              const choices = actorId ? allowedNextStatuses(data, issue).filter(option => option.id !== issue.status) : [];
+              const choices = actorId && !bulk.active ? allowedNextStatuses(data, issue).filter(option => option.id !== issue.status) : [];
               const statusLabelId = `${uid}-status-${issue.id}`;
               const owner = issue.assigneeId ? users.get(issue.assigneeId) : null;
               const before = visible[index - 1];
@@ -444,12 +477,13 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
               const endDate = isCalendarDate(issue.endDate) ? issue.endDate : null;
               const scheduleAction = startDate && endDate ? '간트에서 일정 보기' : '간트에서 날짜 입력';
               const statusLabel = <><i aria-hidden="true" style={{ background: status.color }} /><span id={statusLabelId}>{status.label}</span></>;
+              const selected = bulk.active && bulk.selectedIds.has(issue.id);
               return <li key={issue.id} className="cycle-board-row" data-issue-id={issue.id} data-cycle-board-card={issue.id}
-                data-drop-position={inDrop} draggable={writable}
+                data-drop-position={inDrop} data-bulk-selected={selected || undefined} draggable={writable}
                 onDragStart={event => dragStart(event, issue)} onDragEnd={clearDrag}>
                 <div className="cycle-board-row-copy">
                   <button ref={button => { if (button) rowOpeners.current.set(issue.id, button); else rowOpeners.current.delete(issue.id); }}
-                    type="button" className="cycle-board-issue" aria-label={nameOf(issue)} data-issue-review-id={issue.id}
+                    type="button" className="cycle-board-issue" aria-label={nameOf(issue)} data-issue-review-id={issue.id} disabled={bulk.locked}
                     onClick={event => reviewIssue(issue, event.currentTarget)}>
                     <span>{issue.key}</span><span aria-hidden="true">·</span><strong>{issue.title}</strong>
                   </button>
@@ -465,14 +499,17 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                   <div className="cycle-board-row-schedule">
                     <span>시작일 {startDate ? <time dateTime={startDate}>{startDate}</time> : '미정'}</span>
                     <span>종료일 {endDate ? <time dateTime={endDate}>{endDate}</time> : '미정'}</span>
-                    {onOpenIssueSchedule && <button className="btn btn-ghost" type="button" disabled={pending}
+                    {onOpenIssueSchedule && <button className="btn btn-ghost" type="button" disabled={pending || bulk.locked}
                       aria-label={`${issue.key} ${scheduleAction}`} onClick={() => {
                         if (targetCycle) onOpenIssueSchedule(issue.id, targetCycle.id);
                         else onOpenIssueSchedule(issue.id);
                       }}><CalendarRange size={15} aria-hidden="true" />{scheduleAction}</button>}
                   </div>
                 </div>
-                <div className="cycle-board-row-actions">
+                {bulk.active ? <label className="issue-bulk-select-control cycle-board-row-select">
+                  <input type="checkbox" aria-label={`${issue.key} 업무 선택`} checked={selected}
+                    disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} />
+                </label> : <div className="cycle-board-row-actions">
                   <button className="btn btn-ghost" type="button" aria-label={`${issue.key} 위로 이동`} title="위로 이동"
                     aria-disabled={!writable || !before} onClick={() => { if (before) move(issue, { cycleId: targetId, anchorId: before.id, position: 'before' }); }}>
                     <ArrowUp size={15} aria-hidden="true" />
@@ -486,7 +523,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                       moveOpener.current = event.currentTarget;
                       setMoveIssue(issue);
                     }}>사이클 이동</button>
-                </div>
+                </div>}
               </li>;
             })}</ol> : <p className="cycle-board-empty">{terms.length ? '검색에 맞는 업무가 없습니다.' : '아직 배정된 업무가 없습니다.'}</p>}
           </section>;

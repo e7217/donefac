@@ -160,6 +160,7 @@ export class DocumentTreeCopyService {
     ])).digest('hex');
     const preview: DocumentTreeCopyPreview = {
       ...options, sourceDocumentId, token, documents: documents.map(({ id, title, version }) => ({ id, title, version })),
+      destination: { projectName: targetProject?.name ?? null, parents: destinationAncestors.toReversed().map(({ id, title }) => ({ id, title })) },
       attachmentCount: assetPlan.attachmentCount, attachmentBytes: assetPlan.attachmentBytes, warnings: assetPlan.warnings,
     };
     return { preview, documents, assetPlan, authorizedOrigins, customOrders };

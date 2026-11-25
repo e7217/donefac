@@ -109,6 +109,36 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
     await expect(issueTitle).toHaveValue('저장 중인 티켓 제목 초안');
     await expect(comment).toHaveValue('전송 전 댓글 초안');
     expect(calls).toEqual([`GET ${projectByPath}`, `GET ${objectPath}`, `GET ${projectPath}`, `GET ${objectPath}`]);
+
+    await add.click();
+    await url.fill(copied);
+    const attachedAgain = waitForPost();
+    await connect.click();
+    const newAttachment = await attachedAgain;
+    expect(newAttachment.status()).toBe(201);
+    const currentLink = await newAttachment.json() as GitlabLink;
+    await current.getByRole('button', { name: '수동 연결 다시 확인', exact: true }).click();
+    const recheckSubmit = recheck.getByRole('button', { name: 'GitLab 링크 연결', exact: true });
+    await expect(recheckSubmit).toBeEnabled();
+    const readCount = calls.length;
+    const coworkerRemoved = await request.delete(`${route}/${encodeURIComponent(currentLink.id)}`, {
+      params: { expectedManualLinkId: currentLink.manualLinkId! }, headers: { 'X-Actor-Id': initial.users[1].id },
+    });
+    expect(coworkerRemoved.ok()).toBeTruthy();
+    const stale = waitForPost();
+    await recheckSubmit.click();
+    const refusal = await stale;
+    expect(refusal.status()).toBe(409);
+    expect(refusal.request().postDataJSON()).toMatchObject({ expectedLinkId: currentLink.id, expectedManualLinkId: currentLink.manualLinkId });
+    await expect(recheck.getByRole('alert')).toContainText('GitLab 수동 연결이 변경되었습니다');
+    await expect(current).toHaveCount(0);
+    await expect(recheck).toHaveAttribute('aria-busy', 'false');
+    await expect(recheckSubmit).toBeDisabled();
+    expect(calls).toHaveLength(readCount);
+    await recheck.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(add).toBeFocused();
+    await expect(issueTitle).toHaveValue('저장 중인 티켓 제목 초안');
+    await expect(comment).toHaveValue('전송 전 댓글 초안');
   } finally {
     const removed = await request.delete(`/api/issues/${issue.id}`);
     if (removed.ok()) {

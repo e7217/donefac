@@ -148,7 +148,8 @@ test('전체 프로젝트 간트는 프로젝트 필터를 유지하고 각 달�
     const preview = waitPost(page, '/api/schedule/manual-preview');
     await button(page, '변경 미리보기').click();
     const previewResponse = await preview;
-    expect(previewResponse.request().postDataJSON()).toEqual({ issueIds: expect.arrayContaining([first.id, second.id]), days: 1, workingDays: true });
+    expect(previewResponse.request().postDataJSON()).toEqual({ issueIds: expect.arrayContaining([first.id, second.id]), days: 1, workingDays: true,
+      expectedProjects: expect.arrayContaining([first, second].map(({ id, projectId }) => ({ id, projectId }))) });
     const proposed = await json<SchedulePreview>(previewResponse);
     expect(proposed.previewId).toBeTruthy();
     expect(proposed.changes).toHaveLength(2);

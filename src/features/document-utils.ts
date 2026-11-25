@@ -1,4 +1,4 @@
-import type { DocPage, DocRevision, RichContent } from '../../shared/types';
+import type { DocPage, DocRevision, DocumentTreeDestination, RichContent } from '../../shared/types';
 import { renderDocumentPropertiesMarkdown, renderStandaloneDocumentTableMarkdown } from '../../shared/document-export-markdown';
 import { CALLOUT_LABELS, ISSUE_SUMMARY_GROUP_LABELS, documentPlainText, documentTocOptions, isCalloutVariant, isIssueSummaryGroupBy, isStatusBadgeTone } from '../../shared/document-nodes';
 import { documentNodes } from '../../shared/document-references';
@@ -19,6 +19,27 @@ export function documentAncestors(page: DocPage, pages: ReadonlyMap<string, DocP
     parentId = parent.parentId;
   }
   return parents.reverse();
+}
+
+const TOP_LEVEL_DOCUMENT_LABEL = '최상위 문서';
+
+function documentPathLabel(path: readonly Pick<DocPage, 'title'>[]) {
+  return path.length ? path.map(page => page.title || '제목 없는 문서').join(' / ') : TOP_LEVEL_DOCUMENT_LABEL;
+}
+
+export function documentParentLabels(parents: readonly DocPage[], documents: readonly DocPage[]) {
+  const pages = new Map(documents.map(page => [page.id, page]));
+  const paths = parents.map(parent => ({ id: parent.id, label: documentPathLabel([...documentAncestors(parent, pages), parent]) }));
+  const counts = new Map([[TOP_LEVEL_DOCUMENT_LABEL, 1]]);
+  for (const { label } of paths) counts.set(label, (counts.get(label) ?? 0) + 1);
+  return new Map(paths.map(({ id, label }) => [id, (counts.get(label) ?? 0) > 1 ? `${label} · ${id}` : label]));
+}
+
+export function documentDestinationLabel(destination: DocumentTreeDestination, parentLabels: ReadonlyMap<string, string>) {
+  const path = documentPathLabel(destination.parents);
+  const selected = destination.parents.at(-1);
+  const ambiguous = selected && parentLabels.get(selected.id) === `${path} · ${selected.id}`;
+  return `${destination.projectName ?? '팀 공통 문서'} / ${ambiguous ? `${path} · ${selected.id}` : path}`;
 }
 
 export function documentRevisionLabel(revision: Pick<DocRevision, 'version' | 'confluenceSourceVersion'>): string {

@@ -18,7 +18,7 @@ import { calculateTeamFollowUpSchedule, teamBatchFollowUpScope, TeamFollowUpSche
 import type { Store } from './store.js';
 
 export class SchedulePasteError extends Error {
-  constructor(public status: number, message: string, public details?: { reason: 'schedule_preview_stale' } | { currentVersion: number }) { super(message); }
+  constructor(public status: number, message: string, public details?: { reason: 'schedule_preview_stale' | 'project_changed' } | { currentVersion: number }) { super(message); }
 }
 
 interface ScheduleVersions {
@@ -324,12 +324,28 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
     return { changes, ...followUp };
   }
   const { issueIds, days, workingDays } = raw;
-  if (Object.keys(raw).length !== 3 + Number(hasFollowUp) + Number(hasTeamBlockers) || typeof days !== 'number' || !Number.isSafeInteger(days) ||
+  const hierarchyTarget = Object.hasOwn(raw, 'hierarchy');
+  const targetField = hierarchyTarget ? 'hierarchy' : 'issueIds';
+  if (Object.keys(raw).some(key => ![targetField, 'days', 'workingDays', 'expectedProjects', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key)) ||
+      typeof days !== 'number' || !Number.isSafeInteger(days) ||
       Math.abs(days) > MAX_WORKING_DURATION_DAYS || typeof workingDays !== 'boolean') throw invalid();
-  if (Object.hasOwn(raw, 'hierarchy')) return { hierarchy: parseScheduleIssue(raw.hierarchy), days, workingDays, ...followUp };
-  if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_SCHEDULE_MANUAL_ISSUES ||
-      !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length) throw invalid();
-  return { issueIds, days, workingDays, ...followUp };
+  let selection: { hierarchy: ReturnType<typeof parseScheduleIssue> } | { issueIds: string[] };
+  if (hierarchyTarget) selection = { hierarchy: parseScheduleIssue(raw.hierarchy) };
+  else {
+    if (!Array.isArray(issueIds) || !issueIds.length || issueIds.length > MAX_SCHEDULE_MANUAL_ISSUES ||
+        !issueIds.every(isId) || new Set(issueIds).size !== issueIds.length) throw invalid();
+    selection = { issueIds };
+  }
+  let expectedProjects: { id: string; projectId: string }[] | undefined;
+  if (Object.hasOwn(raw, 'expectedProjects')) {
+    const ids = new Set('hierarchy' in selection ? [selection.hierarchy.id] : selection.issueIds);
+    if (!Array.isArray(raw.expectedProjects) || raw.expectedProjects.length !== ids.size) throw invalid();
+    expectedProjects = Array.from(raw.expectedProjects, (value: unknown) => {
+      if (!isRecord(value) || Object.keys(value).length !== 2 || !isId(value.id) || !isId(value.projectId) || !ids.delete(value.id)) throw invalid();
+      return { id: value.id, projectId: value.projectId };
+    });
+  }
+  return { ...selection, days, workingDays, ...followUp, ...(expectedProjects && { expectedProjects }) };
 }
 
 function parseRowDependencyEdit(raw: unknown): ScheduleRowDependencyEdit {
@@ -993,11 +1009,20 @@ export class SchedulePasteService {
     const input = parseManualPreviewInput(raw);
     const shift = 'changes' in input ? null : input;
     const hierarchy = 'hierarchy' in input ? input.hierarchy : null;
+    const expectedProjects = new Map(shift?.expectedProjects?.map(({ id, projectId }) => [id, projectId]));
+    const checkProject = (issue: Issue) => {
+      const expected = expectedProjects.get(issue.id);
+      if (expected !== undefined && expected !== issue.projectId) {
+        throw new SchedulePasteError(409, `${issue.key}: 선택한 업무가 다른 프로젝트로 이동했습니다. 미리보기를 닫고 현재 프로젝트에서 다시 선택해 주세요.`,
+          { reason: 'project_changed' });
+      }
+    };
     const shiftTarget = (id: string) => ({ id, expectedVersion: undefined, startDate: null, endDate: null });
     return this.store.transaction(() => {
       this.prune();
       const anchor = hierarchy ? this.store.get<Issue>('issues', hierarchy.id) : null;
       if (hierarchy && !anchor) throw new SchedulePasteError(404, '상위 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
+      if (anchor) checkProject(anchor);
       let selected = 'changes' in input ? input.changes : 'issueIds' in input ? input.issueIds.map(shiftTarget) : [];
       const scope = anchor ? { projectId: anchor.projectId } : this.scopeForIssues(selected.map(({ id }) => id));
       const state = this.scopeState(scope);
@@ -1033,6 +1058,7 @@ export class SchedulePasteService {
       for (const { id, expectedVersion, startDate, endDate } of selected) {
         const issue = byId.get(id);
         if (!issue) throw new SchedulePasteError(404, '선택한 업무가 삭제되었거나 존재하지 않습니다. 업무를 다시 선택해 주세요.');
+        if (!hierarchy) checkProject(issue);
         if (expectedVersion !== undefined && issue.version !== expectedVersion) {
           throw new SchedulePasteError(409, `${issue.key}: 업무가 변경되었습니다. 최신 업무를 불러온 뒤 다시 미리 확인해 주세요.`);
         }

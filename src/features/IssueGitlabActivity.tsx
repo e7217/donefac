@@ -8,7 +8,7 @@ import { GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SC
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName } from '../../shared/gitlab-links';
 import { gitlabPipelineSource } from '../../shared/gitlab-pipeline-source';
 import { GITLAB_DEPLOYMENT_STATES, type FeatureProps, type GitlabBranchMergeRequestAttachment, type GitlabDeployment,
-  type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabPipelineReviewReplacement, type GitlabSettings,
+  type GitlabDeploymentReviewResult, type GitlabIssueRefreshResult, type GitlabLink, type GitlabManualLinkRequest, type GitlabPipelineReviewReplacement, type GitlabSettings,
   type GitlabStatusSuggestion } from '../../shared/types';
 import { api, ApiError, apiResponse, post, remove } from '../lib/api';
 import type { GitlabIssueReviewSelection } from '../lib/issue-review';
@@ -266,7 +266,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       if (controller.signal.aborted) return;
       setSettings(result);
       setDraft(current => {
-        if (!current || result.projectIds.includes(Number(current.repositoryId))) return current;
+        if (!current || current.existing || result.projectIds.includes(Number(current.repositoryId))) return current;
         const selectOnlyRepo = defaultRepository && !current.repositoryId && result.projectIds.length === 1;
         return { ...current, repositoryId: selectOnlyRepo ? String(result.projectIds[0]) : '' };
       });
@@ -335,7 +335,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   }
 
   const noRepository = Boolean(settings && (!settings.baseUrl || !settings.projectIds.length));
-  const canSubmit = Boolean(draft?.url.trim() && settings && !noRepository &&
+  const manualRecheck = draft?.existing;
+  const manualLinkChanged = manualRecheck && !visibleLinks.some(link =>
+    link.id === manualRecheck.id && link.manualLinkId === manualRecheck.manualLinkId);
+  const canSubmit = Boolean(draft?.url.trim() && settings && !noRepository && !manualLinkChanged &&
     (draft.repositoryId ? settings.projectIds.includes(Number(draft.repositoryId)) : !draft.existing));
   const target = unlinkTarget && visibleLinks.find(link => link.id === unlinkTarget.id);
   const staleTarget = unlinkTarget && target?.manualLinkId !== unlinkTarget.manualLinkId;
@@ -344,14 +347,19 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     event.preventDefault();
     if (!draft || !settings || !canSubmit || loading) return;
     void mutate(async () => {
-      const link = await post<GitlabLink>(path, {
+      const input: GitlabManualLinkRequest = {
         ...(draft.repositoryId ? { repositoryId: Number(draft.repositoryId) } : {}),
+        ...(draft.existing ? { expectedLinkId: draft.existing.id, expectedManualLinkId: draft.existing.manualLinkId } : {}),
         url: draft.url.trim(), expectedSettingsVersion: settings.version,
-      });
+      };
+      const link = await post<GitlabLink>(path, input);
       showLinkedActivity(link);
       await afterChange(draft.existing ? 'GitLab 연결을 다시 확인했습니다.' : 'GitLab 연결을 저장했습니다.');
       closeAction();
-    }, () => readSettings(false));
+    }, async () => {
+      await readSettings(false);
+      if (draft.existing) await refresh().catch(() => undefined);
+    });
   }
 
   function unlink() {
@@ -593,15 +601,20 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         <input ref={linkInput} className="field" type="url" value={draft.url} autoComplete="off" spellCheck={false} maxLength={4000} required disabled={controlsDisabled}
           aria-describedby={`${formHeading}-url-help`} onChange={event => setDraft({ ...draft, url: event.target.value })} />
       </label>
-      <p id={`${formHeading}-url-help`} className="gitlab-activity-hint">브랜치, 전체 SHA가 포함된 커밋, MR, 파이프라인 주소를 연결할 수 있습니다.</p>
+      <p id={`${formHeading}-url-help`} className="gitlab-activity-hint">{draft.existing
+        ? '같은 GitLab 활동의 주소를 확인해 주세요.' : '브랜치, 전체 SHA가 포함된 커밋, MR, 파이프라인 주소를 연결할 수 있습니다.'}</p>
       <label className="issue-form-label">GitLab 저장소
-        <select className="field" value={draft.repositoryId} disabled={controlsDisabled || loading || !settings || noRepository} required={Boolean(draft.existing)}
+        <select className="field" value={draft.repositoryId} disabled={controlsDisabled || loading || !settings || noRepository || Boolean(draft.existing)}
           onChange={event => setDraft({ ...draft, repositoryId: event.target.value })}>
           <option value="">{draft.existing ? '저장소 선택' : '주소로 저장소 확인'}</option>
+          {draft.existing && !settings?.projectIds.includes(draft.existing.projectId) &&
+            <option value={draft.existing.projectId}>저장소 #{draft.existing.projectId}</option>}
           {settings?.projectIds.map(id => <option value={id} key={id}>저장소 #{id}</option>)}
         </select>
       </label>
-      {actionError && <p className="issue-form-error" role="alert">{actionError}</p>}
+      {(actionError || manualLinkChanged) && <p className="issue-form-error" role="alert">
+        {manualLinkChanged ? 'GitLab 수동 연결이 변경되었습니다. 최신 활동에서 다시 선택해 주세요.' : actionError}
+      </p>}
       <div className="gitlab-activity-actions">
         <button className="btn btn-ghost" type="button" disabled={busy} onClick={closeAction}>취소</button>
         <button className="btn" type="button" disabled={controlsDisabled || loading} onClick={() => void readSettings(true)}>
