@@ -57,6 +57,64 @@ async function sendUpdate(p:Peer,epoch:string,update:Uint8Array,requestId=random
   p.send({type:'update',epoch,requestId,update:Buffer.from(update).toString('base64')});return p.next('ack',requestId);
 }
 
+test('recovery copy retries share one durable document while retaining each actor and recovered generation', async () => {
+  const f = await fixture();
+  try {
+    const { document: source, epoch } = await make(f);
+    const path = `/documents/${source.id}/recovery-copy`;
+    const content = { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '전송 전 복구한 본문' }] }] };
+    const payload = { epoch, content, labels: ['복구'] };
+    assert.equal((await f.request(path, 'POST', [])).status, 400);
+    assert.equal((await f.request(path, 'POST', { content })).status, 400);
+    assert.equal((await f.request(path, 'POST', { ...payload, content: { type: 'paragraph' } })).status, 422);
+    const responses = await Promise.all([f.request(path, 'POST', payload),
+      f.request(path, 'POST', { ...payload, content: { ...content, attrs: {} } })]);
+    assert.deepEqual(responses.map(response => response.status).sort(), [200, 201]);
+    const document = responses[0].data;
+    assert.deepEqual(responses[1].data, document);
+    assert.equal(document.plainText, '전송 전 복구한 본문');
+    assert.deepEqual(document.labels, ['복구']);
+    const original = (await f.request(`/documents/${source.id}/collaboration`)).data.document;
+    assert.equal(original.plainText, '원본');
+    assert.equal((await f.request(`/documents/${document.id}/revisions`)).data.length, 1);
+
+    const edited = await f.request(`/documents/${document.id}`, 'PATCH', { expectedVersion: document.version, title: '팀이 정리한 사본' });
+    assert.equal(edited.status, 200);
+    const trash = await f.request(`/documents/${document.id}`, 'DELETE');
+    assert.equal(trash.status, 200);
+    assert.equal((await f.request(path, 'POST', payload)).status, 409);
+    assert.equal((await f.request(`/trash/${trash.data.trashEntryId}/restore`, 'POST', {})).status, 200);
+    const backup = await f.request('/export');
+    assert.equal((await f.request('/import', 'POST', { data: backup.data })).status, 200);
+    const replay = await f.request(path, 'POST', { content, epoch, labels: [] });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data.id, document.id);
+    assert.equal(replay.data.title, edited.data.title);
+    assert.deepEqual(replay.data.labels, ['복구']);
+
+    const [teammate, otherEpoch] = await Promise.all([
+      f.request(path, 'POST', payload, 'user-seo'), f.request(path, 'POST', { ...payload, epoch: randomUUID() }),
+    ]);
+    assert.equal(teammate.status, 201);
+    assert.equal(otherEpoch.status, 201);
+    assert.equal(new Set([document.id, teammate.data.id, otherEpoch.data.id]).size, 3);
+
+    assert.equal((await f.request(`/documents/${source.id}`, 'DELETE')).status, 200);
+    const recoveredFromTrash = await f.request(path, 'POST', { ...payload, epoch: randomUUID() });
+    assert.equal(recoveredFromTrash.status, 201);
+    assert.equal(recoveredFromTrash.data.projectId, source.projectId);
+    assert.equal(recoveredFromTrash.data.plainText, document.plainText);
+
+    const key = await f.request('/api-keys', 'POST', { name: '복구 사본 정책 확인', access: 'write', projectIds: null });
+    assert.equal(key.status, 201);
+    const scoped = await fetch(`${f.base}/api/v1${path}`, { method: 'POST', headers: {
+      'Content-Type': 'application/json', Authorization: `Bearer ${key.data.token}`,
+    }, body: JSON.stringify(payload) });
+    assert.equal(scoped.status, 403);
+    await scoped.body?.cancel();
+  } finally { await f.close(); f.remove(); }
+});
+
 test('two clients merge concurrent text without duplicate initialization; ACK commits survive restart and checkpoints are immutable',async()=>{
   const f=await fixture();let reopened:Awaited<ReturnType<typeof fixture>>|undefined;const peers:Peer[]=[];
   try{

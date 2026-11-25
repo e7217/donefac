@@ -1144,6 +1144,7 @@ type IssueContext = { keys: ReadonlyMap<string, string>; openIssue: (link: Gitla
 type ActivityIssueReview = { keys: IssueContext['keys']; openIssue: OpenIssueForReview; fallbackRef: RefObject<HTMLElement | null> };
 type ActivityPagination = { pages: GitlabActivityFilters['pages']; onChangePage: (kind: GitlabLink['kind'], page: number) => void };
 type ActivitySelection = { link: GitlabLink; rowRef: RefObject<HTMLLIElement | null> };
+export type GitlabCheckedActivity = { linkId: string; kind: GitlabLink['kind']; triggerRef: RefObject<HTMLButtonElement | null> };
 type ManualLinkActions = {
   disabled: boolean;
   verify: (link: GitlabLink, trigger: HTMLButtonElement) => void;
@@ -1161,10 +1162,11 @@ export type GitlabActivityStatusActions = {
   reviewStatus?: (link: GitlabLink, trigger: HTMLButtonElement) => void;
 };
 
-export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination, selection, onCopyActivityLink }: {
+export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
   links: readonly GitlabLink[]; issueReview?: ActivityIssueReview; issueVersions?: ReadonlyMap<string, number>;
   heading?: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
+  checkedActivity?: GitlabCheckedActivity;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
   const sharedPages = pagination !== undefined;
@@ -1183,31 +1185,38 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
   return <div className="gitlab-activity-list">{groups.map(({ group, rows }) => rows.length > 0 &&
     <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} issueVersions={issueVersions}
       heading={heading} manualActions={manualActions} statusActions={statusActions} pagination={pagination} onCopyActivityLink={onCopyActivityLink}
+      checkedActivity={checkedActivity?.kind === group.kind ? checkedActivity : undefined}
       selection={selection?.link.kind === group.kind ? selection : undefined} />)}</div>;
 }
 
-function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination, selection, onCopyActivityLink }: {
+function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
   group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; issueVersions?: ReadonlyMap<string, number>;
   heading: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
+  checkedActivity?: GitlabCheckedActivity;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
-  const [localPage, setLocalPage] = useState<number>();
+  const [localPage, setLocalPage] = useState<{ page: number; checkedActivity?: GitlabCheckedActivity }>();
+  if (checkedActivity && checkedActivity !== localPage?.checkedActivity) {
+    const index = links.findIndex(link => link.id === checkedActivity.linkId);
+    if (index !== -1) setLocalPage({ page: Math.floor(index / PAGE_SIZE) + 1, checkedActivity });
+  }
   const pageCount = Math.ceil(links.length / PAGE_SIZE);
   const selectedIndex = selection && localPage === undefined ? links.indexOf(selection.link) : 0;
   const selectedPage = Math.floor(Math.max(0, selectedIndex) / PAGE_SIZE) + 1;
-  const currentPage = Math.min(pagination ? pagination.pages[group.kind] ?? 1 : localPage ?? selectedPage, pageCount);
+  const currentPage = Math.min(pagination ? pagination.pages[group.kind] ?? 1 : localPage?.page ?? selectedPage, pageCount);
   const offset = (currentPage - 1) * PAGE_SIZE;
   const Icon = group.Icon;
   function changePage(page: number) {
     if (pagination) pagination.onChangePage(group.kind, page);
-    else setLocalPage(page);
+    else setLocalPage({ page, checkedActivity });
   }
 
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
     <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
       issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} onCopyActivityLink={onCopyActivityLink}
+      checkedActivityTrigger={checkedActivity?.linkId === link.id ? checkedActivity.triggerRef : undefined}
       selectedRowRef={selection?.link === link ? selection.rowRef : undefined} />)}</ul>
     {pageCount > 1 && <nav className="gitlab-activity-pages" aria-label={`${group.label} 페이지 이동`}>
       <button className="btn btn-ghost" type="button" disabled={currentPage === 1} onClick={() => changePage(currentPage - 1)}>이전</button>
@@ -1217,9 +1226,10 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   </section>;
 }
 
-function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, selectedRowRef, onCopyActivityLink }: {
+function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, selectedRowRef, onCopyActivityLink, checkedActivityTrigger }: {
   link: GitlabLink; issueContext?: IssueContext; issueVersion?: number; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions;
   selectedRowRef?: RefObject<HTMLLIElement | null>;
+  checkedActivityTrigger?: RefObject<HTMLButtonElement | null>;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
   const selectedLabelId = useId();
@@ -1296,7 +1306,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       {onCopyActivityLink && <button className="btn btn-ghost" type="button" onClick={() => onCopyActivityLink(link.id)}>
         <Link2 size={14} aria-hidden="true" />티켓 활동 링크 복사
       </button>}
-      {statusCheck && <button className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
+      {statusCheck && <button ref={checkedActivityTrigger} className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
         disabled={statusActionDisabled} aria-busy={refreshing || undefined}
         onClick={event => statusCheck.checkStatus(link, event.currentTarget)}>
         <RefreshCw size={14} aria-hidden="true" />{refreshing ? '확인 중…' : '상태 확인'}

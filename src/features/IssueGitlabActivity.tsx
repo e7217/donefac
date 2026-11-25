@@ -15,7 +15,7 @@ import type { GitlabIssueReviewSelection } from '../lib/issue-review';
 import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, gitlabBranchMergeRequestsPath, GitlabActivityList,
   GitlabActivityRefresh, gitlabLinkedStatusRefreshPath, gitlabMergeRequestPipelinePath, isGitlabLinkedStatusRefreshResult,
   matchesBranchMergeRequestLink, matchesMergeRequestPipelineLink,
-  type BranchMergeRequest, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
+  type BranchMergeRequest, type GitlabCheckedActivity, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { deploymentSource, gitlabDeploymentKey, gitlabDeploymentStatusLabels, IssueGitlabDeployments } from './GitlabDeployments';
 
@@ -122,6 +122,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const visibleLinks = view.source === links ? view.rows : links;
   const [activityScope, setActivityScope] = useState<GitlabActivityScope>('all');
   const [activitySearch, setActivitySearch] = useState({ input: '', query: '', invalid: false });
+  const [checkedActivity, setCheckedActivity] = useState<GitlabCheckedActivity>();
+  const checkedActivityTrigger = useRef<HTMLButtonElement>(null);
   const activitySearchInput = useRef<HTMLInputElement>(null);
   const matchingLinks = useMemo(() => filterGitlabActivityLinks(undefined, visibleLinks,
     { scope: activityScope, query: activitySearch.query, pages: {} }), [visibleLinks, activityScope, activitySearch.query]);
@@ -175,7 +177,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const activityAttachment = useRef<AbortController | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   const opener = useRef<HTMLButtonElement | null>(null);
-  const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean; fallbackToActivity?: boolean } | null>(null);
+  const focusAfterClose = useRef<{ target: HTMLButtonElement | null; revealStatusReview?: boolean; restoreCheckedActivity?: boolean;
+    fallbackToActivity?: boolean } | null>(null);
   const statusReviewResult = useRef<HTMLDivElement>(null);
   const linkInput = useRef<HTMLInputElement>(null);
   const cancelUnlink = useRef<HTMLButtonElement>(null);
@@ -214,10 +217,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   }, [dirty, busy, branchDraft, discard, onDraftChange]);
   useLayoutEffect(() => {
     if (draft || unlinkTarget || branchOpen || busy || disabled || !focusAfterClose.current) return;
-    const { target, revealStatusReview, fallbackToActivity } = focusAfterClose.current;
+    const { target, revealStatusReview, restoreCheckedActivity, fallbackToActivity } = focusAfterClose.current;
     focusAfterClose.current = null;
     if (revealStatusReview && statusReviewResult.current) {
       statusReviewResult.current.focus();
+      return;
+    }
+    if (restoreCheckedActivity && checkedActivityTrigger.current) {
+      checkedActivityTrigger.current.focus();
       return;
     }
     (target?.isConnected && !target.disabled ? target : fallbackToActivity ? activityHeading.current : addButton.current)?.focus({ preventScroll: true });
@@ -230,12 +237,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       setActivitySearch(current => ({ ...current, invalid: true }));
       return;
     }
+    if (query !== activitySearch.query) setCheckedActivity(undefined);
     setActivitySearch({ input: query, query, invalid: false });
   }
 
   function resetActivityFilters() {
     setActivityScope('all');
     setActivitySearch({ input: '', query: '', invalid: false });
+    setCheckedActivity(undefined);
     activitySearchInput.current?.focus({ preventScroll: true });
   }
 
@@ -417,7 +426,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     }
   }
 
-  async function runStatusCheck(trigger: HTMLButtonElement, check: CheckingFeedback, run: (controller: AbortController) => Promise<void>) {
+  async function runStatusCheck(trigger: HTMLButtonElement, check: CheckingFeedback, run: (controller: AbortController) => Promise<GitlabLink | void>) {
     if (controlsDisabled || actionOpen || pending.current) return;
     const hadFocus = document.activeElement === trigger;
     const controller = new AbortController();
@@ -425,8 +434,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     pending.current = true;
     setBusy(true);
     setRefreshFeedback(check);
+    let verified: GitlabLink | void = undefined;
     try {
-      await run(controller);
+      verified = await run(controller);
     } catch (cause) {
       if (!controller.signal.aborted) {
         setRefreshFeedback({ kind: 'failed', message: errorMessage(cause) });
@@ -439,7 +449,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       pending.current = false;
       if (!controller.signal.aborted) {
         if (hadFocus && (document.activeElement === document.body || document.activeElement === trigger)) {
-          focusAfterClose.current = { target: trigger, revealStatusReview: check.action === 'status-review', fallbackToActivity: true };
+          const checked = check.action === 'refresh' && verified;
+          if (checked) setCheckedActivity({ linkId: checked.id, kind: checked.kind, triggerRef: checkedActivityTrigger });
+          focusAfterClose.current = { target: trigger, revealStatusReview: check.action === 'status-review',
+            restoreCheckedActivity: Boolean(checked), fallbackToActivity: true };
         }
         setBusy(false);
       }
@@ -486,6 +499,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         reviewedPipeline: reviewSelected && result.pipelineReview?.replacement && !result.statusReview ? verified : undefined,
         selectedReview: reviewSelected && verified ? result.statusReview ? 'reviewed' : 'no-proposal' : undefined,
         verifiedState: verified ? { label: gitlabLinkLabel(verified), state: gitlabActivityStateLabel(verified.state) } : undefined });
+      return verified;
     });
   }
 
@@ -607,7 +621,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
       <label className="issue-form-label">GitLab 활동 범위
         <select className="field" value={activityScope} disabled={controlsDisabled} onChange={event => {
           const scope = GITLAB_ACTIVITY_SCOPES.find(value => value === event.currentTarget.value);
-          if (scope) setActivityScope(scope);
+          if (scope) {
+            setActivityScope(scope);
+            setCheckedActivity(undefined);
+          }
         }}>
           {GITLAB_ACTIVITY_SCOPES.map(value => <option value={value} key={value}>{GITLAB_ACTIVITY_SCOPE_LABELS[value]}</option>)}
         </select>
@@ -628,6 +645,7 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     {matchingLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
       links={matchingLinks} issueVersions={new Map([[issueId, issueVersion]])}
       selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
+      checkedActivity={checkedActivity}
       onCopyActivityLink={onCopyActivityLink}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,

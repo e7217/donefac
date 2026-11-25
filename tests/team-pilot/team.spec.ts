@@ -458,7 +458,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     await expect(editor(delayed.page)).toHaveAttribute('contenteditable', 'false');
     await expect(editor(delayed.page)).toContainText(staleMarker);
     const copyResponse = delayed.page.waitForResponse(response =>
-      response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/documents');
+      response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/documents/${fixture.documentId}/recovery-copy`);
     await delayed.page.getByRole('button', { name: '사본으로 보관', exact: true }).click();
     const savedCopy = await copyResponse;
     expect(savedCopy.status()).toBe(201);

@@ -447,6 +447,10 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 빈 문서와 내장·팀 양식 만들기에도 같은 요청 ID 흐름을 사용한다. 생성이 확인된 뒤에는 저장한 문서 ID로 목록 갱신과 문서 열기를 재시도한다.
 
+## 공동 편집 복구 사본
+
+팀 브라우저는 `POST /api/documents/:id/recovery-copy`에 `{epoch, content, labels?}`를 보낸다. 같은 원본 문서·작업자·편집 세대·본문으로 처음 사본을 만들면 `201`, 이미 만든 사본을 다시 요청하면 현 사본과 `200`을 반환한다. 사본이 휴지통에 있으면 `409`로 복원을 안내한다. 이 경로는 브라우저용 `/api`에서 제공한다.
+
 ## 티켓에서 새 연결 문서 만들기
 
 브라우저의 `POST /api/issues/:id/documents`에 `X-Actor-Id`와 `{requestId,expectedIssueProjectId,title,projectId,parentId}`를 보낸다. `requestId`는 UUID v4이고 `expectedIssueProjectId`는 검토한 티켓의 프로젝트다. `projectId: null`은 팀 공통 공간이고 `parentId: null`은 최상위다. 저장할 `content`, `icon`, `labels`를 선택적으로 보내거나 `templateId`와 `expectedTemplateVersion`을 함께 보내 팀 템플릿을 사용한다. 결과는 초안이며, 상위 문서는 선택한 공간에 있어야 한다.

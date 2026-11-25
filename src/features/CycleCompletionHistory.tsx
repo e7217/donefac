@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, ChevronDown, FileText, History, Link2, RefreshCw } from 'lucide-react';
-import type { CycleCompletionRecord, CycleCompletionRecordsPage, FeatureProps, PlanningItem } from '../../shared/types';
+import { ArrowLeft, ArrowRight, ChevronDown, FileText, History, Link2, RefreshCw, SquareChartGantt } from 'lucide-react';
+import type { CycleCompletionRecord, CycleCompletionRecordsPage, FeatureProps, Issue, PlanningItem } from '../../shared/types';
+import { isCalendarDate } from '../../shared/calendar';
 import { cycleCompletionRecordHash } from '../../shared/cycle-completion-address';
 import { api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
@@ -10,6 +11,7 @@ import './cycle-completion-history.css';
 
 type RecordProps = Pick<FeatureProps, 'projectId' | 'actorId' | 'openIssue' | 'refresh'> & {
   onOpenCycleRetrospective: (id: string, recordId: string) => void;
+  onOpenCarryoverSchedule: (id: string, recordId: string) => void;
   issues: FeatureProps['data']['issues'];
 };
 type HistoryProps = RecordProps & { cycle?: Pick<PlanningItem, 'id' | 'version'> };
@@ -131,16 +133,17 @@ function HistoryBody({ cycle, ...props }: HistoryProps) {
   </div>;
 }
 
-function CompletionRecord({ id, direct = false, projectId, actorId, issues, openIssue, refresh, onOpenCycleRetrospective }:
+function CompletionRecord({ id, direct = false, projectId, actorId, issues, openIssue, refresh, onOpenCycleRetrospective, onOpenCarryoverSchedule }:
   RecordProps & { id: string; direct?: boolean }) {
   const [retry, setRetry] = useState(0);
   const path = `/projects/${encodeURIComponent(projectId)}/cycle-completion-records/${encodeURIComponent(id)}`;
   const record = useHistoryRequest<RecordView>(path, JSON.stringify([path, actorId, retry]), actorId);
-  const liveIds = useMemo(() => new Set(issues.filter(issue => issue.projectId === projectId).map(issue => issue.id)), [issues, projectId]);
+  const liveIssues = useMemo(() => new Map(issues.filter(issue => issue.projectId === projectId).map(issue => [issue.id, issue])), [issues, projectId]);
   if (!record) return <p role="status">당시 업무를 불러오는 중입니다.</p>;
   if ('error' in record) return <HistoryError message={record.error} onRetry={() => setRetry(attempt => attempt + 1)} />;
-  return <RecordDetails key={`${projectId}:${actorId}:${id}`} record={record.data} actorId={actorId} liveIds={liveIds} openIssue={openIssue}
-    refresh={refresh} openRetrospective={documentId => onOpenCycleRetrospective(documentId, id)} recordPath={path} direct={direct} />;
+  return <RecordDetails key={`${projectId}:${actorId}:${id}`} record={record.data} actorId={actorId} liveIssues={liveIssues} openIssue={openIssue}
+    refresh={refresh} openRetrospective={documentId => onOpenCycleRetrospective(documentId, id)}
+    openCarryoverSchedule={issueId => onOpenCarryoverSchedule(issueId, id)} recordPath={path} direct={direct} />;
 }
 
 function HistoryError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -150,9 +153,9 @@ function HistoryError({ message, onRetry }: { message: string; onRetry: () => vo
   </div>;
 }
 
-function RecordDetails({ record, liveIds, openIssue, openRetrospective, refresh, actorId, recordPath, direct }:
-  Pick<RecordProps, 'openIssue' | 'refresh' | 'actorId'> & { record: RecordView; liveIds: ReadonlySet<string>; recordPath: string;
-    direct: boolean; openRetrospective: (id: string) => void }) {
+function RecordDetails({ record, liveIssues, openIssue, openRetrospective, openCarryoverSchedule, refresh, actorId, recordPath, direct }:
+  Pick<RecordProps, 'openIssue' | 'refresh' | 'actorId'> & { record: RecordView; liveIssues: ReadonlyMap<string, Issue>; recordPath: string;
+    direct: boolean; openRetrospective: (id: string) => void; openCarryoverSchedule: (id: string) => void }) {
   const groups = useMemo(() => {
     const result: Record<Disposition, RecordedIssue[]> = { done: [], cancelled: [], carry: [] };
     for (const issue of record.issues) result[issue.disposition].push(issue);
@@ -179,7 +182,8 @@ function RecordDetails({ record, liveIds, openIssue, openRetrospective, refresh,
       {DISPOSITIONS.map(disposition => <li key={disposition} data-disposition={disposition}>{GROUP_NAMES[disposition]} {size(counts[disposition])}</li>)}
     </ul>
     {DISPOSITIONS.map(disposition => groups[disposition].length > 0 && <RecordedIssueGroup key={disposition}
-      name={GROUP_NAMES[disposition]} issues={groups[disposition]} liveIds={liveIds} openIssue={openIssue} />)}
+      name={GROUP_NAMES[disposition]} issues={groups[disposition]} liveIssues={liveIssues} openIssue={openIssue}
+      openSchedule={disposition === 'carry' ? openCarryoverSchedule : undefined} />)}
     {!record.issues.length && <p>완료 당시 연결된 업무가 없었습니다.</p>}
   </article>;
 }
@@ -227,24 +231,30 @@ function RetrospectiveAction({ savedDocumentId, path, actorId, refresh, openDocu
   </div>;
 }
 
-function RecordedIssueGroup({ name, issues, liveIds, openIssue }: { name: string; issues: RecordedIssue[]; liveIds: ReadonlySet<string>; openIssue: HistoryProps['openIssue'] }) {
+function RecordedIssueGroup({ name, issues, liveIssues, openIssue, openSchedule }: {
+  name: string; issues: RecordedIssue[]; liveIssues: ReadonlyMap<string, Issue>; openIssue: RecordProps['openIssue']; openSchedule?: (id: string) => void;
+}) {
   const heading = useId();
   const [page, setPage] = useState(0);
   const offset = page * ISSUE_PAGE_SIZE;
   return <section className="cycle-history-group" aria-labelledby={heading}>
     <h5 id={heading}>{name}</h5>
     <ul>
-      {issues.slice(offset, offset + ISSUE_PAGE_SIZE).map(issue => <li key={issue.id}>
-        <div>
-          {liveIds.has(issue.id) ? <button className="cycle-history-issue-link" type="button" aria-label={`${issue.key} ${issue.title}`} onClick={() => openIssue(issue.id)}>
-            <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong>
-          </button> : <p className="cycle-history-static-issue">
-            <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><small>현재 업무 없음</small>
-          </p>}
-          <small className="cycle-history-assignee">당시 담당 {issue.assigneeName ?? '미지정'}</small>
-        </div>
-        <span className="cycle-history-status">{issue.statusLabel}</span>
-      </li>)}
+      {issues.slice(offset, offset + ISSUE_PAGE_SIZE).map(issue => {
+        const current = liveIssues.get(issue.id);
+        return <li key={issue.id}>
+          <div>
+            {current ? <button className="cycle-history-issue-link" type="button" aria-label={`${issue.key} ${issue.title}`} onClick={() => openIssue(issue.id)}>
+              <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong>
+            </button> : <p className="cycle-history-static-issue">
+              <span className="issue-key">{issue.key}</span><strong>{issue.title}</strong><small>현재 업무 없음</small>
+            </p>}
+            <small className="cycle-history-assignee">당시 담당 {issue.assigneeName ?? '미지정'}</small>
+          </div>
+          <span className="cycle-history-status">{issue.statusLabel}</span>
+          {current && openSchedule && <CarryoverSchedule issue={current} openSchedule={openSchedule} />}
+        </li>;
+      })}
     </ul>
     {issues.length > ISSUE_PAGE_SIZE && <div className="cycle-history-pagination">
       <span aria-live="polite">{offset + 1}–{Math.min(offset + ISSUE_PAGE_SIZE, issues.length)} / {issues.length.toLocaleString('ko-KR')}</span>
@@ -256,4 +266,16 @@ function RecordedIssueGroup({ name, issues, liveIds, openIssue }: { name: string
       </button>
     </div>}
   </section>;
+}
+
+function CarryoverSchedule({ issue, openSchedule }: { issue: Issue; openSchedule: (id: string) => void }) {
+  const start = isCalendarDate(issue.startDate) ? issue.startDate : null;
+  const end = isCalendarDate(issue.endDate) ? issue.endDate : null;
+  const label = start && end ? '간트에서 일정 열기' : '간트에서 일정 입력';
+  return <div className="cycle-history-current-schedule">
+    <p>현재 일정 · 시작일 {start ?? '미정'} · 종료일 {end ?? '미정'}</p>
+    <button className="btn btn-ghost" type="button" aria-label={`${issue.key} ${label}`} onClick={() => openSchedule(issue.id)}>
+      <SquareChartGantt size={14} aria-hidden="true" />{label}
+    </button>
+  </div>;
 }

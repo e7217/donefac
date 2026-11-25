@@ -103,5 +103,15 @@
 .cycle-history-issue-link:focus-visible strong { text-decoration: underline; text-underline-offset: 2px; }
 .cycle-history-static-issue > small, .cycle-history-assignee { color: var(--muted); }
 .cycle-history-assignee { display: block; }
+.cycle-history-current-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  grid-column: 1 / -1;
+  gap: 2px 10px;
+  color: var(--muted);
+}
+.cycle-history-current-schedule .btn { min-height: 30px; }
 .cycle-history-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
 .cycle-history-error .btn { margin-top: 4px; }

@@ -292,6 +292,26 @@
 
 .issue-table tbody tr.issue-bulk-selected { background: #edf7f1; }
 
+.issue-board-bulk-controls {
+  color: #334f43;
+  font-size: 12px;
+}
+
+.issue-board-card-select {
+  display: flex;
+  width: fit-content;
+  height: 44px;
+  margin-inline-start: auto;
+  padding-inline: 8px;
+  color: #334f43;
+  font-size: 12px;
+}
+
+.issue-board-card-row[data-bulk-selected='true'] > .issue-board-card {
+  border-color: #298166;
+  background: #edf7f1;
+}
+
 @media (max-width: 520px) {
   .issue-bulk-editor { padding: 12px; }
   .issue-bulk-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }

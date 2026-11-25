@@ -7,6 +7,11 @@ import { createEditorSchema } from '../../shared/editor-schema';
 import type { CollaborationSession } from '../../shared/collaboration';
 import type { DocPage,RichContent,WorkspaceSnapshot } from '../../shared/types';
 
+function recoveryCopyResponse(page: Page, sourceId: string) {
+  return page.waitForResponse(response => new URL(response.url()).pathname === `/api/documents/${sourceId}/recovery-copy` &&
+    response.request().method() === 'POST');
+}
+
 interface UpgradeFixture{requests:APIRequestContext;document:DocPage;session:CollaborationSession;actors:string[];titlePrefix:string;serverText:string}
 const test=base.extend<{upgrade:UpgradeFixture}>({
   upgrade:[async({playwright,baseURL},provide)=>{
@@ -35,7 +40,7 @@ test('이전 형식의 미전송 편집을 읽기 전용으로 열고 원본을 
   await open(page,f,entries);await expect(page.locator('.docs-live-prose')).toHaveText(oldText);await expect(page.locator('.docs-live-prose')).toHaveAttribute('contenteditable','false');await expect(page.getByRole('button',{name:'사본으로 보관',exact:true})).toBeEnabled();expect((await canonical(f)).plainText).toBe(f.serverText);expect(await stored(page)).toEqual(entries);
   page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'이 편집 버리기',exact:true}).click();await expect(page.locator('.docs-live-prose')).toHaveText(oldText);expect(await stored(page)).toEqual(entries);
   const downloading=page.waitForEvent('download');await page.getByRole('button',{name:'복구 데이터 내려받기',exact:true}).click();const exported=await recoveryDownload(await downloading);expect(Object.fromEntries(exported.caches.map(value=>[value.key,value.value]))).toEqual({[selected]:entries[selected],[older]:entries[older]});expect(exported.content).toBeTruthy();expect(await stored(page)).toEqual(entries);
-  const copying=page.waitForResponse(response=>response.url().endsWith('/api/documents')&&response.request().method()==='POST');await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();const copied=await(await copying).json() as DocPage;expect(copied.id).not.toBe(f.document.id);expect(copied.plainText).toBe(oldText);await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(copied.title);await expect(page.locator('.docs-prose')).toContainText(oldText);expect((await canonical(f)).plainText).toBe(f.serverText);expect(updateFrames).toBe(0);expect(await stored(page)).toEqual({[older]:entries[older],[otherActor]:entries[otherActor]});
+  const copying=recoveryCopyResponse(page,f.document.id);await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();const copied=await(await copying).json() as DocPage;expect(copied.id).not.toBe(f.document.id);expect(copied.plainText).toBe(oldText);await expect(page.getByRole('textbox',{name:'문서 제목',exact:true})).toHaveValue(copied.title);await expect(page.locator('.docs-prose')).toContainText(oldText);expect((await canonical(f)).plainText).toBe(f.serverText);expect(updateFrames).toBe(0);expect(await stored(page)).toEqual({[older]:entries[older],[otherActor]:entries[otherActor]});
 });
 
 test('복구 화면에서 확인한 편집만 버리고 다른 시점의 보관 편집을 이어서 연다', async ({ page, upgrade: f }) => {
@@ -109,7 +114,7 @@ test('공동 편집 형식 2의 오프라인 편집을 참조 블록과 함께 �
   await expect(page.locator('.docs-live-prose')).toContainText(f.document.title);
   expect(await stored(page)).toEqual(entries);
 
-  const copying=page.waitForResponse(response=>response.url().endsWith('/api/documents')&&response.request().method()==='POST');
+  const copying=recoveryCopyResponse(page,f.document.id);
   await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();
   const copied=await(await copying).json() as DocPage;
   expect(copied.content.content).toContainEqual(reference);
@@ -154,7 +159,7 @@ for (const { version, nodeType, blockLabel } of [
   await expect(recovery.getByRole('region',{name:blockLabel,exact:true})).toBeVisible();
   expect(await stored(page)).toEqual(entries);
 
-  const copying = page.waitForResponse(response => response.url().endsWith('/api/documents') && response.request().method() === 'POST');
+  const copying = recoveryCopyResponse(page, f.document.id);
   await page.getByRole('button',{name:'사본으로 보관',exact:true}).click();
   const result = await copying;
   expect(result.status(),await result.text()).toBe(201);
@@ -180,7 +185,7 @@ test('형식 7의 미전송 편집을 기존 절 ID와 함께 보관한다', asy
   await expect(recovery).toHaveAttribute('contenteditable', 'false');
   await expect(recovery.getByRole('heading', { name: '미전송 절' })).toHaveAttribute('data-document-section-id', 'prior-room-section');
 
-  const copying = page.waitForResponse(response => response.url().endsWith('/api/documents') && response.request().method() === 'POST');
+  const copying = recoveryCopyResponse(page, f.document.id);
   await page.getByRole('button', { name: '사본으로 보관', exact: true }).click();
   const result = await copying;
   expect(result.status(), await result.text()).toBe(201);

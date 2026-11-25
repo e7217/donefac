@@ -23,6 +23,81 @@ async function removeIssues(request: APIRequestContext, issues: Issue[]) {
   }
 }
 
+test('360px 담당자별 프로젝트 보드에서 보이는 카드를 골라 한 번에 상태와 우선순위를 변경한다', async ({ page, request }) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [owner, reviewer] } = await workspace(request);
+  const prefix = `보드-일괄-${randomUUID().slice(0, 8)}`;
+  const bulkPath = `/api/projects/${project.id}/issues/bulk`;
+  const created: Issue[] = [];
+
+  try {
+    for (const [name, assigneeId] of [['대상 하나', owner.id], ['대상 둘', reviewer.id], ['보류', owner.id]]) {
+      const response = await request.post('/api/issues', { data: { title: `${prefix} ${name}`, projectId: project.id,
+        status: 'todo', priority: 'medium', assigneeId } });
+      expect(response.status(), await response.text()).toBe(201);
+      created.push(await response.json());
+    }
+    const [first, second, hidden] = created;
+    const beforeOrder = (await workspace(request)).issueOrders?.find(order => order.projectId === project.id)?.issueIds;
+    expect(beforeOrder).toBeDefined();
+    await page.goto(`/#/${project.id}/issues`);
+    const search = page.getByRole('textbox', { name: '업무 검색', exact: true });
+    await expect(search).toBeVisible({ timeout: 24_000 });
+    await search.fill(prefix);
+    await page.getByRole('button', { name: '보드', exact: true }).click();
+    await page.getByRole('combobox', { name: '보드 그룹', exact: true }).selectOption('assignee');
+    const board = page.getByRole('region', { name: '담당자별 보드', exact: true });
+    const select = (issue: Issue) => board.getByRole('checkbox', { name: `${issue.key} 선택`, exact: true });
+    const toggle = page.getByRole('button', { name: '일괄 편집', exact: true });
+    const editor = page.getByRole('region', { name: '업무 일괄 편집', exact: true });
+    const selectVisible = page.getByRole('checkbox', { name: '표시된 업무 전체 선택', exact: true });
+    await expect(toggle).toBeVisible({ timeout: 5_000 });
+    await toggle.click();
+    await expect(selectVisible).toBeFocused();
+    await select(hidden).check();
+    await select(first).check();
+    await expect(board.locator(`[data-issue-id="${first.id}"]`)).toHaveAttribute('draggable', 'false');
+    await expect(board.getByRole('button', { name: `${first.key} 상태 변경`, exact: true })).toHaveCount(0);
+
+    await search.fill(`${prefix} 대상`);
+    await expect(select(hidden)).toHaveCount(0);
+    await expect(select(first)).toBeChecked();
+    await expect(select(second)).not.toBeChecked();
+    await selectVisible.check();
+    await expect(select(second)).toBeChecked();
+    await editor.getByRole('combobox', { name: '일괄 변경 상태', exact: true }).selectOption('review');
+    await editor.getByRole('combobox', { name: '일괄 변경 우선순위', exact: true }).selectOption('high');
+    const previewResponse = responseAt(page, `${bulkPath}-preview`);
+    await editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const preview = await previewResponse;
+    expect(preview.status(), await preview.text()).toBe(200);
+    const { rows } = await preview.json() as IssueBulkEditPreview;
+    expect(new Set(rows.map(row => row.id))).toEqual(new Set([first.id, second.id]));
+
+    const appliedResponse = responseAt(page, `${bulkPath}-apply`);
+    await editor.getByRole('button', { name: '일괄 적용', exact: true }).click();
+    const applied = await appliedResponse;
+    expect(applied.status(), await applied.text()).toBe(200);
+    for (const issue of [first, second]) {
+      const lane = board.locator(`[data-board-assignee-id="${issue.assigneeId}"]`);
+      await expect(lane.locator(`[data-status-id="review"] [data-issue-id="${issue.id}"]`)).toBeVisible();
+    }
+    await editor.getByRole('button', { name: '일괄 편집 닫기', exact: true }).click();
+    await expect(toggle).toBeFocused();
+    await expect(search).toHaveValue(`${prefix} 대상`);
+    await expect(board.getByRole('button', { name: `${first.key} 상태 변경`, exact: true })).toBeVisible();
+    const saved = await workspace(request);
+    expect(saved.issues.find(issue => issue.id === hidden.id)).toEqual(hidden);
+    expect(saved.issueOrders?.find(order => order.projectId === project.id)?.issueIds).toEqual(beforeOrder);
+    for (const issue of [first, second]) expect(saved.issues.find(value => value.id === issue.id)).toMatchObject({
+      version: issue.version + 1, status: 'review', priority: 'high', assigneeId: issue.assigneeId,
+    });
+  } finally {
+    await removeIssues(request, created);
+  }
+});
+
 test('360px에서 검색 결과만 일괄 편집하고 응답 유실 뒤 같은 미리보기의 적용 결과를 확인한다', async ({ page, request }) => {
   await page.setViewportSize({ width: 360, height: 820 });
   const initial = await workspace(request);

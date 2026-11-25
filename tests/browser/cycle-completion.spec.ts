@@ -158,7 +158,10 @@ test('360px에서 변경된 미리보기를 다시 검토하고 유실된 응답
     const { projects: [project] } = await workspace(request);
     const cycle = await fixture.plan(project.id, '응답 재확인 사이클', 'active');
     const changed = await fixture.issue(cycle, '다른 작업자가 완료할 업무', 'todo');
-    const carry = await fixture.issue(cycle, '백로그로 이동할 업무', 'review');
+    const carryCandidate = await fixture.issue(cycle, '백로그로 이동할 업무', 'review');
+    const carry = await read<Issue>(await request.patch(`/api/issues/${carryCandidate.id}`, {
+      data: { expectedVersion: carryCandidate.version, endDate: null },
+    }));
     const modal = await openCompletion(page, cycle);
     await modal.dialog.getByRole('button', { name: '사이클 완료 닫기', exact: true }).click();
     await expect(modal.open).toBeFocused();
@@ -217,6 +220,7 @@ test('360px에서 변경된 미리보기를 다시 검토하고 유실된 응답
     await retry.click();
     const checkedResponse = await checked;
     expect(checkedResponse.status(), await checkedResponse.text()).toBe(200);
+    const checkedResult = await checkedResponse.json() as CycleCompletionResult;
     expect(attempts).toEqual([{ previewId: draft.previewId }, { previewId: draft.previewId }]);
     await expect(modal.dialog.getByText('사이클을 완료했습니다.', { exact: false })).toBeVisible();
     const afterRetry = await workspace(request);
@@ -224,6 +228,26 @@ test('360px에서 변경된 미리보기를 다시 검토하고 유실된 응답
     expect(afterRetry.issues.find(issue => issue.id === changed.id)).toEqual(remotelyCompleted);
     expect(afterRetry.issues.find(issue => issue.id === carry.id)).toMatchObject({ cycleId: null, cycle: null,
       version: carry.version + 1, status: carry.status, startDate: carry.startDate, endDate: carry.endDate, dueDate: carry.dueDate });
+
+    const recordHash = `#/${project.id}/planning/${cycle.id}?completionRecord=${checkedResult.recordId}`;
+    await modal.dialog.getByRole('button', { name: '완료 기록 보기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === recordHash);
+    const recorded = page.getByRole('article', { name: '선택한 사이클 완료 기록', exact: true });
+    const carryGroup = recorded.getByRole('region', { name: '이월 업무', exact: true });
+    await expect(carryGroup.getByText('현재 일정', { exact: false })).toContainText('종료일 미정');
+    await expect(recorded.getByRole('region', { name: '완료 업무', exact: true }).getByRole('button', { name: /간트|일정 입력/u })).toHaveCount(0);
+    await carryGroup.getByRole('button', { name: `${carry.key} 간트에서 일정 입력`, exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === `#/${project.id}/gantt?focusIssue=${carry.id}&focusDate=endDate`);
+    const endDate = page.getByRole('region', { name: '간트 차트', exact: true }).getByLabel(`${carry.key} 종료일`, { exact: true });
+    await expect(endDate).toBeFocused();
+    await endDate.fill(day(4));
+    await endDate.press('Enter');
+    await expect.poll(async () => (await workspace(request)).issues.find(issue => issue.id === carry.id)?.endDate).toBe(day(4));
+    await expect(page.getByRole('button', { name: '되돌리기', exact: true })).toBeEnabled();
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === recordHash);
+    await expect(carryGroup.getByText('현재 일정', { exact: false })).toContainText(day(4));
+    await expect(carryGroup.getByRole('button', { name: `${carry.key} 간트에서 일정 열기`, exact: true })).toBeVisible();
   } finally { await fixture.clean(); }
 });
 
@@ -235,6 +259,7 @@ test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당�
     const { projects: [project] } = await workspace(request);
     const cycle = await fixture.plan(project.id, '기록을 남길 사이클', 'active');
     const destination = await fixture.plan(project.id, '이월 당시 사이클', 'planned');
+    const currentCycle = await fixture.plan(project.id, '현재 배정된 사이클', 'planned');
     const olderCycle = await fixture.plan(project.id, '기록 추가 이전의 완료 사이클', 'completed');
     const carried = await fixture.issue(cycle, '이월 당시 업무 제목', 'in_progress');
     const done = await fixture.issue(cycle, '첫 완료에 남긴 업무', 'done');
@@ -255,7 +280,7 @@ test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당�
     const currentTitle = `${carried.title} 현재 이름`;
     const currentDestination = `${destination.name} 이름 변경`;
     await read<Issue>(await request.patch(`/api/issues/${carried.id}`, { data: {
-      expectedVersion: carried.version + 1, title: currentTitle, status: 'done',
+      expectedVersion: carried.version + 1, title: currentTitle, status: 'done', cycleId: currentCycle.id,
     } }));
     await read<PlanningItem>(await request.patch(`/api/planning-items/${destination.id}`, { data: {
       expectedVersion: destination.version, name: currentDestination,
@@ -334,6 +359,13 @@ test('360px에서 사이클 완료 기록을 다시 읽고 현재 업무와 당�
     await record.getByRole('button', { name: `${carried.key} ${carried.title}`, exact: true }).click();
     await expect(issueDrawer).toBeVisible();
     await issueDrawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(page).toHaveURL(url => url.hash === sourceHash);
+    await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
+    const carrySchedule = record.getByRole('button', { name: `${carried.key} 간트에서 일정 열기`, exact: true });
+    await carrySchedule.click();
+    await expect(page).toHaveURL(url => url.hash === `#/${project.id}/gantt/${currentCycle.id}?focusIssue=${carried.id}`);
+    await expect(page.getByRole('region', { name: '간트 차트', exact: true }).locator(`[data-issue-id="${carried.id}"]`)).toBeVisible();
+    await page.goBack();
     await expect(page).toHaveURL(url => url.hash === sourceHash);
     await expect(record.getByText(destination.name, { exact: true })).toBeVisible();
   } finally { await fixture.clean(); }

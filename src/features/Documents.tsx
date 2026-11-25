@@ -86,7 +86,7 @@ import './document-comment-review.css';
 
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
-  onSelectDocument: (id: string) => void;
+  onSelectDocument: (id: string, recovery?: { documentId: string; beforeOpen: () => void }) => boolean;
   openDocument: (id: string, sectionId?: string) => void;
   documentLabel?: string | null;
   onChangeDocumentLabel?: (label: string | null) => void;
@@ -1486,13 +1486,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     finally { savingRef.current = false; setSaving(false); }
   }
 
-  const openRecoveryCopy = useCallback((id: string) => {
-    void refresh().then(() => {
-      if (!confirmCommentEditExit()) return;
+  const openRecoveryCopy = useCallback(async (id: string, finishRecovery: () => void) => {
+    const sourceId = draftRef.current?.id;
+    if (!sourceId) return false;
+    const actor = activeActorRef.current;
+    await refresh();
+    if (draftRef.current?.id !== sourceId || activeActorRef.current !== actor || !confirmCommentEditExit()) return false;
+    return onSelectDocument(id, { documentId: sourceId, beforeOpen: () => {
+      rememberDraft(draftRef.current);
+      rememberComment();
       discardCommentEdit();
-      onSelectDocument(id);
-    }).catch(cause => notify(cause instanceof Error ? cause.message : '사본 목록을 불러오지 못했습니다.', 'error'));
-  }, [refresh, onSelectDocument, notify, confirmCommentEditExit, discardCommentEdit]);
+      finishRecovery();
+    } });
+  }, [refresh, onSelectDocument, confirmCommentEditExit, discardCommentEdit, rememberDraft, rememberComment]);
 
   useLayoutEffect(() => {
     if (!editor || insertKind !== 'link') return;

@@ -27,7 +27,7 @@ import { PlanScheduleShiftError, PlanScheduleShiftService } from './plan-schedul
 import { DocumentContentService, DocumentContentError, normalizeDocumentContent, validateDocumentIssueBlocks, validateDocumentListProjects, validatePinnedDocumentRevisions } from './document-content.js';
 import { registerDocumentIncludeRevisionRoutes } from './document-include-revisions.js';
 import { bindImportedDocumentSections, DocumentCreationError, DocumentCreationService } from './document-creation.js';
-import { creationRequestId, deterministicCreationId } from './creation-request.js';
+import { creationRequestFingerprint, creationRequestId, deterministicCreationId } from './creation-request.js';
 import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent } from './document-templates.js';
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
@@ -2584,6 +2584,39 @@ export function createApp(options: {
   });
   app.get('/api/documents/:id/collaboration',(req,res)=>res.json(collaboration.session(String(req.params.id))));
   app.post('/api/documents/:id/collaboration/enable',(req,res)=>res.json(collaboration.enable(String(req.params.id),req.body.expectedVersion,actor(req))));
+  app.post('/api/documents/:id/recovery-copy', (req, res) => {
+    const input = req.body;
+    if (!isRelationId(input.epoch) || !Object.hasOwn(input, 'content') || Object.keys(req.query).length ||
+        Object.keys(input).some(key => key !== 'epoch' && key !== 'content' && key !== 'labels')) {
+      return fail('공동 편집 사본의 편집 세대와 보관 내용을 확인해 주세요.');
+    }
+    const sourceId = req.params.id;
+    const authorId = actor(req);
+    const { content } = documentContent.normalize(input.content);
+    const id = deterministicCreationId(['collaboration-recovery-copy', sourceId, authorId,
+      creationRequestFingerprint({ epoch: input.epoch, content })]);
+    const result = store.transaction(() => {
+      const existing = store.get<DocPage>('documents', id);
+      if (existing) return { document: existing, created: false };
+      if (trash.find('document', id)) return fail('복구 사본이 휴지통에 있습니다. 복원한 뒤 열어 주세요.', 409);
+      const archived = trash.find('document', sourceId);
+      const source = store.get<DocPage>('documents', sourceId) ?? (archived?.resourceType === 'document' ? archived.resource : undefined);
+      if (!source) return fail('복구 사본의 원본 문서를 찾을 수 없습니다.', 404);
+      const suffix = ' (공동 편집 복구 사본)';
+      const title = source.title.slice(0, 300 - suffix.length).toWellFormed().trimEnd() + suffix;
+      const timestamp = now();
+      const document = validateDocument({ id, projectId: source.projectId, parentId: null, authorId, title, status: 'draft',
+        content, labels: input.labels, plainText: '', icon: '📄', version: 1, createdAt: timestamp, updatedAt: timestamp },
+      undefined, { allowMissing: true });
+      bindImportedDocumentSections(document);
+      store.put('documents', document);
+      revision(document, authorId, '공동 편집 복구 사본');
+      activity(req, 'document', document.id, '문서 생성', document.title);
+      notifyDocumentCreated(document);
+      return { document, created: true };
+    });
+    res.set('Cache-Control', 'no-store').status(result.created ? 201 : 200).json(result.document);
+  });
   app.post('/api/documents/:id/checkpoint',(req,res)=>res.json(collaboration.checkpoint(String(req.params.id),actor(req),req.body.expectedVersion,req.body.summary,
     (document,revision)=>notifyDocumentUpdate(document,revision.authorId,revision.createdAt))));
   app.get('/api/comments',(req,res)=>{

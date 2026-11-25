@@ -11,10 +11,12 @@ import { documentPlainText } from '../../shared/document-nodes';
 import { decorateDocumentExtensions } from './DocumentBlocks';
 import { documentFindExtension } from './document-find';
 import { createEditorExtensions } from '../../shared/editor-schema';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { CollaborationClient, hasPendingCollaboration, type CollaborationView } from '../lib/collaboration-client';
 import { collaborativeCursors, publishEditorCursor } from './CollaborationCursors';
 import { downloadDocument } from './document-utils';
+
+const COPY_OPEN_AGAIN = '사본을 저장했습니다. 사본으로 보관을 눌러 다시 열어 주세요.';
 
 export interface CollaborativeEditorProps {
   session: CollaborationSession;
@@ -25,7 +27,7 @@ export interface CollaborativeEditorProps {
   onDocument: (document: DocPage) => void;
   onState: (state: CollaborationView | null) => void;
   onSessionDisabled: (session: CollaborationSession) => void;
-  onOpenCopy: (documentId: string) => void;
+  onOpenCopy: (documentId: string, finishRecovery: () => void) => Promise<boolean>;
   notify: (message: string, kind?: 'success' | 'error') => void;
 }
 
@@ -35,6 +37,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
   const [view, setView] = useState<CollaborationView | null>(null);
   const [restart, setRestart] = useState(0);
   const [error, setError] = useState('');
+  const [copyError, setCopyError] = useState('');
   const [busy, setBusy] = useState(false);
   const editorRef = useRef<Editor | null>(null);
 
@@ -56,7 +59,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
 
   const receiveEditor = useCallback((editor: Editor | null) => { editorRef.current = editor; onEditor(editor); }, [onEditor]);
   function restartSession() {
-    setClient(null); setView(null); setError('');
+    setClient(null); setView(null); setError(''); setCopyError('');
     onEditor(null); onState(null);
     setRestart(value => value + 1);
   }
@@ -78,14 +81,26 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     const editor = editorRef.current;
     if (!client || !editor || busy) return;
     setBusy(true);
+    setCopyError('');
+    let saved = false;
     try {
-      const document = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': actorId }, body: JSON.stringify({ title: `${session.document.title} (공동 편집 복구 사본)`, projectId: session.document.projectId, parentId: null, content: editor.getJSON(), status: 'draft', labels }) });
-      try {
-        client.discardDisplayedPending();
-        notify('이전 편집을 새 문서에 보관했습니다.', 'success');
-      } catch { notify('사본을 저장했습니다. 브라우저에 남은 보관 편집을 다시 확인해 주세요.', 'error'); }
-      onOpenCopy(document.id);
-    } catch (cause) { notify(cause instanceof Error ? cause.message : '복구 사본을 만들지 못했습니다.', 'error'); }
+      const path = `/documents/${encodeURIComponent(session.document.id)}/recovery-copy`;
+      const document = await api<DocPage>(path, { method: 'POST', headers: { 'X-Actor-Id': actorId },
+        body: JSON.stringify({ epoch: client.view.epoch, content: editor.getJSON(), labels }) });
+      if (!document?.id || document.authorId !== actorId) throw new Error('Invalid recovery copy');
+      saved = true;
+      if (editorRef.current !== editor) return;
+      const opened = await onOpenCopy(document.id, () => {
+        try {
+          client.discardDisplayedPending();
+          notify('이전 편집을 새 문서에 보관했습니다.', 'success');
+        } catch { notify('사본을 저장했습니다. 브라우저에 남은 보관 편집을 다시 확인해 주세요.', 'error'); }
+      });
+      if (!opened && editorRef.current === editor) setCopyError(COPY_OPEN_AGAIN);
+    } catch (cause) {
+      setCopyError(saved ? COPY_OPEN_AGAIN :
+        cause instanceof ApiError ? cause.message : '복구 사본의 저장 결과를 확인하지 못했습니다. 같은 편집으로 다시 시도할 수 있습니다.');
+    }
     finally { setBusy(false); }
   }
 
@@ -102,6 +117,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
     {view?.storageError && <div className="docs-notice" role="alert">브라우저에 편집을 임시 보관하지 못했습니다. 서버 동기화가 끝나기 전에 이 화면을 닫지 말고 복구 데이터를 내려받아주세요.<button className="docs-collab-text-button" onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button></div>}
     {recovery && <div className="docs-notice docs-collaboration-recovery" role="alert">
       <strong>{view?.error || '문서가 교체되어 이전 편집을 자동으로 합치지 않았습니다.'}</strong>
+      {copyError && <p>{copyError}</p>}
       {otherRecoveries > 0 && <p>별도로 보관된 편집 {otherRecoveries}건이 있습니다.</p>}
       <div>
         <button onClick={downloadRecovery}><Download size={12} /> 복구 데이터 내려받기</button>

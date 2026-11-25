@@ -189,6 +189,7 @@ export function Issues(props: FeatureProps & {
   const statusFocus = useRef<Pick<ProjectStatusEdit, 'issue' | 'opener'> | null>(null);
   const drag = useRef<BoardDrag | null>(null);
   const bulkToggle = useRef<HTMLButtonElement>(null);
+  const boardBulkControls = useRef<HTMLDivElement>(null);
   const boardCanvas = useRef<HTMLDivElement>(null);
   const listCanvas = useRef<HTMLDivElement>(null);
   const filterEditors = useRef<HTMLFieldSetElement>(null);
@@ -354,9 +355,17 @@ export function Issues(props: FeatureProps & {
   }
   function toggleBulkEdit() {
     if (bulk.active) { closeBulkEdit(); return; }
+    if (drag.current) return;
     if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     setOrderEditProject(null);
     bulk.open();
+    if (view === 'board') requestAnimationFrame(() => {
+      const controls = boardBulkControls.current;
+      (controls?.querySelector<HTMLInputElement>('input:not(:disabled)') ?? controls)?.focus();
+    });
+  }
+  function switchView(next: typeof view) {
+    if (next !== view && (!bulk.active || bulk.close())) setView(next);
   }
   async function changeBoardCell(issue: Issue, status: IssueStatus, assigneeId?: string | null) {
     const statusChanged = status !== issue.status;
@@ -462,7 +471,7 @@ export function Issues(props: FeatureProps & {
   }
 
   function startBoardDrag(event: DragEvent<HTMLElement>, issue: Issue) {
-    if (pendingMutation.current || rankRefreshRequired) { event.preventDefault(); return; }
+    if (bulk.active || pendingMutation.current || rankRefreshRequired) { event.preventDefault(); return; }
     event.dataTransfer.setData(issueDragType, issue.id);
     event.dataTransfer.effectAllowed = 'move';
     drag.current = { issue, projectId, fieldSorted, orderVersion: order?.version };
@@ -477,7 +486,7 @@ export function Issues(props: FeatureProps & {
   }
 
   function boardDragOver(event: DragEvent<HTMLElement>, cell: BoardCell, column: Issue[]) {
-    if (!event.dataTransfer.types.includes(issueDragType) || pendingMutation.current || rankRefreshRequired) return;
+    if (bulk.active || !event.dataTransfer.types.includes(issueDragType) || pendingMutation.current || rankRefreshRequired) return;
     const source = drag.current;
     if (source && (source.projectId !== projectId || source.fieldSorted !== fieldSorted)) return;
     if (fieldSorted && source?.issue.status === cell.status &&
@@ -494,7 +503,7 @@ export function Issues(props: FeatureProps & {
     const id = event.dataTransfer.getData(issueDragType);
     const source = drag.current;
     endBoardDrag();
-    if (!id || source && (source.projectId !== projectId || source.fieldSorted !== fieldSorted || source.issue.id !== id)) return;
+    if (bulk.active || !id || source && (source.projectId !== projectId || source.fieldSorted !== fieldSorted || source.issue.id !== id)) return;
     event.preventDefault();
     const issue = source?.issue ?? projectIssues.find(value => value.id === id);
     if (!issue) return;
@@ -565,19 +574,25 @@ export function Issues(props: FeatureProps & {
       {column.map((issue, index) => {
         const user = data.users.find(user => user.id === issue.assigneeId);
         const destinations = allowedNextStatuses(data, issue).filter(status => status.id !== issue.status);
-        return <div key={issue.id} className="issue-board-card-row" data-order-card={fieldSorted ? undefined : issue.id}>
+        const selected = bulk.active && bulk.selectedIds.has(issue.id);
+        return <div key={issue.id} className="issue-board-card-row" data-order-card={fieldSorted ? undefined : issue.id} data-bulk-selected={selected || undefined}>
           <button className={`issue-board-card ${busy === issue.id ? 'is-saving' : ''}`} data-issue-id={issue.id} data-order-drop={target?.anchorId === issue.id ? target.position : undefined}
-            draggable={!busy && !rankRefreshRequired} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag} onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
+            disabled={bulk.locked} draggable={!bulk.active && !busy && !rankRefreshRequired} onDragStart={event => startBoardDrag(event, issue)} onDragEnd={endBoardDrag}
+            onClick={event => openVisibleIssue(issue.id, event.currentTarget)}>
             <span className="issue-card-key"><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} />{issue.key}<IssueTypeName data={data} issue={issue} /></span><strong>{issue.title}</strong>
             <CustomFieldSummary data={data} issue={issue} /><span className="issue-labels">{issue.labels.slice(0, 2).map(label => <span className="issue-label" key={label}>{label}</span>)}</span>
             <IssueGitlabSummary summary={gitlabSummary.get(issue.id)} />
             <span className="issue-card-footer"><span className="issue-priority"><PriorityIcon value={issue.priority} /><span>{dateLabel(issue.endDate)}</span></span>{user && <span className="issue-avatar" title={user.name} style={{ background: user.color }}>{user.name.slice(0, 1)}</span>}</span>
           </button>
-          <button className="btn btn-ghost issue-board-card-status" type="button" aria-label={`${issue.key} 상태 변경`}
+          {bulk.active ? <label className="issue-bulk-select-control issue-bulk-select-with-label issue-bulk-selection issue-board-card-select">
+            <input type="checkbox" aria-label={`${issue.key} 선택`} checked={selected}
+              disabled={bulk.locked || (!selected && bulk.selectedCount >= ISSUE_BULK_EDIT_LIMIT)} onChange={() => bulk.toggle(issue)} />
+            <span>선택</span>
+          </label> : <button className="btn btn-ghost issue-board-card-status" type="button" aria-label={`${issue.key} 상태 변경`}
             aria-haspopup="dialog" data-board-status-for={issue.id} disabled={!destinations.length || Boolean(busy)}
             onClick={event => openStatusEdit(issue, state, destinations, event.currentTarget)}>
             <ArrowRightLeft size={15} aria-hidden="true" />상태 변경
-          </button>
+          </button>}
           <IssueHierarchyContext issueId={issue.id} hierarchy={hierarchy} openIssue={openIssue} />
           {controls(issue, column, index, targetAssigneeId)}
         </div>;
@@ -634,7 +649,10 @@ export function Issues(props: FeatureProps & {
     {feedback && <p className={`issue-refresh-feedback${feedback === 'failed' ? ' issue-form-error' : ''}`}
       role={feedback === 'failed' ? 'alert' : 'status'}>{refreshMessages[feedback]}</p>}
     <div className="issue-toolbar">
-      <div className="issue-view-switch" aria-label="업무 보기"><button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}><List size={16} /> 목록</button><button className={view === 'board' ? 'active' : ''} disabled={bulk.busy} onClick={() => { if (!bulk.active || bulk.close()) setView('board'); }}><Columns3 size={16} /> 보드</button></div>
+      <div className="issue-view-switch" aria-label="업무 보기">
+        <button className={view === 'list' ? 'active' : ''} disabled={bulk.busy} onClick={() => switchView('list')}><List size={16} /> 목록</button>
+        <button className={view === 'board' ? 'active' : ''} disabled={bulk.busy} onClick={() => switchView('board')}><Columns3 size={16} /> 보드</button>
+      </div>
       {projectSelected && view === 'board' && <label className="issue-board-group-picker">보드 그룹
         <select className="issue-filter" aria-label="보드 그룹" value={boardGrouping ?? ''} disabled={Boolean(busy)} onChange={event => {
           endBoardDrag();
@@ -660,7 +678,7 @@ export function Issues(props: FeatureProps & {
       </select>
       {showGitlabRefresh && <GitlabActivityRefresh refresh={refresh} notify={notify} disabled={bulk.locked} />}
       {order && !fieldSorted && !bulk.active && <button type="button" className="btn btn-ghost issue-order-toggle" aria-pressed={ordering} onClick={() => setOrderEditProject(ordering ? null : projectId)}><ArrowDownUp size={15} aria-hidden="true" /> 순서 편집</button>}
-      {projectSelected && view === 'list' && <button ref={bulkToggle} type="button" className="btn btn-ghost issue-bulk-toggle" aria-pressed={bulk.active}
+      {projectSelected && <button ref={bulkToggle} type="button" className="btn btn-ghost issue-bulk-toggle" aria-pressed={bulk.active}
         disabled={Boolean(busy) || bulk.busy} onClick={toggleBulkEdit}><ListChecks size={16} aria-hidden="true" />일괄 편집</button>}
       {activeFilters && <button className="btn btn-ghost issue-clear-filter" disabled={bulk.locked} onClick={clearFilters}><X size={14} /> 초기화</button>}
     </div>
@@ -690,13 +708,18 @@ export function Issues(props: FeatureProps & {
         {bulk.active && <button className="btn btn-ghost" type="button" disabled={csvDisabled || !bulk.selectedCount} onClick={() => downloadIssuesCsv(true)}>
           <ArrowDownToLine size={14} aria-hidden="true" />선택 업무 CSV
         </button>}
-      </div> : <span className="muted" id={groupedBoard ? groupingInstructions : undefined}>{groupedBoard ? '다른 담당자 행으로 끌면 담당자가 바뀝니다.' : order && !fieldSorted ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
+      </div> : !bulk.active && <span className="muted" id={groupedBoard ? groupingInstructions : undefined}>{groupedBoard ? '다른 담당자 행으로 끌면 담당자가 바뀝니다.' : order && !fieldSorted ? '카드를 끌어 순서와 상태 변경' : '카드를 끌어 상태 변경'}</span>}
     </div>
     {order && !fieldSorted && <div className={notice ? 'issue-order-feedback' : 'sr-only'}>
       <p className={notice?.error ? 'is-error' : ''} role="status" aria-label="업무 순서 상태">{notice?.text}</p>
       {notice?.needsRefresh && <button type="button" className="btn btn-ghost" disabled={Boolean(busy)} onClick={() => void refreshOrder()}>최신 업무 순서 불러오기</button>}
     </div>}
-    {bulk.active && <IssueBulkEdit editor={bulk} statuses={statuses} users={data.users} onClose={closeBulkEdit} />}
+    {bulk.active && <>
+      {view === 'board' && <div className="issue-board-bulk-controls issue-bulk-selection" ref={boardBulkControls} tabIndex={-1}>
+        <IssueBulkSelectVisible editor={bulk} label="표시된 업무 전체 선택" />
+      </div>}
+      <IssueBulkEdit editor={bulk} statuses={statuses} users={data.users} onClose={closeBulkEdit} />
+    </>}
     {!unavailableView && (view === 'list' ? <div className="issue-table-scroll" ref={listCanvas} role="region" aria-label="업무 목록" tabIndex={-1}><table className="issue-table"><thead><tr>{bulk.active && <th className="issue-bulk-selection"><IssueBulkSelectVisible editor={bulk} /></th>}<th className="issue-title-column">업무</th><th>상태</th><th>우선순위</th><th>담당자</th><th>종료일</th><th>라벨</th></tr></thead><tbody>{issues.map((issue, index) => {
       const user = data.users.find(u => u.id === issue.assigneeId);
       const current = statusMeta(data, issue.projectId, issue.status);
@@ -731,7 +754,7 @@ export function Issues(props: FeatureProps & {
           빈 담당자 그룹 표시
         </label>
         <div className="issue-board issue-board-grouped" ref={boardCanvas} role="region" aria-label="담당자별 보드"
-          aria-describedby={groupingInstructions} tabIndex={0}>
+          aria-describedby={bulk.active ? undefined : groupingInstructions} tabIndex={0}>
           <div className="issue-board-lane-columns issue-board-project-columns" role="group" aria-label="프로젝트 상태별 업무 수">
             {statuses.map(state => {
               const capacity = capacities.get(state.id);

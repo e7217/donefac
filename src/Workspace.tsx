@@ -1146,6 +1146,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const current = acceptedRouteRef.current;
     return current?.view === 'planning' && requestRoute({ ...current, planningId: id, completionRecordId: null }, 'replace');
   };
+  const openCycleCompletionRecord = (id: string, cycleId: string) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view === 'planning') requestRoute({ ...current, planningId: cycleId, completionRecordId: id, issueId: null },
+      'push', false, selectedPlanReturn(cycleId));
+  };
   const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) => {
     const current = acceptedRouteRef.current;
     return requestRoute({ projectId, view: nextView, documentId: null, planningId: id, issueId: null,
@@ -1155,16 +1160,18 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openReleaseReadiness = (id: string) =>
     requestRoute({ projectId, view: 'reports', documentId: null, issueId: null, blockerScope: { releaseId: id } },
       'push', false, selectedPlanReturn(id));
-  const openPlannedIssueSchedule = (issueId: string, planId?: string) => {
+  const openPlannedIssueSchedule = (issueId: string, planId?: string, recordId?: string) => {
     const snapshot = dataRef.current, current = acceptedRouteRef.current;
     if (!snapshot || !current || (current.view !== 'planning' && current.view !== 'backlog')) return false;
     const issue = snapshot.issues.find(item => item.id === issueId && item.projectId === current.projectId);
-    const plan = planId ? snapshot.planningItems?.find(item => item.id === planId && item.projectId === current.projectId) : undefined;
+    const targetPlanId = recordId ? issue?.cycleId : planId;
+    const plan = targetPlanId ? snapshot.planningItems?.find(item => item.id === targetPlanId && item.projectId === current.projectId) : undefined;
     if (!issue || (planId && (!plan || issue[planningFields(plan.kind).idField] !== plan.id))) {
       notify('업무나 계획 연결이 바뀌었습니다. 목록에서 다시 확인해 주세요.', 'error');
       return false;
     }
-    const returnRoute = plan && current.planningId !== plan.id ? { ...current, planningId: plan.id } : undefined;
+    const returnRoute = recordId ? { ...current, completionRecordId: recordId }
+      : plan && current.planningId !== plan.id ? { ...current, planningId: plan.id } : undefined;
     const endpoint = !isCalendarDate(issue.startDate) ? 'startDate' : !isCalendarDate(issue.endDate) ? 'endDate' : undefined;
     return requestRoute({ projectId: issue.projectId, view: 'gantt', documentId: null, issueId: null, planningId: plan?.id,
       ganttFocusIssueId: issue.id, ganttFocusDate: endpoint }, 'push', false, returnRoute);
@@ -1264,13 +1271,17 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
-  const selectDocument = (id: string) => {
-    if (!dataRef.current) return;
-    const route = normalizeRoute(dataRef.current, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel}));
+  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void }) => {
+    const snapshot = dataRef.current;
     const previous = acceptedRouteRef.current;
-    if (previous && routeHash(previous) === routeHash(route)) return;
+    if (!snapshot || recovery && (previous?.view !== 'documents' || previous.documentId !== recovery.documentId ||
+        !snapshot.documents.some(document => document.id === id))) return false;
+    const route = normalizeRoute(snapshot, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel}));
+    if (previous && routeHash(previous) === routeHash(route)) return true;
     const automaticSelection = previous?.view === 'documents' && !previous.documentId;
+    recovery?.beforeOpen();
     writeRoute(route, routeIndexRef.current + (automaticSelection ? 0 : 1), automaticSelection ? 'replace' : 'push');
+    return true;
   };
   const copyDocumentCommentLink = async (commentId: string) => {
     const current = acceptedRouteRef.current;
@@ -1427,6 +1438,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'planning' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>프로젝트 계획을 불러오는 중입니다.</p></div>}>
           <Planning {...props} initialPlanningId={planningId} onOpenGantt={id => openPlanIn('gantt',id)}
             completionRecordId={completionRecordId} onOpenCycleRetrospective={openCycleRetrospective}
+            onOpenCompletionRecord={openCycleCompletionRecord}
+            onOpenCarryoverSchedule={(id, recordId) => openPlannedIssueSchedule(id, undefined, recordId)}
             onCloseCompletionRecord={() => openPlanIn('planning', planningId ?? undefined)}
             onSelectPlanning={selectPlanning} onOpenIssueSchedule={openPlannedIssueSchedule}
             onOpenCycleBoard={id => openPlanIn('backlog', id)} onOpenReleaseReadiness={openReleaseReadiness} />

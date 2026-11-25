@@ -122,11 +122,69 @@ test('이전 형식 가져오기 뒤 재접속·재열기에서도 오래된 오
     await expect(page.locator('.docs-live-prose')).toHaveAttribute('contenteditable', 'false');
     const before = await (await legacy.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
     expect(before.documents.find(document => document.id === legacy.document.id)?.plainText).toBe('가져온 수동 문서 본문');
-    await page.getByRole('button', { name: '사본으로 보관', exact: true }).click();
+    let copied: DocPage | undefined;
+    let replayed: DocPage | undefined;
+    let blockList = false;
+    let trashBeforeRefresh = false;
+    let archivedCopyId: string | undefined;
+    await page.route('**/api/workspace', route => blockList ? route.abort('failed') : route.fallback());
+    await page.route(url => url.pathname === '/api/documents' || url.pathname === `/api/documents/${legacy.document.id}/recovery-copy`, async route => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      const response = await route.fetch({ url: `${legacy.apiOrigin}${new URL(route.request().url()).pathname}` });
+      expect(response.ok(), await response.text()).toBe(true);
+      const copy = await response.json() as DocPage;
+      if (!copied) {
+        copied = copy;
+        expect(response.status()).toBe(201);
+        return route.abort('failed');
+      }
+      if (!replayed) {
+        replayed = copy;
+        expect(response.status()).toBe(200);
+        blockList = true;
+      }
+      if (trashBeforeRefresh) {
+        const removed = await legacy.requests.delete(`/api/documents/${copy.id}`);
+        expect(removed.status(), await removed.text()).toBe(200);
+        archivedCopyId = (await removed.json() as { trashEntryId: string }).trashEntryId;
+        trashBeforeRefresh = false;
+      }
+      return route.fulfill({ response });
+    });
+    const copyButton = page.getByRole('button', { name: '사본으로 보관', exact: true });
+    await copyButton.click();
+    await expect.poll(() => copied?.id).toBeTruthy();
+    await expect(copyButton).toBeEnabled();
+    const original = before.documents.find(document => document.id === legacy.document.id)!;
+    const rename = await legacy.requests.patch(`/api/documents/${original.id}`, {
+      data: { expectedVersion: original.version, title: '동료가 이름을 바꾼 원본' },
+    });
+    expect(rename.status(), await rename.text()).toBe(200);
+    page.once('dialog', dialog => dialog.accept());
+    await page.reload();
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue('동료가 이름을 바꾼 원본');
+    await copyButton.click();
+    await expect.poll(() => replayed?.id).toBe(copied!.id);
+    await expect(copyButton).toBeEnabled();
+    await expect(page.locator('.docs-live-prose')).toContainText('old-pending');
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(true);
+    blockList = false;
+    trashBeforeRefresh = true;
+    await copyButton.click();
+    await expect.poll(() => archivedCopyId).toBeTruthy();
+    await expect(copyButton).toBeEnabled();
+    await expect(page.locator('.docs-live-prose')).toContainText('old-pending');
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(true);
+    const restoredCopy = await legacy.requests.post(`/api/trash/${archivedCopyId}/restore`, { data: {} });
+    expect(restoredCopy.status(), await restoredCopy.text()).toBe(200);
+    await copyButton.click();
+    await expect(page).toHaveURL(url => url.hash.endsWith(`/documents/${copied!.id}`));
     await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(`${legacy.document.title} (공동 편집 복구 사본)`);
     await expect(page.locator('.docs-live-prose')).toHaveCount(0);
     await expect(page.locator('.docs-prose')).toContainText('old-pending');
     const after = await (await legacy.requests.get('/api/workspace')).json() as WorkspaceSnapshot;
     expect(after.documents.find(document => document.id === legacy.document.id)?.plainText).toBe('가져온 수동 문서 본문');
+    expect(after.documents.filter(document => document.id !== original.id && document.plainText.includes('old-pending')).map(document => document.id)).toEqual([copied!.id]);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith('teamspace:collaboration-pending:')))).toBe(false);
   } finally { await context.close(); }
 });

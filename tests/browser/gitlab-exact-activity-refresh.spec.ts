@@ -58,7 +58,7 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
   const storedOld = pipeline(oldPipelineId, oldRef, 'running', 0);
   const newer = Array.from({ length: 20 }, (_, index) => pipeline(800 + index, `feature/${issue.key}/newer-${index}`, 'running', 10 + index));
   const newerById = new Map(newer.map(value => [value.id, value]));
-  let remoteOld = pipeline(oldPipelineId, oldRef, 'failed', 1);
+  let remoteOld = pipeline(oldPipelineId, oldRef, 'failed', 35);
   let baseUrl = '';
   const repositoryUrl = () => `${baseUrl}/${repository}`;
   const calls: { path: string; method?: string; credential?: string | string[] }[] = [];
@@ -216,8 +216,12 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
     expect(failed).toEqual({ links: [expect.objectContaining({ id: oldLink.id, state: 'failed' })], failures: [], skipped: 0 });
     expect(calls.slice(readsBeforeExact).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
     await expect(oldRow).toHaveAttribute('data-gitlab-state', 'failed');
+    await expect(pages).toContainText('1 / 2 페이지');
+    await expect(button(oldRow, exactAction)).toBeFocused();
     await expect(title).toHaveValue('저장하지 않은 티켓 제목');
     await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
+    await button(pages, '다음').click();
+    await expect(oldRow).toHaveCount(0);
     await activityScope.selectOption('failed_pipelines');
     await expect(oldRow).toBeVisible();
     await expect(gitlab.locator('.gitlab-activity-row')).toHaveCount(1);

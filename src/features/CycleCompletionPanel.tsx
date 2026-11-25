@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import { Check, RefreshCw, X } from 'lucide-react';
+import { Check, History, RefreshCw, X } from 'lucide-react';
 import type { CycleCompletionIssue, CycleCompletionPreview, CycleCompletionResult, FeatureProps, PlanningItem } from '../../shared/types';
 import { ApiError, api } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
@@ -21,6 +21,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   plans: readonly PlanningItem[];
   onClose: () => void;
   onSaved: (cycle: PlanningItem) => void;
+  onOpenRecord: (recordId: string, cycleId: string) => void;
   restoreFocus: () => void;
 };
 
@@ -32,7 +33,7 @@ function staleResponse(cause: unknown) {
   return cause instanceof ApiError && [404, 409, 410].includes(cause.status);
 }
 
-export function CycleCompletionPanel({ cycle, plans, actorId, notify, refresh, onClose, onSaved, restoreFocus }: Props) {
+export function CycleCompletionPanel({ cycle, plans, actorId, notify, refresh, onClose, onSaved, onOpenRecord, restoreFocus }: Props) {
   const titleId = useId();
   const descriptionId = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -44,6 +45,7 @@ export function CycleCompletionPanel({ cycle, plans, actorId, notify, refresh, o
   const [destination, setDestination] = useState('');
   const [preview, setPreview] = useState<CycleCompletionPreview | null>(null);
   const [result, setResult] = useState<CycleCompletionResult | null>(null);
+  const recordId = result?.recordId;
   const [busy, setBusy] = useState<Operation | null>(null);
   const [needsLatest, setNeedsLatest] = useState(false);
   const [missingCycle, setMissingCycle] = useState(false);
@@ -254,6 +256,9 @@ export function CycleCompletionPanel({ cycle, plans, actorId, notify, refresh, o
     </div>
     <footer>
       <button className="btn btn-ghost" type="button" disabled={Boolean(busy)} onClick={close}>닫기</button>
+      {recordId && <button className="btn btn-primary" type="button" disabled={Boolean(busy)} onClick={() => onOpenRecord(recordId, current.id)}>
+        <History size={15} aria-hidden="true" />완료 기록 보기
+      </button>}
       {!result && preview && <button className="btn btn-primary" type="button" disabled={Boolean(busy || needsLatest || !preview.previewId || preview.counts.blocked)} onClick={apply}>
         {unknown ? <RefreshCw size={15} /> : <Check size={15} />}{unknown ? '같은 완료 요청 다시 확인' : '사이클 완료 적용'}
       </button>}

@@ -644,7 +644,7 @@ test('문서 복구 뒤의 오래된 오프라인 편집은 자동 적용하지 
     await expect(b.locator('.docs-live-prose')).toContainText('stale-offline');
     expect((await canonical(fixture)).plainText).toBe(fixture.initialText);
 
-    const response = b.waitForResponse(result => result.url().endsWith('/api/documents') && result.request().method() === 'POST');
+    const response = b.waitForResponse(result => new URL(result.url()).pathname === `/api/documents/${fixture.document.id}/recovery-copy` && result.request().method() === 'POST');
     await b.getByRole('button', { name: '사본으로 보관', exact: true }).click();
     const copied = await (await response).json() as DocPage;
     expect(copied.id).not.toBe(fixture.document.id);
