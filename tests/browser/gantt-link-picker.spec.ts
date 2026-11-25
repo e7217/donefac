@@ -65,12 +65,14 @@ test('360px에서 선행·후행 날짜와 연결을 함께 검토하고 최신 
     const successor = await createIssue(request, project.id, `${prefix} 후행`, issues, dateAt(6), dateAt(9));
     const unrelated = await createIssue(request, project.id, `${prefix} 독립 업무`, issues, dateAt(7), dateAt(11));
     const { chart, picker } = await openChart(page, project.id, prefix);
+    const predecessorStart = chart.getByLabel(`${predecessor.key} 시작일`, { exact: true });
     const predecessorEnd = chart.getByLabel(`${predecessor.key} 종료일`, { exact: true });
     const successorStart = chart.getByLabel(`${successor.key} 시작일`, { exact: true });
     const successorEnd = chart.getByLabel(`${successor.key} 종료일`, { exact: true });
     const unrelatedEnd = chart.getByLabel(`${unrelated.key} 종료일`, { exact: true });
-    const draftEnd = dateAt(5), draftStart = dateAt(8), draftFinish = dateAt(10);
+    const predecessorDraftStart = dateAt(4), draftEnd = dateAt(5), draftStart = dateAt(8), draftFinish = dateAt(10);
     const unrelatedDraftEnd = dateAt(14), peerEnd = dateAt(13);
+    await predecessorStart.fill(predecessorDraftStart);
     await predecessorEnd.fill(draftEnd);
     await successorStart.fill(draftStart);
     await successorEnd.fill(draftFinish);
@@ -114,6 +116,7 @@ test('360px에서 선행·후행 날짜와 연결을 함께 검토하고 최신 
     await dialog.getByRole('button', { name: '닫기', exact: true }).click();
     await expect(dialog).toHaveCount(0);
     await expect(picker).toBeFocused();
+    await expect(predecessorStart).toHaveValue(predecessorDraftStart);
     await expect(predecessorEnd).toHaveValue(draftEnd);
     await expect(successorStart).toHaveValue(draftStart);
     await expect(successorEnd).toHaveValue(draftFinish);
@@ -133,7 +136,7 @@ test('360px에서 선행·후행 날짜와 연결을 함께 검토하고 최신 
     expect(previewResponse.request().postDataJSON()).toMatchObject({
       issue: { id: successor.id, expectedVersion: successor.version }, changes: { startDate: draftStart, endDate: draftFinish },
       dependency: { action: 'add', relatedIssue: { id: predecessor.id, expectedVersion: predecessor.version }, direction: 'predecessor', type: 'FF', lagDays: 1 },
-      relatedDates: { issue: { id: predecessor.id, expectedVersion: predecessor.version }, changes: { endDate: draftEnd } },
+      relatedDates: { issue: { id: predecessor.id, expectedVersion: predecessor.version }, changes: { startDate: predecessorDraftStart, endDate: draftEnd } },
     });
     const preview = await previewResponse.json() as SchedulePastePreview;
     expect(preview.previewId).toBeTruthy();
@@ -184,6 +187,37 @@ test('360px에서 선행·후행 날짜와 연결을 함께 검토하고 최신 
     expect(latestPreview.previewId).not.toBe(preview.previewId);
     expect(latestPreview.changes.find(change => change.id === predecessor.id)).toMatchObject({ fromEnd: peerEnd, toEnd: draftEnd });
 
+    const useSaved = relatedDates.getByRole('button', { name: `${predecessor.key} 종료일 저장값 사용`, exact: true });
+    await useSaved.click();
+    await expect(applyButton).toBeDisabled();
+    const useDraft = relatedDates.getByRole('button', { name: `${predecessor.key} 종료일 간트 입력 사용`, exact: true });
+    await expect(useDraft).toBeFocused();
+    await useDraft.click();
+    await useSaved.click();
+    const peerRestored = await request.patch(`/api/issues/${predecessor.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: latestPredecessor.version, endDate: predecessor.endDate },
+    });
+    expect(peerRestored.ok(), await peerRestored.text()).toBeTruthy();
+    const restoredByPeer = await peerRestored.json() as Issue;
+    await dialog.getByRole('button', { name: '최신 업무 불러오기', exact: true }).click();
+    await expect(reviewButton).toBeEnabled();
+    await expect(useDraft).toBeVisible();
+    const adjustedEnd = dateAt(19);
+    await dialog.getByLabel('종료일', { exact: true }).fill(adjustedEnd);
+    const mergedPreview = waitPost(page, previewPath);
+    await reviewButton.click();
+    const merged = await mergedPreview;
+    expect(merged.request().postDataJSON()).toMatchObject({ relatedDates: {
+      issue: { id: predecessor.id, expectedVersion: restoredByPeer.version },
+      changes: { startDate: predecessorDraftStart, endDate: restoredByPeer.endDate },
+    } });
+    const mergedReview = await merged.json() as SchedulePastePreview;
+    expect(mergedReview.previewId).toBeTruthy();
+    expect(mergedReview.warnings).toEqual([]);
+    expect(mergedReview.changes.find(change => change.id === predecessor.id)).toMatchObject({
+      fromEnd: restoredByPeer.endDate, toEnd: restoredByPeer.endDate, toStart: predecessorDraftStart,
+    });
+
     const pendingApply = waitPost(page, applyPath);
     await applyButton.click();
     const appliedResponse = await pendingApply;
@@ -192,26 +226,28 @@ test('360px에서 선행·후행 날짜와 연결을 함께 검토하고 최신 
     expect(applied.updated.map(issue => issue.id).sort()).toEqual([predecessor.id, successor.id].sort());
     expect(applied.dependencyChanges).toBe(1);
     await expect(dialog).toHaveCount(0);
-    await expect(predecessorEnd).toHaveValue(draftEnd);
+    await expect(predecessorStart).toHaveValue(predecessorDraftStart);
+    await expect(predecessorEnd).toHaveValue(restoredByPeer.endDate!);
     await expect(unrelatedEnd).toHaveValue(unrelatedDraftEnd);
     await expect(chart.getByRole('button', { name: `${predecessor.key} 날짜 저장`, exact: true })).toHaveCount(0);
     await expect(chart.getByRole('button', { name: `${successor.key} 날짜 저장`, exact: true })).toHaveCount(0);
     await expect(chart.getByRole('button', { name: `${unrelated.key} 날짜 저장`, exact: true })).toBeVisible();
     const after = await workspace(request);
-    expect(after.issues.find(issue => issue.id === predecessor.id)).toMatchObject({ startDate: predecessor.startDate, endDate: draftEnd });
-    expect(after.issues.find(issue => issue.id === successor.id)).toMatchObject({ startDate: draftStart, endDate: draftFinish });
+    expect(after.issues.find(issue => issue.id === predecessor.id)).toMatchObject({ startDate: predecessorDraftStart, endDate: restoredByPeer.endDate });
+    expect(after.issues.find(issue => issue.id === successor.id)).toMatchObject({ startDate: draftStart, endDate: adjustedEnd });
     expect(after.issues.find(issue => issue.id === unrelated.id)).toEqual(unrelated);
     expect(after.dependencies.find(link => link.predecessorId === predecessor.id)).toMatchObject({ successorId: successor.id, type: 'FF', lagDays: 1 });
 
     const pendingUndo = waitPost(page, '/api/schedule/undo');
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     expect((await pendingUndo).ok()).toBeTruthy();
-    await expect(predecessorEnd).toHaveValue(peerEnd);
+    await expect(predecessorStart).toHaveValue(predecessor.startDate!);
+    await expect(predecessorEnd).toHaveValue(restoredByPeer.endDate!);
     await expect(successorStart).toHaveValue(successor.startDate!);
     await expect(successorEnd).toHaveValue(successor.endDate!);
     await expect(unrelatedEnd).toHaveValue(unrelatedDraftEnd);
     const undone = await workspace(request);
-    expect(undone.issues.find(issue => issue.id === predecessor.id)).toMatchObject({ startDate: predecessor.startDate, endDate: peerEnd });
+    expect(undone.issues.find(issue => issue.id === predecessor.id)).toMatchObject({ startDate: predecessor.startDate, endDate: restoredByPeer.endDate });
     expect(undone.issues.find(issue => issue.id === successor.id)).toMatchObject({ startDate: successor.startDate, endDate: successor.endDate });
     expect(undone.issues.find(issue => issue.id === unrelated.id)).toEqual(unrelated);
     expect(undone.dependencies.find(link => link.predecessorId === predecessor.id)).toBeUndefined();

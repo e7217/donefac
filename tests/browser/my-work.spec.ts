@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-import type { Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, Issue, IssueStatusChangeRequest, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'Asia/Seoul' });
 
@@ -98,7 +98,7 @@ test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한�
   }
 
   const section = (name: string) => page.getByRole('region', { name, exact: true });
-  const row = (issue: Issue) => page.getByRole('button', { name: new RegExp(`\\b${issue.key}\\b`) });
+  const row = (issue: Issue) => page.locator(`[data-issue-review-id="${issue.id}"]`);
 
   try {
     const priorityDate = await create('별도 목표 마감일', {
@@ -205,6 +205,103 @@ test('내 업무에서 프로젝트를 넘어 담당과 협력 업무의 기한�
         expect(removed.ok()).toBeTruthy();
       }
     }
+  }
+});
+
+test('360px 내 업무에서 상세를 열지 않고 상태와 인수인계를 저장하고 같은 대기열을 이어서 본다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const { projects: [contextProject, project], users: [actor, peer] } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const headers = { 'X-Actor-Id': actor.id };
+  const created = await request.post('/api/issues', { headers, data: {
+    projectId: project.id, title: `내 업무 인수인계 ${randomUUID().slice(0, 8)}`, status: 'todo', assigneeId: actor.id, reporterId: null,
+  } });
+  expect(created.status(), await created.text()).toBe(201);
+  const issue = await created.json() as Issue;
+  const issuePath = `/api/issues/${issue.id}`;
+  const changePath = `${issuePath}/status-change`;
+
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    const address = `#/${contextProject.id}/mywork`;
+    await page.goto(`/${address}`);
+    const pageHeading = page.getByRole('heading', { name: '내 업무', exact: true });
+    const projectFilter = page.getByRole('combobox', { name: '프로젝트', exact: true });
+    const role = page.getByRole('combobox', { name: '참여 범위', exact: true });
+    const grouping = page.getByRole('combobox', { name: '묶는 기준', exact: true });
+    await projectFilter.selectOption(project.id);
+    await role.selectOption('assigned');
+    await grouping.selectOption('status');
+    const action = page.getByRole('button', { name: `${issue.key} 상태 변경`, exact: true });
+    await expect(action).toBeVisible();
+    const bounds = await action.boundingBox();
+    expect(bounds?.height).toBeGreaterThanOrEqual(44);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    const workRow = page.locator(`[data-issue-review-id="${issue.id}"]`);
+    const details = page.getByRole('dialog', { name: issue.title, exact: true });
+    const closeDetails = details.getByRole('button', { name: '업무 상세 닫기', exact: true });
+    const detailComment = details.getByRole('textbox', { name: '댓글 내용', exact: true });
+    const otherDraft = '티켓 상세에서 작성 중인 별도 댓글입니다.';
+    await workRow.click();
+    await detailComment.fill(otherDraft);
+    await closeDetails.click();
+    await expect(details).toHaveCount(0);
+    await action.press('Enter');
+
+    const dialog = page.getByRole('dialog', { name: '업무 상태 변경', exact: true });
+    const nextState = dialog.getByRole('combobox', { name: '변경할 상태', exact: true });
+    const nextAssignee = dialog.getByRole('combobox', { name: '담당자', exact: true });
+    const handoff = dialog.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    const apply = dialog.getByRole('button', { name: '상태 변경 적용', exact: true });
+    await expect(nextState).toBeFocused();
+    await nextState.selectOption('in_progress');
+    const comment = '이전 검토 내용을 확인한 뒤 작업을 이어갑니다.';
+    await handoff.fill(comment);
+
+    const submitted: IssueStatusChangeRequest[] = [];
+    await page.route(`**${changePath}`, async route => {
+      submitted.push(route.request().postDataJSON() as IssueStatusChangeRequest);
+      const response = await route.fetch();
+      if (submitted.length === 1) {
+        expect(response.status(), await response.text()).toBe(200);
+        await route.abort('failed');
+      } else await route.fulfill({ response });
+    });
+    await apply.click();
+    const retry = dialog.getByRole('button', { name: '저장 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    await expect(handoff).toHaveValue(comment);
+    await retry.click();
+    await expect(dialog).toHaveCount(0);
+    expect(submitted).toHaveLength(2);
+    expect(submitted[1]).toEqual(submitted[0]);
+    const liveComments = await request.get(`/api/comments?${new URLSearchParams({ resourceType: 'issue', resourceId: issue.id })}`);
+    expect(liveComments.ok(), await liveComments.text()).toBeTruthy();
+    expect(await liveComments.json() as Comment[]).toMatchObject([{ body: comment, authorId: actor.id }]);
+    await expect(page.getByRole('region', { name: '진행 중', exact: true }).getByRole('button', { name: `${issue.key} 상태 변경`, exact: true })).toBeFocused();
+    await expect(details).toHaveCount(0);
+    await workRow.click();
+    await expect(detailComment).toHaveValue(otherDraft);
+    await closeDetails.click();
+
+    await action.click();
+    await nextState.selectOption('review');
+    await nextAssignee.selectOption(`user:${peer.id}`);
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(action).toHaveCount(0);
+    await expect(pageHeading).toBeFocused();
+    await expect(projectFilter).toHaveValue(project.id);
+    await expect(role).toHaveValue('assigned');
+    await expect(grouping).toHaveValue('status');
+    await expect(page).toHaveURL(url => url.hash === address);
+    await expect(page.getByRole('dialog', { name: issue.title, exact: true })).toHaveCount(0);
+    const saved = await request.get('/api/workspace');
+    expect(saved.ok(), await saved.text()).toBeTruthy();
+    const { issues } = await saved.json() as WorkspaceSnapshot;
+    expect(issues.find(value => value.id === issue.id)).toMatchObject({ status: 'review', assigneeId: peer.id, version: issue.version + 2 });
+  } finally {
+    const removed = await request.delete(issuePath, { headers });
+    if (removed.ok()) await request.delete(`/api/trash/${(await removed.json()).trashEntryId}`, { headers });
   }
 });
 

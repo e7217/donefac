@@ -32,9 +32,10 @@ test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 
   const releaseFirst = Promise.withResolvers<void>();
   const firstFinished = Promise.withResolvers<void>();
   const requested: { repositoryId: number; expectedVersion: number }[] = [];
-  const refreshed: { repositoryId: number; offset: number }[] = [];
+  const refreshed: { repositoryId: number; offset: number; environment: string | null }[] = [];
   let synced = false;
   let rejectSync = false;
+  let shrinkHistory = false;
 
   await page.route(url => url.pathname === integration, async route => {
     await route.fulfill({ json: settings });
@@ -43,9 +44,10 @@ test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 
     const query = new URL(route.request().url()).searchParams;
     const repositoryId = Number(query.get('repositoryId'));
     const offset = Number(query.get('offset'));
-    if (synced) refreshed.push({ repositoryId, offset });
+    if (synced) refreshed.push({ repositoryId, offset, environment: query.get('environment') });
     const data: GitlabDeploymentPage = {
-      items: [deployment(repositoryId, offset, synced && repositoryId === 43)], total: 2, offset, limit: 1,
+      items: shrinkHistory && offset > 0 ? [] : [deployment(repositoryId, offset, synced && repositoryId === 43)],
+      total: shrinkHistory ? 1 : 2, offset, limit: 1,
     };
     await route.fulfill({ json: data });
   });
@@ -74,8 +76,9 @@ test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 
     const repository = panel.getByRole('combobox', { name: '배포 저장소', exact: true });
     const synchronize = panel.getByRole('button', { name: '배포 이력 동기화', exact: true });
     const report = panel.getByRole('status', { name: '배포 이력 동기화 결과', exact: true });
+    const rows = panel.getByRole('list', { name: 'GitLab 배포 목록', exact: true });
     await expect(repository).toHaveValue('42');
-    await expect(panel.getByText('건너뜀', { exact: true })).toBeVisible();
+    await expect(rows.getByText('건너뜀', { exact: true })).toBeVisible();
     await synchronize.click();
     await firstRequested.promise;
     await expect(synchronize).toBeDisabled();
@@ -84,9 +87,11 @@ test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 
     await repository.selectOption('43');
     await expect(repository).toBeFocused();
     await expect(synchronize).toBeEnabled();
+    await panel.getByRole('searchbox', { name: '배포 환경', exact: true }).fill('43');
+    await panel.getByRole('button', { name: '배포 검색', exact: true }).click();
     await panel.getByRole('button', { name: '다음 배포', exact: true }).click();
     await expect(panel.getByText('기존 43 배포 1', { exact: true })).toBeVisible();
-    await expect(panel.getByText('대기 중', { exact: true })).toBeVisible();
+    await expect(rows.getByText('대기 중', { exact: true })).toBeVisible();
     await synchronize.click();
     await expect(report).toContainText('배포 8건 조회 · 2건 반영 · 포함 MR 2건 반영');
     await expect(report).toContainText('배포 조회 한도에 도달했습니다.');
@@ -106,7 +111,16 @@ test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 
       { repositoryId: 42, expectedVersion: settings.version },
       { repositoryId: 43, expectedVersion: settings.version },
     ]);
-    expect(refreshed).toEqual([{ repositoryId: 43, offset: 1 }]);
+    expect(refreshed).toEqual([{ repositoryId: 43, offset: 1, environment: '43' }]);
+
+    shrinkHistory = true;
+    await panel.getByRole('button', { name: '배포 새로고침', exact: true }).click();
+    await expect.poll(() => refreshed.slice(1)).toEqual([
+      { repositoryId: 43, offset: 1, environment: '43' },
+      { repositoryId: 43, offset: 0, environment: '43' },
+    ]);
+    await expect(row).toHaveAttribute('data-deployment-id', '4300');
+    await expect(panel.getByRole('navigation', { name: 'GitLab 배포 페이지', exact: true })).toHaveCount(0);
 
     rejectSync = true;
     await synchronize.click();

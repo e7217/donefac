@@ -26,8 +26,10 @@ export function automationPipelineContextLabel(source?: string, tag?: boolean): 
   return `${refKind} · ${gitlabPipelineSourceLabel(source)}`;
 }
 
+export const MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH = 255;
+
 export function isGitlabDeploymentEnvironment(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= 255 && value.trim() === value &&
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH && value.trim() === value &&
     value.isWellFormed() && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 

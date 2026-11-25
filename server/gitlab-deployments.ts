@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, verifiedGitlabPipelineTicketEvidence } from '../shared/gitlab-links.js';
-import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabDeploymentStatusBinding, type GitlabLink } from '../shared/types.js';
+import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentFilters, type GitlabDeploymentMergeRequest, type GitlabDeploymentPage, type GitlabDeploymentState, type GitlabDeploymentStatusBinding, type GitlabLink } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl } from './gitlab-push.js';
 import type { Store } from './store.js';
 
@@ -405,7 +405,7 @@ export class GitlabDeployments {
     });
   }
 
-  issuePage(issueId: string, offset: number): GitlabDeploymentPage {
+  issuePage(issueId: string, offset: number, filters: GitlabDeploymentFilters = {}): GitlabDeploymentPage {
     const links = this.store.db.prepare('SELECT json FROM gitlab_links WHERE issue_id=?').all(issueId) as { json: string }[];
     const shaEvidence = new Map<string, ShaEvidence>();
     const mergeRequestEvidence = new Map<string, MergeRequestEvidence>();
@@ -432,11 +432,11 @@ export class GitlabDeployments {
         AND m.merge_request_iid=json_extract(e.value,'$.iid')
       JOIN gitlab_deployments r USING(instance,repository_id,deployment_id) WHERE r.status='success'
     ) AS matched JOIN gitlab_deployments d USING(instance,repository_id,deployment_id)`;
-    return this.page(query, [JSON.stringify([...shaEvidence.values()]), JSON.stringify([...mergeRequestEvidence.values()])], offset);
+    return this.page(query, [JSON.stringify([...shaEvidence.values()]), JSON.stringify([...mergeRequestEvidence.values()])], offset, filters);
   }
 
-  repositoryPage(instance: string, repositoryId: number, offset: number): GitlabDeploymentPage {
-    return this.page('FROM gitlab_deployments d WHERE d.instance=? AND d.repository_id=?', [instance, repositoryId], offset);
+  repositoryPage(instance: string, repositoryId: number, offset: number, filters: GitlabDeploymentFilters = {}): GitlabDeploymentPage {
+    return this.page('FROM gitlab_deployments d', [instance, repositoryId], offset, filters, ['d.instance=?', 'd.repository_id=?']);
   }
 
   exportRows(): GitlabDeployment[] {
@@ -465,7 +465,17 @@ export class GitlabDeployments {
     }
   }
 
-  private page(query: string, arguments_: (string | number)[], offset: number): GitlabDeploymentPage {
+  private page(from: string, arguments_: (string | number)[], offset: number, filters: GitlabDeploymentFilters,
+    conditions: string[] = []): GitlabDeploymentPage {
+    if (filters.environment) {
+      conditions.push('instr(d.environment, ?) > 0');
+      arguments_.push(filters.environment);
+    }
+    if (filters.status) {
+      conditions.push('d.status = ?');
+      arguments_.push(filters.status);
+    }
+    const query = conditions.length ? `${from} WHERE ${conditions.join(' AND ')}` : from;
     const { total } = this.store.db.prepare(`SELECT COUNT(*) AS total ${query}`).get(...arguments_) as { total: number };
     const rows = this.store.db.prepare(`SELECT ${select} ${query} ${byLatest} LIMIT ? OFFSET ?`)
       .all(...arguments_, PAGE_SIZE, offset) as StoredDeployment[];

@@ -258,6 +258,12 @@ test('authenticated deployment first, merge later, scoped ticket evidence, and n
   assert.deepEqual(tracked.items.map(item => [item.environment, item.status, item.sha]), [
     ['staging', 'failed', squashSha], ['production', 'success', mergeSha],
   ]);
+  const failedStaging = 'environment=stag&status=failed';
+  const staging = { ...tracked, total: 1, items: [tracked.items[0]] };
+  assert.deepEqual(await f.json<GitlabDeploymentPage>(`${repositoryPath}&${failedStaging}`), staging);
+  for (const filters of ['status=unknown', 'status=success&status=failed', 'environment=production%0A', 'environment=a&environment=b']) {
+    assert.equal((await f.request(`${repositoryPath}&${filters}`)).status, 400);
+  }
   assert.deepEqual(await f.json<GitlabDeploymentPage>(`/api/issues/${issue.id}/gitlab-deployments?offset=2`), { total: 2, limit: 50, offset: 2, items: [] });
   assert.equal((await f.json<WorkspaceSnapshot>('/api/workspace')).issues.find(row => row.id === issue.id)?.status, issue.status);
   assert.equal((await f.request(`${repositoryPath}&unexpected=true`)).status, 400);
@@ -276,6 +282,8 @@ test('authenticated deployment first, merge later, scoped ticket evidence, and n
   const allowedKey = await readKey(project.id), deniedKey = await readKey(other.id);
   const apiIssuePath = `/api/v1/issues/${issue.id}/gitlab-deployments`;
   assert.deepEqual(await f.json<GitlabDeploymentPage>(apiIssuePath, 'GET', undefined, allowedKey), tracked);
+  assert.deepEqual(await f.json<GitlabDeploymentPage>(`${apiIssuePath}?${failedStaging}`, 'GET', undefined, allowedKey), staging);
+  assert.equal((await f.request(`${apiIssuePath}?${failedStaging}`, 'GET', undefined, deniedKey)).status, 403);
   assert.equal((await f.request(apiIssuePath, 'GET', undefined, deniedKey)).status, 403);
   assert.equal((await f.request('/api/v1/integrations/gitlab/deployments?repositoryId=42', 'GET', undefined, allowedKey)).status, 403);
 

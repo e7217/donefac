@@ -62,6 +62,142 @@ async function openDocument(page: Page, document: DocPage) {
   await expect(page.locator('.docs-prose')).toBeVisible();
 }
 
+async function loseFirstSaveResponse(page: Page, path: string) {
+  const attempts: unknown[] = [];
+  await page.route(`**${path}`, async route => {
+    if (route.request().method() !== 'PATCH') return route.continue();
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length !== 1) return route.continue();
+    const saved = await route.fetch();
+    expect(saved.status()).toBe(200);
+    await route.abort('failed');
+  });
+  return attempts;
+}
+
+test('360px 문서 저장 응답이 끊기면 같은 요청을 다시 확인하고 새 제목 입력을 남긴다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  await page.setViewportSize({ width: 360, height: 820 });
+  await openDocument(page, document);
+  const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+  const editor = page.locator('.docs-prose');
+  const editorText = '응답이 끊기기 전에 저장한 본문';
+  const originalSaveTitle = `${document.title} 저장한 제목`;
+  const laterTitle = `${document.title} 이어서 작성한 제목`;
+  const attempts = await loseFirstSaveResponse(page, `/api/documents/${document.id}`);
+  await title.fill(originalSaveTitle);
+  await editor.fill(editorText);
+  await page.locator('.docs-save-button').click();
+  const recover = page.getByRole('button', { name: '저장 결과 다시 확인', exact: true });
+  await expect(recover).toBeVisible();
+  await title.fill(laterTitle);
+  page.once('dialog', dialog => dialog.accept());
+  await page.reload();
+  await expect(title).toHaveValue(laterTitle);
+
+  const confirming = page.waitForResponse(response => response.url().endsWith(`/api/documents/${document.id}`) && response.request().method() === 'PATCH');
+  await recover.click();
+  expect((await confirming).status()).toBe(200);
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual(attempts[0]);
+  expect(attempts[0]).toMatchObject({ requestId: expect.any(String), expectedVersion: document.version });
+  await expect(recover).toHaveCount(0);
+  await expect(title).toHaveValue(laterTitle);
+  await expect(editor).toHaveText(editorText);
+  await expect(page.locator('.docs-save-state')).toHaveText('저장 필요');
+  const revisions = await (await requests.get(`/api/documents/${document.id}/revisions`)).json() as DocRevision[];
+  expect(revisions.map(revision => [revision.version, revision.title])).toEqual([
+    [document.version + 1, originalSaveTitle], [document.version, document.title],
+  ]);
+
+  await page.locator('.docs-save-button').click();
+  await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
+  const { documents } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  expect(documents.find(page => page.id === document.id)).toMatchObject({
+    version: document.version + 2, title: laterTitle, plainText: editorText,
+  });
+});
+
+test('수동 문서의 저장 결과를 확인한 뒤 그 사이 시작된 공동 편집에 연결한다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  const path = `/api/documents/${document.id}`;
+  const { users } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const peer = users.find(user => user.id !== document.authorId);
+  expect(peer).toBeDefined();
+  await openDocument(page, document);
+  const enable = page.getByRole('button', { name: '공동 편집 시작', exact: true });
+  await expect(enable).toBeVisible();
+  const attempts = await loseFirstSaveResponse(page, path);
+  const editorText = '공동 편집을 시작하기 전에 먼저 저장한 본문';
+  await page.locator('.docs-prose').fill(editorText);
+  await page.locator('.docs-save-button').click();
+  const recover = page.getByRole('button', { name: '저장 결과 다시 확인', exact: true });
+  await expect(recover).toBeVisible();
+
+  const enabled = await requests.post(`${path}/collaboration/enable`, {
+    headers: { 'X-Actor-Id': peer!.id }, data: { expectedVersion: document.version + 1 },
+  });
+  expect(enabled.status()).toBe(200);
+  await expect(enable).toHaveCount(0);
+  const checkpoint = page.getByRole('button', { name: '버전 기록', exact: true });
+  await expect(checkpoint).toHaveCount(0);
+
+  await recover.click();
+  await expect(checkpoint).toBeEnabled();
+  await expect(page.locator('.docs-save-state')).toHaveText('동기화됨');
+  await expect(page.locator('.docs-live-prose')).toHaveText(editorText);
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual(attempts[0]);
+});
+
+test('공동 편집 중 저장 결과를 확인하면 기다리는 동안 받은 동료의 속성 변경도 반영한다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  const path = `/api/documents/${document.id}`;
+  const { users } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const peer = users.find(user => user.id !== document.authorId);
+  expect(peer).toBeDefined();
+  const enabled = await requests.post(`${path}/collaboration/enable`, { data: { expectedVersion: document.version } });
+  expect(enabled.status()).toBe(200);
+  const peerTitle = `${document.title} 동료가 저장한 제목`;
+  let peerBroadcast: Promise<unknown> | undefined;
+  page.on('websocket', socket => {
+    if (socket.url().includes('/collaboration')) {
+      peerBroadcast = socket.waitForEvent('framereceived', frame => frame.payload.toString().includes(peerTitle));
+    }
+  });
+  await openDocument(page, document);
+  await expect(page.locator('.docs-save-state')).toHaveText('동기화됨');
+  const title = page.getByRole('textbox', { name: '문서 제목', exact: true });
+  const attempts = await loseFirstSaveResponse(page, path);
+  await title.fill(`${document.title} 먼저 저장한 제목`);
+  await page.locator('.docs-save-button').click();
+  const recover = page.getByRole('button', { name: '저장 결과 다시 확인', exact: true });
+  await expect(recover).toBeVisible();
+  expect(attempts).toHaveLength(1);
+  const first = attempts[0] as { expectedVersion: number };
+
+  const remote = await requests.patch(path, {
+    headers: { 'X-Actor-Id': peer!.id }, data: { expectedVersion: first.expectedVersion + 1, title: peerTitle, status: 'published' },
+  });
+  expect(remote.status()).toBe(200);
+  const peerDocument = await remote.json() as DocPage;
+  expect(peerBroadcast).toBeDefined();
+  await peerBroadcast;
+
+  await recover.click();
+  await expect(title).toHaveValue(peerTitle);
+  await expect(page.locator('.docs-status-pill')).toHaveText('공유 표시');
+  await expect(page.locator('.docs-save-state')).toHaveText('동기화됨');
+  expect(attempts).toHaveLength(2);
+  expect(attempts[1]).toEqual(attempts[0]);
+
+  const laterTitle = `${document.title} 확인하고 이어서 저장한 제목`;
+  await title.fill(laterTitle);
+  await page.locator('.docs-save-button').click();
+  await expect(page.locator('.docs-save-state')).toHaveText('동기화됨');
+  expect(attempts[2]).toMatchObject({ expectedVersion: peerDocument.version, title: laterTitle });
+});
+
 test('문서 편집·댓글이 저장되고 이전 내용 복구는 새 버전으로 기록된다', async ({ page, syntheticDocument }) => {
   const { document, requests, initialText } = syntheticDocument;
   const errors: string[] = [];
@@ -206,7 +342,9 @@ test('수동 문서의 제목 초안은 다른 사용자가 저장한 본문·�
   expect(response.status()).toBe(200);
   const saved = await response.json() as DocPage;
   expect(saved).toMatchObject({ title: localTitle, plainText: peerBody, status: 'published' });
-  expect(browserWrites).toEqual([{ expectedVersion: remoteDocument.version, title: localTitle }]);
+  expect(browserWrites).toEqual([{
+    expectedVersion: remoteDocument.version, title: localTitle, requestId: expect.any(String), expectedRestoreGeneration: expect.any(String),
+  }]);
   await expect(save).toBeDisabled();
 
   await title.fill(`${document.title} 두 번째 내 제목`);
@@ -552,7 +690,7 @@ test('360px에서 다른 프로젝트 연결 업무를 열고 돌아와도 문�
     await page.goForward();
     await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId, issue: issue.id } });
     await expect(ticketTitle).toHaveValue(issue.title);
-    await expect(ticketComment).toHaveValue('');
+    await expect(ticketComment).toHaveValue(localTicketComment);
     await drawer.getByRole('button', { name: document.title, exact: true }).click();
     await expect(drawer).toHaveCount(0);
     await expect.poll(currentRoute).toEqual({ path: routePath, parameters: { section: sectionId } });

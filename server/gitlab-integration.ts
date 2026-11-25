@@ -2,7 +2,8 @@ import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
 import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestDiscussions,GitlabMergeRequestPipeline,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
-import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabWebhookTrackedEvent } from '../shared/types.js';
+import { GITLAB_DEPLOYMENT_STATES, GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabDeploymentFilters, type GitlabWebhookTrackedEvent } from '../shared/types.js';
+import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isGitlabManualLinkId, isRestorableGitlabLink } from '../shared/gitlab-links.js';
 import { parseGitlabMergeReadiness } from '../shared/gitlab-merge-readiness.js';
@@ -2679,18 +2680,25 @@ export class GitlabIntegrationService{
       if (Object.keys(req.query).length) fail('웹훅 수신 상태 조회 조건을 확인해 주세요.');
       res.json(this.webhookStatus());
     });
-    const deploymentOffset=(request:Request)=>{
-      const value=request.query.offset??'0';
-      if(typeof value!=='string'||!/^\d+$/u.test(value)||!Number.isSafeInteger(Number(value)))fail('GitLab 배포 조회 위치를 확인해 주세요.');
-      return Number(value);
+    const deploymentPageQuery=(request: Request, repository = false): { offset: number; filters: GitlabDeploymentFilters } => {
+      const { offset = '0', environment, status: requestedStatus } = request.query;
+      if (Object.keys(request.query).some(key => key !== 'offset' && key !== 'environment' && key !== 'status' &&
+          (!repository || key !== 'repositoryId'))) fail('GitLab 배포 조회 조건을 확인해 주세요.');
+      if (typeof offset !== 'string' || !/^\d+$/u.test(offset) || !Number.isSafeInteger(Number(offset))) {
+        fail('GitLab 배포 조회 위치를 확인해 주세요.');
+      }
+      if (environment !== undefined && !isGitlabDeploymentEnvironment(environment)) fail('GitLab 배포 환경 이름을 확인해 주세요.');
+      const status = GITLAB_DEPLOYMENT_STATES.find(value => value === requestedStatus);
+      if (requestedStatus !== undefined && !status) fail('GitLab 배포 상태를 확인해 주세요.');
+      return { offset: Number(offset), filters: { environment, status } };
     };
     app.get('/api/integrations/gitlab/deployments',(req,res)=>{
-      if(Object.keys(req.query).some(key=>key!=='repositoryId'&&key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');
+      const { offset, filters } = deploymentPageQuery(req, true);
       const repositoryId=Number(numericObjectId(req.query.repositoryId));
       const settings=this.raw();
       if(!repositoryId)fail('배포를 조회할 GitLab 저장소를 선택해 주세요.');
       if(!settings.projectIds.includes(repositoryId))fail('저장된 GitLab 저장소를 선택해 주세요.',403);
-      res.set('Cache-Control','no-store').json(this.deployments.repositoryPage(this.instance(settings),repositoryId,deploymentOffset(req)));
+      res.set('Cache-Control','no-store').json(this.deployments.repositoryPage(this.instance(settings),repositoryId,offset,filters));
     });
     app.post('/api/integrations/gitlab/deployments/preview', async (req, res) => {
       res.set('Cache-Control', 'no-store');
@@ -2720,9 +2728,9 @@ export class GitlabIntegrationService{
       finally { res.off('close', disconnected); }
     });
     app.get('/api/issues/:id/gitlab-deployments',(req,res)=>{
-      if(Object.keys(req.query).some(key=>key!=='offset'))fail('GitLab 배포 조회 조건을 확인해 주세요.');
+      const { offset, filters } = deploymentPageQuery(req);
       const issue=this.requireIssue(String(req.params.id));
-      res.set('Cache-Control','no-store').json(this.deployments.issuePage(issue.id,deploymentOffset(req)));
+      res.set('Cache-Control','no-store').json(this.deployments.issuePage(issue.id,offset,filters));
     });
     app.post('/api/issues/:id/gitlab-deployments/:instance/:repositoryId/:deploymentId/status-review', async (req, res) => {
       res.set('Cache-Control', 'no-store');

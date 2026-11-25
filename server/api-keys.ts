@@ -425,7 +425,7 @@ export class ApiKeyService {
       }
       const gitlabDeployments = /^\/api\/issues\/([^/]+)\/gitlab-deployments$/.exec(path);
       if (gitlabDeployments) {
-        this.query(request, ['offset']);
+        this.query(request, ['offset', 'environment', 'status']);
         this.resource(key, 'issues', this.decode(gitlabDeployments[1]));
         this.used(key); return next();
       }

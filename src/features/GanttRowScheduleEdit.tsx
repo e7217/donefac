@@ -24,6 +24,8 @@ import { WorkingDayRangePicker } from './WorkingDayRangePicker';
 import './schedule-paste.css';
 import './gantt-row-schedule-edit.css';
 
+type DateSnapshot = Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+type RelatedDateDraft = { source: DateSnapshot; changes: ScheduleBulkDateChanges };
 type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   issue: Issue;
   issues: readonly Issue[];
@@ -36,9 +38,9 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   calendar?: WorkCalendar;
   focusDate?: 'dueDate';
   initialDates?: ScheduleBulkDateChanges;
-  initialDateDraft?: Pick<Issue, 'version' | 'startDate' | 'endDate' | 'dueDate'>;
+  initialDateDraft?: DateSnapshot;
   datesFromGantt?: boolean;
-  relatedDateDrafts?: ReadonlyMap<string, { changes: ScheduleBulkDateChanges }>;
+  relatedDateDrafts?: ReadonlyMap<string, RelatedDateDraft>;
   initialRelatedDateId?: string;
   initialLink?: GanttRowLinkDraft;
   undoScope?: ScheduleUndoScope;
@@ -183,6 +185,7 @@ export function GanttRowScheduleEdit({
   const [suggestionDuration, setSuggestionDuration] = useState('3');
   const [drafts, setDrafts] = useState<LinkDraft[]>(() => [{ ...linkDraft(1), ...initialLink }]);
   const [relatedDateChoices, setRelatedDateChoices] = useState(() => new Set(initialRelatedDateId ? [initialRelatedDateId] : []));
+  const [savedRelatedDates, setSavedRelatedDates] = useState<ReadonlyMap<string, ReadonlySet<DateField>>>(() => new Map());
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const nextDraftId = useRef(2);
@@ -241,10 +244,14 @@ export function GanttRowScheduleEdit({
   for (const { related } of resolvedDrafts) if (related) peers.set(related.id, related);
   const relatedDateOptions = [...peers.values()].flatMap(peer => {
     const draft = relatedDateDrafts?.get(peer.id);
-    return draft ? [{ peer, changes: draft.changes }] : [];
+    return draft ? [{ peer, draft }] : [];
   });
   const selectableDates = relatedDateOptions.filter(({ peer }) => remainingPeers.has(peer.id));
-  const selectedDates = selectableDates.filter(({ peer }) => relatedDateChoices.has(peer.id));
+  const selectedDates = selectableDates.filter(({ peer }) => relatedDateChoices.has(peer.id)).map(({ peer, draft }) => {
+    const changes = { ...draft.changes };
+    for (const field of savedRelatedDates.get(peer.id) ?? []) if (Object.hasOwn(changes, field)) changes[field] = peer[field];
+    return { peer, changes };
+  });
   const relatedChanges = new Map(selectedDates.map(({ peer, changes }) => [peer.id, changes]));
   const relatedDateEdits = selectedDates.map(({ peer, changes }) => ({ issue: versionedIssue(peer), changes }));
   const unreviewedKeys = relatedDateOptions.filter(({ peer }) => !relatedChanges.has(peer.id)).map(({ peer }) => peer.key);
@@ -391,6 +398,19 @@ export function GanttRowScheduleEdit({
       return next;
     });
     releaseSuggestedDate(field);
+    invalidate();
+  }
+
+  function toggleSavedRelatedDate(issueId: string, field: DateField) {
+    setSavedRelatedDates(previous => {
+      const next = new Map(previous);
+      const fields = new Set(next.get(issueId));
+      if (fields.has(field)) fields.delete(field);
+      else fields.add(field);
+      if (fields.size) next.set(issueId, fields);
+      else next.delete(issueId);
+      return next;
+    });
     invalidate();
   }
 
@@ -624,12 +644,26 @@ export function GanttRowScheduleEdit({
         </fieldset>
         {selectableDates.length > 0 && <fieldset disabled={editLocked || !currentIssue} className="gantt-row-edit-fields">
           <legend>연결 업무의 날짜</legend>
-          {selectableDates.map(({ peer, changes }) => {
+          {selectableDates.map(({ peer, draft }) => {
             const included = relatedChanges.has(peer.id);
             return <div key={peer.id} className="gantt-row-edit-diff">
               <div className="gantt-row-edit-diff-title"><strong>{issueText(peer)}</strong></div>
-              <dl>{dates.filter(({ field }) => Object.hasOwn(changes, field)).map(({ field, label }) =>
-                <div key={field}><dt>{label}</dt><dd>{peer[field] ?? '미정'} → <strong>{changes[field] ?? '미정'}</strong></dd></div>)}</dl>
+              <dl>{dates.filter(({ field }) => Object.hasOwn(draft.changes, field)).map(({ field, label }) => {
+                const saved = peer[field] ?? '미정';
+                const entered = draft.changes[field] ?? '미정';
+                const useSaved = savedRelatedDates.get(peer.id)?.has(field) === true;
+                const showChoice = peer[field] !== draft.changes[field] &&
+                  (useSaved || peer.version !== draft.source.version && peer[field] !== draft.source[field]);
+                const action = useSaved ? '간트 입력 사용' : '저장값 사용';
+                return <div key={field}><dt>{label}</dt><dd>
+                  {showChoice ? <div className="gantt-row-edit-date-conflict">
+                    <span>동료가 저장한 값 {useSaved ? <strong>{saved}</strong> : saved}</span>
+                    <span>간트 입력 {useSaved ? entered : <strong>{entered}</strong>}</span>
+                    {included && <button className="btn btn-ghost" type="button" aria-label={`${peer.key} ${label} ${action}`}
+                      onClick={() => toggleSavedRelatedDate(peer.id, field)}>{action}</button>}
+                  </div> : <>{saved} → <strong>{entered}</strong></>}
+                </dd></div>;
+              })}</dl>
               <label className="gantt-row-edit-date-toggle">
                 <input type="checkbox" checked={included} disabled={!included && selectedDates.length >= maxRelatedDates} onChange={event => {
                   const checked = event.currentTarget.checked;

@@ -108,6 +108,19 @@ test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 �
     await expect(records.getByRole('link', { name: 'GitLab 작업 열기', exact: true })).toHaveAttribute('href', `${repoUrl(43)}/-/jobs/710`);
     await repos.selectOption('42');
     await expect(records.getByRole('listitem')).toHaveCount(2);
+    const repositoryEnvironment = history.getByRole('searchbox', { name: '배포 환경', exact: true });
+    const repositoryStatus = history.getByRole('combobox', { name: '배포 상태', exact: true });
+    await repositoryEnvironment.fill('stag');
+    await repositoryStatus.selectOption('failed');
+    await history.getByRole('button', { name: '배포 검색', exact: true }).click();
+    await expect(records.getByRole('listitem')).toHaveCount(1);
+    await expect(records.getByRole('listitem')).toHaveAttribute('data-deployment-status', 'failed');
+    await repos.selectOption('43');
+    await expect(history.getByText('조건에 맞는 GitLab 배포가 없습니다.', { exact: true })).toBeVisible();
+    await expect(repositoryEnvironment).toHaveValue('stag');
+    await expect(repositoryStatus).toHaveValue('failed');
+    await repos.selectOption('42');
+    await expect(records.getByRole('listitem')).toHaveAttribute('data-deployment-status', 'failed');
 
     const merged = await send('Merge Request Hook', { object_kind: 'merge_request', project: { id: 42, web_url: repoUrl(42) },
       object_attributes: { id: 301, iid: 12, target_project_id: 42, title: `${issue.key} 병합`, action: 'merge', state: 'merged',
@@ -134,12 +147,30 @@ test('360px GitLab 배포가 저장소에 먼저 나타나고 MR 병합 확인 �
     expect(width.x).toBeGreaterThanOrEqual(0);
     expect(width.x + width.width).toBeLessThanOrEqual(361);
 
+    const environment = deployments.getByRole('searchbox', { name: '배포 환경', exact: true });
+    const status = deployments.getByRole('combobox', { name: '배포 상태', exact: true });
+    const search = deployments.getByRole('button', { name: '배포 검색', exact: true });
+    await environment.fill('stag');
+    await status.selectOption('failed');
+    await search.click();
+    await expect(rows).toHaveCount(1);
+    await expect(stage).toBeVisible();
+
     const later = await send('Deployment Hook', observation(11, 'staging', 'success', 9, 42, false));
     expect(later).toMatchObject({ deploymentUpdated: true, linked: 0, runs: [] });
     const stale = await send('Deployment Hook', observation(11, 'staging', 'running', 8, 42, false));
     expect(stale.deploymentUpdated).toBeUndefined();
     await deployments.getByRole('button', { name: '배포 새로고침', exact: true }).click();
+    await expect(deployments.getByText('조건에 맞는 GitLab 배포가 없습니다.', { exact: true })).toBeVisible();
+    await expect(environment).toHaveValue('stag');
+    await expect(status).toHaveValue('failed');
+    await status.selectOption('success');
+    await search.click();
+    await expect(rows).toHaveCount(1);
     await expect(stage).toHaveAttribute('data-deployment-status', 'success');
+    await deployments.getByRole('button', { name: '배포 필터 초기화', exact: true }).click();
+    await expect(environment).toBeFocused();
+    await expect(rows).toHaveCount(2);
     const snapshot = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
     expect(snapshot.issues.find(item => item.id === issue?.id)?.status).toBe(issue.status);
   } finally {

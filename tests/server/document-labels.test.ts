@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,8 +28,8 @@ async function fixture(t: TestContext) {
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   const base = `http://127.0.0.1:${address.port}/api`;
-  return async <T = unknown>(path: string, method = 'GET', body?: unknown, status = 200, token?: string) => {
-    const headers = new Headers({ 'Content-Type': 'application/json', 'X-Actor-Id': 'user-min' });
+  return async <T = unknown>(path: string, method = 'GET', body?: unknown, status = 200, token?: string, actorId = 'user-min') => {
+    const headers = new Headers({ 'Content-Type': 'application/json', 'X-Actor-Id': actorId });
     if (token) headers.set('Authorization', `Bearer ${token}`);
     const result = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
     const json = await result.text();
@@ -38,6 +39,42 @@ async function fixture(t: TestContext) {
 }
 
 const content = (text: string): RichContent => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] });
+
+test('document save replays its original version after a later collaborator edit', async t => {
+  const call = await fixture(t);
+  const created = await call<DocPage>('/documents', 'POST', { title: '합성 문서 저장', projectId: 'project-neo', content: content('처음 본문') }, 201);
+  const path = `/documents/${created.id}`;
+  const current = async () => {
+    const page = (await call<WorkspaceSnapshot>('/workspace')).documents.find(document => document.id === created.id);
+    assert.ok(page);
+    return page;
+  };
+  const { restoreGeneration } = await call<WorkspaceSnapshot>('/workspace');
+  assert.ok(restoreGeneration);
+  const body = { requestId: randomUUID(), expectedRestoreGeneration: restoreGeneration, expectedVersion: created.version,
+    title: '확인할 원래 저장 제목', labels: ['처음 라벨'], content: content('확인할 원래 저장 본문') };
+  const saved = await call<DocPage>(path, 'PATCH', body);
+  assert.deepEqual(await call<DocPage>(path, 'PATCH', body), saved);
+  await call(path, 'PATCH', body, 409, undefined, 'user-seo');
+  await call(path, 'PATCH', { ...body, title: '같은 요청의 다른 제목' }, 409);
+
+  const peerSave = await call<DocPage>(path, 'PATCH', { expectedVersion: saved.version, title: '다른 작업자의 제목', labels: ['나중 라벨'] }, 200, undefined, 'user-seo');
+  assert.deepEqual(await call<DocPage>(path, 'PATCH', body), saved);
+  assert.deepEqual(await current(), peerSave);
+  const history = await call<DocRevision[]>(`${path}/revisions`);
+  assert.deepEqual(history.map(revision => revision.version), [peerSave.version, saved.version, created.version]);
+  assert.equal(history.find(revision => revision.version === saved.version)?.authorId, 'user-min');
+
+  const backup = await call('/export');
+  await call('/import', 'POST', { data: backup });
+  await call(path, 'PATCH', body, 409);
+  const { restoreGeneration: nextGeneration } = await call<WorkspaceSnapshot>('/workspace');
+  assert.ok(nextGeneration);
+  assert.notEqual(nextGeneration, restoreGeneration);
+  const restored = await current();
+  await call(path, 'PATCH', { ...body, expectedRestoreGeneration: nextGeneration, expectedVersion: restored.version }, 409);
+  assert.deepEqual(await current(), restored);
+});
 
 test('document labels normalize display values, deduplicate canonically and enforce input bounds', () => {
   assert.deepEqual(normalizeDocumentLabels([' zeta ', 'Cafe\u0301', 'CAFÉ', 'Alpha', 'ZETA', '한글']), ['Alpha', 'Café', 'zeta', '한글']);

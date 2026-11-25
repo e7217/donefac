@@ -1787,6 +1787,7 @@ export type GitlabIssueBranchReview = GitlabIssueBranchResult |
   { state: 'ready'; target: GitlabIssueBranchTarget; previewId: string; expiresAt: string };
 export const GITLAB_DEPLOYMENT_STATES = ['created', 'blocked', 'running', 'success', 'failed', 'canceled', 'skipped'] as const;
 export type GitlabDeploymentState = typeof GITLAB_DEPLOYMENT_STATES[number];
+export interface GitlabDeploymentFilters { environment?: string; status?: GitlabDeploymentState }
 export interface GitlabDeploymentMergeRequest { id: number; iid: number }
 export interface GitlabDeployment {
   instance: string;

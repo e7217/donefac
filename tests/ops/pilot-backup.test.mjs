@@ -172,6 +172,36 @@ function confirmDamage(root, file, changed) {
   else assert.deepEqual(readFileSync(join(root, file.path)), changed);
 }
 
+test('cold backup restores the exact document save receipt alongside later edits', async t => {
+  const root = tempDirectory(t);
+  const source = join(root, 'source');
+  const backup = join(root, 'backup');
+  const restored = join(root, 'restored');
+  const { path, body, saved, latest } = await withWorkspace(source, async api => {
+    const document = await api.json('/documents', {
+      method: 'POST', status: 201, body: { projectId: 'project-neo', title: 'Document receipt backup fixture' },
+    });
+    const { restoreGeneration } = await api.json('/workspace');
+    assert.ok(restoreGeneration);
+    const path = `/documents/${document.id}`;
+    const body = { requestId: randomUUID(), expectedRestoreGeneration: restoreGeneration, expectedVersion: document.version,
+      title: 'Saved before backup', labels: ['Original'] };
+    const saved = await api.json(path, { method: 'PATCH', body });
+    const latest = await api.json(path, { method: 'PATCH', body: { expectedVersion: saved.version, title: 'Edited after the original save' } });
+    return { path, body, saved, latest };
+  });
+
+  succeeds('backup', source, backup);
+  succeeds('restore', backup, restored);
+  await withWorkspace(restored, async api => {
+    assert.deepEqual(await api.json(path, { method: 'PATCH', body }), saved);
+    const { documents } = await api.json('/workspace');
+    assert.deepEqual(documents.find(document => document.id === saved.id), latest);
+    const history = await api.json(`${path}/revisions`);
+    assert.equal(history.filter(revision => revision.version === saved.version).length, 1);
+  });
+});
+
 test('cold backup rejects preexisting missing or wrong referenced bytes without publishing or altering the source', async t => {
   const f = await fixture(t);
   const damageCases = [

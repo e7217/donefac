@@ -1,9 +1,11 @@
 'use client';
 
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
-import { Download, ExternalLink, RefreshCw, Rocket } from 'lucide-react';
+import { Download, ExternalLink, RefreshCw, Rocket, Search } from 'lucide-react';
+import { isGitlabDeploymentEnvironment, MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH } from '../../shared/automation';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
-import type { GitlabDeployment, GitlabDeploymentPage, GitlabDeploymentSyncAttempt, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, GitlabSyncStatus } from '../../shared/types';
+import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentFilters, type GitlabDeploymentPage, type GitlabDeploymentSyncAttempt,
+  type GitlabDeploymentSyncResult, type GitlabLink, type GitlabSettings, type GitlabSyncStatus } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { gitlabActivityUrl } from './GitlabActivity';
 import './gitlab-deployments.css';
@@ -22,7 +24,7 @@ const tierLabels: ReadonlyMap<string, string> = new Map([
   ['production', '프로덕션'], ['staging', '스테이징'], ['testing', '테스트'], ['development', '개발'], ['other', '기타'],
 ]);
 
-type DeploymentRequest = { scope: string; offset: number };
+type DeploymentRequest = { scope: string; offset: number; filters: GitlabDeploymentFilters };
 type DeploymentResponse = { scope: string; request: DeploymentRequest; links?: readonly GitlabLink[] } &
   ({ page: GitlabDeploymentPage } | { error: string });
 type SyncState = { pending: boolean; receipt?: GitlabDeploymentSyncResult; previousCompletedAt?: string; error?: string };
@@ -196,20 +198,33 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   review?: DeploymentReviewAction;
 }) {
   const scope = JSON.stringify([path, repositoryId, settingsVersion]);
-  const [request, setRequest] = useState<DeploymentRequest>({ scope, offset: 0 });
+  const [request, setRequest] = useState<DeploymentRequest>({ scope, offset: 0, filters: {} });
+  const [environment, setEnvironment] = useState('');
+  const environmentInput = useRef<HTMLInputElement>(null);
+  const [status, setStatus] = useState<GitlabDeploymentFilters['status']>();
+  const [environmentInvalid, setEnvironmentInvalid] = useState(false);
   const [response, setResponse] = useState<DeploymentResponse | null>(null);
-  const current = response?.scope === scope ? response : null;
+  const current = response?.scope === scope && response.request.filters === request.filters ? response : null;
   const pending = current?.request !== request || current.links !== links;
   const page = current && 'page' in current ? current.page : null;
   const error = !pending && current && 'error' in current ? current.error : '';
   const requestedOffset = request.scope === scope ? request.offset : 0;
+  const filtered = Boolean(request.filters.environment || request.filters.status);
 
   useEffect(() => {
     const controller = new AbortController();
     const query = new URLSearchParams(repositoryId === undefined ? {} : { repositoryId: String(repositoryId) });
     query.set('offset', String(requestedOffset));
+    if (request.filters.environment) query.set('environment', request.filters.environment);
+    if (request.filters.status) query.set('status', request.filters.status);
     void api<GitlabDeploymentPage>(`${path}?${query}`, { cache: 'no-store', signal: controller.signal }).then(page => {
-      if (!controller.signal.aborted) setResponse({ scope, request, links, page });
+      if (controller.signal.aborted) return;
+      if (requestedOffset > 0 && page.offset === requestedOffset && page.offset >= page.total && page.limit > 0) {
+        const lastOffset = Math.max(0, Math.floor((page.total - 1) / page.limit) * page.limit);
+        setRequest(current => current === request ? { ...current, scope, offset: lastOffset } : current);
+        return;
+      }
+      setResponse({ scope, request, links, page });
     }).catch(cause => {
       if (!controller.signal.aborted) {
         setResponse({ scope, request, links, error: cause instanceof Error ? cause.message : 'GitLab 배포 기록을 불러오지 못했습니다.' });
@@ -222,10 +237,10 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   const previousAvailable = Boolean(page?.offset);
   const nextAvailable = Boolean(page && page.offset + page.limit < page.total);
   function browse(offset: number) {
-    if (!pending) setRequest({ scope, offset });
+    if (!pending) setRequest({ scope, offset, filters: request.filters });
   }
   function refreshPage() {
-    setRequest(current => ({ scope, offset: current.scope === scope ? current.offset : 0 }));
+    setRequest(current => ({ ...current, scope, offset: current.scope === scope ? current.offset : 0 }));
   }
 
   return <>
@@ -233,7 +248,7 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
       {heading}
       <button className="btn btn-ghost" type="button" aria-disabled={pending} onClick={() => {
         if (pending) return;
-        browse(0);
+        refreshPage();
         onRefresh?.();
       }}>
         <RefreshCw size={14} aria-hidden="true" />배포 새로고침
@@ -241,6 +256,42 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
     </div>
     <p className="gitlab-deployment-hint">{description}</p>
     {renderSyncControl?.(refreshPage)}
+    <form className="gitlab-deployment-filters" onSubmit={event => {
+      event.preventDefault();
+      const name = environment.trim();
+      if (name && !isGitlabDeploymentEnvironment(name)) {
+        setEnvironmentInvalid(true);
+        return;
+      }
+      setEnvironment(name);
+      setRequest({ scope, offset: 0, filters: { environment: name || undefined, status } });
+    }}>
+      <label>배포 환경
+        <input ref={environmentInput} className="field" type="search" value={environment} maxLength={MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH}
+          placeholder="환경 이름 일부" aria-invalid={environmentInvalid || undefined} onChange={event => {
+            setEnvironment(event.currentTarget.value);
+            setEnvironmentInvalid(false);
+          }} />
+      </label>
+      <label>배포 상태
+        <select className="field" value={status ?? ''} onChange={event => {
+          const value = event.currentTarget.value;
+          setStatus(GITLAB_DEPLOYMENT_STATES.find(candidate => candidate === value));
+        }}>
+          <option value="">전체 상태</option>
+          {GITLAB_DEPLOYMENT_STATES.map(value => <option key={value} value={value}>{gitlabDeploymentStatusLabels[value]}</option>)}
+        </select>
+      </label>
+      <button className="btn" type="submit"><Search size={14} aria-hidden="true" />배포 검색</button>
+      {(filtered || environment || status) && <button className="btn btn-ghost" type="button" onClick={() => {
+        setEnvironment('');
+        setStatus(undefined);
+        setEnvironmentInvalid(false);
+        if (filtered) setRequest({ scope, offset: 0, filters: {} });
+        environmentInput.current?.focus();
+      }}>배포 필터 초기화</button>}
+      {environmentInvalid && <p className="error-text" role="alert">배포 환경 이름을 확인해 주세요.</p>}
+    </form>
     {pending && <p className="gitlab-deployment-hint" role="status">배포 기록을 불러오는 중입니다.</p>}
     <div className="gitlab-deployment-results" aria-busy={pending}>
       {error && <p className="error-text" role="alert">{error}</p>}
@@ -248,7 +299,9 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
         {page.items.map(deployment => <DeploymentRow key={gitlabDeploymentKey(deployment)}
           deployment={deployment} showRepository={repositoryId === undefined} review={review} refreshPage={refreshPage} />)}
       </ul>}
-      {!pending && page && page.items.length === 0 && <p className="gitlab-deployment-hint">{empty}</p>}
+      {!pending && page && page.items.length === 0 && <p className="gitlab-deployment-hint" role="status">
+        {filtered ? '조건에 맞는 GitLab 배포가 없습니다.' : empty}
+      </p>}
       {page && (previousAvailable || nextAvailable) && <nav className="gitlab-deployment-pages" aria-label="GitLab 배포 페이지">
         <button className="btn btn-ghost" type="button" aria-disabled={pending || !previousAvailable} onClick={() => { if (previousAvailable) browse(previousOffset); }}>이전 배포</button>
         <span>{page.items.length ? `${page.offset + 1}–${page.offset + page.items.length} / ${page.total}` : `0 / ${page.total}`}</span>

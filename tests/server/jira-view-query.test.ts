@@ -368,9 +368,18 @@ test('literal Jira deadlines use only due dates and intersect exact inclusive ca
   }
 });
 
+test('Jira deadline presence matches due dates independently of planning dates', () => {
+  const plannedWithoutDeadline = issue({ startDate: '2024-02-29', endDate: '2024-03-01' });
+  const deadlineWithoutPlan = issue({ dueDate: '2024-02-29' });
+  const examples = [plannedWithoutDeadline, deadlineWithoutPlan];
+  assert.deepEqual(translateJiraViewQuery('due IS EMPTY', context).filters.planning?.dates, { mode: 'due_missing' });
+  assert.deepEqual(examples.filter(match('due IS EMPTY')), [plannedWithoutDeadline]);
+  assert.deepEqual(examples.filter(match('due IS NOT NULL')), [deadlineWithoutPlan]);
+});
+
 test('unrepresentable, ambiguous and impossible Jira deadline expressions fail with a JQL position', () => {
   for (const jql of [
-    'due >= now()', 'due = "1d"', 'due IS EMPTY', 'due != "2024-02-29"', 'due IN ("2024-02-29")',
+    'due >= now()', 'due = "1d"', 'due != "2024-02-29"', 'due IN ("2024-02-29")',
     'due = "2023-02-29"', 'due = "2024-02-29 12:00"', 'due = "2024/02-29"', 'due = 2024-02-29',
     'due >= "2024-03-01" AND due <= "2024-02-29"', 'due < "0000-01-01"', 'due > "9999-12-31"',
     'due < "2024-02-29" OR status = review', 'due = "2024-02-29" OR due = "2024-03-01"',

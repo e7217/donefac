@@ -45,6 +45,7 @@ import { jiraCommentBodyHash, validRestoredJiraCommentCorrections } from './jira
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueSaveError, IssueSaveService } from './issue-save.js';
+import { DocumentSaveError, DocumentSaveService } from './document-save.js';
 import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
 import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
@@ -258,6 +259,7 @@ export function createApp(options: {
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
   const issueSave = new IssueSaveService(store);
+  const documentSave = new DocumentSaveService(store);
   const issueStatusChanges = new IssueStatusChangeService(store);
   const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
     let customFields = defaults.customFields;
@@ -551,7 +553,11 @@ export function createApp(options: {
     validateDocumentHierarchy(d, options.hierarchy);
     return d;
   };
-  const revision = (d: DocPage, authorId: string, summary: string) => store.put('revisions',{id:uid(),documentId:d.id,version:d.version,title:d.title,content:d.content,plainText:d.plainText,authorId,createdAt:now(),summary});
+  const revision = (d: DocPage, authorId: string, summary: string) => {
+    const id = uid();
+    store.put('revisions',{id,documentId:d.id,version:d.version,title:d.title,content:d.content,plainText:d.plainText,authorId,createdAt:now(),summary});
+    return id;
+  };
   const validateDependency = (d: Dependency, current: Dependency[] = store.all<Dependency>('dependencies')) => {
     if(d.predecessorId===d.successorId)fail('자기 자신에게 의존할 수 없습니다.');
     const a=get<Issue>('issues',d.predecessorId),b=get<Issue>('issues',d.successorId);
@@ -2403,6 +2409,12 @@ export function createApp(options: {
     res.json(preview);
   });
   app.patch('/api/documents/:id',(req,res)=>{
+    const saveRequest = Object.hasOwn(req.body, 'requestId') ? documentSave.parse(req.params.id, req.body, actor(req)) : null;
+    const previous = saveRequest ? documentSave.replay(saveRequest) : undefined;
+    if (previous) {
+      apiKeys.authorizeDocumentBody(req, previous.content);
+      return res.set('Cache-Control', 'no-store').json(previous);
+    }
     const bodyChanged=Object.hasOwn(req.body,'content');
     const updated=store.transaction(()=>{
       const old=get<DocPage>('documents',req.params.id);checkVersion(old,req.body.expectedVersion);
@@ -2424,14 +2436,15 @@ export function createApp(options: {
       if(d.projectId!==old.projectId&&store.all<DocPage>('documents').some(x=>x.parentId===d.id))fail('하위 문서를 먼저 이동해 주세요.');
       store.put('documents',d);if(bodyChanged)d=collaboration.replaceBody(d);else{d=collaboration.deriveSnapshot(d);store.put('documents',d);}
       const actorId=actor(req);
-      revision(d,actorId,nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);
+      const revisionId = revision(d,actorId,nullableText(req.body.summary,'변경 설명',500)||'문서 편집');activity(req,'document',d.id,'문서 변경',d.title);
       if (d.title!==old.title || d.status!==old.status || d.projectId!==old.projectId || d.parentId!==old.parentId ||
         d.icon!==old.icon || JSON.stringify(d.labels)!==JSON.stringify(old.labels) ||
         (bodyChanged && JSON.stringify(d.content)!==JSON.stringify(old.content))) notifyDocumentUpdate(d,actorId,d.updatedAt);
+      if (saveRequest) documentSave.record(saveRequest, d, revisionId);
       return d;
     });
     if(bodyChanged)collaboration.reset(updated.id,'문서 본문이 교체되었습니다.');else collaboration.notifyMetadata(updated.id);
-    res.json(updated);
+    res.set('Cache-Control', 'no-store').json(updated);
   });
   app.delete('/api/documents/:id',(req,res)=>{
     const archived=store.transaction(()=>{
@@ -2519,7 +2532,7 @@ export function createApp(options: {
       if(entry.resourceType==='issue') {
         timeReservations.purgeIssue(entry.resourceId);
         issueChangeHistory.purgeIssue(entry.resourceId);
-      }
+      } else documentSave.purgeDocument(entry.resourceId);
       trashItems.purgeOwner(entry.resourceType,entry.resourceId);
       trashItems.queueCleanup(archivedFiles(entry));
       trash.remove(entry.id);
@@ -3785,6 +3798,7 @@ export function createApp(options: {
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
       issueSave.invalidateForImport();
+      documentSave.invalidateForImport();
       issueStatusChanges.clearForImport();
       issueProjectMove.clearForImport();
       issuePaste.resetForImport();
@@ -3897,7 +3911,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
-    if(error instanceof IssueSaveError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueSaveError||error instanceof DocumentSaveError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueStatusChangeError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof FavoriteError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueKeyLookupError)return res.status(error.status).json({error:error.message});

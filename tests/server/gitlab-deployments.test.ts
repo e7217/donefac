@@ -106,7 +106,8 @@ test('issue deployment history joins exact current revisions, deduplicates multi
     [base, repositoryId, otherSha], [base, repositoryId, mergedSha]] as const) {
     const payload = event(origin, projectId, sourceSha);
     const deploymentId = sourceSha === sha ? 15 : sourceSha === otherSha ? 16 : 17;
-    assert.equal(deployments.observe(instanceKey(origin), origin, projectId, { ...payload, deployment_id: deploymentId }), true);
+    assert.equal(deployments.observe(instanceKey(origin), origin, projectId, { ...payload, deployment_id: deploymentId,
+      environment: sourceSha === otherSha ? 'staging%_preview' : payload.environment }), true);
   }
   assert.equal(deployments.issuePage(issueId, 0).total, 0);
 
@@ -129,7 +130,9 @@ test('issue deployment history joins exact current revisions, deduplicates multi
   putLink('merge_request', '102', { state: 'merged', mergeCommitShas: [mergedSha, otherSha, mergedSha] });
   assert.deepEqual(deployments.issuePage(issueId, 0).items.map(row => row.deploymentId), [17, 16, 15]);
 
-  for (let id = 20; id < 72; id++) assert.equal(deployments.observe(instance, base, repositoryId, { ...event(), deployment_id: id }), true);
+  for (let id = 20; id < 72; id++) {
+    assert.equal(deployments.observe(instance, base, repositoryId, { ...event(), deployment_id: id, environment: 'production' }), true);
+  }
   const repositoryFirst = deployments.repositoryPage(instance, repositoryId, 0);
   const issueFirst = deployments.issuePage(issueId, 0);
   assert.deepEqual(repositoryFirst, issueFirst);
@@ -138,6 +141,15 @@ test('issue deployment history joins exact current revisions, deduplicates multi
   assert.equal(issueFirst.items.length, 50);
   assert.equal(issueFirst.items[0].deploymentId, 71);
   assert.deepEqual(deployments.issuePage(issueId, 50).items.map(row => row.deploymentId), [21, 20, 17, 16, 15]);
+  const filters = { environment: 'staging', status: 'success' } as const;
+  const staging = deployments.issuePage(issueId, 0, filters);
+  assert.equal(staging.total, 3);
+  assert.deepEqual(staging.items.map(row => row.deploymentId), [17, 16, 15]);
+  assert.deepEqual(deployments.repositoryPage(instance, repositoryId, 0, filters), staging);
+  assert.deepEqual(deployments.issuePage(issueId, 1, filters).items.map(row => row.deploymentId), [16, 15]);
+  assert.equal(deployments.issuePage(issueId, 0, { ...filters, status: 'failed' }).total, 0);
+  assert.equal(deployments.issuePage(issueId, 0, { environment: 'STAGING' }).total, 0);
+  assert.deepEqual(deployments.issuePage(issueId, 0, { environment: '%_' }).items.map(row => row.deploymentId), [16]);
 
   store.remove('gitlab_links', openMr);
   store.remove('gitlab_links', directCommit);

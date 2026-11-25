@@ -447,6 +447,10 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 빈 문서와 내장·팀 양식 만들기에도 같은 요청 ID 흐름을 사용한다. 생성이 확인된 뒤에는 저장한 문서 ID로 목록 갱신과 문서 열기를 재시도한다.
 
+## 문서 저장 결과 재확인
+
+`PATCH /api/documents/:id`에서 저장 응답을 다시 확인하려면 `requestId`에 UUID v4를 지정하고 `expectedRestoreGeneration`에 저장 시작 시 워크스페이스 세대를 보낸다. 같은 작업자가 같은 문서에 동일한 요청 본문을 다시 보내면 저장한 버전의 문서를 반환한다. 요청 ID를 다른 저장에 사용하거나 자체 JSON 백업을 가져오기 전 세대의 요청이 들어오면 `409`를 반환한다. 원래 저장본을 확인할 수 없는 경우에도 `409`를 반환한다. 영수증은 물리 백업에서 복원한다.
+
 ## 공동 편집 복구 사본
 
 팀 브라우저는 `POST /api/documents/:id/recovery-copy`에 `{epoch, content, labels?}`를 보낸다. 같은 원본 문서·작업자·편집 세대·본문으로 처음 사본을 만들면 `201`, 이미 만든 사본을 다시 요청하면 현 사본과 `200`을 반환한다. 사본이 휴지통에 있으면 `409`로 복원을 안내한다. 이 경로는 브라우저용 `/api`에서 제공한다.
@@ -795,6 +799,8 @@ GitLab 인스턴스·저장소·이벤트·수신 주소 범위에서 `webhook-i
 `Deployment Hook`은 허용한 저장소에서 인증된 이벤트의 `deployment_id`, `environment`, `status`, `status_changed_at`과 정확한 전체 SHA가 있는 `commit_url`을 사용한다. 수명주기 상태는 `blocked`, `running`, `success`, `failed`, `canceled`다. GitLab 프로젝트에 속한 `deployable_url`은 `deployable_id`와 함께 검사한다. 인증된 같은 배포 ID의 더 최근 상태를 저장하고, 최종 상태 뒤에 실행 중·차단 상태가 도착하면 최종 상태를 보존한다. 배포를 저장하거나 갱신한 응답과 마지막 수신 요약에 `deploymentUpdated: true`를 표시한다. [GitLab 배포 이벤트](https://docs.gitlab.com/user/project/integrations/webhook_events/#deployment-events)
 
 브라우저의 `GET /api/integrations/gitlab/deployments?repositoryId=42`는 저장된 연결의 해당 저장소를 조회한다. `GET /api/issues/:id/gitlab-deployments`와 범위 제한 `/api/v1/issues/:id/gitlab-deployments`는 해당 티켓의 개발 활동과 같은 인스턴스·저장소·전체 SHA의 결과를 읽는다. 연결된 커밋·파이프라인의 SHA와 대상 저장소가 확인된 병합 MR의 병합·스쿼시 SHA를 증거로 사용한다. 두 경로는 최신 변경 시각순으로 `{items,total,offset,limit}`을 반환한다. `offset` 기본값은 0이며 한 페이지는 50건이다. 자체 백업 형식 72는 `gitlabDeployments`와 `GitlabLink.mergeCommitShas`를 보존한다.
+
+저장소와 티켓 배포 조회는 `environment`와 `status`를 받을 수 있다. 환경 이름 일부는 대소문자를 구분하며 최대 255자다. `status`는 `created`, `blocked`, `running`, `success`, `failed`, `canceled`, `skipped` 중 하나를 지정한다. 전체 저장 이력에 두 조건을 적용한 결과를 `offset` 위치부터 읽는다.
 
 브라우저의 `POST /api/integrations/gitlab/deployments/preview`에 현재 설정의 `expectedVersion`과 `repositoryId`를 보낸다. 저장 전 입력으로 확인할 때는 `baseUrl`과 `projectIds`를 함께 보내고 그 목록의 저장소를 선택한다. `token`은 선택이며, 생략하면 정규화한 주소가 저장된 주소와 같을 때 저장된 읽기 토큰을 사용한다. 미리보기는 GitLab에서 최근 배포와 성공한 배포의 포함 MR을 읽어 건수를 반환하고 업무·배포·동기화 이력을 건드리지 않는다. [GitLab 배포 API](https://docs.gitlab.com/api/deployments/#list-all-merge-requests-associated-with-a-deployment)
 

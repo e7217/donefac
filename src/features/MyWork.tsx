@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
-import { ChevronRight } from 'lucide-react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowRightLeft, ChevronRight } from 'lucide-react';
 import { buildMyWorkQueue, type MyWorkGrouping, type MyWorkGroupId, type MyWorkItem, type MyWorkRole, type MyWorkRoleFilter } from '../../shared/my-work';
-import type { FeatureProps } from '../../shared/types';
-import { STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
+import type { FeatureProps, Issue, WorkflowStatus } from '../../shared/types';
+import { allowedNextStatuses, projectWorkflow, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
 import type { OpenIssueForReview } from '../lib/issue-review';
+import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
 import { todayDate } from './schedule-utils';
 import './my-work.css';
 
@@ -20,8 +21,9 @@ const groupLabels: Record<MyWorkGroupId, string> = {
 };
 const pageSize = 20;
 const roleLabels: Record<MyWorkRole, string> = { assigned: '담당', collaborating: '협력', reported: '요청', subscribed: '구독' };
+type StatusSelection = IssueStatusEdit & { opener: HTMLButtonElement };
 
-export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscriptions }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue'> & {
+export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueForReview, subscriptions }: Pick<FeatureProps, 'data' | 'actorId' | 'openIssue' | 'notify' | 'refresh'> & {
   onOpenIssueForReview?: OpenIssueForReview;
   subscriptions: { ids: ReadonlySet<string>; ready: boolean; failed: boolean; reload: () => void };
 }) {
@@ -30,6 +32,8 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscri
   const [role, setRole] = useState<MyWorkRoleFilter>('all');
   const [grouping, setGrouping] = useState<MyWorkGrouping>('deadline');
   const [includeClosed, setIncludeClosed] = useState(false);
+  const [statusEdit, setStatusEdit] = useState<StatusSelection | null>(null);
+  const statusFocus = useRef<StatusSelection | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const queue = useRef<HTMLDivElement>(null);
   const selectedProject = data.projects.some(project => project.id === projectId) ? projectId : '';
@@ -56,6 +60,21 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscri
     };
   }, []);
 
+  useLayoutEffect(() => {
+    const selection = statusFocus.current;
+    if (statusEdit || !selection) return;
+    const frame = window.requestAnimationFrame(() => {
+      statusFocus.current = null;
+      const id = CSS.escape(selection.issue.id);
+      const action = queue.current?.querySelector<HTMLButtonElement>(`[data-my-work-status-id="${id}"]`);
+      const details = queue.current?.querySelector<HTMLButtonElement>(`[data-issue-review-id="${id}"]`);
+      const target = [selection.opener, action, details, heading.current].find(control =>
+        control?.isConnected && !control.closest('[inert]') && !control.matches(':disabled'));
+      target?.focus({ preventScroll: target === selection.opener });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [statusEdit]);
+
   const { groups, total } = useMemo(() => buildMyWorkQueue(data, actorId, today, {
     projectId: selectedProject || null, role, includeClosed, grouping,
   }, subscriptions.ids), [data, actorId, today, selectedProject, role, includeClosed, grouping, subscriptions.ids]);
@@ -69,6 +88,27 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscri
     // Each group owns its current page, so read the rows rendered in the queue.
     const issueIds = Array.from(rows, row => row.dataset.issueReviewId!);
     onOpenIssueForReview(id, { issueIds, opener, fallback: heading.current, projectScope: selectedProject || null });
+  }
+
+  function statusChoices(issue: Issue) {
+    return actorId ? allowedNextStatuses(data, issue).filter(status => status.id !== issue.status) : [];
+  }
+
+  function openStatusEdit({ issue, status }: MyWorkItem, choices: WorkflowStatus[], opener: HTMLButtonElement) {
+    if (statusEdit || !choices.length || !window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
+    setStatusEdit({ issue, current: status, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
+  }
+
+  function closeStatusEdit() {
+    if (!statusEdit) return;
+    statusFocus.current = statusEdit;
+    setStatusEdit(null);
+  }
+
+  function openStatusDetails(id: string) {
+    const opener = queue.current?.querySelector<HTMLButtonElement>(`[data-issue-review-id="${CSS.escape(id)}"]`);
+    if (opener) openWorkIssue(id, opener);
+    else openIssue(id);
   }
 
   return (
@@ -117,14 +157,19 @@ export function MyWork({ data, actorId, openIssue, onOpenIssueForReview, subscri
       {!waitingForSubscriptions && <p className="my-work-total" role="status">업무 {total.toLocaleString('ko-KR')}개</p>}
       {!waitingForSubscriptions && total === 0 && <p className="card my-work-empty">표시할 업무가 없습니다.</p>}
       <div className="my-work-groups" ref={queue} key={JSON.stringify([today, selectedProject, role, includeClosed, grouping])}>
-        {groups.map(({ id, items }) => items.length > 0 && <WorkGroup key={id} id={id} items={items} openIssue={openWorkIssue} />)}
+        {groups.map(({ id, items }) => items.length > 0 && <WorkGroup key={id} id={id} items={items} openIssue={openWorkIssue}
+          statusChoices={statusChoices} openStatusEdit={openStatusEdit} />)}
       </div>
+      {statusEdit && <IssueStatusDialog edit={statusEdit} actorId={actorId} latest={data} refresh={refresh} notify={notify}
+        onClose={closeStatusEdit} onOpenDetails={() => openStatusDetails(statusEdit.issue.id)} />}
     </div>
   );
 }
 
-function WorkGroup({ id, items, openIssue }: {
+function WorkGroup({ id, items, openIssue, statusChoices, openStatusEdit }: {
   id: MyWorkGroupId; items: MyWorkItem[]; openIssue: (id: string, opener: HTMLButtonElement) => void;
+  statusChoices: (issue: Issue) => WorkflowStatus[];
+  openStatusEdit: (item: MyWorkItem, choices: WorkflowStatus[], opener: HTMLButtonElement) => void;
 }) {
   const headingId = useId();
   const [pageIndex, setPageIndex] = useState(0);
@@ -140,8 +185,10 @@ function WorkGroup({ id, items, openIssue }: {
         <span>{items.length.toLocaleString('ko-KR')}개</span>
       </header>
       <ul className="my-work-list">
-        {items.slice(start, end).map(({ issue, project, status, role, reported, subscribed, date }) => (
-          <li key={issue.id}>
+        {items.slice(start, end).map(item => {
+          const { issue, project, status, role, reported, subscribed, date } = item;
+          const choices = statusChoices(issue);
+          return <li key={issue.id}>
             <button className="my-work-row" type="button" data-issue-review-id={issue.id}
               onClick={event => openIssue(issue.id, event.currentTarget)}>
               <span className="my-work-identity">
@@ -159,8 +206,12 @@ function WorkGroup({ id, items, openIssue }: {
               </span>
               <ChevronRight className="my-work-row-arrow" size={16} aria-hidden="true" />
             </button>
-          </li>
-        ))}
+            {choices.length > 0 && <button className="btn btn-ghost my-work-status-action" type="button" aria-haspopup="dialog"
+              aria-label={`${issue.key} 상태 변경`} data-my-work-status-id={issue.id} onClick={event => openStatusEdit(item, choices, event.currentTarget)}>
+              <ArrowRightLeft size={15} aria-hidden="true" />상태 변경
+            </button>}
+          </li>;
+        })}
       </ul>
       {lastPage > 0 && (
         <nav className="my-work-pages" aria-label={`${groupLabels[id]} 페이지`}>

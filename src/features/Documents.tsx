@@ -117,6 +117,7 @@ type DocumentLinkTarget = {
   from: MappablePosition; to: MappablePosition; selectedText: string;
 };
 type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
+type DocumentSaveAttempt = { actorId: string; requestId: string; expectedRestoreGeneration: string; collaborative: boolean; draft: Draft };
 type ClipboardImageScope = { editor: Editor; documentId: string; actorId: string; liveEpoch: string | null };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type MigratedIssueLinkState = { href: string; status: 'pending' | 'missing' | 'failed'; expectsComment: boolean };
@@ -155,6 +156,7 @@ function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrde
 }
 const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
+const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
@@ -169,6 +171,16 @@ const draftFromPage = (page: DocPage): Draft => {
 };
 const sameBody = (left: RichContent, right: RichContent) => left === right || JSON.stringify(left) === JSON.stringify(right);
 const manualHistoryKey = history().spec.key;
+
+function readSaveAttempt(actorId: string, id: string, generation?: string): DocumentSaveAttempt | null {
+  try {
+    const attempt = JSON.parse(sessionStorage.getItem(saveCacheKey(actorId, id)) ?? 'null') as DocumentSaveAttempt | null;
+    if (attempt?.actorId === actorId && generation && attempt.expectedRestoreGeneration === generation &&
+        typeof attempt.requestId === 'string' && typeof attempt.collaborative === 'boolean' && attempt.draft?.id === id &&
+        attempt.draft.dirty && attempt.draft.content?.type === 'doc' && Number.isSafeInteger(attempt.draft.expectedVersion)) return attempt;
+  } catch { /* The cached request may be unavailable or malformed. */ }
+  return null;
+}
 
 function loadManualBody(editor: Editor | null, content: RichContent) {
   if (!editor || editor.isDestroyed) return;
@@ -242,6 +254,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (!value) setShowLatest(false);
   }, []);
   const documentSave = useRef<DocumentSave | null>(null);
+  const saveRecoveryRef = useRef<DocumentSaveAttempt | null>(null);
+  const saveRecoveryObserved = useRef<ObservedDocument | undefined>(undefined);
+  const [saveRecovery, setSaveRecovery] = useState<DocumentSaveAttempt | null>(null);
+  const showSaveRecovery = useCallback((attempt: DocumentSaveAttempt | null) => {
+    if (saveRecoveryRef.current !== attempt) saveRecoveryObserved.current = undefined;
+    saveRecoveryRef.current = attempt;
+    setSaveRecovery(attempt);
+  }, []);
   const titleInput = useRef<HTMLInputElement>(null);
   const manualEditorRef = useRef<Editor | null>(null);
   const [publicationDocumentId, setPublicationDocumentId] = useState<string | null>(null);
@@ -258,6 +278,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => publicationOpener.current?.focus());
   }, [onClosePublicationLink,publicationLink,selectedDocumentId]);
   const [storageProblem, setStorageProblem] = useState(false);
+  const rememberSaveAttempt = useCallback((owner: string, id: string, attempt: DocumentSaveAttempt | null) => {
+    try {
+      const key = saveCacheKey(owner, id);
+      if (attempt) sessionStorage.setItem(key, JSON.stringify(attempt));
+      else sessionStorage.removeItem(key);
+    } catch { setStorageProblem(true); }
+  }, []);
   const reportReplyStorageProblem = useCallback(() => setStorageProblem(true), []);
   const reply = useDocumentCommentReply(actorId, draft?.id, reportReplyStorageProblem);
   const { isSending: isReplySending, hasDraft: hasReplyDraft, clearDocument: clearReplyDrafts } = reply;
@@ -482,6 +509,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const activeSession = session?.document.id === selectedPage?.id ? session : null;
   const manualSession = activeSession?.enabled === false;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
+  const confirmingSave = saveRecovery?.actorId === actorId && saveRecovery.draft.id === draft?.id;
   const liveDocument = liveState?.document;
   const remoteDocument = liveMode ? liveDocument : activeSession?.document;
   const latestPage = selectedPage && remoteDocument?.id === selectedPage.id && remoteDocument.version > selectedPage.version ? remoteDocument : selectedPage;
@@ -587,6 +615,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     if (pending?.documentId === document.id && pending.actorId === actorRef.current) {
       // Process the HTTP receipt before treating a broadcast as a peer edit.
       if (!pending.observed || pending.observed.document.version < document.version) pending.observed = observed;
+      return;
+    }
+    const recovery = saveRecoveryRef.current;
+    if (recovery?.draft.id === document.id && recovery.actorId === actorRef.current) {
+      if (!saveRecoveryObserved.current || saveRecoveryObserved.current.document.version < document.version) saveRecoveryObserved.current = observed;
       return;
     }
     reconcileDraft(observed);
@@ -778,6 +811,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         setDraft(null);
         setConflict(null);
       }
+      showSaveRecovery(null);
       return;
     }
     const sameActor = actorRef.current === actorId;
@@ -805,6 +839,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         }
       }
     } catch { /* A malformed local draft must not prevent opening a saved document. */ }
+    const attempt = readSaveAttempt(actorId, selectedPage.id, data.restoreGeneration);
+    if (attempt && (!next.dirty || next.expectedVersion < attempt.draft.expectedVersion)) next = attempt.draft;
+    showSaveRecovery(attempt && next.expectedVersion === attempt.draft.expectedVersion ? attempt : null);
     draftRef.current = next;
     setDraft(next);
     loadManualBody(manualEditor, next.content);
@@ -815,7 +852,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     closeAnnotation();
     setSlashQuery(null);
     setInsertKind(null);
-  }, [selectedPage, actorId, manualEditor, rememberDraft, manualSession, archivedLiveRecovery, observeDocument, setConflict, closeAnnotation]);
+  }, [selectedPage, actorId, manualEditor, rememberDraft, manualSession, archivedLiveRecovery, observeDocument, setConflict, closeAnnotation,
+    data.restoreGeneration, showSaveRecovery]);
 
   useEffect(() => {
     if (!archiveImport && !selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
@@ -889,20 +927,28 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [creating, createAttempt, creationRejected]);
 
   const saveDraft = useCallback(async () => {
-    const captured = draftRef.current;
-    if (!captured?.dirty || savingRef.current || actorRef.current !== activeActorRef.current) return;
-    if (conflictRef.current && conflictRef.current !== 'generic') { setShowLatest(true); return; }
-    if (archivedLiveRecoveryRef.current) { notify('보관한 공동 편집을 먼저 복구하거나 최신 문서를 열어주세요.', 'error'); return; }
-    const collaborative = sessionRef.current?.enabled && sessionRef.current.document.id === captured.id;
-    if (collaborative && (manualRecoveryRef.current || liveStateRef.current?.phase !== 'connected' || liveStateRef.current?.pending)) { notify('공동 편집 연결과 본문 동기화를 먼저 확인해주세요.', 'error'); return; }
+    const editable = draftRef.current;
+    if (!editable || savingRef.current || actorRef.current !== activeActorRef.current) return;
     const capturedActor = actorRef.current;
-    const pending: DocumentSave = { actorId: capturedActor, documentId: captured.id };
+    const cachedAttempt = saveRecoveryRef.current;
+    const recovering = cachedAttempt?.draft.id === editable.id && cachedAttempt.actorId === capturedActor ? cachedAttempt : null;
+    const captured = recovering?.draft ?? editable;
+    const collaborative = recovering?.collaborative ?? Boolean(sessionRef.current?.enabled && sessionRef.current.document.id === captured.id);
+    if (!recovering) {
+      if (!captured.dirty) return;
+      if (conflictRef.current && conflictRef.current !== 'generic') { setShowLatest(true); return; }
+      if (archivedLiveRecoveryRef.current) { notify('보관한 공동 편집을 먼저 복구하거나 최신 문서를 열어주세요.', 'error'); return; }
+      if (collaborative && (manualRecoveryRef.current || liveStateRef.current?.phase !== 'connected' || liveStateRef.current?.pending)) { notify('공동 편집 연결과 본문 동기화를 먼저 확인해주세요.', 'error'); return; }
+    }
+    const sameContext = () => draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
+    const pending: DocumentSave = { actorId: capturedActor, documentId: captured.id, observed: recovering ? saveRecoveryObserved.current : undefined };
+    let attempt = recovering;
     documentSave.current = pending;
     savingRef.current = true;
     setSaving(true);
     try {
-      if (!collaborative) {
-        const latest = await api<CollaborationSession>(`/documents/${captured.id}/collaboration`);
+      if (!recovering && !collaborative) {
+        const latest = await api<CollaborationSession>(`/documents/${captured.id}/collaboration`, { headers: { 'X-Actor-Id': capturedActor } });
         if (latest.enabled) {
           sessionRef.current = latest; setSession(latest);
           if (captured.bodyDirty) { manualRecoveryRef.current = true; setManualRecovery(true); }
@@ -911,18 +957,31 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         }
         observeDocument({ document: latest.document, live: false });
       }
+      if (!attempt && data.restoreGeneration) {
+        attempt = { actorId: capturedActor, requestId: newRequestId(), expectedRestoreGeneration: data.restoreGeneration, collaborative, draft: captured };
+        rememberSaveAttempt(capturedActor, captured.id, attempt);
+      }
       const base = captured.baseMetadata;
       const result = await api<DocPage>(`/documents/${captured.id}`, { method: 'PATCH', headers: { 'X-Actor-Id': capturedActor }, body: JSON.stringify({
         expectedVersion: captured.expectedVersion,
+        ...(attempt ? { requestId: attempt.requestId, expectedRestoreGeneration: attempt.expectedRestoreGeneration } : {}),
         ...(!base || documentTitleForSave(captured.title) !== documentTitleForSave(base.title) ? { title: documentTitleForSave(captured.title) } : {}),
         ...(!base || !sameLabels(captured.labels, base.labels) ? { labels: captured.labels } : {}),
         ...(!base || captured.status !== base.status ? { status: captured.status } : {}),
         ...(!base || captured.parentId !== base.parentId ? { parentId: captured.parentId } : {}),
         ...(!collaborative && captured.bodyDirty ? { content: captured.content, plainText: captured.plainText, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION } : {}),
       }) });
+      if (result?.id !== captured.id || result.version !== captured.expectedVersion + 1 || result.content?.type !== 'doc') {
+        throw new Error('문서 저장 응답을 확인하지 못했습니다.');
+      }
       const current = draftRef.current;
-      if (current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
-        storeDraft(draftAfterSave(captured, current, result, Boolean(collaborative)), !collaborative);
+      if (current && sameContext()) {
+        const next = draftAfterSave(captured, current, result, collaborative);
+        storeDraft(next, !collaborative);
+        if (!next.bodyDirty && manualRecoveryRef.current && sessionRef.current?.enabled && sessionRef.current.document.id === captured.id) {
+          manualRecoveryRef.current = false;
+          setManualRecovery(false);
+        }
         setConflict(null);
       } else {
         // Reconcile only the request owner's cached buffer. A response for a
@@ -938,11 +997,22 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           }
         } catch { setStorageProblem(true); }
       }
-      await refresh();
+      if (attempt) rememberSaveAttempt(capturedActor, captured.id, null);
+      if (sameContext()) showSaveRecovery(null);
+      try {
+        await refresh();
+        if (recovering && sameContext()) notify('문서 저장 결과를 확인했습니다.', 'success');
+      } catch { notify('문서를 저장했습니다. 목록을 다시 열어 최신 내용을 확인해 주세요.', 'error'); }
     } catch (error) {
+      if (attempt && !isDefiniteTemplateFailure(error)) {
+        if (sameContext()) showSaveRecovery(attempt);
+        return;
+      }
+      if (attempt) rememberSaveAttempt(capturedActor, captured.id, null);
+      if (sameContext()) showSaveRecovery(null);
       if (error instanceof ApiError && error.status === 409) {
-        if (draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor) setConflict('generic');
-        notify('다른 변경사항이 있어 저장하지 않았습니다. 내 편집은 임시 보관되어 있어요.', 'error');
+        if (sameContext()) setConflict('generic');
+        notify(recovering ? error.message : '다른 변경사항이 있어 저장하지 않았습니다. 내 편집은 임시 보관되어 있어요.', 'error');
         await refresh().catch(() => {});
       } else notify(error instanceof Error ? error.message : '문서를 저장하지 못했습니다.', 'error');
     } finally {
@@ -951,7 +1021,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       savingRef.current = false;
       setSaving(false);
     }
-  }, [notify, observeDocument, refresh, setConflict, storeDraft]);
+  }, [data.restoreGeneration, notify, observeDocument, refresh, rememberSaveAttempt, setConflict, showSaveRecovery, storeDraft]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
@@ -1454,12 +1524,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       await remove(`/documents/${captured.id}?expectedVersion=${captured.expectedVersion}`);
       window.dispatchEvent(new Event('teamspace:trash-changed'));
       const clean = { ...captured, dirty: false }; rememberDraft(clean, capturedActor);
+      rememberSaveAttempt(capturedActor, captured.id, null);
       rememberComment(emptyCommentDraft(), { actorId: capturedActor, documentId: captured.id });
       clearReplyDrafts(capturedActor, captured.id);
       if (reselectedCommentDraft.current?.actorId === capturedActor && reselectedCommentDraft.current.documentId === captured.id) reselectedCommentDraft.current = null;
       try { localStorage.removeItem(selectionCommentCacheKey(capturedActor, captured.id)); } catch { setStorageProblem(true); }
       const sameContext = draftRef.current?.id === captured.id && actorRef.current === capturedActor && activeActorRef.current === capturedActor;
       if (sameContext) {
+        showSaveRecovery(null);
         discardCommentEdit();
         draftRef.current = null;
         setDraft(null);
@@ -2141,7 +2213,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <span aria-current="page" title={documentTitleForSave(draft.title)}>{documentTitleForSave(draft.title)}</span>
               </span>
             </nav>
-            <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
+            <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : confirmingSave ? <><span /> 저장 결과 미확인</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
               <FavoriteAction type="document" id={selectedPage.id} />
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
@@ -2172,11 +2244,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 <ListOrdered size={16} aria-hidden="true" />
               </button>
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
-              <button className="btn btn-primary docs-save-button" disabled={saving || !draft.dirty || manualRecovery || Boolean(metadataReview) || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onClick={() => void saveDraft()}><Save size={14} /> {liveMode ? '속성 저장' : '저장'}</button>
+              <button className="btn btn-primary docs-save-button" disabled={saving || (!confirmingSave && (!draft.dirty || manualRecovery || Boolean(metadataReview) || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))))} onClick={() => void saveDraft()}><Save size={14} /> {confirmingSave ? '저장 결과 다시 확인' : liveMode ? '속성 저장' : '저장'}</button>
             </div>
           </div>
 
-          {conflict && !manualRecovery && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
+          {confirmingSave && !saving && <div className="docs-notice" role="status">문서 저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.</div>}
+          {conflict && !manualRecovery && !confirmingSave && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
           {showLatest && previewDocument && <div className="docs-latest-preview"><div><strong>서버 버전 {previewDocument.version} · {previewDocument.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
             {Boolean(draft.labels.length || previewDocument.labels?.length) && <p className="docs-latest-labels">{previewDocument.labels?.length ? <>라벨 · {previewDocument.labels.join(', ')}</> : '라벨 없음'}</p>}
             <pre>{previewDocument.plainText || contentText(previewDocument.content)}</pre>
@@ -2190,7 +2263,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             }))} onResolve={resolveMetadata} />}
           {storageProblem && <div className="docs-notice" role="alert">브라우저 임시 저장 공간이 부족합니다. 이동하기 전에 저장하거나 JSON으로 내보내주세요.</div>}
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
-          {manualRecovery && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
+          {manualRecovery && !confirmingSave && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
 
           <div className="docs-paper-scroll">
             <div className="docs-paper">
@@ -2501,7 +2574,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>첨부 링크나 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh}
               reloadKey={clipboardAttachment?.documentId === draft.id ? clipboardAttachment.versionId : undefined}
               onInsertFileLink={bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
-              onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={saveCopy} saving={saving} />}
+              onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={confirmingSave ? undefined : saveCopy} saving={saving} />}
           </div>
         </aside>}
       </> : filtersActive && !visible.length ? <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>조건에 맞는 문서가 없습니다.</h2></div>

@@ -22,7 +22,7 @@ test('360px 업무의 요청자를 기본 지정하고 변경한 뒤 내가 요�
   const created: Issue[] = [];
   const member = (id: string) => `member:${id}`;
   const details = (name: string) => page.getByRole('dialog', { name, exact: true });
-  const row = (issue: Issue) => page.getByRole('button', { name: new RegExp(`\\b${issue.key}\\b`) });
+  const row = (issue: Issue) => page.locator(`[data-issue-review-id="${issue.id}"]`);
   const close = (name: string) => details(name).getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
   const stored = async (id: string) => (await workspace(request)).issues.find(issue => issue.id === id);
 

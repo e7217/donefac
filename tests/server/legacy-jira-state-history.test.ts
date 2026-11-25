@@ -52,7 +52,7 @@ test('Jira Backup ChangeGroup and ChangeItem retain explicit visibility and sour
   assert.equal(change.containerId, '1000');
   assert.deepEqual(change.references, [{ kind: 'issue', sourceId: '1000', relation: 'historyOf' }]);
   assert.deepEqual(change.metadata, { level: 'staff', public: 'false', items: [{ id: '6100', field: 'status', fieldtype: 'jira',
-    oldvalue: '1', oldstring: '열림', newvalue: '2', newstring: '진행 중', rolelevel: '33' }] });
+    oldvalue: '1', oldstring: '열림', newvalue: '2', newstring: '진행 중', rolelevel: '33' }], jiraWorkflowStatusChangePositions: [0] });
 });
 
 test('duplicate Jira Backup ChangeGroup IDs cannot reassign history to another issue', () => {

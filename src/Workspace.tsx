@@ -1403,7 +1403,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
             onOpenIssueForReview={openIssueForReview}
             refreshBoard={refreshBoard} issueOverlayOpen={boardIssueFocus}/>
         </Suspense>}
-        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue}
+        {view === 'mywork' && <MyWork key={actorId} data={data} actorId={actorId} openIssue={openIssue} refresh={refresh} notify={notify}
           subscriptions={issueSubscriptions} onOpenIssueForReview={openIssueForReview}/>}
         {view === 'favorites' && <FavoritesPage data={data} openIssue={openIssue} openDocument={openDocument} refresh={refresh}/>}
         {view === 'search' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>검색을 불러오는 중입니다.</p></div>}>
