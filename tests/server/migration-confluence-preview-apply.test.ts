@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentNodes } from '../../shared/document-references.js';
-import type { LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
+import type { LegacyPackageSummary, MigrationApplyResult, MigrationOptions, MigrationPreview, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types.js';
 import { zip } from '../fixtures/legacy-export-zip.mjs';
 
 const property = (name: string, value: string) => `<property name="${name}">${value}</property>`;
@@ -50,6 +50,7 @@ test('a real Confluence ZIP keeps exact file-preview download bytes and rejects 
   const xml = `<hibernate-generic>${[
     entity('Space', '42', property('key', 'FILES') + property('name', '배포 자료')),
     page('100', sourceTitle), page('200', '다른 소유 문서'),
+    entity('ContentPermissionSet', '900', property('type', 'Edit') + reference('owningContent', 'Page', '100')),
     entity('BodyContent', '500', property('body', `<![CDATA[${storage}]]>`) + reference('content', 'Page', '100')),
     file('700', '100', '1'),
     file('720', '200', '2', '<collection name="historicalVersions"><element class="Attachment"><id name="id">721</id></element></collection>'),
@@ -71,6 +72,12 @@ test('a real Confluence ZIP keeps exact file-preview download bytes and rejects 
   for (const code of ['CONFLUENCE_FILE_PREVIEW_LINKED', 'UNRESOLVED_CONFLUENCE_FILE_PREVIEW']) {
     assert.ok(preview.notices.some(notice => notice.code === code && notice.recordId === `${id}/page:100`), code);
   }
+  const editRestriction = 'SOURCE_CONFLUENCE_EDIT_RESTRICTION_REVIEW';
+  assert.ok(preview.notices.some(notice => notice.code === editRestriction && notice.recordId === `${id}/page:100` &&
+    notice.severity === 'warning' && notice.requiresAcknowledgement));
+  assert.ok(preview.requiredAcknowledgements.includes(editRestriction));
+  await request(`/migrations/previews/${preview.id}/apply`, 400, 'POST', { expectedVersion: preview.version,
+    acknowledgements: preview.requiredAcknowledgements.filter(code => code !== editRestriction) });
   const { import: receipt } = await request<MigrationApplyResult>(`/migrations/previews/${preview.id}/apply`, 201, 'POST', {
     expectedVersion: preview.version, acknowledgements: preview.requiredAcknowledgements,
   });
@@ -81,6 +88,11 @@ test('a real Confluence ZIP keeps exact file-preview download bytes and rejects 
   const oldFile = records.find(row => row.record.id === 'attachment:721');
   const latestFile = records.find(row => row.record.id === 'attachment:720');
   assert.ok(original?.targetId && otherPage?.targetId && localFile?.targetId && oldFile?.targetId && latestFile?.targetId);
+  const permission = records.find(row => row.record.id === 'relation:ContentPermissionSet:900');
+  assert.ok(permission);
+  const archived = (recordId: string) => request<SourceRecordArchive>(`/source-imports/${receipt.id}/records/${recordId}`);
+  assert.deepEqual((await archived(original.id)).record.metadata.editPermissionSetIds, ['900']);
+  assert.equal((await archived(permission.id)).record.metadata.type, 'Edit');
   assert.equal(localFile.ownerId, original.targetId);
   assert.equal(oldFile.ownerId, otherPage.targetId);
   assert.notEqual(oldFile.targetId, latestFile.targetId);

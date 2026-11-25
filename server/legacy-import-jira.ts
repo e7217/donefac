@@ -10,7 +10,7 @@ import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-im
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { readJiraStatusCategory } from './legacy-jira-status-category.js';
-import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
+import { hasRestrictedJiraServiceDeskComment, isJiraCommentRestrictionAttribute, isJiraServiceDeskCommentKey } from './migration-jira-history.js';
 import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey, JIRA_EPIC_RELATION_STYLE } from './migration-jira-hierarchy.js';
 import { observeJiraIdentityEmail } from './migration-identity-email.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
@@ -56,6 +56,7 @@ function observeMigrationAccount(identity: LegacyRecord, kind: JiraMigrationAcco
   identity.metadata.migrationAccountKey = identity.sourceId;
 }
 const JIRA_EPIC_LINK_TYPE = 'com.pyxis.greenhopper.jira:gh-epic-link';
+const JIRA_ADMIN_LABEL_FIELD_TYPE = 'com.atlassian.jira.plugin.system.customfieldtypes:labels';
 const jiraCustomFieldId = /^customfield_[1-9]\d{0,24}$/u;
 type RestEpicField = { id: string; exact: boolean };
 
@@ -587,6 +588,7 @@ class Context{
   finish():LegacyDataset{
     applyStandaloneHistory(this);
     this.activityPages.finish((kind, raw, issue, _path, index) => jsonActivity(this, kind, raw, issue.sourceId, index, 'rest-page'));
+    protectJiraServiceDeskAttachments(this.dataset.records);
     for (const [key, owners] of this.restKeyOwners) {
       if (owners.size < 2) continue;
       for (const id of new Set([key, ...owners])) {
@@ -1150,11 +1152,93 @@ function adminXmlScalar(node: LegacyXmlNode, name: string): string | null | unde
 function adminXmlScalarCandidates(node: LegacyXmlNode, name: string): string[] {
   return [node.attributes[name], ...children(node, name).map(value => text(value))].filter(value => value !== undefined);
 }
+
+function attachAdminServiceDeskProperty(context: Context, node: LegacyXmlNode, path: string): boolean {
+  const entity = 'sd.comment.property';
+  if (node.name !== 'EntityProperty' || !adminXmlScalarCandidates(node, 'entityName').includes(entity)) return false;
+  const targetId = adminXmlScalar(node, 'entityId');
+  const owners = [...new Set(adminXmlScalarCandidates(node, 'entityId'))].flatMap(id => {
+    const comment = context.byId.get(`comment:${id}`);
+    return comment && isJiraHierarchyIssueId(id) ? [comment] : [];
+  });
+  const key = adminXmlScalar(node, 'propertyKey');
+  const exact = adminXmlScalar(node, 'entityName') === entity && owners.length === 1 && owners[0].sourceId === targetId;
+  let details: LegacyValue = null;
+  if (exact && (key === undefined || isJiraServiceDeskCommentKey(key))) {
+    try { details = jsonValue(JSON.parse(adminXmlScalar(node, 'value') ?? '')); } catch { /* Keep uncertain restriction evidence. */ }
+  }
+  for (const owner of owners) {
+    const previous = owner.metadata.jiraServiceDeskCommentProperties;
+    owner.metadata.jiraServiceDeskCommentProperties = [...(Array.isArray(previous) ? previous : []), {
+      key: isJiraServiceDeskCommentKey(key) ? key : 'sd.public.comment', value: details,
+    }];
+  }
+  if (!exact || details === null) context.warn('JIRA_SERVICE_DESK_COMMENT_PROPERTY_UNVERIFIED',
+    'Jira 서비스 데스크 댓글 속성의 원래 댓글 또는 열람 제한 값을 확인할 수 없습니다.', owners[0]?.id ?? null, path);
+  return true;
+}
+
+function protectJiraServiceDeskAttachments(rows: readonly LegacyRecord[]) {
+  const protectedNames = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (row.kind !== 'comment' || row.textFormat !== 'jira-wiki' || !row.containerId || !hasRestrictedJiraServiceDeskComment(row.metadata)) continue;
+    for (const match of row.text.matchAll(/(?<!\\)!([^!|\r\n]+)(?:\|[^!\r\n]*)?!|(?<!\\)\[\^([^\]\r\n]+)\]/gu)) {
+      const filename = (match[1] ?? match[2]).trim();
+      if (!filename) continue;
+      const names = protectedNames.get(row.containerId) ?? new Set<string>();
+      names.add(filename);
+      protectedNames.set(row.containerId, names);
+    }
+  }
+  if (!protectedNames.size) return;
+  for (const row of rows) {
+    if (row.kind === 'attachment' && row.containerId && typeof row.metadata.filename === 'string' &&
+        protectedNames.get(row.containerId)?.has(row.metadata.filename)) {
+      row.metadata.restricted = true;
+    }
+  }
+}
+
 function adminXmlDateValue(node: LegacyXmlNode, value: ObjectValue): unknown {
   const dateNodes = children(node, 'datevalue'), [date] = dateNodes;
   if (dateNodes.length > 1 || date && (date.children.length || Object.hasOwn(node.attributes,'datevalue')) ||
       ['stringvalue','textvalue','numbervalue'].some(name=>str(value[name]).trim())) return ambiguousDateValue;
   return value.datevalue;
+}
+
+function parseBackupLabels(context: Context, labels: readonly LegacyXmlNode[], path: string) {
+  for (const [index, node] of labels.entries()) {
+    const issueId = adminXmlScalar(node, 'issue');
+    const fieldId = adminXmlScalar(node, 'fieldid');
+    const label = adminXmlScalar(node, 'label');
+    const issue = issueId ? context.byId.get(`issue:${issueId}`) : undefined;
+    const field = fieldId ? context.byId.get(`field:${fieldId}`) : undefined;
+    if (issue && label?.trim()) {
+      const fields = issue.metadata.fields as Record<string, LegacyValue>;
+      if (fieldId === undefined) {
+        const prior = fields.labels;
+        if (Array.isArray(prior)) prior.push(label);
+        else fields.labels = [label];
+        continue;
+      }
+      if (field?.metadata.jiraAdminLabelField === true && isJiraHierarchyIssueId(issue.sourceId) &&
+          issue.metadata.jiraComponentProjectAmbiguous !== true && label === label.trim() && label.isWellFormed() && !/\p{Cc}/u.test(label)) {
+        const prior = fields[field.sourceId];
+        if (Array.isArray(prior)) prior.push(label);
+        else {
+          fields[field.sourceId] = [label];
+          issue.references.push(...ref('field', field.sourceId, 'customField'));
+        }
+        continue;
+      }
+    }
+    const raw = context.put('relation', `jira-admin-label:${index}`, {
+      title: 'Jira 라벨 원본', containerId: issue?.sourceId ?? null,
+      metadata: { jiraAdminLabel: Object.fromEntries(['id', 'issue', 'fieldid', 'label'].map(name => [name, adminXmlScalarCandidates(node, name)])) },
+      references: ref('issue', issue?.sourceId, 'source'),
+    });
+    context.warn('JIRA_ADMIN_LABEL_SCOPE_UNVERIFIED', 'Jira 라벨의 업무, 필드 또는 값을 확인할 수 없어 원본에 보관합니다.', raw.id, path);
+  }
 }
 
 function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
@@ -1220,6 +1304,10 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   }
     else if (name==='CustomField') {
       const field = context.put('field',v.id,{title:str(v.name)||str(v.cfname),text:str(v.description),textFormat:'plain',metadata:selected(v,['customfieldtypekey','customfieldsearcherkey','fieldtype','cfname'])});
+      const fieldType = adminXmlScalar(node, 'customfieldtypekey'), oldType = adminXmlScalar(node, 'fieldtype');
+      if (isJiraHierarchyIssueId(field.sourceId) && adminXmlScalar(node, 'id') === field.sourceId &&
+          fieldType !== null && oldType !== null && (fieldType ?? oldType) === JIRA_ADMIN_LABEL_FIELD_TYPE &&
+          (fieldType === undefined || oldType === undefined || fieldType === oldType)) field.metadata.jiraAdminLabelField = true;
       const role = jiraScheduleDateRole(field.title);
       if (role) {
         const proof = jiraDatePickerProof(str(v.customfieldtypekey || v.fieldtype));
@@ -1330,11 +1418,21 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       references: [...ref('issue', value.issue, 'historyOf'), ...ref('identity', authorId, 'author')] });
   }
   for(const[groupId]of historyItems)if(!groups.has(groupId)){context.warn('CHANGE_GROUP_MISSING','변경 항목의 ChangeGroup이 없습니다.',null,path,'error');context.unsupported('orphan:ChangeItem',(historyItems.get(groupId)||[]).length);}
-  const handled=new Set(['User','OSUser','CwdUser','ApplicationUser','Project','Issue','CustomField','CustomFieldOption','Status','IssueType','Priority','Resolution','Workflow','ChangeGroup','ChangeItem','IssueLinkType']);
+  const handled=new Set(['User','OSUser','CwdUser','ApplicationUser','Project','Issue','CustomField','CustomFieldOption','Status','IssueType','Priority','Resolution','Workflow','ChangeGroup','ChangeItem','IssueLinkType','Label']);
   for(const{name,value:v,node}of values){
     if(name==='Action'){handled.add(name);if(str(v.type)!=='comment'){context.unsupported(`Action:${str(v.type)||'unknown'}`);continue;}const id=str(v.id),author=resolveActor(v.author);context.put('comment',id,{title:'댓글',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created,`comment:${id}`),updatedAt:context.date(v.updated,`comment:${id}`),text:str(v.body),textFormat:'jira-wiki',metadata:{...selected(v,['updateauthor']),...jiraVisibilityMetadata(v,false)},references:[...ref('issue',v.issue,'commentOn'),...ref('identity',author,'author')]});}
     else if(name==='FileAttachment'){handled.add(name);context.attachment(str(v.id),str(v.issue||v.issueid),{...selected(v,['filename','filesize','mimetype','created','version']),...jiraVisibilityMetadata(v,false),author:resolveActor(v.author)});}
-    else if(name==='CustomFieldValue'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`),fieldId=str(v.customfield);if(!issue){context.warn('CUSTOM_FIELD_ISSUE_MISSING','사용자 정의 필드 값의 이슈가 없습니다.',null,path,'error');continue;}const fields=issue.metadata.fields as Record<string,LegacyValue>,value=jsonValue(Object.fromEntries(['stringvalue','textvalue','numbervalue','datevalue','parentkey','valuetype'].filter(name=>v[name]!==undefined).map(name=>[name,v[name]]))),previous=fields[fieldId];fields[fieldId]=previous===undefined?[value]:[...(Array.isArray(previous)?previous:[previous]),value];issue.references.push(...ref('field',fieldId,'customField'));if(!Object.keys(obj(value)).length)context.warn('CUSTOM_FIELD_VALUE_EMPTY','필드 값 행은 있지만 실제 값이 비어 있습니다.',issue.id);
+    else if(name==='CustomFieldValue'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`),fieldId=str(v.customfield);if(!issue){context.warn('CUSTOM_FIELD_ISSUE_MISSING','사용자 정의 필드 값의 이슈가 없습니다.',null,path,'error');continue;}
+      const value=jsonValue(Object.fromEntries(['stringvalue','textvalue','numbervalue','datevalue','parentkey','valuetype'].filter(name=>v[name]!==undefined).map(name=>[name,v[name]])));
+      if (context.byId.get(`field:${fieldId}`)?.metadata.jiraAdminLabelField === true) {
+        const archived = issue.metadata.jiraAdminUnconfirmedLabelValues;
+        const row = { id: str(v.id), fieldId, value };
+        if (Array.isArray(archived)) archived.push(row);
+        else issue.metadata.jiraAdminUnconfirmedLabelValues = [row];
+        context.warn('JIRA_ADMIN_LABEL_SCOPE_UNVERIFIED', '전용 라벨 행으로 확인하지 못한 Jira 사용자 정의 값은 원본에 보관합니다.', issue.id, path);
+        continue;
+      }
+      const fields=issue.metadata.fields as Record<string,LegacyValue>,previous=fields[fieldId];fields[fieldId]=previous===undefined?[value]:[...(Array.isArray(previous)?previous:[previous]),value];issue.references.push(...ref('field',fieldId,'customField'));if(!Object.keys(obj(value)).length)context.warn('CUSTOM_FIELD_VALUE_EMPTY','필드 값 행은 있지만 실제 값이 비어 있습니다.',issue.id);
       const role = projectedFields.get(fieldId);
       if (role) context.scheduleDates.observe(issue,role,fieldId,adminXmlDateValue(node,v),path);
     }
@@ -1382,7 +1480,6 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     }
     else if(name==='RemoteIssueLink'){handled.add(name);const url=context.url(v.url),author=resolveActor(v.author);const references=ref('issue',v.issueid||v.issue,'source');if(url){const pageId=new URL(url).searchParams.get('pageId');if(pageId)references.push(...ref('page',pageId,'externalDocument'));}context.put('relation',`remote:${str(v.id)}`,{title:str(v.title)||'외부 연결',authorId:author,containerId:str(v.issueid||v.issue)||null,metadata:{url,relationship:str(v.relationship),globalId:str(v.globalid)},references});}
     else if(name==='Worklog'){handled.add(name);const author=resolveActor(v.author);context.put('history',`worklog:${str(v.id)}`,{title:'작업 시간 기록',containerId:str(v.issue)||null,authorId:author,createdAt:context.date(v.created),updatedAt:context.date(v.updated),text:str(v.body),textFormat:'plain',metadata:{kind:'worklog',...(Object.hasOwn(v,'body')?{worklogNoteObserved:typeof v.body==='string'}:{}),...selected(v,['started','startDate','startdate','timeworked','timeSpentSeconds','timeSpent','role','roleId','roleKey','rolelevel','roleLevel','group','groupId','groupKey','groupName','grouplevel','groupLevel','visibility','restriction','restrictions','restricted','isRestricted','hasRestrictions','restrictionType','restrictionValue','viewRole','viewRoleLevel','viewGroup','viewGroupLevel','permissions'])},references:[...ref('issue',v.issue,'worklogOf'),...ref('identity',author,'author')]});}
-    else if(name==='Label'){handled.add(name);const issue=context.byId.get(`issue:${str(v.issue)}`);if(issue){const fields=issue.metadata.fields as Record<string,LegacyValue>;fields.labels=[...(Array.isArray(fields.labels)?fields.labels:[]),str(v.label)];}else context.warn('LABEL_ISSUE_MISSING','라벨의 이슈가 없습니다.',null,path);}
     else if (name === 'Version' || name === 'ProjectVersion') {
       handled.add(name);
       const id = versionIdentifier(v.id);
@@ -1435,7 +1532,8 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       }
     }
   }
-  for(const{name}of values)if(!handled.has(name))context.unsupported(name);
+  parseBackupLabels(context, rows.filter(node => node.name === 'Label'), path);
+  for(const{name,node}of values)if(!handled.has(name)&&!attachAdminServiceDeskProperty(context,node,path))context.unsupported(name);
   if(context.dataset.unsupported.length)context.warn('UNSUPPORTED_ADMIN_ENTITIES','지원하지 않는 관리자/플러그인 객체는 종류와 개수만 기록했습니다. 자격 증명·시스템 설정의 원시 속성은 미리보기에 복사하지 않았습니다.',null,path);
 }
 

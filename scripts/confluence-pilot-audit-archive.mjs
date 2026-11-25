@@ -74,6 +74,11 @@ function validAttachmentBinary(row) {
   return fileSize === undefined || typeof fileSize === 'string' && /^\d+$/u.test(fileSize) && Number(fileSize) === size;
 }
 
+function hasArchivedEditRestriction(row) {
+  const { editPermissionSetIds } = row.metadata;
+  return Array.isArray(editPermissionSetIds) && editPermissionSetIds.length > 0;
+}
+
 const permissionWarningCode = 'CONFLUENCE_SPACE_PERMISSION_REVIEW';
 const restrictedCode = 'CONFLUENCE_RESTRICTED_CONTENT';
 const unlinkedBinaryCode = 'CONFLUENCE_UNLINKED_ATTACHMENT_FILES';
@@ -114,6 +119,7 @@ export async function compareConfluenceArchive(archivePath, inventory, { addFind
   let versionMismatches = 0;
   let hierarchyMismatches = 0;
   let restrictionMismatches = 0;
+  let editRestrictionMismatches = 0;
   for (const [id, page] of inventory.pages) {
     const row = archived.get(id);
     if (!row) {
@@ -131,18 +137,23 @@ export async function compareConfluenceArchive(archivePath, inventory, { addFind
       hierarchyMismatches++;
       addFinding?.(id, 'HIERARCHY_MISMATCH');
     }
-    if (page.restriction === 'clear' || page.restriction === 'restricted') {
+    if (page.permissionChecked) {
       permissionCheckedPages++;
       addPermissionCheckedPage?.(id);
-      if ((row.metadata.restricted === true) !== (page.restriction === 'restricted')) {
-        restrictionMismatches++;
-        addFinding?.(id, 'RESTRICTION_MISMATCH');
-      }
+    }
+    if (page.readRestriction !== 'unknown' && (row.metadata.restricted === true) !== (page.readRestriction === 'restricted')) {
+      restrictionMismatches++;
+      addFinding?.(id, 'RESTRICTION_MISMATCH');
+    }
+    if (page.editRestriction !== 'unknown' && hasArchivedEditRestriction(row) !== (page.editRestriction === 'restricted')) {
+      editRestrictionMismatches++;
+      addFinding?.(id, 'EDIT_RESTRICTION_MISMATCH');
     }
   }
 
   let archiveOnlyPages = 0;
   let archivedRestrictedPages = 0;
+  let archivedEditRestrictedPages = 0;
   let missingPageBodies = 0;
   for (const id of scoped) {
     const row = archived.get(id);
@@ -153,6 +164,10 @@ export async function compareConfluenceArchive(archivePath, inventory, { addFind
     if (row.metadata.restricted === true) {
       archivedRestrictedPages++;
       addFinding?.(id, 'ARCHIVE_RESTRICTED');
+    }
+    if (hasArchivedEditRestriction(row)) {
+      archivedEditRestrictedPages++;
+      addFinding?.(id, 'ARCHIVE_EDIT_RESTRICTED');
     }
     if (row.metadata.bodyPresent !== true) {
       missingPageBodies++;
@@ -202,12 +217,14 @@ export async function compareConfluenceArchive(archivePath, inventory, { addFind
   return {
     sha256, bytes: bytes.length, pages: archived.size, matchedPages, missingPages, archiveOnlyPages, outsideSelectionPages,
     totalCurrentPages: current.length, permissionCheckedPages,
-    otherSpaces: spaces.length - 1, otherSpacePages, unassignedPages, versionMismatches, hierarchyMismatches, restrictionMismatches,
-    archivedRestrictedPages, missingPageBodies, attachments: scopedAttachments.length, attachmentBinaries, attachmentEvidenceProblems,
+    otherSpaces: spaces.length - 1, otherSpacePages, unassignedPages, versionMismatches, hierarchyMismatches,
+    restrictionMismatches, editRestrictionMismatches, archivedRestrictedPages, archivedEditRestrictedPages,
+    missingPageBodies, attachments: scopedAttachments.length, attachmentBinaries, attachmentEvidenceProblems,
     permissionWarnings, unlinkedAttachmentWarnings, analysisErrors, analysisWarnings,
     diagnostics: [...keys.values()].sort((a, b) => a.severity.localeCompare(b.severity) || a.code.localeCompare(b.code)),
     needsReview: [missingPages, archiveOnlyPages, unassignedPages, versionMismatches, hierarchyMismatches, restrictionMismatches,
-      archivedRestrictedPages, missingPageBodies, attachmentEvidenceProblems, permissionWarnings, unlinkedAttachmentWarnings, scopedAnalysisErrors]
+      editRestrictionMismatches, archivedRestrictedPages, archivedEditRestrictedPages, missingPageBodies, attachmentEvidenceProblems,
+      permissionWarnings, unlinkedAttachmentWarnings, scopedAnalysisErrors]
       .some(count => count > 0),
   };
 }

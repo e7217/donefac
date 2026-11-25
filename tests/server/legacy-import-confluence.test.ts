@@ -384,6 +384,75 @@ test('restriction collections, missing permission owners and ancestor inheritanc
   assert.ok(codes(data).includes('CONFLUENCE_RESTRICTION_OWNER_UNKNOWN'));assert.ok(codes(data).includes('CONFLUENCE_RESTRICTION_SET_MISSING'));
 });
 
+const nativePermission = (type: 'ContentPermissionSet' | 'ContentPermission', id: string, fields: string) =>
+  `<object class="${type}" package="com.atlassian.confluence.security"><id name="id">${id}</id>${fields}</object>`;
+
+test('a proven edit-only permission reviews that page while read restriction still excludes descendants', () => {
+  const data = parseConfluence(files([
+    space,
+    page('100', '편집 제한 문서', list('contentPermissionSets', 'ContentPermissionSet', ['500']) + list('historicalVersions', 'Page', ['103'])),
+    page('101', '열람 문서', r('parent', 'Page', '100')),
+    object('Page', '103', p('title', '원본 이력') + p('version', '1') + r('originalVersion', 'Page', '100')),
+    object('Comment', '200', r('containerContent', 'Page', '100')),
+    object('Attachment', '300', p('title', '첨부.txt') + p('version', '1') + r('containerContent', 'Page', '100')),
+    page('110', '읽기와 편집 제한 문서', list('contentPermissionSets', 'ContentPermissionSet', ['510', '511'])),
+    page('111', '읽기 제한 상속', r('parent', 'Page', '110')),
+    ...['100', '101', '103', '110', '111'].map(id => body(`8${id}`, 'Page', id, '<p>원문</p>')),
+    body('8200', 'Comment', '200', '<p>댓글 원문</p>'),
+    nativePermission('ContentPermissionSet', '500', p('type', 'Edit') + r('owningContent', 'Page', '100') +
+      list('contentPermissions', 'ContentPermission', ['501'])),
+    nativePermission('ContentPermission', '501', p('type', 'Edit') + r('owningSet', 'ContentPermissionSet', '500') + r('owningContent', 'Page', '100')),
+    nativePermission('ContentPermissionSet', '510', p('type', 'Edit') + r('owningContent', 'Page', '110')),
+    nativePermission('ContentPermissionSet', '511', p('type', 'View') + r('owningContent', 'Page', '110')),
+  ], [['attachments/100/300/1', Buffer.from('첨부 원문')]]), 'edit-restriction');
+
+  const edit = find(data, 'page', '100');
+  assert.deepEqual(edit.metadata.editPermissionSetIds, ['500']);
+  assert.equal(edit.metadata.permissionSetIds, undefined);
+  assert.ok(refHas(edit, 'relation', 'ContentPermissionSet:500', 'restriction'));
+  assert.equal(find(data, 'relation', 'ContentPermissionSet:500').metadata.type, 'Edit');
+  assert.equal(find(data, 'relation', 'ContentPermission:501').metadata.type, 'Edit');
+  const clear = [edit, find(data, 'page', '101'), find(data, 'revision', '103'), find(data, 'comment', '200'), find(data, 'attachment', '300')];
+  assert.ok(clear.every(row => row.metadata.restricted === undefined));
+  assert.ok(clear.slice(1).every(row => row.metadata.editPermissionSetIds === undefined));
+  const read = find(data, 'page', '110');
+  assert.deepEqual(read.metadata.editPermissionSetIds, ['510']);
+  assert.deepEqual(read.metadata.permissionSetIds, ['511']);
+  assert.equal(read.metadata.restricted, true);
+  assert.equal(find(data, 'page', '111').metadata.restricted, true);
+  assert.deepEqual(data.diagnostics.filter(row => row.code === 'CONFLUENCE_EDIT_RESTRICTION_REVIEW').map(row => [row.recordId, row.severity]),
+    [['page:100', 'warning'], ['page:110', 'warning']]);
+  assert.deepEqual(data.diagnostics.filter(row => row.severity === 'error').map(row => [row.recordId, row.code]),
+    [['page:110', 'CONFLUENCE_RESTRICTED_CONTENT'], ['page:111', 'CONFLUENCE_RESTRICTED_CONTENT']]);
+});
+
+test('unconfirmed XML edit permissions stay under the existing read restriction protections', () => {
+  const data = parseConfluence(files([
+    space,
+    page('100', '교차 소유자', list('contentPermissionSets', 'ContentPermissionSet', ['500'])),
+    page('101', '다른 권한 집합 소유자', list('contentPermissionSets', 'ContentPermissionSet', ['500'])),
+    page('102', '읽기 구성원', r('parent', 'Page', '103')),
+    page('103', '구성원 유형 불일치'),
+    page('104', '선언한 구성원 없음'),
+    page('105', '원본 객체의 작업 구분 없음'),
+    page('106', '외부 클래스에 붙은 권한'),
+    page('107', '서로 다른 구성원 목록'),
+    ...['100', '101', '102', '103', '104', '105', '106', '107'].map(id => body(`8${id}`, 'Page', id, '<p>원문</p>')),
+    nativePermission('ContentPermissionSet', '500', p('type', 'Edit') + r('owningContent', 'Page', '100')),
+    nativePermission('ContentPermissionSet', '510', p('type', 'Edit') + r('owningContent', 'Page', '103')),
+    nativePermission('ContentPermission', '511', p('type', 'View') + r('owningSet', 'ContentPermissionSet', '510')),
+    nativePermission('ContentPermissionSet', '520', p('type', 'Edit') + r('owningContent', 'Page', '104') +
+      list('contentPermissions', 'ContentPermission', ['521'])),
+    nativePermission('ContentPermissionSet', '530', r('owningContent', 'Page', '105')),
+    object('ContentPermissionSet', '540', p('type', 'Edit') + r('owningContent', 'Page', '106')),
+    nativePermission('ContentPermissionSet', '550', p('type', 'Edit') + r('owningContent', 'Page', '107') +
+      p('contentPermissions', '구조가 불명확한 원본') + list('contentPermissions', 'ContentPermission', ['551'])),
+  ]), 'uncertain-edit-restriction');
+  assert.ok(data.records.filter(row => row.kind === 'page').every(row =>
+    row.metadata.restricted === true && row.metadata.editPermissionSetIds === undefined));
+  assert.ok(!codes(data).includes('CONFLUENCE_EDIT_RESTRICTION_REVIEW'));
+});
+
 test('missing or ambiguous primary XML, malformed XML and duplicate source objects are rejected',()=>{
   assert.throws(()=>parseConfluence(new Map(),'x'),/entities.xml/);
   assert.throws(()=>parseConfluence(new Map([['entities.xml',Buffer.from('<x/>')],['nested/entities.xml',Buffer.from('<x/>')]]),'x'),/여러 개/);

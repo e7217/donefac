@@ -219,6 +219,7 @@ export function createApp(options: {
   browserOrigin?: string;
   gitlabWebhookPublicOrigin?: string;
   restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
+  editRestrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
   confluenceReviews?: readonly PilotConfluenceReview[];
   confluenceReviewCoverage?: readonly MigrationConfluenceReviewCoverage[];
 } = {}) {
@@ -324,7 +325,7 @@ export function createApp(options: {
   const documentTreeMove=new DocumentTreeMoveService(store,trash);
   const migrations=new MigrationService(store,dataDir,legacyImport,sourcePreservation,id=>
     Boolean(store.get('documents',id)||trash.find('document',id))||trash.hasLocalAttachmentVersion(id)||trashItems.hasLocalAttachmentVersion(id),
-    options.restrictedConfluencePages, options.confluenceReviews, options.confluenceReviewCoverage);
+    options.restrictedConfluencePages, options.confluenceReviews, options.confluenceReviewCoverage, options.editRestrictedConfluencePages);
   trashItems.finishCleanup();
   const attachmentVersions=new AttachmentVersionsService(store,dataDir);
   const documentTreeCopy = new DocumentTreeCopyService(store, new DocumentCopyAssets(store, files, attachmentVersions), documentOrders);

@@ -76,20 +76,39 @@ function nonemptyRestriction(value: LegacyValue): boolean {
   return value !== 0;
 }
 
+const serviceDeskCommentKeys = new Set(['sd.public.comment', 'sd.allow.public.comment']);
+
+export function isJiraServiceDeskCommentKey(value: unknown): value is string {
+  return typeof value === 'string' && serviceDeskCommentKeys.has(value.toLowerCase());
+}
+
 function restrictedCommentProperty(value: LegacyValue): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const { key, value: details } = value;
-  if (typeof key !== 'string' || key.toLowerCase() !== 'sd.public.comment') return false;
-  if (!details || typeof details !== 'object' || Array.isArray(details) ||
-      !Object.hasOwn(details, 'internal') && !Object.hasOwn(details, 'public')) return true;
-  return nonemptyRestriction(details.internal) || details.public === false || details.public === 'false';
+  if (!isJiraServiceDeskCommentKey(key)) return false;
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return true;
+  const expectedPublic: [string, boolean][] = [['internal', false], ['public', true]];
+  if (key.toLowerCase() === 'sd.allow.public.comment') expectedPublic.push(['allow', true]);
+  const flags = expectedPublic.filter(([name]) => Object.hasOwn(details, name));
+  return !flags.length || flags.some(([name, expected]) => {
+    const flag = details[name];
+    return flag !== expected && (typeof flag !== 'string' || flag.trim().toLowerCase() !== String(expected));
+  });
+}
+
+export function hasRestrictedJiraServiceDeskComment(metadata: LegacyRecord['metadata']): boolean {
+  return Object.entries(metadata).some(([name, value]) =>
+    ['properties', 'visibility', 'jiraservicedeskcommentproperties'].includes(attributeName(name)) &&
+    Array.isArray(value) && value.some(restrictedCommentProperty));
 }
 
 function hasJiraVisibilityRestriction(metadata: LegacyRecord['metadata']): boolean {
   return Object.entries(metadata).some(([name, value]) => {
     const normalized = attributeName(name);
     if (normalized === 'public') return value === false || value === 'false' || value === 0 || value === '0';
-    if (normalized === 'properties') return Array.isArray(value) ? value.some(restrictedCommentProperty) : nonemptyRestriction(value);
+    if (normalized === 'properties' || normalized === 'jiraservicedeskcommentproperties') {
+      return Array.isArray(value) ? value.some(restrictedCommentProperty) : nonemptyRestriction(value);
+    }
     if (normalized === 'visibility') {
       // Older staged JSON encoded service-desk properties in the visibility field.
       return Array.isArray(value) ? value.some(property => !property || typeof property !== 'object' || Array.isArray(property) ||

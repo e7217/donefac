@@ -37,7 +37,7 @@ test('360px 이관 화면에서 ZIP 전체 검토 범위와 개별 검토 파일
       const otherPackageId = randomUUID();
       options.confluenceReviews = [baseReview, { ...baseReview, coverage: {
         archivePages: 4, matchedPages: 1, permissionCheckedPages: 1, outsideSelectionPages: 3, otherSpacePages: 0, unassignedPages: 0,
-      } }, { ...baseReview, coverage: {
+      } }, { ...baseReview, status: 'needs-review', findingsPages: 1, editRestrictedPages: 1, coverage: {
         archivePages: 4, matchedPages: 3, permissionCheckedPages: 3, outsideSelectionPages: 1, otherSpacePages: 0, unassignedPages: 0,
       } }, { ...baseReview, packageId: otherPackageId, status: 'needs-review', findingsPages: 1234 }];
       options.confluenceReviewCoverage = [{ packageId: source.id, archivePages: 4, permissionCheckedPages: 3 },
@@ -63,6 +63,8 @@ test('360px 이관 화면에서 ZIP 전체 검토 범위와 개별 검토 파일
     await expect(legacy).toBeVisible();
     await expect(current).toContainText('검토한 범위에서 대조 일치');
     await expect(current).toContainText('검토 진단이 있는 페이지 0개');
+    const editOnly = coverage.getByRole('article').filter({ hasText: '편집만 제한된 페이지' });
+    await expect(editOnly).toContainText('편집만 제한된 페이지 1개');
     for (const [label, count] of [
       ['ZIP에 포함된 현재 페이지', 4], ['페이지 제한 여부 확인', 1], ['페이지 제한 여부 미확인', 3], ['지정 범위 밖 페이지', 3],
     ] as const) {
@@ -74,6 +76,7 @@ test('360px 이관 화면에서 ZIP 전체 검토 범위와 개별 검토 파일
     const preview = settings.getByRole('region', { name: '이관 적용 미리보기', exact: true });
     const previewCoverage = preview.getByRole('region', { name: 'Confluence 원본 검토 범위', exact: true });
     await expect(previewCoverage.getByRole('article')).toHaveCount(3);
+    await expect(previewCoverage.getByText(/편집만 제한된 페이지 1개/)).toBeVisible();
     await expect(previewCoverage.getByRole('region', { name: `ZIP 전체 페이지 제한 확인 ${filename}`, exact: true })).toBeVisible();
     await expect(coverage).toHaveCount(1);
     const bounds = await previewCoverage.boundingBox();

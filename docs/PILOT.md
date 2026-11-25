@@ -239,6 +239,7 @@ npm run pilot:confluence:audit -- /absolute/path/confluence-audit.json /absolute
 | 사유 코드 | 확인할 항목 |
 | --- | --- |
 | `LIVE_RESTRICTED`, `LIVE_RESTRICTION_UNKNOWN` | 현재 페이지의 직접 제한이나 상위 페이지에서 상속된 읽기 제한, 또는 제한을 확인할 수 없는 응답 |
+| `LIVE_EDIT_RESTRICTED`, `ARCHIVE_EDIT_RESTRICTED`, `EDIT_RESTRICTION_MISMATCH` | 현재 확인한 편집 제한, XML에 기록된 편집 제한, 두 결과의 차이 |
 | `LIVE_PAGE_UNAVAILABLE`, `ARCHIVE_ONLY_PAGE` | 선택했으나 계정에서 읽을 수 없는 페이지, 또는 이번 조회에 잡히지 않고 ZIP에 있는 페이지 |
 | `ARCHIVE_RESTRICTED`, `RESTRICTION_MISMATCH` | ZIP에서 확인한 제한 표시, 또는 확인된 현재 제한과 ZIP 표시의 차이 |
 | `MISSING_FROM_ARCHIVE`, `VERSION_MISMATCH`, `HIERARCHY_MISMATCH` | ZIP의 페이지 누락, 현재 버전 또는 상위 관계 차이 |
@@ -296,6 +297,8 @@ npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/reh
 
 `review`는 브라우저 주소를 출력하기 전에 검토에 연결한 ZIP과 저장된 분석 기록의 원본 인스턴스를 대조한다. 대조 파일에 현재 읽기 제한이 확인된 페이지(`LIVE_RESTRICTED`)가 있으면 XML에 제한 정보가 빠져 있어도 적용을 차단한다. **이관 검토 진단**에서 해당 원본을 제외한 뒤 새 미리보기를 연다. 같은 Confluence 인스턴스에서 다른 ZIP에 들어 있는 하위 페이지·댓글·이력·첨부에도 제외가 전파된다. 선택한 ZIP에 페이지 자체가 없으면 연결을 확인한 하위 기록을 직접 제외할 수 있다. 이전 미리보기는 현재 검토 범위에서 다시 만든다. 읽기 제한 여부를 확인하지 못한 페이지와 공간 권한은 담당자가 검토한다.
 
+직접·상위 페이지의 읽기 제한을 대조해 편집만 제한된 페이지를 확인하면 `LIVE_EDIT_RESTRICTED`와 별도의 건수를 기록한다. XML에서 같은 편집 제한이 확인된 경우도 이관 미리보기에서 대상 페이지와 **이관 후 팀 편집 범위**를 확인한다. 확인한 편집 제한은 해당 페이지의 검토 항목으로 남으며, 하위 페이지에는 원래의 읽기 제한 확인을 따로 적용한다. 예전 대조 파일의 `LIVE_RESTRICTED`는 당시 확인한 차단 근거로 사용한다. [Atlassian 페이지 제한](https://confluence.atlassian.com/conf90/page-restrictions-1425052088.html)
+
 실제 데이터 이관에서 연결된 ZIP을 고르면 매핑과 미리보기의 **ZIP 전체 페이지 제한 확인**에서 형식 3의 합산 결과와 아직 확인할 페이지 수를 볼 수 있다. 아래에서 각 검토의 범위·시각·진단을 확인한다. 공간 권한과 이관 후 팀의 열람 범위는 별도로 검토한다.
 
 `--profile`은 선택 옵션이다. `stage`는 새 디렉터리의 `workspace/.teamspace-rehearsal/`에 `stage.json`과 선택한 Confluence 검토 파일을 저장한다. 옵션 선택에 관계없이 한 파일 64MiB, 최대 20개, 합계 512MiB를 파일럿 시작 전과 실제 읽을 때 검사한다. `review`가 출력한 루프백 주소에서 **워크스페이스 설정 → 실제 데이터 이관**을 열고, 프로젝트·팀원·상태 매핑과 미리보기의 확인 항목을 검토한 뒤 적용한다. 특정 객체의 경고나 오류는 **이관 검토 진단 → 원본 상세 보기**에서 해당 패키지의 본문·메타데이터·관계와 대조한다. 리허설 파일럿은 루프백에만 접속을 받고 명령을 실행한 셸의 외부 연동 자격 증명을 상속하지 않는다.
@@ -303,6 +306,8 @@ npm run pilot:rehearsal -- stage /absolute/path/manifest.json /absolute/path/reh
 이관 리허설은 `stage`, `review`, `verify`에서 외부 웹훅 전송과 반복 업무·마감 알림의 자동 실행을 중지한다. 저장된 규칙은 조회할 수 있다. `.teamspace-rehearsal/`이 있는 워크스페이스와 복원본은 일반 API와 팀 접속 모드에서 시작할 수 없으며 `pilot:rehearsal review`로 연다.
 
 브라우저에서 파일을 준비할 때는 **워크스페이스 설정 → 기존 도구 원본 분석 → 여러 원본 파일 분석**을 연다. 파일별로 원본 도구와 인스턴스 식별값을 확인한 뒤 순서대로 분석한다. 실패한 행은 설정을 수정해 다시 시도하거나 대기열에서 뺄 수 있다. 응답을 받지 못한 파일도 같은 내용과 인스턴스 식별값으로 확인할 수 있으며 이미 저장된 분석은 다시 사용한다. **분석한 패키지로 이관 매핑**을 누르면 확인된 패키지를 **실제 데이터 이관**에서 선택한다. 다른 패키지의 작업 중인 매핑이나 미리보기가 있으면 교체를 확인한다. **선택 패키지 매핑 불러오기**에서 매핑을 열고 미리보기를 검토해 적용한다.
+
+이전 Jira 분석에서 라벨이나 댓글 제한 근거를 다시 확인하라는 진단이 나오면 같은 파일을 같은 원본 인스턴스에 올린다. 패키지 ID와 SHA-256을 유지하면서 최신 분석으로 갱신한다. Jira 관리자 XML의 기본 라벨과 확인된 사용자 정의 라벨을 따로 매핑한다. Service Management의 내부 댓글과 해당 댓글의 Jira Wiki 표기에서 같은 업무 파일명으로 확인한 첨부는 **이관 검토 진단**에서 제외한 뒤 미리보기를 다시 만든다. [Jira 라벨 필드](https://support.atlassian.com/jira/kb/merging-labels-into-the-default-labels-field-after-42-upgrade/) · [Jira 내부 댓글](https://support.atlassian.com/jira/kb/jira-service-management-data-center-how-to-retrieve-internal-or-external-comments/)
 
 여러 파일을 올렸다면 **생성할 프로젝트**에서 대상의 **원본 프로젝트·공간**을 펼쳐 파일명, 인스턴스, 이관 건수를 확인한다. 다른 원본을 각각의 프로젝트로 옮기려면 **프로젝트 매핑**에서 서로 다른 대상 키를 지정하고 새 미리보기를 만든다. 여러 원본을 한 프로젝트로 옮기기로 했다면 `PROJECT_SOURCE_MERGE` 필수 확인을 선택한 뒤 적용한다.
 

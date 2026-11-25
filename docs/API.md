@@ -1022,6 +1022,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
 
+이전 분석의 Jira 라벨·댓글 제한 근거가 부족하면 미리보기는 `SOURCE_JIRA_SOURCE_EVIDENCE_REANALYSIS_REQUIRED`를 표시한다. 같은 원본 바이트와 인스턴스 식별값으로 원본 분석을 요청하면 저장한 패키지 ID 및 SHA-256을 유지하고 분석 버전을 올린다. 이전 변환의 미리보기는 다시 만든다. Confluence의 편집 제한을 확인했고 해당 페이지를 포함하면 미리보기의 필수 확인에 `SOURCE_CONFLUENCE_EDIT_RESTRICTION_REVIEW`가 포함된다. 기존 읽기 제한은 원본을 제외할 때까지 차단된다.
+
 변환 목록은 `GET /api/migrations/previews/:id/content?expectedVersion=…`로 요청한다. `packageId`, 제목·원본 ID·원래 Jira 키를 검색할 최대 200자의 `q`, `offset`(0~100,000, 기본 0), `limit`(1~50, 기본 25)을 선택적으로 지정한다. 응답은 `{previewId,version,total,offset,limit,rows}`이며 각 행에는 `{recordId,packageId,sourceId,targetType,title,sourceKey?,change}`가 들어간다. `targetType`은 `issue` 또는 `document`, `change`는 `new` 또는 `update`다. 적용 계획의 새 업무·문서와 원본 설명·본문 변경분을 반영할 기존 항목을 반환한다. 차단된 계획에는 조회할 변환 행이 없다.
 
 `GET /api/migrations/previews/:id/content/detail?expectedVersion=…&recordId=…`은 목록 행과 해당 업무의 `description`·`descriptionFormat` 또는 문서의 `content`를 반환한다. 계획에 해당하면 새 업무의 `schedule`이나 새 대상의 연결 예정 `sourceUrl`도 제공한다. `recordId`는 목록에서 받은 값 전체를 인코딩해 보낸다. 이 값은 첫 `/`로 패키지 ID와 분석 레코드 ID를 나눈다. 화면의 **원본 보기**는 이 두 ID를 사용해 기존 분석 원본 조회 경로에서 기록을 읽는다.

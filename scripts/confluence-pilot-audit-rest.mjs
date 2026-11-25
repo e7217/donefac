@@ -220,9 +220,13 @@ export async function readConfluenceInventory({ spaceKey, pageIds }, getJson) {
 
   for (const page of pages.values()) {
     // View restrictions apply to descendants, while edit restrictions apply to the page itself.
-    const statuses = await Promise.all([restriction(page.id, 'read'), restriction(page.id, 'update')]);
-    for (const id of page.ancestors) statuses.push(await restriction(id, 'read'));
-    page.restriction = combineRestrictions(statuses);
+    const [directRead, directEdit] = await Promise.all([restriction(page.id, 'read'), restriction(page.id, 'update')]);
+    const viewRestrictions = [directRead];
+    for (const id of page.ancestors) viewRestrictions.push(await restriction(id, 'read'));
+    page.readRestriction = combineRestrictions(viewRestrictions);
+    page.editRestriction = directEdit;
+    page.permissionChecked = page.readRestriction === 'restricted' ||
+      (page.readRestriction === 'clear' && page.editRestriction !== 'unknown');
   }
 
   return { spaceKey, spaceId, explicitSelection, requestedPageIds, pages, unreadableIds, unavailablePages: unreadableIds.size };

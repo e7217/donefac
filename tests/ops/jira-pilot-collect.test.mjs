@@ -289,15 +289,21 @@ test('explicit issue collection retains partial history and intentionally omitte
 test('Jira collection rejects conflicting comment and worklog observations before it publishes a ZIP', async t => {
   const visibility = { type: 'role', value: 'Synthetic private audience' };
   const serviceDeskProperty = { key: 'sd.public.comment', value: { internal: true } };
+  const legacyProperty = { key: 'sd.allow.public.comment', value: { allow: false } };
   const changedBody = 'Synthetic changed private comment';
   const cases = [
     ['comment body', 'comment', {}, { body: changedBody }],
     ['missing comment body', 'comment', {}, { body: undefined }],
     ['comment author', 'comment', {}, { author: { ...author, key: 'different-author' } }],
+    ['missing comment author', 'comment', {}, { author: undefined }],
+    ['unverified worklog author', 'worklog', {}, { author: { displayName: 'Same author label' } }],
+    ['missing comment creation timestamp', 'comment', {}, { created: undefined }],
+    ['missing worklog update timestamp', 'worklog', { updated: date }, {}],
     ['missing comment role', 'comment', { visibility }, {}],
     ['changed comment role', 'comment', { visibility }, { visibility: { type: 'role', value: 'Other synthetic role' } }],
     ['missing service-desk privacy property', 'comment', { properties: [serviceDeskProperty] },
       { properties: [{ key: serviceDeskProperty.key, value: { internal: false } }] }],
+    ['missing older service-desk privacy property', 'comment', { properties: [legacyProperty] }, { properties: [] }],
     ['missing worklog restriction', 'worklog', { 'group-id': 42 }, {}],
     ['missing worklog note', 'worklog', {}, { comment: undefined }],
     ['unconfirmed cleared worklog note', 'worklog', { comment: null }, { comment: undefined }],

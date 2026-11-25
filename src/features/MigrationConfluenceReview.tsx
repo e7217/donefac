@@ -48,6 +48,7 @@ export function ConfluenceSourceReview({ reviews, coverage, packages }: {
         <small>검토 진단이 있는 페이지 {review.findingsPages.toLocaleString('ko-KR')}개
           {review.unidentifiedPages > 0 && ` · 식별하지 못한 페이지 ${review.unidentifiedPages.toLocaleString('ko-KR')}개`}
         </small>
+        {review.editRestrictedPages && <p>편집만 제한된 페이지 {review.editRestrictedPages.toLocaleString('ko-KR')}개 · 원본의 편집 권한은 이관 후 별도로 검토하세요.</p>}
       </article>;
     })}
     <p>공간 권한은 원본에서 별도로 확인하세요.</p>

@@ -26,6 +26,7 @@ const reviewSchema = z.object({
   spacePermissions: z.literal('manual-review'),
   findingsPages: count.max(maxFindings),
   unidentifiedPages: count.max(maxFindings),
+  editRestrictedPages: liveCount.positive().optional(),
   coverage: z.object({
     archivePages: archiveCount,
     matchedPages: liveCount,
@@ -35,8 +36,8 @@ const reviewSchema = z.object({
     unassignedPages: archiveCount,
   }).strict().optional(),
 }).strict().refine(review => {
-  const { coverage, findingsPages, unidentifiedPages, selection, status } = review;
-  if (findingsPages + unidentifiedPages > maxFindings ||
+  const { coverage, findingsPages, unidentifiedPages, selection, status, editRestrictedPages } = review;
+  if (findingsPages + unidentifiedPages > maxFindings || (editRestrictedPages ?? 0) > findingsPages ||
       (status === 'matched' && (findingsPages !== 0 || unidentifiedPages !== 0))) return false;
   if (!coverage) return true;
   const { archivePages, matchedPages, permissionCheckedPages, outsideSelectionPages, otherSpacePages, unassignedPages } = coverage;
@@ -67,14 +68,19 @@ function readRestrictions(input: unknown, allowEmpty: boolean) {
 }
 
 function parseReviewInput(input: unknown) {
-  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['restrictions', 'reviews', 'coverage'].includes(key)) ||
+  if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['restrictions', 'reviews', 'coverage', 'editRestrictions'].includes(key)) ||
       !Object.hasOwn(input, 'restrictions') || !Object.hasOwn(input, 'reviews')) throw new Error(readError);
-  const { restrictions, reviews, coverage } = input as Record<string, unknown>;
+  const { restrictions, reviews, coverage, editRestrictions } = input as Record<string, unknown>;
   if (!Array.isArray(reviews) || !reviews.length || reviews.length > 100) throw new Error(readError);
   const parsed = z.array(reviewSchema).safeParse(reviews);
   if (!parsed.success) throw new Error(readError);
   const combined = coverage === undefined ? undefined : parseReviewCoverage(coverage, parsed.data);
+  const edits = editRestrictions === undefined ? undefined : readRestrictions(editRestrictions, false);
+  const editsCount = parsed.data.reduce((total, review) => total + (review.editRestrictedPages ?? 0), 0);
+  const uniqueEdits = [...(edits?.values() ?? [])].reduce((total, pages) => total + pages.size, 0);
+  if ((editsCount > 0 && !uniqueEdits) || uniqueEdits > editsCount) throw new Error(readError);
   return { restrictedConfluencePages: readRestrictions(restrictions, true), confluenceReviews: parsed.data,
+    ...(edits ? { editRestrictedConfluencePages: edits } : {}),
     ...(combined?.length ? { confluenceReviewCoverage: combined } : {}) };
 }
 
@@ -98,6 +104,7 @@ function parseReviewCoverage(input: unknown, reviews: readonly PilotConfluenceRe
 export async function readPilotConfluenceReview(env: Record<string, string | undefined>, teamAccess: boolean,
   stdin: AsyncIterable<string | Uint8Array>): Promise<{
     restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
+    editRestrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>;
     confluenceReviews?: readonly PilotConfluenceReview[];
   confluenceReviewCoverage?: readonly MigrationConfluenceReviewCoverage[];
   }> {

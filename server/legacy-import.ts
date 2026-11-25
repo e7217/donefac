@@ -12,7 +12,7 @@ import type { LegacyAnalysis } from './legacy-import-analysis.js';
 
 const MAX_PACKAGES=20,MAX_STORED_BYTES=512*1024*1024;
 type Hooks={actor:(req:Request)=>string;activity:(req:Request,type:string,id:string,action:string,detail?:string)=>unknown};
-export type StoredLegacyPackageDetail = LegacyPackageDetail & { jiraBackupLayoutChecked?: true };
+export type StoredLegacyPackageDetail = LegacyPackageDetail & { jiraBackupLayoutChecked?: true; sourceEvidenceChecked?: true };
 const fail=(status:number,message:string):never=>{throw new LegacyImportError(status,message);};
 const scalar=(value:unknown,label:string,max=500):string=>typeof value==='string'&&value.trim()&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value)?value.trim():fail(400,`${label}을(를) 확인해 주세요.`);
 function pageOptions(query:Record<string,unknown>){const integer=(name:string,fallback:number,max:number)=>{const value=query[name];if(value===undefined)return fallback;if(typeof value!=='string'||!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)>max||name==='limit'&&Number(value)<1)fail(400,'페이지 범위를 확인해 주세요.');return Number(value);};return{offset:integer('offset',0,100000),limit:integer('limit',50,100)};}
@@ -66,23 +66,38 @@ export class LegacyImportService{
     if(!Buffer.isBuffer(bytes)||!bytes.length)fail(400,'분석할 원본 파일이 필요합니다.');if(bytes.length>LEGACY_MAX_RAW_BYTES)fail(413,'원본 파일은64MiB 이하여야 합니다.');
     let filename:string;try{filename=safeFilename(input.filename);}catch{fail(400,'원본 파일명을 확인해 주세요.');}const instanceKey=scalar(input.instanceKey,'원본 인스턴스 식별값',200),product=input.product??'auto';if(!['auto','jira','confluence'].includes(product as string))fail(400,'원본 제품을 확인해 주세요.');
     const sha256=createHash('sha256').update(bytes).digest('hex'),existing=this.store.db.prepare('SELECT json FROM legacy_packages WHERE instance_key=? AND sha256=?').get(instanceKey,sha256) as {json:string}|undefined;
-    if(existing){const summary=JSON.parse(existing.json) as LegacyPackageSummary;if(product!=='auto'&&product!==summary.source.product)fail(400,'동일한 원본의 기존 분석 제품과 선택값이 다릅니다.');return{summary,duplicate:true};}
-    const packages=this.list();if(packages.length>=MAX_PACKAGES||packages.reduce((sum,value)=>sum+value.size,0)+bytes.length>MAX_STORED_BYTES)fail(409,'원본 분석 보관 한도(20개·512MiB)에 도달했습니다. 불필요한 패키지를 삭제해 주세요.');
-    this.busy=true;const id=randomUUID(),pending=join(this.root,`${id}.pending`),bundle=join(this.root,`${id}.bundle`);let committed=false;
+    const previous = existing ? JSON.parse(existing.json) as LegacyPackageSummary : undefined;
+    if (previous) {
+      if (product !== 'auto' && product !== previous.source.product) fail(400,'동일한 원본의 기존 분석 제품과 선택값이 다릅니다.');
+      if (this.detail(previous.id).sourceEvidenceChecked) return { summary: previous, duplicate: true };
+      filename = previous.filename;
+    } else {
+      const packages = this.list();
+      if (packages.length >= MAX_PACKAGES || packages.reduce((sum, value) => sum + value.size, 0) + bytes.length > MAX_STORED_BYTES) {
+        fail(409,'원본 분석 보관 한도(20개·512MiB)에 도달했습니다. 불필요한 패키지를 삭제해 주세요.');
+      }
+    }
+    this.busy=true;const id=previous?.id ?? randomUUID(),pending=join(this.root,`${id}.pending`),bundle=join(this.root,`${id}.bundle`);let committed=false;
     try{
       writeFileSync(pending,bytes,{mode:0o600,flag:'wx',flush:true});syncDirectory(this.root);
-      const analysis=await this.analyze({path:pending,filename:filename!,instanceKey,product:product as 'auto'|'jira'|'confluence'});if(this.closed)fail(503,'원본 분석 서비스가 종료되었습니다.');
+      const analysis=await this.analyze({path:pending,filename:filename!,instanceKey,product:previous?.source.product ?? product as 'auto'|'jira'|'confluence'});if(this.closed)fail(503,'원본 분석 서비스가 종료되었습니다.');
       const counts:Partial<Record<LegacyRecordKind,number>>={};for(const value of analysis.dataset.records)counts[value.kind]=(counts[value.kind]||0)+1;
-      const summary:LegacyPackageSummary={id,filename:filename!,sha256,size:bytes.length,version:1,createdAt:new Date().toISOString(),actorId,source:analysis.dataset.source,counts,errors:analysis.dataset.diagnostics.filter(value=>value.severity==='error').length,warnings:analysis.dataset.diagnostics.filter(value=>value.severity==='warning').length,fileCount:analysis.files.length,expandedBytes:analysis.expandedBytes,applySupported:false};
+      const summary:LegacyPackageSummary={id,filename:filename!,sha256,size:bytes.length,version:(previous?.version ?? 0)+1,createdAt:previous?.createdAt ?? new Date().toISOString(),actorId,source:analysis.dataset.source,counts,errors:analysis.dataset.diagnostics.filter(value=>value.severity==='error').length,warnings:analysis.dataset.diagnostics.filter(value=>value.severity==='warning').length,fileCount:analysis.files.length,expandedBytes:analysis.expandedBytes,applySupported:false};
       this.store.transaction(()=>{
-        this.store.db.prepare('INSERT INTO legacy_packages(id,instance_key,sha256,json) VALUES(?,?,?,?)').run(id,instanceKey,sha256,JSON.stringify(summary));
+        if (previous) {
+          if (this.get(id).version !== previous.version) fail(409, '원본 분석 버전이 변경되었습니다. 최신 목록을 불러와 주세요.');
+          this.store.db.prepare('UPDATE legacy_packages SET json=? WHERE id=?').run(JSON.stringify(summary), id);
+          this.store.db.prepare('DELETE FROM legacy_records WHERE package_id=?').run(id);
+          this.store.db.prepare('DELETE FROM legacy_diagnostics WHERE package_id=?').run(id);
+          this.store.db.prepare('DELETE FROM legacy_file_manifests WHERE package_id=?').run(id);
+        } else this.store.db.prepare('INSERT INTO legacy_packages(id,instance_key,sha256,json) VALUES(?,?,?,?)').run(id,instanceKey,sha256,JSON.stringify(summary));
         const putRecord=this.store.db.prepare('INSERT INTO legacy_records(package_id,record_id,kind,title,source_id,json) VALUES(?,?,?,?,?,?)');for(const value of analysis.dataset.records)putRecord.run(id,value.id,value.kind,value.title,value.sourceId,JSON.stringify(value));
         const putDiagnostic=this.store.db.prepare('INSERT INTO legacy_diagnostics(package_id,id,severity,json) VALUES(?,?,?,?)');for(const value of analysis.dataset.diagnostics)putDiagnostic.run(id,value.id,value.severity,JSON.stringify(value));
-        const manifest = { files: analysis.files, unsupported: analysis.dataset.unsupported,
+        const manifest = { files: analysis.files, unsupported: analysis.dataset.unsupported, sourceEvidenceChecked: true,
           ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true } : {}) };
         this.store.db.prepare('INSERT INTO legacy_file_manifests(package_id,json) VALUES(?,?)').run(id, JSON.stringify(manifest));afterSave?.(summary);renameSync(pending,bundle);syncDirectory(this.root);
-      });committed=true;return{summary,duplicate:false};
-    }finally{this.busy=false;if(!committed){rmSync(pending,{force:true});rmSync(bundle,{force:true});}}
+      });committed=true;return{summary,duplicate:Boolean(previous)};
+    }finally{this.busy=false;if(!committed){rmSync(pending,{force:true});if(!previous)rmSync(bundle,{force:true});}}
   }
   remove(id:string,expected:unknown,afterRemove?:(summary:LegacyPackageSummary)=>void):void{
     this.store.transaction(()=>{const summary=this.get(id);if(!Number.isSafeInteger(expected))fail(400,'expectedVersion이 필요합니다.');if(expected!==summary.version)fail(409,'원본 분석 버전이 다릅니다. 최신 목록을 불러와 주세요.');this.store.db.prepare('DELETE FROM legacy_packages WHERE id=?').run(id);afterRemove?.(summary);});

@@ -21,7 +21,7 @@ import { installMigrationContentReview, migrationContentReviewDetail, migrationC
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
-import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { hasRestrictedJiraServiceDeskComment, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import { readJiraWorklogCorrectionCandidates } from './jira-worklog-corrections.js';
@@ -39,7 +39,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 26;
+const conversionVersion = 27;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -68,7 +68,19 @@ const changedRetainedResourceLinks = '이관을 검토하는 동안 기존 업�
 const changedConfluencePropertyScope = '이관을 검토하는 동안 문서 속성 보고서의 원본 공간 연결이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 export const changedConfluenceReplyRoot = '답글을 추가할 문장 댓글이 변경되었습니다. 새 미리보기를 만들어 주세요.';
 
-function reviewStoredJiraBackup(detail: StoredLegacyPackageDetail, dataset: MigrationPackage['dataset']): void {
+function reviewStoredJiraEvidence(detail: StoredLegacyPackageDetail, dataset: MigrationPackage['dataset']): void {
+  if (dataset.source.product !== 'jira') return;
+  const adminBackup = dataset.source.format === 'jira-backup-xml';
+  if (!detail.sourceEvidenceChecked) {
+    const hadEntityProperties = adminBackup && dataset.unsupported.some(({ type }) => type === 'EntityProperty');
+    const hadAffectedRecords = dataset.records.some(record => {
+      if (record.kind === 'comment') return hasRestrictedJiraServiceDeskComment(record.metadata);
+      const fields = record.metadata.fields;
+      return adminBackup && record.kind === 'issue' && fields !== null && typeof fields === 'object' && !Array.isArray(fields) && Object.hasOwn(fields, 'labels');
+    });
+    if (hadEntityProperties || hadAffectedRecords) diagnostic(dataset, { severity: 'error', code: 'JIRA_SOURCE_EVIDENCE_REANALYSIS_REQUIRED',
+      message: '이전 분석의 Jira 라벨 또는 댓글 열람 제한을 대조할 수 없습니다. 같은 파일을 같은 인스턴스로 다시 올려 분석해 주세요.' });
+  }
   if (dataset.source.format !== 'jira-backup-xml' || detail.jiraBackupLayoutChecked === true) return;
   const paths = detail.files.map(file => file.path);
   const { entities, activeObjects } = jiraAdminBackupPaths(paths);
@@ -117,13 +129,17 @@ export class MigrationService {
     private readonly sources: SourcePreservationService, hasCommittedAppend: (id: string) => boolean,
     private readonly restrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>,
     private readonly confluenceReviews: readonly PilotConfluenceReview[] = [],
-    private readonly confluenceReviewCoverage: readonly MigrationConfluenceReviewCoverage[] = []) {
+    private readonly confluenceReviewCoverage: readonly MigrationConfluenceReviewCoverage[] = [],
+    private readonly editRestrictedConfluencePages?: ReadonlyMap<string, ReadonlySet<string>>) {
     this.append = new AttachmentAppend(dataDir);
     this.files = new AttachmentFiles(dataDir);
-    const restrictions = [...(restrictedConfluencePages ?? [])]
+    const orderedRestrictions = (scope?: ReadonlyMap<string, ReadonlySet<string>>) => [...(scope ?? [])]
       .sort(([first], [second]) => first.localeCompare(second))
       .map(([instance, pages]) => [instance, [...pages].sort()]);
-    this.confluenceRestrictionHash = restrictions.length ? createHash('sha256').update(JSON.stringify(restrictions)).digest('hex') : null;
+    const restrictions = orderedRestrictions(restrictedConfluencePages);
+    const editRestrictions = orderedRestrictions(editRestrictedConfluencePages);
+    const reviewScope = editRestrictions.length ? { restrictions, editRestrictions } : restrictions.length ? restrictions : null;
+    this.confluenceRestrictionHash = reviewScope ? createHash('sha256').update(JSON.stringify(reviewScope)).digest('hex') : null;
     this.append.recover(id => this.sources.hasImport(id) || this.sources.hasLocalAttachmentVersion(id) || hasCommittedAppend(id));
     store.db.exec(`CREATE TABLE IF NOT EXISTS migration_previews (
       id TEXT PRIMARY KEY, expires_at TEXT NOT NULL, generation TEXT NOT NULL, size INTEGER NOT NULL, json TEXT NOT NULL
@@ -170,7 +186,7 @@ export class MigrationService {
       },
     }));
     for (const [index, { dataset }] of packages.entries()) {
-      if (!optionsOnly) reviewStoredJiraBackup(details[index], dataset);
+      if (!optionsOnly) reviewStoredJiraEvidence(details[index], dataset);
       projectJiraComponents(dataset);
     }
     if (packages.reduce((sum, item) => sum + item.dataset.records.length, 0) > 100000) {
@@ -1294,10 +1310,13 @@ export class MigrationService {
         .map(({ dataset }) => dataset.source.instanceKey))];
       const retainedPropertyScopes = propertyReportInstances.length ? this.retainedConfluencePropertyScopes(propertyReportInstances) : undefined;
       const restrictedConfluencePages = new Map<string, ReadonlySet<string>>();
+      const editRestrictedConfluencePages = new Map<string, ReadonlySet<string>>();
       for (const { summary: { source } } of packages) {
         if (source.product !== 'confluence') continue;
         const pages = this.restrictedConfluencePages?.get(source.instanceKey);
         if (pages?.size) restrictedConfluencePages.set(source.instanceKey, pages);
+        const edits = this.editRestrictedConfluencePages?.get(source.instanceKey);
+        if (edits?.size) editRestrictedConfluencePages.set(source.instanceKey, edits);
       }
       const prepared = await this.work<PreparedMigration>({
         action: 'preview', sources: packages.map(item => this.fileSpec(item.summary)),
@@ -1306,6 +1325,7 @@ export class MigrationService {
           ...(append ? { append } : {}), ...(appendPages ? { appendPages } : {}), ...(retainedResourceLinks ? { retainedResourceLinks } : {}),
           ...(retainedPropertyScopes ? { retainedConfluencePropertyScopes: retainedPropertyScopes.scopes } : {}) },
         ...(restrictedConfluencePages.size ? { restrictedConfluencePages } : {}),
+        ...(editRestrictedConfluencePages.size ? { editRestrictedConfluencePages } : {}),
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');

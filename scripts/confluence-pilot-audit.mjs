@@ -146,19 +146,23 @@ try {
     } : undefined);
   signal.throwIfAborted();
   let restrictedPages = 0;
+  let editRestrictedPages = 0;
   let unknownRestrictions = 0;
   for (const page of inventory.pages.values()) {
-    if (page.restriction === 'restricted') {
+    if (page.readRestriction === 'restricted' || (page.readRestriction === 'unknown' && page.editRestriction === 'restricted')) {
       restrictedPages++;
       addFinding(page.id, 'LIVE_RESTRICTED');
+    } else if (page.readRestriction === 'clear' && page.editRestriction === 'restricted') {
+      editRestrictedPages++;
+      addFinding(page.id, 'LIVE_EDIT_RESTRICTED');
     }
-    if (page.restriction === 'unknown') {
+    if (!page.permissionChecked) {
       unknownRestrictions++;
       addFinding(page.id, 'LIVE_RESTRICTION_UNKNOWN');
     }
   }
   const { unavailablePages } = inventory;
-  const needsReview = !inventory.pages.size || unavailablePages > 0 || restrictedPages > 0 || unknownRestrictions > 0 || archive?.needsReview;
+  const needsReview = !inventory.pages.size || unavailablePages > 0 || restrictedPages > 0 || editRestrictedPages > 0 || unknownRestrictions > 0 || archive?.needsReview;
   const status = needsReview ? 'needs-review' : archive ? 'matched' : 'observed';
   const selection = inventory.explicitSelection ? 'explicit-pages' : 'visible-space';
   const spacePermissions = 'manual-review';
@@ -177,7 +181,7 @@ try {
     }, signal);
   }
   process.stdout.write(`${JSON.stringify({ status, selection, visiblePages: inventory.pages.size, unavailablePages,
-    restrictedPages, unknownRestrictions, spacePermissions, archive })}\n`);
+    restrictedPages, editRestrictedPages, unknownRestrictions, spacePermissions, archive })}\n`);
   if (needsReview) process.exitCode = 2;
 } catch (error) {
   process.exitCode = interrupted.signal.aborted ? 130 : 1;

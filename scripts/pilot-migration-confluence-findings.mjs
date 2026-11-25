@@ -4,9 +4,12 @@ export const CONFLUENCE_FINDINGS_MAX_BYTES = 64 * 1024 * 1024;
 
 export const CONFLUENCE_FINDING_CODES = Object.freeze([
   'ARCHIVE_ONLY_PAGE',
+  'ARCHIVE_EDIT_RESTRICTED',
   'ARCHIVE_RESTRICTED',
   'ATTACHMENT_EVIDENCE_PROBLEM',
+  'EDIT_RESTRICTION_MISMATCH',
   'HIERARCHY_MISMATCH',
+  'LIVE_EDIT_RESTRICTED',
   'LIVE_PAGE_UNAVAILABLE',
   'LIVE_RESTRICTED',
   'LIVE_RESTRICTION_UNKNOWN',
@@ -20,6 +23,7 @@ const statuses = new Set(['matched', 'needs-review']);
 const selections = new Set(['explicit-pages', 'visible-space']);
 const knownCodes = new Set(CONFLUENCE_FINDING_CODES);
 const uncheckedCodes = new Set(['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE', 'LIVE_RESTRICTION_UNKNOWN', 'MISSING_FROM_ARCHIVE']);
+const incompatibleEditEvidence = ['ARCHIVE_ONLY_PAGE', 'LIVE_PAGE_UNAVAILABLE', 'LIVE_RESTRICTED', 'LIVE_RESTRICTION_UNKNOWN'];
 const hashPattern = /^[a-f0-9]{64}$/u;
 const uuidPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/u;
 const pageIdPattern = /^[1-9]\d{0,19}$/u;
@@ -94,6 +98,7 @@ export function parseConfluenceFindings(raw) {
     if (!hasKeys(row, ['pageId', 'codes']) || typeof row.pageId !== 'string' || !pageIdPattern.test(row.pageId) ||
         pageIds.has(row.pageId) || !Array.isArray(row.codes) || !row.codes.length || row.codes.length > knownCodes.size ||
         new Set(row.codes).size !== row.codes.length || Array.from(row.codes).some(code => !knownCodes.has(code)) ||
+        (row.codes.includes('LIVE_EDIT_RESTRICTED') && incompatibleEditEvidence.some(code => row.codes.includes(code))) ||
         (checked.has(row.pageId) && row.codes.some(code => uncheckedCodes.has(code)))) {
       throw new Error(invalidFindings);
     }
@@ -123,18 +128,26 @@ export function combinedConfluenceCoverage(reviews, archivePageIds) {
   }));
 }
 
-export function confirmedConfluenceRestrictions(reviews, packages) {
+function confirmedConfluencePageFinding(reviews, packages, code) {
   const instances = new Map(packages.map(pkg => [pkg.packageId, pkg.instanceKey]));
-  const restrictedPages = new Map();
+  const byInstance = new Map();
   for (const { proof, findings } of reviews) {
     const instance = instances.get(proof.packageId);
     for (const { pageId, codes } of findings.findings) {
-      if (!codes.includes('LIVE_RESTRICTED')) continue;
-      if (!restrictedPages.has(instance)) restrictedPages.set(instance, new Set());
-      restrictedPages.get(instance).add(pageId);
+      if (!codes.includes(code)) continue;
+      if (!byInstance.has(instance)) byInstance.set(instance, new Set());
+      byInstance.get(instance).add(pageId);
     }
   }
-  return restrictedPages;
+  return byInstance;
+}
+
+export function confirmedConfluenceRestrictions(reviews, packages) {
+  return confirmedConfluencePageFinding(reviews, packages, 'LIVE_RESTRICTED');
+}
+
+export function confirmedConfluenceEditRestrictions(reviews, packages) {
+  return confirmedConfluencePageFinding(reviews, packages, 'LIVE_EDIT_RESTRICTED');
 }
 
 export function confluenceFindingsProof(findings, sha256, packageId) {

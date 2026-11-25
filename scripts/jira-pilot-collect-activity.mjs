@@ -89,24 +89,28 @@ function numericValue(value) {
   return Number.isSafeInteger(normalized) ? normalized : value;
 }
 
-function observedDateChanged(before, after) {
-  return before !== undefined && after !== undefined && !isDeepStrictEqual(dateValue(before), dateValue(after));
+function retainsDate(before, after) {
+  return before == null || isDeepStrictEqual(dateValue(before), dateValue(after));
 }
 
 function retainsObservation(before, after) {
   return before === undefined || isDeepStrictEqual(before, after);
 }
 
-function authorChanged(before, after) {
-  if (typeof before === 'string' && typeof after === 'string') return before !== after;
-  if (!object(before) || !object(after)) return false;
+function authorIds(author) {
   const id = value => (typeof value === 'string' && value.length > 0) || Number.isSafeInteger(value) ? String(value) : null;
-  for (const [left, right] of [[before.accountId, after.accountId], [before.key, after.key], [before.id, after.id],
-    [before.name ?? before.username, after.name ?? after.username]]) {
-    const source = id(left), page = id(right);
-    if (source !== null && page !== null) return source !== page;
+  return object(author) ? [author.accountId, author.key, author.name ?? author.username, author.id].map(id) : [id(author)];
+}
+
+function retainsAuthor(before, after) {
+  const source = authorIds(before), page = authorIds(after);
+  if (!source.some(Boolean)) return true;
+  if (!object(before) || !object(after)) {
+    const primary = ids => ids.find(Boolean);
+    return primary(source) === primary(page);
   }
-  return false;
+  const shared = source.findIndex((value, index) => value !== null && page[index] !== null);
+  return shared !== -1 && source[shared] === page[shared];
 }
 
 function retainsRestrictionValue(before, after) {
@@ -138,8 +142,8 @@ function retainedRestrictions(before, after, worklog) {
 function sameActivityPayload(before, after, worklog) {
   const text = worklog ? 'comment' : 'body';
   const seconds = worklog ? parseJiraWorklogDuration(before) : undefined;
-  return retainsObservation(before[text], after[text]) && !authorChanged(before.author, after.author) &&
-    !observedDateChanged(before.created, after.created) && !observedDateChanged(before.updated, after.updated) &&
+  return retainsObservation(before[text], after[text]) && retainsAuthor(before.author, after.author) &&
+    retainsDate(before.created, after.created) && retainsDate(before.updated, after.updated) &&
     (!worklog || retainsObservation(observedWorklogStart(before), observedWorklogStart(after))) &&
     (typeof seconds !== 'number' || seconds === parseJiraWorklogDuration(after)) &&
     retainedRestrictions(before, after, worklog);

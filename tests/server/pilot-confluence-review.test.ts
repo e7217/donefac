@@ -48,6 +48,21 @@ test('team access and ambiguous Confluence review configuration are rejected bef
   await assert.rejects(readPilotConfluenceReview({ ...originalRestrictions, ...reviewEnv }, false, unreadable), /검토 파일/);
 });
 
+test('offline Confluence review keeps verified edit-only pages in a separate instance scope', async () => {
+  const payload = { restrictions: [['wiki', ['111']]], editRestrictions: [['wiki', ['222']]],
+    reviews: [{ ...review, status: 'needs-review', findingsPages: 2, editRestrictedPages: 1 }] };
+  const configuration = await readPilotConfluenceReview(reviewEnv, false, stream(payload));
+  assert.deepEqual(configuration.restrictedConfluencePages, new Map([['wiki', new Set(['111'])]]));
+  assert.deepEqual(configuration.editRestrictedConfluencePages, new Map([['wiki', new Set(['222'])]]));
+  assert.equal(configuration.confluenceReviews?.[0].editRestrictedPages, 1);
+  for (const bad of [
+    { ...payload, editRestrictions: undefined },
+    { ...payload, editRestrictions: [['wiki', ['222', '333']]] },
+    { ...payload, reviews: [{ ...payload.reviews[0], editRestrictedPages: 3 }] },
+    { ...payload, reviews: [{ ...payload.reviews[0], editRestrictedPages: 0 }] },
+  ]) await assert.rejects(readPilotConfluenceReview(reviewEnv, false, stream(bad)), /검토 파일/);
+});
+
 test('offline Confluence review stdin rejects inconsistent coverage and private fields', async () => {
   const payload = (row: unknown) => stream({ restrictions: [], reviews: [row] });
   const { coverage } = review;

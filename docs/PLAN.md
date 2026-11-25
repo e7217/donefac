@@ -559,6 +559,10 @@ Push 웹훅은 브랜치 이름과 커밋 메시지의 티켓 키로 MR 전 개�
 
 ## 기존 도구 원본 이관
 
+Confluence의 정확한 XML 편집 제한과 REST에서 확인한 편집 전용 제한은 페이지별 이관 확인 항목으로 기록한다. 읽기 제한은 확인한 하위 페이지와 이력·댓글·첨부에도 적용한다. XML 또는 REST에서 누락되거나 충돌하는 제한 근거는 차단 또는 추가 확인으로 유지하고, 기존 `LIVE_RESTRICTED` 검토 파일을 계속 적용한다. [Atlassian 페이지 제한](https://confluence.atlassian.com/conf90/page-restrictions-1425052088.html)
+
+Jira 관리자 XML의 `Label`은 필드 ID가 없는 경우 시스템 라벨로, 필드 ID와 원래 Labels 형식이 확인된 값은 해당 여러 선택 필드로 옮긴다. 업무나 필드 범위를 확인할 수 없는 값은 진단과 보존 원본에 남긴다. Service Management의 원본 댓글 속성에서 확인한 내부 댓글과 Jira Wiki 표기로 확인한 같은 업무 첨부는 명시적으로 제외할 때까지 이관을 보류한다. REST 수집에서는 상세 응답에서 확인한 댓글·작업 시간의 작성자·시각·본문 및 제한 근거를 별도 페이지에서 대조한다. 이전 분석에 필요한 근거가 빠졌으면 같은 바이트와 인스턴스를 올려 패키지 ID를 유지한 채 다시 분석한다. [Jira 라벨 필드](https://support.atlassian.com/jira/kb/merging-labels-into-the-default-labels-field-after-42-upgrade/) · [Jira 내부 댓글](https://support.atlassian.com/jira/kb/jira-service-management-data-center-how-to-retrieve-internal-or-external-comments/)
+
 Jira 관리자 백업 ZIP은 첨부 디렉터리 밖에서 `entities.xml` 한 개를 사용한다. 두 개 이상이면 이관을 차단하고 백업을 분리하도록 안내한다. `activeobjects.xml`의 사이클 정보는 관리자 XML과 같은 디렉터리에서 읽고, 다른 디렉터리에 둔 파일은 보관하고 경고를 남긴다. 파일 소속이 불분명한 예전 분석은 패키지를 다시 분석하고, 기존 미리보기는 새로 만든다. [Atlassian Jira Data Center 백업 구조](https://support.atlassian.com/jira/kb/unable-to-find-jira-backup-entitiesxml-inside-of-zip-file-error/)
 
 Confluence ZIP 대조 파일에 ZIP 전체의 현재 페이지, 원본과 연결한 페이지, 제한 상태가 확인된 페이지와 확인 범위 밖의 페이지를 집계한다. 리허설의 매핑과 미리보기는 같은 패키지에 연결된 각 검토의 집계를 표시한다. 형식 1 파일의 확인 범위는 미기록으로 표시하며 공간 권한은 계속 수동 검토한다. 검증 보고서에는 저장한 대조 근거와 전체 페이지 확인을 증명할 수 없는 패키지 수를 남긴다. [Confluence ZIP 사전 대조](PILOT.md#confluence-공간-xml과-현재-페이지-대조)

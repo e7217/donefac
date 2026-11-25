@@ -195,6 +195,7 @@ function inlineCommentProperties(node: LegacyXmlNode): InlineCommentPropertyName
 const confluenceClassPackages = {
   BlogPost: 'com.atlassian.confluence.pages', Comment: 'com.atlassian.confluence.pages', Page: 'com.atlassian.confluence.pages',
   ContentProperty: 'com.atlassian.confluence.content', Space: 'com.atlassian.confluence.spaces', ConfluenceUserImpl: 'com.atlassian.confluence.user',
+  ContentPermission: 'com.atlassian.confluence.security', ContentPermissionSet: 'com.atlassian.confluence.security',
 };
 
 function exactClass(node: LegacyXmlNode, type: keyof typeof confluenceClassPackages): boolean {
@@ -516,27 +517,122 @@ function attachLabels(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map
   }
 }
 
+const permissionOwnerFields = new Set(['owningContent', 'content', 'contentEntity', 'owningContentEntity']);
+const permissionSetFields = new Set(['owningSet', 'contentPermissionSet', 'permissionSet']);
+const permissionTypeFields = new Set(['type']);
+const permissionMemberFields = new Set(['contentPermissions']);
+const contentPermissionSetCollections = ['contentPermissionSets', 'permissionSets', 'restrictions'];
+
+function permissionProperties(node: LegacyXmlNode, names: ReadonlySet<string>): LegacyXmlNode[] {
+  return node.children.filter(field => names.has(field.attributes.name));
+}
+
+function exactEditPermission(object: XmlObject, type: 'ContentPermission' | 'ContentPermissionSet'): boolean {
+  const [operation, extra] = permissionProperties(object.node, permissionTypeFields);
+  return exactClass(object.node, type) && confluenceNumericId.test(object.id) && exactObjectId(object.node) === object.id &&
+    Boolean(!extra && operation?.name === 'property' && !operation.children.length &&
+      Object.keys(operation.attributes).length === 1 && operation.text === 'Edit');
+}
+
+function exactPermissionOwner(node: LegacyXmlNode): string | undefined {
+  const type = objectClass(node), id = exactReferenceId(node);
+  if (node.name === 'property' && (type === 'Page' || type === 'BlogPost') && exactClass(node, type) && confluenceNumericId.test(id)) {
+    return `${type}:${id}`;
+  }
+}
+
 function attachRelations(data:LegacyDataset,byType:Map<string,XmlObject[]>,rows:Map<string,LegacyRecord>,objects:Map<string,XmlObject>,kindFor:(type:string,id:string)=>LegacyRecordKind,sourceIdFor:(type:string,id:string)=>string,path:string):void{
-  const restricted=new Set<string>(),permissionOwners=new Map<string,string[]>();
+  const restricted = new Set<string>();
+  const permissionOwners = new Map<string, string[]>();
   for(const type of RELATION_TYPES)for(const item of byType.get(type)??[]){
     const row=record('relation',`${type}:${item.id}`,{title:type,authorId:nullString(ref(item.node,'creator')),createdAt:nullString(prop(item.node,'creationDate')),updatedAt:nullString(prop(item.node,'lastModificationDate')),metadata:{sourceClass:type,originalId:item.id,...primitiveProperties(item.node,['type','userName','groupName','permissionType','destinationSpaceKey','destinationPageTitle','linkDestination','linkType','relationName'])}});
     for(const field of item.node.children){const targets=field.name==='property'?[field]:field.name==='collection'?field.children:[];for(const node of targets){const target=idOf(node),targetType=objectClass(node);if(!target||!targetType)continue;const targetRow=rows.get(`${targetType}:${target}`);const targetKind=targetRow?.kind??(RELATION_TYPES.has(targetType)?'relation':targetType==='Label'?'option':kindFor(targetType,target));const targetId=targetRow?.sourceId??(RELATION_TYPES.has(targetType)?`${targetType}:${target}`:sourceIdFor(targetType,target));addReference(row,targetKind,targetId,field.attributes.name||'target');}}
     addRecord(data,row);
     if(type==='ContentPermissionSet'){
-      const owners=row.references.filter(reference=>['owningContent','content','contentEntity','owningContentEntity'].includes(reference.relation));
+      const owners=row.references.filter(reference=>permissionOwnerFields.has(reference.relation));
       permissionOwners.set(item.id,owners.map(reference=>`${reference.kind}:${reference.sourceId}`));
-      for(const owner of owners)restricted.add(`${owner.kind}:${owner.sourceId}`);
       if(!owners.length)diagnostic(data,{severity:'error',code:'CONFLUENCE_RESTRICTION_OWNER_UNKNOWN',message:'접근 제한의 대상 콘텐츠가 불명확합니다. 권한을 재현하거나 명시적으로 제외하기 전에는 적용할 수 없습니다.',recordId:row.id,path});
     }
     if(type==='SpacePermission')diagnostic(data,{severity:'warning',code:'CONFLUENCE_SPACE_PERMISSION_REVIEW',message:'공간 권한 관계를 보존했습니다. 새 서비스의 팀 접근 정책과 별도로 대조해야 합니다.',recordId:row.id,path});
   }
-  for(const [key,row]of rows){
-    const object=objects.get(key);if(!object)continue;
-    const sets=refs(object.node,'contentPermissionSets').concat(refs(object.node,'permissionSets'),refs(object.node,'restrictions'));
-    if(sets.length){restricted.add(row.id);row.metadata.permissionSetIds=sets;for(const setId of sets)addReference(row,'relation',`ContentPermissionSet:${setId}`,'restriction');}
+  const setDeclarations = new Map<string, { objectKey: string; element: LegacyXmlNode }[]>();
+  const setIdsByOwner = new Map<string, string[]>();
+  for (const key of rows.keys()) {
+    const object = objects.get(key);
+    if (!object) continue;
+    const assignedSetIds: string[] = [];
+    for (const name of contentPermissionSetCollections) {
+      for (const element of collection(object.node, name)?.children ?? []) {
+        const id = idOf(element);
+        if (!id) continue;
+        assignedSetIds.push(id);
+        const claims = setDeclarations.get(id) ?? [];
+        claims.push({ objectKey: key, element });
+        setDeclarations.set(id, claims);
+      }
+    }
+    if (assignedSetIds.length) setIdsByOwner.set(key, assignedSetIds);
+  }
+  const memberPermissions = new Map<string, XmlObject[]>();
+  for (const permission of byType.get('ContentPermission') ?? []) {
+    const setIds = new Set(permissionProperties(permission.node, permissionSetFields).map(idOf).filter(Boolean));
+    for (const setId of setIds) {
+      const members = memberPermissions.get(setId) ?? [];
+      members.push(permission);
+      memberPermissions.set(setId, members);
+    }
+  }
+  const editSets = new Map<string, string>();
+  const editSetsByOwner = new Map<string, string[]>();
+  for (const set of byType.get('ContentPermissionSet') ?? []) {
+    const owners = permissionProperties(set.node, permissionOwnerFields);
+    const owner = owners[0] && exactPermissionOwner(owners[0]);
+    const declarations = setDeclarations.get(set.id) ?? [];
+    const memberFields = permissionProperties(set.node, permissionMemberFields);
+    const declaredMembers = memberFields[0]?.children ?? [];
+    const allMembers = [...(memberPermissions.get(set.id) ?? []), ...declaredMembers.map(element => {
+      const id = exactReferenceId(element);
+      return element.name === 'element' && exactClass(element, 'ContentPermission') ? objects.get(`ContentPermission:${id}`) : undefined;
+    })];
+    const provenEdit = owner && rows.has(owner) && exactEditPermission(set, 'ContentPermissionSet') &&
+      memberFields.length <= 1 && (!memberFields.length || memberFields[0].name === 'collection') &&
+      owners.every(field => exactPermissionOwner(field) === owner) && declarations.every(({ objectKey, element }) =>
+        objectKey === owner && element.name === 'element' && exactClass(element, 'ContentPermissionSet') && exactReferenceId(element) === set.id) &&
+      allMembers.every(member => member && exactEditPermission(member, 'ContentPermission') &&
+        permissionProperties(member.node, permissionSetFields).every(field =>
+          field.name === 'property' && exactClass(field, 'ContentPermissionSet') && exactReferenceId(field) === set.id) &&
+        permissionProperties(member.node, permissionOwnerFields).every(field => exactPermissionOwner(field) === owner));
+    if (provenEdit && owner) {
+      editSets.set(set.id, owner);
+      const ownerSets = editSetsByOwner.get(owner) ?? [];
+      ownerSets.push(set.id);
+      editSetsByOwner.set(owner, ownerSets);
+    } else {
+      for (const ownerId of permissionOwners.get(set.id) ?? []) restricted.add(ownerId);
+    }
+  }
+  for (const [owner, ids] of setIdsByOwner) {
+    const row = rows.get(owner)!;
+    for (const id of ids) addReference(row, 'relation', `ContentPermissionSet:${id}`, 'restriction');
+    const readOrUnknown = ids.filter(id => editSets.get(id) !== owner);
+    if (!readOrUnknown.length) continue;
+    restricted.add(row.id);
+    row.metadata.permissionSetIds = readOrUnknown;
   }
   const bySourceId=new Map<string,LegacyRecord[]>();for(const row of rows.values()){const values=bySourceId.get(row.sourceId)??[];values.push(row);bySourceId.set(row.sourceId,values);}
-  for(const item of byType.get('ContentPermission')??[]){const setId=ref(item.node,'owningSet')||ref(item.node,'contentPermissionSet')||ref(item.node,'permissionSet');const owner=ref(item.node,'owningContent')||ref(item.node,'content');if(owner)for(const row of bySourceId.get(owner)??[])restricted.add(row.id);if(setId&&!permissionOwners.has(setId))diagnostic(data,{severity:'error',code:'CONFLUENCE_RESTRICTION_SET_MISSING',message:'권한 제한의 소유 집합을 찾을 수 없습니다. 권한 검토가 필요합니다.',recordId:`relation:ContentPermission:${item.id}`,path});}
+  for (const item of byType.get('ContentPermission') ?? []) {
+    const setId = ref(item.node, 'owningSet') || ref(item.node, 'contentPermissionSet') || ref(item.node, 'permissionSet');
+    const ownerId = ref(item.node, 'owningContent') || ref(item.node, 'content');
+    if (ownerId && !editSets.has(setId)) for (const row of bySourceId.get(ownerId) ?? []) restricted.add(row.id);
+    if (setId && !permissionOwners.has(setId)) diagnostic(data, { severity: 'error', code: 'CONFLUENCE_RESTRICTION_SET_MISSING',
+      message: '권한 제한의 소유 집합을 찾을 수 없습니다. 권한 검토가 필요합니다.', recordId: `relation:ContentPermission:${item.id}`, path });
+  }
+  for (const [owner, ids] of editSetsByOwner) {
+    const row = rows.get(owner)!;
+    row.metadata.editPermissionSetIds = ids;
+    diagnostic(data, { severity: 'warning', code: 'CONFLUENCE_EDIT_RESTRICTION_REVIEW', recordId: row.id, path,
+      message: '원본 문서의 편집 제한이 확인되었습니다. 이관 후 팀의 편집 범위를 확인해 주세요.' });
+  }
   // View restrictions can be inherited by descendants; carry this uncertainty to their comments/history.
   const descendants=new Map<string,string[]>();for(const row of data.records)for(const parent of row.references.filter(item=>['parent','container-content','current-version','ancestor','body-owner'].includes(item.relation))){const key=`${parent.kind}:${parent.sourceId}`,values=descendants.get(key)??[];values.push(row.id);descendants.set(key,values);}
   const pending=[...restricted];for(let i=0;i<pending.length;i++)for(const id of descendants.get(pending[i])??[])if(!restricted.has(id)){restricted.add(id);pending.push(id);}

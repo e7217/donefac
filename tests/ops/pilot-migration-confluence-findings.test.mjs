@@ -8,7 +8,8 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   confluenceFindingsProof, CONFLUENCE_FINDING_CODES, CONFLUENCE_FINDINGS_FORMAT, CONFLUENCE_FINDINGS_MAX_BYTES,
-  CONFLUENCE_FINDINGS_VERSION, parseConfluenceFindings, validConfluenceFindingsProof,
+  CONFLUENCE_FINDINGS_VERSION, confirmedConfluenceEditRestrictions, confirmedConfluenceRestrictions,
+  parseConfluenceFindings, validConfluenceFindingsProof,
 } from '../../scripts/pilot-migration-confluence-findings.mjs';
 import { collectMigrationEvidence } from '../../scripts/pilot-migration-evidence.mjs';
 import { startRehearsalPilot } from '../../scripts/pilot-migration-runtime.mjs';
@@ -134,6 +135,8 @@ test('rejects incompatible metadata, duplicate page or reason, and injected priv
     report({ archive: { sha256: zipHash, bytes: 13, file: injected } }), report({ selection: injected }),
     report({ findings: [goodRow, goodRow] }), report({ findings: [{ ...goodRow, codes: [] }] }),
     report({ findings: [{ ...goodRow, codes: ['VERSION_MISMATCH', 'VERSION_MISMATCH'] }] }),
+    report({ findings: [{ ...goodRow, codes: ['LIVE_EDIT_RESTRICTED', 'LIVE_RESTRICTION_UNKNOWN'] }] }),
+    report({ findings: [{ ...goodRow, codes: ['LIVE_EDIT_RESTRICTED', 'LIVE_RESTRICTED'] }] }),
     report({ findings: [{ ...goodRow, codes: ['UNKNOWN'] }] }), report({ findings: [{ ...goodRow, pageId: 1 }] }),
     report({ findings: [{ ...goodRow, pageId: '01' }] }), report({ findings: [{ ...goodRow, pageId: '1'.repeat(21) }] }),
     report({ findings: [{ ...goodRow, text: injected }] }), report({ source: injected }),
@@ -145,15 +148,31 @@ test('rejects incompatible metadata, duplicate page or reason, and injected priv
 
 test('rejects a proof with wrong identifiers, incompatible counts, or extra fields', () => {
   const allReasons = confluenceFindingsProof(parseConfluenceFindings(report({
-    findings: [{ pageId, codes: [...CONFLUENCE_FINDING_CODES] }],
+    findings: [{ pageId, codes: CONFLUENCE_FINDING_CODES.filter(code => code !== 'LIVE_EDIT_RESTRICTED') },
+      { pageId: '2', codes: ['LIVE_EDIT_RESTRICTED'] }],
   })), reportHash, packageId);
   assert.equal(validConfluenceFindingsProof(allReasons), true);
   for (const invalid of [
     { packageId: '../workspace' }, { sha256: 'wrong' }, { archive: { sha256: 'wrong', bytes: 13 } }, { pageCount: 0 },
-    { reasonCounts: null }, { reasonCounts: {} }, { reasonCounts: { VERSION_MISMATCH: 2 } },
+    { reasonCounts: null }, { reasonCounts: {} }, { reasonCounts: { VERSION_MISMATCH: 3 } },
     { reasonCounts: { VERSION_MISMATCH: 0 } }, { reasonCounts: { VERSION_MISMATCH: 1, UNKNOWN: 1 } },
     { findings: [] }, { spacePermissions: 'passed' }, { unidentifiedPages: Number.MAX_SAFE_INTEGER },
   ]) assert.equal(validConfluenceFindingsProof({ ...allReasons, ...invalid }), false);
+});
+
+test('current edit-only findings are separated from legacy and current read blockers', () => {
+  const current = parseConfluenceFindings(coveredReport({ version: CONFLUENCE_FINDINGS_VERSION,
+    permissionCheckedPageIds: ['2', '3'], findings: [{ pageId: '2', codes: ['LIVE_EDIT_RESTRICTED'] }, { pageId: '3', codes: ['LIVE_RESTRICTED'] }],
+  }));
+  const legacyPackageId = '00000000-0000-4000-8000-000000000003';
+  const legacy = parseConfluenceFindings(report({ findings: [{ pageId: '4', codes: ['LIVE_RESTRICTED'] }] }));
+  const reviews = [
+    { findings: current, proof: confluenceFindingsProof(current, reportHash, packageId) },
+    { findings: legacy, proof: confluenceFindingsProof(legacy, 'c'.repeat(64), legacyPackageId) },
+  ];
+  const packages = [{ packageId, instanceKey: 'wiki' }, { packageId: legacyPackageId, instanceKey: 'wiki' }];
+  assert.deepEqual(confirmedConfluenceEditRestrictions(reviews, packages), new Map([['wiki', new Set(['2'])]]));
+  assert.deepEqual(confirmedConfluenceRestrictions(reviews, packages), new Map([['wiki', new Set(['3', '4'])]]));
 });
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
@@ -233,14 +252,15 @@ async function withReview(root, action) {
   }
 }
 
-async function prepareRehearsal(t, sources, findings, bind = true) {
+async function prepareRehearsal(t, sources, findings, bind = true, coverage) {
   const scratch = await mkdtemp(join(tmpdir(), 'teamspace-confluence-live-restriction-'));
   t.after(() => rm(scratch, { recursive: true, force: true }));
   const root = join(scratch, 'run');
   const manifest = join(scratch, 'manifest.json');
   const findingsPath = join(scratch, 'findings.json');
   const [reviewed] = sources;
-  const raw = Buffer.from(JSON.stringify(report({ archive: { sha256: digest(reviewed.bytes), bytes: reviewed.bytes.length }, findings })));
+  const raw = Buffer.from(JSON.stringify(report({ archive: { sha256: digest(reviewed.bytes), bytes: reviewed.bytes.length }, findings,
+    ...coverage })));
   for (const { name, bytes } of sources) await writeFile(join(scratch, `${name}.zip`), bytes);
   await writeFile(manifest, JSON.stringify({ packages: sources.map(({ name }) => ({
     file: `${name}.zip`, product: 'confluence', instanceKey: name,
@@ -504,6 +524,65 @@ test('guarded rehearsal requires excluding ZIP-bound live restrictions and omits
   assert.deepEqual(review.counts, { excluded: 1, documentBound: 1, archiveOnly: 0, absent: 0 });
   assert.deepEqual(review.liveRestrictedCounts, { excluded: 1, documentBound: 0, archiveOnly: 0, absent: 0 });
   assert.equal(verified.source.evidence.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
+  assert.deepEqual(verified.restore.evidence.receipts[0].confluenceReviews, [review]);
+});
+
+test('verified edit-only evidence requires acknowledgment while retaining the page and its descendants', { timeout: 120_000 }, async t => {
+  const bytes = wikiArchive('EDIT', [
+    { id: pageId, title: 'Edit-restricted page' },
+    { id: childPageId, title: 'Page without inherited edit restriction', parent: pageId, attachment: allowedBytes },
+  ]);
+  const { root, staged } = await prepareRehearsal(t, [{ name: 'edit-only-wiki', bytes }],
+    [{ pageId, codes: ['LIVE_EDIT_RESTRICTED', 'EDIT_RESTRICTION_MISMATCH'] }], true, {
+      version: CONFLUENCE_FINDINGS_VERSION, permissionCheckedPageIds: [pageId, childPageId],
+      coverage: { archivePages: 2, matchedPages: 2, permissionCheckedPages: 2,
+        outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 },
+    });
+  assert.deepEqual(staged.confluenceReviews[0].reasonCounts, { EDIT_RESTRICTION_MISMATCH: 1, LIVE_EDIT_RESTRICTED: 1 });
+  const sourceId = staged.packages[0].packageId;
+  const recordId = `${sourceId}/page:${pageId}`;
+  const acknowledgment = 'SOURCE_CONFLUENCE_EDIT_RESTRICTION_REVIEW';
+
+  const unguarded = await startRehearsalPilot(join(root, 'workspace'));
+  let stale;
+  try {
+    const { actor, configuration } = await reviewConfiguration(unguarded.url, staged.packages);
+    stale = await previewMigration(unguarded.url, actor, configuration);
+    assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+    assert.ok(!stale.requiredAcknowledgements.includes(acknowledgment));
+  } finally { await unguarded.close(); }
+
+  await withReview(root, async base => {
+    const { actor, configuration } = await reviewConfiguration(base, staged.packages);
+    assert.match((await applyMigration(base, actor, stale, 409)).error, /Confluence 페이지별 검토 범위/u);
+    const { confluenceReviews } = await api(base, `/migrations/options?packageId=${sourceId}`);
+    assert.equal(confluenceReviews[0].editRestrictedPages, 1);
+    assert.ok(!JSON.stringify(confluenceReviews).includes(pageId));
+    const preview = await previewMigration(base, actor, configuration);
+    assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+    assert.deepEqual(preview.notices.filter(notice => notice.code === acknowledgment).map(notice =>
+      [notice.severity, notice.recordId, notice.requiresAcknowledgement]), [['warning', recordId, true]]);
+    assert.ok(!preview.notices.some(notice => notice.code === 'RESTRICTED_CONTENT'));
+    assert.equal(preview.counts.documents, 2);
+    assert.equal(preview.counts.attachments, 1);
+    await applyMigration(base, actor, preview, 400, preview.requiredAcknowledgements.filter(code => code !== acknowledgment));
+    const { import: receipt } = await applyMigration(base, actor, preview);
+    assert.ok(receipt.notices.some(notice => notice.code === acknowledgment));
+    const { documents } = await api(base, '/workspace');
+    const parent = documents.find(document => document.title === 'Edit-restricted page');
+    assert.ok(parent);
+    assert.equal(documents.find(document => document.title === 'Page without inherited edit restriction').parentId, parent.id);
+    const audit = await api(base, `/source-imports/${receipt.id}/reconciliation/audit?expectedVersion=${receipt.version}`);
+    assert.deepEqual(audit.attachments.map(({ status, recordStatus }) => [status, recordStatus]), [['verified', 'linked']]);
+  });
+
+  const verified = await verification(root, 2);
+  assert.equal(verified.comparison.matches, true);
+  assert.equal(verified.source.evidence.checks.receiptsWithLiveRestrictedConfluenceDocuments, 0);
+  assert.equal(verified.source.evidence.checks.confluencePackagesWithoutFullPageCoverage, 0);
+  const [review] = verified.source.evidence.receipts[0].confluenceReviews;
+  assert.deepEqual(review.counts, { excluded: 0, documentBound: 1, archiveOnly: 0, absent: 0 });
+  assert.deepEqual(review.liveRestrictedCounts, { excluded: 0, documentBound: 0, archiveOnly: 0, absent: 0 });
   assert.deepEqual(verified.restore.evidence.receipts[0].confluenceReviews, [review]);
 });
 

@@ -2961,11 +2961,13 @@ test('360px 전체 이관 검증은 현재 필터와 별개로 모든 첨부 버
     const good = await checkAll();
     expect(good.jiraStatusHistory).toBeNull();
     expect(good.primaryRecords).toHaveLength(2);
+    const matchedField = { matched: 1, changed: 0, unavailable: 0, invalid: 0 };
     for (const packageId of [pkg.id, otherPackage.id]) {
       expect(good.primaryRecords.find(item => item.packageId === packageId)).toEqual({
         packageId, kind: 'page', counts: { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 },
         invalidTargets: 0, dispositionSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
         hierarchy: { matched: 1, changed: 0, unavailable: 0, invalid: 0, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
+        fields: { counts: { title: matchedField, content: matchedField, labels: matchedField }, sha256: expect.stringMatching(/^[a-f0-9]{64}$/) },
       });
     }
     await expect(primaryPackage).toHaveCount(1);

@@ -543,6 +543,74 @@ test('Confluence user keys support reviewed author mapping across exported files
   assert.equal(workspace.documents.find(page => page.title === '두 번째 원본 문서')?.authorId, 'user-jun');
 });
 
+test('previous Jira packages can be reanalyzed in place without publishing Service Management internal comments or their named attachments', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const filename = 'synthetic-jira-service-desk.zip';
+  const instanceKey = 'synthetic-jira-service-desk';
+  const date = '2024-01-01T00:00:00Z';
+  const archive = Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="OLD" name="Synthetic service desk"/>
+    <Status id="1" pname="Open"/><IssueType id="3" pname="Task"/>
+    <Issue id="100" project="10" number="1" summary="Synthetic support request" status="1" issuetype="3" created="${date}"/>
+    <Issue id="101" project="10" number="2" summary="Synthetic unrelated request" status="1" issuetype="3" created="${date}"/>
+    <Action id="200" issue="100" type="comment" author="source.author" created="${date}" body="Internal synthetic note !proof.png|thumbnail! [^secret.txt]"/>
+    <Action id="201" issue="100" type="comment" author="source.author" created="${date}" body="Public synthetic note"/>
+    <Action id="202" issue="100" type="comment" author="source.author" created="${date}" body="Malformed private synthetic note"/>
+    <FileAttachment id="300" issue="100" filename="proof.png" filesize="5" mimetype="image/png" created="${date}" author="source.author"/>
+    <FileAttachment id="301" issue="100" filename="secret.txt" filesize="5" mimetype="text/plain" created="${date}" author="source.author"/>
+    <FileAttachment id="302" issue="101" filename="proof.png" filesize="5" mimetype="image/png" created="${date}" author="source.author"/>
+    <EntityProperty id="401" entityName="sd.comment.property" entityId="200" propertyKey="sd.allow.public.comment" value="{&quot;allow&quot;:false}"/>
+    <EntityProperty id="402" entityName="sd.comment.property" entityId="201" propertyKey="sd.public.comment"><value><![CDATA[{"internal":"false"}]]></value></EntityProperty>
+    <EntityProperty id="403" entityName="sd.comment.property" entityId="202" propertyKey="sd.public.comment" value="unknown"/>
+  </entity-engine-xml>`);
+  const bytes = zip([{ path: 'entities.xml', bytes: archive }, ...[300, 301, 302].map(id => ({
+    path: `attachments/OLD/OLD-${id === 302 ? 2 : 1}/${id}`, bytes: Buffer.from('bytes'),
+  }))]);
+  const packageSummary = await f.upload(bytes, filename, 'jira', instanceKey);
+  const config = await f.configuration(packageSummary, 'SERVICEDESK');
+  f.db.prepare(`UPDATE legacy_file_manifests SET json=json_set(json_remove(json,'$.sourceEvidenceChecked'),'$.unsupported',json(?))
+    WHERE package_id=?`).run(JSON.stringify([{ type: 'EntityProperty', count: 3 }]), packageSummary.id);
+  f.db.prepare(`UPDATE legacy_records SET json=json_remove(json,'$.metadata.jiraServiceDeskCommentProperties','$.metadata.restricted')
+    WHERE package_id=?`).run(packageSummary.id);
+  const stale = await f.preview(config);
+  assert.ok(stale.notices.some(notice => notice.code === 'SOURCE_JIRA_SOURCE_EVIDENCE_REANALYSIS_REQUIRED' && notice.severity === 'error'));
+  assert.equal(stale.canApply, false);
+  assert.equal((await f.apply(stale)).status, 409);
+
+  const params = new URLSearchParams({ filename, product: 'jira', instanceKey });
+  const reupload = () => fetch(`${f.base}/legacy-import/packages?${params}`, { method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream', 'X-Actor-Id': 'user-seo' }, body: new Uint8Array(bytes) });
+  const renewed = await reupload();
+  assert.equal(renewed.status, 200);
+  const refreshed = await renewed.json() as LegacyPackageSummary;
+  assert.deepEqual([refreshed.id, refreshed.sha256, refreshed.version], [packageSummary.id, packageSummary.sha256, packageSummary.version + 1]);
+  const duplicate = await reupload();
+  assert.equal(duplicate.status, 200);
+  assert.deepEqual(await duplicate.json(), refreshed);
+
+  const blocked = await f.preview(config);
+  const restricted = ['comment:200', 'comment:202', 'attachment:300', 'attachment:301'].map(value => `${packageSummary.id}/${value}`);
+  assert.equal(blocked.canApply, false);
+  assert.deepEqual(new Set(blocked.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT').map(notice => notice.recordId)), new Set(restricted));
+  assert.equal((await f.apply(blocked)).status, 409);
+  const preview = await f.preview({ ...config, excludedRecords: restricted });
+  assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
+  const applied = await f.apply(preview);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const { data: exported } = await f.call<WorkspaceSnapshot & { comments: Comment[]; sourceRecords: SourceRecordArchive[] }>('/export');
+  const comments = exported.comments.map(value => value.body);
+  assert.ok(comments.includes('Public synthetic note'));
+  assert.ok(comments.every(body => !/Internal synthetic note|Malformed private synthetic note/.test(body)));
+  const preserved = exported.sourceRecords.filter(row => row.source.instanceKey === instanceKey);
+  for (const recordId of ['comment:200', 'comment:202', 'attachment:300', 'attachment:301']) {
+    const raw = preserved.find(row => row.record.id === recordId);
+    assert.ok(raw, recordId);
+    assert.equal(raw.targetId, null, recordId);
+  }
+  assert.ok(preserved.find(row => row.record.id === 'attachment:302')?.targetId);
+});
+
 test('previous Jira archive analyses and previews cannot bypass backup directory review', async t => {
   const f = await fixture();
   t.after(() => f.close());

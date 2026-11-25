@@ -186,9 +186,10 @@ function migrationOptionDetails(packages: MigrationPackage[]) {
       if (customField(row) && !(pkg.dataset.source.product === 'jira' && row.metadata.jiraEpicLinkField === true)) {
         const projectedDate = projectedSources.get(row.sourceId);
         const jiraComponents = pkg.dataset.source.product === 'jira' && row.sourceId === JIRA_COMPONENTS_FIELD_ID;
+        const jiraAdminLabels = pkg.dataset.source.format === 'jira-backup-xml' && row.metadata.jiraAdminLabelField === true;
         fields.push({ id: optionId(pkg.summary.id,'field',row.sourceId), packageId:pkg.summary.id,
-          sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : suggestedKind(row),
-          ...(projectedDate ? { projectedDate } : {}), ...(jiraComponents ? { requiredKind: 'multi_select' } : {}) });
+          sourceValue:row.sourceId, label:row.title||row.sourceId, suggestedKind: projectedDate ? 'archive' : jiraAdminLabels ? 'multi_select' : suggestedKind(row),
+          ...(projectedDate ? { projectedDate } : {}), ...(jiraComponents || jiraAdminLabels ? { requiredKind: 'multi_select' } : {}) });
       }
     }
     for(const[sourceProjectId,count]of containerRows){const row=index.get(`project:${sourceProjectId}`),name=row?.title||(sourceProjectId==='__unassigned__'?'원본 프로젝트 미지정':sourceProjectId);containers.push({id:optionId(pkg.summary.id,'container',sourceProjectId),packageId:pkg.summary.id,sourceProjectId,name,proposedKey:proposedKey(string(row?.metadata.key||row?.metadata.pkey||row?.metadata.spaceKey)||sourceProjectId,pkg.summary.id+sourceProjectId),...count});}
@@ -1994,7 +1995,7 @@ class Planner{
         if (!kind || !fieldKinds.includes(kind)) {
           this.notice('FIELD_MAPPING_REQUIRED', `원본 필드의 처리 방식을 선택해 주세요: ${option.label}`, 'error');
         } else if (option.requiredKind && kind !== option.requiredKind) {
-          this.notice('JIRA_COMPONENT_FIELD_KIND', 'Jira 컴포넌트는 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error');
+          this.noticeRequiredFieldKind(option);
         }
       }
       const projectConfigs=new Map<string,MigrationConfiguration['projects'][number]>();for(const mapping of config.projects){if(projectConfigs.has(mapping.containerId)||!this.options.containers.some(container=>container.id===mapping.containerId))this.notice('PROJECT_MAPPING_INVALID','프로젝트 매핑이 중복되거나 원본 컨테이너가 없습니다.','error');projectConfigs.set(mapping.containerId,mapping);}
@@ -2442,7 +2443,7 @@ class Planner{
         continue;
       }
       if (!definition) {
-        if (option.requiredKind) {
+        if (option.sourceValue === JIRA_COMPONENTS_FIELD_ID) {
           this.notice('JIRA_COMPONENT_CATALOG_MISSING', '이 업무의 Jira 컴포넌트 선택지를 확인할 수 없습니다. 적용할 원본 범위와 제외 항목을 확인해 주세요.', 'error', entry);
           continue;
         }
@@ -2471,7 +2472,8 @@ class Planner{
       const raw = Object.hasOwn(fields, option.sourceValue) ? fields[option.sourceValue] : fields[option.sourceValue.replace(/^csv:/, '')];
       if (raw === undefined) continue;
       const fieldId = fieldMappings[option.id];
-      if (fieldId === null || fieldId === undefined && (option.projectedDate || option.requiredKind)) {
+      const projection = option.requiredKind && this.sourceEntry(entry, 'field', option.sourceValue);
+      if (fieldId === null || fieldId === undefined && (option.projectedDate || option.requiredKind) || projection && this.skip(projection)) {
         this.noticeArchivedCustomField(entry, option);
         continue;
       }
@@ -2481,7 +2483,7 @@ class Planner{
         continue;
       }
       if (option.requiredKind && field.kind !== option.requiredKind) {
-        this.notice('JIRA_COMPONENT_FIELD_KIND', 'Jira 컴포넌트는 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error', entry);
+        this.noticeRequiredFieldKind(option, entry);
         continue;
       }
       if (Object.hasOwn(issue.customFields!, field.id)) {
@@ -2489,6 +2491,13 @@ class Planner{
         continue;
       }
       issue.customFields![field.id] = this.convertField(entry, option.sourceValue, field, raw);
+    }
+  }
+  private noticeRequiredFieldKind(option: MigrationOptions['fields'][number], entry?: Entry) {
+    if (option.sourceValue === JIRA_COMPONENTS_FIELD_ID) {
+      this.notice('JIRA_COMPONENT_FIELD_KIND', 'Jira 컴포넌트는 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error', entry);
+    } else {
+      this.notice('JIRA_LABEL_FIELD_KIND', 'Jira 사용자 정의 라벨은 여러 선택 필드로 이관하거나 원본에 보관해 주세요.', 'error', entry);
     }
   }
   private noticeArchivedCustomField(entry: Entry, option: MigrationOptions['fields'][number]): void {

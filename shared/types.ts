@@ -419,6 +419,7 @@ export interface MigrationConfluenceReview {
   spacePermissions: 'manual-review';
   findingsPages: number;
   unidentifiedPages: number;
+  editRestrictedPages?: number;
   coverage?: MigrationConfluenceCoverage;
 }
 export interface MigrationConfluenceReviewCoverage {

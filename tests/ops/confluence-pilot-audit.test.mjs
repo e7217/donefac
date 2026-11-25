@@ -33,7 +33,7 @@ function reference(name, type, id) { return `<property name="${name}" class="${t
 function object(type, id, properties) { return `<object class="${type}"><id name="id">${id}</id>${properties}</object>`; }
 
 function nativeExport(pages = [root, child], { extras = false, restricted = [], spaceId = '42', includeBinary = true,
-  spacePermission = false, omitBody = [], otherSpaceId } = {}) {
+  editRestricted = [], spacePermission = false, omitBody = [], otherSpaceId } = {}) {
   const space = object('Space', spaceId, property('key', 'WIKI') + property('name', 'Fixture Wiki'));
   const otherSpace = otherSpaceId ? object('Space', otherSpaceId, property('key', 'OTHER')) : '';
   function pageRows(page, originalId) {
@@ -55,6 +55,9 @@ function nativeExport(pages = [root, child], { extras = false, restricted = [], 
   }
   for (const [index, id] of restricted.entries()) {
     rows.push(object('ContentPermissionSet', `80${index}`, property('type', 'View') + reference('owningContent', 'Page', id)));
+  }
+  for (const [index, id] of editRestricted.entries()) {
+    rows.push(object('ContentPermissionSet', `81${index}`, property('type', 'Edit') + reference('owningContent', 'Page', id)));
   }
   if (spacePermission) rows.push(object('SpacePermission', '900', property('type', 'VIEWSPACE') + reference('space', 'Space', spaceId)));
   return zip([{ path: 'native/entities.xml', bytes: Buffer.from(`<hibernate-generic>${space}${otherSpace}${rows.join('')}</hibernate-generic>`) },
@@ -323,19 +326,59 @@ test('unsupported or incomplete permission evidence keeps the current page and d
   }
 });
 
-test('a direct edit restriction requires review only for its own selected page', async t => {
+test('a verified direct edit restriction is reported separately and does not propagate to the child', async t => {
   const source = await fixture(t, { restrictionOverride({ id, operation, envelope, url, json }) {
     if (id !== root.id || operation !== 'update') return false;
     envelope.restrictions.user = pageEnvelope([{ type: 'known', username: privateUsername }], 0, 100, url, false);
     json(envelope);
     return true;
   } });
-  const { directory, audit } = await invocation(t, source.origin + context);
-  const result = await audit();
+  for (const [editRestricted, editRestrictionMismatches, codes] of [
+    [[], 1, ['EDIT_RESTRICTION_MISMATCH', 'LIVE_EDIT_RESTRICTED']],
+    [[root.id], 0, ['ARCHIVE_EDIT_RESTRICTED', 'LIVE_EDIT_RESTRICTED']],
+  ]) {
+    const archive = nativeExport([root, child], { editRestricted });
+    const { directory, audit } = await invocation(t, source.origin + context, { archive });
+    const findingsPath = join(directory, 'private-edit-review.json');
+    const result = await audit('--findings', findingsPath);
+    assert.equal(result.code, 2, result.stdout + result.stderr);
+    assertPrivate(result, directory);
+    const report = JSON.parse(result.stdout);
+    assertCounts(report, { status: 'needs-review', visiblePages: 2,
+      restrictedPages: 0, editRestrictedPages: 1, unknownRestrictions: 0 });
+    assertCounts(report.archive, { permissionCheckedPages: 2, restrictionMismatches: 0,
+      editRestrictionMismatches, archivedRestrictedPages: 0, archivedEditRestrictedPages: editRestricted.length });
+    await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space',
+      permissionCheckedPageIds: [root.id, child.id], findings: [{ pageId: root.id, codes }],
+      coverage: { archivePages: 2, matchedPages: 2, permissionCheckedPages: 2,
+        outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 } });
+  }
+  assert.deepEqual(source.errors, []);
+});
+
+test('an edit restriction never clears an unavailable direct or inherited read check', async t => {
+  const source = await fixture(t, { restrictionOverride({ id, operation, envelope, url, json }) {
+    if (id !== root.id) return false;
+    if (operation === 'read') { json({ message: privateBody }, 403); return true; }
+    envelope.restrictions.user = pageEnvelope([{ username: privateUsername }], 0, 100, url, false);
+    json(envelope);
+    return true;
+  } });
+  const archive = nativeExport();
+  const { directory, audit } = await invocation(t, source.origin + context, { archive });
+  const findingsPath = join(directory, 'private-unknown-review.json');
+  const result = await audit('--findings', findingsPath);
   assert.equal(result.code, 2, result.stdout + result.stderr);
   assert.deepEqual(source.errors, []);
   assertPrivate(result, directory);
-  assertCounts(JSON.parse(result.stdout), { status: 'needs-review', visiblePages: 2, restrictedPages: 1, unknownRestrictions: 0 });
+  assertCounts(JSON.parse(result.stdout), { status: 'needs-review', visiblePages: 2,
+    restrictedPages: 1, editRestrictedPages: 0, unknownRestrictions: 2 });
+  await assertFindings(findingsPath, { directory, archive, status: 'needs-review', selection: 'visible-space',
+    permissionCheckedPageIds: [], findings: [
+      { pageId: root.id, codes: ['EDIT_RESTRICTION_MISMATCH', 'LIVE_RESTRICTED', 'LIVE_RESTRICTION_UNKNOWN'] },
+      { pageId: child.id, codes: ['LIVE_RESTRICTION_UNKNOWN'] },
+    ], coverage: { archivePages: 2, matchedPages: 2, permissionCheckedPages: 0,
+      outsideSelectionPages: 0, otherSpacePages: 0, unassignedPages: 0 } });
 });
 
 test('the audit counts an explicitly selected unreadable page without exposing its details', async t => {

@@ -10,7 +10,7 @@ import { PILOT_REHEARSAL_DIRECTORY } from '../server/pilot-rehearsal.ts';
 import { readConfluenceArchivePageIds } from './confluence-pilot-audit-archive.mjs';
 import { JIRA_COLLECTION_PLAN_MAX_BYTES, parseJiraCollectionPlan } from './jira-pilot-collect-plan.mjs';
 import { collectMigrationEvidence, compareMigrationEvidence } from './pilot-migration-evidence.mjs';
-import { CONFLUENCE_FINDINGS_MAX_BYTES, CONFLUENCE_FINDINGS_VERSION, combinedConfluenceCoverage, confirmedConfluenceRestrictions,
+import { CONFLUENCE_FINDINGS_MAX_BYTES, CONFLUENCE_FINDINGS_VERSION, combinedConfluenceCoverage, confirmedConfluenceEditRestrictions, confirmedConfluenceRestrictions,
   confluenceFindingsProof, parseConfluenceFindings, validConfluenceFindingsProof } from './pilot-migration-confluence-findings.mjs';
 import { createJiraPlanCoverage } from './pilot-migration-jira-plan.mjs';
 import { backupAndRestoreRehearsal, startRehearsalPilot } from './pilot-migration-runtime.mjs';
@@ -550,15 +550,17 @@ async function stage(manifestPath, root, { profilePath, findingsPaths, jiraPlanP
 }
 
 function pilotReviewOptions(packages, confluenceReviews, coverage = []) {
-  const restricted = confirmedConfluenceRestrictions(confluenceReviews, packages);
-  const restrictions = [...restricted].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
+  const toScope = records => [...records].map(([instanceKey, pages]) => [instanceKey, [...pages]]);
+  const restrictions = toScope(confirmedConfluenceRestrictions(confluenceReviews, packages));
+  const editRestrictions = toScope(confirmedConfluenceEditRestrictions(confluenceReviews, packages));
   const reviews = confluenceReviews.map(({ proof }) => ({
     packageId: proof.packageId, archiveSha256: proof.archive.sha256, archiveBytes: proof.archive.bytes,
     checkedAt: proof.checkedAt, selection: proof.selection, status: proof.status, spacePermissions: proof.spacePermissions,
     findingsPages: proof.pageCount, unidentifiedPages: proof.unidentifiedPages,
+    ...(proof.reasonCounts.LIVE_EDIT_RESTRICTED ? { editRestrictedPages: proof.reasonCounts.LIVE_EDIT_RESTRICTED } : {}),
     ...(proof.coverage ? { coverage: proof.coverage } : {}),
   }));
-  return { restrictions, reviews, coverage };
+  return { restrictions, reviews, coverage, editRestrictions };
 }
 
 async function review(directory) {
