@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
+import { AUTOMATION_TRIGGER_LABELS } from '../../shared/automation';
 import { GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabSettings, type GitlabWebhookDelivery, type GitlabWebhookStatus } from '../../shared/types';
 import { api } from '../lib/api';
 
@@ -25,6 +26,31 @@ function deliveryResult(delivery: GitlabWebhookDelivery) {
     return delivery.duplicate ? '중복 전송' : delivery.deploymentUpdated ? '배포 기록 반영' : '배포 상태 변경 없음';
   }
   return `업무 연결 ${delivery.linked}건 · 자동화 기록 ${delivery.automationRuns}건${delivery.duplicate ? ' · 중복 전송' : ''}`;
+}
+
+export function GitlabWebhookAutomationResult({ delivery }: { delivery: GitlabWebhookDelivery }) {
+  const summary = delivery.stateAutomation;
+  if (!summary) return null;
+  if (summary.result === 'not_evaluated') return <p>이 수신에서는 상태 변경 규칙을 평가하지 않았습니다.</p>;
+  const triggerLabel = AUTOMATION_TRIGGER_LABELS[summary.trigger];
+  if (summary.result === 'held') return <p>상태 자동화 · {triggerLabel} · {summary.reason}</p>;
+
+  const { candidateTickets, heldEvent, occurredAt, outcomes } = summary;
+  const outcomesWithLabels = [
+    { count: outcomes.changed, label: '상태 변경' },
+    { count: outcomes.no_op, label: '이미 목표 상태' },
+    { count: outcomes.blocked, label: '전환 차단' },
+    { count: outcomes.ignored, label: '적용 보류' },
+    { count: candidateTickets - delivery.automationRuns, label: '활성 규칙 범위 없음' },
+  ];
+  const outcomesText = outcomesWithLabels.filter(({ count }) => count > 0).map(({ count, label }) => `${label} ${count}건`).join(' · ');
+  return <div>
+    <p><strong>상태 자동화 · {triggerLabel}</strong></p>
+    <p>대상 티켓 {candidateTickets}건 · {candidateTickets ? outcomesText : '확인된 자동화 대상 티켓이 없습니다.'}</p>
+    {heldEvent && <p>{heldEvent.reason}</p>}
+    {occurredAt ? <p>발생 시각 <time dateTime={occurredAt}>{new Date(occurredAt).toLocaleString('ko-KR')}</time></p>
+      : <p>이벤트 발생 시각 확인 불가</p>}
+  </div>;
 }
 
 export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSettings }) {
@@ -94,6 +120,7 @@ export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSetting
               <p>{gitlabWebhookEventLabels[delivery.event]} · {gitlabWebhookAuthenticationLabels[delivery.authentication]}</p>
               <p><time dateTime={delivery.receivedAt}>{new Date(delivery.receivedAt).toLocaleString('ko-KR')}</time></p>
               <p>{deliveryResult(delivery)}</p>
+              <GitlabWebhookAutomationResult delivery={delivery} />
             </>}
             <details className="gitlab-webhook-event-evidence" open={expanded.has(repositoryId)} onToggle={event => {
               const open = event.currentTarget.open;
@@ -112,6 +139,7 @@ export function GitlabWebhookStatusPanel({ settings }: { settings: GitlabSetting
                   {receipt ? <div>
                     <p><time dateTime={receipt.receivedAt}>{new Date(receipt.receivedAt).toLocaleString('ko-KR')}</time> · {gitlabWebhookAuthenticationLabels[receipt.authentication]}</p>
                     <p>{deliveryResult(receipt)}</p>
+                    <GitlabWebhookAutomationResult delivery={receipt} />
                   </div> : <span>{authenticationConfigured ? '수신 대기' : '인증 미설정'}</span>}
                 </li>)}
               </ul>

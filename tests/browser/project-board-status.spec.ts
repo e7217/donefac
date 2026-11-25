@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
-import type { Issue, IssueStatusChangeRequest, IssueStatusChangeResult, ProjectIssueOrder, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ hasTouch: true, viewport: { width: 360, height: 820 } });
 
@@ -49,44 +49,63 @@ async function fixture(request: APIRequestContext) {
   const tag = randomUUID().slice(0, 8);
   const prefix = `이관 보드 ${tag}`;
   const path = `/api/projects/${project.id}/workflow`;
+  const schemaPath = `/api/projects/${project.id}/issue-schema`;
   const readWorkflow = async () => json<ProjectWorkflow>(await request.get(path));
   const baseline = await readWorkflow();
+  const fieldId = { checked: `checked_${tag}`, effort: `effort_${tag}`, reference: `reference_${tag}` };
   const ready = { id: `imported_${tag}`, label: `원본 검토 대기 ${tag}`, category: 'in_progress', color: '#586b9d' };
   const review = { id: `review_${tag}`, label: `팀 검토 ${tag}`, category: 'review', color: '#458576' };
   const guarded = { id: `check_${tag}`, label: `추가 검토 ${tag}`, category: 'review', color: '#446f98' };
   const finished = { id: `closed_${tag}`, label: `검토 마감 ${tag}`, category: 'done', color: '#4d8760' };
   const created: Issue[] = [];
   let view: SavedView | undefined;
+  let baselineSchema: ProjectIssueSchema | undefined;
 
-  async function make(title: string, status: string, assigneeId: string | null = actor.id) {
+  async function make(title: string, status: string, assigneeId: string | null = actor.id, customFields?: Issue['customFields']) {
     const issue = await json<Issue>(await request.post('/api/issues', {
-      headers, data: { projectId: project.id, title, status, assigneeId, type: '작업' },
+      headers, data: { projectId: project.id, title, status, assigneeId, type: '작업', customFields },
     }), 201);
     created.push(issue);
     return issue;
   }
 
   return {
-    project, actor, newAssignee, prefix, ready, review, guarded, finished, restoreGeneration,
-    async setup({ grouped = false, layout = 'board' }: { grouped?: boolean; layout?: 'board' | 'list' } = {}) {
+    project, actor, newAssignee, prefix, ready, review, guarded, finished, restoreGeneration, fieldId,
+    async setup({ grouped = false, layout = 'board', handoffFields = false, guardedField = 'description' }: {
+      grouped?: boolean; layout?: 'board' | 'list'; handoffFields?: boolean; guardedField?: 'description' | 'dueDate';
+    } = {}) {
       const needsAssignee = layout === 'list';
+      let schema: ProjectIssueSchema | undefined;
+      if (handoffFields) {
+        baselineSchema = await json<ProjectIssueSchema>(await request.get(schemaPath));
+        const fields = [
+          { id: fieldId.checked, kind: 'checkbox', name: '추가 확인 완료' },
+          { id: fieldId.effort, kind: 'number', name: '남은 확인 횟수' },
+          { id: fieldId.reference, kind: 'text', name: '기존 참고 사항' },
+        ].map(field => ({ ...field, description: '', issueTypes: ['작업'], required: false, archived: false, options: [] }));
+        schema = await json<ProjectIssueSchema>(await request.patch(schemaPath, { headers, data: {
+          ...baselineSchema, expectedVersion: baselineSchema.version, fields: [...baselineSchema.fields, ...fields],
+        } }));
+      }
       const workflow = await json<ProjectWorkflow>(await request.patch(path, { headers, data: {
         ...baseline, expectedVersion: baseline.version, statuses: [...baseline.statuses, ready, review, guarded, finished],
         transitions: [...baseline.transitions,
           { from: ready.id, to: review.id, issueTypes: ['작업'], requiredFields: needsAssignee ? ['assigneeId'] : [] },
-          { from: ready.id, to: guarded.id, issueTypes: ['작업'], requiredFields: ['description'] },
+          { from: ready.id, to: guarded.id, issueTypes: ['작업'], requiredFields: handoffFields
+            ? ['description', `custom:${fieldId.checked}`, `custom:${fieldId.effort}`] : [guardedField] },
           { from: ready.id, to: 'done', issueTypes: ['버그'], requiredFields: [] },
           { from: review.id, to: finished.id, issueTypes: ['작업'], requiredFields: [] },
         ],
       } }));
       await make(`필터에서 가린 이전 카드 ${tag}`, review.id);
-      const issue = await make(`${prefix} 원본에서 옮긴 상태`, ready.id, needsAssignee ? null : actor.id);
+      const issue = await make(`${prefix} 원본에서 옮긴 상태`, ready.id, needsAssignee ? null : actor.id,
+        handoffFields ? { [fieldId.reference]: '기존 참고 값' } : undefined);
       await make(`${prefix} 팀에서 작성한 기존 카드`, review.id);
       view = await json<SavedView>(await request.post('/api/views', { headers, data: {
         projectId: project.id, name: prefix, layout, ...(grouped ? { boardGrouping: 'assignee' } : {}),
         filters: { query: prefix, status: 'all', assigneeId: 'all', type: 'all' },
       } }), 201);
-      return { issue, workflow, location: `/#/${project.id}/issues?${new URLSearchParams({ savedView: view.id })}` };
+      return { issue, workflow, schema, location: `/#/${project.id}/issues?${new URLSearchParams({ savedView: view.id })}` };
     },
     async removeGuarded(workflow: ProjectWorkflow) {
       return json<ProjectWorkflow>(await request.patch(path, { headers, data: {
@@ -107,6 +126,10 @@ async function fixture(request: APIRequestContext) {
       const current = await readWorkflow();
       if (current.version !== baseline.version) {
         await json<ProjectWorkflow>(await request.patch(path, { headers, data: { ...baseline, expectedVersion: current.version } }));
+      }
+      if (baselineSchema) {
+        const currentSchema = await json<ProjectIssueSchema>(await request.get(schemaPath));
+        await json<ProjectIssueSchema>(await request.patch(schemaPath, { headers, data: { ...baselineSchema, expectedVersion: currentSchema.version } }));
       }
     },
   };
@@ -165,11 +188,123 @@ test('360px 프로젝트 목록에서 필수 담당자와 상태를 함께 저�
   } finally { await f.close(); }
 });
 
+test('360px 보드의 상태 변경에서 필수 설명과 사용자 정의 필드 및 인수인계를 한 번만 저장한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  try {
+    const { issue, workflow, schema, location } = await f.setup({ handoffFields: true });
+    const form = chooser(page);
+    const apply = button(form, '상태 변경 적용');
+    const description = form.getByRole('textbox', { name: '업무 설명', exact: true });
+    const checked = form.getByRole('combobox', { name: '추가 확인 완료', exact: true });
+    const effort = form.getByRole('spinbutton', { name: '남은 확인 횟수', exact: true });
+    const note = form.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    const action = statusAction(page, issue);
+    await action.tap();
+    await destination(page).selectOption(f.guarded.id);
+    await expect(description).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await description.fill('확인 항목과 업무 범위');
+    await checked.selectOption('false');
+    await effort.fill('0');
+    await assigneeChoice(page).selectOption(`user:${f.newAssignee.id}`);
+    await note.fill('이 상태에서 먼저 배포 내역을 확인해 주세요.');
+    await expect(apply).toBeEnabled();
+
+    const requests: IssueStatusChangeRequest[] = [];
+    await page.route(`**${statusPath(issue)}`, async route => {
+      requests.push(route.request().postDataJSON() as IssueStatusChangeRequest);
+      const response = await route.fetch();
+      if (requests.length === 1 && response.ok()) await route.fulfill({ status: 503, json: { error: 'synthetic lost response' } });
+      else await route.fulfill({ response });
+    });
+    await apply.tap();
+    const retry = verifyAction(page);
+    await expect(retry).toBeVisible();
+    await expect(description).toHaveValue('확인 항목과 업무 범위');
+    await expect(checked).toHaveValue('false');
+    await expect(effort).toHaveValue('0');
+    await expect(note).toHaveValue('이 상태에서 먼저 배포 내역을 확인해 주세요.');
+    const confirmation = nextStatusChange(page, issue);
+    await retry.tap();
+    const result = await json<IssueStatusChangeResult>(await confirmation);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[0]).toMatchObject({
+      expectedVersion: issue.version, expectedWorkflowVersion: workflow.version, expectedIssueSchemaVersion: schema!.version,
+      description: '확인 항목과 업무 범위', customFields: { [f.fieldId.checked]: false, [f.fieldId.effort]: 0 },
+    });
+    expect(result).toMatchObject({ duplicate: true, issue: { status: f.guarded.id, version: issue.version + 1,
+      assigneeId: f.newAssignee.id, description: '확인 항목과 업무 범위',
+      customFields: { [f.fieldId.checked]: false, [f.fieldId.effort]: 0, [f.fieldId.reference]: '기존 참고 값' },
+    } });
+    const comments = await json<Comment[]>(await request.get(`/api/comments?resourceType=issue&resourceId=${issue.id}`));
+    expect(comments).toMatchObject([{ id: result.receipt.commentId, body: '이 상태에서 먼저 배포 내역을 확인해 주세요.' }]);
+    await expect(form).toHaveCount(0);
+    await expect(card(page, issue)).toBeFocused();
+  } finally { await f.close(); }
+});
+
+test('동료가 채운 필수 속성을 재검토하고 업무 설명과 인수인계 초안을 유지한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const f = await fixture(request);
+  try {
+    const { issue, location } = await f.setup({ handoffFields: true });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
+    await page.goto(location);
+    await statusAction(page, issue).tap();
+    const form = chooser(page);
+    const apply = button(form, '상태 변경 적용');
+    const description = form.getByRole('textbox', { name: '업무 설명', exact: true });
+    const checked = form.getByRole('combobox', { name: '추가 확인 완료', exact: true });
+    const effort = form.getByRole('spinbutton', { name: '남은 확인 횟수', exact: true });
+    const note = form.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    await destination(page).selectOption(f.guarded.id);
+    await description.fill('내가 작성한 업무 설명');
+    await checked.selectOption('false');
+    await effort.fill('2');
+    await note.fill('추가 확인이 끝난 뒤 배포해 주세요.');
+    await assigneeChoice(page).selectOption(`user:${f.newAssignee.id}`);
+    const concurrent = await json<Issue>(await request.patch(issuePath(issue), { headers: { 'X-Actor-Id': f.newAssignee.id }, data: {
+      expectedVersion: issue.version, description: '동료가 먼저 저장한 업무 설명',
+      customFields: { ...issue.customFields, [f.fieldId.effort]: 4 },
+    } }));
+    const rejected = nextStatusChange(page, issue);
+    await apply.tap();
+    expect((await rejected).status()).toBe(409);
+    await button(form, '최신 업무 불러오기').tap();
+    await expect(destination(page)).toBeEnabled();
+    await destination(page).selectOption(f.guarded.id);
+    await expect(description).toHaveValue('내가 작성한 업무 설명');
+    await expect(note).toHaveValue('추가 확인이 끝난 뒤 배포해 주세요.');
+    await expect(assigneeChoice(page)).toHaveValue(`user:${f.newAssignee.id}`);
+    await expect(form.getByText('동료가 먼저 저장한 업무 설명', { exact: true })).toBeVisible();
+    await expect(apply).toBeDisabled();
+    await button(form, '업무 설명 입력값 사용').tap();
+    await expect(apply).toBeDisabled();
+    await button(form, '남은 확인 횟수 저장값 사용').tap();
+    await expect(apply).toBeEnabled();
+
+    const applying = nextStatusChange(page, issue);
+    await apply.tap();
+    const result = await applying;
+    expect(result.request().postDataJSON()).toMatchObject({ expectedVersion: concurrent.version, description: '내가 작성한 업무 설명',
+      customFields: { [f.fieldId.checked]: false }, comment: { body: '추가 확인이 끝난 뒤 배포해 주세요.' } });
+    expect(result.request().postDataJSON().customFields).toEqual({ [f.fieldId.checked]: false });
+    expect(await json<IssueStatusChangeResult>(result)).toMatchObject({ issue: { assigneeId: f.newAssignee.id,
+      description: '내가 작성한 업무 설명', customFields: { [f.fieldId.effort]: 4, [f.fieldId.checked]: false },
+      status: f.guarded.id, version: concurrent.version + 1 } });
+    await expect(form).toHaveCount(0);
+  } finally { await f.close(); }
+});
+
 test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만 변경한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const f = await fixture(request);
   try {
-    const { issue, workflow, location } = await f.setup();
+    const { issue, workflow, location } = await f.setup({ guardedField: 'dueDate' });
     const rank = await f.rank();
     const writes = changes(page);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
@@ -188,8 +323,8 @@ test('360px 프로젝트 보드에서 키보드와 터치로 허용한 상태만
     await destination(page).selectOption(f.guarded.id);
     const blocked = nextStatusChange(page, issue);
     await button(chooser(page), '상태 변경 적용').tap();
-    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['description'] } });
-    await expect(chooser(page).getByRole('alert')).toContainText('설명');
+    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['dueDate'] } });
+    await expect(chooser(page).getByRole('alert')).toContainText('마감일');
     await expect(button(chooser(page), '업무 상세에서 확인')).toBeVisible();
     expect(await f.read(issue)).toEqual(issue);
     await page.keyboard.press('Escape');
@@ -237,7 +372,7 @@ test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실�
   test.setTimeout(75_000);
   const f = await fixture(request);
   try {
-    const { issue, workflow, location } = await f.setup({ grouped: true });
+    const { issue, workflow, location } = await f.setup({ grouped: true, guardedField: 'dueDate' });
     const rank = await f.rank();
     const writes = changes(page);
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);

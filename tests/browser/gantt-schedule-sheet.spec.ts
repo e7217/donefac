@@ -21,9 +21,9 @@ async function downloadSheet(page: Page, projectKey: string) {
   const bytes = await readFile(await download.path());
   expect([...bytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
   const [header, ...lines] = bytes.toString('utf8', 3).replace(/\r?\n$/, '').split(/\r?\n/);
-  expect(header).toBe('업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형\t근무일 간격');
+  expect(header).toBe('업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형\t근무일 간격\t내보낸 기준');
   const rows = lines.map(line => line.split('\t'));
-  for (const row of rows) expect(row).toHaveLength(7);
+  for (const row of rows) expect(row).toHaveLength(8);
   return { header, rows };
 }
 
@@ -91,14 +91,14 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     expect(selected.rows.map(([key]) => key).sort()).toEqual([successor.key, successor.key, partial.key].sort());
     const successorRows = selected.rows.filter(([key]) => key === successor.key);
     expect(successorRows.map(cells => cells.slice(1, 4))).toEqual([[successorStart, originalEnd, originalDue], ['', '', '']]);
-    expect(successorRows.map(cells => cells.slice(4))).toEqual(expect.arrayContaining([
+    expect(successorRows.map(cells => cells.slice(4, 7))).toEqual(expect.arrayContaining([
       [hidden.key, 'FF', '-1'],
       [visible.key, 'SS', '2'],
     ]));
 
-    const edited = selected.rows.map(([key, startDate, endDate, dueDate, predecessor, type, lag]) => [
+    const edited = selected.rows.map(([key, startDate, endDate, dueDate, predecessor, type, lag, baseline]) => [
       key, startDate, key === successor.key && endDate ? editedEnd : endDate,
-      dueDate ? (key === partial.key ? '-' : editedDue) : '', predecessor, type, predecessor === hidden.key ? '3' : lag,
+      dueDate ? (key === partial.key ? '-' : editedDue) : '', predecessor, type, predecessor === hidden.key ? '3' : lag, baseline,
     ].join('\t'));
     const text = `\uFEFF${[selected.header, ...edited].join('\n')}`;
     await page.getByRole('button', { name: '일정 붙여넣기', exact: true }).click();
@@ -106,7 +106,7 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     await expect(dialog).toContainText(`대상 프로젝트 ${targetProject.key} · ${targetProject.name}`);
     await expect(projectFilter).toBeDisabled();
     const input = dialog.getByRole('textbox', { name: '붙여넣을 일정표' });
-    const mixed = `${text}\n${[other.key, successorStart, editedEnd, '', '', '', ''].join('\t')}`;
+    const mixed = `${text}\n${[other.key, successorStart, editedEnd, '', '', '', '', ''].join('\t')}`;
     await input.fill(mixed);
     const discard = page.waitForEvent('dialog');
     await page.evaluate(() => history.back());
@@ -164,7 +164,7 @@ test('360px 전체 프로젝트 간트에서 선택 업무의 TSV를 편집해 �
     await projectFilter.selectOption(routeProject.id);
     await expect(row(successor)).toHaveCount(0);
     const otherSheet = await downloadSheet(page, routeProject.key);
-    expect(otherSheet.rows).toEqual([[other.key, successorStart, originalEnd, '', '', '', '']]);
+    expect(otherSheet.rows.map(cells => cells.slice(0, 7))).toEqual([[other.key, successorStart, originalEnd, '', '', '', '']]);
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     await projectFilter.selectOption(targetProject.id);
     await expect(row(successor).getByLabel(`${successor.key} 종료일`, { exact: true })).toHaveValue(originalEnd);
@@ -226,14 +226,21 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
     for (const task of [left, right]) await chart.getByRole('checkbox', { name: `${task.key} 선택`, exact: true }).check();
     const sheet = await downloadSheet(page, 'all');
     expect(sheet.rows).toHaveLength(2);
-    expect(sheet.rows).toEqual(expect.arrayContaining([
+    expect(sheet.rows.map(cells => cells.slice(0, 7))).toEqual(expect.arrayContaining([
       [left.key, originalStart, originalEnd, '', firstLead.key, 'SS', '0'],
       [right.key, originalStart, originalEnd, '', secondLead.key, 'FF', '0'],
     ]));
-    const edited = [sheet.header, ...sheet.rows.map(([key, start, end, , predecessor, type]) => [
+    const edited = [sheet.header, ...sheet.rows.map(([key, start, end, , predecessor, type, , baseline]) => [
       key, key === left.key ? updatedStart : start, key === right.key ? updatedEnd : end,
-      '', predecessor, key === right.key ? '-' : type, key === right.key ? '' : '2',
+      '', predecessor, key === right.key ? '-' : type, key === right.key ? '' : '2', baseline,
     ].join('\t'))].join('\n');
+    const peerEnd = '2026-12-07';
+    const peerLeft = await json<Issue>(await request.patch(`/api/issues/${left.id}`, {
+      headers: { 'X-Actor-Id': 'user-seo' }, data: { expectedVersion: left.version, endDate: peerEnd },
+    }));
+    await json<Dependency>(await request.patch(`/api/dependencies/${oldFirstLink.id}`, {
+      headers: { 'X-Actor-Id': 'user-seo' }, data: { expectedVersion: oldFirstLink.version, type: 'SF' },
+    }));
 
     const opener = page.getByRole('button', { name: '일정 붙여넣기', exact: true });
     await opener.click();
@@ -252,12 +259,20 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
       return json<SchedulePastePreview>(response);
     }
 
-    const crossProject = [left.key, '', '', '', secondLead.key, 'FS', '0'].join('\t');
+    const crossProject = [left.key, '', '', '', secondLead.key, 'FS', '0', ''].join('\t');
     const rejected = await review(`${edited}\n${crossProject}`);
     expect(rejected.previewId).toBeNull();
     expect(rejected.errors).toEqual(expect.arrayContaining([expect.objectContaining({ key: left.key, line: 4, message: expect.stringMatching(/프로젝트/) })]));
     await expect(apply).toBeDisabled();
 
+    const sameCell = await review(edited.split('\n').map(line => {
+      const cells = line.split('\t');
+      if (cells[0] === left.key) cells[2] = updatedEnd;
+      return cells.join('\t');
+    }).join('\n'));
+    expect(sameCell.previewId).toBeNull();
+    await expect(dialog.getByRole('region', { name: '일정 붙여넣기 오류' })).toContainText(`현재 ${peerEnd} · 입력 ${updatedEnd}`);
+    await expect(apply).toBeDisabled();
     const preview = await review(edited);
     expect(preview).toMatchObject({ projectId: null, projectIds: [first.id, second.id].sort(), errors: [], previewId: expect.any(String) });
     const dates = dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
@@ -267,7 +282,7 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
       await expect(links).toContainText(`${project.key} · ${project.name}`);
     }
     const before = await workspace();
-    expect(before.issues.find(item => item.id === left.id)).toEqual(left);
+    expect(before.issues.find(item => item.id === left.id)).toEqual(peerLeft);
     expect(before.issues.find(item => item.id === right.id)).toEqual(right);
 
     const appliedIds: string[] = [];
@@ -289,19 +304,19 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
     await expect(projectFilter).toHaveValue('');
 
     const after = await workspace();
-    expect(after.issues.find(item => item.id === left.id)).toMatchObject({ startDate: updatedStart, version: left.version + 1 });
+    expect(after.issues.find(item => item.id === left.id)).toMatchObject({ startDate: updatedStart, endDate: peerEnd, version: peerLeft.version + 1 });
     expect(after.issues.find(item => item.id === right.id)).toMatchObject({ endDate: updatedEnd, version: right.version + 1 });
     expect(after.issues.find(item => item.id === skipped.id)).toEqual(skipped);
-    expect(after.dependencies.find(value => value.id === oldFirstLink.id)?.lagDays).toBe(2);
+    expect(after.dependencies.find(value => value.id === oldFirstLink.id)).toMatchObject({ type: 'SF', lagDays: 2 });
     expect(after.dependencies.find(value => value.id === oldSecondLink.id)).toBeUndefined();
 
     const undo = waitPost('/api/schedule/undo');
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     expect((await undo).status()).toBe(200);
     const restored = await workspace();
-    expect(restored.issues.find(item => item.id === left.id)).toMatchObject({ startDate: originalStart, version: left.version + 2 });
+    expect(restored.issues.find(item => item.id === left.id)).toMatchObject({ startDate: originalStart, endDate: peerEnd, version: peerLeft.version + 2 });
     expect(restored.issues.find(item => item.id === right.id)).toMatchObject({ endDate: originalEnd, version: right.version + 2 });
-    expect(restored.dependencies.find(value => value.id === oldFirstLink.id)?.lagDays).toBe(0);
+    expect(restored.dependencies.find(value => value.id === oldFirstLink.id)).toMatchObject({ type: 'SF', lagDays: 0 });
     expect(restored.dependencies.find(value => value.id === oldSecondLink.id)).toMatchObject({ type: 'FF', lagDays: 0 });
   } finally {
     for (const task of created.reverse()) await request.delete(`/api/issues/${task.id}`);

@@ -348,7 +348,12 @@ test('두 공동 편집자가 새 블록을 동기화하고 접기 표시를 로
     const revisionResponse = page.waitForResponse(response => response.url().endsWith(`/api/documents/${f.source.id}/checkpoint`) && response.request().method() === 'POST'); await page.getByRole('button', { name: '버전 기록', exact: true }).click(); const revision = await (await revisionResponse).json() as DocRevision;
     await page.locator('.docs-live-prose .doc-reference-node[data-teamspace-node="issueReference"]').hover(); await page.locator('.docs-live-prose .doc-reference-node[data-teamspace-node="issueReference"]').getByRole('button', { name: '참조 블록 삭제', exact: true }).click(); await expect(peer.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(0); await expect(page.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
     const current = await currentDoc(f); expect((await f.requests.post(`/api/documents/${current.id}/restore`, { data: { expectedVersion: current.version, revisionId: revision.id } })).status()).toBe(200);
-    for (const client of [page, peer]) { await expect(client.locator('.docs-collaboration-recovery')).toBeVisible(); client.once('dialog', dialog => dialog.accept()); await client.getByRole('button', { name: '최신 문서 열기', exact: true }).click(); await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(1); await expect(chartGroup(client)).toBeVisible(); }
+    for (const client of [page, peer]) {
+      await expect(client.locator('.docs-live-prose .doc-reference-node > .doc-reference-card.issue')).toHaveCount(1);
+      await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨');
+      await expect(client.locator('.docs-collaboration-recovery')).toHaveCount(0);
+      await expect(chartGroup(client)).toBeVisible();
+    }
     const continuation = '복구 후 이어쓰기'; await page.locator('.docs-live-prose > p').last().click(); await page.keyboard.press('End'); await page.keyboard.insertText(continuation); await expect(peer.locator('.docs-live-prose')).toContainText(continuation); for (const client of [page, peer]) await expect(client.locator('.docs-collaboration-state')).toHaveText('서버에 동기화됨'); const persisted = await currentDoc(f); expect(persisted.plainText).toContain(continuation); expect(contentReferences(persisted.content)).toHaveLength(2); await page.locator('.docs-paper-scroll').evaluate(element => { element.scrollTop = 0; }); mkdirSync('docs/screenshots', { recursive: true }); await page.screenshot({ path: 'docs/screenshots/document-blocks.png', fullPage: true });
   } finally { await second.close(); }
 });

@@ -23,11 +23,9 @@ async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, 
 }
 
 const workspace = async (request: APIRequestContext) => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
-const waitPatch = (page: Page, path: string) => page.waitForResponse(response =>
-  new URL(response.url()).pathname === path && response.request().method() === 'PATCH');
 const waitStatusChange = (page: Page, issue: Issue) => page.waitForResponse(response =>
   new URL(response.url()).pathname === statusPath(issue) && response.request().method() === 'POST');
-const statusChangeInput = (fields: Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion'>) => ({
+const statusChangeInput = (fields: Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion' | 'description'>) => ({
   ...fields, requestId: expect.any(String), restoreGeneration: expect.any(String),
 });
 
@@ -67,9 +65,9 @@ async function fixture(request: APIRequestContext) {
   const original = await Promise.all([readWorkflow(first), readWorkflow(second)]);
   const created: Issue[] = [];
 
-  async function issue(project: Project, title: string, assigneeId: string, status = sharedId) {
+  async function issue(project: Project, title: string, assigneeId: string, status = sharedId, description = '') {
     const result = await json<Issue>(await request.post('/api/issues', {
-      headers, data: { title: `${prefix} ${title}`, projectId: project.id, status, assigneeId },
+      headers, data: { title: `${prefix} ${title}`, projectId: project.id, status, assigneeId, description },
     }), 201);
     created.push(result);
     return result;
@@ -77,7 +75,7 @@ async function fixture(request: APIRequestContext) {
 
   return {
     first, second, actor, prefix, firstLabel, secondLabel, secondReview,
-    async configure() {
+    async configure(eastDescription = '') {
       const [left, right] = original;
       const transitions = (to: string, requiredFields: ProjectWorkflow['transitions'][number]['requiredFields'] = []) =>
         ({ from: sharedId, to, issueTypes: [], requiredFields });
@@ -90,7 +88,7 @@ async function fixture(request: APIRequestContext) {
       const workflow = await configure(second, right, [{ ...common, label: secondLabel, category: 'in_progress' }, secondReview],
         [transitions('review'), transitions(secondReview.id, ['description']), transitions('in_progress')]);
       const west = await issue(first, '첫째 업무', actor.id);
-      const east = await issue(second, '둘째 업무', actor.id);
+      const east = await issue(second, '둘째 업무', actor.id, sharedId, eastDescription);
       const someoneElse = await issue(second, '다른 담당자', peer.id, 'todo');
       return { west, east, someoneElse, workflow };
     },
@@ -173,29 +171,32 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await expect(page.getByRole('dialog', { name: '통합 검색', exact: true, includeHidden: true })).toHaveCount(0);
     await expect(destination(page)).toBeFocused();
     await expect(destination(page)).toHaveValue(f.secondReview.id);
-    const blocked = waitStatusChange(page, east);
-    await button(chooser(page), '상태 변경 적용').click();
-    expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['description'] } });
-    await expect(chooser(page).getByRole('alert')).toContainText('설명');
-    await expect(destination(page)).toHaveValue(f.secondReview.id);
+    await expect(button(chooser(page), '상태 변경 적용')).toBeDisabled();
     expect(await f.read(east)).toEqual(east);
     expect(await f.ranks()).toEqual(ranks);
 
-    await button(chooser(page), '업무 상세에서 확인').click();
-    const drawer = page.getByRole('dialog', { name: east.title, exact: true });
+    const description = '둘째 프로젝트의 검토 전에 확인할 업무 설명입니다.';
+    await chooser(page).getByRole('textbox', { name: '업무 설명', exact: true }).fill(description);
+    const changing = waitStatusChange(page, east);
+    await button(chooser(page), '상태 변경 적용').click();
+    const accepted = await changing;
+    expect(accepted.request().postDataJSON()).toEqual(statusChangeInput({
+      expectedVersion: east.version, expectedWorkflowVersion: workflow.version, status: f.secondReview.id, description,
+    }));
+    const { issue: moved } = await json<IssueStatusChangeResult>(accepted);
+    expect(moved).toMatchObject({ id: east.id, projectId: f.second.id, status: f.secondReview.id, description, version: east.version + 1 });
     await expect(chooser(page)).toHaveCount(0);
+    await expect(inside(page, 'review', east).locator('[data-board-status]')).toHaveText(f.secondReview.label);
+    await expect(inside(page, 'in_progress', east)).toHaveCount(0);
+    await expect(button(card(page, east), `${east.key} 상태 변경`)).toBeDisabled();
+    await expect(button(card(page, east), `${east.key} 업무 열기`)).toBeFocused();
+    await button(card(page, east), `${east.key} 업무 열기`).click();
+    const drawer = page.getByRole('dialog', { name: east.title, exact: true });
     await expect(drawer).toBeVisible();
     await expect.poll(() => route(page)).toEqual({ ...filtered, issue: east.id });
     await page.reload();
-    await expect(drawer).toBeVisible();
+    await expect(drawer.getByLabel('설명', { exact: true })).toHaveValue(description);
     await expect.poll(() => route(page)).toEqual({ ...filtered, issue: east.id });
-    const description = '검토 전 필수 설명을 업무 상세에서 작성했습니다.';
-    await drawer.getByLabel('설명', { exact: true }).fill(description);
-    const changingDetails = waitPatch(page, issuePath(east));
-    await button(drawer, '변경사항 저장').click();
-    const detailed = await json<Issue>(await changingDetails);
-    expect(detailed).toMatchObject({ id: east.id, projectId: f.second.id, status: east.status, description });
-    await expect(button(drawer, '변경사항 저장')).toBeDisabled();
     await button(drawer, '업무 상세 닫기').click();
     await expect(drawer).toHaveCount(0);
     await expect.poll(() => route(page)).toEqual(filtered);
@@ -204,26 +205,8 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await expect(search(page)).toHaveValue(f.prefix);
     await expect(card(page, west)).toHaveCount(0);
     await expect(card(page, someoneElse)).toHaveCount(0);
-    await expect(inside(page, 'in_progress', east)).toBeVisible();
-
-    await openTransitions();
-    const changing = waitStatusChange(page, east);
-    await button(chooser(page), '상태 변경 적용').click();
-    const accepted = await changing;
-    expect(accepted.request().postDataJSON()).toEqual(statusChangeInput({
-      expectedVersion: detailed.version, expectedWorkflowVersion: workflow.version, status: f.secondReview.id,
-    }));
-    const { issue: moved } = await json<IssueStatusChangeResult>(accepted);
-    expect(moved).toMatchObject({ id: east.id, projectId: f.second.id, status: f.secondReview.id, version: detailed.version + 1 });
-    await expect(chooser(page)).toHaveCount(0);
-    await expect(inside(page, 'review', east).locator('[data-board-status]')).toHaveText(f.secondReview.label);
-    await expect(inside(page, 'in_progress', east)).toHaveCount(0);
-    await expect(button(card(page, east), `${east.key} 상태 변경`)).toBeDisabled();
-    await expect(button(card(page, east), `${east.key} 업무 열기`)).toBeFocused();
-    await page.reload();
-    await expect.poll(() => route(page)).toEqual(filtered);
     await expect(inside(page, 'review', east)).toBeVisible();
-    expect(writes).toEqual([statusPath(east), issuePath(east), statusPath(east)]);
+    expect(writes).toEqual([statusPath(east)]);
     expect(await f.read(west)).toEqual(west);
     expect(await f.read(east)).toEqual(moved);
     const updatedRanks = await f.ranks();
@@ -249,7 +232,7 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await expect(board(page)).toBeFocused();
     await expect.poll(() => route(page)).toEqual(onlyPeer);
     expect(await f.read(someoneElse)).toEqual(assigned);
-    expect(writes).toEqual([statusPath(east), issuePath(east), statusPath(east), statusPath(someoneElse)]);
+    expect(writes).toEqual([statusPath(east), statusPath(someoneElse)]);
   } finally {
     await f.close();
   }
@@ -304,7 +287,7 @@ test('팀 보드에서 워크플로 변경을 확인한 뒤 응답이 유실된 
   test.setTimeout(75_000);
   const f = await fixture(request);
   try {
-    const { west, east, workflow } = await f.configure();
+    const { west, east, workflow } = await f.configure('검토 전 작성한 합성 업무 설명');
     const ranks = await f.ranks();
     const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 1800, height: 1000 });

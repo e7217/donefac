@@ -13,6 +13,7 @@ import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, 
 import { addsScheduleDependencyPair, dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
 import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
+import { mergeScheduleSheetLink, scheduleSheetConflict, unchangedScheduleSheetLink } from './schedule-sheet-merge.js';
 import { calculateTeamFollowUpSchedule, teamBatchFollowUpScope, TeamFollowUpScheduleError } from './team-follow-up-schedule.js';
 import type { Store } from './store.js';
 
@@ -1176,17 +1177,26 @@ export class SchedulePasteService {
           preview.errors.push({line:row.line,key:row.key,message});
           continue;
         }
-        const { startDate, endDate, dueDate } = row;
-        const datesChanged = (startDate !== undefined && startDate !== issue.startDate) ||
-          (endDate !== undefined && endDate !== issue.endDate) ||
-          (dueDate !== undefined && dueDate !== (issue.dueDate ?? null));
-        resolvedRows.push({ row, issue, datesChanged });
-        if (startDate === undefined && endDate === undefined && dueDate === undefined) continue;
+        const baseline = row.baseline;
+        if (baseline && baseline.issueId !== issue.id) {
+          preview.errors.push({ line: row.line, key: row.key, message: '업무 키와 내려받은 일정표의 업무가 다릅니다. 현재 업무 키를 확인해 주세요.' });
+          continue;
+        }
         const request = requestedDates.get(issue.id) ?? { issue, line: null, dates: {}, firstLines: {} };
-        if (datesChanged && request.line === null) request.line = row.line;
+        let datesChanged = false;
         for (const field of dateKeys) {
           const value = row[field];
           if (value === undefined) continue;
+          const current = issue[field] ?? null;
+          if (baseline) {
+            const original = baseline[field] ?? null;
+            if (value === original) continue;
+            if (current !== original && current !== value) {
+              preview.errors.push({ line: row.line, key: row.key, message: scheduleSheetConflict(dateFields[field], original, current, value) });
+              continue;
+            }
+          }
+          datesChanged ||= value !== current;
           const firstLine = request.firstLines[field];
           if (firstLine === undefined) {
             request.dates[field] = value;
@@ -1197,7 +1207,9 @@ export class SchedulePasteService {
               message: `${issue.key}의 ${dateFields[field]} 값이 ${firstLine}번째 줄의 값과 충돌합니다.` });
           }
         }
-        requestedDates.set(issue.id, request);
+        if (datesChanged && request.line === null) request.line = row.line;
+        if (Object.keys(request.dates).length) requestedDates.set(issue.id, request);
+        resolvedRows.push({ row, issue, datesChanged });
       }
 
       for (const { issue, line, dates } of requestedDates.values()) {
@@ -1228,7 +1240,13 @@ export class SchedulePasteService {
         const input = row.dependency;
         let predecessor: Issue | undefined;
         if (input) {
-          const matched = byKey.get(input.predecessorKey);
+          const baseline = row.baseline?.dependency;
+          const untouched = baseline && unchangedScheduleSheetLink(input, baseline);
+          const matched = untouched ? byId.get(baseline.predecessorId) : byKey.get(input.predecessorKey);
+          if (untouched && matched?.projectId !== issue.projectId) {
+            if (!datesChanged) unchangedRows.push(issue.id);
+            continue;
+          }
           if (!matched || matched.id === issue.id) {
             const message = matched === null ? `선행 업무 키 ${input.predecessorKey}가 ${scopeLabel} 중복되어 있습니다.`
               : matched ? '자기 자신에게 의존할 수 없습니다.' : `${scopeLabel} 선행 업무 키 ${input.predecessorKey}가 없습니다.`;
@@ -1252,9 +1270,14 @@ export class SchedulePasteService {
         if (input && predecessor) {
           targetIds.add(predecessor.id);
           const before = byPair.get(pair);
-          const after = input.type === '-' ? null : {
+          const merge = mergeScheduleSheetLink(input, predecessor.id, before, row.baseline?.dependency);
+          if ('errors' in merge) {
+            for (const message of merge.errors) preview.errors.push({ line: row.line, key: row.key, message });
+            continue;
+          }
+          const after = !merge.values ? null : {
             id:before?.id ?? randomUUID(),predecessorId:predecessor.id,successorId:issue.id,
-            type:input.type ?? before?.type ?? 'FS',lagDays:input.lagDays ?? before?.lagDays ?? 0,
+            ...merge.values,
           } as const satisfies Dependency;
           const changed = after ? !before || before.type !== after.type || before.lagDays !== after.lagDays : Boolean(before);
           const summary: SchedulePasteDependencyChange = {

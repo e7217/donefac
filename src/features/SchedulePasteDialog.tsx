@@ -911,6 +911,7 @@ function ProjectScheduleEditDialog({
                   빈 칸은 기존 날짜를 유지합니다.
                   업무 키와 선행 업무는 현재 키, Jira 원래 키 또는 이동 전 키로 입력하세요.
                   선행 업무가 여러 개면 후행 업무 키를 연결마다 한 행씩 적으세요.
+                  내려받은 일정표는 <strong>내보낸 기준</strong> 열까지 함께 붙여넣으세요.
                   {isTeamPaste && ' 선후행 업무는 같은 프로젝트에 속해야 합니다.'}
                 </p>
                 {followUpOption}

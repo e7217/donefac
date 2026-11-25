@@ -1407,6 +1407,9 @@ export interface IssueStatusChangeRequest {
   restoreGeneration: string;
   status: Issue['status'];
   assigneeId?: Issue['assigneeId'];
+  description?: Issue['description'];
+  customFields?: NonNullable<Issue['customFields']>;
+  expectedIssueSchemaVersion?: number;
   comment?: { body: string; mentions?: CommentMention[] };
 }
 export interface IssueStatusChangeReceipt {
@@ -1851,6 +1854,13 @@ export interface GitlabRepositorySearch {
 }
 export const GITLAB_WEBHOOK_TRACKED_EVENTS = ['push', 'merge_request', 'pipeline', 'deployment'] as const;
 export type GitlabWebhookTrackedEvent = (typeof GITLAB_WEBHOOK_TRACKED_EVENTS)[number];
+export type GitlabWebhookStateAutomation = { result: 'not_evaluated' }
+  | { result: 'held'; trigger: GitlabAutomationTrigger; reason: string }
+  | {
+    result: 'evaluated'; trigger: GitlabAutomationTrigger; occurredAt: string | null; candidateTickets: number;
+    outcomes: Record<AutomationOutcome['outcome'], number>;
+    heldEvent?: { disposition: Exclude<AutomationEvent['disposition'], 'fresh'>; reason: string };
+  };
 export interface GitlabWebhookDelivery {
   event: GitlabWebhookTrackedEvent | 'tag_push' | 'other';
   authentication: 'secret-token' | 'signing-token';
@@ -1859,6 +1869,7 @@ export interface GitlabWebhookDelivery {
   linked: number;
   automationRuns: number;
   deploymentUpdated?: true;
+  stateAutomation?: GitlabWebhookStateAutomation;
 }
 export interface GitlabWebhookStatus {
   settingsVersion: number;

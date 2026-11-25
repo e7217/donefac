@@ -1,7 +1,7 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestDiscussions,GitlabMergeRequestPipeline,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestDiscussions,GitlabMergeRequestPipeline,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStateAutomation,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { GITLAB_DEPLOYMENT_STATES, GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabDeploymentFilters, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -50,6 +50,7 @@ type RawSettings={baseUrl:string;projectIds:number[];jiraRoutes?:GitlabJiraRoute
 type LinkedMergeRequestReadContext = { issue: Issue; link: GitlabLink; captured: RawSettings; workspaceGeneration: unknown;
   token: string | null; assertCurrent: () => void };
 type WebhookResult = { ok: true; duplicate: boolean; linked: number; runs: AutomationRun[]; deploymentUpdated?: true };
+type WebhookStateEvaluation = { runs: AutomationRun[]; stateAutomation: GitlabWebhookStateAutomation };
 type AcceptedWebhookEvents = Partial<Record<GitlabWebhookTrackedEvent, GitlabWebhookDelivery>>;
 type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery; lastAcceptedByEvent?: AcceptedWebhookEvents };
 type VerifiedPipelineCursor = PipelineClassification & { scope: string; objectId: number; sourceBranch: string; sourceSha: string };
@@ -101,6 +102,13 @@ const GITLAB_PUSH_COMMIT_LIMIT=20;
 const ISSUE_REFRESH_LINK_LIMIT=20;
 const ISSUE_REFRESH_CONCURRENCY=4;
 const now=()=>new Date().toISOString();
+function stateEvaluation(event: AutomationEvent, runs: AutomationRun[]): WebhookStateEvaluation {
+  const { trigger, occurredAt, disposition, reason } = event;
+  const outcomes = { changed: 0, no_op: 0, blocked: 0, ignored: 0 };
+  for (const run of runs) outcomes[run.outcome]++;
+  return { runs, stateAutomation: { result: 'evaluated', trigger, occurredAt, candidateTickets: new Set(event.issueIds).size, outcomes,
+    ...(disposition === 'fresh' ? {} : { heldEvent: { disposition, reason } }) } };
+}
 function isTrackedWebhookEvent(event: string): event is GitlabWebhookTrackedEvent {
   return GITLAB_WEBHOOK_TRACKED_EVENTS.some(tracked => tracked === event);
 }
@@ -1892,7 +1900,7 @@ export class GitlabIntegrationService{
     }
     return linked;
   }
-  private deploymentSucceeded(raw: RawSettings, deployment: GitlabDeployment, fresh: boolean, receivedAt: string): AutomationRun[] {
+  private deploymentSucceeded(raw: RawSettings, deployment: GitlabDeployment, fresh: boolean, receivedAt: string): WebhookStateEvaluation {
     const { instance, repositoryId, deploymentId, environment, changedAt } = deployment;
     const objectId = String(deploymentId);
     const digest = createHash('sha256').update(`deployment-success:${objectId}`).digest('hex');
@@ -1900,20 +1908,20 @@ export class GitlabIntegrationService{
     // Claim the success even when no ticket qualifies, so a redelivery cannot apply it to links added later.
     const receipt = this.store.db.prepare('INSERT OR IGNORE INTO webhook_inbox(id,created_at) VALUES(?,?)')
       .run(`automation:${id}`, receivedAt);
-    if (receipt.changes !== 1 || !fresh) return [];
+    if (receipt.changes !== 1 || !fresh) return { runs: [], stateAutomation: { result: 'held', trigger: 'deployment.succeeded',
+      reason: receipt.changes !== 1 ? '이 배포의 성공을 이미 처리했습니다.' : '이 환경의 최신 성공을 확정할 수 없습니다.' } };
 
     const links = this.deployments.matchingAutomaticLinks(deployment);
-    if (!links.length) return [];
     const route = raw.jiraRoutes?.find(candidate => candidate.repositoryId === repositoryId);
-    const matcher = this.ticketMatcher(this.syncIssues(), route);
+    const matcher = links.length ? this.ticketMatcher(this.syncIssues(), route) : undefined;
     const issueIds = [...new Set(links.flatMap(link => {
-      const match = matcher.inherit(link);
+      const match = matcher?.inherit(link);
       return match ? [match.issue.id] : [];
     }))];
-    if (!issueIds.length) return [];
-    return this.hooks.processEvent({ id, trigger: 'deployment.succeeded', gitlabProjectId: repositoryId,
+    const event: AutomationEvent = { id, trigger: 'deployment.succeeded', gitlabProjectId: repositoryId,
       objectKind: 'deployment', objectId, branch: '', environment, issueIds, occurredAt: changedAt,
-      receivedAt, disposition: 'fresh', reason: '' });
+      receivedAt, disposition: 'fresh', reason: '' };
+    return stateEvaluation(event, issueIds.length ? this.hooks.processEvent(event) : []);
   }
   private prepareWebhook(req:Request){
     const raw=this.raw(),authentication=this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
@@ -1960,7 +1968,7 @@ export class GitlabIntegrationService{
     const { raw, authentication, body, project, projectId, kind, instance, eventId, head } = webhook;
     const attributes=record(body.object_attributes);
     const receivedAt = now();
-    const processWebhook = (): WebhookResult => {
+    const processWebhook = (): WebhookResult & { stateAutomation?: GitlabWebhookStateAutomation } => {
       if(this.hasWebhookReceipt(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
       if (verification && this.raw().version !== raw.version) fail('GitLab 연결 설정이 변경되었습니다. 웹훅을 다시 시도해 주세요.',503);
       const guarded = this.recreatedBranchCursor(instance, projectId, head);
@@ -1970,11 +1978,11 @@ export class GitlabIntegrationService{
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
       if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:verification?.absent === false ? 0 : this.recordPush(raw,instance,projectId,kind,body,project,verification?.absent === true),runs:[]};
       if(kind==='deployment'){
-        let runs: AutomationRun[] = [];
+        let evaluation: WebhookStateEvaluation = { runs: [], stateAutomation: { result: 'not_evaluated' } };
         const changed=this.deployments.observe(instance,raw.baseUrl,projectId,body,(deployment, fresh) => {
-          runs = this.deploymentSucceeded(raw, deployment, fresh, receivedAt);
+          evaluation = this.deploymentSucceeded(raw, deployment, fresh, receivedAt);
         });
-        return{ok:true,duplicate:false,linked:0,runs,...(changed?{deploymentUpdated:true}:{})};
+        return { ok: true, duplicate: false, linked: 0, ...evaluation, ...(changed ? { deploymentUpdated: true } : {}) };
       }
       if(kind!=='merge_request'&&kind!=='pipeline')return{ok:true,duplicate:false,linked:0,runs:[]};
       const id=objectId(attributes),state=string(attributes.state)||string(attributes.status)||'unknown',branch=bound(kind==='merge_request'?attributes.source_branch:attributes.ref,512),sha=bound(attributes.sha||record(attributes.last_commit).id||record(body.commit).id,128);
@@ -2140,16 +2148,18 @@ export class GitlabIntegrationService{
         reason = '더 최신 GitLab 조회에서 같은 실행의 파이프라인을 확인해 이전 결과를 적용하지 않았습니다.';
       }
       const pipelineEvidence = !pipelineIncompatible && objectDisposition === 'fresh' ? verifiedClassification : undefined;
-      const runs=trigger?this.hooks.processEvent({id:eventId,trigger,gitlabProjectId:projectId,objectKind:kind,objectId:id,branch,
-        ...pipelineEvidence,...(draft.targetBranch?{targetBranch:draft.targetBranch}:{}),issueIds,occurredAt:time,receivedAt:now(),disposition,reason}):[];
-      return{ok:true,duplicate:false,linked,runs};
+      if (!trigger) return { ok: true, duplicate: false, linked, runs: [], stateAutomation: { result: 'not_evaluated' } };
+      const event: AutomationEvent = { id:eventId, trigger, gitlabProjectId:projectId, objectKind:kind, objectId:id, branch,
+        ...pipelineEvidence, ...(draft.targetBranch ? { targetBranch:draft.targetBranch } : {}),
+        issueIds, occurredAt:time, receivedAt:now(), disposition, reason };
+      return { ok: true, duplicate: false, linked, ...stateEvaluation(event, this.hooks.processEvent(event)) };
     };
     return this.store.transaction(() => {
-      const result = processWebhook();
+      const { stateAutomation, ...result } = processWebhook();
       const event = isTrackedWebhookEvent(kind) || kind === 'tag_push' ? kind : 'other';
       const { duplicate, linked, runs, deploymentUpdated } = result;
       const delivery: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns: runs.length,
-        ...(deploymentUpdated ? { deploymentUpdated } : {}) };
+        ...(deploymentUpdated ? { deploymentUpdated } : {}), ...(stateAutomation ? { stateAutomation } : {}) };
       const id = String(projectId);
       const priorAccepted = acceptedWebhookEvents(this.store.get<StoredWebhookDelivery>('gitlab_webhook_deliveries', id));
       const lastAcceptedByEvent = !duplicate && isTrackedWebhookEvent(event) ? { ...priorAccepted, [event]: delivery } : priorAccepted;

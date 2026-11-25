@@ -1,6 +1,7 @@
 import { isCalendarDate } from '../shared/calendar.js';
 import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../shared/schedule-dependencies.js';
-import { SCHEDULE_PASTE_COLUMNS as columnLabels, SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../shared/schedule-paste-format.js';
+import { parseScheduleSheetBaseline, SCHEDULE_PASTE_COLUMNS as columnLabels, SCHEDULE_PASTE_MAX_BYTES,
+  SCHEDULE_PASTE_MAX_ROWS, type ScheduleSheetBaseline } from '../shared/schedule-paste-format.js';
 import type { DependencyType, SchedulePasteDiagnostic } from '../shared/types.js';
 import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from './delimited-paste.js';
 
@@ -13,6 +14,7 @@ export interface SchedulePasteRow {
   endDate: string | null | undefined;
   dueDate?: string | null;
   dependency?: { predecessorKey: string; type?: DependencyType | '-'; lagDays?: number };
+  baseline?: ScheduleSheetBaseline;
 }
 
 interface Header {
@@ -25,6 +27,7 @@ interface Header {
   predecessorIndex: number | undefined;
   typeIndex: number | undefined;
   lagIndex: number | undefined;
+  baselineIndex: number | undefined;
 }
 
 interface Candidate {
@@ -47,7 +50,7 @@ const columnAliases = new Map<string, Column>([
   ['티켓', 'key'], ['issuekey', 'key'], ['key', 'key'],
   ['startdate', 'start'], ['enddate', 'end'], ['duedate', 'due'],
   ['predecessor', 'predecessor'], ['predecessorkey', 'predecessor'],
-  ['dependencytype', 'dependencyType'], ['lagdays', 'lag'],
+  ['dependencytype', 'dependencyType'], ['lagdays', 'lag'], ['exportedbaseline', 'baseline'],
 ]);
 
 const requiredHeader = '업무 키와 시작일·종료일·목표 마감일·선행 업무 중 하나 이상의 헤더가 필요합니다.';
@@ -88,6 +91,7 @@ function inspectHeader(parsed: DelimitedText): Candidate {
       recordIndex, record, keyIndex: columns.get('key')!,
       startIndex: columns.get('start'), endIndex: columns.get('end'), dueIndex: columns.get('due'),
       predecessorIndex: columns.get('predecessor'), typeIndex: columns.get('dependencyType'), lagIndex: columns.get('lag'),
+      baselineIndex: columns.get('baseline'),
     };
   }
   return candidate;
@@ -142,7 +146,7 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
 
   const { parsed, header } = valid[0];
   if (parsed.error) return { rows: [], errors: [parsed.error] };
-  const { recordIndex, record, keyIndex, startIndex, endIndex, dueIndex, predecessorIndex } = header!;
+  const { recordIndex, record, keyIndex, startIndex, endIndex, dueIndex, predecessorIndex, baselineIndex } = header!;
   const dataRecords = parsed.records.slice(recordIndex + 1).filter(row => !blankRecord(row));
   if (dataRecords.length > SCHEDULE_PASTE_MAX_ROWS) {
     return { rows: [], errors: [{ line: dataRecords[SCHEDULE_PASTE_MAX_ROWS].line, message: '일정은 한 번에 500행까지 붙여넣을 수 있습니다.' }] };
@@ -162,6 +166,12 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
     const key = normalizedKey(row.cells[keyIndex]);
     if (!validKey(key)) {
       errors.push({ line: row.line, message: '업무 키는 제어 문자가 없는 1~200자여야 합니다.' });
+      continue;
+    }
+    const baselineCell = baselineIndex === undefined ? '' : row.cells[baselineIndex].trim();
+    const baseline = baselineCell ? parseScheduleSheetBaseline(baselineCell) : undefined;
+    if (baselineCell && !baseline) {
+      errors.push({ line: row.line, key, message: '내보낸 기준을 읽을 수 없습니다. 내려받은 일정표의 기준 열을 확인해 주세요.' });
       continue;
     }
     let seen = seenKeys.get(key);
@@ -205,6 +215,7 @@ export function parseSchedulePaste(text: unknown): { rows: SchedulePasteRow[]; e
     if (typeof dependency === 'string') errors.push({ line: row.line, key, message: dependency });
     if (validDates && typeof dependency !== 'string') {
       if (dependency) parsedRow.dependency = dependency;
+      if (baseline) parsedRow.baseline = baseline;
       rows.push(parsedRow);
     }
   }

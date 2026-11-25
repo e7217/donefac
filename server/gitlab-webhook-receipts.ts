@@ -54,14 +54,14 @@ export class GitlabWebhookReceipts {
   }
 
   remember(scope: GitlabWebhookReceiptScope, digest: string, delivery: GitlabWebhookDelivery): void {
-    const { event, authentication, receivedAt, duplicate, linked, automationRuns, deploymentUpdated } = delivery;
+    const { event, authentication, receivedAt, duplicate, linked, automationRuns, deploymentUpdated, stateAutomation } = delivery;
     if (scope.event !== event || event === 'other' || !MESSAGE_DIGEST.test(digest)) return;
     const threshold = cutoff();
     if (receivedAt <= threshold) return;
     this.deleteExpired.run(threshold);
     // Retain the first summary, including whether that authenticated request was already a duplicate.
     const summary: GitlabWebhookDelivery = { event, authentication, receivedAt, duplicate, linked, automationRuns,
-      ...(deploymentUpdated ? { deploymentUpdated } : {}) };
+      ...(deploymentUpdated ? { deploymentUpdated } : {}), ...(stateAutomation ? { stateAutomation } : {}) };
     const result = this.insert.run(scopeDigest(scope), digest, scope.repositoryId, receivedAt, JSON.stringify(summary));
     if (result.changes) this.deleteOverflow.run(MAX_RECEIPTS);
   }

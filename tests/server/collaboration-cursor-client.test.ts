@@ -18,7 +18,7 @@ const snapshot: DocPage = {
   authorId: self.actorId, createdAt: '2025-11-19T00:00:00.000Z', updatedAt: '2025-11-19T00:00:00.000Z',
 };
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, replacement?: ConstructorParameters<typeof CollaborationClient>[4]) {
   class BrowserSocket {
     static readonly CONNECTING = 0;
     static readonly OPEN = 1;
@@ -52,7 +52,7 @@ function fixture(t: TestContext) {
     return { name, prior };
   });
   let views = 0;
-  const client = new CollaborationClient({ enabled: true, epoch, schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => views++, () => {});
+  const client = new CollaborationClient({ enabled: true, epoch, schemaVersion: COLLABORATION_SCHEMA, document: snapshot }, self.actorId, () => views++, () => {}, replacement);
   const server = new Y.Doc();
   t.after(() => {
     client.destroy();
@@ -127,6 +127,35 @@ test('ACK of a restored snapshot cannot remove the original writer’s newer pen
     reader.doc.destroy();
   }
   assert.equal(storage.size, 1);
+});
+
+test('session replacement waits for composition and keeps the resulting unpublished transaction', async t => {
+  let composing = true;
+  let reconnected = false;
+  const { client, socket, storage, welcome } = fixture(t, {
+    isComposing: () => composing,
+    restart: () => { reconnected = true; },
+  });
+  socket.receive(welcome);
+  socket.receive({ type: 'reset', epoch: 'replacement', document: snapshot, reason: 'new body' });
+  assert.equal(client.view.phase, 'offline');
+  assert.equal(client.view.pending, false);
+  assert.equal(reconnected, false);
+
+  const paragraph = new Y.XmlElement('paragraph');
+  const text = new Y.XmlText();
+  text.insert(0, '한국어 조합 완료');
+  paragraph.insert(0, [text]);
+  client.doc.getXmlFragment('default').push([paragraph]);
+  composing = false;
+  await delay(75);
+  assert.equal(client.view.phase, 'recovery');
+  assert.equal(client.view.pending, true);
+  assert.equal(client.view.epoch, epoch);
+  assert.equal(reconnected, false);
+  assert.equal(storage.size, 1);
+  assert.equal(socket.sent.filter(message => message.type === 'update').length, 0);
+  assert.match(client.doc.getXmlFragment('default').toString(), /한국어 조합 완료/u);
 });
 
 test('cursor delivery waits for ACK, keeps the newest position and follows connection state', async t => {

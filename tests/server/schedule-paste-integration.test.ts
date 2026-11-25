@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { createApp } from '../../server/app.js';
+import { buildGanttScheduleSheet } from '../../shared/schedule-paste-format.js';
 import { MAX_SCHEDULE_BULK_DATE_ISSUES, type Dependency, type Issue, type Project, type ProjectIssueSchema, type ProjectWorkflow,
   type ScheduleBulkDateInput, type ScheduleChange, type SchedulePasteApplyResult, type SchedulePastePreview, type WorkCalendar,
   type WorkspaceSnapshot } from '../../shared/types.js';
@@ -62,6 +63,85 @@ function applyBulkDates(f: Fixture, review: SchedulePastePreview, actorId?: stri
   return f.call<SchedulePasteApplyResult>(`${bulkDatePath}/apply`, 'POST', { previewId: review.previewId }, actorId);
 }
 const allDates = ({ startDate, endDate, dueDate }: Issue) => ({ startDate, endDate, dueDate });
+
+test('editing an exported schedule applies only changed cells and fences divergent dates and links', async () => {
+  const f = await fixture();
+  try {
+    const predecessor = await issue(f, '합성 선행 업무', '2026-11-17', '2026-11-20');
+    const successor = await issue(f, '합성 후행 업무', '2026-11-23', '2026-11-27', '2026-12-08');
+    const link = await f.call<Dependency>('/dependencies', 'POST', {
+      predecessorId: predecessor.id, successorId: successor.id, type: 'FS', lagDays: 0,
+    });
+    assert.equal(link.status, 201);
+    const exported = buildGanttScheduleSheet([successor], [predecessor, successor], [link.data]);
+    assert.ok(exported.ok);
+    const peerDate = '2026-11-24';
+    const peerIssue = await f.call<Issue>(`/issues/${successor.id}`, 'PATCH', {
+      expectedVersion: successor.version, startDate: peerDate,
+    }, 'user-seo');
+    assert.equal(peerIssue.status, 200);
+    const peerLink = await f.call<Dependency>(`/dependencies/${link.data.id}`, 'PATCH', {
+      expectedVersion: link.data.version, type: 'SS', lagDays: 0,
+    }, 'user-seo');
+    assert.equal(peerLink.status, 200);
+    const [header, raw] = exported.text.trimEnd().split(/\r?\n/u);
+    const row = raw.split('\t');
+    const edited = (edits: Record<number, string>) => {
+      const cells = [...row];
+      for (const [column, value] of Object.entries(edits)) cells[Number(column)] = value;
+      return `${header}\n${cells.join('\t')}`;
+    };
+
+    const conflict = await preview(f, edited({ 1: '2026-11-25', 5: 'FF' }));
+    assert.equal(conflict.previewId, null);
+    assert.equal(conflict.errors.length, 2);
+    assert.match(conflict.errors[0].message, /시작일.*2026-11-23.*2026-11-24.*2026-11-25/u);
+    assert.match(conflict.errors[1].message, /연결 유형.*FS.*SS.*FF/u);
+    const nextEnd = '2026-11-30';
+    const accepted = await f.call<SchedulePastePreview>('/schedule/paste-preview', 'POST', {
+      projectId: f.project.id, text: edited({ 2: nextEnd, 6: '2' }),
+    });
+    assert.ok(accepted.data.previewId);
+    assert.deepEqual(accepted.data.errors, []);
+    assert.deepEqual(accepted.data.changes.map(({ fromStart, toStart, toEnd }) => [fromStart, toStart, toEnd]), [[peerDate, peerDate, nextEnd]]);
+    assert.deepEqual(accepted.data.dependencyChanges?.map(({ before, after }) => [before, after]), [
+      [{ type: 'SS', lagDays: 0 }, { type: 'SS', lagDays: 2 }],
+    ]);
+    const saved = await apply(f, accepted.data);
+    assert.equal(saved.status, 200);
+    assert.deepEqual(allDates(saved.data.updated[0]), { startDate: peerDate, endDate: nextEnd, dueDate: successor.dueDate });
+    assert.equal((await workspace(f)).dependencies.find(value => value.id === link.data.id)?.type, 'SS');
+    const undo = await f.call('/schedule/undo', 'POST', { undoId: saved.data.undoId });
+    assert.equal(undo.status, 200);
+    const restored = await workspace(f);
+    assert.deepEqual(allDates(restored.issues.find(value => value.id === successor.id)!), allDates(peerIssue.data));
+    const restoredLink = restored.dependencies.find(value => value.id === link.data.id);
+    assert.equal(restoredLink?.type, 'SS');
+    assert.equal(restoredLink?.lagDays, 0);
+
+    const movedRow = await preview(f, edited({ 0: predecessor.key, 2: nextEnd }));
+    assert.equal(movedRow.previewId, null);
+    assert.match(movedRow.errors[0].message, /내려받은 일정표의 업무가 다릅니다/u);
+    const corrupted = await preview(f, edited({ 7: '1|%ZZ|bad|-|-' }));
+    assert.equal(corrupted.previewId, null);
+    assert.match(corrupted.errors[0].message, /내보낸 기준을 읽을 수 없습니다/u);
+
+    const editedRemoval = await preview(f, edited({ 5: '-', 6: '' }));
+    assert.equal(editedRemoval.previewId, null);
+    assert.match(editedRemoval.errors[0].message, /수정된 연결/u);
+    assert.equal((await f.call(`/issues/${predecessor.id}`, 'DELETE', undefined, 'user-seo')).status, 200);
+    const acceptedDate = await f.call<SchedulePastePreview>('/schedule/paste-preview', 'POST', {
+      projectId: f.project.id, text: edited({ 2: nextEnd }),
+    });
+    assert.deepEqual(acceptedDate.data.errors, []);
+    assert.ok(acceptedDate.data.previewId);
+    assert.deepEqual(acceptedDate.data.dependencyChanges, []);
+    assert.equal((await apply(f, acceptedDate.data)).status, 200);
+    const editedDeletedLink = await preview(f, edited({ 6: '2' }));
+    assert.equal(editedDeletedLink.previewId, null);
+    assert.ok(editedDeletedLink.errors.length);
+  } finally { await f.close(); }
+});
 
 test('bulk calendar dates review set, clear and keep separately, bind proposal kind and undo only changed dates', async () => {
   const f = await fixture();

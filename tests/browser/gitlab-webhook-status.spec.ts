@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { GitlabSettings, GitlabWebhookStatus, Issue, WorkspaceSnapshot } from '../../shared/types';
+import type { AutomationRule, GitlabSettings, GitlabWebhookStatus, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 async function readJson<T>(response: APIResponse, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -11,7 +11,7 @@ async function readJson<T>(response: APIResponse, status = 200): Promise<T> {
 }
 
 test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설정 초안과 인증 변경을 반영한다', async ({ page, request }) => {
-  test.setTimeout(60_000);
+  test.setTimeout(95_000);
   const settingsPath = '/api/integrations/gitlab';
   const statusPath = `${settingsPath}/webhook-status`;
   const webhookPath = `${settingsPath}/webhook`;
@@ -28,6 +28,7 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
   const draftToken = `synthetic-read-draft-${randomUUID()}`;
   const repositoryIds = [42, 99];
   let issue: Issue | undefined;
+  let rule: AutomationRule | undefined;
 
   const workspace = async () => readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const readSettings = async () => readJson<GitlabSettings>(await request.get(settingsPath));
@@ -39,7 +40,7 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
   try {
     const original = await readSettings();
     expect(original.baseUrl).toBe('');
-    const { projects: [project] } = await workspace();
+    const { projects: [project], users: [actor] } = await workspace();
     issue = await readJson<Issue>(await request.post('/api/issues', {
       data: { projectId: project.id, title: `GitLab 수신 검증 ${randomUUID()}` },
     }), 201);
@@ -124,10 +125,11 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
       },
     };
     expect(await readJson(await send(pipeline))).toMatchObject({ duplicate: false, linked: 1 });
+    const unrelatedSha = 'c'.repeat(40);
     const deployment = {
       object_kind: 'deployment', project: { id: 99, web_url: secondProjectUrl, path_with_namespace: 'team/second' },
       deployment_id: 871, environment: 'staging', status: 'success', status_changed_at: occurredAt,
-      short_sha: sha.slice(0, 8), commit_url: `${secondProjectUrl}/-/commit/${sha}`,
+      short_sha: unrelatedSha.slice(0, 8), commit_url: `${secondProjectUrl}/-/commit/${unrelatedSha}`,
     };
     expect(await readJson(await send(deployment))).toMatchObject({ duplicate: false, deploymentUpdated: true });
     expect(await readJson(await send(mr, mrDeliveryId))).toMatchObject({ duplicate: true, linked: 0 });
@@ -149,9 +151,13 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
     await expect(secondSummary).toHaveText('이벤트별 수신 3/4');
     await expect(secondEvent('Merge Request')).toContainText('업무 연결 1건');
     await expect(secondEvent('Merge Request')).toContainText('자동화 기록 0건');
-    await expect(secondEvent('Merge Request').locator('time')).toHaveAttribute('datetime', mrReceipt?.receivedAt ?? '');
+    await expect(secondEvent('Merge Request')).toContainText('상태 자동화 · Merge Request 열림');
+    await expect(secondEvent('Merge Request')).toContainText('대상 티켓 1건 · 활성 규칙 범위 없음 1건');
+    await expect(secondEvent('Merge Request').locator('time').first()).toHaveAttribute('datetime', mrReceipt?.receivedAt ?? '');
     await expect(secondEvent('Pipeline')).toContainText('업무 연결 1건');
+    await expect(secondEvent('Pipeline')).toContainText('상태 자동화 · 파이프라인 실패');
     await expect(secondEvent('배포 이벤트')).toContainText('배포 기록 반영');
+    await expect(secondEvent('배포 이벤트')).toContainText('대상 티켓 0건 · 확인된 자동화 대상 티켓이 없습니다.');
     await expect(secondEvent('Push')).toContainText('수신 대기');
     await firstSummary.click();
     await expect(firstEvents.getByText('수신 대기', { exact: true })).toHaveCount(3);
@@ -164,10 +170,30 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
       expect.objectContaining({ kind: 'pipeline', projectId: 99, state: 'failed' }),
     ]));
 
+    rule = await readJson<AutomationRule>(await request.post('/api/automation-rules', { data: {
+      projectId: project.id, name: `수신 결과 ${randomUUID()}`, trigger: 'merge_request.merged', enabled: false,
+      gitlabProjectIds: [99], branchPattern: 'feature/*', issueTypes: [], fromStatuses: ['todo'], toStatusId: 'done', actorId: actor.id, priority: 100,
+    } }), 201);
+    rule = await readJson<AutomationRule>(await request.patch(`/api/automation-rules/${rule.id}`, {
+      data: { ...rule, expectedVersion: rule.version, enabled: true },
+    }));
+    const merged = { ...mr, object_attributes: { ...mr.object_attributes, action: 'merge', state: 'merged', updated_at: new Date().toISOString() } };
+    expect(await readJson(await send(merged))).toMatchObject({ linked: 1, runs: [expect.objectContaining({ issueId: issue.id, outcome: 'changed' })] });
+    await refreshStatus();
+    await expect(secondEvent('Merge Request')).toContainText('대상 티켓 1건 · 상태 변경 1건');
+    expect((await workspace()).issues.find(item => item.id === issue?.id)?.status).toBe('done');
+
+    const older = { ...merged, object_attributes: { ...merged.object_attributes, updated_at: occurredAt } };
+    expect(await readJson(await send(older))).toMatchObject({ linked: 0, runs: [expect.objectContaining({ issueId: issue.id, outcome: 'ignored' })] });
+    const latest = await refreshStatus();
+    await expect(secondEvent('Merge Request')).toContainText('대상 티켓 1건 · 적용 보류 1건');
+    await expect(secondEvent('Merge Request')).toContainText('최신 수신 이벤트보다 오래된 이벤트입니다.');
+    await expect(readToken).toHaveValue(draftToken);
+
     const remote = await readJson<GitlabSettings>(await request.patch(settingsPath, {
       data: { expectedVersion: configured.version, token: `other-actor-read-token-${randomUUID()}` },
     }));
-    expect(await refreshStatus()).toEqual({ ...both, settingsVersion: remote.version });
+    expect(await refreshStatus()).toEqual({ ...latest, settingsVersion: remote.version });
     await expect(panel.getByRole('alert')).toContainText('연결 설정이 변경되었습니다');
     await expect(first).toHaveCount(0);
     await expect(readToken).toHaveValue(draftToken);
@@ -192,6 +218,7 @@ test('360px GitLab 설정에서 이벤트별 인증 수신을 확인하고 설�
     expect(instanceRequests).toEqual([]);
   } finally {
     try {
+      if (rule) await request.delete(`/api/automation-rules/${rule.id}?expectedVersion=${rule.version}`);
       if (issue) await request.delete(`/api/issues/${issue.id}`);
       const current = await readSettings();
       if (current.baseUrl === baseUrl) {

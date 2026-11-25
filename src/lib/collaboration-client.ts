@@ -30,6 +30,7 @@ export interface RemoteCollaborationCursor {
 interface PendingCache { epoch: string; schemaVersion: number; update: string; pending: true; updatedAt: string }
 interface PendingSnapshot { key: string; value: string }
 interface PendingEntry { snapshot: PendingSnapshot; cache: PendingCache | null; update?: Uint8Array }
+type SessionReplacement = { isComposing: () => boolean; restart: () => void };
 const REMOTE = Symbol('server-update');
 const CACHE = Symbol('pending-cache');
 const MAX_CACHE_STATE = 16 * 1024 * 1024;
@@ -176,6 +177,7 @@ export class CollaborationClient {
   readonly doc = new Y.Doc();
   private socket: WebSocket | null = null;
   private retry: ReturnType<typeof setTimeout> | null = null;
+  private replacementTimer: ReturnType<typeof setTimeout> | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private cursorPeerId: string | null = null;
@@ -187,6 +189,7 @@ export class CollaborationClient {
   private cursorListeners = new Set<() => void>();
   private cursorNotificationQueued = false;
   private disposed = false;
+  private roomReplaced = false;
   private welcomed = false;
   private retryCount = 0;
   private localSequence = 0;
@@ -207,7 +210,8 @@ export class CollaborationClient {
   private readonly publish: (state: CollaborationView) => void;
   private readonly onDocument: (document: DocPage) => void;
 
-  constructor(session: CollaborationSession, actorId: string, publish: (state: CollaborationView) => void, onDocument: (document: DocPage) => void) {
+  constructor(session: CollaborationSession, actorId: string, publish: (state: CollaborationView) => void,
+    onDocument: (document: DocPage) => void, private readonly replacement?: SessionReplacement) {
     this.actorId = actorId; this.documentId = session.document.id;
     this.publish = publish; this.onDocument = onDocument;
     this.state = { phase: 'connecting', ready: false, pending: false, peers: [], epoch: session.epoch || '', document: session.document, error: '', storageError: false, otherRecoveries: 0 };
@@ -314,7 +318,7 @@ export class CollaborationClient {
   };
 
   private sendPending() {
-    if (!this.welcomed || this.socket?.readyState !== WebSocket.OPEN || this.state.phase !== 'connected') return;
+    if (this.roomReplaced || !this.welcomed || this.socket?.readyState !== WebSocket.OPEN || this.state.phase !== 'connected') return;
     if (this.localSequence <= this.acknowledgedSequence) return;
     // Each message contains every local change since the last durable ACK, so a
     // later ACK cannot claim a missing earlier incremental update is persisted.
@@ -391,8 +395,37 @@ export class CollaborationClient {
     this.publishRemoteCursors();
   }
 
+  private replaceSession(reason: string, stillCollaborative = true) {
+    if (this.disposed || this.roomReplaced) return;
+    this.roomReplaced = true;
+    this.clearCursorChannel();
+    this.socket?.close();
+
+    const settle = () => {
+      if (this.disposed) return;
+      // IME input may still be in the editor DOM. Keep the old binding until
+      // its committed transaction can enter the pending cache.
+      if (this.replacement?.isComposing()) {
+        this.replacementTimer = setTimeout(settle, 50);
+        return;
+      }
+      this.replacementTimer = null;
+      this.persistPending();
+      if (stillCollaborative && this.replacement && this.localSequence <= this.acknowledgedSequence &&
+          !this.unreadableCache && !this.legacyRecovery && !this.state.storageError) {
+        this.setState({ phase: 'connecting', ready: false, peers: [], error: '' });
+        this.replacement.restart();
+        return;
+      }
+      const ready = this.state.ready || this.doc.getXmlFragment('default').length > 0;
+      this.setState({ phase: 'recovery', ready, peers: [], error: reason });
+    };
+    if (this.replacement?.isComposing()) this.setState({ phase: 'offline', peers: [] });
+    settle();
+  }
+
   private connect() {
-    if (this.disposed || this.state.phase === 'recovery' || this.state.phase === 'error') return;
+    if (this.disposed || this.roomReplaced || this.state.phase === 'recovery' || this.state.phase === 'error') return;
     if (this.socket?.readyState === WebSocket.OPEN || this.socket?.readyState === WebSocket.CONNECTING) return;
     if (!navigator.onLine) { this.setState({ phase: 'offline', peers: [] }); return; }
     this.welcomed = false;
@@ -418,18 +451,19 @@ export class CollaborationClient {
       this.welcomed = false; this.socket = null;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = null;
-      if (this.state.phase === 'recovery' || this.state.phase === 'error') return;
-      this.clearCursorChannel(event.code !== 4409);
-      if (event.code === 4409) { this.setState({ phase: 'recovery', error: '문서 버전이 교체되었습니다. 이전 편집을 보관하거나 최신 문서를 열어주세요.', peers: [] }); return; }
+      if (this.roomReplaced || this.state.phase === 'recovery' || this.state.phase === 'error') return;
+      if (event.code === 4409) { this.replaceSession('문서 버전이 교체되었습니다. 이전 편집을 보관하거나 최신 문서를 열어주세요.'); return; }
+      this.clearCursorChannel(true);
       this.setState({ phase: 'offline', peers: [] });
       void this.reconcileDisconnect();
     };
   }
 
   private receive(message: CollaborationServerMessage) {
+    if (this.roomReplaced) return;
     if (message.type === 'welcome') {
       if (message.schemaVersion !== COLLABORATION_SCHEMA) { this.fail('문서 형식이 달라 편집을 중단했습니다. 새로고침 후 다시 확인해주세요.'); return; }
-      if (message.epoch !== this.state.epoch) { this.clearCursorChannel(); this.setState({ phase: 'recovery', error: '문서 버전이 교체되어 이전 편집을 자동으로 합치지 않았습니다.' }); this.socket?.close(); return; }
+      if (message.epoch !== this.state.epoch) { this.replaceSession('문서 버전이 교체되어 이전 편집을 자동으로 합치지 않았습니다.'); return; }
       Y.applyUpdate(this.doc, decodeBytes(message.update), REMOTE);
       this.serverVector = decodeBytes(message.stateVector);
       this.welcomed = true; this.retryCount = 0; this.inFlight.clear();
@@ -468,10 +502,7 @@ export class CollaborationClient {
       this.publishRemoteCursors();
     }
     else if (message.type === 'reset') {
-      this.persistPending();
-      this.clearCursorChannel();
-      this.setState({ phase: 'recovery', peers: [], error: message.reason || '이전 버전 복구로 문서가 교체되었습니다.' });
-      this.socket?.close();
+      this.replaceSession(message.reason || '이전 버전 복구로 문서가 교체되었습니다.');
     } else if (message.type === 'error') this.fail(message.message);
   }
 
@@ -487,19 +518,18 @@ export class CollaborationClient {
     this.socket?.close();
   }
   private scheduleReconnect() {
-    if (this.disposed || this.retry || !navigator.onLine) return;
+    if (this.disposed || this.roomReplaced || this.retry || !navigator.onLine) return;
     this.retry = setTimeout(() => { this.retry = null; this.connect(); }, Math.min(10_000, 400 * 2 ** this.retryCount++));
   }
   private async reconcileDisconnect() {
-    if (this.disposed || !navigator.onLine) return;
+    if (this.disposed || this.roomReplaced || !navigator.onLine) return;
     try {
       const response = await fetch(`/api/documents/${encodeURIComponent(this.documentId)}/collaboration`, { headers: { 'X-Actor-Id': this.actorId }, signal: AbortSignal.timeout(5000) });
-      if (this.disposed || this.socket || this.state.phase === 'recovery' || this.state.phase === 'error') return;
       if (response.ok) {
         const session = await response.json() as CollaborationSession;
+        if (this.disposed || this.roomReplaced || this.socket || this.state.phase !== 'offline') return;
         if (!session.enabled || session.epoch !== this.state.epoch) {
-          this.clearCursorChannel();
-          this.setState({ phase: 'recovery', ready: this.state.ready || this.doc.getXmlFragment('default').length > 0, error: '문서가 교체되거나 공동 편집이 해제되어 이전 편집을 자동으로 합치지 않았습니다.' });
+          this.replaceSession('문서가 교체되거나 공동 편집이 해제되어 이전 편집을 자동으로 합치지 않았습니다.', session.enabled);
           return;
         }
       }
@@ -507,7 +537,7 @@ export class CollaborationClient {
     if (!this.disposed && !this.socket) this.scheduleReconnect();
   }
   private onOnline = () => { if (this.retry) clearTimeout(this.retry); this.retry = null; this.connect(); };
-  private onOffline = () => { if (this.state.phase === 'recovery' || this.state.phase === 'error') return; this.clearCursorChannel(true); this.socket?.close(); this.setState({ phase: 'offline', peers: [] }); };
+  private onOffline = () => { if (this.roomReplaced || this.state.phase === 'recovery' || this.state.phase === 'error') return; this.clearCursorChannel(true); this.socket?.close(); this.setState({ phase: 'offline', peers: [] }); };
 
   private clearStoredSnapshots() {
     for (const snapshot of this.restoredSnapshots) removeObservedSnapshot(snapshot);
@@ -531,6 +561,7 @@ export class CollaborationClient {
     this.clearCursorChannel();
     window.removeEventListener('online', this.onOnline); window.removeEventListener('offline', this.onOffline);
     if (this.retry) clearTimeout(this.retry);
+    if (this.replacementTimer) clearTimeout(this.replacementTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.socket?.close();
     this.doc.off('update', this.onUpdate);

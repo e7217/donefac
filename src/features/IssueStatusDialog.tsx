@@ -2,20 +2,24 @@
 
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import type { FeatureProps, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
-import { allowedNextStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
+import type { CustomFieldDefinition, CustomFieldValue, FeatureProps, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
+import { fieldApplies, fieldValueLabel, hasCustomValue, projectIssueSchema, visibleIssueFieldIds } from '../../shared/issue-schema';
+import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CommentMentionInput, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
+import { CustomFieldInput } from './CustomFields';
 import { errorMessage } from './schedule-utils';
 import './issue-status-dialog.css';
 
 export type IssueStatusEdit = { issue: Issue; current: WorkflowStatus; choices: WorkflowStatus[]; workflowVersion: number };
 type Recovery = 'conflict' | 'verify' | 'refresh';
 type StatusChangeAttempt = { actorId: string; input: IssueStatusChangeRequest };
+type PropertyDraft<Value> = { base: Value; value: Value };
+type CustomDraft = PropertyDraft<CustomFieldValue> & { label: string; kind: CustomFieldDefinition['kind'] };
 
-const STALE = '업무 또는 프로젝트 워크플로가 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
+const STALE = '업무, 워크플로 또는 업무 양식이 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
 const REFRESH = '변경 사항을 저장했습니다. 화면에 반영하려면 최신 업무를 불러와 주세요.';
 const UNKNOWN_HANDOFF = '상태 변경과 인수인계 댓글의 저장 결과를 확인하지 못했습니다.';
 const UNASSIGNED = 'unassigned';
@@ -37,6 +41,27 @@ function definiteStatusError(cause: unknown): cause is ApiError {
   return cause instanceof ApiError && cause.status < 500 && ![408, 425, 429, 499].includes(cause.status);
 }
 
+function sameProperty(left: CustomFieldValue, right: CustomFieldValue): boolean {
+  return left === right || Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every(value => right.includes(value));
+}
+
+function propertyConflict<Value extends CustomFieldValue>(draft: PropertyDraft<Value> | undefined, saved: Value): boolean {
+  return Boolean(draft && !sameProperty(draft.base, saved) && !sameProperty(draft.value, saved));
+}
+
+function PropertyConflict({ label, saved, onUseSaved, onUseInput }: {
+  label: string; saved: string; onUseSaved: () => void; onUseInput: () => void;
+}) {
+  return <div className="issue-status-property-conflict">
+    <p>동료가 저장한 {label}</p>
+    <blockquote>{saved || '미지정'}</blockquote>
+    <div>
+      <button className="btn btn-ghost" type="button" aria-label={`${label} 저장값 사용`} onClick={onUseSaved}>저장값 사용</button>
+      <button className="btn" type="button" aria-label={`${label} 입력값 사용`} onClick={onUseInput}>입력값 사용</button>
+    </div>
+  </div>;
+}
+
 export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh, notify, onClose, onOpenDetails }: {
   edit: IssueStatusEdit;
   actorId: string;
@@ -46,8 +71,9 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   onClose: () => void;
   onOpenDetails: () => void;
 }) {
-  const [review, setReview] = useState(() => ({ edit: originalEdit, restoreGeneration: latest.restoreGeneration }));
-  const { edit, restoreGeneration } = review;
+  const [review, setReview] = useState(() => ({ edit: originalEdit, restoreGeneration: latest.restoreGeneration,
+    schemaVersion: projectIssueSchema(latest, originalEdit.issue.projectId).version }));
+  const { edit, restoreGeneration, schemaVersion } = review;
   const heading = useId();
   const errorId = useId();
   const commentId = useId();
@@ -60,6 +86,9 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(edit.choices.length === 1 ? edit.choices[0].id : '');
   const [assigneeId, setAssigneeId] = useState<Issue['assigneeId'] | undefined>();
+  const [description, setDescription] = useState<PropertyDraft<string>>();
+  const [customFields, setCustomFields] = useState<Record<string, CustomDraft>>({});
+  const [reportedRequired, setReportedRequired] = useState<string[]>([]);
   const [comment, setComment] = useState(emptyCommentDraft);
   const [commentSaved, setCommentSaved] = useState(false);
   const [error, setError] = useState('');
@@ -67,14 +96,38 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const [showDetails, setShowDetails] = useState(false);
   const [assigneeRequired, setAssigneeRequired] = useState(false);
   const current = latest.issues.find(issue => issue.id === edit.issue.id);
+  const schema = projectIssueSchema(latest, edit.issue.projectId);
   const stale = latest.restoreGeneration !== restoreGeneration || !current || current.version !== edit.issue.version || current.projectId !== edit.issue.projectId ||
-    projectWorkflow(latest, edit.issue.projectId).version !== edit.workflowVersion;
+    projectWorkflow(latest, edit.issue.projectId).version !== edit.workflowVersion || schema.version !== schemaVersion;
+  const fieldsDisabled = busy || stale || Boolean(recovery);
+  const draftCustom = Object.fromEntries(Object.entries(customFields).map(([id, field]) => [id, field.value]));
+  const required = new Set<string>(selected ? [...reportedRequired,
+    ...requiredFieldsFor(latest, edit.issue.projectId, edit.issue.type, selected, edit.issue.status)] : []);
+  const visibleFields = visibleIssueFieldIds(schema, { type: edit.issue.type, status: selected || edit.issue.status,
+    customFields: { ...edit.issue.customFields, ...draftCustom } });
+  const applicable = schema.fields.filter(field => !field.archived && fieldApplies(field, edit.issue.type));
+  const unavailable = Object.entries(customFields).filter(([id, draft]) => !applicable.some(field => field.id === id && field.kind === draft.kind));
+  const customRequired = (field: CustomFieldDefinition) => required.has(`custom:${field.id}`) || field.required && visibleFields.has(field.id);
+  const storedCustom = (id: string) => edit.issue.customFields?.[id] ?? null;
+  const customValue = (field: CustomFieldDefinition) => customFields[field.id]?.kind === field.kind
+    ? customFields[field.id].value : storedCustom(field.id);
+  const propertyFields = applicable.filter(field => customFields[field.id]?.kind === field.kind ||
+    customRequired(field) && !hasCustomValue(storedCustom(field.id)));
+  const descriptionValue = description?.value ?? edit.issue.description;
+  const missingDescription = required.has('description') && !descriptionValue.trim();
+  const descriptionConflict = propertyConflict(description, edit.issue.description);
+  const incompleteProperties = missingDescription || propertyFields.some(field => customRequired(field) && !hasCustomValue(customValue(field)));
+  const unresolvedProperties = descriptionConflict || unavailable.length > 0 ||
+    propertyFields.some(field => propertyConflict(customFields[field.id], storedCustom(field.id)));
+  const hasPropertiesDraft = Boolean(description || Object.keys(customFields).length);
   const assigneeUnavailable = typeof assigneeId === 'string' && !latest.users.some(user => user.id === assigneeId);
   const assigneeOption = assigneeId === undefined ? '' : assigneeId === null ? UNASSIGNED : `${USER_OPTION}${assigneeId}`;
   const unknownResult = comment.body.trim() ? UNKNOWN_HANDOFF :
     `${assigneeId === undefined ? '상태' : '상태와 담당자'} 변경 결과를 확인하지 못했습니다.`;
   const discardPrompt = recovery === 'verify' ? `${unknownResult} 닫을까요?` :
-    comment.body.trim() ? '작성 중인 인수인계 댓글을 버리고 닫을까요?' : null;
+    hasPropertiesDraft ? '작성 중인 업무 내용과 인수인계 입력을 버리고 닫을까요?' :
+      comment.body.trim() ? '작성 중인 인수인계 댓글을 버리고 닫을까요?' : null;
+  const canSubmit = Boolean(selected && !assigneeUnavailable && !incompleteProperties && !unresolvedProperties && !fieldsDisabled);
   const nameCounts = new Map<string, number>();
   for (const user of latest.users) nameCounts.set(user.name, (nameCounts.get(user.name) ?? 0) + 1);
 
@@ -133,6 +186,28 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setAssigneeRequired(false);
   }
 
+  function changeDescription(value: string, useLatest = false) {
+    setDescription(value === edit.issue.description ? undefined : { base: useLatest ? edit.issue.description : description?.base ?? edit.issue.description, value });
+    clearValidation();
+  }
+
+  function changeCustom(field: CustomFieldDefinition, value: CustomFieldValue, useLatest = false) {
+    const saved = storedCustom(field.id);
+    if (sameProperty(value, saved)) return forgetCustom(field.id);
+    setCustomFields(previous => ({ ...previous, [field.id]: { label: field.name, kind: field.kind,
+      base: useLatest || !previous[field.id] ? saved : previous[field.id].base, value } }));
+    clearValidation();
+  }
+
+  function forgetCustom(id: string) {
+    setCustomFields(previous => {
+      const next = { ...previous };
+      delete next[id];
+      return next;
+    });
+    clearValidation();
+  }
+
   async function committed(withComment = commentSaved) {
     setRecovery('refresh');
     try {
@@ -154,10 +229,12 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setRecovery(null);
     const details = cause.details;
     const requiredFields = typeof details === 'object' && details !== null && 'requiredFields' in details &&
-      Array.isArray(details.requiredFields) ? details.requiredFields : [];
+      Array.isArray(details.requiredFields) ? details.requiredFields.filter((field): field is string => typeof field === 'string') : [];
     const missingAssignee = cause.status === 422 && requiredFields.includes('assigneeId');
     setAssigneeRequired(missingAssignee);
-    setShowDetails(cause.status === 422 && (!missingAssignee || requiredFields.length > 1));
+    if (cause.status === 422) setReportedRequired(requiredFields);
+    setShowDetails(cause.status === 422 && (!requiredFields.length || requiredFields.some(field =>
+      field !== 'assigneeId' && field !== 'description' && !applicable.some(definition => field === `custom:${definition.id}`))));
   }
 
   async function applyStatusChange(attempt: StatusChangeAttempt) {
@@ -173,6 +250,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       if (!confirmedStatusChange(result, edit, attempt.input)) throw new Error(unknownResult);
       changeAttempt.current = null;
       setComment(emptyCommentDraft());
+      setDescription(undefined);
+      setCustomFields({});
       setCommentSaved(withComment);
       await committed(withComment);
     } catch (cause) {
@@ -190,32 +269,33 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     }
   }
 
-  async function reviewLatestWithComment() {
+  async function reviewLatestWithDraft() {
     const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
     if (typeof snapshot?.restoreGeneration !== 'string' || !Array.isArray(snapshot?.issues)) {
       throw new Error('최신 업무 정보를 불러오지 못했습니다.');
     }
     const issue = snapshot.issues.find(issue => issue.id === edit.issue.id && issue.projectId === edit.issue.projectId);
     if (!issue) {
-      setError('현재 프로젝트에서 업무를 찾을 수 없습니다. 작성한 댓글을 확인해 주세요.');
+      setError('현재 프로젝트에서 업무를 찾을 수 없습니다. 작성한 입력을 확인해 주세요.');
       return;
     }
     const choices = allowedNextStatuses(snapshot, issue).filter(status => status.id !== issue.status);
     await refresh();
-    setReview({ restoreGeneration: snapshot.restoreGeneration, edit: { issue, choices,
+    setReview({ restoreGeneration: snapshot.restoreGeneration, schemaVersion: projectIssueSchema(snapshot, issue.projectId).version, edit: { issue, choices,
       current: statusMeta(snapshot, issue.projectId, issue.status), workflowVersion: projectWorkflow(snapshot, issue.projectId).version } });
     clearValidation();
     setRecovery(null);
     setSelected('');
+    setReportedRequired([]);
     if (!choices.length) {
-      setError('현재 업무에서 변경할 수 있는 상태가 없습니다. 작성한 댓글을 확인해 주세요.');
+      setError('현재 업무에서 변경할 수 있는 상태가 없습니다. 작성한 입력을 확인해 주세요.');
       setShowDetails(true);
     }
   }
 
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (!selected || assigneeUnavailable || stale || recovery || pending.current) return;
+    if (!canSubmit || pending.current) return;
     if (!restoreGeneration) {
       setRecovery('conflict');
       setError('현재 작업 공간을 확인하려면 최신 업무를 불러와 주세요.');
@@ -226,8 +306,11 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setBusy(true);
     clearValidation();
     try {
+      const changes = Object.fromEntries(Object.entries(draftCustom).filter(([id, value]) => !sameProperty(value, storedCustom(id))));
       const attempt = { actorId, input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
         expectedWorkflowVersion: edit.workflowVersion, status: selected, ...(assigneeId === undefined ? {} : { assigneeId }),
+        ...(description && descriptionValue !== edit.issue.description ? { description: descriptionValue } : {}),
+        ...(Object.keys(changes).length ? { customFields: changes, expectedIssueSchemaVersion: schemaVersion } : {}),
         ...(note.body ? { comment: note } : {}) } };
       changeAttempt.current = attempt;
       await applyStatusChange(attempt);
@@ -242,7 +325,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     try {
       if (recovery === 'verify' && changeAttempt.current) await applyStatusChange(changeAttempt.current);
       else if (recovery === 'refresh') await committed();
-      else if (comment.body.trim()) await reviewLatestWithComment();
+      else if (comment.body.trim() || hasPropertiesDraft) await reviewLatestWithDraft();
       else { await refresh(); onClose(); }
     } catch (cause) { setError(errorMessage(cause)); }
     finally { pending.current = false; setBusy(false); }
@@ -259,14 +342,14 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         <p>현재 상태 <span aria-hidden="true" className="issue-status-dot" style={{ background: edit.current.color }} />{edit.current.label}</p>
         <p>현재 담당자 {assigneeName(edit.issue.assigneeId)}</p>
         <label>변경할 상태
-          <select ref={statusField} className="field" value={selected} required disabled={busy || stale || Boolean(recovery)}
-            onChange={event => { setSelected(event.currentTarget.value); clearValidation(); }}>
+          <select ref={statusField} className="field" value={selected} required disabled={fieldsDisabled}
+            onChange={event => { setSelected(event.currentTarget.value); setReportedRequired([]); clearValidation(); }}>
             <option value="" disabled>상태 선택</option>
             {edit.choices.map(status => <option key={status.id} value={status.id}>{status.label}</option>)}
           </select>
         </label>
         <label>담당자
-          <select ref={assigneeField} className="field" value={assigneeOption} disabled={busy || stale || Boolean(recovery)}
+          <select ref={assigneeField} className="field" value={assigneeOption} disabled={fieldsDisabled}
             aria-invalid={assigneeRequired || assigneeUnavailable || undefined}
             aria-describedby={assigneeRequired || assigneeUnavailable ? errorId : undefined}
             onChange={event => {
@@ -280,6 +363,35 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
             {assigneeUnavailable && <option value={assigneeOption} disabled>팀원 확인 불가</option>}
           </select>
         </label>
+        {(description || missingDescription || propertyFields.length > 0 || unavailable.length > 0) &&
+          <fieldset className="issue-status-properties" disabled={fieldsDisabled}>
+            <legend>상태와 함께 저장할 속성</legend>
+            {(description || missingDescription) && <>
+              <label>업무 설명
+                <textarea className="field" rows={3} maxLength={200000} required={required.has('description')} value={descriptionValue}
+                  onChange={event => changeDescription(event.currentTarget.value)} />
+              </label>
+              {descriptionConflict && <PropertyConflict label="업무 설명" saved={edit.issue.description}
+                onUseSaved={() => changeDescription(edit.issue.description)} onUseInput={() => changeDescription(descriptionValue, true)} />}
+            </>}
+            {propertyFields.map(field => {
+              const draft = customFields[field.id];
+              const saved = storedCustom(field.id);
+              const compatible = draft?.kind === field.kind;
+              return <div className="issue-status-property" key={field.id}>
+                <span>{field.name}{customRequired(field) && <span aria-hidden="true"> *</span>}</span>
+                <CustomFieldInput field={field} label={field.name} users={latest.users} value={customValue(field)}
+                  required={customRequired(field)} onChange={value => changeCustom(field, value)} />
+                {compatible && propertyConflict(draft, saved) && <PropertyConflict label={field.name} saved={fieldValueLabel(field, saved, latest.users)}
+                  onUseSaved={() => forgetCustom(field.id)} onUseInput={() => changeCustom(field, draft.value, true)} />}
+              </div>;
+            })}
+            {unavailable.map(([id, draft]) => <div className="issue-status-property-conflict" key={id}>
+              <p>{draft.label}의 적용 조건 또는 형식이 바뀌었습니다.</p>
+              <blockquote>{String(draft.value ?? '미지정')}</blockquote>
+              <button className="btn btn-ghost" type="button" onClick={() => forgetCustom(id)}>{draft.label} 입력 지우기</button>
+            </div>)}
+          </fieldset>}
         <div className="issue-status-handoff">
           <label htmlFor={commentId}>인수인계 댓글 <span aria-hidden="true">(선택)</span></label>
           <CommentMentionInput id={commentId} className="field" rows={3} draft={comment} users={latest.users}
@@ -297,7 +409,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         <button className="btn btn-ghost" type="button" onClick={close} disabled={busy}>취소</button>
         {recovery || stale ? <button ref={recoverButton} className="btn btn-primary" type="button" disabled={busy} onClick={() => void recover()}>
           {recovery === 'verify' ? '저장 결과 다시 확인' : '최신 업무 불러오기'}
-        </button> : <button className="btn btn-primary" type="submit" disabled={busy || !selected || assigneeUnavailable}>상태 변경 적용</button>}
+        </button> : <button className="btn btn-primary" type="submit" disabled={!canSubmit}>상태 변경 적용</button>}
       </footer>
     </form>
   </dialog>;

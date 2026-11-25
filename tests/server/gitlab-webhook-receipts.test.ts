@@ -42,7 +42,9 @@ function delivery(changes: Partial<GitlabWebhookDelivery> = {}): GitlabWebhookDe
 
 test('matches a digest only within the exact scope and keeps the original successful receipt after restart', t => {
   const f = fixture(t);
-  const accepted = delivery();
+  const accepted = delivery({ stateAutomation: { result: 'evaluated', trigger: 'pipeline.failed', occurredAt: '2024-06-05T06:07:08.000Z',
+    candidateTickets: 3, outcomes: { changed: 0, no_op: 0, blocked: 0, ignored: 2 },
+    heldEvent: { disposition: 'stale', reason: '최신 파이프라인 결과를 유지했습니다.' } } });
   const envelope = { ...accepted, headers: { 'webhook-id': 'internal-message-id', 'x-gitlab-token': 'private-header-value' } };
   f.store.transaction(() => f.receipts.remember(scope, id, envelope));
   f.store.transaction(() => f.receipts.remember(scope, id, delivery({ duplicate: true, linked: 0, automationRuns: 0 })));

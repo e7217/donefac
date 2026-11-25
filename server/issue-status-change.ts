@@ -1,9 +1,9 @@
-import type { Comment, Issue, IssueStatusChangeReceipt, IssueStatusChangeRequest, IssueStatusChangeResult } from '../shared/types.js';
+import type { Comment, Issue, IssueStatusChangeReceipt, IssueStatusChangeRequest, IssueStatusChangeResult, ProjectIssueSchema } from '../shared/types.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store } from './store.js';
 import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
-type StatusChangeReason = 'request_reused' | 'receipt_unavailable' | 'workspace_changed';
+type StatusChangeReason = 'request_reused' | 'receipt_unavailable' | 'workspace_changed' | 'schema_changed';
 
 export class IssueStatusChangeError extends Error {
   constructor(public status: number, message: string, reason?: StatusChangeReason) {
@@ -16,14 +16,17 @@ export class IssueStatusChangeError extends Error {
 
 type StoredReceipt = Omit<IssueStatusChangeReceipt, 'requestId'> & { actorId: string; fingerprint: string };
 type CommentDraft = Pick<Comment, 'body' | 'mentions'>;
-type TransitionInput = Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion'>;
+type TransitionInput = Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion' | 'description'> & {
+  customFields?: Record<string, unknown>;
+};
 type StatusChangeHooks = {
   parseComment: (body: unknown, mentions: unknown) => CommentDraft;
   transition: (before: Issue, input: TransitionInput) => Issue;
   saveComment: (issue: Issue, draft: CommentDraft) => Comment;
 };
 
-const statusChangeFields = new Set(['requestId', 'expectedVersion', 'expectedWorkflowVersion', 'restoreGeneration', 'status', 'assigneeId', 'comment']);
+const statusChangeFields = new Set(['requestId', 'expectedVersion', 'expectedWorkflowVersion', 'restoreGeneration', 'status', 'assigneeId',
+  'description', 'customFields', 'expectedIssueSchemaVersion', 'comment']);
 const receiptLifetimeMs = 7 * 24 * 60 * 60 * 1000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -42,7 +45,8 @@ function parseStatusChange(value: unknown) {
   if (!isRecord(value) || Object.keys(value).some(key => !statusChangeFields.has(key))) {
     throw new IssueStatusChangeError(400, '업무 상태 변경 요청을 확인해 주세요.');
   }
-  const { requestId, expectedVersion, expectedWorkflowVersion, restoreGeneration, status, assigneeId, comment } = value;
+  const { requestId, expectedVersion, expectedWorkflowVersion, restoreGeneration, status, assigneeId, description,
+    customFields, expectedIssueSchemaVersion, comment } = value;
   if (typeof requestId !== 'string' || !creationRequestId.test(requestId) || !isVersion(expectedVersion) ||
       !isVersion(expectedWorkflowVersion) || !isIdentifier(restoreGeneration) || !isIdentifier(status) ||
       (assigneeId !== undefined && assigneeId !== null && !isIdentifier(assigneeId))) {
@@ -51,9 +55,17 @@ function parseStatusChange(value: unknown) {
   if (comment !== undefined && (!isRecord(comment) || Object.keys(comment).some(key => key !== 'body' && key !== 'mentions'))) {
     throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 댓글 요청을 확인해 주세요.');
   }
+  if (description !== undefined && (typeof description !== 'string' || description.length > 200000)) {
+    throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 설명을 확인해 주세요.');
+  }
+  if (customFields === undefined ? expectedIssueSchemaVersion !== undefined :
+    !isRecord(customFields) || Object.keys(customFields).length > 100 || !isVersion(expectedIssueSchemaVersion)) {
+    throw new IssueStatusChangeError(400, '사용자 정의 속성과 확인한 업무 양식 버전을 보내 주세요.');
+  }
   return {
-    requestId: requestId.toLowerCase(), restoreGeneration, comment,
-    transition: { expectedVersion, expectedWorkflowVersion, status, ...(assigneeId === undefined ? {} : { assigneeId }) },
+    requestId: requestId.toLowerCase(), restoreGeneration, comment, expectedIssueSchemaVersion,
+    transition: { expectedVersion, expectedWorkflowVersion, status, ...(assigneeId === undefined ? {} : { assigneeId }),
+      ...(description === undefined ? {} : { description }), ...(isRecord(customFields) ? { customFields } : {}) },
   };
 }
 
@@ -75,9 +87,9 @@ export class IssueStatusChangeService {
   }
 
   apply(issueId: string, actorId: string, value: unknown, hooks: StatusChangeHooks): IssueStatusChangeResult {
-    const { requestId, restoreGeneration, comment, transition } = parseStatusChange(value);
+    const { requestId, restoreGeneration, comment, transition, expectedIssueSchemaVersion } = parseStatusChange(value);
     const draft = comment === undefined ? null : hooks.parseComment(comment.body, comment.mentions);
-    const fingerprint = creationRequestFingerprint({ ...transition, restoreGeneration, comment });
+    const fingerprint = creationRequestFingerprint({ ...transition, restoreGeneration, expectedIssueSchemaVersion, comment });
     return this.store.transaction(() => {
       if (workspaceRestoreGeneration(this.store) !== restoreGeneration) {
         throw new IssueStatusChangeError(409, '워크스페이스가 복원되었습니다. 최신 업무를 불러와 주세요.', 'workspace_changed');
@@ -102,7 +114,12 @@ export class IssueStatusChangeService {
 
       const previous = this.store.get<Issue>('issues', issueId);
       if (!previous) throw new IssueStatusChangeError(404, '업무를 찾을 수 없습니다.');
-      const issue = hooks.transition(previous, transition);
+      if (expectedIssueSchemaVersion !== undefined && (this.store.get<ProjectIssueSchema>('issue_schemas', previous.projectId)?.version ?? 1) !== expectedIssueSchemaVersion) {
+        throw new IssueStatusChangeError(409, '업무 양식이 변경되었습니다. 최신 업무를 불러와 주세요.', 'schema_changed');
+      }
+      const issue = hooks.transition(previous, { ...transition,
+        ...(transition.customFields && { customFields: { ...previous.customFields, ...transition.customFields } }),
+      });
       const commentId = draft === null ? null : hooks.saveComment(issue, draft).id;
       const receipt: IssueStatusChangeReceipt = {
         requestId, issueId, projectId: issue.projectId, appliedVersion: issue.version,

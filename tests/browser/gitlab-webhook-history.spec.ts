@@ -76,6 +76,7 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
   const privatePayload = 'synthetic-private-webhook-payload';
   const privateResponse = 'synthetic-private-webhook-response';
   const acceptedMessage = randomUUID();
+  const acceptedPipelineMessage = randomUUID();
   const proxyOnlyMessage = randomUUID();
   const eventUuid = randomUUID();
   const unrelatedMessage = randomUUID();
@@ -112,6 +113,8 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
       await finishLateRead.promise;
     }
     const payload = [
+      { id: 603, url: receiverUrl, trigger: 'pipeline_hooks', response_status: '200', created_at: attemptedAt,
+        request_headers: { 'webhook-id': acceptedPipelineMessage } },
       { id: 602, url: receiverUrl, trigger: 'push_hooks', response_status: '401', created_at: attemptedAt,
         execution_duration: 0.125, request_headers: { 'X-Gitlab-Token': privateHeader, 'Idempotency-Key': acceptedMessage }, request_data: { internal: privatePayload },
         response_headers: { 'X-Private': privateHeader }, response_body: privateResponse },
@@ -140,6 +143,14 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     }).then(response => readJson(response));
     await sendPush(acceptedMessage);
     const accepted = (await readJson<GitlabWebhookStatus>(await request.get(statusPath))).repositories[0].lastDelivery;
+    const finishedAt = new Date(Date.now() - 1_000).toISOString();
+    await readJson(await request.post(receiverPath, {
+      headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': acceptedPipelineMessage },
+      data: { object_kind: 'pipeline', project: { id: repositoryId, web_url: `${source}/team/history` },
+        object_attributes: { id: 813, status: 'failed', ref: 'feature/no-ticket-key', sha: 'c'.repeat(40), finished_at: finishedAt } },
+    }));
+    const pipelineReceipt = (await readJson<GitlabWebhookStatus>(await request.get(statusPath))).repositories[0].lastDelivery;
+    expect(pipelineReceipt?.stateAutomation).toMatchObject({ result: 'evaluated', trigger: 'pipeline.failed', occurredAt: finishedAt, candidateTickets: 0 });
     await sendPush(unrelatedMessage);
     const receiptsBefore = await readJson<GitlabWebhookStatus>(await request.get(statusPath));
     const latest = receiptsBefore.repositories.find(item => item.repositoryId === repositoryId)?.lastDelivery;
@@ -190,6 +201,8 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     expect(calls.map(call => call.target.pathname)).toEqual([hookPath, hookPath, eventsPath]);
     expect(Object.fromEntries(calls[2].target.searchParams)).toEqual({ page: '1', per_page: '20' });
     const attempt = (id: number) => history.getByRole('listitem', { name: `GitLab 전송 #${id}`, exact: true });
+    await expect(attempt(603)).toContainText('상태 자동화 · 파이프라인 실패');
+    await expect(attempt(603)).toContainText('대상 티켓 0건 · 확인된 자동화 대상 티켓이 없습니다.');
     await expect(attempt(602)).toContainText('HTTP 401');
     await expect(attempt(602)).toContainText('같은 메시지 인증 수신 확인');
     await expect(attempt(601)).toContainText('HTTP 200');
@@ -198,6 +211,7 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     await expect(attempt(600)).toContainText('같은 메시지 대조 불가');
     await expect(attempt(598)).toContainText('같은 메시지 인증 수신 확인');
     expect(result.attempts.map(({ id, messageReceipt }) => [id, messageReceipt])).toEqual([
+      [603, { status: 'matched', delivery: pipelineReceipt }],
       [602, { status: 'matched', delivery: accepted }], [601, { status: 'unconfirmed' }],
       [600, { status: 'unavailable' }], [598, { status: 'matched', delivery: accepted }],
     ]);
@@ -206,7 +220,7 @@ test('360px에서 GitLab의 전송 실패와 Teamspace 인증 수신을 대조�
     await expect(history).toContainText('이 저장소의 마지막 인증 수신 · Push · Secret Token');
     await expect(history).not.toContainText('HTTP 503');
     for (const privateValue of [managerToken, webhookSecret, privateHeader, privatePayload, privateResponse, '?route=legacy',
-      acceptedMessage, proxyOnlyMessage, eventUuid, unrelatedMessage, 'messageDigests', 'request_headers']) {
+      acceptedMessage, acceptedPipelineMessage, proxyOnlyMessage, eventUuid, unrelatedMessage, 'messageDigests', 'request_headers']) {
       expect(JSON.stringify(result)).not.toContain(privateValue);
       await expect(history).not.toContainText(privateValue);
     }

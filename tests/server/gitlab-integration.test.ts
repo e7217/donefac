@@ -78,14 +78,20 @@ test('verified MR reads fence only the exact lifecycle event while a matching fi
     object_attributes: { id, iid, target_project_id: 42, title: 'NEO-1 webhook', source_branch: 'feature/NEO-1',
       url: `${repositoryUrl}/-/merge_requests/${iid}`, state: 'closed', action: 'close', updated_at: at(3000), ...values },
   }));
+  const observedState = () => f.service.webhookStatus().repositories[0].lastDelivery?.stateAutomation;
 
   // Action and revision are separate clocks. Neither an old action nor an old snapshot can replace the read.
   assert.equal(deliver(701, 7, { actioned_at: at(1000), updated_at: at(4000) }).linked, 0);
   assert.equal(f.events.at(-1)?.disposition, 'stale');
+  assert.deepEqual(observedState(), { result: 'evaluated', trigger: 'merge_request.closed', occurredAt: at(1000), candidateTickets: 1,
+    outcomes: { changed: 0, no_op: 0, blocked: 0, ignored: 0 }, heldEvent: { disposition: 'stale', reason: f.events.at(-1)!.reason } });
   assert.equal(deliver(701, 7, { actioned_at: at(4000), updated_at: at(1000) }).linked, 0);
   assert.equal(f.events.at(-1)?.disposition, 'stale');
   assert.equal(deliver(701, 7, {}).linked, 0);
   assert.equal(f.events.at(-1)?.disposition, 'ambiguous');
+  const ambiguity = observedState();
+  assert.ok(ambiguity?.result === 'evaluated');
+  assert.equal(ambiguity.heldEvent?.disposition, 'ambiguous');
   assert.equal(deliver(701, 99, { updated_at: at(9000) }).linked, 0);
   assert.equal(f.events.at(-1)?.disposition, 'unverified');
   assert.equal(deliver(701, 7, { project_id: 43, updated_at: at(9000) }).linked, 0);
@@ -705,13 +711,16 @@ test('GitLab webhook receipts persist only accepted delivery summaries for each 
   const signedDelivery = signedStatus.repositories[1].lastDelivery;
   assert.ok(signedDelivery);
   assert.deepEqual(signedDelivery, { event: 'merge_request', authentication: 'signing-token', receivedAt: signedDelivery.receivedAt,
-    duplicate: false, linked: 1, automationRuns: 0 });
+    duplicate: false, linked: 1, automationRuns: 0,
+    stateAutomation: { result: 'evaluated', trigger: 'merge_request.merged', occurredAt: body.object_attributes.updated_at, candidateTickets: 1,
+      outcomes: { changed: 0, no_op: 0, blocked: 0, ignored: 0 } } });
   assert.deepEqual(signedStatus.repositories[1].lastAcceptedByEvent, { merge_request: signedDelivery });
   assert.deepEqual(signedStatus.repositories[0].lastDelivery, delivered);
   assert.equal(f.service.webhook(request(body, signed, raw)).duplicate, true);
   const replay = f.service.webhookStatus().repositories[1].lastDelivery;
   assert.ok(replay);
-  assert.deepEqual(replay, { ...signedDelivery, receivedAt: replay.receivedAt, duplicate: true, linked: 0 });
+  assert.deepEqual(replay, { event: 'merge_request', authentication: 'signing-token', receivedAt: replay.receivedAt,
+    duplicate: true, linked: 0, automationRuns: 0 });
   assert.deepEqual(f.service.webhookStatus().repositories[1].lastAcceptedByEvent, { merge_request: signedDelivery });
   assert.equal(f.events.length, 1);
 
@@ -792,8 +801,10 @@ test('legacy GitLab receipt rows seed only the known accepted event through a ne
 
   const original = request(mr());
   assert.equal(f.service.webhook(original).linked, 1);
-  const legacyMerge = repo(42).lastDelivery;
-  assert.ok(legacyMerge);
+  const latest = repo(42).lastDelivery;
+  assert.ok(latest);
+  const legacyMerge = { ...latest };
+  delete legacyMerge.stateAutomation;
   f.store.put(table, { id: '42', delivery: legacyMerge });
   const legacyPush: GitlabWebhookDelivery = { ...legacyMerge, event: 'push', linked: 0 };
   f.store.put(table, { id: '77', delivery: legacyPush });

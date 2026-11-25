@@ -36,7 +36,7 @@ test('schedule sheet roundtrips saved dates and sorted inbound dependencies for 
   const links = [dependency(quoted, successor, 'SF', 0), dependency(hidden, successor, 'FF', -2), dependency(unscheduled, hidden, 'SS', 3)];
   const selected = [successor, unscheduled];
   const exported = sheetText(buildGanttScheduleSheet(selected, projects, links));
-  assert.equal(exported, [
+  assert.equal(exported.split('\r\n').map(line => line.split('\t').slice(0, 7).join('\t')).join('\r\n'), [
     '\uFEFF업무 키\t시작일\t종료일\t목표 마감일\t선행 업무\t연결 유형\t근무일 간격',
     'TEAM-14\t2026-11-23\t\t2026-11-30\tTEAM-2\tFF\t-2',
     'TEAM-14\t\t\t\t"TEAM-10""old"\tSF\t0',
@@ -44,11 +44,18 @@ test('schedule sheet roundtrips saved dates and sorted inbound dependencies for 
     '',
   ].join('\r\n'));
   assert.equal(sheetText(buildGanttScheduleSheet(selected, projects.toReversed(), links.toReversed())), exported);
+  assert.match(exported.split('\r\n')[0], /\t내보낸 기준$/u);
   assert.deepEqual(parseSchedulePaste(exported), {
     rows: [
-      { line: 2, key: 'TEAM-14', startDate: '2026-11-23', endDate: undefined, dueDate: '2026-11-30', dependency: { predecessorKey: 'TEAM-2', type: 'FF', lagDays: -2 } },
-      { line: 3, key: 'TEAM-14', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'TEAM-10"OLD', type: 'SF', lagDays: 0 } },
-      { line: 4, key: 'TEAM-1', startDate: undefined, endDate: undefined },
+      { line: 2, key: 'TEAM-14', startDate: '2026-11-23', endDate: undefined, dueDate: '2026-11-30',
+        dependency: { predecessorKey: 'TEAM-2', type: 'FF', lagDays: -2 },
+        baseline: { issueId: successor.id, startDate: '2026-11-23', endDate: null, dueDate: '2026-11-30',
+          dependency: { id: links[1].id, predecessorId: hidden.id, predecessorKey: hidden.key, type: 'FF', lagDays: -2 } } },
+      { line: 3, key: 'TEAM-14', startDate: undefined, endDate: undefined, dependency: { predecessorKey: 'TEAM-10"OLD', type: 'SF', lagDays: 0 },
+        baseline: { issueId: successor.id, startDate: '2026-11-23', endDate: null, dueDate: '2026-11-30',
+          dependency: { id: links[0].id, predecessorId: quoted.id, predecessorKey: 'TEAM-10"OLD', type: 'SF', lagDays: 0 } } },
+      { line: 4, key: 'TEAM-1', startDate: undefined, endDate: undefined,
+        baseline: { issueId: unscheduled.id, startDate: null, endDate: null, dueDate: null, dependency: null } },
     ],
     errors: [],
   });
@@ -91,9 +98,13 @@ test('team schedule sheet roundtrips several projects and filter-hidden predeces
   assert.deepEqual(parseSchedulePaste(exported), {
     rows: [
       { line: 2, key: 'OPS-1', startDate: '2026-11-24', endDate: undefined, dueDate: '2026-11-30',
-        dependency: { predecessorKey: 'OPS-8', type: 'SS', lagDays: 2 } },
+        dependency: { predecessorKey: 'OPS-8', type: 'SS', lagDays: 2 },
+        baseline: { issueId: second.id, startDate: '2026-11-24', endDate: null, dueDate: '2026-11-30',
+          dependency: { id: links[1].id, predecessorId: secondPredecessor.id, predecessorKey: secondPredecessor.key, type: 'SS', lagDays: 2 } } },
       { line: 3, key: 'TEAM-1', startDate: undefined, endDate: '2026-11-23',
-        dependency: { predecessorKey: 'TEAM-8', type: 'FF', lagDays: -1 } },
+        dependency: { predecessorKey: 'TEAM-8', type: 'FF', lagDays: -1 },
+        baseline: { issueId: first.id, startDate: null, endDate: '2026-11-23', dueDate: null,
+          dependency: { id: links[0].id, predecessorId: firstPredecessor.id, predecessorKey: firstPredecessor.key, type: 'FF', lagDays: -1 } } },
     ],
     errors: [],
   });

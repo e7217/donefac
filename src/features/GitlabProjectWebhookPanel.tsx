@@ -5,7 +5,7 @@ import { Copy, Link2, Search } from 'lucide-react';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookReview } from '../../shared/gitlab-project-webhooks';
 import type { GitlabSettings } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
-import { gitlabWebhookAuthenticationLabels, gitlabWebhookEventLabels } from './GitlabWebhookStatusPanel';
+import { GitlabWebhookAutomationResult, gitlabWebhookAuthenticationLabels, gitlabWebhookEventLabels } from './GitlabWebhookStatusPanel';
 import './gitlab-project-webhook.css';
 
 type Action = 'review' | 'register';
@@ -104,6 +104,7 @@ function WebhookHistory({ value }: { value: GitlabProjectWebhookHistory }) {
                 </time>
               </small>}
             </p>
+            {messageReceipt.status === 'matched' && <GitlabWebhookAutomationResult delivery={messageReceipt.delivery} />}
           </li>;
         })}
       </ol>

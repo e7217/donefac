@@ -379,18 +379,18 @@ async function verifySignedGitlabWebhooks(session, anonymous, origin) {
       before: '0'.repeat(40), after: sha, checkout_sha: sha, total_commits_count: 1,
       commits: [{ id: sha, title: 'NEO-1 HTTPS 서명 커밋', timestamp: happenedAt, url: commitUrl }],
     } },
-    { event: 'merge_request', name: 'Merge Request Hook', linked: 1, payload: {
+    { event: 'merge_request', name: 'Merge Request Hook', linked: 1, trigger: 'merge_request.opened', payload: {
       object_kind: 'merge_request', project, object_attributes: {
         id: 731, iid: 31, source_branch: branch, target_project_id: project.id, title: 'NEO-1 HTTPS 서명 MR',
         sha, state: 'opened', action: 'open', updated_at: happenedAt, url: mrUrl,
       },
     } },
-    { event: 'pipeline', name: 'Pipeline Hook', linked: 1, payload: {
+    { event: 'pipeline', name: 'Pipeline Hook', linked: 1, trigger: 'pipeline.succeeded', payload: {
       object_kind: 'pipeline', project, object_attributes: {
         id: 701, ref: branch, sha, status: 'success', finished_at: happenedAt, url: pipelineUrl,
       },
     } },
-    { event: 'deployment', name: 'Deployment Hook', linked: 0, deploymentUpdated: true, payload: {
+    { event: 'deployment', name: 'Deployment Hook', linked: 0, deploymentUpdated: true, trigger: 'deployment.succeeded', payload: {
       object_kind: 'deployment', project, deployment_id: 901, status: 'success', status_changed_at: happenedAt,
       environment: 'staging', environment_tier: 'staging', commit_url: commitUrl, short_sha: sha.slice(0, 8),
     } },
@@ -423,11 +423,13 @@ async function verifySignedGitlabWebhooks(session, anonymous, origin) {
   const [after] = (await readStatus()).repositories;
   assert.equal(after.repositoryId, project.id);
   assert.deepEqual(Object.keys(after.lastAcceptedByEvent).sort(), events.map(({ event }) => event).sort());
-  for (const { event, linked, deploymentUpdated } of events) {
+  for (const { event, linked, deploymentUpdated, trigger } of events) {
     const accepted = after.lastAcceptedByEvent[event];
     assert.ok(Number.isFinite(Date.parse(accepted.receivedAt)));
     assert.deepEqual(accepted, { event, authentication: 'signing-token', receivedAt: accepted.receivedAt,
-      duplicate: false, linked, automationRuns: 0, ...(deploymentUpdated ? { deploymentUpdated: true } : {}) });
+      duplicate: false, linked, automationRuns: 0, ...(deploymentUpdated ? { deploymentUpdated: true } : {}),
+      ...(trigger ? { stateAutomation: { result: 'evaluated', trigger, occurredAt: happenedAt, candidateTickets: 1,
+        outcomes: { changed: 0, no_op: 0, blocked: 0, ignored: 0 } } } : {}) });
   }
   assert.deepEqual(after.lastDelivery, after.lastAcceptedByEvent.deployment);
 

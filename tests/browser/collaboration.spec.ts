@@ -670,6 +670,45 @@ test('같은 작업자의 두 탭을 닫고 다시 열면 각각의 미전송 �
   } finally { await context.close(); }
 });
 
+test('문서 복구 뒤 변경을 모두 저장한 온라인·오프라인 작업자는 최신 문서에 자동으로 연결된다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 360, height: 820 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [a, b] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(a, fixture.document), open(b, fixture.document)]);
+    await Promise.all([synced(a), synced(b)]);
+    const titleDraft = '복구 후 이어서 저장할 제목 초안';
+    await b.getByRole('textbox', { name: '문서 제목', exact: true }).fill(titleDraft);
+    await a.locator('.docs-live-prose').press('Control+End');
+    await a.keyboard.insertText(' 복구 전에 팀이 저장한 문장');
+    await synced(a);
+    await expect(b.locator('.docs-live-prose')).toContainText('복구 전에 팀이 저장한 문장');
+    await contexts[1].setOffline(true);
+    await expect(b.locator('.docs-collaboration-state')).toHaveText('연결 끊김');
+
+    const current = await canonical(fixture);
+    const path = `/api/documents/${fixture.document.id}`;
+    const revisions = await (await fixture.requests.get(`${path}/revisions`)).json() as { id: string; version: number }[];
+    const original = revisions.find(revision => revision.version === 1);
+    expect(original).toBeDefined();
+    expect((await fixture.requests.post(`${path}/restore`, { data: { revisionId: original!.id, expectedVersion: current.version } })).status()).toBe(200);
+    await expect(a.locator('.docs-live-prose')).toHaveText(fixture.initialText);
+    await synced(a);
+    await expect(a.locator('.docs-collaboration-recovery')).toHaveCount(0);
+    await contexts[1].setOffline(false);
+    await expect(b.locator('.docs-live-prose')).toHaveText(fixture.initialText);
+    await synced(b);
+    await expect(b.locator('.docs-collaboration-recovery')).toHaveCount(0);
+    await expect(b.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(titleDraft);
+    await b.locator('.docs-live-prose').press('Control+End');
+    await b.keyboard.insertText(' 다시 연결한 뒤 입력');
+    await synced(b);
+    await expect(a.locator('.docs-live-prose')).toHaveText(`${fixture.initialText} 다시 연결한 뒤 입력`);
+    expect((await canonical(fixture)).plainText).toBe(`${fixture.initialText} 다시 연결한 뒤 입력`);
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
 test('문서 복구 뒤의 오래된 오프라인 편집은 자동 적용하지 않고 사본으로 복구한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
   await enable(fixture);
   const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 1440, height: 1000 } })));

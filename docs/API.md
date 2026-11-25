@@ -393,7 +393,9 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 ## 상태 변경과 인수인계 댓글
 
-브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,comment?:{body,mentions?}}`를 보낸다. `requestId`는 저장을 시도할 때 발급한 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`를 보내면 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 이력, 알림, 선택한 댓글을 함께 저장한다.
+브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,description?,customFields?,expectedIssueSchemaVersion?,comment?:{body,mentions?}}`를 보낸다. `requestId`는 저장을 시도할 때 발급한 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`를 보내면 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 이력, 알림, 선택한 댓글을 함께 저장한다.
+
+`description`에는 현재 설명 형식으로 작성한 본문을 보낸다. `customFields`에는 저장할 사용자 정의 필드 ID와 값만 보내며 `expectedIssueSchemaVersion`을 함께 지정한다. 최신 양식 버전과 다르면 `409`와 `schema_changed`를 반환한다. 현재 양식과 일반 업무 저장 규칙으로 값을 검증하고 기존 필드에 합친다. 설명과 필드 입력은 대상을 변경할 때와 재시도할 때 같은 요청의 일부로 확인한다.
 
 응답은 `{issue,receipt,duplicate}`다. `receipt`에는 `requestId`, `issueId`, `projectId`, `appliedVersion`, `status`, `assigneeId`, `commentId`가 들어간다. 댓글을 생략한 요청의 `commentId`는 `null`이다. 응답이 끊기면 정확히 같은 ID와 값을 다시 보낸다. 같은 작업자·업무·입력으로 7일 안에 다시 요청하면 현재 `issue`, 당시의 `receipt`, `duplicate: true`를 돌려준다. 이미 쓴 ID의 용도가 다르면 `409`와 `request_reused`를 반환한다. 다른 프로젝트로 이동했거나 티켓이 없어지면 `receipt_unavailable`, 자체 백업 가져오기 후 이전 세대의 요청은 `workspace_changed`를 반환한다.
 
@@ -775,6 +777,8 @@ MR 생명주기 이벤트는 정확한 MR ID와 저장소 내 번호를 확인�
 GitLab의 Secret Token 방식은 `X-Gitlab-Token`으로 인증한다. Signing Token 방식은 `whsec_` 뒤의32바이트 Base64 키와 Standard Webhooks 헤더를 사용한다. 서명 헤더가 있으면 원문 JSON 바이트의 HMAC-SHA256와 최근5분 이내 서명 시각을 검증한다. 잘못된 서명을 Secret Token으로 우회하지 않는다. GitLab 설정 방법과 이벤트 필드는 [공식 웹훅 문서](https://docs.gitlab.com/user/project/integrations/webhooks/), [이벤트 문서](https://docs.gitlab.com/user/project/integrations/webhook_events/)를 참고한다.
 
 `webhook-status`는 `settingsVersion`과 `repositories`를 반환한다. 각 저장소에 `repositoryId`와 `lastDelivery`가 들어간다. `lastDelivery`는 인증된 수신이 없으면 `null`이다. 수신이 있으면 `event`, `authentication`, 서버의 `receivedAt`, `duplicate`, 업무 연결 반영 수 `linked`, 자동화 기록 수 `automationRuns`를 포함한다. 자동화 기록 수에는 차단이나 무시 결과도 포함될 수 있다. 중복을 제외한 수신이 기록된 경우 `lastAcceptedByEvent`에 `push`, `merge_request`, `pipeline`, `deployment` 가운데 해당하는 유형별 최근 요약을 반환한다. 같은 유형의 재전송은 `lastDelivery`에 기록되고 유형별 요약은 유지된다. 이전 물리 사본에서는 확인 가능한 마지막 수신 한 건으로 시작한다.
+
+새 MR·파이프라인·배포 수신의 `stateAutomation`에는 규칙 평가 결과를 요약한다. `evaluated`는 `trigger`, 원본 발생 시각 `occurredAt`, 대상 티켓 수 `candidateTickets`, 변경·이미 목표 상태·차단·보류 집계 `outcomes`를 담는다. 발생 순서나 근거를 확인하지 못하면 `heldEvent`에 검증 상태와 사유를 담는다. 성공 배포를 이미 처리했거나 최신 성공 여부가 불분명하면 `held`, 이번 수신에서 상태 규칙 평가를 시작하지 않았으면 `not_evaluated`다. 기존 수신과 같은 요청의 재전송에서는 `stateAutomation`이 생략될 수 있다. 같은 메시지가 확인된 전송 이력의 `delivery`에서도 요약을 읽을 수 있다.
 
 원문, 헤더, 비밀값은 수신 요약에 저장하지 않는다. 주소나 웹훅 인증값을 바꾸면 요약을 초기화하고, 저장소 제거와 Jira 매핑 변경은 해당 저장소에만 적용한다. 읽기 토큰 변경은 수신 요약을 유지한다. 별도 물리 복원은 요약을 보존하며 자체 JSON 가져오기는 초기화한다.
 
@@ -1382,6 +1386,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 브라우저의 `POST /api/schedule/paste-preview`에 `{projectId, text, rescheduleSuccessors?, includeTeamBlockers?}`를 보낸다. 한 프로젝트로 좁히려면 `projectId`에 해당 ID를 보내고 전체 프로젝트에서 찾으려면 명시적으로 `null`을 보낸다. 두 업무 키 열은 대소문자를 구분하지 않는다. 조회 범위에서 현재 키가 하나면 우선 사용한다. 현재 키가 없으면 확인된 이전 키와 일치하는 업무가 하나일 때 적용 대상으로 삼는다. 현재 키가 중복되거나 이전 키로 여러 업무가 일치하면 오류를 반환한다. 선후행 연결의 양쪽 업무는 같은 프로젝트에 있어야 한다.
 
 `text`는 헤더가 있는 TSV 또는 CSV다. `key`(`업무 키`)와 `startDate`(`시작일`), `endDate`(`종료일`), `dueDate`(`목표 마감일`), `predecessor`(`선행 업무`) 중 한 열 이상이 필요하다. 빈 날짜 값은 유지하고 `-`는 지운다. 선행 업무 키가 있으면 `dependency type`(`연결 유형`)과 `lag days`(`근무일 간격`)도 사용할 수 있다. 유형 `-`는 지정한 관계를 해제한다. 빈 유형과 간격은 기존 값을 사용하며 새 연결의 기본값은 `FS`·`0`이다. 다른 헤더가 명시된 열은 무시한다. 최대 500행, UTF-8 128KiB를 처리한다.
+
+간트에서 받은 TSV의 `내보낸 기준`(`exported baseline`)은 당시 업무와 선행 연결의 식별자·값을 담는다. 이 열을 함께 보내면 내보낸 값 그대로인 날짜·연결 유형·간격은 현재 값을 유지한다. 같은 칸의 현재 값과 입력이 둘 다 당시 값에서 다르게 바뀌면 `errors`에 세 값을 표시한다. 수정 요청의 연결이 해제 또는 교체되었거나 해제하려는 연결이 다른 작업자에 의해 바뀐 경우도 적용을 보류한다. 새 행이나 기존 형식에서 기준 값이 비어 있으면 일반 입력 규칙을 사용한다.
 
 같은 후행 업무 키를 서로 다른 선행 업무 행에 반복할 수 있다. 후행·선행 쌍마다 한 행을 쓰고, 선행 업무가 비어 있는 행은 후행 업무별 하나까지 허용한다. 날짜는 여러 행에 나눠 입력할 수 있다. 현재 키와 이전 키가 같은 업무를 가리켜도 중복과 날짜 충돌을 업무 ID로 검사한다. 시작일·종료일·목표 마감일을 합친 뒤 범위와 워크플로를 검사하므로 `changes`에는 업무당 날짜 변경이 최대 한 건 들어간다.
 

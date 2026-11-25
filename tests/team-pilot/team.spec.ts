@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { expect, request as apiRequest, test, type APIRequestContext, type BrowserContext, type Dialog, type Page } from '@playwright/test';
+import { expect, request as apiRequest, test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
 import type { Editor } from '@tiptap/core';
 import type { CollaborationClientMessage, CollaborationServerMessage, CollaborationSession } from '../../shared/collaboration';
 import { documentPlainText } from '../../shared/document-plain-text';
@@ -229,13 +229,6 @@ async function verifyMigratedReference(page: Page, fixture: Fixture) {
   };
 }
 
-async function openLatest(peer: Peer) {
-  const accept = (dialog: Dialog) => void dialog.accept();
-  peer.page.on('dialog', accept);
-  try { await peer.page.getByRole('button', { name: '최신 문서 열기', exact: true }).click({ timeout: SYNC_TIMEOUT }); }
-  finally { peer.page.off('dialog', accept); }
-}
-
 async function createGanttSuccessor(peer: Peer, origin: string, jiraKey: string, plan: ScheduledSuccessorPlan): Promise<Issue> {
   const { predecessor, calendarVersion, lagDays, startDate, endDate } = plan;
   const title = `${predecessor.key} 후속 일정`;
@@ -454,7 +447,9 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     expect(restored.document.version).toBe(current.version + 1);
     expect(restored.document.plainText).toBe(checkpoint.plainText);
     await delayed.context.setOffline(false);
-    await Promise.all(peers.map(peer => expect(peer.page.locator('.docs-collaboration-recovery')).toBeVisible({ timeout: SYNC_TIMEOUT })));
+    await matchesRendered(onlinePeers, restored.document, finalEpoch, fixture);
+    await Promise.all(onlinePeers.map(peer => expect(peer.page.locator('.docs-collaboration-recovery')).toHaveCount(0)));
+    await expect(delayed.page.locator('.docs-collaboration-recovery')).toBeVisible({ timeout: SYNC_TIMEOUT });
     await expect(editor(delayed.page)).toHaveAttribute('contenteditable', 'false');
     await expect(editor(delayed.page)).toContainText(staleMarker);
     const copyResponse = delayed.page.waitForResponse(response =>
@@ -466,9 +461,6 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     expect(copied.id).not.toBe(fixture.documentId);
     expect(copied.plainText).toBe(`${current.plainText} ${staleMarker}`);
     await expect(delayed.page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(copied.title, { timeout: SYNC_TIMEOUT });
-    for (let first = 0; first < onlinePeers.length; first += OPEN_BATCH_SIZE) {
-      await Promise.all(onlinePeers.slice(first, first + OPEN_BATCH_SIZE).map(openLatest));
-    }
     await delayed.page.goto(location, { waitUntil: 'domcontentloaded' });
     await matchesRendered(peers, restored.document, finalEpoch, fixture);
 

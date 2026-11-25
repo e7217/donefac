@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import type { ApiKeyCreated, Comment, Issue, IssueChangeHistoryPage, IssueStatusChangeRequest, IssueStatusChangeResult,
-  Project, ProjectWorkflow, TeamNotificationPage, WorkspaceSnapshot } from '../../shared/types.js';
+  Project, ProjectIssueSchema, ProjectWorkflow, TeamNotificationPage, WorkspaceSnapshot } from '../../shared/types.js';
 
 const writer = 'user-min';
 const assignee = 'user-seo';
@@ -129,6 +129,43 @@ test('a handoff saves status, assignee, an ordinary comment and notifications ex
   const expired = await f.call<TransitionError>(409, f.path(issue), 'POST', input);
   assert.equal(expired.details?.currentVersion, advanced.version);
   assert.deepEqual(await f.comments(issue), [comment]);
+});
+
+test('status handoff merges typed field input and guards the issue schema before committing its receipt', async t => {
+  const f = await fixture(t);
+  const schemaPath = `/projects/${f.project.id}/issue-schema`;
+  const baseline = await f.call<ProjectIssueSchema>(200, schemaPath);
+  const fields = [
+    { id: 'review_flag', name: '추가 확인 완료', kind: 'checkbox' },
+    { id: 'review_count', name: '남은 확인 횟수', kind: 'number' },
+    { id: 'review_reference', name: '참고 사항', kind: 'text' },
+  ].map(field => ({ ...field, description: '', required: false, archived: false, issueTypes: [], options: [] }));
+  const schema = await f.call<ProjectIssueSchema>(200, schemaPath, 'PATCH', { ...baseline, expectedVersion: baseline.version, fields });
+  const workflow = await f.call<ProjectWorkflow>(200, f.workflowPath);
+  await f.call(200, f.workflowPath, 'PATCH', { ...workflow, expectedVersion: workflow.version, transitions: workflow.transitions.map(edge =>
+    edge.from === 'todo' && edge.to === 'in_progress' ? { ...edge, requiredFields: ['description', 'custom:review_flag', 'custom:review_count'] } : edge) });
+  const issue = await f.createIssue('속성을 보완해 인수인계할 업무', { customFields: { review_reference: '기존 참고 값' } });
+  const input = await f.requestFor(issue, { assigneeId: assignee, description: '업무 설명 확정',
+    customFields: { review_flag: false, review_count: 0 }, expectedIssueSchemaVersion: schema.version });
+  await f.call(400, f.path(issue), 'POST', { ...input, expectedIssueSchemaVersion: undefined });
+  const stale = await f.call<TransitionError>(409, f.path(issue), 'POST', { ...input, expectedIssueSchemaVersion: schema.version - 1 });
+  assert.equal(stale.details?.reason, 'schema_changed');
+  await f.call(400, f.path(issue), 'POST', { ...input, customFields: { review_flag: 'false', review_count: 0 } });
+  assert.deepEqual(await f.live(issue), issue);
+  assert.deepEqual(await f.comments(issue), []);
+
+  const saved = await f.transition(issue, input);
+  assert.deepEqual(saved.issue.customFields, { review_flag: false, review_count: 0, review_reference: '기존 참고 값' });
+  assert.equal(saved.issue.description, input.description);
+  assert.equal(saved.issue.status, input.status);
+  assert.equal(saved.issue.assigneeId, assignee);
+  assert.equal(saved.issue.version, issue.version + 1);
+  assert.deepEqual((await f.comments(issue)).map(({ id }) => id), [saved.receipt.commentId]);
+  const changedIntent = await f.call<TransitionError>(409, f.path(issue), 'POST', { ...input, customFields: { ...input.customFields, review_count: 1 } });
+  assert.equal(changedIntent.details?.reason, 'request_reused');
+  await f.call(200, schemaPath, 'PATCH', { ...schema, expectedVersion: schema.version, fields: schema.fields.map(field => ({ ...field, name: `${field.name} 수정` })) });
+  assert.deepEqual(await f.transition(issue, input), { ...saved, duplicate: true });
+  assert.deepEqual((await f.comments(issue)).map(({ id }) => id), [saved.receipt.commentId]);
 });
 
 test('plain status changes identify the exact request when the same actor submits identical edits', async t => {

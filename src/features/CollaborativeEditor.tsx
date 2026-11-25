@@ -41,6 +41,14 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
   const [busy, setBusy] = useState(false);
   const editorRef = useRef<Editor | null>(null);
 
+  const restartSession = useCallback(() => {
+    const editor = editorRef.current;
+    if (editor && !editor.isDestroyed) editor.setEditable(false, false);
+    setClient(null); setView(null); setError(''); setCopyError('');
+    onEditor(null); onState(null);
+    setRestart(value => value + 1);
+  }, [onEditor, onState]);
+
   useEffect(() => {
     let active = true;
     let owned: CollaborationClient | null = null;
@@ -49,20 +57,21 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
       const current = await api<CollaborationSession>(`/documents/${session.document.id}/collaboration`);
       if (!active) return;
       if (!current.enabled && !hasPendingCollaboration(actorId, current.document.id)) { onSessionDisabled(current); return; }
-      owned = new CollaborationClient(current, actorId, state => { if (active) { setView(state); onState(state); } }, onDocument);
+      owned = new CollaborationClient(current, actorId, state => { if (active) { setView(state); onState(state); } }, onDocument, {
+        isComposing: () => {
+          const editor = editorRef.current;
+          return Boolean(editor && !editor.isDestroyed && editor.view.composing);
+        },
+        restart: () => { if (active) restartSession(); },
+      });
       setClient(owned);
       owned.start();
     };
     void connect().catch(cause => { if (active) setError(cause instanceof Error ? cause.message : '공동 편집에 연결하지 못했습니다.'); });
     return () => { active = false; owned?.destroy(); onEditor(null); onState(null); };
-  }, [session.document.id, session.epoch, actorId, restart, onDocument, onEditor, onState, onSessionDisabled]);
+  }, [session.document.id, session.epoch, actorId, restart, onDocument, onEditor, onState, onSessionDisabled, restartSession]);
 
   const receiveEditor = useCallback((editor: Editor | null) => { editorRef.current = editor; onEditor(editor); }, [onEditor]);
-  function restartSession() {
-    setClient(null); setView(null); setError(''); setCopyError('');
-    onEditor(null); onState(null);
-    setRestart(value => value + 1);
-  }
 
   function downloadRecovery() {
     if (!client) return;
@@ -125,7 +134,7 @@ export function CollaborativeEditor(props: CollaborativeEditorProps) {
         <button onClick={discardRecovery} disabled={busy}><RotateCcw size={12} />{otherRecoveries > 0 ? '이 편집 버리기' : '최신 문서 열기'}</button>
       </div>
     </div>}
-    {client && view?.ready ? <LiveBinding {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
+    {client && view?.ready ? <LiveBinding key={view.epoch} {...props} client={client} connected={view.phase === 'connected'} readOnly={Boolean(recovery)} onEditor={receiveEditor} /> : <div className="docs-collaboration-loading">{error ? <><p>{error}</p><button className="btn" onClick={restartSession}>다시 연결</button></> : recovery ? <p>보관한 데이터 형식을 확인해야 합니다. 복구 데이터를 내려받아 보존해주세요.</p> : <><Loader2 size={20} className="docs-spin" /><p>서버의 문서를 불러오고 있어요.</p></>}</div>}
   </div>;
 }
 
