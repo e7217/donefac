@@ -10,7 +10,7 @@ async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, 
   return await response.json() as T;
 }
 
-test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확인으로 업무에 한 번만 연결한다', async ({ page, request }) => {
+test('360px 티켓에서 GitLab 브랜치 응답 유실을 확인하고 삭제 후 같은 이름으로 다시 만든다', async ({ page, request }) => {
   test.setTimeout(95_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const { projects: [project], users: [actor] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
@@ -29,12 +29,14 @@ test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확�
   let defaultHead = sha;
   const readToken = `synthetic-read-${randomUUID()}`;
   const writeToken = `synthetic-write-${randomUUID()}`;
+  const webhookSecret = `synthetic-push-${randomUUID()}`;
   const projectPath = `/lab/api/v4/projects/${repoId}`;
   const branchCollection = `${projectPath}/repository/branches`;
   const targetBranchPath = `${branchCollection}/${encodeURIComponent(branch)}`;
   const calls: { method?: string; path: string; credential: 'read' | 'write' | 'unknown'; input?: unknown }[] = [];
   let baseUrl = '';
   let remoteHead: string | null = null;
+  let disconnectAfterCreate = true;
   const mock = createServer(async (req, res) => {
     const { pathname: path } = new URL(req.url ?? '/', 'http://fixture.test');
     const token = req.headers['private-token'];
@@ -49,9 +51,10 @@ test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확�
       const input = JSON.parse(Buffer.concat(chunks).toString()) as { branch?: string; ref?: string };
       calls.push({ method: req.method, path, credential, input });
       if (credential !== 'write') return send({}, 403);
-      if (input.branch !== branch || input.ref !== sha || remoteHead !== null) return send({}, 400);
+      if (input.branch !== branch || input.ref !== (disconnectAfterCreate ? sha : defaultHead) || remoteHead !== null) return send({}, 400);
       remoteHead = input.ref;
-      res.destroy();
+      if (disconnectAfterCreate) res.destroy();
+      else send({ name: branch, commit: { id: remoteHead } }, 201);
       return;
     }
     calls.push({ method: req.method, path, credential });
@@ -68,7 +71,7 @@ test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확�
 
   try {
     const settings = await json<GitlabSettings>(await request.patch('/api/integrations/gitlab', {
-      headers, data: { expectedVersion: original.version, baseUrl, projectIds: [repoId], token: readToken },
+      headers, data: { expectedVersion: original.version, baseUrl, projectIds: [repoId], token: readToken, webhookSecret },
     }));
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
     const query = new URLSearchParams({ boardQuery: issue.title });
@@ -164,6 +167,36 @@ test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확�
     const snapshot = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
     expect(snapshot.issues.find(value => value.id === issue.id)).toMatchObject({ title: issue.title, status: issue.status });
     expect(snapshot.gitlabLinks.filter(link => link.issueId === issue.id)).toEqual([found.link]);
+
+    remoteHead = null;
+    disconnectAfterCreate = false;
+    const deleted = await json<{ linked: number }>(await request.post('/api/integrations/gitlab/webhook', {
+      headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'push', project_id: repoId, ref: `refs/heads/${branch}`, before: sha, after: '0'.repeat(40), commits: [],
+        project: { id: repoId, web_url: `${baseUrl}/${repositoryPath}`, path_with_namespace: repositoryPath } },
+    }));
+    expect(deleted.linked).toBe(1);
+    await opener.click();
+    await expect(form.getByRole('textbox', { name: '브랜치 이름', exact: true })).toHaveValue(branch);
+    const replacementResponse = waitForAction('preview');
+    await form.getByRole('button', { name: '브랜치 미리보기', exact: true }).click();
+    const replacement = await json<GitlabIssueBranchReview>(await replacementResponse);
+    expect(replacement).toMatchObject({ state: 'ready', target: { ...target, sourceSha: defaultHead } });
+    expect(calls.filter(call => call.method === 'POST')).toHaveLength(1);
+
+    await form.getByLabel('GitLab API 토큰', { exact: true }).fill(writeToken);
+    const recreateResponse = waitForAction('apply');
+    await form.getByRole('button', { name: 'GitLab 브랜치 만들기', exact: true }).click();
+    const recreated = await json<GitlabIssueBranchResult>(await recreateResponse, 201);
+    expect(recreated).toMatchObject({ state: 'created', link: { id: found.link?.id, state: 'active', sourceSha: defaultHead } });
+    expect(calls.filter(call => call.method === 'POST').map(call => call.input)).toEqual([
+      { branch, ref: sha }, { branch, ref: defaultHead },
+    ]);
+    await form.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(branchActivity.getByRole('link', { name: `${branch} GitLab에서 새 탭으로 열기`, exact: true }))
+      .toHaveAttribute('href', `${branchUrl}?ref_type=heads`);
+    await expect(issueTitle).toHaveValue(titleDraft);
+    await expect(comment).toHaveValue(commentDraft);
   } finally {
     try {
       const removed = await request.delete(`/api/issues/${issue.id}`, { headers });
@@ -172,7 +205,7 @@ test('360px 티켓에서 GitLab 브랜치 생성 응답을 잃어도 읽기 확�
         await request.delete(`/api/trash/${trashEntryId}`, { headers });
       }
       const settings = await json<GitlabSettings>(await request.get('/api/integrations/gitlab'));
-      await request.patch('/api/integrations/gitlab', { headers, data: { expectedVersion: settings.version, baseUrl: '', projectIds: [], token: '' } });
+      await request.patch('/api/integrations/gitlab', { headers, data: { expectedVersion: settings.version, baseUrl: '', projectIds: [], token: '', webhookSecret: '' } });
     } finally {
       mock.closeAllConnections();
       await new Promise<void>((resolve, reject) => mock.close(error => error ? reject(error) : resolve()));

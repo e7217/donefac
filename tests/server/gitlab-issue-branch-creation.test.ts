@@ -46,6 +46,7 @@ async function fixture(t: TestContext) {
   let baseUrl = '';
   let mode: Mode = 'normal';
   let afterWrite: (() => Promise<void>) | undefined;
+  let failReadOf: string | undefined;
   const remote = createServer(async (request, response) => {
     const method = request.method ?? '';
     const path = new URL(request.url ?? '/', 'http://fixture.test').pathname;
@@ -60,6 +61,10 @@ async function fixture(t: TestContext) {
     const branches = `${gitlabProjectPath}/repository/branches`;
     if (method === 'GET' && path.startsWith(`${branches}/`)) {
       const name = decodeURIComponent(path.slice(branches.length + 1));
+      if (name === failReadOf) {
+        failReadOf = undefined;
+        return reply({ message: 'Try again' }, 503);
+      }
       const sha = heads.get(name);
       return sha ? reply({ name, commit: { id: sha } }) : reply({ message: 'Branch not found' }, 404);
     }
@@ -104,6 +109,13 @@ async function fixture(t: TestContext) {
     return result;
   }
   const post = <T>(path: string, body: unknown, status = 200, actor = actorId) => call<T>(path, status, { method: 'POST', body, actor });
+  const push = (branch: string, before: string, after: string, eventId = randomUUID(), status = 200) =>
+    call<{ linked: number; duplicate: boolean }>('/integrations/gitlab/webhook', status, {
+      method: 'POST', headers: { 'X-Gitlab-Token': webhookSecret, 'webhook-id': eventId }, body: {
+        object_kind: 'push', project_id: repositoryId, ref: `refs/heads/${branch}`, before, after, commits: [],
+        project: { id: repositoryId, web_url: `${baseUrl}/${repositoryPath}`, path_with_namespace: repositoryPath },
+      },
+    });
   async function configure() {
     const settings = await call<GitlabSettings>('/integrations/gitlab');
     return call<GitlabSettings>('/integrations/gitlab', 200, { method: 'PATCH', body: {
@@ -120,8 +132,9 @@ async function fixture(t: TestContext) {
     return result;
   }
   return {
-    issue, settings, dataDir, path, call, post, selection, review, heads, remoteCalls, baseUrl,
+    issue, settings, dataDir, path, call, post, push, selection, review, heads, remoteCalls, baseUrl,
     setMode(value: Mode) { mode = value; },
+    failNextBranchRead(name: string) { failReadOf = name; },
     waitBeforeReply(gate: () => Promise<void>) { afterWrite = gate; },
     writes: () => remoteCalls.filter(call => call.method === 'POST'),
     async restart() { await stop(); service = await start(); },
@@ -195,6 +208,155 @@ test('ambiguous remote branch creation reconciles across restarts without anothe
   assert.equal(conflict.link, undefined);
   assert.equal(f.writes().length, 2);
   assert.deepEqual((await f.call<WorkspaceSnapshot>('/workspace')).gitlabLinks.filter(link => link.issueId === f.issue.id), [found.link]);
+});
+
+test('a branch deleted after merge can be recreated after a fresh review and reconciled without repeating the write', async t => {
+  const f = await fixture(t);
+  const branch = `feature/${f.issue.key}`;
+  const first = await f.review(branch);
+  const apply = (previewId: string, status = 200) =>
+    f.post<GitlabIssueBranchResult>(`${f.path}/apply`, { previewId, writeToken }, status);
+  const created = await apply(first.previewId, 201);
+  assert.ok(created.link);
+
+  assert.equal(f.heads.delete(branch), true);
+  assert.equal((await f.push(branch, sourceSha, '0'.repeat(40))).linked, 1);
+  assert.equal((await apply(first.previewId)).state, 'deleted');
+  const reconcile = () => f.post<GitlabIssueBranchResult>(`${f.path}/reconcile`, f.selection(branch));
+  const previousCalls = f.remoteCalls.length;
+  assert.equal((await reconcile()).state, 'deleted');
+  const deletionReads = f.remoteCalls.slice(previousCalls);
+  assert.ok(deletionReads.every(call => call.method === 'GET'));
+  assert.ok(deletionReads.some(call => call.path === `${gitlabProjectPath}/repository/branches/${encodeURIComponent(branch)}`));
+
+  f.heads.set('main', laterSha);
+  const replacement = await f.review(branch);
+  assert.notEqual(replacement.previewId, first.previewId);
+  assert.equal(replacement.target.sourceSha, laterSha);
+  assert.equal(f.writes().length, 1);
+
+  f.heads.set(branch, startingSha);
+  const race = await apply(replacement.previewId);
+  assert.equal(race.state, 'existing');
+  assert.equal(race.observedSha, startingSha);
+  assert.equal(f.writes().length, 1);
+  assert.equal(f.heads.delete(branch), true);
+
+  f.setMode('create-then-disconnect');
+  assert.equal((await apply(replacement.previewId)).state, 'pending');
+  await apply(first.previewId, 409);
+  await f.restart();
+  assert.equal((await apply(replacement.previewId)).state, 'pending');
+  const found = await reconcile();
+  assert.equal(found.state, 'found');
+  assert.deepEqual([found.link?.id, found.link?.state, found.link?.sourceSha], [created.link.id, 'active', laterSha]);
+  assert.equal((await apply(replacement.previewId)).state, 'found');
+  assert.deepEqual(f.writes().map(call => call.body), [{ branch, ref: sourceSha }, { branch, ref: laterSha }]);
+
+  f.heads.set(branch, startingSha);
+  assert.equal((await f.push(branch, laterSha, startingSha)).linked, 1);
+  const workspace = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.deepEqual(workspace.gitlabLinks.filter(link => link.id === created.link!.id).map(link => [link.state, link.sourceSha]), [['active', startingSha]]);
+});
+
+test('recreating a branch missing without a webhook requires fresh review and ignores a late deletion at the reused SHA', async t => {
+  const f = await fixture(t);
+  const branch = `feature/${f.issue.key}-same-sha`;
+  const zeroSha = '0'.repeat(40);
+  const apply = (previewId: string, status = 200) =>
+    f.post<GitlabIssueBranchResult>(`${f.path}/apply`, { previewId, writeToken }, status);
+  const current = async () => (await f.call<WorkspaceSnapshot>('/workspace')).gitlabLinks.find(link => link.issueId === f.issue.id);
+  const first = await f.review(branch);
+  const created = await apply(first.previewId, 201);
+  assert.ok(created.link);
+
+  f.heads.delete(branch);
+  const replacement = await f.review(branch);
+  assert.equal(replacement.target.sourceSha, sourceSha);
+  assert.deepEqual([(await current())?.state, f.writes().length], ['active', 1]);
+
+  const recreated = await apply(replacement.previewId, 201);
+  assert.deepEqual([recreated.link?.id, recreated.link?.state, recreated.link?.sourceSha], [created.link.id, 'active', sourceSha]);
+  assert.equal(f.writes().length, 2);
+  await f.restart();
+
+  const lateDeletion = randomUUID();
+  assert.equal((await f.push(branch, sourceSha, zeroSha, lateDeletion)).linked, 0);
+  const beforeDuplicate = f.remoteCalls.length;
+  assert.equal((await f.push(branch, sourceSha, zeroSha, lateDeletion)).duplicate, true);
+  assert.equal(f.remoteCalls.length, beforeDuplicate);
+  assert.equal((await current())?.state, 'active');
+
+  f.heads.set(branch, laterSha);
+  assert.equal((await f.push(branch, sourceSha, startingSha)).linked, 1);
+  assert.equal((await f.push(branch, startingSha, laterSha)).linked, 1);
+  assert.equal((await current())?.sourceSha, laterSha);
+
+  f.heads.delete(branch);
+  f.heads.delete('main');
+  const missingRead = randomUUID();
+  await f.push(branch, laterSha, zeroSha, missingRead, 503);
+  assert.equal((await current())?.state, 'active');
+  f.heads.set('main', sourceSha);
+  assert.equal((await f.push(branch, laterSha, zeroSha, missingRead)).linked, 1);
+  assert.deepEqual([(await current())?.state, (await current())?.sourceSha], ['deleted', laterSha]);
+
+  const outdatedReview = await f.review(branch);
+  f.heads.set(branch, laterSha);
+  assert.equal((await f.push(branch, zeroSha, laterSha)).linked, 1);
+  await apply(outdatedReview.previewId, 409);
+  assert.equal(f.writes().length, 2);
+});
+
+test('the confirmed replacement preserves a newer branch head observed before GitLab returns 201', async t => {
+  const f = await fixture(t);
+  const branch = `feature/${f.issue.key}-already-pushed`;
+  const zeroSha = '0'.repeat(40);
+  const apply = (previewId: string) => f.post<GitlabIssueBranchResult>(`${f.path}/apply`, { previewId, writeToken }, 201);
+  const first = await apply((await f.review(branch)).previewId);
+  f.heads.delete(branch);
+  assert.equal((await f.push(branch, sourceSha, zeroSha)).linked, 1);
+  const replacement = await f.review(branch, 'release/current');
+  const committed = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  f.waitBeforeReply(async () => { committed.resolve(); await resume.promise; });
+  const pending = apply(replacement.previewId);
+  try {
+    await Promise.race([committed.promise, pending.then(() => assert.fail('GitLab did not delay its creation response'))]);
+    assert.equal((await f.push(branch, zeroSha, startingSha)).linked, 1);
+    f.heads.set(branch, laterSha);
+    assert.equal((await f.push(branch, startingSha, laterSha)).linked, 1);
+  } finally { resume.resolve(); }
+
+  const created = await pending;
+  assert.deepEqual([created.link?.id, created.link?.sourceSha, created.observedSha], [first.link?.id, laterSha, laterSha]);
+  const replay = await f.post<GitlabIssueBranchResult>(`${f.path}/reconcile`, f.selection(branch));
+  assert.deepEqual([replay.state, replay.link?.sourceSha, f.writes().length], ['found', laterSha, 2]);
+});
+
+test('a confirmed replacement reconciles with GitLab when the old generation sent a different head during POST', async t => {
+  const f = await fixture(t);
+  const branch = `feature/${f.issue.key}-late-push`;
+  const first = await f.post<GitlabIssueBranchResult>(`${f.path}/apply`, { previewId: (await f.review(branch)).previewId, writeToken }, 201);
+  f.heads.delete(branch);
+  const replacement = await f.review(branch, 'release/current');
+  const committed = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  f.waitBeforeReply(async () => { committed.resolve(); await resume.promise; });
+  const pending = f.post<GitlabIssueBranchResult>(`${f.path}/apply`, { previewId: replacement.previewId, writeToken });
+  try {
+    await Promise.race([committed.promise, pending.then(() => assert.fail('GitLab did not delay its creation response'))]);
+    assert.equal((await f.push(branch, sourceSha, laterSha)).linked, 1);
+    assert.equal(f.heads.get(branch), startingSha);
+    f.failNextBranchRead(branch);
+  } finally { resume.resolve(); }
+
+  assert.equal((await pending).state, 'link_needed');
+  assert.equal(f.writes().length, 2);
+  await f.restart();
+  f.heads.set(branch, sourceSha);
+  const found = await f.post<GitlabIssueBranchResult>(`${f.path}/reconcile`, f.selection(branch));
+  assert.deepEqual([found.state, found.link?.id, found.link?.sourceSha, f.writes().length], ['found', first.link?.id, sourceSha, 2]);
 });
 
 test('already present branches, stale settings and invalid repository or ref never initiate a branch write', async t => {

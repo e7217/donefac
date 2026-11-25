@@ -39,6 +39,7 @@ const resultLabels: Record<GitlabIssueBranchResult['state'], string> = {
   pending: '브랜치 생성 결과를 아직 확인하지 못했습니다. GitLab에서 결과를 다시 확인하세요.',
   conflict: '현재 브랜치의 커밋이 검토한 기준과 다릅니다. GitLab에서 브랜치를 확인하세요.',
   link_needed: 'GitLab에서 브랜치를 확인했습니다. 티켓 연결을 다시 확인하세요.',
+  deleted: '이전에 연결한 브랜치가 삭제되었습니다. 같은 이름을 사용하려면 브랜치를 다시 미리보세요.',
 };
 
 function errorReason(error: unknown): string | undefined {
@@ -98,7 +99,8 @@ export function IssueGitlabBranchCreate({ issueId, issueKey, settings, loadingSe
   const branchValid = isGitlabBranchName(target.branch) && !gitlabObjectSha(target.branch);
   const refValid = !ref.trim() || isGitlabBranchName(ref.trim());
   const canPreview = !locked && !loadingSettings && !unavailable && configuredRepository && branchValid && refValid;
-  const targetUrl = result && result.state !== 'pending' ? gitlabActivityUrl(result.target.webUrl, 'branch') : null;
+  const targetUrl = result && result.state !== 'pending' && result.state !== 'deleted'
+    ? gitlabActivityUrl(result.target.webUrl, 'branch') : null;
 
   useLayoutEffect(() => {
     branchInput.current?.focus();

@@ -6,12 +6,15 @@ import type { Store } from './store.js';
 
 type Connection = { baseUrl: string; version: number; projectIds: readonly number[]; readToken(): string | null };
 type IssueIdentity = Pick<Issue, 'id' | 'key' | 'projectId'>;
+type BranchRevision = { linkId: string; revision: string };
+type Replacement = BranchRevision & { previewId: string };
 type Review = {
   issue: IssueIdentity;
   actorId: string;
   version: number;
   baseUrl: string;
   target: GitlabIssueBranchTarget;
+  replacement?: Replacement;
   expiresAt: number;
 };
 type Attempt = {
@@ -21,8 +24,13 @@ type Attempt = {
   target: GitlabIssueBranchTarget;
   state: 'pending' | 'confirmed' | 'observed';
   linkId?: string;
+  replacement?: Replacement;
 };
-type Attach = (input: { issue: Issue; target: GitlabIssueBranchTarget; observedSha: string; actorId: string }) => GitlabLink;
+type BranchHooks = {
+  attach(input: { issue: Issue; target: GitlabIssueBranchTarget; observedSha: string; actorId: string;
+    replacement?: BranchRevision & { head: string | null } }): GitlabLink;
+  branchRevision(issueId: string, target: GitlabIssueBranchTarget, linkId: string): string | undefined;
+};
 
 const REVIEW_TTL = 10 * 60_000;
 const MAX_REVIEWS = 256;
@@ -89,7 +97,7 @@ function remoteError(cause: unknown, creating = false): GitlabIssueBranchError {
 export class GitlabIssueBranchCreation {
   private readonly reviews = new Map<string, Review>();
 
-  constructor(private readonly store: Store, private readonly readConnection: () => Connection, private readonly attach: Attach) {
+  constructor(private readonly store: Store, private readonly readConnection: () => Connection, private readonly hooks: BranchHooks) {
     this.store.db.exec(`CREATE TABLE IF NOT EXISTS gitlab_issue_branch_attempts (
       target_key TEXT PRIMARY KEY,
       preview_id TEXT NOT NULL UNIQUE,
@@ -145,9 +153,11 @@ export class GitlabIssueBranchCreation {
     if (!attempt.linkId) return { state: 'link_needed', target, observedSha };
     const link = this.store.get<GitlabLink>('gitlab_links', attempt.linkId);
     if (!link || link.issueId !== attempt.issue.id || link.projectId !== target.repositoryId ||
-        link.kind !== 'branch' || link.sourceBranch !== target.branch || link.state !== 'active') {
+        link.kind !== 'branch' || link.sourceBranch !== target.branch) {
       return { state: 'existing', target, observedSha };
     }
+    if (link.state === 'deleted') return { state: 'deleted', target };
+    if (link.state !== 'active') return { state: 'existing', target, observedSha };
     return { state: reportCreation && attempt.state === 'confirmed' ? 'created' : 'found', target, link,
       observedSha: link.sourceSha ?? observedSha };
   }
@@ -165,6 +175,26 @@ export class GitlabIssueBranchCreation {
     return new GitlabIssueBranchError(409, '같은 작업자로 브랜치와 기준 커밋을 다시 검토해 주세요.', { reason: 'review_required' });
   }
 
+  private replacement(attempt: Attempt): Replacement | undefined {
+    const { issue, target, linkId, previewId } = attempt;
+    if (attempt.state === 'pending' || !linkId) return;
+    const revision = this.hooks.branchRevision(issue.id, target, linkId);
+    return revision ? { previewId, linkId, revision } : undefined;
+  }
+
+  private checkReplacement(attempt: Attempt | undefined, reviewed: Replacement) {
+    if (attempt?.previewId === reviewed.previewId && attempt.linkId === reviewed.linkId &&
+        this.hooks.branchRevision(attempt.issue.id, attempt.target, reviewed.linkId) === reviewed.revision) return;
+    throw new GitlabIssueBranchError(409, '이전 브랜치 연결 또는 푸시 기록이 변경되었습니다. 다시 미리보기를 열어 확인해 주세요.', { reason: 'branch_changed' });
+  }
+
+  private observedBranch(attempt: Attempt, target: GitlabIssueBranchTarget, observedSha: string | undefined): GitlabIssueBranchResult {
+    if (!observedSha) return { state: 'deleted', target };
+    const recorded = this.result(attempt);
+    return recorded.state === 'found' && recorded.observedSha === observedSha
+      ? recorded : { state: 'existing', target, observedSha };
+  }
+
   private saveAttempt(key: string, attempt: Attempt) {
     this.store.db.prepare('UPDATE gitlab_issue_branch_attempts SET attempt=? WHERE target_key=? AND preview_id=?')
       .run(JSON.stringify(attempt), key, attempt.previewId);
@@ -174,14 +204,16 @@ export class GitlabIssueBranchCreation {
   private markObserved(key: string, attempt: Attempt, state: 'confirmed' | 'observed'): Attempt {
     return this.store.transaction(() => {
       const current = this.ownedAttempt(key, attempt.issue.id);
-      if (!current || current.previewId !== attempt.previewId || current.state !== 'pending') return current ?? attempt;
+      if (!current || current.previewId !== attempt.previewId ||
+          (current.state !== 'pending' && (current.state !== 'observed' || state !== 'confirmed'))) return current ?? attempt;
       return this.saveAttempt(key, { ...current, state });
     });
   }
 
   private linkObserved(key: string, attempt: Attempt, connection: Connection, actorId: string, issueIdentity: IssueIdentity,
-    reportCreation = false): GitlabIssueBranchResult {
+    reportCreation = false, replacement?: BranchRevision & { head: string | null }): GitlabIssueBranchResult {
     if (attempt.state === 'pending' || attempt.linkId) return this.result(attempt);
+    if (attempt.replacement && !replacement) return this.result(attempt);
     try {
       return this.store.transaction(() => {
         const current = this.ownedAttempt(key, attempt.issue.id);
@@ -191,7 +223,7 @@ export class GitlabIssueBranchCreation {
         const issue = this.store.get<Issue>('issues', current.issue.id);
         if (!sameIssue(issue, issueIdentity) || !this.store.get('users', actorId)) return this.result(current);
         this.connection(connection.version, current.target.repositoryId, connection.baseUrl);
-        const link = this.attach({ issue, target: current.target, observedSha: current.target.sourceSha, actorId });
+        const link = this.hooks.attach({ issue, target: current.target, observedSha: current.target.sourceSha, actorId, replacement });
         return this.result(this.saveAttempt(key, { ...current, linkId: link.id }), reportCreation);
       });
     } catch {
@@ -207,7 +239,8 @@ export class GitlabIssueBranchCreation {
     const ref = refName(input.ref);
     const credential = input.accessToken === undefined ? connection.readToken() : token(input.accessToken);
     const previous = this.ownedAttempt(key, issueId);
-    if (previous) {
+    const replacement = previous && this.replacement(previous);
+    if (previous && !replacement) {
       assertTargetWithoutCredential(previous.target, credential);
       return this.result(previous);
     }
@@ -217,15 +250,16 @@ export class GitlabIssueBranchCreation {
     signal?.throwIfAborted();
     const now = Date.now();
     const review = { issue: { id: issue.id, key: issue.key, projectId: issue.projectId }, actorId, version: connection.version,
-      baseUrl: connection.baseUrl, target, expiresAt: now + REVIEW_TTL };
+      baseUrl: connection.baseUrl, target, replacement, expiresAt: now + REVIEW_TTL };
     this.recheck(review);
     assertTargetWithoutCredential(target, credential);
     const concurrent = this.ownedAttempt(key, issueId);
-    if (concurrent) {
+    if (replacement) this.checkReplacement(concurrent, replacement);
+    else if (concurrent) {
       assertTargetWithoutCredential(concurrent.target, credential);
       return this.result(concurrent);
     }
-    if (existingSha) return { state: 'existing', target, observedSha: existingSha };
+    if (existingSha) return previous && replacement ? this.observedBranch(previous, target, existingSha) : { state: 'existing', target, observedSha: existingSha };
     for (const [id, saved] of this.reviews) if (saved.expiresAt <= now) this.reviews.delete(id);
     if (this.reviews.size >= MAX_REVIEWS) this.reviews.delete(this.reviews.keys().next().value!);
     const previewId = randomUUID();
@@ -253,23 +287,30 @@ export class GitlabIssueBranchCreation {
     const { branch, repositoryId, sourceSha } = target;
     const remote = { baseUrl: review.baseUrl, token: credential };
     const key = branchKey(review.baseUrl, repositoryId, branch);
+    const { replacement } = review;
     const previous = this.ownedAttempt(key, issueId);
-    if (previous) return this.result(previous);
+    if (replacement) this.checkReplacement(previous, replacement);
+    else if (previous) return this.result(previous);
 
     const existingSha = await readGitlabBranchHead(remote, repositoryId, branch, signal)
       .catch(cause => { signal?.throwIfAborted(); throw remoteError(cause); });
     signal?.throwIfAborted();
     this.recheck(review);
     const concurrent = this.ownedAttempt(key, issueId);
-    if (concurrent) return this.result(concurrent);
+    if (replacement) this.checkReplacement(concurrent, replacement);
+    else if (concurrent) return this.result(concurrent);
     if (existingSha) return { state: 'existing', target, observedSha: existingSha };
 
-    const attempt: Attempt = { previewId, issue: review.issue, actorId, target, state: 'pending' };
+    const attempt: Attempt = { previewId, issue: review.issue, actorId, target, state: 'pending', ...(replacement ? { replacement } : {}) };
     const connection = this.store.transaction(() => {
       this.recheck(review);
       const current = this.connection(review.version, repositoryId, review.baseUrl);
-      const claimed = this.store.db.prepare('INSERT OR IGNORE INTO gitlab_issue_branch_attempts (target_key,preview_id,attempt) VALUES (?,?,?)')
-        .run(key, previewId, JSON.stringify(attempt));
+      if (replacement) this.checkReplacement(this.ownedAttempt(key, issueId), replacement);
+      const claimed = replacement
+        ? this.store.db.prepare('UPDATE gitlab_issue_branch_attempts SET preview_id=?, attempt=? WHERE target_key=? AND preview_id=?')
+          .run(previewId, JSON.stringify(attempt), key, replacement.previewId)
+        : this.store.db.prepare('INSERT OR IGNORE INTO gitlab_issue_branch_attempts (target_key,preview_id,attempt) VALUES (?,?,?)')
+          .run(key, previewId, JSON.stringify(attempt));
       return Number(claimed.changes) === 1 ? current : null;
     });
     if (!connection) {
@@ -283,14 +324,31 @@ export class GitlabIssueBranchCreation {
       if (createdSha !== sourceSha) return this.result(attempt);
     } catch (cause) {
       if (cause instanceof GitlabReadError && cause.httpStatus !== null && KNOWN_REJECTIONS.has(cause.httpStatus)) {
-        this.store.db.prepare(`DELETE FROM gitlab_issue_branch_attempts WHERE target_key=? AND preview_id=? AND json_extract(attempt,'$.state')='pending'`)
-          .run(key, previewId);
+        if (replacement && previous) {
+          this.store.db.prepare(`UPDATE gitlab_issue_branch_attempts SET preview_id=?, attempt=?
+            WHERE target_key=? AND preview_id=? AND json_extract(attempt,'$.state')='pending'`)
+            .run(previous.previewId, JSON.stringify(previous), key, previewId);
+        } else {
+          this.store.db.prepare(`DELETE FROM gitlab_issue_branch_attempts WHERE target_key=? AND preview_id=? AND json_extract(attempt,'$.state')='pending'`)
+            .run(key, previewId);
+        }
         throw remoteError(cause, true);
       }
       return this.result(this.ownedAttempt(key, issueId) ?? attempt);
     }
     const confirmed = this.markObserved(key, attempt, 'confirmed');
-    return this.linkObserved(key, confirmed, connection, actorId, attempt.issue, true);
+    if (!replacement) return this.linkObserved(key, confirmed, connection, actorId, attempt.issue, true);
+
+    // The old and new branch generations can both have pushes in flight while GitLab responds.
+    const revision = this.hooks.branchRevision(issueId, target, replacement.linkId);
+    if (!revision) return this.result(confirmed);
+    try {
+      const head = await readGitlabBranchHead(remote, repositoryId, branch, signal);
+      signal?.throwIfAborted();
+      return this.linkObserved(key, confirmed, connection, actorId, attempt.issue, true, { ...replacement, revision, head });
+    } catch {
+      return this.result(confirmed);
+    }
   }
 
   async reconcile(issueId: string, value: unknown, actorId: string, signal?: AbortSignal): Promise<GitlabIssueBranchResult> {
@@ -301,14 +359,21 @@ export class GitlabIssueBranchCreation {
     if (!attempt) throw new GitlabIssueBranchError(404, '확인할 브랜치 생성 요청을 찾을 수 없습니다.', { reason: 'attempt_missing' });
     const credential = input.accessToken === undefined ? connection.readToken() : token(input.accessToken);
     assertTargetWithoutCredential(attempt.target, credential);
-    if (attempt.linkId) return this.result(attempt);
+    if (attempt.linkId && !this.replacement(attempt)) return this.result(attempt);
+    const replacementRevision = attempt.replacement && this.hooks.branchRevision(issueId, attempt.target, attempt.replacement.linkId);
     const observedSha = await readGitlabBranchHead({ baseUrl: connection.baseUrl, token: credential }, repositoryId, branch, signal)
       .catch(cause => { signal?.throwIfAborted(); throw remoteError(cause); });
     signal?.throwIfAborted();
     this.connection(connection.version, repositoryId, connection.baseUrl);
-    if (!observedSha) return { state: 'pending', target: attempt.target };
-    if (observedSha !== attempt.target.sourceSha) return { state: 'conflict', target: attempt.target, observedSha };
+    if (attempt.linkId) return this.observedBranch(attempt, attempt.target, observedSha ?? undefined);
+    const confirmedReplacement = attempt.replacement && attempt.state === 'confirmed';
+    if (!confirmedReplacement) {
+      if (!observedSha) return { state: 'pending', target: attempt.target };
+      if (observedSha !== attempt.target.sourceSha) return { state: 'conflict', target: attempt.target, observedSha };
+    }
     const known = this.markObserved(key, attempt, 'observed');
-    return this.linkObserved(key, known, connection, actorId, issue);
+    const replacement = attempt.replacement && replacementRevision
+      ? { ...attempt.replacement, revision: replacementRevision, head: observedSha } : undefined;
+    return this.linkObserved(key, known, connection, actorId, issue, false, replacement);
   }
 }

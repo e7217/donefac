@@ -10,7 +10,7 @@ import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, includesGitlabCredential, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, includesGitlabCredential, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchHead, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import type { MergeRequestPipelineTestReaders } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -54,7 +54,7 @@ type StoredWebhookDelivery = { id: string; delivery: GitlabWebhookDelivery; last
 type VerifiedPipelineCursor = PipelineClassification & { scope: string; objectId: number; sourceBranch: string; sourceSha: string };
 type ObjectCursor={id:string;occurredAt:string|null;state:string;receivedAt?:string;approvalRevision?:{updatedAt:string;head:string};pipeline?:VerifiedPipelineCursor};
 type BranchCursor={id:string;pipelineId:number};
-type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string;source?:'read';revision?:string};
+type PushObservation={id:string;state:'active'|'deleted';sourceSha:string;webUrl:string;updatedAt:string;source?:'read';revision?:string;branchRecreated?:true};
 type Hooks={
   processEvent:(event:AutomationEvent)=>AutomationRun[];
   manualStatusReview?:(issue:Issue, observations:readonly GitlabStatusObservation[], actorId:string, settingsVersion:number)=>GitlabStatusReview|undefined;
@@ -578,10 +578,11 @@ function promoteAttachedLink(link:GitlabLink,originalJiraKey?:string):GitlabLink
   delete verified.manualLinkId;
   return originalJiraKey?{...verified,originalJiraKey}:verified;
 }
-function refreshAttachedBranch(link:GitlabLink, {state,sourceSha,webUrl,updatedAt,branchObservationSource}:Pick<GitlabLink,'state'|'sourceSha'|'webUrl'|'updatedAt'|'branchObservationSource'>):GitlabLink{
+function refreshAttachedBranch(link:GitlabLink, {state,sourceSha,webUrl,updatedAt,branchObservationSource,branchRecreated}:Pick<GitlabLink,'state'|'sourceSha'|'webUrl'|'updatedAt'|'branchObservationSource'|'branchRecreated'>):GitlabLink{
   if(branchObservationSource==='sync' && (link.branchObservationSource!=='sync' || Date.parse(link.updatedAt)>Date.parse(updatedAt)))return link;
-  if(link.state===state&&link.sourceSha===sourceSha&&link.webUrl===webUrl&&link.branchObservationSource===branchObservationSource)return link;
-  const refreshed={...link,state,sourceSha,webUrl,updatedAt};
+  if(link.state===state&&link.sourceSha===sourceSha&&link.webUrl===webUrl&&link.branchObservationSource===branchObservationSource&&
+      (!branchRecreated||link.branchRecreated))return link;
+  const refreshed={...link,state,sourceSha,webUrl,updatedAt,...(branchRecreated?{branchRecreated}:{})};
   if(branchObservationSource===undefined)delete refreshed.branchObservationSource;
   else refreshed.branchObservationSource=branchObservationSource;
   return refreshed;
@@ -603,8 +604,8 @@ function linkedBranchTarget(link: GitlabLink, issueId: string, instance: string)
   const cursorId = pushCursorId(instance, link.projectId, branch);
   return link.issueId === issueId && link.id === `${cursorId}:${issueId}` ? { branch, cursorId } : null;
 }
-function branchLinkFields({state,sourceSha,webUrl,updatedAt,source}:PushObservation) {
-  return {state,sourceSha,webUrl,updatedAt,...(source?{branchObservationSource:source}:{})};
+function branchLinkFields({state,sourceSha,webUrl,updatedAt,source,branchRecreated}:PushObservation) {
+  return {state,sourceSha,webUrl,updatedAt,...(source?{branchObservationSource:source}:{}),...(branchRecreated?{branchRecreated}:{})};
 }
 function pushObservationFromLink(link: GitlabLink, includeSnapshot=false): PushObservation | null {
   if (!includeSnapshot && link.branchObservationSource === 'sync') return null;
@@ -616,6 +617,7 @@ function pushObservationFromLink(link: GitlabLink, includeSnapshot=false): PushO
   const id = pushCursorId(instance, link.projectId, sourceBranch);
   return link.id === `${id}:${link.issueId}` ? {
     id,state,sourceSha,webUrl,updatedAt,...(link.branchObservationSource==='read'?{source:'read'}:{}),
+    ...(link.branchRecreated?{branchRecreated:link.branchRecreated}:{}),
   } : null;
 }
 function safePreviewValue(value:string,token:string|null):string{
@@ -723,7 +725,10 @@ export class GitlabIntegrationService{
       const saved = this.raw();
       return { baseUrl: saved.baseUrl, version: saved.version, projectIds: saved.projectIds,
         readToken: () => saved.token ? this.store.unseal(saved.token) : null };
-    }, input => this.attachCreatedBranch(input));
+    }, {
+      attach: input => this.attachCreatedBranch(input),
+      branchRevision: (issueId, target, linkId) => this.createdBranchRevision(issueId, target, linkId),
+    });
   }
   private raw():RawSettings{const value=record(this.store.setting('gitlab'));return{baseUrl:string(value.baseUrl),projectIds:Array.isArray(value.projectIds)?value.projectIds as number[]:[],...(Array.isArray(value.jiraRoutes)&&value.jiraRoutes.length?{jiraRoutes:value.jiraRoutes as GitlabJiraRoute[]}:{}),token:typeof value.token==='string'?value.token:null,webhookSecret:typeof value.webhookSecret==='string'?value.webhookSecret:null,signingToken:typeof value.signingToken==='string'?value.signingToken:null,version:Number.isSafeInteger(value.version)&&Number(value.version)>0?Number(value.version):1,lastSyncAt:typeof value.lastSyncAt==='string'?value.lastSyncAt:null,lastError:typeof value.lastError==='string'?value.lastError:null};}
   private public(raw:RawSettings):GitlabSettings{return{baseUrl:raw.baseUrl,projectIds:raw.projectIds,tokenConfigured:!!raw.token,webhookSecretConfigured:!!raw.webhookSecret,signingTokenConfigured:!!raw.signingToken,version:raw.version,lastSyncAt:raw.lastSyncAt,lastError:raw.lastError,...(raw.jiraRoutes?.length?{jiraRoutes:raw.jiraRoutes}:{}),...(this.projectWebhooks.receiverUrl?{webhookReceiverUrl:this.projectWebhooks.receiverUrl}:{})};}
@@ -756,13 +761,43 @@ export class GitlabIntegrationService{
   private requireIssue(issueId:string):Issue{
     return this.store.get<Issue>('issues',issueId)??fail('업무를 찾을 수 없습니다.',404);
   }
-  private attachCreatedBranch({ issue, target, observedSha, actorId }: {
+  private createdBranchRevision(issueId: string, target: GitlabIssueBranchTarget, linkId: string): string | undefined {
+    const cursorId = pushCursorId(this.instance(), target.repositoryId, target.branch);
+    if (linkId !== `${cursorId}:${issueId}`) return;
+    const link = this.store.get<GitlabLink>('gitlab_links', linkId);
+    if (!link || !isRestorableGitlabLink(link) || !['active', 'deleted'].includes(link.state) || link.kind !== 'branch' || link.issueId !== issueId ||
+        link.projectId !== target.repositoryId || link.sourceBranch !== target.branch) return;
+    const cursor = this.store.get<PushObservation>('gitlab_push_cursors', cursorId);
+    if (cursor && (cursor.state !== link.state || cursor.sourceSha !== link.sourceSha)) return;
+    return createHash('sha256').update(JSON.stringify([link, cursor ?? null])).digest('hex');
+  }
+  private attachCreatedBranch({ issue, target, observedSha, actorId, replacement }: {
     issue: Issue; target: GitlabIssueBranchTarget; observedSha: string; actorId: string;
+    replacement?: { linkId: string; revision: string; head: string | null };
   }): GitlabLink {
     const instance = this.instance();
     const draft = repositoryBranchDraft({ name: target.branch, commit: { id: observedSha }, web_url: target.webUrl }, keys);
     const snapshot = linkForIssue(instance, target.repositoryId, 'branch', { issue }, draft);
     const existing = this.store.get<GitlabLink>('gitlab_links', snapshot.id);
+    if (replacement) {
+      const id = pushCursorId(instance, target.repositoryId, target.branch);
+      if (!existing || this.createdBranchRevision(issue.id, target, replacement.linkId) !== replacement.revision) {
+        fail('GitLab 브랜치 상태가 변경되었습니다. 최신 활동을 다시 확인해 주세요.', 409);
+      }
+      const observation: PushObservation = { id, state: replacement.head === null ? 'deleted' : 'active',
+        sourceSha: replacement.head ?? observedSha, webUrl: target.webUrl, updatedAt: now(),
+        ...(replacement.head === null ? {} : { source:'read' }), branchRecreated: true, revision: randomUUID() };
+      const fields = branchLinkFields(observation);
+      const link = refreshAttachedBranch(existing, fields);
+      if (!isRestorableGitlabLink(link)) fail('GitLab 활동의 저장 정보를 확인할 수 없습니다.', 502);
+      this.store.put('gitlab_push_cursors', observation);
+      for (const alias of this.branchLinksForKey(id, target.repositoryId, target.branch)) {
+        const next = refreshAttachedBranch(alias, fields);
+        if (next !== alias) this.store.put('gitlab_links', next);
+      }
+      this.hooks.onIssueBranchAttached?.(actorId, issue.id, link);
+      return link;
+    }
     const link = existing && !existing.manualLinkId ? existing : this.verifiedBranchAttachment(instance, snapshot, existing, now());
     if (!isRestorableGitlabLink(link) || link.issueId !== issue.id || link.sourceBranch !== target.branch ||
       link.sourceSha !== observedSha || link.state !== 'active') {
@@ -1449,7 +1484,9 @@ export class GitlabIntegrationService{
             result.failures.push({ linkId:link.id, message:'브랜치 상태가 변경되었습니다. 최신 업무에서 다시 확인해 주세요.' });
             continue;
           }
-          const observation:PushObservation = { id:cursorId, state:'active', sourceSha, webUrl, updatedAt:now(), source:'read', revision:randomUUID() };
+          const branchRecreated = cursor?.branchRecreated ?? latest.branchRecreated;
+          const observation:PushObservation = { id:cursorId, state:'active', sourceSha, webUrl, updatedAt:now(), source:'read',
+            revision:randomUUID(), ...(branchRecreated?{branchRecreated}:{}) };
           const fields = branchLinkFields(observation);
           const updated = refreshAttachedBranch(latest,fields);
           if (!isRestorableGitlabLink(updated)) {
@@ -1625,7 +1662,8 @@ export class GitlabIntegrationService{
       const observed = pushObservationFromLink(link);
       if (!observed) continue;
       const previous = observations.get(observed.id);
-      if (!previous || Date.parse(previous.updatedAt) < Date.parse(observed.updatedAt)) observations.set(observed.id, observed);
+      const newest = !previous || Date.parse(previous.updatedAt) < Date.parse(observed.updatedAt) ? observed : previous;
+      observations.set(observed.id, observed.branchRecreated || previous?.branchRecreated ? { ...newest, branchRecreated:true } : newest);
     }
     for (const observed of observations.values()) this.store.put('gitlab_push_cursors', observed);
     const raw = this.raw();
@@ -1723,7 +1761,8 @@ export class GitlabIntegrationService{
     }
     return linked;
   }
-  private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, matches: TicketMatch[]): number {
+  private observeBranch(baseUrl: string, instance: string, projectId: number, head: GitlabHeadPush, repository: URL | null, matches: TicketMatch[],
+    verifiedDeletion: boolean): number {
     const id = pushCursorId(instance,projectId,head.branch);
     const links = this.branchLinksForKey(id,projectId,head.branch);
     const pending = this.pendingBranchReads.get(id);
@@ -1746,14 +1785,16 @@ export class GitlabIntegrationService{
     const baseline = previous ?? (latestAttached && pushObservationFromLink(latestAttached,true));
     const lastHead = baseline?.state === 'deleted' ? '0'.repeat(baseline.sourceSha.length) : baseline?.sourceSha;
     const sameHead = lastHead === head.after;
-    if (lastHead !== undefined && !sameHead && lastHead !== head.before) return 0;
+    if (lastHead !== undefined && !sameHead && lastHead !== head.before && !verifiedDeletion) return 0;
 
     const treeUrl = repository && gitlabPushLinkUrl(repository, 'tree', head.branch);
     const webUrl = treeUrl || gitlabScopedPushUrl(baseUrl, previous?.webUrl ?? snapshotUrl ?? pending?.webUrl ?? archived?.webUrl);
     if (!webUrl) return 0;
     const observation: PushObservation = {
-      id, state: head.deleted ? 'deleted' : 'active', sourceSha: sameHead && previous ? previous.sourceSha : head.deleted ? head.before : head.after, webUrl,
+      id, state: head.deleted ? 'deleted' : 'active', sourceSha: head.deleted ?
+        (verifiedDeletion || sameHead ? baseline?.sourceSha ?? head.before : head.before) : head.after, webUrl,
       updatedAt: sameHead && previous && !previous.source ? previous.updatedAt : now(), revision: randomUUID(),
+      ...(baseline?.branchRecreated?{branchRecreated:baseline.branchRecreated}:{}),
     };
     this.store.put('gitlab_push_cursors', observation);
     const fields = branchLinkFields(observation);
@@ -1764,7 +1805,7 @@ export class GitlabIntegrationService{
       const link: GitlabLink = { ...fields, id: `${id}:${issueId}`, issueId, projectId, iid: 0, kind: 'branch', title: head.branch, sourceBranch: head.branch, ...(originalJiraKey?{originalJiraKey}:{}) };
       const existing = this.store.get<GitlabLink>('gitlab_links', link.id);
       const next=retainOriginalJiraKey(link,existing);
-      if (existing?.state === next.state && !existing.manualLinkId && !existing.branchObservationSource && existing.sourceSha === next.sourceSha && existing.webUrl === next.webUrl && existing.originalJiraKey === next.originalJiraKey) continue;
+      if (existing?.state === next.state && !existing.manualLinkId && !existing.branchObservationSource && existing.sourceSha === next.sourceSha && existing.webUrl === next.webUrl && existing.originalJiraKey === next.originalJiraKey && existing.branchRecreated === next.branchRecreated) continue;
       this.store.put('gitlab_links', next);
       linked++;
     }
@@ -1792,7 +1833,7 @@ export class GitlabIntegrationService{
       if (latest !== link) this.store.put('gitlab_links', latest);
     }
   }
-  private recordPush(raw: RawSettings, instance: string, projectId: number, kind: string, body: Obj, project: Obj): number {
+  private recordPush(raw: RawSettings, instance: string, projectId: number, kind: string, body: Obj, project: Obj, verifiedDeletion: boolean): number {
     const head = kind === 'push' ? readGitlabHeadPush(body) : null;
     const route=raw.jiraRoutes?.find(candidate=>candidate.repositoryId===projectId);
     const readKeys=route?routedKeys:keys;
@@ -1803,7 +1844,7 @@ export class GitlabIntegrationService{
     const repository = gitlabRepositoryUrl(raw.baseUrl, project);
     const matcher=this.ticketMatcher(this.syncIssues(),route);
     const branchMatches=matcher.match(branchKeys);
-    let linked = head ? this.observeBranch(raw.baseUrl, instance, projectId, head, repository, branchMatches) : 0;
+    let linked = head ? this.observeBranch(raw.baseUrl, instance, projectId, head, repository, branchMatches, verifiedDeletion) : 0;
     if (head?.deleted) return linked;
 
     for (const item of (head ? commits.slice(-GITLAB_PUSH_COMMIT_LIMIT) : commits)) {
@@ -1869,15 +1910,60 @@ export class GitlabIntegrationService{
       objectKind: 'deployment', objectId, branch: '', environment, issueIds, occurredAt: changedAt,
       receivedAt, disposition: 'fresh', reason: '' });
   }
-  webhook(req:Request):WebhookResult{
+  private prepareWebhook(req:Request){
     const raw=this.raw(),authentication=this.authenticate(req,raw);const body=record(req.body),project=record(body.project),projectId=Number(project.id??body.project_id);if(!raw.projectIds.includes(projectId))fail('허용된 저장소가 아닙니다.',403);
     const header=req.header('X-Gitlab-Event')||'',kind=string(body.object_kind)||({'Merge Request Hook':'merge_request','Pipeline Hook':'pipeline','Push Hook':'push','Tag Push Hook':'tag_push','Deployment Hook':'deployment'} as Record<string,string>)[header]||'';
-    const attributes=record(body.object_attributes),instance=this.instance(raw),externalId=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update((req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody||Buffer.from(JSON.stringify(body))).digest('hex');if(externalId.length>500)fail('Webhook 식별자가 너무 깁니다.');const eventId=`gitlab:${instance}:${projectId}:${kind}:${createHash('sha256').update(externalId).digest('hex')}`;
+    const instance=this.instance(raw),externalId=req.header('webhook-id')||req.header('Idempotency-Key')||req.header('X-Gitlab-Event-UUID')||createHash('sha256').update((req as Request&{gitlabRawBody?:Buffer}).gitlabRawBody||Buffer.from(JSON.stringify(body))).digest('hex');if(externalId.length>500)fail('Webhook 식별자가 너무 깁니다.');const eventId=`gitlab:${instance}:${projectId}:${kind}:${createHash('sha256').update(externalId).digest('hex')}`;
+    const head = kind === 'push' ? readGitlabHeadPush(body) : null;
+    return { raw, authentication, body, project, projectId, kind, instance, eventId, head };
+  }
+  private recreatedBranchCursor(instance: string, projectId: number, head: GitlabHeadPush | null): PushObservation | undefined {
+    // A delayed deletion can carry the same predecessor as the current incarnation.
+    if (!head?.deleted) return;
+    const id = pushCursorId(instance, projectId, head.branch);
+    const cursor = this.store.get<PushObservation>('gitlab_push_cursors', id);
+    if (cursor?.branchRecreated) return cursor;
+    const links = this.branchLinksForKey(id, projectId, head.branch);
+    const marked = links.find(link => link.branchRecreated) ?? (!links.length ? this.hooks.findArchivedBranchLink?.(id) : undefined);
+    if (marked?.branchRecreated) return cursor ?? pushObservationFromLink(marked,true) ?? undefined;
+  }
+  private hasWebhookReceipt(eventId: string): boolean {
+    return Boolean(this.store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(eventId));
+  }
+  private async receiveWebhook(req: Request, signal: AbortSignal): Promise<WebhookResult> {
+    const webhook = this.prepareWebhook(req);
+    const { instance, projectId, head, raw, eventId } = webhook;
+    if (this.hasWebhookReceipt(eventId)) return this.applyWebhook(req, webhook);
+    const cursor = this.recreatedBranchCursor(instance, projectId, head);
+    if (!cursor || !head) return this.applyWebhook(req, webhook);
+    const token = raw.token ? this.store.unseal(raw.token) : null;
+    let sourceSha: string | null;
+    try {
+      sourceSha = await readGitlabBranchHead({ baseUrl:raw.baseUrl, token }, projectId, head.branch, signal);
+    } catch {
+      signal.throwIfAborted();
+      return fail('GitLab에서 재생성된 브랜치의 현재 HEAD를 확인하지 못했습니다. 웹훅을 다시 시도해 주세요.',503);
+    }
+    signal.throwIfAborted();
+    return this.applyWebhook(req, webhook, { cursor, absent:sourceSha === null });
+  }
+  webhook(req:Request):WebhookResult{
+    return this.applyWebhook(req, this.prepareWebhook(req));
+  }
+  private applyWebhook(req:Request, webhook:ReturnType<GitlabIntegrationService['prepareWebhook']>,
+    verification?: { cursor:PushObservation; absent:boolean }):WebhookResult{
+    const { raw, authentication, body, project, projectId, kind, instance, eventId, head } = webhook;
+    const attributes=record(body.object_attributes);
     const receivedAt = now();
     const processWebhook = (): WebhookResult => {
-      if(this.store.db.prepare('SELECT id FROM webhook_inbox WHERE id=?').get(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
+      if(this.hasWebhookReceipt(eventId))return{ok:true,duplicate:true,linked:0,runs:[]};
+      if (verification && this.raw().version !== raw.version) fail('GitLab 연결 설정이 변경되었습니다. 웹훅을 다시 시도해 주세요.',503);
+      const guarded = this.recreatedBranchCursor(instance, projectId, head);
+      if ((guarded || verification) && JSON.stringify(guarded) !== JSON.stringify(verification?.cursor)) {
+        fail('GitLab 브랜치의 확인된 상태가 변경되었습니다. 웹훅을 다시 시도해 주세요.',503);
+      }
       this.store.db.prepare('INSERT INTO webhook_inbox(id,created_at) VALUES(?,?)').run(eventId,now());
-      if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:this.recordPush(raw,instance,projectId,kind,body,project),runs:[]};
+      if(kind==='push'||kind==='tag_push')return{ok:true,duplicate:false,linked:verification?.absent === false ? 0 : this.recordPush(raw,instance,projectId,kind,body,project,verification?.absent === true),runs:[]};
       if(kind==='deployment'){
         let runs: AutomationRun[] = [];
         const changed=this.deployments.observe(instance,raw.baseUrl,projectId,body,(deployment, fresh) => {
@@ -2649,7 +2735,16 @@ export class GitlabIntegrationService{
       finally { res.off('close', disconnected); }
     });
     app.patch('/api/integrations/gitlab',(req,res)=>{hooks.actor(req);res.json(this.configure(req.body,()=>hooks.activity(req,'integration','gitlab','GitLab 설정 변경')));});
-    app.post('/api/integrations/gitlab/webhook',(req,res)=>res.json(this.webhook(req)));
+    app.post('/api/integrations/gitlab/webhook', async (req,res) => {
+      const controller = new AbortController();
+      const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+      res.once('close', disconnected);
+      try {
+        const result = await this.receiveWebhook(req, controller.signal);
+        if (!controller.signal.aborted) res.json(result);
+      } catch (error) { if (!controller.signal.aborted) throw error; }
+      finally { res.off('close', disconnected); }
+    });
     const projectWebhookRequest = (operation: 'review' | 'register' | 'history') => async (req: Request, res: Response) => {
       res.set('Cache-Control', 'no-store');
       const actorId = hooks.actor(req);

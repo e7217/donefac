@@ -468,6 +468,16 @@ async function readExactBranch(request: ReturnType<typeof projectReadRequest>, r
   }
 }
 
+async function verifyBranchReadAccess(project: Awaited<ReturnType<typeof readVerifiedProject>>, repositoryId: number,
+  missingBranch: string, signal?: AbortSignal) {
+  // GitLab may hide inaccessible branch data behind 404. Check the same repository's default branch.
+  const defaultBranch = project.project.default_branch;
+  if (!isGitlabBranchName(defaultBranch) || defaultBranch === missingBranch ||
+      !(await readExactBranch(project, repositoryId, defaultBranch, signal))) {
+    throw new GitlabReadError('branches', 'invalid-response');
+  }
+}
+
 async function readExactCommit({ projectUrl, headers }: ReturnType<typeof projectReadRequest>, repositoryId: number,
   sha: string, signal?: AbortSignal): Promise<string> {
   const url = new URL(projectUrl);
@@ -507,6 +517,7 @@ export async function readGitlabBranchTarget(connection: Connection, repositoryI
   const targetRead = !commit && branch === sourceRef ? sourceRead : readExactBranch(project, repositoryId, branch, signal);
   const [sourceSha, existingSha] = await Promise.all([sourceRead, targetRead]);
   if (!sourceSha) throw new GitlabReadError('branches', 'http', 404);
+  if (commit && existingSha === null) await verifyBranchReadAccess(project, repositoryId, branch, signal);
   if (includesGitlabCredential(connection.token, [sourceSha, existingSha ?? ''])) throw new GitlabReadError('branches', 'invalid-response');
   const target: GitlabIssueBranchTarget = { repositoryId, repositoryPath, branch, ref: sourceRef, sourceSha, webUrl };
   return { target, ...(existingSha && { existingSha }) };
@@ -519,6 +530,7 @@ export async function readGitlabBranchHead(connection: Connection, repositoryId:
   }
   const project = await readVerifiedProject(connection, repositoryId, signal);
   const sha = await readExactBranch(project, repositoryId, branch, signal);
+  if (sha === null) await verifyBranchReadAccess(project, repositoryId, branch, signal);
   if (sha && includesGitlabCredential(connection.token, [sha])) throw new GitlabReadError('branches', 'invalid-response');
   return sha;
 }

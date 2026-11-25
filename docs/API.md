@@ -886,7 +886,11 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 `POST /api/issues/:id/gitlab-branch/apply`에 `{previewId,writeToken}`을 보낸다. 같은 작업자와 티켓의 위치, 설정, 브랜치 이름을 확인하고 고정한 SHA에서 생성한다. 입력한 API 쓰기 토큰은 해당 요청에서만 사용한다. 생성하고 현재 티켓에 연결한 첫 결과는 `201` 및 `{state: 'created',target,link,observedSha}`다. 같은 요청의 확인 결과는 `200`이며 `found`와 연결을 반환한다. 외부 생성 결과가 불명확하면 `pending`, GitLab 생성 후 Teamspace 연결이 보류되면 `link_needed`를 반환한다.
 
-`POST /api/issues/:id/gitlab-branch/reconcile`에 `{expectedSettingsVersion,repositoryId,branch,accessToken?}`을 보낸다. 기록된 시도와 GitLab의 현재 이름·SHA를 조회한다. 검토한 SHA와 일치하면 연결하고 `found`를 반환한다. 접속이 끊겼을 때도 생성 시도를 물리 DB에서 찾고 조회로만 확인한다. 다른 SHA는 `conflict`, 아직 GitLab에서 찾을 수 없으면 `pending`을 반환한다. 시도 자체가 남아 있지 않으면 `404`와 `attempt_missing`을 반환하므로 다시 미리본다. 저장한 요청으로 이전에 사용한 이름은 조회 대상으로 남으며 새 브랜치를 시작할 때는 다른 이름을 고른다. 프로젝트 이동 후에도 동일한 활성 티켓 ID에서 명시적으로 연결을 확인할 수 있다. 티켓 자동 전이는 기존의 인증된 이벤트와 활성 규칙을 따른다.
+`POST /api/issues/:id/gitlab-branch/reconcile`에 `{expectedSettingsVersion,repositoryId,branch,accessToken?}`을 보낸다. 기록된 시도와 GitLab의 현재 이름·SHA를 조회한다. 검토한 SHA와 일치하면 연결하고 `found`를 반환한다. 접속이 끊겼을 때도 생성 시도를 물리 DB에서 찾고 조회로만 확인한다. 미확인 시도에서 다른 SHA는 `conflict`, 아직 GitLab에서 찾을 수 없으면 `pending`이다. 시도 자체가 없으면 `404`와 `attempt_missing`을 반환하므로 다시 미리본다. 프로젝트 이동 후에도 동일한 활성 티켓 ID에서 명시적으로 연결을 확인할 수 있다. 티켓 자동 전이는 기존의 인증된 이벤트와 활성 규칙을 따른다.
+
+전에 생성하고 연결한 브랜치를 GitLab에서 찾을 수 없으면 재확인은 `deleted`를 반환한다. 같은 티켓에서 같은 이름을 새로 미리볼 수 있다. 미리보기와 적용은 확인한 GitLab 저장소에서 브랜치가 비어 있는지 각각 조회하고, 적용 시 기존 연결과 푸시 기록도 대조한다. 변경을 감지하면 `409`와 `branch_changed`를 반환한다. 재생성이 확인되면 GitLab의 현재 브랜치와 커밋을 조회해 같은 업무 연결에 반영한다. 생성 성공은 저장했으나 연결 재확인이 보류된 경우 이후 조회에서 GitLab의 현재 커밋으로 연결할 수 있다. 재생성 요청이 저장된 뒤 이전 생성의 미리보기 ID를 보내면 `409`와 `review_required`를 반환한다.
+
+재생성한 브랜치의 삭제 웹훅은 저장한 GitLab 연결로 같은 브랜치를 확인한다. 브랜치가 여전히 있으면 인증 수신을 기록하고 현재 티켓 연결을 유지한다. GitLab에 없는 것으로 확인되면 삭제를 반영한다. 조회에 실패하거나 조회 중 저장한 연결이 바뀌면 `503`으로 재전송을 요청한다.
 
 ### 연결 브랜치의 MR 확인
 

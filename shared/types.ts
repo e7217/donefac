@@ -1562,6 +1562,7 @@ export interface GitlabLink {
   kind: 'merge_request' | 'commit' | 'pipeline' | 'branch';
   title: string; webUrl: string; state: string; updatedAt: string;
   sourceBranch?: string; targetBranch?: string; sourceSha?: string; branchObservationSource?: 'sync' | 'read';
+  branchRecreated?: true;
   originalJiraKey?: string; manualLinkId?: string;
   mergeReadiness?: GitlabMergeReadiness; mergeCommitShas?: string[]; mergeRequestSourceProjectId?: number;
   pipelineObservedAt?: string | null; pipelineSource?: string; pipelineTag?: boolean;
@@ -1775,7 +1776,7 @@ export interface GitlabIssueBranchTarget {
   webUrl: string;
 }
 export interface GitlabIssueBranchResult {
-  state: 'created' | 'found' | 'pending' | 'conflict' | 'existing' | 'link_needed';
+  state: 'created' | 'found' | 'pending' | 'conflict' | 'existing' | 'link_needed' | 'deleted';
   target: GitlabIssueBranchTarget;
   link?: GitlabLink;
   observedSha?: string;
