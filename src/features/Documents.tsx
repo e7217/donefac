@@ -23,7 +23,7 @@ import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
 import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, DOCUMENT_HEADING_LEVELS, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel } from '../../shared/document-nodes';
 import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
-import { isDocumentSectionId } from '../../shared/document-sections';
+import { isDocumentSectionId, parseDocumentHash } from '../../shared/document-sections';
 import { isRelationId } from '../../shared/issue-relations';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { jiraMigratedTargetAddress, type MigratedJiraTarget } from '../../shared/jira-migration-address';
@@ -54,6 +54,7 @@ import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentTableTools } from './DocumentTableTools';
 import { DocumentBlockOrder } from './DocumentBlockOrder';
+import { DocumentPageSuggestions } from './DocumentPageSuggestions';
 import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
 import { DocumentSelectionCommentDialog, type SelectionCommentSource } from './DocumentSelectionCommentDialog';
 import { DocumentDecisionLinkDialog, type DecisionLinkSource } from './DocumentDecisionLinkDialog';
@@ -621,7 +622,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     extensions: [
       ...decorateDocumentExtensions(createEditorExtensions()),
       documentFindExtension,
-      Placeholder.configure({ placeholder: '내용을 작성하세요. / 를 입력해 블록을 추가할 수 있어요.' }),
+      Placeholder.configure({ placeholder: '내용을 작성하세요. /로 블록을 추가하고 @로 문서를 연결하세요.' }),
     ],
     content: { type: 'doc', content: [{ type: 'paragraph' }] },
     editorProps: { attributes: { class: 'docs-prose', 'aria-label': '문서 본문' } },
@@ -2021,6 +2022,18 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     navigateSlash(event);
   }
 
+  function openInlineDocumentLink(href: string) {
+    let destination: URL;
+    try { destination = new URL(href, location.href); } catch { return false; }
+    if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
+        destination.username || destination.password) return false;
+    const [path, query] = destination.hash.split('?');
+    const sectionLink = /^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(new URLSearchParams(query).get('section'));
+    if (!sectionLink && !parseDocumentHash(destination.hash, { allowLabel: true })) return false;
+    window.location.hash = destination.hash;
+    return true;
+  }
+
   return <DocumentBlocksProvider data={data} actorId={actorId} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
     editorReadOnly={bodyReadOnly || archivedLiveRecovery}
     openIssueBlock={bodyReadOnly || checklistReselecting ? undefined : openIssueBlock} onListDraftChange={trackListDraft}>
@@ -2237,7 +2250,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <div ref={editorWrap} className="docs-editor-wrap" onPasteCapture={event => void pasteClipboardImages(event)} onKeyDownCapture={event => {
                 if (!checklistReselecting && !event.defaultPrevented && !event.nativeEvent.isComposing && event.key === 'Enter' &&
                     !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.target instanceof HTMLAnchorElement &&
-                    openMigratedIssueLink(event.target)) {
+                    (openMigratedIssueLink(event.target) || openInlineDocumentLink(event.target.href))) {
                   event.preventDefault();
                   event.stopPropagation();
                   return;
@@ -2271,16 +2284,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   window.location.hash = href;
                   return;
                 }
-                if (!href) return;
-                let link: URL;
-                try { link = new URL(href, location.href); } catch { return; }
-                if (link.origin !== location.origin || link.pathname !== location.pathname) return;
-                const [path, query] = link.hash.split('?');
-                if (/^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(new URLSearchParams(query).get('section'))) {
+                if (href && openInlineDocumentLink(href)) {
                   event.preventDefault();
-                  window.location.hash = link.hash;
                 }
               }}>{liveMode && activeSession ? <CollaborativeEditor key={`${draft.id}:${actorId}:${liveReload}`} session={activeSession} actorId={actorId} labels={draft.labels} onEditor={receiveLiveEditor} onContent={receiveLiveContent} onDocument={receiveLiveDocument} onState={receiveLiveState} onSessionDisabled={receiveDisabledSession} onOpenCopy={openRecoveryCopy} notify={notify} /> : <EditorContent editor={manualEditor} />}
+                {editor && !bodyReadOnly && !archivedLiveRecovery && !publicationOpen && !checklistReselecting && !issueDrawerOpen && draft.id === selectedPageId &&
+                  <DocumentPageSuggestions key={documentScope} editor={editor} wrap={editorWrap} documentId={draft.id} documents={data.documents} projects={data.projects} />}
                 {!checklistReselecting && !bodyReadOnly && matchingSlashCommands.length > 0 && <div className="docs-slash-menu docs-popover" role="group" aria-label="블록 추가" style={{ top: slashTop }}>
                   <div className="docs-slash-caption" aria-hidden="true">블록 추가</div>
                   {matchingSlashCommands.map((command, index) => <button key={command.label} type="button" aria-current={index === slashIndex || undefined}

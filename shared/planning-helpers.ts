@@ -16,6 +16,10 @@ export const PLANNING_STATUS_META:Record<PlanningStatus,{label:string;color:stri
 export function planningFields<K extends PlanningKind>(kind:K){return PLANNING_FIELDS[kind];}
 export function planningMeta(kind:PlanningKind){return PLANNING_META[kind];}
 export function planningLabel(data:Pick<WorkspaceSnapshot,'planningItems'>,id:string|null|undefined){return data.planningItems?.find(item=>item.id===id)?.name||'';}
+export function planningAssignmentBlock({ kind, status }: Pick<PlanningItem, 'kind' | 'status'>): 'archived' | 'completed' | null {
+  if (status === 'archived') return 'archived';
+  return kind === 'cycle' && status === 'completed' ? 'completed' : null;
+}
 export function projectPlanningItems(data:Pick<WorkspaceSnapshot,'planningItems'>,projectId:string,kind:PlanningKind,options:{includeArchived?:boolean}={}):PlanningItem[]{
   return(data.planningItems||[]).filter(item=>item.projectId===projectId&&item.kind===kind&&(options.includeArchived||item.status!=='archived')).sort((a,b)=>a.name.localeCompare(b.name,'ko'));
 }

@@ -212,6 +212,74 @@ test('업무 일괄 배정의 충돌은 전체 취소되고 선택은 유지되�
   } finally { for (const issue of issues) await request.delete(`/api/issues/${issue.id}`); await cleanPlan(request, item.id); }
 });
 
+test('완료된 사이클은 기존 업무에서 확인하고 해제할 수 있으며 새 연결 후보에는 나타나지 않는다', async ({ page, request }) => {
+  const { projects: [project] } = await snapshot(request);
+  const suffix = randomUUID().slice(0, 8);
+  const response = await request.post('/api/planning-items', { data: {
+    projectId: project.id, kind: 'cycle', name: `완료할 사이클 ${suffix}`, status: 'active',
+    startDate: dateAt(-7), endDate: dateAt(0),
+  } });
+  expect(response.status(), await response.text()).toBe(201);
+  const cycle = await response.json() as PlanningItem;
+  const openCycle = await plan(request, project.id, 'cycle', `새 연결 가능 ${suffix}`);
+  const issues: Issue[] = [];
+  async function createIssue(title: string, fields: Partial<Issue> = {}) {
+    const created = await request.post('/api/issues', { data: { projectId: project.id, title: `${title} ${suffix}`, ...fields } });
+    expect(created.status(), await created.text()).toBe(201);
+    const issue = await created.json() as Issue;
+    issues.push(issue);
+    return issue;
+  }
+  try {
+    const linked = await createIssue('기존 연결', { cycleId: cycle.id, status: 'done' });
+    const unassigned = await createIssue('아직 연결 안 됨');
+    const completionPath = `/api/planning-items/${cycle.id}/complete`;
+    const review = await request.post(`${completionPath}/preview`, { data: { expectedVersion: cycle.version, destinationId: null } });
+    expect(review.status(), await review.text()).toBe(200);
+    const { previewId } = await review.json();
+    const completed = await request.post(completionPath, { data: { previewId } });
+    expect(completed.status(), await completed.text()).toBe(200);
+
+    await page.goto(`/#/${project.id}/planning/${cycle.id}`);
+    const editor = page.getByRole('region', { name: '사이클 상세', exact: true });
+    await expect(editor.getByLabel('계획 상태', { exact: true })).toHaveValue('completed');
+    await expect(editor.getByText('완료된 사이클에는 새 업무를 연결할 수 없습니다.', { exact: false })).toBeVisible();
+    await editor.getByRole('button', { name: '업무 연결·해제', exact: true }).click();
+    await editor.getByLabel('연결할 업무 검색', { exact: true }).fill(suffix);
+    const checkbox = (issue: Issue) => editor.getByRole('checkbox', { name: `${issue.key} 계획 연결`, exact: true });
+    await expect(checkbox(linked)).toBeChecked();
+    await expect(checkbox(unassigned)).toBeDisabled();
+
+    const panel = page.getByRole('dialog');
+    const selector = panel.getByLabel('사이클', { exact: true });
+    const openIssue = (issue: Issue) => editor.locator('.planning-linked-issue').filter({ hasText: issue.title }).click();
+    await openIssue(linked);
+    await expect(selector).toHaveValue(cycle.id);
+    await expect(selector.locator('option:checked')).toContainText('완료 · 현재 연결');
+    await panel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await openIssue(unassigned);
+    await expect(selector.locator(`option[value="${cycle.id}"]`)).toHaveCount(0);
+    await expect(selector.locator(`option[value="${openCycle.id}"]`)).toHaveCount(1);
+    await panel.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+
+    await checkbox(linked).uncheck();
+    const applied = page.waitForResponse(result => result.url().endsWith(`/api/planning-items/${cycle.id}/issues`) && result.request().method() === 'POST');
+    await editor.getByRole('button', { name: '연결 변경 적용', exact: true }).click();
+    expect((await applied).status()).toBe(200);
+    await expect.poll(async () => (await snapshot(request)).issues.find(value => value.id === linked.id)?.cycleId).toBeNull();
+    await page.goto(`/#/${project.id}/gantt/${cycle.id}`);
+    await page.getByRole('button', { name: '업무 추가', exact: true }).click();
+    const inlineCycle = page.getByLabel('추가할 업무 사이클', { exact: true });
+    await expect(inlineCycle).toHaveValue('');
+    await expect(inlineCycle.locator(`option[value="${cycle.id}"]`)).toHaveCount(0);
+    await expect(inlineCycle.locator(`option[value="${openCycle.id}"]`)).toHaveCount(1);
+  } finally {
+    for (const issue of issues) await request.delete(`/api/issues/${issue.id}`);
+    await cleanPlan(request, cycle.id);
+    await cleanPlan(request, openCycle.id);
+  }
+});
+
 test('이름이 변경된 계획을 오래된 업무 편집이 덮어쓰지 않고 canonical ID로 유지한다', async ({ page, request }) => {
   const initial = await snapshot(request), project = initial.projects[0];
   const item = await plan(request, project.id, 'module', `원래 모듈 ${Date.now()}`);

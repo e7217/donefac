@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { fieldApplies, hasCustomValue } from '../shared/issue-schema.js';
 import type { IssueProjectMoveInput, IssueProjectMoveMapping, IssueProjectMoveNotice, IssueProjectMovePreview, IssueProjectMoveResult } from '../shared/issue-project-move.js';
+import { planningAssignmentBlock } from '../shared/planning-helpers.js';
 import type { CustomFieldDefinition, CustomFieldValue, Dependency, Issue, PlanningItem, Project, ProjectIssueOrder, ProjectIssueSchema, ProjectWorkflow, WorkCalendar } from '../shared/types.js';
 import type { Store } from './store.js';
 
@@ -256,8 +257,8 @@ export class IssueProjectMoveService {
       for (const field of PLAN_FIELDS) {
         const kind = field.slice(0, -2) as 'cycle' | 'module' | 'release';
         const planId = requested[field] ?? null;
-        const plan = planId ? plans.find(item => item.id === planId && item.kind === kind && item.status !== 'archived') : undefined;
-        if (planId && !plan) blockers.push({ code: 'target_plan_invalid', issueId, message: '대상 프로젝트의 활성 계획 항목을 선택해 주세요.' });
+        const plan = planId ? plans.find(item => item.id === planId && item.kind === kind && !planningAssignmentBlock(item)) : undefined;
+        if (planId && !plan) blockers.push({ code: 'target_plan_invalid', issueId, message: '대상 프로젝트에서 업무를 연결할 수 있는 계획 항목을 선택해 주세요.' });
         if (issue[field] && !plan) warnings.push({ code: 'source_plan_cleared', issueId, message: `기존 계획 항목 ${issue[kind] ?? ''} 연결이 해제됩니다.` });
         mapping[field] = plan?.id ?? null;
         draft[field] = mapping[field];

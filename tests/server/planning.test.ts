@@ -79,6 +79,78 @@ test('bulk membership changes check every version and shared workflow rules befo
   }finally{await f.close();f.remove();}
 });
 
+test('completed cycles preserve and remove historical membership while blocking new assignments', async () => {
+  const source = await fixture(), restored = await fixture(undefined, false);
+  try {
+    const cycle = await create(source, 'cycle', '완료할 사이클', {
+      status: 'active', startDate: '2026-11-09', endDate: '2026-11-20',
+    });
+    const linked = await issue(source, '완료된 업무', { cycleId: cycle.id, status: 'done' });
+    const unassigned = await issue(source, '새로 연결하려는 업무');
+    const completePath = `/planning-items/${cycle.id}/complete`;
+    const review = await source.request(`${completePath}/preview`, 'POST', { expectedVersion: cycle.version, destinationId: null });
+    assert.equal(review.status, 200, JSON.stringify(review.data));
+    const completion = await source.request(completePath, 'POST', { previewId: review.data.previewId });
+    assert.equal(completion.status, 200, JSON.stringify(completion.data));
+    assert.equal(completion.data.cycle.status, 'completed');
+    const current = completion.data.cycle as PlanningItem;
+    const before = await snapshot(source);
+
+    for (const fields of [{ cycleId: cycle.id }, { cycle: cycle.name }]) {
+      const rejected = await source.request('/issues', 'POST', { projectId: cycle.projectId, title: '완료된 사이클로 생성', ...fields });
+      assert.equal(rejected.status, 422);
+      assert.match(rejected.data.error, /완료된 사이클/);
+    }
+    const rejectedUpdate = await source.request(`/issues/${unassigned.id}`, 'PATCH', { expectedVersion: unassigned.version, cycleId: cycle.id });
+    assert.equal(rejectedUpdate.status, 422);
+    assert.match(rejectedUpdate.data.error, /완료된 사이클/);
+    const batch = await source.request(`/planning-items/${cycle.id}/issues`, 'POST', { expectedVersion: current.version, assignments: [
+      { issueId: linked.id, expectedVersion: linked.version, assigned: false },
+      { issueId: unassigned.id, expectedVersion: unassigned.version, assigned: true },
+    ] });
+    assert.equal(batch.status, 422);
+    assert.match(batch.data.error, /완료된 사이클/);
+    const bulk = await source.request(`/projects/${cycle.projectId}/issues/bulk-preview`, 'POST', {
+      issues: [linked, unassigned].map(value => ({ id: value.id, expectedVersion: value.version })),
+      changes: { cycleId: cycle.id, priority: 'high' },
+    });
+    assert.equal(bulk.status, 200);
+    assert.deepEqual([bulk.data.previewId, bulk.data.changed, bulk.data.blocked], [null, 1, 1]);
+    assert.match(bulk.data.rows.find((row: { id: string }) => row.id === unassigned.id).reason, /완료된 사이클/);
+    assert.deepEqual(await snapshot(source), before);
+
+    const retained = await source.request(`/issues/${linked.id}`, 'PATCH', { expectedVersion: linked.version, cycleId: cycle.id, title: '기존 연결 유지' });
+    assert.equal(retained.status, 200);
+    assert.equal(retained.data.cycleId, cycle.id);
+    const backup = await source.request('/export');
+    assert.equal((await restored.request('/import', 'POST', { data: backup.data })).status, 200);
+    assert.equal((await snapshot(restored)).issues.find(value => value.id === linked.id)?.cycleId, cycle.id);
+
+    const deleted = await source.request(`/issues/${linked.id}`, 'DELETE', { expectedVersion: retained.data.version });
+    assert.equal(deleted.status, 200);
+    const fromTrash = await source.request(`/trash/${deleted.data.trashEntryId}/restore`, 'POST', {});
+    assert.equal(fromTrash.status, 200, JSON.stringify(fromTrash.data));
+    const restoredIssue = (await snapshot(source)).issues.find(value => value.id === linked.id)!;
+    assert.equal(restoredIssue.cycleId, cycle.id);
+    const removed = await source.request(`/planning-items/${cycle.id}/issues`, 'POST', { expectedVersion: current.version,
+      assignments: [{ issueId: linked.id, expectedVersion: restoredIssue.version, assigned: false }],
+    });
+    assert.equal(removed.status, 200);
+    assert.equal(removed.data.updated[0].cycleId, null);
+
+    const module = await create(source, 'module', '완료된 모듈', { status: 'completed' });
+    const release = await create(source, 'release', '완료된 릴리스', { status: 'completed' });
+    const otherPlanning = await issue(source, '모듈과 릴리스 연결', { moduleId: module.id, releaseId: release.id });
+    assert.equal(otherPlanning.moduleId, module.id);
+    assert.equal(otherPlanning.releaseId, release.id);
+    assert.equal((await source.request(`/planning-items/${cycle.id}`, 'PATCH', { expectedVersion: current.version, status: 'planned' })).status, 200);
+    assert.equal((await issue(source, '다시 계획 중인 사이클', { cycleId: cycle.id })).cycleId, cycle.id);
+  } finally {
+    await source.close(); await restored.close();
+    source.remove(); restored.remove();
+  }
+});
+
 test('current backup preserves canonical planning IDs and archived refs; legacy1/2/3 migrate original labels and invalid refs rollback',async()=>{
   const source=await fixture(),target=await fixture(undefined,false);
   try{

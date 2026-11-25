@@ -1504,7 +1504,8 @@ export const TEAM_NOTIFICATION_KINDS = [
   'document-changes-requested', 'document-published', 'document-review-withdrawn', 'document-review-approved',
 ] as const;
 export type TeamNotificationKind = typeof TEAM_NOTIFICATION_KINDS[number];
-export type TeamNotificationFilter = 'all' | 'unread';
+export type TeamNotificationFilter = 'all' | 'unread' | 'archived';
+export type TeamNotificationInboxChange = { archived: boolean } | { read: boolean };
 export interface TeamNotification {
   id: string;
   recipientId: string;
@@ -1517,6 +1518,7 @@ export interface TeamNotification {
   detail?: string;
   createdAt: string;
   readAt: string | null;
+  archivedAt?: string;
 }
 export interface TeamNotificationPage {
   items: TeamNotification[];

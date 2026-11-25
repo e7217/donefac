@@ -87,6 +87,49 @@ async function issue(f: Fixture, assigneeId: string, title: string, collaborator
   return expectStatus(f.call<Issue>('/issues', 'POST', { projectId: 'project-neo', title, assigneeId, collaboratorIds }), 201);
 }
 
+test('inbox archive is recipient-scoped, reversible, and preserves the read state through backup', async t => {
+  const f = await fixture(t);
+  const ticket = await issue(f, reviewer, '보관할 배정 알림');
+  const original = (await inbox(f, reviewer)).items.find(item => item.targetId === ticket.id)!;
+  const endpoint = `/notifications/${original.id}/inbox`;
+  const change = (body: object, actorId = reviewer) => f.call<{ item: TeamNotification; unreadCount: number }>(endpoint, 'PATCH', body, actorId);
+  await expectStatus(change({ archived: true, read: false }), 400);
+  await expectStatus(change({ archived: 'true' }), 400);
+  await expectStatus(change({ archived: true }, other), 404);
+
+  const first = await expectStatus(change({ archived: true }));
+  assert.equal(first.unreadCount, 0);
+  assert.equal(first.item.readAt, null);
+  assert.ok(first.item.archivedAt);
+  assert.deepEqual(await expectStatus(change({ archived: true })), first);
+  assert.deepEqual((await inbox(f, reviewer)).items, []);
+  assert.deepEqual((await inbox(f, other, '?filter=archived')).items, []);
+  assert.deepEqual((await inbox(f, reviewer, '?filter=archived')).items, [first.item]);
+
+  await comment(f, 'issue', ticket.id, editor);
+  const openInbox = await inbox(f, reviewer, '?filter=unread');
+  assert.equal(openInbox.unreadCount, 1);
+  assert.equal(openInbox.items[0].kind, 'issue-comment');
+  await expectStatus(f.call('/notifications/read-all', 'PATCH', { throughId: openInbox.items[0].id }, reviewer));
+  assert.equal((await inbox(f, reviewer, '?filter=archived')).items[0].readAt, null);
+
+  const backup = await expectStatus(f.call<Backup>('/export'));
+  assert.equal(backup.schemaVersion, 127);
+  await expectStatus(f.call('/import', 'POST', { data: { ...backup, schemaVersion: 126 } }), 400);
+  await expectStatus(f.call('/import', 'POST', { data: { ...backup, teamNotifications: backup.teamNotifications.map(item =>
+    item.id === original.id ? { ...item, archivedAt: '2000-01-01T00:00:00.000Z' } : item) } }), 400);
+  await f.restart();
+  assert.deepEqual((await inbox(f, reviewer, '?filter=archived')).items, [first.item]);
+  await expectStatus(f.call('/import', 'POST', { data: backup }));
+  assert.deepEqual((await inbox(f, reviewer, '?filter=archived')).items, [first.item]);
+  const returned = await expectStatus(change({ archived: false }));
+  assert.equal(returned.unreadCount, 1);
+  assert.deepEqual(returned.item, original);
+  assert.equal((await expectStatus(change({ read: true }))).unreadCount, 0);
+  assert.equal((await expectStatus(change({ read: false }))).unreadCount, 1);
+  assert.deepEqual((await inbox(f, reviewer, '?filter=unread')).items, [original]);
+});
+
 async function comment(f: Fixture, resourceType: 'issue' | 'document', resourceId: string, actorId: string) {
   return expectStatus(f.call<Comment>('/comments', 'POST', { resourceType, resourceId, body: privateComment }, actorId), 201);
 }

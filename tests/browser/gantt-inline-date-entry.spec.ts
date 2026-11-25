@@ -155,6 +155,55 @@ test('간트에서 날짜 일부를 비운 입력은 마지막 유효값을 유�
   } finally { await request.delete(`/api/issues/${issue.id}`); }
 });
 
+test('360px 간트의 날짜 칸에 붙여넣은 날짜는 저장 전까지 초안으로 유지된다', async ({ page, context, request }) => {
+  const { projects: [project] } = await workspace(request);
+  const title = `간트 날짜 칸 붙여넣기 ${Date.now()}`;
+  const before = { startDate: '2026-11-23', endDate: '2026-11-27' };
+  const after = { startDate: '2026-11-24', endDate: '2026-11-28' };
+  const created = await request.post('/api/issues', { data: { projectId: project.id, title, ...before } });
+  expect(created.status(), await created.text()).toBe(201);
+  const issue = await created.json() as Issue;
+  const stored = async () => (await workspace(request)).issues.find(value => value.id === issue.id);
+
+  try {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.setViewportSize({ width: 360, height: 760 });
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색', { exact: true }).fill(title);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const start = chart.getByLabel(`${issue.key} 시작일`, { exact: true });
+    const end = chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const paste = async (field: Locator, value: string) => {
+      await page.evaluate(text => navigator.clipboard.writeText(text), value);
+      await field.press('Control+v');
+    };
+
+    await paste(start, '2027-02-29');
+    await expect(start).toHaveValue(before.startDate);
+    await start.press('Delete');
+    await expect(start).toHaveAttribute('aria-invalid', 'true');
+    await paste(start, ` ${after.startDate} \n`);
+    await expect(start).toHaveValue(after.startDate);
+    await expect(start).not.toHaveAttribute('aria-invalid', 'true');
+    await paste(end, `${after.startDate}\t${after.endDate}`);
+    await expect(end).toHaveValue(before.endDate);
+    await paste(end, after.endDate);
+    await expect(end).toHaveValue(after.endDate);
+    expect(await stored()).toMatchObject({ ...before, version: issue.version });
+
+    await end.press('Enter');
+    await expect.poll(stored).toMatchObject({ ...after, version: issue.version + 1 });
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await expect.poll(stored).toMatchObject(before);
+  } finally {
+    const removed = await request.delete(`/api/issues/${issue.id}`);
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`);
+    }
+  }
+});
+
 test('간트 날짜 초안을 저장하지 않고 유지하거나 확인 후 전체 프로젝트 보드로 이동한다', async ({ page, request }) => {
   const { projects: [project] } = await workspace(request);
   const title = `팀 보드 이동 전 간트 날짜 입력 ${Date.now()}`;

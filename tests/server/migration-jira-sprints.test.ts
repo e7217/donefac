@@ -78,9 +78,9 @@ function adminPackage(): Buffer {
     <CustomField id="${sprintField}" cfname="Sprint" customfieldtypekey="com.pyxis.greenhopper.jira:gh-sprint"/>
     <Version id="6301" project="${originalProject}" vname="통합 계획" released="false"/>
     <Version id="6302" project="${originalProject}" vname="별도 릴리스" released="false"/>
-    ${issue('4401', 1, '과거 이력과 진행 스프린트')}${issue('4402', 2, '후보가 있는 업무')}
+    ${issue('4401', 1, '과거 이력과 진행 스프린트')}${issue('4402', 2, '후보가 있는 업무')}${issue('4498', 98, '지난 사이클에만 있던 업무')}
     ${hasSprint(1, '4401', '5101')}${hasSprint(2, '4401', '5102')}
-    ${hasSprint(3, '4402', '5102')}${hasSprint(4, '4402', '5103')}
+    ${hasSprint(3, '4402', '5102')}${hasSprint(4, '4402', '5103')}${hasSprint(5, '4498', '5101')}
     ${hasFixVersion('6301')}${hasFixVersion('6302')}</entity-engine-xml>`;
   const activeObjects = `<backup xmlns="http://www.atlassian.com/ao"><data tableName="AO_60DB71_SPRINT">
     <column name="ID"/><column name="NAME"/><column name="START_DATE"/><column name="END_DATE"/>
@@ -142,6 +142,7 @@ test('Jira sprint and version choices survive restore and append preserves team 
   assert.equal(active.startDate, start);
   assert.equal(active.endDate, end);
   assert.equal(previous.status, 'completed');
+  assert.equal((await issue('지난 사이클에만 있던 업무')).cycleId, previous.id);
   const first = await issue('과거 이력과 진행 스프린트');
   assert.equal(first.cycleId, active.id);
   const another = await issue('후보가 있는 업무');
@@ -172,7 +173,7 @@ test('Jira sprint and version choices survive restore and append preserves team 
   const stale = await f.preview(appendConfig);
   assert.ok(stale.canApply, JSON.stringify(stale.notices));
   const renamed = await plan('cycle', '팀이 바꾼 사이클');
-  await f.call<PlanningItem>(`/planning-items/${active.id}`, 'PATCH', { expectedVersion: renamed.version, endDate: '2025-01-21' });
+  await f.call<PlanningItem>(`/planning-items/${active.id}`, 'PATCH', { expectedVersion: renamed.version, status: 'completed', endDate: '2025-01-21' });
   assert.match((await f.apply<{ error: string }>(stale, 409)).error, /사이클이 변경/);
   const fresh = await f.preview(appendConfig);
   assert.ok(fresh.canApply, JSON.stringify(fresh.notices));
@@ -196,6 +197,7 @@ test('Jira sprint and version choices survive restore and append preserves team 
   const reuse = await issue('기존 사이클에 붙일 업무');
   assert.equal(reuse.cycleId, active.id);
   assert.equal(reuse.cycle, '팀이 바꾼 사이클');
+  assert.equal((await plan('cycle', '팀이 바꾼 사이클')).status, 'completed');
   assert.equal((await issue('과거 이력과 진행 스프린트')).cycleId, selected.id);
   assert.equal((await plan('cycle', '팀이 바꾼 사이클')).endDate, '2025-01-21');
   assert.equal((await issue('새 사이클에 붙일 업무')).cycleId, (await plan('cycle', '새 REST 사이클')).id);

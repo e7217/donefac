@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { ListChecks, Plus, X } from 'lucide-react';
 import { isCalendarDate } from '../../shared/calendar';
 import { fieldValueLabel, hasCustomValue, projectIssueSchema } from '../../shared/issue-schema';
-import { PLANNING_STATUS_META, planningFields, planningMeta, projectPlanningItems } from '../../shared/planning-helpers';
+import { PLANNING_STATUS_META, planningAssignmentBlock, planningFields, planningMeta, projectPlanningItems } from '../../shared/planning-helpers';
 import { projectWorkflow } from '../../shared/workflow-helpers';
 import { issueSearchAliasLabel, searchIssueCandidates, WORKSPACE_SEARCH_QUERY_LIMIT } from '../../shared/workspace-search';
 import {
@@ -119,15 +119,16 @@ export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: 
   const validParent = !selectingParent || Boolean(currentParent && !parentError);
   const { planningItems } = data;
   const planningOptions = useMemo(() => new Map(planningKinds.map(kind => [kind, active && !team
-    ? projectPlanningItems({ planningItems }, projectId, kind) : []])), [active, planningItems, projectId, team]);
+    ? projectPlanningItems({ planningItems }, projectId, kind).filter(item => !planningAssignmentBlock(item)) : []])), [active, planningItems, projectId, team]);
   const planningChanges: Pick<IssueBulkEditChanges, 'cycleId' | 'moduleId' | 'releaseId'> = {};
   const planningErrors = new Map<PlanningKind, string>();
   if (!team) for (const kind of planningKinds) {
     const choice = planningDrafts[kind];
     if (choice === undefined) continue;
     if (choice && !planningOptions.get(kind)?.some(item => item.id === choice.id)) {
-      const archived = planningItems?.some(item => item.id === choice.id && item.projectId === projectId && item.kind === kind && item.status === 'archived');
-      planningErrors.set(kind, archived ? `보관된 ${planningMeta(kind).label}에는 연결할 수 없습니다. 다른 계획을 선택해 주세요.`
+      const item = planningItems?.find(item => item.id === choice.id && item.projectId === projectId && item.kind === kind);
+      const block = item ? planningAssignmentBlock(item) : null;
+      planningErrors.set(kind, block ? `${block === 'archived' ? '보관된' : '완료된'} ${planningMeta(kind).label}에는 연결할 수 없습니다. 다른 계획을 선택해 주세요.`
         : '현재 프로젝트에서 이 계획을 찾을 수 없습니다. 다른 계획을 선택해 주세요.');
       continue;
     }

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, 
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
 import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePastePreview, type SchedulePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
-import { createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
+import { createCalendarMath, defaultWorkCalendar, isCalendarDate } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
 import { checkDependencySchedule, checkTeamBlockerSchedule, DEPENDENCY_ENDPOINTS, DEPENDENCY_TYPES, isDependencyType, TEAM_BLOCKER_SCHEDULE_RULE, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
@@ -23,7 +23,7 @@ import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreatio
 import { issueSearchText, projectIssueSchema, projectIssueTypes, requiredFieldLabels } from '../../shared/issue-schema';
 import { summarizeIssueGitlabLinks } from '../../shared/issue-gitlab-view';
 import { createIssueViewMatcher, createTeamIssueSearchMatcher, issuePriorityLabelFilterLabels, matchesGitlabFilter, orderIssueView } from '../../shared/issue-view';
-import { planningFields } from '../../shared/planning-helpers';
+import { planningAssignmentBlock, planningFields } from '../../shared/planning-helpers';
 import { issueSearchAliasLabel, matchingIssueSearchAliases, normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import { issuePlanningFilterLabels } from './issue-planning-filter-labels';
 import { issueStatusFilterLabel } from './IssueStatusFilter';
@@ -2611,7 +2611,7 @@ function ProjectGantt(props: GanttProps) {
       <button className="btn btn-primary" type="submit" disabled={busy || (shiftMode === 'hierarchy' ? !hierarchyTrace : !selectedIssues.length)}>변경 미리보기</button>
       <button className="issue-icon-button" type="button" onClick={closeShiftForm} disabled={busy} aria-label="일정 이동 닫기"><X size={16} aria-hidden="true" /></button>
     </form>}
-    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={filteredProject?.id ?? projectId} chooseProject={allProjects} actorId={props.actorId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan?.status !== 'archived' ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={closeCreateForm} onCreated={async issue => {
+    {createOpen && <InlineIssueForm key={`${projectId}:${draftEpoch}`} data={data} projectId={filteredProject?.id ?? projectId} chooseProject={allProjects} actorId={props.actorId} projects={data.projects} users={data.users} sharedViewActive={ganttViewId !== null} initialPlan={planningExpanded && selectedPlan && !planningAssignmentBlock(selectedPlan) ? selectedPlan : undefined} onDraftChange={trackDraft} onClose={closeCreateForm} onCreated={async issue => {
       await refresh();
       finishCreating();
       if (scheduleFocus) {
@@ -2652,7 +2652,7 @@ function ProjectGantt(props: GanttProps) {
       onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue}
       onOpenMilestoneCandidateIssue={openChartIssue} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 칸에 YYYY-MM-DD를 붙여넣을 수 있습니다. 행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
     {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}
     {unavailableDateIds.length > 0 && <div className="gantt-hint">
       <span role="status">원래 업무와 연결할 수 없는 날짜 초안이 {unavailableDateIds.length}건 있습니다.</span>
@@ -3540,6 +3540,12 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
       aria-label={`${issue.key} ${edge === 'start' ? '시작일' : '종료일'}`}
       value={state.value} disabled={disabled || pending}
       onInput={event => readInput(event.currentTarget)}
+      onPaste={event => {
+        const value = event.clipboardData.getData('text/plain').trim();
+        if (disabled || pendingRef.current || !isCalendarDate(value)) return;
+        event.preventDefault();
+        setInput(inlineDateInput(value));
+      }}
       // Clearing the last segment can change validity without dispatching an input event.
       onKeyUp={event => readInput(event.currentTarget)} onBlur={event => readInput(event.currentTarget)}
       onKeyDown={event => {

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Express, Request, Response, NextFunction } from 'express';
 import type { Issue, PlanningItem, PlanningKind, PlanningStatus, PlanScheduleDates, Project, SavedView, User } from '../shared/types.js';
-import { planningFields, PLANNING_META } from '../shared/planning-helpers.js';
+import { planningAssignmentBlock, planningFields, PLANNING_META } from '../shared/planning-helpers.js';
 import { Store } from './store.js';
 
 export class PlanningError extends Error {constructor(public status:number,message:string,public details?:unknown){super(message);}}
@@ -36,6 +36,11 @@ function blankItem(projectId:string,kind:PlanningKind,label:string,timestamp:str
 }
 type PlanFields=Pick<Issue,'cycle'|'module'|'release'|'cycleId'|'moduleId'|'releaseId'>;
 const jiraImportedPlanIds = { release: /^jira_release_[a-f0-9]{64}$/, cycle: /^jira_sprint_[a-f0-9]{64}$/ };
+function assertAssignable(item: PlanningItem): void {
+  const block = planningAssignmentBlock(item);
+  if (block === 'archived') fail('보관된 계획 항목에 새 업무를 배정할 수 없습니다.', 422);
+  if (block === 'completed') fail('완료된 사이클에 새 업무를 배정할 수 없습니다.', 422);
+}
 type Hooks = {
   actor: (request: Request) => string;
   activity: (request: Request, resourceType: string, resourceId: string, action: string, detail?: string) => unknown;
@@ -93,19 +98,19 @@ export class PlanningService{
       }else id=previous?.[idField]||null;
       const item=id?items.find(item=>item.id===id):undefined;
       if(id!==null&&(!item||item.projectId!==projectId||item.kind!==kind))fail(`${PLANNING_META[kind].label}의 프로젝트·종류·ID가 올바르지 않습니다.`);
-      if(item?.status==='archived'&&previous?.[idField]!==id)fail('보관된 계획 항목에 새 업무를 배정할 수 없습니다.',422);
+      if(item&&previous?.[idField]!==id)assertAssignable(item);
       (result as any)[idField]=id;(result as any)[labelField]=item?.name||null;
     }
     return result;
   }
   /** Mutates both IDs and derived labels so every issue write has one canonical reference. */
-  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowArchived?:boolean | ReadonlySet<string>}={}):void{
+  validateIssueReferences(issue:Issue,previous?:Issue,options:{allowHistorical?:boolean | ReadonlySet<string>}={}):void{
     const items=this.all();
     for(const kind of kinds){const {idField,labelField}=planningFields(kind),id=issue[idField];if(id===undefined||id===null){(issue as any)[idField]=null;(issue as any)[labelField]=null;continue;}
       if(typeof id!=='string')fail(`${PLANNING_META[kind].label} ID가 올바르지 않습니다.`);
       const item=items.find(item=>item.id===id);if(!item||item.projectId!==issue.projectId||item.kind!==kind)fail(`${PLANNING_META[kind].label}의 프로젝트·종류·ID가 올바르지 않습니다.`);
-      const allowed = options.allowArchived === true || Boolean(options.allowArchived && options.allowArchived.has(id));
-      if(item.status==='archived'&&!allowed&&previous?.[idField]!==id)fail('보관된 계획 항목에 새 업무를 배정할 수 없습니다.',422);
+      const allowed = options.allowHistorical === true || (options.allowHistorical && options.allowHistorical.has(id));
+      if(!allowed&&previous?.[idField]!==id)assertAssignable(item);
       (issue as any)[labelField]=item.name;
     }
   }
@@ -155,6 +160,16 @@ export class PlanningService{
     });
     for (const item of plans) this.put(item);
     return plans;
+  }
+  historicalJiraPlanIds(imported: PlanningItem[], issues: Issue[]): ReadonlySet<string> {
+    const ids = new Set(imported.filter(item => planningAssignmentBlock(item)).map(item => item.id));
+    // An appended Jira migration can also reuse a previously imported sprint.
+    for (const id of new Set(issues.map(issue => issue.cycleId))) {
+      if (!id || ids.has(id) || !jiraImportedPlanIds.cycle.test(id)) continue;
+      const item = this.store.get<PlanningItem>('planning_items', id);
+      if (item?.kind === 'cycle' && item.status === 'completed') ids.add(id);
+    }
+    return ids;
   }
   /** The combined schedule apply/undo transaction owns this date-only write. */
   writeScheduleDates(id:string,expectedVersion:number,dates:PlanScheduleDates):PlanningItem{

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isCalendarDate } from '../shared/calendar.js';
 import { COMMENT_MENTION_NOTIFICATION_KINDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
-import type { Comment, TeamNotification, TeamNotificationFilter, TeamNotificationPage } from '../shared/types.js';
+import type { Comment, TeamNotification, TeamNotificationFilter, TeamNotificationInboxChange, TeamNotificationPage } from '../shared/types.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 50;
@@ -14,9 +14,9 @@ const ISSUE_COMMENT_KIND = 'issue-comment';
 const COMMENT_REPLY_KIND = 'document-comment-reply';
 const REQUIRED_DETAIL_KINDS: ReadonlySet<string> = new Set([...ISSUE_RISK_NOTIFICATION_KINDS, ...ISSUE_DEADLINE_REMINDER_KINDS]);
 const COLUMNS = `id,recipient_id AS recipientId,actor_id AS actorId,kind,project_id AS projectId,
-  target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail,comment_id AS commentId`;
+  target_id AS targetId,target_label AS targetLabel,created_at AS createdAt,read_at AS readAt,detail,comment_id AS commentId,archived_at AS archivedAt`;
 const INSERT = `INSERT INTO team_notifications
-  (id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`;
+  (id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id,archived_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`;
 const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS team_notifications (
   seq INTEGER PRIMARY KEY,
   id TEXT NOT NULL UNIQUE,
@@ -29,15 +29,16 @@ const CREATE_TABLE = `CREATE TABLE IF NOT EXISTS team_notifications (
   created_at TEXT NOT NULL,
   read_at TEXT,
   detail TEXT,
-  comment_id TEXT
+  comment_id TEXT,
+  archived_at TEXT
 )`;
-const RESTORE_FIELDS = new Set(['id', 'recipientId', 'actorId', 'kind', 'projectId', 'targetId', 'targetLabel', 'createdAt', 'readAt', 'detail', 'commentId']);
+const RESTORE_FIELDS = new Set(['id', 'recipientId', 'actorId', 'kind', 'projectId', 'targetId', 'targetLabel', 'createdAt', 'readAt', 'detail', 'commentId', 'archivedAt']);
 
 export class TeamNotificationError extends Error {
   readonly status = 400;
 }
 
-type NewNotification = Omit<TeamNotification, 'actorId' | 'id' | 'recipientId' | 'readAt'> & {
+type NewNotification = Omit<TeamNotification, 'actorId' | 'id' | 'recipientId' | 'readAt' | 'archivedAt'> & {
   actorId: string;
   recipientIds: (string | null | undefined)[];
 };
@@ -47,7 +48,9 @@ type NewDeadlineReminder = Pick<TeamNotification, 'recipientId' | 'targetId' | '
   projectId: string;
   deadline: { value: string; source: 'dueDate' | 'endDate' };
 };
-type StoredNotification = Omit<TeamNotification, 'detail' | 'commentId'> & { detail: string | null; commentId: string | null };
+type StoredNotification = Omit<TeamNotification, 'detail' | 'commentId' | 'archivedAt'> & {
+  detail: string | null; commentId: string | null; archivedAt: string | null;
+};
 
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 const validId = (value: unknown): value is string => nonempty(value) && value.length <= 200 && value.trim() === value;
@@ -73,8 +76,8 @@ function validateCommentId(kind: string, commentId: unknown, present: boolean): 
   throw new TeamNotificationError('댓글 알림의 댓글 ID를 확인해 주세요.');
 }
 
-function publicNotification({ detail, commentId, ...row }: StoredNotification): TeamNotification {
-  return { ...row, ...(detail === null ? {} : { detail }), ...(commentId === null ? {} : { commentId }) };
+function publicNotification({ detail, commentId, archivedAt, ...row }: StoredNotification): TeamNotification {
+  return { ...row, ...(detail === null ? {} : { detail }), ...(commentId === null ? {} : { commentId }), ...(archivedAt === null ? {} : { archivedAt }) };
 }
 
 function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>): TeamNotification {
@@ -89,7 +92,8 @@ function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<s
     typeof row.kind !== 'string' || !KINDS.has(row.kind) ||
     (row.projectId !== null && !nonempty(row.projectId)) || (row.kind.startsWith('issue-') && row.projectId === null) ||
     !nonempty(row.targetId) || !nonempty(row.targetLabel) || row.targetLabel.length > LABEL_LIMIT ||
-    !timestamp(row.createdAt) || (row.readAt !== null && (!timestamp(row.readAt) || row.readAt < row.createdAt))) {
+    !timestamp(row.createdAt) || (row.readAt !== null && (!timestamp(row.readAt) || row.readAt < row.createdAt)) ||
+    (Object.hasOwn(row, 'archivedAt') && (!timestamp(row.archivedAt) || row.archivedAt < row.createdAt))) {
     throw new TeamNotificationError('알림 종류·팀원·대상·시간을 확인해 주세요.');
   }
   const detail = validateDetail(row.kind, row.detail, Object.hasOwn(row, 'detail'));
@@ -127,8 +131,11 @@ export class NotificationsService {
       if (!columns.some(column => column.name === 'comment_id')) {
         store.db.exec('ALTER TABLE team_notifications ADD COLUMN comment_id TEXT');
       }
+      if (!columns.some(column => column.name === 'archived_at')) {
+        store.db.exec('ALTER TABLE team_notifications ADD COLUMN archived_at TEXT');
+      }
       if (columns.find(column => column.name === 'actor_id')?.notnull === 1) {
-        const fields = 'seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id';
+        const fields = 'seq,id,recipient_id,actor_id,kind,project_id,target_id,target_label,created_at,read_at,detail,comment_id,archived_at';
         store.db.exec(`
           ALTER TABLE team_notifications RENAME TO previous_team_notifications;
           ${CREATE_TABLE};
@@ -156,7 +163,7 @@ export class NotificationsService {
     const detail = validateDetail(input.kind, input.detail, input.detail !== undefined);
     const commentId = validateCommentId(input.kind, input.commentId, input.commentId !== undefined);
     for (const id of recipients) {
-      insert.run(randomUUID(), id, input.actorId, input.kind, input.projectId, input.targetId, targetLabel, input.createdAt, null, detail, commentId);
+      insert.run(randomUUID(), id, input.actorId, input.kind, input.projectId, input.targetId, targetLabel, input.createdAt, null, detail, commentId, null);
     }
   }
 
@@ -169,7 +176,7 @@ export class NotificationsService {
     const detail = `${deadline.source === 'dueDate' ? '목표 마감일' : '계획 종료일'} ${deadline.value}`;
     this.store.db.prepare(`${INSERT} ON CONFLICT(id) DO NOTHING`).run(
       reminderId(kind, recipientId, targetId, deadline.value), recipientId, null, kind, projectId, targetId,
-      targetLabel.slice(0, LABEL_LIMIT), createdAt, null, detail, null,
+      targetLabel.slice(0, LABEL_LIMIT), createdAt, null, detail, null, null,
     );
   }
 
@@ -182,7 +189,8 @@ export class NotificationsService {
       params.push(cursor.seq);
     }
     params.push(PAGE_SIZE + 1);
-    const rows = this.store.db.prepare(`SELECT ${COLUMNS} FROM team_notifications WHERE recipient_id=?
+    const archiveCondition = filter === 'archived' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL';
+    const rows = this.store.db.prepare(`SELECT ${COLUMNS} FROM team_notifications WHERE recipient_id=? AND ${archiveCondition}
       ${filter === 'unread' ? 'AND read_at IS NULL' : ''} ${before === undefined ? '' : 'AND seq < ?'} ORDER BY seq DESC LIMIT ?`)
       .all(...params) as unknown as StoredNotification[];
     const items = rows.slice(0, PAGE_SIZE).map(publicNotification);
@@ -190,7 +198,7 @@ export class NotificationsService {
   }
 
   count(recipientId: string): number {
-    const row = this.store.db.prepare('SELECT count(*) AS unread FROM team_notifications WHERE recipient_id=? AND read_at IS NULL')
+    const row = this.store.db.prepare('SELECT count(*) AS unread FROM team_notifications WHERE recipient_id=? AND read_at IS NULL AND archived_at IS NULL')
       .get(recipientId) as {unread: number};
     return row.unread;
   }
@@ -202,11 +210,22 @@ export class NotificationsService {
   }
 
   markAllRead(recipientId: string, throughId: string): boolean {
-    // Including an already-read cutoff row distinguishes an idempotent retry from a missing cutoff.
-    const result = this.store.db.prepare(`UPDATE team_notifications SET read_at=coalesce(read_at,max(created_at,?))
-      WHERE recipient_id=? AND seq <= (SELECT seq FROM team_notifications WHERE recipient_id=? AND id=?)
-        AND (read_at IS NULL OR id=?)`).run(new Date().toISOString(), recipientId, recipientId, throughId, throughId);
-    return result.changes !== 0;
+    const cutoff = this.store.db.prepare('SELECT seq FROM team_notifications WHERE recipient_id=? AND id=?').get(recipientId, throughId);
+    if (!cutoff) return false;
+    this.store.db.prepare(`UPDATE team_notifications SET read_at=max(created_at,?)
+      WHERE recipient_id=? AND seq <= ? AND read_at IS NULL AND archived_at IS NULL`)
+      .run(new Date().toISOString(), recipientId, cutoff.seq);
+    return true;
+  }
+
+  changeInbox(recipientId: string, id: string, change: TeamNotificationInboxChange): { item: TeamNotification; unreadCount: number } | null {
+    const field = 'archived' in change ? 'archived_at' : 'read_at';
+    const enabled = 'archived' in change ? change.archived : change.read;
+    const row = this.store.db.prepare(`UPDATE team_notifications
+      SET ${field}=CASE WHEN ? THEN coalesce(${field},max(created_at,?)) ELSE NULL END
+      WHERE recipient_id=? AND id=? RETURNING ${COLUMNS}`)
+      .get(Number(enabled), new Date().toISOString(), recipientId, id) as StoredNotification | undefined;
+    return row ? { item: publicNotification(row), unreadCount: this.count(recipientId) } : null;
   }
 
   all(): TeamNotification[] {
@@ -227,6 +246,6 @@ export class NotificationsService {
     this.store.db.exec('DELETE FROM team_notifications');
     const insert = this.store.db.prepare(INSERT);
     for (const row of rows) insert.run(row.id, row.recipientId, row.actorId, row.kind, row.projectId, row.targetId,
-      row.targetLabel, row.createdAt, row.readAt, row.detail ?? null, row.commentId ?? null);
+      row.targetLabel, row.createdAt, row.readAt, row.detail ?? null, row.commentId ?? null, row.archivedAt ?? null);
   }
 }

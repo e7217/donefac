@@ -1639,6 +1639,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 새 `issue-status-changed`의 `detail`은 변경 전후 상태명이고, 새 `issue-comment`의 `commentId`는 해당 업무에 저장된 댓글 ID다. 이전 알림에서 이 필드들은 생략될 수 있다. 알림에는 티켓 식별 정보와 댓글 위치가 들어가며 본문은 티켓에서 읽는다. 자체 백업 형식 86은 상태 상세와 일반 댓글 위치를 보존한다. 복원할 댓글이 있으면 업무와 작성자가 알림의 대상·작업자와 일치해야 한다.
 
+`GET /api/notifications`의 `filter=all`과 `filter=unread`는 받은 알림을 조회하고 `filter=archived`는 보관함을 조회한다. `unreadCount`는 받은 알림 중 읽지 않은 수다. `PATCH /api/notifications/:id/inbox`에 `{archived:true|false}` 또는 `{read:true|false}`를 하나만 보내고 `{item,unreadCount}`를 받는다. 선택한 작업자의 알림 ID를 사용한다. 보관 여부와 읽음 상태를 각각 기록하며 같은 요청을 반복하면 이미 저장한 시각을 유지한다. 보관 시각을 포함한 백업은 형식 127을 사용한다.
+
 ## 개인 즐겨찾기
 
 브라우저의 `GET /api/favorites`는 `X-Actor-Id`로 선택한 작업자가 표시한 활성 항목의 `{resourceType,resourceId,createdAt}` 배열을 최근 추가 순서로 반환한다. `resourceType`은 `issue` 또는 `document`다. `PUT /api/favorites/:resourceType/:resourceId`는 해당 작업자의 즐겨찾기를 등록하고 같은 항목 객체를 반환한다. 반복 등록은 최초 등록 시각을 유지한다. `DELETE`는 같은 경로에서 `{ok:true}`를 반환하며 재호출할 수 있다. 대상 ID는 URL 경로 한 구간으로 인코딩한다.

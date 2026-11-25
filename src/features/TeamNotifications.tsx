@@ -1,8 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
-import { Bell, Check, RefreshCw, X } from 'lucide-react';
-import type { TeamNotification, TeamNotificationFilter, TeamNotificationKind, TeamNotificationPage, User } from '../../shared/types';
+import { Archive, ArchiveRestore, Bell, Check, Mail, RefreshCw, X } from 'lucide-react';
+import type { TeamNotification, TeamNotificationFilter, TeamNotificationInboxChange, TeamNotificationKind, TeamNotificationPage, User } from '../../shared/types';
 import { api, relativeTime } from '../lib/api';
 import './team-notifications.css';
 
@@ -36,9 +36,17 @@ const EVENT_LABELS: Record<TeamNotificationKind, string> = {
   'document-review-withdrawn': '검토 철회',
 };
 
-const FILTER_LABELS: Record<TeamNotificationFilter, string> = { all: '전체', unread: '읽지 않음' };
-const FILTERS: TeamNotificationFilter[] = ['all', 'unread'];
+const FILTER_LABELS: Record<TeamNotificationFilter, string> = { all: '전체', unread: '읽지 않음', archived: '보관함' };
+const FILTERS: TeamNotificationFilter[] = ['all', 'unread', 'archived'];
+const EMPTY_LABELS: Record<TeamNotificationFilter, string> = {
+  all: '아직 받은 알림이 없습니다.', unread: '읽지 않은 알림이 없습니다.', archived: '보관한 알림이 없습니다.',
+};
 type NotificationResults = Pick<TeamNotificationPage, 'items' | 'nextCursor'>;
+
+function matchesFilter(item: TeamNotification, filter: TeamNotificationFilter) {
+  if (filter === 'archived') return Boolean(item.archivedAt);
+  return !item.archivedAt && (filter === 'all' || item.readAt === null);
+}
 
 export default function TeamNotifications(props: TeamNotificationsProps) {
   return <NotificationInbox key={props.actorId} {...props} />;
@@ -163,9 +171,8 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
     setLoadingMore(false);
   }
 
-  async function markRead(item?: TeamNotification, navigate = false) {
-    const throughId = page?.items[0]?.id;
-    if ((!item && !throughId) || writeRequest.current) return;
+  async function writeInbox(action: (signal: AbortSignal) => Promise<void>) {
+    if (writeRequest.current) return;
     readRequest.current?.abort();
     readRequest.current = null;
     setLoadingMore(false);
@@ -174,30 +181,7 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
     writeRequest.current = controller;
     setBusy(true);
     try {
-      if (navigate && item) {
-        if (!(await onOpen(item)) || controller.signal.aborted) return;
-        dismiss(wrapper.current?.contains(document.activeElement) ?? false);
-      }
-      if (item?.readAt) return;
-      const path = item ? `/notifications/${encodeURIComponent(item.id)}/read` : '/notifications/read-all';
-      const result = await api<{ unreadCount: number }>(path, {
-        method: 'PATCH', headers: { 'X-Actor-Id': actorId }, signal: controller.signal,
-        body: item ? undefined : JSON.stringify({ throughId }),
-      });
-      if (controller.signal.aborted) return;
-      const readAt = new Date().toISOString();
-      setCount(result.unreadCount);
-      setPage(previous => previous && {
-        nextCursor: !item && filter === 'unread' ? null : previous.nextCursor,
-        items: previous.items
-          .map(row => (!item || row.id === item.id) && !row.readAt ? { ...row, readAt } : row)
-          .filter(row => filter === 'all' || !row.readAt),
-      });
-      if (!navigate) closeButton.current?.focus();
-      if (!item && result.unreadCount > 0 && closeButton.current) {
-        paged.current = false;
-        void load(filter);
-      }
+      await action(controller.signal);
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : '알림을 처리하지 못했습니다.');
     } finally {
@@ -206,6 +190,52 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
         setBusy(false);
       }
     }
+  }
+
+  function markRead(item?: TeamNotification, navigate = false) {
+    const throughId = page?.items[0]?.id;
+    if (!item && (!throughId || filter === 'archived')) return;
+    return writeInbox(async signal => {
+      if (navigate && item) {
+        if (!(await onOpen(item)) || signal.aborted) return;
+        dismiss(wrapper.current?.contains(document.activeElement) ?? false);
+      }
+      if (item?.readAt) return;
+      const path = item ? `/notifications/${encodeURIComponent(item.id)}/read` : '/notifications/read-all';
+      const result = await api<{ unreadCount: number }>(path, {
+        method: 'PATCH', headers: { 'X-Actor-Id': actorId }, signal,
+        body: item ? undefined : JSON.stringify({ throughId }),
+      });
+      if (signal.aborted) return;
+      const readAt = new Date().toISOString();
+      setCount(result.unreadCount);
+      setPage(previous => previous && {
+        nextCursor: !item && filter === 'unread' ? null : previous.nextCursor,
+        items: previous.items
+          .map(row => (!item || row.id === item.id) && !row.readAt ? { ...row, readAt } : row)
+          .filter(row => matchesFilter(row, filter)),
+      });
+      if (!navigate) closeButton.current?.focus();
+      if (!item && result.unreadCount > 0 && closeButton.current) {
+        paged.current = false;
+        void load(filter);
+      }
+    });
+  }
+
+  function changeInbox(item: TeamNotification, change: TeamNotificationInboxChange) {
+    return writeInbox(async signal => {
+      const result = await api<{ item: TeamNotification; unreadCount: number }>(`/notifications/${encodeURIComponent(item.id)}/inbox`, {
+        method: 'PATCH', headers: { 'X-Actor-Id': actorId }, signal, body: JSON.stringify(change),
+      });
+      if (signal.aborted) return;
+      // Move focus before the row is removed or its temporarily disabled button loses focus.
+      closeButton.current?.focus();
+      setCount(result.unreadCount);
+      setPage(previous => previous && { ...previous,
+        items: previous.items.map(row => row.id === item.id ? result.item : row).filter(row => matchesFilter(row, filter)),
+      });
+    });
   }
 
   function reload() {
@@ -256,14 +286,14 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
                 setFilter(value);
               }}>{FILTER_LABELS[value]}</button>)}
           </div>
-          <button className="team-notifications-mark-all" type="button" disabled={busy || !items.length || !count}
-            onClick={() => void markRead()}>모두 읽음</button>
+          {filter !== 'archived' && <button className="team-notifications-mark-all" type="button" disabled={busy || !items.length || !count}
+            onClick={() => void markRead()}>모두 읽음</button>}
         </div>
         <div className="team-notifications-results" aria-busy={busy || (page === null && !error)}>
           {error && <p className="team-notifications-error" role="alert">{error}</p>}
           {!page && !error && <p className="team-notifications-empty" role="status">알림을 불러오는 중입니다.</p>}
           {page && !items.length && !error && !page.nextCursor && <p className="team-notifications-empty">
-            {filter === 'unread' ? '읽지 않은 알림이 없습니다.' : '아직 받은 알림이 없습니다.'}
+            {EMPTY_LABELS[filter]}
           </p>}
           {!!items.length && <ul className="team-notifications-list">
             {items.map(item => <li key={item.id} className={item.readAt ? undefined : 'is-unread'}>
@@ -274,8 +304,16 @@ function NotificationInbox({ actorId, users, onOpen }: TeamNotificationsProps) {
                 <time dateTime={item.createdAt} title={new Date(item.createdAt).toLocaleString('ko-KR')}>{relativeTime(item.createdAt)}</time>
                 {item.detail && <span className="team-notifications-detail">{item.detail}</span>}
               </button>
-              {!item.readAt && <button className="icon-btn team-notifications-mark" type="button" title="읽음 처리" aria-label={`${item.targetLabel} 읽음 처리`}
+              {item.readAt ? <button className="icon-btn team-notifications-mark" type="button" title="읽지 않음으로 표시"
+                aria-label={`${item.targetLabel} 읽지 않음으로 표시`} disabled={busy} onClick={() => void changeInbox(item, { read: false })}>
+                <Mail size={16} aria-hidden="true" />
+              </button> : <button className="icon-btn team-notifications-mark" type="button" title="읽음 처리" aria-label={`${item.targetLabel} 읽음 처리`}
                 disabled={busy} onClick={() => void markRead(item)}><Check size={16} aria-hidden="true" /></button>}
+              <button className="icon-btn team-notifications-mark" type="button" title={item.archivedAt ? '보관 해제' : '보관'}
+                aria-label={`${item.targetLabel} ${item.archivedAt ? '보관 해제' : '보관'}`} disabled={busy}
+                onClick={() => void changeInbox(item, { archived: !item.archivedAt })}>
+                {item.archivedAt ? <ArchiveRestore size={16} aria-hidden="true" /> : <Archive size={16} aria-hidden="true" />}
+              </button>
             </li>)}
           </ul>}
           {page?.nextCursor && <button className="btn team-notifications-more" type="button" disabled={busy || loadingMore}

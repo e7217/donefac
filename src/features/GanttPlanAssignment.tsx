@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { AlertCircle, Check, Link2, LoaderCircle, RefreshCw, X } from 'lucide-react';
 import type { FeatureProps, Issue, PlanningItem, WorkspaceSnapshot } from '../../shared/types';
-import { planningFields, PLANNING_META } from '../../shared/planning-helpers';
+import { planningAssignmentBlock, planningFields, PLANNING_META } from '../../shared/planning-helpers';
 import { api } from '../lib/api';
 import { errorMessage } from './schedule-utils';
 
@@ -36,12 +36,12 @@ function capture(data: FeatureProps['data'], item: PlanningItem, issues: Issue[]
 }
 function defaultMode(review: Review): Mode {
   const { idField } = planningFields(review.item.kind);
-  return review.item.status === 'archived' || review.issues.length > 0 && review.issues.every(issue => issue[idField] === review.item.id) ? 'remove' : 'assign';
+  return planningAssignmentBlock(review.item) || review.issues.length > 0 && review.issues.every(issue => issue[idField] === review.item.id) ? 'remove' : 'assign';
 }
 function eligible(review: Review, issue: Issue, mode: Mode): boolean {
   if (review.missingItem || review.missingIssues.includes(issue.id) || issue.projectId !== review.item.projectId) return false;
   const { idField } = planningFields(review.item.kind);
-  return mode === 'assign' ? review.item.status !== 'archived' && issue[idField] !== review.item.id : issue[idField] === review.item.id;
+  return mode === 'assign' ? !planningAssignmentBlock(review.item) && issue[idField] !== review.item.id : issue[idField] === review.item.id;
 }
 
 export function GanttPlanAssignment({ data, item, issues, actorId, refresh, onDraftChange, onClose, onApplied }: GanttPlanAssignmentProps) {
@@ -57,6 +57,8 @@ export function GanttPlanAssignment({ data, item, issues, actorId, refresh, onDr
   const draftId = `gantt-plan-assignment:${review.item.id}`;
   const idField = planningFields(review.item.kind).idField;
   const labelField = planningFields(review.item.kind).labelField;
+  const assignmentBlock = planningAssignmentBlock(review.item);
+  const blockingPlanLabel = assignmentBlock === 'archived' ? '보관된 계획' : '완료된 사이클';
   const candidates = review.issues.filter(issue => eligible(review, issue, mode));
   const changes = candidates.filter(issue => selected.has(issue.id));
   const dirty = !committed && changes.length > 0;
@@ -165,7 +167,7 @@ export function GanttPlanAssignment({ data, item, issues, actorId, refresh, onDr
   function reason(issue: Issue) {
     if (review.missingIssues.includes(issue.id)) return '삭제된 업무 · 변경 제외';
     if (issue.projectId !== review.item.projectId) return '다른 프로젝트 · 변경 제외';
-    if (mode === 'assign' && review.item.status === 'archived') return '보관된 계획 · 새 연결 불가';
+    if (mode === 'assign' && assignmentBlock) return `${blockingPlanLabel} · 새 연결 불가`;
     if (!eligible(review, issue, mode)) return mode === 'assign' ? '이미 연결됨 · 변경 없음' : '이 계획의 업무가 아님 · 변경 없음';
     if (!selected.has(issue.id)) return '선택하지 않음';
     return mode === 'assign' && issue[idField] ? '기존 같은 종류 계획을 대체' : mode === 'assign' ? '이 계획에 연결' : '이 계획에서 해제';
@@ -176,8 +178,8 @@ export function GanttPlanAssignment({ data, item, issues, actorId, refresh, onDr
       <header><div><span className="feature-eyebrow">{PLANNING_META[review.item.kind].label} · {review.item.name}</span><h2 id="gantt-plan-assignment-title">계획 업무 연결</h2><p>선택한 업무의 연결만 바꿉니다. 업무 날짜와 상태는 그대로 유지됩니다.</p></div><button type="button" className="issue-icon-button" aria-label="계획 업무 연결 닫기" disabled={Boolean(pending)} onClick={close}><X size={20} /></button></header>
       <form onSubmit={apply}>
         <div className="issue-create-fields">
-          <fieldset disabled={Boolean(pending) || Boolean(committed)}><legend>연결 방식</legend><label className="gantt-checkbox-label"><input type="radio" name="gantt-plan-assignment-mode" checked={mode === 'assign'} disabled={review.item.status === 'archived'} onChange={() => selectMode('assign')} />이 계획에 연결</label><label className="gantt-checkbox-label"><input type="radio" name="gantt-plan-assignment-mode" checked={mode === 'remove'} onChange={() => selectMode('remove')} />이 계획에서 해제</label></fieldset>
-          {review.item.status === 'archived' && <p className="issue-section-empty">보관된 계획에는 새 업무를 연결할 수 없습니다. 기존 연결만 해제할 수 있습니다.</p>}
+          <fieldset disabled={Boolean(pending) || Boolean(committed)}><legend>연결 방식</legend><label className="gantt-checkbox-label"><input type="radio" name="gantt-plan-assignment-mode" checked={mode === 'assign'} disabled={Boolean(assignmentBlock)} onChange={() => selectMode('assign')} />이 계획에 연결</label><label className="gantt-checkbox-label"><input type="radio" name="gantt-plan-assignment-mode" checked={mode === 'remove'} onChange={() => selectMode('remove')} />이 계획에서 해제</label></fieldset>
+          {assignmentBlock && <p className="issue-section-empty">{blockingPlanLabel}에는 새 업무를 연결할 수 없습니다. 기존 연결은 해제할 수 있습니다.</p>}
           <p className="issue-section-empty">선택 업무 {review.issues.length}개 · 변경 대상 {changes.length}개. 같은 종류의 다른 계획이 있으면 선택한 계획으로 대체합니다.</p>
           {!committed && (remoteChanged || actorChanged) && <div className="issue-form-error" role="status"><AlertCircle size={14} />{actorChanged ? '작업자가 변경되었습니다. 최신 상태를 불러온 뒤 검토하세요.' : '검토 이후 다른 변경이 있습니다. 입력은 유지되며 적용할 때 버전을 확인합니다.'}</div>}
           {!committed && !candidates.length && <p className="issue-section-empty">이 방식으로 변경할 업무가 없습니다. 이미 같은 연결인 업무는 다시 저장하지 않습니다.</p>}

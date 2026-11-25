@@ -161,7 +161,7 @@ test('Jira release links and choices survive native restore and reviewed append 
   assert.deepEqual(saved.filters, freshViewReview.filters);
 
   const backup = await f.call<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 126);
+  assert.equal(backup.schemaVersion, 127);
   await f.call('/import', 'POST', { data: { ...backup, schemaVersion: 125 } }, 400);
   await f.call('/import', 'POST', { data: backup });
   assert.deepEqual((await f.call<SavedView[]>(`/views?projectId=${projectId}`)).find(view => view.id === saved.id)?.filters, saved.filters);

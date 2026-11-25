@@ -500,7 +500,7 @@ export function createApp(options: {
     }
     if (hierarchy) for (const id of visited) hierarchy.validated.add(id);
   };
-  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & WorkflowValidationOptions & {allowArchivedPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
+  const validateIssue = (i: Issue,previous?:Issue,options?:IssueHierarchyOptions & WorkflowValidationOptions & {allowHistoricalPlanning?:boolean | ReadonlySet<string>;allowArchivedSchema?:boolean}) => {
     get('projects',i.projectId); i.title=text(i.title,'티켓 제목',300);
     normalizeIssueDescription(i);
     issueSchemas.validateIssue(i,previous,{checkFields:options?.checkFields,allowArchived:options?.allowArchivedSchema});
@@ -514,7 +514,7 @@ export function createApp(options: {
     i.startDate=date(i.startDate,'시작일');i.endDate=date(i.endDate,'종료일');i.dueDate=date(i.dueDate,'마감일');dateRange(i.startDate,i.endDate);
     if(i.estimate!==null&&(!Number.isFinite(i.estimate)||i.estimate<0||i.estimate>100000))fail('예상 작업량은 0 이상의 숫자여야 합니다.');
     validatePlannedEffortMinutes(i.plannedEffortMinutes);
-    planning.validateIssueReferences(i,previous,{allowArchived:options?.allowArchivedPlanning});
+    planning.validateIssueReferences(i,previous,{allowHistorical:options?.allowHistoricalPlanning});
     validateIssueHierarchy(i, options);
     workflows.validateIssue(i,previous,options);return i;
   };
@@ -1102,7 +1102,7 @@ export function createApp(options: {
       }
       const planningProjects = value.appendPages ? [] : value.append ? [value.append.projectId] : value.projects.map(project => project.id);
       const jiraPlans = planning.persistMigratedJiraPlans(value.planningItems ?? [], new Set(planningProjects));
-      const historicalPlans = new Set(jiraPlans.filter(item => item.status === 'archived').map(item => item.id));
+      const historicalPlans = planning.historicalJiraPlanIds(jiraPlans, value.issues);
       for (const item of jiraPlans) activity(req, 'planning', item.id, item.kind === 'cycle' ? 'Jira 스프린트 이관' : 'Jira 릴리스 이관', item.name);
       // Insert both sets first so forward references can be validated against the complete plan.
       for (const issue of value.issues) store.put('issues', issue);
@@ -1115,7 +1115,7 @@ export function createApp(options: {
       if (firstDocument && !refreshedDocuments.length) documentContent.validate(firstDocument.id, firstDocument.content);
       validateDocumentListProjects([...value.documents, ...value.revisions].map(document => document.content), id => Boolean(store.get('projects', id)));
       for (const issue of value.issues) store.put('issues', validateIssue(issue, undefined, {
-        checkFields: false, allowArchivedSchema: true, allowArchivedPlanning: historicalPlans, hierarchy: issueHierarchy,
+        checkFields: false, allowArchivedSchema: true, allowHistoricalPlanning: historicalPlans, hierarchy: issueHierarchy,
       }));
       for (const document of value.documents) store.put('documents', validateDocument(document, undefined, {skipReferences:true}));
       if (value.documentOrders?.length) {
@@ -1499,7 +1499,7 @@ export function createApp(options: {
   });
   app.get('/api/notifications',(req,res)=>{
     const {filter='all',before}=req.query;
-    if (Object.keys(req.query).some(key=>key!=='filter'&&key!=='before') || (filter!=='all'&&filter!=='unread') ||
+    if (Object.keys(req.query).some(key=>key!=='filter'&&key!=='before') || (filter!=='all'&&filter!=='unread'&&filter!=='archived') ||
       (before!==undefined&&(typeof before!=='string'||!before))) return fail('알림 조회 조건을 확인해 주세요.');
     res.set('Cache-Control','no-store').json(notifications.list(requireSelectedActor(req),filter,before));
   });
@@ -1546,6 +1546,15 @@ export function createApp(options: {
     const recipientId=requireSelectedActor(req);
     if (!notifications.markRead(recipientId,req.params.id)) return fail('알림을 찾을 수 없습니다.',404);
     res.set('Cache-Control','no-store').json({unreadCount:notifications.count(recipientId)});
+  });
+  app.patch('/api/notifications/:id/inbox',(req,res)=>{
+    const recipientId=requireSelectedActor(req), body=req.body;
+    if (Object.keys(req.query).length || !body || typeof body!=='object' || Array.isArray(body) || Object.keys(body).length!==1 ||
+      (typeof body.archived!=='boolean' && typeof body.read!=='boolean')) return fail('알림의 보관 또는 읽음 상태를 지정해 주세요.');
+    const change=typeof body.archived==='boolean' ? {archived:body.archived} : {read:body.read};
+    const result=notifications.changeInbox(recipientId,req.params.id,change);
+    if (!result) return fail('알림을 찾을 수 없습니다.',404);
+    res.set('Cache-Control','no-store').json(result);
   });
   app.post('/api/users',(req,res)=>{const u=validateUser({id:uid(),name:req.body.name,email:req.body.email,color:req.body.color||'#5879ed'});store.put('users',u);res.status(201).json(u);});
   app.patch('/api/users/:id',(req,res)=>{const u=get('users',req.params.id);const updated=validateUser({...u,...Object.fromEntries(['name','email','color'].filter(k=>k in req.body).map(k=>[k,req.body[k]]))});store.transaction(()=>{store.put('users',updated);activity(req,'user',u.id,'팀원 정보 변경');});res.json(updated);});
@@ -2419,7 +2428,7 @@ export function createApp(options: {
         if(reused)fail('같은 업무 키가 이미 사용 중이라 복원할 수 없습니다.',409);
         let issue:Issue;
         try{
-          issue=validateIssue({...original,version:original.version+1,updatedAt},original,{checkFields:false,checkTransition:false,allowArchivedPlanning:true,allowArchivedSchema:true});
+          issue=validateIssue({...original,version:original.version+1,updatedAt},original,{checkFields:false,checkTransition:false,allowHistoricalPlanning:true,allowArchivedSchema:true});
         }catch(error){
           if((error instanceof ApiError||error instanceof WorkflowError||error instanceof IssueSchemaError||error instanceof PlanningError)&&error.status<500)return fail(`업무 설정을 확인한 뒤 복원해 주세요. ${error.message}`,409);
           throw error;
@@ -3588,6 +3597,9 @@ export function createApp(options: {
       data.documentPublications,data.documents,data.users,data.revisions,data.exportedAt,data.schemaVersion,
     ):[];
     if(data.schemaVersion<15&&Array.isArray(data.teamNotifications)&&data.teamNotifications.length)fail('팀 알림을 포함한 백업은 schemaVersion 15가 필요합니다.');
+    if (data.schemaVersion < 127 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: unknown) => row && typeof row === 'object' && Object.hasOwn(row, 'archivedAt')
+    )) fail('보관한 팀 알림을 포함한 백업은 schemaVersion 127이 필요합니다.');
     if (data.schemaVersion < 91 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
       (row: { kind?: unknown } | null) => row?.kind === 'document-review-approved',
     )) fail('문서 검토 승인 알림을 포함한 백업은 schemaVersion 91이 필요합니다.');
@@ -3724,7 +3736,7 @@ export function createApp(options: {
       for(const i of data.issues)store.put('issues',i);
       for(const d of data.documents)store.put('documents',d);
       const validTimestamp=(v:any)=>typeof v==='string'&&!Number.isNaN(Date.parse(v));
-      const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowArchivedPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
+      const keys=new Set();for(const i of data.issues){validateIssue(i,undefined,{checkTransition:false,checkFields:false,allowHistoricalPlanning:true,allowArchivedSchema:true});if(!Number.isInteger(i.version)||i.version<1||!validTimestamp(i.createdAt)||!validTimestamp(i.updatedAt)||typeof i.key!=='string'||keys.has(i.key))fail('티켓 버전·키·시간을 확인해 주세요.');keys.add(i.key);i.version=Math.max(i.version,(previousIssues.get(i.id)||0)+1);store.put('issues',i);}
       issueOrders.replaceImported(importedIssueOrders);
       for(const d of data.documents){validateDocument(d,undefined,{allowMissing:true,skipReferences:true});if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       documentOrders.replaceImported(importedDocumentOrders);

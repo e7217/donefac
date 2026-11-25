@@ -483,7 +483,7 @@ test('Jira deadline saved views match imported source dates and preserve native 
   assert.equal(invalid.canApply, false);
   assert.ok(invalid.notices.some(notice => notice.severity === 'error' && notice.code === 'DATE_UNRESOLVED'));
   const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 126);
+  assert.equal(backup.schemaVersion, 127);
   const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 123 } }, 400);
   assert.match(older.error, /schemaVersion 124/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
@@ -532,7 +532,7 @@ test('Jira rolling deadlines move at Seoul midnight and survive export without f
   assert.deepEqual(afterMidnight.filters, review.filters);
   const view = await f.request<SavedView>(IMPORT, 'POST', { ...importView, revision: afterMidnight.revision }, 201);
   const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
-  assert.equal(backup.schemaVersion, 126);
+  assert.equal(backup.schemaVersion, 127);
   const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 124 } }, 400);
   assert.match(older.error, /schemaVersion 125/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');

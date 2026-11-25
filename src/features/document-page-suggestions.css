@@ -1,0 +1,31 @@
+.docs-popover.docs-page-suggestions {
+  inset-inline-start: 0;
+  width: min(360px, 100%);
+  max-height: min(290px, 45vh);
+  overflow-y: auto;
+}
+
+.docs-page-suggestions button {
+  flex-direction: column;
+  gap: 2px;
+}
+
+.docs-page-suggestions button[aria-current='true'] {
+  background: #eef3fc;
+  color: #365ba4;
+}
+
+.docs-page-suggestions strong,
+.docs-page-suggestions button span {
+  overflow-wrap: anywhere;
+}
+
+.docs-page-suggestions button span,
+.docs-page-suggestions-empty {
+  color: #56647b;
+  font-size: 11px;
+}
+
+.docs-page-suggestions-empty {
+  margin: 6px 10px;
+}
