@@ -166,8 +166,10 @@ const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${ac
 const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
 const editCopyCacheKey = (actorId: string, id: string) => `teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
+const commentAttemptKey = (actorId: string, id: string) => `teamspace:document-comment-attempt:${JSON.stringify([actorId, id])}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
+type CommentAttempt = CommentContext & { requestId: string; generation: string; content: ReturnType<typeof commentDraftPayload> };
 type DocumentCreationAttempt = { actorId: string; projectId: string | null; body: string; documentId?: string };
 type DocumentEditCopyAttempt = {
   actorId: string; sourceId: string; editSequence: number; sourceMetadata: DocumentMetadata; documentId?: string;
@@ -366,6 +368,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const handledCommentActivation = useRef<number>(undefined);
   const commentsHeading = useRef<HTMLHeadingElement>(null);
   const [commentBusy, setCommentBusy] = useState(false);
+  const commentSendPending = useRef(false);
+  const [commentAttempt, setCommentAttempt] = useState<CommentAttempt | null>(null);
+  const [commentSubmitError, setCommentSubmitError] = useState('');
   const [commentsLoading, setCommentsLoading] = useState(false);
   const [commentsRefreshing, setCommentsRefreshing] = useState(false);
   const [commentError, setCommentError] = useState('');
@@ -1166,6 +1171,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const focusedComment = commentFocus && comments.find(comment => comment.id === commentFocus.commentId);
   const focusedRoot = rootComments.find(comment => comment.id === (focusedComment?.parentCommentId ?? focusedComment?.id));
   const linkedCommentMissing = commentActivation !== undefined && loadedCommentActivation === commentActivation && !focusedRoot && !commentError;
+  const commentResultPending = commentAttempt?.actorId === actorId && commentAttempt.documentId === documentId;
   const visibleComments = commentFilter === 'all' ? rootComments : rootComments.filter(comment => commentFilterFor(comment) === commentFilter);
   const activeCommentEdit = commentEditing.current?.base;
   const showDetachedCommentEdit = activeCommentEdit && (!visibleComments.some(comment => comment.id === (activeCommentEdit.parentCommentId ?? activeCommentEdit.id))
@@ -1179,9 +1185,16 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     commentContextRef.current = context;
     resolutionRequest.current = null;
     let cached = emptyCommentDraft();
-    try { cached = decodeCommentDraft(localStorage.getItem(commentCacheKey(actorId, documentId))); } catch { setStorageProblem(true); }
+    let attempt: CommentAttempt | null = null;
+    try {
+      cached = decodeCommentDraft(localStorage.getItem(commentCacheKey(actorId, documentId)));
+      const saved = JSON.parse(sessionStorage.getItem(commentAttemptKey(actorId, documentId)) ?? 'null') as CommentAttempt | null;
+      if (saved?.actorId === actorId && saved.documentId === documentId && typeof saved.requestId === 'string' &&
+          typeof saved.generation === 'string' && typeof saved.content?.body === 'string' && saved.content.body) attempt = saved;
+    } catch { setStorageProblem(true); }
     commentDraftRef.current = cached;
     setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentsRefreshing(false); setCommentError('');
+    setCommentAttempt(attempt); setCommentSubmitError('');
     setCommentFilter('all'); setResolvingCommentId(null); setResolutionError('');
     return () => {
       if (resolutionRequest.current === context) resolutionRequest.current = null;
@@ -1461,14 +1474,38 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   async function submitComment(event: React.FormEvent) {
     event.preventDefault();
     const context = commentContextRef.current;
-    const payload = commentDraftPayload(commentDraftRef.current);
-    if (!context || !payload.body || commentBusy) return;
-    setCommentBusy(true);
+    if (!context || context.documentId !== documentId || context.actorId !== activeActorRef.current || commentSendPending.current) return;
+    const pending = commentResultPending ? commentAttempt : null;
+    const payload = pending?.content ?? commentDraftPayload(commentDraftRef.current);
+    if (!payload.body) return;
+    const generation = data.restoreGeneration;
+    const attempt = pending ?? (generation ? { ...context, requestId: newRequestId(), generation, content: payload } : null);
+    const isCurrent = () => commentContextRef.current?.documentId === context.documentId &&
+      commentContextRef.current.actorId === context.actorId && activeActorRef.current === context.actorId;
+    const key = commentAttemptKey(context.actorId, context.documentId);
+    function finishAttempt() {
+      if (!attempt) return;
+      if (isCurrent()) setCommentAttempt(current => current?.requestId === attempt.requestId ? null : current);
+      try {
+        const saved = JSON.parse(sessionStorage.getItem(key) ?? 'null') as CommentAttempt | null;
+        if (saved?.requestId === attempt.requestId) sessionStorage.removeItem(key);
+      } catch { setStorageProblem(true); }
+    }
+    commentSendPending.current = true;
+    setCommentBusy(true); setCommentSubmitError('');
+    if (attempt) {
+      setCommentAttempt(attempt);
+      try { sessionStorage.setItem(key, JSON.stringify(attempt)); } catch { setStorageProblem(true); }
+    }
     try {
       const result = await api<Comment>('/comments', { method: 'POST', headers: { 'X-Actor-Id': context.actorId },
-        body: JSON.stringify({ resourceType: 'document', resourceId: context.documentId, ...payload }) });
-      const current = commentContextRef.current;
-      if (current?.documentId === context.documentId && current.actorId === context.actorId && activeActorRef.current === context.actorId) {
+        body: JSON.stringify({ resourceType: 'document', resourceId: context.documentId, ...payload,
+          ...(attempt ? { requestId: attempt.requestId, expectedRestoreGeneration: attempt.generation } : {}) }) });
+      if (!result?.id || result.resourceType !== 'document' || result.resourceId !== context.documentId ||
+          result.authorId !== context.actorId || result.documentSource || result.parentCommentId) throw new Error('저장한 댓글 응답을 확인하지 못했습니다.');
+      finishAttempt();
+      if (attempt && activeGeneration.current !== attempt.generation) return;
+      if (isCurrent()) {
         setComments(items => items.some(item => item.id === result.id) ? items : [...items, result]);
         setCommentFilter('all');
         if (sameCommentDraft(commentDraftPayload(commentDraftRef.current), payload)) updateCommentDraft(emptyCommentDraft());
@@ -1480,9 +1517,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         } catch { setStorageProblem(true); }
       }
       window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
-      await refresh();
-    } catch (error) { notify(error instanceof Error ? error.message : '댓글을 등록하지 못했습니다.', 'error'); }
-    finally { setCommentBusy(false); }
+      await refresh().catch(() => { if (isCurrent()) setCommentSubmitError('댓글을 등록했습니다. 문서 목록을 다시 불러와 주세요.'); });
+    } catch (error) {
+      const knownFailure = error instanceof ApiError && [400, 404, 409, 422].includes(error.status);
+      if (knownFailure) finishAttempt();
+      if (isCurrent()) {
+        const detail = error instanceof Error ? error.message : '댓글을 등록하지 못했습니다.';
+        setCommentSubmitError(knownFailure || !attempt ? detail : '댓글 등록 결과를 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.');
+      }
+    } finally { commentSendPending.current = false; setCommentBusy(false); }
   }
 
   function showSavedSelectionComment(comment: Comment) {
@@ -2787,9 +2830,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               })}
               {showDetachedCommentEdit && <CommentEditBody comment={activeCommentEdit} editing={commentEditing} users={data.users} />}
               <form className="docs-comment-form" onSubmit={submitComment}>
+                {commentSubmitError && <p className="docs-panel-error" role="alert">{commentSubmitError}</p>}
                 <CommentMentionInput className="field" draft={commentDraft} onChange={updateCommentDraft} users={data.users}
                   placeholder="의견을 남겨주세요…" aria-label="새 문서 댓글" rows={4} />
-                <button type="submit" className="btn btn-primary" disabled={!commentDraft.body.trim() || commentBusy}>{commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />} 댓글 남기기</button>
+                <button type="submit" className="btn btn-primary" disabled={(!commentResultPending && !commentDraft.body.trim()) || commentBusy}>
+                  {commentBusy ? <Loader2 size={13} className="docs-spin" /> : <Send size={13} />}
+                  {commentBusy ? '댓글 등록 확인 중…' : commentResultPending ? '댓글 결과 다시 확인' : '댓글 남기기'}
+                </button>
               </form>
             </>}
             {sideTab === 'links' && <>

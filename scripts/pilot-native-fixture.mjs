@@ -29,14 +29,29 @@ export async function prepareNativeTeamPilot(pilot, actorIds) {
   assert.equal(submitted.item.status, 'pending');
   assert.equal(submitted.item.reporterId, reporterId);
   assert.deepEqual((await api('/workspace')).issues, []);
-  const decision = await api(`${intakePath}/${submitted.item.id}/decision`, { method: 'POST', headers: owner, body: {
+  const editPath = `${intakePath}/${submitted.item.id}/edit`;
+  const editRequest = { requestId: randomUUID(), restoreGeneration, expectedVersion: submitted.item.version,
+    title: '합성 현장 일정 요청 확정', description: '장비 검증 순서를 반영한 접수 요청입니다.' };
+  const editedIntake = await api(editPath, { method: 'POST', headers: reporter, body: editRequest });
+  assert.equal(editedIntake.item.version, submitted.item.version + 1);
+  assert.equal(editedIntake.item.title, editRequest.title);
+  assert.equal(editedIntake.item.description, editRequest.description);
+  assert.deepEqual(await api(editPath, { method: 'POST', headers: reporter, body: editRequest }), { ...editedIntake, duplicate: true });
+  const decisionPath = `${intakePath}/${submitted.item.id}/decision`;
+  const decisionRequest = {
     requestId: randomUUID(), restoreGeneration, expectedVersion: submitted.item.version, decision: 'accept',
     expectedWorkflowVersion: workflow.version, expectedIssueSchemaVersion: schema.version, issue: { assigneeId: ownerId },
-  } });
+  };
+  const staleDecision = await api(decisionPath, { method: 'POST', headers: owner, status: 409, body: decisionRequest });
+  assert.equal(staleDecision.details.reason, 'stale_request');
+  const decision = await api(decisionPath, { method: 'POST', headers: owner,
+    body: { ...decisionRequest, requestId: randomUUID(), expectedVersion: editedIntake.item.version } });
   const intake = decision.item;
   assert.equal(intake.status, 'accepted');
   const issue = (await api('/workspace')).issues.find(value => value.id === intake.issueId);
   assert.ok(issue);
+  assert.equal(issue.title, editRequest.title);
+  assert.equal(issue.description, editRequest.description);
   assert.equal(issue.reporterId, reporterId);
   assert.equal(issue.assigneeId, ownerId);
   assert.equal(issue.status, workflow.initialStatusId);

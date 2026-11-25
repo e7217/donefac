@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, test } from '@playwright/test';
+import { expect, test, type Route } from '@playwright/test';
 import type { GitlabLink, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types';
 
-test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌부터 연결 해제까지 초안을 유지한다', async ({ page, request }) => {
+test('360px 티켓에서 GitLab MR 연결의 설정 충돌과 응답 유실을 복구하고 초안을 유지한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const initial = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
@@ -74,16 +74,43 @@ test('360px 티켓에서 번호 없는 GitLab MR을 검증하고 설정 충돌�
     await expect(repository).toHaveValue('');
     expect(calls).toEqual([]);
 
-    const first = waitForPost();
+    let attachmentAttempts = 0;
+    let savedLink: GitlabLink | undefined;
+    const interceptAttachment = async (requestRoute: Route) => {
+      attachmentAttempts++;
+      if (attachmentAttempts === 1) {
+        await requestRoute.fulfill({ status: 504, json: { error: '응답 시간 초과' } });
+        return;
+      }
+      const response = await requestRoute.fetch();
+      expect(response.status(), await response.text()).toBe(201);
+      savedLink = await response.json() as GitlabLink;
+      await requestRoute.abort('connectionreset');
+    };
+    await page.route(route, interceptAttachment);
     await connect.click();
-    const attached = await first;
-    expect(attached.status(), await attached.text()).toBe(201);
-    const link = await attached.json() as GitlabLink;
-    expect(link.webUrl).toBe(canonicalUrl());
-    await expect(form).toHaveCount(0);
-    await expect(add).toBeFocused();
+    await expect(form.getByRole('alert')).toContainText('응답 시간 초과');
+    await expect(form.getByRole('alert')).toContainText('최신 GitLab 활동을 불러왔습니다');
+    await expect(url).toHaveValue(copied);
+    await expect(repository).toHaveValue('');
+    await expect(gitlab.locator('.gitlab-activity-row')).toHaveCount(0);
+    expect(calls).toEqual([]);
+    expect(attachmentAttempts).toBe(1);
+
+    await connect.click();
     const row = gitlab.locator('.gitlab-activity-row').filter({ hasText: title });
     await expect(row.getByRole('link', { name: new RegExp(title) })).toHaveAttribute('href', canonicalUrl());
+    await expect(form.getByRole('alert')).toContainText('GitLab 연결 응답을 확인하지 못했습니다.');
+    await expect(form.getByRole('alert')).toContainText('최신 GitLab 활동을 불러왔습니다');
+    await expect(url).toHaveValue(copied);
+    expect(attachmentAttempts).toBe(2);
+    expect(savedLink).toBeDefined();
+    const link = savedLink!;
+    expect(link.webUrl).toBe(canonicalUrl());
+    await page.unroute(route, interceptAttachment);
+    await form.getByRole('button', { name: '취소', exact: true }).click();
+    await expect(form).toHaveCount(0);
+    await expect(add).toBeFocused();
     await expect(row.getByText('수동 연결', { exact: true })).toBeVisible();
 
     merged = true;

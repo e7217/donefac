@@ -5,6 +5,22 @@ import type { ScheduleUndoInfo, ScheduleUndoResult, ScheduleUndoScope } from '..
 import { api, ApiError } from '../lib/api';
 
 const REQUEST_TIMEOUT = 20_000;
+const undoIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const undoRequestKey = (key: string) => `teamspace:schedule-undo:${key}`;
+
+function pendingUndoId(key: string) {
+  try {
+    const id = sessionStorage.getItem(undoRequestKey(key));
+    return id && undoIdPattern.test(id) ? id : null;
+  } catch { return null; }
+}
+
+function forgetPendingUndo(key: string, id: string) {
+  try {
+    const storageKey = undoRequestKey(key);
+    if (sessionStorage.getItem(storageKey) === id) sessionStorage.removeItem(storageKey);
+  } catch { /* Result handling still works without tab storage. */ }
+}
 
 export function scheduleUndoHeaders(scope?: ScheduleUndoScope | null, actorId?: string): Record<string, string> {
   return {
@@ -31,11 +47,12 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
   const scopeId = scope && 'id' in scope ? scope.id : '';
   const key = kind && actorId ? JSON.stringify([actorId, restoreGeneration ?? null, kind, scopeId]) : null;
   const session = useRef<UndoSession | null>(null);
-  const [selection, setSelection] = useState<{ key: string; undoId: string | null } | null>(null);
+  const [selection, setSelection] = useState<{ key: string; undoId: string | null; recovering: boolean } | null>(null);
 
   useEffect(() => {
     if (!key || !kind) return;
-    const active: UndoSession = { key, id: null, retry: false, lookup: null, request: null, load };
+    const pendingId = pendingUndoId(key);
+    const active: UndoSession = { key, id: pendingId, retry: pendingId !== null, lookup: null, request: null, load };
     session.current = active;
     const params = new URLSearchParams({ scope: kind });
     if (scopeId) params.set('id', scopeId);
@@ -52,13 +69,16 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
         if (lookup.signal.aborted || session.current !== active) return;
         if (undo !== null && typeof undo?.undoId !== 'string') return;
         active.id = undo?.undoId ?? null;
-        setSelection({ key: active.key, undoId: active.id });
+        setSelection({ key: active.key, undoId: active.id, recovering: false });
       }).catch(() => {
         // A failed lookup does not discard a receipt already held by this screen.
       }).finally(() => { if (active.lookup === lookup) active.lookup = null; });
     }
 
-    void load();
+    if (pendingId) queueMicrotask(() => {
+      if (session.current === active && active.retry) setSelection({ key, undoId: pendingId, recovering: true });
+    });
+    else void load();
     window.addEventListener('focus', load);
     return () => {
       window.removeEventListener('focus', load);
@@ -75,11 +95,11 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
 
   const remember = useCallback((undoId: string) => {
     const active = session.current;
-    if (!active || active.key !== key) return;
+    if (!active || active.key !== key || active.retry || active.request) return;
     active.lookup?.abort();
     active.id = undoId;
     active.retry = false;
-    setSelection({ key: active.key, undoId });
+    setSelection({ key: active.key, undoId, recovering: false });
   }, [key]);
 
   const undo = useCallback(async (): Promise<ScheduleUndoResult | null> => {
@@ -89,6 +109,8 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
     const request = new AbortController();
     active.lookup?.abort();
     active.request = request;
+    try { sessionStorage.setItem(undoRequestKey(active.key), undoId); }
+    catch { /* The exact request remains available in memory. */ }
     const headers = scheduleUndoHeaders(kind === 'team' ? { kind } : { kind, id: scopeId }, actorId);
     let reload = false;
     async function send(retry: boolean) {
@@ -106,20 +128,26 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
       } catch (cause) {
         if (request.signal.aborted || active.retry || !isUncertainScheduleResponse(cause)) throw cause;
         active.retry = true;
+        setSelection({ key: active.key, undoId, recovering: true });
         result = await send(true);
       }
       if (session.current !== active || request.signal.aborted) return null;
       if (active.id === undoId) {
+        forgetPendingUndo(active.key, undoId);
+        reload = active.retry;
         active.retry = false;
         active.id = null;
-        setSelection({ key: active.key, undoId: null });
+        setSelection({ key: active.key, undoId: null, recovering: false });
       }
       return result;
     } catch (cause) {
       if (session.current !== active || request.signal.aborted) return null;
       if (!isUncertainScheduleResponse(cause)) {
+        forgetPendingUndo(active.key, undoId);
         active.retry = false;
         reload = cause instanceof ApiError && [404, 409].includes(cause.status);
+        if (reload) active.id = null;
+        setSelection({ key: active.key, undoId: active.id, recovering: false });
         throw cause;
       }
       throw new Error('되돌리기 결과를 확인하지 못했습니다. 되돌리기를 다시 누르면 같은 작업을 확인합니다.');
@@ -129,5 +157,6 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
     }
   }, [actorId, key, kind, scopeId]);
 
-  return { undoId: selection?.key === key ? selection.undoId : null, remember, reload, undo };
+  const current = selection?.key === key ? selection : null;
+  return { undoId: current?.undoId ?? null, recovering: current?.recovering ?? false, remember, reload, undo };
 }

@@ -174,13 +174,37 @@ export class IssueIntakeService {
     });
   }
 
+  edit(projectId: string, id: string, actorId: string, input: unknown, log: (item: IssueIntakeRequest) => void): IssueIntakeResult {
+    const attempt = parseAttempt(input);
+    const { body } = attempt;
+    const { expectedVersion } = body;
+    if (!exactFields(body, [...baseFields, 'expectedVersion', 'title', 'description']) || !version(expectedVersion)) {
+      throw new IssueIntakeError(400, '수정할 접수 버전과 내용을 확인해 주세요.');
+    }
+    const title = boundedText(body.title, titleLimit, '요청 제목', true, true);
+    const description = boundedText(body.description, descriptionLimit, '요청 설명');
+    return this.withAttempt(projectId, actorId, attempt, { action: 'edit', id, expectedVersion, title, description }, () => {
+      const before = this.get(projectId, id);
+      if (before.reporterId !== actorId) throw new IssueIntakeError(403, '요청을 작성한 팀원만 수정할 수 있습니다.');
+      if (before.version !== expectedVersion || before.status !== 'pending') {
+        throw new IssueIntakeError(409, '접수 요청이 수정되었거나 처리됐습니다. 최신 상태를 확인해 주세요.', 'stale_request');
+      }
+      if (before.title === title && before.description === description) return before;
+      const updatedAt = new Date(Math.max(Date.now(), Date.parse(before.updatedAt))).toISOString();
+      const next = { ...before, title, description, updatedAt, version: before.version + 1 };
+      this.put(next);
+      log(next);
+      return next;
+    });
+  }
+
   review(projectId: string, id: string, actorId: string, input: unknown, hooks: ReviewHooks): IssueIntakeResult {
     const attempt = parseAttempt(input);
     const review = parseReview(attempt.body);
     return this.withAttempt(projectId, actorId, attempt, { action: 'review', id, review }, () => {
       const before = this.get(projectId, id);
       if (before.version !== review.expectedVersion || before.status !== 'pending') {
-        throw new IssueIntakeError(409, '다른 작업자가 접수 요청을 처리했습니다. 최신 상태를 확인해 주세요.', 'stale_request');
+        throw new IssueIntakeError(409, '접수 요청이 수정되었거나 처리됐습니다. 최신 상태를 확인해 주세요.', 'stale_request');
       }
       let issue: Issue | null = null;
       if (review.decision === 'accept') {

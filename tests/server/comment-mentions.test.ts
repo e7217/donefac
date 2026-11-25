@@ -177,6 +177,34 @@ test('ticket comment request receipts save alerts once and reject replay across 
   assert.deepEqual(await f.list('issue', issue.id), [created]);
 });
 
+test('document comment receipts confirm one save and one alert after a retry', async t => {
+  const f = await fixture(t);
+  const document = await f.document('문서 댓글 등록 확인');
+  const issue = await f.issue('문서 댓글 요청과 독립적인 티켓');
+  const { restoreGeneration } = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.ok(restoreGeneration);
+  const input = { requestId: randomUUID(), expectedRestoreGeneration: restoreGeneration, resourceType: 'document',
+    resourceId: document.id, ...compose(f.user(reviewer), ' 검토 부탁드립니다.') };
+  const post = (body: unknown, status: number, actor = writer) => f.call<Comment>('/comments', { method: 'POST', body, status, actor });
+
+  const created = await post(input, 201);
+  assert.deepEqual(await post(input, 200), created);
+  await post(input, 409, collaborator);
+  await post({ ...input, body: `${input.body} 추가` }, 409);
+  await post({ ...input, resourceType: 'issue', resourceId: issue.id }, 409);
+  assert.deepEqual(await f.list('issue', issue.id), []);
+
+  await f.restore(await f.call<Backup>('/export'));
+  const restored = await f.call<WorkspaceSnapshot>('/workspace');
+  assert.notEqual(restored.restoreGeneration, restoreGeneration);
+  await post(input, 409);
+  await post({ ...input, expectedRestoreGeneration: restored.restoreGeneration }, 409);
+  assert.deepEqual(await f.list('document', document.id), [created]);
+  assert.deepEqual((await f.inbox(reviewer, document.id)).map(({ kind, commentId }) => [kind, commentId]), [
+    ['document-comment-mentioned', created.id],
+  ]);
+});
+
 test('a pinned comment saves mention alerts with its receipt and replays after a member is renamed', async t => {
   const f = await fixture(t);
   const document = await f.document('원문 문장 멘션');

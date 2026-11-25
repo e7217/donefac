@@ -352,7 +352,15 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         ...(draft.existing ? { expectedLinkId: draft.existing.id, expectedManualLinkId: draft.existing.manualLinkId } : {}),
         url: draft.url.trim(), expectedSettingsVersion: settings.version,
       };
-      const link = await post<GitlabLink>(path, input);
+      const link = await post<GitlabLink>(path, input).catch(async cause => {
+        if (draft.existing || (cause instanceof ApiError && cause.status !== 408 && cause.status < 500)) throw cause;
+        const refreshed = await refresh().then(() => true, () => false);
+        const message = cause instanceof ApiError ? cause.message : 'GitLab 연결 응답을 확인하지 못했습니다.';
+        const next = refreshed
+          ? '최신 GitLab 활동을 불러왔습니다. 다시 연결하기 전에 목록에서 대상 링크를 확인해 주세요.'
+          : 'GitLab 활동 새로고침으로 대상 링크가 저장되었는지 확인해 주세요.';
+        throw new Error(`${message} ${next}`);
+      });
       showLinkedActivity(link);
       await afterChange(draft.existing ? 'GitLab 연결을 다시 확인했습니다.' : 'GitLab 연결을 저장했습니다.');
       closeAction();

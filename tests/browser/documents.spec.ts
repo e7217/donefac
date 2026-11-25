@@ -254,6 +254,53 @@ test('문서 편집·댓글이 저장되고 이전 내용 복구는 새 버전�
   expect(errors).toEqual([]);
 });
 
+test('360px 문서 댓글의 응답이 끊겨도 새로고침 뒤 같은 댓글만 확인하고 다음 초안을 보존한다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  await page.setViewportSize({ width: 360, height: 820 });
+  await openDocument(page, document);
+  const field = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+  const openPanel = page.getByRole('button', { name: '정보 패널 열기', exact: true });
+  await openPanel.click();
+  const original = '응답이 끊기기 전에 서버에 저장한 의견';
+  const next = '별도로 작성 중인 다음 의견';
+  const attempts: unknown[] = [];
+  let committed: Comment | undefined;
+  await page.route('**/api/comments', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    attempts.push(route.request().postDataJSON());
+    if (attempts.length > 1) return route.continue();
+    const response = await route.fetch();
+    expect(response.status()).toBe(201);
+    committed = await response.json() as Comment;
+    await route.abort('failed');
+  });
+  await field.fill(original);
+  await page.getByRole('button', { name: '댓글 남기기', exact: true }).click();
+  const recover = page.getByRole('button', { name: '댓글 결과 다시 확인', exact: true });
+  await expect(recover).toBeEnabled();
+  await expect(page.getByRole('alert').filter({ hasText: '댓글 등록 결과를 확인하지 못했습니다.' })).toBeVisible();
+  await field.fill(next);
+  page.on('dialog', dialog => dialog.accept());
+  await page.reload();
+  await openPanel.click();
+  await expect(field).toHaveValue(next);
+
+  const replay = page.waitForResponse(response => new URL(response.url()).pathname === '/api/comments' && response.request().method() === 'POST');
+  await recover.click();
+  const response = await replay;
+  expect(response.status()).toBe(200);
+  expect(await response.json()).toEqual(committed);
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0]).toMatchObject({ resourceType: 'document', resourceId: document.id, body: original,
+    requestId: expect.any(String), expectedRestoreGeneration: expect.any(String) });
+  expect(attempts[1]).toEqual(attempts[0]);
+  await expect(recover).toHaveCount(0);
+  await expect(field).toHaveValue(next);
+  await expect(page.locator('.docs-comment p').filter({ hasText: original })).toHaveCount(1);
+  const comments = await requests.get(`/api/comments?resourceType=document&resourceId=${document.id}`);
+  expect(await comments.json()).toEqual([committed]);
+});
+
 test('360px에서 문서 링크를 삽입하고 선택한 글의 서식을 유지하며 주소를 수정한다', async ({ page, syntheticDocument }) => {
   await page.setViewportSize({ width: 360, height: 820 });
   const { document, requests, initialText } = syntheticDocument;

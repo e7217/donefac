@@ -342,7 +342,9 @@ function ProjectGantt(props: GanttProps) {
   const [busy, setBusy] = useState(false);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const undoScope = useMemo<ScheduleUndoScope>(() => allProjects ? { kind: 'team' } : { kind: 'project', id: projectId }, [allProjects, projectId]);
-  const { undoId, remember: rememberUndo, reload: reloadScheduleUndo, undo: undoScheduleChange } = useScheduleUndo(undoScope, props.actorId, data.restoreGeneration);
+  const { undoId, recovering: recoveringUndo, remember: rememberUndo, reload: reloadScheduleUndo, undo: undoScheduleChange } =
+    useScheduleUndo(undoScope, props.actorId, data.restoreGeneration);
+  const undoLabel = recoveringUndo ? '되돌리기 결과 다시 확인' : '되돌리기';
   const [days, setDays] = useState(5);
   const [workingDays, setWorkingDays] = useState(true);
   const [shiftSuccessors, setShiftSuccessors] = useState(false);
@@ -2645,7 +2647,9 @@ function ProjectGantt(props: GanttProps) {
         aria-expanded={shiftMode === 'selection'} aria-controls={shiftMode === 'selection' ? 'gantt-shift-form' : undefined}>
         <MoveHorizontal size={15} aria-hidden="true" />{selectedIssues.length ? `${selectedIssues.length}개 ` : ''}일정 이동
       </button>
-      <button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined} disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label="되돌리기" title="마지막 일정 변경 되돌리기"><Undo2 size={16} /><span className="gantt-undo-label">되돌리기</span></button>
+      <button className="btn btn-ghost" onClick={undo} data-gantt-focus-control={scheduleFocus ? '' : undefined} onPointerDown={scheduleFocus ? keepInlineDateFocus : undefined}
+        disabled={!undoId || busy || Boolean(activeDatePicker)} aria-label={undoLabel} title={recoveringUndo ? undoLabel : '마지막 일정 변경 되돌리기'}>
+        <Undo2 size={16} aria-hidden="true" /><span className="gantt-undo-label">{undoLabel}</span></button>
       {canEditBulkDates && <button ref={bulkDatesTrigger} className="btn" type="button" onClick={openBulkDates}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus}
         disabled={!selectedIssues.length || bulkDatesOverLimit || busy || Boolean(activeDatePicker)}>

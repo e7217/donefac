@@ -305,7 +305,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const teamFollowUpChoices = teamBlockers.outgoing.get(issueId) ?? [];
   const [scheduleReflection, setScheduleReflection] = useState<{ anchorVersion: number | null; draftFields: ScheduleDraftFields } | null>(null);
   const scheduleUndoScope: ScheduleUndoScope | null = issue ? { kind: 'issue', id: issue.id } : null;
-  const { undoId: scheduleUndoId, remember: rememberScheduleUndo, undo: undoSchedule } = useScheduleUndo(
+  const { undoId: scheduleUndoId, recovering: recoveringScheduleUndo, remember: rememberScheduleUndo, undo: undoSchedule } = useScheduleUndo(
     scheduleUndoScope, props.actorId, data.restoreGeneration,
   );
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
@@ -1353,7 +1353,8 @@ function IssuePanelContent(props: IssuePanelProps) {
             <button className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
               onClick={() => onOpenIssueSchedule(issue.id)}><SquareChartGantt size={15} aria-hidden="true" />간트에서 일정 보기</button>
             {scheduleUndoId && <button ref={rowScheduleUndoButton} className="btn btn-ghost" type="button" disabled={dependencyBusy || commenting}
-              onClick={() => void undoRowScheduleEdit()}><Undo2 size={15} aria-hidden="true" />일정과 연결 되돌리기</button>}
+              onClick={() => void undoRowScheduleEdit()}><Undo2 size={15} aria-hidden="true" />
+              {recoveringScheduleUndo ? '되돌리기 결과 다시 확인' : '일정과 연결 되돌리기'}</button>}
           </div>
           {scheduleWarnings.length > 0 && <div className="issue-grid-wide issue-schedule-warnings" role="status">
             <ul>{scheduleWarnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>

@@ -2069,6 +2069,13 @@ export function createApp(options: {
       item => recordActivity(actorId, 'project', projectId, '업무 요청 접수', item.title, item.createdAt));
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
+  app.post('/api/projects/:projectId/intake/:id/edit', (req, res) => {
+    const projectId = String(req.params.projectId);
+    const actorId = requireSelectedActor(req);
+    const result = issueIntake.edit(projectId, String(req.params.id), actorId, req.body,
+      item => recordActivity(actorId, 'project', projectId, '업무 요청 수정', item.title, item.updatedAt));
+    res.set('Cache-Control', 'no-store').json(result);
+  });
   app.post('/api/projects/:projectId/intake/:id/decision', (req, res) => {
     const projectId = String(req.params.projectId);
     const actorId = actor(req);
@@ -2784,10 +2791,10 @@ export function createApp(options: {
     if (Object.hasOwn(req.body, 'parentCommentId')) return fail('문장 댓글 답글 경로를 사용해 주세요.');
     const draft = prepareOrdinaryComment(req.body.body, req.body.mentions);
     const authorId = actor(req);
-    if (resourceType === 'issue' && Object.hasOwn(req.body, 'requestId')) {
+    if (Object.hasOwn(req.body, 'requestId')) {
       if (typeof resourceId !== 'string' || !resourceId) return fail('댓글 대상을 확인해 주세요.');
       const result = commentCreation.create({ requestId: req.body.requestId, generation: req.body.expectedRestoreGeneration,
-        actorId: authorId, resourceId, draft }, () => saveOrdinaryComment(authorId, 'issue', resourceId, draft));
+        actorId: authorId, resourceType, resourceId, draft }, () => saveOrdinaryComment(authorId, resourceType, resourceId, draft));
       return res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.comment);
     }
     const comment = store.transaction(() => saveOrdinaryComment(authorId, resourceType, resourceId, draft));

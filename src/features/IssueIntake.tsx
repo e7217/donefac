@@ -77,6 +77,15 @@ function useIntakeMutation(actorId: string, projectId: string, notify: FeaturePr
     dirty.current = true;
     setChanged(true);
   }
+  function discard() {
+    if (!mayClose()) return false;
+    attempt.current = null;
+    dirty.current = false;
+    setChanged(false);
+    setFailure(null);
+    setUncertain(false);
+    return true;
+  }
 
   useEffect(() => {
     const beforeNavigation = (event: Event) => {
@@ -130,7 +139,7 @@ function useIntakeMutation(actorId: string, projectId: string, notify: FeaturePr
       setBusy(false);
     }
   }
-  return { busy, uncertain, failure, setFailure, changed, markDirty, dismiss, submit };
+  return { busy, uncertain, failure, setFailure, changed, markDirty, dismiss, discard, submit };
 }
 
 function IntakeModal({ modal, title, description, children }: {
@@ -332,6 +341,8 @@ function IntakeReview({ id, path, onClose, onSaved, data, projectId, actorId, no
   const [revision, setRevision] = useState(0);
   const [checking, setChecking] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'copied' | 'failed'>();
+  const [editing, setEditing] = useState(false);
+  const editButton = useRef<HTMLButtonElement>(null);
   const checkingRef = useRef(false);
   const current = loaded.kind === 'ready' ? loaded.value : null;
   useEffect(() => {
@@ -388,6 +399,11 @@ function IntakeReview({ id, path, onClose, onSaved, data, projectId, actorId, no
     }
   }
 
+  function closeEdit() {
+    setEditing(false);
+    requestAnimationFrame(() => editButton.current?.focus());
+  }
+
   return <IntakeModal modal={modal} title="접수 요청 검토">
     {!current ? <div className="issue-intake-feedback">
       {loaded.kind === 'error' ? <><p role="alert">{loaded.message}</p><button type="button" className="btn" onClick={() => {
@@ -403,15 +419,26 @@ function IntakeReview({ id, path, onClose, onSaved, data, projectId, actorId, no
         <h3>{current.title}</h3>
         <p className="issue-intake-original-meta">{person(latestData, current.reporterId)} · <IntakeTime value={current.createdAt} /></p>
         {current.description && <p className="issue-intake-text">{current.description}</p>}
+        {!editing && current.status === 'pending' && current.reporterId === actorId &&
+          <button type="button" className="btn" ref={editButton} disabled={checking || modal.changed || modal.busy || modal.uncertain}
+            onClick={() => setEditing(true)}>요청 수정</button>}
       </section>
-      <IntakeDecision item={current} snapshot={latestData} modal={modal} checking={checking}
+      {editing ? <IntakeOriginalEdit item={current} generation={latestData.restoreGeneration} modal={modal} checking={checking}
+        readLatest={readLatest} onCancel={() => { if (modal.discard()) closeEdit(); }} onSubmit={async fields => {
+          const result = await modal.submit(`${detailPath}/edit`, fields, id);
+          if (!result) return;
+          setLoaded({ kind: 'ready', value: result });
+          closeEdit();
+          onSaved();
+          notify('업무 요청을 수정했습니다.');
+        }} /> : <IntakeDecision item={current} snapshot={latestData} modal={modal} checking={checking}
         readLatest={readLatest} onSubmit={async fields => {
           const result = await modal.submit(`${detailPath}/decision`, fields, id);
           if (!result) return;
           setLoaded({ kind: 'ready', value: result });
           onSaved();
           notify('접수 요청의 처리 결과를 저장했습니다.');
-        }} />
+        }} />}
       {current.status !== 'pending' && <section className="issue-intake-result" aria-label="처리 결과">
         <h3>처리 결과</h3>
         <p>{stateLabels[current.status]} · {person(latestData, current.reviewerId)} · <IntakeTime value={current.updatedAt} /></p>
@@ -424,14 +451,60 @@ function IntakeReview({ id, path, onClose, onSaved, data, projectId, actorId, no
   </IntakeModal>;
 }
 
+function IntakeOriginalEdit({ item, generation, modal, checking, readLatest, onCancel, onSubmit }: {
+  item: IssueIntakeRequest; generation: WorkspaceSnapshot['restoreGeneration']; modal: ReturnType<typeof useIntakeMutation>;
+  checking: boolean; readLatest: () => Promise<void>; onCancel: () => void;
+  onSubmit: (input: () => Record<string, unknown>) => Promise<void>;
+}) {
+  const titleInput = useRef<HTMLInputElement>(null);
+  const [titleEdit, setTitleEdit] = useState<string | null>(null);
+  const [descriptionEdit, setDescriptionEdit] = useState<string | null>(null);
+  const title = titleEdit ?? item.title;
+  const description = descriptionEdit ?? item.description;
+  const open = item.status === 'pending';
+  const locked = !open || modal.busy || modal.uncertain || checking;
+  const blocked = !generation || !title.trim() || Boolean(modal.failure?.conflict) ||
+    title.trim() === item.title && description.trim() === item.description;
+  useEffect(() => { titleInput.current?.focus(); }, []);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!open || checking || !modal.uncertain && blocked) return;
+    void onSubmit(() => ({ restoreGeneration: generation, expectedVersion: item.version, title: title.trim(), description: description.trim() }));
+  }
+
+  return <form aria-label="요청 수정" className="issue-intake-form" onSubmit={submit} onChange={modal.markDirty}>
+    {!open && <p role="status">요청은 이미 처리됐습니다. 입력한 내용을 확인할 수 있습니다.</p>}
+    <fieldset disabled={locked}>
+      <label>요청 제목<input className="field" ref={titleInput} value={title} maxLength={200} required
+        onChange={event => setTitleEdit(event.currentTarget.value === item.title ? null : event.currentTarget.value)} /></label>
+      <label>요청 내용<textarea className="field" value={description} maxLength={5000} rows={5}
+        onChange={event => setDescriptionEdit(event.currentTarget.value === item.description ? null : event.currentTarget.value)} /></label>
+    </fieldset>
+    {modal.failure && <div className="issue-intake-error"><p role="alert">{modal.failure.message}</p>
+      {modal.failure.conflict && <button type="button" className="btn" disabled={checking} onClick={() => void readLatest()}>
+        {checking ? '확인 중…' : '최신 상태 확인'}
+      </button>}
+    </div>}
+    <div className="issue-intake-modal-actions">
+      <button type="button" className="btn" disabled={modal.busy || checking} onClick={onCancel}>수정 취소</button>
+      <button type="submit" className="btn btn-primary" data-intake-retry disabled={!open || modal.busy || checking || !modal.uncertain && blocked}>
+        {modal.busy ? '저장 중…' : modal.uncertain ? '같은 요청 다시 확인' : '수정 저장'}
+      </button>
+    </div>
+  </form>;
+}
+
 function IntakeDecision({ item, snapshot, modal, checking, readLatest, onSubmit }: {
   item: IssueIntakeRequest; snapshot: WorkspaceSnapshot; modal: ReturnType<typeof useIntakeMutation>; checking: boolean;
   readLatest: () => Promise<void>; onSubmit: (input: () => Record<string, unknown>) => Promise<void>;
 }) {
   const { projectId } = item;
   const [decision, setDecision] = useState<Decision>('accept');
-  const [title, setTitle] = useState(item.title);
-  const [description, setDescription] = useState(item.description);
+  const [titleEdit, setTitleEdit] = useState<string | null>(null);
+  const [descriptionEdit, setDescriptionEdit] = useState<string | null>(null);
+  const title = titleEdit ?? item.title;
+  const description = descriptionEdit ?? item.description;
   const [type, setType] = useState(() => initialIssueType(snapshot, projectId));
   const workflow = projectWorkflow(snapshot, projectId);
   const [status, setStatus] = useState(() => workflow.initialStatusId);
@@ -476,9 +549,10 @@ function IntakeDecision({ item, snapshot, modal, checking, readLatest, onSubmit 
         {Object.entries(decisionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
       </select></label>
       <fieldset hidden={decision !== 'accept'} disabled={decision !== 'accept'}>
-        <label>업무 제목<input className="field" required value={title} maxLength={300} onChange={event => setTitle(event.currentTarget.value)} /></label>
+        <label>업무 제목<input className="field" required value={title} maxLength={300}
+          onChange={event => setTitleEdit(event.currentTarget.value === item.title ? null : event.currentTarget.value)} /></label>
         <label>업무 설명<textarea className="field" value={description} rows={4} maxLength={200000}
-          required={required.includes('description')} onChange={event => setDescription(event.currentTarget.value)} /></label>
+          required={required.includes('description')} onChange={event => setDescriptionEdit(event.currentTarget.value === item.description ? null : event.currentTarget.value)} /></label>
         <div className="issue-intake-field-grid">
           <label>유형<IssueTypeSelect data={snapshot} projectId={projectId} value={type} onChange={setType} /></label>
           <label>상태<select className="field" value={status} required onChange={event => setStatus(event.currentTarget.value)}>

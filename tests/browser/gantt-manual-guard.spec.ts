@@ -382,6 +382,58 @@ test('360px 간트에서 결과 확인을 닫아도 이미 저장한 일정을 �
   } finally { await fixture.close(); }
 });
 
+test('간트 새로고침 뒤 미확인 되돌리기를 먼저 확인하고 새 변경에는 손대지 않는다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const fixture = await makeFixture(request);
+  try {
+    const original = await fixture.create('되돌리기 결과를 확인할 업무', 1, 3);
+    const newer = await fixture.create('다른 탭이 새로 편집할 업무', 4, 6);
+    await page.setViewportSize({ width: 360, height: 820 });
+    const { chart, undo } = await openChart(page, original);
+    const actorId = await page.getByLabel('작업자 선택', { exact: true }).inputValue();
+    const headers = { 'X-Actor-Id': actorId, 'X-Teamspace-Schedule-Undo-Scope': `project:${original.projectId}` };
+    const end = chart.getByLabel(`${original.key} 종료일`, { exact: true });
+    const applied = nextPost(page, applyPath);
+    await end.fill(fixture.date(4));
+    await end.press('Enter');
+    const { undoId } = await readJson<SchedulePasteApplyResult>(await applied);
+    await expect(undo).toBeEnabled();
+
+    const lostAttempts: { search: string; undoId: string; duplicate?: boolean }[] = [];
+    const undoRequests = /\/api\/schedule\/undo(?:\?.*)?$/;
+    await page.route(undoRequests, async route => {
+      const sent = route.request();
+      const received = await readJson<{ duplicate?: boolean }>(await route.fetch());
+      lostAttempts.push({ search: new URL(sent.url()).search, undoId: sent.postDataJSON().undoId, duplicate: received.duplicate });
+      await route.abort('failed');
+    });
+    await undo.click();
+    await expect(page.getByText('되돌리기 결과를 확인하지 못했습니다.', { exact: false })).toBeVisible();
+    expect(lostAttempts).toEqual([{ search: '', undoId, duplicate: undefined }, { search: '?retry=true', undoId, duplicate: true }]);
+    expect(await fixture.stored()).toEqual([{ ...schedule(original), version: original.version + 2 }, schedule(newer)]);
+    await page.unroute(undoRequests);
+
+    const newerReview = await readJson<SchedulePreview>(await request.post(previewPath, { headers, data: { changes: [{
+      id: newer.id, expectedVersion: newer.version, startDate: newer.startDate, endDate: fixture.date(8),
+    }] } }));
+    const secondUndo = await readJson<SchedulePasteApplyResult>(await request.post(applyPath, { headers, data: { previewId: newerReview.previewId } }));
+    expect(secondUndo.undoId).not.toBe(undoId);
+    const expected = [{ ...schedule(original), version: original.version + 2 }, { ...schedule(newer), endDate: fixture.date(8), version: newer.version + 1 }];
+    await page.reload();
+    const recover = page.getByRole('button', { name: '되돌리기 결과 다시 확인', exact: true });
+    await expect(recover).toBeEnabled();
+    const confirmation = nextPost(page, undoPath);
+    await recover.click();
+    const confirmed = await confirmation;
+    expect(new URL(confirmed.url()).search).toBe('?retry=true');
+    expect(confirmed.request().postDataJSON()).toEqual({ undoId });
+    expect(await readJson<{ duplicate?: boolean }>(confirmed)).toMatchObject({ duplicate: true });
+    await expect(recover).toHaveCount(0);
+    await expect(undo).toBeEnabled();
+    expect(await fixture.stored()).toEqual(expected);
+  } finally { await fixture.close(); }
+});
+
 test('360px 간트 일정 완성의 저장 응답이 끊겨도 결과를 확인하고 원래 있던 날짜만 남긴다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const fixture = await makeFixture(request);

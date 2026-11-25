@@ -128,6 +128,43 @@ test('a project intake request is separate from the backlog and creates one ordi
   assert.deepEqual(await outcomeNotifications(), notifications);
 });
 
+test('only the requester can correct a pending intake and its exact edit survives concurrent retries and review', async t => {
+  const { request, workspace, pending, decision, acceptFields, restart, outcomeNotifications } = await fixture(t);
+  const original = await pending('수정 전 흡착 시험 요청');
+  const editPath = `${path}/${original.id}/edit`;
+  const reviewPath = `${path}/${original.id}/decision`;
+  const correction = { title: '수정 후 흡착 시험 요청', description: '압력 범위를 정정합니다.' };
+  const edit = await decision(original, correction);
+  const originalReview = await decision(original, await acceptFields({}));
+  await request(editPath, 'POST', edit, 403, reviewer);
+  assert.deepEqual((await request<IssueIntakeRequest>(`${path}/${original.id}`)).data, original);
+
+  const perform = () => request<IssueIntakeResult>(editPath, 'POST', edit, 200, reporter);
+  const [first, second] = await Promise.all([perform(), perform()]);
+  assert.deepEqual([first.data.duplicate, second.data.duplicate].sort(), [false, true]);
+  assert.deepEqual(first.data.item, second.data.item);
+  const item = first.data.item;
+  assert.deepEqual(item, { ...original, ...correction, version: original.version + 1, updatedAt: item.updatedAt });
+  conflict('stale_request')((await request<{ details?: { reason?: string } }>(editPath, 'POST', { ...edit, requestId: randomUUID() }, 409, reporter)).data);
+  conflict('stale_request')((await request<{ details?: { reason?: string } }>(reviewPath, 'POST', originalReview, 409)).data);
+  assert.deepEqual(await outcomeNotifications(), []);
+  await restart();
+  assert.deepEqual((await perform()).data, { item, duplicate: true });
+
+  const applied = (await request<IssueIntakeResult>(reviewPath, 'POST', await decision(item, await acceptFields({})))).data;
+  conflict('stale_request')((await request<{ details?: { reason?: string } }>(editPath, 'POST', {
+    ...edit, requestId: randomUUID(), expectedVersion: applied.item.version,
+  }, 409, reporter)).data);
+  assert.deepEqual((await perform()).data, { ...applied, duplicate: true });
+  const saved = await workspace();
+  const issue = saved.issues.find(issue => issue.id === applied.item.issueId)!;
+  assert.equal(issue.title, item.title);
+  assert.equal(issue.description, item.description);
+  assert.equal(issue.reporterId, reporter);
+  assert.equal(saved.activities.filter(value => value.resourceId === project && value.action === '업무 요청 수정').length, 1);
+  assert.equal((await outcomeNotifications()).length, 1);
+});
+
 test('intake reviews guard current workflow, required dates, duplicate scope and competing decisions', async t => {
   const { request, workspace, pending, decision, workflow, workflowPath, acceptFields, outcomeNotifications } = await fixture(t);
   const item = await pending('경쟁 변경을 확인할 접수');

@@ -611,9 +611,9 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 수정한 본문에서 유지할 멘션의 전체 범위를 `mentions`로 보낸다. 배열을 생략하거나 비우면 현재 멘션을 해제한다. 새로 멘션한 팀원이 알림을 받는다. 자체 백업 형식 89는 활성·휴지통 댓글의 수정 시각과 버전을 보존한다. 자체 백업으로 작업공간을 교체하면 편집 토큰을 새로 받아야 한다.
 
-### 티켓 댓글 등록 결과 다시 확인
+### 일반 댓글 등록 결과 다시 확인
 
-브라우저의 `POST /api/comments`에서 `resourceType: 'issue'`와 함께 선택 항목 `requestId` 및 `expectedRestoreGeneration`을 보낸다. 요청 ID는 UUID v4이며 세대는 현재 워크스페이스 응답의 `restoreGeneration`을 사용한다. 새 등록은 `201`로 `Comment`를 반환한다. 같은 작업자·업무·본문·멘션·요청 ID의 재시도는 저장한 활성 댓글과 `200`을 반환한다. 다른 요청에 사용한 ID, 삭제된 댓글의 등록 결과, 이전 워크스페이스 세대는 `409`로 응답한다. 물리 백업은 요청 기록을 보존한다. 자체 JSON 가져오기는 워크스페이스 세대를 바꾼다.
+브라우저의 `POST /api/comments`에서 `resourceType: 'issue'` 또는 `'document'`와 대상 ID를 보낸다. 요청 결과를 다시 확인하려면 UUID v4 `requestId`와 현재 워크스페이스의 `restoreGeneration`을 담은 `expectedRestoreGeneration`을 함께 보낸다. 새 등록은 `201`과 `Comment`를 반환한다. 같은 작업자·대상 종류와 ID·본문·멘션·요청 ID의 재시도는 저장한 활성 댓글과 `200`을 반환한다. 다른 요청에 사용한 ID, 삭제된 댓글의 등록 결과, 이전 워크스페이스 세대는 `409`로 응답한다. 물리 백업은 요청 기록을 보존한다. 자체 JSON 가져오기는 워크스페이스 세대를 바꾼다.
 
 ### 댓글 멘션
 
@@ -667,6 +667,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 `GET /api/projects/:projectId/intake`는 `{items,total,offset,limit,counts:{pending,closed}}`를 반환한다. `state=pending` 또는 `state=closed`를 사용한다. 선택 조건은 `q`, `mine=1`, `offset`이다. 결과는 30건씩 표시하고 두 건수는 검색 및 요청자 조건을 적용한다. `GET /api/projects/:projectId/intake/:id`에서 해당 요청을 읽는다.
 
 `POST /api/projects/:projectId/intake`에 `{requestId,restoreGeneration,title,description?}`를 보낸다. 제목은 200자, 일반 텍스트 설명은 5,000자까지 입력한다. 생성된 항목의 상태는 `pending`이다. 새 응답은 `201`의 `{item,duplicate:false}`다.
+
+`POST /api/projects/:projectId/intake/:id/edit`에 `X-Actor-Id`와 `{requestId,restoreGeneration,expectedVersion,title,description}`을 보낸다. `pending` 상태의 원래 요청자가 제목과 설명을 수정한다. 다른 작업자는 `403`을 받고, 검토가 끝났거나 버전이 바뀌면 `409`와 `stale_request`를 받는다. 새 수정은 `200`과 `{item,duplicate:false}`, 같은 수정 요청을 다시 확인하면 `200`과 `{item,duplicate:true}`를 반환한다.
 
 `POST /api/projects/:projectId/intake/:id/decision`에 `{requestId,restoreGeneration,expectedVersion,decision,reason?}`와 결정에 필요한 값을 보낸다. `accept`는 `issue`, `expectedWorkflowVersion`, `expectedIssueSchemaVersion`으로 현재 양식에 새 업무를 만든다. `duplicate`는 같은 프로젝트의 업무 ID `issueId`와 `expectedIssueVersion`을 사용한다. `reject`는 1,000자 이내의 사유가 필요하다. 응답의 `item.status`는 각각 `accepted`, `duplicate`, `rejected`이고 연결 업무가 있으면 당시 ID와 키를 반환한다.
 

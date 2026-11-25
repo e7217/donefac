@@ -20,25 +20,28 @@ export class CommentCreationService {
     )`);
   }
 
-  create(input: { requestId: unknown; generation: unknown; actorId: string; resourceId: string; draft: Draft }, save: () => Comment) {
-    const { requestId, generation, actorId, resourceId, draft } = input;
+  create(input: { requestId: unknown; generation: unknown; actorId: string; resourceType: Comment['resourceType']; resourceId: string; draft: Draft }, save: () => Comment) {
+    const { requestId, generation, actorId, resourceType, resourceId, draft } = input;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId) || typeof generation !== 'string' || !generation) {
       throw new CommentCreationError(400, '댓글 등록 요청 ID와 워크스페이스 세대를 확인해 주세요.');
     }
     const id = requestId.toLowerCase();
-    const fingerprint = creationRequestFingerprint({ resourceId, ...draft });
+    // Keep existing issue receipts valid and distinguish document requests from them.
+    const fingerprint = creationRequestFingerprint({ ...(resourceType === 'document' && { resourceType }), resourceId, ...draft });
+    const resourceLabel = resourceType === 'document' ? '문서' : '티켓';
     return this.store.transaction(() => {
       if (generation !== workspaceRestoreGeneration(this.store)) {
-        throw new CommentCreationError(409, '워크스페이스가 복원되었습니다. 새로고침한 뒤 현재 티켓의 댓글을 확인해 주세요.');
+        throw new CommentCreationError(409, `워크스페이스가 복원되었습니다. 새로고침한 뒤 현재 ${resourceLabel}의 댓글을 확인해 주세요.`);
       }
       const receipt = this.store.db.prepare(`SELECT actor_id AS actorId, fingerprint, comment_id AS commentId
         FROM comment_creation_requests WHERE id=?`).get(id) as Receipt | undefined;
       if (receipt) {
         if (receipt.actorId !== actorId || receipt.fingerprint !== fingerprint) {
-          throw new CommentCreationError(409, '이미 사용한 댓글 등록 요청입니다. 현재 티켓의 댓글을 확인해 주세요.');
+          throw new CommentCreationError(409, `이미 사용한 댓글 등록 요청입니다. 현재 ${resourceLabel}의 댓글을 확인해 주세요.`);
         }
         const comment = receipt.commentId ? this.store.get<Comment>('comments', receipt.commentId) : undefined;
-        if (!comment || comment.resourceType !== 'issue' || comment.resourceId !== resourceId || comment.authorId !== actorId) {
+        if (!comment || comment.resourceType !== resourceType || comment.resourceId !== resourceId || comment.authorId !== actorId ||
+            comment.documentSource || comment.parentCommentId) {
           throw new CommentCreationError(409, '이 요청에서 등록한 댓글을 확인할 수 없습니다. 댓글 목록과 휴지통을 확인해 주세요.');
         }
         return { comment, duplicate: true };

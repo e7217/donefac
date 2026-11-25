@@ -143,6 +143,73 @@ test('접수 링크와 360px 검토로 다른 작업자의 요청을 업무 하�
   }
 });
 
+test('접수 요청자는 처리 전에 내용을 바로잡고 동료의 작성 중인 검토 입력을 유지한다', async ({ page, browser, request, baseURL }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const item = await f.create('압력 값 확인 요청', '처음 기록한 압력 범위입니다.');
+  const address = `${f.workspacePath}?request=${item.id}`;
+  await page.setViewportSize({ width: 360, height: 820 });
+  await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reviewer.id);
+  await page.goto(address);
+  const check = review(page);
+  const original = check.getByRole('region', { name: '접수 원문', exact: true });
+  await expect(original.getByText(item.title, { exact: true })).toBeVisible();
+  await expect(check.getByRole('button', { name: '요청 수정', exact: true })).toHaveCount(0);
+  await check.getByRole('textbox', { name: '업무 설명', exact: true }).fill('담당 팀에서 점검 순서를 검토합니다.');
+
+  const submitter = await browser.newContext({ baseURL, viewport: { width: 360, height: 820 } });
+  try {
+    await submitter.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.reporter.id);
+    const author = await submitter.newPage();
+    await author.goto(address);
+    const authorDialog = review(author);
+    const editButton = authorDialog.getByRole('button', { name: '요청 수정', exact: true });
+    await editButton.click();
+    const editor = authorDialog.getByRole('form', { name: '요청 수정', exact: true });
+    const title = '정정한 압력 값 확인 요청';
+    const description = '확인할 범위를 12~23으로 정정합니다.';
+    await expect(editor.getByLabel('요청 제목', { exact: true })).toBeFocused();
+    await editor.getByLabel('요청 제목', { exact: true }).fill(title);
+    await editor.getByRole('textbox', { name: '요청 내용', exact: true }).fill(description);
+    const attempts: string[] = [];
+    await author.route(url => url.pathname === `${f.path}/${item.id}/edit`, async route => {
+      attempts.push(route.request().postData() ?? '');
+      if (attempts.length > 1) { await route.continue(); return; }
+      const result = await route.fetch();
+      expect(result.status(), await result.text()).toBe(200);
+      await route.abort('failed');
+    });
+    await editor.getByRole('button', { name: '수정 저장', exact: true }).click();
+    await expect(editor.getByRole('alert')).toContainText('같은 요청');
+    await expect(editor.getByLabel('요청 제목', { exact: true })).toHaveValue(title);
+    await editor.getByRole('button', { name: '같은 요청 다시 확인', exact: true }).click();
+    await expect(editor).toHaveCount(0);
+    await expect(editButton).toBeFocused();
+    await expect(authorDialog.getByRole('region', { name: '접수 원문', exact: true }).getByText(description, { exact: true })).toBeVisible();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toBe(attempts[0]);
+    expect((await f.list()).items).toMatchObject([{ id: item.id, title, description, version: item.version + 1 }]);
+
+    await accept(page).click();
+    await expect(check.getByRole('alert')).toContainText('최신 상태');
+    await check.getByRole('button', { name: '최신 상태 확인', exact: true }).click();
+    await expect(original.getByText(description, { exact: true })).toBeVisible();
+    await expect(check.getByLabel('업무 제목', { exact: true })).toHaveValue(title);
+    await expect(check.getByRole('textbox', { name: '업무 설명', exact: true })).toHaveValue('담당 팀에서 점검 순서를 검토합니다.');
+    await accept(page).click();
+    await expect(check.getByRole('region', { name: '처리 결과', exact: true })).toBeVisible();
+    const snapshot = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    expect(snapshot.issues.filter(issue => issue.projectId === f.project.id)).toMatchObject([{
+      title, description: '담당 팀에서 점검 순서를 검토합니다.', reporterId: f.reporter.id,
+    }]);
+    await author.reload();
+    await expect(authorDialog.getByRole('region', { name: '처리 결과', exact: true })).toBeVisible();
+    await expect(editButton).toHaveCount(0);
+  } finally {
+    await submitter.close();
+  }
+});
+
 test('중복 업무가 바뀌면 메모를 남기고 최신 버전을 다시 고르며 반려에는 사유를 받는다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const f = await fixture(request);
