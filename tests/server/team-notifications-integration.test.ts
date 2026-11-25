@@ -114,7 +114,7 @@ test('inbox archive is recipient-scoped, reversible, and preserves the read stat
   assert.equal((await inbox(f, reviewer, '?filter=archived')).items[0].readAt, null);
 
   const backup = await expectStatus(f.call<Backup>('/export'));
-  assert.equal(backup.schemaVersion, 127);
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   await expectStatus(f.call('/import', 'POST', { data: { ...backup, schemaVersion: 126 } }), 400);
   await expectStatus(f.call('/import', 'POST', { data: { ...backup, teamNotifications: backup.teamNotifications.map(item =>
     item.id === original.id ? { ...item, archivedAt: '2000-01-01T00:00:00.000Z' } : item) } }), 400);

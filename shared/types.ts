@@ -1440,6 +1440,33 @@ export interface DocumentIssueLinkResult { issue: Issue; link: ResourceLink; dup
 export type DocumentFollowUpResult = DocumentIssueLinkResult;
 export const MAX_COMMENT_MENTIONS = 50;
 export interface CommentMention { userId: string; from: number; to: number }
+export type IssueIntakeStatus = 'pending' | 'accepted' | 'duplicate' | 'rejected';
+export interface IssueIntakeRequest {
+  id: string;
+  projectId: string;
+  version: number;
+  title: string;
+  description: string;
+  reporterId: string;
+  status: IssueIntakeStatus;
+  createdAt: string;
+  updatedAt: string;
+  reviewerId: string | null;
+  issueId: string | null;
+  issueKey: string | null;
+  reason: string | null;
+}
+export interface IssueIntakePage {
+  items: IssueIntakeRequest[];
+  total: number;
+  offset: number;
+  limit: number;
+  counts: { pending: number; closed: number };
+}
+export interface IssueIntakeResult {
+  item: IssueIntakeRequest;
+  duplicate: boolean;
+}
 export interface IssueStatusChangeRequest {
   requestId: string;
   expectedVersion: number;
@@ -2264,6 +2291,11 @@ export interface CycleBoardMoveInput {
   position: 'before' | 'after';
 }
 export interface CycleBoardMoveResult extends IssueOrderMoveResult { duplicate: boolean }
+export interface DocumentSpaceHome {
+  projectId: string | null;
+  documentId: string | null;
+  version: number;
+}
 export interface WorkspaceSnapshot {
   projects: Project[]; users: User[]; issues: Issue[]; documents: DocPage[]; workflows?: ProjectWorkflow[];
   dependencies: Dependency[]; resourceLinks: ResourceLink[]; activities: Activity[]; gitlabLinks: GitlabLink[]; savedViews?: SavedView[];
@@ -2280,6 +2312,7 @@ export interface WorkspaceSnapshot {
   confluenceMigrationOrigins?: string[];
   jiraMigrationOrigins?: string[];
   documentOrders?: (DocumentSiblingOrder & { custom?: true })[];
+  documentSpaceHomes?: DocumentSpaceHome[];
 }
 export interface ScheduleChange {
   id: string;

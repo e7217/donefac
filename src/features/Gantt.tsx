@@ -13,6 +13,7 @@ import { buildGanttExportReport } from '../../shared/gantt-export-model';
 import { buildGanttScheduleSheet, buildTeamGanttScheduleSheet } from '../../shared/schedule-paste-format';
 import { traceGanttDependencies } from '../../shared/gantt-dependency-focus';
 import { traceGanttHierarchy } from '../../shared/gantt-hierarchy-focus';
+import type { GanttCalendarField } from '../../shared/gantt-month-calendar';
 import { afterAcceptedNavigation, areGanttDateDraftsPreservedByNavigation, dispatchWorkspaceNavigation, isGanttPreservedByNavigation } from '../lib/navigation';
 import { api, ApiError, post } from '../lib/api';
 import { downloadText } from '../lib/download';
@@ -56,6 +57,7 @@ import { PROJECT_CAPACITY_DRAFT, TEAM_CAPACITY_DRAFT } from './WorkloadCapacityE
 import { GanttDependencyModal, type DependencyInput, type DependencyPrefill, type RelatedIssueDirection } from './GanttDependencyModal';
 import { GanttDependencyFindings, type GanttDependencyFinding, type GanttTeamBlockerFinding } from './GanttDependencyFindings';
 import { GanttDeadlines } from './GanttDeadlines';
+import { GanttMonthCalendar } from './GanttMonthCalendar';
 import { classifyGanttDeadline, GANTT_DEADLINE_LABELS, type GanttDeadline } from './gantt-deadline';
 import { GanttDependencyFocusLabel, GanttDependencyFocusPanel } from './GanttDependencyFocus';
 import { GanttHierarchyFocusLabel, GanttHierarchyFocusPanel, GanttHierarchySpan } from './GanttHierarchyFocus';
@@ -185,7 +187,8 @@ type TeamFollowUpHandoff = {
 type RowScheduleEdit = {
   issue: Issue;
   opener: HTMLButtonElement;
-  focusDate?: 'dueDate';
+  focusDate?: GanttCalendarField;
+  focusFallback?: HTMLElement | null;
   dateDrafts: ReadonlyMap<string, ChartDateDraft>;
   initialRelatedDateId?: string;
   initialLink?: GanttRowLinkDraft;
@@ -215,6 +218,7 @@ const MAX_TIMELINE_DAYS = 180;
 const ANALYSIS_PANEL_ID = 'gantt-schedule-analysis';
 const FINDINGS_PANEL_ID = 'gantt-dependency-findings';
 const DEADLINES_PANEL_ID = 'gantt-issue-deadlines';
+const MONTH_CALENDAR_PANEL_ID = 'gantt-month-calendar';
 const TEAM_BLOCKERS_PANEL_ID = 'gantt-team-blockers';
 const TIME_RESERVATIONS_DRAFT = 'time-reservations';
 const RANGE_PICK_DRAFT = 'date-range-pick';
@@ -361,6 +365,7 @@ function ProjectGantt(props: GanttProps) {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [findingsOpen, setFindingsOpen] = useState(false);
   const [deadlinesOpen, setDeadlinesOpen] = useState(false);
+  const [monthCalendarDate, setMonthCalendarDate] = useState<string | null>(null);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
   const [showTeamBlockerLines, setShowTeamBlockerLines] = useState(true);
   const [teamBlockerChartPair, setTeamBlockerChartPair] = useState<{ sourceId: string; targetId: string; opener: HTMLButtonElement }>();
@@ -428,6 +433,7 @@ function ProjectGantt(props: GanttProps) {
   const restoreCreateFocus = useRef(false);
   const findingsTrigger = useRef<HTMLButtonElement>(null);
   const deadlinesTrigger = useRef<HTMLButtonElement>(null);
+  const monthCalendarTrigger = useRef<HTMLButtonElement>(null);
   const teamBlockersTrigger = useRef<HTMLButtonElement>(null);
   const linkPickerTrigger = useRef<HTMLButtonElement>(null);
   const dependencyFocusTrigger = useRef<HTMLButtonElement>(null);
@@ -1272,6 +1278,7 @@ function ProjectGantt(props: GanttProps) {
   const datePickerRow = datePicker ? issueRows.get(datePicker.issue.id) : undefined;
   const activeDatePicker = datePickerRow ? datePicker : null;
   const deadlineActionsDisabled = busy || Boolean(activeDatePicker || linkPicker || issueOverlayOpen || drag);
+  const monthCalendarDisabled = busy || scheduleEditorOpen || Boolean(issueOverlayOpen);
   const issueDeadlines = new Map<string, GanttDeadline>();
   let lateDeadlineCount = 0;
   for (const issue of issues) {
@@ -1591,6 +1598,15 @@ function ProjectGantt(props: GanttProps) {
   function closeDeadlines() {
     setDeadlinesOpen(false);
     deadlinesTrigger.current?.focus({ preventScroll: true });
+  }
+  function closeMonthCalendar() {
+    setMonthCalendarDate(null);
+    monthCalendarTrigger.current?.focus({ preventScroll: true });
+  }
+  function visibleTimelineDate() {
+    const scroll = scrollRef.current;
+    const visibleDays = scroll ? Math.max(0, Math.floor(timelineViewportOffset(scroll) / dayWidth)) : 0;
+    return isoDay(Math.min(range.end, range.start + visibleDays));
   }
   function choosePlan(id: string | null) {
     setSelectedPlanningId(id);
@@ -2096,7 +2112,7 @@ function ProjectGantt(props: GanttProps) {
     return result;
   }
   function openRowScheduleEdit(issue: Issue, opener: HTMLButtonElement,
-    { focusDate, initialLink, relatedId, fromLinkPicker = false, dateDrafts }: Pick<RowScheduleEdit, 'focusDate' | 'initialLink'> & {
+    { focusDate, focusFallback, initialLink, relatedId, fromLinkPicker = false, dateDrafts }: Pick<RowScheduleEdit, 'focusDate' | 'focusFallback' | 'initialLink'> & {
       relatedId?: string; fromLinkPicker?: boolean; dateDrafts?: RowScheduleEdit['dateDrafts'];
     } = {}) {
     const canKeepDates = canKeepInlineDateDrafts(fromLinkPicker);
@@ -2104,11 +2120,11 @@ function ProjectGantt(props: GanttProps) {
     const snapshots = canKeepDates ? dateDrafts ?? rowDateDrafts(issue.projectId) : new Map<string, ChartDateDraft>();
     queueMicrotask(() => {
       setLinkPicker(null);
-      setRowScheduleEdit({ issue, opener, focusDate, dateDrafts: snapshots, initialRelatedDateId: relatedId, initialLink });
+      setRowScheduleEdit({ issue, opener, focusDate, focusFallback, dateDrafts: snapshots, initialRelatedDateId: relatedId, initialLink });
     });
   }
   function closeRowScheduleEdit(updated?: readonly Issue[]) {
-    const { opener, focusDate, issue } = rowScheduleEdit ?? {};
+    const { opener, focusDate, focusFallback, issue } = rowScheduleEdit ?? {};
     setRowScheduleEdit(null);
     if (updated && focusAfterCompletingMissingRows(updated)) return;
     pendingScheduleFocus.current = () => {
@@ -2116,7 +2132,7 @@ function ProjectGantt(props: GanttProps) {
         `[data-issue-id="${CSS.escape(issue.id)}"] .gantt-row-schedule-trigger`,
       );
       const fallback = focusDate === 'dueDate' && deadlinesOpen ? deadlinesTrigger.current : rowEdit;
-      const target = [opener, fallback, scrollRef.current].find(element => element?.isConnected &&
+      const target = [opener, focusFallback, fallback, scrollRef.current].find(element => element?.isConnected &&
         !element.closest('[inert]') && !element.matches(':disabled'));
       target?.focus({ preventScroll: true });
     };
@@ -2359,9 +2375,9 @@ function ProjectGantt(props: GanttProps) {
     if (drag.mode === 'end') delta = Math.max(delta, -duration);
     setDrag({ ...drag, delta });
   }
-  function openChartIssue(id: string, opener: HTMLElement, issueIds: readonly string[]) {
+  function openChartIssue(id: string, opener: HTMLElement, issueIds: readonly string[], fallback: HTMLElement | null = scrollRef.current) {
     if (!props.onOpenIssueForReview) { openIssue(id); return; }
-    props.onOpenIssueForReview(id, { issueIds, opener, fallback: scrollRef.current,
+    props.onOpenIssueForReview(id, { issueIds, opener, fallback,
       ...(teamDependencyTrace && { projectScope: null }) });
   }
   function openIssueRow(id: string, opener: HTMLElement) {
@@ -2584,6 +2600,12 @@ function ProjectGantt(props: GanttProps) {
         {activeFindings.length > 0 && <span className="gantt-findings-count" aria-hidden="true">{activeFindings.length}</span>}
       </button>
       <span id="gantt-dependency-summary" hidden>충돌 {activeConflictCount}건, 전체 점검 항목 {activeFindings.length}건</span>
+      <button ref={monthCalendarTrigger} className="btn" type="button" aria-expanded={monthCalendarDate !== null}
+        aria-controls={monthCalendarDate ? MONTH_CALENDAR_PANEL_ID : undefined}
+        data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={monthCalendarDisabled}
+        onClick={() => monthCalendarDate ? closeMonthCalendar() : setMonthCalendarDate(visibleTimelineDate())}>
+        <CalendarDays size={15} aria-hidden="true" />월간 일정
+      </button>
       <button ref={deadlinesTrigger} className="btn" type="button" aria-label="목표 마감일 검토" aria-expanded={deadlinesOpen}
         aria-controls={deadlinesOpen ? DEADLINES_PANEL_ID : undefined} aria-describedby="gantt-deadline-summary"
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={deadlineActionsDisabled}
@@ -2672,6 +2694,13 @@ function ProjectGantt(props: GanttProps) {
         reviewTeamBlockerSchedules(predecessor, [{ relation, target: successor }], opener, findingsTrigger.current)}
       onPointerDown={keepInlineDateFocus}
       onClose={() => { setFindingsOpen(false); findingsTrigger.current?.focus({ preventScroll: true }); }} />}
+    {monthCalendarDate && <GanttMonthCalendar id={MONTH_CALENDAR_PANEL_ID} initialDate={monthCalendarDate} today={todayDate()}
+      issues={visibleIssues} milestones={milestones} projects={allProjects ? projectsById : undefined}
+      disabled={monthCalendarDisabled} onPointerDown={keepInlineDateFocus} onClose={closeMonthCalendar}
+      onOpenIssue={(id, opener, issueIds) => openChartIssue(id, opener, issueIds, monthCalendarTrigger.current)}
+      onOpenMilestone={openMilestoneReview}
+      onEditDate={(issue, field, opener) => openRowScheduleEdit(issue, opener,
+        { focusDate: field, focusFallback: monthCalendarTrigger.current })} />}
     {deadlinesOpen && <GanttDeadlines id={DEADLINES_PANEL_ID} issues={issues} disabled={deadlineActionsDisabled}
       onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, { focusDate: 'dueDate' })}
       onPointerDown={keepInlineDateFocus} />}
@@ -2793,9 +2822,7 @@ function ProjectGantt(props: GanttProps) {
       }}>보기 기간으로 이동</button>}
       {onCopyTimelineLink && <button type="button" className="btn" disabled={Boolean(scheduleFocus || activeDatePicker)}
         onPointerDown={keepInlineDateFocus} onClick={() => {
-          const scroll = scrollRef.current;
-          const visibleDays = scroll ? Math.max(0, Math.floor(timelineViewportOffset(scroll) / dayWidth)) : 0;
-          const date = isoDay(Math.min(range.end, range.start + visibleDays));
+          const date = visibleTimelineDate();
           const planId = !allProjects && planningExpanded ? selectedPlanningId : null;
           void onCopyTimelineLink({ date, zoom, hideDone, search: allProjects ? undefined : projectQuery.slice(0, 200).toWellFormed(),
             plansOpen: !allProjects && planningExpanded, linkedOnly: Boolean(planId && linkedOnly) }, planId);

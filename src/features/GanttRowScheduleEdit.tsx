@@ -36,7 +36,7 @@ type Props = Pick<FeatureProps, 'actorId' | 'notify' | 'refresh'> & {
   relatedIncomingTeamBlockers?: ReadonlyMap<string, readonly TeamIncomingBlocker[]>;
   outgoingTeamBlockers?: readonly TeamFollowUpChoice[];
   calendar?: WorkCalendar;
-  focusDate?: 'dueDate';
+  focusDate?: DateField;
   initialDates?: ScheduleBulkDateChanges;
   initialDateDraft?: DateSnapshot;
   datesFromGantt?: boolean;
@@ -316,7 +316,7 @@ export function GanttRowScheduleEdit({
     const initialSearch = initialLink?.action === 'add' && !initialLink.relatedId &&
       modal.current?.querySelector<HTMLInputElement>('input[data-row-link-search]');
     if (initialSearch) { initialSearch.focus(); return; }
-    initialDateInput.current?.focus({ preventScroll: focusDate !== 'dueDate' });
+    initialDateInput.current?.focus({ preventScroll: focusDate === undefined });
   }, [focusDate, initialLink]);
   useEffect(() => () => {
     request.current?.abort();

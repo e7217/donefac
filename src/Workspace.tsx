@@ -56,6 +56,7 @@ const Development = lazy(() => import('./features/Development').then(module => (
 const Planning = lazy(() => import('./features/Planning').then(module => ({default: module.Planning})));
 const CycleBoard = lazy(() => import('./features/CycleBoard').then(module => ({default: module.CycleBoard})));
 const Reports = lazy(() => import('./features/Reports').then(module => ({default: module.Reports})));
+const IssueIntake = lazy(() => import('./features/IssueIntake').then(module => ({ default: module.IssueIntake })));
 const Documents = lazy(() => import('./features/Documents').then(module => ({default: module.Documents})));
 const DocumentPublicationLibrary = lazy(() => import('./features/DocumentPublicationLibrary').then(module => ({default: module.DocumentPublicationLibrary})));
 const TeamOverview = lazy(() => import('./features/TeamOverview').then(module => ({default: module.TeamOverview})));
@@ -63,10 +64,11 @@ const TeamBoard = lazy(() => import('./features/TeamBoard'));
 const Trash = lazy(() => import('./features/Trash').then(module => ({default: module.Trash})));
 const WorkspaceSearch = lazy(() => import('./features/WorkspaceSearch').then(module => ({default: module.WorkspaceSearch})));
 
-type View = 'overview' | 'issues' | 'backlog' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'favorites' | 'trash' | 'teamoverview' | 'teamboard' | 'search';
+type View = 'overview' | 'issues' | 'intake' | 'backlog' | 'gantt' | 'planning' | 'reports' | 'documents' | 'publication' | 'development' | 'settings' | 'mywork' | 'favorites' | 'trash' | 'teamoverview' | 'teamboard' | 'search';
 const navigation = [
   { id: 'overview', label: '프로젝트 개요', icon: LayoutDashboard },
   { id: 'issues', label: '업무', icon: ListTodo },
+  { id: 'intake', label: '업무 접수', icon: ClipboardList },
   { id: 'backlog', label: '백로그 · 사이클', icon: CalendarRange },
   { id: 'gantt', label: '간트 · 일정', icon: SquareChartGantt },
   { id: 'planning', label: '사이클 · 모듈 · 릴리스', icon: FolderPlus },
@@ -80,6 +82,8 @@ type WorkspaceRoute = {
   projectId: string; view: View; documentId: string | null; reportId?: string | null; planningId?: string | null; issueId: string | null;
   completionRecordId?: string | null;
   issueCommentId?: string | null;
+  intakeRequestId?: string | null;
+  intakeCompose?: boolean;
   gitlabActivityId?: string | null;
   documentPreviewId?: string | null;
   savedViewId?: string | null; ganttScope?: 'team'; ganttProject?: string | null;
@@ -127,7 +131,7 @@ const refreshScopes = {
 type RefreshScope = keyof typeof refreshScopes;
 type WorkspaceRevisions = Record<RefreshScope, string | null>;
 type WorkspaceRead = { request: number; snapshot: WorkspaceSnapshot | null; revisions: WorkspaceRevisions };
-const validViews: View[] = ['overview','issues','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','favorites','trash','teamoverview','teamboard','search'];
+const validViews: View[] = ['overview','issues','intake','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','favorites','trash','teamoverview','teamboard','search'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
 const emptyTeamGanttScheduleFilters: TeamGanttScheduleFilters = {};
@@ -167,6 +171,10 @@ function routeHash(route: WorkspaceRoute) {
     else if (route.view === 'issues' && route.gitlabActivityId) query.set('gitlabActivity', route.gitlabActivityId);
   }
   if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
+  if (route.view === 'intake') {
+    if (route.intakeRequestId) query.set('request', route.intakeRequestId);
+    else if (route.intakeCompose) query.set('compose', '1');
+  }
   if (route.view === 'planning' && route.completionRecordId) query.set(cycleCompletionRecordParameter, route.completionRecordId);
   if (route.view === 'development' && route.gitlabActivityFilters) appendGitlabActivityFilters(query, route.gitlabActivityFilters);
   if (route.view === 'development' && route.gitlabDeploymentView) appendGitlabDeploymentView(query, route.gitlabDeploymentView);
@@ -415,7 +423,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const issue = snapshot.issues.find(i => i.id === requestedIssue);
   if (issue) {
     issueId = issue.id;
-    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && view !== 'favorites' &&
+    if (view !== 'teamoverview' && view !== 'teamboard' && view !== 'reports' && view !== 'search' && view !== 'favorites' && view !== 'intake' &&
         view !== 'mywork' && !ganttScope && !documentId) projectId = issue.projectId;
     if (view === 'settings' || (view === 'documents' && !documentId)) view = 'issues';
   }
@@ -479,6 +487,9 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
   const requestedComment = parameters.get('comment');
+  const intakeRequest = parameters.get('request');
+  const intakeRequestId = view === 'intake' && projectId === parts[0] && isRelationId(intakeRequest) ? intakeRequest : null;
+  const intakeCompose = view === 'intake' && !intakeRequestId && !issueId && projectId === parts[0] && parameters.get('compose') === '1';
   const documentReading = Boolean(view === 'documents' && documentId && !publication && isDocumentReading(parameters));
   const documentCommentId = view === 'documents' && documentId && !publication && isRelationId(requestedComment) ? requestedComment : null;
   const section = parameters.get('section');
@@ -513,7 +524,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   }
   return { projectId, view, documentId, issueId, issueCommentId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttTimelineLink, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
-    documentLabel, documentReading, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId,
+    documentLabel, documentReading, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId, intakeRequestId, intakeCompose,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
     gitlabActivityFilters: activityFilters, gitlabActivityId,
     gitlabDeploymentView: view === 'development' ? readGitlabDeploymentView(parameters) : undefined };
@@ -546,6 +557,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [ganttProject, setGanttProject] = useState<string | null>(null);
   const [ganttScheduleFilters, setGanttScheduleFilters] = useState(emptyTeamGanttScheduleFilters);
   const [ganttTimelineLink, setGanttTimelineLink] = useState<GanttTimelineLink>();
+  const [intakeRoute, setIntakeRoute] = useState<{ requestId: string | null; compose: boolean }>({ requestId: null, compose: false });
   const [ganttFocusIssueId, setGanttFocusIssueId] = useState<string | null>(null);
   const [ganttFocusDate, setGanttFocusDate] = useState<ScheduleDependencyEndpoint | null>(null);
   const [ganttMilestoneId, setGanttMilestoneId] = useState<string | null>(null);
@@ -815,6 +827,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
     setCycleQuery(route.cycleQuery ?? '');
+    setIntakeRoute(previous => previous.requestId === (route.intakeRequestId ?? null) && previous.compose === Boolean(route.intakeCompose)
+      ? previous : { requestId: route.intakeRequestId ?? null, compose: Boolean(route.intakeCompose) });
     setGitlabActivityFilters(route.gitlabActivityFilters ?? DEFAULT_GITLAB_ACTIVITY_FILTERS);
     const deploymentView = route.gitlabDeploymentView ?? DEFAULT_GITLAB_DEPLOYMENT_VIEW;
     setGitlabDeploymentView(previous => sameGitlabDeploymentView(previous, deploymentView) ? previous : deploymentView);
@@ -996,7 +1010,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       }
       return;
     }
-    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'mywork' || current?.view === 'gantt' && current.ganttScope === 'team' ||
+    if (current?.view === 'search' || current?.view === 'favorites' || current?.view === 'mywork' || current?.view === 'intake' || current?.view === 'gantt' && current.ganttScope === 'team' ||
         current?.view === 'development' && current.projectId === issue.projectId) {
       if (requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview })) setSearchOpen(false);
       return;
@@ -1378,6 +1392,40 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       notify('간트 위치 링크를 복사하지 못했습니다.', 'error');
     }
   };
+  const changeIntakeRequest = (id: string | null) => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'intake' && !current.issueId && (id === null || isRelationId(id))
+      ? requestRoute({ ...current, intakeCompose: false, intakeRequestId: id }) : false;
+  };
+  const closeIntakeCompose = () => {
+    const current = acceptedRouteRef.current;
+    return current?.view === 'intake' && current.intakeCompose
+      ? requestRoute({ ...current, intakeCompose: false }, 'replace') : false;
+  };
+  const openIntakeIssue = async (id: string) => {
+    const source = acceptedRouteRef.current;
+    if (source?.view !== 'intake' || !source.intakeRequestId) return false;
+    const context = routeHash(source), actor = actorRef.current;
+    await refresh();
+    const current = acceptedRouteRef.current;
+    return Boolean(current && routeHash(current) === context && actorRef.current === actor &&
+      dataRef.current?.issues.some(issue => issue.id === id) && requestRoute({ ...current, issueId: id }));
+  };
+  const copyIntakeLink = async (id?: string) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view !== 'intake' || (id && !isRelationId(id))) return false;
+    const url = new URL(location.pathname, location.origin);
+    url.hash = routeHash({ projectId: current.projectId, view: 'intake', documentId: null, issueId: null,
+      intakeRequestId: id, intakeCompose: !id });
+    try {
+      await navigator.clipboard.writeText(url.href);
+      notify(id ? '접수 요청 링크를 복사했습니다.' : '업무 접수 링크를 복사했습니다.');
+      return true;
+    } catch {
+      notify('접수 링크를 복사하지 못했습니다.', 'error');
+      return false;
+    }
+  };
 
   if (!data) return <div className="loading-screen"><div className="brand-mark"><Command size={26}/></div><h1>Teamspace</h1>{failure ? <><p className="error-text">{failure}</p><button className="btn btn-primary" onClick={() => refresh().catch(e => setFailure(e.message))}>다시 연결</button><p className="muted">API 서버가 실행 중인지 확인해주세요.</p></> : <><LoaderCircle className="spin"/><p className="muted">팀의 업무 공간을 불러오는 중입니다</p></>}</div>;
   const project = data.projects.find(p => p.id === projectId) || data.projects[0];
@@ -1485,6 +1533,12 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           onChangeSavedView={id => requestRoute({projectId,view:'issues',documentId:null,issueId,savedViewId:id})}
           onOpenGantt={id => requestRoute({projectId,view:'gantt',documentId:null,issueId:null,savedViewId:id})}
           onOpenFieldBreakdown={id => requestRoute({projectId,view:'reports',documentId:null,issueId:null,fieldBreakdownScope:{savedViewId:id}})}/>}
+        {view === 'intake' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>업무 접수를 불러오는 중입니다.</p></div>}>
+          <IssueIntake {...props} composeFromLink={intakeRoute.compose} selectedRequestId={intakeRoute.requestId}
+            onChangeRequest={changeIntakeRequest} onCloseCompose={closeIntakeCompose}
+            onCopySubmissionLink={() => copyIntakeLink()} onCopyRequestLink={copyIntakeLink}
+            issueOverlayOpen={Boolean(issueId)} onOpenLinkedIssue={openIntakeIssue} />
+        </Suspense>}
         {view === 'backlog' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>사이클 계획을 불러오는 중입니다.</p></div>}>
           <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
             query={cycleQuery} onQueryChange={changeCycleQuery} onOpenIssueSchedule={openPlannedIssueSchedule}

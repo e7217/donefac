@@ -16,6 +16,7 @@ import { CollaborationService, CollaborationError, type CollaborationUpgradeGuar
 import { PlanningService, PlanningError } from './planning.js';
 import { CycleCompletionError, CycleCompletionService } from './cycle-completion.js';
 import { CycleCopyError, CycleCopyService } from './cycle-copy.js';
+import { IssueIntakeError, IssueIntakeService } from './issue-intake.js';
 import { CycleCompletionRecords, CycleCompletionRecordsError } from './cycle-completion-records.js';
 import { cycleRetrospectiveDraft, cycleRetrospectiveId } from './cycle-retrospective.js';
 import { aggregateCycleProgress, CycleProgressError } from './cycle-progress.js';
@@ -33,6 +34,7 @@ import { DocumentTemplateError, DocumentTemplatesService, templateDraftContent }
 import { DocumentTemplateAssetsService } from './document-template-assets.js';
 import { DocumentCopyAssetError, DocumentCopyAssets } from './document-copy-assets.js';
 import { DocumentOrderError, DocumentOrderService } from './document-order.js';
+import { DocumentSpaceHomeError, DocumentSpaceHomeService } from './document-space-home.js';
 import { DocumentTreeCopyError, DocumentTreeCopyService } from './document-tree-copy.js';
 import { DocumentFollowUpError, DocumentFollowUpService, readDocumentChecklistWork, resolveDocumentDecisionSource, resolveDocumentFollowUpComment, validateDocumentDecisionSource } from './document-follow-up.js';
 import { DocumentSelectionCommentError, DocumentSelectionCommentService } from './document-selection-comments.js';
@@ -264,6 +266,7 @@ export function createApp(options: {
   const issueSave = new IssueSaveService(store);
   const documentSave = new DocumentSaveService(store);
   const issueStatusChanges = new IssueStatusChangeService(store);
+  const issueIntake = new IssueIntakeService(store);
   const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
     let customFields = defaults.customFields;
     if (source) {
@@ -312,6 +315,7 @@ export function createApp(options: {
   const cycleCompletion = new CycleCompletionService(store, cycleCompletionRecords);
   const issueOrders = new IssueOrderService(store);
   const documentOrders = new DocumentOrderService(store);
+  const documentSpaceHomes = new DocumentSpaceHomeService(store);
   const issueBulkEdit = new IssueBulkEditService(store);
   const issueChangeHistory = new IssueChangeHistory(store, {
     schema: projectId => issueSchemas.get(projectId), workflow: projectId => workflows.get(projectId),
@@ -482,6 +486,7 @@ export function createApp(options: {
       ...(confluenceMigrationOrigins.length ? { confluenceMigrationOrigins } : {}),
       ...(jiraMigrationOrigins.length ? { jiraMigrationOrigins } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
+      documentSpaceHomes: documentSpaceHomes.snapshot(),
     } as unknown as WorkspaceSnapshot;
   };
   const validateEmail = (email: any) => { const e = text(email,'이메일',254).toLowerCase(); if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) fail('올바른 이메일이 필요합니다.'); return e; };
@@ -2023,6 +2028,34 @@ export function createApp(options: {
     });
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
   });
+  app.get('/api/projects/:projectId/intake', (req, res) => {
+    res.set('Cache-Control', 'no-store').json(issueIntake.list(String(req.params.projectId), actor(req), req.query));
+  });
+  app.get('/api/projects/:projectId/intake/:id', (req, res) => {
+    actor(req);
+    res.set('Cache-Control', 'no-store').json(issueIntake.get(String(req.params.projectId), String(req.params.id)));
+  });
+  app.post('/api/projects/:projectId/intake', (req, res) => {
+    const projectId = String(req.params.projectId);
+    const actorId = actor(req);
+    const result = issueIntake.create(projectId, actorId, req.body,
+      item => recordActivity(actorId, 'project', projectId, '업무 요청 접수', item.title, item.createdAt));
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result);
+  });
+  app.post('/api/projects/:projectId/intake/:id/decision', (req, res) => {
+    const projectId = String(req.params.projectId);
+    const actorId = actor(req);
+    const result = issueIntake.review(projectId, String(req.params.id), actorId, req.body, {
+      versions: () => ({ workflow: workflows.get(projectId).version, schema: issueSchemas.get(projectId).version }),
+      accept: (fields, item) => commitIssueCreation(actorId, prepareIssueCreation({ title: item.title, description: item.description,
+        ...fields, projectId, reporterId: item.reporterId })),
+      record: item => {
+        const action = item.status === 'accepted' ? '접수 업무 등록' : item.status === 'duplicate' ? '접수 중복 업무 연결' : '접수 반려';
+        recordActivity(actorId, 'project', projectId, action, item.issueKey ? `${item.issueKey} · ${item.title}` : item.title, item.updatedAt);
+      },
+    });
+    res.set('Cache-Control', 'no-store').json(result);
+  });
   app.post('/api/projects/:projectId/issues/paste-preview', (req, res) => {
     const scope = { projectId: String(req.params.projectId), actorId: actor(req) };
     res.set('Cache-Control', 'no-store').json(issuePaste.preview(scope, req.body.text));
@@ -2380,6 +2413,15 @@ export function createApp(options: {
   }
   app.post('/api/documents',(req,res)=>createDocument(req,res));
   app.post('/api/issues/:id/documents',(req,res)=>createDocument(req,res,req.params.id));
+  app.get('/api/document-space-home', (req, res) => {
+    const projectId = documentSpaceHomes.space(req.query.projectId);
+    res.set('Cache-Control', 'no-store').json(documentSpaceHomes.get(projectId));
+  });
+  app.patch('/api/document-space-home', (req, res) => {
+    actor(req);
+    const projectId = documentSpaceHomes.space(req.query.projectId);
+    res.set('Cache-Control', 'no-store').json(documentSpaceHomes.save(projectId, req.body));
+  });
   app.get('/api/documents/:id/sibling-order', (req, res) => {
     res.set('Cache-Control', 'no-store').json(documentOrders.get(req.params.id));
   });
@@ -3267,7 +3309,7 @@ export function createApp(options: {
       : entry);
     const binaries=[...new Map([...attachments,...attachmentVersions,...trashEntries.flatMap(archivedFiles),...itemArchives.flatMap(trashItemFiles)].map(file=>[file.id,file])).values()];
     const exportedAt=now();
-    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),gitlabMergeRequestObservations:gitlab.mergeRequestObservations.exportRows(),notificationSubscriptions:subscriptions.all(),favorites:favorites.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
+    const payload={schemaVersion:NATIVE_BACKUP_SCHEMA_VERSION,issueIntake:issueIntake.exportRows(),savedFieldBreakdowns:savedFieldBreakdowns.all(),recurringIssueRules:recurringIssueRules.all(),cycleCompletionRecords:cycleCompletionRecords.exportRecords(),trashEntries,trashItems:itemArchives,teamNotifications:notifications.all(),deadlineReminderPreferences:deadlineReminders.all(),gitlabDeployments:gitlab.deployments.exportRows(),gitlabMergeRequestObservations:gitlab.mergeRequestObservations.exportRows(),notificationSubscriptions:subscriptions.all(),favorites:favorites.all(),atlassianLinks:atlassianLinks.all(),documentPublications:documentPublication.all(),documentTemplates:documentTemplates.all(),issueTemplates:issueTemplates.all(),issueChangeHistory:issueChangeHistory.all(),documentTemplateAssets:[] as ReturnType<DocumentTemplateAssetsService['export']>,worklogs:worklogs.all(),timeReservations:timeReservations.all(),reportingLedger:reportLedger.exportData(exportedAt),reportSnapshots:reports.all(),automationRules:automation.all(),automationRuns:exportAutomationRunHistory(store),issueAssignmentRules:issueAssignments.all(),collabStates:collaboration.exportStates(),exportedAt,...snapshot('backup'),comments:store.all('comments'),revisions:store.all('revisions'),attachments,attachmentContents:[] as {id:string;data:string}[],attachmentVersions,sourceImports:sourcePreservation.allImports(),sourceRecords:sourcePreservation.allRecords(),issueRelations:sourcePreservation.allRelations()};
     const estimated=Buffer.byteLength(JSON.stringify(payload))+documentTemplateAssets.exportBytes()+binaries.reduce((sum,a)=>sum+Math.ceil(a.size/3)*4+100,0);
     if(estimated>MAX_EXPORT_BYTES)fail('첨부파일을 포함한 전체 내보내기 파일은 64MiB 미만이어야 합니다. 운영 파일 백업을 사용해 주세요.',413);
     try{payload.attachmentContents=binaries.map(a=>({id:a.id,data:files.read(a).toString('base64')}));}catch{fail('첨부파일을 읽거나 무결성을 확인하지 못해 내보내기를 중단했습니다.',503);}
@@ -3280,6 +3322,11 @@ export function createApp(options: {
     if(data.schemaVersion===1){if(data.attachments?.length||data.attachmentContents?.length)fail('첨부파일이 있는 데이터는 schemaVersion 2가 필요합니다.');data.attachments=[];data.attachmentContents=[];}
     const expected=[...Object.keys(tables),'comments','revisions','attachments','attachmentContents'];
     for(const key of expected){if(!Array.isArray(data[key])||data[key].length>100000)fail(`${key} 데이터가 올바르지 않습니다.`);const ids=new Set();for(const x of data[key]){if(!x||typeof x.id!=='string'||!x.id||ids.has(x.id))fail(`${key}에 잘못되거나 중복된 ID가 있습니다.`);ids.add(x.id);}}
+    if (data.schemaVersion < 129 && data.issueIntake !== undefined && (!Array.isArray(data.issueIntake) || data.issueIntake.length)) {
+      fail('업무 접수를 포함한 백업은 schemaVersion 129가 필요합니다.');
+    }
+    const importedIssueIntake = data.schemaVersion >= 129
+      ? issueIntake.validateImport(data.issueIntake, data.projects, data.users) : [];
     if (data.schemaVersion < 87 && data.issueTemplates !== undefined && (!Array.isArray(data.issueTemplates) || data.issueTemplates.length)) {
       fail('업무 템플릿을 포함한 백업은 schemaVersion 87이 필요합니다.');
     }
@@ -3338,6 +3385,12 @@ export function createApp(options: {
       fail('사용자 지정 문서 순서를 포함한 백업은 schemaVersion 82가 필요합니다.');
     }
     const importedDocumentOrders = data.schemaVersion >= 82 ? documentOrders.validateImport(data.documentOrders, data.documents) : [];
+    if (data.schemaVersion < 128 && data.documentSpaceHomes !== undefined &&
+        (!Array.isArray(data.documentSpaceHomes) || data.documentSpaceHomes.length)) {
+      fail('문서 공간 홈을 포함한 백업은 schemaVersion 128이 필요합니다.');
+    }
+    const importedDocumentSpaceHomes = data.schemaVersion >= 128
+      ? documentSpaceHomes.validateImport(data.documentSpaceHomes, data.projects, data.documents) : [];
     const importDocument = <T extends DocPage | DocRevision>(document: T): T => ({ ...document, ...normalizeBackupDocumentContent(document.content, data.schemaVersion) });
     const importedDocuments = (data.documents as DocPage[]).map(importDocument);
     const importedRevisions = (data.revisions as DocRevision[]).map(importDocument);
@@ -3860,6 +3913,7 @@ export function createApp(options: {
       issueSave.invalidateForImport();
       documentSave.invalidateForImport();
       issueStatusChanges.clearForImport();
+      const previousIntake = issueIntake.clearForImport();
       issueProjectMove.clearForImport();
       issuePaste.resetForImport();
       documentCreation.invalidateForImport();
@@ -3872,6 +3926,7 @@ export function createApp(options: {
       for(const table of ['automation_runs','automation_rules','automatic_schedule_previews','schedule_paste_previews','plan_schedule_previews','milestones','baselines','project_calendars','collaboration_requests','collaboration_documents','issue_schemas','workflows','saved_views','planning_items','attachments','resource_links','dependencies','comments','revisions','gitlab_links','schedule_undos','issue_sequences','activities','issues','documents','projects','users','webhook_inbox'])store.db.exec(`DELETE FROM ${table}`);
       data.users.forEach((u:any)=>store.put('users',validateUser(u)));data.projects.forEach((p:any)=>store.put('projects',validateProject(p)));
       if(!data.users.length)fail('최소 한 명의 팀원이 필요합니다.');
+      issueIntake.restore(importedIssueIntake, previousIntake);
       issueTemplates.restore(importedIssueTemplates);
       recurringIssueRules.restore(importedRecurringIssueRules);
       documentTemplates.restore(importedTemplates);
@@ -3901,6 +3956,7 @@ export function createApp(options: {
       issueOrders.replaceImported(importedIssueOrders);
       for(const d of data.documents){validateDocument(d,undefined,{allowMissing:true,skipReferences:true});if(!Number.isInteger(d.version)||d.version<1||!validTimestamp(d.createdAt)||!validTimestamp(d.updatedAt))fail('문서 버전·시간을 확인해 주세요.');d.version=Math.max(d.version,(previousDocuments.get(d.id)||0)+1);store.put('documents',d);}
       documentOrders.replaceImported(importedDocumentOrders);
+      documentSpaceHomes.replaceImported(importedDocumentSpaceHomes);
       let importedDependencyVersion=previousDependencyVersion;
       for(const dependency of [...importedDependencies,...archivedDependencies]){
         dependency.version=nextDependencyVersion(dependency,previousDependencyVersion);
@@ -3960,7 +4016,7 @@ export function createApp(options: {
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(error instanceof DecisionFollowUpError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof DocumentTreeMoveError||error instanceof DocumentCopyAssetError)return res.status(error.status).json({error:error.message});
-    if(error instanceof DocumentTreeCopyError||error instanceof DocumentOrderError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof DocumentTreeCopyError||error instanceof DocumentOrderError||error instanceof DocumentSpaceHomeError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof AtlassianLinkError||error instanceof AtlassianReadError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueRelationVersionError)return res.status(error.status).json({error:error.message});
     if(error instanceof DocumentFollowUpError||error instanceof DocumentSelectionCommentError)return res.status(error.status).json({error:error.message,details:error.details});
@@ -3983,6 +4039,7 @@ export function createApp(options: {
     if(error instanceof GitlabDeploymentError||error instanceof GitlabMergeRequestObservationError)return res.status(error.status).json({error:error.message});
     if(error instanceof CycleCompletionError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CycleCopyError)return res.status(error.status).json({error:error.message,details:error.details});
+    if(error instanceof IssueIntakeError)return res.status(error.status).json({error:error.message,details:error.reason ? {reason:error.reason} : undefined});
     if(error instanceof CycleCompletionRecordsError||error instanceof CycleProgressError)return res.status(error.status).json({error:error.message});
     if(error instanceof DeadlineReminderError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof CommentMentionError)return res.status(error.status).json({error:error.message});

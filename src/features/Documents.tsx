@@ -11,7 +11,7 @@ import { NodeSelection, type Transaction } from '@tiptap/pm/state';
 import { createAbsolutePositionFromRelativePosition, createRelativePositionFromTypeIndex } from 'yjs';
 import {
   ArrowDownToLine, Bold, BookOpen, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
-  Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, GripVertical, History, ImageIcon, Info, Italic, Link2, List,
+  Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, GripVertical, History, House, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
   PanelRightOpen, Paperclip, Pencil, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   RotateCcw, Table2, TableOfContents, TableProperties, Tag, Trash2, Unlink, X,
@@ -79,6 +79,7 @@ import { COMMENT_LIST_CHANGED, CommentTrashButton } from './CommentTrashButton';
 import { CommentMentionInput, commentDraftPayload, decodeCommentDraft, emptyCommentDraft, encodeCommentDraft, sameCommentDraft, type CommentDraft } from './CommentMentions';
 import { DocumentReplyComposer, DocumentReplyList, useDocumentCommentReply } from './DocumentCommentReplies';
 import { NotificationSubscriptionButton } from './NotificationSubscriptionButton';
+import { DocumentSpaceHomeAction } from './DocumentSpaceHomeAction';
 import { FavoriteAction } from './FavoritesState';
 import { CollaborativeEditor } from './CollaborativeEditor';
 import type { CollaborationSession } from '../../shared/collaboration';
@@ -231,6 +232,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   reading, onChangeReading, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
   commentFocus, onCopyCommentLink, onOpenIssueForReview, onOpenIssueSchedule, onOpenMigratedIssue }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
+  const [homeEntryReady, setHomeEntryReady] = useState<string | null>(null);
   const [findScope, setFindScope] = useState<string | null>(null);
   const findOpener = useRef<HTMLButtonElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
@@ -238,6 +240,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const readingFindOpener = useRef<HTMLButtonElement>(null);
   const readingFindInput = useRef<HTMLInputElement>(null);
   const readingBody = useRef<HTMLDivElement>(null);
+  const readingTitle = useRef<HTMLHeadingElement>(null);
+  const pendingHomeFocus = useRef<string | null>(null);
   const documentScope = JSON.stringify([actorId, selectedDocumentId]);
   if (findScope !== null && findScope !== documentScope) setFindScope(null);
   if (readingFindScope !== null && (!reading || readingFindScope !== documentScope)) setReadingFindScope(null);
@@ -518,6 +522,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const orderOpen = Boolean(orderRequest);
   const currentProject = data.projects.find(project => project.id === projectId);
   const pagesById = useMemo(() => new Map(data.documents.map(page => [page.id, page])), [data.documents]);
+  const configuredProjectHome = currentProject ? data.documentSpaceHomes?.find(home => home.projectId === currentProject.id) : undefined;
+  const configuredTeamHome = data.documentSpaceHomes?.find(home => home.projectId === null);
+  const projectHomePage = configuredProjectHome?.documentId ? pagesById.get(configuredProjectHome.documentId) : undefined;
+  const teamHomePage = configuredTeamHome?.documentId ? pagesById.get(configuredTeamHome.documentId) : undefined;
+  const projectHome = projectHomePage?.projectId === currentProject?.id ? projectHomePage : undefined;
+  const teamHome = teamHomePage?.projectId === null ? teamHomePage : undefined;
   const moveSource = moveRequest && (pagesById.get(moveRequest.source.id) ?? moveRequest.source);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
   const activeSession = editorSessionNeeded && session?.document.id === selectedPageId ? session : null;
@@ -878,8 +888,21 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     data.restoreGeneration, showSaveRecovery]);
 
   useEffect(() => {
-    if (!archiveImport && !selectedDocumentId && visible.length) onSelectDocument(visible[0].id);
-  }, [archiveImport, selectedDocumentId, visible, onSelectDocument]);
+    if (archiveImport || selectedDocumentId || filtersActive) {
+      setHomeEntryReady(null);
+      return;
+    }
+    let active = true;
+    // A teammate can change the home while this workspace remains open.
+    void refresh().catch(() => {}).finally(() => { if (active) setHomeEntryReady(projectId); });
+    return () => { active = false; };
+  }, [archiveImport, selectedDocumentId, filtersActive, projectId, refresh]);
+  useEffect(() => {
+    if (archiveImport || selectedDocumentId || (!filtersActive && homeEntryReady !== projectId)) return;
+    if (projectHome && !filtersActive) {
+      if (onSelectDocument(projectHome.id, undefined, true)) pendingHomeFocus.current = projectHome.id;
+    } else if (visible.length) onSelectDocument(visible[0].id);
+  }, [archiveImport, selectedDocumentId, projectHome, filtersActive, homeEntryReady, projectId, visible, onSelectDocument]);
 
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
@@ -1231,12 +1254,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     return () => { active = false; };
   }, [documentId, historyVersion, sideTab, publicationOpen]);
 
-  function selectDocument(id: string) {
+  function selectDocument(id: string, showReading = reading) {
     if (id === selectedDocumentId) return true;
     if (documentAction) {
       if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return false;
-      onSelectDocument(id, undefined, reading);
-      return true;
+      return onSelectDocument(id, undefined, showReading);
     }
     if (savingRef.current || isReplySending() || isCommentEditPending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
     const commentEditDirty = hasCommentEditDraft();
@@ -1251,8 +1273,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     rememberDraft(draftRef.current);
     rememberComment();
     discardCommentEdit();
-    onSelectDocument(id, undefined, reading);
-    return true;
+    return onSelectDocument(id, undefined, showReading);
+  }
+
+  function openSpaceHome(page: DocPage) {
+    if (page.id === selectedDocumentId) {
+      if (reading) readingTitle.current?.focus();
+      else onChangeReading(true);
+    } else if (selectDocument(page.id, true)) pendingHomeFocus.current = page.id;
   }
 
   function openNew(parentId = '', template = 'blank') {
@@ -2198,6 +2226,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }
 
   const readingPage = reading ? latestPage : null;
+  useLayoutEffect(() => {
+    if (!readingPage || readingPage.id !== selectedDocumentId || draft?.id !== readingPage.id ||
+        pendingHomeFocus.current !== readingPage.id || !readingTitle.current) return;
+    pendingHomeFocus.current = null;
+    if (!sectionId && !commentFocus && !publicationOpen && !issueDrawerOpen) readingTitle.current.focus();
+  }, [draft?.id, readingPage, selectedDocumentId, sectionId, commentFocus, publicationOpen, issueDrawerOpen]);
   const readingFindOpen = Boolean(readingPage && readingFindScope === documentScope);
   function openReadingFind() {
     if (readingFindOpen) {
@@ -2276,6 +2310,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         <div className="docs-tree-content">
           <div className="docs-tree-group" {...(currentProject && treeDrag.space(currentProject.id))}><span>{currentProject?.name || '프로젝트 문서'}</span>
             <div className="docs-tree-group-actions">
+              {projectHome && <button className="docs-tree-group-add" type="button" aria-label="프로젝트 문서 홈 열기"
+                title={projectHome.title} onClick={() => openSpaceHome(projectHome)}><House size={14} aria-hidden="true" /></button>}
               {currentProject && <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(currentProject.id)} notify={notify} />}
               <button type="button" className="docs-tree-group-add" aria-label="프로젝트 문서 추가" onClick={() => openNew()}><Plus size={14} /></button>
             </div>
@@ -2284,6 +2320,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           {!filtersActive && !visible.some(page => page.projectId !== null) && <p className="docs-tree-empty">첫 문서를 작성해보세요.</p>}
           <div className="docs-tree-group docs-tree-common" {...treeDrag.space(null)}><span>팀 공통 문서</span>
             <div className="docs-tree-group-actions">
+              {teamHome && <button className="docs-tree-group-add" type="button" aria-label="팀 공통 문서 홈 열기"
+                title={teamHome.title} onClick={() => openSpaceHome(teamHome)}><House size={14} aria-hidden="true" /></button>}
               <NotificationSubscriptionButton actorId={actorId} targetType="space" targetId={documentNotificationSpaceId(null)} notify={notify} />
               <button type="button" className="docs-tree-group-add" aria-label="팀 공통 문서 추가" onClick={() => { openNew(); setNewProject(''); }}><Plus size={14} /></button>
             </div>
@@ -2330,6 +2368,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {readingPage && <button type="button" className="btn btn-ghost docs-icon-button" aria-label="읽기 링크 복사" title="읽기 링크 복사"
                 onClick={() => void copyReadingLink(readingPage)}><Link2 size={15} aria-hidden="true" /></button>}
               {!reading && <>
+              <DocumentSpaceHomeAction key={selectedPage.id} document={selectedPage} home={selectedPage.projectId === null ? configuredTeamHome : configuredProjectHome}
+                restoreGeneration={data.restoreGeneration} disabled={saving || restoring} refresh={refresh} notify={notify} />
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               <button type="button" className="btn btn-ghost docs-icon-button" title="팀 템플릿으로 저장" aria-label="팀 템플릿으로 저장"
                 disabled={saving || restoring} onClick={event => manageTemplates(event.currentTarget, latestPage ?? selectedPage)}><FileStack size={16} aria-hidden="true" /></button>
@@ -2388,7 +2428,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 if (link && !link.closest('.docs-migrated-issue-link') && (openMigratedIssueLink(link) || openInlineDocumentLink(link.href, true))) event.preventDefault();
               }}>
               <div className="docs-document-meta"><span>저장본 · 버전 {readingPage.version}</span><span>마지막 수정 {relativeTime(readingPage.updatedAt)}</span></div>
-              <h2 className="docs-title-input">{breadcrumbTitle}</h2>
+              <h2 ref={readingTitle} tabIndex={-1} className="docs-title-input">{breadcrumbTitle}</h2>
               {Boolean(readingPage.labels?.length) && <ul className="docs-label-chips" aria-label="문서에 적용한 라벨">
                 {readingPage.labels?.map(label => <li className="docs-label-chip" key={label}><span>{label}</span></li>)}
               </ul>}

@@ -451,6 +451,10 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 `POST /api/projects/:projectId/workflow/status-migration-apply`에 `{previewId}`를 보낸다. 검토한 작업자와 프로젝트가 일치해야 한다. 출발 상태의 티켓이 추가·삭제·이동되거나 대상 버전과 워크플로·양식·배정 규칙이 바뀌면 전체 적용을 거절한다. 상태 변화, 필요한 완료 시각, 활동·보고서·알림·발신 이벤트를 한 트랜잭션에 기록한다. 동일한 미리보기 ID로 7일간 완료 결과를 다시 받을 수 있다. 두 단계는 브라우저용 `/api` 경로에 있다.
 
+## 문서 공간 홈
+
+브라우저의 `GET /api/document-space-home?projectId=…`는 `{projectId,documentId,version}`을 반환한다. 팀 공통 공간은 프로젝트 ID를 생략한다. 한 번도 지정하지 않은 공간의 `version`은 `0`이다. 같은 주소에 `PATCH`로 `{documentId,expectedVersion,restoreGeneration}`을 보낸다. 현재 공간의 활성 저장 문서를 지정하거나 `documentId: null`로 해제한다. 문서가 공간 밖으로 이동하거나 삭제되면 해당 홈이 해제되고 버전이 올라간다. 버전이나 복원 세대가 바뀐 요청은 `409`를 받는다. 형식 128 이후 백업은 공간 홈을 저장한다.
+
 ## 문서 생성과 Markdown 가져오기
 
 `POST /api/documents`와 자동화용 `POST /api/v1/documents`에서 UUID v4인 `requestId`를 선택적으로 보낼 수 있다. 새 요청은 `201`, 동일한 작업자와 입력으로 다시 보내면 저장된 문서와 `200`을 반환한다. 같은 ID에 다른 입력을 보내거나 생성한 문서를 현재 범위에서 읽을 수 없으면 `409`를 반환한다. 문서·첫 이력·생성 활동·알림과 요청 기록을 함께 저장한다. 물리 백업은 요청 기록을 보존한다. 같은 워크스페이스를 이동용 JSON 백업으로 교체하면 이전 요청은 `409`를 반환한다.
@@ -647,6 +651,16 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 담당자별 보드 이동은 `targetAssigneeId`를 보낸다. `null`은 담당자 미지정 줄이다. 기준 카드가 있으면 대상 상태와 담당자에 속해야 한다. 줄을 바꿀 때는 같은 값의 `assigneeId`를 보내 재배정하고, 같은 줄의 순서·상태 이동에는 `targetAssigneeId`만 보낸다. `assigneeId`를 명시하면 상태 전이와 같이 일반 업무 편집 규칙을 검사하며, 지정한 담당자를 적용한다. 순서·상태·담당자와 이력은 한 트랜잭션에 저장한다. 담당자가 바뀌면 새 업무 순서 버전을 발급한다.
 
 자동화 클라이언트는 프로젝트 범위의 키로 `/api/v1/projects/:id/issue-order`에 같은 요청을 보낸다. 이동에는 쓰기 키가 필요하다.
+
+## 프로젝트 업무 접수
+
+`GET /api/projects/:projectId/intake`는 `{items,total,offset,limit,counts:{pending,closed}}`를 반환한다. `state=pending` 또는 `state=closed`를 사용한다. 선택 조건은 `q`, `mine=1`, `offset`이다. 결과는 30건씩 표시하고 두 건수는 검색 및 요청자 조건을 적용한다. `GET /api/projects/:projectId/intake/:id`에서 해당 요청을 읽는다.
+
+`POST /api/projects/:projectId/intake`에 `{requestId,restoreGeneration,title,description?}`를 보낸다. 제목은 200자, 일반 텍스트 설명은 5,000자까지 입력한다. 생성된 항목의 상태는 `pending`이다. 새 응답은 `201`의 `{item,duplicate:false}`다.
+
+`POST /api/projects/:projectId/intake/:id/decision`에 `{requestId,restoreGeneration,expectedVersion,decision,reason?}`와 결정에 필요한 값을 보낸다. `accept`는 `issue`, `expectedWorkflowVersion`, `expectedIssueSchemaVersion`으로 현재 양식에 새 업무를 만든다. `duplicate`는 같은 프로젝트의 업무 ID `issueId`와 `expectedIssueVersion`을 사용한다. `reject`는 1,000자 이내의 사유가 필요하다. 응답의 `item.status`는 각각 `accepted`, `duplicate`, `rejected`이고 연결 업무가 있으면 당시 ID와 키를 반환한다.
+
+같은 작업자의 같은 요청은 UUID v4 `requestId`와 입력으로 7일간 결과를 다시 확인할 수 있다. 응답은 `200`의 `duplicate:true`다. 프로젝트·작업자·입력이 바뀌거나 오래된 검토 버전·복원 세대를 쓰면 `409`를 반환한다. 자체 백업 형식 129는 요청과 결과를 보존한다. 파일 단위 물리 백업은 재확인 기록도 보존한다.
 
 ## 백로그 또는 사이클에서 업무 생성
 
