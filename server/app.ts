@@ -318,7 +318,7 @@ export function createApp(options: {
   const automaticSchedule=new AutomaticScheduleService(store,calendars);
   const schedulePaste=new SchedulePasteService(store);
   const planScheduleShift=new PlanScheduleShiftService(store);
-  const legacyImport=new LegacyImportService(store,dataDir);
+  const legacyImport=new LegacyImportService(store,dataDir,{preserveUnregisteredBundles:migrationRehearsal});
   const workspaceRevisions = new WorkspaceRevisions(store);
   const trash=new TrashService(store);
   const trashItems=new TrashItemsService(store,files);

@@ -1,6 +1,6 @@
 import { randomUUID,createHash } from 'node:crypto';
 import { Worker } from 'node:worker_threads';
-import { mkdirSync,chmodSync,readdirSync,writeFileSync,renameSync,rmSync,openSync,closeSync,fsyncSync } from 'node:fs';
+import { mkdirSync,chmodSync,lstatSync,readdirSync,writeFileSync,renameSync,rmSync,openSync,closeSync,fsyncSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Express,Request } from 'express';
 import type { LegacyDiagnostic,LegacyDiagnosticPage,LegacyPackageSummary,LegacyPackageDetail,LegacyRecord,LegacyRecordKind,LegacyRecordPage,LegacyRecordSummary } from '../shared/types.js';
@@ -12,7 +12,11 @@ import type { LegacyAnalysis } from './legacy-import-analysis.js';
 
 const MAX_PACKAGES=20,MAX_STORED_BYTES=512*1024*1024;
 type Hooks={actor:(req:Request)=>string;activity:(req:Request,type:string,id:string,action:string,detail?:string)=>unknown};
-export type StoredLegacyPackageDetail = LegacyPackageDetail & { jiraBackupLayoutChecked?: true; sourceEvidenceChecked?: true };
+export type StoredLegacyPackageDetail = LegacyPackageDetail & {
+  jiraBackupLayoutChecked?: true;
+  sourceEvidenceChecked?: true;
+  jiraServiceDeskOwnerEvidenceChecked?: true;
+};
 const fail=(status:number,message:string):never=>{throw new LegacyImportError(status,message);};
 const scalar=(value:unknown,label:string,max=500):string=>typeof value==='string'&&value.trim()&&value.length<=max&&!/[\u0000-\u001f\u007f]/.test(value)?value.trim():fail(400,`${label}을(를) 확인해 주세요.`);
 function pageOptions(query:Record<string,unknown>){const integer=(name:string,fallback:number,max:number)=>{const value=query[name];if(value===undefined)return fallback;if(typeof value!=='string'||!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)>max||name==='limit'&&Number(value)<1)fail(400,'페이지 범위를 확인해 주세요.');return Number(value);};return{offset:integer('offset',0,100000),limit:integer('limit',50,100)};}
@@ -24,15 +28,23 @@ export class LegacyImportService{
   private closed=false;
   private current:{worker:Worker;reject:(error:Error)=>void}|null=null;
   private busy=false;
-  constructor(private readonly store:Store,dataDir:string){
-    this.root=join(dataDir,'legacy-imports');mkdirSync(this.root,{recursive:true,mode:0o700});chmodSync(this.root,0o700);
+  constructor(private readonly store:Store,dataDir:string,{ preserveUnregisteredBundles = false } = {}){
+    this.root=join(dataDir,'legacy-imports');
+    const sourceDirectory = preserveUnregisteredBundles ? lstatSync(this.root, { throwIfNoEntry: false }) : undefined;
+    if (sourceDirectory && !sourceDirectory.isDirectory()) throw new Error('리허설 원본 보관 디렉터리를 확인해 주세요.');
+    mkdirSync(this.root,{recursive:true,mode:0o700});chmodSync(this.root,0o700);
     store.db.exec(`CREATE TABLE IF NOT EXISTS legacy_packages(id TEXT PRIMARY KEY,instance_key TEXT NOT NULL,sha256 TEXT NOT NULL,json TEXT NOT NULL,UNIQUE(instance_key,sha256));
       CREATE TABLE IF NOT EXISTS legacy_records(package_id TEXT NOT NULL REFERENCES legacy_packages(id) ON DELETE CASCADE,record_id TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,source_id TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(package_id,record_id));
       CREATE TABLE IF NOT EXISTS legacy_diagnostics(package_id TEXT NOT NULL REFERENCES legacy_packages(id) ON DELETE CASCADE,id TEXT NOT NULL,severity TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(package_id,id));
       CREATE TABLE IF NOT EXISTS legacy_file_manifests(package_id TEXT PRIMARY KEY REFERENCES legacy_packages(id) ON DELETE CASCADE,json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS legacy_record_kind ON legacy_records(package_id,kind);
       CREATE INDEX IF NOT EXISTS legacy_diagnostic_severity ON legacy_diagnostics(package_id,severity);`);
-    const known=new Set(this.list().map(value=>value.id));for(const filename of readdirSync(this.root)){const match=/^([a-f\d-]{36})\.(pending|bundle)$/.exec(filename);if(match&&(match[2]==='pending'||!known.has(match[1])))rmSync(join(this.root,filename),{force:true});}
+    // A rehearsal needs the original bytes even when the stored analysis row is missing.
+    const known = preserveUnregisteredBundles ? null : new Set(this.list().map(value=>value.id));
+    for (const filename of readdirSync(this.root)) {
+      const match = /^([a-f\d-]{36})\.(pending|bundle)$/.exec(filename);
+      if (match && (match[2] === 'pending' || (known && !known.has(match[1])))) rmSync(join(this.root,filename),{force:true});
+    }
   }
   list():LegacyPackageSummary[]{return(this.store.db.prepare('SELECT json FROM legacy_packages ORDER BY rowid DESC').all() as {json:string}[]).map(row=>JSON.parse(row.json) as LegacyPackageSummary);}
   private get(id:string):LegacyPackageSummary{const row=this.store.db.prepare('SELECT json FROM legacy_packages WHERE id=?').get(id) as {json:string}|undefined;if(!row)return fail(404,'분석한 원본 패키지를 찾을 수 없습니다.');return JSON.parse(row.json) as LegacyPackageSummary;}
@@ -69,7 +81,9 @@ export class LegacyImportService{
     const previous = existing ? JSON.parse(existing.json) as LegacyPackageSummary : undefined;
     if (previous) {
       if (product !== 'auto' && product !== previous.source.product) fail(400,'동일한 원본의 기존 분석 제품과 선택값이 다릅니다.');
-      if (this.detail(previous.id).sourceEvidenceChecked) return { summary: previous, duplicate: true };
+      const detail = this.detail(previous.id);
+      const nativeJiraCurrent = previous.source.format !== 'jira-backup-xml' || detail.jiraServiceDeskOwnerEvidenceChecked === true;
+      if (detail.sourceEvidenceChecked === true && nativeJiraCurrent) return { summary: previous, duplicate: true };
       filename = previous.filename;
     } else {
       const packages = this.list();
@@ -94,7 +108,7 @@ export class LegacyImportService{
         const putRecord=this.store.db.prepare('INSERT INTO legacy_records(package_id,record_id,kind,title,source_id,json) VALUES(?,?,?,?,?,?)');for(const value of analysis.dataset.records)putRecord.run(id,value.id,value.kind,value.title,value.sourceId,JSON.stringify(value));
         const putDiagnostic=this.store.db.prepare('INSERT INTO legacy_diagnostics(package_id,id,severity,json) VALUES(?,?,?,?)');for(const value of analysis.dataset.diagnostics)putDiagnostic.run(id,value.id,value.severity,JSON.stringify(value));
         const manifest = { files: analysis.files, unsupported: analysis.dataset.unsupported, sourceEvidenceChecked: true,
-          ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true } : {}) };
+          ...(summary.source.format === 'jira-backup-xml' ? { jiraBackupLayoutChecked: true, jiraServiceDeskOwnerEvidenceChecked: true } : {}) };
         this.store.db.prepare('INSERT INTO legacy_file_manifests(package_id,json) VALUES(?,?)').run(id, JSON.stringify(manifest));afterSave?.(summary);renameSync(pending,bundle);syncDirectory(this.root);
       });committed=true;return{summary,duplicate:Boolean(previous)};
     }finally{this.busy=false;if(!committed){rmSync(pending,{force:true});if(!previous)rmSync(bundle,{force:true});}}

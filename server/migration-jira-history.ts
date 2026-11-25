@@ -102,6 +102,12 @@ export function hasRestrictedJiraServiceDeskComment(metadata: LegacyRecord['meta
     Array.isArray(value) && value.some(restrictedCommentProperty));
 }
 
+export function jiraServiceDeskAttachmentNames(comment: LegacyRecord): string[] {
+  if (comment.kind !== 'comment' || comment.textFormat !== 'jira-wiki') return [];
+  return [...comment.text.matchAll(/(?<!\\)!([^!|\r\n]+)(?:\|[^!\r\n]*)?!|(?<!\\)\[\^([^\]\r\n]+)\]/gu)]
+    .map(match => (match[1] ?? match[2]).trim()).filter(Boolean);
+}
+
 function hasJiraVisibilityRestriction(metadata: LegacyRecord['metadata']): boolean {
   return Object.entries(metadata).some(([name, value]) => {
     const normalized = attributeName(name);

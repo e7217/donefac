@@ -44,5 +44,10 @@ export function diagnostic(dataset:LegacyDataset,input:Omit<LegacyDiagnostic,'id
 }
 export function classifyMissingReferences(dataset:LegacyDataset):void{
   const ids=new Set(dataset.records.map(value=>value.id));
-  for(const value of dataset.records)for(const ref of value.references)if(!ids.has(`${ref.kind}:${ref.sourceId}`))diagnostic(dataset,{severity:'warning',code:'MISSING_REFERENCE',message:`원본 ${ref.relation} 관계의 대상이 패키지에 없습니다 (${ref.kind}: ${ref.sourceId}).`,recordId:value.id});
+  for(const value of dataset.records)for(const ref of value.references){
+    // The Jira service desk parser emits its own redacted warning for these cross-package references.
+    if(dataset.source.format==='jira-backup-xml'&&value.kind==='relation'&&value.metadata.jiraServiceDeskCommentProperty===true&&
+      ref.kind==='comment'&&ref.relation==='commentVisibility')continue;
+    if(!ids.has(`${ref.kind}:${ref.sourceId}`))diagnostic(dataset,{severity:'warning',code:'MISSING_REFERENCE',message:`원본 ${ref.relation} 관계의 대상이 패키지에 없습니다 (${ref.kind}: ${ref.sourceId}).`,recordId:value.id});
+  }
 }

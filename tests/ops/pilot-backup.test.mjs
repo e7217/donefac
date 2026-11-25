@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { tsImport } from 'tsx/esm/api';
@@ -16,6 +17,7 @@ const { AttachmentFiles } = await tsImport('../../server/attachments.ts', import
 const { Store } = await tsImport('../../server/store.ts', import.meta.url);
 const actor = 'user-seo';
 const dbFile = 'teamspace.sqlite';
+const keyFile = '.credential-key';
 const journalFile = '.attachments-import.json';
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
@@ -261,4 +263,112 @@ test('cold backup validates the attachment directory selected by native import r
     assert.equal(existsSync(join(restored, previousPath)), false);
     assert.equal(readFileSync(join(source, journalFile), 'utf8'), journal);
   }
+});
+
+test('startup preserves GitLab and outbound signing credentials when a workspace copy is missing its key', async t => {
+  const root = tempDirectory(t);
+  const secrets = {
+    token: 'synthetic-api-token',
+    webhookSecret: 'synthetic-inbound-secret',
+    signingToken: `whsec_${Buffer.alloc(32, 7).toString('base64')}`,
+  };
+
+  for (const kind of [...Object.keys(secrets), 'outbound']) {
+    await t.test(kind, async () => {
+      const directory = join(root, kind);
+      const secret = await withWorkspace(directory, async api => {
+        if (kind === 'outbound') {
+          const created = await api.json('/webhook-endpoints', {
+            method: 'POST', status: 201,
+            body: { name: 'Synthetic endpoint', url: 'https://outbound.invalid/', eventTypes: ['issue.created'] },
+          });
+          return created.secret;
+        }
+        await api.json('/integrations/gitlab', {
+          method: 'PATCH',
+          body: { expectedVersion: 1, baseUrl: 'https://gitlab.invalid/', projectIds: [1], [kind]: secrets[kind] },
+        });
+        return secrets[kind];
+      });
+      const keyPath = join(directory, keyFile);
+      const key = readFileSync(keyPath);
+      const database = readFileSync(join(directory, dbFile));
+      rmSync(keyPath);
+
+      assert.throws(() => new Store(directory), /원본 \.credential-key 파일이 필요/u);
+      assert.equal(existsSync(keyPath), false);
+      assert.deepEqual(readFileSync(join(directory, dbFile)), database);
+
+      writeFileSync(keyPath, key);
+      const reopened = new Store(directory);
+      try {
+        const ciphertext = kind === 'outbound'
+          ? reopened.db.prepare('SELECT secret FROM webhook_endpoints').get().secret
+          : reopened.setting('gitlab')[kind];
+        assert.equal(reopened.unseal(ciphertext), secret);
+      } finally { reopened.db.close(); }
+    });
+  }
+});
+
+test('cold backup and restore require a matching key even if the backup manifest matches a replaced key', async t => {
+  const root = tempDirectory(t);
+  const source = join(root, 'source'), backup = join(root, 'backup'), restore = join(root, 'restore');
+  const secret = 'synthetic-cold-backup-gitlab-token';
+  await withWorkspace(source, async api => {
+    await api.json('/integrations/gitlab', {
+      method: 'PATCH',
+      body: { expectedVersion: 1, baseUrl: 'https://gitlab.invalid/', projectIds: [1], token: secret },
+    });
+  });
+  const keyPath = join(source, keyFile), originalKey = readFileSync(keyPath);
+  const wrongKey = Buffer.from(originalKey);
+  wrongKey[0] ^= 1;
+  const mismatch = /\.credential-key로 저장된 자격 증명을 확인할 수 없습니다/u;
+
+  writeFileSync(keyPath, wrongKey);
+  assert.throws(() => new Store(source), mismatch);
+  refuses('backup', source, join(root, 'rejected-backup'), mismatch);
+  assert.deepEqual(readFileSync(keyPath), wrongKey);
+  assert.ok(!readdirSync(root).some(name => name.startsWith('.teamspace-backup-')));
+
+  writeFileSync(keyPath, originalKey);
+  succeeds('backup', source, backup);
+  succeeds('restore', backup, restore);
+  const recovered = new Store(restore);
+  try { assert.equal(recovered.unseal(recovered.setting('gitlab').token), secret); }
+  finally { recovered.db.close(); }
+
+  const backupKey = join(backup, 'data', keyFile);
+  const manifestPath = join(backup, 'manifest.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  manifest.files.find(file => file.path === keyFile).sha256 = sha256(wrongKey);
+  const manifestText = JSON.stringify(manifest);
+  writeFileSync(backupKey, wrongKey);
+  writeFileSync(manifestPath, manifestText);
+
+  refuses('restore', backup, join(root, 'rejected-restore'), mismatch);
+  assert.deepEqual(readFileSync(backupKey), wrongKey);
+  assert.equal(readFileSync(manifestPath, 'utf8'), manifestText);
+  assert.ok(!readdirSync(root).some(name => name.startsWith('.teamspace-restore-')));
+});
+
+test('older workspaces without stored credentials can generate a fresh key', async t => {
+  const root = tempDirectory(t);
+  const legacy = new DatabaseSync(join(root, dbFile));
+  legacy.exec('CREATE TABLE marker(value TEXT); INSERT INTO marker VALUES(\'preserved\')');
+  legacy.close();
+
+  const upgraded = new Store(root);
+  try {
+    assert.equal(upgraded.db.prepare('SELECT value FROM marker').get().value, 'preserved');
+    upgraded.setSetting('gitlab', { baseUrl: 'https://gitlab.invalid/', projectIds: [1] });
+  } finally { upgraded.db.close(); }
+  const keyPath = join(root, keyFile);
+  rmSync(keyPath);
+  const reopened = new Store(root);
+  try {
+    assert.deepEqual(reopened.setting('gitlab').projectIds, [1]);
+    assert.equal(readFileSync(keyPath).length, 32);
+  } finally { reopened.db.close(); }
 });

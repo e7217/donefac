@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, truncate, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, rmdir, stat, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -947,6 +947,112 @@ test('profile-bound stage discards rejected inputs and accepts an exact clean pr
   assert.equal(staged.code, 0, staged.stdout + staged.stderr);
   const accepted = JSON.parse(await readFile(join(rehearsalState(join(root, 'workspace')), 'stage.json'), 'utf8'));
   assert.equal(accepted.profile.status, 'analyzed');
+});
+
+test('review rejects damaged ordinary staged packages before printing a browser address and allows a retry', { timeout: 90_000 }, async t => {
+  const scratch = await mkdtemp(join(tmpdir(), 'teamspace-rehearsal-review-integrity-'));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const root = join(scratch, 'run');
+  const workspace = join(root, 'workspace');
+  const manifest = join(scratch, 'manifest.json');
+  const fixtures = fixturePackages();
+  const sources = fixtures.map(({ filename, product }) => ({ file: filename, product, instanceKey: `${originalFrom}-${product}` }));
+  for (const item of fixtures) await writeFile(join(scratch, item.filename), item.bytes);
+  await writeFile(manifest, JSON.stringify({ packages: sources }));
+  const staged = await launch(['stage', manifest, root], process.env).exited;
+  assert.equal(staged.code, 0, staged.stderr);
+  const { packages, confluenceReviews, jiraPlans } = JSON.parse(await readFile(join(rehearsalState(workspace), 'stage.json'), 'utf8'));
+  assert.equal(confluenceReviews, undefined);
+  assert.equal(jiraPlans, undefined);
+  const second = packages[1];
+  const bundle = join(workspace, 'legacy-imports', `${second.packageId}.bundle`);
+  const bundleBytes = await readFile(bundle);
+  assert.deepEqual(bundleBytes, fixtures[1].bytes);
+
+  async function rejectReview(reason) {
+    const review = launch(['review', root], process.env);
+    try {
+      await assert.rejects(() => waitForReview(review), reason);
+      const result = await review.exited;
+      assert.equal(result.code, 1, result.stderr);
+      assert.match(result.stderr, /패키지 2/u);
+      assert.doesNotMatch(result.stdout + result.stderr, /이관 검토 주소|http:\/\/127\.0\.0\.1:/u);
+      for (const value of [scratch, ...fixtures.map(item => item.filename), originalFrom, privateTitle, privateBody, restrictedTitle,
+        'changed-private-instance']) {
+        assert.equal((result.stdout + result.stderr).includes(value), false);
+      }
+    } finally {
+      review.child.kill('SIGINT');
+      await review.exited;
+    }
+  }
+
+  const changedBytes = Buffer.from(bundleBytes);
+  changedBytes[0] ^= 1;
+  await writeFile(bundle, changedBytes);
+  await rejectReview(/SHA-256|해시/u);
+  assert.deepEqual(await readFile(bundle), changedBytes);
+  await writeFile(bundle, bundleBytes);
+
+  const savedBundle = join(scratch, 'retained-source.bundle');
+  await rename(bundle, savedBundle);
+  try {
+    await rejectReview(/누락|없습니다/u);
+    assert.equal(existsSync(bundle), false);
+    await mkdir(bundle);
+    try { await rejectReview(/읽을 수 없/u); }
+    finally { await rmdir(bundle); }
+    await symlink(savedBundle, bundle);
+    try {
+      await rejectReview(/읽을 수 없/u);
+      assert.equal((await lstat(bundle)).isSymbolicLink(), true);
+      assert.deepEqual(await readFile(savedBundle), bundleBytes);
+    } finally { await rm(bundle); }
+  } finally {
+    await rename(savedBundle, bundle);
+  }
+
+  const setAnalyzedInstance = instanceKey => {
+    const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'));
+    try {
+      const result = db.prepare("UPDATE legacy_packages SET json=json_set(json, '$.source.instanceKey', ?) WHERE id=?")
+        .run(instanceKey, second.packageId);
+      assert.equal(result.changes, 1);
+    } finally { db.close(); }
+  };
+  setAnalyzedInstance('changed-private-instance');
+  try { await rejectReview(/분석 기록과 원본 인스턴스가 일치하지 않습니다/u); }
+  finally { setAnalyzedInstance(second.instanceKey); }
+
+  // Simulate a missing registry row without removing its associated analysis records.
+  const db = new DatabaseSync(join(workspace, 'teamspace.sqlite'), { enableForeignKeyConstraints: false });
+  const stored = db.prepare('SELECT * FROM legacy_packages WHERE id=?').get(second.packageId);
+  assert.ok(stored);
+  assert.equal(db.prepare('DELETE FROM legacy_packages WHERE id=?').run(second.packageId).changes, 1);
+  try {
+    await rejectReview(/분석 기록과 원본 인스턴스가 일치하지 않습니다/u);
+    assert.deepEqual(await readFile(bundle), bundleBytes);
+  } finally {
+    db.prepare('INSERT INTO legacy_packages(id,instance_key,sha256,json) VALUES(?,?,?,?)')
+      .run(stored.id, stored.instance_key, stored.sha256, stored.json);
+    db.close();
+  }
+
+  const review = launch(['review', root], process.env);
+  try {
+    const base = await waitForReview(review);
+    const analyses = await json(base, '/legacy-import/packages');
+    assert.equal(analyses.length, packages.length);
+    for (const item of packages) {
+      const current = analyses.find(value => value.id === item.packageId);
+      assert.equal(current.sha256, item.sha256);
+      assert.equal(current.source.instanceKey, item.instanceKey);
+    }
+  } finally {
+    review.child.kill('SIGINT');
+    const stopped = await review.exited;
+    assert.equal(stopped.code, 130, stopped.stderr);
+  }
 });
 
 test('review opens a legacy rehearsal with Confluence proof beside its workspace', { timeout: 60_000 }, async t => {

@@ -4,12 +4,13 @@ import { dirname, basename, resolve, join, relative, isAbsolute, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
+import { assertWorkspaceCredentials, CREDENTIAL_KEY_FILE, readWorkspaceCredentialKey } from '../server/workspace-credentials.mjs';
 
 const SCRIPT = fileURLToPath(import.meta.url);
 const WRAPPER = join(dirname(SCRIPT), 'pilot-lock.sh');
 const FORMAT = 'teamspace-pilot-cold-backup';
 const DB = 'teamspace.sqlite';
-const KEY = '.credential-key';
+const KEY = CREDENTIAL_KEY_FILE;
 const MANIFEST = 'manifest.json';
 const MAX_MANIFEST = 64 * 1024 * 1024;
 const MAX_ENTRIES = 1_000_000;
@@ -89,8 +90,9 @@ function copyTree(source, target, tree) {
   if (JSON.stringify(after) !== JSON.stringify(tree)) fail('복사 중 원본 파일 목록 또는 내용이 변경되었습니다.');
 }
 function credential(root) {
-  const path = join(root, KEY), fd = regularFd(path);
-  try { if (fstatSync(fd).size !== 32) fail('32바이트 .credential-key 파일이 필요합니다.'); } finally { closeSync(fd); }
+  const key = readWorkspaceCredentialKey(root);
+  if (!key) fail('데이터베이스와 함께 원본 .credential-key 파일이 필요합니다.');
+  return key;
 }
 function attachmentImportJournal(root) {
   const path = join(root, '.attachments-import.json');
@@ -155,7 +157,7 @@ function workspaceFileInventory(db, tables, uploadDirectory) {
 }
 
 function validateDatabase(root, checkpoint) {
-  credential(root);
+  const key = credential(root);
   const path = join(root, DB), fd = regularFd(path); closeSync(fd);
   const db = new DatabaseSync(path, { readOnly: !checkpoint, enableForeignKeyConstraints: true });
   let expected;
@@ -169,6 +171,7 @@ function validateDatabase(root, checkpoint) {
     const check = db.prepare('PRAGMA quick_check').all();
     if (check.length !== 1 || check[0].quick_check !== 'ok') fail('SQLite quick_check에 실패했습니다.');
     if (db.prepare('PRAGMA foreign_key_check').all().length) fail('SQLite 외래 키 검사에 실패했습니다.');
+    assertWorkspaceCredentials(db, key);
     const generation = db.prepare("SELECT value FROM settings WHERE key='attachmentImportGeneration'").get();
     const committedGeneration = generation ? JSON.parse(generation.value) : null;
     const journal = attachmentImportJournal(root);

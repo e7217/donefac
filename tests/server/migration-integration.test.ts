@@ -594,9 +594,33 @@ test('previous Jira packages can be reanalyzed in place without publishing Servi
   assert.equal(blocked.canApply, false);
   assert.deepEqual(new Set(blocked.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT').map(notice => notice.recordId)), new Set(restricted));
   assert.equal((await f.apply(blocked)).status, 409);
-  const preview = await f.preview({ ...config, excludedRecords: restricted });
+  const reviewedConfig = { ...config, excludedRecords: restricted };
+  const preview = await f.preview(reviewedConfig);
   assert.equal(preview.canApply, true, JSON.stringify(preview.notices));
-  const applied = await f.apply(preview);
+
+  // The previous analysis could recognize a comment property without preserving its exact owner reference.
+  f.db.prepare(`UPDATE legacy_file_manifests SET json=json_remove(json,'$.jiraServiceDeskOwnerEvidenceChecked')
+    WHERE package_id=?`).run(packageSummary.id);
+  const oldNotice = {
+    id: randomUUID(), severity: 'warning', code: 'JIRA_SERVICE_DESK_COMMENT_PROPERTY_UNVERIFIED',
+    message: 'Synthetic older comment property diagnostic', recordId: null, path: 'entities.xml',
+  };
+  f.db.prepare('INSERT INTO legacy_diagnostics(package_id,id,severity,json) VALUES(?,?,?,?)')
+    .run(packageSummary.id, oldNotice.id, oldNotice.severity, JSON.stringify(oldNotice));
+  const outdated = await f.preview(reviewedConfig);
+  assert.equal(outdated.canApply, false);
+  assert.ok(outdated.notices.some(notice => notice.code === 'SOURCE_JIRA_SERVICE_DESK_OWNER_REANALYSIS_REQUIRED' && notice.severity === 'error'));
+  const updatedResponse = await reupload();
+  assert.equal(updatedResponse.status, 200);
+  const updated = await updatedResponse.json() as LegacyPackageSummary;
+  assert.deepEqual([updated.id, updated.sha256, updated.version], [refreshed.id, refreshed.sha256, refreshed.version + 1]);
+  const staleReview = await f.apply(preview);
+  assert.equal(staleReview.status, 409, JSON.stringify(staleReview.data));
+  assert.match(JSON.stringify(staleReview.data), /분석 버전이 변경/);
+
+  const currentPreview = await f.preview(reviewedConfig);
+  assert.equal(currentPreview.canApply, true, JSON.stringify(currentPreview.notices));
+  const applied = await f.apply(currentPreview);
   assert.equal(applied.status, 201, JSON.stringify(applied.data));
   const { data: exported } = await f.call<WorkspaceSnapshot & { comments: Comment[]; sourceRecords: SourceRecordArchive[] }>('/export');
   const comments = exported.comments.map(value => value.body);

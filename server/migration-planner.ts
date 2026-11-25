@@ -36,7 +36,7 @@ import { readJiraStatusCategory, type JiraStatusCategory } from './legacy-jira-s
 import { buildJiraComponentOptions } from './migration-jira-component-options.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './migration-identity-email.js';
-import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey, jiraStatusHistoryOwnerAliases, jiraStatusTransitions } from './migration-jira-history.js';
+import { hasRestrictedJiraServiceDeskComment, isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, isRestrictedJiraStatusHistory, jiraAttachmentFileEvidence, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryKind, jiraHistoryOwnerAliases, jiraHistorySourceKey, jiraServiceDeskAttachmentNames, jiraStatusHistoryOwnerAliases, jiraStatusTransitions } from './migration-jira-history.js';
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
@@ -673,6 +673,7 @@ class Planner{
   private boundPageTargets = new Set<string>();
   private retainedPageOwners = new Map<string, string | null>();
   private restrictedSourcePages = new Set<string>();
+  private restrictedJiraServiceDeskEntries = new Set<string>();
   private labelListProjectScopes?: Map<string, LabelListProjectScope | null>;
   private readonly nativeJiraStatusCategories: ReadonlyMap<string, JiraStatusCategory | null>;
   constructor(readonly input:MigrationPlanningInput, private readonly confirmedConfluenceRestrictions?: ReadonlyMap<string, ReadonlySet<string>>){
@@ -1954,6 +1955,51 @@ class Planner{
     return restrictedRecords;
   }
 
+  private indexJiraServiceDeskRestrictions(): void {
+    const sourceKey = (entry: Entry, id: string) => JSON.stringify([entry.pkg.dataset.source.instanceKey, id]);
+    const commentIds = new Set<string>();
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (entry.pkg.dataset.source.product !== 'jira' || !hasRestrictedJiraServiceDeskComment(row.metadata)) continue;
+      if (row.kind === 'comment' && row.metadata.syntheticId !== true && isJiraHierarchyIssueId(row.sourceId)) {
+        commentIds.add(sourceKey(entry, row.sourceId));
+      } else if (entry.pkg.dataset.source.format === 'jira-backup-xml' && row.kind === 'relation' &&
+          row.metadata.jiraServiceDeskCommentProperty === true) {
+        for (const ref of row.references) {
+          if (ref.kind === 'comment' && ref.relation === 'commentVisibility' && isJiraHierarchyIssueId(ref.sourceId)) {
+            commentIds.add(sourceKey(entry, ref.sourceId));
+          }
+        }
+      }
+    }
+    if (!commentIds.size) return;
+
+    const namesByIssue = new Map<string, Set<string>>();
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (entry.pkg.dataset.source.product !== 'jira' || row.kind !== 'comment' || row.metadata.syntheticId === true ||
+          !commentIds.has(sourceKey(entry, row.sourceId))) continue;
+      this.restrictedJiraServiceDeskEntries.add(entry.key);
+      const { containerId } = row;
+      if (!containerId || !isJiraHierarchyIssueId(containerId) || jiraHistoryOwnerAliases(row)?.length !== 1) continue;
+      const key = sourceKey(entry, containerId);
+      for (const name of jiraServiceDeskAttachmentNames(row)) {
+        const names = namesByIssue.get(key) ?? new Set<string>();
+        names.add(name);
+        namesByIssue.set(key, names);
+      }
+    }
+    if (!namesByIssue.size) return;
+
+    for (const entry of this.entries) {
+      const { row } = entry;
+      if (entry.pkg.dataset.source.product !== 'jira' || row.kind !== 'attachment' || !row.containerId ||
+          typeof row.metadata.filename !== 'string' || !namesByIssue.get(sourceKey(entry, row.containerId))?.has(row.metadata.filename) ||
+          jiraAttachmentOwnerAliases(row)?.length !== 1) continue;
+      this.restrictedJiraServiceDeskEntries.add(entry.key);
+    }
+  }
+
   initialize():void{
     const config=this.configuration,sourceCount=this.entries.length;
     if(this.input.packages.length>MAX_PACKAGES||sourceCount>MAX_RECORDS||this.input.packages.reduce((sum,pkg)=>sum+pkg.summary.expandedBytes,0)>MAX_EXPANDED_BYTES)this.notice('PLAN_LIMIT','한 이관은20개 패키지·100000개 원본 객체·총256MiB 확장 크기 이하여야 합니다.','error');
@@ -1962,6 +2008,7 @@ class Planner{
     try{if(!config.timezone)throw new Error();new Intl.DateTimeFormat('en',{timeZone:config.timezone}).format(0);}catch{this.timezoneValid=false;this.notice('TIMEZONE_INVALID','유효한 원본 IANA 시간대를 지정해 주세요.','error');}
     if(!['block','import-time'].includes(config.datePolicy))this.notice('DATE_POLICY_INVALID','날짜 처리 방식을 확인해 주세요.','error');
     this.initializeOriginBases();
+    this.indexJiraServiceDeskRestrictions();
     for(const key of config.excludedRecords||[]){if(!this.entryByKey.has(key))this.notice('EXCLUSION_INVALID','제외 대상 원본 객체를 찾을 수 없습니다.','error');else this.excluded.add(key);}
     const explicitCount=this.excluded.size,children=new Map<string,string[]>();
     for(const entry of this.entries){this.archiveIds.set(entry.key,randomUUID());const row=entry.row,parents:string[]=[];if(row.parentId)parents.push(`${entry.pkg.summary.id}/${row.kind==='issue'?'issue':row.kind==='page'?'page':row.kind}:${row.parentId}`);if(row.kind==='issue'||row.kind==='page')parents.push(`${entry.pkg.summary.id}/project:${entry.container}`);else{const owner=this.ownerEntry(entry);if(owner&&owner!==entry)parents.push(owner.key);const current=string(row.metadata.currentVersionId);if(current)parents.push(`${entry.pkg.summary.id}/${row.kind==='revision'?'page':row.kind}:${current}`);}for(const parent of parents){const values=children.get(parent)||[];values.push(entry.key);children.set(parent,values);}}
@@ -2044,7 +2091,7 @@ class Planner{
   }
   restricted(entry:Entry):boolean{
     const row=entry.row,metadata=row.metadata;
-    if(entry.pkg.dataset.source.product==='jira'&&(isRestrictedJiraHistory(row)||isRestrictedJiraStatusHistory(row)||isRestrictedJiraAttachment(row)))return true;
+    if(entry.pkg.dataset.source.product==='jira'&&(this.restrictedJiraServiceDeskEntries.has(entry.key)||isRestrictedJiraHistory(row)||isRestrictedJiraStatusHistory(row)||isRestrictedJiraAttachment(row)))return true;
     if((row.kind==='page'||row.kind==='comment')&&(metadata.restricted===true||metadata.hasRestrictions===true||Array.isArray(metadata.restrictions)&&metadata.restrictions.length>0||Array.isArray(metadata.permissions)&&metadata.permissions.length>0))return true;
     if(row.kind==='comment'){if(string(metadata.level)||string(metadata.rolelevel)||string(metadata.groupLevel)||string(metadata.roleLevel))return true;const visibility=object(metadata.visibility);if(Object.keys(visibility).length)return true;if(Array.isArray(metadata.visibility)&&metadata.visibility.some(value=>{const property=object(value);return property.key==='sd.public.comment'&&['true',true].includes(object(property.value).internal as string|boolean);}))return true;}
     if(row.kind==='issue'){const security=scalar(sourceField(row,'security','Security Level','Issue Security Level'));if(security!==undefined&&security!==null&&security!==false&&(typeof security==='object'?Object.keys(object(security)).some(key=>!!object(security)[key]):!!string(security)))return true;}

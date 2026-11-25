@@ -10,7 +10,7 @@ import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-im
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
 import { readJiraStatusCategory } from './legacy-jira-status-category.js';
-import { hasRestrictedJiraServiceDeskComment, isJiraCommentRestrictionAttribute, isJiraServiceDeskCommentKey } from './migration-jira-history.js';
+import { hasRestrictedJiraServiceDeskComment, isJiraCommentRestrictionAttribute, isJiraServiceDeskCommentKey, jiraServiceDeskAttachmentNames } from './migration-jira-history.js';
 import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey, JIRA_EPIC_RELATION_STYLE } from './migration-jira-hierarchy.js';
 import { observeJiraIdentityEmail } from './migration-identity-email.js';
 import { jiraWorklogRestrictionAttribute } from './migration-worklog.js';
@@ -1153,38 +1153,49 @@ function adminXmlScalarCandidates(node: LegacyXmlNode, name: string): string[] {
   return [node.attributes[name], ...children(node, name).map(value => text(value))].filter(value => value !== undefined);
 }
 
-function attachAdminServiceDeskProperty(context: Context, node: LegacyXmlNode, path: string): boolean {
+function attachAdminServiceDeskProperty(context: Context, node: LegacyXmlNode, path: string, index: number): boolean {
   const entity = 'sd.comment.property';
   if (node.name !== 'EntityProperty' || !adminXmlScalarCandidates(node, 'entityName').includes(entity)) return false;
   const targetId = adminXmlScalar(node, 'entityId');
-  const owners = [...new Set(adminXmlScalarCandidates(node, 'entityId'))].flatMap(id => {
+  const candidates = [...new Set(adminXmlScalarCandidates(node, 'entityId'))];
+  const validIds = candidates.filter(isJiraHierarchyIssueId);
+  const malformedOwner = children(node, 'entityId').some(owner => owner.children.length || Object.keys(owner.attributes).length);
+  const owners = validIds.flatMap(id => {
     const comment = context.byId.get(`comment:${id}`);
-    return comment && isJiraHierarchyIssueId(id) ? [comment] : [];
+    return comment ? [comment] : [];
   });
   const key = adminXmlScalar(node, 'propertyKey');
-  const exact = adminXmlScalar(node, 'entityName') === entity && owners.length === 1 && owners[0].sourceId === targetId;
+  const exact = adminXmlScalar(node, 'entityName') === entity && typeof targetId === 'string' && isJiraHierarchyIssueId(targetId);
   let details: LegacyValue = null;
   if (exact && (key === undefined || isJiraServiceDeskCommentKey(key))) {
     try { details = jsonValue(JSON.parse(adminXmlScalar(node, 'value') ?? '')); } catch { /* Keep uncertain restriction evidence. */ }
   }
+  const property = { key: isJiraServiceDeskCommentKey(key) ? key : 'sd.public.comment', value: details };
   for (const owner of owners) {
     const previous = owner.metadata.jiraServiceDeskCommentProperties;
-    owner.metadata.jiraServiceDeskCommentProperties = [...(Array.isArray(previous) ? previous : []), {
-      key: isJiraServiceDeskCommentKey(key) ? key : 'sd.public.comment', value: details,
-    }];
+    owner.metadata.jiraServiceDeskCommentProperties = [...(Array.isArray(previous) ? previous : []), property];
   }
-  if (!exact || details === null) context.warn('JIRA_SERVICE_DESK_COMMENT_PROPERTY_UNVERIFIED',
-    'Jira 서비스 데스크 댓글 속성의 원래 댓글 또는 열람 제한 값을 확인할 수 없습니다.', owners[0]?.id ?? null, path);
+  if (!exact || !owners.length) {
+    context.put('relation', `service-desk-comment-property:${index + 1}`, {
+      title: 'Jira 서비스 데스크 댓글 열람 속성',
+      metadata: { jiraServiceDeskCommentProperty: true, jiraServiceDeskCommentProperties: [property],
+        jiraServiceDeskCommentPropertySource: Object.fromEntries(['id', 'entityName', 'entityId', 'propertyKey', 'value']
+          .map(name => [name, adminXmlScalarCandidates(node, name)])) },
+      references: validIds.flatMap(id => ref('comment', id, 'commentVisibility')),
+    });
+  }
+  if (malformedOwner || !validIds.length || validIds.length !== candidates.length) context.warn('JIRA_SERVICE_DESK_COMMENT_OWNER_UNVERIFIED',
+    'Jira 서비스 데스크 댓글의 열람 제한 대상을 확정할 수 없습니다. 원본 댓글과 속성의 연결을 확인한 뒤 다시 내보내 주세요.', null, path, 'error');
+  if (!exact || !owners.length || details === null) context.warn('JIRA_SERVICE_DESK_COMMENT_PROPERTY_UNVERIFIED',
+    'Jira 서비스 데스크 댓글 속성의 원래 댓글 또는 열람 제한 값을 이 패키지에서 확인할 수 없습니다.', null, path);
   return true;
 }
 
 function protectJiraServiceDeskAttachments(rows: readonly LegacyRecord[]) {
   const protectedNames = new Map<string, Set<string>>();
   for (const row of rows) {
-    if (row.kind !== 'comment' || row.textFormat !== 'jira-wiki' || !row.containerId || !hasRestrictedJiraServiceDeskComment(row.metadata)) continue;
-    for (const match of row.text.matchAll(/(?<!\\)!([^!|\r\n]+)(?:\|[^!\r\n]*)?!|(?<!\\)\[\^([^\]\r\n]+)\]/gu)) {
-      const filename = (match[1] ?? match[2]).trim();
-      if (!filename) continue;
+    if (!row.containerId || !hasRestrictedJiraServiceDeskComment(row.metadata)) continue;
+    for (const filename of jiraServiceDeskAttachmentNames(row)) {
       const names = protectedNames.get(row.containerId) ?? new Set<string>();
       names.add(filename);
       protectedNames.set(row.containerId, names);
@@ -1533,7 +1544,9 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     }
   }
   parseBackupLabels(context, rows.filter(node => node.name === 'Label'), path);
-  for(const{name,node}of values)if(!handled.has(name)&&!attachAdminServiceDeskProperty(context,node,path))context.unsupported(name);
+  for (const [index, { name, node }] of values.entries()) {
+    if (!handled.has(name) && !attachAdminServiceDeskProperty(context, node, path, index)) context.unsupported(name);
+  }
   if(context.dataset.unsupported.length)context.warn('UNSUPPORTED_ADMIN_ENTITIES','지원하지 않는 관리자/플러그인 객체는 종류와 개수만 기록했습니다. 자격 증명·시스템 설정의 원시 속성은 미리보기에 복사하지 않았습니다.',null,path);
 }
 

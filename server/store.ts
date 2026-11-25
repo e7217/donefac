@@ -1,9 +1,10 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, chmodSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
+import { randomBytes, createCipheriv } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Comment, MutationOrigin } from '../shared/types.js';
+import { assertWorkspaceCredentials, CREDENTIAL_KEY_FILE, decryptWorkspaceCredential, readWorkspaceCredentialKey } from './workspace-credentials.mjs';
 
 export interface MutationContext { actorId: string | null; origin: MutationOrigin; sourceEventId?: string | null }
 export interface StoreChange { table: string; before: unknown; after: unknown; context: MutationContext }
@@ -23,12 +24,24 @@ export class Store {
   }
   constructor(dataDir: string) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-    const keyPath = join(dataDir, '.credential-key');
-    if (!existsSync(keyPath)) writeFileSync(keyPath, randomBytes(32), { mode: 0o600 });
+    const dbPath = join(dataDir, 'teamspace.sqlite');
+    const keyPath = join(dataDir, CREDENTIAL_KEY_FILE);
+    let key = readWorkspaceCredentialKey(dataDir);
+    if (existsSync(dbPath)) {
+      const existing = new DatabaseSync(dbPath, { readOnly: true });
+      try { assertWorkspaceCredentials(existing, key); }
+      finally { existing.close(); }
+    }
+    if (!key) {
+      try { writeFileSync(keyPath, randomBytes(32), { flag: 'wx', mode: 0o600, flush: true }); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      key = readWorkspaceCredentialKey(dataDir);
+      if (!key) throw new Error('.credential-key 파일을 만들 수 없습니다.');
+    }
     chmodSync(keyPath, 0o600);
-    this.key = readFileSync(keyPath);
-    this.db = new DatabaseSync(join(dataDir, 'teamspace.sqlite'));
-    chmodSync(join(dataDir, 'teamspace.sqlite'), 0o600);
+    this.key = key;
+    this.db = new DatabaseSync(dbPath);
+    chmodSync(dbPath, 0o600);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE COLLATE NOCASE,json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY,key TEXT NOT NULL UNIQUE,json TEXT NOT NULL);
@@ -134,8 +147,6 @@ export class Store {
     return [iv, cipher.getAuthTag(), ciphertext].map(b => b.toString('base64')).join('.');
   }
   unseal(value: string) {
-    const [iv, tag, content] = value.split('.').map(v => Buffer.from(v, 'base64'));
-    const decipher = createDecipheriv('aes-256-gcm', this.key, iv); decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(content), decipher.final()]).toString('utf8');
+    return decryptWorkspaceCredential(this.key, value).toString('utf8');
   }
 }

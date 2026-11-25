@@ -39,7 +39,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 27;
+const conversionVersion = 28;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -54,6 +54,8 @@ type PreviewHeader = {
 };
 type PreviewRow = PreviewHeader & { json: string };
 type PreviewContentHeader = Omit<PreviewHeader, 'generation' | 'expiresAt'> & { packageIds: string[] };
+type StagedPackageVersions = Readonly<Record<string, number>>;
+type StoredPreparedMigration = PreparedMigration & { stagedPackageVersions: StagedPackageVersions };
 type JiraArchiveRow = { id: string; json: string; importId: string };
 type AppendDestination = Pick<MigrationAppendContext, 'project' | 'workflow' | 'schema'> & {
   instanceKey: string; sourceProjectId: string; originalSourceProjectId: string;
@@ -81,7 +83,13 @@ function reviewStoredJiraEvidence(detail: StoredLegacyPackageDetail, dataset: Mi
     if (hadEntityProperties || hadAffectedRecords) diagnostic(dataset, { severity: 'error', code: 'JIRA_SOURCE_EVIDENCE_REANALYSIS_REQUIRED',
       message: '이전 분석의 Jira 라벨 또는 댓글 열람 제한을 대조할 수 없습니다. 같은 파일을 같은 인스턴스로 다시 올려 분석해 주세요.' });
   }
-  if (dataset.source.format !== 'jira-backup-xml' || detail.jiraBackupLayoutChecked === true) return;
+  if (!adminBackup) return;
+  if (detail.jiraServiceDeskOwnerEvidenceChecked !== true && dataset.diagnostics.some(item =>
+    item.code === 'JIRA_SERVICE_DESK_COMMENT_PROPERTY_UNVERIFIED')) {
+    diagnostic(dataset, { severity: 'error', code: 'JIRA_SERVICE_DESK_OWNER_REANALYSIS_REQUIRED',
+      message: '이전 분석의 Jira 내부 댓글 제한을 여러 파일에서 대조하려면 같은 원본을 같은 인스턴스로 다시 올려 주세요.' });
+  }
+  if (detail.jiraBackupLayoutChecked === true) return;
   const paths = detail.files.map(file => file.path);
   const { entities, activeObjects } = jiraAdminBackupPaths(paths);
   const xmlInputs = entities.length ? entities : paths.filter(path => /\.xml$/iu.test(path) &&
@@ -1119,14 +1127,14 @@ export class MigrationService {
   private fileSpec(summary: LegacyPackageSummary): MigrationSourceFile {
     return { id: summary.id, filename: summary.filename, sha256: summary.sha256, path: join(this.dataDir, 'legacy-imports', `${summary.id}.bundle`) };
   }
-  private verifyPackages(packages: SourceImport['packages']) {
+  private verifyPackages(packages: SourceImport['packages'], versions: StagedPackageVersions | undefined) {
     return packages.map(value => {
       let current: LegacyPackageDetail;
       try { current = this.legacy.detail(value.stagingId); }
       catch { return fail(409, '검토한 원본 패키지가 삭제되었습니다. 다시 분석하고 미리보기를 만들어 주세요.'); }
-      if (current.summary.sha256 !== value.sha256 || current.summary.filename !== value.filename ||
+      if (current.summary.version !== versions?.[value.stagingId] || current.summary.sha256 !== value.sha256 || current.summary.filename !== value.filename ||
           JSON.stringify(current.summary.source) !== JSON.stringify(value.source)) {
-        return fail(409, '검토한 원본 패키지가 변경되었습니다.');
+        return fail(409, '검토한 원본 패키지 또는 분석 버전이 변경되었습니다. 새 미리보기를 만들어 주세요.');
       }
       return this.fileSpec(current.summary);
     });
@@ -1329,7 +1337,8 @@ export class MigrationService {
       });
       if (this.closed) fail(503, '이관 서비스가 종료되었습니다.');
       if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
-      this.verifyPackages(prepared.sourceImport.packages);
+      const stagedPackageVersions = Object.fromEntries(packages.map(({ summary }) => [summary.id, summary.version]));
+      this.verifyPackages(prepared.sourceImport.packages, stagedPackageVersions);
       if (retainedResourceLinks) {
         const current = readMigrationRetainedResourceLinks(this.store, packages, configuration, this.restrictedConfluencePages);
         if (retainedResourceLinks.token !== current?.token) fail(409, changedRetainedResourceLinks);
@@ -1386,15 +1395,15 @@ export class MigrationService {
       // Keep the review available even for a blocked plan, without saving arrays that cannot be applied.
       if (!prepared.preview.canApply) {
         const { preview } = prepared;
-        this.storePreview({ preview }, generation);
+        this.storePreview({ preview }, generation, stagedPackageVersions);
         return preview;
       }
-      this.storePreview(prepared, generation);
+      this.storePreview(prepared, generation, stagedPackageVersions);
       return prepared.preview;
     } finally { this.busy = false; }
   }
-  private storePreview(prepared: PreparedMigration | Pick<PreparedMigration, 'preview'>, generation: string) {
-    const json = JSON.stringify({ ...prepared, conversionVersion, confluenceRestrictionHash: this.confluenceRestrictionHash });
+  private storePreview(prepared: PreparedMigration | Pick<PreparedMigration, 'preview'>, generation: string, stagedPackageVersions: StagedPackageVersions) {
+    const json = JSON.stringify({ ...prepared, stagedPackageVersions, conversionVersion, confluenceRestrictionHash: this.confluenceRestrictionHash });
     const size = Buffer.byteLength(json);
     if (size > 192 * MiB) fail(413, '변환 결과가 192MiB를 넘습니다. 패키지를 나누어 주세요.');
     this.store.transaction(() => {
@@ -1420,7 +1429,7 @@ export class MigrationService {
     if (row.confluenceRestrictionHash !== this.confluenceRestrictionHash) fail(409, 'Confluence 페이지별 검토 범위가 달라졌습니다. 새 미리보기를 만들어 주세요.');
     if (Date.parse(row.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
   }
-  private getPreview(id: string, actorId: string, reviewOnly = false): { prepared: PreparedMigration; generation: string } {
+  private getPreview(id: string, actorId: string, reviewOnly = false): { prepared: StoredPreparedMigration; generation: string } {
     const json = reviewOnly ? "json_object('preview',json_extract(json,'$.preview'))" : 'json';
     const row = this.store.db.prepare(`SELECT ${json} AS json, generation,
       json_extract(json,'$.preview.actorId') AS actorId,
@@ -1430,7 +1439,7 @@ export class MigrationService {
       json_extract(json,'$.confluenceRestrictionHash') AS confluenceRestrictionHash FROM migration_previews WHERE id=?`).get(id) as PreviewRow | undefined;
     if (!row) return fail(408, '미리보기 보관 기간이 지났거나 새로 검토해야 합니다.');
     this.checkPreviewHeader(row, actorId);
-    return { prepared: JSON.parse(row.json) as PreparedMigration, generation: row.generation };
+    return { prepared: JSON.parse(row.json) as StoredPreparedMigration, generation: row.generation };
   }
   private previewContentHeader(id: string, actorId: string, expectedVersion: unknown) {
     const expected = migrationContentReviewNumber(expectedVersion, 1, Number.MAX_SAFE_INTEGER);
@@ -1477,7 +1486,7 @@ export class MigrationService {
           preview.requiredAcknowledgements.some(code => !acknowledgements.includes(code))) {
         fail(400, '미리보기의 필수 확인 항목을 모두 확인해 주세요.');
       }
-      const sources = this.verifyPackages(prepared.sourceImport.packages);
+      const sources = this.verifyPackages(prepared.sourceImport.packages, prepared.stagedPackageVersions);
       const copies = await this.work<(Omit<AppendedFile, 'bytes'> & { bytes: Uint8Array })[]>({
         action: 'files', sources, copies: prepared.fileCopies,
       });
@@ -1497,7 +1506,7 @@ export class MigrationService {
         receipt = this.store.withMutationContext({ actorId, origin: 'import' }, () => this.store.transaction(() => {
           if (generation !== this.generation()) fail(409, '워크스페이스가 복원되었습니다. 새 미리보기를 만들어 주세요.');
           if (Date.parse(preview.expiresAt) <= Date.now()) fail(408, '미리보기가 만료되었습니다. 다시 검토해 주세요.');
-          this.verifyPackages(prepared.sourceImport.packages);
+          this.verifyPackages(prepared.sourceImport.packages, prepared.stagedPackageVersions);
           const { append, appendPages } = prepared;
           let selectedPackages: MigrationPackage[] | undefined;
           const loadSelectedPackages = () => selectedPackages ??= this.loadPackages(preview.configuration.packageIds, true);

@@ -51,8 +51,8 @@ class BoundedFileError extends Error {
   constructor(reason, message) { super(message); this.reason = reason; }
 }
 
-async function withBoundedFile(path, limit, remaining, action) {
-  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+async function withBoundedFile(path, limit, remaining, action, flags = 0) {
+  const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | flags);
   try {
     const first = await file.stat({ bigint: true });
     if (!first.isFile() || first.size <= 0n || first.size > BigInt(limit)) {
@@ -63,7 +63,7 @@ async function withBoundedFile(path, limit, remaining, action) {
   } finally { await file.close(); }
 }
 
-async function readBoundedFile(path, limit, remaining = limit) {
+async function readBoundedFile(path, limit, remaining = limit, flags = 0) {
   return withBoundedFile(path, limit, remaining, async (file, first) => {
     const bytes = Buffer.alloc(Number(first.size));
     for (let offset = 0; offset < bytes.length;) {
@@ -77,7 +77,7 @@ async function readBoundedFile(path, limit, remaining = limit) {
       throw new BoundedFileError('FILE_CHANGED', '읽는 동안 파일이 바뀌었습니다.');
     }
     return bytes;
-  });
+  }, flags);
 }
 
 async function readJsonFile(path, label) {
@@ -568,24 +568,25 @@ async function review(directory) {
   const reviewedIds = new Set(confluenceReviews.map(({ proof }) => proof.packageId));
   const reviewedPackages = packages.filter(pkg => reviewedIds.has(pkg.packageId));
   const coverage = await verifiedConfluenceCoverage(workspace, reviewedPackages, confluenceReviews);
-  if (jiraPlans.length) {
-    const ids = new Set(jiraPlans.flatMap(({ proof }) => proof.packageIds));
-    const { bundles } = await verifyBundles(workspace, packages.filter(pkg => ids.has(pkg.packageId)), [], jiraPlans);
-    if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Jira 수집 계획에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
-  }
   const pilot = await startRehearsalPilot(workspace, { signal, ...pilotReviewOptions(reviewedPackages, confluenceReviews, coverage) });
   try {
-    if (confluenceReviews.length) {
-      const { bundles } = await verifyBundles(workspace, reviewedPackages);
-      if (bundles.some(bundle => bundle.status !== 'verified')) throw new Error('Confluence 대조에 연결한 ZIP 원본의 무결성을 확인해 주세요.');
-      const staged = new Map((await apiCall(pilot)('/legacy-import/packages')).map(item => [item.id, item]));
-      for (const pkg of reviewedPackages) {
-        const current = staged.get(pkg.packageId);
-        if (current?.sha256 !== pkg.sha256 || current.size !== pkg.size || current.source?.product !== pkg.product ||
-            current.source?.format !== pkg.format || current.source?.instanceKey !== pkg.instanceKey) {
-          throw new Error('Confluence 대조에 연결한 ZIP의 분석 기록과 원본 인스턴스가 일치하지 않습니다.');
-        }
+    // Check preparation against the open workspace while the pilot holds its data lock.
+    const staged = new Map((await apiCall(pilot)('/legacy-import/packages')).map(item => [item.id, item]));
+    for (const [index, pkg] of packages.entries()) {
+      const current = staged.get(pkg.packageId);
+      if (current?.sha256 !== pkg.sha256 || current.size !== pkg.size || current.source?.product !== pkg.product ||
+          current.source?.format !== pkg.format || current.source?.instanceKey !== pkg.instanceKey) {
+        throw new Error(`원본 패키지 ${index + 1}번의 분석 기록과 원본 인스턴스가 일치하지 않습니다.`);
       }
+    }
+    const { bundles } = await verifyBundles(workspace, packages, [], jiraPlans);
+    const bundleProblem = {
+      missing: '보관한 원본 파일이 없습니다.',
+      unreadable: '보관한 원본 파일을 읽을 수 없습니다.',
+      mismatch: '원본 파일의 크기 또는 SHA-256이 리허설 기록과 다릅니다.',
+    };
+    for (const [index, bundle] of bundles.entries()) {
+      if (bundle.status !== 'verified') throw new Error(`원본 패키지 ${index + 1}번을 검토할 수 없습니다. ${bundleProblem[bundle.status]}`);
     }
     console.log(`이관 검토 주소 ${pilot.url}`);
     if (confluenceReviews.length) console.log(`Confluence 페이지별 검토 파일 ${confluenceReviews.length}개를 불러왔습니다.`);
@@ -607,11 +608,16 @@ async function verifyBundles(directory, packages, confluenceReviews = [], jiraPl
   const bundles = [], archivePageIds = new Map();
   const exactReviews = exactCoveragePackageIds(confluenceReviews);
   const jiraCoverage = jiraPlans.length ? createJiraPlanCoverage(jiraPlans.map(({ plan }) => plan)) : null;
+  const bundlesDirectory = join(directory, 'legacy-imports');
+  if (packages.length) {
+    const stat = await lstat(bundlesDirectory).catch(error => { if (error.code !== 'ENOENT') throw new Error('리허설 원본 보관 디렉터리를 확인해 주세요.'); });
+    if (stat && !stat.isDirectory()) throw new Error('리허설 원본 보관 디렉터리를 확인해 주세요.');
+  }
   for (const item of packages) {
     signal.throwIfAborted();
     let bytes;
     try {
-      bytes = await readBoundedFile(join(directory, 'legacy-imports', `${item.packageId}.bundle`), LEGACY_MAX_RAW_BYTES);
+      bytes = await readBoundedFile(join(bundlesDirectory, `${item.packageId}.bundle`), LEGACY_MAX_RAW_BYTES, undefined, constants.O_NOFOLLOW);
     } catch (error) {
       signal.throwIfAborted();
       bundles.push({ packageId: item.packageId, status: error.code === 'ENOENT' ? 'missing' : 'unreadable' });
