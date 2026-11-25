@@ -1153,6 +1153,15 @@ function adminXmlScalarCandidates(node: LegacyXmlNode, name: string): string[] {
   return [node.attributes[name], ...children(node, name).map(value => text(value))].filter(value => value !== undefined);
 }
 
+function adminHistoryVisibilityMetadata(node: LegacyXmlNode, value: ObjectValue, syntheticId: boolean): Record<string, LegacyValue> {
+  const metadata = jiraVisibilityMetadata(value, syntheticId);
+  // Flattening duplicate or structured restriction values can erase the private value.
+  if (Object.keys(metadata).some(name => name !== 'syntheticId' && adminXmlScalar(node, name) === null)) {
+    return syntheticId ? { syntheticId: true, restricted: true } : { restricted: true };
+  }
+  return metadata;
+}
+
 function attachAdminServiceDeskProperty(context: Context, node: LegacyXmlNode, path: string, index: number): boolean {
   const entity = 'sd.comment.property';
   if (node.name !== 'EntityProperty' || !adminXmlScalarCandidates(node, 'entityName').includes(entity)) return false;
@@ -1415,7 +1424,7 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
   }
   // Jira can retain multiple Epic link styles after a failed configuration change. A style with competing IDs cannot prove membership.
   if ([...epicTypeClaims].filter(isJiraHierarchyIssueId).length > 1) verifiedEpicTypes.clear();
-  const groups = new Map<string, ObjectValue>();
+  const groups = new Map<string, { value: ObjectValue; node: LegacyXmlNode }>();
   const exactWorkflowOwners = new Set<string>();
   const historyItems = new Map<string, LegacyValue[]>();
   const exactWorkflowItems = new Map<string, number[]>();
@@ -1423,7 +1432,7 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
     if (name === 'ChangeGroup') {
       const groupId = str(value.id);
       if (groups.has(groupId)) throw new LegacyImportError(400, 'Jira 백업에 중복된 ChangeGroup ID가 있습니다.');
-      groups.set(groupId, value);
+      groups.set(groupId, { value, node });
       const owner = adminXmlScalar(node, 'issue');
       if (isJiraHierarchyIssueId(groupId) && adminXmlScalar(node, 'id') === groupId && typeof owner === 'string' && isJiraHierarchyIssueId(owner)) {
         exactWorkflowOwners.add(groupId);
@@ -1441,15 +1450,15 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
         exactWorkflowItems.set(groupId, positions);
       }
       items.push({ ...selected(item, ['id', 'field', 'fieldtype', 'fieldId', 'fieldType', 'oldvalue', 'oldstring', 'newvalue', 'newstring']),
-        ...jiraVisibilityMetadata(item, false) });
+        ...adminHistoryVisibilityMetadata(node, item, false) });
       historyItems.set(groupId, items);
     }
   }
-  for (const [groupId, value] of groups) {
+  for (const [groupId, { value, node }] of groups) {
     const authorId = resolveActor(value.author);
     context.put('history', groupId, { title: '변경 이력', containerId: str(value.issue) || null, authorId,
       createdAt: context.date(value.created, `history:${groupId}`),
-      metadata: { ...jiraVisibilityMetadata(value, !stableHistoryId(value.id)), items: historyItems.get(groupId) ?? [],
+      metadata: { ...adminHistoryVisibilityMetadata(node, value, !stableHistoryId(value.id)), items: historyItems.get(groupId) ?? [],
         jiraWorkflowStatusChangePositions: exactWorkflowOwners.has(groupId) ? exactWorkflowItems.get(groupId) ?? [] : [] },
       references: [...ref('issue', value.issue, 'historyOf'), ...ref('identity', authorId, 'author')] });
   }

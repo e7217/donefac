@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page, type Response } from '@playwright/test';
 import type { AutomationRule, AutomationRun, Dependency, DocPage, GitlabSettings, Issue, IssueViewGitlabFilter, ProjectWorkflow, SavedView, WorkspaceSnapshot } from '../../shared/types';
+import { projectWorkflow } from '../../shared/workflow-helpers';
 
 const settingsPath = '/api/integrations/gitlab';
 const board = (page: Page) => page.getByRole('region', { name: '전체 프로젝트 보드', exact: true });
@@ -180,7 +181,9 @@ test('GitLab 병합 후 열린 360px 팀 보드와 간트, 문서가 같은 업�
 
 test('팀 보드 갱신을 편집 동안 멈추고 다시 열어 낡은 쓰기를 막으며 수동 실패 후 재시도한다', async ({ page, request }) => {
   test.setTimeout(75_000);
-  const { projects: [base, project], users: [actor] } = await snapshot(request);
+  const workspace = await snapshot(request);
+  const { projects: [base, project], users: [actor], restoreGeneration } = workspace;
+  const workflowVersion = projectWorkflow(workspace, project.id).version;
   const headers = { 'X-Actor-Id': actor.id };
   const query = `갱신 충돌 ${randomUUID().slice(0, 8)}`;
   const issue = await json<Issue>(await request.post('/api/issues', { headers, data: {
@@ -207,11 +210,12 @@ test('팀 보드 갱신을 편집 동안 멈추고 다시 열어 낡은 쓰기�
     await page.clock.runFor(31_000);
     expect(polls).toHaveLength(pausedAt);
     await expect(destination).toHaveValue('review');
-    const stale = page.waitForResponse(response => new URL(response.url()).pathname === path && response.request().method() === 'PATCH');
+    const stale = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/status-change` && response.request().method() === 'POST');
     await button(chooser, '상태 변경 적용').click();
     const rejected = await stale;
     expect(rejected.status()).toBe(409);
-    expect(rejected.request().postDataJSON()).toMatchObject({ expectedVersion: issue.version, status: 'review' });
+    expect(rejected.request().postDataJSON()).toEqual({ requestId: expect.stringMatching(/^[0-9a-f-]{36}$/u), restoreGeneration,
+      expectedVersion: issue.version, expectedWorkflowVersion: workflowVersion, status: 'review' });
     await expect(chooser.getByRole('alert')).toBeVisible();
     await expect(destination).toHaveValue('review');
     const resume = page.waitForResponse(response => condition(response, 200));

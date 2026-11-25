@@ -385,7 +385,7 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 브라우저의 `PATCH /api/issues/:id`에 `{expectedVersion, expectedWorkflowVersion, status}`를 보내 상태를 바꾼다. `status`는 해당 업무 프로젝트의 실제 상태 ID다. 선택 속성인 `expectedWorkflowVersion`을 보낼 때는 `status`를 함께 지정하고, 조회한 워크플로의 양의 정수 버전을 사용한다. 업무 버전과 별도로 워크플로 버전이 달라지면 `409`와 `details.reason`의 `workflow_changed`, `currentWorkflowVersion`을 반환한다. 일반 상태 전이의 필수 입력·차단 검사를 적용하며 프로젝트 내 상대 순서를 보존한다.
 
-이 버전 검사와 함께 `assigneeId`를 지정하면 팀원 ID 또는 `null`을 상태와 함께 저장한다. 현재 값과 같아도 직접 지정한 값은 자동 배정보다 우선한다. `assigneeId`를 생략하면 현재 프로젝트의 배정 규칙을 적용한다. 전이의 필수 담당자 조건은 저장할 최종 값으로 검사한다. 검증을 통과한 경우에만 변경을 함께 커밋한다. 이 경로를 프로젝트 업무 목록과 두 보드의 상태 변경 창에서 사용한다.
+이 버전 검사와 함께 `assigneeId`를 지정하면 팀원 ID 또는 `null`을 상태와 함께 저장한다. 현재 값과 같아도 직접 지정한 값은 자동 배정보다 우선한다. `assigneeId`를 생략하면 현재 프로젝트의 배정 규칙을 적용한다. 전이의 필수 담당자 조건은 저장할 최종 값으로 검사한다. 검증을 통과한 경우에만 변경을 함께 커밋한다. 프로젝트 업무 목록과 두 보드의 상태 변경 창은 요청 ID를 지원하는 `POST /api/issues/:id/status-change`를 사용한다.
 
 브라우저의 `GET /api/workspace`는 `X-Teamspace-Board-Revision` 헤더와 `Cache-Control: no-store`를 보낸다. 조회한 32자리 16진수 버전을 `?teamBoardSince=…`로 다시 보내면 같은 버전에는 본문 없는 `204`를, 바뀐 버전에는 `200`과 최신 워크스페이스를 돌려준다. 업무·프로젝트·사용자·워크플로·업무 양식·업무 순서·GitLab 연결·선후행과 업무–문서 링크의 저장이 버전을 갱신한다. 서버 재시작과 물리 복원은 SQLite에 저장된 버전을 사용한다. 수동으로 전체 워크스페이스를 다시 읽을 때는 쿼리를 생략한다.
 
@@ -393,9 +393,9 @@ Jira 이관 업무의 `jira_origin_preserved` 경고는 원본 링크와 영수�
 
 ## 상태 변경과 인수인계 댓글
 
-브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,comment:{body,mentions?}}`를 보낸다. `requestId`는 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`는 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 댓글, 이력, 알림을 함께 저장한다.
+브라우저의 `POST /api/issues/:id/status-change`에 `{requestId,expectedVersion,expectedWorkflowVersion,restoreGeneration,status,assigneeId?,comment?:{body,mentions?}}`를 보낸다. `requestId`는 저장을 시도할 때 발급한 UUID v4이며 `restoreGeneration`은 최근 워크스페이스 응답의 값이다. `comment`를 보내면 일반 업무 댓글과 같은 본문·멘션 규칙을 적용한다. `assigneeId`를 생략하면 자동 배정 규칙을 적용하며 `null`로 담당자를 해제할 수 있다. 허용된 상태 전이와 필수 값·차단 업무를 검증하고 티켓과 이력, 알림, 선택한 댓글을 함께 저장한다.
 
-응답은 `{issue,receipt,duplicate}`다. `receipt`에는 `requestId`, `issueId`, `projectId`, `appliedVersion`, `status`, `assigneeId`, `commentId`가 들어간다. 같은 작업자·업무·입력으로 7일 안에 다시 요청하면 현재 `issue`, 당시의 `receipt`, `duplicate: true`를 돌려준다. 이미 쓴 ID의 용도가 다르면 `409`와 `request_reused`를 반환한다. 다른 프로젝트로 이동했거나 티켓이 없어지면 `receipt_unavailable`, 자체 백업 가져오기 후 이전 세대의 요청은 `workspace_changed`를 반환한다.
+응답은 `{issue,receipt,duplicate}`다. `receipt`에는 `requestId`, `issueId`, `projectId`, `appliedVersion`, `status`, `assigneeId`, `commentId`가 들어간다. 댓글을 생략한 요청의 `commentId`는 `null`이다. 응답이 끊기면 정확히 같은 ID와 값을 다시 보낸다. 같은 작업자·업무·입력으로 7일 안에 다시 요청하면 현재 `issue`, 당시의 `receipt`, `duplicate: true`를 돌려준다. 이미 쓴 ID의 용도가 다르면 `409`와 `request_reused`를 반환한다. 다른 프로젝트로 이동했거나 티켓이 없어지면 `receipt_unavailable`, 자체 백업 가져오기 후 이전 세대의 요청은 `workspace_changed`를 반환한다.
 
 ## 보드 상태별 업무 한도
 
@@ -1023,6 +1023,8 @@ Jira REST 업무 응답과 별도로 저장한 댓글(`comments`)·작업 시간
 미리보기는 30분간 보관한다. 새 변환 규칙이 적용되면 미리보기를 다시 만든다. 적용 시 같은 작업자와 미리보기 버전, 필수 확인 코드 전체가 필요하다. 패키지·첨부 해시, 패키지 분석 버전, 원본 바인딩, 새 프로젝트 키를 재검사한다. 같은 바이트로 재분석했어도 분석 버전이 달라지면 `409`를 반환한다. 같은 적용 요청을 다시 보내면 기존 영수증을 반환한다. 원본 객체가 겹치는 새 이관과 이미 사용 중인 프로젝트 키는 충돌로 처리한다. 기존 작업공간에 대한 변경 권한은 현재 신뢰하는 관리 브라우저를 기준으로 한다.
 
 이전 분석의 Jira 라벨·댓글 제한 근거가 부족하면 미리보기는 `SOURCE_JIRA_SOURCE_EVIDENCE_REANALYSIS_REQUIRED` 또는 `SOURCE_JIRA_SERVICE_DESK_OWNER_REANALYSIS_REQUIRED`를 표시한다. 같은 원본 바이트와 인스턴스 식별값으로 원본 분석을 요청하면 저장한 패키지 ID 및 SHA-256을 유지하고 분석 버전을 올린다. Jira Service Management 댓글 속성의 대상을 확정할 수 없으면 `SOURCE_JIRA_SERVICE_DESK_COMMENT_OWNER_UNVERIFIED`로 적용을 중단한다. 동일 인스턴스의 선택 패키지에서 댓글 ID를 확인하면 그 댓글과 같은 업무의 지정된 파일을 제외 대상으로 안내한다. Confluence의 편집 제한을 확인했고 해당 페이지를 포함하면 미리보기의 필수 확인에 `SOURCE_CONFLUENCE_EDIT_RESTRICTION_REVIEW`가 포함된다. 기존 읽기 제한은 원본을 제외할 때까지 차단된다.
+
+Jira 관리자 XML의 상태 변경 그룹이나 항목에 서로 겹치거나 구조가 모호한 열람 제한 값이 있으면 해당 이력을 제한 대상으로 처리한다. 이전 단계에서 이 확인을 거치지 않은 상태 변경이 있으면 `SOURCE_JIRA_ADMIN_HISTORY_REANALYSIS_REQUIRED`를 반환한다. 같은 ZIP을 같은 원본 인스턴스로 다시 분석하고 새 미리보기를 만든다.
 
 변환 목록은 `GET /api/migrations/previews/:id/content?expectedVersion=…`로 요청한다. `packageId`, 제목·원본 ID·원래 Jira 키를 검색할 최대 200자의 `q`, `offset`(0~100,000, 기본 0), `limit`(1~50, 기본 25)을 선택적으로 지정한다. 응답은 `{previewId,version,total,offset,limit,rows}`이며 각 행에는 `{recordId,packageId,sourceId,targetType,title,sourceKey?,change}`가 들어간다. `targetType`은 `issue` 또는 `document`, `change`는 `new` 또는 `update`다. 적용 계획의 새 업무·문서와 원본 설명·본문 변경분을 반영할 기존 항목을 반환한다. 차단된 계획에는 조회할 변환 행이 없다.
 

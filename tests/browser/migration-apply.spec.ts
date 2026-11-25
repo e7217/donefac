@@ -4,7 +4,7 @@ import { zip } from '../fixtures/legacy-export-zip.mjs';
 import { test, expect, type APIRequestContext, type Locator, type Page } from '@playwright/test';
 import { contentReferences } from '../../shared/document-nodes';
 import { documentSectionHash } from '../../shared/document-sections';
-import type { AttachmentHead, DocPage, Issue, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, ResourceLink, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationResourceLinkFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
+import type { AttachmentHead, DocPage, Issue, IssueStatusChangeResult, LegacyPackageSummary, MigrationApplyResult, MigrationMappingFile, MigrationOptions, MigrationPreview, ProjectWorkflow, ResourceLink, SourceReconciliationAudit, SourceReconciliationAuthorFindingsPage, SourceReconciliationFileCheck, SourceReconciliationJiraStatusFindingsPage, SourceReconciliationResourceLinkFindingsPage, SourceRecordArchive, SourceRecordPage, WorkspaceSnapshot } from '../../shared/types';
 
 const csv = (rows: string[][]) => Buffer.from(rows.map(row => row.map(value => `"${value.replaceAll('"', '""')}"`).join(',')).join('\r\n'));
 const suffix = () => randomUUID().replaceAll('-', '').slice(0, 7).toUpperCase();
@@ -293,9 +293,15 @@ test('360px Jira 이관에서 초기 상태와 허용 전이를 검토해 새 �
     await expect(destination).toBeFocused();
     await expect(destination.locator(`option[value="${doneState}"]`)).toHaveCount(0);
     await destination.selectOption(approvalState);
-    const boardPatch = page.waitForResponse(response => response.url().endsWith(`/api/issues/${originalReady.id}`) && response.request().method() === 'PATCH');
+    const boardChange = page.waitForResponse(response => response.url().endsWith(`/api/issues/${originalReady.id}/status-change`) && response.request().method() === 'POST');
     await statusDialog.getByRole('button', { name: '상태 변경 적용', exact: true }).click();
-    expect(await (await boardPatch).json()).toMatchObject({ status: approvalState });
+    const appliedChange = await boardChange;
+    expect(appliedChange.status(), await appliedChange.text()).toBe(200);
+    const { issue: moved, receipt: statusReceipt, duplicate } = await appliedChange.json() as IssueStatusChangeResult;
+    expect(moved).toMatchObject({ status: approvalState, version: originalReady.version + 1 });
+    expect(statusReceipt).toMatchObject({ requestId: appliedChange.request().postDataJSON().requestId, issueId: originalReady.id,
+      status: approvalState, appliedVersion: moved.version, commentId: null });
+    expect(duplicate).toBe(false);
     await expect(statusDialog).toHaveCount(0);
     await expect(approvalColumn.getByRole('button', { name: `${originalReady.key} 상태 변경`, exact: true })).toBeFocused();
     await approvalColumn.locator(`.issue-board-card[data-issue-id="${originalReady.id}"]`).click();

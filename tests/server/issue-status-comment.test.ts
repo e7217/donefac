@@ -131,6 +131,36 @@ test('a handoff saves status, assignee, an ordinary comment and notifications ex
   assert.deepEqual(await f.comments(issue), [comment]);
 });
 
+test('plain status changes identify the exact request when the same actor submits identical edits', async t => {
+  const f = await fixture(t);
+  const issue = await f.createIssue('여러 탭에서 열어 둔 업무', { reporterId: reporter });
+  const input = await f.requestFor(issue, { assigneeId: assignee, comment: undefined });
+  const competing = { ...input, requestId: randomUUID() };
+  const results = await Promise.all([f.transition(issue, input), f.transition(issue, input)]);
+  const saved = results.find(result => !result.duplicate);
+  const duplicate = results.find(result => result.duplicate);
+  assert.ok(saved && duplicate);
+  assert.deepEqual(saved.receipt, { requestId: input.requestId, issueId: issue.id, projectId: issue.projectId,
+    appliedVersion: issue.version + 1, status: input.status, assigneeId: assignee, commentId: null });
+  assert.deepEqual(duplicate, { ...saved, duplicate: true });
+
+  const stale = await f.call<TransitionError>(409, f.path(issue), 'POST', competing);
+  assert.equal(stale.details?.currentVersion, saved.issue.version);
+  const changedIntent = await f.call<TransitionError>(409, f.path(issue), 'POST', { ...input, comment: { body: '다른 요청' } });
+  assert.equal(changedIntent.details?.reason, 'request_reused');
+  assert.deepEqual((await f.inbox(assignee, issue)).map(({ kind }) => kind), ['issue-assigned']);
+  assert.deepEqual((await f.inbox(reporter, issue)).map(({ kind }) => kind), ['issue-status-changed']);
+
+  const reassigned = await f.update(saved.issue, { assigneeId: null }, assignee);
+  const beforeRetry = await f.workspace();
+  assert.deepEqual(await f.transition(issue, input), { issue: reassigned, receipt: saved.receipt, duplicate: true });
+  assert.deepEqual(await f.workspace(), beforeRetry);
+  assert.deepEqual(await f.comments(issue), []);
+  const history = (await f.history(issue)).entries;
+  const statusEntries = history.filter(entry => entry.changes.some(change => change.field === 'status'));
+  assert.deepEqual(statusEntries.map(({ actorId, issueVersion }) => [actorId, issueVersion]), [[writer, saved.issue.version]]);
+});
+
 test('one request proves its own actor and intent while stale, no-op and API-key attempts add no comments', async t => {
   const f = await fixture(t);
   const issue = await f.createIssue('한 번만 상태를 바꿀 업무');
@@ -143,6 +173,7 @@ test('one request proves its own actor and intent while stale, no-op and API-key
     { path: f.path(issue), body: input, headers: { 'X-Actor-Id': assignee } },
     { path: f.path(other), body: input },
     { path: f.path(issue), body: { ...input, comment: { body: '다른 댓글 내용' } } },
+    { path: f.path(issue), body: { ...input, comment: undefined } },
     { path: f.path(issue), body: { ...input, status: 'review' } },
     { path: f.path(issue), body: { ...input, assigneeId: null } },
   ];
@@ -156,8 +187,9 @@ test('one request proves its own actor and intent while stale, no-op and API-key
   const staleWorkflow = await f.requestFor(other, { expectedWorkflowVersion: input.expectedWorkflowVersion + 1 });
   const workflowError = await f.call<TransitionError>(409, f.path(other), 'POST', staleWorkflow);
   assert.equal(workflowError.details?.reason, 'workflow_changed');
-  for (const comment of [{ body: '   ' }, { body: 'x', mentions: [{ userId: assignee, from: 0, to: 1 }] }]) {
-    await f.call(400, f.path(other), 'POST', await f.requestFor(other, { comment }));
+  const commentInput = await f.requestFor(other);
+  for (const comment of [null, {}, { body: '   ' }, { body: 'x', mentions: [{ userId: assignee, from: 0, to: 1 }] }]) {
+    await f.call(400, f.path(other), 'POST', { ...commentInput, comment });
   }
   assert.deepEqual(await f.workspace(), before);
   assert.equal((await f.comments(issue)).length, 1);
@@ -259,4 +291,26 @@ test('portable import preserves committed comments and rejects an outdated gener
   assert.equal(reapplied.duplicate, false);
   assert.notEqual(reapplied.receipt.commentId, saved.receipt.commentId);
   assert.deepEqual((await f.comments(issue)).map(row => row.id), [reapplied.receipt.commentId]);
+});
+
+test('portable import clears plain receipts and rejects retries from the replaced workspace generation', async t => {
+  const f = await fixture(t);
+  const issue = await f.createIssue('상태 전이를 복원할 업무');
+  const backup = await f.call(200, '/export');
+  const input = await f.requestFor(issue, { comment: undefined });
+  const saved = await f.transition(issue, input);
+
+  await f.call(200, '/import', 'POST', { data: backup });
+  const restored = await f.live(issue);
+  assert.ok(restored && restored.version > saved.issue.version);
+  const stale = await f.call<TransitionError>(409, f.path(restored), 'POST', { ...input, expectedVersion: restored.version });
+  assert.equal(stale.details?.reason, 'workspace_changed');
+  assert.deepEqual(await f.live(restored), restored);
+
+  const refreshed = await f.requestFor(restored, { requestId: input.requestId, comment: undefined });
+  const reapplied = await f.transition(restored, refreshed);
+  assert.equal(reapplied.duplicate, false);
+  assert.equal(reapplied.receipt.commentId, null);
+  assert.equal(reapplied.issue.version, restored.version + 1);
+  assert.deepEqual(await f.comments(restored), []);
 });

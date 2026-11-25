@@ -654,12 +654,19 @@ test('reanalyzing the same Jira ZIP makes catalog-backed historical workflow sta
   </entity-engine-xml>`) }]);
   const uploaded = await f.upload(archive, filename, 'jira', instanceKey);
   const config = await f.configuration(uploaded, 'WORKFLOW');
-  f.db.prepare(`UPDATE legacy_file_manifests SET json=json_remove(json,'$.jiraHistoricalWorkflowEvidenceChecked') WHERE package_id=?`).run(uploaded.id);
-  f.db.prepare(`UPDATE legacy_records SET json=json_remove(json,'$.metadata.jiraWorkflowStatusLabel','$.metadata.jiraWorkflowStatusChangePositions')
-    WHERE package_id=?`).run(uploaded.id);
   const before = await f.preview(config);
   assert.equal(before.canApply, true, JSON.stringify(before.notices));
-  assert.equal(before.jiraObservedWorkflows, undefined);
+  assert.ok(before.jiraObservedWorkflows?.[0].statuses.some(status => status.label === 'Approval'));
+
+  // Previous deployments could preserve workflow evidence without checking raw history visibility fields.
+  f.db.prepare(`UPDATE legacy_file_manifests SET json=json_remove(json,'$.jiraAdminHistoryVisibilityChecked') WHERE package_id=?`).run(uploaded.id);
+  const blocked = await f.preview(config);
+  assert.equal(blocked.canApply, false);
+  assert.equal(blocked.jiraObservedWorkflows, undefined);
+  assert.ok(blocked.notices.some(notice => notice.code === 'SOURCE_JIRA_ADMIN_HISTORY_REANALYSIS_REQUIRED' && notice.recordId === null));
+  const { data: unverifiedOptions } = await f.call<MigrationOptions>(`/migrations/options?packageId=${uploaded.id}`);
+  assert.ok(!unverifiedOptions.jiraWorkflowStatuses?.some(status => status.label === 'Approval'));
+  assert.equal((await f.apply(blocked)).status, 409);
 
   const params = new URLSearchParams({ filename, product: 'jira', instanceKey });
   const reupload = () => fetch(`${f.base}/legacy-import/packages?${params}`, { method: 'POST',

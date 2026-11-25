@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { Issue, Project, ProjectIssueOrder, ProjectWorkflow, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, IssueStatusChangeRequest, IssueStatusChangeResult, Project, ProjectIssueOrder, ProjectWorkflow, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
 
 const name = '전체 프로젝트 보드';
 const button = (within: Locator | Page, label: string) => within.getByRole('button', { name: label, exact: true });
 const teamPath = (project: Project) => `#/${project.id}/teamboard`;
 const issuePath = (issue: Issue) => `/api/issues/${issue.id}`;
+const statusPath = (issue: Issue) => `${issuePath(issue)}/status-change`;
 const workflowPath = (project: Project) => `/api/projects/${project.id}/workflow`;
 const orderPath = (project: Project) => `/api/projects/${project.id}/issue-order`;
 const board = (page: Page) => page.getByRole('region', { name, exact: true });
@@ -24,12 +25,19 @@ async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, 
 const workspace = async (request: APIRequestContext) => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
 const waitPatch = (page: Page, path: string) => page.waitForResponse(response =>
   new URL(response.url()).pathname === path && response.request().method() === 'PATCH');
+const waitStatusChange = (page: Page, issue: Issue) => page.waitForResponse(response =>
+  new URL(response.url()).pathname === statusPath(issue) && response.request().method() === 'POST');
+const statusChangeInput = (fields: Pick<IssueStatusChangeRequest, 'status' | 'assigneeId' | 'expectedVersion' | 'expectedWorkflowVersion'>) => ({
+  ...fields, requestId: expect.any(String), restoreGeneration: expect.any(String),
+});
 
-function trackPatchPaths(page: Page) {
+function trackIssueWrites(page: Page) {
   const paths: string[] = [];
   page.on('request', request => {
     const path = new URL(request.url()).pathname;
-    if (request.method() === 'PATCH' && (path.startsWith('/api/issues/') || path.endsWith('/issue-order'))) paths.push(path);
+    const method = request.method();
+    if ((method === 'PATCH' && (path.startsWith('/api/issues/') || path.endsWith('/issue-order'))) ||
+        (method === 'POST' && path.startsWith('/api/issues/') && path.endsWith('/status-change'))) paths.push(path);
   });
   return paths;
 }
@@ -122,7 +130,7 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
   try {
     const { west, east, someoneElse, workflow } = await f.configure();
     const ranks = await f.ranks();
-    const patches = trackPatchPaths(page);
+    const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 360, height: 820 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
     await page.goto(`/#/${f.first.id}/overview`);
@@ -165,7 +173,7 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await expect(page.getByRole('dialog', { name: '통합 검색', exact: true, includeHidden: true })).toHaveCount(0);
     await expect(destination(page)).toBeFocused();
     await expect(destination(page)).toHaveValue(f.secondReview.id);
-    const blocked = waitPatch(page, issuePath(east));
+    const blocked = waitStatusChange(page, east);
     await button(chooser(page), '상태 변경 적용').click();
     expect(await json<{ details: unknown }>(await blocked, 422)).toMatchObject({ details: { requiredFields: ['description'] } });
     await expect(chooser(page).getByRole('alert')).toContainText('설명');
@@ -199,11 +207,13 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await expect(inside(page, 'in_progress', east)).toBeVisible();
 
     await openTransitions();
-    const changing = waitPatch(page, issuePath(east));
+    const changing = waitStatusChange(page, east);
     await button(chooser(page), '상태 변경 적용').click();
     const accepted = await changing;
-    expect(accepted.request().postDataJSON()).toEqual({ expectedVersion: detailed.version, expectedWorkflowVersion: workflow.version, status: f.secondReview.id });
-    const moved = await json<Issue>(accepted);
+    expect(accepted.request().postDataJSON()).toEqual(statusChangeInput({
+      expectedVersion: detailed.version, expectedWorkflowVersion: workflow.version, status: f.secondReview.id,
+    }));
+    const { issue: moved } = await json<IssueStatusChangeResult>(accepted);
     expect(moved).toMatchObject({ id: east.id, projectId: f.second.id, status: f.secondReview.id, version: detailed.version + 1 });
     await expect(chooser(page)).toHaveCount(0);
     await expect(inside(page, 'review', east).locator('[data-board-status]')).toHaveText(f.secondReview.label);
@@ -213,7 +223,7 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await page.reload();
     await expect.poll(() => route(page)).toEqual(filtered);
     await expect(inside(page, 'review', east)).toBeVisible();
-    expect(patches).toEqual([issuePath(east), issuePath(east), issuePath(east)]);
+    expect(writes).toEqual([statusPath(east), issuePath(east), statusPath(east)]);
     expect(await f.read(west)).toEqual(west);
     expect(await f.read(east)).toEqual(moved);
     const updatedRanks = await f.ranks();
@@ -227,19 +237,19 @@ test('360px 전체 프로젝트 보드에서 실제 상태를 선택하고 티�
     await button(card(page, someoneElse), `${someoneElse.key} 상태 변경`).click();
     await destination(page).selectOption('in_progress');
     await chooser(page).getByRole('combobox', { name: '담당자', exact: true }).selectOption(`user:${f.actor.id}`);
-    const assigning = waitPatch(page, issuePath(someoneElse));
+    const assigning = waitStatusChange(page, someoneElse);
     await button(chooser(page), '상태 변경 적용').click();
     const assignedResponse = await assigning;
-    expect(assignedResponse.request().postDataJSON()).toEqual({ expectedVersion: someoneElse.version,
-      expectedWorkflowVersion: workflow.version, status: 'in_progress', assigneeId: f.actor.id });
-    const assigned = await json<Issue>(assignedResponse);
+    expect(assignedResponse.request().postDataJSON()).toEqual(statusChangeInput({ expectedVersion: someoneElse.version,
+      expectedWorkflowVersion: workflow.version, status: 'in_progress', assigneeId: f.actor.id }));
+    const { issue: assigned } = await json<IssueStatusChangeResult>(assignedResponse);
     expect(assigned).toMatchObject({ status: 'in_progress', assigneeId: f.actor.id, version: someoneElse.version + 1 });
     await expect(chooser(page)).toHaveCount(0);
     await expect(card(page, someoneElse)).toHaveCount(0);
     await expect(board(page)).toBeFocused();
     await expect.poll(() => route(page)).toEqual(onlyPeer);
     expect(await f.read(someoneElse)).toEqual(assigned);
-    expect(patches).toEqual([issuePath(east), issuePath(east), issuePath(east), issuePath(someoneElse)]);
+    expect(writes).toEqual([statusPath(east), issuePath(east), statusPath(east), statusPath(someoneElse)]);
   } finally {
     await f.close();
   }
@@ -251,7 +261,7 @@ test('팀 보드에서 다른 프로젝트 카드가 있는 열에 끌어도 업
   try {
     const { west, east, workflow } = await f.configure();
     const ranks = await f.ranks();
-    const patches = trackPatchPaths(page);
+    const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 1800, height: 1000 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
     await page.goto(`/${teamPath(f.first)}?${new URLSearchParams({ boardQuery: f.prefix })}`);
@@ -262,22 +272,24 @@ test('팀 보드에서 다른 프로젝트 카드가 있는 열에 끌어도 업
     expect((await statusOptions(page)).sort()).toEqual(['review', f.secondReview.id].sort());
     await expect(destination(page)).toHaveValue('');
     await expect(button(chooser(page), '상태 변경 적용')).toBeDisabled();
-    expect(patches).toEqual([]);
+    expect(writes).toEqual([]);
     expect(await f.read(east)).toEqual(east);
     expect(await f.ranks()).toEqual(ranks);
 
     await destination(page).selectOption('review');
-    const applying = waitPatch(page, issuePath(east));
+    const applying = waitStatusChange(page, east);
     await button(chooser(page), '상태 변경 적용').click();
     const response = await applying;
-    expect(response.request().postDataJSON()).toEqual({ status: 'review', expectedVersion: east.version, expectedWorkflowVersion: workflow.version });
-    const moved = await json<Issue>(response);
+    expect(response.request().postDataJSON()).toEqual(statusChangeInput({
+      status: 'review', expectedVersion: east.version, expectedWorkflowVersion: workflow.version,
+    }));
+    const { issue: moved } = await json<IssueStatusChangeResult>(response);
     expect(moved).toMatchObject({ id: east.id, projectId: f.second.id, status: 'review' });
     await expect(chooser(page)).toHaveCount(0);
     await expect(inside(page, 'review', west)).toBeVisible();
     await expect(inside(page, 'review', east)).toBeVisible();
     await expect.poll(() => route(page)).toEqual({ path: teamPath(f.first), project: null, member: null, query: f.prefix, issue: null });
-    expect(patches).toEqual([issuePath(east)]);
+    expect(writes).toEqual([statusPath(east)]);
     expect(await f.read(west)).toEqual(west);
     expect(await f.read(east)).toEqual(moved);
     const updatedRanks = await f.ranks();
@@ -294,7 +306,7 @@ test('팀 보드에서 워크플로 변경을 확인한 뒤 응답이 유실된 
   try {
     const { west, east, workflow } = await f.configure();
     const ranks = await f.ranks();
-    const patches = trackPatchPaths(page);
+    const writes = trackIssueWrites(page);
     await page.setViewportSize({ width: 1800, height: 1000 });
     await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), f.actor.id);
     await page.goto(`/${teamPath(f.first)}?${new URLSearchParams({ boardQuery: f.prefix })}`);
@@ -314,10 +326,12 @@ test('팀 보드에서 워크플로 변경을 확인한 뒤 응답이 유실된 
     expect(changed.version).toBeGreaterThan(workflow.version);
     expect(await f.read(east)).toEqual(east);
 
-    const stale = waitPatch(page, issuePath(east));
+    const stale = waitStatusChange(page, east);
     await apply.click();
     const rejected = await stale;
-    expect(rejected.request().postDataJSON()).toEqual({ status: f.secondReview.id, expectedVersion: east.version, expectedWorkflowVersion: workflow.version });
+    expect(rejected.request().postDataJSON()).toEqual(statusChangeInput({
+      status: f.secondReview.id, expectedVersion: east.version, expectedWorkflowVersion: workflow.version,
+    }));
     expect(await json<{ details: unknown }>(rejected, 409)).toMatchObject({ details: { reason: 'workflow_changed', currentWorkflowVersion: changed.version } });
     await expect(chooser(page).getByRole('alert')).toContainText('워크플로');
     await expect(destination(page)).toHaveValue(f.secondReview.id);
@@ -330,27 +344,39 @@ test('팀 보드에서 워크플로 변경을 확인한 뒤 응답이 유실된 
     expect(await statusOptions(page)).toEqual(['review']);
     await expect(destination(page)).toHaveValue('review');
 
-    const submitted: unknown[] = [];
-    let committed: Issue | undefined;
-    await page.route(`**${issuePath(east)}`, async route => {
-      if (route.request().method() !== 'PATCH') return route.continue();
+    const submitted: IssueStatusChangeRequest[] = [];
+    let committed: IssueStatusChangeResult | undefined;
+    await page.route(`**${statusPath(east)}`, async route => {
+      if (route.request().method() !== 'POST') return route.continue();
       submitted.push(route.request().postDataJSON());
-      committed = await json<Issue>(await route.fetch());
-      await route.abort('failed');
+      const response = await route.fetch();
+      if (submitted.length === 1) {
+        committed = await json<IssueStatusChangeResult>(response);
+        await route.abort('failed');
+      } else await route.fulfill({ response });
     });
-    const verifying = page.waitForResponse(response => new URL(response.url()).pathname === '/api/workspace' && response.request().method() === 'GET');
     await apply.click();
-    const verified = await json<WorkspaceSnapshot>(await verifying);
-    expect(verified.issues.find(issue => issue.id === east.id)).toEqual(committed);
-    expect(committed).toMatchObject({ status: 'review', id: east.id, projectId: f.second.id, version: east.version + 1 });
+    const confirm = button(chooser(page), '저장 결과 다시 확인');
+    await expect(confirm).toBeVisible();
+    expect(committed).toMatchObject({ duplicate: false,
+      issue: { status: 'review', id: east.id, projectId: f.second.id, version: east.version + 1 },
+      receipt: { requestId: submitted[0].requestId, appliedVersion: east.version + 1, commentId: null },
+    });
+    expect(await f.read(east)).toEqual(committed!.issue);
+    const verifying = waitStatusChange(page, east);
+    await confirm.click();
+    const verified = await json<IssueStatusChangeResult>(await verifying);
+    expect(verified).toEqual({ ...committed, duplicate: true });
     await expect(chooser(page)).toHaveCount(0);
     await expect(inside(page, 'review', east)).toBeVisible();
     await expect(inside(page, 'in_progress', east)).toHaveCount(0);
     await page.reload();
     await expect(inside(page, 'review', east)).toBeVisible();
-    expect(submitted).toEqual([{ status: 'review', expectedVersion: east.version, expectedWorkflowVersion: changed.version }]);
-    expect(patches).toEqual([issuePath(east), issuePath(east)]);
-    expect(await f.read(east)).toEqual(committed);
+    expect(submitted).toHaveLength(2);
+    expect(submitted[0]).toEqual(statusChangeInput({ status: 'review', expectedVersion: east.version, expectedWorkflowVersion: changed.version }));
+    expect(submitted[1]).toEqual(submitted[0]);
+    expect(writes).toEqual([statusPath(east), statusPath(east), statusPath(east)]);
+    expect(await f.read(east)).toEqual(verified.issue);
     const updatedRanks = await f.ranks();
     expect(updatedRanks[0]).toEqual(ranks[0]);
     expect(updatedRanks[1].issueIds).toEqual(ranks[1].issueIds);

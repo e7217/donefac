@@ -488,6 +488,53 @@ test('catalog-backed Jira history statuses remain scoped to the proven project a
   assert.ok(!buildMigrationOptions([...request.packages, conflict]).jiraWorkflowStatuses?.some(row => row.id === review));
 });
 
+test('Jira administrator XML history restrictions survive ambiguous source markup', () => {
+  const rows = [
+    { groupAttributes: 'level="exact-private-role"' },
+    { groupAttributes: 'level="duplicate-private-role"', groupFields: '<level/>' },
+    { groupFields: '<level>repeated-private-role</level><level/>' },
+    { itemFields: '<visibility><role key="nested-private-role"/></visibility>' },
+    { itemFields: '<public claim="attributed-private-role">true</public>' },
+    { itemFields: '<public>false</public>' },
+    { groupAttributes: 'public="true"', itemFields: '<internal>false</internal>' },
+  ];
+  const dataset = parseJira(new Map([['entities.xml', Buffer.from(`<entity-engine-xml>
+    <Project id="10" pkey="ADM" pname="Admin fixture"/>
+    <Status id="1" pname="Open"/><Status id="2" pname="Closed"/><IssueType id="3" pname="Task"/>
+    <Issue id="101" project="10" number="1" summary="History witness" status="2" issuetype="3" created="${created}"/>
+    <Issue id="102" project="10" number="2" summary="Open work" status="1" issuetype="3" created="${created}"/>
+    ${rows.map(({ groupAttributes = '', groupFields = '', itemFields = '' }, index) => `
+      <Status id="${10 + index}" pname="${index === rows.length - 1 ? 'Public approval' : `Private approval ${index}`}" statuscategory="4"/>
+      <ChangeGroup id="${301 + index}" issue="101" created="${created}" ${groupAttributes}>${groupFields}</ChangeGroup>
+      <ChangeItem id="${401 + index}" group="${301 + index}" field="status" fieldtype="jira" oldvalue="1" newvalue="${10 + index}">${itemFields}</ChangeItem>`).join('')}
+  </entity-engine-xml>`)]]), 'admin-history-visibility');
+  const { summary } = pkg('admin-history-visibility', 'jira', dataset.records, dataset.diagnostics);
+  const source = { summary: { ...summary, source: dataset.source }, dataset };
+  const request = input([source]);
+  const options = buildMigrationOptions(request.packages);
+  const candidates = options.jiraWorkflowStatuses ?? [];
+  const open = candidates.find(status => status.label === 'Open');
+  const approval = candidates.find(status => status.label === 'Public approval');
+  assert.ok(open && approval);
+  assert.ok(candidates.every(status => !status.label.startsWith('Private approval')));
+
+  const restrictedIds = rows.slice(0, -1).map((_, index) => `history:${301 + index}`);
+  const excluded = restrictedIds.map(id => `${source.summary.id}/${id}`);
+  const blocked = buildMigrationPlan(request).preview;
+  assert.equal(blocked.canApply, false);
+  assert.deepEqual(blocked.notices.filter(notice => notice.code === 'RESTRICTED_CONTENT').map(notice => notice.recordId), excluded);
+  assert.doesNotMatch(JSON.stringify({ options, blocked }), /Private approval|private-role/);
+  assert.doesNotMatch(JSON.stringify(dataset.records.filter(record => /^history:30[2-5]$/.test(record.id))), /private-role/);
+
+  request.configuration.excludedRecords = excluded;
+  const accepted = buildMigrationPlan(request);
+  assert.equal(accepted.preview.canApply, true, JSON.stringify(accepted.preview.notices));
+  const [observed] = accepted.preview.jiraObservedWorkflows ?? [];
+  assert.deepEqual(observed?.transitions, [{ from: open.id, to: approval.id, issueCount: 1 }]);
+  assert.deepEqual(accepted.sourceRecords.filter(row => restrictedIds.includes(row.record.id)).map(row => [row.excluded, row.ownerId]),
+    restrictedIds.map(() => [true, null]));
+});
+
 test('Jira descriptions retain Markdown annotations while comments stay plain and documents retain native nodes', () => {
   const taskSource = jira(), documentSource = confluence();
   const adf = JSON.stringify({ type: 'doc', version: 1, content: [

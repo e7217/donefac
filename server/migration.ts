@@ -21,7 +21,8 @@ import { installMigrationContentReview, migrationContentReviewDetail, migrationC
 import type { MigrationSourceFile, MigrationWork } from './migration-work.js';
 import { AttachmentAppend, type AppendedFile } from './attachment-append.js';
 import { AttachmentFiles } from './attachments.js';
-import { hasRestrictedJiraServiceDeskComment, jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
+import { countJiraStatusTransitions, hasRestrictedJiraServiceDeskComment, isRestrictedJiraStatusHistory,
+  jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import { readJiraWorklogCorrectionCandidates } from './jira-worklog-corrections.js';
@@ -39,7 +40,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 29;
+const conversionVersion = 30;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -194,7 +195,14 @@ export class MigrationService {
       },
     }));
     for (const [index, { dataset }] of packages.entries()) {
-      if (!optionsOnly) reviewStoredJiraEvidence(details[index], dataset);
+      const detail = details[index];
+      if (dataset.source.format === 'jira-backup-xml' && detail.jiraAdminHistoryVisibilityChecked !== true) {
+        const unverified = dataset.records.filter(record => countJiraStatusTransitions(record) > 0 && !isRestrictedJiraStatusHistory(record));
+        for (const record of unverified) record.metadata.restricted = true;
+        if (unverified.length && !optionsOnly) diagnostic(dataset, { severity: 'error', code: 'JIRA_ADMIN_HISTORY_REANALYSIS_REQUIRED',
+          message: '이전 Jira 분석에서 상태 변경 이력의 열람 범위를 확인하려면 같은 원본을 같은 인스턴스로 다시 올려 주세요.' });
+      }
+      if (!optionsOnly) reviewStoredJiraEvidence(detail, dataset);
       projectJiraComponents(dataset);
     }
     if (packages.reduce((sum, item) => sum + item.dataset.records.length, 0) > 100000) {

@@ -40,13 +40,15 @@ function isVersion(value: unknown): value is number {
 
 function parseStatusChange(value: unknown) {
   if (!isRecord(value) || Object.keys(value).some(key => !statusChangeFields.has(key))) {
-    throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 댓글 요청을 확인해 주세요.');
+    throw new IssueStatusChangeError(400, '업무 상태 변경 요청을 확인해 주세요.');
   }
   const { requestId, expectedVersion, expectedWorkflowVersion, restoreGeneration, status, assigneeId, comment } = value;
   if (typeof requestId !== 'string' || !creationRequestId.test(requestId) || !isVersion(expectedVersion) ||
       !isVersion(expectedWorkflowVersion) || !isIdentifier(restoreGeneration) || !isIdentifier(status) ||
-      (assigneeId !== undefined && assigneeId !== null && !isIdentifier(assigneeId)) || !isRecord(comment) ||
-      Object.keys(comment).some(key => key !== 'body' && key !== 'mentions')) {
+      (assigneeId !== undefined && assigneeId !== null && !isIdentifier(assigneeId))) {
+    throw new IssueStatusChangeError(400, '업무 상태 변경 요청을 확인해 주세요.');
+  }
+  if (comment !== undefined && (!isRecord(comment) || Object.keys(comment).some(key => key !== 'body' && key !== 'mentions'))) {
     throw new IssueStatusChangeError(400, '업무 상태와 함께 저장할 댓글 요청을 확인해 주세요.');
   }
   return {
@@ -74,7 +76,7 @@ export class IssueStatusChangeService {
 
   apply(issueId: string, actorId: string, value: unknown, hooks: StatusChangeHooks): IssueStatusChangeResult {
     const { requestId, restoreGeneration, comment, transition } = parseStatusChange(value);
-    const draft = hooks.parseComment(comment.body, comment.mentions);
+    const draft = comment === undefined ? null : hooks.parseComment(comment.body, comment.mentions);
     const fingerprint = creationRequestFingerprint({ ...transition, restoreGeneration, comment });
     return this.store.transaction(() => {
       if (workspaceRestoreGeneration(this.store) !== restoreGeneration) {
@@ -82,8 +84,9 @@ export class IssueStatusChangeService {
       }
       const now = Date.now();
       this.store.db.prepare('DELETE FROM issue_status_change_requests WHERE expires_at <= ?').run(new Date(now).toISOString());
+      // Existing databases require a text value in comment_id. An empty value stores a receipt without a comment.
       const stored = this.store.db.prepare(`SELECT issue_id AS issueId, project_id AS projectId, actor_id AS actorId,
-        fingerprint, applied_version AS appliedVersion, status, assignee_id AS assigneeId, comment_id AS commentId
+        fingerprint, applied_version AS appliedVersion, status, assignee_id AS assigneeId, NULLIF(comment_id, '') AS commentId
         FROM issue_status_change_requests WHERE id=?`).get(requestId) as StoredReceipt | undefined;
       if (stored) {
         if (stored.issueId !== issueId || stored.actorId !== actorId || stored.fingerprint !== fingerprint) {
@@ -100,15 +103,15 @@ export class IssueStatusChangeService {
       const previous = this.store.get<Issue>('issues', issueId);
       if (!previous) throw new IssueStatusChangeError(404, '업무를 찾을 수 없습니다.');
       const issue = hooks.transition(previous, transition);
-      const savedComment = hooks.saveComment(issue, draft);
+      const commentId = draft === null ? null : hooks.saveComment(issue, draft).id;
       const receipt: IssueStatusChangeReceipt = {
         requestId, issueId, projectId: issue.projectId, appliedVersion: issue.version,
-        status: issue.status, assigneeId: issue.assigneeId, commentId: savedComment.id,
+        status: issue.status, assigneeId: issue.assigneeId, commentId,
       };
       this.store.db.prepare(`INSERT INTO issue_status_change_requests(id, issue_id, project_id, actor_id, fingerprint,
         applied_version, status, assignee_id, comment_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(requestId, issueId, receipt.projectId, actorId, fingerprint, receipt.appliedVersion, receipt.status, receipt.assigneeId,
-          receipt.commentId, new Date(now + receiptLifetimeMs).toISOString());
+          receipt.commentId ?? '', new Date(now + receiptLifetimeMs).toISOString());
       return { issue, receipt, duplicate: false };
     });
   }

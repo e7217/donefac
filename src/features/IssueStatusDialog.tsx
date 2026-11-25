@@ -2,9 +2,9 @@
 
 import { X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
-import type { FeatureProps, Issue, IssueChangeHistoryPage, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
+import type { FeatureProps, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, User, WorkflowStatus, WorkspaceSnapshot } from '../../shared/types';
 import { allowedNextStatuses, projectWorkflow, statusMeta } from '../../shared/workflow-helpers';
-import { api, ApiError, patch } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CommentMentionInput, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
@@ -12,8 +12,8 @@ import { errorMessage } from './schedule-utils';
 import './issue-status-dialog.css';
 
 export type IssueStatusEdit = { issue: Issue; current: WorkflowStatus; choices: WorkflowStatus[]; workflowVersion: number };
-type Recovery = 'conflict' | 'verify' | 'verify-comment' | 'refresh';
-type HandoffAttempt = { actorId: string; input: IssueStatusChangeRequest };
+type Recovery = 'conflict' | 'verify' | 'refresh';
+type StatusChangeAttempt = { actorId: string; input: IssueStatusChangeRequest };
 
 const STALE = '업무 또는 프로젝트 워크플로가 변경되었습니다. 최신 상태를 불러온 뒤 다시 선택해 주세요.';
 const REFRESH = '변경 사항을 저장했습니다. 화면에 반영하려면 최신 업무를 불러와 주세요.';
@@ -21,12 +21,13 @@ const UNKNOWN_HANDOFF = '상태 변경과 인수인계 댓글의 저장 결과�
 const UNASSIGNED = 'unassigned';
 const USER_OPTION = 'user:';
 
-function confirmedHandoff(result: IssueStatusChangeResult, edit: IssueStatusEdit, input: IssueStatusChangeRequest): boolean {
+function confirmedStatusChange(result: IssueStatusChangeResult, edit: IssueStatusEdit, input: IssueStatusChangeRequest): boolean {
   const { issue, receipt, duplicate } = result ?? {};
   return Boolean(receipt && issue && typeof duplicate === 'boolean' && receipt.requestId === input.requestId &&
     receipt.issueId === edit.issue.id && receipt.projectId === edit.issue.projectId && receipt.appliedVersion === input.expectedVersion + 1 &&
     receipt.status === input.status && (receipt.assigneeId === null || typeof receipt.assigneeId === 'string') &&
-    (input.assigneeId === undefined || receipt.assigneeId === input.assigneeId) && typeof receipt.commentId === 'string' && receipt.commentId.length > 0 &&
+    (input.assigneeId === undefined || receipt.assigneeId === input.assigneeId) &&
+    (input.comment ? typeof receipt.commentId === 'string' && receipt.commentId.length > 0 : receipt.commentId === null) &&
     issue.id === receipt.issueId && issue.projectId === receipt.projectId && Number.isSafeInteger(issue.version) &&
     (issue.version === receipt.appliedVersion ? issue.status === receipt.status && issue.assigneeId === receipt.assigneeId :
       duplicate && issue.version > receipt.appliedVersion));
@@ -55,7 +56,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const assigneeField = useRef<HTMLSelectElement>(null);
   const recoverButton = useRef<HTMLButtonElement>(null);
   const pending = useRef(false);
-  const handoffAttempt = useRef<HandoffAttempt | null>(null);
+  const changeAttempt = useRef<StatusChangeAttempt | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(edit.choices.length === 1 ? edit.choices[0].id : '');
   const [assigneeId, setAssigneeId] = useState<Issue['assigneeId'] | undefined>();
@@ -70,8 +71,9 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     projectWorkflow(latest, edit.issue.projectId).version !== edit.workflowVersion;
   const assigneeUnavailable = typeof assigneeId === 'string' && !latest.users.some(user => user.id === assigneeId);
   const assigneeOption = assigneeId === undefined ? '' : assigneeId === null ? UNASSIGNED : `${USER_OPTION}${assigneeId}`;
-  const unknownResult = `${assigneeId === undefined ? '상태' : '상태와 담당자'} 변경 결과를 확인하지 못했습니다.`;
-  const discardPrompt = recovery === 'verify-comment' ? `${UNKNOWN_HANDOFF} 닫을까요?` : recovery === 'verify' ? `${unknownResult} 닫을까요?` :
+  const unknownResult = comment.body.trim() ? UNKNOWN_HANDOFF :
+    `${assigneeId === undefined ? '상태' : '상태와 담당자'} 변경 결과를 확인하지 못했습니다.`;
+  const discardPrompt = recovery === 'verify' ? `${unknownResult} 닫을까요?` :
     comment.body.trim() ? '작성 중인 인수인계 댓글을 버리고 닫을까요?' : null;
   const nameCounts = new Map<string, number>();
   for (const user of latest.users) nameCounts.set(user.name, (nameCounts.get(user.name) ?? 0) + 1);
@@ -98,7 +100,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   }, [assigneeRequired, busy]);
 
   useEffect(() => {
-    if (!busy && recovery === 'verify-comment') recoverButton.current?.focus();
+    if (!busy && recovery === 'verify') recoverButton.current?.focus();
   }, [busy, recovery]);
 
   useEffect(() => {
@@ -131,12 +133,6 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setAssigneeRequired(false);
   }
 
-  function matchesChange(issue: Issue | undefined): boolean {
-    return Boolean(issue && issue.id === edit.issue.id && issue.projectId === edit.issue.projectId &&
-      issue.status === selected && Number.isSafeInteger(issue.version) && issue.version > edit.issue.version &&
-      (assigneeId === undefined || issue.assigneeId === assigneeId));
-  }
-
   async function committed(withComment = commentSaved) {
     setRecovery('refresh');
     try {
@@ -147,47 +143,6 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         assigneeId === undefined ? `${edit.issue.key} · ${label}(으)로 변경했습니다.` : `${edit.issue.key} · 상태 ${label}${details} 저장 완료`);
       onClose();
     } catch { setError(REFRESH); }
-  }
-
-  async function verify() {
-    try {
-      const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store' });
-      if (!Array.isArray(snapshot?.issues)) throw new Error(unknownResult);
-      const confirmed = snapshot.restoreGeneration === restoreGeneration
-        ? snapshot.issues.find(issue => issue.id === edit.issue.id && issue.projectId === edit.issue.projectId)
-        : undefined;
-      if (confirmed?.version === edit.issue.version && confirmed.status === edit.issue.status && confirmed.assigneeId === edit.issue.assigneeId &&
-        projectWorkflow(snapshot, edit.issue.projectId).version === edit.workflowVersion) {
-        setRecovery(null);
-        setError('서버의 업무가 변경되지 않았습니다. 다시 적용할 수 있습니다.');
-        return;
-      }
-
-      let message = STALE;
-      if (confirmed && confirmed.version > edit.issue.version) {
-        const appliedVersion = edit.issue.version + 1;
-        const history = await api<IssueChangeHistoryPage>(`/issues/${encodeURIComponent(edit.issue.id)}/change-history?beforeVersion=${appliedVersion + 1}`,
-          { cache: 'no-store' });
-        if (!Array.isArray(history?.entries)) throw new Error(unknownResult);
-        const entry = history.entries.find(row => row.issueId === edit.issue.id && row.issueVersion === appliedVersion &&
-          row.projectId === edit.issue.projectId && row.previousProjectId === edit.issue.projectId);
-        const statusChange = entry?.changes.find(change => change.field === 'status');
-        const assigneeChange = entry?.changes.find(change => change.field === 'assigneeId');
-        const transitioned = statusChange?.before.value === edit.issue.status && statusChange.after.value === selected;
-        const assigned = assigneeId === undefined || (assigneeChange ? assigneeChange.after.value : edit.issue.assigneeId) === assigneeId;
-        if (transitioned && assigned && entry) {
-          if (entry.origin === 'user' && entry.actorId === actorId) { await committed(); return; }
-          message = '선택한 변경을 다른 작업자가 먼저 저장했습니다. 최신 업무를 불러와 주세요.';
-        } else if (confirmed.status === selected && assigneeId !== undefined && confirmed.assigneeId !== assigneeId) {
-          message = '업무 상태가 바뀌었고 실제 담당자가 선택한 값과 다릅니다. 최신 업무를 확인해 주세요.';
-        }
-      }
-      setRecovery('conflict');
-      setError(message);
-    } catch {
-      setRecovery('verify');
-      setError(`${unknownResult} 최신 업무를 확인해 주세요.`);
-    }
   }
 
   function reportStatusError(cause: ApiError) {
@@ -205,31 +160,32 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setShowDetails(cause.status === 422 && (!missingAssignee || requiredFields.length > 1));
   }
 
-  async function applyHandoff(attempt: HandoffAttempt) {
+  async function applyStatusChange(attempt: StatusChangeAttempt) {
     if (attempt.actorId !== actorId) {
-      setError('작성한 작업자로 전환한 뒤 저장 결과를 다시 확인해 주세요.');
+      setError('변경을 요청한 작업자로 전환한 뒤 저장 결과를 다시 확인해 주세요.');
       return;
     }
+    const withComment = Boolean(attempt.input.comment);
     try {
       const result = await api<IssueStatusChangeResult>(`/issues/${encodeURIComponent(edit.issue.id)}/status-change`, {
         method: 'POST', headers: { 'X-Actor-Id': attempt.actorId }, body: JSON.stringify(attempt.input),
       });
-      if (!confirmedHandoff(result, edit, attempt.input)) throw new Error(UNKNOWN_HANDOFF);
-      handoffAttempt.current = null;
+      if (!confirmedStatusChange(result, edit, attempt.input)) throw new Error(unknownResult);
+      changeAttempt.current = null;
       setComment(emptyCommentDraft());
-      setCommentSaved(true);
-      await committed(true);
+      setCommentSaved(withComment);
+      await committed(withComment);
     } catch (cause) {
       if (definiteStatusError(cause)) {
-        if (recovery === 'verify-comment' && (cause.status === 401 || cause.status === 403)) {
-          setError(`${UNKNOWN_HANDOFF} 접속을 확인한 뒤 같은 요청으로 다시 확인해 주세요.`);
+        if (recovery === 'verify' && (cause.status === 401 || cause.status === 403)) {
+          setError(`${unknownResult} 접속을 확인한 뒤 같은 요청으로 다시 확인해 주세요.`);
           return;
         }
-        handoffAttempt.current = null;
+        changeAttempt.current = null;
         reportStatusError(cause);
       } else {
-        setRecovery('verify-comment');
-        setError(`${UNKNOWN_HANDOFF} 같은 요청으로 다시 확인해 주세요.`);
+        setRecovery('verify');
+        setError(`${unknownResult} 같은 요청으로 다시 확인해 주세요.`);
       }
     }
   }
@@ -260,34 +216,23 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!selected || assigneeUnavailable || stale || recovery || pending.current) return;
+    if (!restoreGeneration) {
+      setRecovery('conflict');
+      setError('현재 작업 공간을 확인하려면 최신 업무를 불러와 주세요.');
+      return;
+    }
     const note = commentDraftPayload(comment);
     pending.current = true;
     setBusy(true);
     clearValidation();
     try {
-      if (note.body) {
-        if (!restoreGeneration) {
-          setRecovery('conflict');
-          setError('현재 작업 공간을 확인하려면 최신 업무를 불러와 주세요.');
-          return;
-        }
-        const attempt = { actorId, input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
-          expectedWorkflowVersion: edit.workflowVersion, status: selected, ...(assigneeId === undefined ? {} : { assigneeId }), comment: note } };
-        handoffAttempt.current = attempt;
-        await applyHandoff(attempt);
-        return;
-      }
-      const updated = await patch<Issue>(`/issues/${encodeURIComponent(edit.issue.id)}`, {
-        expectedVersion: edit.issue.version, expectedWorkflowVersion: edit.workflowVersion, status: selected,
-        ...(assigneeId === undefined ? {} : { assigneeId }),
-      });
-      if (!matchesChange(updated) || updated?.version !== edit.issue.version + 1) throw new Error(unknownResult);
-      await committed();
-    } catch (cause) {
-      if (definiteStatusError(cause)) reportStatusError(cause);
-      else if (note.body) setError(errorMessage(cause));
-      else await verify();
-    } finally { pending.current = false; setBusy(false); }
+      const attempt = { actorId, input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
+        expectedWorkflowVersion: edit.workflowVersion, status: selected, ...(assigneeId === undefined ? {} : { assigneeId }),
+        ...(note.body ? { comment: note } : {}) } };
+      changeAttempt.current = attempt;
+      await applyStatusChange(attempt);
+    } catch (cause) { setError(errorMessage(cause)); }
+    finally { pending.current = false; setBusy(false); }
   }
 
   async function recover() {
@@ -295,8 +240,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     pending.current = true;
     setBusy(true);
     try {
-      if (recovery === 'verify') await verify();
-      else if (recovery === 'verify-comment' && handoffAttempt.current) await applyHandoff(handoffAttempt.current);
+      if (recovery === 'verify' && changeAttempt.current) await applyStatusChange(changeAttempt.current);
       else if (recovery === 'refresh') await committed();
       else if (comment.body.trim()) await reviewLatestWithComment();
       else { await refresh(); onClose(); }
@@ -339,7 +283,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         <div className="issue-status-handoff">
           <label htmlFor={commentId}>인수인계 댓글 <span aria-hidden="true">(선택)</span></label>
           <CommentMentionInput id={commentId} className="field" rows={3} draft={comment} users={latest.users}
-            readOnly={busy || recovery === 'verify' || recovery === 'verify-comment' || recovery === 'refresh'} onChange={next => {
+            readOnly={busy || recovery === 'verify' || recovery === 'refresh'} onChange={next => {
               setComment(next);
               if (!recovery) clearValidation();
             }} />
@@ -352,7 +296,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       <footer>
         <button className="btn btn-ghost" type="button" onClick={close} disabled={busy}>취소</button>
         {recovery || stale ? <button ref={recoverButton} className="btn btn-primary" type="button" disabled={busy} onClick={() => void recover()}>
-          {recovery === 'verify-comment' ? '저장 결과 다시 확인' : recovery === 'verify' ? '최신 상태 확인' : '최신 업무 불러오기'}
+          {recovery === 'verify' ? '저장 결과 다시 확인' : '최신 업무 불러오기'}
         </button> : <button className="btn btn-primary" type="submit" disabled={busy || !selected || assigneeUnavailable}>상태 변경 적용</button>}
       </footer>
     </form>

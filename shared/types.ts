@@ -1407,7 +1407,7 @@ export interface IssueStatusChangeRequest {
   restoreGeneration: string;
   status: Issue['status'];
   assigneeId?: Issue['assigneeId'];
-  comment: { body: string; mentions?: CommentMention[] };
+  comment?: { body: string; mentions?: CommentMention[] };
 }
 export interface IssueStatusChangeReceipt {
   requestId: string;
@@ -1416,7 +1416,7 @@ export interface IssueStatusChangeReceipt {
   appliedVersion: number;
   status: Issue['status'];
   assigneeId: Issue['assigneeId'];
-  commentId: string;
+  commentId: string | null;
 }
 export interface IssueStatusChangeResult {
   issue: Issue;
