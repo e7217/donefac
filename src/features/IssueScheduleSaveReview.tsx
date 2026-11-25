@@ -15,6 +15,22 @@ type Props = {
   onSave: () => void;
 };
 
+function keepDialogFocus(event: KeyboardEvent<HTMLElement>, busy: boolean, onClose: () => void) {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!busy) onClose();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
+  const edge = event.shiftKey ? buttons[0] : buttons[buttons.length - 1];
+  if (!edge || event.target === event.currentTarget || event.target === edge) {
+    event.preventDefault();
+    (event.shiftKey ? buttons[buttons.length - 1] : buttons[0])?.focus();
+  }
+}
+
 export function IssueScheduleSaveReview({ preview, issues, issueId, busy, staleMessage, onClose, onReviewAgain, onSave }: Props) {
   const headingId = useId();
   const dialog = useRef<HTMLElement>(null);
@@ -24,22 +40,6 @@ export function IssueScheduleSaveReview({ preview, issues, issueId, busy, staleM
     const target = staleMessage && !busy ? reviewButton.current : dialog.current;
     target?.focus({ preventScroll: true });
   }, [busy, preview, staleMessage]);
-
-  function handleKeys(event: KeyboardEvent<HTMLElement>) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      if (!busy) onClose();
-      return;
-    }
-    if (event.key !== 'Tab') return;
-    const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-    const edge = event.shiftKey ? buttons[0] : buttons[buttons.length - 1];
-    if (!edge || event.target === event.currentTarget || event.target === edge) {
-      event.preventDefault();
-      (event.shiftKey ? buttons[buttons.length - 1] : buttons[0])?.focus();
-    }
-  }
 
   const change = preview.changes.find(row => row.id === issueId);
   const dates = change ? [
@@ -54,7 +54,7 @@ export function IssueScheduleSaveReview({ preview, issues, issueId, busy, staleM
 
   return <div className="issue-modal-overlay">
     <section ref={dialog} className="gantt-preview-modal issue-schedule-save-review" role="dialog" aria-modal="true"
-      aria-labelledby={headingId} aria-busy={busy} tabIndex={-1} onKeyDown={handleKeys}>
+      aria-labelledby={headingId} aria-busy={busy} tabIndex={-1} onKeyDown={event => keepDialogFocus(event, busy, onClose)}>
       <header><h2 id={headingId}>일정 변경 검토</h2>
         <button className="issue-icon-button" type="button" onClick={onClose} disabled={busy} aria-label="일정 검토 닫기"><X size={20} /></button>
       </header>
@@ -84,6 +84,28 @@ export function IssueScheduleSaveReview({ preview, issues, issueId, busy, staleM
         <button ref={reviewButton} className="btn btn-primary" type="button" onClick={action}
           disabled={busy || !staleMessage && (!preview.previewId || blocking.length > 0)}>
           {!staleMessage && <Save size={15} aria-hidden="true" />}{busy ? '처리 중…' : staleMessage ? '다시 검토' : '검토한 날짜로 저장'}
+        </button>
+      </footer>
+    </section>
+  </div>;
+}
+
+export function IssueSaveRecovery({ busy, onClose, onRetry }: { busy: boolean; onClose: () => void; onRetry: () => void }) {
+  const headingId = useId();
+  const dialog = useRef<HTMLElement>(null);
+  const retry = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    (busy ? dialog.current : retry.current)?.focus({ preventScroll: true });
+  }, [busy]);
+  return <div className="issue-modal-overlay">
+    <section ref={dialog} className="gantt-preview-modal" role="dialog" aria-modal="true" aria-labelledby={headingId}
+      aria-busy={busy} tabIndex={-1} onKeyDown={event => keepDialogFocus(event, busy, onClose)}>
+      <header><h2 id={headingId}>업무 저장 결과 확인</h2></header>
+      <div className="issue-create-fields">저장 응답을 받지 못했습니다. 같은 요청으로 결과를 확인할 수 있습니다.</div>
+      <footer>
+        <button className="btn btn-ghost" type="button" onClick={onClose} disabled={busy}>닫기</button>
+        <button ref={retry} className="btn btn-primary" type="button" onClick={onRetry} disabled={busy}>
+          {busy ? '확인 중…' : '저장 결과 다시 확인'}
         </button>
       </footer>
     </section>

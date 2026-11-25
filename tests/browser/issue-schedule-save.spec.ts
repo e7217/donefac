@@ -26,6 +26,71 @@ async function removeIssue(request: APIRequestContext, issue: Issue) {
   if (removed.ok()) await request.delete(`/api/trash/${(await removed.json()).trashEntryId}`);
 }
 
+test('검토한 티켓 저장의 응답이 끊긴 뒤 같은 변경 결과를 다시 확인한다', async ({ page, request }) => {
+  test.setTimeout(80_000);
+  const { projects: [project], users: [actor, peer] } = await workspace(request);
+  const suffix = randomUUID().slice(0, 8);
+  const issues: Issue[] = [];
+  async function make(label: string, startDate: string, endDate: string) {
+    const issue = await read<Issue>(await request.post('/api/issues', { data: {
+      projectId: project.id, title: `${label} ${suffix}`, startDate, endDate,
+    } }), 201);
+    issues.push(issue);
+    return issue;
+  }
+  try {
+    const predecessor = await make('재확인 선행 업무', '2027-03-08', '2027-03-12');
+    const ticket = await make('저장 결과 재확인 업무', '2027-03-18', '2027-03-23');
+    await read(await request.post('/api/dependencies', { data: {
+      predecessorId: predecessor.id, successorId: ticket.id, type: 'FS', lagDays: 0,
+    } }), 201);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/issues?issue=${ticket.id}`);
+    const panel = page.getByRole('dialog', { name: new RegExp(suffix) });
+    const comment = '등록하지 않은 인수인계 메모';
+    const title = `${ticket.title} 저장`;
+    await panel.getByRole('textbox', { name: '제목', exact: true }).fill(title);
+    await panel.getByRole('textbox', { name: '댓글 내용', exact: true }).fill(comment);
+    await date(panel, '시작일').fill('2027-03-09');
+    await button(panel, '변경사항 저장').click();
+    const review = page.getByRole('dialog', { name: '일정 변경 검토', exact: true });
+    await expect(review).toContainText(predecessor.title);
+
+    let firstInput: unknown;
+    let saved: Issue | undefined;
+    const patches: string[] = [];
+    await page.route(`**${issuePath(ticket)}`, async route => {
+      if (route.request().method() !== 'PATCH') return route.fallback();
+      const input = route.request().postData()!;
+      patches.push(input);
+      if (patches.length !== 1) return route.fallback();
+      firstInput = JSON.parse(input);
+      saved = await read<Issue>(await route.fetch());
+      await route.abort('failed');
+    });
+    await button(review, '검토한 날짜로 저장').click();
+    const recovery = page.getByRole('dialog', { name: '업무 저장 결과 확인', exact: true });
+    await expect(recovery).toBeVisible();
+    expect(firstInput).toMatchObject({ requestId: expect.any(String), schedulePreviewId: expect.any(String), title });
+    expect(saved).toMatchObject({ version: ticket.version + 1, startDate: '2027-03-09', title });
+
+    const peerChange = await read<Issue>(await request.patch(issuePath(ticket), { headers: { 'X-Actor-Id': peer.id }, data: {
+      expectedVersion: saved!.version, description: '같은 티켓에 남긴 팀원의 후속 변경',
+    } }));
+    const repeated = responseAt(page, issuePath(ticket), 'PATCH');
+    await button(recovery, '저장 결과 다시 확인').click();
+    expect(await read<Issue>(await repeated)).toEqual(peerChange);
+    expect(patches).toHaveLength(2);
+    expect(patches[1]).toBe(patches[0]);
+    await expect(recovery).toHaveCount(0);
+    await expect(panel.getByRole('textbox', { name: '제목', exact: true })).toHaveValue(title);
+    await expect(panel.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue(comment);
+    expect((await workspace(request)).issues.find(value => value.id === ticket.id)).toEqual(peerChange);
+  } finally {
+    for (const issue of issues.reverse()) await removeIssue(request, issue);
+  }
+});
+
 test('360px 티켓 일반 저장에서 숨은 선행과 프로젝트 간 차단을 검토하고 최신 결과로 함께 저장한다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const { projects: [project, other], users: [actor, peer] } = await workspace(request);

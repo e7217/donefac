@@ -290,6 +290,7 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
   const startedAt = new Date(Date.now() - 60_000).toISOString();
   let baseUrl = '';
   let finishedAt: string | undefined;
+  let replacementCompleted = false;
   let newRun = false;
   const repoUrl = () => `${baseUrl}/${repository}`;
   const pipelineUrl = (id: number) => `${repoUrl()}/-/pipelines/${id}`;
@@ -300,7 +301,7 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
   const runs = () => [
     pipeline(blockedId, blockedRef, finishedAt ? 'success' : 'running'),
     pipeline(readyId, readyRef, finishedAt ? 'success' : 'running'),
-    pipeline(blockedById, blockedRef, 'running'),
+    pipeline(blockedById, blockedRef, replacementCompleted ? 'success' : 'running'),
     pipeline(taggedId, readyRef, 'running', 'push', true),
     pipeline(otherSourceId, readyRef, 'running', 'schedule'),
     ...(newRun ? [pipeline(newRunId, readyRef, 'running')] : []),
@@ -392,6 +393,38 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
     expect(afterOlderReview.gitlabLinks.filter(link => link.issueId === issue.id).map(link => link.id).sort()).toEqual([blocked.id, ready.id].sort());
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
 
+    const addReplacement = button(outcome, `최신 파이프라인 #${blockedById} 연결`);
+    await addReplacement.press('Enter');
+    const addForm = gitlab.getByRole('form', { name: 'GitLab 링크 추가', exact: true });
+    const address = addForm.getByRole('textbox', { name: 'GitLab URL', exact: true });
+    await expect(address).toHaveValue(replacementUrl);
+    await expect(address).toBeFocused();
+    await expect(addForm.getByRole('combobox', { name: 'GitLab 저장소', exact: true })).toHaveValue(String(repositoryId));
+    expect(calls).toHaveLength(0);
+    const linking = page.waitForResponse(response => new URL(response.url()).pathname === `${issuePath}/gitlab-links` && response.request().method() === 'POST');
+    await button(addForm, 'GitLab 링크 연결').click();
+    const linkResponse = await linking;
+    expect(linkResponse.request().postDataJSON()).toEqual({ repositoryId, url: replacementUrl, expectedSettingsVersion: configured.version });
+    const linkedReplacement = await json<GitlabLink>(linkResponse, 201);
+    expect(linkedReplacement).toMatchObject({ issueId: issue.id, projectId: repositoryId, iid: blockedById, state: 'running' });
+    expect(calls.splice(0).map(url => url.pathname)).toEqual([projectRead, pipelineRead(blockedById)]);
+    await expect(addForm).toHaveCount(0);
+    const reviewReplacement = button(outcome, `최신 파이프라인 #${blockedById} 상태 검토`);
+    await expect(reviewReplacement).toBeFocused();
+    replacementCompleted = true;
+    finishedAt = new Date().toISOString();
+    const replacementReview = await refreshActivity(page, reviewReplacement, reviewPath(linkedReplacement));
+    expect(reviewedQueries(blockedById, blockedRef)).toEqual([]);
+    expect(replacementReview.statusReview).toMatchObject({ kind: 'suggestion',
+      suggestion: { issueId: issue.id, toStatus: 'done', evidence: { link: { id: linkedReplacement.id } } },
+    });
+    await expect(outcome).toBeFocused();
+    await expect(status).toHaveValue(issue.status);
+    await expect(title).toHaveValue('아직 저장하지 않은 최신 파이프라인 검토 제목');
+    await expect(comment).toHaveValue('보내지 않은 파이프라인 검토 댓글');
+    expect((await workspace()).issues.find(row => row.id === issue.id)).toEqual(issue);
+    expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
+
     const latest = await refreshActivity(page, button(row(readyId), selectedReviewAction), reviewPath(ready));
     expect(reviewedQueries(readyId, readyRef)).toEqual([pipelineRead(taggedId)]);
     await expect(replacement).toHaveCount(0);
@@ -419,7 +452,7 @@ test('360px에서 같은 실행 계열의 최신 파이프라인을 확인하고
     await expect(comment).toHaveValue('보내지 않은 파이프라인 검토 댓글');
     const after = await workspace();
     expect(after.issues.find(row => row.id === issue.id)).toEqual(issue);
-    expect(after.gitlabLinks.filter(row => row.issueId === issue.id).map(link => link.iid).sort()).toEqual([blockedId, readyId]);
+    expect(after.gitlabLinks.filter(row => row.issueId === issue.id).map(link => link.iid).sort()).toEqual([blockedId, readyId, blockedById]);
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
   } finally {
     try {

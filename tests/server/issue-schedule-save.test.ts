@@ -138,6 +138,49 @@ test('ticket schedule preview sees linked work and ordinary save commits dates, 
   assert.ok(entry?.changes.some(change => change.field === 'dueDate' && change.after.value === nextDates.dueDate));
 });
 
+test('ticket save replays the current result without a second write, and fences native restore', async t => {
+  const f = await fixture(t);
+  const ticket = await f.createIssue('티켓 저장 결과를 다시 확인할 업무');
+  const another = await f.createIssue('다른 티켓');
+  const before = await f.workspace();
+  const changes = { ...dates(ticket), endDate: '2026-11-23' };
+  const review = await f.review(ticket, changes);
+  const input = { expectedVersion: ticket.version, requestId: randomUUID(), expectedRestoreGeneration: before.restoreGeneration,
+    schedulePreviewId: review.previewId, ...changes, title: '검토한 업무를 저장' };
+  const path = issuePath(ticket);
+  const db = new DatabaseSync(join(f.dataDir, 'teamspace.sqlite'));
+  try {
+    db.exec(`CREATE TRIGGER fail_ticket_save_receipt BEFORE INSERT ON issue_save_requests
+      BEGIN SELECT RAISE(ABORT,'synthetic ticket save receipt failure'); END`);
+    await f.call(500, path, 'PATCH', input);
+    assert.deepEqual(await f.workspace(), before);
+  } finally {
+    db.exec('DROP TRIGGER IF EXISTS fail_ticket_save_receipt');
+    db.close();
+  }
+
+  const [first, replay] = await Promise.all([f.call<Issue>(200, path, 'PATCH', input), f.call<Issue>(200, path, 'PATCH', input)]);
+  assert.deepEqual(replay, first);
+  assert.equal(first.version, ticket.version + 1);
+  assert.equal(first.endDate, changes.endDate);
+  await f.call(409, path, 'PATCH', { ...input, title: '다른 입력' });
+  await f.call(409, issuePath(another), 'PATCH', input);
+  await f.call(409, path, 'PATCH', input, { 'X-Actor-Id': otherActorId });
+  const current = await f.edit(first, { description: '다음 버전에서 추가한 설명' }, otherActorId);
+  assert.deepEqual(await f.call<Issue>(200, path, 'PATCH', input), current);
+  const history = await f.call<IssueChangeHistoryPage>(200, `${path}/change-history`);
+  assert.deepEqual(history.entries.map(entry => entry.issueVersion), [current.version, first.version]);
+
+  const backup = await f.call<WorkspaceSnapshot>(200, '/export');
+  await f.call(200, '/import', 'POST', { data: backup });
+  const restored = await f.workspace();
+  assert.notEqual(restored.restoreGeneration, before.restoreGeneration);
+  await f.call(409, path, 'PATCH', input);
+  const restoredIssue = restored.issues.find(issue => issue.id === ticket.id)!;
+  await f.call(409, path, 'PATCH', { ...input, expectedRestoreGeneration: restored.restoreGeneration, expectedVersion: restoredIssue.version });
+  assert.deepEqual((await f.workspace()).issues.find(issue => issue.id === ticket.id), restoredIssue);
+});
+
 test('ticket schedule save rejects drift in an unedited predecessor, new edge and cross-project successor calendar', async t => {
   const f = await fixture(t);
   const destination = await f.project('OTHER', '후행 프로젝트');

@@ -27,7 +27,7 @@ import { IssueWorklogs } from './IssueWorklogs';
 import { TimeReservations } from './TimeReservations';
 import { IssueGitlabActivity } from './IssueGitlabActivity';
 import { IssueDescriptionEditor } from './IssueDescriptionEditor';
-import { IssueScheduleSaveReview } from './IssueScheduleSaveReview';
+import { IssueSaveRecovery, IssueScheduleSaveReview } from './IssueScheduleSaveReview';
 import { IssueAutomationHistory } from './IssueAutomationHistory';
 import { IssueChangeHistory } from './IssueChangeHistory';
 import { IssueJiraStatusHistory } from './IssueJiraStatusHistory';
@@ -42,6 +42,7 @@ import { AtlassianLinks } from './AtlassianLinks';
 import type { GitlabIssueReviewSelection, IssueReviewDirection, IssueReviewPosition } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
+import { isDefiniteIssueCreationFailure } from '../lib/issue-creation';
 import { useScheduleUndo } from './schedule-undo';
 import { dependencyLabel, errorMessage } from './schedule-utils';
 import { GanttDependencyModal, type DependencyInput, type RelatedIssueDirection } from './GanttDependencyModal';
@@ -71,6 +72,7 @@ type IssueScheduleSaveInput = {
   status?: Issue['status'];
 };
 type ScheduleSaveReview = { preview: SchedulePreview; input: IssueScheduleSaveInput; staleMessage?: string };
+type IssueSaveAttempt = { body: string; expectedVersion: number; review: ScheduleSaveReview | null; suggestion: GitlabStatusSuggestion | null };
 type ScheduleDraftFields = 'none' | 'due-date' | 'all';
 type TicketTeamFollowUp = Omit<TeamFollowUpSelection, 'source'> & {
   source: Issue;
@@ -220,6 +222,7 @@ function IssuePanelContent(props: IssuePanelProps) {
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [scheduleSaveReview, setScheduleSaveReview] = useState<ScheduleSaveReview | null>(null);
+  const [saveRecovery, setSaveRecovery] = useState<IssueSaveAttempt | null>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
   const scheduleSaveReturnFocus = useRef(false);
   const closeScheduleSaveReview = useCallback((restoreFocus = true) => {
@@ -350,7 +353,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setLinkedDocumentCreation(false);
     if (restoreFocus) requestAnimationFrame(() => linkedDocumentOpener.current?.focus({ preventScroll: true }));
   }, [trackLinkedDocumentDraft]);
-  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || teamFollowUp || projectMove || linkedDocumentCreation || scheduleSaveReview);
+  const nestedModalOpen = Boolean(childCreation || cloneCreation || scheduleIssueCreation || blockedIssueCreation || dependencyEditor || rowScheduleEdit || teamFollowUp || projectMove || linkedDocumentCreation || scheduleSaveReview || saveRecovery);
   const [dependencyBusy, setDependencyBusy] = useState(false);
   const [jiraDeadlinePending, setJiraDeadlinePending] = useState(false);
   const jiraDeadlinePendingRef = useRef(false);
@@ -496,17 +499,18 @@ function IssuePanelContent(props: IssuePanelProps) {
         return;
       }
       if (moveGuard.dirty && (hasUnsavedFields || childNames.length)) childNames.push(moveGuard.uncertain ? '프로젝트 이동 결과 확인' : '프로젝트 이동 설정');
-      if (hasUnsavedFields || childNames.length || documentGuard.uncertain || followUpGuard.outcomeUnknown) {
+      if (hasUnsavedFields || childNames.length || documentGuard.uncertain || followUpGuard.outcomeUnknown || saveRecovery) {
         const hasUnsavedInput = hasUnsavedFields || childNames.length > 0;
         const unsavedNames = [...(dirtyRef.current ? ['업무 변경사항'] : []), ...(unstoredComment.current ? ['보관하지 못한 댓글'] : []), ...childNames];
         const draftMessage = `저장하지 않은 ${unsavedNames.join('·')}이 있습니다. 내용을 버리고 이동할까요?`;
-        const unconfirmedSave = documentGuard.uncertain ? '연결 문서가 이미 저장됐을 수 있습니다.'
+        const unconfirmedSave = saveRecovery ? '업무 변경이 이미 저장됐을 수 있습니다.' : documentGuard.uncertain ? '연결 문서가 이미 저장됐을 수 있습니다.'
           : followUpGuard.outcomeUnknown ? '프로젝트 간 일정이 이미 저장됐을 수 있습니다.' : '';
         const message = unconfirmedSave ? `${unconfirmedSave} ${hasUnsavedInput ? draftMessage : '저장 결과 확인을 닫고 이동할까요?'}` : draftMessage;
         if (!window.confirm(message)) event.preventDefault();
         else afterAcceptedNavigation(event, () => {
           for (const value of childDrafts) value?.discard();
           setDependencyEditor(null);
+          setSaveRecovery(null);
           dirtyRef.current = false;
           setDraft(issue); setBaseDraft(issue); setLabels(issue?.labels.join(', ') || '');
           setStagedGitlabStatus(null);
@@ -522,7 +526,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       afterAcceptedNavigation(event, discardCommentEdit);
     };
     const leave = (event: BeforeUnloadEvent) => {
-      if (!dirtyRef.current && !unstoredComment.current && !savingRef.current && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
+      if (!dirtyRef.current && !unstoredComment.current && !savingRef.current && !saveRecovery && !commentingRef.current && !linkingRef.current && !jiraDeadlinePendingRef.current &&
           !isCommentEditPending() && !hasCommentEditDraft() && !childDraft.current && !gitlabDraft.current && !dependencyDraftRef.current && !dependencyBusyRef.current &&
           !rowScheduleGuard.current.dirty && !rowScheduleGuard.current.pending && !teamFollowUpGuard.current.dirty && !teamFollowUpGuard.current.pending &&
           !teamFollowUpGuard.current.outcomeUnknown && !projectMoveGuard.current.dirty && !projectMoveGuard.current.pending &&
@@ -532,7 +536,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     window.addEventListener('teamspace:navigate', navigate); window.addEventListener('beforeunload', leave);
     return () => { window.removeEventListener('teamspace:navigate', navigate); window.removeEventListener('beforeunload', leave); };
   }, [issue, notify, tab, projectMove, rowScheduleEdit, teamFollowUp, linkedDocumentCreation, closeProjectMove, closeRowScheduleEdit, closeTeamFollowUp,
-    closeLinkedDocumentCreation, scheduleSaveReview, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending, storeCommentDraft]);
+    closeLinkedDocumentCreation, scheduleSaveReview, saveRecovery, closeScheduleSaveReview, discardCommentEdit, hasCommentEditDraft, isCommentEditPending, storeCommentDraft]);
   useEffect(() => {
     let activeRequest: AbortController | undefined;
     const loadComments = () => {
@@ -824,10 +828,74 @@ function IssuePanelContent(props: IssuePanelProps) {
   function updatePlanning(kind: 'cycle' | 'module' | 'release', id: string | null) { setDraft(previous => previous ? { ...previous, [`${kind}Id`]: id, [kind]: data.planningItems?.find(item => item.id === id)?.name || null } : previous); }
   function submitIssue(event: FormEvent) {
     event.preventDefault();
-    if (!scheduleSaveReview) void save();
+    if (!scheduleSaveReview && !saveRecovery) void save();
+  }
+  async function sendIssueSave(body: string, expectedVersion: number) {
+    const saved = await api<Issue>(`/issues/${encodeURIComponent(issueId)}`, {
+      method: 'PATCH', body, headers: { 'X-Actor-Id': props.actorId },
+    });
+    if (!saved || saved.id !== issueId || typeof saved.title !== 'string' || !Array.isArray(saved.labels) ||
+        !Number.isSafeInteger(saved.version) || saved.version <= expectedVersion) throw new Error('업무 저장 응답을 확인할 수 없습니다.');
+    return saved;
+  }
+  async function acceptIssueSave(updated: Issue, recovering = false) {
+    if (scheduleSaveReview) closeScheduleSaveReview();
+    if (recovering) scheduleSaveReturnFocus.current = true;
+    setSaveRecovery(null);
+    setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
+    setStagedGitlabStatus(null);
+    try {
+      await refresh();
+      notify(recovering ? `${updated.key} 저장 결과를 확인했습니다.` : `${updated.key} 변경사항을 저장했습니다.`);
+    } catch {
+      setError({ message: '업무를 저장했습니다. 목록을 새로고침해 최신 내용을 확인해 주세요.' });
+    }
+  }
+  async function reportSaveFailure(err: unknown, review: ScheduleSaveReview | null, suggestion: GitlabStatusSuggestion | null) {
+    if (isStaleScheduleSaveReview(err) && review) {
+      setScheduleSaveReview({ ...review, staleMessage: err.message });
+      await refresh().catch(() => undefined);
+      return;
+    }
+    if (scheduleSaveReview) closeScheduleSaveReview();
+    if (suggestion && isStaleGitlabStatusSuggestion(err)) {
+      setStagedGitlabStatus(null);
+      setRejectedGitlabStatusToken(suggestion.token);
+      setDraft(current => current?.status === suggestion.toStatus ? { ...current, status: suggestion.fromStatus } : current);
+      setError({ message: err.message });
+      await refresh().catch(() => undefined);
+      return;
+    }
+    const openBlockers = isOpenBlockerError(err);
+    setError({ message: errorMessage(err), openBlockers });
+    if (openBlockers) {
+      setRelationsRefreshKey(key => key + 1);
+      void refresh().catch(() => undefined);
+    }
+    if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); }
+  }
+  async function retryIssueSave() {
+    if (!saveRecovery || savingRef.current) return;
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      await acceptIssueSave(await sendIssueSave(saveRecovery.body, saveRecovery.expectedVersion), true);
+    } catch (err) {
+      if (isDefiniteIssueCreationFailure(err, true)) {
+        setSaveRecovery(null);
+        scheduleSaveReturnFocus.current = true;
+        await reportSaveFailure(err, saveRecovery.review, saveRecovery.suggestion);
+      }
+    } finally { savingRef.current = false; setSaving(false); }
+  }
+  function closeSaveRecovery() {
+    if (savingRef.current || !window.confirm('업무 변경이 이미 저장됐을 수 있습니다. 결과 확인을 닫을까요?')) return;
+    setSaveRecovery(null);
+    scheduleSaveReturnFocus.current = true;
+    void refresh().catch(() => setError({ message: '현재 업무를 불러오지 못했습니다. 저장하기 전에 최신 업무를 확인해 주세요.' }));
   }
   async function save(mode: 'save' | 'review-again' | 'confirm' = 'save') {
-    if (!draft || !issue || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return;
+    if (!draft || !issue || saveRecovery || savingRef.current || dependencyBusyRef.current || childDraft.current?.pending) return;
     const { descriptionFormat, reporterId, dueDate, ...fields } = editableIssue(draft, labels);
     const changedFormat = descriptionFormat !== (baseDraft?.descriptionFormat ?? 'plain');
     const changedDueDate = (dueDate ?? null) !== (baseDraft?.dueDate ?? null);
@@ -846,6 +914,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     setSaving(true);
     setError(null);
     const suggestion = stagedGitlabStatus?.toStatus === draft.status ? stagedGitlabStatus : null;
+    let attempt: IssueSaveAttempt | null = null;
     try {
       if (changedDates && mode !== 'confirm') {
         preview = await post<SchedulePreview>(`/issues/${issueId}/schedule-save-preview`, input);
@@ -862,38 +931,23 @@ function IssuePanelContent(props: IssuePanelProps) {
         closeScheduleSaveReview();
         return;
       }
-      const updated = await patch<Issue>(`/issues/${issueId}`, { expectedVersion: draft.version, ...fields,
+      const generation = data.restoreGeneration;
+      const body = JSON.stringify({ expectedVersion: draft.version, ...fields,
+        ...(generation ? { requestId: newRequestId(), expectedRestoreGeneration: generation } : {}),
         ...(changedDates && preview?.previewId ? { schedulePreviewId: preview.previewId } : {}),
         ...(suggestion ? { gitlabStatusSuggestionToken: suggestion.token } : {}),
         ...(reporterId !== undefined && reporterId !== baseDraft?.reporterId ? { reporterId } : {}),
         ...(changedDueDate ? { dueDate: dueDate ?? null } : {}),
         ...(changedFormat ? { descriptionFormat } : {}) });
-      if (scheduleSaveReview) closeScheduleSaveReview();
-      setDraft(updated); setBaseDraft(updated); setLabels(updated.labels.join(', ')); setConflict(false); dirtyRef.current = false;
-      setStagedGitlabStatus(null);
-      await refresh(); notify(`${issue.key} 변경사항을 저장했습니다.`);
+      if (generation) attempt = { body, expectedVersion: draft.version, review: preview ? { preview, input } : null, suggestion };
+      await acceptIssueSave(await sendIssueSave(body, draft.version));
     } catch (err) {
-      if (isStaleScheduleSaveReview(err) && preview) {
-        setScheduleSaveReview({ preview, input, staleMessage: err.message });
-        await refresh().catch(() => undefined);
+      if (attempt && !isDefiniteIssueCreationFailure(err)) {
+        if (scheduleSaveReview) closeScheduleSaveReview(false);
+        setSaveRecovery(attempt);
         return;
       }
-      if (scheduleSaveReview) closeScheduleSaveReview();
-      if (suggestion && isStaleGitlabStatusSuggestion(err)) {
-        setStagedGitlabStatus(null);
-        setRejectedGitlabStatusToken(suggestion.token);
-        setDraft(current => current?.status === suggestion.toStatus ? { ...current, status: suggestion.fromStatus } : current);
-        setError({ message: err.message });
-        await refresh().catch(() => undefined);
-        return;
-      }
-      const openBlockers = isOpenBlockerError(err);
-      setError({ message: errorMessage(err), openBlockers });
-      if (openBlockers) {
-        setRelationsRefreshKey(key => key + 1);
-        void refresh().catch(() => undefined);
-      }
-      if (err instanceof ApiError && err.status === 409) { setConflict(true); await refresh().catch(() => undefined); }
+      await reportSaveFailure(err, preview ? { preview, input } : null, suggestion);
     } finally { savingRef.current = false; setSaving(false); }
   }
   function reflectDuplicateClosure(updated: Issue, observed = false) {
@@ -1463,6 +1517,7 @@ function IssuePanelContent(props: IssuePanelProps) {
     {scheduleSaveReview && <IssueScheduleSaveReview preview={scheduleSaveReview.preview} issues={data.issues} issueId={issueId}
       busy={saving} staleMessage={scheduleSaveReview.staleMessage} onClose={() => closeScheduleSaveReview()}
       onReviewAgain={() => void save('review-again')} onSave={() => void save('confirm')} />}
+    {saveRecovery && <IssueSaveRecovery busy={saving} onClose={closeSaveRecovery} onRetry={() => void retryIssueSave()} />}
     {childCreation && <NewIssueModal {...props} parentIssue={childCreation} onClose={closeChildCreation} />}
     {cloneCreation && <NewIssueModal {...props} cloneIssue={cloneCreation} onClose={closeCloneCreation}
       onCloneCreated={showCreatedClone} refresh={refreshIssueRelations} />}

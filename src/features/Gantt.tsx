@@ -112,7 +112,7 @@ function recoverableDates(issue: Issue, draft: StoredGanttDateDraft | undefined)
   if (draft.version === issue.version && (draft.startDate !== issue.startDate || draft.endDate !== issue.endDate)) return undefined;
   return draft;
 }
-function draftDatesAreSaved(issue: Issue, draft: StoredGanttDateDraft) {
+function draftDatesAreSaved(issue: Issue, draft: Pick<StoredGanttDateDraft, 'version' | 'startDate' | 'endDate' | 'draftStart' | 'draftEnd'>) {
   return issue.version > draft.version &&
     (draft.draftStart === draft.startDate || issue.startDate === draft.draftStart) &&
     (draft.draftEnd === draft.endDate || issue.endDate === draft.draftEnd);
@@ -320,7 +320,7 @@ function ProjectGantt(props: GanttProps) {
   const [busy, setBusy] = useState(false);
   const [scheduleWarnings, setScheduleWarnings] = useState<string[]>([]);
   const undoScope = useMemo<ScheduleUndoScope>(() => allProjects ? { kind: 'team' } : { kind: 'project', id: projectId }, [allProjects, projectId]);
-  const { undoId, remember: rememberUndo, undo: undoScheduleChange } = useScheduleUndo(undoScope, props.actorId, data.restoreGeneration);
+  const { undoId, remember: rememberUndo, reload: reloadScheduleUndo, undo: undoScheduleChange } = useScheduleUndo(undoScope, props.actorId, data.restoreGeneration);
   const [days, setDays] = useState(5);
   const [workingDays, setWorkingDays] = useState(true);
   const [shiftSuccessors, setShiftSuccessors] = useState(false);
@@ -484,8 +484,9 @@ function ProjectGantt(props: GanttProps) {
       restoreViewport.current = anchor;
       setRefreshCount(count => count + 1);
     }
+    if (!signal.aborted && mode === 'manual' && result !== 'skipped') void reloadScheduleUndo();
     return result;
-  }, [refreshGantt]);
+  }, [refreshGantt, reloadScheduleUndo]);
   const { requestMode, feedback: refreshFeedback, manualRefresh, reconsider } = useWorkspaceRefresh(refreshWithViewport, refreshPaused, hasRefreshInteraction);
   useLayoutEffect(() => {
     if (!inlineDateFocused || document.activeElement?.matches('input[data-schedule-edge]')) return;
@@ -608,6 +609,11 @@ function ProjectGantt(props: GanttProps) {
     storeInlineDates();
   }, [storeInlineDates]);
   const markBusy = useCallback((value: boolean) => { busyRef.current = value; setBusy(value); }, []);
+  const refreshAfterUnknownSchedule = useCallback(async () => {
+    try { await refresh(); }
+    catch { notify('간트 목록을 불러오지 못했습니다. 간트 새로고침으로 다시 확인해 주세요.', 'error'); }
+    await reloadScheduleUndo();
+  }, [notify, refresh, reloadScheduleUndo]);
   useEffect(() => {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
@@ -656,7 +662,8 @@ function ProjectGantt(props: GanttProps) {
             if (discardBulkDates) setBulkDateSelection(null);
             setRowScheduleEdit(null);
             setDraftEpoch(value => value + 1);
-            if (awaitingCreationResult || awaitingLinkResult || awaitingPasteResult || awaitingFollowUpResult) {
+            if (awaitingLinkResult || awaitingScheduleResult) void refreshAfterUnknownSchedule();
+            else if (awaitingCreationResult) {
               void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
             }
           });
@@ -695,7 +702,7 @@ function ProjectGantt(props: GanttProps) {
       window.removeEventListener('beforeunload', unload);
       window.removeEventListener('teamspace:workspace-imported', importReset);
     };
-  }, [notify, refresh, trackDraft, manualProblem?.kind, clearInlineDates, dateStorageError]);
+  }, [notify, refresh, refreshAfterUnknownSchedule, trackDraft, manualProblem?.kind, clearInlineDates, dateStorageError]);
   function canLeave() { return window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true })); }
   function closeTeamBlockers() {
     const draft = draftsRef.current.get(TEAM_BLOCKER_DRAFT);
@@ -2198,13 +2205,17 @@ function ProjectGantt(props: GanttProps) {
       restoreShiftFocus(datePreviewFocusTarget);
     } else focusAfterDatePicking(datePreviewFocusTarget);
   }
-  function closePreview() {
+  async function closePreview() {
     const unresolved = manualProblem?.kind === 'uncertain' || manualProblem?.kind === 'unavailable';
     if (unresolved && !window.confirm('일정이 이미 저장됐을 수 있습니다. 적용 결과 확인을 닫을까요?')) return;
     setManualReview(null);
     setManualProblem(null);
+    if (unresolved) {
+      markBusy(true);
+      try { await refreshAfterUnknownSchedule(); }
+      finally { markBusy(false); }
+    }
     restoreDatePreviewFocus();
-    if (unresolved) void refresh().catch(() => undefined);
   }
   function startDatePicking(issue: Issue, opener: HTMLButtonElement) {
     if (busyRef.current) return;
@@ -3470,7 +3481,10 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
   const dirty = start !== (source.startDate || '') || end !== (source.endDate || '');
   const editing = dirty || incomplete;
   const conflict = issue.version > source.version && editing;
-  if (issue.version > source.version && !editing && !pending) {
+  const confirmedDraft = dirty && !incomplete && draftDatesAreSaved(issue, {
+    version: source.version, startDate: source.startDate, endDate: source.endDate, draftStart: start || null, draftEnd: end || null,
+  });
+  if (issue.version > source.version && !pending && (!editing || confirmedDraft)) {
     setSource(issue);
     setStart(inlineDateInput(issue.startDate));
     setEnd(inlineDateInput(issue.endDate));

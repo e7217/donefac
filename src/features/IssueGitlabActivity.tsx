@@ -30,7 +30,8 @@ type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
   canPrepareStatusSuggestion: (suggestion: GitlabStatusSuggestion) => boolean;
   onPrepareStatusSuggestion: (suggestion: GitlabStatusSuggestion) => void;
 };
-type Draft = { repositoryId: string; url: string; existing?: GitlabLink };
+type LinkFields = { repositoryId: string; url: string };
+type Draft = LinkFields & { existing?: GitlabLink; prefill?: LinkFields };
 type LinkView = { source: readonly GitlabLink[]; rows: readonly GitlabLink[] };
 type RefreshFailure = GitlabIssueRefreshResult['failures'][number] & { label: string };
 type CheckingFeedback = { kind: 'checking'; linkId?: string; deploymentKey?: string; action: GitlabLinkedStatusAction };
@@ -148,6 +149,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
   const pipelineReplacement = currentFeedback?.pipelineReview?.superseded === 1 ? currentFeedback.pipelineReview.replacement : undefined;
   const replacementUrl = pipelineReplacement && reviewedPipeline && visibleLinks.some(link => samePipelineRead(link, reviewedPipeline))
     ? replacementPipelineUrl(pipelineReplacement, reviewedPipeline) : null;
+  const replacementLink = pipelineReplacement && replacementUrl && visibleLinks.find(link => link.kind === 'pipeline' &&
+    link.issueId === issueId && link.projectId === pipelineReplacement.repositoryId &&
+    gitlabPipelineLinkIdentity(link)?.objectId === pipelineReplacement.pipelineId &&
+    gitlabActivityUrl(link.webUrl, 'pipeline')?.href === replacementUrl.href);
   const [busy, setBusy] = useState(false);
   const pending = useRef(false);
   const settingsRequest = useRef<AbortController | null>(null);
@@ -184,9 +189,10 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     setBranchDraft({ dirty: false, pending: false });
     setActionError('');
   }, []);
-  const defaultRepository = draft?.existing?.projectId ?? (settings?.projectIds.length === 1 ? settings.projectIds[0] : undefined);
-  const dirty = Boolean(draft && (draft.url.trim() !== (draft.existing?.webUrl ?? '') ||
-    (draft.repositoryId && Number(draft.repositoryId) !== defaultRepository)));
+  const onlyRepository = settings?.projectIds.length === 1 ? String(settings.projectIds[0]) : '';
+  const initialRepository = draft?.existing ? String(draft.existing.projectId) : draft?.prefill?.repositoryId ?? onlyRepository;
+  const initialAddress = draft?.existing?.webUrl ?? draft?.prefill?.url ?? '';
+  const dirty = Boolean(draft && (draft.url.trim() !== initialAddress || (draft.repositoryId && draft.repositoryId !== initialRepository)));
   useLayoutEffect(() => {
     onDraftChange(dirty || branchDraft.dirty, busy || branchDraft.pending, discard);
     return () => onDraftChange(false, false, discard);
@@ -235,12 +241,12 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
     discard();
   }
 
-  function showEditor(trigger: HTMLButtonElement, link?: GitlabLink) {
+  function showEditor(trigger: HTMLButtonElement, initial: Draft = { repositoryId: '', url: '' }) {
     opener.current = trigger;
     setActionError('');
     setUnlinkTarget(null);
-    setDraft({ repositoryId: link ? String(link.projectId) : '', url: link?.webUrl ?? '', existing: link });
-    void readSettings(!link);
+    setDraft(initial);
+    void readSettings(!initial.repositoryId);
     requestAnimationFrame(() => linkInput.current?.focus());
   }
 
@@ -500,6 +506,15 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         같은 실행 계열에 더 최신 GitLab 파이프라인이 있습니다. 최신 실행에서 상태를 다시 검토해 주세요.
       </p>}
       {pipelineReplacement && replacementUrl && <div className="gitlab-activity-actions">
+        <button className="btn" type="button" disabled={controlsDisabled || actionOpen} onClick={event => {
+          if (replacementLink) void checkGitlabStatus(event.currentTarget, replacementLink, 'status-review');
+          else {
+            const prefill = { repositoryId: String(pipelineReplacement.repositoryId), url: replacementUrl.href };
+            showEditor(event.currentTarget, { ...prefill, prefill });
+          }
+        }}>
+          최신 파이프라인 #{pipelineReplacement.pipelineId} {replacementLink ? '상태 검토' : '연결'}
+        </button>
         <a className="btn btn-ghost" href={replacementUrl.href} target="_blank" rel="noopener noreferrer">
           GitLab에서 더 최신 파이프라인 #{pipelineReplacement.pipelineId} 열기 <ExternalLink size={13} aria-hidden="true" />
         </a>
@@ -564,7 +579,9 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,
         checkStatus: (link, trigger) => void checkGitlabStatus(trigger, link),
         reviewStatus: (link, trigger) => void checkGitlabStatus(trigger, link, 'status-review') }}
-      manualActions={{ disabled: controlsDisabled || actionOpen, verify: (link, trigger) => showEditor(trigger, link), unlink: showUnlink,
+      manualActions={{ disabled: controlsDisabled || actionOpen, verify: (link, trigger) => showEditor(trigger, {
+        repositoryId: String(link.projectId), url: link.webUrl, existing: link,
+      }), unlink: showUnlink,
         hasMergeRequest: (branch, mr) => visibleLinks.some(link => matchesBranchMergeRequestLink(link, branch, mr)),
         attachMergeRequest: attachBranchMergeRequest,
         findMergeRequestPipeline: (mr, pipeline) => visibleLinks.find(link => matchesMergeRequestPipelineLink(link, mr, pipeline)),

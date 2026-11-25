@@ -78,6 +78,73 @@ async function expectFitsMobile(dialog: Locator) {
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
 }
 
+test('360px 내장 템플릿의 문서 생성 응답을 잃어도 한 번만 만들고 목록을 다시 연다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [actor] } = await workspace(request);
+  const prefix = `내장 문서 생성 ${randomUUID().slice(0, 8)}`;
+  const title = `${prefix} 회의록`;
+  const parent = await createDocument(request, project.id, `${prefix} 상위 문서`);
+  const attempts: { status: number; body: string | null; actor: string | undefined }[] = [];
+  let failRefresh = false;
+  const createdDocuments = () => workspace(request).then(snapshot => snapshot.documents.filter(document => document.title === title));
+
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${project.id}/documents/${parent.id}`);
+    const { dialog, title: titleInput, submit } = await openNew(page);
+    await dialog.getByRole('button', { name: /회의록/u }).click();
+    await titleInput.fill(title);
+    const parentInput = dialog.getByRole('combobox', { name: '상위 문서', exact: true });
+    await parentInput.selectOption(parent.id);
+
+    await page.route('**/api/workspace', async route => {
+      if (!failRefresh) return route.continue();
+      failRefresh = false;
+      await route.fulfill({ status: 503, json: { error: '목록 응답을 잃었습니다.' } });
+    });
+    await page.route('**/api/documents', async route => {
+      const request = route.request();
+      if (request.method() !== 'POST' || request.postDataJSON()?.title !== title) return route.continue();
+      const response = await route.fetch();
+      attempts.push({ status: response.status(), body: request.postData(), actor: request.headers()['x-actor-id'] });
+      if (attempts.length === 1) return route.abort('failed');
+      if (attempts.length === 2) failRefresh = true;
+      await route.fulfill({ response });
+    });
+
+    await submit.click();
+    const retry = dialog.getByRole('button', { name: /^(문서 만들기|저장 다시 확인)$/u });
+    await expect(retry).toBeEnabled();
+    const first = await createdDocuments();
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject({ version: 1, projectId: project.id, parentId: parent.id, authorId: actor.id });
+    expect(first[0].plainText).toContain('회의 정보');
+    await retry.click();
+    await expect.poll(() => attempts.length).toBe(2);
+    expect(await createdDocuments()).toEqual(first);
+    expect(attempts.map(attempt => attempt.status)).toEqual([201, 200]);
+    expect(attempts[1].body).toBe(attempts[0].body);
+    expect(attempts.map(attempt => attempt.actor)).toEqual([actor.id, actor.id]);
+
+    const reopen = dialog.getByRole('button', { name: '저장한 문서 열기', exact: true });
+    await expect(reopen).toBeFocused();
+    await expect(dialog.getByRole('alert')).toContainText('목록');
+    await expect(titleInput).toBeDisabled();
+    await expect(parentInput).toBeDisabled();
+    await reopen.click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(new RegExp(`/documents/${first[0].id}$`));
+    await expect(page.locator('.docs-prose')).toContainText('회의 정보');
+    expect(attempts).toHaveLength(2);
+    expect(await createdDocuments()).toEqual(first);
+    const revisions = await json<DocRevision[]>(await request.get(`/api/documents/${first[0].id}/revisions`));
+    expect(revisions.map(revision => revision.version)).toEqual([1]);
+  } finally {
+    await cleanup(request, prefix, project.id);
+  }
+});
+
 test('360px에서 원본이 삭제된 템플릿의 본문 이미지와 첨부를 열 수 있다', async ({ page, request }) => {
   await page.setViewportSize({ width: 360, height: 820 });
   const { projects: [project], users: [actor] } = await workspace(request);

@@ -282,6 +282,51 @@ for (const { title, inline } of [
   });
 }
 
+test('360px 간트에서 결과 확인을 닫아도 이미 저장한 일정을 다시 적용하지 않고 되돌린다', async ({ page, request }) => {
+  const fixture = await makeFixture(request);
+  try {
+    const issue = await fixture.create('저장 결과 확인을 닫을 업무', 1, 4);
+    const proposedEnd = fixture.date(6);
+    await page.setViewportSize({ width: 360, height: 820 });
+    const { chart, dialog, undo } = await openChart(page, issue);
+    const end = chart.getByLabel(`${issue.key} 종료일`, { exact: true });
+    await expect(undo).toBeDisabled();
+
+    let committed: SchedulePasteApplyResult | undefined;
+    const applyRequests: unknown[] = [];
+    page.on('request', sent => {
+      if (sent.method() === 'POST' && new URL(sent.url()).pathname === applyPath) applyRequests.push(sent.postDataJSON());
+    });
+    await page.route(`**${applyPath}`, async route => {
+      committed = await readJson<SchedulePasteApplyResult>(await route.fetch());
+      await route.abort('failed');
+    }, { times: 1 });
+    await end.fill(proposedEnd);
+    await end.press('Enter');
+    await expect(dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true })).toBeEnabled();
+    expect(await fixture.stored()).toEqual([{ ...schedule(issue), endDate: proposedEnd, version: issue.version + 1 }]);
+    expect(committed?.undoId).toBeTruthy();
+
+    const cancel = dialog.getByRole('button', { name: '취소', exact: true });
+    await Promise.all([page.waitForEvent('dialog').then(prompt => prompt.dismiss()), cancel.click()]);
+    await expect(dialog).toBeVisible();
+    await Promise.all([page.waitForEvent('dialog').then(prompt => prompt.accept()), cancel.click()]);
+    await expect(dialog).toHaveCount(0);
+    await expect(end).toHaveValue(proposedEnd);
+    await expect(undo).toBeEnabled();
+    await expect(chart.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    expect(applyRequests).toHaveLength(1);
+
+    const reverted = nextPost(page, undoPath);
+    await undo.click();
+    const response = await reverted;
+    expect(response.request().postDataJSON()).toEqual({ undoId: committed?.undoId });
+    await readJson(response);
+    await expect(end).toHaveValue(issue.endDate!);
+    expect(await fixture.stored()).toEqual([{ ...schedule(issue), version: issue.version + 2 }]);
+  } finally { await fixture.close(); }
+});
+
 test('360px 간트 일정 완성의 저장 응답이 끊겨도 결과를 확인하고 원래 있던 날짜만 남긴다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const fixture = await makeFixture(request);

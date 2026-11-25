@@ -23,7 +23,7 @@ type UndoSession = {
   retry: boolean;
   lookup: AbortController | null;
   request: AbortController | null;
-  load: () => void;
+  load: () => Promise<void> | undefined;
 };
 
 export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string, restoreGeneration: string | null | undefined) {
@@ -45,7 +45,7 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
       active.lookup?.abort();
       const lookup = new AbortController();
       active.lookup = lookup;
-      void api<{ undo: ScheduleUndoInfo | null }>(`/schedule/undo/latest?${params}`, {
+      return api<{ undo: ScheduleUndoInfo | null }>(`/schedule/undo/latest?${params}`, {
         headers: scheduleUndoHeaders(null, actorId), cache: 'no-store',
         signal: AbortSignal.any([lookup.signal, AbortSignal.timeout(REQUEST_TIMEOUT)]),
       }).then(({ undo }) => {
@@ -58,7 +58,7 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
       }).finally(() => { if (active.lookup === lookup) active.lookup = null; });
     }
 
-    load();
+    void load();
     window.addEventListener('focus', load);
     return () => {
       window.removeEventListener('focus', load);
@@ -67,6 +67,11 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
       if (session.current === active) session.current = null;
     };
   }, [actorId, key, kind, scopeId]);
+
+  const reload = useCallback(async () => {
+    const active = session.current;
+    if (active && active.key === key) await active.load();
+  }, [key]);
 
   const remember = useCallback((undoId: string) => {
     const active = session.current;
@@ -120,9 +125,9 @@ export function useScheduleUndo(scope: ScheduleUndoScope | null, actorId: string
       throw new Error('되돌리기 결과를 확인하지 못했습니다. 되돌리기를 다시 누르면 같은 작업을 확인합니다.');
     } finally {
       active.request = null;
-      if (reload) active.load();
+      if (reload) void active.load();
     }
   }, [actorId, key, kind, scopeId]);
 
-  return { undoId: selection?.key === key ? selection.undoId : null, remember, undo };
+  return { undoId: selection?.key === key ? selection.undoId : null, remember, reload, undo };
 }

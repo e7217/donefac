@@ -43,6 +43,7 @@ import { JiraOriginalCommentLinks } from './jira-original-comment-links.js';
 import { jiraCommentBodyHash, validRestoredJiraCommentCorrections } from './jira-comment-corrections.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
+import { IssueSaveError, IssueSaveService } from './issue-save.js';
 import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
 import { IssueChangeHistory, IssueChangeHistoryError } from './issue-change-history.js';
 import { IssueTemplateError, IssueTemplatesService } from './issue-templates.js';
@@ -255,6 +256,7 @@ export function createApp(options: {
   const commentEditing = new CommentEditingService(store);
   const issueChildren = new IssueChildService(store);
   const issueCreation = new IssueCreationService(store);
+  const issueSave = new IssueSaveService(store);
   const issueStatusChanges = new IssueStatusChangeService(store);
   const issueTemplates = new IssueTemplatesService(store, (projectId, defaults, source) => {
     let customFields = defaults.customFields;
@@ -2119,6 +2121,10 @@ export function createApp(options: {
     res.set('Cache-Control', 'no-store').json(result);
   });
   app.patch('/api/issues/:id',async(req,res)=>{
+    const saveRequest = Object.hasOwn(req.body, 'requestId') ? issueSave.parse(req.params.id, req.body, actor(req)) : null;
+    const replay = () => saveRequest ? issueSave.replay(saveRequest) : undefined;
+    const previousResult = replay();
+    if (previousResult) return res.set('Cache-Control', 'no-store').json(previousResult);
     const hasGitlabSuggestion = Object.hasOwn(req.body, 'gitlabStatusSuggestionToken');
     const verifySuggestion = (issue: Issue) => automation.verifyManualStatusSuggestion(issue, req.body.status, req.body.type,
       req.body.gitlabStatusSuggestionToken, actor(req), gitlab.settings().version);
@@ -2138,18 +2144,27 @@ export function createApp(options: {
         }
         finally { res.off('close', abort); }
         if (controller.signal.aborted) return;
-        if (!verified) return staleManualStatusSuggestion();
+        if (!verified) {
+          const currentResult = replay();
+          if (currentResult) return res.set('Cache-Control', 'no-store').json(currentResult);
+          return staleManualStatusSuggestion();
+        }
       }
     }
     const updated=store.transaction(()=>{
+      const currentResult = replay();
+      if (currentResult) return currentResult;
       const old=get<Issue>('issues',req.params.id);
       if (hasGitlabSuggestion && verifySuggestion(old) && !verified) return staleManualStatusSuggestion();
       const prepared = prepareVersionedIssueUpdate(old, req.body);
       if (Object.hasOwn(req.body, 'schedulePreviewId')) {
         schedulePaste.consumeIssueSavePreview(req.body.schedulePreviewId, actor(req), old, prepared.issue, scheduleReviewHooks);
       }
-      return commitIssueUpdate(req, old, prepared);
-    });res.json(updated);
+      const saved = commitIssueUpdate(req, old, prepared);
+      if (saveRequest) issueSave.record(saveRequest, saved);
+      return saved;
+    });
+    res.set('Cache-Control', 'no-store').json(updated);
   });
   app.delete('/api/issues/:id',(req,res)=>{
     const archived=store.transaction(()=>{
@@ -3707,6 +3722,7 @@ export function createApp(options: {
       commentEditing.clearForImport();
       issueChildren.clearForImport();
       issueCreation.invalidateForImport();
+      issueSave.invalidateForImport();
       issueStatusChanges.clearForImport();
       issueProjectMove.clearForImport();
       issuePaste.resetForImport();
@@ -3819,6 +3835,7 @@ export function createApp(options: {
     if(error instanceof DocumentCreationError||error instanceof DocumentTemplateError||error instanceof IssueChildCreationError||error instanceof IssueCreationError||error instanceof IssueTemplateError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueRelationError||error instanceof IssueProjectMoveError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof IssueChangeHistoryError)return res.status(error.status).json({error:error.message});
+    if(error instanceof IssueSaveError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueStatusChangeError)return res.status(error.status).json({error:error.message,details:error.details});
     if(error instanceof FavoriteError)return res.status(error.status).json({error:error.message});
     if(error instanceof IssueKeyLookupError)return res.status(error.status).json({error:error.message});
