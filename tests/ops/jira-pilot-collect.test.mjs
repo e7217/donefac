@@ -55,7 +55,8 @@ async function serve(t, handler) {
 }
 
 async function jiraFixture(t, { unavailableHistory = false, searchDrift = false, repeatedComment = false, wrongCommentOwner = false,
-  inconsistentCommentTotal = false, offOriginAttachment, remoteLinks = () => ({ value: [] }) } = {}) {
+  inconsistentCommentTotal = false, offOriginAttachment, remoteLinks = () => ({ value: [] }),
+  observeActivity = (_source, _kind, row) => row } = {}) {
   return serve(t, ({ url, request, response, json }) => {
     assert.equal(request.method, 'GET');
     assert.equal(request.headers.authorization, credential);
@@ -90,8 +91,8 @@ async function jiraFixture(t, { unavailableHistory = false, searchDrift = false,
         reporter: author, status: { id: '2', name: 'Done' }, issuetype: { id: '3', name: 'Task' },
         customfield_10206: '2020-03-06', customfield_10207: '2020-03-09',
         ...(first ? { attachment: attachments, comment: { startAt: 0, maxResults: 1, total: inconsistentCommentTotal ? 3 : 2,
-          comments: [comment] },
-          worklog: { startAt: 0, maxResults: 1, total: 1, worklogs: [worklog] } } : {}) };
+          comments: [observeActivity('embedded', 'comment', comment)] },
+          worklog: { startAt: 0, maxResults: 1, total: 1, worklogs: [observeActivity('embedded', 'worklog', worklog)] } } : {}) };
       const dateSchema = { type: 'date', custom: 'com.atlassian.jira.plugin.system.customfieldtypes:datepicker' };
       return json({ id, key, self: sourceIssue, fields, names: { customfield_10206: 'Start date', customfield_10207: 'End date' },
         schema: { customfield_10206: dateSchema, customfield_10207: dateSchema },
@@ -112,9 +113,10 @@ async function jiraFixture(t, { unavailableHistory = false, searchDrift = false,
       const second = { id: '201', author, body: 'Second private fixture comment', created: date,
         visibility: { type: 'role', value: 'Synthetic restricted role' } };
       if (wrongCommentOwner) second.self = `${base}/issue/101/comment/201`;
-      return page('comments', first ? [comment, repeatedComment ? { ...comment, body: 'Repeated fixture comment' } : second] : []);
+      return page('comments', first ? [observeActivity('page', 'comment', comment),
+        repeatedComment ? { ...comment, body: 'Repeated fixture comment' } : second] : []);
     }
-    if (route[2] === 'worklog') return page('worklogs', first ? [worklog] : []);
+    if (route[2] === 'worklog') return page('worklogs', first ? [observeActivity('page', 'worklog', worklog)] : []);
     if (unavailableHistory) return json({ error: 'synthetic changelog is unavailable' }, 404);
     return page('values', [statusChange('601'), statusChange('602')]);
   });
@@ -282,6 +284,70 @@ test('explicit issue collection retains partial history and intentionally omitte
   assert.ok(records.has('history:601'), 'The embedded fragment of the original history must remain.');
   assert.ok(dataset.diagnostics.some(item => item.code === 'HISTORY_PARTIAL' && item.recordId === 'issue:101'));
   assert.ok(dataset.diagnostics.some(item => item.code === 'ATTACHMENT_BYTES_MISSING'));
+});
+
+test('Jira collection rejects conflicting comment and worklog observations before it publishes a ZIP', async t => {
+  const visibility = { type: 'role', value: 'Synthetic private audience' };
+  const serviceDeskProperty = { key: 'sd.public.comment', value: { internal: true } };
+  const changedBody = 'Synthetic changed private comment';
+  const cases = [
+    ['comment body', 'comment', {}, { body: changedBody }],
+    ['missing comment body', 'comment', {}, { body: undefined }],
+    ['comment author', 'comment', {}, { author: { ...author, key: 'different-author' } }],
+    ['missing comment role', 'comment', { visibility }, {}],
+    ['changed comment role', 'comment', { visibility }, { visibility: { type: 'role', value: 'Other synthetic role' } }],
+    ['missing service-desk privacy property', 'comment', { properties: [serviceDeskProperty] },
+      { properties: [{ key: serviceDeskProperty.key, value: { internal: false } }] }],
+    ['missing worklog restriction', 'worklog', { 'group-id': 42 }, {}],
+    ['missing worklog note', 'worklog', {}, { comment: undefined }],
+    ['unconfirmed cleared worklog note', 'worklog', { comment: null }, { comment: undefined }],
+    ['changed worklog duration', 'worklog', {}, { timeSpentSeconds: 92 }],
+    ['missing worklog duration', 'worklog', {}, { timeSpentSeconds: undefined }],
+    ['unreadable worklog duration', 'worklog', {}, { timeSpentSeconds: null, timeSpent: 'PT1M31S' }],
+    ['changed worklog source day', 'worklog', {}, { started: new Date(date).toISOString() }],
+    ['missing worklog source day', 'worklog', {}, { started: undefined }],
+  ];
+  for (const [name, kind, embedded, page] of cases) {
+    await t.test(name, async inner => {
+      const source = await jiraFixture(inner, { observeActivity: (mode, currentKind, row) => {
+        if (currentKind !== kind) return row;
+        return { ...row, ...(mode === 'embedded' ? embedded : page) };
+      } });
+      const { directory, collect } = await invocation(inner, { baseUrl: source.origin + context, issueKeys: ['SRC-1'] });
+      const result = await collect();
+      assert.equal(result.code, 1);
+      assert.deepEqual(source.errors, []);
+      assert.match(result.stderr, new RegExp(`같은 Jira ${kind === 'worklog' ? '작업 시간' : '댓글'}의 내용 또는 열람 제한`));
+      assert.ok(source.seen.some(({ path }) => path === `${apiPath}/issue/100/${kind}`));
+      assert.deepEqual((await readdir(directory)).sort(), ['jira-auth', 'source.json']);
+      assertPrivateOutput(result);
+      for (const privateValue of [changedBody, visibility.value, 'different-author', 'Other synthetic role']) {
+        assert.ok(!`${result.stdout}\n${result.stderr}`.includes(privateValue));
+      }
+    });
+  }
+});
+
+test('Jira collection accepts sparse embedded records and equivalent page metadata while retaining restrictions', async t => {
+  const visibility = { type: 'role', value: 'Synthetic private audience' };
+  const source = await jiraFixture(t, { observeActivity: (mode, kind, row) => {
+    if (mode === 'embedded' && kind === 'comment') return { id: row.id, author: { key: row.author.key }, visibility };
+    if (mode === 'embedded') return { ...row, 'group-id': '42', started: undefined, startDate: row.started,
+      timeSpentSeconds: undefined, timeSpent: 'PT1M31S' };
+    if (kind === 'comment') return { ...row, id: Number(row.id), visibility: { ...visibility, identifier: 'role-42' } };
+    return { ...row, id: Number(row.id), groupId: 42,
+      author: { ...row.author, displayName: 'Enriched author name', avatarUrls: { '24x24': '/synthetic.png' } },
+      created: new Date(row.created).toISOString(), started: row.started.replace('+0900', '+09:00') };
+  } });
+  const { output, collect } = await invocation(t, { baseUrl: source.origin + context, issueKeys: ['SRC-1'] });
+  const result = await collect();
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(source.errors, []);
+  assertPrivateOutput(result);
+  const { records } = await inspectArchive(output);
+  assert.deepEqual(records.get('comment:200').metadata.visibility, { ...visibility, identifier: 'role-42' });
+  assert.equal(records.get('history:worklog:300').metadata.groupId, 42);
+  assert.equal(records.get('history:worklog:300').metadata.timeSpentSeconds, '91');
 });
 
 test('Jira collection rejects drifting pagination and redirects without publishing any archive', async t => {

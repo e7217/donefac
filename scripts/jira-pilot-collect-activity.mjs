@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
+import { isJiraCommentRestrictionAttribute, isRestrictedJiraHistory } from '../server/migration-jira-history.ts';
+import { jiraWorklogRawStart, jiraWorklogRestrictionAttribute, parseJiraWorklogDuration } from '../server/migration-worklog.ts';
 
 const pageSize = 100;
 const maxRecords = 100_000;
@@ -67,6 +69,82 @@ function hasHistoryItems(group) {
   return Array.isArray(group.items) && group.items.every(object);
 }
 
+function dateValue(value) {
+  if (typeof value !== 'string' || !/(?:Z|[+-]\d\d:?\d\d)$/iu.test(value)) return value;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : value;
+}
+
+function observedWorklogStart(row) {
+  const raw = jiraWorklogRawStart(row);
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const value = raw.trim();
+  // Worklogs are grouped by Jira's written calendar day as well as retaining the instant.
+  const timestamp = dateValue(value);
+  return typeof timestamp === 'number' ? [value.slice(0, 10), timestamp] : value;
+}
+
+function numericValue(value) {
+  const normalized = detailCount(value);
+  return Number.isSafeInteger(normalized) ? normalized : value;
+}
+
+function observedDateChanged(before, after) {
+  return before !== undefined && after !== undefined && !isDeepStrictEqual(dateValue(before), dateValue(after));
+}
+
+function retainsObservation(before, after) {
+  return before === undefined || isDeepStrictEqual(before, after);
+}
+
+function authorChanged(before, after) {
+  if (typeof before === 'string' && typeof after === 'string') return before !== after;
+  if (!object(before) || !object(after)) return false;
+  const id = value => (typeof value === 'string' && value.length > 0) || Number.isSafeInteger(value) ? String(value) : null;
+  for (const [left, right] of [[before.accountId, after.accountId], [before.key, after.key], [before.id, after.id],
+    [before.name ?? before.username, after.name ?? after.username]]) {
+    const source = id(left), page = id(right);
+    if (source !== null && page !== null) return source !== page;
+  }
+  return false;
+}
+
+function retainsRestrictionValue(before, after) {
+  if (object(before) && object(after)) {
+    return Object.entries(before).every(([name, value]) => Object.hasOwn(after, name) && retainsRestrictionValue(value, after[name]));
+  }
+  if (Array.isArray(before) && Array.isArray(after)) {
+    return before.every(value => after.some(candidate => retainsRestrictionValue(value, candidate)));
+  }
+  return isDeepStrictEqual(numericValue(before), numericValue(after)) ||
+    typeof before === 'boolean' && String(before) === after || typeof after === 'boolean' && before === String(after);
+}
+
+function retainedRestrictions(before, after, worklog) {
+  const normalizedName = name => name.replace(/[\s_-]/g, '').toLowerCase();
+  const restricts = (name, value) => isRestrictedJiraHistory({ kind: worklog ? 'history' : 'comment',
+    metadata: { ...(worklog ? { kind: 'worklog' } : {}), [name]: value } });
+  const afterEntries = Object.entries(after);
+  return Object.entries(before).every(([name, value]) => {
+    const restriction = worklog ? jiraWorklogRestrictionAttribute(name) : isJiraCommentRestrictionAttribute(name);
+    if (!restriction || !restricts(name, value)) return true;
+    const key = normalizedName(name);
+    const source = Array.isArray(value) ? value.filter(entry => restricts(name, [entry])) : value;
+    return afterEntries.some(([field, candidate]) => normalizedName(field) === key && restricts(field, candidate) &&
+      retainsRestrictionValue(source, candidate));
+  });
+}
+
+function sameActivityPayload(before, after, worklog) {
+  const text = worklog ? 'comment' : 'body';
+  const seconds = worklog ? parseJiraWorklogDuration(before) : undefined;
+  return retainsObservation(before[text], after[text]) && !authorChanged(before.author, after.author) &&
+    !observedDateChanged(before.created, after.created) && !observedDateChanged(before.updated, after.updated) &&
+    (!worklog || retainsObservation(observedWorklogStart(before), observedWorklogStart(after))) &&
+    (typeof seconds !== 'number' || seconds === parseJiraWorklogDuration(after)) &&
+    retainedRestrictions(before, after, worklog);
+}
+
 async function collectPages({ issue, getJson, addJson }, endpoint, key, embedded) {
   const history = endpoint === 'changelog';
   const idOf = history ? historyId : numericId;
@@ -103,6 +181,10 @@ async function collectPages({ issue, getJson, addJson }, endpoint, key, embedded
       const prior = embedded?.groups.get(id);
       if (history && prior && !isDeepStrictEqual(historyPayload(prior), historyPayload(row))) {
         throw new Error('같은 Jira 변경 이력의 내용이 업무 응답과 별도 페이지에서 서로 다릅니다.');
+      }
+      if (!history && prior && !sameActivityPayload(prior, row, endpoint === 'worklog')) {
+        const label = endpoint === 'worklog' ? '작업 시간' : '댓글';
+        throw new Error(`같은 Jira ${label}의 내용 또는 열람 제한이 업무 응답과 별도 페이지에서 서로 다릅니다.`);
       }
       const position = embedded?.positions?.get(id);
       if (position !== undefined && position !== offset + index) {

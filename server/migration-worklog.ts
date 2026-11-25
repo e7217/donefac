@@ -100,18 +100,21 @@ function textSeconds(value: LegacyValue): number | JiraWorklogProblem {
   return seconds > BigInt(0) ? Number(seconds) : durationProblem();
 }
 
-function duration(row: LegacyRecord): number | JiraWorklogProblem {
+export function parseJiraWorklogDuration(metadata: LegacyRecord['metadata']): number | JiraWorklogProblem {
   for (const name of ['timeSpentSeconds', 'timeworked']) {
-    if (Object.hasOwn(row.metadata, name)) return numericSeconds(row.metadata[name]) ?? durationProblem();
+    if (Object.hasOwn(metadata, name)) return numericSeconds(metadata[name]) ?? durationProblem();
   }
-  return textSeconds(row.metadata.timeSpent);
+  return textSeconds(metadata.timeSpent);
+}
+
+export function jiraWorklogRawStart(metadata: LegacyRecord['metadata']): LegacyValue | undefined {
+  for (const name of ['started', 'startDate', 'startdate']) {
+    if (Object.hasOwn(metadata, name)) return metadata[name];
+  }
 }
 
 function start(row: LegacyRecord, timeZone: string): { workDate: string; startedAt: string | null } | JiraWorklogProblem {
-  let raw: LegacyValue | undefined;
-  for (const name of ['started', 'startDate', 'startdate']) {
-    if (Object.hasOwn(row.metadata, name)) { raw = row.metadata[name]; break; }
-  }
+  const raw = jiraWorklogRawStart(row.metadata);
   if (typeof raw !== 'string' || !raw.trim() || raw.length > 100) {
     return problem('WORKLOG_START_INVALID', '작업 시작 날짜(started/startDate/startdate)가 없거나 올바르지 않습니다.');
   }
@@ -144,7 +147,7 @@ function start(row: LegacyRecord, timeZone: string): { workDate: string; started
 
 export function parseJiraWorklog(row: LegacyRecord, timeZone: string): ParsedJiraWorklog | JiraWorklogProblem {
   if (!isJiraWorklog(row)) return problem('WORKLOG_RECORD_INVALID', 'Jira 작업 시간 기록 객체가 아닙니다.');
-  const durationSeconds = duration(row);
+  const durationSeconds = parseJiraWorklogDuration(row.metadata);
   if (typeof durationSeconds !== 'number') return durationSeconds;
   const started = start(row, timeZone);
   return 'code' in started ? started : { ...started, durationSeconds };
