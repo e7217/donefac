@@ -687,7 +687,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
           const current = acceptedRouteRef.current;
           if (!current || current.issueId || !hasSameIssueOverlayContext(route, current)) return;
           if (opener?.isConnected && !opener.closest('[inert]')) opener.focus({ preventScroll: true });
-          else if (focusMain) workspaceMain.current?.focus({ preventScroll: true });
+          else if (focusMain || opener && route.view === 'documents') workspaceMain.current?.focus({ preventScroll: true });
         });
       }
     }
@@ -910,8 +910,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       return true;
     };
     if (current?.view === 'documents' && current.documentId) {
-      requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview });
-      return;
+      return requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview });
     }
     if (current?.view === 'teamboard') {
       if (requestIssueRoute({ ...current, issueId: id, documentPreviewId: retainedPreview }) && capacityTrigger) {
@@ -948,6 +947,21 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   };
   const openSearchIssue = (id: string, commentId?: string) => openIssue(id, undefined, commentId);
+  const openMigratedWikiIssue = async (id: string, commentId?: string, opener?: HTMLAnchorElement, signal?: AbortSignal) => {
+    const current = acceptedRouteRef.current;
+    if (signal?.aborted || current?.view !== 'documents' || !current.documentId || current.issueId) return false;
+    if (!dataRef.current?.issues.some(issue => issue.id === id)) {
+      const hash = routeHash(current), index = routeIndexRef.current, actor = actorRef.current;
+      const update = await readWorkspace(signal);
+      const latest = acceptedRouteRef.current;
+      if (signal?.aborted || !latest || routeHash(latest) !== hash || routeIndexRef.current !== index || actorRef.current !== actor) return false;
+      applyWorkspace(update);
+      if (actorRef.current !== actor) return false;
+    }
+    const opened = openIssue(id, undefined, commentId) === true;
+    if (opened && opener?.isConnected) overlayIssueOpener.current = opener;
+    return opened;
+  };
   const closeIssuePanel = (id: string) => {
     const current = acceptedRouteRef.current;
     if (current?.issueId === id) requestRoute({ ...current, issueId: null, issueCommentId: null, documentPreviewId: null });
@@ -1366,6 +1380,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
           onCopyCommentLink={copyDocumentCommentLink} onOpenIssueSchedule={openFollowUpSchedule} onOpenIssueForReview={openIssueForReview}
+          onOpenMigratedIssue={openMigratedWikiIssue}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {
             const current = acceptedRouteRef.current;
             if (current?.view === 'documents') requestRoute({...current, documentLabel:label});

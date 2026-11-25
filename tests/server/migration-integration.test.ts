@@ -29,6 +29,9 @@ import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
 import { normalizeDocumentContent, readDocumentSelection } from '../../server/document-content.js';
+import { convertLegacyContent } from '../../server/migration-content.js';
+import { confluencePageFieldDigest } from '../../server/migration-planner.js';
+import { measureIncomingArchive } from '../../server/source-archive-integrity.js';
 
 async function fixture(atlassianEnv?: NodeJS.ProcessEnv) {
   const dir = mkdtempSync(join(tmpdir(), 'teamspace-migration-integration-')), service = createApp({ dataDir: dir, outboundWorker: false, atlassianEnv }), server = service.app.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -2647,6 +2650,80 @@ function labelListExport(target: MigrationFixture, instance: string, name: strin
   const bytes = Buffer.from(`<hibernate-generic>${root}${records}</hibernate-generic>`);
   return target.upload(zip([{ path: 'entities.xml', bytes }]), `${name}.zip`, 'confluence', instance);
 }
+
+test('Confluence recovers only proven old Jira anchors from the same page revision', async t => {
+  const initial = await fixture(), restored = await fixture();
+  t.after(() => Promise.all([initial.close(), restored.close()]));
+  const instance = 'synthetic-confluence-jira-anchors';
+  const origin = 'https://wiki.example.test/confluence';
+  const href = 'https://jira.example.test/jira/browse/OPS-7?focusedCommentId=42#comment-42';
+  const link = `<p>릴리스 <a href="${href}"><strong>원래 댓글</strong></a> 확인</p>`;
+  const pages = [
+    { id: '811', title: '원본 링크 그대로', body: link },
+    { id: '812', title: '팀이 수정한 링크 문서', body: link },
+    { id: '813', title: '확인할 수 없는 첨부', body: link + '<p><ac:link><ri:attachment ri:filename="missing.pdf" /></ac:link></p>' },
+  ];
+  const uploaded = await labelListExport(initial, instance, 'original-jira-anchors', pages);
+  const config = await initial.configuration(uploaded, 'JIRAANCHOR');
+  config.sourceBaseUrls[uploaded.id] = origin;
+  const applied = await initial.apply(await initial.preview(config));
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  const [projectId] = applied.data.import.projectIds;
+  type Backup = WorkspaceSnapshot & { revisions: DocRevision[]; sourceImports: SourceImport[]; sourceRecords: SourceRecordArchive[] };
+  const { data: backup } = await initial.call<Backup>('/export');
+  const archives = backup.sourceRecords.filter(archive => archive.record.kind === 'page' && archive.targetId);
+  assert.equal(archives.length, 3);
+  const nativeBySource = new Map(archives.map(archive => [archive.record.sourceId, archive.targetId!]));
+  const retainedLink = (document: Pick<DocPage, 'content'>) =>
+    document.content.content?.[0].content?.find(node => node.text === '원래 댓글')?.marks;
+  for (const archive of archives) {
+    const document = backup.documents.find(item => item.id === archive.targetId)!;
+    assert.ok(retainedLink(document)?.some(mark => mark.type === 'link' && mark.attrs?.href === href));
+    assert.ok(retainedLink(document)?.some(mark => mark.type === 'bold'));
+    const former = convertLegacyContent(archive.record, { resolveReference: () => null, legacyConfluenceJiraAnchorProjection: true });
+    assert.ok(former.diagnostics.some(item => item.code === 'LEGACY_CONFLUENCE_JIRA_ANCHOR'));
+    const oldBody = normalizeDocumentContent(former.content);
+    assert.match(oldBody.plainText, /업무 참조/u);
+    Object.assign(document, oldBody);
+    for (const revision of backup.revisions.filter(revision => revision.documentId === document.id)) Object.assign(revision, oldBody);
+    assert.ok(archive.confluencePageFieldHashes);
+    archive.confluencePageFieldHashes.content = confluencePageFieldDigest('content', oldBody.content);
+    delete archive.confluencePageBodySourceHash;
+  }
+  for (const receipt of backup.sourceImports) {
+    if (receipt.integrity) {
+      const records = backup.sourceRecords.filter(archive => archive.sourceImportId === receipt.id);
+      receipt.integrity.packages = measureIncomingArchive(receipt, records).packages;
+    }
+  }
+  const restoredResult = await restored.call('/import', 'POST', { data: backup });
+  assert.equal(restoredResult.status, 200, JSON.stringify(restoredResult.data));
+  const readDocs = async () => new Map((await restored.call<WorkspaceSnapshot>('/workspace')).data.documents.map(document => [document.id, document]));
+  const original = await readDocs();
+  const edited = original.get(nativeBySource.get('812')!)!;
+  const save = await restored.call<DocPage>(`/documents/${edited.id}`, 'PATCH', {
+    expectedVersion: edited.version, contentSchemaVersion: documentContentSchemaVersion(edited.content),
+    content: { type: 'doc', content: [...edited.content.content!, { type: 'paragraph', content: [{ type: 'text', text: '팀이 쓴 새 문장' }] }] },
+  });
+  assert.equal(save.status, 200, JSON.stringify(save.data));
+
+  const repeated = await labelListExport(restored, instance, 'review-jira-anchors', pages);
+  const reviewConfig = await restored.configuration(repeated);
+  reviewConfig.sourceBaseUrls[repeated.id] = origin;
+  const review = await restored.preview({ ...reviewConfig, appendPagesTo: { projectId, refreshExisting: true } });
+  assert.equal(review.canApply, true, JSON.stringify(review.notices));
+  const decisions = new Map(review.documentRefresh?.map(row => [row.sourceId, row.fields.find(field => field.field === 'content')?.decision]));
+  assert.equal(decisions.get('811'), 'apply');
+  assert.equal(decisions.get('812'), 'conflict');
+  assert.equal(decisions.get('813'), undefined);
+  assert.equal(review.notices.filter(item => item.code === 'CONFLUENCE_REFRESH_JIRA_ANCHORS_RESTORED').length, 1);
+  const result = await restored.apply(review);
+  assert.equal(result.status, 201, JSON.stringify(result.data));
+  const current = await readDocs();
+  assert.ok(retainedLink(current.get(nativeBySource.get('811')!)!)?.some(mark => mark.attrs?.href === href));
+  assert.deepEqual(current.get(edited.id)?.content, save.data.content);
+  assert.deepEqual(current.get(nativeBySource.get('813')!)?.content, original.get(nativeBySource.get('813')!)?.content);
+});
 
 test('Confluence inline comment text survives actual import, version refresh, and restore with its raw anchor retained', async t => {
   const f = await fixture();

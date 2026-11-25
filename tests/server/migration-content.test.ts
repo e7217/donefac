@@ -433,6 +433,59 @@ test('Confluence references/includes and local images resolve through callbacks,
   assert.ok(calls.some(value => value.kind === 'page' && value.spaceKey === 'SYN'));
 });
 
+test('Confluence page and revision anchors keep Jira labels, formatting and full selectors', () => {
+  const jira = 'https://jira.example.test:8443/jira/browse/';
+  const known = `${jira}OLD-7`, unknown = `${jira}OLD-42`;
+  const focused = `${known}?focusedCommentId=17&page=issuetabpanels:comment-tabpanel#comment-17`;
+  const opaque = `${known}?focusedCommentId=abc#comment-17`;
+  const encoded = `${jira}%4FLD-7?pageId=200`;
+  const anchored = `${known}#comment-42`;
+  const xml = `<p><a href="${known}">확인한 업무</a></p>` +
+    `<p><a href="${unknown}"><strong>업무</strong> <em>설명</em></a></p>` +
+    `<p><a href="${focused.replaceAll('&', '&amp;')}"><u>특정 댓글</u></a></p>` +
+    `<p><a href="${opaque}">지원하지 않는 선택자</a></p>` +
+    `<p><a href="${known}#"/><a href="${encoded}">인코딩된 키</a></p>` +
+    `<p><a href="${anchored}"><code>기호</code></a></p>`;
+  for (const kind of ['page', 'revision'] as const) {
+    const calls: MigrationReferenceInput[] = [];
+    const result = convertLegacyContent({ ...source('confluence-storage', xml), kind }, resolver(calls));
+    canonical(result);
+    assert.deepEqual(nodes(result.content, 'issueReference').map(node => ({ ...node.attrs })), [
+      { issueId: 'issue-new', label: '확인한 업무' },
+    ]);
+    const linked = nodes(result.content, 'text').map(node => [node.text, node.marks?.find(mark => mark.type === 'link')?.attrs?.href,
+      node.marks?.filter(mark => mark.type !== 'link').map(mark => mark.type)]);
+    assert.deepEqual(linked, [
+      ['업무', unknown, ['bold']], [' ', unknown, []], ['설명', unknown, ['italic']],
+      ['특정 댓글', focused, ['underline']], ['지원하지 않는 선택자', opaque, []],
+      [`${known}#`, `${known}#`, []], ['인코딩된 키', encoded, []],
+      ['기호', undefined, ['code']], [' (', undefined, undefined], [anchored, anchored, []], [')', undefined, undefined],
+    ]);
+    assert.deepEqual(calls, [{ kind: 'issue', url: known }, { kind: 'issue', url: unknown }]);
+    assert.deepEqual(result.diagnostics, []);
+  }
+});
+
+test('legacy Confluence Jira anchor projection reproduces only the previous direct-link fallback', () => {
+  const known = 'https://jira.example.test/jira/browse/OLD-7';
+  const unknown = 'https://jira.example.test/jira/browse/OLD-42?focusedCommentId=17';
+  const spoofed = 'https://example.test/path?target=/browse/OTHER-3';
+  const xml = `<p><a href="${known}">확인한 업무</a></p>` +
+    `<p><a href="${unknown}"><strong>원본 댓글</strong></a><a href="${spoofed}">다른 주소</a></p>` +
+    '<p><ac:link><ri:page ri:content-title="누락 문서"/></ac:link></p>' +
+    '<ac:image><ri:attachment ri:filename="missing.png"/></ac:image>';
+  const result = convertLegacyContent(source('confluence-storage', xml), { ...resolver(), legacyConfluenceJiraAnchorProjection: true });
+  canonical(result);
+  assert.deepEqual(nodes(result.content, 'issueReference').map(node => ({ ...node.attrs })), [{ issueId: 'issue-new', label: '확인한 업무' }]);
+  assert.ok(result.plainText.includes(`[업무 참조: 원본 댓글 (${unknown})][업무 참조: 다른 주소 (${spoofed})]`));
+  assert.ok(result.plainText.includes('[문서 참조: 누락 문서]'));
+  assert.deepEqual(result.diagnostics.map(item => item.code), ['LEGACY_CONFLUENCE_JIRA_ANCHOR', 'UNRESOLVED_REFERENCE', 'UNRESOLVED_IMAGE']);
+
+  const comment = convertLegacyContent({ ...source('confluence-storage', `<p><a href="${unknown}">원본 댓글</a></p>`), kind: 'comment' }, resolver());
+  assert.equal(comment.plainText, `[업무 참조: 원본 댓글 (${unknown})]`);
+  assert.deepEqual(comment.diagnostics.map(item => item.code), ['UNRESOLVED_REFERENCE']);
+});
+
 test('Confluence textual include parameters preserve space scope and nested page identities', () => {
   const include = (value: string, parameter = '') =>
     `<ac:structured-macro ac:name="include"><ac:parameter ac:name="${parameter}">${value}</ac:parameter></ac:structured-macro>`;

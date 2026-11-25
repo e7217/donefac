@@ -96,6 +96,7 @@ import { FavoriteError, FavoritesService } from './favorites.js';
 import { AtlassianReadError } from '../shared/atlassian-links.js';
 import { parseAtlassianSearchInput } from '../shared/atlassian-search.js';
 import { confluenceMigratedDocumentAddress } from '../shared/confluence-migration-address.js';
+import { jiraMigratedTargetAddress } from '../shared/jira-migration-address.js';
 import { AtlassianLinkError, AtlassianLinksService } from './atlassian-links.js';
 import { AtlassianReader } from './atlassian-read.js';
 import { MigratedConfluenceDocuments } from './migrated-confluence-documents.js';
@@ -448,6 +449,7 @@ export function createApp(options: {
       .map(([id, origins]) => [id, [...new Set(origins.map(origin => origin.projectId))]]) : [];
     const issueAliases = priorIssueKeys ? readIssueSearchAliases(store, issues, priorIssueKeys) : null;
     const confluenceMigrationOrigins = purpose === 'workspace' ? migratedConfluenceDocuments.origins() : [];
+    const jiraMigrationOrigins = purpose === 'workspace' ? atlassianLinks.migratedJiraOrigins() : [];
     return {
       ...data,
       workflows:workflows.snapshot(),savedViews:savedViews.all(),planningItems:planning.all(),calendars:calendars.snapshot(),
@@ -461,6 +463,7 @@ export function createApp(options: {
       ...(issueMoveOrigins.length ? { issueMoveOrigins: Object.fromEntries(issueMoveOrigins) } : {}),
       ...(issueAliases && Object.keys(issueAliases).length ? { issueAliases } : {}),
       ...(confluenceMigrationOrigins.length ? { confluenceMigrationOrigins } : {}),
+      ...(jiraMigrationOrigins.length ? { jiraMigrationOrigins } : {}),
       documentOrders: purpose === 'backup' ? documentOrders.forBackup(documents) : documentOrders.snapshot(documents),
     } as unknown as WorkspaceSnapshot;
   };
@@ -1377,6 +1380,13 @@ export function createApp(options: {
     const address = Object.keys(req.query).length === 1 && typeof url === 'string' ? confluenceMigratedDocumentAddress(url) : null;
     if (!address) return fail('이관한 Confluence 문서의 원본 주소를 확인해 주세요.');
     res.json({ target: migratedConfluenceDocuments.resolve(address) });
+  });
+  app.get('/api/atlassian-links/resolve-migrated-jira-target', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const url = req.query.url;
+    const address = Object.keys(req.query).length === 1 && typeof url === 'string' ? jiraMigratedTargetAddress(url) : null;
+    if (!address) return fail('이관한 Jira 업무 또는 댓글의 원본 주소를 확인해 주세요.');
+    res.json({ target: atlassianLinks.resolveMigratedJiraTarget(address) });
   });
   app.post('/api/atlassian-links',(req,res)=>{
     actor(req);

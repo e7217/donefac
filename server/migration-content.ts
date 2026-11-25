@@ -1,4 +1,5 @@
 import { XMLParser } from 'fast-xml-parser';
+import { parseAtlassianSearchInput } from '../shared/atlassian-search.js';
 import { isCalendarDate } from '../shared/calendar.js';
 import { commentWebLinkRanges, commentWebUrl } from '../shared/comment-web-links.js';
 import { parseConfluenceJiraList } from '../shared/confluence-jira-list.js';
@@ -55,6 +56,7 @@ export interface MigrationContentContext {
   legacyDocumentLayout?: boolean;
   legacyDocumentProperties?: boolean;
   legacyMultiSpacePropertyReports?: boolean;
+  legacyConfluenceJiraAnchorProjection?: boolean;
   resolveLabelListProject?: (sourceSpaceKey: string | null) => string | null;
   resolveChildListSpaceProject?: (sourceSpaceKey: string | null) => string | null;
   resolvePropertyReportSpaceProject?: (sourceSpaceKey: string | null) => string | null;
@@ -375,7 +377,7 @@ class Converter {
     if (/^\/(?!\/)/.test(url) || url.startsWith('#')) return url;
     try { const parsed = new URL(url); return ['http:', 'https:', 'mailto:', 'tel:'].includes(parsed.protocol) && !parsed.username && !parsed.password ? url : null; } catch { return null; }
   }
-  reference(input: MigrationReferenceInput, include = false, displayLabel = ''): RichContent[] {
+  reference(input: MigrationReferenceInput, include = false, displayLabel = '', jiraAnchor?: { href: string; label: RichContent[] }): RichContent[] {
     if (input.kind === 'page' && input.url && this.context.resolvePageHref) {
       const destination = this.context.resolvePageHref(input.url);
       if (destination || /^https?:\/\//iu.test(input.url)) {
@@ -384,11 +386,16 @@ class Converter {
       }
     }
     const found = this.resolve(input), label = displayLabel || found?.label || (input.spaceKey && input.title ? `${input.spaceKey}:${input.title}` : input.title) || input.sourceId || input.url || '원본 참조';
-    if (!found) { const target = input.sourceId || (input.spaceKey && input.title ? `${input.spaceKey}:${input.title}` : input.title) || input.url; this.warn('UNRESOLVED_REFERENCE', '이관 대상이 없는 문서·업무 참조를 읽을 수 있는 텍스트로 보존했습니다.'); return text(`[${include ? '문서 포함' : input.kind === 'issue' ? '업무' : '문서'} 참조: ${label}${target && target !== label ? ` (${target})` : ''}]`); }
+    if (!found) {
+      if (jiraAnchor && !this.context.legacyConfluenceJiraAnchorProjection) return this.link(jiraAnchor.label, jiraAnchor.href, 'linked-address');
+      const target = input.sourceId || (input.spaceKey && input.title ? `${input.spaceKey}:${input.title}` : input.title) || input.url;
+      this.warn(jiraAnchor ? 'LEGACY_CONFLUENCE_JIRA_ANCHOR' : 'UNRESOLVED_REFERENCE', '이관 대상이 없는 문서·업무 참조를 읽을 수 있는 텍스트로 보존했습니다.');
+      return text(`[${include ? '문서 포함' : input.kind === 'issue' ? '업무' : '문서'} 참조: ${label}${target && target !== label ? ` (${target})` : ''}]`);
+    }
     if (label.length > 300) this.warn('REFERENCE_LABEL_NORMALIZED', '참조 표시 이름이 300자를 넘어 원본 보관 자료와 함께 확인해야 합니다.');
     return [{ type: input.kind === 'issue' ? 'issueReference' : include ? 'documentInclude' : 'documentReference', attrs: { [input.kind === 'issue' ? 'issueId' : 'documentId']: found.id, label: label.slice(0, 300) } }];
   }
-  link(label: RichContent[], url: string): RichContent[] {
+  link(label: RichContent[], url: string, fallback?: 'linked-address'): RichContent[] {
     if (this.captureCommentLinks && !commentWebUrl(url)) return [{ type: 'hardBreak' }];
     const safe = this.safeUrl(url);
     if (!safe) { this.warn('UNSAFE_URL', '안전하지 않은 URL은 실행 가능한 링크로 만들지 않고 텍스트로 보존했습니다.'); return [...label, ...text(` (${url})`)]; }
@@ -398,9 +405,12 @@ class Converter {
       if (this.captureCommentLinks) return text(commentLinkLabel(label) || commentUrl, [{ type: 'link', attrs: { href: commentUrl } }]);
       return commentLinkText(label, commentUrl);
     }
-    if (special) this.warn('LINK_TARGET_SHOWN_AS_TEXT', '코드·이미지 등 링크를 직접 적용할 수 없는 내용 뒤에 원본 링크 주소를 텍스트로 남겼습니다.');
-    const marked = label.map(node => node.type === 'text' && !node.marks?.some(mark => mark.type === 'code') ? { ...node, marks: [...(node.marks || []).filter(mark => mark.type !== 'link'), { type: 'link', attrs: { href: safe } }] } : node);
-    return special ? [...marked, ...text(` (${url})`)] : marked;
+    const mark: Mark = { type: 'link', attrs: { href: safe } };
+    const marked = label.map(node => node.type === 'text' && !node.marks?.some(mark => mark.type === 'code') ? { ...node, marks: [...(node.marks || []).filter(mark => mark.type !== 'link'), mark] } : node);
+    if (!special) return marked;
+    if (fallback === 'linked-address') return [...marked, ...text(' ('), ...text(safe, [mark]), ...text(')')];
+    this.warn('LINK_TARGET_SHOWN_AS_TEXT', '코드·이미지 등 링크를 직접 적용할 수 없는 내용 뒤에 원본 링크 주소를 텍스트로 남겼습니다.');
+    return [...marked, ...text(` (${url})`)];
   }
   sectionLink(label: RichContent[], display: string, fragment: string, page?: MigrationReferenceInput, fromUrl = false): RichContent[] {
     const settings = this.context.sectionLinks!;
@@ -660,6 +670,18 @@ class Converter {
           return this.link(values.length ? values : text(label || download.url), target?.url ?? download.url);
         }
         const reference = this.urlReference(url);
+        if (this.richDocument && url.includes('/browse/')) {
+          const href = this.safeUrl(url);
+          const path = href?.split(/[?#]/u, 1)[0];
+          if (href && path && parseAtlassianSearchInput(path)?.product === 'jira') {
+            const anchor = { href, label: values.length ? values : text(href) };
+            // The original address is required when a query or fragment selects something more specific than the issue.
+            if (!this.context.legacyConfluenceJiraAnchorProjection && (path !== href || reference?.kind !== 'issue')) {
+              return this.link(anchor.label, href, 'linked-address');
+            }
+            if (reference?.kind === 'issue') return this.reference(reference, false, label, anchor);
+          }
+        }
         const hash = url.indexOf('#');
         const page = reference?.kind === 'page' ? reference : undefined;
         if (page && this.context.resolvePageHref && (/^https?:\/\//iu.test(url) || this.context.resolvePageHref(url))) {

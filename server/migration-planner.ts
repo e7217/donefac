@@ -1303,7 +1303,6 @@ class Planner{
       const contentContext = this.confluencePageContentContext(entry, document.id, append.project.id);
       let childListBaseline: string | undefined;
       let headingDepthBaseline: string | undefined;
-      let multiSpaceReportBaseline: string | undefined;
       const canCheckFormerBody = (newer || sameSourceRevision) && !sourceBodyErrors.has(entry.key) &&
         incomingBody !== undefined && (!acceptedBody || incomingBody === acceptedBody) &&
         hasConfluenceBody(previous.record) && row.text === previous.record.text;
@@ -1330,22 +1329,38 @@ class Planner{
           }
         }
       }
-      let multiSpaceProjection: ReturnType<typeof convertLegacyContent> | undefined;
-      if (canCheckFormerBody && hasConfluencePropertyReportMacro(row.text)) {
-        const candidate = convertLegacyContent(row, contentContext);
-        if (usableConfluenceBody(candidate) && documentPropertyReports(candidate.content).some(report => Array.isArray(report.projectIds))) {
-          const former = convertLegacyContent(row, { ...contentContext, resolvePropertyReportSpaceProject: undefined, legacyMultiSpacePropertyReports: true });
-          const diagnostics = former.diagnostics.filter(item => item.code !== 'LEGACY_MULTI_SPACE_PROPERTY_REPORT');
-          const formerHash = confluencePageFieldDigest('content', former.content);
-          const checkpoint = previous.confluencePageFieldHashes?.content ?? confluencePageFieldDigest('content', document.content);
-          if (diagnostics.length < former.diagnostics.length && usableConfluenceBody({ ...former, diagnostics }) && formerHash === checkpoint) {
-            multiSpaceReportBaseline = formerHash;
-            multiSpaceProjection = candidate;
+      let recoveredBody: { baseline: string; projection: ReturnType<typeof convertLegacyContent>; jiraAnchors: boolean } | undefined;
+      const mayHaveLegacyReport = canCheckFormerBody && hasConfluencePropertyReportMacro(row.text);
+      const mayHaveLegacyJiraLink = canCheckFormerBody && row.text.includes('/browse/');
+      if (mayHaveLegacyReport || mayHaveLegacyJiraLink) {
+        const projection = convertLegacyContent(row, contentContext);
+        const baseline = previous.confluencePageFieldHashes?.content ?? confluencePageFieldDigest('content', document.content);
+        if (usableConfluenceBody(projection) && confluencePageFieldDigest('content', projection.content) !== baseline) {
+          const recoveries: { options: Partial<MigrationContentContext>; diagnostic: string }[] = [];
+          if (mayHaveLegacyReport && documentPropertyReports(projection.content).some(report => Array.isArray(report.projectIds))) {
+            recoveries.push({ options: { resolvePropertyReportSpaceProject: undefined, legacyMultiSpacePropertyReports: true },
+              diagnostic: 'LEGACY_MULTI_SPACE_PROPERTY_REPORT' });
+          }
+          if (mayHaveLegacyJiraLink) {
+            recoveries.push({ options: { legacyConfluenceJiraAnchorProjection: true }, diagnostic: 'LEGACY_CONFLUENCE_JIRA_ANCHOR' });
+          }
+          const candidates = recoveries.map(recovery => [recovery]);
+          if (recoveries.length > 1) candidates.push(recoveries);
+          for (const candidate of candidates) {
+            const options = Object.assign({}, ...candidate.map(item => item.options)) as Partial<MigrationContentContext>;
+            const former = convertLegacyContent(row, { ...contentContext, ...options });
+            const allowed = new Set(candidate.map(item => item.diagnostic));
+            if (!candidate.every(item => former.diagnostics.some(diagnostic => diagnostic.code === item.diagnostic))) continue;
+            const diagnostics = former.diagnostics.filter(item => !allowed.has(item.code));
+            if (usableConfluenceBody({ ...former, diagnostics }) && confluencePageFieldDigest('content', former.content) === baseline) {
+              recoveredBody = { baseline, projection, jiraAnchors: allowed.has('LEGACY_CONFLUENCE_JIRA_ANCHOR') };
+              break;
+            }
           }
         }
       }
       const sameRevision = sameSourceRevision && (row.metadata.labelSetComplete === true || originalChecklistFallback ||
-        propertiesProjection || childListBaseline !== undefined || headingDepthBaseline !== undefined);
+        propertiesProjection || childListBaseline !== undefined || headingDepthBaseline !== undefined || recoveredBody !== undefined);
       const sourceParent = confluenceParentEvidence(row);
       const reviewParent = sourceParent !== undefined && (newer || laterConfluenceHierarchy(row, previous.record, timezone, previousTimezone));
       if (!newer && !sameRevision && !reviewParent) {
@@ -1358,10 +1373,10 @@ class Planner{
         this.notice('CONFLUENCE_REFRESH_TITLE_UNAVAILABLE', '원본 제목이 비어 있거나 300자를 초과해 현재 제목을 보존합니다.', 'warning', entry);
       }
       const needsBodyReview = (newer || sameRevision) && incomingBody !== undefined && (originalChecklistFallback ||
-        childListBaseline !== undefined || headingDepthBaseline !== undefined || multiSpaceReportBaseline !== undefined ||
+        childListBaseline !== undefined || headingDepthBaseline !== undefined || recoveredBody !== undefined ||
         incomingBody !== acceptedBody && (propertiesProjection || bodyReview?.review));
       const converted = needsBodyReview && !sourceBodyErrors.has(entry.key)
-        ? multiSpaceProjection ?? convertLegacyContent(row, contentContext) : null;
+        ? recoveredBody?.projection ?? convertLegacyContent(row, contentContext) : null;
       const safeBody = converted && usableConfluenceBody(converted) ? converted : null;
       if (needsBodyReview && !safeBody) {
         this.notice('CONFLUENCE_REFRESH_BODY_UNAVAILABLE', '본문을 안전하게 변환하거나 원본 참조·첨부를 확인할 수 없어 현재 본문을 보존합니다.', 'warning', entry, true);
@@ -1400,7 +1415,7 @@ class Planner{
       const hashes = { ...previousConfluencePageFieldDigests(previous, document.content) };
       if (childListBaseline) hashes.content = childListBaseline;
       if (headingDepthBaseline) hashes.content = headingDepthBaseline;
-      if (multiSpaceReportBaseline) hashes.content = multiSpaceReportBaseline;
+      if (recoveredBody) hashes.content = recoveredBody.baseline;
       if (hashes.parentId === undefined && initialParentId !== undefined) hashes.parentId = confluencePageFieldDigest('parentId', initialParentId);
       if (originalChecklistFallback && !previous.confluencePageFieldHashes?.content) {
         // For old receipts, the full original code block is the only proven baseline.
@@ -1460,6 +1475,8 @@ class Planner{
             '같은 원본 버전의 하위 문서 목록에 수동 순서가 있으면 반영합니다.', 'info', entry);
           if (field === 'content' && sameRevision && headingDepthBaseline) this.notice('CONFLUENCE_REFRESH_HEADING_DEPTH_RESTORED',
             '같은 원본 버전에서 확인한 제목 단계와 목차 범위를 복원합니다.', 'warning', entry, true);
+          if (field === 'content' && recoveredBody?.jiraAnchors) this.notice('CONFLUENCE_REFRESH_JIRA_ANCHORS_RESTORED',
+            '글자로 남아 있던 Jira 주소를 원본 링크로 복원합니다.', 'warning', entry, true);
           Object.assign(accepted, { [field]: incoming });
           hashes[field] = incomingHash;
           if (field === 'content') acceptedBody = incomingBody;

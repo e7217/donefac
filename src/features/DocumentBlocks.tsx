@@ -479,7 +479,7 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
     {excerptTarget && <button type="button" className="btn btn-ghost doc-excerpt-jump" onClick={goToExcerpt}>발췌 위치로 이동</button>}
     {excerpt !== undefined && !excerptTarget && <p className="doc-pinned-message" role="status">저장본에서 발췌 위치를 찾을 수 없습니다.</p>}
     {showOutline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
-    <div className="doc-readonly-content" data-document-outline-root="" ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
+    <div className="doc-readonly-content" data-document-outline-root="" data-static-document-content={mode ? '' : undefined} ref={contentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }
 function ReferenceNodeView({ node, selected, deleteNode, updateAttributes, editor }: NodeViewProps) {

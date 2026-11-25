@@ -99,6 +99,10 @@ Jira의 원본 설치 주소와 티켓 키에 해당하는 이관 영수증·업
 
 접근 제한과 제외 여부를 확인한 활성 이관 문서가 하나면 `{target:{documentId,sectionId?}}`를 반환한다. 문서·절의 근거가 모호하거나 유효한 주소의 서버·설치 경로를 확인할 수 없으면 `{target:null}`을 반환한다. 잘못된 주소, 중복되거나 지원하지 않는 선택자, 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회는 읽기 전용이며 Teamspace에 보존된 기록을 사용하므로 원본 서버에 접속하지 않는다.
 
+### 문서 본문의 Jira 주소
+
+브라우저는 워크스페이스의 `jiraMigrationOrigins`와 서버·포트·설치 경로가 일치하는 Jira 원본 업무 또는 댓글 링크를 현재 문서에서 일반 클릭하면 `GET /api/atlassian-links/resolve-migrated-jira-target?url=…`로 조회한다. 서버는 적용 영수증의 설치 주소와 보관된 원본 업무의 ID·키·소유 근거를 대조한다. 위의 Jira 댓글 선택자를 쓰면 정확한 활성 댓글도 확인한다. 확인한 한 건을 `{target:{issueId,commentId?}}`로 반환하며 `commentId`는 Teamspace 댓글 ID다. 유효한 주소에서 근거가 모호하거나 대상이 없으면 `{target:null}`을 반환한다. 지원하지 않는 쿼리·프래그먼트나 추가 요청 매개변수는 `400`이다. 응답은 `Cache-Control: no-store`를 사용한다. 조회 중 원본 서버로 요청을 보내지 않는다.
+
 ## 티켓 사이의 업무 관계
 
 `GET /api/issues/:id/relations`는 현재 티켓이 양쪽 중 하나인 `IssueRelationView[]`을 반환한다. `POST`로 `{otherIssueId,type,direction}`을 보낸다. `type`은 `related`, `blocks`, `duplicates`다. `direction`이 `outgoing`이면 URL의 티켓이 차단하는 쪽 또는 중복 티켓이며, `incoming`이면 상대 티켓이 그 역할이다. `related`는 두 티켓을 ID 순서로 저장한다. 같은 관계를 다시 보내면 이미 저장된 행과 `200`을 반환하고, 새 연결은 `201`을 반환한다.

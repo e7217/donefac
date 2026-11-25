@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import Placeholder from '@tiptap/extension-placeholder';
 import { ySyncPluginKey } from '@tiptap/y-tiptap';
@@ -21,6 +21,8 @@ import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, DOCUMENT_HEADING_LEVELS, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel } from '../../shared/document-nodes';
 import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
 import { isDocumentSectionId } from '../../shared/document-sections';
+import { isRelationId } from '../../shared/issue-relations';
+import { jiraMigratedTargetAddress, type MigratedJiraTarget } from '../../shared/jira-migration-address';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
@@ -84,6 +86,7 @@ type Props = FeatureProps & {
   issueDrawerOpen?: boolean;
   onOpenIssueForReview?: OpenIssueForReview;
   onOpenIssueSchedule?: (id: string) => boolean;
+  onOpenMigratedIssue?: (issueId: string, commentId?: string, opener?: HTMLAnchorElement, signal?: AbortSignal) => Promise<boolean>;
   commentFocus?: { commentId: string; activation: number };
   onCopyCommentLink?: (commentId: string) => void;
 };
@@ -101,6 +104,7 @@ type DocumentConflict = 'generic' | { document: DocPage; fields: DocumentMetadat
 type ObservedDocument = { document: DocPage; live: boolean };
 type DocumentSave = { actorId: string; documentId: string; observed?: ObservedDocument };
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
+type MigratedIssueLinkState = { href: string; status: 'pending' | 'missing' | 'failed'; expectsComment: boolean };
 type CommentFilter = 'all' | 'open' | 'resolved';
 const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
 const COMMENT_FILTERS: CommentFilter[] = ['all', 'open', 'resolved'];
@@ -178,13 +182,15 @@ function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
 
 export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument,
   documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
-  commentFocus, onCopyCommentLink, onOpenIssueForReview, onOpenIssueSchedule }: Props) {
+  commentFocus, onCopyCommentLink, onOpenIssueForReview, onOpenIssueSchedule, onOpenMigratedIssue }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [findScope, setFindScope] = useState<string | null>(null);
   const findOpener = useRef<HTMLButtonElement>(null);
   const findInput = useRef<HTMLInputElement>(null);
   const documentScope = JSON.stringify([actorId, selectedDocumentId]);
   if (findScope !== null && findScope !== documentScope) setFindScope(null);
+  const [migratedIssueLink, setMigratedIssueLink] = useState<MigratedIssueLinkState | null>(null);
+  const migratedIssueRequest = useRef<{ anchor: HTMLAnchorElement; controller: AbortController } | null>(null);
   const draftRef = useRef<Draft | null>(null);
   const listDrafts = useRef(new Set<string>());
   const trackListDraft = useCallback((id: string, dirty: boolean) => {
@@ -388,6 +394,55 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const selectedPage = data.documents.find(page => page.id === selectedDocumentId);
   const selectedPageId = selectedPage?.id;
   const publicationOpen = Boolean(selectedPage && (publicationLink || selectedPage.id === publicationDocumentId));
+
+  useLayoutEffect(() => {
+    setMigratedIssueLink(null);
+    return () => {
+      migratedIssueRequest.current?.controller.abort();
+      migratedIssueRequest.current = null;
+    };
+  }, [documentScope, sectionId, issueDrawerOpen, publicationOpen, checklistReselecting]);
+
+  async function resolveMigratedIssue(anchor: HTMLAnchorElement, href: string, expectsComment: boolean) {
+    if (!onOpenMigratedIssue || migratedIssueRequest.current?.anchor === anchor) return;
+    migratedIssueRequest.current?.controller.abort();
+    const controller = new AbortController();
+    const { signal } = controller;
+    const route = location.hash;
+    const stillOnLink = () => location.hash === route && anchor.isConnected && anchor.getAttribute('href') === href;
+    // Let the issue drawer restore focus to an anchor inside the editable body.
+    if (anchor.isContentEditable && !anchor.hasAttribute('tabindex')) anchor.tabIndex = -1;
+    migratedIssueRequest.current = { anchor, controller };
+    setMigratedIssueLink({ href, status: 'pending', expectsComment });
+    try {
+      const query = new URLSearchParams({ url: href });
+      const { target } = await api<{ target: MigratedJiraTarget | null }>(`/atlassian-links/resolve-migrated-jira-target?${query}`, { signal, cache: 'no-store' });
+      if (signal.aborted) return;
+      if (!stillOnLink()) {
+        setMigratedIssueLink(null);
+        return;
+      }
+      const verified = target && isRelationId(target.issueId) &&
+        (expectsComment ? isRelationId(target.commentId) : target.commentId === undefined);
+      const opened = verified && await onOpenMigratedIssue(target.issueId, target.commentId, anchor, signal);
+      if (!signal.aborted) setMigratedIssueLink(opened || !stillOnLink() ? null : { href, status: 'missing', expectsComment });
+    } catch {
+      if (!signal.aborted) setMigratedIssueLink(stillOnLink() ? { href, status: 'failed', expectsComment } : null);
+    } finally {
+      if (migratedIssueRequest.current?.controller === controller) migratedIssueRequest.current = null;
+    }
+  }
+
+  function openMigratedIssueLink(element: Element) {
+    const anchor = element.closest<HTMLAnchorElement>('a[href]');
+    if (!anchor || !onOpenMigratedIssue || !data.jiraMigrationOrigins?.length || publicationOpen || issueDrawerOpen ||
+        anchor.closest('[data-static-document-content]')) return false;
+    const href = anchor.getAttribute('href');
+    const address = href && jiraMigratedTargetAddress(href);
+    if (!href || !address || !data.jiraMigrationOrigins.includes(`${address.origin}${address.contextPath}`)) return false;
+    void resolveMigratedIssue(anchor, href, Boolean(address.commentId));
+    return true;
+  }
   const moveOpen = Boolean(selectedPage && selectedPage.id === moveDocumentId);
   const copyOpen = Boolean(selectedPage && selectedPage.id === copyDocumentId);
   const orderOpen = Boolean(selectedPage && selectedPage.id === orderDocumentId);
@@ -1959,6 +2014,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </div>
               {!checklistReselecting && findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
                 canReplace={!bodyReadOnly && !saving && !conflict} onClose={closeFind} />}
+              {migratedIssueLink && <div className="docs-notice docs-migrated-issue-link" role="status">
+                {migratedIssueLink.status === 'pending' ? '이관된 Jira 주소를 확인하는 중…' : migratedIssueLink.status === 'failed'
+                  ? '이관된 Jira 주소를 조회하지 못했습니다.' : migratedIssueLink.expectsComment
+                    ? '이관된 Jira 댓글을 확인할 수 없습니다.' : '이관된 Jira 업무를 확인할 수 없습니다.'}
+                {migratedIssueLink.status !== 'pending' && <> <a href={migratedIssueLink.href} target="_blank" rel="noopener noreferrer">원본 열기</a></>}
+              </div>}
               </div>
               {!checklistReselecting && editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
                 <button type="button" aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter" title="Ctrl/⌘+Shift+Enter"
@@ -1971,12 +2032,34 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
                 sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
                 ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen && !checklistReselecting} />}
-              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={handleEditorKeys}
-                onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
-                onClickCapture={event => {
-                  if (!checklistReselecting || !(event.target instanceof Element) || !event.target.closest('a[href], button, input[type="checkbox"]')) return;
+              <div ref={editorWrap} className="docs-editor-wrap" onKeyDownCapture={event => {
+                if (!checklistReselecting && !event.defaultPrevented && !event.nativeEvent.isComposing && event.key === 'Enter' &&
+                    !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && event.target instanceof HTMLAnchorElement &&
+                    openMigratedIssueLink(event.target)) {
                   event.preventDefault();
                   event.stopPropagation();
+                  return;
+                }
+                handleEditorKeys(event);
+              }}
+                onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setSlashQuery(null); }}
+                onClickCapture={event => {
+                  if (!(event.target instanceof Element)) return;
+                  if (checklistReselecting && event.target.closest('a[href], button, input[type="checkbox"]')) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    return;
+                  }
+                  if (!event.target.closest('a[href]') || event.defaultPrevented || event.button !== 0 ||
+                      event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                  if (openMigratedIssueLink(event.target)) {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  } else if (migratedIssueRequest.current) {
+                    migratedIssueRequest.current.controller.abort();
+                    migratedIssueRequest.current = null;
+                    setMigratedIssueLink(null);
+                  }
                 }}
                 onClick={event => {
                 if (!(event.target instanceof Element) || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;

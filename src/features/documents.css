@@ -200,6 +200,7 @@
 .docs-history-hint { background:#faf7ee; color:#ae996d; font-size:10px; line-height:1.8; padding:10px; border-radius:5px; margin-bottom:12px; }
 .docs-history-hint button { display:block; background:none; border:0; font-size:10px; color:#a38a4f; text-decoration:underline; cursor:pointer; margin-top:5px; padding:0; }
 .docs-notice { background:#fff8eb; color:#a38c60; padding:12px 18px; font-size:10px; line-height:1.8; border-bottom:1px solid #f0e4c8; }
+.docs-migrated-issue-link a { color:#4258a3; font-weight:600; text-decoration:underline; text-underline-offset:2px; }
 .docs-conflict strong { display:block; color:#a17c43; }
 .docs-conflict>div { display:flex; flex-wrap:wrap; gap:10px; margin-top:5px; }
 .docs-conflict button { background:transparent; border:0; text-decoration:underline; color:#9e7c46; font-size:10px; cursor:pointer; padding:2px 0; }

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { AtlassianReadError, isConfluencePageId, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
+import { AtlassianReadError, isConfluencePageId, isJiraIssueKey, parseAtlassianLink, type AtlassianLink, type AtlassianLinkTarget, type ParsedAtlassianLink } from '../shared/atlassian-links.js';
 import { parseAtlassianSearchInput, sameAtlassianSearchAddress, type AtlassianSearchAddress, type AtlassianSearchTarget } from '../shared/atlassian-search.js';
+import type { JiraMigrationTargetAddress, MigratedJiraTarget } from '../shared/jira-migration-address.js';
 import type { Comment, SourceImport, SourceRecordArchive } from '../shared/types.js';
 import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryOwnerAliases, jiraHistorySourceKey } from './migration-jira-history.js';
 import { migrationOriginLink, parseMigrationOriginBase } from './migration-origin-links.js';
@@ -15,6 +16,7 @@ type ArchivedPage = { targetId: string; importId: string; instanceKey: string; p
 type ArchivedSpace = { spaceKey: string | null; key: string | null; sourceClass: string | null };
 type ArchiveRow = { json: string | null };
 type JiraCommentArchiveRow = ArchiveRow & { archiveId: string; importId: string; instanceKey: string; issueId: string; commentId: string };
+type JiraSourceIssue = { issueId: string; instanceKey: string; owner: SourceRecordArchive };
 
 const inputFields = ['targetType', 'targetId', 'product', 'url'];
 const backupFields = ['id', ...inputFields, 'createdAt'];
@@ -127,32 +129,127 @@ export class AtlassianLinksService {
     return [...targets.values()];
   }
 
-  private jiraArchivePackage(archive: SourceRecordArchive) {
-    if (archive.source?.product !== 'jira' || archive.excluded || !archive.targetProjectId) return;
-    const receipt = this.store.get<SourceImport>('source_imports', archive.sourceImportId);
-    if (!receipt?.projectIds.includes(archive.targetProjectId)) return;
-    const packages = receipt.packages.filter(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' &&
-      pkg.source.instanceKey === archive.source.instanceKey && pkg.source.format === archive.source.format);
-    if (packages.length === 1) return { configuredBase: receipt.configuration.sourceBaseUrls?.[packages[0].stagingId] };
+  private jiraReceiptOrigins(): { instanceKey: string; base: string }[] {
+    const rows = this.store.db.prepare(`SELECT DISTINCT json_extract(pkg.value,'$.source.instanceKey') AS instanceKey, base.value
+      FROM source_imports AS receipt JOIN json_each(receipt.json,'$.packages') AS pkg
+      JOIN json_each(receipt.json,'$.configuration.sourceBaseUrls') AS base ON base.key=json_extract(pkg.value,'$.stagingId')
+      WHERE json_extract(pkg.value,'$.source.product')='jira' AND base.type='text'`)
+      .all() as { instanceKey: string; value: string }[];
+    return rows.flatMap(({ instanceKey, value }) => {
+      const base = parseMigrationOriginBase('jira', value);
+      return base ? [{ instanceKey, base: base.origin + base.contextPath }] : [];
+    });
   }
 
-  private resolveJiraComment(address: JiraAddress, sourceCommentId: string): AtlassianSearchTarget[] {
+  migratedJiraOrigins(): string[] {
+    return this.sources ? [...new Set(this.jiraReceiptOrigins().map(({ base }) => base))].sort() : [];
+  }
+
+  resolveMigratedJiraTarget(address: JiraMigrationTargetAddress): MigratedJiraTarget | null {
+    const original = this.migratedJiraIssue(address);
+    if (!original || !this.store.db.prepare('SELECT 1 FROM issues WHERE id=?').get(original.issueId)) return null;
+    if (!address.commentId) return { issueId: original.issueId };
+    const [comment] = this.resolveJiraComment(address, address.commentId, original);
+    return comment?.commentId ? { issueId: original.issueId, commentId: comment.commentId } : null;
+  }
+
+  private migratedJiraIssue(address: JiraAddress): JiraSourceIssue | undefined {
+    const { sources } = this;
+    if (!sources) return;
+    const base = address.origin + address.contextPath;
+    const issueUrl = `${base}/browse/${address.issueKey}`;
+    const instances = new Set(this.jiraReceiptOrigins().filter(origin => origin.base === base).map(origin => origin.instanceKey));
+    const db = this.store.db;
+    const byKey = db.prepare(`SELECT source_alias AS alias FROM source_bindings WHERE product='jira' AND source_instance=?
+      AND kind='issue' AND target_type='issue' AND upper(source_alias)=?`);
+    const byId = db.prepare(`SELECT json_remove(json,'$.record.text') AS json FROM source_records WHERE id=? AND json_valid(json)`);
+    let original: JiraSourceIssue | undefined;
+    for (const instanceKey of instances) {
+      const aliases = (byKey.all(instanceKey, address.issueKey) as { alias: string }[]).map(({ alias }) => alias);
+      const candidates = sources.jiraIssueOrigins(instanceKey, aliases, 'alias');
+      for (const [archiveId, matches] of Map.groupBy(candidates, candidate => candidate.archiveId)) {
+        const { issueId, projectId, sourceProjectId } = matches[0];
+        const result = byId.get(archiveId) as ArchiveRow | undefined;
+        const owner = result?.json ? JSON.parse(result.json) as SourceRecordArchive : undefined;
+        if (!owner?.record?.metadata || owner.id !== archiveId || owner.source?.instanceKey !== instanceKey ||
+            owner.record.kind !== 'issue' || owner.record.containerId !== sourceProjectId || owner.targetProjectId !== projectId ||
+            owner.targetType !== 'issue' || owner.targetId !== issueId || owner.ownerType !== 'issue' || owner.ownerId !== issueId) continue;
+        const pkg = this.jiraArchivePackage(owner);
+        const origin = parseMigrationOriginBase('jira', pkg?.configuredBase);
+        if (!origin || migrationOriginLink(origin, 'jira', owner.record) !== issueUrl) continue;
+        if (original || owner.record.metadata.restricted === true || isRestrictedJiraHistoryOwner(owner.record)) return;
+        const originalKey = owner.record.metadata.key;
+        if (!isJiraIssueKey(originalKey)) return;
+        const ownerAliases = [...new Set([owner.record.sourceId, originalKey])];
+        const bindings = sources.jiraIssueOrigins(instanceKey, ownerAliases, 'alias');
+        if (bindings.length !== ownerAliases.length || bindings.some(binding => binding.archiveId !== archiveId ||
+            binding.issueId !== issueId || binding.projectId !== projectId || binding.sourceProjectId !== sourceProjectId)) return;
+        original = { issueId, instanceKey, owner };
+      }
+    }
+    if (original && !this.unboundJiraIssueContradicts(address, instances, original)) return original;
+  }
+
+  private unboundJiraIssueContradicts(address: JiraAddress, instances: Set<string>, original: JiraSourceIssue): boolean {
+    const claims = this.store.db.prepare(`SELECT json_remove(json,'$.record.text') AS json FROM source_records
+      WHERE product='jira' AND source_instance=? AND kind='issue' AND target_type IS NULL AND target_id IS NULL
+        AND upper(json_extract(json,'$.record.metadata.key'))=?`);
+    for (const instanceKey of instances) {
+      const rows = claims.iterate(instanceKey, address.issueKey) as Iterable<ArchiveRow>;
+      for (const { json } of rows) {
+        if (!json) continue;
+        const claim = JSON.parse(json) as SourceRecordArchive;
+        const pkg = this.jiraReceiptPackage(claim);
+        if (!pkg) continue;
+        const base = parseMigrationOriginBase('jira', pkg.configuredBase);
+        const sameInstance = instanceKey === original.instanceKey;
+        const sameBase = base?.origin === address.origin && base.contextPath === address.contextPath;
+        if (!sameBase && !(sameInstance && pkg.configuredBase == null)) continue;
+        if (claim.record.metadata.restricted === true || isRestrictedJiraHistoryOwner(claim.record) || !sameInstance) return true;
+        if (claim.record.sourceId !== original.owner.record.sourceId) {
+          // A sparse follow-up can repeat the key while omitting the numeric issue ID.
+          if (claim.record.sourceId.toUpperCase() !== address.issueKey ||
+              claim.record.containerId !== original.owner.record.containerId) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private jiraReceiptPackage(archive: SourceRecordArchive) {
+    if (archive.source?.product !== 'jira') return;
+    const receipt = this.store.get<SourceImport>('source_imports', archive.sourceImportId);
+    const packages = receipt?.packages.filter(pkg => pkg.sha256 === archive.packageSha256 && pkg.source.product === 'jira' &&
+      pkg.source.instanceKey === archive.source.instanceKey && pkg.source.format === archive.source.format);
+    if (receipt && packages?.length === 1) return { receipt, configuredBase: receipt.configuration.sourceBaseUrls?.[packages[0].stagingId] };
+  }
+
+  private jiraArchivePackage(archive: SourceRecordArchive) {
+    if (archive.excluded || !archive.targetProjectId) return;
+    const pkg = this.jiraReceiptPackage(archive);
+    if (pkg?.receipt.projectIds.includes(archive.targetProjectId)) return pkg;
+  }
+
+  private resolveJiraComment(address: JiraAddress, sourceCommentId: string, original?: JiraSourceIssue): AtlassianSearchTarget[] {
     const { sources } = this;
     if (!sources) return [];
     const issueUrl = `${address.origin}${address.contextPath}/browse/${address.issueKey}`;
     const db = this.store.db;
+    const binding = original ? ''
+      : `JOIN atlassian_links AS link ON link.product='jira' AND link.target_type='issue' AND link.target_id=issue.id AND link.url=?`;
+    const scope = original ? 'AND issue.id=? AND archive.source_instance=?' : '';
     const rows = db.prepare(`SELECT archive.id AS archiveId, archive.import_id AS importId, archive.source_instance AS instanceKey,
         live.resource_id AS issueId, live.id AS commentId,
         CASE WHEN json_valid(archive.json) THEN json_set(archive.json,'$.record.text','') END AS json
       FROM source_records AS archive
       JOIN comments AS live ON live.id=archive.target_id AND live.resource_type='issue' AND live.resource_id=archive.owner_id
       JOIN issues AS issue ON issue.id=live.resource_id
-      JOIN atlassian_links AS link ON link.product='jira' AND link.target_type='issue' AND link.target_id=issue.id AND link.url=?
+      ${binding}
       WHERE archive.product='jira' AND archive.kind='comment' AND archive.source_id=? AND archive.target_type='comment'
-        AND archive.owner_type='issue' AND NOT EXISTS (SELECT 1 FROM source_records AS duplicate
+        AND archive.owner_type='issue' ${scope} AND NOT EXISTS (SELECT 1 FROM source_records AS duplicate
           WHERE duplicate.product='jira' AND duplicate.source_instance=archive.source_instance AND duplicate.kind='comment'
             AND duplicate.source_id=archive.source_id AND duplicate.target_type='comment' AND duplicate.id<>archive.id)
-      `).iterate(issueUrl, sourceCommentId) as Iterable<JiraCommentArchiveRow>;
+      `).iterate(...(original ? [sourceCommentId, original.issueId, original.instanceKey] : [issueUrl, sourceCommentId])) as Iterable<JiraCommentArchiveRow>;
     const ownerById = db.prepare(`SELECT CASE WHEN json_valid(json) THEN json_set(json,'$.record.text','') END AS json FROM source_records WHERE id=?`);
     let found: AtlassianSearchTarget | undefined;
     for (const { json, archiveId, importId, instanceKey, issueId, commentId } of rows) {
@@ -176,8 +273,8 @@ export class AtlassianLinksService {
       const ownerIds = new Set(bindings.map(binding => binding.archiveId));
       if (ownerIds.size !== 1) continue;
       const [ownerId] = ownerIds;
-      const ownerRow = ownerById.get(ownerId) as ArchiveRow | undefined;
-      const owner = ownerRow?.json ? JSON.parse(ownerRow.json) as SourceRecordArchive | null : null;
+      const ownerRow = original ? undefined : ownerById.get(ownerId) as ArchiveRow | undefined;
+      const owner = original?.owner ?? (ownerRow?.json ? JSON.parse(ownerRow.json) as SourceRecordArchive | null : null);
       if (owner?.record?.kind !== 'issue' || owner.id !== ownerId || owner.source?.instanceKey !== instanceKey ||
           owner.targetType !== 'issue' || owner.targetId !== issueId || owner.ownerType !== 'issue' || owner.ownerId !== issueId ||
           owner.targetProjectId !== archive.targetProjectId || owner.record.metadata.restricted === true || isRestrictedJiraHistoryOwner(owner.record)) continue;

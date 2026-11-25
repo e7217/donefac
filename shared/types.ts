@@ -2165,6 +2165,7 @@ export interface WorkspaceSnapshot {
   issueMoveOrigins?: Record<string, string[]>;
   issueAliases?: Record<string, IssueSearchAlias[]>;
   confluenceMigrationOrigins?: string[];
+  jiraMigrationOrigins?: string[];
   documentOrders?: (DocumentSiblingOrder & { custom?: true })[];
 }
 export interface ScheduleChange {
