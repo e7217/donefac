@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { collectMigrationEvidence, compareMigrationEvidence } from '../../scripts/pilot-migration-evidence.mjs';
+import { SOURCE_RECONCILIATION_PRIMARY_FIELDS, type SourceReconciliationFieldStatus } from '../../shared/types.js';
 
 const jira = {
   packageId: '00000000-0000-0000-0000-000000000011', product: 'jira', format: 'jira-json', sha256: 'a'.repeat(64),
@@ -21,6 +22,12 @@ const fileId = '00000000-0000-0000-0000-000000000040';
 const recordCounts = { linked: 4, trashed: 0, missing: 0, 'archive-only': 1, excluded: 0 };
 const primaryCounts = { linked: 1, trashed: 0, missing: 0, 'archive-only': 0, excluded: 0 };
 const hierarchyMatched = { matched: 1, changed: 0, unavailable: 0, invalid: 0, sha256: '8'.repeat(64) };
+const fieldTotals = { matched: 1, changed: 0, unavailable: 0, invalid: 0 };
+function fieldProof(kind: 'issue' | 'page', matched = 1) {
+  return { sha256: '6'.repeat(64), counts: Object.fromEntries(SOURCE_RECONCILIATION_PRIMARY_FIELDS[kind].map(field => [
+    field, { ...fieldTotals, matched },
+  ])) };
+}
 const attachmentCounts = { verified: 1, missing: 0, corrupt: 0, unbound: 0, excluded: 0, unreadable: 0 };
 const targetDigests = {
   comments: { count: 1, sha256: '1'.repeat(64) },
@@ -68,7 +75,7 @@ function sample({ version = 1, corrupt = false, changedOwner = false, swappedAut
     recordCounts,
     primaryRecords: packages.map(({ packageId, product }) => ({ packageId, kind: product === 'jira' ? 'issue' : 'page',
       counts: { ...primaryCounts }, invalidTargets: 0, dispositionSha256: 'e'.repeat(64), title: 'never-emit-private-primary-title',
-      hierarchy: { ...hierarchyMatched, parentId: 'never-emit-parent-id' } })),
+      hierarchy: { ...hierarchyMatched, parentId: 'never-emit-parent-id' }, fields: fieldProof(product === 'jira' ? 'issue' : 'page') })),
     attachmentCounts: corrupt ? { ...attachmentCounts, verified: 0, corrupt: 1 } : attachmentCounts,
     attachments: [{ sourceRecordId: archivedId, fileId, recordStatus: 'linked', status: corrupt ? 'corrupt' : 'verified',
       packageSha256: wiki.sha256, product: wiki.product, sourceInstance: wiki.instanceKey, size: 11,
@@ -144,9 +151,9 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
   assert.equal(before.checks.receiptsWithArchiveOnlyPrimaryRecords, 0);
   assert.deepEqual(before.receipts[0].primaryRecords, [
     { packageId: jira.packageId, kind: 'issue', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
-      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched },
+      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched, fields: fieldProof('issue') },
     { packageId: wiki.packageId, kind: 'page', counts: primaryCounts, invalidTargets: 0, dispositionSha256: 'e'.repeat(64),
-      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched },
+      records: { expected: 1, observed: 1 }, hierarchy: hierarchyMatched, fields: fieldProof('page') },
   ]);
   assert.deepEqual(before.receipts[0].targetContent, { version: 1, ...targetDigests });
   assert.deepEqual(before.receipts[0].jiraStatusHistory, statusHistory);
@@ -171,7 +178,7 @@ test('migration rehearsal proves package coverage and matching cold-restore evid
 test('migration rehearsal distinguishes archive-only primary records from hard coverage failures', async () => {
   const input = sample();
   const [jiraProof, wikiProof] = input.observations.primaryRecords;
-  const archiveOnly = { ...jiraProof, counts: { ...primaryCounts, linked: 0, 'archive-only': 1 }, hierarchy: undefined };
+  const archiveOnly = { ...jiraProof, counts: { ...primaryCounts, linked: 0, 'archive-only': 1 }, hierarchy: undefined, fields: fieldProof('issue', 0) };
   const observations = { ...input.observations, primaryRecords: [wikiProof, archiveOnly] };
   const review = await evidence(input, observations);
   assert.equal(review.status, 'review');
@@ -217,11 +224,45 @@ test('migration rehearsal requires complete and consistent coverage rows, includ
   for (const invalid of invalidProofs) await assert.rejects(readPrimary(invalid), /검증 (결과|건수)/u);
 
   input.packages = [jira, { ...wiki, counts: {} }];
-  const zero = await readPrimary([jiraProof, { ...wikiProof, counts: { ...primaryCounts, linked: 0 }, hierarchy: undefined }]);
+  const zero = await readPrimary([jiraProof, { ...wikiProof, counts: { ...primaryCounts, linked: 0 }, hierarchy: undefined, fields: fieldProof('page', 0) }]);
   assert.equal(zero.status, 'verified');
   assert.deepEqual(zero.receipts[0].primaryRecords[1].records, { expected: 0, observed: 0 });
   input.packages = [jira, { ...wiki, counts: { page: -1 } }];
   await assert.rejects(evidence(input), /이관 준비 기록의 업무·문서 분석 건수/u);
+});
+
+test('offline rehearsal gates field changes against applied evidence and validates the proof', async () => {
+  const input = sample();
+  const [jiraProof, wikiProof] = input.observations.primaryRecords;
+  const readFields = (fields: unknown) => evidence(input, { ...input.observations, primaryRecords: [{ ...jiraProof, fields }, wikiProof] });
+  const clean = await readFields(jiraProof.fields);
+  assert.equal(clean.status, 'verified');
+  assert.equal(clean.checks.receiptsWithPrimaryFieldReview, 0);
+  const legacy = await readFields(undefined);
+  assert.equal(legacy.status, 'review');
+  assert.equal(legacy.checks.receiptsWithPrimaryFieldReview, 1);
+
+  for (const status of ['changed', 'unavailable', 'invalid'] satisfies SourceReconciliationFieldStatus[]) {
+    const fields = { ...jiraProof.fields, counts: { ...jiraProof.fields.counts,
+      status: { ...fieldTotals, matched: 0, [status]: 1, originalValue: 'never-emit-field-value' },
+    } };
+    const result = await readFields(fields);
+    assert.equal(result.status, status === 'invalid' ? 'failed' : 'review');
+    assert.equal(result.checks.receiptsWithPrimaryFieldFailures, Number(status === 'invalid'));
+    assert.equal(result.checks.receiptsWithPrimaryFieldReview, Number(status !== 'invalid'));
+    assert.doesNotMatch(JSON.stringify(result), /never-emit-field-value/u);
+    assert.deepEqual(compareMigrationEvidence(result, await readFields({ ...fields, sha256: '9'.repeat(64) })).changedReceiptIds, [receiptId]);
+  }
+  const { counts: totals } = jiraProof.fields;
+  const absentOptional = await readFields({ ...jiraProof.fields, counts: { ...totals,
+    reporterId: { ...fieldTotals, matched: 0 }, plannedEffortMinutes: { ...fieldTotals, matched: 0 } } });
+  assert.equal(absentOptional.status, 'verified');
+  for (const malformed of [
+    { ...jiraProof.fields, sha256: 'raw-value' },
+    { ...jiraProof.fields, counts: { ...totals, unknownField: fieldTotals } },
+    { ...jiraProof.fields, counts: { ...totals, title: { ...fieldTotals, matched: 0 } } },
+    { ...jiraProof.fields, counts: { ...totals, reporterId: { ...fieldTotals, matched: 2 } } },
+  ]) await assert.rejects(readFields(malformed), /티켓·문서 필드 검증/u);
 });
 
 test('migration rehearsal reviews changed and unavailable parent evidence and fails invalid hierarchy', async () => {

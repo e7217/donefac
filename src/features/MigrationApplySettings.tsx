@@ -4,7 +4,7 @@ import { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, us
 import { ArchiveRestore, CheckCircle2, Download, FileCheck2, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { suggestMigrationIdentityMappings, suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions';
 import { buildMigrationPreflightReport } from '../../shared/migration-preflight';
-import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentField, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueField, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type SourceRecordArchive, type StatusCategory, type User } from '../../shared/types';
+import { ISSUE_TYPES, MIGRATION_MAPPING_FILE_MAX_BYTES, type ConfluenceMigrationDocumentReview, type CustomFieldKind, type FeatureProps, type JiraMigrationIssueReview, type LegacyPackageSummary, type LegacyRecord, type LegacyRecordPage, type MigrationApplyResult, type MigrationConfiguration, type MigrationFieldOption, type MigrationIdentityOption, type MigrationJiraPlanningChoice, type MigrationMappingFile, type MigrationMappingRestore, type MigrationNotice, type MigrationOptions, type MigrationPreview, type MigrationValueOption, type SourceImport, type SourceRecordArchive, type StatusCategory, type User } from '../../shared/types';
 import { api, post } from '../lib/api';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { LegacyRecordDetail } from './LegacyRecordDetail';
@@ -13,6 +13,7 @@ import { ConfluenceSourceReview } from './MigrationConfluenceReview';
 import { MigrationContentReview } from './MigrationContentReview';
 import { MigrationJiraObservedWorkflowReview, MigrationJiraWorkflowEditor, MigrationJiraWorkflowPreview } from './MigrationJiraWorkflow';
 import { MigrationReconciliation } from './MigrationReconciliation';
+import { confluenceRefreshFieldLabels, jiraRefreshFieldLabels } from './migration-field-labels';
 import { SourceArchiveDetail, SourceImportRecords } from './SourceOrigins';
 import { downloadDocument } from './document-utils';
 import './migration-apply.css';
@@ -72,14 +73,9 @@ const documentOrderCountLabels = {
   confluenceOrderedSiblingGroups: '원본 순서를 적용할 문서 그룹',
   confluenceUnresolvedSiblingGroups: '기본 순서를 사용할 문서 그룹',
 };
-const jiraRefreshFieldLabels: Record<JiraMigrationIssueField, string> = {
-  title: '제목', description: '설명', status: '상태', type: '업무 유형', priority: '우선순위', assigneeId: '담당자', reporterId: '요청자', labels: '라벨',
-  startDate: '시작일', endDate: '종료일', dueDate: '마감일', estimate: '예상 작업량', plannedEffortMinutes: '계획 작업 시간 (분)', parentId: '상위 업무',
-};
 function sourceMappingDetail(option: MigrationValueOption & Pick<MigrationFieldOption, 'projectedDate'>) {
   return option.projectedDate ? `${option.sourceValue} · 업무 일정 ${jiraRefreshFieldLabels[option.projectedDate]}에 반영` : option.sourceValue;
 }
-const confluenceRefreshFieldLabels: Record<ConfluenceMigrationDocumentField, string> = { title: '제목', content: '본문', labels: '라벨', parentId: '상위 문서' };
 const countLabels: Record<string, string> = { projects: '프로젝트', issues: '업무', retainedIssues: '이미 이관한 업무', retainedPages: '이미 이관한 문서', retainedRecords: '기존 업무의 원본 기록', documents: '문서', comments: '댓글', worklogs: '적용할 작업 시간', archivedWorklogs: '원본에만 보관할 작업 시간', revisions: '문서 버전', attachments: '첨부', attachmentVersions: '첨부 버전', sourceRecords: '보존 원본', archivedRecords: '보존 원본', excludedRecords: '제외한 원본 합계', explicitExcludedRecords: '직접 제외한 원본', excludedDescendants: '함께 제외된 하위 기록', resourceLinks: '문서·업무 연결', retainedResourceLinks: '기존 항목과의 업무·문서 연결', issueRelations: '업무 관계', ...sourceLinkCountLabels, ...jiraPlanningCountLabels, ...jiraRefreshCountLabels, ...confluenceRefreshCountLabels, ...documentOrderCountLabels };
 const appendLabels = {
   append: {
@@ -612,7 +608,14 @@ function ActorMigration(props: MigrationApplyProps) {
         </MappingSection>
         {appendTo && issueDestination && <AppendMappings options={options} target={issueDestination} value={appendTo} onChange={next => change({ ...configuration, appendTo: next })} />}
         {mode === 'new' && <>
-        <MappingSection title="상태 매핑"><Paged title="상태 매핑" items={options.statuses} label={item => item.label} render={item => <MappingRow label={item.label} detail={item.sourceValue}><select className="field" aria-label={`상태 매핑 ${item.label}`} value={configuration.statuses[item.id] || 'todo'} onChange={event => mapValue('statuses', item.id, event.target.value as StatusCategory)}>{Object.entries(categoryLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select></MappingRow>} /></MappingSection>
+        <MappingSection title="상태 매핑"><Paged title="상태 매핑" items={options.statuses} label={item => item.label} render={item =>
+          <MappingRow label={item.label} detail={item.sourceValue}>
+            <select className="field" aria-label={`상태 매핑 ${item.label}`} value={configuration.statuses[item.id] ?? ''}
+              onChange={event => mapValue('statuses', item.id, event.target.value as StatusCategory)}>
+              <option value="" disabled>분류 선택</option>
+              {Object.entries(categoryLabels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </select>
+          </MappingRow>} /></MappingSection>
         {Boolean(options.jiraWorkflowStatuses?.length || configuration.jiraWorkflows) && <MappingSection title="Jira 워크플로 매핑">
           <MigrationJiraWorkflowEditor options={options} configuration={configuration} onChange={changeJiraWorkflows} />
         </MappingSection>}

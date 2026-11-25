@@ -4882,6 +4882,123 @@ test('reconciliation and the whole-receipt audit follow exact migrated attachmen
   } finally { await f.close(); }
 });
 
+test('receipt compares the current Jira and Confluence primary fields with their latest applied checkpoints', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jira = await f.upload(Buffer.from('Issue id,Issue key,Project key,Summary,Description,Created,Updated,Status,Issue Type\r\n100,DRIFT-1,DRIFT,원본 티켓,원본 설명,2024-01-01T00:00:00Z,2024-01-02T00:00:00Z,Open,Task\r\n'),
+    'drift.csv', 'jira', 'primary-field-jira');
+  const confluence = '<hibernate-generic>' +
+    '<object class="Space"><id name="id">10</id><property name="key">FIELD</property><property name="name">필드 검증 위키</property></object>' +
+    '<object class="Page"><id name="id">20</id><property name="title">원본 문서</property><property name="version">1</property>' +
+    '<property name="creationDate">2024-01-01T00:00:00Z</property><property name="lastModificationDate">2024-01-02T00:00:00Z</property>' +
+    '<property name="space" class="Space"><id name="id">10</id></property></object>' +
+    '<object class="BodyContent"><id name="id">30</id><property name="body"><![CDATA[<p>원본 본문</p>]]></property>' +
+    '<property name="content" class="Page"><id name="id">20</id></property></object></hibernate-generic>';
+  const wiki = await f.upload(zip([{ path: 'entities.xml', bytes: Buffer.from(confluence) }]), 'drift-wiki.zip', 'confluence', 'primary-field-wiki');
+  const initial = await f.apply(await f.preview(await f.configuration([jira, wiki], 'FIELDTEST')));
+  assert.equal(initial.status, 201, JSON.stringify(initial.data));
+  const receipt = initial.data.import;
+  const [projectId] = receipt.projectIds;
+  const snapshot = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const issue = snapshot.issues.find(item => item.projectId === projectId)!;
+  const page = snapshot.documents.find(item => item.projectId === projectId)!;
+  assert.equal(issue.title, '원본 티켓');
+  assert.equal(page.title, '원본 문서');
+
+  async function audit(current = receipt) {
+    const response = await f.call<SourceReconciliationAudit>(`/source-imports/${current.id}/reconciliation/audit?expectedVersion=${current.version}`);
+    assert.equal(response.status, 200, JSON.stringify(response.data));
+    return response.data;
+  }
+  function fields(report: SourceReconciliationAudit, pkg: LegacyPackageSummary) {
+    const proof = report.primaryRecords.find(row => row.packageId === pkg.id)?.fields;
+    assert.ok(proof);
+    assert.match(proof.sha256, /^[a-f\d]{64}$/u);
+    return proof;
+  }
+  const noFields = { matched: 0, changed: 0, unavailable: 0, invalid: 0 };
+  const matched = { ...noFields, matched: 1 };
+  const changed = { ...noFields, changed: 1 };
+  const before = await audit();
+  assert.equal(before.integrity.status, 'verified');
+  assert.deepEqual(fields(before, jira).counts, {
+    title: matched, description: matched, type: matched, status: matched, priority: matched, assigneeId: matched, reporterId: noFields,
+    labels: matched, startDate: matched, endDate: matched, dueDate: matched, estimate: matched, plannedEffortMinutes: noFields,
+  });
+  assert.deepEqual(fields(before, wiki).counts, { title: matched, content: matched, labels: matched });
+
+  const delta = await f.upload(Buffer.from('Issue id,Issue key,Project key,Summary,Created,Updated,Status,Issue Type\r\n100,DRIFT-1,DRIFT,새 원본 제목,2024-01-01T00:00:00Z,2024-02-02T00:00:00Z,Open,Task\r\n'),
+    'drift-delta.csv', 'jira', 'primary-field-jira');
+  const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${delta.id}`);
+  const target = options.appendTarget;
+  assert.ok(target);
+  assert.equal(target.projectId, projectId);
+  const followUp = await f.apply(await f.preview({ ...options.defaultConfiguration,
+    appendTo: { projectId, refreshExisting: true,
+      statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+      issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])), fields: {},
+    },
+  }));
+  assert.equal(followUp.status, 201, JSON.stringify(followUp.data));
+  const updated = (await f.call<WorkspaceSnapshot>('/workspace')).data;
+  const currentIssue = updated.issues.find(item => item.id === issue.id);
+  assert.ok(currentIssue);
+  assert.equal(currentIssue.title, '새 원본 제목');
+  assert.equal(currentIssue.description, issue.description);
+  const refreshed = await audit();
+  assert.deepEqual(fields(refreshed, jira).counts.title, matched);
+  assert.notEqual(fields(refreshed, jira).sha256, fields(before, jira).sha256);
+
+  // A later historical checkpoint that omits an unchanged field still has the earlier proven value.
+  const checkpoint = f.db.prepare(`UPDATE source_records SET json=json_remove(json,'$.jiraIssueFieldHashes.description')
+    WHERE import_id=? AND target_id=? AND kind='issue' AND json_type(json,'$.jiraIssueFieldHashes.description')='text'`)
+    .run(followUp.data.import.id, issue.id);
+  assert.equal(checkpoint.changes, 1);
+  assert.deepEqual(fields(await audit(), jira).counts.description, matched);
+
+  const localIssue = await f.call<Issue>(`/issues/${issue.id}`, 'PATCH', {
+    expectedVersion: currentIssue.version, description: '**팀 수정 설명**', descriptionFormat: 'markdown', plannedEffortMinutes: 45,
+  });
+  assert.equal(localIssue.status, 200, JSON.stringify(localIssue.data));
+  const localPage = await f.call<DocPage>(`/documents/${page.id}`, 'PATCH', { expectedVersion: page.version,
+    content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '팀 수정 문서 본문' }] }] },
+  });
+  assert.equal(localPage.status, 200, JSON.stringify(localPage.data));
+  const drift = await audit();
+  assert.equal(drift.integrity.status, 'verified');
+  assert.deepEqual(fields(drift, jira).counts.title, matched);
+  assert.deepEqual(fields(drift, jira).counts.description, changed);
+  assert.deepEqual(fields(drift, jira).counts.plannedEffortMinutes, { ...noFields, unavailable: 1 });
+  assert.deepEqual(fields(drift, wiki).counts, { title: matched, content: changed, labels: matched });
+  assert.doesNotMatch(JSON.stringify(drift.primaryRecords), /팀 수정|원본 문서|DRIFT-1/u);
+
+  async function finding(pkg: LegacyPackageSummary, field: string, finding: string, status = 200) {
+    const params = new URLSearchParams({ packageId: pkg.id, field, finding });
+    const response = await f.call<SourceReconciliationPage>(`/source-imports/${receipt.id}/reconciliation?${params}`);
+    assert.equal(response.status, status, JSON.stringify(response.data));
+    return response.data;
+  }
+  const found = await finding(jira, 'description', 'changed-field');
+  assert.equal(found.total, 1);
+  assert.equal(found.rows[0].target?.id, issue.id);
+  assert.deepEqual(found.rows[0].fieldComparison, { field: 'description', status: 'changed' });
+  assert.equal((await finding(jira, 'plannedEffortMinutes', 'unavailable-field')).rows[0].target?.id, issue.id);
+  assert.equal((await finding(jira, 'title', 'changed-field')).total, 0);
+  await finding(jira, 'content', 'changed-field', 400);
+  await finding(wiki, 'parentId', 'changed-field', 400);
+
+  f.db.prepare("UPDATE issues SET json=json_set(json,'$.title',123) WHERE id=?").run(issue.id);
+  assert.deepEqual(fields(await audit(), jira).counts.title, { ...noFields, invalid: 1 });
+  assert.equal((await finding(jira, 'title', 'invalid-field')).rows[0].target?.id, issue.id);
+  f.db.prepare("UPDATE issues SET json=json_set(json,'$.title',?) WHERE id=?").run(currentIssue.title, issue.id);
+
+  const archived = await f.call(`/documents/${page.id}?expectedVersion=${localPage.data.version}`, 'DELETE');
+  assert.equal(archived.status, 200, JSON.stringify(archived.data));
+  assert.deepEqual(fields(await audit(), wiki).counts.content, changed);
+  const archivedFinding = (await finding(wiki, 'content', 'changed-field')).rows[0];
+  assert.deepEqual([archivedFinding.status, archivedFinding.target?.id, archivedFinding.fieldComparison?.status], ['trashed', page.id, 'changed']);
+});
+
 test('receipt audits the current Jira and Confluence hierarchy with the latest applied parent evidence', async t => {
   const f = await fixture();
   t.after(() => f.close());

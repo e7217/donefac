@@ -9,6 +9,7 @@ import { JiraActivityPages, type JiraActivityKind } from './legacy-import-jira-a
 import { JIRA_RAW_COMPONENTS_FIELD_ID, projectJiraComponents } from './legacy-import-jira-components.js';
 import { JiraDateProjection,jiraDatePickerProof,jiraRestDateProof,jiraScheduleDateRole,type JiraDateRole } from './legacy-import-jira-dates.js';
 import { JiraSprintProjection,JIRA_SPRINT_FIELD_TYPE } from './legacy-import-jira-sprints.js';
+import { readJiraStatusCategory } from './legacy-jira-status-category.js';
 import { isJiraCommentRestrictionAttribute } from './migration-jira-history.js';
 import { isJiraHierarchyIssueId, isJiraHierarchyIssueKey, JIRA_EPIC_RELATION_STYLE } from './migration-jira-hierarchy.js';
 import { observeJiraIdentityEmail } from './migration-identity-email.js';
@@ -1088,6 +1089,14 @@ function parseSearchXml(context:Context,root:LegacyXmlNode,path:string):void{
     }
     readRssOriginalEstimate(context, item, node, fields, path);
     for(const name of ['type','status','priority','resolution','security','due','resolved','environment','version','fixVersion','component','labels']){const matches=children(node,name);if(!matches.length)continue;const normalized=name==='type'?'issuetype':name,fieldId=`builtin:${normalized}`;fields[normalized]=matches.map(value=>({id:value.attributes.id||null,text:text(value)}));if(['type','status','priority','resolution'].includes(name)){context.field(fieldId,normalized,'jira-builtin');for(const value of matches){const option=context.option(fieldId,{id:value.attributes.id||text(value),name:text(value)});item.references.push(...ref('option',option,normalized));}}}
+    const statusNodes = children(node, 'status'), [statusNode] = statusNodes;
+    const categoryNodes = children(node, 'statusCategory'), [categoryNode] = categoryNodes;
+    const statusId = statusNode?.attributes.id;
+    if (statusNodes.length === 1 && !statusNode.children.length && statusId && isJiraHierarchyIssueId(statusId) && categoryNode) {
+      const category = categoryNodes.length === 1 && !categoryNode.children.length && !categoryNode.text.trim()
+        ? readJiraStatusCategory(categoryNode.attributes.key, categoryNode.attributes.id) : null;
+      if (category !== undefined) item.metadata.jiraStatusCategory = { statusId, category };
+    }
     for (const value of children(node, 'fixVersion')) {
       const versionId = versionIdentifier(value.attributes.id);
       const versionProject = versionIdentifier(project?.attributes.id ?? project?.attributes.key);
@@ -1224,6 +1233,12 @@ function parseBackupXml(context:Context,root:LegacyXmlNode,path:string):void{
       context.field(fieldId, name, 'jira-builtin');
       const option = context.ensure('option', `${fieldId}:${id}`, { title, containerId: fieldId,
         metadata: selected(v, ['id','description','sequence','style']), references: ref('field', fieldId, 'field') });
+      if (name === 'Status' && option && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id) {
+        const rawCategory = adminXmlScalar(node, 'statuscategory');
+        const category = rawCategory === null ? null : readJiraStatusCategory(undefined, rawCategory);
+        const previous = option.metadata.jiraStatusCategory;
+        if (category !== undefined) option.metadata.jiraStatusCategory = previous === undefined || previous === category ? category : null;
+      }
       if (name === 'IssueType' && isJiraHierarchyIssueId(id) && adminXmlScalar(node, 'id') === id) {
         const labels = [adminXmlScalar(node, 'pname'), adminXmlScalar(node, 'name')];
         const names = new Set(labels.filter((label): label is string => typeof label === 'string' && !!label.trim()).map(label => label.trim().toLowerCase()));

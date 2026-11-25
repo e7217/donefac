@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { expect, test, type APIRequestContext, type Locator, type Page } from '@playwright/test';
-import type { LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, MigrationPreview, WorkspaceSnapshot } from '../../shared/types';
+import type { LegacyPackageDetail, LegacyPackageSummary, LegacyRecord, MigrationOptions, MigrationPreview, WorkspaceSnapshot } from '../../shared/types';
 
 async function readApi<T>(request: APIRequestContext, path: string): Promise<T> {
   const response = await request.get(path);
@@ -126,6 +126,59 @@ test('360px에서 제한된 Jira 원본의 검토 보고서를 저장하고 그 
     expect(after.issues).toEqual(workspace.issues);
   } finally {
     const deleted = await request.delete(`${packagePath}?expectedVersion=${source.version}`);
+    expect(deleted.ok(), await deleted.text()).toBe(true);
+  }
+});
+
+test('Jira 원본 분류를 상태 매핑에 표시하고 충돌한 상태는 직접 선택해 검토한다', async ({ page, request }) => {
+  const suffix = randomUUID().slice(0, 7).toUpperCase();
+  const filename = `status-review-${suffix}.json`;
+  const project = { id: '10101', key: `CAT${suffix}`, name: `Jira 상태 분류 ${suffix}` };
+  const statuses = [
+    { id: '1001', name: 'Shipped', statusCategory: { id: 3, key: 'done' } },
+    { id: '1002', name: 'Open for QA', statusCategory: { id: 4, key: 'indeterminate' } },
+    { id: '1003', name: 'Waiting for handoff', statusCategory: { id: 2, key: 'new' } },
+    { id: '1003', name: 'Waiting for handoff', statusCategory: { id: 3, key: 'done' } },
+  ];
+  const archive = Buffer.from(JSON.stringify({ issues: statuses.map((status, index) => ({
+    id: String(10101 + index), key: `${project.key}-${index + 1}`, fields: {
+      project, status, summary: `${status.name} ${index + 1}`, issuetype: { id: '3', name: 'Task' },
+      created: '2025-10-01T00:00:00Z', updated: '2025-10-03T00:00:00Z',
+    },
+  })) }));
+  const params = new URLSearchParams({ product: 'jira', filename, instanceKey: `status-review-${suffix}` });
+  const upload = await request.post(`/api/legacy-import/packages?${params}`, {
+    headers: { 'Content-Type': 'application/octet-stream' }, data: archive,
+  });
+  expect(upload.status(), await upload.text()).toBe(201);
+  const source = await upload.json() as LegacyPackageSummary;
+  try {
+    const { projects: [current] } = await readApi<WorkspaceSnapshot>(request, '/api/workspace');
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${current.id}/settings`);
+    const settings = page.getByRole('region', { name: '실제 데이터 이관', exact: true });
+    await settings.getByLabel(`이관 패키지 ${filename}`, { exact: true }).check();
+    await settings.getByRole('button', { name: '선택 패키지 매핑 불러오기', exact: true }).click();
+    await settings.locator('summary').filter({ hasText: /^상태 매핑$/u }).click();
+    const status = (name: string) => settings.getByRole('combobox', { name: `상태 매핑 ${name}`, exact: true });
+    await expect(status('Shipped')).toHaveValue('done');
+    await expect(status('Open for QA')).toHaveValue('in_progress');
+    const disputed = status('Waiting for handoff');
+    await expect(disputed.locator('option:checked')).toHaveText('분류 선택');
+    const blocked = await createPreview(page, settings);
+    expect(blocked.canApply).toBe(false);
+    expect(blocked.notices).toContainEqual(expect.objectContaining({ code: 'JIRA_STATUS_CATEGORY_CONFLICT', severity: 'error' }));
+
+    await disputed.selectOption('todo');
+    const reviewed = await createPreview(page, settings);
+    expect(reviewed.canApply, JSON.stringify(reviewed.notices)).toBe(true);
+    expect(reviewed.requiredAcknowledgements).toContain('JIRA_STATUS_CATEGORY_CONFLICT');
+    const options = await readApi<MigrationOptions>(request, `/api/migrations/options?packageId=${source.id}`);
+    expect(Object.fromEntries(options.statuses.map(({ id, label }) => [label, reviewed.configuration.statuses[id]]))).toEqual({
+      Shipped: 'done', 'Open for QA': 'in_progress', 'Waiting for handoff': 'todo',
+    });
+  } finally {
+    const deleted = await request.delete(`/api/legacy-import/packages/${source.id}?expectedVersion=${source.version}`);
     expect(deleted.ok(), await deleted.text()).toBe(true);
   }
 });

@@ -3,11 +3,12 @@
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { ArrowUpRight, ClipboardCheck, FileCheck2, RefreshCw, Search } from 'lucide-react';
 import type {
-  FeatureProps, LegacyRecordKind, SourceImport, SourceReconciliationFileCheck, SourceReconciliationPage,
+  FeatureProps, LegacyRecordKind, SourceImport, SourceReconciliationFileCheck, SourceReconciliationPage, SourceReconciliationPrimaryField,
   SourceReconciliationRow, SourceReconciliationStatus, SourceReconciliationTarget, SourceRecordArchive,
 } from '../../shared/types';
 import { api } from '../lib/api';
-import { MigrationReceiptAudit, primaryRecordFindingLabels, reconciliationPackageIdentity, type PrimaryRecordDrill } from './MigrationReceiptAudit';
+import { MigrationReceiptAudit, primaryFieldFindingLabels, primaryRecordFindingLabels, reconciliationPackageIdentity, type PrimaryRecordDrill } from './MigrationReceiptAudit';
+import { primaryFieldLabel } from './migration-field-labels';
 import { SourceArchiveDetail, sourceRecordKindLabels } from './SourceOrigins';
 
 const PAGE_SIZE = 30;
@@ -24,7 +25,7 @@ const fileLabels: Record<SourceReconciliationFileCheck['status'], string> = {
 
 type Filters = {
   packageId: string; status: SourceReconciliationStatus | ''; kind: LegacyRecordKind | '';
-  finding: NonNullable<PrimaryRecordDrill['finding']> | ''; q: string; offset: number;
+  finding: NonNullable<PrimaryRecordDrill['finding']> | ''; field: SourceReconciliationPrimaryField | ''; q: string; offset: number;
 };
 type PageLoad = { filters: Filters; data: SourceReconciliationPage } | { filters: Filters; error: string };
 type Destination = NonNullable<SourceReconciliationTarget['owner']>;
@@ -47,7 +48,7 @@ export function MigrationReconciliation(props: Props) {
 }
 
 function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDocument, refresh, notify }: Props) {
-  const [filters, setFilters] = useState<Filters>({ packageId: '', status: '', kind: '', finding: '', q: '', offset: 0 });
+  const [filters, setFilters] = useState<Filters>({ packageId: '', status: '', kind: '', finding: '', field: '', q: '', offset: 0 });
   const [searchDraft, setSearchDraft] = useState('');
   const [load, setLoad] = useState<PageLoad | null>(null);
   const [receiptVersion, setReceiptVersion] = useState<number | null>(null);
@@ -61,7 +62,10 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
   const result = load?.filters === filters && 'data' in load ? load.data : null;
   const error = load?.filters === filters && 'error' in load ? load.error : null;
   const loading = load?.filters !== filters;
-  const findingLabel = filters.finding && primaryRecordFindingLabels[filters.finding];
+  const findingLabel = filters.field
+    ? `${primaryFieldLabel(filters.field)} ${primaryFieldFindingLabels[filters.finding as keyof typeof primaryFieldFindingLabels]}`
+    : primaryRecordFindingLabels[filters.finding as keyof typeof primaryRecordFindingLabels];
+  const reviewFinding = filters.finding === 'changed-parent' || filters.finding === 'changed-field' || filters.finding === 'unavailable-field';
   const auditRecord = record?.area === 'audit' ? record : null;
   const jiraRecord = record?.area === 'jira-audit' ? record : null;
   const authorRecord = record?.area === 'author-audit' ? record : null;
@@ -74,6 +78,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
     if (filters.status) params.set('status', filters.status);
     if (filters.kind) params.set('kind', filters.kind);
     if (filters.finding) params.set('finding', filters.finding);
+    if (filters.field) params.set('field', filters.field);
     if (filters.q) params.set('q', filters.q);
     void api<SourceReconciliationPage>(`${base}/reconciliation?${params}`, { signal: abort.signal, cache: 'no-store' })
       .then(data => {
@@ -102,11 +107,11 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
   }
   function updateFilters(changes: Partial<Filters> = {}) {
     if (record?.area === 'list') closeRecord();
-    setFilters(current => ({ ...current, ...changes }));
+    setFilters(current => ({ ...current, ...changes, ...(changes.finding === '' ? { field: '' } : {}) }));
   }
-  function drill({ packageId, kind, status, finding }: PrimaryRecordDrill) {
+  function drill({ packageId, kind, status, finding, field }: PrimaryRecordDrill) {
     setSearchDraft('');
-    updateFilters({ packageId, kind, status: status ?? '', finding: finding ?? '', q: '', offset: 0 });
+    updateFilters({ packageId, kind, status: status ?? '', finding: finding ?? '', field: field ?? '', q: '', offset: 0 });
     listHeading.current?.focus();
   }
   function changePackage(packageId: string) {
@@ -212,7 +217,7 @@ function ReconciliationPanel({ sourceImportId, packages, data, openIssue, openDo
         </label>
         <button type="submit" className="btn" aria-label="대조 검색 실행"><Search size={16} aria-hidden="true" />검색</button>
         {findingLabel && <div className="migration-reconciliation-finding-filter">
-          <span className={`migration-audit-status ${filters.finding === 'changed-parent' ? 'is-unbound' : 'is-mismatch'}`}>{findingLabel}만</span>
+          <span className={`migration-audit-status ${reviewFinding ? 'is-unbound' : 'is-mismatch'}`}>{findingLabel}만</span>
           <button type="button" className="btn btn-ghost" onClick={() => {
             updateFilters({ finding: '', offset: 0 });
             listHeading.current?.focus();

@@ -2,13 +2,16 @@ import { createHash, type Hash } from 'node:crypto';
 import { constants, statSync } from 'node:fs';
 import fileSystem from 'node:fs/promises';
 import type { Express } from 'express';
-import { MIGRATION_AUTHOR_KINDS, MIGRATION_AUTHOR_STATUSES } from '../shared/types.js';
+import { isCalendarDate } from '../shared/calendar.js';
+import { MIGRATION_AUTHOR_KINDS, MIGRATION_AUTHOR_STATUSES, PRIORITY, SOURCE_RECONCILIATION_FIELD_STATUSES,
+  SOURCE_RECONCILIATION_OPTIONAL_JIRA_FIELDS, SOURCE_RECONCILIATION_PRIMARY_FIELDS } from '../shared/types.js';
 import type {
-  Attachment, AttachmentVersion, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment, SourceReconciliationAuthorFindingsPage,
+  Attachment, AttachmentVersion, DocPage, Issue, LegacyRecordKind, SourceImport, SourceReconciliationAudit, SourceReconciliationAuditAttachment, SourceReconciliationAuthorFindingsPage,
   SourceReconciliationAuditStatus, SourceReconciliationFileCheck, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
   SourceReconciliationJiraFinding, SourceReconciliationJiraRelationFinding, SourceReconciliationJiraRelationFindingsPage,
   SourceReconciliationJiraStatusFindingsPage, SourceReconciliationOwner,
-  SourceReconciliationHierarchyStatus, SourceReconciliationPrimaryFinding,
+  SourceReconciliationFieldCounts, SourceReconciliationFieldStatus, SourceReconciliationHierarchyStatus, SourceReconciliationPrimaryField,
+  SourceReconciliationPrimaryFields, SourceReconciliationPrimaryFinding,
   SourceReconciliationPage, SourceReconciliationPrimaryRecords, SourceReconciliationRow, SourceReconciliationStatus,
   SourceReconciliationResourceLinkFinding, SourceReconciliationResourceLinkFindingsPage, SourceReconciliationTarget, SourceReconciliationTargetContent,
 } from '../shared/types.js';
@@ -46,15 +49,22 @@ type PrimaryRecordFingerprint = Pick<SourceReconciliationPrimaryRecords, 'kind' 
   hash: Hash;
   hierarchy: Record<SourceReconciliationHierarchyStatus, number>;
   hierarchyHash: Hash;
+  fields: SourceReconciliationPrimaryFields['counts'];
+  fieldHash: Hash;
 };
 type FileMetadata = Pick<Attachment, 'size' | 'sha256' | 'resourceId' | 'resourceType'>;
 type AuditEntry = Omit<SourceReconciliationAuditAttachment, 'status'> & { status: SourceReconciliationAuditStatus | null };
 type ReceiptPackage = SourceImport['packages'][number];
 type ReceiptQuery = { offset: number; limit: number; kind?: LegacyRecordKind; status?: SourceReconciliationStatus; q: string;
-  packageId?: string; finding?: SourceReconciliationPrimaryFinding };
+  packageId?: string; finding?: SourceReconciliationPrimaryFinding; field?: SourceReconciliationPrimaryField };
 type Dependencies = { store: Store; files: AttachmentFiles; preservation: SourcePreservationService; trash: TrashService };
 const statuses: readonly SourceReconciliationStatus[] = ['linked', 'trashed', 'missing', 'archive-only', 'excluded'];
-const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding']);
+const receiptKeys = new Set(['q', 'kind', 'status', 'offset', 'limit', 'packageId', 'finding', 'field']);
+const comparisonStatuses = { 'changed-field': 'changed', 'unavailable-field': 'unavailable', 'invalid-field': 'invalid' } as const;
+const comparisonFindings = Object.keys(comparisonStatuses);
+const primaryFindings = new Set(['invalid-primary-target', 'changed-parent', 'invalid-parent', ...comparisonFindings]);
+const primaryFields = [...SOURCE_RECONCILIATION_PRIMARY_FIELDS.issue, ...SOURCE_RECONCILIATION_PRIMARY_FIELDS.page];
+const optionalIssueFields = new Set<string>(SOURCE_RECONCILIATION_OPTIONAL_JIRA_FIELDS);
 const jiraFindings: readonly SourceReconciliationJiraFinding[] = ['unavailable', 'restricted', 'excluded', 'unresolved-time', 'unresolved-author'];
 const jiraFindingKeys = new Set(['expectedVersion', 'finding', 'offset', 'limit', 'expectedFingerprint']);
 const jiraRelationFindings: readonly SourceReconciliationJiraRelationFinding[] = ['missing', 'mismatch', 'unavailable'];
@@ -83,14 +93,18 @@ function parseQuery(input: Record<string, unknown>): ReceiptQuery {
   if (packageId !== undefined && (typeof packageId !== 'string' || !packageId.trim() || packageId.length > 200 || /[\x00-\x1f\x7f]/u.test(packageId))) {
     failure(400, '이관 대조 원본 패키지 ID를 확인해 주세요.');
   }
-  if (finding !== undefined && ((finding !== 'invalid-primary-target' && finding !== 'changed-parent' && finding !== 'invalid-parent') || packageId === undefined)) {
+  if (finding !== undefined && (typeof finding !== 'string' || !primaryFindings.has(finding) || packageId === undefined)) {
     failure(400, '원본 패키지와 대상 연결 확인 조건을 확인해 주세요.');
   }
+  const field = primaryFields.find(candidate => candidate === input.field);
+  const isComparison = typeof finding === 'string' && comparisonFindings.includes(finding);
+  if (isComparison ? !field : input.field !== undefined) failure(400, '이관 대조 필드와 확인 조건을 확인해 주세요.');
   const q = input.q === undefined ? '' : input.q;
   if (typeof q !== 'string' || q.length > 300 || [...q].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)) {
     failure(400, '이관 대조 검색어를 확인해 주세요.');
   }
-  return { kind, status: status as ReceiptQuery['status'], packageId, finding, offset: pageInteger(input.offset, 0, 0, 1_000_000),
+  return { kind, status: status as ReceiptQuery['status'], packageId, finding: finding as ReceiptQuery['finding'], field,
+    offset: pageInteger(input.offset, 0, 0, 1_000_000),
     limit: pageInteger(input.limit, 30, 1, 100), q: casefold(q.trim()) };
 }
 
@@ -305,6 +319,112 @@ function primaryHierarchyReader(store: Store) {
   };
 }
 
+type CurrentPrimaryRecord = { json: string | null; assigneeId?: string | null };
+type JiraPrimaryField = typeof SOURCE_RECONCILIATION_PRIMARY_FIELDS.issue[number];
+type ConfluencePrimaryField = typeof SOURCE_RECONCILIATION_PRIMARY_FIELDS.page[number];
+type FieldObservation = { field: SourceReconciliationPrimaryField; status: SourceReconciliationFieldStatus; proof: unknown[] };
+type Checkpoint = { field: SourceReconciliationPrimaryField; digest: unknown; valueType: string };
+
+function objectRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringList(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+
+function richDocument(value: unknown): value is DocPage['content'] {
+  return objectRecord(value) && value.type === 'doc' && (value.content === undefined || Array.isArray(value.content));
+}
+
+function currentJiraFieldDigest(field: JiraPrimaryField, payload: Record<string, unknown>, storedAssigneeId: string | null | undefined) {
+  const value = payload[field];
+  const format = payload.descriptionFormat;
+  switch (field) {
+    case 'description':
+      if (typeof value !== 'string' || (format !== undefined && format !== 'plain' && format !== 'markdown')) return null;
+      return jiraFieldDigest(field, value, format);
+    case 'assigneeId': case 'reporterId':
+      if (value !== null && !(typeof value === 'string' && value.length) && !(field === 'reporterId' && value === undefined)) return null;
+      if (field === 'assigneeId' && storedAssigneeId !== undefined && value !== storedAssigneeId) return null;
+      return jiraFieldDigest(field, value as Issue[typeof field]);
+    case 'startDate': case 'endDate': case 'dueDate':
+      return value === null || isCalendarDate(value) ? jiraFieldDigest(field, value) : null;
+    case 'estimate': case 'plannedEffortMinutes':
+      if (value === undefined && field === 'plannedEffortMinutes') return jiraFieldDigest(field, value);
+      return value === null || typeof value === 'number' && Number.isFinite(value) && value >= 0 &&
+        (field === 'estimate' || Number.isSafeInteger(value)) ? jiraFieldDigest(field, value) : null;
+    case 'labels': return stringList(value) ? jiraFieldDigest(field, value) : null;
+    case 'priority': return typeof value === 'string' && Object.hasOwn(PRIORITY, value) ? jiraFieldDigest(field, value as Issue['priority']) : null;
+    default: return typeof value === 'string' && value.length ? jiraFieldDigest(field, value) : null;
+  }
+}
+
+function currentConfluenceFieldDigest(field: ConfluencePrimaryField, payload: Record<string, unknown>) {
+  const value = payload[field];
+  switch (field) {
+    case 'title': return typeof value === 'string' && value.length ? confluencePageFieldDigest(field, value) : null;
+    case 'labels': return value === undefined || stringList(value) ? confluencePageFieldDigest(field, value) : null;
+    case 'content': return richDocument(value) ? confluencePageFieldDigest(field, value) : null;
+  }
+}
+
+function receiptFieldReader(store: Store) {
+  // Select each latest field independently. A later partial refresh can omit a field or leave an older checkpoint in force.
+  const latest = store.db.prepare(`WITH checkpoints AS MATERIALIZED (
+    SELECT julianday(json_extract(receipt.json,'$.createdAt')) AS appliedAt,
+      CASE WHEN json_type(proof.json,?)='object' THEN json_extract(proof.json,?) END AS hashes
+    FROM source_records AS proof INDEXED BY source_records_target
+    JOIN source_imports AS receipt ON receipt.id=proof.import_id
+    WHERE proof.target_type=? AND proof.target_id=? AND proof.product=? AND proof.source_instance=? AND proof.kind=?
+      AND ${intactPrimaryRecord('proof')}
+  ), field_rows AS MATERIALIZED (
+    SELECT field.key AS field, field.value AS digest, field.type AS valueType, checkpoints.appliedAt
+    FROM checkpoints CROSS JOIN json_each(checkpoints.hashes) AS field
+  ), newest AS (
+    SELECT field, MAX(appliedAt) AS appliedAt FROM field_rows GROUP BY field
+  ) SELECT DISTINCT field_rows.field, digest, valueType FROM field_rows JOIN newest USING (field, appliedAt)
+    ORDER BY field_rows.field, valueType, digest`);
+  const liveIssue = store.db.prepare('SELECT json, assignee_id AS assigneeId FROM issues WHERE id=?');
+  const livePage = store.db.prepare('SELECT json FROM documents WHERE id=?');
+  const archived = store.db.prepare(`SELECT CASE WHEN json_valid(json) THEN json_extract(json,'$.resource') END AS json
+    FROM trash_entries WHERE id=? AND resource_type=? AND resource_id=?`);
+
+  return (row: MatchRow, status: SourceReconciliationStatus, target: SourceReconciliationTarget | null,
+    selected?: SourceReconciliationPrimaryField): FieldObservation[] => {
+    if (status !== 'linked' && status !== 'trashed') return [];
+    const kind = primaryRecordKind(row.product);
+    const fields = SOURCE_RECONCILIATION_PRIMARY_FIELDS[kind].filter(field => !selected || field === selected);
+    const issue = kind === 'issue';
+    const type = issue ? 'issue' : 'document';
+    const checkpointPath = issue ? '$.jiraIssueFieldHashes' : '$.confluencePageFieldHashes';
+    const payload = target?.type === type ? (status === 'trashed' ? archived.get(row.trashId, type, target.id) :
+      (issue ? liveIssue : livePage).get(target.id)) as CurrentPrimaryRecord | undefined : undefined;
+    let values: Record<string, unknown> | null = null;
+    if (payload?.json) {
+      try {
+        const parsed: unknown = JSON.parse(payload.json);
+        if (objectRecord(parsed) && parsed.id === target?.id && parsed.projectId === target?.projectId) values = parsed;
+      } catch { /* A malformed current payload is an invalid target value. */ }
+    }
+    const checkpoints = values && target ? Map.groupBy(latest.all(checkpointPath, checkpointPath, type, target.id, row.product, row.sourceInstance, row.kind) as Checkpoint[],
+      checkpoint => checkpoint.field) : new Map<SourceReconciliationPrimaryField, Checkpoint[]>();
+    const results: FieldObservation[] = [];
+    for (const field of fields) {
+      const expected = checkpoints.get(field) ?? [];
+      if (issue && optionalIssueFields.has(field) && values && values[field] === undefined && !expected.length) continue;
+      const current = values ? issue ? currentJiraFieldDigest(field as JiraPrimaryField, values, payload?.assigneeId)
+        : currentConfluenceFieldDigest(field as ConfluencePrimaryField, values) : null;
+      const invalid = current === null || expected.some(({ digest, valueType }) =>
+        valueType !== 'text' || typeof digest !== 'string' || !/^[0-9a-f]{64}$/u.test(digest));
+      const fieldStatus: SourceReconciliationFieldStatus = invalid ? 'invalid' : expected.length !== 1 ? 'unavailable'
+        : expected[0].digest === current ? 'matched' : 'changed';
+      results.push({ field, status: fieldStatus, proof: [field, fieldStatus, expected.map(({ digest }) => digest), current] });
+    }
+    return results;
+  };
+}
+
 function archiveProjection(archive: TrashArchive, audit: boolean) {
   const labels: Record<string, Map<string, string>> = {
     comment: new Map(archive.comments.map(value => [value.id, '댓글'])),
@@ -389,6 +509,13 @@ function reconciliation(dependencies: Dependencies, importId: string, query: Rec
   const rows: SourceReconciliationRow[] = [];
   const hierarchyFinding = query.finding === 'changed-parent' ? 'changed' : query.finding === 'invalid-parent' ? 'invalid' : null;
   const readHierarchy = hierarchyFinding ? primaryHierarchyReader(dependencies.store) : null;
+  const requestedField = query.field;
+  const fieldStatus = query.finding && comparisonStatuses[query.finding as keyof typeof comparisonStatuses];
+  const scopedPrimaryKind = scopedPackage && primaryRecordKind(scopedPackage.source.product);
+  if (requestedField && (!scopedPrimaryKind || !SOURCE_RECONCILIATION_PRIMARY_FIELDS[scopedPrimaryKind].some(field => field === requestedField))) {
+    failure(400, '원본 패키지에서 대조할 수 있는 필드를 선택해 주세요.');
+  }
+  const readFields = requestedField ? receiptFieldReader(dependencies.store) : null;
   let total = 0;
   const counts = scanReceipt(dependencies, receipt, false, (row, status, target, stagingId) => {
     if ((query.status && status !== query.status) || (query.kind && row.kind !== query.kind)) return;
@@ -397,12 +524,20 @@ function reconciliation(dependencies: Dependencies, importId: string, query: Rec
     if (query.finding === 'invalid-primary-target' && !invalidTarget && !invalidBinding) return;
     if (readHierarchy && (!scopedPackage || row.kind !== primaryRecordKind(scopedPackage.source.product) ||
       readHierarchy(row, status, target)?.state !== hierarchyFinding)) return;
+    let fieldComparison: SourceReconciliationRow['fieldComparison'];
+    if (readFields && fieldStatus && requestedField) {
+      if (row.kind !== scopedPrimaryKind) return;
+      const [result] = readFields(row, status, target, requestedField);
+      if (result?.status !== fieldStatus) return;
+      fieldComparison = { field: requestedField, status: fieldStatus };
+    }
     if (query.q && ![row.sourceId, row.sourceKey, row.title, row.sourceInstance, target?.label, target?.owner?.label]
       .some(value => value && casefold(value).includes(query.q))) return;
     if (total++ < query.offset || rows.length >= query.limit) return;
     const { sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance } = row;
     rows.push({ sourceRecordId, kind, sourceId, sourceKey, title, product, sourceInstance, status, target,
-      ...(invalidTarget ? { invalidPrimaryTarget: true } : {}), ...(invalidBinding ? { invalidPrimaryBinding: true } : {}) });
+      ...(invalidTarget ? { invalidPrimaryTarget: true } : {}), ...(invalidBinding ? { invalidPrimaryBinding: true } : {}),
+      ...(fieldComparison ? { fieldComparison } : {}) });
   }, scopedPackage);
   return { importId, receiptVersion: receipt.version, counts, rows, total, offset: query.offset, limit: query.limit };
 }
@@ -601,11 +736,16 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const fingerprint = createHash('sha256');
   fingerprint.update(JSON.stringify(integrity)).update('\n');
   const readHierarchy = primaryHierarchyReader(dependencies.store);
+  const readFields = receiptFieldReader(dependencies.store);
   const primaryByPackage = new Map<string, PrimaryRecordFingerprint>(receipt.packages.map(({ stagingId, source, sha256 }) => {
     const kind = primaryRecordKind(source.product);
     const hash = createHash('sha256').update(JSON.stringify([stagingId, source.product, source.instanceKey, sha256, kind])).update('\n');
+    const fieldNames = SOURCE_RECONCILIATION_PRIMARY_FIELDS[kind];
+    const createFieldCounts = () => Object.fromEntries(SOURCE_RECONCILIATION_FIELD_STATUSES.map(status => [status, 0])) as SourceReconciliationFieldCounts;
     return [stagingId, { kind, counts: emptyRecordCounts(), invalidTargets: 0, hash,
-      hierarchy: { matched: 0, changed: 0, unavailable: 0, invalid: 0 }, hierarchyHash: createHash('sha256') }];
+      hierarchy: createFieldCounts(), hierarchyHash: createHash('sha256'),
+      fields: Object.fromEntries(fieldNames.map(field => [field, createFieldCounts()])),
+      fieldHash: createHash('sha256').update(JSON.stringify([stagingId, kind, fieldNames])).update('\n') }];
   }));
   const orderedEntries: { order: number; entry: AuditEntry }[] = [];
   const contents = { comments: contentFingerprint(), revisions: contentFingerprint(), worklogs: contentFingerprint() };
@@ -627,6 +767,11 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
       if (hierarchy) {
         primary.hierarchy[hierarchy.state]++;
         primary.hierarchyHash.update(JSON.stringify(hierarchy.proof)).update('\n');
+      }
+      const observations = readFields(row, status, target);
+      for (const { field, status: fieldStatus, proof } of observations) {
+        primary.fields[field]![fieldStatus]++;
+        primary.fieldHash.update(JSON.stringify([row.sourceRecordId, target?.id, status, proof])).update('\n');
       }
     }
     if (collect && row.kind === 'attachment') orderedEntries.push({ order: auditRowOrder, entry: auditEntry(row, status, archivedFile) });
@@ -660,8 +805,9 @@ function auditSnapshot(dependencies: Dependencies, receipt: SourceImport, collec
   const jiraRelationProjection = auditJiraRelationProjections(dependencies, receipt)?.audit ?? null;
   const resourceLinkProjection = auditResourceLinkProjections(dependencies.store, receipt)?.audit ?? null;
   const authorAttribution = auditSourceAuthors(dependencies.store, dependencies.trash, receipt)?.audit ?? null;
-  const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash, hierarchy, hierarchyHash }]) => ({
+  const primaryRecords: SourceReconciliationPrimaryRecords[] = [...primaryByPackage].map(([packageId, { kind, counts, invalidTargets, hash, hierarchy, hierarchyHash, fields, fieldHash }]) => ({
     packageId, kind, counts, invalidTargets, dispositionSha256: hash.digest('hex'), hierarchy: { ...hierarchy, sha256: hierarchyHash.digest('hex') },
+    fields: { counts: fields, sha256: fieldHash.digest('hex') },
   }));
   fingerprint.update(JSON.stringify([primaryRecords, targetContent, jiraStatusHistory, jiraRelationProjection, resourceLinkProjection, authorAttribution]));
   const entries = orderedEntries.sort((left, right) => left.order - right.order).map(({ entry }) => entry);

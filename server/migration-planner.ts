@@ -1,7 +1,7 @@
 import { createHash,randomUUID } from 'node:crypto';
 import type { AttachmentVersion,ConfluenceMigrationDocumentField,ConfluenceMigrationDocumentReview,ConfluenceMigrationDocumentValues,ConfluenceMigrationPageFieldHashes,CustomFieldDefinition,CustomFieldKind,CustomFieldValue,DocPage,DocumentSourceSelection,Issue,JiraMigrationCustomFieldHashes,JiraMigrationIssueField,JiraMigrationIssueFieldHashes,JiraMigrationIssueSourceFieldHashes,JiraMigrationIssueReview,JiraMigrationIssueValues,LegacyRecord,LegacyValue,MigrationConfiguration,MigrationNotice,MigrationOptions,MigrationValueOption,Project,ProjectIssueSchema,ProjectWorkflow,RichContent,SourceRecordArchive,StatusCategory } from '../shared/types.js';
 import { CONFLUENCE_MIGRATION_DOCUMENT_FIELDS,ISSUE_TYPES,JIRA_MIGRATION_ISSUE_FIELDS,MIGRATION_AUTHOR_KINDS,PRIORITY } from '../shared/types.js';
-import { jiraParentEvidence } from './migration-jira-hierarchy.js';
+import { isJiraHierarchyIssueId, jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { defaultIssueSchema, fieldApplies, fieldValueLabel, visibleIssueFieldIds } from '../shared/issue-schema.js';
 import { defaultWorkflow } from '../shared/workflow-helpers.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -32,6 +32,7 @@ import { jiraMigrationIssueAddress, jiraRenderedHtmlDescription, projectJiraDesc
 import { jiraAdministratorFixAssociation, jiraReleaseVersionId, planJiraReleases } from './migration-jira-releases.js';
 import { jiraSprintCatalogId, planJiraSprints } from './migration-jira-sprints.js';
 import { JIRA_COMPONENTS_FIELD_ID, JIRA_RAW_COMPONENTS_FIELD_ID } from './legacy-import-jira-components.js';
+import { readJiraStatusCategory, type JiraStatusCategory } from './legacy-jira-status-category.js';
 import { buildJiraComponentOptions } from './migration-jira-component-options.js';
 import { jiraEnglishDate, sourceTimestamp } from './migration-source-time.js';
 import { confluenceIdentityEmailEvidence, jiraIdentityEmailEvidence } from './migration-identity-email.js';
@@ -64,6 +65,10 @@ type JiraScheduleEndpoint = typeof jiraScheduleEndpoints[number];
 const jiraScheduleLabels = { startDate: '시작일', endDate: '종료일' } satisfies Record<JiraScheduleEndpoint, string>;
 const projectedJiraDate = (row: LegacyRecord, field: JiraScheduleEndpoint): unknown => object(row.metadata.jiraProjectedDates)[field];
 function sourceField(row:LegacyRecord,...names:string[]):unknown{const fields=fieldMap(row);const name=Object.keys(fields).find(name=>names.some(candidate=>normalizedName(name)===normalizedName(candidate)));return name===undefined?undefined:fields[name];}
+function jiraCompletionTime(row: LegacyRecord): string {
+  const value = scalar(sourceField(row, 'resolutiondate', 'resolved'));
+  return string(object(value).text ?? value) || string(row.metadata.resolutiondate) || row.updatedAt || '';
+}
 export function recognizedJiraPriority(label: string): Issue['priority'] | null {
   if (/urgent|highest|blocker|긴급/i.test(label)) return 'urgent';
   if (/high|critical|높음/i.test(label)) return 'high';
@@ -98,15 +103,44 @@ function builtin(pkg:MigrationPackage,row:LegacyRecord,kind:'status'|'issuetype'
 function customField(row:LegacyRecord){return row.kind==='field'&&!row.sourceId.startsWith('builtin:')&&row.metadata.fieldType!=='csv-label-only';}
 function suggestedKind(row:LegacyRecord):CustomFieldKind|'archive'{const type=string(row.metadata.fieldType||row.metadata.customfieldtypekey||row.metadata.fieldtype).toLowerCase();if(/multi.*user|cascad|group|version|project/.test(type))return'archive';if(/multi.*select|multi.*checkbox/.test(type))return'multi_select';if(/select|radio/.test(type))return'select';if(/checkbox|boolean/.test(type))return'checkbox';if(/float|number|decimal|integer/.test(type))return'number';if(/date/.test(type))return'date';if(/userpicker|user$/.test(type))return'user';if(/url/.test(type))return'url';if(/text|string/.test(type))return'text';return'archive';}
 function suggestCategory(label:string):StatusCategory{if(/cancel|취소|폐기/i.test(label))return'cancelled';if(/done|closed|resolved|완료|종료|해결/i.test(label))return'done';if(/review|검토|검수|승인/i.test(label))return'review';if(/progress|진행|작업 중/i.test(label))return'in_progress';if(/backlog|대기열/i.test(label))return'backlog';return'todo';}
+
+const statusFamily: Record<StatusCategory, JiraStatusCategory> = {
+  backlog: 'new', todo: 'new', in_progress: 'indeterminate', review: 'indeterminate', done: 'done', cancelled: 'done',
+};
+const categoryDefaults: Record<JiraStatusCategory, StatusCategory> = { new: 'todo', indeterminate: 'in_progress', done: 'done' };
+type JiraStatusGroup = { category?: JiraStatusCategory | null; nameSuggestions: Set<StatusCategory> };
+
+function nativeJiraCategory(source: LegacySource, row: LegacyRecord, statusId: string, index: Map<string, LegacyRecord>) {
+  if (source.format === 'jira-json' && row.metadata.dialect === 'rest-json') {
+    const status = object(fieldMap(row).status);
+    if (string(status.id) !== statusId) return;
+    const category = object(status.statusCategory);
+    return readJiraStatusCategory(category.key, category.id);
+  }
+  if (source.format === 'jira-search-xml') {
+    const evidence = object(row.metadata.jiraStatusCategory);
+    if (evidence.statusId === statusId) return evidence.category === null ? null : readJiraStatusCategory(evidence.category, undefined);
+  }
+  if (source.format === 'jira-backup-xml') {
+    const option = index.get(`option:builtin:status:${statusId}`);
+    const category = option?.metadata.jiraStatusCategory;
+    return category === null ? null : readJiraStatusCategory(category, undefined);
+  }
+}
+
 function packageIndex(pkg:MigrationPackage){return new Map(pkg.dataset.records.map(row=>[row.id,row]));}
 function containerFor(pkg:MigrationPackage,row:LegacyRecord,index=packageIndex(pkg)):string{
   const pending=[row],seen=new Set<string>();for(let cursor=0;cursor<pending.length;cursor++){const current=pending[cursor];if(seen.has(current.id))continue;seen.add(current.id);if(current.kind==='project')return current.sourceId;const declared=current.references.find(ref=>ref.kind==='project');if(declared)return declared.sourceId;if(current.containerId&&index.get(`project:${current.containerId}`))return current.containerId;for(const ref of current.references)if(['container-content','current-version','original-version','body-owner','attachedTo','commentOn','historyOf','worklogOf'].includes(ref.relation)){const owner=index.get(`${ref.kind}:${ref.sourceId}`);if(owner)pending.push(owner);}if(current.kind==='issue'||current.kind==='page')return current.containerId||'__unassigned__';}return'__unassigned__';
 }
 function proposedKey(value:string,id:string):string{const key=value.toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);return/^[A-Z][A-Z0-9]{1,11}$/.test(key)?key:`MIG${hash(id).slice(0,6).toUpperCase()}`;}
 
-export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOptions{
+function migrationOptionDetails(packages: MigrationPackage[]) {
   const containers:MigrationOptions['containers']=[],identities:MigrationOptions['identities']=[],statuses:MigrationValueOption[]=[],issueTypes:MigrationValueOption[]=[],fields:MigrationOptions['fields']=[];
   const jiraWorkflowStates = new Map<string, { label: string; containerIds: Set<string> }>();
+  // The imported status identity is shared across selections in one source instance.
+  const jiraStatusGroups = new Map<string, JiraStatusGroup>();
+  const jiraStatusOptions = new Map<string, string>();
+  const unidentifiedOptions = new Set<string>();
   for(const pkg of packages){const index=packageIndex(pkg),containerRows=new Map<string,{issueCount:number;documentCount:number}>(),identityIds=new Set<string>(),statusValues=new Map<string,string>(),typeValues=new Map<string,string>();
     const projectedSources = new Map<string, JiraScheduleEndpoint>();
     if (pkg.dataset.source.product === 'jira') for (const row of pkg.dataset.records) {
@@ -127,6 +161,16 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
           typeValues.set(type.value, type.label);
           if (pkg.dataset.source.product === 'jira') {
             const statusId = importedStatusId(pkg.dataset.source, state.value);
+            const option = optionId(pkg.summary.id, 'status', state.value);
+            const originalStatusId = jiraOriginalStatusId(pkg.dataset.source, row);
+            if (originalStatusId === state.value && isJiraHierarchyIssueId(originalStatusId)) {
+              const group: JiraStatusGroup = jiraStatusGroups.get(statusId) ?? { nameSuggestions: new Set() };
+              const category = nativeJiraCategory(pkg.dataset.source, row, originalStatusId, index);
+              if (category !== undefined) group.category = group.category === undefined || group.category === category ? category : null;
+              group.nameSuggestions.add(suggestCategory(state.label));
+              jiraStatusGroups.set(statusId, group);
+              jiraStatusOptions.set(option, statusId);
+            } else unidentifiedOptions.add(option);
             let workflowState = jiraWorkflowStates.get(statusId);
             if (!workflowState) {
               workflowState = { label: state.label, containerIds: new Set() };
@@ -165,10 +209,32 @@ export function buildMigrationOptions(packages:MigrationPackage[]):MigrationOpti
     }
     for(const[value,label]of statusValues)statuses.push({id:optionId(pkg.summary.id,'status',value),packageId:pkg.summary.id,sourceValue:value,label});for(const[value,label]of typeValues)issueTypes.push({id:optionId(pkg.summary.id,'issuetype',value),packageId:pkg.summary.id,sourceValue:value,label});
   }
-  const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:Object.fromEntries(statuses.map(state=>[state.id,suggestCategory(state.label)])),issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};
+  const defaultStatuses: MigrationConfiguration['statuses'] = {};
+  const nativeCategories = new Map<string, JiraStatusCategory | null>();
+  for (const state of statuses) {
+    const group = jiraStatusGroups.get(jiraStatusOptions.get(state.id) ?? '');
+    if (!group || group.category === undefined) {
+      defaultStatuses[state.id] = suggestCategory(state.label);
+      continue;
+    }
+    const { category, nameSuggestions } = group;
+    if (category === null || unidentifiedOptions.has(state.id)) {
+      nativeCategories.set(state.id, null);
+      continue;
+    }
+    nativeCategories.set(state.id, category);
+    const [suggestion] = nameSuggestions;
+    defaultStatuses[state.id] = nameSuggestions.size === 1 && statusFamily[suggestion] === category ? suggestion : categoryDefaults[category];
+  }
+  const defaultConfiguration:MigrationConfiguration={packageIds:packages.map(pkg=>pkg.summary.id),projects:containers.map(container=>({containerId:container.id,key:container.proposedKey,name:container.name})),users:Object.fromEntries(identities.map(identity=>[identity.id,null])),statuses:defaultStatuses,issueTypes:Object.fromEntries(issueTypes.map(type=>[type.id,null])),fields:Object.fromEntries(fields.map(field=>[field.id,field.suggestedKind])),sourceBaseUrls:Object.fromEntries(packages.map(pkg=>[pkg.summary.id,null])),timezone:'UTC',datePolicy:'block',excludedRecords:[]};
   const jiraWorkflowStatuses = [...jiraWorkflowStates].map(([id, { label, containerIds }]) => ({ id, label, containerIds: [...containerIds] }));
-  return { packages: packages.map(pkg=>structuredClone(pkg.summary)), containers, identities, statuses, issueTypes, fields,
+  const options: MigrationOptions = { packages: packages.map(pkg=>structuredClone(pkg.summary)), containers, identities, statuses, issueTypes, fields,
     defaultConfiguration, ...(jiraWorkflowStatuses.length ? { jiraWorkflowStatuses } : {}) };
+  return { options, nativeCategories };
+}
+
+export function buildMigrationOptions(packages: MigrationPackage[]): MigrationOptions {
+  return migrationOptionDetails(packages).options;
 }
 
 function confluenceSourceVersion(row: LegacyRecord): number | null {
@@ -607,7 +673,12 @@ class Planner{
   private retainedPageOwners = new Map<string, string | null>();
   private restrictedSourcePages = new Set<string>();
   private labelListProjectScopes?: Map<string, LabelListProjectScope | null>;
-  constructor(readonly input:MigrationPlanningInput, private readonly confirmedConfluenceRestrictions?: ReadonlyMap<string, ReadonlySet<string>>){this.options=buildMigrationOptions(input.packages);const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
+  private readonly nativeJiraStatusCategories: ReadonlyMap<string, JiraStatusCategory | null>;
+  constructor(readonly input:MigrationPlanningInput, private readonly confirmedConfluenceRestrictions?: ReadonlyMap<string, ReadonlySet<string>>){
+    const { options, nativeCategories } = migrationOptionDetails(input.packages);
+    this.options = options;
+    this.nativeJiraStatusCategories = nativeCategories;
+    const configuration=structuredClone(input.configuration);this.result={preview:{id:input.id,version:1,actorId:input.actorId,createdAt:input.now,expiresAt:new Date(Date.parse(input.now)+30*60000).toISOString(),configuration,projects:[],counts:{},notices:this.notices,requiredAcknowledgements:[],canApply:false,samples:[]},sourceImport:{id:input.id,version:1,createdAt:input.now,actorId:input.actorId,projectIds:[],configuration,packages:input.packages.map(pkg=>({stagingId:pkg.summary.id,filename:pkg.summary.filename,sha256:pkg.summary.sha256,source:structuredClone(pkg.dataset.source)})),counts:{}},sourceRecords:[],projects:[],workflows:[],issueSchemas:[],issues:[],documents:[],comments:[],revisions:[],worklogs:[],attachments:[],attachmentVersions:[],fileCopies:[],resourceLinks:[],issueRelations:[],atlassianLinks:[]};for(const pkg of input.packages){const index=packageIndex(pkg);this.indexes.set(pkg.summary.id,index);const options=new Map<string,MigrationOptions['fields'][number]>();for(const option of this.options.fields.filter(option=>option.packageId===pkg.summary.id)){options.set(option.sourceValue,option);options.set(option.sourceValue.replace(/^csv:/,''),option);}this.fieldOptions.set(pkg.summary.id,options);const sourceOptions=new Map<string,LegacyRecord[]>();for(const row of pkg.dataset.records){const entry={pkg,row,key:qualified(pkg.summary.id,row),container:containerFor(pkg,row,index)};this.entries.push(entry);this.entryByKey.set(entry.key,entry);if(row.kind==='option'&&row.containerId){const values=sourceOptions.get(row.containerId)||[];values.push(row);sourceOptions.set(row.containerId,values);}if(['page','issue','attachment'].includes(row.kind)){for(const alias of [row.sourceId,...(row.kind==='issue'&&row.metadata.key?[string(row.metadata.key)]:[])]){const key=JSON.stringify([row.kind,'id',alias]),values=this.referenceIndex.get(key)||[];if(!values.includes(entry))values.push(entry);this.referenceIndex.set(key,values);}const key=JSON.stringify([row.kind,'title',row.title]),values=this.referenceIndex.get(key)||[];values.push(entry);this.referenceIndex.set(key,values);}}this.sourceOptions.set(pkg.summary.id,sourceOptions);}}
   notice(code:string,message:string,severity:MigrationNotice['severity']='warning',entry?:Entry,ack=false){if(this.notices.length>=9999){if(this.notices.length===9999)this.notices.push({severity:'error',code:'NOTICE_LIMIT',message:'진단이10000건 한도에 도달했습니다. 누락된 진단을 승인으로 간주하지 않으며 패키지를 나누거나 매핑·제외 조건을 먼저 수정해야 합니다.',recordId:null,requiresAcknowledgement:false});return;}const recordId=entry?.key||null,key=JSON.stringify([code,recordId,message]);if(this.noticeKeys.has(key))return;this.noticeKeys.add(key);this.notices.push({severity,code,message:message.length>2000?`${message.slice(0,1950)} [진단 일부만 표시]`:message,recordId,requiresAcknowledgement:ack});}
   get configuration(){return this.result.preview.configuration;}
   sourceEntry(entry:Entry,kind:string,id:string){return this.entryByKey.get(`${entry.pkg.summary.id}/${kind}:${id}`);}
@@ -1902,7 +1973,20 @@ class Planner{
     this.initializeAppend();
     this.initializePageAppend();
     if (!config.appendTo && !config.appendPagesTo) {
-      for(const option of this.options.statuses)if(!categories.includes(config.statuses[option.id]))this.notice('STATUS_MAPPING_REQUIRED',`원본 상태의 분류를 선택해 주세요: ${option.label}`,'error');
+      for (const option of this.options.statuses) {
+        const chosen = config.statuses[option.id];
+        const valid = categories.includes(chosen);
+        const sourceCategory = this.nativeJiraStatusCategories.get(option.id);
+        if (sourceCategory === null) {
+          this.notice('JIRA_STATUS_CATEGORY_CONFLICT', valid
+            ? `원본 Jira 상태 '${option.label}'의 분류 근거가 서로 다릅니다. 직접 선택한 분류를 확인해 주세요.`
+            : `원본 Jira 상태 '${option.label}'의 분류 근거가 서로 다릅니다. 상태 매핑에서 분류를 선택해 주세요.`, valid ? 'warning' : 'error', undefined, valid);
+        } else if (!valid) {
+          this.notice('STATUS_MAPPING_REQUIRED', `원본 상태의 분류를 선택해 주세요: ${option.label}`, 'error');
+        } else if (sourceCategory && statusFamily[chosen] !== sourceCategory) {
+          this.notice('JIRA_STATUS_CATEGORY_OVERRIDE', `원본 Jira 상태 '${option.label}'의 분류를 변경합니다. 선택한 분류를 확인해 주세요.`, 'warning', undefined, true);
+        }
+      }
       for(const option of this.options.issueTypes)if(!Object.hasOwn(config.issueTypes,option.id)||config.issueTypes[option.id]!==null&&!ISSUE_TYPES.includes(config.issueTypes[option.id] as typeof ISSUE_TYPES[number]))this.notice('TYPE_MAPPING_REQUIRED',`원본 유형을 기존 유형 또는 새 유형에 매핑해 주세요: ${option.label}`,'error');
       for (const option of this.options.fields) {
         const kind = config.fields[option.id] ?? (option.requiredKind ? 'archive' : undefined);
@@ -2049,7 +2133,7 @@ class Planner{
         const existingState = workflow.statuses.find(status => status.id === stateId);
         const category = mapping ? existingState?.category : this.configuration.statuses[statusOption];
         if (!category) {
-          this.notice('APPEND_STATUS_REQUIRED', `원본 상태 '${state.label}'를 기존 프로젝트의 상태에 연결해 주세요.`, 'error', entry);
+          if (mapping) this.notice('APPEND_STATUS_REQUIRED', `원본 상태 '${state.label}'를 기존 프로젝트의 상태에 연결해 주세요.`, 'error', entry);
           continue;
         }
         if (!mapping) {
@@ -2090,7 +2174,7 @@ class Planner{
         const due = this.issueDate(jiraCalendarValue(row, 'dueDate'), entry);
         if (start && end && start > end) this.notice('ISSUE_DATE_RANGE','시작일이 종료일보다 늦습니다.','error',entry);
         const rawEstimate=sourceField(row,'estimate'),estimate=rawEstimate===undefined||rawEstimate===null||rawEstimate===''?null:Number(rawEstimate);if(estimate!==null&&(!Number.isFinite(estimate)||estimate<0||estimate>100000))this.notice('ESTIMATE_ARCHIVED','예상 작업량의 단위/범위를 현재 숫자로 옮기지 않고 원본으로 보관합니다.','warning',entry,true);
-        const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:priority??'medium',assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(string(sourceField(row,'resolutiondate','resolved'))||row.updatedAt,entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
+        const issue:Issue={id,key:`${project.key}-${number}`,projectId:project.id,title,description:'',type:typeId,status:stateId,priority:priority??'medium',assigneeId:typeof mappedAssignee==='string'?mappedAssignee:null,collaboratorIds:[],parentId:null,labels:[...new Set(labels)],startDate:start,endDate:end,dueDate:due,estimate:estimate!==null&&Number.isFinite(estimate)&&estimate>=0&&estimate<=100000?estimate:null,cycle:null,module:null,release:null,cycleId:null,moduleId:null,releaseId:null,customFields:{},version:1,createdAt,updatedAt,completedAt:category==='done'?(this.time(jiraCompletionTime(row),entry,false)||updatedAt):null};this.result.issues.push(issue);this.issueById.set(id,issue);this.primaryById.set(id,entry);this.bindings.set(entry.key,{type:'issue',id,projectId:project.id});
         if (reporterId !== undefined) issue.reporterId = reporterId;
         if (entry.pkg.dataset.source.product === 'jira') {
           const plannedEffortMinutes = this.jiraPlannedEffort(entry);
@@ -2112,7 +2196,9 @@ class Planner{
       } else if (!workflow.statuses.length) {
         Object.assign(workflow, defaultWorkflow(project.id, this.input.now));
       } else {
-        workflow.initialStatusId = workflow.statuses.find(status => status.category === 'todo')?.id || workflow.statuses[0].id;
+        workflow.initialStatusId = (workflow.statuses.find(status => status.category === 'todo') ??
+          workflow.statuses.find(status => status.category === 'backlog') ??
+          workflow.statuses.find(status => status.category !== 'done' && status.category !== 'cancelled') ?? workflow.statuses[0]).id;
         if (workflow.statuses.length <= 40) {
           workflow.transitions = workflow.statuses.flatMap(from => workflow.statuses.filter(to => to.id !== from.id)
             .map(to => ({ from: from.id, to: to.id, issueTypes: [], requiredFields: [] })));

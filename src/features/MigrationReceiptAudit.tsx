@@ -2,15 +2,18 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ClipboardCheck, Download, FileSearch, Loader2 } from 'lucide-react';
-import type {
-  SourceImport, SourceReconciliationAudit, SourceReconciliationAuditStatus, SourceReconciliationIntegrity, SourceReconciliationIntegrityPackage,
-  SourceReconciliationJiraFinding, SourceReconciliationJiraStatusFinding, SourceReconciliationJiraStatusFindingsPage,
-  SourceReconciliationJiraStatusHistory, SourceReconciliationPrimaryRecords, SourceReconciliationStatus, User,
+import {
+  SOURCE_RECONCILIATION_PRIMARY_FIELDS, type SourceImport, type SourceReconciliationAudit, type SourceReconciliationAuditStatus,
+  type SourceReconciliationFieldStatus, type SourceReconciliationIntegrity, type SourceReconciliationIntegrityPackage,
+  type SourceReconciliationJiraFinding, type SourceReconciliationJiraStatusFinding, type SourceReconciliationJiraStatusFindingsPage,
+  type SourceReconciliationJiraStatusHistory, type SourceReconciliationPrimaryField, type SourceReconciliationPrimaryRecords,
+  type SourceReconciliationStatus, type User,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import { MigrationAuthorAudit } from './MigrationAuthorReview';
 import { MigrationJiraRelationAudit } from './MigrationJiraRelationAudit';
 import { MigrationResourceLinkAudit } from './MigrationResourceLinkAudit';
+import { primaryFieldLabel } from './migration-field-labels';
 import { downloadDocument } from './document-utils';
 import './migration-receipt-audit.css';
 
@@ -35,6 +38,14 @@ export const primaryRecordFindingLabels = {
   'invalid-primary-target': '대상 연결 오류',
   'changed-parent': '현재 상위 연결 차이',
   'invalid-parent': '상위 연결 검증 오류',
+} as const;
+export const primaryFieldFindingLabels = {
+  'changed-field': '차이',
+  'unavailable-field': '비교 불가',
+  'invalid-field': '검증 오류',
+} as const;
+const fieldFindings = {
+  changed: 'changed-field', unavailable: 'unavailable-field', invalid: 'invalid-field',
 } as const;
 const hierarchyLabels = {
   matched: '상위 연결 일치',
@@ -72,7 +83,9 @@ export type AuditDetail = {
   onClose: () => void;
 };
 export type PrimaryRecordDrill = Pick<SourceReconciliationPrimaryRecords, 'packageId' | 'kind'> & (
-  { status: SourceReconciliationStatus; finding?: never } | { status?: never; finding: keyof typeof primaryRecordFindingLabels }
+  { status: SourceReconciliationStatus; finding?: never; field?: never } |
+  { status?: never; finding: keyof typeof primaryRecordFindingLabels; field?: never } |
+  { status?: never; finding: keyof typeof primaryFieldFindingLabels; field: SourceReconciliationPrimaryField }
 );
 
 export function reconciliationPackageIdentity({ source, sha256 }: SourceImport['packages'][number]) {
@@ -264,7 +277,7 @@ function PrimaryRecordCoverage({ records, packages, integrityPackages, recordLab
   return <section className="migration-audit-integrity migration-audit-primary-records" aria-label="이관 티켓·문서 대조">
     <div className="migration-audit-integrity-heading"><h5>이관 티켓·문서 대조</h5></div>
     <ul className="migration-audit-integrity-packages" aria-label="원본 패키지별 티켓·문서">
-      {records.map(({ packageId, kind, counts, invalidTargets, hierarchy }) => {
+      {records.map(({ packageId, kind, counts, invalidTargets, hierarchy, fields }) => {
         const total = Object.values(counts).reduce((sum, value) => sum + value, 0);
         const needsReview = counts['archive-only'] > 0 || counts.missing > 0 || counts.trashed > 0;
         const pkg = packagesById.get(packageId);
@@ -291,10 +304,37 @@ function PrimaryRecordCoverage({ records, packages, integrityPackages, recordLab
                 select: status => onDrill({ packageId, kind, finding: status === 'changed' ? 'changed-parent' : 'invalid-parent' }),
               } : undefined} />
           </div>}
+          {fields && <PrimaryFieldCoverage kind={kind} fields={fields} controls={primaryListId}
+            onSelect={pkg ? (field, finding) => onDrill({ packageId, kind, field, finding }) : undefined} />}
         </li>;
       })}
     </ul>
   </section>;
+}
+
+function PrimaryFieldCoverage({ kind, fields, controls, onSelect }: {
+  kind: SourceReconciliationPrimaryRecords['kind']; fields: NonNullable<SourceReconciliationPrimaryRecords['fields']>; controls: string;
+  onSelect?: (field: SourceReconciliationPrimaryField, finding: keyof typeof primaryFieldFindingLabels) => void;
+}) {
+  const compared = SOURCE_RECONCILIATION_PRIMARY_FIELDS[kind].flatMap(field => {
+    const totals = fields.counts[field];
+    return totals && Object.values(totals).some(value => value > 0) ? [{ field, totals }] : [];
+  });
+  if (!compared.length) return null;
+  const needsReview = compared.filter(({ totals }) => totals.changed || totals.unavailable || totals.invalid).length;
+  return <details className="migration-audit-findings">
+    <summary>이관 필드 대조 · {needsReview ? `확인할 필드 ${count(needsReview)}` : '비교 결과 일치'}</summary>
+    {compared.map(({ field, totals }) => {
+      const name = primaryFieldLabel(field);
+      const labels: Record<SourceReconciliationFieldStatus, string> = {
+        matched: `${name} 일치`, changed: `${name} 차이`, unavailable: `${name} 비교 불가`, invalid: `${name} 검증 오류`,
+      };
+      return <AuditCounts key={field} label={`${name} 대조 건수`} labels={labels} counts={totals} drill={onSelect ? {
+        controls, statuses: ['changed', 'unavailable', 'invalid'],
+        select: status => onSelect(field, fieldFindings[status]),
+      } : undefined} />;
+    })}
+  </details>;
 }
 
 function JiraStatusHistoryAudit({ history, integrity, base, receiptVersion, detail }: {

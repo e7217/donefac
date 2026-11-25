@@ -11,7 +11,7 @@ async function readJson<T>(response: Pick<APIResponse, 'status' | 'text'>, statu
   return JSON.parse(text) as T;
 }
 
-test('360px 이관 대조에서 현재 상위 연결 차이와 원본 주소·대상 연결 오류를 각각 확인한다', async ({ page, request }) => {
+test('360px 이관 대조에서 현재 필드와 상위 연결 차이, 원본 주소·대상 연결 오류를 각각 확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const token = randomUUID().slice(0, 7).toUpperCase();
@@ -65,10 +65,11 @@ test('360px 이관 대조에서 현재 상위 연결 차이와 원본 주소·�
     createdIssues.push(...workspace.issues.filter(issue => receipt.projectIds.includes(issue.projectId) && testTitles.has(issue.title)).map(issue => issue.id));
     const child = workspace.issues.find(issue => issue.title === childTitle && issue.projectId === currentIssue.projectId)!;
     expect(child.parentId).toBe(currentIssue.id);
+    const localDescription = '팀에서 다시 편집한 설명';
     const changed = await readJson<Issue>(await request.patch(`/api/issues/${child.id}`, {
-      data: { expectedVersion: child.version, parentId: null },
+      data: { expectedVersion: child.version, parentId: null, description: localDescription },
     }));
-    expect(changed).toMatchObject({ id: child.id, parentId: null, version: child.version + 1 });
+    expect(changed).toMatchObject({ id: child.id, parentId: null, description: localDescription, version: child.version + 1 });
     const base = `/api/source-imports/${receipt.id}`;
     const listing = `${base}/reconciliation`;
     const audit = `${listing}/audit`;
@@ -79,6 +80,10 @@ test('360px 이관 대조에서 현재 상위 연결 차이와 원본 주소·�
       matched: 2, changed: 1, unavailable: 0, invalid: 0,
     });
     expect(audited.primaryRecords.find(row => row.packageId === second.id)?.hierarchy?.changed).toBe(0);
+    expect(audited.primaryRecords.find(row => row.packageId === first.id)?.fields?.counts.description).toEqual({
+      matched: 2, changed: 1, unavailable: 0, invalid: 0,
+    });
+    expect(audited.primaryRecords.find(row => row.packageId === second.id)?.fields?.counts.description?.changed).toBe(0);
     const realPage = await readJson<SourceReconciliationPage>(await request.get(`${listing}?${new URLSearchParams({ packageId: first.id, kind: 'issue', limit: '30', offset: '0' })}`));
     expect(realPage.rows.map(row => row.sourceId).sort()).toEqual(['1200', '1201', '1202']);
     expect(realPage.rows.every(row => row.status === 'linked')).toBe(true);
@@ -139,6 +144,29 @@ test('360px 이관 대조에서 현재 상위 연결 차이와 원본 주소·�
     await expect(list.getByRole('listitem')).toHaveCount(3);
     await expect(reconciliation.getByLabel('대조 원본 패키지', { exact: true })).toHaveValue(first.id);
     await expect(reconciliation.getByLabel('대조 원본 종류', { exact: true })).toHaveValue('issue');
+
+    const fields = pkg.locator('details').filter({ hasText: '이관 필드 대조' });
+    await fields.locator('summary').click();
+    const fieldResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === listing && url.searchParams.get('finding') === 'changed-field';
+    });
+    await fields.getByRole('button', { name: '설명 차이 1개 보기', exact: true }).click();
+    const changedFields = await fieldResponse;
+    expect(Object.fromEntries(new URL(changedFields.url()).searchParams)).toEqual({
+      offset: '0', limit: '30', packageId: first.id, kind: 'issue', finding: 'changed-field', field: 'description',
+    });
+    const fieldRows = (await readJson<SourceReconciliationPage>(changedFields)).rows;
+    expect(fieldRows).toHaveLength(1);
+    expect(fieldRows[0]).toMatchObject({ target: { id: child.id }, fieldComparison: { field: 'description', status: 'changed' } });
+    await expect(reconciliation.getByText('설명 차이만', { exact: true })).toBeVisible();
+    await expect(reconciliation.getByRole('heading', { name: '대조 원본 목록', exact: true })).toBeFocused();
+    await expect(list.getByRole('listitem')).toHaveCount(1);
+    await expect(list.getByText(childTitle, { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    await reconciliation.getByRole('button', { name: '설명 차이 필터 해제', exact: true }).click();
+    await expect(list.getByRole('listitem')).toHaveCount(3);
+
     const selectedFinding = page.waitForResponse(response => matchesFinding(new URL(response.url())));
     await pkg.getByRole('button', { name: '대상 연결 오류 2개 보기', exact: true }).click();
     const finding = await selectedFinding;

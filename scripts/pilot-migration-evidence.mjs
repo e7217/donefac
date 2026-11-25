@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SOURCE_RECONCILIATION_PRIMARY_FIELDS, SOURCE_RECONCILIATION_FIELD_STATUSES, SOURCE_RECONCILIATION_OPTIONAL_JIRA_FIELDS } from '../shared/types.ts';
 import { CONFLUENCE_FINDINGS_VERSION, confirmedConfluenceRestrictions } from './pilot-migration-confluence-findings.mjs';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -117,6 +118,24 @@ function targetContentEvidence(raw) {
     worklogs: section('worklogs'), issueRelations: section('issueRelations') };
 }
 
+/** @param {'issue'|'page'} kind */
+function primaryFieldEvidence(raw, kind, boundRecords) {
+  if (raw === undefined) return undefined;
+  const message = '영수증의 티켓·문서 필드 검증 결과가 올바르지 않습니다.';
+  const inventory = SOURCE_RECONCILIATION_PRIMARY_FIELDS[kind];
+  requireEvidence(isObject(raw) && hex(raw.sha256) && isObject(raw.counts) && Object.keys(raw.counts).length === inventory.length, message);
+  const fields = inventory.map(field => {
+    const totals = raw.counts[field];
+    requireEvidence(isObject(totals) && SOURCE_RECONCILIATION_FIELD_STATUSES.every(status => count(totals[status])), message);
+    const statuses = counts(totals, SOURCE_RECONCILIATION_FIELD_STATUSES);
+    const observed = sum(Object.values(statuses));
+    const mayBeAbsent = kind === 'issue' && SOURCE_RECONCILIATION_OPTIONAL_JIRA_FIELDS.some(candidate => candidate === field);
+    requireEvidence(mayBeAbsent ? observed <= boundRecords : observed === boundRecords, message);
+    return [field, statuses];
+  });
+  return { sha256: raw.sha256, counts: Object.fromEntries(fields) };
+}
+
 function primaryRecordsEvidence(raw, receiptPackages, matches, integrity, recordCounts) {
   const message = '영수증의 패키지별 업무·문서 연결 검증 결과가 올바르지 않습니다.';
   requireEvidence(Array.isArray(raw) && raw.length === receiptPackages.length, message);
@@ -142,8 +161,10 @@ function primaryRecordsEvidence(raw, receiptPackages, matches, integrity, record
       requireEvidence(sum(Object.values(statuses)) === statusCounts.linked + statusCounts.trashed, message);
       hierarchy = { ...statuses, sha256: proof.sha256 };
     }
+    const fields = primaryFieldEvidence(entry.fields, kind, statusCounts.linked + statusCounts.trashed);
     return { packageId, kind, counts: statusCounts, invalidTargets, dispositionSha256,
-      records: { expected: matches.get(packageId)?.expectedPrimaryRecords ?? null, observed }, ...(hierarchy ? { hierarchy } : {}) };
+      records: { expected: matches.get(packageId)?.expectedPrimaryRecords ?? null, observed },
+      ...(hierarchy ? { hierarchy } : {}), ...(fields ? { fields } : {}) };
   });
   requireEvidence(recordStatuses.every(status => totals[status] <= recordCounts[status]), message);
   return proof.sort((left, right) => left.packageId.localeCompare(right.packageId));
@@ -461,6 +482,7 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     receiptsWithLiveRestrictedConfluenceDocuments: 0, receiptsWithPrimaryRecordCountMismatches: 0,
     receiptsWithInvalidPrimaryTargets: 0, receiptsWithArchiveOnlyPrimaryRecords: 0,
     receiptsWithHierarchyFailures: 0, receiptsWithHierarchyReview: 0,
+    receiptsWithPrimaryFieldFailures: 0, receiptsWithPrimaryFieldReview: 0,
     confluencePackagesWithoutFullPageCoverage: withoutFullCoverage.size };
   const seenReceipts = new Set();
   const receipts = [];
@@ -523,11 +545,15 @@ export async function collectMigrationEvidence(call, packages, confluenceReviews
     if (primaryRecords.some(({ hierarchy }) => hierarchy && hierarchy.invalid > 0)) checks.receiptsWithHierarchyFailures++;
     if (primaryRecords.some(({ counts, hierarchy }) => hierarchy
       ? hierarchy.changed > 0 || hierarchy.unavailable > 0 : counts.linked + counts.trashed > 0)) checks.receiptsWithHierarchyReview++;
+    if (primaryRecords.some(({ fields }) => fields && Object.values(fields.counts).some(totals => totals.invalid > 0))) checks.receiptsWithPrimaryFieldFailures++;
+    if (primaryRecords.some(({ counts, fields }) => fields
+      ? Object.values(fields.counts).some(totals => totals.changed > 0 || totals.unavailable > 0)
+      : counts.linked + counts.trashed > 0)) checks.receiptsWithPrimaryFieldReview++;
   }
   receipts.sort((a, b) => a.id.localeCompare(b.id));
   const failed = checks.sourceIdentityMismatches > 0 || checks.receiptsWithLiveRestrictedConfluenceDocuments > 0 || checks.receiptsWithJiraRelationFailures > 0 ||
     checks.receiptsWithResourceLinkFailures > 0 || checks.receiptsWithPrimaryRecordCountMismatches > 0 ||
-    checks.receiptsWithInvalidPrimaryTargets > 0 || checks.receiptsWithHierarchyFailures > 0 || receipts.some(failedAudit);
+    checks.receiptsWithInvalidPrimaryTargets > 0 || checks.receiptsWithHierarchyFailures > 0 || checks.receiptsWithPrimaryFieldFailures > 0 || receipts.some(failedAudit);
   const review = confluenceReviews.some(({ proof }) => proof.status === 'needs-review') ||
     Object.values(checks).some(Boolean) || staged.some(pkg => pkg.errors > 0) || receipts.some(receipt =>
     receipt.recordCounts.trashed > 0 || receipt.recordCounts.excluded > 0 || receipt.attachmentCounts.unbound > 0);

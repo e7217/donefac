@@ -628,6 +628,7 @@ export interface SourceReconciliationRow {
   status: SourceReconciliationStatus; target: SourceReconciliationTarget | null;
   invalidPrimaryTarget?: true;
   invalidPrimaryBinding?: true;
+  fieldComparison?: { field: SourceReconciliationPrimaryField; status: SourceReconciliationFieldStatus };
 }
 export interface SourceReconciliationPage {
   importId: string; receiptVersion: number; counts: Record<SourceReconciliationStatus, number>;
@@ -671,6 +672,19 @@ export interface SourceReconciliationContentDigest {
   count: number;
   sha256: string;
 }
+export const SOURCE_RECONCILIATION_PRIMARY_FIELDS = {
+  issue: JIRA_MIGRATION_ISSUE_FIELDS.filter(field => field !== 'parentId'),
+  page: CONFLUENCE_MIGRATION_DOCUMENT_FIELDS.filter(field => field !== 'parentId'),
+};
+export const SOURCE_RECONCILIATION_OPTIONAL_JIRA_FIELDS = ['reporterId', 'plannedEffortMinutes'] as const;
+export const SOURCE_RECONCILIATION_FIELD_STATUSES = ['matched', 'changed', 'unavailable', 'invalid'] as const;
+export type SourceReconciliationPrimaryField = typeof SOURCE_RECONCILIATION_PRIMARY_FIELDS.issue[number] | typeof SOURCE_RECONCILIATION_PRIMARY_FIELDS.page[number];
+export type SourceReconciliationFieldStatus = typeof SOURCE_RECONCILIATION_FIELD_STATUSES[number];
+export type SourceReconciliationFieldCounts = Record<SourceReconciliationFieldStatus, number>;
+export interface SourceReconciliationPrimaryFields {
+  sha256: string;
+  counts: Partial<Record<SourceReconciliationPrimaryField, SourceReconciliationFieldCounts>>;
+}
 export interface SourceReconciliationPrimaryRecords {
   packageId: string;
   kind: 'issue' | 'page';
@@ -678,9 +692,10 @@ export interface SourceReconciliationPrimaryRecords {
   invalidTargets: number;
   dispositionSha256: string;
   hierarchy?: Record<SourceReconciliationHierarchyStatus, number> & { sha256: string };
+  fields?: SourceReconciliationPrimaryFields;
 }
 export type SourceReconciliationHierarchyStatus = 'matched' | 'changed' | 'unavailable' | 'invalid';
-export type SourceReconciliationPrimaryFinding = 'invalid-primary-target' | 'changed-parent' | 'invalid-parent';
+export type SourceReconciliationPrimaryFinding = 'invalid-primary-target' | 'changed-parent' | 'invalid-parent' | 'changed-field' | 'unavailable-field' | 'invalid-field';
 export interface SourceReconciliationTargetContent {
   version: 1;
   comments: SourceReconciliationContentDigest;
