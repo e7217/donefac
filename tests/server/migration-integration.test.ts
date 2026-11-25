@@ -24,7 +24,7 @@ import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
 import { suggestSameSourceAccountMappings } from '../../shared/migration-identity-suggestions.js';
 import { DEFAULT_WORKSPACE_SEARCH_FILTERS, searchWorkspace } from '../../shared/workspace-search.js';
 import type { MigrationContentReviewDetail, MigrationContentReviewPage, ProjectWorkloadResult, SourceReconciliationResourceLinkFindingsPage } from '../../shared/types.js';
-import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
+import type { ApiKeyCreated, Attachment, AttachmentHead, AttachmentVersion, AutomationRule, AutomationRun, Comment, CommentEditSnapshot, DocPage, DocRevision, GitlabSettings, GitlabSyncPreview, GitlabSyncResult, Issue, IssueCommentView, IssueWorklogPage, LegacyPackageSummary, MigrationApplyResult, MigrationConfiguration, MigrationOptions, MigrationPreview, ProjectIssueSchema, ProjectWorkflow, ReportingLedgerData, RichContent, SourceImport, SourceImportIntegrityPackage, SourceReconciliationAudit, SourceReconciliationFileCheck, SourceReconciliationPage, SourceRecordArchive, SourceRecordPage, WebhookEndpointCreated, WorklogEntry, WorkspaceSnapshot } from '../../shared/types.js';
 import { createApp } from '../../server/app.js';
 import { AttachmentAppend, type AppendedFile } from '../../server/attachment-append.js';
 import { hash } from '../../server/attachments.js';
@@ -56,6 +56,175 @@ function jiraGitlabCsv(rows: Array<[sourceId: string, originalKey: string, title
 }
 
 type MigrationFixture = Awaited<ReturnType<typeof fixture>>;
+
+test('reviewed Jira comment corrections preserve local edits and stable imported comment identities through retries and restore', async t => {
+  const f = await fixture(), restored = await fixture();
+  t.after(() => Promise.all([f.close(), restored.close()]));
+  const instance = 'synthetic-jira-comment-corrections';
+  const jiraBase = 'https://jira-comments.example.test/jira';
+  const issueUrl = `${jiraBase}/browse/JCOMMENTS-17`;
+  const oldLink = 'https://docs.example.test/releases/old', newLink = 'https://docs.example.test/releases/new';
+  const legacyLink = 'https://docs.example.test/releases/legacy';
+  const legacySourceBody = `[이전 렌더링 링크|${legacyLink}]`;
+  const first = '2024-01-01T00:00:00.000Z', second = '2024-01-02T00:00:00.000Z', third = '2024-01-03T00:00:00.000Z';
+  const author = { name: 'source.author', displayName: '원본 작성자' };
+  const comment = (id: string, body: string, updated: string | null = first) => ({ id, body, author, created: first, updated });
+  const upload = (name: string, entries: Array<ReturnType<typeof comment> & { visibility?: { type: string; value: string } }>) =>
+    f.upload(Buffer.from(JSON.stringify({ issues: [{ id: '1420', key: 'JCOMMENTS-17', fields: {
+      project: { id: '420', key: 'JCOMMENTS', name: 'Synthetic Jira comments' }, summary: 'Jira comment revisions',
+      status: { id: '1', name: 'Open' }, issuetype: { id: '3', name: 'Task' }, created: first, updated: third, comment: { comments: entries },
+    } }] })), `${name}.json`, 'jira', instance);
+  const initial = await upload('initial-comments', [
+    comment('301', `[이전 링크|${oldLink}]`), comment('302', '수정 충돌을 볼 댓글'), comment('303', '삭제할 댓글'),
+    comment('304', '동일한 댓글'), comment('305', '수정 시각이 없는 댓글'), comment('306', '접근 제한이 바뀔 댓글'),
+    comment('307', legacySourceBody),
+  ]);
+  const initialConfig = await f.configuration(initial, 'COMFIX');
+  initialConfig.sourceBaseUrls[initial.id] = jiraBase;
+  const initialApply = await f.apply(await f.preview(initialConfig));
+  assert.equal(initialApply.status, 201, JSON.stringify(initialApply.data));
+  type Backup = WorkspaceSnapshot & { schemaVersion: number; comments: Comment[]; sourceRecords: SourceRecordArchive[] };
+  const { data: formerBackup } = await f.call<Backup>('/export');
+  const legacyOriginal = formerBackup.sourceRecords.find(row => row.record.kind === 'comment' && row.record.sourceId === '307')!;
+  const legacyNative = formerBackup.comments.find(row => row.id === legacyOriginal.targetId)!;
+  const oldRendering = convertLegacyContent(legacyOriginal.record, { legacyAnnotations: true, resolveReference: () => null }).plainText;
+  assert.equal(oldRendering, '이전 렌더링 링크');
+  assert.ok(legacyNative.body.includes(legacyLink));
+  legacyNative.body = oldRendering;
+  const formerRestore = await f.call('/import', 'POST', { data: { ...formerBackup, schemaVersion: 120 } });
+  assert.equal(formerRestore.status, 200, JSON.stringify(formerRestore.data));
+  const [projectId] = initialApply.data.import.projectIds;
+  const { data: workspace } = await f.call<WorkspaceSnapshot>('/workspace');
+  const issue = workspace.issues.find(row => row.projectId === projectId)!;
+  const commentsPath = `/comments?resourceType=issue&resourceId=${issue.id}`;
+  const comments = async (target = f) => (await target.call<IssueCommentView[]>(commentsPath)).data;
+  const original = await comments();
+  const firstComment = original.find(row => row.body.includes(oldLink))!;
+  const conflicting = original.find(row => row.body === '수정 충돌을 볼 댓글')!;
+  const deleted = original.find(row => row.body === '삭제할 댓글')!;
+  const confirmed = original.find(row => row.body === '동일한 댓글')!;
+  const dateMissing = original.find(row => row.body === '수정 시각이 없는 댓글')!;
+  const restricted = original.find(row => row.body === '접근 제한이 바뀔 댓글')!;
+  assert.ok(firstComment && conflicting && deleted && confirmed && dateMissing && restricted);
+  const resolve = async (sourceId: string, target = f) => {
+    const url = `${issueUrl}?focusedCommentId=${sourceId}#comment-${sourceId}`;
+    const result = await target.call<{ target: { issueId: string; commentId: string } | null }>(
+      `/atlassian-links/resolve-migrated-jira-target?${new URLSearchParams({ url })}`);
+    assert.equal(result.status, 200, JSON.stringify(result.data));
+    return result.data.target;
+  };
+  assert.deepEqual(await resolve('301'), { issueId: issue.id, commentId: firstComment.id });
+  assert.equal((await f.call(`/comments/${deleted.id}`, 'DELETE', undefined, deleted.authorId)).status, 200);
+  const append = async (pkg: LegacyPackageSummary): Promise<MigrationConfiguration> => {
+    const { data: options } = await f.call<MigrationOptions>(`/migrations/options?packageId=${pkg.id}`);
+    const target = options.appendTarget!;
+    assert.equal(target?.projectId, projectId);
+    return { ...options.defaultConfiguration, sourceBaseUrls: { [pkg.id]: jiraBase },
+      users: Object.fromEntries(options.identities.map(identity => [identity.id, firstComment.authorId])),
+      appendTo: { projectId, refreshComments: true,
+        statuses: Object.fromEntries(options.statuses.map(option => [option.id, target.statuses.find(status => status.label === option.label)!.id])),
+        issueTypes: Object.fromEntries(options.issueTypes.map(option => [option.id, target.issueTypes.find(type => type.name === option.label)!.id])),
+        fields: {},
+      },
+    };
+  };
+  const delta = await upload('revised-comments', [
+    comment('301', `[새 링크|${newLink}]`, second), comment('302', 'Jira 수정 내용', second),
+    comment('303', '삭제한 댓글의 새 Jira 내용', second), comment('304', '동일한 댓글', third),
+    comment('305', '시각을 확인할 수 없는 Jira 수정', null),
+    { ...comment('306', '제한된 Jira 본문', second), visibility: { type: 'role', value: 'Private' } },
+    comment('307', legacySourceBody, second),
+    comment('310', '추가 옵션을 끈 상태에서 보관할 새 원본', second),
+  ]);
+  const config = await append(delta);
+  const stale = await f.preview(config);
+  assert.equal(stale.canApply, true, JSON.stringify(stale.notices));
+  const oldEdit = await f.call<CommentEditSnapshot>(`/comments/${firstComment.id}/edit`, 'GET', undefined, firstComment.authorId);
+  const edit = async (id: string, editToken: string, body: string) =>
+    f.call<CommentEditSnapshot>(`/comments/${id}`, 'PATCH', { editToken, body, requestId: randomUUID() }, firstComment.authorId);
+  const conflictEdit = await f.call<CommentEditSnapshot>(`/comments/${conflicting.id}/edit`, 'GET', undefined, conflicting.authorId);
+  const local = await edit(conflicting.id, conflictEdit.data.editToken, '팀에서 고친 댓글');
+  assert.equal(local.status, 200, JSON.stringify(local.data));
+  assert.equal((await f.apply(stale)).status, 409);
+  const plan = await f.preview(config);
+  assert.equal(plan.canApply, true, JSON.stringify(plan.notices));
+  const decisions = new Map(plan.jiraCommentReview?.map(row => [row.sourceId, row]));
+  for (const [id, decision] of [['301', 'apply'], ['302', 'local-conflict'], ['303', 'archive-only'], ['304', 'confirm'], ['305', 'archive-only']]) {
+    assert.equal(decisions.get(id)?.decision, decision);
+  }
+  assert.deepEqual([decisions.get('307')?.decision, decisions.get('307')?.before, decisions.get('307')?.after],
+    ['apply', oldRendering, `이전 렌더링 링크 <${legacyLink}>`]);
+  assert.ok(plan.requiredAcknowledgements.includes('JIRA_COMMENT_CORRECTIONS'));
+  assert.ok(!plan.jiraCommentReview?.some(row => row.before?.includes('제한된 Jira 본문') || row.after?.includes('제한된 Jira 본문')));
+  assert.equal((await f.apply(plan, { acknowledgements: [] })).status, 400);
+  const immediatelyBefore = await comments();
+  f.db.exec(`CREATE TRIGGER fail_jira_comment_revision_receipt BEFORE INSERT ON source_imports
+    BEGIN SELECT RAISE(ABORT, 'synthetic Jira comment revision receipt failure'); END;`);
+  try { assert.equal((await f.apply(plan)).status, 500); }
+  finally { f.db.exec('DROP TRIGGER fail_jira_comment_revision_receipt'); }
+  assert.deepEqual(await comments(), immediatelyBefore);
+  const applied = await f.apply(plan);
+  assert.equal(applied.status, 201, JSON.stringify(applied.data));
+  assert.equal((await f.apply(plan)).data.duplicate, true);
+  assert.equal((await edit(firstComment.id, oldEdit.data.editToken, '검토 전에 열린 편집기')).status, 409);
+  const current = await comments();
+  const updated = current.find(row => row.id === firstComment.id)!;
+  assert.equal(updated.authorId, firstComment.authorId);
+  assert.equal(updated.createdAt, firstComment.createdAt);
+  assert.equal(updated.editVersion, 1);
+  assert.ok(updated.jiraCorrectionRecordId && updated.editedAt && updated.body.includes(newLink));
+  assert.equal(updated.jiraOriginalLinksAvailable, true);
+  assert.equal(current.find(row => row.id === confirmed.id)?.editVersion, undefined);
+  assert.equal(current.find(row => row.id === confirmed.id)?.body, confirmed.body);
+  assert.equal(current.find(row => row.id === conflicting.id)?.body, '팀에서 고친 댓글');
+  assert.equal(current.find(row => row.id === dateMissing.id)?.body, dateMissing.body);
+  assert.equal(current.find(row => row.id === restricted.id)?.body, restricted.body);
+  assert.equal(current.find(row => row.id === legacyNative.id)?.body, `이전 렌더링 링크 <${legacyLink}>`);
+  assert.ok(!current.some(row => row.id === deleted.id || row.body.includes('추가 옵션을 끈')));
+  assert.deepEqual(await resolve('301'), { issueId: issue.id, commentId: firstComment.id });
+  assert.equal(await resolve('303'), null);
+  const latestLinks = (await f.call(`/comments/${firstComment.id}/jira-original-links`)).data;
+  assert.deepEqual(latestLinks, { links: [{ label: '새 링크', href: newLink }], limited: false });
+  const older = await upload('older-than-confirmed', [comment('304', '중간 날짜의 다른 댓글', second)]);
+  const olderPlan = await f.preview(await append(older));
+  assert.equal(olderPlan.jiraCommentReview?.[0].decision, 'archive-only');
+  assert.equal(olderPlan.canApply, false);
+
+  const { data: backup } = await f.call<Backup>('/export');
+  assert.equal(backup.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
+  const head = backup.sourceRecords.find(row => row.id === updated.jiraCorrectionRecordId)!;
+  assert.equal(head.targetType, null);
+  assert.equal(head.ownerId, issue.id);
+  assert.equal(backup.sourceRecords.filter(row => row.targetType === 'comment' && row.targetId === firstComment.id).length, 1);
+  const downgraded = await restored.call('/import', 'POST', { data: { ...backup, schemaVersion: 120 } });
+  assert.equal(downgraded.status, 400);
+  const incorrect = structuredClone(backup);
+  incorrect.comments.find(row => row.id === firstComment.id)!.jiraCorrectionRecordId = head.jiraCommentCorrection!.originalRecordId;
+  assert.equal((await restored.call('/import', 'POST', { data: incorrect })).status, 400);
+  const copy = await restored.call('/import', 'POST', { data: backup });
+  assert.equal(copy.status, 200, JSON.stringify(copy.data));
+  assert.deepEqual(await comments(restored), current);
+  assert.deepEqual(await resolve('301', restored), { issueId: issue.id, commentId: firstComment.id });
+  assert.deepEqual((await restored.call(`/comments/${firstComment.id}/jira-original-links`)).data, latestLinks);
+  const remove = () => restored.call<{ trashItemId: string }>(`/comments/${firstComment.id}`, 'DELETE', undefined, firstComment.authorId);
+  const trash = await remove();
+  assert.equal(trash.status, 200);
+  assert.equal(await resolve('301', restored), null);
+  const archivedBackup = (await restored.call<Backup>('/export')).data;
+  const archivedRestore = await restored.call('/import', 'POST', { data: archivedBackup });
+  assert.equal(archivedRestore.status, 200, JSON.stringify(archivedRestore.data));
+  assert.equal(await resolve('301', restored), null);
+  assert.equal((await restored.call(`/trash/items/${trash.data.trashItemId}/restore`, 'POST', undefined, firstComment.authorId)).status, 200);
+  assert.deepEqual(await resolve('301', restored), { issueId: issue.id, commentId: firstComment.id });
+  const trashedAgain = await remove();
+  assert.equal(trashedAgain.status, 200);
+  assert.equal((await restored.call(`/trash/items/${trashedAgain.data.trashItemId}`, 'DELETE', undefined, firstComment.authorId)).status, 200);
+  const afterDeletion = (await restored.call<Backup>('/export')).data;
+  assert.ok(afterDeletion.sourceRecords.some(row => row.id === head.id));
+  const deletedRestore = await restored.call('/import', 'POST', { data: afterDeletion });
+  assert.equal(deletedRestore.status, 200, JSON.stringify(deletedRestore.data));
+  assert.equal(await resolve('301', restored), null);
+});
 
 test('migrated Confluence description destinations resolve unique source sections across separate imports and restore', async t => {
   const f = await fixture();

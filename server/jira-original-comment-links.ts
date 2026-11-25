@@ -1,6 +1,7 @@
 import type { StatementSync } from 'node:sqlite';
 import type { Comment, IssueCommentView, JiraOriginalCommentLinksResult, SourceImport, SourceRecordArchive } from '../shared/types.js';
 import { extractJiraOriginalCommentLinks } from './migration-content.js';
+import { latestVerifiedJiraCommentSource } from './jira-comment-corrections.js';
 import { isRestrictedJiraHistory, isRestrictedJiraHistoryOwner, jiraHistoryOwnerAliases } from './migration-jira-history.js';
 import type { SourcePreservationService } from './source-preservation.js';
 import type { Store } from './store.js';
@@ -13,14 +14,16 @@ export class JiraOriginalCommentLinks {
 
   constructor(private readonly store: Store, private readonly sources: SourcePreservationService) {
     // Discover candidate rows without pulling archived comment bodies into the issue comment list.
-    this.candidates = store.db.prepare(`SELECT json_set(archive.json, '$.record.text', '') AS json
+    this.candidates = store.db.prepare(`SELECT CASE WHEN json_type(live.json,'$.jiraCorrectionRecordId')='text'
+      THEN archive.json ELSE json_set(archive.json, '$.record.text', '') END AS json
       FROM source_records AS archive JOIN comments AS live ON live.id=archive.target_id
         AND live.resource_type='issue' AND live.resource_id=archive.owner_id
       WHERE archive.owner_type='issue' AND archive.owner_id=? AND archive.kind='comment'
         AND archive.target_type='comment' AND archive.product='jira'
         AND json_extract(archive.json,'$.excluded') IS NOT 1
         AND (
-          instr(lower(json_extract(archive.json,'$.record.text')), 'http')>0
+          json_type(live.json,'$.jiraCorrectionRecordId')='text'
+          OR instr(lower(json_extract(archive.json,'$.record.text')), 'http')>0
           OR json_extract(archive.json,'$.record.textFormat')='adf'
             AND instr(json_extract(archive.json,'$.record.text'), '"link"')>0
           OR json_extract(archive.json,'$.record.metadata.bodyFormat')='search-rendered-html'
@@ -35,9 +38,16 @@ export class JiraOriginalCommentLinks {
   list(issueId: string, comments: Comment[]): IssueCommentView[] {
     const candidateIds = new Set<string>();
     const ownerEvidence = new Map<string, boolean>();
+    const byId = new Map(comments.map(comment => [comment.id, comment]));
     for (const row of this.candidates.iterate(issueId) as Iterable<ArchiveRow>) {
       const archive = JSON.parse(row.json) as SourceRecordArchive;
-      if (archive.targetId && this.verified(archive, issueId, ownerEvidence)) candidateIds.add(archive.targetId);
+      const comment = archive.targetId && byId.get(archive.targetId);
+      if (!comment || !this.verified(archive, issueId, ownerEvidence)) continue;
+      if (comment.jiraCorrectionRecordId) {
+        const source = latestVerifiedJiraCommentSource(this.store, archive, comment);
+        if (!source || !extractJiraOriginalCommentLinks(source).links.length) continue;
+      }
+      candidateIds.add(comment.id);
     }
     return comments.map(comment => ({ ...comment, jiraOriginalLinksAvailable: candidateIds.has(comment.id) ? true : undefined }));
   }
@@ -48,7 +58,8 @@ export class JiraOriginalCommentLinks {
     if (rows.length !== 1) return null;
     const archive = JSON.parse(rows[0].json) as SourceRecordArchive;
     if (archive.targetId !== comment.id || !this.verified(archive, comment.resourceId, new Map())) return null;
-    return extractJiraOriginalCommentLinks(archive.record);
+    const source = latestVerifiedJiraCommentSource(this.store, archive, comment);
+    return source ? extractJiraOriginalCommentLinks(source) : null;
   }
 
   private verified(archive: SourceRecordArchive, issueId: string, ownerEvidence: Map<string, boolean>): boolean {

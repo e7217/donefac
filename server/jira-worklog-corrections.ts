@@ -54,7 +54,7 @@ export function jiraWorklogProjectedNote(record: LegacyRecord): string | undefin
   return !dependsOnReferences && !converted.diagnostics.length && note.length <= 2000 ? note : undefined;
 }
 
-function memberPackage(record: SourceRecordArchive, receipt: SourceImport) {
+export function jiraHistoryReceiptPackage(record: SourceRecordArchive, receipt: SourceImport) {
   if (!record.source || !record.record || receipt.id !== record.sourceImportId || record.excluded ||
       !record.targetProjectId || !Array.isArray(receipt.projectIds) || !receipt.projectIds.includes(record.targetProjectId) ||
       !Array.isArray(receipt.packages) || !Array.isArray(receipt.configuration?.packageIds) || !Array.isArray(receipt.configuration.excludedRecords)) return;
@@ -83,7 +83,7 @@ function originalBaseline(source: SourceRecordArchive, receipt: SourceImport | u
   if (!receipt || source.jiraWorklogCorrection || !sourceIsOwnedWorklog(source, current)) return null;
   if (source.authorAttribution && (source.authorAttribution.kind !== 'worklog' ||
       source.authorAttribution.targetId !== current.id || source.authorAttribution.expectedAuthorId !== current.authorId)) return null;
-  const pkg = memberPackage(source, receipt);
+  const pkg = jiraHistoryReceiptPackage(source, receipt);
   if (!pkg) return null;
   const fields = sourceFields(source, receipt);
   if (!fields) return null;
@@ -110,7 +110,7 @@ export function jiraWorklogCorrectionBaseline(source: SourceRecordArchive, recei
       marker.previousRecordId !== previous.id || source.id === original.id || source.id === previous.id ||
       source.jiraHistoryAppend || source.authorAttribution || !sourceIsOwnedWorklog(source, current) ||
       source.source.instanceKey !== original.source.instanceKey || source.record.sourceId !== original.record.sourceId ||
-      source.targetProjectId !== original.targetProjectId || !memberPackage(source, receipt) || !previousReceipt ||
+      source.targetProjectId !== original.targetProjectId || !jiraHistoryReceiptPackage(source, receipt) || !previousReceipt ||
       previousReceipt.id === receipt.id || previousReceipt.createdAt > receipt.createdAt ||
       receipt.configuration.appendTo?.refreshWorklogs !== true || receipt.configuration.appendTo.projectId !== source.targetProjectId) return null;
   const fields = sourceFields(source, receipt);

@@ -25,6 +25,7 @@ import { jiraAttachmentOwnerAliases, jiraAttachmentSourceId, jiraHistoryOwnerAli
 import { jiraParentEvidence } from './migration-jira-hierarchy.js';
 import { jiraIssueRelationSource } from './migration-jira-relations.js';
 import { readJiraWorklogCorrectionCandidates } from './jira-worklog-corrections.js';
+import { readJiraCommentCorrectionCandidates } from './jira-comment-corrections.js';
 import { readMigrationRetainedResourceLinks } from './migration-retained-resource-links.js';
 import { parseMigrationOriginBase } from './migration-origin-links.js';
 import { hasIssueProjectMove, readIssueProjectHistory } from './issue-project-history.js';
@@ -38,7 +39,7 @@ const fail = (status: number, message: string): never => { throw new LegacyImpor
 const unique = (values: string[]) => new Set(values).size === values.length;
 const uuid = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const generationKey = 'migrationWorkspaceGeneration';
-const conversionVersion = 25;
+const conversionVersion = 26;
 const MAX_REFRESH_ISSUES = 1000;
 const MAX_REFRESH_DOCUMENTS = 300;
 const MAX_REFRESH_BYTES = 64 * MiB;
@@ -264,7 +265,7 @@ export class MigrationService {
     const mapping = configuration.appendTo;
     if (!mapping) return;
     const destination = this.appendDestination(packages, buildMigrationOptions(packages), {
-      history: mapping.refreshHistory || mapping.refreshWorklogs, attachments: mapping.refreshAttachments, relations: mapping.refreshRelations,
+      history: mapping.refreshHistory || mapping.refreshComments || mapping.refreshWorklogs, attachments: mapping.refreshAttachments, relations: mapping.refreshRelations,
     });
     if (!destination || destination.project.id !== mapping.projectId) {
       return fail(applying ? 409 : 400, applying ? changedAppend : invalidAppend);
@@ -292,7 +293,7 @@ export class MigrationService {
     const refreshContext = mapping.refreshExisting || mapping.refreshCustomFields || hasEpicLinks
       ? this.jiraRefreshIssues(packages, configuration, knownIssues, destination, digest)
       : undefined;
-    const history = mapping.refreshHistory || mapping.refreshWorklogs
+    const history = mapping.refreshHistory || mapping.refreshComments || mapping.refreshWorklogs
       ? this.jiraHistoryContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const attachments = mapping.refreshAttachments ? this.jiraAttachmentContext(packages, configuration, knownIssues, destination, digest) : undefined;
     const relationRefresh = mapping.refreshRelations ? this.jiraRelationContext(packages, configuration, knownIssues, destination, digest) : undefined;
@@ -363,21 +364,25 @@ export class MigrationService {
     return { origins, issues };
   }
   private jiraHistoryContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
-    destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'historyIssues' | 'knownHistory' | 'jiraWorklogCandidates'> {
+    destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'historyIssues' | 'knownHistory' | 'jiraCommentCandidates' | 'jiraWorklogCandidates'> {
+    const mapping = configuration.appendTo;
     const selected = { comment: new Set<string>(), worklog: new Set<string>() };
     const { origins, issues: historyIssues } = this.jiraChildIssues(packages, configuration, knownIssues, destination, row => {
       const source = jiraHistorySourceKey(row);
-      if (!source || source.kind === 'comment' && !configuration.appendTo?.refreshHistory) return null;
+      if (!source || !(mapping?.refreshHistory || (source.kind === 'comment' ? mapping?.refreshComments : mapping?.refreshWorklogs))) return null;
       selected[source.kind].add(source.sourceId);
       return jiraHistoryOwnerAliases(row);
     });
     const known = this.sources.jiraKnownHistory(destination.instanceKey, { comment: [...selected.comment], worklog: [...selected.worklog] });
-    const jiraWorklogCandidates = configuration.appendTo?.refreshWorklogs
+    const jiraCommentCandidates = mapping?.refreshComments
+      ? readJiraCommentCorrectionCandidates(this.store, destination.instanceKey, [...selected.comment].sort(), destination.project.id) : undefined;
+    const jiraWorklogCandidates = mapping?.refreshWorklogs
       ? readJiraWorklogCorrectionCandidates(this.store, destination.instanceKey, [...selected.worklog].sort(), destination.project.id) : undefined;
     // An unrelated local change to a ticket title is not a history conflict.
     digest.update('\njira-history\n').update(JSON.stringify([origins, historyIssues.map(issue => issue.id), known]));
+    if (jiraCommentCandidates) digest.update('\njira-comment-corrections\n').update(JSON.stringify(jiraCommentCandidates));
     if (jiraWorklogCandidates) digest.update('\njira-worklog-corrections\n').update(JSON.stringify(jiraWorklogCandidates));
-    return { historyIssues, knownHistory: known.map(({ kind, sourceId, issueId }) => ({ kind, sourceId, issueId })), jiraWorklogCandidates };
+    return { historyIssues, knownHistory: known.map(({ kind, sourceId, issueId }) => ({ kind, sourceId, issueId })), jiraCommentCandidates, jiraWorklogCandidates };
   }
   private jiraAttachmentContext(packages: MigrationPackage[], configuration: MigrationConfiguration, knownIssues: MigrationAppendContext['knownIssues'],
     destination: AppendDestination, digest: ReturnType<typeof createHash>): Pick<MigrationAppendContext, 'attachmentIssues' | 'knownAttachments'> {
@@ -1215,7 +1220,7 @@ export class MigrationService {
     const append = configuration.appendTo;
     if (append) {
       const destination = this.appendDestination(packages, options, {
-        history: append.refreshHistory || append.refreshWorklogs, attachments: append.refreshAttachments, relations: append.refreshRelations,
+        history: append.refreshHistory || append.refreshComments || append.refreshWorklogs, attachments: append.refreshAttachments, relations: append.refreshRelations,
       });
       if (!destination || destination.project.id !== append.projectId) return unavailable();
       const statuses = new Set(destination.workflow.statuses.map(status => status.id));

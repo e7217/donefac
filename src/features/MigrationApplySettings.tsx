@@ -40,13 +40,17 @@ const jiraRefreshCountLabels = {
   updatedIssues: '변경 업무', updatedFields: '기본 필드 반영', conflictingFields: '현재 값을 유지할 기본 필드', skippedIssueUpdates: '변경을 건너뛴 업무',
   updatedCustomFields: '사용자 정의 속성 반영', conflictingCustomFields: '현재 값을 유지할 사용자 정의 속성',
   newJiraComments: '기존 업무의 새 댓글', newJiraWorklogs: '기존 업무의 새 작업 시간 기록',
+  updatedJiraComments: '반영할 Jira 댓글 수정', confirmedJiraComments: '최신 원본을 확인할 Jira 댓글',
+  conflictingJiraComments: '팀 변경을 유지할 Jira 댓글', archivedJiraCommentCorrections: '원본에만 보관할 Jira 댓글 수정',
   updatedJiraWorklogs: '반영할 Jira 작업 시간 수정', confirmedJiraWorklogs: '최신 원본을 확인할 Jira 작업 시간',
   conflictingJiraWorklogs: '팀 변경을 유지할 Jira 작업 시간',
   archivedJiraWorklogCorrections: '원본에만 보관할 Jira 작업 시간 수정',
   newJiraAttachments: '기존 업무의 새 첨부파일', newJiraRelations: '기존 업무 사이의 새 Jira 관계',
   skippedJiraRelations: 'Jira 관계 원본 보관',
 };
-const jiraWorklogReceiptCountLabels: Record<string, string> = {
+const jiraCorrectionReceiptCountLabels: Record<string, string> = {
+  updatedJiraComments: '반영한 Jira 댓글 수정', confirmedJiraComments: '최신 원본을 확인한 Jira 댓글',
+  conflictingJiraComments: '팀 변경을 유지한 Jira 댓글', archivedJiraCommentCorrections: '원본에만 보관한 Jira 댓글 수정',
   updatedJiraWorklogs: '반영한 Jira 작업 시간 수정', confirmedJiraWorklogs: '최신 원본을 확인한 Jira 작업 시간',
   conflictingJiraWorklogs: '팀 변경을 유지한 Jira 작업 시간',
   archivedJiraWorklogCorrections: '원본에만 보관한 Jira 작업 시간 수정',
@@ -95,7 +99,8 @@ const destinationMode = (configuration: MigrationConfiguration | null | undefine
 type RefreshProduct = 'Jira' | 'Confluence';
 function refreshProduct(configuration: MigrationConfiguration | null | undefined): RefreshProduct | undefined {
   const issues = configuration?.appendTo;
-  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory || issues?.refreshWorklogs || issues?.refreshAttachments || issues?.refreshRelations) return 'Jira';
+  if (issues?.refreshExisting || issues?.refreshCustomFields || issues?.refreshHistory || issues?.refreshComments ||
+    issues?.refreshWorklogs || issues?.refreshAttachments || issues?.refreshRelations) return 'Jira';
   const pages = configuration?.appendPagesTo;
   if (pages?.refreshExisting || pages?.refreshAttachments || pages?.refreshHistory) return 'Confluence';
 }
@@ -111,9 +116,12 @@ function refreshSummary(product: RefreshProduct, counts: MigrationPreview['count
   if (updated) actions.push(`기존 ${item} ${updated.toLocaleString()}건 변경`);
   if (counts.retainedResourceLinks) actions.push(`기존 항목과의 업무·문서 연결 ${counts.retainedResourceLinks.toLocaleString()}건 추가`);
   if (product === 'Jira') {
-    const { updatedCustomFields, newJiraComments, newJiraWorklogs, updatedJiraWorklogs, confirmedJiraWorklogs, newJiraAttachments, newJiraRelations } = counts;
+    const { updatedCustomFields, newJiraComments, updatedJiraComments, confirmedJiraComments,
+      newJiraWorklogs, updatedJiraWorklogs, confirmedJiraWorklogs, newJiraAttachments, newJiraRelations } = counts;
     if (updatedCustomFields) actions.push(`사용자 정의 속성 ${updatedCustomFields.toLocaleString()}건 반영`);
     if (newJiraComments) actions.push(`기존 업무에 새 댓글 ${newJiraComments.toLocaleString()}건 추가`);
+    if (updatedJiraComments) actions.push(`Jira 댓글 수정 ${updatedJiraComments.toLocaleString()}건 반영`);
+    if (confirmedJiraComments) actions.push(`Jira 댓글 최신 원본 ${confirmedJiraComments.toLocaleString()}건 확인`);
     if (newJiraWorklogs) actions.push(`기존 업무에 새 작업 시간 기록 ${newJiraWorklogs.toLocaleString()}건 추가`);
     if (updatedJiraWorklogs) actions.push(`Jira 작업 시간 수정 ${updatedJiraWorklogs.toLocaleString()}건 반영`);
     if (confirmedJiraWorklogs) actions.push(`Jira 작업 시간 최신 원본 ${confirmedJiraWorklogs.toLocaleString()}건 확인`);
@@ -258,7 +266,7 @@ function ActorMigration(props: MigrationApplyProps) {
   const reviewProduct = refreshProduct(preview?.configuration);
   const noRefreshChanges = reviewProduct && preview?.notices.some(notice => notice.code === refreshNoChanges[reviewProduct]);
   const preservedEdits = (preview?.counts.conflictingFields ?? 0) + (preview?.counts.conflictingCustomFields ?? 0) +
-    (preview?.counts.conflictingDocumentFields ?? 0) + (preview?.counts.conflictingJiraWorklogs ?? 0);
+    (preview?.counts.conflictingDocumentFields ?? 0) + (preview?.counts.conflictingJiraComments ?? 0) + (preview?.counts.conflictingJiraWorklogs ?? 0);
   const reviewHeading = preview?.canApply ? '검토 후 적용할 수 있습니다'
     : noRefreshChanges ? preservedEdits > 0 ? '보존할 팀 편집이 있습니다' : `적용할 ${reviewProduct} 변경이 없습니다`
     : '적용을 막는 항목을 해결하세요';
@@ -525,6 +533,9 @@ function ActorMigration(props: MigrationApplyProps) {
           </RefreshOption>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshHistory" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 업무에 댓글과 작업 시간 기록 추가">
             사용자 매핑에서 지정한 팀원을 작성자로 연결합니다. 작성자를 확인하기 어려운 기록은 원본에 보관합니다.
+          </RefreshOption>}
+          {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshComments" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 댓글의 수정분 검토">
+            원래 작성자와 수정 시각을 확인해 기존 댓글에 반영할 수 있는지 검토합니다. 팀에서 수정한 댓글은 유지합니다.
           </RefreshOption>}
           {appendTo && issueDestination && <RefreshOption value={appendTo} option="refreshWorklogs" onChange={next => change({ ...configuration, appendTo: next })} label="기존 Jira 작업 시간 기록의 수정분 검토">
             이전에 이관한 기록과 Jira 수정본의 작업일, 시간, 메모를 비교합니다. 팀에서 수정하거나 삭제한 기록은 유지합니다.
@@ -873,6 +884,7 @@ const originalLabels = {
   diagnostic: { title: '이관 진단 원본 기록', open: '원본 상세 보기', close: '이관 진단 원본 닫기' },
   document: { title: 'Confluence 변경 원본 기록', open: 'Confluence 원본 보기', close: 'Confluence 원본 닫기' },
   relation: { title: 'Jira 관계 원본 기록', open: 'Jira 관계 원본 보기', close: 'Jira 관계 원본 닫기' },
+  comment: { title: 'Jira 댓글 수정 원본 기록', open: 'Jira 댓글 원본 보기', close: 'Jira 댓글 원본 닫기' },
   worklog: { title: 'Jira 작업 시간 수정 원본 기록', open: 'Jira 작업 시간 원본 보기', close: 'Jira 작업 시간 원본 닫기' },
 };
 type PreviewOriginalKind = keyof typeof originalLabels;
@@ -917,6 +929,10 @@ function MigrationReviewDetails({ preview, packages, actorId, busy, onExclude }:
   }
   return <>
     {preview.issueRefresh && preview.issueRefresh.length > 0 && <JiraRefreshReview rows={preview.issueRefresh} />}
+    {preview.jiraCommentReview && preview.jiraCommentReview.length > 0 && <JiraCommentReview rows={preview.jiraCommentReview}
+      total={(preview.counts.updatedJiraComments ?? 0) + (preview.counts.confirmedJiraComments ?? 0) +
+        (preview.counts.conflictingJiraComments ?? 0) + (preview.counts.archivedJiraCommentCorrections ?? 0)}
+      renderOriginal={recordId => originalButton(recordId, 'comment')} />}
     {preview.jiraWorklogReview && preview.jiraWorklogReview.length > 0 && <JiraWorklogReview rows={preview.jiraWorklogReview}
       total={(preview.counts.updatedJiraWorklogs ?? 0) + (preview.counts.confirmedJiraWorklogs ?? 0) +
         (preview.counts.conflictingJiraWorklogs ?? 0) + (preview.counts.archivedJiraWorklogCorrections ?? 0)}
@@ -1003,7 +1019,7 @@ type AppendMapping = NonNullable<MigrationConfiguration['appendTo']>;
 type PageAppendMapping = NonNullable<MigrationConfiguration['appendPagesTo']>;
 type MappingChoice = { id: string; label: string; detail?: string };
 
-type RefreshFlag = 'refreshExisting' | 'refreshCustomFields' | 'refreshAttachments' | 'refreshHistory' | 'refreshRelations' | 'refreshWorklogs';
+type RefreshFlag = 'refreshExisting' | 'refreshCustomFields' | 'refreshAttachments' | 'refreshHistory' | 'refreshRelations' | 'refreshComments' | 'refreshWorklogs';
 function RefreshOption<Mapping extends Partial<Record<RefreshFlag, true>>>({ value, option = 'refreshExisting', onChange, label, children }: {
   value: Mapping; option?: RefreshFlag; onChange: (next: Mapping) => void; label: string; children: ReactNode;
 }) {
@@ -1032,6 +1048,36 @@ function JiraRefreshReview({ rows }: { rows: JiraMigrationIssueReview[] }) {
         ...(row.customFields ?? []).map(change => ({ ...change, id: `custom:${change.fieldId}` })),
       ]} />
     </div>} />
+  </section>;
+}
+
+type JiraCommentReviewRow = NonNullable<MigrationPreview['jiraCommentReview']>[number];
+const jiraCommentDecisions: Record<JiraCommentReviewRow['decision'], string> = {
+  apply: '수정 반영',
+  confirm: '최신 원본 확인',
+  'local-conflict': '팀에서 수정한 댓글 유지',
+  'archive-only': '원본에만 보관',
+};
+
+function JiraCommentReview({ rows, total, renderOriginal }: { rows: JiraCommentReviewRow[]; total: number; renderOriginal: (recordId: string) => ReactNode }) {
+  const titleId = useId();
+  return <section className="migration-refresh-review" aria-labelledby={titleId}>
+    <h4 id={titleId}>Jira 댓글 수정 검토</h4>
+    {total > rows.length && <p>총 {total.toLocaleString()}건 중 {rows.length.toLocaleString()}건을 표시합니다.</p>}
+    <Paged title="Jira 댓글 수정" items={rows} label={row => `${row.sourceId} ${row.issueKey ?? ''} ${jiraCommentDecisions[row.decision]}`} render={row =>
+      <article className="migration-refresh-entry" aria-label={`Jira 댓글 ${row.sourceId}`}>
+        <div className="migration-refresh-field-heading">
+          <strong>{row.issueKey && `${row.issueKey} · `}Jira 댓글 {row.sourceId}</strong>
+          <span className={row.decision === 'apply' || row.decision === 'confirm' ? 'is-apply' : 'is-conflict'}>{jiraCommentDecisions[row.decision]}</span>
+        </div>
+        <p>{row.reason}</p>
+        {(row.before !== undefined || row.after !== undefined) && <dl aria-label="댓글 본문 비교">
+          {row.before !== undefined && <div><dt>현재 댓글</dt><dd>{row.before || '비어 있음'}</dd></div>}
+          {row.after !== undefined && <div><dt>Jira 수정본</dt><dd>{row.after || '비어 있음'}</dd></div>}
+        </dl>}
+        {renderOriginal(row.recordId)}
+      </article>
+    } />
   </section>;
 }
 
@@ -1244,7 +1290,7 @@ function MigrationCounts({ entries, mode = 'new', applied = false }: { entries: 
   const labels = mode === 'append-pages' ? { ...countLabels, documents: '새로 추가할 문서', retainedRecords: '기존 문서의 원본 기록' }
     : mode === 'append' ? { ...countLabels, issues: '새로 추가할 업무' } : countLabels;
   return <div className="migration-counts">{visible.map(([name, count]) =>
-    <span key={name}>{(applied && jiraWorklogReceiptCountLabels[name]) || labels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>;
+    <span key={name}>{(applied && jiraCorrectionReceiptCountLabels[name]) || labels[name] || name} <strong>{count.toLocaleString()}</strong></span>)}</div>;
 }
 function MappingRow({ label, detail, detailId, children }: { label: string; detail: string; detailId?: string; children: ReactNode }) { return <div className="migration-mapping-row"><div><strong>{label}</strong><small id={detailId}>{detail}</small></div>{children}</div>; }
 const identityReviewCopy = {

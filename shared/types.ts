@@ -312,6 +312,7 @@ export interface MigrationAppendConfiguration {
   refreshExisting?: true;
   refreshCustomFields?: true;
   refreshHistory?: true;
+  refreshComments?: true;
   refreshWorklogs?: true;
   refreshAttachments?: true;
   refreshRelations?: true;
@@ -343,6 +344,15 @@ export interface JiraMigrationWorklogReview {
   reason: string;
   before?: JiraMigrationWorklogValues;
   after?: JiraMigrationWorklogValues;
+}
+export interface JiraMigrationCommentReview {
+  recordId: string;
+  sourceId: string;
+  issueKey?: string;
+  decision: 'apply' | 'confirm' | 'local-conflict' | 'archive-only';
+  reason: string;
+  before?: string;
+  after?: string;
 }
 export interface JiraDeadlineRecoveryReview {
   sourceImportId: string;
@@ -524,6 +534,7 @@ export interface MigrationPreview {
   counts:Record<string,number>;notices:MigrationNotice[];requiredAcknowledgements:string[];canApply:boolean;
   samples:{recordId:string;targetType:'issue'|'document';title:string;plainText:string;content?:RichContent;sourceUrl?:string;schedule?:Pick<Issue,'startDate'|'endDate'>}[];
   issueRefresh?: JiraMigrationIssueReview[];
+  jiraCommentReview?: JiraMigrationCommentReview[];
   jiraWorklogReview?: JiraMigrationWorklogReview[];
   jiraWorkflows?: MigrationJiraWorkflowReview[];
   jiraObservedWorkflows?: MigrationJiraObservedWorkflow[];
@@ -564,6 +575,7 @@ export interface SourceRecordArchive {
   jiraIssueSourceFieldHashes?: JiraMigrationIssueSourceFieldHashes;
   jiraCustomFieldHashes?: JiraMigrationCustomFieldHashes;
   jiraHistoryAppend?: true;
+  jiraCommentCorrection?: { commentId: string; originalRecordId: string; previousRecordId: string; bodySha256: string; editVersion: number; confirmed?: true };
   jiraWorklogCorrection?: { worklogId: string; originalRecordId: string; previousRecordId: string; noteSha256: string; confirmed?: true };
   jiraAttachmentAppend?: true;
   jiraRelationId?: string;
@@ -1411,6 +1423,7 @@ export interface Comment {
   createdAt: string;
   editVersion?: number;
   editedAt?: string;
+  jiraCorrectionRecordId?: string;
   documentSource?: DocumentDecisionSource;
   parentCommentId?: string;
   mentions?: CommentMention[];

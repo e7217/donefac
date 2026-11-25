@@ -39,6 +39,7 @@ import { DocumentCommentResolutionError, advanceRestoredCommentResolutionVersion
 import { CommentMentionError, parseCommentMentions, validateCurrentMentionNames } from './comment-mentions.js';
 import { CommentEditError, CommentEditingService, validateCommentEdit } from './comment-editing.js';
 import { JiraOriginalCommentLinks } from './jira-original-comment-links.js';
+import { jiraCommentBodyHash, validRestoredJiraCommentCorrections } from './jira-comment-corrections.js';
 import { IssueChildCreationError, IssueChildService } from './issue-child.js';
 import { IssueCreationError, IssueCreationService } from './issue-creation.js';
 import { IssueStatusChangeError, IssueStatusChangeService } from './issue-status-change.js';
@@ -971,7 +972,15 @@ export function createApp(options: {
       const { refreshedIssues, hierarchy: issueHierarchy } = prepareJiraRefreshes(value);
       const refreshedDocuments = prepareConfluenceRefreshes(value);
       const importedWorklogs = value.worklogs ?? [];
+      const correctedComments = value.jiraCommentUpdates ?? [];
       const correctedWorklogs = value.jiraWorklogUpdates ?? [];
+      const commentCorrections = new Map(value.sourceRecords.flatMap(source =>
+        source.jiraCommentCorrection ? [[source.id, source] as const] : []));
+      if (commentCorrections.size !== correctedComments.length || (correctedComments.length &&
+          (!value.append || value.preview.configuration.appendTo?.refreshComments !== true ||
+            new Set(correctedComments.map(row => row.id)).size !== correctedComments.length))) {
+        fail('Jira 댓글을 수정할 기존 업무와 검토한 원본을 확인해 주세요.', 409);
+      }
       const issueHistoryOwners = new Set(value.jiraHistoryOwners ?? []);
       const newJiraComments = value.comments.filter(comment => issueHistoryOwners.has(comment.resourceId)).length;
       const newJiraWorklogs = importedWorklogs.filter(worklog => issueHistoryOwners.has(worklog.issueId)).length;
@@ -1058,7 +1067,8 @@ export function createApp(options: {
         const current = store.db.prepare('SELECT next_number FROM issue_sequences WHERE project_id=?').get(projectId) as { next_number: number } | undefined;
         if ((current?.next_number ?? 1) !== startIssueNumber) fail('새 업무 번호가 변경되었습니다. 이관 미리보기를 다시 만들어 주세요.',409);
         if (value.projects.length || value.workflows.length || value.issueSchemas.length || value.documents.length || value.revisions.length ||
-            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !correctedWorklogs.length && !newJiraAttachments && !jiraRelationRefresh.length) ||
+            (!value.issues.length && !refreshedIssues.length && !hasJiraHistory && !correctedComments.length && !correctedWorklogs.length &&
+              !newJiraAttachments && !jiraRelationRefresh.length) ||
             !Number.isSafeInteger(startIssueNumber + value.issues.length) || value.issues.some((issue,index)=>
               issue.projectId !== projectId || issue.key !== `${project.key}-${startIssueNumber + index}` || store.get('issues',issue.id)) ||
             value.comments.some(comment => comment.resourceType !== 'issue' || store.get('comments', comment.id) ||
@@ -1129,6 +1139,36 @@ export function createApp(options: {
           activity(req, 'issue', row.issueId, 'Jira 작업 시간 수정 반영', `${row.changes.workDate} · ${row.changes.durationSeconds}초`);
         }
       }
+      let editedJiraComments = 0;
+      for (const update of correctedComments) {
+        const current = store.get<Comment>('comments', update.id);
+        const source = commentCorrections.get(update.sourceRecordId);
+        const marker = source?.jiraCommentCorrection;
+        const editVersion = (current?.editVersion ?? 0) + Number(current?.body !== update.body);
+        if (!current || !source || !marker || update.projectId !== value.append?.projectId ||
+            store.get<Issue>('issues', update.issueId)?.projectId !== update.projectId ||
+            current.resourceType !== 'issue' || current.resourceId !== update.issueId || current.mentions?.length ||
+            (current.editVersion ?? 0) !== update.expectedEditVersion || marker.commentId !== current.id ||
+            marker.previousRecordId !== (current.jiraCorrectionRecordId ?? marker.originalRecordId) ||
+            source.ownerType !== 'issue' || source.ownerId !== update.issueId || source.targetProjectId !== update.projectId ||
+            source.targetType !== null || source.targetId !== null || source.excluded || source.sourceImportId !== value.sourceImport.id ||
+            !update.body.trim() || update.body.length > 20_000 || jiraCommentBodyHash(update.body) !== marker.bodySha256 ||
+            !Number.isSafeInteger(editVersion) || marker.editVersion !== editVersion ||
+            (marker.confirmed === true) !== (current.body === update.body)) {
+          return fail('검토한 Jira 댓글이나 원본이 변경되었습니다. 새 미리보기를 만들어 주세요.', 409);
+        }
+        const corrected = { ...current, jiraCorrectionRecordId: source.id };
+        if (!marker.confirmed) {
+          const appliedAt = now();
+          corrected.body = update.body;
+          corrected.editVersion = editVersion;
+          corrected.editedAt = current.editedAt && current.editedAt > appliedAt ? current.editedAt : appliedAt;
+          editedJiraComments++;
+          activity(req, 'issue', update.issueId, 'Jira 댓글 수정 반영', `원본 댓글 ${source.record.sourceId}`);
+        }
+        store.put('comments', corrected);
+        commentCorrections.delete(source.id);
+      }
       for (const revision of value.revisions) store.put('revisions', revision);
       const plannedAnchors = new Map(value.confluenceCommentAnchors?.map(anchor => [anchor.commentId, anchor]));
       const anchorDocuments = new Map<string, { document: DocPage; bodyHash: string }>();
@@ -1189,11 +1229,13 @@ export function createApp(options: {
         for (const [projectId, next] of nextNumbers) insertSequence.run(projectId, next);
       }
       reportLedger.baselineImportedIssues(value.issues);
-      const action = refreshedIssues.length || hasJiraHistory || correctedWorklogs.length || newJiraAttachments || jiraRelationRefresh.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
+      const action = refreshedIssues.length || hasJiraHistory || correctedComments.length || correctedWorklogs.length || newJiraAttachments || jiraRelationRefresh.length ? 'Jira 원본 변경분 반영' : (refreshedDocuments.length || newConfluenceAttachments || newConfluenceVersions || hasConfluenceHistory) ? 'Confluence 원본 변경분 반영' :
         value.appendPages ? 'Confluence 신규 문서 추가' : value.append ? 'Jira 신규 업무 추가' : '원본 이관 적용';
       const details = [`${value.issues.length}개 업무`, `${value.documents.length}개 문서`];
       if (refreshedIssues.length) details.push(`기존 업무 ${refreshedIssues.length}개 변경`);
       if (newJiraComments) details.push(`기존 업무에 원본 댓글 ${newJiraComments}개 추가`);
+      if (editedJiraComments) details.push(`기존 Jira 댓글 ${editedJiraComments}개 수정`);
+      if (correctedComments.length > editedJiraComments) details.push(`기존 Jira 댓글 ${correctedComments.length - editedJiraComments}개 최신 원본 확인`);
       if (newJiraWorklogs) details.push(`기존 업무에 원본 작업 시간 ${newJiraWorklogs}개 추가`);
       const worklogEdits = correctedWorklogs.length - confirmedWorklogs.size;
       if (worklogEdits) details.push(`기존 Jira 작업 시간 ${worklogEdits}개 수정`);
@@ -3377,6 +3419,13 @@ export function createApp(options: {
     validateCommentReplyTopology(data.schemaVersion, data.comments, importedTrash, importedTrashItems);
     const archiveComments=[...importedTrash.flatMap(entry=>entry.comments),...importedTrashItems.flatMap(trashItemComments)];
     const allImportedComments=[...(data.comments as Comment[]),...archiveComments];
+    const hasJiraCommentCorrections = (Array.isArray(data.sourceRecords) && data.sourceRecords.some((row: unknown) =>
+      row && typeof row === 'object' && Object.hasOwn(row, 'jiraCommentCorrection'))) ||
+      allImportedComments.some(comment => Object.hasOwn(comment, 'jiraCorrectionRecordId'));
+    if (data.schemaVersion < 121 && (hasJiraCommentCorrections || (Array.isArray(data.sourceImports) &&
+        data.sourceImports.some((receipt: SourceImport | null) => receipt?.configuration?.appendTo?.refreshComments !== undefined)))) {
+      fail('Jira 댓글 수정 이관에는 schemaVersion 121 백업이 필요합니다.');
+    }
     const importedUserIds = new Set((data.users as User[]).map(user => user.id));
     for (const issue of allImportedIssues) {
       if (Object.hasOwn(issue, 'reporterId') && issue.reporterId !== null &&
@@ -3410,6 +3459,10 @@ export function createApp(options: {
       versions:data.schemaVersion>=9?[...data.attachmentVersions,...archiveVersions]:[], relations:data.schemaVersion>=9?data.issueRelations:[],
     }, {users:data.users,projects:data.projects,issues:data.issues,documents:data.documents,comments:allImportedComments,revisions:allImportedRevisions,attachments:[...data.attachments,...archiveAttachments],
       issueProjectHistory:importedIssueProjectHistory,archivedIssues,archivedIssueRelations:importedTrash.flatMap(entry=>entry.issueRelations)});
+    if (hasJiraCommentCorrections && !validRestoredJiraCommentCorrections(allImportedComments,
+        new Map(importedSources.records.map(row => [row.id, row])), importedSources.imports)) {
+      fail('Jira 댓글의 수정 원본과 저장된 이력을 확인해 주세요.');
+    }
     const sourceImportTimes = new Map(importedSources.imports.map(receipt => [receipt.id, receipt.createdAt]));
     const proveJiraProjectMove = (issueId: string, sourceProjectId: string, currentProjectId: string, receiptId: string) => {
       const since = sourceImportTimes.get(receiptId);

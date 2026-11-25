@@ -62,6 +62,21 @@ export interface MigrationJiraWorklogCandidate {
     { durationSeconds: number; deletedAt: string | null };
   previous: { updatedAt: string; workDate: string; durationSeconds: number; noteSha256: string } | null;
 }
+export interface MigrationJiraCommentCandidate {
+  sourceId: string;
+  originalRecordId: string;
+  previousRecordId: string;
+  current: Comment & { projectId: string };
+  previous: { updatedAt: string; bodySha256: string; editVersion: number } | null;
+}
+export interface MigrationJiraCommentUpdate {
+  id: string;
+  issueId: string;
+  projectId: string;
+  expectedEditVersion: number;
+  sourceRecordId: string;
+  body: string;
+}
 export interface MigrationJiraWorklogUpdate {
   id: string;
   issueId: string;
@@ -87,6 +102,7 @@ export interface MigrationAppendContext {
   hierarchyIssueAliases?: { alias: string; issueId: string }[];
   historyIssues?: Pick<Issue, 'id' | 'projectId' | 'key' | 'title'>[];
   knownHistory?: { kind: 'comment' | 'worklog'; sourceId: string; issueId: string }[];
+  jiraCommentCandidates?: MigrationJiraCommentCandidate[];
   jiraWorklogCandidates?: MigrationJiraWorklogCandidate[];
   attachmentIssues?: Pick<Issue, 'id' | 'projectId'>[];
   knownAttachments?: { sourceId: string; issueId: string }[];
@@ -139,6 +155,7 @@ export interface PreparedMigration {
   retainedConfluencePropertyScopeCheck?: { instanceKeys: string[]; token: string };
   issueUpdates?: MigrationJiraIssueUpdate[];
   jiraHistoryOwners?: string[];
+  jiraCommentUpdates?: MigrationJiraCommentUpdate[];
   jiraWorklogUpdates?: MigrationJiraWorklogUpdate[];
   jiraAttachmentOwners?: string[];
   documentUpdates?: MigrationConfluenceDocumentUpdate[];

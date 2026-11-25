@@ -446,6 +446,84 @@ test('Jira descriptions retain Markdown annotations while comments stay plain an
   }
 });
 
+test('Jira comment corrections keep the original target, confirm unchanged text, and preserve local edits and unverified source bodies', () => {
+  const baseline = buildMigrationPlan(input([jira()]));
+  const [project] = baseline.projects;
+  const [first] = baseline.issues;
+  const identity = record('identity', 'alice', { title: '기존 작성자' });
+  const before = '원래 댓글';
+  const changedAt = '2020-01-02T10:00:00.000Z';
+  const comment = (id: string, text: string, extra: Partial<LegacyRecord> = {}) => record('comment', id, {
+    containerId: '1', authorId: 'alice', createdAt: created, updatedAt: changedAt, textFormat: 'plain', text,
+    references: [{ kind: 'issue', sourceId: '1', relation: 'commentOn' }], ...extra,
+  });
+  const rows = [identity, comment('101', '새 댓글 본문'), comment('102', before), comment('103', '팀이 수동으로 복구한 댓글의 Jira 수정'),
+    comment('104', '공개 범위가 제한된 수정본', { metadata: { internal: true } }),
+    comment('105', '같은 번호를 가진 다른 원본 A'), comment('106', '삭제한 댓글의 수정본'),
+    comment('107', '이전 시각의 수정본', { updatedAt: created }), comment('108', '새 댓글'),
+    comment('109', '원본 작성 시각이 다른 댓글', { createdAt: changedAt })];
+  const missingPrimary = [{ id: 'no-primary', severity: 'error' as const, code: 'NO_PRIMARY_CONTENT', message: '업무 원문 없음', recordId: null, path: null }];
+  const source = pkg('jira-comment-review', 'jira', rows, missingPrimary);
+  const overlap = pkg('jira-overlap', 'jira', [identity, comment('105', '같은 번호를 가진 다른 원본 B')], missingPrimary);
+  overlap.dataset.source.instanceKey = source.dataset.source.instanceKey;
+  const packages = [source, overlap];
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  const request = input(packages);
+  for (const option of buildMigrationOptions(packages).identities) request.configuration.users[option.id] = actor.id;
+  request.configuration.appendTo = { projectId: project.id, statuses: {}, issueTypes: {}, fields: {}, refreshComments: true };
+  request.append = {
+    project, workflow: baseline.workflows[0], schema: baseline.issueSchemas[0], nextIssueNumber: 3, token: 'comment-review',
+    knownIssues: [{ alias: '1', issueId: first.id, projectId: project.id }], historyIssues: [first],
+    knownHistory: rows.filter(row => row.kind === 'comment' && row.sourceId !== '108').map(row =>
+      ({ kind: 'comment', sourceId: row.sourceId, issueId: first.id })),
+    jiraCommentCandidates: ['101', '102', '103', '104', '105', '107', '109'].map(sourceId => ({
+      sourceId, originalRecordId: `original-${sourceId}`, previousRecordId: `original-${sourceId}`,
+      current: { ...baseline.comments[0], id: `current-${sourceId}`, projectId: project.id,
+        ...(sourceId === '103' ? { editVersion: 1, editedAt: changedAt } : {}) },
+      previous: { updatedAt: created, bodySha256: hash(before), editVersion: 0 },
+    })),
+  };
+  const plan = buildMigrationPlan(request);
+  assert.equal(plan.preview.canApply, true, JSON.stringify(plan.preview.notices));
+  assert.equal(plan.comments.length, 0);
+  assert.equal(plan.preview.counts.updatedJiraComments, 1);
+  assert.equal(plan.preview.counts.confirmedJiraComments, 1);
+  assert.equal(plan.preview.counts.conflictingJiraComments, 1);
+  assert.equal(plan.preview.counts.archivedJiraCommentCorrections, 6);
+  const review = new Map(plan.preview.jiraCommentReview!.map(row => [row.sourceId, row]));
+  assert.deepEqual([...review].map(([id, row]) => [id, row.decision]), [
+    ['101', 'apply'], ['102', 'confirm'], ['103', 'local-conflict'], ...['104', '105', '106', '107', '108', '109'].map(id => [id, 'archive-only']),
+  ]);
+  for (const id of ['104', '105', '106', '107', '108', '109']) {
+    assert.equal(review.get(id)!.before, undefined);
+    assert.equal(review.get(id)!.after, undefined);
+  }
+  assert.equal(review.get('101')!.before, before);
+  assert.equal(review.get('101')!.after, '새 댓글 본문');
+  assert.equal(review.get('103')!.before, before);
+  const accepted = plan.sourceRecords.filter(row => row.jiraCommentCorrection);
+  assert.deepEqual(accepted.map(row => row.record.sourceId), ['101', '102']);
+  for (const archive of accepted) {
+    assert.equal(archive.targetType, null);
+    assert.equal(archive.targetId, null);
+    assert.equal(archive.ownerId, first.id);
+    assert.equal(archive.targetProjectId, project.id);
+  }
+  assert.deepEqual(accepted.map(row => [row.jiraCommentCorrection!.editVersion, row.jiraCommentCorrection!.confirmed]), [[1, undefined], [0, true]]);
+  assert.deepEqual(plan.jiraCommentUpdates?.map(({ id, body, expectedEditVersion, sourceRecordId }) =>
+    [id, body, expectedEditVersion, sourceRecordId]), [
+    ['current-101', '새 댓글 본문', 0, accepted[0].id], ['current-102', before, 0, accepted[1].id],
+  ]);
+  assert.ok(plan.preview.requiredAcknowledgements.includes('JIRA_COMMENT_CORRECTIONS'));
+  const together = buildMigrationPlan({ ...request, configuration: {
+    ...request.configuration, appendTo: { ...request.configuration.appendTo, refreshHistory: true },
+  } });
+  assert.equal(together.preview.canApply, true, JSON.stringify(together.preview.notices));
+  assert.equal(together.comments.length, 1);
+  assert.equal(together.comments[0].body, '새 댓글');
+  assert.ok(together.preview.jiraCommentReview?.every(row => row.sourceId !== '108'));
+});
+
 test('Jira history append verifies owner aliases, preserves stable source IDs, and accepts proven sparse backups', () => {
   const baseline = buildMigrationPlan(input([jira()]));
   const [first, second] = baseline.issues;

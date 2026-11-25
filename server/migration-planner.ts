@@ -19,6 +19,7 @@ import { confluenceSectionAliases, legacySectionId } from './migration-confluenc
 import { hasConfluencePropertyMacro, hasConfluencePropertyReportMacro } from './migration-confluence-properties.js';
 import { isJiraWorklog,parseJiraWorklog, type ParsedJiraWorklog } from './migration-worklog.js';
 import { jiraWorklogNoteHash, jiraWorklogProjectedNote, jiraWorklogSourceUpdatedAt } from './jira-worklog-corrections.js';
+import { jiraCommentBodyHash, jiraCommentProjectedBody, jiraCommentSourceUpdatedAt } from './jira-comment-corrections.js';
 import type { MigrationContentContext, MigrationPageIdentity, MigrationReferenceInput } from './migration-content.js';
 import { safeFilename } from './attachments.js';
 import type { MigrationConfluenceKnownAttachment,MigrationJiraRefreshCandidate,MigrationPackage,MigrationPageAppendContext,MigrationPlanningInput,PreparedMigration } from './migration-contracts.js';
@@ -38,9 +39,10 @@ import { isRestrictedJiraAttachment, isRestrictedJiraHistory, isRestrictedJiraHi
 import { jiraIssueRelationSource, jiraRelationEndpoints, sameJiraRelationType, type JiraIssueRelationSource } from './migration-jira-relations.js';
 import { isTeamspaceIssueRelation } from '../shared/issue-relations.js';
 import { migrationOptionId as optionId } from './migration-option-id.js';
-import type { JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
+import type { JiraMigrationCommentReview, JiraMigrationWorklogReview, LegacySource, MigrationAuthorExpectation, MigrationAuthorKind, MigrationAuthorStatus, MigrationJiraObservedTransition, MigrationJiraObservedWorkflow, MigrationJiraWorkflow, MigrationPreview, MigrationPreviewProject, MigrationPreviewProjectSource } from '../shared/types.js';
 
 const MAX_PACKAGES=20,MAX_RECORDS=100000,MAX_EXPANDED_BYTES=256*1024*1024,MAX_PROJECTS=100,MAX_FILE_BYTES=20*1024*1024;
+const MAX_COMMENT_CORRECTION_REVIEW = 1000;
 const MAX_WORKLOG_CORRECTION_REVIEW = 1000;
 const categories:StatusCategory[]=['backlog','todo','in_progress','review','done','cancelled'];
 const fieldKinds:CustomFieldKind[]=['text','number','date','select','multi_select','checkbox','user','url'];
@@ -577,6 +579,7 @@ class Planner{
   private jiraRefreshCheckpoints = new Map<string, { issue: Issue; hashes?: JiraMigrationIssueFieldHashes;
     sourceHashes?: JiraMigrationIssueSourceFieldHashes; customHashes?: JiraMigrationCustomFieldHashes }>();
   private jiraHistoryOwners = new Map<string, JiraHistoryIssue>();
+  private jiraCommentCorrections = new Map<string, { owner: JiraHistoryIssue; marker: NonNullable<SourceRecordArchive['jiraCommentCorrection']> }>();
   private jiraWorklogCorrections = new Map<string, { owner: JiraHistoryIssue; marker: NonNullable<SourceRecordArchive['jiraWorklogCorrection']> }>();
   private knownJiraHistory = new Set<string>();
   private jiraAttachmentOwners = new Map<string, AttachmentOwner>();
@@ -677,7 +680,7 @@ class Planner{
       else if (previous?.issueId !== issue.issueId || previous.projectId !== issue.projectId) this.retainedIssuesByJiraKey.set(key, null);
     }
     const retainedIssues = this.retainedEntries.size;
-    if (mapping.refreshHistory === true || mapping.refreshWorklogs === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
+    if (mapping.refreshHistory === true || mapping.refreshComments === true || mapping.refreshWorklogs === true) for (const { kind, sourceId } of append.knownHistory ?? []) {
       this.knownJiraHistory.add(JSON.stringify([kind, sourceId]));
     }
     if (mapping.refreshAttachments === true) for (const { sourceId } of append.knownAttachments ?? []) {
@@ -686,7 +689,8 @@ class Planner{
     for (const entry of this.entries) {
       if (entry.row.kind === 'issue' || entry.row.kind === 'relation' || this.excluded.has(entry.key)) continue;
       const owner = this.ownerEntry(entry);
-      if ((mapping.refreshHistory === true || mapping.refreshWorklogs === true && isJiraWorklog(entry.row)) &&
+      if ((mapping.refreshHistory === true || mapping.refreshComments === true && entry.row.kind === 'comment' ||
+           mapping.refreshWorklogs === true && isJiraWorklog(entry.row)) &&
           entry.pkg.dataset.source.product === 'jira' && jiraHistoryKind(entry.row)) {
         const identity = jiraHistorySourceKey(entry.row);
         if (!owner || identity && this.knownJiraHistory.has(JSON.stringify([identity.kind, identity.sourceId]))) {
@@ -1650,7 +1654,7 @@ class Planner{
   }
   unknownTime(entry:Entry,message:string):string{if(this.configuration.datePolicy==='import-time'){this.notice('DATE_IMPORT_TIME',`${message} 현재 이관 시각을 사용하며 원본 문자열은 보존합니다.`,'warning',entry,true);}else this.notice('DATE_UNRESOLVED',message,'error',entry);return this.input.now;}
   project(entry:Entry):Project|undefined{return this.projectsByContainer.get(optionId(entry.pkg.summary.id,'container',entry.container));}
-  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.reviewJiraWorklogCorrections();this.createSecondary();this.createConfluenceHistory();this.planConfluenceCommentReplies();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
+  run():PreparedMigration{this.initialize();if(!this.notices.some(notice=>notice.severity==='error')){this.createPrimary();this.createJiraReleases();this.createJiraSprints();this.createOriginLinks();this.createFiles();this.indexConfluenceInlineComments();this.convertDocuments();this.createJiraRefreshes();this.createConfluenceRefreshes();this.createConfluenceDocumentOrders();this.createJiraHistory();this.reviewJiraCommentCorrections();this.reviewJiraWorklogCorrections();this.createSecondary();this.createConfluenceHistory();this.planConfluenceCommentReplies();this.createWorklogs();this.createRelations();this.validateGraph();}this.archive();return this.finish();}
   private jiraPlanningSelections(field: 'jiraReleaseSelections' | 'jiraSprintSelections', code: string, label: string): Record<string, string | null> {
     const choices = this.configuration[field];
     const selections = Object.fromEntries(Object.entries(choices ?? {}).filter(([key]) => {
@@ -1943,7 +1947,7 @@ class Planner{
       if (diagnostic.severity !== 'error' || /ATTACHMENT_BYTES_MISSING/.test(diagnostic.code)) continue;
       const entry = recordKey ? this.entryByKey.get(recordKey) : undefined;
       if (diagnostic.code === 'NO_PRIMARY_CONTENT' && (this.result.appendPages && config.appendPagesTo?.refreshHistory === true ||
-          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshWorklogs === true ||
+          this.result.append && (config.appendTo?.refreshHistory === true || config.appendTo?.refreshComments === true || config.appendTo?.refreshWorklogs === true ||
             config.appendTo?.refreshAttachments === true || config.appendTo?.refreshRelations === true) &&
           pkg.dataset.source.format === 'jira-backup-xml')) {
         this.deferredPrimaryNotices.push({ message: diagnostic.message, entry });
@@ -4339,6 +4343,94 @@ class Planner{
     this.result.jiraHistoryOwners = [...new Set([...this.jiraHistoryOwners.values()].map(issue => issue.id))];
     Object.assign(this.result.preview.counts, { newJiraComments, newJiraWorklogs, retainedRecords: this.retainedEntries.size });
   }
+  private reviewJiraCommentCorrections(): void {
+    const append = this.input.append;
+    if (!append || this.configuration.appendTo?.refreshComments !== true) return;
+    const issues = new Map(append.historyIssues?.map(issue => [issue.id, issue]));
+    const scope = this.jiraChildScope(append);
+    const candidates = Map.groupBy(append.jiraCommentCandidates ?? [], comment => comment.sourceId);
+    const entries = this.entries.filter(entry => entry.pkg.dataset.source.product === 'jira' && entry.row.kind === 'comment' &&
+      this.retainedEntries.has(entry.key) && !this.excluded.has(entry.key));
+    const groups = Map.groupBy(entries, entry => jiraHistorySourceKey(entry.row)?.sourceId ?? entry.key);
+    const planned: JiraMigrationCommentReview[] = [], retained: JiraMigrationCommentReview[] = [];
+    const updates: NonNullable<PreparedMigration['jiraCommentUpdates']> = [];
+    const counts = { updatedJiraComments: 0, confirmedJiraComments: 0, conflictingJiraComments: 0, archivedJiraCommentCorrections: 0 };
+    for (const [entry, ...duplicates] of groups.values()) {
+      const { row } = entry;
+      const known = candidates.get(row.sourceId);
+      if (!known?.length && this.jiraHistoryOwners.has(entry.key)) continue;
+      const owner = this.resolveJiraChildOwner(entry, jiraHistoryOwnerAliases(row), issues, scope);
+      const authorId = this.mappedAuthor(entry);
+      const addReview = (decision: JiraMigrationCommentReview['decision'], reason: string,
+        values: Pick<JiraMigrationCommentReview, 'before' | 'after'> = {}) => {
+        counts[decision === 'apply' ? 'updatedJiraComments' : decision === 'confirm' ? 'confirmedJiraComments' :
+          decision === 'local-conflict' ? 'conflictingJiraComments' : 'archivedJiraCommentCorrections']++;
+        const review = decision === 'apply' || decision === 'confirm' ? planned : retained;
+        if (review.length < MAX_COMMENT_CORRECTION_REVIEW) {
+          review.push({ recordId: entry.key, sourceId: row.sourceId, issueKey: owner?.key, decision, reason, ...values });
+        }
+      };
+      const raw = duplicates.length ? JSON.stringify(row) : null;
+      if (!jiraHistorySourceKey(row) || known?.length !== 1 || !owner || duplicates.some(duplicate =>
+        JSON.stringify(duplicate.row) !== raw || this.mappedAuthor(duplicate) !== authorId ||
+        this.resolveJiraChildOwner(duplicate, jiraHistoryOwnerAliases(duplicate.row), issues, scope)?.id !== owner.id)) {
+        addReview('archive-only', '이미 적용한 댓글과 이번 원본의 ID·업무·접근 범위를 확인할 수 없습니다.');
+        continue;
+      }
+      const [{ current, previous, originalRecordId, previousRecordId }] = known;
+      const createdAt = jiraCommentSourceUpdatedAt({ ...row, updatedAt: row.createdAt }, this.configuration.timezone);
+      if (current.resourceType !== 'issue' || current.resourceId !== owner.id || current.projectId !== owner.projectId ||
+          !authorId || authorId !== current.authorId || !createdAt || createdAt !== current.createdAt) {
+        addReview('archive-only', '댓글의 원래 업무, 작성자 또는 작성 시각이 이전 이관 기록과 일치하지 않습니다.');
+        continue;
+      }
+      const updatedAt = jiraCommentSourceUpdatedAt(row, this.configuration.timezone);
+      const body = jiraCommentProjectedBody(row);
+      if (!previous || !updatedAt || updatedAt < createdAt || body === undefined) {
+        addReview('archive-only', '이전 적용 본문이나 원본의 수정 시각·표시 본문을 확인할 수 없습니다.');
+        continue;
+      }
+      const bodySha256 = jiraCommentBodyHash(body);
+      const confirmed = bodySha256 === previous.bodySha256;
+      if (updatedAt <= previous.updatedAt) {
+        if (!confirmed) addReview('archive-only', 'Jira 수정 시각이 확인한 마지막 원본보다 최신인지 확인할 수 없습니다.');
+        continue;
+      }
+      const editVersion = current.editVersion ?? 0;
+      if (editVersion !== previous.editVersion || current.mentions?.length) {
+        addReview('local-conflict', '팀에서 수정한 댓글을 유지합니다.', { before: current.body, after: body });
+        continue;
+      }
+      if (jiraCommentBodyHash(current.body) !== previous.bodySha256) {
+        addReview('archive-only', '저장된 댓글이 이전 이관 본문과 정확하게 일치하는지 확인할 수 없습니다.');
+        continue;
+      }
+      const nextEditVersion = editVersion + Number(!confirmed);
+      if (!Number.isSafeInteger(nextEditVersion)) {
+        addReview('archive-only', '댓글의 수정 버전 한도에 도달했습니다.');
+        continue;
+      }
+      addReview(confirmed ? 'confirm' : 'apply', confirmed ? '같은 본문을 확인한 최근 Jira 수정 시각을 기록합니다.' :
+        '최근 Jira 수정본을 기존 댓글에 반영합니다.', { before: current.body, after: body });
+      if (updates.length >= MAX_COMMENT_CORRECTION_REVIEW) continue;
+      updates.push({ id: current.id, issueId: owner.id, projectId: owner.projectId, expectedEditVersion: editVersion,
+        sourceRecordId: this.archiveIds.get(entry.key)!, body });
+      this.jiraCommentCorrections.set(entry.key, { owner, marker: { commentId: current.id, originalRecordId, previousRecordId,
+        bodySha256, editVersion: nextEditVersion, ...(confirmed ? { confirmed: true } : {}) } });
+    }
+    if (counts.updatedJiraComments + counts.confirmedJiraComments > updates.length) {
+      this.notice('JIRA_COMMENT_CORRECTIONS_LIMIT', '한 번에 검토할 댓글 수정분은 1,000건입니다. 원본을 나누어 이관해 주세요.', 'error');
+    }
+    if (counts.updatedJiraComments) this.notice('JIRA_COMMENT_CORRECTIONS',
+      '미리보기에서 현재 댓글과 Jira 수정본을 대조해 반영할 본문을 확인해 주세요.', 'warning', undefined, true);
+    const review = [...planned, ...retained.slice(0, MAX_COMMENT_CORRECTION_REVIEW - planned.length)];
+    if (Object.values(counts).reduce((sum, count) => sum + count, 0) > review.length) {
+      this.notice('JIRA_COMMENT_REVIEW_LIMIT', '댓글 수정분은 앞의 1,000건까지 목록에 표시합니다.', 'info');
+    }
+    this.result.jiraCommentUpdates = updates;
+    this.result.preview.jiraCommentReview = review;
+    Object.assign(this.result.preview.counts, counts);
+  }
   private reviewJiraWorklogCorrections(): void {
     const append = this.input.append;
     if (!append || this.configuration.appendTo?.refreshWorklogs !== true) return;
@@ -4445,9 +4537,10 @@ class Planner{
       const restrictedJiraHistory = entry.pkg.dataset.source.product === 'jira' && isRestrictedJiraStatusHistory(entry.row);
       const ownerEntry = excluded || restrictedJiraHistory ? null : this.ownerEntry(entry);
       const jiraHistoryOwner = this.jiraHistoryOwners.get(entry.key);
+      const jiraCommentCorrection = this.jiraCommentCorrections.get(entry.key);
       const jiraWorklogCorrection = this.jiraWorklogCorrections.get(entry.key);
       const jiraAttachmentOwner = this.jiraAttachmentOwners.get(entry.key);
-      const jiraActivityOwner = jiraHistoryOwner ?? jiraWorklogCorrection?.owner;
+      const jiraActivityOwner = jiraHistoryOwner ?? jiraCommentCorrection?.owner ?? jiraWorklogCorrection?.owner;
       const owner = issueCheckpoint || pageCheckpoint ? binding : jiraActivityOwner ? { type: 'issue' as const, id: jiraActivityOwner.id, projectId: jiraActivityOwner.projectId } :
         jiraAttachmentOwner ?? this.confluenceAttachmentOwners.get(entry.key) ?? this.confluenceHistoryOwners.get(entry.key) ??
         (ownerEntry ? this.bindings.get(ownerEntry.key) : undefined);
@@ -4483,6 +4576,7 @@ class Planner{
         ownerType, ownerId: ownerType ? owner!.id : null,
         ...(excluded ? { excluded: true } : {}),
         ...(jiraHistoryOwner ? { jiraHistoryAppend: true } : {}),
+        ...(jiraCommentCorrection ? { jiraCommentCorrection: jiraCommentCorrection.marker } : {}),
         ...(jiraWorklogCorrection ? { jiraWorklogCorrection: jiraWorklogCorrection.marker } : {}),
         ...(jiraAttachmentOwner ? { jiraAttachmentAppend: true } : {}),
         ...(this.jiraRelationIds.has(entry.key) ? { jiraRelationId: this.jiraRelationIds.get(entry.key)! } : {}),
@@ -4533,7 +4627,8 @@ class Planner{
 
   finish():PreparedMigration{
     this.collectReusedAttachmentVersions();
-    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length && !this.result.jiraWorklogUpdates?.length &&
+    if (!this.result.confluenceHistoryOwners?.length && !this.result.jiraHistoryOwners?.length &&
+        !this.result.jiraCommentUpdates?.length && !this.result.jiraWorklogUpdates?.length &&
         !this.result.jiraAttachmentOwners?.length &&
         this.result.preview.counts.newJiraRelations === undefined) for (const { message, entry } of this.deferredPrimaryNotices) {
       this.notice('SOURCE_NO_PRIMARY_CONTENT', message, 'error', entry);
@@ -4569,7 +4664,7 @@ class Planner{
       });
     }
     if (this.input.append && !this.result.issues.length && !this.result.issueUpdates?.length && !this.result.jiraHistoryOwners?.length &&
-        !this.result.jiraWorklogUpdates?.length && !this.result.jiraAttachmentOwners?.length && !counts.newJiraRelations &&
+        !this.result.jiraCommentUpdates?.length && !this.result.jiraWorklogUpdates?.length && !this.result.jiraAttachmentOwners?.length && !counts.newJiraRelations &&
         !this.notices.some(notice => notice.severity === 'error')) {
       if (this.configuration.appendTo?.refreshRelations) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무 관계나 다른 업무 변경분이 없습니다.', 'error');
@@ -4577,6 +4672,8 @@ class Planner{
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 첨부나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshHistory) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 새 Jira 업무·댓글·작업 시간이나 기존 업무 변경분이 없습니다.', 'error');
+      } else if (this.configuration.appendTo?.refreshComments) {
+        this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 Jira 댓글 수정분이나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshWorklogs) {
         this.notice('JIRA_REFRESH_NO_CHANGES', '적용할 Jira 작업 시간 수정이나 다른 업무 변경분이 없습니다.', 'error');
       } else if (this.configuration.appendTo?.refreshExisting || this.configuration.appendTo?.refreshCustomFields) {

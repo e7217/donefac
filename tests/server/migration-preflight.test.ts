@@ -57,6 +57,9 @@ test('migration preflight exports the selected package and counts without copyin
   preview.notices.push({ severity: 'warning', code: 'PROJECT_SOURCE_MERGE', message: 'never-emit-origin-details', recordId: null,
     requiresAcknowledgement: true });
   preview.requiredAcknowledgements.push('PROJECT_SOURCE_MERGE');
+  preview.jiraCommentReview = [{ recordId, sourceId: 'never-emit-comment-id', issueKey: 'never-emit-comment-issue',
+    decision: 'apply', reason: 'never-emit-comment-reason', before: 'never-emit-prior-comment', after: 'never-emit-revised-comment' }];
+  Object.assign(preview.counts, { updatedJiraComments: 1, confirmedJiraComments: 1, conflictingJiraComments: 1, archivedJiraCommentCorrections: 1 });
   const report = buildMigrationPreflightReport(preview, [{ ...jira, id: unrelatedPackageId }, jira]);
   assert.deepEqual(report, {
     format: 'teamspace-migration-preflight', version: 1,
@@ -65,6 +68,7 @@ test('migration preflight exports the selected package and counts without copyin
     packages: [{ id: packageId, product: 'jira', format: 'jira-json', size: 4000, sha256: jira.sha256, errors: 1, warnings: 2 }],
     missingPackageSummaryCount: 0,
     counts: { sourceRecords: 4, explicitExcludedRecords: 1, excludedRecords: 2, excludedDescendants: 1, issues: 1, conflictingFields: 1,
+      updatedJiraComments: 1, confirmedJiraComments: 1, conflictingJiraComments: 1, archivedJiraCommentCorrections: 1,
       jiraReleases: 2, jiraReleaseLinks: 1, jiraReleaseUnassigned: 0,
       jiraSprints: 2, jiraSprintLinks: 1, jiraSprintUnassigned: 0, jiraSprintHistoryOnly: 1 },
     diagnostics: [
@@ -87,6 +91,8 @@ test('migration preflight distinguishes planner warnings, acknowledgements and m
   const ready = buildMigrationPreflightReport(clean, [packageSummary]);
   assert.equal(ready.status, 'ready');
   assert.equal(ready.mode, 'append');
+  const commentConflict = buildMigrationPreflightReport({ ...clean, counts: { conflictingJiraComments: 1 } }, [packageSummary]);
+  assert.equal(commentConflict.status, 'review');
 
   const warning = buildMigrationPreflightReport({ ...clean, notices: [{ severity: 'warning', code: 'FIELD_ARCHIVED', message: 'never-emit-field',
     recordId: null, requiresAcknowledgement: false }] }, [packageSummary]);
