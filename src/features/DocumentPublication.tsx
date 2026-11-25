@@ -432,8 +432,7 @@ function PublicationDialog({
     if (!initialSnapshot || !view || loading || initialSnapshotAttempted.current) return;
     const timer = setTimeout(() => {
       initialSnapshotAttempted.current = true;
-      const current = initialSnapshot.kind === 'review' ? view.review : view.published;
-      if (current?.revisionId !== initialSnapshot.revisionId) {
+      if (initialSnapshot.kind === 'review' && view.review?.revisionId !== initialSnapshot.revisionId) {
         setSnapshotError('링크가 가리킨 저장본이 현재 상태에서 변경되었습니다. 필요한 경우 현재 저장본을 선택해 주세요.');
         return;
       }
@@ -573,11 +572,9 @@ function PublicationDialog({
     [selectedSnapshot],
   );
   const pinnedId = snapshotKind === 'review' ? view?.review?.revisionId : view?.published?.revisionId;
-  const previousSnapshot = Boolean(
-    selectedSnapshot &&
-      (selectedSnapshot.id !== pinnedId ||
-        (snapshotKind && snapshotGenerations[snapshotKind] !== view?.workspaceGeneration)),
-  );
+  const sameGeneration = snapshotKind !== null && snapshotGenerations[snapshotKind] === view?.workspaceGeneration;
+  const previousSnapshot = Boolean(selectedSnapshot && (selectedSnapshot.id !== pinnedId || !sameGeneration));
+  const canLinkSection = sameGeneration && (snapshotKind === 'published' || !previousSnapshot);
   const frozenData = useMemo(() => ({ ...data, documents: [], issues: [] }), [data]);
   const noNavigation = useCallback(() => {}, []);
   if (typeof window === 'undefined') return null;
@@ -970,7 +967,7 @@ function PublicationDialog({
                   nodeBudget={30000}
                   showOutline
                   sectionId={initialSnapshot && initialSnapshot.kind === snapshotKind && initialSnapshot.revisionId === selectedSnapshot.id ? sectionId : null}
-                  sectionLinkHref={snapshotKind && !previousSnapshot ? id => documentSectionHash(page.id, id, page.projectId ?? projectId,
+                  sectionLinkHref={snapshotKind && canLinkSection ? id => documentSectionHash(page.id, id, page.projectId ?? projectId,
                     { kind: snapshotKind, revisionId: selectedSnapshot.id }) : undefined}
                 />
               </DocumentBlocksProvider>

@@ -1695,7 +1695,7 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `GET /api/v1/documents/:id/publication`은 현재 검토 요청, 마지막 발행 정보, 각 문서 저장본의 ID·제목·버전, 현재 초안의 `documentVersion`, 검토 상태의 `version`, `workspaceGeneration`을 반환한다. 검토 이력이 없는 문서의 상태 `version`은 0이다. 복원 전 워크스페이스의 `workspaceGeneration`은 `null`일 수 있다.
 
-`GET /api/v1/documents/:id/publication/snapshot?kind=review&revisionId=…`에는 상태 응답의 `reviewRevision.id`를 넣는다. 마지막 발행본은 `kind=published`와 `publishedRevision.id`를 사용한다. 응답은 요청 당시 저장된 `DocRevision`이다. 저장본이 없으면 `404`, 상태가 바뀌어 다른 저장본을 가리키면 `409`를 반환한다.
+`GET /api/v1/documents/:id/publication/snapshot?kind=review&revisionId=…`에는 상태 응답의 `reviewRevision.id`를 넣는다. `kind=published`에는 `publishedRevision.id` 또는 이전에 승인·발행한 저장본 ID를 넣는다. 응답은 해당 `DocRevision`이다. 문서나 검토·발행 기록이 없으면 `404`, 요청한 검토본이 현재 검토본과 다르거나 발행이 확인되지 않은 ID면 `409`를 반환한다.
 
 `GET /api/v1/documents/:id/publication/comparison`에는 상태 응답의 `version`을 `expectedVersion`으로 보내고, `workspaceGeneration`, `publishedRevisionId`, `reviewRevisionId`를 함께 보낸다. 복원 세대가 `null`이면 `workspaceGeneration=`을 보낸다. 응답의 `published`와 `review`는 같은 조회에서 검증한 두 `DocRevision`이며 `version`과 `workspaceGeneration`도 포함한다. 문서와 두 본문의 참조 범위를 검사한다. 최신 발행본이나 검토본이 없거나, 버전·복원 세대·저장본이 달라지면 `409`를 반환한다. 브라우저의 `/api` 경로에서도 같은 계약을 사용한다.
 
@@ -1712,6 +1712,8 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 메모는 최대 2,000자다. 버전·복원 세대 또는 요청 직전 문서 버전이 다르면 `409`로 응답한다. 다른 작업자에게만 허용된 동작은 `403`을 반환한다. 모든 경로는 해당 문서의 프로젝트 범위를 확인한다. 브라우저에서 사용하는 동일한 경로의 접두사는 `/api`다.
 
 그룹 검토의 `review.reviewers`에는 각 `reviewerId`와 `approval`이 들어간다. 승인한 검토자의 `approval`에는 `byId`, `at`, `note`를 기록한다. 그룹 발행의 `published.approvals`는 요청 당시의 검토자 순서대로 모든 승인 기록을 보존한다. `publishedById`는 마지막 승인자다. 자체 백업 형식 91부터 활성·휴지통 문서의 그룹 검토와 부분 승인 알림을 보존한다.
+
+자체 백업 형식 131부터 활성·휴지통 문서에 `previousPublications`를 보관한다. 같은 문서의 저장본과 검토·발행 작업자, 시간과 버전 순서를 대조하여 복원한다. 새 발행 때 보관된 직전 발행본부터 공유 주소에서 조회할 수 있다. 이 기능을 적용하기 전에 이미 교체된 저장본의 본문은 문서 이력에서 확인할 수 있다.
 
 ### 검토함·발행본 목록
 

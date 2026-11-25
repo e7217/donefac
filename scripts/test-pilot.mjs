@@ -628,9 +628,25 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.deepEqual(gitlabRule, gitlab.rule);
   assert.deepEqual(gitlabRuns, gitlab.runs);
   assert.deepEqual(gitlabLinks, gitlab.links);
-  assert.deepEqual(storedLinks.toSorted((a, b) => a.id.localeCompare(b.id)), gitlabLinks.links.toSorted((a, b) => a.id.localeCompare(b.id)));
+  const expectedLinks = [...gitlabLinks.links];
+  let gitlabReadStatus;
+  if (fixture.source === 'native') {
+    assert.ok(gitlab.read?.link && gitlab.read.status, 'The native pilot must verify a GitLab read and retry.');
+    const [mergeRequests, readStatus] = await Promise.all([
+      api(`/issues/${gitlab.issue.id}/gitlab-links?kind=merge_request`), api('/integrations/gitlab/sync-status'),
+    ]);
+    assert.equal(mergeRequests.total, 1);
+    assert.deepEqual(mergeRequests.links, [gitlab.read.link]);
+    assert.deepEqual(readStatus, gitlab.read.status);
+    assert.equal(gitlabSettings.tokenConfigured, true);
+    expectedLinks.push(gitlab.read.link);
+    gitlabReadStatus = readStatus;
+  }
+  const byId = (a, b) => a.id.localeCompare(b.id);
+  assert.deepEqual(storedLinks.toSorted(byId), expectedLinks.sort(byId));
   assert.deepEqual(webhookStatus, gitlab.webhookStatus);
   assert.equal(gitlabSettings.signingTokenConfigured, true);
+  assert.equal(gitlabSettings.baseUrl, gitlab.settings.baseUrl);
   assert.deepEqual(gitlabSettings.jiraRoutes, gitlab.settings.jiraRoutes);
 
   return {
@@ -638,7 +654,7 @@ async function teamSnapshot(api, fixture, evidence) {
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
       otherCalendar, successor, dependency, issueList, view, statusRevision, competingReplay, competingRevision, dueDateRevision,
-      gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus })).digest('hex'),
+      gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus, gitlabReadStatus })).digest('hex'),
   };
 }
 
@@ -780,7 +796,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(await verifyDetails(copy, restored), dataBaseline, 'The separate restoration changed the team workflow evidence.');
   await stop(copy);
   const records = native
-    ? 'native intake, published and draft documents, attachment bytes, member email, revoked API key and GitLab links by Teamspace key'
+    ? 'native intake, published and draft documents, attachment bytes, member email, revoked API key and GitLab read and webhook evidence by Teamspace key'
     : 'Jira and Confluence records, attachment bytes and GitLab links by original Jira key';
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
     `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched ${records}, ` +

@@ -98,15 +98,15 @@ export async function verifyNativeTeamData(pilot, seed, knowledge) {
   assert.notEqual(knowledge.documentId, seed.document.id);
   const projectId = seed.issue.projectId;
   const documentPath = `/documents/${encodeURIComponent(knowledge.documentId)}`;
-  const snapshotPath = `${documentPath}/publication/snapshot?${new URLSearchParams({
-    kind: 'published', revisionId: knowledge.revisionId,
+  const snapshotPath = revisionId => `${documentPath}/publication/snapshot?${new URLSearchParams({
+    kind: 'published', revisionId,
   })}`;
-  const [workspace, portable, storedIntake, notificationPage, home, file, publication, revision, keys] = await Promise.all([
+  const [workspace, portable, storedIntake, notificationPage, home, file, publication, revision, latestRevision, keys] = await Promise.all([
     api('/workspace'), api('/export'), api(`/projects/${projectId}/intake/${seed.intake.id}`),
     api('/notifications', { headers: { 'X-Actor-Id': seed.intake.reporterId } }),
     api(`/document-space-home?projectId=${encodeURIComponent(projectId)}`),
     pilot.request(`/attachments/${seed.attachment.id}/content`),
-    api(`${documentPath}/publication`), api(snapshotPath),
+    api(`${documentPath}/publication`), api(snapshotPath(knowledge.revisionId)), api(snapshotPath(knowledge.latest.revisionId)),
     api('/api-keys', { headers: { 'X-Actor-Id': seed.member.id } }),
   ]);
   assert.deepEqual(portable.sourceImports, []);
@@ -122,14 +122,18 @@ export async function verifyNativeTeamData(pilot, seed, knowledge) {
   const link = workspace.resourceLinks.find(value => value.id === knowledge.linkId);
   assert.ok(link && link.issueId === seed.issue.id && link.documentId === knowledge.documentId && link.kind === '관련 문서');
   const draft = workspace.documents.find(document => document.id === knowledge.documentId);
-  assert.equal(draft?.title, knowledge.draftTitle);
-  assert.ok(draft.plainText.includes(knowledge.draftBody) && !draft.plainText.includes(knowledge.publishedBody));
-  assert.equal(publication.published.revisionId, knowledge.revisionId);
+  assert.equal(draft?.title, knowledge.draft.title);
+  assert.ok(draft.plainText.includes(knowledge.draft.body) && !draft.plainText.includes(knowledge.publishedBody));
+  assert.equal(publication.published.revisionId, knowledge.latest.revisionId);
   assert.equal(publication.published.publishedById, knowledge.reviewerId);
+  assert.equal(latestRevision.id, knowledge.latest.revisionId);
+  assert.equal(latestRevision.documentId, knowledge.documentId);
+  assert.equal(latestRevision.title, knowledge.latest.title);
+  assert.ok(latestRevision.plainText.includes(knowledge.latest.body) && !latestRevision.plainText.includes(knowledge.draft.body));
   assert.equal(revision.id, knowledge.revisionId);
   assert.equal(revision.documentId, knowledge.documentId);
   assert.equal(revision.title, knowledge.publishedTitle);
-  assert.ok(revision.plainText.includes(knowledge.publishedBody) && !revision.plainText.includes(knowledge.draftBody));
+  assert.ok(revision.plainText.includes(knowledge.publishedBody) && !revision.plainText.includes(knowledge.latest.body));
   assert.ok(revision.content.content.some(node => node.type === 'heading' && node.attrs?.sectionId === knowledge.sectionId));
   const member = workspace.users.find(user => user.id === seed.member.id);
   assert.equal(member?.email, seed.member.email);
@@ -143,5 +147,5 @@ export async function verifyNativeTeamData(pilot, seed, knowledge) {
     headers: { Authorization: `Bearer ${seed.key.token}` }, status: 401,
   });
 
-  return digest(JSON.stringify({ storedIntake, notice, home, attachment: seed.attachment, link, draft, publication, revision, member, revoked }));
+  return digest(JSON.stringify({ storedIntake, notice, home, attachment: seed.attachment, link, draft, publication, revision, latestRevision, member, revoked }));
 }

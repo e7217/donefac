@@ -1,11 +1,10 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { expect, request as apiRequest, type APIResponse, type BrowserContext } from '@playwright/test';
 import type { AutomationRule, AutomationRun, GitlabLink, GitlabSettings, GitlabWebhookStatus, Issue, WorkspaceSnapshot } from '../../shared/types';
+import { verifyNativeGitlabRead } from './native-gitlab-read';
 
 const integration = '/api/integrations/gitlab';
-const baseUrl = 'https://gitlab.example.test';
 const repositoryId = 42;
-const repositoryUrl = `${baseUrl}/team/pilot`;
 const branch = 'main';
 
 async function json<T>(response: APIResponse, message: string, status = 200): Promise<T> {
@@ -40,17 +39,24 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
   expect(workflow?.statuses.find(item => item.id === issue.status)?.category).toBe('in_progress');
   const lookupKey = jiraIssueKey ?? issue.key;
   if (jiraIssueKey) expect(issue.key).not.toBe(jiraIssueKey);
-  const settings = await json<GitlabSettings>(await requests.get(integration), 'Read current GitLab settings');
   const signingKey = randomBytes(32);
+  const signingToken = `whsec_${signingKey.toString('base64')}`;
+  const nativeRead = jiraIssueKey ? undefined : await verifyNativeGitlabRead(context, origin, issue, repositoryId, signingToken);
+  const baseUrl = nativeRead?.settings.baseUrl ?? 'https://gitlab.example.test';
+  const repositoryUrl = nativeRead?.repositoryUrl ?? `${baseUrl}/team/pilot`;
   const jiraRoutes = jiraInstanceKey ? [{ repositoryId, projectId, jiraInstanceKey }] : [];
-  const configured = await requests.patch(integration, { headers, data: {
-    expectedVersion: settings.version, baseUrl, projectIds: [repositoryId], signingToken: `whsec_${signingKey.toString('base64')}`,
-    jiraRoutes,
-  } }).catch(() => { throw new Error('Could not configure signing for the isolated GitLab pilot.'); });
-  const signed = await json<GitlabSettings>(configured, 'Configure GitLab signing');
+  let signed = nativeRead?.settings;
+  if (!signed) {
+    const settings = await json<GitlabSettings>(await requests.get(integration), 'Read current GitLab settings');
+    const configured = await requests.patch(integration, { headers, data: {
+      expectedVersion: settings.version, baseUrl, projectIds: [repositoryId], signingToken, jiraRoutes,
+    } }).catch(() => { throw new Error('Could not configure signing for the isolated GitLab pilot.'); });
+    signed = await json<GitlabSettings>(configured, 'Configure GitLab signing');
+  }
   expect(signed.signingTokenConfigured).toBe(true);
   expect(signed.projectIds).toEqual([repositoryId]);
   expect(signed.jiraRoutes ?? []).toEqual(jiraRoutes);
+  const settingsEvidence = { baseUrl: signed.baseUrl, jiraRoutes: signed.jiraRoutes };
   const rule = await json<AutomationRule>(await requests.post('/api/automation-rules', { headers, data: {
     projectId, name: '합성 파이프라인 성공 시 검토', trigger: 'pipeline.succeeded', enabled: true,
     gitlabProjectIds: [repositoryId], branchPattern: branch, issueTypes: [], fromStatuses: [issue.status], toStatusId: review.id, actorId,
@@ -148,10 +154,12 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
         await expect(pipelines.locator('[data-gitlab-kind="pipeline"][data-gitlab-state="success"]')).toHaveCount(2, { timeout: 25_000 });
         if (jiraIssueKey) await expect(pipelines.getByText(jiraIssueKey, { exact: true })).toHaveCount(2);
         for (const id of [701, 702]) await expect(pipelines.locator(`a[href="${pipelineUrl(id)}"]`)).toBeVisible();
+        if (nativeRead) await expect(detail.locator(`a[href="${nativeRead.link.webUrl}"]`)).toBeVisible();
       } finally {
         await page.close();
       }
-      return { issue: issueAfter, links: finalLinks, rule, runs: applied.runs, webhookStatus, settings: { jiraRoutes: signed.jiraRoutes } };
+      return { issue: issueAfter, links: finalLinks, rule, runs: applied.runs, webhookStatus, settings: settingsEvidence,
+        ...(nativeRead && { read: { link: nativeRead.link, status: nativeRead.status } }) };
     } finally {
       await sender.dispose();
     }

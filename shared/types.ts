@@ -1345,8 +1345,9 @@ export interface DocumentPublicationState {
   version: number;
   review: DocumentReview | null;
   published: DocumentPublishedVersion | null;
+  previousPublications?: DocumentPublishedVersion[];
 }
-export interface DocumentPublicationView extends DocumentPublicationState {
+export interface DocumentPublicationView extends Omit<DocumentPublicationState, 'previousPublications'> {
   workspaceGeneration: string | null;
   documentVersion: number;
   reviewRevision: Pick<DocRevision, 'id' | 'version' | 'title'> | null;

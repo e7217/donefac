@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, type APIResponse, type BrowserContext, type Page, type Response } from '@playwright/test';
-import { isDocumentSectionId, parseDocumentHash } from '../../shared/document-sections';
+import { documentSectionHash, isDocumentSectionId, parseDocumentHash } from '../../shared/document-sections';
 import type { DocPage, DocumentPublicationView, LinkedDocumentCreationResult, WorkspaceSnapshot } from '../../shared/types';
 
 interface NativeKnowledgeFixture {
@@ -142,7 +142,36 @@ export async function verifyNativeKnowledge(writer: BrowserContext, reader: Brow
     await expect(frozenPublication).not.toContainText(draftBody, { timeout });
     await expect(frozenPublication.getByRole('heading', { name: sectionTitle, level: 2, exact: true }))
       .toHaveAttribute('data-document-section-id', sectionId, { timeout });
-    return { projectId, issueId, linkId: link.id, documentId, revisionId, sectionId, authorId, reviewerId, publishedTitle, publishedBody, draftTitle, draftBody };
+
+    const authorHeaders = { Origin: origin, 'X-Actor-Id': authorId };
+    const secondReview = await json<DocumentPublicationView>(await writer.request.post(publicationPath, { headers: authorHeaders, data: {
+      action: 'request', expectedVersion: publication.version, workspaceGeneration: publication.workspaceGeneration,
+      expectedDocumentVersion: draft.version, reviewerId,
+    } }));
+    const secondRevisionId = secondReview.reviewRevision?.id;
+    if (!secondRevisionId) throw new Error('Native knowledge did not freeze the second submission.');
+    expect(secondRevisionId).not.toBe(revisionId);
+    expect(secondReview.reviewRevision).toMatchObject({ title: draftTitle, version: draft.version });
+    const notYetPublished = await reader.request.get(`${publicationPath}/snapshot?${new URLSearchParams({ kind: 'published', revisionId: secondRevisionId })}`);
+    expect(notYetPublished.status()).toBe(409);
+    const newDraft = { title: `${publishedTitle} 다음 회차`, body: '제안만 작성했고 아직 검토 요청을 보내지 않았습니다.' };
+    await json<DocPage>(await writer.request.patch(`/api/documents/${encodeURIComponent(documentId)}`, { headers: authorHeaders, data: {
+      expectedVersion: draft.version, title: newDraft.title,
+      content: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: newDraft.body }] }] },
+    } }));
+    const secondPublication = await json<DocumentPublicationView>(await reader.request.post(publicationPath, { headers: { Origin: origin, 'X-Actor-Id': reviewerId }, data: {
+      action: 'publish', expectedVersion: secondReview.version, workspaceGeneration: secondReview.workspaceGeneration,
+    } }));
+    expect(secondPublication.published).toMatchObject({ revisionId: secondRevisionId, publishedById: reviewerId });
+    const priorSection = documentSectionHash(documentId, sectionId, projectId, { kind: 'published', revisionId });
+    await source.goto(new URL(`/${priorSection}`, origin).href, { waitUntil: 'domcontentloaded', timeout });
+    await source.reload({ waitUntil: 'domcontentloaded', timeout });
+    await expect(frozenPublication.getByRole('heading', { name: sectionTitle, level: 2, exact: true })).toBeFocused({ timeout });
+    await expect(frozenPublication).toContainText(publishedBody, { timeout });
+    await expect(frozenPublication).not.toContainText(draftBody, { timeout });
+    await expect(frozenPublication).not.toContainText(newDraft.body, { timeout });
+    return { projectId, issueId, linkId: link.id, documentId, revisionId, sectionId, authorId, reviewerId, publishedTitle, publishedBody,
+      latest: { revisionId: secondRevisionId, title: draftTitle, body: draftBody }, draft: newDraft };
   } finally {
     await Promise.allSettled([source.close(), peer.close()]);
   }

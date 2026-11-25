@@ -93,6 +93,64 @@ test('팀 간트 일정 붙여넣기는 같은 일정표에서 수정한 양쪽 
   }
 });
 
+test('360px 간트에서 일정표를 검토하고 적용해도 행에 입력한 날짜 초안을 보호한다', async ({ page, request }) => {
+  const project = (await workspace(request)).projects[0];
+  const retained = await createIssue(request, project.id, 0);
+  const matched = await createIssue(request, project.id, 8);
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/gantt`);
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    const retainedStart = chart.getByLabel(`${retained.key} 시작일`, { exact: true });
+    const retainedEnd = chart.getByLabel(`${retained.key} 종료일`, { exact: true });
+    const matchedStart = chart.getByLabel(`${matched.key} 시작일`, { exact: true });
+    const pasteButton = page.getByRole('button', { name: '일정 붙여넣기', exact: true });
+    const paste = page.getByRole('dialog', { name: '일정 붙여넣기', exact: true });
+    const draftStart = dateAt(1);
+    const matchedDate = dateAt(9);
+    const pastedEnd = dateAt(4);
+    const current = async (issue: Issue) => (await workspace(request)).issues.find(value => value.id === issue.id);
+    await retainedStart.fill(draftStart);
+    await matchedStart.fill(matchedDate);
+    await pasteButton.click();
+    await expect(paste).toBeVisible();
+    await paste.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(pasteButton).toBeFocused();
+    await expect(retainedStart).toHaveValue(draftStart);
+    await expect(matchedStart).toHaveValue(matchedDate);
+
+    await pasteButton.click();
+    await paste.getByRole('textbox', { name: '붙여넣을 일정표' }).fill(
+      `key,startDate,endDate\n${retained.key},,${pastedEnd}\n${matched.key},${matchedDate},`);
+    await paste.getByRole('button', { name: '붙여넣기 미리보기', exact: true }).click();
+    await expect.poll(() => current(retained)).toMatchObject({ startDate: retained.startDate, endDate: retained.endDate });
+    await expect.poll(() => current(matched)).toMatchObject({ startDate: matched.startDate });
+    await paste.getByRole('button', { name: '검토한 일정 적용', exact: true }).click();
+    await expect(paste).toHaveCount(0);
+    await expect.poll(() => current(retained)).toMatchObject({ startDate: retained.startDate, endDate: pastedEnd });
+    await expect.poll(() => current(matched)).toMatchObject({ startDate: matchedDate });
+    await expect(chart.getByRole('button', { name: `${matched.key} 날짜 저장`, exact: true })).toHaveCount(0);
+    await expect(retainedStart).toHaveValue(draftStart);
+
+    await chart.getByRole('button', { name: `${retained.key} 일정과 연결 편집`, exact: true }).click();
+    const editor = page.getByRole('dialog', { name: '업무 일정과 연결 편집', exact: true });
+    await expect(editor.getByLabel('시작일', { exact: true })).toHaveValue(draftStart);
+    await expect(editor.getByLabel('종료일', { exact: true })).toHaveValue(pastedEnd);
+    await editor.getByRole('button', { name: '닫기', exact: true }).click();
+    await expect(retainedStart).toHaveValue(draftStart);
+    await retainedEnd.press('Escape');
+    await expect(retainedEnd).toHaveValue(pastedEnd);
+  } finally {
+    for (const issue of [matched, retained]) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) {
+        const { trashEntryId } = await response.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`);
+      }
+    }
+  }
+});
+
 test('붙여넣기 전에 오류와 연결 경고를 표시하고 검토한 변경을 적용·되돌린다', async ({ page, request }) => {
   const project = (await workspace(request)).projects[0];
   const predecessor = await createIssue(request, project.id, 0);

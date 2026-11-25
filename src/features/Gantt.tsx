@@ -1632,7 +1632,7 @@ function ProjectGantt(props: GanttProps) {
 
   function toggleSelected(id: string) { setSelected(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }); }
   function openSchedulePaste() {
-    if (busyRef.current || !sheetScope || !canLeave()) return;
+    if (busyRef.current || !sheetScope || (!canKeepInlineDateDrafts() && !canLeave())) return;
     queueMicrotask(() => {
       setLinkPicker(null);
       setDatePicker(null);

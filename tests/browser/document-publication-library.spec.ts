@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
+import { DOCUMENT_CONTENT_SCHEMA_VERSION } from '../../shared/document-nodes';
+import { documentSectionHash } from '../../shared/document-sections';
 import type { DocPage, DocumentPublicationList, DocumentPublicationView, WorkspaceSnapshot } from '../../shared/types';
 
 async function publicationFixture(request: APIRequestContext) {
   const workspace = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
   const [author, reviewer] = workspace.users;
   const created: DocPage[] = [];
-  async function create(title: string, text: string, projectId: string | null) {
+  async function create(title: string, text: string, projectId: string | null, section?: {id: string; title: string}) {
     const response = await request.post('/api/documents', {
-      headers: { 'X-Actor-Id': author.id }, data: { projectId, title, content: {
-        type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }],
+      headers: { 'X-Actor-Id': author.id }, data: { projectId, title, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content: {
+        type: 'doc', content: [
+          ...(section ? [{ type: 'heading', attrs: { level: 2, sectionId: section.id }, content: [{ type: 'text', text: section.title }] }] : []),
+          { type: 'paragraph', content: [{ type: 'text', text }] },
+        ],
       } },
     });
     expect(response.status(), await response.text()).toBe(201);
@@ -42,19 +47,22 @@ async function publicationFixture(request: APIRequestContext) {
   } };
 }
 
-test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 가리키는 버전을 확인한다', async ({ page, request }) => {
+test('검토함에서 버전을 열고 새 발행 뒤에도 처음 발행한 본문과 절 주소를 유지한다', async ({ page, context, request }) => {
   const { workspace, author, reviewer, create, state, transition, publish, clear } = await publicationFixture(request);
   const project = workspace.projects[0];
   const key = randomUUID().slice(0, 8);
 
   try {
-    const published = await create(`발행 검색 ${key}`, '팀에 발행한 초기 안내', project.id);
+    const previousSection = { id: `published-${randomUUID()}`, title: '첫 발행의 절' };
+    const published = await create(`발행 검색 ${key}`, '팀에 발행한 초기 안내', project.id, previousSection);
     const common = await create(`공통 발행 ${key}`, '팀 공통 발행 안내', null);
     const firstRelease = await publish(published);
     await publish(common);
     const draftTitle = `검토 전 새 편집 ${key}`;
     const changed = await request.patch(`/api/documents/${published.id}`, {
-      data: { expectedVersion: published.version, title: draftTitle },
+      data: { expectedVersion: published.version, title: draftTitle, contentSchemaVersion: DOCUMENT_CONTENT_SCHEMA_VERSION, content: { type: 'doc', content: [
+        { type: 'paragraph', content: [{ type: 'text', text: '두 번째 발행의 안내' }] },
+      ] } },
     });
     expect(changed.ok(), await changed.text()).toBeTruthy();
 
@@ -130,10 +138,23 @@ test('검토 알림과 탭에서 역할별 목록을 열고 고정본 링크가 
     const secondRelease = await publish(published);
     await page.goto(savedLink);
     await page.reload();
-    await expect(dialog.getByRole('alert').filter({ hasText: '링크가 가리킨 저장본이 현재 상태에서 변경되었습니다' })).toBeVisible();
-    await expect(frozenPublication).toHaveCount(0);
+    await expect(frozenPublication).toContainText('이전 발행 당시 저장본');
+    await expect(frozenPublication).toContainText('팀에 발행한 초기 안내');
+    await expect(frozenPublication).not.toContainText('두 번째 발행의 안내');
+    await frozenPublication.getByText('문서 목차', { exact: true }).click();
+    const exactSectionHash = documentSectionHash(published.id, previousSection.id, project.id, {
+      kind: 'published', revisionId: firstRelease.publishedRevision!.id,
+    });
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    await frozenPublication.getByRole('button', { name: `절 링크 복사 ${previousSection.title}`, exact: true }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(new URL(exactSectionHash, page.url()).href);
+    await page.goto(`/${exactSectionHash}`);
+    await page.reload();
+    await expect(frozenPublication.getByRole('heading', { name: previousSection.title, exact: true })).toBeFocused();
     await dialog.getByRole('button', { name: '발행본 불러오기', exact: true }).click();
     await expect(frozenPublication).toContainText(secondRelease.publishedRevision!.title);
+    await expect(frozenPublication).toContainText('두 번째 발행의 안내');
+    await expect(frozenPublication.getByRole('heading', { name: previousSection.title, exact: true })).toHaveCount(0);
   } finally {
     await clear();
   }

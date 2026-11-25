@@ -465,6 +465,90 @@ test('native14 preserves publication snapshots, rejects invalid/older references
   } finally { await f.close(); }
 });
 
+test('exact publication links require recorded approval and retain earlier bodies through native and trash restore', async t => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const first = await make(f, '처음 발행한 지침');
+  const path = `/documents/${first.id}/publication/snapshot`;
+  const snapshotPath = (revisionId: string, kind = 'published') => `${path}?${new URLSearchParams({ kind, revisionId })}`;
+  let state = await accepted(transition(f, await requestReview(f, first), 'publish', 'user-seo'));
+  const earlier = [await snapshot(f, state, 'published')];
+  const second = await edit(f, first, '두 번째 발행 지침');
+  const groupReview = await accepted(transition(f, state, 'request', 'user-min', {
+    expectedDocumentVersion: second.version, reviewerIds: ['user-seo', 'user-jun'],
+  }));
+  const partial = await accepted(transition(f, groupReview, 'approve', 'user-seo'));
+  assert.equal((await f.call(snapshotPath(partial.review!.revisionId))).status, 409);
+  state = await accepted(transition(f, partial, 'approve', 'user-jun'));
+  earlier.push(await snapshot(f, state, 'published'));
+  const latest = await edit(f, second, '현재 발행한 지침');
+  const latestRequest = await requestReview(f, latest);
+  f.database.exec(`CREATE TRIGGER reject_publication_history BEFORE UPDATE ON document_publications
+    WHEN json_array_length(NEW.json,'$.previousPublications')=2 BEGIN SELECT RAISE(ABORT,'synthetic publication history failure'); END;`);
+  try {
+    assert.equal((await transition(f, latestRequest, 'publish', 'user-seo')).status, 500);
+    assert.deepEqual(await publication(f, first.id), latestRequest);
+    assert.equal((await f.call(snapshotPath(latestRequest.review!.revisionId))).status, 409);
+  } finally { f.database.exec('DROP TRIGGER reject_publication_history'); }
+  state = await accepted(transition(f, latestRequest, 'publish', 'user-seo'));
+  const current = await snapshot(f, state, 'published');
+  const pending = await edit(f, latest, '승인 대기 중인 지침');
+  state = await requestReview(f, pending);
+  const review = await snapshot(f, state, 'review');
+  const draft = await edit(f, pending, '검토에 포함되지 않은 초안');
+  state = await publication(f, first.id);
+  const unrelated = await make(f, '같은 프로젝트의 다른 문서');
+
+  const exported = await f.call<Backup>('/export');
+  assert.equal(exported.status, 200);
+  assert.equal(exported.data.schemaVersion, 131);
+  const backup = exported.data;
+  const unknownRevision = (doc: DocPage) => backup.revisions.find(value => value.documentId === doc.id && value.version === doc.version)!.id;
+  const history = backup.documentPublications.find(value => value.documentId === first.id)!.previousPublications!;
+  assert.deepEqual(history.map(value => value.revisionId), earlier.map(value => value.id));
+  assert.deepEqual(history[1].approvals?.map(value => value.byId), ['user-seo', 'user-jun']);
+  async function verifyLinks() {
+    for (const revision of [...earlier, current]) {
+      assert.deepEqual(await f.call(snapshotPath(revision.id)), { status: 200, data: revision });
+      assert.equal((await f.call(snapshotPath(revision.id, 'review'))).status, 409);
+    }
+    for (const revisionId of [review.id, unknownRevision(draft), unknownRevision(unrelated)]) {
+      assert.equal((await f.call(snapshotPath(revisionId))).status, 409);
+    }
+    assert.deepEqual(await f.call(snapshotPath(review.id, 'review')), { status: 200, data: review });
+  }
+  await verifyLinks();
+
+  const portableImport = (data: Backup) => f.call('/import', 'POST', { data });
+  const withoutHistorySupport = structuredClone(backup);
+  withoutHistorySupport.schemaVersion = 130;
+  assert.equal((await portableImport(withoutHistorySupport)).status, 400);
+  for (const corrupt of [
+    (entry: DocumentPublicationState) => { entry.previousPublications!.reverse(); },
+    (entry: DocumentPublicationState) => { entry.previousPublications!.push(entry.published!); },
+    (entry: DocumentPublicationState) => { entry.previousPublications![0].revisionId = unknownRevision(unrelated); },
+    (entry: DocumentPublicationState) => { entry.previousPublications![0].publishedById = 'user-min'; },
+  ]) {
+    const invalid = structuredClone(backup);
+    corrupt(invalid.documentPublications.find(value => value.documentId === first.id)!);
+    assert.equal((await portableImport(invalid)).status, 400);
+    assert.deepEqual(await publication(f, first.id), state);
+  }
+  assert.equal((await portableImport(backup)).status, 200);
+  await verifyLinks();
+  const live = await document(f, first.id);
+  const archived = await f.call<{trashEntryId: string}>(`/documents/${first.id}?expectedVersion=${live.version}`, 'DELETE');
+  assert.equal(archived.status, 200, JSON.stringify(archived.data));
+  assert.equal((await f.call(snapshotPath(earlier[0].id))).status, 404);
+  const archivedBackup = await f.call<Backup>('/export');
+  assert.equal(archivedBackup.status, 200);
+  assert.equal((await portableImport(archivedBackup.data)).status, 200);
+  assert.equal((await f.call(snapshotPath(earlier[0].id))).status, 404);
+  const restored = await f.call(`/trash/${archived.data.trashEntryId}/restore`, 'POST');
+  assert.equal(restored.status, 200, JSON.stringify(restored.data));
+  await verifyLinks();
+});
+
 test('public publication routes require write access, enforce project boundaries and bind request/publish actors to API-key owners', async () => {
   const f = await fixture();
   try {
