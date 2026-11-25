@@ -7,6 +7,7 @@ import { projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LAB
 import { fieldApplies, hasCustomValue, projectIssueSchema, projectIssueTypes, requiredFieldLabels, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { MAX_PLANNED_EFFORT_MINUTES } from '../../shared/project-workload';
 import { CalendarError, createCalendarMath, defaultWorkCalendar } from '../../shared/calendar';
+import { gitlabFollowUpPath, type GitlabFollowUpPreview } from '../../shared/gitlab-follow-up';
 import { DEPENDENCY_ENDPOINTS, DEPENDENCY_LABELS, DEPENDENCY_TYPES, MAX_DEPENDENCY_LAG_DAYS, SCHEDULE_DATE_LABELS, dependencyBound, dependencyPredecessorBound, dependencyScheduleWarning, isDependencyLag, isDependencyType, type ScheduleDependencyEndpoint } from '../../shared/schedule-dependencies';
 import { api, ApiError } from '../lib/api';
 import { createIssueAttempt, isDefiniteIssueCreationFailure, requestIssueCreation, type IssueCreationAttempt } from '../lib/issue-creation';
@@ -41,6 +42,8 @@ type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | '
   initialBoardAssigneeId?: string | null;
   selectingChecklist?: boolean;
   onReselectChecklist?: () => void;
+  gitlabFollowUp?: GitlabFollowUpPreview;
+  onGitlabFollowUpCreated?: (issue: Issue) => void;
   onClose: () => void;
 } & (
   (({ sourceDocument?: FollowUpSource; cycleBoardCreation?: never } | { sourceDocument?: never; cycleBoardCreation: CycleBoardCreation }) &
@@ -181,13 +184,15 @@ function titleFromChecklist(text: string): string {
 
 export function NewIssueModal({ data, projectId, actorId, initialStatus, initialBoardAssigneeId, sourceDocument, selectingChecklist = false,
   onReselectChecklist, parentIssue, scheduleLink, onScheduleIssueCreated, cloneIssue, onCloneCreated, blockedByIssue, cycleBoardCreation,
-  onBlockedIssueCreated, onClose, refresh, notify, openIssue }: Props) {
+  onBlockedIssueCreated, gitlabFollowUp, onGitlabFollowUpCreated, onClose, refresh, notify, openIssue }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const sourceComment = sourceDocument?.comment;
   const checklistMode = sourceDocument?.checklistTitle !== undefined;
   const checklistPicking = checklistMode && selectingChecklist;
-  const [initialTitle] = useState(() => cloneIssue?.title ?? (checklistMode ? titleFromChecklist(sourceDocument.checklistTitle) : undefined));
+  const [initialTitle] = useState(() => cloneIssue?.title ?? (gitlabFollowUp
+    ? `${gitlabFollowUp.source.key} · ${gitlabFollowUp.evidence.label} ${gitlabFollowUp.evidence.state} 후속 작업`
+    : checklistMode ? titleFromChecklist(sourceDocument.checklistTitle) : undefined));
   const [previousChecklistSource, setPreviousChecklistSource] = useState(checklistMode ? sourceDocument : undefined);
   const [description, setDescription] = useState(cloneIssue?.description ?? sourceComment?.body ?? '');
   const [priority, setPriority] = useState<Priority>(cloneIssue?.priority ?? 'medium');
@@ -199,6 +204,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
   const [reporterId, setReporterId] = useState<Issue['reporterId']>();
   const [descriptionFormat, setDescriptionFormat] = useState<IssueDescriptionFormat>(cloneIssue?.descriptionFormat ?? 'plain');
   const [selectedProject, setSelectedProject] = useState(() => {
+    if (gitlabFollowUp) return gitlabFollowUp.source.projectId;
     if (cycleBoardCreation) return projectId;
     if (parentIssue) return parentIssue.projectId;
     if (scheduleLink) return scheduleLink.issue.projectId;
@@ -216,6 +222,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
   const [sourceVersion, setSourceVersion] = useState(sourceDocument?.version);
   const [sourceSelection, setSourceSelection] = useState(sourceDocument?.sourceSelection);
   const [reviewedParent, setReviewedParent] = useState(parentIssue);
+  const [reviewedGitlab, setReviewedGitlab] = useState(gitlabFollowUp);
+  const [needsGitlabReview, setNeedsGitlabReview] = useState(false);
   const [parentReview, setParentReview] = useState<ParentReview | null>(null);
   const [reviewedClone, setReviewedClone] = useState(cloneIssue);
   const [cloneReview, setCloneReview] = useState<CloneReview | null>(null);
@@ -273,6 +281,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
   const scheduleRole = scheduleCopy.role;
   const scheduleAnchorRole = scheduleCopy.anchorRole;
   const cloneMode = Boolean(reviewedClone);
+  const gitlabFollowUpMode = Boolean(reviewedGitlab);
   const blockedMode = Boolean(reviewedBlocked);
   const rangeDates = cloneMode ? cloneDates : scheduleDates;
   const rangeCalendar = reviewedSchedule?.calendar ?? blockedCalendar ?? data.calendars?.find(calendar => calendar.projectId === selectedProject);
@@ -305,9 +314,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
     : reviewedSchedule ? `/issues/${encodeURIComponent(reviewedSchedule.issue.id)}/${scheduleCopy.path}`
     : reviewedClone ? `/issues/${encodeURIComponent(reviewedClone.id)}/clone`
     : reviewedBlocked ? `/issues/${encodeURIComponent(reviewedBlocked.id)}/blocked-issues`
+    : reviewedGitlab ? gitlabFollowUpPath(reviewedGitlab.source.id, reviewedGitlab.evidence.linkId)
     : sourceDocument ? `/documents/${encodeURIComponent(sourceDocument.id)}/follow-up-issues` : undefined;
   const linkedCreation = Boolean(linkedPath);
-  const usesIssueReceipt = !linkedCreation || scheduleMode || cloneMode || blockedMode || checklistMode;
+  const usesIssueReceipt = !linkedCreation || scheduleMode || cloneMode || blockedMode || checklistMode || gitlabFollowUpMode;
   const currentParent = reviewedParent && data.issues.find(issue => issue.id === reviewedParent.id);
   const parentUnavailable = reviewedParent && (!currentParent || currentParent.projectId !== reviewedParent.projectId);
   const needsParentReview = Boolean(parentReview || parentUnavailable);
@@ -321,20 +331,20 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
         '원본 업무가 변경됐습니다. 최신 원본 버전을 확인해 주세요.') : '') ||
     (needsBlockedReview ? blockedReviewMessage : '');
   const confirmationLocation = childMode ? '상위 업무의 하위 목록' : scheduleMode ? `${scheduleAnchorRole} 업무의 일정 연결 목록`
-    : cloneMode ? '원본 업무의 관련 업무 목록' : blockedMode ? '차단하는 업무의 관계 목록' : sourceDocument ? '문서의 연결 목록'
+    : cloneMode || gitlabFollowUpMode ? '원본 업무의 관련 업무 목록' : blockedMode ? '차단하는 업무의 관계 목록' : sourceDocument ? '문서의 연결 목록'
     : cycleBoardCreation ? '백로그와 사이클 목록' : '업무 목록';
   const fieldsLocked = busy || recovering || (usesIssueReceipt && replayRejected);
   const refreshAfterClose = useCallback(() => {
     void refresh().catch(() => notify(childMode
       ? '하위 업무 목록을 불러오지 못했습니다. 상위 업무를 다시 열어 확인해 주세요.'
       : scheduleMode ? `일정 연결을 불러오지 못했습니다. ${scheduleAnchorRole} 업무를 다시 열어 확인해 주세요.`
-      : cloneMode ? '관련 업무를 불러오지 못했습니다. 원본 업무를 다시 열어 확인해 주세요.'
+      : cloneMode || gitlabFollowUpMode ? '관련 업무를 불러오지 못했습니다. 원본 업무를 다시 열어 확인해 주세요.'
       : blockedMode ? '차단 관계를 불러오지 못했습니다. 차단하는 업무를 다시 열어 확인해 주세요.'
       : sourceDocument ? '연결 목록을 불러오지 못했습니다. 문서를 다시 열어 확인해 주세요.'
       : '업무 목록을 불러오지 못했습니다. 목록을 다시 열어 확인해 주세요.', 'error'));
-  }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, blockedMode, sourceDocument, refresh, notify]);
+  }, [childMode, scheduleMode, scheduleAnchorRole, cloneMode, blockedMode, gitlabFollowUpMode, sourceDocument, refresh, notify]);
   const fromBoard = initialBoardAssigneeId !== undefined;
-  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode || Boolean(cycleBoardCreation) || fromBoard;
+  const handlesNestedNavigation = childMode || scheduleMode || cloneMode || blockedMode || checklistMode || gitlabFollowUpMode || Boolean(cycleBoardCreation) || fromBoard;
 
   function close() {
     if (pendingRef.current) return;
@@ -603,10 +613,31 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
     });
   }
 
+  async function reloadGitlabFollowUp() {
+    if (!reviewedGitlab || !linkedPath || pendingRef.current) return;
+    pendingRef.current = true;
+    setBusy(true);
+    try {
+      const latest = await api<GitlabFollowUpPreview>(linkedPath, { cache: 'no-store' });
+      if (latest.source?.id !== reviewedGitlab.source.id || latest.source.projectId !== selectedProject ||
+          latest.evidence?.linkId !== reviewedGitlab.evidence.linkId) throw new Error('현재 프로젝트에서 GitLab 근거를 확인할 수 없습니다.');
+      await refresh();
+      setReviewedGitlab(latest);
+      setNeedsGitlabReview(false);
+      setError('');
+      requestAnimationFrame(() => titleInput.current?.focus({ preventScroll: true }));
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      pendingRef.current = false;
+      setBusy(false);
+    }
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pendingRef.current || checklistPicking || !selectedProject || needsSourceReview || needsParentReview || needsScheduleReview ||
-      needsCloneReview || needsBlockedReview || needsCycleReview || (blockedMode && !blockedCalendar) || replayRejected) return;
+      needsCloneReview || needsBlockedReview || needsCycleReview || needsGitlabReview || (blockedMode && !blockedCalendar) || replayRejected) return;
     const replay = Boolean(attempt.current);
     if (scheduleMode && lagDays === null && !replay) return;
     const form = event.currentTarget;
@@ -635,6 +666,19 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
         onClose();
         if (onScheduleIssueCreated) onScheduleIssueCreated(issue);
         else openIssue(issue.id);
+      } else if (reviewedGitlab && linkedPath) {
+        const request = attempt.current ?? createIssueAttempt(actorId, {
+          expectedRevision: reviewedGitlab.revision, issue: issuePayload(new FormData(form)),
+        });
+        attempt.current = request;
+        const issue = await requestIssueCreation(request, selectedProject, linkedPath);
+        confirmed = true;
+        await refresh();
+        attempt.current = null;
+        dirtyRef.current = false;
+        pendingRef.current = false;
+        onClose();
+        onGitlabFollowUpCreated?.(issue);
       } else if (reviewedClone && linkedPath) {
         const request = attempt.current ?? createIssueAttempt(actorId, {
           expectedSourceVersion: reviewedClone.version,
@@ -781,6 +825,10 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
         } else if (reviewedSchedule && status === 404 && details?.reason === scheduleCopy.missing) {
           setScheduleReview({ state: 'missing' });
           setError(errorMessage(cause));
+        } else if (reviewedGitlab && (details?.reason === 'gitlab_follow_up_changed' || details?.reason === 'gitlab_follow_up_unavailable')) {
+          setNeedsGitlabReview(true);
+          setError(errorMessage(cause));
+          requestAnimationFrame(() => dialog.current?.focus({ preventScroll: true }));
         } else if (reviewedClone && ((status === 409 && details?.reason === 'source_version_changed') ||
           (status === 404 && details?.reason === 'source_missing'))) {
           await readCloneReview(reviewedClone);
@@ -861,14 +909,19 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
       <form onSubmit={submit} onChange={() => { dirtyRef.current = true; }}>
         <header><div>
           {!linkedCreation && <span className="feature-eyebrow">NEW ISSUE</span>}
-          <h2 id="new-issue-title">{childMode ? '하위 업무 만들기' : scheduleMode ? `${scheduleRole} 업무 만들기` : cloneMode ? '업무 복제' : blockedMode ? '새 차단 대상 업무' : sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
+          <h2 id="new-issue-title">{childMode ? '하위 업무 만들기' : scheduleMode ? `${scheduleRole} 업무 만들기` : cloneMode ? '업무 복제' : blockedMode ? '새 차단 대상 업무' : gitlabFollowUpMode ? 'GitLab 후속 업무 만들기' : sourceDocument ? '후속 업무 만들기' : '새 업무 만들기'}</h2>
           {sourceDocument && <p className="issue-follow-up-source">연결할 문서 · <strong>{sourceDocument.title}</strong></p>}
           {reviewedParent && <p className="issue-follow-up-source">상위 업무 · <strong>{reviewedParent.key} {reviewedParent.title}</strong></p>}
           {reviewedSchedule && <p className="issue-follow-up-source">{scheduleAnchorRole} 업무 · <strong>{reviewedSchedule.issue.key} {reviewedSchedule.issue.title}</strong></p>}
           {reviewedClone && <p className="issue-follow-up-source">원본 업무 · <strong>{reviewedClone.key} {reviewedClone.title}</strong></p>}
+          {reviewedGitlab && <p className="issue-follow-up-source">원본 업무 · <strong>{reviewedGitlab.source.key} {reviewedGitlab.source.title}</strong></p>}
           {reviewedBlocked && <p className="issue-follow-up-source">차단하는 업무 · <strong>{reviewedBlocked.key} {reviewedBlocked.title}</strong></p>}
           {cycleBoardCreation && <p className="issue-follow-up-source">등록 위치 · <strong>{reviewedCycle?.name ?? '백로그'}</strong></p>}
         </div><button ref={closeButton} className="issue-icon-button" type="button" disabled={busy} onClick={close} aria-label="닫기"><X size={19} /></button></header>
+        {reviewedGitlab && <section className="issue-follow-up-passage" aria-label="저장할 GitLab 근거">
+          <a href={reviewedGitlab.evidence.href} target="_blank" rel="noopener noreferrer">{reviewedGitlab.evidence.label}</a>
+          <span> · {reviewedGitlab.evidence.state}</span>
+        </section>}
         {sourceSelection && <section className="issue-follow-up-passage" aria-label={checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}>
           <strong>{checklistMode ? '선택한 체크리스트 항목' : '선택한 본문'}</strong>
           <blockquote>{sourceSelection.text}</blockquote>
@@ -881,7 +934,7 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
           <div className="issue-create-fields">
             <label className="issue-form-label">프로젝트
               <select name="projectId" className="field" value={selectedProject} autoFocus={blockedMode}
-                disabled={childMode || scheduleMode || cloneMode || Boolean(sourceDocument?.projectId) || Boolean(cycleBoardCreation) || fromBoard} onChange={event => {
+                disabled={childMode || scheduleMode || cloneMode || gitlabFollowUpMode || Boolean(sourceDocument?.projectId) || Boolean(cycleBoardCreation) || fromBoard} onChange={event => {
                 const next = event.target.value;
                 setSelectedProject(next);
                 setSelectedType(initialIssueType(data, next));
@@ -1023,6 +1076,8 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
         </div>}
         {linkedCreation && linkedError && <div className="issue-follow-up-error">
           <div className="issue-form-error" role="alert">{linkedError}</div>
+          {needsGitlabReview && <button type="button" className="btn" disabled={busy}
+            onClick={() => void reloadGitlabFollowUp()}>최신 GitLab 근거 확인</button>}
           {checklistMode && needsSourceReview && onReselectChecklist && <button type="button" className="btn" disabled={busy}
             onClick={onReselectChecklist}>최신 체크리스트 항목 다시 선택</button>}
           {!checklistMode && canReviewVersion && <button type="button" className="btn" disabled={busy} onClick={() => {
@@ -1088,12 +1143,14 @@ export function NewIssueModal({ data, projectId, actorId, initialStatus, initial
             <button type="button" className="btn" disabled={busy} onClick={() => void reloadBlockedReview()}>차단 기준 다시 불러오기</button>}
         </div>}
         <footer>
-          {!scheduleMode && !blockedMode && <span className="muted">{sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : childMode ? '생성한 업무는 상위 업무의 하위 목록에서 열 수 있어요.' : cloneMode ? '복제 업무는 원본의 관련 업무 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>}
+          {!scheduleMode && !blockedMode && <span className="muted">{gitlabFollowUpMode ? '원본 업무의 관련 업무로 연결하고 위 GitLab 근거를 설명에 기록합니다.'
+            : sourceDocument ? '생성한 업무는 문서의 연결 목록에서 열 수 있어요.' : childMode ? '생성한 업무는 상위 업무의 하위 목록에서 열 수 있어요.'
+              : cloneMode ? '복제 업무는 원본의 관련 업무 목록에서 열 수 있어요.' : '상세 속성은 생성 후에도 수정할 수 있어요.'}</span>}
           <button className="btn btn-ghost" type="button" disabled={busy} onClick={close}>취소</button>
           <button ref={submitButton} className="btn btn-primary" type="submit" disabled={busy || !selectedProject || !selectedType ||
-            needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || needsBlockedReview || needsCycleReview || replayRejected ||
+            needsSourceReview || needsParentReview || needsScheduleReview || needsCloneReview || needsBlockedReview || needsCycleReview || needsGitlabReview || replayRejected ||
             (blockedMode && !blockedCalendar) || (scheduleMode && lagDays === null && !recovering)}>
-            {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument ? '업무 만들고 연결' : childMode ? '하위 업무 만들기' : scheduleMode ? '업무 만들고 일정 연결' : cloneMode ? '복제 업무 만들기' : blockedMode ? '업무 만들고 차단 관계 연결' : '업무 만들기'}</>}
+            {busy ? '만드는 중…' : recovering ? '업무 생성 결과 다시 확인' : <><Plus size={16} /> {sourceDocument || gitlabFollowUpMode ? '업무 만들고 연결' : childMode ? '하위 업무 만들기' : scheduleMode ? '업무 만들고 일정 연결' : cloneMode ? '복제 업무 만들기' : blockedMode ? '업무 만들고 차단 관계 연결' : '업무 만들기'}</>}
           </button>
         </footer>
       </form>

@@ -6,7 +6,7 @@ import { documentPropertyReportProjectIds, documentPropertyReports, MAX_DOCUMENT
 import {
   contentReferences, DOCUMENT_TOC_DEFAULTS, documentIssueBlocks, documentPlainText, documentRevisionIncludes,
   isCalloutVariant, isDocumentHeadingLevel, isDocumentTocLayout, isDocumentTocLevel, isIssueSummaryGroupBy, isLiveDocumentInclude, isStatusBadgeLabel, isStatusBadgeTone,
-  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
+  MAX_CALLOUT_TITLE_LENGTH, MAX_DOCUMENT_BYTES, MAX_DOCUMENT_ISSUE_BLOCKS, MAX_DOCUMENT_NODES, MAX_STATUS_BADGE_LABEL_LENGTH, normalizeDocumentColumnLayoutOptions, type DocumentIssueBlockTarget,
 } from '../shared/document-nodes.js';
 import { isDocumentSectionId } from '../shared/document-sections.js';
 import { documentChecklistItemSelection, documentSelectionText } from '../shared/document-selection.js';
@@ -83,7 +83,7 @@ export function normalizeDocumentContent(value:unknown):{content:RichContent;pla
   const sectionIds = new Set<string>();
   const checklistIds = new Set<string>();
   const check=(value:unknown,depth:number)=>{
-    if(++count>30000||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
+    if(++count>MAX_DOCUMENT_NODES||depth>60)invalid('문서 블록 수 또는 중첩 한도를 초과했습니다.');
     const node=object(value);if(typeof node.type!=='string')invalid('문서 노드 종류가 필요합니다.');const type=schema.nodes[node.type];if(!type)invalid('지원하지 않는 문서 노드입니다.');
     const attributes=attrs(node.attrs,type.spec.attrs);
     if(node.marks!==undefined&&!Array.isArray(node.marks))invalid('문서 서식이 올바르지 않습니다.');

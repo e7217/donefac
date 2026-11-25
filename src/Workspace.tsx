@@ -2,8 +2,8 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type PointerEvent } from 'react';
 import { ArrowDownToLine, ArrowUpFromLine, ArrowUpRight, BarChart3, Bell, BookOpen, CalendarRange, Check, ChevronDown, ChevronRight, CircleDot, ClipboardList, Columns3, Command, FolderPlus, GitBranch, Inbox, KeyRound, LayoutDashboard, ListTodo, LoaderCircle, Plus, Search, Settings2, Sparkles, SquareChartGantt, Star, Trash2, Users, X } from 'lucide-react';
-import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
-import { DELIVERY_BLOCKER_REASONS, RELEASE_BLOCKER_REASONS, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
+import type { DeliveryBlockerDraftScope, DocumentPublicationListTab, DocumentPublicationTarget, FeatureProps, IssueIntakeRequest, TeamBoardFilters, TeamGanttScheduleFilters, TeamNotification, TeamOverviewFilters, WorkspaceSnapshot } from '../shared/types';
+import { DELIVERY_BLOCKER_REASONS, INTAKE_NOTIFICATION_KIND_BY_STATUS, RELEASE_BLOCKER_REASONS, isIntakeNotificationKind, isIssueViewGitlabFilter, isTeamOverviewIssueMetric } from '../shared/types';
 import { reservationDayRange } from '../shared/time-reservations';
 import { isCalendarDate } from '../shared/calendar';
 import { planningFields } from '../shared/planning-helpers';
@@ -1267,7 +1267,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openNotification = async (notification: TeamNotification) => {
     const request = ++notificationOpenRequest.current;
     const routeIndex = routeIndexRef.current;
-    const active = () => request === notificationOpenRequest.current && routeIndex === routeIndexRef.current;
+    const currentActor = actorRef.current;
+    const active = () => request === notificationOpenRequest.current && routeIndex === routeIndexRef.current && currentActor === actorRef.current;
     try { await refresh(); }
     catch (cause) {
       if (active()) notify((cause as Error).message, 'error');
@@ -1284,7 +1285,25 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       setCommentFocus(commentId ? { targetType, targetId, actorId, commentId, activation: ++commentFocusActivation.current } : null);
       return true;
     };
-    if (notification.kind.startsWith('issue-')) {
+    if (isIntakeNotificationKind(notification.kind)) {
+      const { projectId: intakeProject, targetId, kind } = notification;
+      if (intakeProject && snapshot?.projects.some(project => project.id === intakeProject)) {
+        try {
+          const intake = await api<IssueIntakeRequest>(
+            `/projects/${encodeURIComponent(intakeProject)}/intake/${encodeURIComponent(targetId)}`,
+            { headers: { 'X-Actor-Id': currentActor }, cache: 'no-store' });
+          if (!active() || dataRef.current?.restoreGeneration !== snapshot.restoreGeneration) return false;
+          if (intake.id === targetId && intake.projectId === intakeProject && intake.reporterId === currentActor &&
+              intake.reviewerId === notification.actorId && intake.status !== 'pending' &&
+              INTAKE_NOTIFICATION_KIND_BY_STATUS[intake.status] === kind) {
+            return requestRoute({ projectId: intakeProject, view: 'intake', documentId: null, issueId: null, intakeRequestId: targetId });
+          }
+        } catch (cause) {
+          if (active()) notify(cause instanceof Error ? cause.message : '접수 결과를 찾을 수 없습니다.', 'error');
+          return false;
+        }
+      }
+    } else if (notification.kind.startsWith('issue-')) {
       const issue = snapshot?.issues.find(value => value.id === notification.targetId);
       if (issue) return openTarget('issue', { projectId:issue.projectId, view:'issues', documentId:null, issueId:issue.id,
         savedViewId:view === 'issues' && projectId === issue.projectId ? savedViewId : null });

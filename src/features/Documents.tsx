@@ -59,6 +59,7 @@ import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlas
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
 import { DocumentTableTools } from './DocumentTableTools';
+import { DocumentTablePaste } from './DocumentTablePaste';
 import { DocumentBlockOrder } from './DocumentBlockOrder';
 import { DocumentPageSuggestions } from './DocumentPageSuggestions';
 import { exitDocumentColumnLayout, insertDocumentColumnLayout, unwrapDocumentColumnLayout } from './document-column-layout';
@@ -420,6 +421,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [insertUrl, setInsertUrl] = useState('');
   const documentLinkTarget = useRef<DocumentLinkTarget | null>(null);
   const clipboardImageScope = useRef<ClipboardImageScope | null>(null);
+  const tablePasteActive = useRef(false);
+  const setTablePasteActive = useCallback((active: boolean) => { tablePasteActive.current = active; }, []);
   const clipboardImageGeneration = useRef(0);
   const [clipboardImageUploads, setClipboardImageUploads] = useState<Record<string, number>>({});
   const [clipboardAttachment, setClipboardAttachment] = useState<{ documentId: string; versionId: string } | null>(null);
@@ -919,6 +922,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     const guard = (event: Event) => {
       if (event.defaultPrevented) return;
+      if (tablePasteActive.current) {
+        event.preventDefault();
+        notify('표 데이터 입력을 마친 뒤 이동해 주세요.', 'error');
+        return;
+      }
       if (offlineExport) afterAcceptedNavigation(event, () => setOfflineExport(null));
       if (archiveImport) {
         if (archiveImportNavigation.current === 'busy') {
@@ -2483,6 +2491,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 {button('인용', <Quote size={15} />, () => editor?.chain().focus().toggleBlockquote().run(), editor?.isActive('blockquote'))}
                 {button('코드 블록', <Code2 size={16} />, () => editor?.chain().focus().toggleCodeBlock().run(), editor?.isActive('codeBlock'))}
                 {button('표 삽입', <Table2 size={15} />, () => editor?.chain().focus().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run())}
+                <DocumentTablePaste key={`${actorId}:${draft.id}`} editor={editor} canEdit={clipboardWritable && !saving && !restoring}
+                  onActiveChange={setTablePasteActive} />
                 {button('2단 구역 삽입', <Columns2 size={15} />, () => insertColumns(2))}
                 {button('3단 구역 삽입', <Columns3 size={15} />, () => insertColumns(3))}
                 {button('이미지 URL 삽입', <ImageIcon size={15} />, () => { setInsertKind('image'); setInsertUrl(''); })}

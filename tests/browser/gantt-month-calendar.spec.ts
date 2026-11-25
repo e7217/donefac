@@ -33,6 +33,7 @@ async function fixture(request: APIRequestContext) {
       return milestone;
     },
     stored: async (issue: Issue) => (await read()).issues.find(item => item.id === issue.id),
+    keepForCleanup(id: string) { issueIds.push(id); },
     async close() {
       for (const milestone of milestones) await request.delete(`/api/milestones/${milestone.id}?expectedVersion=${milestone.version}`, { headers });
       for (const id of issueIds.reverse()) {
@@ -181,6 +182,78 @@ test('전체 프로젝트 월간 일정은 프로젝트 필터를 적용하고 1
     await expect(g.agenda.getByRole('listitem')).toHaveCount(10);
     await expect(g.search).toHaveValue(f.prefix);
     await expect(filter).toHaveValue(f.otherProject.id);
+  } finally {
+    await f.close();
+  }
+});
+
+test('360px 월간 일정에서 고른 날짜에 업무를 만들고 다른 날짜 초안과 팀 필터를 보존한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const date = '2028-06-15';
+  const title = `${f.prefix} 선택한 날의 새 업무`;
+  try {
+    const existing = await f.issue('입력 중인 기존 업무', { startDate: '2028-06-13', endDate: '2028-06-16' }, f.otherProject);
+    const g = await openGantt(page, f, date, true);
+    const filter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    await filter.selectOption(f.otherProject.id);
+    const existingEnd = g.row(existing).getByLabel(`${existing.key} 종료일`, { exact: true });
+    await existingEnd.fill('2028-06-18');
+    await g.toggle.click();
+    await g.date(date).click();
+    const add = g.calendar.getByRole('button', { name: '이 날짜에 업무 추가', exact: true });
+    const form = g.calendar.getByRole('form', { name: '간트에서 업무 만들기', exact: true });
+    await add.click();
+    const titleInput = form.getByRole('textbox', { name: '추가할 업무 제목', exact: true });
+    await expect(titleInput).toBeFocused();
+    await expect(form.getByLabel('추가할 업무 시작일', { exact: true })).toHaveValue(date);
+    await expect(form.getByLabel('추가할 업무 종료일', { exact: true })).toHaveValue(date);
+    await expect(form.getByRole('combobox', { name: '추가할 업무 프로젝트', exact: true })).toHaveValue(f.otherProject.id);
+    const box = await form.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(360);
+
+    await titleInput.fill(title);
+    const declined = page.waitForEvent('dialog').then(dialog => dialog.dismiss());
+    await form.getByRole('button', { name: '취소', exact: true }).click();
+    await declined;
+    await expect(titleInput).toHaveValue(title);
+    const approved = page.waitForEvent('dialog').then(dialog => dialog.accept());
+    await form.getByRole('button', { name: '취소', exact: true }).click();
+    await approved;
+    await expect(form).toHaveCount(0);
+    await expect(add).toBeFocused();
+    await expect(existingEnd).toHaveValue('2028-06-18');
+
+    await add.click();
+    await titleInput.fill(title);
+    const attempts: string[] = [];
+    await page.route(url => url.pathname === '/api/issues', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      attempts.push(route.request().postData()!);
+      if (attempts.length > 1) return route.continue();
+      const result = await json<Issue>(await route.fetch(), 201);
+      f.keepForCleanup(result.id);
+      await route.abort('failed');
+    });
+    await form.getByRole('button', { name: '간트에 추가', exact: true }).click();
+    const retry = form.getByRole('button', { name: '업무 추가 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    await retry.click();
+    await expect(form).toHaveCount(0);
+    await expect(add).toBeFocused();
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toBe(attempts[0]);
+    expect(JSON.parse(attempts[0])).toMatchObject({ projectId: f.otherProject.id, title, startDate: date, endDate: date });
+    const workspace = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+    const saved = workspace.issues.filter(item => item.title === title);
+    expect(saved).toHaveLength(1);
+    await expect(g.agendaIssue(saved[0])).toBeVisible();
+    await expect(g.date(date)).toHaveAttribute('aria-pressed', 'true');
+    await expect(g.search).toHaveValue(f.prefix);
+    await expect(filter).toHaveValue(f.otherProject.id);
+    await expect(existingEnd).toHaveValue('2028-06-18');
+    expect((await f.stored(existing))?.endDate).toBe('2028-06-16');
   } finally {
     await f.close();
   }

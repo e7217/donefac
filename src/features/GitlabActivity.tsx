@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { ArrowRight, ClipboardCheck, ExternalLink, FileDiff, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Link2, MessageSquarePlus, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ExternalLink, FileDiff, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Link2, MessageSquarePlus, Plus, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { commentWebUrl } from '../../shared/comment-web-links';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { GITLAB_MERGE_READINESS_LABELS, isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
@@ -15,6 +15,7 @@ import type {
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import type { OpenIssueForReview } from '../lib/issue-review';
+import type { GitlabFollowUpActions } from './GitlabFollowUp';
 import './gitlab-activity.css';
 import './gitlab-pipeline-jobs.css';
 
@@ -1229,12 +1230,13 @@ export type GitlabActivityCommentActions = {
   add: (reference: { href: string; body: string }) => void;
 };
 
-export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, commentActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
+export function GitlabActivityList({ links, issueReview, issueVersions, heading = 'h4', manualActions, statusActions, commentActions, followUpActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
   links: readonly GitlabLink[]; issueReview?: ActivityIssueReview; issueVersions?: ReadonlyMap<string, number>;
   heading?: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
   checkedActivity?: GitlabCheckedActivity;
   commentActions?: GitlabActivityCommentActions;
+  followUpActions?: GitlabFollowUpActions;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
   const sharedPages = pagination !== undefined;
@@ -1252,17 +1254,19 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
   };
   return <div className="gitlab-activity-list">{groups.map(({ group, rows }) => rows.length > 0 &&
     <ActivityGroup key={group.kind} group={group} links={rows} issueContext={issueContext} issueVersions={issueVersions}
-      heading={heading} manualActions={manualActions} statusActions={statusActions} commentActions={commentActions} pagination={pagination} onCopyActivityLink={onCopyActivityLink}
+      heading={heading} manualActions={manualActions} statusActions={statusActions} commentActions={commentActions}
+      followUpActions={followUpActions} pagination={pagination} onCopyActivityLink={onCopyActivityLink}
       checkedActivity={checkedActivity?.kind === group.kind ? checkedActivity : undefined}
       selection={selection?.link.kind === group.kind ? selection : undefined} />)}</div>;
 }
 
-function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, commentActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
+function ActivityGroup({ group, links, issueContext, issueVersions, heading: Heading, manualActions, statusActions, commentActions, followUpActions, pagination, selection, onCopyActivityLink, checkedActivity }: {
   group: typeof kinds[number]; links: GitlabLink[]; issueContext?: IssueContext; issueVersions?: ReadonlyMap<string, number>;
   heading: 'h3' | 'h4'; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions; pagination?: ActivityPagination;
   selection?: ActivitySelection;
   checkedActivity?: GitlabCheckedActivity;
   commentActions?: GitlabActivityCommentActions;
+  followUpActions?: GitlabFollowUpActions;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
   const [localPage, setLocalPage] = useState<{ page: number; checkedActivity?: GitlabCheckedActivity }>();
@@ -1284,7 +1288,8 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
     <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
-      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} commentActions={commentActions} onCopyActivityLink={onCopyActivityLink}
+      issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} commentActions={commentActions}
+      followUpActions={followUpActions} onCopyActivityLink={onCopyActivityLink}
       checkedActivityTrigger={checkedActivity?.linkId === link.id ? checkedActivity.triggerRef : undefined}
       selectedRowRef={selection?.link === link ? selection.rowRef : undefined} />)}</ul>
     {pageCount > 1 && <nav className="gitlab-activity-pages" aria-label={`${group.label} 페이지 이동`}>
@@ -1303,11 +1308,12 @@ function savedActivityCommentUrl(link: GitlabLink, url: URL | null): string | un
   return commentWebUrl(link.kind === 'branch' ? `${safePath}?ref_type=heads` : safePath);
 }
 
-function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, commentActions, selectedRowRef, onCopyActivityLink, checkedActivityTrigger }: {
+function ActivityRow({ link, issueContext, issueVersion, manualActions, statusActions, commentActions, followUpActions, selectedRowRef, onCopyActivityLink, checkedActivityTrigger }: {
   link: GitlabLink; issueContext?: IssueContext; issueVersion?: number; manualActions?: ManualLinkActions; statusActions?: GitlabActivityStatusActions;
   selectedRowRef?: RefObject<HTMLLIElement | null>;
   checkedActivityTrigger?: RefObject<HTMLButtonElement | null>;
   commentActions?: GitlabActivityCommentActions;
+  followUpActions?: GitlabFollowUpActions;
   onCopyActivityLink?: (linkId: string) => void;
 }) {
   const selectedLabelId = useId();
@@ -1334,6 +1340,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
   const reviewing = statusCheck?.reviewingLinkId === link.id;
   const manual = link.manualLinkId ? manualActions : undefined;
   const commentUrl = commentActions && savedActivityCommentUrl(link, url);
+  const followUp = followUpActions?.eligible.get(link.id);
   const titleContent = <>
     {number && <span className="gitlab-activity-number">{number}</span>}
     {link.kind === 'commit' && sha && <code title={sha}>{sha.slice(0, 8)}</code>}
@@ -1378,7 +1385,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
       directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
-    {(issueKey || statusCheck || manual || onCopyActivityLink || commentUrl) && <div className="gitlab-activity-row-actions">
+    {(issueKey || statusCheck || manual || onCopyActivityLink || commentUrl || followUp) && <div className="gitlab-activity-row-actions">
       {issueKey && issueContext && <button className="btn btn-ghost" type="button"
         data-gitlab-review-opener="activity"
         onClick={event => issueContext.openIssue(link, event.currentTarget, true)}>
@@ -1395,6 +1402,11 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
           const summary = [activity, `저장 상태 ${states.get(state) ?? '미확인'}`, caption].filter(Boolean).join(' · ');
           commentActions.add({ href: commentUrl, body: `${summary}\n<${commentUrl}>` });
         }}><MessageSquarePlus size={14} aria-hidden="true" />댓글 초안에 추가</button>}
+      {followUp && followUpActions && <button className="btn btn-ghost" type="button" disabled={followUpActions.disabled}
+        data-gitlab-follow-up={link.id}
+        onClick={event => followUpActions.open(followUp, event.currentTarget)}>
+        <Plus size={14} aria-hidden="true" />후속 업무 만들기
+      </button>}
       {statusCheck && <button ref={checkedActivityTrigger} className="btn btn-ghost" type="button" aria-label="이 GitLab 활동 상태 확인"
         disabled={statusActionDisabled} aria-busy={refreshing || undefined}
         onClick={event => statusCheck.checkStatus(link, event.currentTarget)}>

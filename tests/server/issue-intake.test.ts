@@ -9,8 +9,9 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { NATIVE_BACKUP_SCHEMA_VERSION } from '../../shared/native-backup.js';
+import { isIntakeNotificationKind } from '../../shared/types.js';
 import type {
-  IssueIntakePage, IssueIntakeRequest, IssueIntakeResult, ProjectIssueSchema, ProjectWorkflow, WorkspaceSnapshot,
+  IssueIntakePage, IssueIntakeRequest, IssueIntakeResult, ProjectIssueSchema, ProjectWorkflow, TeamNotification, TeamNotificationPage, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
 const project = 'project-neo';
@@ -55,9 +56,11 @@ async function fixture(t: TestContext) {
     assert.ok(value);
     return value;
   };
-  const pending = async (title: string) => (await request<IssueIntakeResult>(path, 'POST', {
+  const outcomeNotifications = async (actor = reporter) =>
+    (await request<TeamNotificationPage>('/notifications', 'GET', undefined, 200, actor)).data.items.filter(row => isIntakeNotificationKind(row.kind));
+  const pending = async (title: string, actor = reporter) => (await request<IssueIntakeResult>(path, 'POST', {
     requestId: randomUUID(), restoreGeneration: await generation(), title, description: '합성 요청 설명',
-  }, 201, reporter)).data.item;
+  }, 201, actor)).data.item;
   const decision = async (item: IssueIntakeRequest, body: Record<string, unknown>) => ({
     requestId: randomUUID(), restoreGeneration: await generation(), expectedVersion: item.version, ...body,
   });
@@ -67,12 +70,12 @@ async function fixture(t: TestContext) {
     decision: 'accept', issue, expectedWorkflowVersion: (await workflow()).version,
     expectedIssueSchemaVersion: (await request<ProjectIssueSchema>(`/projects/${project}/issue-schema`)).data.version,
   });
-  return { request, workspace, generation, pending, decision, workflowPath, workflow, acceptFields, database,
+  return { request, workspace, generation, pending, decision, workflowPath, workflow, acceptFields, database, outcomeNotifications,
     async restart() { await close(); service = await open(); } };
 }
 
 test('a project intake request is separate from the backlog and creates one ordinary ticket with its original reporter', async t => {
-  const { request, workspace, generation, decision, acceptFields, restart } = await fixture(t);
+  const { request, workspace, generation, decision, acceptFields, restart, outcomeNotifications } = await fixture(t);
   const initial = await workspace();
   const payload = { requestId: randomUUID(), restoreGeneration: await generation(), title: '테스트 도구 요청', description: '빌드 단계를 간단히 확인한다.' };
   const create = () => request<IssueIntakeResult>(path, 'POST', payload, [200, 201], reporter);
@@ -83,6 +86,7 @@ test('a project intake request is separate from the backlog and creates one ordi
   assert.equal(item.status, 'pending');
   assert.equal(item.reporterId, reporter);
   assert.deepEqual((await workspace()).issues, initial.issues);
+  assert.deepEqual(await outcomeNotifications(), []);
   const mine = (await request<IssueIntakePage>(`${path}?mine=1&q=${encodeURIComponent('빌드 단계')}`, 'GET', undefined, 200, reporter)).data;
   assert.deepEqual(mine.counts, { pending: 1, closed: 0 });
   assert.deepEqual(mine.items, [item]);
@@ -111,13 +115,21 @@ test('a project intake request is separate from the backlog and creates one ordi
   assert.equal(saved.activities.filter(value => value.resourceId === project && value.action === '접수 업무 등록').length, 1);
   assert.deepEqual((await request<IssueIntakeRequest>(`${path}/${item.id}`)).data, applied.item);
   assert.deepEqual((await request<IssueIntakePage>(`${path}?state=closed&q=${applied.item.issueKey}`)).data.items, [applied.item]);
+  const notifications = await outcomeNotifications();
+  assert.equal(notifications.length, 1);
+  const { id: notificationId, ...notice } = notifications[0];
+  assert.ok(notificationId);
+  assert.deepEqual(notice, { actorId: reviewer, recipientId: reporter, projectId: project, targetId: item.id,
+    kind: 'intake-accepted', targetLabel: item.title, createdAt: applied.item.updatedAt, readAt: null });
+  assert.deepEqual(await outcomeNotifications(reviewer), []);
   await restart();
   assert.deepEqual((await request<IssueIntakeResult>(`${path}/${item.id}/decision`, 'POST', review)).data, { ...applied, duplicate: true });
   assert.deepEqual((await workspace()).issues, saved.issues);
+  assert.deepEqual(await outcomeNotifications(), notifications);
 });
 
 test('intake reviews guard current workflow, required dates, duplicate scope and competing decisions', async t => {
-  const { request, workspace, pending, decision, workflow, workflowPath, acceptFields } = await fixture(t);
+  const { request, workspace, pending, decision, workflow, workflowPath, acceptFields, outcomeNotifications } = await fixture(t);
   const item = await pending('경쟁 변경을 확인할 접수');
   const route = `${path}/${item.id}/decision`;
   const readConflict = async (body: object, reason: string) =>
@@ -150,10 +162,16 @@ test('intake reviews guard current workflow, required dates, duplicate scope and
   const closed = (await request<IssueIntakePage>(`${path}?state=closed&offset=100`)).data;
   assert.equal(closed.offset, 0);
   assert.deepEqual(closed.counts, { pending: 0, closed: 2 });
+  const self = await pending('요청자가 직접 검토할 요청', reviewer);
+  await request(`${path}/${self.id}/decision`, 'POST', await decision(self, { decision: 'reject', reason: '직접 정리했습니다.' }));
+  assert.deepEqual(await outcomeNotifications(reviewer), []);
+  assert.deepEqual((await outcomeNotifications()).map(({ kind, targetId }) => ({ kind, targetId })), [
+    { kind: 'intake-rejected', targetId: other.id }, { kind: 'intake-duplicate', targetId: item.id },
+  ]);
 });
 
 test('intake issue, queue transition and receipt roll back together and survive exchange backup', async t => {
-  const { request, workspace, pending, decision, acceptFields, database } = await fixture(t);
+  const { request, workspace, pending, decision, acceptFields, database, outcomeNotifications } = await fixture(t);
   const item = await pending('저장 결과 실패를 검증할 요청');
   const route = `${path}/${item.id}/decision`;
   const apply = await decision(item, await acceptFields({}));
@@ -168,21 +186,44 @@ test('intake issue, queue transition and receipt roll back together and survive 
     assert.deepEqual((await request<IssueIntakeRequest>(`${path}/${item.id}`)).data, item);
     assert.deepEqual(await workspace(), original);
     assert.deepEqual(sequence(), beforeSequence);
+    assert.deepEqual(await outcomeNotifications(), []);
   } finally {
     database.exec('DROP TRIGGER synthetic_intake_rollback');
   }
   const applied = (await request<IssueIntakeResult>(route, 'POST', apply)).data.item;
+  const [notification] = await outcomeNotifications();
+  await request(`/notifications/${notification.id}/read`, 'PATCH', undefined, 200, reporter);
   const stillPending = await pending('백업에서 이어서 검토할 요청');
-  const data = (await request<{ schemaVersion: number; issueIntake: IssueIntakeRequest[] }>('/export')).data;
+  const data = (await request<{ schemaVersion: number; issueIntake: IssueIntakeRequest[]; teamNotifications: TeamNotification[] }>('/export')).data;
   assert.equal(data.schemaVersion, NATIVE_BACKUP_SCHEMA_VERSION);
   assert.deepEqual(data.issueIntake.map(row => row.id).sort(), [applied.id, stillPending.id].sort());
   await request('/import', 'POST', { data: { ...data, issueIntake: [{ ...applied, reviewerId: null }] } }, 400);
   assert.deepEqual((await request<IssueIntakeRequest>(`${path}/${item.id}`)).data, applied);
   await request('/import', 'POST', { data: { ...data, schemaVersion: 128 } }, 400);
+  await request('/import', 'POST', { data: { ...data, schemaVersion: 129 } }, 400);
+  const savedNotices = await outcomeNotifications();
+  assert.ok(savedNotices[0].readAt);
+  const unrelatedActor = original.users.find(user => user.id !== reviewer && user.id !== reporter)!.id;
+  const badTargets: Partial<TeamNotification>[] = [
+    { projectId: null }, { kind: 'intake-rejected' }, { targetId: stillPending.id }, { targetId: randomUUID() },
+    { recipientId: unrelatedActor }, { actorId: unrelatedActor },
+  ];
+  for (const invalid of badTargets) {
+    const teamNotifications = data.teamNotifications.map(value => value.id === notification.id ? { ...value, ...invalid } : value);
+    await request('/import', 'POST', { data: { ...data, teamNotifications } }, 400);
+    assert.deepEqual(await outcomeNotifications(), savedNotices);
+  }
+  await request('/import', 'POST', { data: { ...data, teamNotifications: [...data.teamNotifications, { ...savedNotices[0], id: randomUUID() }] } }, 400);
+  assert.deepEqual(await outcomeNotifications(), savedNotices);
   await request('/import', 'POST', { data });
   const restored = (await request<IssueIntakeRequest>(`${path}/${item.id}`)).data;
   assert.deepEqual(restored, { ...applied, version: applied.version + 1 });
   assert.deepEqual((await request<IssueIntakeRequest>(`${path}/${stillPending.id}`)).data, { ...stillPending, version: stillPending.version + 1 });
   assert.equal((await workspace()).issues.filter(value => value.id === applied.issueId).length, 1);
+  assert.deepEqual(await outcomeNotifications(), savedNotices);
   conflict('workspace_changed')((await request<{ details?: { reason?: string } }>(route, 'POST', apply, 409)).data);
+  await request('/import', 'POST', { data: { ...data, schemaVersion: 129,
+    teamNotifications: data.teamNotifications.filter(value => !isIntakeNotificationKind(value.kind)) } });
+  assert.deepEqual(await outcomeNotifications(), []);
+  assert.equal((await request<IssueIntakeRequest>(`${path}/${item.id}`)).data.status, 'accepted');
 });

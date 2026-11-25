@@ -1483,6 +1483,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       </section>}
       <AtlassianLinks targetType="issue" targetId={issue.id} actorId={props.actorId} notify={notify} />
       <IssueGitlabActivity key={gitlabActivityId} issueId={issue.id} issueKey={issue.key} issueVersion={issue.version} links={gitlabLinks} refresh={refresh} notify={notify}
+        data={data} projectId={issue.projectId} actorId={props.actorId} openIssue={openIssue}
         gitlabActivitySelection={gitlabActivitySelection} gitlabActivityId={gitlabActivityId} gitlabActivityFocusRef={gitlabActivityFocusRef}
         onCopyActivityLink={onCopyGitlabActivityLink}
         commentActions={{ disabled: commenting || Boolean(commentRequestId), add: appendGitlabActivityToComment }}

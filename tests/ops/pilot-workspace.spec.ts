@@ -19,6 +19,8 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
   const intakeTitle = '팀 시험 일정 검토 요청';
   const leadTitle = '요구사항 검토';
   const nextTitle = '검토 결과 공유';
+  const monthlyTitle = '선택한 날에 공유 준비';
+  const tableValue = '시범 검토 완료';
 
   await page.goto('/');
   const sidebar = page.locator('.sidebar');
@@ -98,6 +100,14 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
   const calendar = page.getByRole('region', { name: '월간 일정', exact: true });
   await calendar.locator('[data-calendar-date="2027-01-07"]').click();
   await expect(calendar.getByRole('list', { name: '선택한 날의 일정', exact: true })).toContainText(intakeTitle);
+  await calendar.locator('[data-calendar-date="2027-01-15"]').click();
+  await calendar.getByRole('button', { name: '이 날짜에 업무 추가', exact: true }).click();
+  const monthlyCreate = calendar.getByRole('form', { name: '간트에서 업무 만들기', exact: true });
+  await monthlyCreate.getByRole('textbox', { name: '추가할 업무 제목', exact: true }).fill(monthlyTitle);
+  await expect(monthlyCreate.getByLabel('추가할 업무 시작일', { exact: true })).toHaveValue('2027-01-15');
+  await monthlyCreate.getByRole('button', { name: '간트에 추가', exact: true }).click();
+  await expect(calendar.getByRole('list', { name: '선택한 날의 일정', exact: true })).toContainText(monthlyTitle);
+  expect((await workspace()).issues.find(issue => issue.title === monthlyTitle)).toMatchObject({ startDate: '2027-01-15', endDate: '2027-01-15' });
   await monthlyButton.click();
   const row = chart.locator(`[data-issue-id="${lead.id}"]`);
   await expect(row.getByLabel(`${lead.key} 시작일`, { exact: true })).toHaveValue('2027-01-11');
@@ -110,6 +120,11 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
   await ticket.getByRole('button', { name: documentTitle, exact: true }).click();
   await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(documentTitle);
   await page.locator('.docs-prose').fill(documentBody);
+  await page.getByRole('button', { name: '표 데이터 붙여넣기', exact: true }).click();
+  const pasteTable = page.getByRole('dialog', { name: '표 데이터 붙여넣기', exact: true });
+  await pasteTable.getByRole('textbox', { name: '표 데이터', exact: true }).fill(`검토\t결과\n시범 회차\t${tableValue}`);
+  await pasteTable.getByRole('button', { name: '표 삽입', exact: true }).click();
+  await expect(page.locator('.docs-prose').getByRole('table')).toContainText(tableValue);
   await page.getByRole('button', { name: '저장', exact: true }).click();
   await expect(page.locator('.docs-save-state')).toHaveText('저장됨');
   await page.getByRole('button', { name: '공간 홈으로 지정', exact: true }).click();
@@ -123,11 +138,20 @@ test('a blank built pilot supports intake, Gantt planning and a linked document 
     const peer = await second.newPage();
     await peer.goto(`/#/${project.id}/documents`);
     await expect(peer.getByRole('article', { name: '저장본 읽기' })).toContainText(documentBody);
+    await expect(peer.getByRole('article', { name: '저장본 읽기' }).getByRole('table')).toContainText(tableValue);
     await expect(peer.getByRole('combobox', { name: '작업자 선택' })).toHaveValue(reader.id);
     const saved = await workspace();
     const document = saved.documents.find(item => item.title === documentTitle)!;
-    expect(document).toMatchObject({ projectId: project.id, plainText: documentBody });
+    expect(document).toMatchObject({ projectId: project.id });
+    expect(document.plainText).toContain(documentBody);
+    expect(document.plainText).toContain(tableValue);
     expect(saved.resourceLinks).toEqual([expect.objectContaining({ issueId: lead.id, documentId: document.id })]);
+    await peer.getByRole('button', { name: '알림', exact: true }).click();
+    const inbox = peer.getByRole('dialog', { name: '팀 알림', exact: true });
+    await inbox.getByRole('button', { name: new RegExp(`${intakeTitle}.*접수 업무 등록`) }).click();
+    const receipt = peer.getByRole('dialog', { name: '접수 요청 검토', exact: true });
+    await expect(receipt.getByRole('region', { name: '처리 결과', exact: true })).toContainText(accepted.key);
+    await receipt.getByRole('button', { name: '접수 창 닫기', exact: true }).click();
     await peer.locator('.sidebar').getByRole('button', { name: /^내 업무/ }).click();
     await expect(peer.getByRole('main').getByRole('button', { name: new RegExp(nextTitle) })).toBeVisible();
     await peer.getByRole('button', { name: `${next.key} 상태 변경`, exact: true }).click();

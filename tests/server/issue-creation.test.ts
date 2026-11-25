@@ -9,8 +9,9 @@ import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
 import { documentSectionHash, markdownImportSectionId } from '../../shared/document-sections.js';
+import { gitlabFollowUpPath, type GitlabFollowUpPreview } from '../../shared/gitlab-follow-up.js';
 import type { ApiKeyCreated, CycleBoardCreateInput, CycleCompletionPreview, CycleCompletionResult, DependencyType, DocPage, DocRevision,
-  Issue, IssueCloneResult, IssueRelation, PlanningItem, ProjectIssueOrder, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated,
+  GitlabLink, Issue, IssueCloneResult, IssueRelation, PlanningItem, ProjectIssueOrder, ProjectWorkflow, SchedulePreview, WebhookEndpointCreated,
   WorkCalendar, WorkspaceSnapshot,
 } from '../../shared/types.js';
 
@@ -106,6 +107,72 @@ test('ordinary ticket retries allocate one issue, key, audit, notification and o
   const { data: updated } = await call<Issue>(`/issues/${issue.id}`, 'PATCH', { expectedVersion: issue.version, title: '저장 뒤 수정' });
   await restart();
   assert.deepEqual((await call<Issue>('/issues', 'POST', reordered)).data, updated);
+});
+
+test('a GitLab follow-up binds verified saved evidence, workflow and one atomic creation receipt', async t => {
+  const { call, observer, sideEffects, restart } = await fixture(t);
+  const { data: source } = await call<Issue>('/issues', 'POST', { projectId, title: '합성 GitLab 원본 업무' }, 201);
+  const { data: unrelated } = await call<Issue>('/issues', 'POST', { projectId, title: '다른 원본 업무' }, 201);
+  const observedAt = '2026-11-20T05:00:00.000Z';
+  const linkId = `gitlab:0123456789ab:42:pipeline:700:${source.id}`;
+  const href = 'http://127.0.0.1:9/forge/group/repo/-/pipelines/700';
+  const failed: GitlabLink = { id: linkId, issueId: source.id, projectId: 42, iid: 23, kind: 'pipeline',
+    title: '합성 실패', webUrl: `${href}?synthetic=omit#trace`, state: 'failed', updatedAt: observedAt,
+    sourceBranch: 'ci/source', pipelineSource: 'push' };
+  const mr: GitlabLink = { id: `gitlab:0123456789ab:42:merge_request:401:${source.id}`, issueId: source.id, projectId: 42,
+    iid: 8, kind: 'merge_request', title: '합성 충돌', webUrl: 'http://127.0.0.1:9/forge/group/repo/-/merge_requests/8',
+    state: 'opened', updatedAt: observedAt, mergeReadiness: { state: 'conflict', observedAt, source: 'webhook' } };
+  const insert = (link: GitlabLink) => observer.prepare('INSERT INTO gitlab_links(id,issue_id,json) VALUES(?,?,?)')
+    .run(link.id, link.issueId, JSON.stringify(link));
+  insert(failed);
+  insert(mr);
+  const path = gitlabFollowUpPath(source.id, linkId);
+  const { data: preview } = await call<GitlabFollowUpPreview>(path);
+  assert.deepEqual(preview.evidence, { linkId, issueId: source.id, label: 'GitLab 파이프라인 #700', state: '실패', href, observedAt });
+  assert.equal((await call<GitlabFollowUpPreview>(gitlabFollowUpPath(source.id, mr.id))).data.evidence.state, '충돌 해결 필요');
+  await call(gitlabFollowUpPath(unrelated.id, linkId), 'GET', undefined, 409);
+  const input = { requestId: randomUUID(), expectedRevision: preview.revision,
+    issue: { title: 'CI 실패 후속 작업', description: '검토한 상세 메모', descriptionFormat: 'markdown', assigneeId, priority: 'high' } };
+  const workflowPath = `/projects/${projectId}/workflow`;
+  const { data: workflow } = await call<ProjectWorkflow>(workflowPath);
+  await call(workflowPath, 'PATCH', { ...workflow, expectedVersion: workflow.version,
+    fieldRules: [...workflow.fieldRules, { issueType: '*', statusId: workflow.initialStatusId, requiredFields: ['dueDate'] }] });
+  const before = sideEffects();
+  assert.equal((await call<Failure>(path, 'POST', input, 409)).data.details.reason, 'gitlab_follow_up_changed');
+  const reviewed = (await call<GitlabFollowUpPreview>(path)).data;
+  assert.ok(reviewed.workflowVersion > preview.workflowVersion);
+  assert.notEqual(reviewed.revision, preview.revision);
+  const ready = { ...input, expectedRevision: reviewed.revision };
+  await call(path, 'POST', ready, 422);
+  const current = { ...ready, issue: { ...ready.issue, dueDate: '2026-11-30' } };
+  await call(path, 'POST', { ...current, issue: { ...current.issue, projectId: 'project-team' } }, 400);
+  assert.deepEqual(sideEffects(), before);
+  observer.exec("CREATE TRIGGER fail_gitlab_follow_up BEFORE INSERT ON issue_creation_requests BEGIN SELECT RAISE(ABORT,'synthetic GitLab follow-up failure'); END");
+  try {
+    await call(path, 'POST', current, 500);
+    assert.deepEqual(sideEffects(), before);
+    assert.deepEqual((await call<IssueRelation[]>(`/issues/${source.id}/relations`)).data, []);
+  } finally {
+    observer.exec('DROP TRIGGER fail_gitlab_follow_up');
+  }
+  const replies = await Promise.all([call<Issue>(path, 'POST', current, [200, 201]), call<Issue>(path, 'POST', current, [200, 201])]);
+  assert.deepEqual(replies.map(reply => reply.status).sort(), [200, 201]);
+  const [{ data: created }, { data: replayed }] = replies;
+  assert.deepEqual(created, replayed);
+  assert.deepEqual([created.assigneeId, created.priority, created.dueDate], [assigneeId, 'high', '2026-11-30']);
+  assert.equal(created.description, `검토한 상세 메모\n\nGitLab 파이프라인 #700 · 실패\n원본 업무 ${source.key}\n<${href}>`);
+  const [relation] = (await call<IssueRelation[]>(`/issues/${created.id}/relations`)).data;
+  assert.equal(relation.type, 'related');
+  assert.deepEqual(new Set([relation.sourceIssueId, relation.targetIssueId]), new Set([created.id, source.id]));
+  assert.deepEqual((await call<WorkspaceSnapshot>('/workspace')).data.gitlabLinks.filter(link => link.issueId === created.id), []);
+  const successful = { ...failed, id: failed.id.replace(':700:', ':701:'), iid: 24, state: 'success',
+    webUrl: href.replace('/700', '/701') };
+  insert(successful);
+  assert.equal((await call<Failure>(path, 'GET', undefined, 409)).data.details.reason, 'gitlab_follow_up_unavailable');
+  await restart();
+  assert.deepEqual((await call<Issue>(path, 'POST', current)).data, created);
+  assert.equal((await call<Failure>(path, 'POST', current, 409, assigneeId)).data.details.reason, 'request_conflict');
+  assert.equal((await call<Failure>(gitlabFollowUpPath(source.id, mr.id), 'POST', current, 409)).data.details.reason, 'request_conflict');
 });
 
 test('a failed create or receipt insert rolls back the issue and all side effects and permits retry', async t => {

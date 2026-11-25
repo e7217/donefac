@@ -18,8 +18,9 @@ import { gitlabActivityKindLabel, gitlabActivityStateLabel, gitlabActivityUrl, g
   type BranchMergeRequest, type GitlabActivityCommentActions, type GitlabCheckedActivity, type GitlabLinkedStatusAction, type MergeRequestObservedPipeline } from './GitlabActivity';
 import { IssueGitlabBranchCreate } from './IssueGitlabBranchCreate';
 import { deploymentSource, gitlabDeploymentKey, gitlabDeploymentStatusLabels, IssueGitlabDeployments } from './GitlabDeployments';
+import { useGitlabFollowUp } from './GitlabFollowUp';
 
-type Props = Pick<FeatureProps, 'refresh' | 'notify'> & {
+type Props = Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'openIssue' | 'refresh' | 'notify'> & {
   issueId: string;
   issueKey: string;
   issueVersion: number;
@@ -116,7 +117,7 @@ function matchesDeploymentReview(result: GitlabDeploymentReviewResult, selected:
 }
 
 export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gitlabActivitySelection, gitlabActivityId, gitlabActivityFocusRef,
-  onCopyActivityLink, commentActions, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
+  onCopyActivityLink, commentActions, data, projectId, actorId, openIssue, refresh, notify, disabled, onDraftChange, isCurrentStatusSuggestion, canPrepareStatusSuggestion, onPrepareStatusSuggestion }: Props) {
   const formHeading = useId(), unlinkHeading = useId(), selectionMissingId = useId();
   const [view, setView] = useState<LinkView>(() => ({ source: links, rows: links }));
   if (view.source !== links) setView({ source: links, rows: links });
@@ -373,6 +374,8 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
 
   const actionOpen = Boolean(draft || unlinkTarget || branchOpen);
   const controlsDisabled = disabled || busy || branchDraft.pending;
+  const followUp = useGitlabFollowUp({ data, projectId, actorId, openIssue, refresh, notify }, visibleLinks,
+    controlsDisabled || actionOpen, activityHeading);
   const canCheckStatus = visibleLinks.some(link => link.kind === 'branch' || link.kind === 'merge_request' || link.kind === 'pipeline');
 
   async function attachVerifiedActivity(path: string, input: object,
@@ -643,12 +646,14 @@ export function IssueGitlabActivity({ issueId, issueKey, issueVersion, links, gi
         활동 필터 초기화
       </button>}
     </div>}
+    {followUp.content}
     {matchingLinks.length ? <GitlabActivityList key={JSON.stringify([activityScope, activitySearch.query])}
       links={matchingLinks} issueVersions={new Map([[issueId, issueVersion]])}
       selection={selectedLink && matchingLinks.includes(selectedLink) ? { link: selectedLink, rowRef: selectedRow } : undefined}
       checkedActivity={checkedActivity}
       onCopyActivityLink={onCopyActivityLink}
       commentActions={{ ...commentActions, disabled: commentActions.disabled || controlsDisabled || actionOpen }}
+      followUpActions={followUp.actions}
       statusActions={{ disabled: controlsDisabled || actionOpen,
         refreshingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'refresh' ? refreshFeedback.linkId : null,
         reviewingLinkId: refreshFeedback?.kind === 'checking' && refreshFeedback.action === 'status-review' ? refreshFeedback.linkId : null,

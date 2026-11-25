@@ -3,7 +3,7 @@ import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../s
 import { parseScheduleSheetBaseline, SCHEDULE_PASTE_COLUMNS as columnLabels, SCHEDULE_PASTE_MAX_BYTES,
   SCHEDULE_PASTE_MAX_ROWS, type ScheduleSheetBaseline } from '../shared/schedule-paste-format.js';
 import type { DependencyType, SchedulePasteDiagnostic } from '../shared/types.js';
-import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from './delimited-paste.js';
+import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from '../shared/delimited-paste.js';
 
 export { SCHEDULE_PASTE_MAX_BYTES, SCHEDULE_PASTE_MAX_ROWS } from '../shared/schedule-paste-format.js';
 

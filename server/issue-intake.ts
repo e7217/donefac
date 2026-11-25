@@ -22,10 +22,11 @@ type Review = { expectedVersion: number; reason: string | null } & (
   { decision: 'accept'; issue: Record<string, unknown>; expectedWorkflowVersion: number; expectedIssueSchemaVersion: number } |
   { decision: 'duplicate'; issueId: string; expectedIssueVersion: number } |
   { decision: 'reject' });
+type ReviewedIntake = IssueIntakeRequest & { status: Exclude<IssueIntakeRequest['status'], 'pending'>; reviewerId: string };
 type ReviewHooks = {
   versions: () => { workflow: number; schema: number };
   accept: (fields: Record<string, unknown>, request: IssueIntakeRequest) => Issue;
-  record: (request: IssueIntakeRequest) => void;
+  record: (request: ReviewedIntake) => void;
 };
 type Receipt = { projectId: string; actorId: string; itemId: string; fingerprint: string };
 
@@ -199,7 +200,7 @@ export class IssueIntakeService {
       }
       const status = review.decision === 'accept' ? 'accepted' : review.decision === 'reject' ? 'rejected' : 'duplicate';
       const updatedAt = new Date(Math.max(Date.now(), Date.parse(before.updatedAt))).toISOString();
-      const next: IssueIntakeRequest = { ...before, status, version: before.version + 1, updatedAt,
+      const next: ReviewedIntake = { ...before, status, version: before.version + 1, updatedAt,
         reviewerId: actorId, issueId: issue?.id ?? null, issueKey: issue?.key ?? null, reason: review.reason };
       this.put(next);
       hooks.record(next);

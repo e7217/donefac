@@ -2,7 +2,7 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { isDependencyLag, isDependencyType, MAX_DEPENDENCY_LAG_DAYS } from '../shared/schedule-dependencies.js';
 import { SCHEDULE_PASTE_COLUMNS } from '../shared/schedule-paste-format.js';
 import type { Dependency, DependencyType } from '../shared/types.js';
-import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from './delimited-paste.js';
+import { blankRecord, readDelimited, type DelimitedRecord, type DelimitedText } from '../shared/delimited-paste.js';
 import { hasScheduleDependencyCycle } from './schedule-dependency-changes.js';
 
 export const ISSUE_PASTE_MAX_ROWS = 100;

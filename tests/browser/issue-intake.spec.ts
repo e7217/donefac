@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Page } from '@playwright/test';
-import type { Issue, IssueIntakePage, IssueIntakeRequest, IssueIntakeResult, Project, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, IssueIntakePage, IssueIntakeRequest, IssueIntakeResult, Project, TeamNotificationPage, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: APIResponse, status = 200): Promise<T> {
   expect(response.status(), await response.text()).toBe(status);
@@ -124,6 +124,20 @@ test('접수 링크와 360px 검토로 다른 작업자의 요청을 업무 하�
     await expect(dialog).toHaveCount(0);
     await issue.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
     await expect(dialog.getByRole('region', { name: '처리 결과', exact: true })).toContainText(closed.issueKey!);
+
+    const readReporterNotice = async () => {
+      const inbox = await json<TeamNotificationPage>(await request.get('/api/notifications', { headers: { 'X-Actor-Id': f.reporter.id } }));
+      return inbox.items.filter(item => item.targetId === received.id);
+    };
+    await expect.poll(readReporterNotice).toMatchObject([{ kind: 'intake-accepted', readAt: null }]);
+    await fromLink.getByRole('button', { name: '알림', exact: true }).click();
+    const inbox = fromLink.getByRole('dialog', { name: '팀 알림', exact: true });
+    const notice = inbox.getByRole('button', { name: new RegExp(`${original}.*접수 업무 등록`) });
+    await expect(notice).toBeVisible();
+    await notice.click();
+    await expect(review(fromLink).getByRole('region', { name: '처리 결과', exact: true })).toContainText(closed.issueKey!);
+    expect(f.acceptUrl(fromLink)).toBe(`#/${f.project.id}/intake?request=${received.id}`);
+    await expect.poll(readReporterNotice).toMatchObject([{ kind: 'intake-accepted', readAt: expect.any(String) }]);
   } finally {
     await submitter.close();
   }

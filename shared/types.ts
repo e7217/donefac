@@ -1571,9 +1571,18 @@ export interface Activity { id: string; resourceType: string; resourceId: string
 export const ISSUE_RISK_NOTIFICATION_KINDS = ['issue-block-added', 'issue-block-resolved', 'issue-deadline-postponed'] as const;
 export const ISSUE_DEADLINE_REMINDER_KINDS = ['issue-deadline-upcoming', 'issue-deadline-today', 'issue-deadline-overdue'] as const;
 export const COMMENT_MENTION_NOTIFICATION_KINDS = ['issue-comment-mentioned', 'document-comment-mentioned'] as const;
+export const INTAKE_NOTIFICATION_KIND_BY_STATUS = {
+  accepted: 'intake-accepted',
+  duplicate: 'intake-duplicate',
+  rejected: 'intake-rejected',
+} as const satisfies Record<Exclude<IssueIntakeStatus, 'pending'>, string>;
+const intakeNotificationKinds = Object.values(INTAKE_NOTIFICATION_KIND_BY_STATUS);
+export function isIntakeNotificationKind(value: unknown): value is typeof intakeNotificationKinds[number] {
+  return intakeNotificationKinds.some(kind => kind === value);
+}
 export const TEAM_NOTIFICATION_KINDS = [
   'issue-assigned', 'issue-created', 'issue-comment', 'issue-status-changed', ...ISSUE_RISK_NOTIFICATION_KINDS,
-  ...ISSUE_DEADLINE_REMINDER_KINDS, ...COMMENT_MENTION_NOTIFICATION_KINDS,
+  ...ISSUE_DEADLINE_REMINDER_KINDS, ...COMMENT_MENTION_NOTIFICATION_KINDS, ...intakeNotificationKinds,
   'document-created', 'document-comment', 'document-comment-reply', 'document-updated', 'document-review-requested',
   'document-changes-requested', 'document-published', 'document-review-withdrawn', 'document-review-approved',
 ] as const;

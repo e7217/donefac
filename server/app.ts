@@ -123,6 +123,7 @@ import { createCalendarMath, isCalendarDate } from '../shared/calendar.js';
 import { reservationDayRange, reservationLocalDateTime } from '../shared/time-reservations.js';
 import { dependencyScheduleWarning, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { isRestorableGitlabLink } from '../shared/gitlab-links.js';
+import { gitlabFollowUpEvidence, type GitlabFollowUpPreview } from '../shared/gitlab-follow-up.js';
 import { hasDuplicateTeamspaceIssueRelations, isRelationId, isTeamspaceIssueRelation, issueRelationEndpoints, issueRelationScheduleMode } from '../shared/issue-relations.js';
 import type { IssueBlockedCreationResult, IssueCloneResult, IssueCloseAsDuplicateResult } from '../shared/types.js';
 import { issueDeadline } from '../shared/my-work.js';
@@ -135,7 +136,7 @@ import { createIssueViewMatcher, IssueViewPriorityLabelFilterError, IssueViewSta
 import { matchingIssueSearchAliases, normalizeWorkspaceSearchQuery } from '../shared/workspace-search.js';
 import { matchingGitlabSearchLinks, normalizeGitlabSearchInput } from '../shared/gitlab-search.js';
 import type { ScheduleUndoInfo, ScheduleUndoResult, ScheduleUndoScope } from '../shared/types.js';
-import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
+import { COMMENT_MENTION_NOTIFICATION_KINDS, CONFLUENCE_MIGRATION_DOCUMENT_FIELDS, INTAKE_NOTIFICATION_KIND_BY_STATUS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, JIRA_MIGRATION_ISSUE_FIELDS, PRIORITY, documentNotificationSpaceId, isIntakeNotificationKind, type Issue, type IssueRelation, type DocPage, type DocRevision, type Project, type WorkspaceSnapshot, type ScheduleChange, type SchedulePreview, type Attachment, type AttachmentVersion, type Comment, type User, type Dependency, type PlanningItem, type PlanScheduleDates, type TeamNotificationKind, type TrashRestoreResult, type GitlabLink, type ReportSnapshot, type ResourceLink, type LinkedDocumentCreationResult, type RichContent, type SourceImport } from '../shared/types.js';
 
 type ScheduleUndoIssue = Pick<Issue, 'id' | 'startDate' | 'endDate'> & Partial<Pick<Issue, 'dueDate'>> & { appliedVersion:number };
 type ScheduleUndoPlan = { id:string; appliedVersion:number; dates:PlanScheduleDates };
@@ -2052,6 +2053,8 @@ export function createApp(options: {
       record: item => {
         const action = item.status === 'accepted' ? '접수 업무 등록' : item.status === 'duplicate' ? '접수 중복 업무 연결' : '접수 반려';
         recordActivity(actorId, 'project', projectId, action, item.issueKey ? `${item.issueKey} · ${item.title}` : item.title, item.updatedAt);
+        notifications.notify({ kind: INTAKE_NOTIFICATION_KIND_BY_STATUS[item.status], actorId, recipientIds: [item.reporterId],
+          projectId, targetId: item.id, targetLabel: item.title, createdAt: item.updatedAt });
       },
     });
     res.set('Cache-Control', 'no-store').json(result);
@@ -2954,6 +2957,56 @@ export function createApp(options: {
     const response: IssueCloneResult = { ...result, relation };
     res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(response);
   });
+  const gitlabFollowUpPreview = (sourceIssueId: string, linkId: string): GitlabFollowUpPreview => {
+    const source = store.get<Issue>('issues', sourceIssueId);
+    if (!source) return fail('원본 업무를 찾을 수 없습니다.', 404, { reason: 'gitlab_follow_up_unavailable' });
+    const linked = store.db.prepare('SELECT json FROM gitlab_links WHERE issue_id=?').all(sourceIssueId) as { json: string }[];
+    const evidence = gitlabFollowUpEvidence(linked.map(row => JSON.parse(row.json) as GitlabLink)).get(linkId);
+    if (!evidence) return fail('현재 저장된 병합 차단 또는 최신 실패 활동에서 이 근거를 확인할 수 없습니다.', 409,
+      { reason: 'gitlab_follow_up_unavailable' });
+    const { id, key, title, projectId, version } = source;
+    const preview = { source: { id, key, title, projectId, version }, evidence,
+      workflowVersion: workflows.get(projectId).version, schemaVersion: issueSchemas.get(projectId).version,
+      restoreGeneration: workspaceRestoreGeneration(store) };
+    return { ...preview, revision: creationRequestFingerprint(preview) };
+  };
+  app.get('/api/issues/:id/gitlab-links/:linkId/follow-up', (req, res) => {
+    actor(req);
+    const preview = gitlabFollowUpPreview(String(req.params.id), String(req.params.linkId));
+    res.set('Cache-Control', 'no-store').json(preview);
+  });
+  app.post('/api/issues/:id/gitlab-links/:linkId/follow-up', (req, res) => {
+    const input = req.body as Record<string, unknown>;
+    if (!input || typeof input !== 'object' || Array.isArray(input) ||
+        Object.keys(input).some(key => !['requestId', 'expectedRevision', 'issue'].includes(key))) {
+      return fail('GitLab 후속 업무 요청을 확인해 주세요.');
+    }
+    const { expectedRevision, issue } = input;
+    if (typeof expectedRevision !== 'string' || !/^[a-f0-9]{64}$/u.test(expectedRevision) ||
+        !issue || typeof issue !== 'object' || Array.isArray(issue)) {
+      return fail('검토한 GitLab 근거와 새 업무 정보를 확인해 주세요.');
+    }
+    const sourceIssueId = String(req.params.id), linkId = String(req.params.linkId);
+    const issueInput = issue as Record<string, unknown>;
+    const result = issueCreation.create(() => actor(req), input, () => {
+      const preview = gitlabFollowUpPreview(sourceIssueId, linkId);
+      if (preview.revision !== expectedRevision) return fail('GitLab 근거 또는 원본 업무·업무 양식이 변경되었습니다. 최신 정보를 확인해 주세요.',
+        409, { reason: 'gitlab_follow_up_changed' });
+      const { source, evidence } = preview;
+      if (Object.hasOwn(issueInput, 'projectId') && issueInput.projectId !== source.projectId) {
+        return fail('후속 업무는 원본과 같은 프로젝트에 만들어 주세요.');
+      }
+      const note = issueInput.description === undefined ? '' : issueInput.description;
+      if (typeof note !== 'string') return fail('설명을 확인해 주세요.');
+      const url = issueInput.descriptionFormat === 'markdown' ? `<${evidence.href}>` : evidence.href;
+      const description = [note.trimEnd(), `${evidence.label} · ${evidence.state}\n원본 업무 ${source.key}\n${url}`].filter(Boolean).join('\n\n');
+      const created = createIssueInTransaction(req, { ...issueInput, projectId: source.projectId, description });
+      issueRelations.createInTransaction(source.id, { otherIssueId: created.id, type: 'related', direction: 'outgoing' },
+        relationAudit(req), relationNotification(req));
+      return created;
+    }, { kind: 'gitlab-follow-up', sourceIssueId, linkId });
+    res.set('Cache-Control', 'no-store').status(result.duplicate ? 200 : 201).json(result.issue);
+  });
   app.post('/api/issues/:id/close-as-duplicate', (req, res) => {
     const input = req.body as Record<string, unknown>;
     if (!input || typeof input !== 'object' || Array.isArray(input) ||
@@ -3806,6 +3859,9 @@ export function createApp(options: {
       data.documentPublications,data.documents,data.users,data.revisions,data.exportedAt,data.schemaVersion,
     ):[];
     if(data.schemaVersion<15&&Array.isArray(data.teamNotifications)&&data.teamNotifications.length)fail('팀 알림을 포함한 백업은 schemaVersion 15가 필요합니다.');
+    if (data.schemaVersion < 130 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
+      (row: { kind?: unknown } | null) => isIntakeNotificationKind(row?.kind),
+    )) fail('업무 접수 결과 알림을 포함한 백업은 schemaVersion 130이 필요합니다.');
     if (data.schemaVersion < 127 && Array.isArray(data.teamNotifications) && data.teamNotifications.some(
       (row: unknown) => row && typeof row === 'object' && Object.hasOwn(row, 'archivedAt')
     )) fail('보관한 팀 알림을 포함한 백업은 schemaVersion 127이 필요합니다.');
@@ -3932,7 +3988,8 @@ export function createApp(options: {
       documentTemplates.restore(importedTemplates);
       documentTemplateAssets.restore(importedTemplateAssets);
       notifications.restore(data.schemaVersion>=15?data.teamNotifications:[], subscriptionRefs.users,
-        data.schemaVersion>=71 ? new Map(allImportedComments.map(comment => [comment.id, comment])) : undefined);
+        data.schemaVersion>=71 ? new Map(allImportedComments.map(comment => [comment.id, comment])) : undefined,
+        data.schemaVersion>=130 ? new Map(importedIssueIntake.map(item => [item.id, item])) : undefined);
       deadlineReminders.restore(data.schemaVersion >= 70 ? data.deadlineReminderPreferences : [], subscriptionRefs.users);
       subscriptions.restore(data.schemaVersion>=25?data.notificationSubscriptions:[],subscriptionRefs,data.schemaVersion>=29);
       favorites.restore(importedFavorites);

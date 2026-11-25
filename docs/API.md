@@ -662,6 +662,8 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 같은 작업자의 같은 요청은 UUID v4 `requestId`와 입력으로 7일간 결과를 다시 확인할 수 있다. 응답은 `200`의 `duplicate:true`다. 프로젝트·작업자·입력이 바뀌거나 오래된 검토 버전·복원 세대를 쓰면 `409`를 반환한다. 자체 백업 형식 129는 요청과 결과를 보존한다. 파일 단위 물리 백업은 재확인 기록도 보존한다.
 
+요청자와 검토자가 다르면 등록·중복 연결·반려의 팀 알림을 검토 저장과 함께 만든다. 알림 종류는 `intake-accepted`, `intake-duplicate`, `intake-rejected`이며 `targetId`는 접수 ID다. 형식 130 백업은 해당 접수와 알림의 프로젝트, 요청자, 검토자와 결정 종류를 확인해 읽음 상태를 함께 복원한다.
+
 ## 백로그 또는 사이클에서 업무 생성
 
 브라우저의 `POST /api/projects/:id/cycle-board/issues`에 `{requestId,targetCycle,issue}`를 보낸다. `requestId`는 UUID v4다. 백로그는 `targetCycle:null`을 보내고, 사이클은 `{id,expectedVersion}`을 보낸다. `issue`는 일반 생성 양식의 필드를 사용하며, 프로젝트 ID를 보내면 주소의 프로젝트와 같아야 한다. 사이클은 `targetCycle`로 지정한다.
@@ -871,6 +873,12 @@ GitLab 프로젝트의 **Push events**는 `refs/heads/` 이름에서 티켓 키�
 이관 키를 연결할 때 이미 인증된 활성 브랜치가 있으면 조회한 브랜치의 SHA와 정확히 일치할 때 해당 관측을 사용한다. SHA가 다르거나 푸시가 브랜치 삭제를 기록한 경우에는 그 조회로 링크를 추가하지 않는다.
 
 `GET /api/v1/issues/:id/gitlab-links`는 `{links, total, offset, limit}`을 반환한다. 선택한 `kind`는 `branch`, `commit`, `merge_request`, `pipeline`이며 `offset` 기본값은 0이다. 기록 시간이 최근인 항목부터 50개씩 반환한다. 브랜치의 `sourceBranch`와 `sourceSha`는 참조 이름과 마지막 확인 SHA다. 읽기·쓰기 키 모두 프로젝트 범위 안에서 조회할 수 있다.
+
+### GitLab 활동의 후속 업무
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/follow-up`은 저장된 병합 차단 MR 또는 최신 실패 파이프라인의 `source`, `evidence`, `workflowVersion`, `schemaVersion`, `restoreGeneration`, `revision`을 반환한다. 미리보기에서는 저장된 업무·활동과 현재 양식을 읽는다.
+
+같은 주소에 `POST`로 `{requestId,expectedRevision,issue}`를 보내 같은 프로젝트의 새 업무를 만든다. `expectedRevision`에는 검토한 `revision`을 사용한다. 새 업무 설명에 검토한 활동과 원본 링크를 포함하고 원본 티켓과 관련 업무 관계를 함께 저장한다. 결과는 첫 저장에 `201`, 같은 요청을 다시 확인하면 `200`과 생성한 업무다. 근거가 바뀌면 `409`의 `gitlab_follow_up_changed` 또는 `gitlab_follow_up_unavailable`을 반환한다.
 
 ### GitLab 수동 연결
 

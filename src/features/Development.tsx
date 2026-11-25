@@ -13,6 +13,7 @@ import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh, gitlabActivityKindLabel, gitlabActivityStateLabel,
   gitlabLinkedStatusRefreshPath, isGitlabLinkedStatusRefreshResult } from './GitlabActivity';
 import { GitlabDeploymentPreview } from './GitlabDeploymentPreview';
+import { useGitlabFollowUp } from './GitlabFollowUp';
 import { RepositoryGitlabDeployments } from './GitlabDeployments';
 import { GitlabProjectWebhookPanel } from './GitlabProjectWebhookPanel';
 import { GitlabRepositoryPicker } from './GitlabRepositoryPicker';
@@ -424,8 +425,8 @@ export function Development(props: FeatureProps & DevelopmentActivityProps & {
   </div>;
 }
 
-function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFilters, onChangeActivityFilters, onOpenIssueForReview,
-  statusBusy, refreshingLinkId, checkedActivity, checkedActivityButton, onCheckActivityStatus }: Pick<FeatureProps, 'data' | 'projectId' | 'refresh' | 'notify'> & DevelopmentActivityProps & {
+function DevelopmentActivityFeed({ data, projectId, actorId, openIssue, refresh, notify, activityFilters, onChangeActivityFilters, onOpenIssueForReview,
+  statusBusy, refreshingLinkId, checkedActivity, checkedActivityButton, onCheckActivityStatus }: Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'openIssue' | 'refresh' | 'notify'> & DevelopmentActivityProps & {
     statusBusy: boolean;
     refreshingLinkId: string | null;
     checkedActivity: GitlabLink | null;
@@ -440,6 +441,7 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
   const issueKeys = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.key])), [projectIssues]);
   const issueVersions = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.version])), [projectIssues]);
   const links = useMemo(() => data.gitlabLinks.filter(link => issueKeys.has(link.issueId)), [data.gitlabLinks, issueKeys]);
+  const followUp = useGitlabFollowUp({ data, projectId, actorId, openIssue, refresh, notify }, links, statusBusy, heading);
   const repositories = useMemo(() => gitlabActivityRepositories(links), [links]);
   const unavailableRepository = repositoryKey && !repositories.some(repository => repository.key === repositoryKey);
   const matching = useMemo(() => filterGitlabActivityLinks({ issues: projectIssues, issueAliases: data.issueAliases }, links,
@@ -528,7 +530,8 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
         </button>
       </div>
     </section>}
-    {matching.length > 0 ? <GitlabActivityList links={matching} heading="h3" issueVersions={issueVersions}
+    {followUp.content}
+    {matching.length > 0 ? <GitlabActivityList links={matching} heading="h3" issueVersions={issueVersions} followUpActions={followUp.actions}
       issueReview={{ keys: issueKeys, openIssue: onOpenIssueForReview, fallbackRef: heading }} pagination={{ pages, onChangePage: changePage }}
       statusActions={{ disabled: statusBusy, refreshingLinkId, checkStatus: (link, trigger) => onCheckActivityStatus(link, trigger, heading.current) }} />
       : unavailableRepository ? <p className="development-activity-empty" role="status">이 프로젝트에 선택한 저장소의 개발 활동이 없습니다.</p>

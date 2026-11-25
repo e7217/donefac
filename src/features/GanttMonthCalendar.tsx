@@ -1,7 +1,7 @@
 'use client';
 
-import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import { CalendarDays, ChevronLeft, ChevronRight, Diamond, X } from 'lucide-react';
+import { useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent, type ReactNode } from 'react';
+import { CalendarDays, ChevronLeft, ChevronRight, Diamond, Plus, X } from 'lucide-react';
 import type { Issue, Milestone, Project } from '../../shared/types';
 import { buildGanttMonthCalendar, ganttCalendarWeekday, shiftGanttCalendarDay, shiftGanttCalendarMonth, type GanttCalendarField } from '../../shared/gantt-month-calendar';
 import './gantt-month-calendar.css';
@@ -21,6 +21,8 @@ interface Props {
   issues: readonly Issue[];
   milestones: readonly Milestone[];
   projects?: ReadonlyMap<string, Project>;
+  createForm?: ReactNode;
+  onCreate?: (date: string, opener: HTMLButtonElement) => void;
   disabled: boolean;
   onPointerDown: (event: PointerEvent<HTMLElement>) => void;
   onClose: () => void;
@@ -29,7 +31,7 @@ interface Props {
   onEditDate: (issue: Issue, field: GanttCalendarField, opener: HTMLButtonElement) => void;
 }
 
-export function GanttMonthCalendar({ id, initialDate, today, issues, milestones, projects, disabled,
+export function GanttMonthCalendar({ id, initialDate, today, issues, milestones, projects, createForm, onCreate, disabled,
   onPointerDown, onClose, onOpenIssue, onOpenMilestone, onEditDate }: Props) {
   const heading = useId();
   const viewport = useRef<HTMLDivElement>(null);
@@ -111,7 +113,12 @@ export function GanttMonthCalendar({ id, initialDate, today, issues, milestones,
         </div>
       </div>
       <div className="gantt-month-agenda">
-        <h3 aria-live="polite"><time dateTime={selectedDate}>{dayLabel(selectedDate)}</time> <span>{countLabel(agenda.length)}건</span></h3>
+        <div className="gantt-month-agenda-heading">
+          <h3 aria-live="polite"><time dateTime={selectedDate}>{dayLabel(selectedDate)}</time> <span>{countLabel(agenda.length)}건</span></h3>
+          {onCreate && <button type="button" className="btn gantt-month-create" disabled={disabled} aria-expanded={Boolean(createForm)}
+            onClick={event => onCreate(selectedDate, event.currentTarget)}><Plus size={14} aria-hidden="true" />이 날짜에 업무 추가</button>}
+        </div>
+        {createForm}
         {shown.length ? <ul role="list" className="gantt-month-agenda-list" aria-label="선택한 날의 일정">
           {shown.map(entry => {
             if (entry.kind === 'milestone') {

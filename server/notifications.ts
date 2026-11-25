@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isCalendarDate } from '../shared/calendar.js';
-import { COMMENT_MENTION_NOTIFICATION_KINDS, ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
-import type { Comment, TeamNotification, TeamNotificationFilter, TeamNotificationInboxChange, TeamNotificationPage } from '../shared/types.js';
+import { COMMENT_MENTION_NOTIFICATION_KINDS, INTAKE_NOTIFICATION_KIND_BY_STATUS, isIntakeNotificationKind,
+  ISSUE_DEADLINE_REMINDER_KINDS, ISSUE_RISK_NOTIFICATION_KINDS, TEAM_NOTIFICATION_KINDS } from '../shared/types.js';
+import type { Comment, IssueIntakeRequest, TeamNotification, TeamNotificationFilter, TeamNotificationInboxChange, TeamNotificationPage } from '../shared/types.js';
 import type { Store } from './store.js';
 
 const PAGE_SIZE = 50;
@@ -80,7 +81,8 @@ function publicNotification({ detail, commentId, archivedAt, ...row }: StoredNot
   return { ...row, ...(detail === null ? {} : { detail }), ...(commentId === null ? {} : { commentId }), ...(archivedAt === null ? {} : { archivedAt }) };
 }
 
-function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>): TeamNotification {
+function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>,
+  intakeRequests?: ReadonlyMap<string, IssueIntakeRequest>): TeamNotification {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TeamNotificationError('알림 데이터 형식을 확인해 주세요.');
   const row = value as Record<string, unknown>;
   const deadlineReminder = typeof row.kind === 'string' && DEADLINE_KINDS.has(row.kind);
@@ -98,6 +100,13 @@ function restoreRow(value: unknown, users: Set<string>, comments?: ReadonlyMap<s
   }
   const detail = validateDetail(row.kind, row.detail, Object.hasOwn(row, 'detail'));
   const commentId = validateCommentId(row.kind, row.commentId, Object.hasOwn(row, 'commentId'));
+  if (isIntakeNotificationKind(row.kind)) {
+    const request = intakeRequests?.get(row.targetId);
+    if (!request || request.status === 'pending' || INTAKE_NOTIFICATION_KIND_BY_STATUS[request.status] !== row.kind ||
+        request.projectId !== row.projectId || request.reporterId !== row.recipientId || request.reviewerId !== row.actorId) {
+      throw new TeamNotificationError('접수 결과 알림의 요청, 수신자와 검토자를 확인해 주세요.');
+    }
+  }
   if (commentId !== null) {
     const comment = comments?.get(commentId);
     // A receipt remains available after permanent deletion of its target comment.
@@ -234,13 +243,19 @@ export class NotificationsService {
   }
 
   /** Restoring oldest-first preserves insertion order and all read state. */
-  restore(raw: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>): void {
+  restore(raw: unknown, users: Set<string>, comments?: ReadonlyMap<string, Comment>,
+    intakeRequests?: ReadonlyMap<string, IssueIntakeRequest>): void {
     if (!Array.isArray(raw)) throw new TeamNotificationError('백업의 알림 목록을 확인해 주세요.');
     const seen = new Set<string>();
+    const intakeTargets = new Set<string>();
     const rows = Array.from(raw, value => {
-      const row = restoreRow(value, users, comments);
+      const row = restoreRow(value, users, comments, intakeRequests);
       if (seen.has(row.id)) throw new TeamNotificationError('백업에 중복된 알림 ID가 있습니다.');
       seen.add(row.id);
+      if (isIntakeNotificationKind(row.kind)) {
+        if (intakeTargets.has(row.targetId)) throw new TeamNotificationError('백업에 중복된 접수 결과 알림이 있습니다.');
+        intakeTargets.add(row.targetId);
+      }
       return row;
     });
     this.store.db.exec('DELETE FROM team_notifications');
