@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import { MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type Project, type SchedulePasteApplyResult,
+import { MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, type Dependency, type Issue, type Project, type SchedulePasteApplyResult,
   type SchedulePastePreview, type ScheduleRowDependencyEdit, type WorkspaceSnapshot } from '../../shared/types.js';
 
 const reviewPath = '/schedule/row-edit/preview';
@@ -58,6 +58,74 @@ async function fixture(t: TestContext) {
     apply: (previewId: string, status = 200, actorId?: string) => call<SchedulePasteApplyResult>(applyPath, status, 'POST', { previewId }, actorId),
   };
 }
+
+test('row edit saves multiple linked date drafts with their final links and checks every selected version', async t => {
+  const f = await fixture(t);
+  const anchor = await f.issue('기준 일정', f.project.id, { startDate: '2026-11-27', endDate: '2026-11-30' });
+  const existing = await f.issue('연결된 선행 일정');
+  const candidate = await f.issue('새 선행 일정');
+  const foreign = await f.issue('다른 프로젝트의 일정', 'project-neo');
+  const existingLink = await f.link(existing, anchor);
+  const end = (issue: Issue, endDate: string) => ({ issue: versionOf(issue), changes: { endDate } });
+  const existingEdit = end(existing, '2026-11-25');
+  const candidateEdit = end(candidate, '2026-11-26');
+  const input = {
+    projectId: f.project.id, issue: versionOf(anchor), changes: { startDate: '2026-11-30' },
+    relatedDateEdits: [existingEdit, candidateEdit], dependencies: [add(candidate, 'predecessor', 'FS')], rescheduleSuccessors: true,
+  };
+  const before = await f.workspace();
+  await f.review({ ...input, relatedDates: existingEdit }, 400);
+  await f.review({ ...input, relatedDateEdits: Array.from({ length: MAX_SCHEDULE_BULK_LINK_ISSUES }, () => existingEdit) }, 400);
+  for (const [relatedDateEdits, rejectedIssue] of [
+    [[existingEdit, existingEdit], existing],
+    [[existingEdit, end(anchor, '2026-12-01')], anchor],
+    [[existingEdit, end(foreign, '2026-11-26')], foreign],
+  ] as const) {
+    const rejected = await f.review({ ...input, relatedDateEdits });
+    assert.equal(rejected.previewId, null);
+    assert.ok(rejected.errors.some(error => error.issueId === rejectedIssue.id));
+  }
+  const disconnected = await f.review({ ...input, dependencies: [...input.dependencies, remove(existingLink, existing)] });
+  assert.equal(disconnected.previewId, null);
+  assert.ok(disconnected.errors.some(error => error.issueId === existing.id && error.message.includes('선후행 연결')));
+  const fixed = await f.review({ ...input, changes: { endDate: '2026-12-02' }, includeTeamBlockers: true,
+    relatedDateEdits: [existingEdit, { issue: versionOf(candidate), changes: { startDate: candidate.startDate } }],
+    dependencies: [add(candidate, 'successor', 'FS')] });
+  assert.equal(fixed.previewId, null);
+  assert.ok(fixed.errors.some(error => error.message.includes(candidate.key) && error.message.includes('입력한 시작일')));
+  assert.deepEqual(await f.workspace(), before);
+
+  const oldReview = await f.review(input);
+  assert.deepEqual(oldReview.errors, []);
+  assert.ok(oldReview.previewId);
+  const changed = await f.call<Issue>(`/issues/${existing.id}`, 200, 'PATCH', {
+    expectedVersion: existing.version, title: '동료가 바꾼 선행 업무 이름',
+  }, 'user-seo');
+  const afterPeerEdit = await f.workspace();
+  await f.apply(oldReview.previewId, 409);
+  assert.deepEqual(await f.workspace(), afterPeerEdit);
+
+  const review = await f.review({ ...input, relatedDateEdits: [end(changed, '2026-11-25'), candidateEdit] });
+  assert.deepEqual(review.errors, []);
+  assert.ok(review.previewId);
+  assert.deepEqual(review.changes.map(change => change.id), [anchor.id, existing.id, candidate.id]);
+  const applied = await f.apply(review.previewId);
+  assert.equal(applied.dependencyChanges, 1);
+  assert.deepEqual(await f.apply(review.previewId), applied);
+  const saved = await f.workspace();
+  assert.equal(saved.issues.find(issue => issue.id === anchor.id)?.startDate, '2026-11-30');
+  assert.equal(saved.issues.find(issue => issue.id === existing.id)?.endDate, '2026-11-25');
+  assert.equal(saved.issues.find(issue => issue.id === candidate.id)?.endDate, '2026-11-26');
+  assert.ok(pair(saved, candidate, anchor));
+
+  const undone = await f.call<SchedulePasteApplyResult>('/schedule/undo', 200, 'POST', { undoId: applied.undoId });
+  assert.equal(undone.dependencyChanges, 1);
+  assert.deepEqual(undone.updated.map(dates), [anchor, existing, candidate].map(dates));
+  const restored = await f.workspace();
+  assert.equal(restored.issues.find(issue => issue.id === existing.id)?.title, changed.title);
+  assert.equal(pair(restored, candidate, anchor), undefined);
+  assert.equal(pair(restored, existing, anchor)?.id, existingLink.id);
+});
 
 test('multi-link row edit projects reversal, update and insertion together, rolls back a late write and undoes the entire apply', async t => {
   const f = await fixture(t);

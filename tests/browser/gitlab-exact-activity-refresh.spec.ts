@@ -234,7 +234,6 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
       const readsBeforeOpening = calls.length;
       await development.goto(`/#/${project.id}/development`);
       const feed = development.getByRole('region', { name: '연결된 개발 활동', exact: true });
-      const heading = feed.getByRole('heading', { name: /^연결된 개발 활동/u });
       const scope = feed.getByRole('combobox', { name: '개발 활동 범위', exact: true });
       const query = feed.getByRole('searchbox', { name: '개발 활동 검색', exact: true });
       const settingDraft = development.getByLabel('읽기 API 토큰', { exact: true });
@@ -257,11 +256,24 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
       expect(calls.slice(readsBeforeOpening).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
       await expect(filtered).toHaveCount(0);
       await expect(feed.getByText('조건에 맞는 개발 활동이 없습니다.', { exact: true })).toBeVisible();
-      await expect(heading).toBeFocused();
+      const confirmed = feed.getByRole('region', { name: '확인한 GitLab 활동', exact: true });
+      await expect(confirmed).toContainText(`파이프라인 #${oldPipelineId} · 성공`);
+      const openConfirmed = button(confirmed, '티켓에서 이 활동 보기');
+      await expect(openConfirmed).toBeFocused();
+      await openConfirmed.press('Enter');
+      const opened = development.getByRole('dialog', { name: issue.title, exact: true });
+      const selected = opened.locator('[data-gitlab-selected]');
+      await expect(selected).toHaveAttribute('data-gitlab-link-id', oldLink.id);
+      await expect(selected).toHaveAttribute('data-gitlab-state', 'success');
+      await expect(selected).toBeFocused();
+      await button(opened, '업무 상세 닫기').click();
+      await expect(opened).toHaveCount(0);
+      await expect(openConfirmed).toBeFocused();
       await expect(query).toHaveValue(marker);
       await expect(scope).toHaveValue('failed_pipelines');
       await expect(development).toHaveURL(url => url.hash === hash);
       await expect(settingDraft).toHaveValue('저장하지 않은 GitLab 연결 초안');
+      expect(calls.slice(readsBeforeOpening).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
 
       const after = await workspace();
       expect(after.gitlabLinks.filter(link => link.issueId === issue.id)).toEqual(afterBulk.gitlabLinks.filter(link => link.issueId === issue.id)

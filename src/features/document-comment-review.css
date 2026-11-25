@@ -1,3 +1,16 @@
+.docs-comment-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.docs-comment-heading .btn {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 6px;
+}
+
 .docs-comment-filters {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

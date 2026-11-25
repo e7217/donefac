@@ -271,7 +271,7 @@ test('선택 업무의 날짜를 유지해 숨은 업무를 찾고 독립 연결
   }
 });
 
-test('360px 간트에서 날짜 초안이 없는 기준 업무로 검색하고 골라 둔 상대 업무의 날짜만 연결과 함께 저장한다', async ({ page, request }) => {
+test('360px 간트에서 여러 연결 업무의 날짜 초안을 골라 함께 저장하고 되돌린다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const project = (await workspace(request)).projects[0];
@@ -329,18 +329,23 @@ test('360px 간트에서 날짜 초안이 없는 기준 업무로 검색하고 �
     await secondSearch.fill(other.key);
     await secondSearch.press('Enter');
     await secondLink.getByLabel('연결 방향', { exact: true }).selectOption('successor');
-    const dateChoice = relatedDates.getByRole('combobox', { name: '함께 저장할 업무 날짜', exact: true });
-    await expect(dateChoice).toHaveValue(peer.id);
-    await dateChoice.selectOption(other.id);
+    const firstDate = relatedDates.getByRole('checkbox', { name: `${peer.key} 날짜도 저장`, exact: true });
+    const secondDate = relatedDates.getByRole('checkbox', { name: `${other.key} 날짜도 저장`, exact: true });
+    await expect(firstDate).toBeChecked();
+    await expect(secondDate).not.toBeChecked();
     await expect(relatedDates).toContainText(otherDraft);
-    await dateChoice.selectOption(peer.id);
     await expect(relatedDates).toContainText(peerDraft);
     await expect(dialog.getByText(`${other.key}의 날짜 입력은 간트에 남습니다.`, { exact: false })).toBeVisible();
+    await secondDate.check();
+    await expect(firstDate).toBeChecked();
 
     const reviewed = await preview();
-    expect(reviewed.input).toMatchObject({ relatedDates: { issue: { id: peer.id }, changes: { startDate: peerDraft } },
+    expect(reviewed.input).toMatchObject({ relatedDateEdits: [
+      { issue: { id: peer.id, expectedVersion: peer.version }, changes: { startDate: peerDraft } },
+      { issue: { id: other.id, expectedVersion: other.version }, changes: { startDate: otherDraft } },
+    ],
       dependencies: [{ relatedIssue: { id: peer.id }, direction: 'successor' }, { relatedIssue: { id: other.id }, direction: 'successor' }] });
-    expect(reviewed.result.changes.map(change => change.id)).toEqual([peer.id]);
+    expect(reviewed.result.changes.map(change => change.id)).toEqual([peer.id, other.id]);
     const applyPromise = waitPost(page, '/api/schedule/row-edit/apply');
     await dialog.getByRole('button', { name: '일정과 연결 적용', exact: true }).click();
     const applied = await applyPromise;
@@ -352,7 +357,7 @@ test('360px 간트에서 날짜 초안이 없는 기준 업무로 검색하고 �
     const saved = await workspace(request);
     expect(saved.issues.find(issue => issue.id === anchor.id)).toEqual(anchor);
     expect(saved.issues.find(issue => issue.id === peer.id)).toMatchObject({ startDate: peerDraft });
-    expect(saved.issues.find(issue => issue.id === other.id)).toEqual(other);
+    expect(saved.issues.find(issue => issue.id === other.id)).toMatchObject({ startDate: otherDraft });
     expect(saved.issues.find(issue => issue.id === unrelated.id)).toEqual(unrelated);
     expect(saved.dependencies.filter(link => link.predecessorId === anchor.id).map(link => link.successorId).sort())
       .toEqual([peer.id, other.id].sort());
@@ -361,7 +366,7 @@ test('360px 간트에서 날짜 초안이 없는 기준 업무로 검색하고 �
     await page.getByRole('button', { name: '되돌리기', exact: true }).click();
     expect((await undoPromise).ok()).toBeTruthy();
     await expect(peerStart).toHaveValue(peer.startDate!);
-    await expect(otherStart).toHaveValue(otherDraft);
+    await expect(otherStart).toHaveValue(other.startDate!);
     await expect(unrelatedEnd).toHaveValue(unrelatedDraft);
     const undone = await workspace(request);
     expect(undone.dependencies.filter(link => link.predecessorId === anchor.id)).toEqual([]);

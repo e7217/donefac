@@ -121,6 +121,9 @@ type ClipboardImageScope = { editor: Editor; documentId: string; actorId: string
 type SideTab = 'comments' | 'history' | 'links' | 'attachments' | 'source';
 type MigratedIssueLinkState = { href: string; status: 'pending' | 'missing' | 'failed'; expectsComment: boolean };
 type CommentFilter = 'all' | 'open' | 'resolved';
+type CommentLoadMode = 'event' | 'manual' | 'automatic';
+const COMMENT_REFRESH_INTERVAL_MS = 15_000;
+const COMMENT_LOAD_TIMEOUT_MS = 12_000;
 const COMMENT_FILTER_LABELS = { all: '전체', open: '미해결', resolved: '해결됨' } satisfies Record<CommentFilter, string>;
 const COMMENT_FILTERS: CommentFilter[] = ['all', 'open', 'resolved'];
 
@@ -289,7 +292,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const commentsHeading = useRef<HTMLHeadingElement>(null);
   const [commentBusy, setCommentBusy] = useState(false);
   const [commentsLoading, setCommentsLoading] = useState(false);
+  const [commentsRefreshing, setCommentsRefreshing] = useState(false);
   const [commentError, setCommentError] = useState('');
+  const loadCommentList = useRef<((mode: CommentLoadMode) => void) | null>(null);
   const [revisions, setRevisions] = useState<DocRevision[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState('');
@@ -999,6 +1004,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const activeCommentEdit = commentEditing.current?.base;
   const showDetachedCommentEdit = activeCommentEdit && (!visibleComments.some(comment => comment.id === (activeCommentEdit.parentCommentId ?? activeCommentEdit.id))
     || !comments.some(comment => comment.id === activeCommentEdit.id));
+  const commentsPanelVisible = sidebarOpen && sideTab === 'comments' && !issueDrawerOpen && !publicationOpen && !newOpen &&
+    !archiveImport && !issueBlockDialog && !templateManager && !offlineExport && !documentAction && !checklistReselecting;
   useEffect(() => {
     if (!documentId) return;
     rememberComment();
@@ -1008,7 +1015,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     let cached = emptyCommentDraft();
     try { cached = decodeCommentDraft(localStorage.getItem(commentCacheKey(actorId, documentId))); } catch { setStorageProblem(true); }
     commentDraftRef.current = cached;
-    setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentError('');
+    setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentsRefreshing(false); setCommentError('');
     setCommentFilter('all'); setResolvingCommentId(null); setResolutionError('');
     return () => {
       if (resolutionRequest.current === context) resolutionRequest.current = null;
@@ -1018,32 +1025,70 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     if (!documentId) return;
     let activeRequest: AbortController | undefined;
-    const loadComments = () => {
+    const loadComments = (mode: CommentLoadMode) => {
+      if (mode === 'automatic' && activeRequest) return;
       activeRequest?.abort();
       const request = new AbortController();
       activeRequest = request;
+      if (mode === 'manual') {
+        setCommentsRefreshing(true);
+        setCommentError('');
+      }
       void api<Comment[]>(`/comments?resourceType=document&resourceId=${encodeURIComponent(documentId)}`, {
-        signal: request.signal, headers: { 'X-Actor-Id': actorId },
-      }).then(result => { if (!request.signal.aborted) { setComments(result); setCommentError(''); } })
-        .catch(error => { if (!request.signal.aborted) setCommentError(error instanceof Error ? error.message : '댓글을 불러오지 못했습니다.'); })
-        .finally(() => {
-          if (!request.signal.aborted) {
-            setCommentsLoading(false);
-            setLoadedCommentActivation(commentActivation);
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(COMMENT_LOAD_TIMEOUT_MS)]), headers: { 'X-Actor-Id': actorId },
+      }).then(result => {
+        if (request.signal.aborted) return;
+        const focused = document.activeElement?.closest('article[id^="document-comment-"]');
+        const filter = activeCommentFilter.current;
+        if (focused && filter) {
+          const comment = result.find(item => `document-comment-${item.id}` === focused.id);
+          const root = comment?.parentCommentId ? result.find(item => item.id === comment.parentCommentId) : comment;
+          if (!root || (filter.value !== 'all' && commentFilterFor(root) !== filter.value)) filter.focus({ preventScroll: true });
+        }
+        setComments(result);
+        setCommentError('');
+      })
+        .catch(error => {
+          if (!request.signal.aborted && mode !== 'automatic') {
+            setCommentError(error instanceof ApiError ? error.message : '댓글을 불러오지 못했습니다.');
           }
+        })
+        .finally(() => {
+          if (activeRequest !== request || request.signal.aborted) return;
+          activeRequest = undefined;
+          setCommentsLoading(false);
+          setCommentsRefreshing(false);
+          setLoadedCommentActivation(commentActivation);
         });
     };
-    loadComments();
-    window.addEventListener(COMMENT_LIST_CHANGED, loadComments);
-    window.addEventListener('teamspace:trash-changed', loadComments);
-    window.addEventListener('teamspace:workspace-imported', loadComments);
+    const reload = () => loadComments('event');
+    loadCommentList.current = loadComments;
+    reload();
+    window.addEventListener(COMMENT_LIST_CHANGED, reload);
+    window.addEventListener('teamspace:trash-changed', reload);
+    window.addEventListener('teamspace:workspace-imported', reload);
     return () => {
       activeRequest?.abort();
-      window.removeEventListener(COMMENT_LIST_CHANGED, loadComments);
-      window.removeEventListener('teamspace:trash-changed', loadComments);
-      window.removeEventListener('teamspace:workspace-imported', loadComments);
+      loadCommentList.current = null;
+      window.removeEventListener(COMMENT_LIST_CHANGED, reload);
+      window.removeEventListener('teamspace:trash-changed', reload);
+      window.removeEventListener('teamspace:workspace-imported', reload);
     };
   }, [documentId, actorId, commentActivation]);
+
+  useEffect(() => {
+    if (!documentId || !commentsPanelVisible) return;
+    const refreshVisible = () => {
+      if (document.visibilityState === 'visible') loadCommentList.current?.('automatic');
+    };
+    refreshVisible();
+    const timer = window.setInterval(refreshVisible, COMMENT_REFRESH_INTERVAL_MS);
+    document.addEventListener('visibilitychange', refreshVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshVisible);
+    };
+  }, [documentId, commentsPanelVisible]);
 
   useEffect(() => {
     if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments' || issueDrawerOpen || publicationOpen || documentAction || newOpen || templateManager) return;
@@ -2307,7 +2352,14 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
             {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
             {sideTab === 'comments' && <>
-              <div className="docs-panel-heading"><h3 tabIndex={-1} ref={commentsHeading}>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
+              <div className="docs-panel-heading docs-comment-heading">
+                <div><h3 tabIndex={-1} ref={commentsHeading}>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
+                <button className="btn btn-ghost" type="button" title="댓글 새로고침" aria-label="댓글 새로고침"
+                  aria-busy={commentsRefreshing} aria-disabled={commentsRefreshing}
+                  onClick={() => { if (!commentsRefreshing) loadCommentList.current?.('manual'); }}>
+                  {commentsRefreshing ? <Loader2 className="spin" size={14} aria-hidden="true" /> : <RefreshCw size={14} aria-hidden="true" />}
+                </button>
+              </div>
               <div className="docs-comment-filters" role="group" aria-label="문서 댓글 상태">
                 {COMMENT_FILTERS.map(filter => <button key={filter} type="button" value={filter}
                   ref={filter === commentFilter ? activeCommentFilter : undefined} aria-pressed={filter === commentFilter}

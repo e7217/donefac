@@ -3097,12 +3097,11 @@ function ProjectGantt(props: GanttProps) {
       initialDateDraft={rowScheduleEdit.dateDrafts.get(rowScheduleEdit.issue.id)?.source}
       relatedDateDrafts={rowScheduleEdit.dateDrafts} initialRelatedDateId={rowScheduleEdit.initialRelatedDateId} initialLink={rowScheduleEdit.initialLink}
       actorId={props.actorId} undoScope={undoScope} notify={notify} refresh={refresh} onDraftChange={trackDraft} onClose={closeRowScheduleEdit}
-      onApplied={async (result, reviewedAnchorVersion, reviewedRelatedIssue) => {
+      onApplied={async (result, reviewedAnchorVersion, reviewedRelatedIssues) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
-        const reviewedRows = [{ id: rowScheduleEdit.issue.id, expectedVersion: reviewedAnchorVersion }, reviewedRelatedIssue];
+        const reviewedRows = [{ id: rowScheduleEdit.issue.id, expectedVersion: reviewedAnchorVersion }, ...reviewedRelatedIssues];
         for (const row of reviewedRows) {
-          if (!row) continue;
           const draft = rowScheduleEdit.dateDrafts.get(row.id);
           if (!draft) continue;
           const saved = result.updated.find(issue => issue.id === row.id)

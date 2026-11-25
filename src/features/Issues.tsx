@@ -47,7 +47,9 @@ type IssueRowAction = 'details' | 'status';
 type ProjectStatusEdit = IssueStatusEdit & { opener: HTMLButtonElement };
 type OrderNotice = { projectId: string; text: string; error?: boolean; needsRefresh?: boolean };
 type ProjectFilters = Pick<SavedViewState['filters'], 'statusIds' | 'fieldFilter' | 'planning' | 'gitlab' | 'priorities' | 'labels' | 'reporter'>;
+type ProjectIssueLayout = Pick<SavedViewState, 'layout' | 'boardGrouping'> & { showEmptyAssignees: boolean };
 const defaultView: SavedViewState = { layout: 'list', filters: { query: '', status: 'all', assigneeId: 'all', type: 'all' } };
+const defaultLayout: ProjectIssueLayout = { layout: 'list', showEmptyAssignees: false };
 const assigneeMemberPrefix = 'member:';
 const assigneeCollator = new Intl.Collator('ko', { numeric: true });
 const refreshMessages = {
@@ -55,6 +57,19 @@ const refreshMessages = {
   skipped: '업무 새로고침을 건너뛰었습니다.',
   failed: '업무를 새로고침하지 못했습니다. 다시 시도해 주세요.',
 } as const;
+
+function readProjectIssueLayout(key: string | null): ProjectIssueLayout {
+  if (!key) return defaultLayout;
+  try {
+    const value: Partial<ProjectIssueLayout> | null = JSON.parse(localStorage.getItem(key) ?? 'null');
+    if (value?.layout === 'list' || value?.layout === 'board') return {
+      layout: value.layout,
+      boardGrouping: value.boardGrouping === 'assignee' ? 'assignee' : undefined,
+      showEmptyAssignees: value.showEmptyAssignees === true,
+    };
+  } catch { /* Preferences are optional when browser storage is unavailable. */ }
+  return defaultLayout;
+}
 
 function groupBoardIssues(issues: Issue[], users: readonly User[], showEmpty: boolean) {
   const byAssignee = new Map<string | null, Issue[]>();
@@ -147,11 +162,11 @@ export function Issues(props: FeatureProps & {
   const projectViews = loadedViews?.projectId === projectId && loadedViews.snapshot === data.savedViews ? loadedViews.values : workspaceViews;
   const selectedView = savedViewId ? projectViews.find(value => value.id === savedViewId) : undefined;
   const unavailableView = Boolean(savedViewId && !selectedView);
-  const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; id: string | null; applied: boolean }>();
-  const [view, setView] = useState<'list' | 'board'>('list');
-  const [boardGrouping, setBoardGrouping] = useState<SavedViewState['boardGrouping']>();
+  const layoutKey = !actorId || isAll(projectId) ? null : `teamspace:project-issue-layout:${JSON.stringify([actorId, projectId, data.restoreGeneration ?? null])}`;
+  const [appliedRouteView, setAppliedRouteView] = useState<{ projectId: string; layoutKey: string | null; id: string | null; applied: boolean }>();
+  const [issueLayout, setIssueLayout] = useState(defaultLayout);
+  const { layout: view, boardGrouping, showEmptyAssignees } = issueLayout;
   const [sort, setSort] = useState<SavedViewState['sort']>();
-  const [showEmptyAssignees, setShowEmptyAssignees] = useState(false);
   const groupingInstructions = useId();
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('all');
@@ -302,9 +317,8 @@ export function Issues(props: FeatureProps & {
     const memberId = value.startsWith(assigneeMemberPrefix) ? value.slice(assigneeMemberPrefix.length) : value;
     setAssignee(value === 'current-user' ? { kind: 'current-user' } : memberId);
   }
-  function applySavedView(value: SavedViewState) {
-    setView(value.layout);
-    setBoardGrouping(value.layout === 'board' ? value.boardGrouping : undefined);
+  function applySavedView(value: SavedViewState, layout?: ProjectIssueLayout) {
+    setIssueLayout(layout ?? { layout: value.layout, boardGrouping: value.layout === 'board' ? value.boardGrouping : undefined, showEmptyAssignees: false });
     setSort(value.sort);
     if (value.sort?.length) setOrderEditProject(null);
     setQuery(value.filters.query);
@@ -315,14 +329,21 @@ export function Issues(props: FeatureProps & {
     updateProjectFilters({ statusIds, fieldFilter, planning, gitlab, priorities, labels, reporter });
     setFilterEditorEpoch(epoch => epoch + 1);
   }
-  if (appliedRouteView?.projectId !== projectId || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
-    setAppliedRouteView({ projectId, id: savedViewId, applied: Boolean(selectedView) });
-    if (appliedRouteView?.projectId !== projectId) {
-      setBoardGrouping(undefined);
-      setSort(undefined);
-      setShowEmptyAssignees(false);
-    }
-    if (selectedView || savedViewId || appliedRouteView?.id) applySavedView(selectedView ?? defaultView);
+  const layoutScopeChanged = appliedRouteView?.projectId !== projectId || appliedRouteView.layoutKey !== layoutKey;
+  if (layoutScopeChanged || appliedRouteView.id !== savedViewId || (!appliedRouteView.applied && selectedView)) {
+    setAppliedRouteView({ projectId, layoutKey, id: savedViewId, applied: Boolean(selectedView) });
+    if (layoutScopeChanged) setSort(undefined);
+    if (savedViewId) applySavedView(selectedView ?? defaultView);
+    else if (appliedRouteView?.id) applySavedView(defaultView, readProjectIssueLayout(layoutKey));
+    else setIssueLayout(readProjectIssueLayout(layoutKey));
+  }
+  function changeIssueLayout(change: Partial<ProjectIssueLayout>) {
+    const next = { ...issueLayout, ...change };
+    setIssueLayout(next);
+    if (savedViewId || !layoutKey) return;
+    try {
+      localStorage.setItem(layoutKey, JSON.stringify(next));
+    } catch { /* The current view still works without browser storage. */ }
   }
   function clearFilters() {
     if (!window.dispatchEvent(new Event('teamspace:navigate', {cancelable:true}))) return;
@@ -365,7 +386,7 @@ export function Issues(props: FeatureProps & {
     });
   }
   function switchView(next: typeof view) {
-    if (next !== view && (!bulk.active || bulk.close())) setView(next);
+    if (next !== view && (!bulk.active || bulk.close())) changeIssueLayout({ layout: next });
   }
   async function changeBoardCell(issue: Issue, status: IssueStatus, assigneeId?: string | null) {
     const statusChanged = status !== issue.status;
@@ -656,7 +677,7 @@ export function Issues(props: FeatureProps & {
       {projectSelected && view === 'board' && <label className="issue-board-group-picker">보드 그룹
         <select className="issue-filter" aria-label="보드 그룹" value={boardGrouping ?? ''} disabled={Boolean(busy)} onChange={event => {
           endBoardDrag();
-          setBoardGrouping(event.currentTarget.value === 'assignee' ? 'assignee' : undefined);
+          changeIssueLayout({ boardGrouping: event.currentTarget.value === 'assignee' ? 'assignee' : undefined });
         }}><option value="">그룹 없음</option><option value="assignee">담당자별</option></select>
       </label>}
       <div className="issue-search"><Search size={15} /><input aria-label="업무 검색" placeholder="제목, 번호, 속성 검색" value={query} disabled={bulk.locked} onChange={e => setQuery(e.target.value)} /></div>
@@ -750,7 +771,7 @@ export function Issues(props: FeatureProps & {
         openIssue={onOpenBoardCapacityIssue ?? openIssue} close={closeCapacity} />}
       {groupedBoard ? <>
         <label className="issue-board-empty-toggle">
-          <input type="checkbox" checked={showEmptyAssignees} onChange={event => setShowEmptyAssignees(event.currentTarget.checked)} />
+          <input type="checkbox" checked={showEmptyAssignees} onChange={event => changeIssueLayout({ showEmptyAssignees: event.currentTarget.checked })} />
           빈 담당자 그룹 표시
         </label>
         <div className="issue-board issue-board-grouped" ref={boardCanvas} role="region" aria-label="담당자별 보드"

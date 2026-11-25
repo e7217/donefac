@@ -19,6 +19,147 @@ function filterButtons(page: Page) {
   };
 }
 
+test('360px 열린 문서 댓글에 팀원의 변경을 표시하고 본문과 새 댓글 초안을 보존한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  await page.clock.install();
+  const { projects: [project], users: [author, reviewer] } = await expectJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const quote = '초기 도면을 기준으로 간섭을 검토합니다.';
+  const source = await expectJson<DocPage>(await request.post('/api/documents', { headers: actor(author), data: {
+    projectId: project.id, title: `댓글 동기화 ${randomUUID().slice(0, 8)}`, content: documentBody(quote),
+  } }), 201);
+  const path = `/api/documents/${source.id}`;
+  const isCommentRead = (url: string) => {
+    const address = new URL(url);
+    return address.pathname === '/api/comments' && address.searchParams.get('resourceType') === 'document' &&
+      address.searchParams.get('resourceId') === source.id;
+  };
+  let commentReads = 0;
+  page.on('request', observed => {
+    if (observed.method() === 'GET' && isCommentRead(observed.url())) commentReads++;
+  });
+  try {
+    const { comment: thread } = await expectJson<DocumentSelectionCommentResult>(await request.post(`${path}/selection-comments`, {
+      headers: actor(author), data: { requestId: randomUUID(), expectedDocumentVersion: source.version,
+        sourceSelection: { from: 1, to: quote.length + 1, text: quote }, body: '동시에 검토할 문장 댓글' },
+    }), 201);
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(`/#/${project.id}/documents/${source.id}`);
+    const editor = page.locator('.docs-prose');
+    await expect(editor).toHaveText(quote, { timeout: 30_000 });
+    await editor.press('End');
+    await page.keyboard.insertText(' 아직 저장하지 않은 검토 내용');
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const article = page.locator(`#document-comment-${thread.id}`);
+    const draft = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await expect(article).toBeVisible();
+    await draft.fill('보내지 않은 댓글 초안');
+
+    const incoming = await expectJson<Comment>(await request.post('/api/comments', { headers: actor(reviewer), data: {
+      resourceType: 'document', resourceId: source.id, body: '동료가 다른 창에서 추가한 의견',
+    } }), 201);
+    await expect(page.locator(`#document-comment-${incoming.id}`)).toHaveCount(0);
+    await page.clock.runFor(15_100);
+    await expect(page.locator(`#document-comment-${incoming.id}`)).toBeVisible();
+    await expect(draft).toHaveValue('보내지 않은 댓글 초안');
+    await expect(draft).toBeFocused();
+    await expect(editor).toHaveText(`${quote} 아직 저장하지 않은 검토 내용`);
+
+    const filters = filterButtons(page);
+    await filters.open.click();
+    await article.getByRole('button', { name: '해결 처리', exact: true }).focus();
+    await expectJson<Comment>(await request.patch(`${path}/selection-comments/${thread.id}/resolution`, {
+      headers: actor(reviewer), data: { state: 'resolved', expectedVersion: 0 },
+    }));
+    await page.clock.runFor(15_100);
+    await expect(article).toHaveCount(0);
+    await expect(filters.open).toBeFocused();
+    await filters.resolved.click();
+    await expect(article.getByText('해결됨', { exact: true })).toBeVisible();
+
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    const hiddenReads = commentReads;
+    await page.clock.runFor(31_000);
+    expect(commentReads).toBe(hiddenReads);
+    const resumed = page.waitForResponse(response => response.request().method() === 'GET' && isCommentRead(response.url()));
+    await page.evaluate(() => {
+      Reflect.deleteProperty(document, 'visibilityState');
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await resumed;
+    await expect(draft).toHaveValue('보내지 않은 댓글 초안');
+  } finally {
+    const removed = await request.delete(path, { headers: actor(author) });
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers: actor(author) });
+    }
+  }
+});
+
+test('문서 댓글을 새로고침하는 동안 등록한 댓글을 보존하고 조회 실패 뒤 다시 읽는다', async ({ page, request }) => {
+  const { projects: [project], users: [author] } = await expectJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const source = await expectJson<DocPage>(await request.post('/api/documents', { headers: actor(author), data: {
+    projectId: project.id, title: `댓글 다시 읽기 ${randomUUID().slice(0, 8)}`, content: documentBody('검토 사항을 정리합니다.'),
+  } }), 201);
+  const path = `/api/documents/${source.id}`;
+  const held = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const delivered = Promise.withResolvers<void>();
+  let nextRead: 'hold' | 'fail' | undefined;
+  try {
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(`/#/${project.id}/documents/${source.id}`);
+    const panel = page.getByRole('complementary', { name: '문서 상세 정보', exact: true });
+    await expect(panel.getByText('아직 댓글이 없어요', { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.route(url => url.pathname === '/api/comments' && url.searchParams.get('resourceId') === source.id, async route => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const action = nextRead;
+      nextRead = undefined;
+      if (action === 'fail') return route.fulfill({ status: 503, json: { error: '댓글 조회를 다시 시도해 주세요.' } });
+      if (action !== 'hold') return route.continue();
+      const stale = await route.fetch();
+      held.resolve();
+      await release.promise;
+      await route.fulfill({ response: stale }).catch(() => undefined);
+      delivered.resolve();
+    });
+    const draft = panel.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    const refresh = panel.getByRole('button', { name: '댓글 새로고침', exact: true });
+    await draft.fill('늦은 조회가 지우면 안 되는 댓글');
+    nextRead = 'hold';
+    await refresh.click();
+    await held.promise;
+    await expect(refresh).toHaveAttribute('aria-busy', 'true');
+    await panel.getByRole('button', { name: '댓글 남기기', exact: true }).click();
+    const saved = panel.getByText('늦은 조회가 지우면 안 되는 댓글', { exact: true });
+    await expect(saved).toHaveCount(1);
+    await expect(refresh).toHaveAttribute('aria-busy', 'false');
+    release.resolve();
+    await delivered.promise;
+    await expect(saved).toHaveCount(1);
+
+    nextRead = 'fail';
+    await refresh.click();
+    await expect(panel.getByRole('alert').filter({ hasText: '댓글 조회를 다시 시도해 주세요.' })).toBeVisible();
+    await expect(saved).toHaveCount(1);
+    await expect(refresh).toBeFocused();
+    await refresh.press('Enter');
+    await expect(panel.getByRole('alert').filter({ hasText: '댓글 조회를 다시 시도해 주세요.' })).toHaveCount(0);
+    await expect(saved).toHaveCount(1);
+  } finally {
+    release.resolve();
+    const removed = await request.delete(path, { headers: actor(author) });
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers: actor(author) });
+    }
+  }
+});
+
 test('360px에서 문장 댓글을 해결하고 멘션과 공유 링크로 원문을 찾아 다시 열며 동시 상태 변경을 확인한다', async ({ page, request, browser, baseURL }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

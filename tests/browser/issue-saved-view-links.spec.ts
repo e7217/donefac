@@ -2,10 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import type { Issue, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
-async function projects(request: APIRequestContext) {
+async function workspace(request: APIRequestContext) {
   const response = await request.get('/api/workspace');
   expect(response.ok(), await response.text()).toBeTruthy();
-  return (await response.json() as WorkspaceSnapshot).projects;
+  return await response.json() as WorkspaceSnapshot;
 }
 
 async function createIssue(request: APIRequestContext, projectId: string, title: string, status = 'in_progress') {
@@ -31,9 +31,60 @@ async function removeIssue(request: APIRequestContext, issue: Issue) {
   if (response.ok()) await request.delete(`/api/trash/${(await response.json()).trashEntryId}`);
 }
 
+test('360px에서 문서로 이동한 뒤 개인 담당자별 보드를 복원하고 공유 보기와 분리한다', async ({ page, request }) => {
+  const { projects: [project, otherProject], users: [actor, teammate] } = await workspace(request);
+  const saved = await createView(request, project.id, `개인 보기 대조 ${randomUUID().slice(0, 8)}`, '', 'list');
+  try {
+    const base = `/#/${project.id}/issues`;
+    const groupedBoard = page.getByRole('region', { name: '담당자별 보드', exact: true });
+    const list = page.getByRole('region', { name: '업무 목록', exact: true });
+    const emptyGroup = page.getByRole('checkbox', { name: '빈 담당자 그룹 표시', exact: true });
+    const pickBoard = page.getByRole('button', { name: '보드', exact: true });
+    const grouping = page.getByLabel('보드 그룹', { exact: true });
+    const actorPicker = page.getByLabel('작업자 선택', { exact: true });
+    const savedPicker = page.getByLabel('저장된 업무 보기', { exact: true });
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(base);
+    await expect(list).toBeVisible();
+    await pickBoard.click();
+    await grouping.selectOption('assignee');
+    await emptyGroup.check();
+    await expect(groupedBoard).toBeVisible();
+    await page.goto(`/#/${project.id}/documents`);
+    await expect(groupedBoard).toHaveCount(0);
+    await page.goBack();
+    await expect(groupedBoard).toBeVisible();
+    await expect(emptyGroup).toBeChecked();
+    await page.reload();
+    await expect(groupedBoard).toBeVisible();
+    await expect(emptyGroup).toBeChecked();
+
+    await actorPicker.selectOption(teammate.id);
+    await expect(list).toBeVisible();
+    await actorPicker.selectOption(actor.id);
+    await expect(groupedBoard).toBeVisible();
+    await page.goto(`/#/${otherProject.id}/issues`);
+    await expect(list).toBeVisible();
+    await page.goto(base);
+    await expect(groupedBoard).toBeVisible();
+
+    await savedPicker.selectOption(saved.id);
+    await expect(list).toBeVisible();
+    await expect(savedPicker).toHaveValue(saved.id);
+    await pickBoard.click();
+    await expect(grouping).toHaveValue('');
+    await savedPicker.selectOption('');
+    await expect(savedPicker).toHaveValue('');
+    await expect(groupedBoard).toBeVisible();
+    await expect(emptyGroup).toBeChecked();
+  } finally { await deleteView(request, saved); }
+});
+
 test('360px에서 공유 보드 링크로 저장한 업무를 다시 열고 상세와 간트를 오간다', async ({ page, context, request }) => {
   test.setTimeout(80_000);
-  const [project] = await projects(request);
+  const { projects: [project] } = await workspace(request);
   const prefix = `공유 보드 주소 ${randomUUID().slice(0, 8)}`;
   const issues: Issue[] = [];
   let view: SavedView | undefined;
@@ -141,7 +192,7 @@ test('360px에서 공유 보드 링크로 저장한 업무를 다시 열고 상�
 
 test('삭제되었거나 다른 프로젝트의 공유 보기 링크는 전체 업무를 표시하지 않고 해제할 수 있다', async ({ page, request }) => {
   test.setTimeout(65_000);
-  const [project, otherProject] = await projects(request);
+  const { projects: [project, otherProject] } = await workspace(request);
   const prefix = `열 수 없는 공유 주소 ${randomUUID().slice(0, 8)}`;
   let active: Issue | undefined;
   const views: SavedView[] = [];
@@ -187,7 +238,7 @@ test('삭제되었거나 다른 프로젝트의 공유 보기 링크는 전체 �
 
 test('보기 이름을 편집 중 뒤로 가기를 거절하면 원래 보기와 입력을 유지한다', async ({ page, request }) => {
   test.setTimeout(65_000);
-  const [project] = await projects(request);
+  const { projects: [project] } = await workspace(request);
   const prefix = `공유 보기 이름 초안 ${randomUUID().slice(0, 8)}`;
   const views: SavedView[] = [];
   try {
