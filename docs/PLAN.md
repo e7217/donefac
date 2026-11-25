@@ -125,7 +125,7 @@
 
 문서 연결 패널과 본문의 업무 참조, 티켓의 관계 추가와 중복 처리에서도 Jira 원래 키와 이동 전 키로 후보를 찾는다. 정확한 현재 키가 먼저 표시된다. 같은 키가 여러 업무를 가리키면 현재 키·프로젝트·제목과 일치한 이전 키를 확인한다. 현재 프로젝트 이름이나 키를 함께 입력해 후보를 좁힐 수 있다. 연결과 본문 참조에는 선택한 업무 ID를 기록한다.
 
-Jira·Confluence 원본 주소는 빠른 검색과 전체 검색에서 현재 저장된 연결을 읽는다. HTTP(S) 원본과 설치 경로를 같게 맞추고 Jira 키, Confluence 페이지 ID 또는 제목 주소의 공간·제목을 대조한다. Confluence의 두 페이지 ID 형식은 같은 원본 페이지로 처리한다. 저장된 연결을 활성 업무·문서별로 합치며 결과를 현재 프로젝트나 라벨로 좁힐 수 있다. 페이지 주소의 검색 요청과 공유 주소에는 필요한 `pageId`를 남기고 프래그먼트를 제거한다. 연결 조회는 Teamspace 저장소 안에서 수행한다.
+Jira·Confluence 원본 주소는 빠른 검색과 전체 검색에서 현재 저장된 연결을 읽는다. HTTP(S) 원본과 설치 경로를 같게 맞추고 Jira 키, Confluence 페이지 ID 또는 제목 주소의 공간·제목을 대조한다. 옛 Confluence의 `/pages/{id}` 및 `/pages/{id}/{title}`도 같은 설치의 페이지 ID 주소로 바꿔 현재 문서를 찾는다. 저장된 연결을 활성 업무·문서별로 합치며 결과를 현재 프로젝트나 라벨로 좁힐 수 있다. 페이지 주소의 검색 요청과 공유 주소에는 필요한 `pageId`를 남기고 프래그먼트를 제거한다. 연결 조회는 Teamspace 저장소 안에서 수행한다.
 
 Confluence의 예전 제목 주소는 원본 페이지가 연결된 활성 문서, 영수증에 적힌 설치 경로와 같은 패키지에서 보관한 원본 페이지 제목·공간으로 찾는다. Teamspace에서 문서 제목을 수정한 뒤에도 원래 제목을 검색하며, 확인된 대상이 여럿이면 모두 표시한다. [Confluence 주소 형식](https://support.atlassian.com/confluence/kb/the-differences-between-various-url-formats-for-a-confluence-page/)
 
@@ -307,7 +307,7 @@ Jira 이관 티켓은 원본 Jira 키, 이관 당시의 영수증·보관 기록
 
 원본 Jira 프로젝트를 하나로 확인할 수 있으면 현재 프로젝트의 이관 업무와 적용 영수증을 대조해 원래 상태·유형명과 ID 및 담당자·요청자 계정을 변환한다. 후속 이관 자료는 실제 반영한 값을 사용한다. 변환은 현재 프로젝트에서 고유하게 확인된 매핑을 사용하고, 미리보기에서는 이름 변경을 반영한다.
 
-Jira `due` 날짜 비교는 목표 마감일이 있는 업무의 날짜 범위로 옮긴다. REST 자료에서 새 업무를 이관할 때도 원본 `duedate`를 저장한다. 현재 업무에 저장된 목표 마감일로 미리보기를 계산하고, 저장된 보기는 목록·보드·간트·문서 업무 목록의 공통 일정 필터를 사용한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
+Jira `due` 날짜 비교는 목표 마감일이 있는 업무의 날짜 범위로 옮긴다. `IS EMPTY`와 `IS NOT EMPTY`는 목표 마감일 입력 여부로 옮기며 `NULL`도 같은 의미로 쓴다. 계획 시작일과 종료일은 별개의 일정으로 본다. REST 자료에서 새 업무를 이관할 때도 원본 `duedate`를 저장한다. 현재 업무에 저장된 목표 마감일로 미리보기를 계산하고, 저장된 보기는 목록·보드·간트·문서 업무 목록의 공통 일정 필터를 사용한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
 Jira `priority` 조건의 이름과 ID는 하나로 확인된 원본 프로젝트의 이관 업무와 영수증에서 읽는다. 확인한 원본 값이 현재 Teamspace 우선순위 하나에 여러 개 대응하면 조건의 교집합이 그 전체를 포함할 때 변환한다. 같은 Jira ID의 이름이 바뀌어 기존 이관 수준을 유지한 경우 반영 기록으로 연결을 확인한다. 미리보기와 저장에서 팀의 편집 및 근거가 불명확한 업무가 결과를 바꾸는지 확인한다. 저장한 보기와 Confluence에서 복원한 업무 목록은 현재 Teamspace 티켓의 우선순위를 조회한다.
 

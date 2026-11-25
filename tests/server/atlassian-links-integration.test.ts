@@ -174,6 +174,7 @@ test('original address search matches local targets by exact installation and so
   const { call, base } = await appFixture(t, scratch(t));
   const classic = 'https://wiki.example.invalid/wiki/pages/viewpage.action?pageId=99999999999999999999';
   const modern = 'https://wiki.example.invalid/wiki/spaces/TEAM/pages/99999999999999999999/Old+Title';
+  const numericPath = 'https://wiki.example.invalid/wiki/pages/99999999999999999999/Old+Title';
   const samePage = 'https://wiki.example.invalid/wiki/spaces/OTHER/pages/99999999999999999999/Renamed';
   const sameIdElsewhere = 'https://wiki.example.invalid/other/pages/viewpage.action?pageId=99999999999999999999';
   const display = 'https://wiki.example.invalid/wiki/display/TEAM/Release%20Notes';
@@ -195,6 +196,7 @@ test('original address search matches local targets by exact installation and so
   assert.equal(numeric.headers.get('Cache-Control'), 'no-store');
   assert.deepEqual(await numeric.json(), { targets: [documentTarget, issueTarget] });
   assert.deepEqual(await call(resolveRoute(classic)), { targets: [documentTarget, issueTarget] });
+  assert.deepEqual(await call(resolveRoute(numericPath + '?tracking=hidden#section')), { targets: [documentTarget, issueTarget] });
   assert.deepEqual(await call(resolveRoute(sameIdElsewhere)), {
     targets: [{ targetType: 'document', targetId: unrelated.id }],
   });
@@ -206,6 +208,8 @@ test('original address search matches local targets by exact installation and so
   assert.deepEqual(Object.keys(result).sort(), ['documents', 'issues']);
   assert.deepEqual(result.issues.map(value => value.id), [issue.id]);
   assert.deepEqual(result.documents.map(value => value.id), [document.id]);
+  assert.deepEqual(await call(searchRoute(numericPath)), result);
+  assert.deepEqual(await call(resolveRoute(numericPath.replace('/wiki/', '/wrong-mount/'))), { targets: [] });
   const text = await call<{ issues: Issue[]; documents: DocPage[] }>(searchRoute(document.title));
   assert.deepEqual(text.documents.map(value => value.id), [document.id]);
 

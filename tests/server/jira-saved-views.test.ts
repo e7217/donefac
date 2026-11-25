@@ -460,16 +460,38 @@ test('Jira deadline saved views match imported source dates and preserve native 
   }, 201);
   assert.deepEqual(view.filters, review.filters);
 
+  const missingJql = `project = ${origin.key} AND dueDate IS EMPTY`;
+  const missing = await f.preview(missingJql, projectId);
+  assert.deepEqual(missing.filters.planning, { dates: { mode: 'due_missing' } });
+  assert.deepEqual(missing.issues.map(issue => issue.id), imported.filter(issue => issue.dueDate === null).map(issue => issue.id));
+  const dated = await f.preview('due IS NOT NULL', projectId);
+  assert.deepEqual(dated.filters.planning, { dates: { mode: 'due_set' } });
+  assert.deepEqual(dated.issues.map(issue => issue.id).sort(), imported.filter(issue => issue.dueDate !== null).map(issue => issue.id).sort());
+  assert.deepEqual((await f.preview(`${jql} AND due IS NOT EMPTY`, projectId)).filters, review.filters);
+  for (const invalidJql of ['due IS EMPTY AND due IS NOT NULL', 'due IS NULL AND due < "2024-03-02"', 'due IS NOT today']) {
+    await f.request(PREVIEW, 'POST', { projectId, jql: invalidJql }, 400);
+  }
+  const missingView = await f.request<SavedView>(IMPORT, 'POST', {
+    projectId, jql: missingJql, name: 'Jira missing deadline', layout: 'list', acceptProjectOrder: false, revision: missing.revision,
+  }, 201);
+
   await f.request(PREVIEW, 'POST', { projectId, jql: `project = ${origin.key} AND due >= startOfWeek()` }, 400);
   const invalid = await f.reviewJiraMigration('invalid-source-date', [{
     id: '41251', key: 'LEGINVALID', fields: { duedate: 'not-a-date' },
   }], 'TEAMINVALID');
   assert.equal(invalid.canApply, false);
   assert.ok(invalid.notices.some(notice => notice.severity === 'error' && notice.code === 'DATE_UNRESOLVED'));
-  const backup = await f.request<WorkspaceSnapshot>('/export');
+  const backup = await f.request<WorkspaceSnapshot & { schemaVersion: number }>('/export');
+  assert.equal(backup.schemaVersion, 124);
+  const older = await f.request<{ error: string }>('/import', 'POST', { data: { ...backup, schemaVersion: 123 } }, 400);
+  assert.match(older.error, /schemaVersion 124/u);
   await f.request(`/views/${view.id}?expectedVersion=${view.version}`, 'DELETE');
+  await f.request(`/views/${missingView.id}?expectedVersion=${missingView.version}`, 'DELETE');
   await f.request('/import', 'POST', { data: backup });
-  assert.deepEqual(await f.request(`/views?projectId=${projectId}`), [view]);
+  const restored = await f.request<SavedView[]>(`/views?projectId=${projectId}`);
+  assert.equal(restored.length, 2);
+  assert.deepEqual(restored.find(saved => saved.id === view.id), view);
+  assert.deepEqual(restored.find(saved => saved.id === missingView.id), missingView);
 });
 
 test('Jira multi-status saved views preserve original aliases while reviewing current workflow names', async t => {

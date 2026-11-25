@@ -55,7 +55,7 @@ type StatusClause = (BasicClause & { field: 'status'; operator: '=' | 'in' })
   | { field: 'status'; offset: number; branches: StatusClause[][] };
 type ComponentClause = (BasicClause & { field: 'component' }) | { field: 'component'; offset: number; branches: ComponentClause[][] };
 type PriorityClause = { offset: number; values: Token[] };
-type DueClause = { field: 'due'; offset: number; from?: string; to?: string };
+type DueClause = { field: 'due'; offset: number; from?: string; to?: string; presence?: 'empty' | 'set' };
 type CurrentUserClause = { field: 'assignee' | 'reporter'; offset: number; operator: 'current-user' };
 type ScalarCondition = { id: string | null; label: string };
 type Clause = BasicClause | StatusClause | ComponentClause | DueClause | CurrentUserClause;
@@ -278,9 +278,17 @@ class QueryParser {
   }
 
   private dueClause(offset: number): DueClause {
+    const clause: DueClause = { field: 'due', offset };
+    if (this.consume('is')) {
+      const presence = this.consume('not') ? 'set' : 'empty';
+      if (!this.consume('empty') && !this.consume('null')) {
+        throw new JiraViewQueryError('목표 마감일이 비어 있는지 확인하려면 EMPTY 또는 NULL을 사용해 주세요.', this.current().offset);
+      }
+      return { ...clause, presence };
+    }
     const operator = this.current();
     if (operator.kind !== 'symbol' || !dueOperators.includes(operator.value)) {
-      throw new JiraViewQueryError('목표 마감일에는 =, <, <=, >, >= 중 하나를 사용해 주세요.', operator.offset);
+      throw new JiraViewQueryError('목표 마감일에는 =, <, <=, >, >=, IS, IS NOT을 사용할 수 있습니다.', operator.offset);
     }
     this.index++;
     const dateMessage = '목표 마감일은 따옴표로 감싼 유효한 YYYY-MM-DD 또는 YYYY/MM/DD 날짜여야 합니다.';
@@ -288,7 +296,6 @@ class QueryParser {
     const date = value.value.replace(/^(\d{4})\/(\d{2})\/(\d{2})$/u, '$1-$2-$3');
     if (value.kind !== 'quoted' || !isCalendarDate(date)) throw new JiraViewQueryError(dateMessage, value.offset);
 
-    const clause: DueClause = { field: 'due', offset };
     switch (operator.value) {
       case '=': return { ...clause, from: date, to: date };
       case '>=': return { ...clause, from: date };
@@ -464,13 +471,20 @@ function dueFilter(clauses: readonly DueClause[]) {
   if (!clauses.length) return undefined;
   let from: string | undefined;
   let to: string | undefined;
+  let presence: DueClause['presence'];
   for (const clause of clauses) {
+    if (clause.presence && presence && clause.presence !== presence) {
+      throw new JiraViewQueryError('목표 마감일 입력 여부 조건이 서로 충돌합니다.', clause.offset);
+    }
+    presence = clause.presence ?? presence;
     if (clause.from && (!from || from < clause.from)) from = clause.from;
     if (clause.to && (!to || to > clause.to)) to = clause.to;
-    if (from && to && from > to) {
+    if ((presence === 'empty' && (from || to)) || (from && to && from > to)) {
       throw new JiraViewQueryError('목표 마감일 조건에 공통으로 일치할 수 있는 날짜가 없습니다.', clause.offset);
     }
   }
+  if (!from && !to) return presence === 'empty' ? { dates: { mode: 'due_missing' as const }, label: '목표 마감일 없음' }
+    : { dates: { mode: 'due_set' as const }, label: '목표 마감일 있음' };
   const range = from && to ? `${from} ~ ${to}` : from ? `${from}부터` : `${to}까지`;
   return { dates: { mode: 'due' as const, ...(from ? { from } : {}), ...(to ? { to } : {}) }, label: `${fieldLabels.due} · ${range}` };
 }

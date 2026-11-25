@@ -83,7 +83,7 @@ curl --fail-with-body \
 
 ## 원본 주소로 업무와 문서 찾기
 
-브라우저의 `GET /api/atlassian-links/resolve?url=…`은 원본 주소 한 개를 받아 `{targets: [{targetType, targetId}]}`를 반환한다. 붙여넣은 주소는 클라이언트에서 정규화한다. Confluence Server·Data Center의 표준 짧은 주소 `/x/…`은 같은 서버와 설치 경로의 `viewpage.action?pageId=…` 주소로 변환한다. `viewpage.action`은 검색에 필요한 `pageId`를 유지하며 추적 쿼리·프래그먼트를 검색 주소에서 제거한다. 짧은 주소에 `pageId`가 함께 있으면 디코딩한 ID 하나와 일치해야 한다. 지원 형식에 맞지 않는 요청은 `400`을 반환한다.
+브라우저의 `GET /api/atlassian-links/resolve?url=…`은 원본 주소 한 개를 받아 `{targets: [{targetType, targetId}]}`를 반환한다. 붙여넣은 주소는 클라이언트에서 정규화한다. Confluence Server·Data Center의 표준 짧은 주소 `/x/…`과 예전 숫자 경로 `/pages/{id}`, `/pages/{id}/{title}`은 같은 서버와 설치 경로의 `viewpage.action?pageId=…` 주소로 변환한다. 검색 주소에 필요한 `pageId`를 유지하고 추적 쿼리와 일반 프래그먼트를 제거한다. 원래 주소에 `pageId`가 함께 있으면 경로에서 확인한 ID 하나와 일치해야 한다. 지원 형식에 맞지 않는 요청은 `400`을 반환한다.
 
 같은 스킴·호스트·포트·설치 경로의 Jira 업무 키 또는 Confluence 페이지 ID를 저장된 링크에서 찾는다. `/display/…` 주소는 직접 저장한 제목 링크와, 같은 원본 패키지에서 제목·공간을 확인한 이관 문서를 찾는다. 이관 문서는 영수증의 서버·설치 경로, 보관된 문서와 원본의 연결, 현재 저장된 숫자 페이지 ID 링크를 함께 대조한다. 활성 업무·문서를 한 번씩 반환하며 같은 주소에 연결된 별도 대상은 각각 반환한다. 원본 서버에 접속하지 않는다. `GET /api/search?q=…`에 유효한 원본 주소를 보내면 같은 대상을 기존 `{issues, documents}` 형식으로 반환한다.
 
@@ -638,7 +638,7 @@ ZIP 안의 HTML 표는 셀의 범위가 격자와 일치하고 지원하는 마�
 
 최대 4,000자의 검색식에서 `AND`와 괄호를 사용할 수 있다. `project`·`status`·`issuetype`·`assignee`·`reporter`는 `=`로 비교하고, 담당자와 요청자는 `IS EMPTY`로 미지정을 확인한다. `assignee = currentUser()`와 `reporter = currentUser()`는 **현재 사용자** 조건으로 옮긴다. 미리보기는 요청한 작업자의 업무로 계산하며, 저장한 보기는 열람할 때의 작업자로 다시 계산한다. `status IN (...)`이나 상태 조건만 이어진 `OR`은 여러 상태를 고른 보기로 변환한다. `AND`로 연결된 상태 조건은 서로 겹치는 상태를 선택한다. 현재 상태를 확인할 수 없거나 겹치는 값이 없으면 오류를 표시한다. 라벨에는 `=`, `IN`, `!=`, `NOT IN`, `IS EMPTY`, `IS NOT EMPTY`를 사용할 수 있다. `labels !=`와 `labels NOT IN`은 라벨이 있는 업무에서 비교한다. 서로 다른 필드를 잇는 `OR`, 이 범위 밖의 함수와 연산자, 원본 이력과 텍스트 검색은 변환 오류로 표시한다. [JQL 필드](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html) · [Atlassian JQL 연산자](https://confluence.atlassian.com/jiracoreserver/advanced-searching-operators-reference-939937721.html) · [Atlassian 빈 값 비교 안내](https://support.atlassian.com/jira/kb/why-my-jql-search-with-not-in-or-not-equals-operators-has-issues-missing/)
 
-`due`와 `dueDate`는 따옴표로 감싼 `YYYY-MM-DD` 또는 `YYYY/MM/DD` 날짜를 `=`, `<`, `<=`, `>`, `>=`로 비교한다. `AND`로 연결한 조건들의 공통 범위를 `filters.planning.dates`의 `{mode:'due',from?,to?}`로 반환한다. 양 끝은 포함하며 `<`와 `>`의 경계는 하루 앞뒤로 옮긴다. 목표 마감일이 없는 업무는 결과에서 빠진다. 비어 있는 교집합, 상대 날짜나 날짜 함수, 날짜 집합과 빈 값 비교는 변환 오류로 표시한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
+`due`와 `dueDate`는 따옴표로 감싼 `YYYY-MM-DD` 또는 `YYYY/MM/DD` 날짜를 `=`, `<`, `<=`, `>`, `>=`로 비교한다. `AND`로 연결한 조건들의 공통 범위를 `filters.planning.dates`의 `{mode:'due',from?,to?}`로 반환한다. 양 끝은 포함하며 `<`와 `>`의 경계는 하루 앞뒤로 옮긴다. `IS EMPTY`와 `IS NOT EMPTY`는 각각 `{mode:'due_missing'}`과 `{mode:'due_set'}`으로 저장하며 `NULL`도 받는다. 입력 여부의 교집합이 비어 있거나 상대 날짜, 날짜 함수, 날짜 집합을 쓰면 변환 오류로 표시한다. [Atlassian JQL 마감일](https://confluence.atlassian.com/jirasoftwareserver101/advanced-searching-fields-reference-1455427012.html#Advancedsearching-fieldsreference-Due)
 
 `priority`는 `=`와 `IN`을 지원하며 `AND`의 교집합을 원본 값에서 먼저 계산한다. 이관 기록으로 한 Jira 프로젝트를 확인하면 같은 패키지의 옵션과 업무에 남은 ID·이름을 대조한다. CSV에 이름만 있으면 확인한 같은 이름의 범위를 사용할 수 있다. 숫자 ID는 해당 ID가 확인된 원본 값을 선택한다. 원본 이름이 여러 ID를 가리키거나 최종 조건이 같은 Teamspace 우선순위에 대응하는 원본 값 일부만 선택하면 변환 오류로 표시한다. 이관한 업무의 현재 값이 확인된 원본 매핑에서 어긋나거나 확인할 근거가 없는 업무가 선택한 우선순위에 있으면 저장을 보류한다. Jira 이관 연결이 없는 프로젝트에서는 Teamspace의 우선순위 코드와 한글 이름을 사용한다. 저장한 `filters.priorities`는 이후 새 티켓도 현재 값으로 조회한다. [Atlassian JQL 우선순위](https://confluence.atlassian.com/jiracoreserver/advanced-searching-fields-reference-939937719.html#Advancedsearching-fieldsreference-Priority)
 
@@ -1534,7 +1534,7 @@ Jira 원본 이관 미리보기와 영수증에는 `worklogs` 및 `archivedWorkl
 
 `cycleId`, `moduleId`, `releaseId`를 생략하면 해당 계획의 조건을 적용하지 않는다. `null`은 해당 종류의 계획에 연결되지 않은 업무를 뜻한다. ID는 같은 프로젝트의 같은 종류 계획을 가리킨다. 보관된 계획도 계속 사용할 수 있다. 계획을 삭제하려면 해당 ID를 사용하는 보기를 수정하거나 삭제해야 한다.
 
-`dates.mode`가 `planned`이면 유효한 시작·종료일을 모두 가진 업무이고 `needs_dates`이면 날짜 확인이 필요한 업무다. `overlap`은 유효한 계획 기간이 지정 범위와 겹치는 업무를 조회하고 `due`는 목표 마감일을 조회한다. 두 범위 모드에는 YYYY-MM-DD 형식의 `from`·`to` 중 최소 하나를 보내고, 두 경계를 보낸 경우 `from`이 `to`보다 늦을 수 없다. 경계 날짜를 포함한다. 보기 수정 요청에서 `filters.planning`이 빠지면 저장된 계획 조건을 유지한다. 조건을 지우려면 빈 객체를 보낸다. 자체 백업 형식 47은 저장 조건과 계획 ID를 함께 복원한다.
+`dates.mode`가 `planned`이면 유효한 시작·종료일을 모두 가진 업무이고 `needs_dates`이면 날짜 확인이 필요한 업무다. `overlap`은 유효한 계획 기간이 지정 범위와 겹치는 업무를 조회하고 `due`는 목표 마감일을 조회한다. 두 범위 모드에는 YYYY-MM-DD 형식의 `from`·`to` 중 최소 하나를 보내고, 두 경계를 보낸 경우 `from`이 `to`보다 늦을 수 없다. 경계 날짜를 포함한다. `due_set`과 `due_missing`은 유효한 목표 마감일이 있거나 없는 업무를 각각 고르며 경계 값을 생략한다. 보기 수정 요청에서 `filters.planning`이 빠지면 저장된 계획 조건을 유지한다. 조건을 지우려면 빈 객체를 보낸다. 마감일 입력 여부 조건은 자체 백업 형식 124에서 복원한다.
 
 ## 공유 보기의 GitLab 조건
 

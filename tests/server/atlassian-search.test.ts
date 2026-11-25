@@ -69,6 +69,10 @@ test('numeric Confluence locators match across page URL forms without rounding l
   assert.equal(modern.url, `${base}/spaces/SPACE/pages/${pageId}/Renamed%20page`);
   assert.ok(sameAtlassianSearchAddress(legacy, modern));
   assert.ok(sameAtlassianSearchAddress(modern, address(`${base}/spaces/OTHER/pages/${pageId}`)));
+  for (const path of [`/pages/${pageId}`, `/pages/${pageId}/Renamed%20page/?pageId=${pageId}&tracking=discard#section`]) {
+    assert.deepEqual(address(`${base}${path}`), legacy);
+  }
+  assert.equal(sameAtlassianSearchAddress(legacy, address(`https://kb.example.test/other/pages/${pageId}`)), false);
   assert.equal(sameAtlassianSearchAddress(legacy, address(`${base}/spaces/SPACE/pages/90071992547409931235`)), false);
   assert.equal(sameAtlassianSearchAddress(legacy, address(
     `https://kb.example.test/other/spaces/SPACE/pages/${pageId}/Renamed%20page`,
@@ -124,6 +128,7 @@ test('Confluence comment permalinks preserve one exact selector across canonical
     [`${display}?tracking=discard#comment-${commentId}`, `${display}?focusedCommentId=${commentId}`],
     [`${display}?focusedCommentId=${commentId}#heading`, `${display}?focusedCommentId=${commentId}`],
     [`${modern}?focusedCommentId=${commentId}`, `${modern}?focusedCommentId=${commentId}`],
+    [`${base}/pages/42/Release%20notes#comment-${commentId}`, `${numeric}&focusedCommentId=${commentId}`],
     [`${base}/x/ZIAB#%63omment%2D${commentId}`, `${base}/pages/viewpage.action?pageId=98404&focusedCommentId=${commentId}`],
   ]) {
     const parsed = address(input);
@@ -171,6 +176,13 @@ test('malformed source addresses never become canonical lookup input', () => {
     `${base}/wiki/display/PLAN/title\ud800`,
     `${base}/wiki/pages/viewpage.action?pageId=42&pageId=42`,
     `${base}/wiki/pages/viewpage.action?pageId=0`,
+    `${base}/wiki/pages/42/Title?pageId=43`,
+    `${base}/wiki/pages/42?pageId=42&pageId=42`,
+    `${base}/wiki/pages/42?focusedCommentId=9#comment-10`,
+    `${base}/wiki/%2e/pages/42/Title`,
+    `${base}/wiki/pages/42/title%2Fother`,
+    `${base}/wiki/pages/42/title%00`,
+    `${base}/wiki/pages/42/title%GG`,
     `${base}/wiki/spaces/PLAN/pages/42?pageId=43`,
     `${base}/wiki/spaces/PLAN/pages/42?pageId=42&pageId=42`,
     `${base}/wiki/display/PLAN/Title?pageId=42`,

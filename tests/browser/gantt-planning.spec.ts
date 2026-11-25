@@ -291,3 +291,77 @@ test('간트 초안의 작업자 탐색을 보호하고 외부 갱신 후 날짜
     expect((await snapshot(request)).issues.find(value => value.id === first.id)?.description).toBe('새로고침에서 보이는 다른 변경');
   } finally { await cleanup(request, [first.id, second.id]); }
 });
+
+test('자동 일정 응답이 유실되면 같은 제안의 저장 결과와 되돌리기를 확인한다', async ({ page, request }) => {
+  const { projects: [project] } = await snapshot(request);
+  const monday = nextMonday(), title = `자동 일정 결과 확인 ${Date.now()}`;
+  const pending = await issue(request, project.id, title, null, null);
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/gantt`);
+    await page.getByLabel('간트 업무 검색').fill(title);
+    await page.getByRole('checkbox', { name: `${pending.key} 선택`, exact: true }).check();
+    await page.getByRole('button', { name: '자동 일정', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '자동 일정 제안', exact: true });
+    await dialog.getByRole('checkbox', { name: '날짜가 없는 업무에 명시한 기간 사용', exact: true }).check();
+    const anchor = dialog.getByLabel('자동 일정 기준 시작일', { exact: true });
+    const duration = dialog.getByLabel('자동 일정 기본 기간', { exact: true });
+    await anchor.fill(monday);
+    await duration.fill('3');
+    const previewResponse = page.waitForResponse(response => response.url().endsWith('/api/schedule/auto-preview'));
+    await dialog.getByRole('button', { name: '자동 일정 미리보기', exact: true }).click();
+    const proposal = await (await previewResponse).json() as AutomaticSchedulePreview;
+    expect(proposal.changes).toMatchObject([{ id: pending.id, toStart: monday, toEnd: addDays(monday, 2) }]);
+
+    const attempts: unknown[] = [];
+    let undoId: string | undefined;
+    await page.route('**/api/schedule/auto-apply', async route => {
+      attempts.push(route.request().postDataJSON());
+      if (attempts.length === 2) {
+        const applied = await route.fetch();
+        expect(applied.ok(), await applied.text()).toBeTruthy();
+        undoId = (await applied.json() as { undoId: string }).undoId;
+      }
+      await route.abort('connectionreset');
+    });
+    const apply = dialog.getByRole('button', { name: '자동 일정 적용', exact: true });
+    const recover = dialog.getByRole('button', { name: '적용 결과 다시 확인', exact: true });
+    const resultPath = `/api/schedule/auto-result/${encodeURIComponent(proposal.previewId)}`;
+    const row = async () => (await snapshot(request)).issues.find(value => value.id === pending.id);
+    async function confirmResult() {
+      const response = page.waitForResponse(value => new URL(value.url()).pathname === resultPath && value.request().method() === 'GET');
+      await recover.click();
+      const result = await response;
+      expect(result.ok(), await result.text()).toBeTruthy();
+      return result.json();
+    }
+
+    await apply.click();
+    await expect(recover).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '조건 다시 입력', exact: true })).toBeDisabled();
+    await expect(anchor).toHaveValue(monday);
+    await expect(duration).toHaveValue('3');
+    await expect(dialog).toContainText('선택한 업무 1개');
+    expect(await confirmResult()).toEqual({ applied: false });
+    await expect(dialog.getByRole('status')).toContainText('같은 제안을 다시 적용할 수 있습니다');
+    expect(await row()).toMatchObject({ startDate: null, endDate: null, version: pending.version });
+
+    await apply.click();
+    await expect(recover).toBeVisible();
+    expect(await row()).toMatchObject({ startDate: monday, endDate: addDays(monday, 2), version: pending.version + 1 });
+    await page.route('**/api/workspace', route => route.fulfill({ status: 503, json: { error: 'Synthetic reload failure' } }), { times: 1 });
+    expect(await confirmResult()).toMatchObject({ undoId, updated: [{ id: pending.id, version: pending.version + 1 }] });
+    expect(undoId).toBeTruthy();
+    await expect(dialog.getByRole('alert')).toContainText('자동 일정을 저장했습니다');
+    await dialog.getByRole('button', { name: '간트 다시 불러오기', exact: true }).click();
+    expect(attempts).toEqual([{ previewId: proposal.previewId }, { previewId: proposal.previewId }]);
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByLabel(`${pending.key} 종료일`, { exact: true })).toHaveValue(addDays(monday, 2));
+
+    const undoRequest = page.waitForRequest(value => new URL(value.url()).pathname === '/api/schedule/undo' && value.method() === 'POST');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    expect((await undoRequest).postDataJSON()).toEqual({ undoId });
+    await expect(page.getByLabel(`${pending.key} 종료일`, { exact: true })).toHaveValue('');
+    expect(await row()).toMatchObject({ startDate: null, endDate: null, version: pending.version + 2 });
+  } finally { await cleanup(request, [pending.id]); }
+});

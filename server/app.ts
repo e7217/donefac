@@ -3232,6 +3232,9 @@ export function createApp(options: {
         'kind' in view.filters.reporter && view.filters.reporter.kind === 'current-user'))
     )) fail('현재 사용자 조건을 포함한 보기는 schemaVersion 123이 필요합니다.');
     const importedViews=savedViews.validateImport(data.schemaVersion>=3?data.savedViews:[],data.projects,data.users,importedSchemas,importedPlanning.items);
+    if (data.schemaVersion < 124 && importedViews.some(({ filters }) =>
+      filters.planning?.dates?.mode === 'due_set' || filters.planning?.dates?.mode === 'due_missing'
+    )) fail('목표 마감일 입력 여부 조건을 포함한 보기는 schemaVersion 124가 필요합니다.');
     if (data.schemaVersion < 92 && data.savedFieldBreakdowns !== undefined &&
         (!Array.isArray(data.savedFieldBreakdowns) || data.savedFieldBreakdowns.length)) {
       fail('저장된 필드 집계가 포함된 백업은 schemaVersion 92가 필요합니다.');

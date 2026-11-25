@@ -222,8 +222,8 @@ function parseDateFilter(value: unknown): IssueViewDateFilter {
   const mode = Object.hasOwn(filter, 'mode') ? filter.mode : undefined;
   const hasFrom = Object.hasOwn(filter, 'from');
   const hasTo = Object.hasOwn(filter, 'to');
-  if (mode === 'planned' || mode === 'needs_dates') {
-    if (hasFrom || hasTo) throw new IssueViewPlanningFilterError('일정 입력 여부 조건에 날짜 범위를 지정할 수 없습니다.');
+  if (mode === 'planned' || mode === 'needs_dates' || mode === 'due_set' || mode === 'due_missing') {
+    if (hasFrom || hasTo) throw new IssueViewPlanningFilterError('날짜 입력 여부 조건에 날짜 범위를 지정할 수 없습니다.');
     return { mode };
   }
   if (mode !== 'overlap' && mode !== 'due') throw new IssueViewPlanningFilterError('날짜 조건 종류를 확인해 주세요.');
@@ -256,6 +256,8 @@ export function parseIssueViewPlanningFilter(value: unknown, projectId: string, 
 }
 
 function matchesDateFilter(issue: Issue, filter: IssueViewDateFilter): boolean {
+  if (filter.mode === 'due_set') return isCalendarDate(issue.dueDate);
+  if (filter.mode === 'due_missing') return !isCalendarDate(issue.dueDate);
   if (filter.mode === 'due') {
     const { dueDate } = issue;
     return isCalendarDate(dueDate) && (!filter.from || dueDate >= filter.from) && (!filter.to || dueDate <= filter.to);

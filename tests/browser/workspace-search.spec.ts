@@ -492,6 +492,25 @@ test('360px에서 이관한 Confluence 문서의 제목을 바꾼 뒤에도 원�
     await expect(page.locator('[aria-label="문서 본문"]')).toContainText(body);
     await page.goBack();
     await expect(result.document(renamed)).toBeVisible();
+
+    const numericPath = `${sourceBase}/pages/820/${encodeURIComponent(sourceTitle)}`;
+    await page.getByRole('button', { name: '통합 검색', exact: true }).click();
+    await quick.getByRole('textbox', { name: '통합 검색어', exact: true }).fill(`${numericPath}?tracking=synthetic-private#section`);
+    await expect(quick.getByText(currentTitle, { exact: true })).toBeVisible();
+    await quick.getByRole('button', { name: '전체 검색 결과', exact: true }).click();
+    await expect.poll(() => route(page)).toEqual({ path: `#/${projectId}/search`, query: { q: numeric } });
+    await expect(result.rows).toHaveCount(1);
+    await page.reload();
+    await expect(result.document(renamed)).toBeVisible();
+
+    await result.term.fill(`${sourceBase}/elsewhere/pages/820`);
+    await result.submit.click();
+    await expect(result.results).toContainText('검색 결과 0건');
+    await result.term.fill(`${sourceBase}/pages/820`);
+    await result.submit.click();
+    await result.document(renamed).click();
+    await expect.poll(() => route(page)).toEqual({ path: `#/${projectId}/documents/${documentId}`, query: {} });
+    await expect(page.getByRole('textbox', { name: '문서 제목', exact: true })).toHaveValue(currentTitle);
     expect(outgoing).toEqual([]);
   } finally {
     if (documentId) {

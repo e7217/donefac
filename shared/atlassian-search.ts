@@ -2,6 +2,7 @@ import {
   atlassianWebUrl, AtlassianReadError, isConfluencePageId, MAX_ATLASSIAN_LINK_URL_LENGTH, parseAtlassianLink,
   type AtlassianLink, type ParsedAtlassianLink,
 } from './atlassian-links.js';
+import { legacyConfluencePagePath } from './confluence-migration-address.js';
 
 export type AtlassianSearchAddress = ParsedAtlassianLink & { commentId?: string };
 export type AtlassianSearchTarget = Pick<AtlassianLink, 'targetType' | 'targetId'> & { commentId?: string };
@@ -50,23 +51,29 @@ export function parseAtlassianSearchInput(input: string): AtlassianSearchAddress
   const url = atlassianWebUrl(input);
   if (!url || !input.isWellFormed() || !safeSearchPath(input)) return null;
   for (const product of ['jira', 'confluence'] as const) {
+    let parsed: ParsedAtlassianLink;
     try {
-      const parsed = parseAtlassianLink(product, input);
-      if (parsed.product === 'confluence') {
-        const pageIds = url.searchParams.getAll('pageId');
-        if (pageIds.length && (pageIds.length !== 1 || !('pageId' in parsed) || pageIds[0] !== parsed.pageId)) return null;
-      }
-      const commentId = sourceCommentId(url, parsed.product);
-      if (commentId === null) return null;
-      if (commentId !== undefined) {
-        const canonical = new URL(parsed.url);
-        canonical.searchParams.set(commentParam, commentId);
-        return canonical.href.length <= MAX_ATLASSIAN_LINK_URL_LENGTH ? { ...parsed, commentId, url: canonical.href } : null;
-      }
-      return parsed;
+      parsed = parseAtlassianLink(product, input);
     } catch (error) {
       if (!(error instanceof AtlassianReadError)) throw error;
+      const legacy = product === 'confluence' ? legacyConfluencePagePath(url.pathname) : null;
+      if (!legacy) continue;
+      const canonical = `${url.origin}${legacy.contextPath}/pages/viewpage.action?pageId=${legacy.pageId}`;
+      if (canonical.length > MAX_ATLASSIAN_LINK_URL_LENGTH) return null;
+      parsed = { ...legacy, product: 'confluence', origin: url.origin, url: canonical };
     }
+    if (parsed.product === 'confluence') {
+      const pageIds = url.searchParams.getAll('pageId');
+      if (pageIds.length && (pageIds.length !== 1 || !('pageId' in parsed) || pageIds[0] !== parsed.pageId)) return null;
+    }
+    const commentId = sourceCommentId(url, parsed.product);
+    if (commentId === null) return null;
+    if (commentId !== undefined) {
+      const canonical = new URL(parsed.url);
+      canonical.searchParams.set(commentParam, commentId);
+      return canonical.href.length <= MAX_ATLASSIAN_LINK_URL_LENGTH ? { ...parsed, commentId, url: canonical.href } : null;
+    }
+    return parsed;
   }
   return null;
 }

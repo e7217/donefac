@@ -9,6 +9,8 @@ export const ISSUE_FILTER_DATE_LABELS = {
   needs_dates: '일정 미정',
   overlap: '계획 기간 겹침',
   due: '목표 마감일 범위',
+  due_set: '목표 마감일 있음',
+  due_missing: '목표 마감일 없음',
 } as const;
 
 export function issuePlanningFilterLabels(filter: IssueViewPlanningFilter | undefined, planningItems: readonly PlanningItem[]): string[] {

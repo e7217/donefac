@@ -40,14 +40,14 @@ export function safePagePath(value: string): boolean {
   }));
 }
 
-function legacyConfluencePage(url: URL): ConfluenceMigrationPageAddress | null {
-  const match = /^(.*)\/pages\/([^/]+)(?:\/([^/]+))?$/u.exec(url.pathname.replace(/\/+$/u, ''));
+export function legacyConfluencePagePath(pathname: string): { contextPath: string; pageId: string } | null {
+  const match = /^(.*)\/pages\/([^/]+)(?:\/([^/]+))?$/u.exec(pathname.replace(/\/+$/u, ''));
   if (!match || /\/spaces\/[^/]+$/u.test(match[1])) return null;
   const contextPath = atlassianContextPath(match[1]);
-  const sourceId = decodePagePart(match[2]);
+  const pageId = decodePagePart(match[2]);
   const slug = match[3] === undefined ? undefined : decodePagePart(match[3]);
-  if (contextPath === undefined || !isConfluencePageId(sourceId) || (match[3] !== undefined && (!slug || slug.includes('/')))) return null;
-  return { origin: url.origin, contextPath, identity: { sourceId } };
+  if (contextPath === undefined || !isConfluencePageId(pageId) || (match[3] !== undefined && (!slug || slug.includes('/')))) return null;
+  return { contextPath, pageId };
 }
 
 export function confluenceMigrationPageAddress(value: string, base?: MigrationOriginBase): ConfluenceMigrationPageAddress | null {
@@ -78,7 +78,8 @@ export function confluenceMigrationPageAddress(value: string, base?: MigrationOr
     result = { origin: parsed.origin, contextPath: parsed.contextPath, identity };
   } catch (error) {
     if (!(error instanceof AtlassianReadError)) throw error;
-    result = legacyConfluencePage(url);
+    const legacy = legacyConfluencePagePath(url.pathname);
+    result = legacy ? { origin: url.origin, contextPath: legacy.contextPath, identity: { sourceId: legacy.pageId } } : null;
   }
   if (!result || (pageIds.length && pageIds[0] !== result.identity.sourceId) ||
       (base && (result.origin !== base.origin || result.contextPath !== base.contextPath))) return null;

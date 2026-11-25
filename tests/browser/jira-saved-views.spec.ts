@@ -202,6 +202,59 @@ test('360px에서 Jira 원래 프로젝트와 매핑한 검색 조건을 공유 
   }
 });
 
+test('Jira 마감일 미입력 보기를 공유하고 계획 날짜와 마감일을 각각 판단한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const token = `due-${randomUUID().slice(0, 8)}`;
+  const { projects: [project] } = await json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const issues: Issue[] = [];
+  let view: SavedView | undefined;
+  async function makeIssue(title: string, dueDate: string | null) {
+    const issue = await json<Issue>(await request.post('/api/issues', { data: {
+      projectId: project.id, title, labels: [token], startDate: '2026-11-27', endDate: '2026-11-27', dueDate,
+    } }), 201);
+    issues.push(issue);
+    return issue;
+  }
+  try {
+    const open = await makeIssue(`마감일 미입력 ${token}`, null);
+    const dated = await makeIssue(`마감일 입력 ${token}`, '2026-12-01');
+    await page.goto(`/#/${project.id}/issues`);
+    await page.getByRole('button', { name: 'Jira 필터 옮기기', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Jira 필터 옮기기', exact: true });
+    const jql = `project = ${project.key} AND labels = "${token}" AND due IS EMPTY`;
+    await dialog.getByLabel('Jira 검색식 (JQL)', { exact: true }).fill(jql);
+    const preview = page.waitForResponse(response => response.url().endsWith('/api/views/jira/preview'));
+    await dialog.getByRole('button', { name: '조건 미리보기', exact: true }).click();
+    const result = await json<JiraSavedViewPreview>(await preview);
+    expect(result.issues.map(issue => issue.id)).toEqual([open.id]);
+    await expect(dialog.getByRole('region', { name: 'Jira 필터 미리보기', exact: true })).toContainText('목표 마감일 없음');
+    await dialog.getByLabel('보기 이름', { exact: true }).fill(`마감일 확인 ${token}`);
+    const saved = page.waitForResponse(response => response.url().endsWith('/api/views/jira/import'));
+    await dialog.getByRole('button', { name: '공유 보기 저장', exact: true }).click();
+    view = await json<SavedView>(await saved, 201);
+    expect(view.filters.planning?.dates).toEqual({ mode: 'due_missing' });
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole('button', { name: '간트에서 열기', exact: true }).click();
+    const chart = page.getByRole('region', { name: '간트 차트', exact: true });
+    await expect(chart.locator(`[data-issue-id="${open.id}"]`)).toBeVisible();
+    await expect(chart.locator(`[data-issue-id="${dated.id}"]`)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '간트에 적용된 계획·일정 조건' })).toContainText('목표 마감일 없음');
+    expect(new URL(page.url()).hash).toContain(`savedView=${view.id}`);
+
+    await json<Issue>(await request.patch(`/api/issues/${open.id}`, { data: { expectedVersion: open.version, dueDate: '2026-12-01' } }));
+    await page.reload();
+    await expect(chart.locator(`[data-issue-id="${open.id}"]`)).toHaveCount(0);
+    await expect(page.getByRole('list', { name: '간트에 적용된 계획·일정 조건' })).toContainText('목표 마감일 없음');
+  } finally {
+    if (view) await request.delete(`/api/views/${view.id}?expectedVersion=${view.version}`);
+    for (const issue of issues) {
+      const response = await request.delete(`/api/issues/${issue.id}`);
+      if (response.ok()) await request.delete(`/api/trash/${(await response.json() as { trashEntryId: string }).trashEntryId}`);
+    }
+  }
+});
+
 test('360px에서 Jira 우선순위 일부만 합쳐지는 조건을 막고 전체 그룹을 업무와 간트의 공유 보기로 연다', async ({ page, request }) => {
   test.setTimeout(85_000);
   const suffix = randomUUID().slice(0, 7).toUpperCase();
