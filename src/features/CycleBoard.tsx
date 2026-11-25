@@ -7,6 +7,7 @@ import { orderProjectIssues } from '../../shared/issue-view';
 import { PRIORITY, type CycleBoardMoveInput, type CycleBoardMoveResult, type FeatureProps, type Issue, type PlanningItem } from '../../shared/types';
 import { statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
+import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CycleProgress } from './CycleProgress';
@@ -22,6 +23,7 @@ type Props = FeatureProps & {
   onOpenPlanning: (id: string) => void;
   onOpenIssues: () => void;
   onOpenIssueSchedule?: (id: string, planId?: string) => boolean;
+  onOpenIssueForReview?: OpenIssueForReview;
 };
 type CycleRef = CycleBoardMoveInput['sourceCycle'];
 type MoveTarget = Pick<CycleBoardMoveInput, 'anchorId' | 'position'> & { cycleId: string | null };
@@ -48,7 +50,7 @@ export function CycleBoard(props: Props) {
 }
 
 function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notify,
-  initialCycleId, query, onQueryChange, onChangeCycle, onOpenPlanning, onOpenIssues, onOpenIssueSchedule }: Props) {
+  initialCycleId, query, onQueryChange, onChangeCycle, onOpenPlanning, onOpenIssues, onOpenIssueSchedule, onOpenIssueForReview }: Props) {
   const uid = useId();
   const [moveIssue, setMoveIssue] = useState<Issue | null>(null);
   const [creation, setCreation] = useState<Creation | null>(null);
@@ -84,6 +86,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const writable = Boolean(order && actorId && !pending && !hold && !creation);
   const terms = query.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
   const matchesSearch = (issue: Issue) => terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
+  const lanes = [{ items: backlog, targetCycle: undefined }, ...(cycle ? [{ items: members, targetCycle: cycle }] : [])]
+    .map(lane => ({ ...lane, visible: lane.items.filter(matchesSearch) }));
   const created = feedback?.created && (issues.find(issue => issue.id === feedback.created?.id) ?? feedback.created);
   const createdMatchesSearch = created && matchesSearch(created);
   const createdInLane = created && (cycleIdOf(created) === null || cycleIdOf(created) === cycleId);
@@ -170,6 +174,12 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     focusTarget.current = issue.id;
     onQueryChange('');
     setFeedback({ text: `${issue.key} 업무를 만들었습니다.` });
+  }
+
+  function reviewIssue(issue: Issue, opener: HTMLButtonElement) {
+    if (!onOpenIssueForReview) { openIssue(issue.id); return; }
+    const issueIds = lanes.flatMap(lane => lane.visible.map(item => item.id));
+    onOpenIssueForReview(issue.id, { issueIds, opener, fallback: searchInput.current });
   }
 
   function keep(value: Hold | null) {
@@ -357,10 +367,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     </div>}
     {cycle && <CycleProgress cycle={cycle} actorId={actorId} data={data} projectId={projectId} openIssue={openIssue} />}
     <div className="cycle-board-lanes">
-      {[{ items: backlog, targetCycle: undefined }, ...(cycle ? [{ items: members, targetCycle: cycle }] : [])]
-        .map(({ items, targetCycle }) => {
+      {lanes.map(({ items, targetCycle, visible }) => {
           const targetId = targetCycle?.id ?? null;
-          const visible = items.filter(matchesSearch);
           const done = items.filter(item => statusMeta(data, projectId, item.status).category === 'done').length;
           const dateRange = targetCycle && [targetCycle.startDate, targetCycle.endDate].some(Boolean)
             ? `${targetCycle.startDate ?? '시작일 미정'} ~ ${targetCycle.endDate ?? '종료일 미정'}` : '일정 미정';
@@ -400,7 +408,8 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                 onDragStart={event => dragStart(event, issue)} onDragEnd={clearDrag}>
                 <div className="cycle-board-row-copy">
                   <button ref={button => { if (button) rowOpeners.current.set(issue.id, button); else rowOpeners.current.delete(issue.id); }}
-                    type="button" className="cycle-board-issue" aria-label={nameOf(issue)} onClick={() => openIssue(issue.id)}>
+                    type="button" className="cycle-board-issue" aria-label={nameOf(issue)} data-issue-review-id={issue.id}
+                    onClick={event => reviewIssue(issue, event.currentTarget)}>
                     <span>{issue.key}</span><span aria-hidden="true">·</span><strong>{issue.title}</strong>
                   </button>
                   <div className="cycle-board-row-meta">

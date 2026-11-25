@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Download, ExternalLink, RefreshCw, Rocket, Search } from 'lucide-react';
 import { isGitlabDeploymentEnvironment, MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH } from '../../shared/automation';
 import { gitlabObjectSha } from '../../shared/gitlab-links';
 import { GITLAB_DEPLOYMENT_STATES, type GitlabDeployment, type GitlabDeploymentFilters, type GitlabDeploymentPage, type GitlabDeploymentSyncAttempt,
   type GitlabDeploymentSyncResult, type GitlabLink, type GitlabSettings, type GitlabSyncStatus } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
+import { DEFAULT_GITLAB_DEPLOYMENT_VIEW, type ChangeGitlabDeploymentView, type GitlabDeploymentListing, type GitlabDeploymentView } from '../lib/gitlab-deployment-route';
 import { gitlabActivityUrl } from './GitlabActivity';
 import './gitlab-deployments.css';
 
@@ -24,7 +25,7 @@ const tierLabels: ReadonlyMap<string, string> = new Map([
   ['production', '프로덕션'], ['staging', '스테이징'], ['testing', '테스트'], ['development', '개발'], ['other', '기타'],
 ]);
 
-type DeploymentRequest = { scope: string; offset: number; filters: GitlabDeploymentFilters };
+type DeploymentRequest = { offset: number; filters: GitlabDeploymentFilters; refresh: number };
 type DeploymentResponse = { scope: string; request: DeploymentRequest; links?: readonly GitlabLink[] } &
   ({ page: GitlabDeploymentPage } | { error: string });
 type SyncState = { pending: boolean; receipt?: GitlabDeploymentSyncResult; previousCompletedAt?: string; error?: string };
@@ -185,7 +186,8 @@ function DeploymentSync({ repositoryId, settingsVersion, attempt, statusAvailabl
   </div>;
 }
 
-function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, onRefresh, renderSyncControl, review }: {
+function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading, description, empty, onRefresh, renderSyncControl, review,
+  listing, onChangeListing }: {
   path: string;
   repositoryId?: number;
   settingsVersion?: number;
@@ -196,32 +198,41 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
   onRefresh?: () => void;
   renderSyncControl?: (refreshPage: () => void) => ReactNode;
   review?: DeploymentReviewAction;
+  listing?: GitlabDeploymentListing;
+  onChangeListing?: (listing: GitlabDeploymentListing, mode: 'push' | 'replace') => void;
 }) {
   const scope = JSON.stringify([path, repositoryId, settingsVersion]);
-  const [request, setRequest] = useState<DeploymentRequest>({ scope, offset: 0, filters: {} });
-  const [environment, setEnvironment] = useState('');
+  const [localListing, setLocalListing] = useState<GitlabDeploymentListing>(DEFAULT_GITLAB_DEPLOYMENT_VIEW);
+  const { environment: appliedEnvironment, status: appliedStatus, offset } = listing ?? localListing;
+  const filters = useMemo<GitlabDeploymentFilters>(() => ({ environment: appliedEnvironment, status: appliedStatus }), [appliedEnvironment, appliedStatus]);
+  const [refresh, setRefresh] = useState(0);
+  const request = useMemo<DeploymentRequest>(() => ({ offset, filters, refresh }), [offset, filters, refresh]);
+  const [input, setInput] = useState({ source: filters, environment: appliedEnvironment ?? '', status: appliedStatus, invalid: false });
+  if (input.source !== filters) setInput({ source: filters, environment: appliedEnvironment ?? '', status: appliedStatus, invalid: false });
+  const { environment, status, invalid: environmentInvalid } = input;
   const environmentInput = useRef<HTMLInputElement>(null);
-  const [status, setStatus] = useState<GitlabDeploymentFilters['status']>();
-  const [environmentInvalid, setEnvironmentInvalid] = useState(false);
   const [response, setResponse] = useState<DeploymentResponse | null>(null);
-  const current = response?.scope === scope && response.request.filters === request.filters ? response : null;
+  const current = response?.scope === scope && response.request.filters === filters ? response : null;
   const pending = current?.request !== request || current.links !== links;
   const page = current && 'page' in current ? current.page : null;
   const error = !pending && current && 'error' in current ? current.error : '';
-  const requestedOffset = request.scope === scope ? request.offset : 0;
-  const filtered = Boolean(request.filters.environment || request.filters.status);
+  const filtered = Boolean(appliedEnvironment || appliedStatus);
+  const changeListing = useCallback((next: GitlabDeploymentListing, mode: 'push' | 'replace') => {
+    if (onChangeListing) onChangeListing(next, mode);
+    else setLocalListing(current => mode === 'push' || current === localListing ? next : current);
+  }, [localListing, onChangeListing]);
 
   useEffect(() => {
     const controller = new AbortController();
     const query = new URLSearchParams(repositoryId === undefined ? {} : { repositoryId: String(repositoryId) });
-    query.set('offset', String(requestedOffset));
+    query.set('offset', String(request.offset));
     if (request.filters.environment) query.set('environment', request.filters.environment);
     if (request.filters.status) query.set('status', request.filters.status);
     void api<GitlabDeploymentPage>(`${path}?${query}`, { cache: 'no-store', signal: controller.signal }).then(page => {
       if (controller.signal.aborted) return;
-      if (requestedOffset > 0 && page.offset === requestedOffset && page.offset >= page.total && page.limit > 0) {
+      if (request.offset > 0 && page.offset === request.offset && page.offset >= page.total && page.limit > 0) {
         const lastOffset = Math.max(0, Math.floor((page.total - 1) / page.limit) * page.limit);
-        setRequest(current => current === request ? { ...current, scope, offset: lastOffset } : current);
+        changeListing({ ...request.filters, offset: lastOffset }, 'replace');
         return;
       }
       setResponse({ scope, request, links, page });
@@ -231,16 +242,16 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
       }
     });
     return () => controller.abort();
-  }, [path, repositoryId, request, requestedOffset, links, scope]);
+  }, [path, repositoryId, request, links, scope, changeListing]);
 
   const previousOffset = page ? Math.max(0, page.offset - page.limit) : 0;
   const previousAvailable = Boolean(page?.offset);
   const nextAvailable = Boolean(page && page.offset + page.limit < page.total);
   function browse(offset: number) {
-    if (!pending) setRequest({ scope, offset, filters: request.filters });
+    if (!pending) changeListing({ ...filters, offset }, 'push');
   }
   function refreshPage() {
-    setRequest(current => ({ ...current, scope, offset: current.scope === scope ? current.offset : 0 }));
+    setRefresh(current => current + 1);
   }
 
   return <>
@@ -260,23 +271,22 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
       event.preventDefault();
       const name = environment.trim();
       if (name && !isGitlabDeploymentEnvironment(name)) {
-        setEnvironmentInvalid(true);
+        setInput({ ...input, invalid: true });
         return;
       }
-      setEnvironment(name);
-      setRequest({ scope, offset: 0, filters: { environment: name || undefined, status } });
+      setInput({ ...input, environment: name, invalid: false });
+      if (offset === 0 && appliedEnvironment === (name || undefined) && appliedStatus === status) refreshPage();
+      else changeListing({ offset: 0, environment: name || undefined, status }, 'push');
     }}>
       <label>배포 환경
         <input ref={environmentInput} className="field" type="search" value={environment} maxLength={MAX_GITLAB_DEPLOYMENT_ENVIRONMENT_LENGTH}
-          placeholder="환경 이름 일부" aria-invalid={environmentInvalid || undefined} onChange={event => {
-            setEnvironment(event.currentTarget.value);
-            setEnvironmentInvalid(false);
-          }} />
+          placeholder="환경 이름 일부" aria-invalid={environmentInvalid || undefined}
+          onChange={event => setInput({ ...input, environment: event.currentTarget.value, invalid: false })} />
       </label>
       <label>배포 상태
         <select className="field" value={status ?? ''} onChange={event => {
           const value = event.currentTarget.value;
-          setStatus(GITLAB_DEPLOYMENT_STATES.find(candidate => candidate === value));
+          setInput({ ...input, status: GITLAB_DEPLOYMENT_STATES.find(candidate => candidate === value) });
         }}>
           <option value="">전체 상태</option>
           {GITLAB_DEPLOYMENT_STATES.map(value => <option key={value} value={value}>{gitlabDeploymentStatusLabels[value]}</option>)}
@@ -284,10 +294,8 @@ function DeploymentHistory({ path, repositoryId, settingsVersion, links, heading
       </label>
       <button className="btn" type="submit"><Search size={14} aria-hidden="true" />배포 검색</button>
       {(filtered || environment || status) && <button className="btn btn-ghost" type="button" onClick={() => {
-        setEnvironment('');
-        setStatus(undefined);
-        setEnvironmentInvalid(false);
-        if (filtered) setRequest({ scope, offset: 0, filters: {} });
+        setInput({ source: filters, environment: '', status: undefined, invalid: false });
+        if (filtered) changeListing({ offset: 0 }, 'push');
         environmentInput.current?.focus();
       }}>배포 필터 초기화</button>}
       {environmentInvalid && <p className="error-text" role="alert">배포 환경 이름을 확인해 주세요.</p>}
@@ -325,22 +333,33 @@ export function IssueGitlabDeployments({ issueId, links, review }: {
   </section>;
 }
 
-export function RepositoryGitlabDeployments({ settings, syncStatus, onSyncSettled }: {
+export function RepositoryGitlabDeployments({ settings, syncStatus, onSyncSettled, view, onChangeView }: {
   settings: GitlabSettings;
   syncStatus: GitlabSyncStatus | null;
   onSyncSettled: () => Promise<GitlabSyncStatus | null>;
+  view: GitlabDeploymentView;
+  onChangeView: ChangeGitlabDeploymentView;
 }) {
   const headingId = useId();
-  const [selectedRepositoryId, setSelectedRepositoryId] = useState<number>();
   const { projectIds, version, baseUrl } = settings;
-  const repositoryId = selectedRepositoryId !== undefined && projectIds.includes(selectedRepositoryId) ? selectedRepositoryId : projectIds[0];
+  const repositoryId = projectIds.find(id => id === view.repositoryId) ?? projectIds[0];
+  const unavailableRepository = view.repositoryId !== undefined && view.repositoryId !== repositoryId;
+  useEffect(() => {
+    if (baseUrl && repositoryId !== undefined && unavailableRepository) onChangeView({ ...view, repositoryId, offset: 0 }, 'replace', view);
+  }, [baseUrl, onChangeView, repositoryId, unavailableRepository, view]);
+  const changeListing = useCallback((listing: GitlabDeploymentListing, mode: 'push' | 'replace') => {
+    onChangeView({ ...listing, repositoryId }, mode, view);
+  }, [onChangeView, repositoryId, view]);
   if (!baseUrl || repositoryId === undefined) return null;
   const attempt = syncStatus?.repositories.find(repository => repository.repositoryId === repositoryId)?.deployments ?? null;
   return <section className="card gitlab-deployments" aria-labelledby={headingId}>
     <DeploymentHistory path="/integrations/gitlab/deployments" repositoryId={repositoryId} settingsVersion={version}
+      listing={unavailableRepository ? { ...view, offset: 0 } : view} onChangeListing={changeListing}
       heading={<><h2 id={headingId}><Rocket size={18} aria-hidden="true" />GitLab 배포 기록</h2>
         <label className="gitlab-deployment-repository">배포 저장소
-          <select className="field" value={repositoryId} onChange={event => setSelectedRepositoryId(Number(event.target.value))}>
+          <select className="field" value={repositoryId} onChange={event => onChangeView({
+            ...view, repositoryId: Number(event.currentTarget.value), offset: 0,
+          }, 'push')}>
             {projectIds.map(id => <option key={id} value={id}>저장소 #{id}</option>)}
           </select>
         </label></>}

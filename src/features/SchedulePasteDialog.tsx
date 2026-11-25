@@ -14,7 +14,8 @@ import { api, ApiError } from '../lib/api';
 import { GanttBlockerLinkPicker, type BlockerLinkSelection } from './GanttBlockerLinksDialog';
 import {
   bulkLinkDateFields, GanttBulkChainFields, GanttBulkLinkDateFields, GanttBulkLinkFields,
-  type BulkLinkDateRow, type BulkLinkDraft, type BulkLinkOperation, type BulkLinkRule, type BulkLinkRuleChanges,
+  type BulkLinkDateChoice, type BulkLinkDateField, type BulkLinkDateRow, type BulkLinkDraft,
+  type BulkLinkOperation, type BulkLinkRule, type BulkLinkRuleChanges,
 } from './GanttBulkLinksDialog';
 import { scheduleUndoHeaders } from './schedule-undo';
 import './schedule-paste.css';
@@ -48,8 +49,8 @@ export type SchedulePasteDialogProps = {
   notify: FeatureProps['notify'];
   onClose: (awaitingResult?: boolean) => void;
   onDraftChange: (id: string, dirty: boolean, pending?: boolean, awaitingResult?: boolean) => void;
-  onApplied: (result: SchedulePasteApplyResult, followUpIssueIds: readonly string[], linkOperation: BulkLinkOperation,
-    includedDateDraftIds?: readonly string[]) => Promise<void>;
+  onApplied: (result: SchedulePasteApplyResult, linkOperation: BulkLinkOperation,
+    reviewedDateDrafts?: readonly ScheduleBulkLinkDateEdit[]) => Promise<void>;
 } & (
   | { projectId: string; projectLabel?: string; bulkDates?: never; bulkLinks?: BulkLinks; blockerLinks?: never; teamPaste?: never }
   | { projectId: string | null; projectLabel?: string; bulkDates?: never; bulkLinks?: never; blockerLinks: BlockerLinks; teamPaste?: never }
@@ -63,8 +64,9 @@ type Review = {
   projects?: ProjectLabels;
   result: SchedulePastePreview;
   linkOperation: BulkLinkOperation;
-  includedDateDraftIds?: readonly string[];
+  reviewedDateDrafts?: readonly ScheduleBulkLinkDateEdit[];
 };
+type DateDraftChoices = Partial<Record<BulkLinkDateField, { saved: string | null; choice: BulkLinkDateChoice }>>;
 type DateField = 'startDate' | 'endDate' | 'dueDate';
 type DateAction = 'keep' | 'set' | 'clear';
 type DateEntry = { action: DateAction; value: string };
@@ -161,7 +163,7 @@ function ProjectScheduleEditDialog({
   const [chainRule, setChainRule] = useState<BulkLinkRule>(defaultLinkRule);
   const [anchorQuery, setAnchorQuery] = useState('');
   const [excludedDateDrafts, setExcludedDateDrafts] = useState<ReadonlySet<string>>(() => new Set());
-  const [dateDraftConfirmations, setDateDraftConfirmations] = useState<ReadonlyMap<string, number>>(() => new Map());
+  const [dateDraftChoices, setDateDraftChoices] = useState<ReadonlyMap<string, DateDraftChoices>>(() => new Map());
   const [blockerSelection, setBlockerSelection] = useState<BlockerLinkSelection>(() => new Map());
   const [blockerRefreshKey, setBlockerRefreshKey] = useState(0);
   const [review, setReview] = useState<Review | null>(null);
@@ -207,7 +209,7 @@ function ProjectScheduleEditDialog({
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
   const linkRuleEdited = hasLinkInput(link, anchorQuery) || chainEdited;
-  const dateDraftChoicesEdited = excludedDateDrafts.size > 0 || dateDraftConfirmations.size > 0;
+  const dateDraftChoicesEdited = excludedDateDrafts.size > 0 || dateDraftChoices.size > 0;
   const bulkDateInputsEdited = datesEdited || dateDraftChoicesEdited || rescheduleSuccessors;
   const linkPreferencesEdited = rescheduleSuccessors || linkOperation !== 'add';
   const linksEdited = linkRuleEdited || dateDraftChoicesEdited || linkPreferencesEdited;
@@ -233,6 +235,7 @@ function ProjectScheduleEditDialog({
   const dateDraftsById = useMemo(() => new Map(dateDrafts?.map(draft => [draft.source.id, draft])), [dateDrafts]);
   const dateDraftRows: BulkLinkDateRow[] = [];
   const dateDraftEdits: ScheduleBulkLinkDateEdit[] = [];
+  const reviewedDateDrafts: ScheduleBulkLinkDateEdit[] = [];
   let hasConflictingDateDrafts = false;
   const dateDraftIssues = bulkDates ? bulkIssues : chainMode ? chainIssues : anchor ? [...bulkIssues, anchor] : bulkIssues;
   for (const issue of dateDraftIssues) {
@@ -240,27 +243,38 @@ function ProjectScheduleEditDialog({
     if (!dateDraft || dateDraft.source.projectId !== issue.projectId || (bulkLinks && !sameProjectIds.has(issue.id))) continue;
     const changedDates: BulkLinkDateRow['dates'] = [];
     const changes: ScheduleBulkDateChanges = {};
+    const reviewedDates: ScheduleBulkDateChanges = {};
     for (const field of bulkLinkDateFields) {
       const draft = dateDraft.changes[field];
       if (draft === undefined) continue;
       const base = dateDraft.source[field] ?? null;
       const saved = issue[field] ?? null;
-      changedDates.push({ field, base, saved, draft, conflict: saved !== base && saved !== draft });
-      // A date in a bulk date draft takes precedence over the common edit even when already saved.
-      if (bulkDates || saved !== draft) changes[field] = draft;
+      const decision = dateDraftChoices.get(issue.id)?.[field];
+      const conflict = saved !== draft && (saved !== base || decision !== undefined);
+      const choice = decision && decision.saved === saved ? decision.choice : undefined;
+      changedDates.push({ field, base, saved, draft, conflict, choice });
+      const value = choice === 'saved' ? saved : draft;
+      reviewedDates[field] = value;
+      // In a shared date edit, keeping the saved value overrides the corresponding common change.
+      if (bulkDates || saved !== value) changes[field] = value;
     }
     if (!changedDates.length) continue;
     dateDraftRows.push({ issue, dates: changedDates });
     if (excludedDateDrafts.has(issue.id)) continue;
-    if (changedDates.some(date => date.conflict) && dateDraftConfirmations.get(issue.id) !== issue.version) hasConflictingDateDrafts = true;
-    if (Object.keys(changes).length) dateDraftEdits.push({ issue: { id: issue.id, expectedVersion: issue.version }, changes });
+    if (changedDates.some(date => date.conflict && !date.choice)) {
+      hasConflictingDateDrafts = true;
+      continue;
+    }
+    const target = { id: issue.id, expectedVersion: issue.version };
+    reviewedDateDrafts.push({ issue: target, changes: reviewedDates });
+    if (Object.keys(changes).length) dateDraftEdits.push({ issue: target, changes });
   }
   const hasDateDraftEdits = dateDraftEdits.length > 0;
   const editsLinkDates = Boolean(bulkLinks && hasDateDraftEdits);
   const rowDatesInput = hasDateDraftEdits ? { dates: dateDraftEdits } : {};
   const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true as const } : {};
   const teamFollowUpInput = includeTeamBlockers && rescheduleSuccessors ? { includeTeamBlockers: true as const } : {};
-  const reviewChoices = [[...excludedDateDrafts], [...dateDraftConfirmations], rescheduleSuccessors, includeTeamBlockers];
+  const reviewChoices = [[...excludedDateDrafts], [...dateDraftChoices], rescheduleSuccessors, includeTeamBlockers];
   const input = blockerInput ? JSON.stringify(blockerInput)
     : bulkLinks ? JSON.stringify([chainMode
       ? [linkMode, chainOrder]
@@ -491,18 +505,17 @@ function ProjectScheduleEditDialog({
     if (include) excluded.delete(id);
     else excluded.add(id);
     setExcludedDateDrafts(excluded);
-    const confirmations = new Map(dateDraftConfirmations);
-    confirmations.delete(id);
-    setDateDraftConfirmations(confirmations);
-    resetReview(excluded.size > 0 || confirmations.size > 0 || (bulkDates ? datesEdited || rescheduleSuccessors : linkRuleEdited || linkPreferencesEdited));
+    const choices = new Map(dateDraftChoices);
+    if (!include) choices.delete(id);
+    setDateDraftChoices(choices);
+    resetReview(excluded.size > 0 || choices.size > 0 || (bulkDates ? datesEdited || rescheduleSuccessors : linkRuleEdited || linkPreferencesEdited));
   }
 
-  function updateDateDraftConfirmation(issue: Issue, confirm: boolean) {
-    const confirmations = new Map(dateDraftConfirmations);
-    if (confirm) confirmations.set(issue.id, issue.version);
-    else confirmations.delete(issue.id);
-    setDateDraftConfirmations(confirmations);
-    resetReview(excludedDateDrafts.size > 0 || confirmations.size > 0 || (bulkDates ? datesEdited || rescheduleSuccessors : linkRuleEdited || linkPreferencesEdited));
+  function chooseDateDraft(id: string, field: BulkLinkDateField, saved: string | null, choice: BulkLinkDateChoice) {
+    const choices = new Map(dateDraftChoices);
+    choices.set(id, { ...choices.get(id), [field]: { saved, choice } });
+    setDateDraftChoices(choices);
+    resetReview(true);
   }
 
   function updateBlockers(selection: BlockerLinkSelection) {
@@ -549,8 +562,7 @@ function ProjectScheduleEditDialog({
     setApproved(false);
     setRetryApply(null);
     setNotice('');
-    const submitted = { input, targets, projects: selectedProjects, linkOperation,
-      ...(bulkDates && { includedDateDraftIds: dateDraftEdits.map(({ issue }) => issue.id) }) };
+    const submitted = { input, targets, projects: selectedProjects, linkOperation, reviewedDateDrafts };
     let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true; includeTeamBlockers?: true } |
       ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
@@ -620,7 +632,7 @@ function ProjectScheduleEditDialog({
 
   async function reflectResult(result: SchedulePasteApplyResult) {
     try {
-      await onApplied(result, review?.result.followUpIssueIds ?? [], review?.linkOperation ?? linkOperation, review?.includedDateDraftIds);
+      await onApplied(result, review?.linkOperation ?? linkOperation, review?.reviewedDateDrafts);
     } catch (cause) {
       if (mounted.current) {
         setError(`${directLinks ? '선후행 연결은' : '일정은'} 적용되었습니다. ${errorMessage(cause)} 아래에서 화면 반영을 다시 시도하세요.`);
@@ -745,7 +757,7 @@ function ProjectScheduleEditDialog({
     </div>
   );
   const dateDraftFields = dateDraftRows.length > 0 && <GanttBulkLinkDateFields rows={dateDraftRows} excluded={excludedDateDrafts}
-    confirmations={dateDraftConfirmations} onInclude={updateDateDraftInclusion} onConfirm={updateDateDraftConfirmation}
+    onInclude={updateDateDraftInclusion} onChoose={chooseDateDraft}
     projectNames={projectNames ?? undefined}
     description={bulkDates
       ? '포함한 초안은 해당 업무의 같은 날짜 항목에서 위 공통 변경보다 우선합니다. 제외한 초안은 간트에 남습니다.'

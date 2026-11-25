@@ -78,6 +78,7 @@
 .docs-format-btn { display:inline-flex; align-items:center; justify-content:center; width:29px; height:27px; border:0; background:transparent; color:#8190a6; border-radius:4px; cursor:pointer; }
 .docs-format-btn:hover { background:#eaf0f9; color:#506dc5; }
 .docs-format-btn.is-active { color:#5372d5; background:#e4ebff; }
+.docs-history-control:disabled { opacity:.45; cursor:default; background:transparent; }
 .docs-editor-toolbar .docs-selection-action {
   min-height: 32px;
   max-width: 100%;

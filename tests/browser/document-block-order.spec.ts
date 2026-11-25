@@ -65,14 +65,27 @@ test('360px에서 표와 제목 블록을 이동하고 선택·절 링크·저�
     await open(page, document);
     await expect.poll(() => order(page)).toEqual(original);
     const editor = page.locator('.docs-prose');
+    const toolbar = page.getByRole('toolbar', { name: '문서 서식' });
+    const undo = toolbar.getByRole('button', { name: '실행 취소', exact: true });
+    const redo = toolbar.getByRole('button', { name: '다시 실행', exact: true });
+    await expect(undo).toBeDisabled();
+    await expect(redo).toBeDisabled();
     await editor.getByText(introText, { exact: true }).click();
     await expect(action(page, '위로')).toBeDisabled();
     await editor.getByRole('cell', { name: '왼쪽 셀', exact: true }).click();
     await action(page, '위로').press('Enter');
-    await expect.poll(() => order(page)).toEqual([introText, tableText, headingText, checklistText]);
+    const firstOrder = [introText, tableText, headingText, checklistText];
+    await expect.poll(() => order(page)).toEqual(firstOrder);
     await expect(editor).toBeFocused();
     expect(await editor.evaluate(() => window.getSelection()?.anchorNode?.parentElement?.closest('td')?.textContent)).toBe('왼쪽 셀');
 
+    await undo.click();
+    await expect.poll(() => order(page)).toEqual(original);
+    await expect(undo).toBeDisabled();
+    await expect(editor).toBeFocused();
+    await redo.press('Enter');
+    await expect.poll(() => order(page)).toEqual(firstOrder);
+    await expect(redo).toBeDisabled();
     await page.keyboard.press('Control+z');
     await expect.poll(() => order(page)).toEqual(original);
     await editor.getByRole('cell', { name: '왼쪽 셀', exact: true }).click();

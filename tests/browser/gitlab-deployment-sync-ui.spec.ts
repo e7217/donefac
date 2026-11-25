@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import type { GitlabDeployment, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabSettings, WorkspaceSnapshot } from '../../shared/types';
+import type { GitlabDeployment, GitlabDeploymentPage, GitlabDeploymentSyncResult, GitlabLink, GitlabSettings, WorkspaceSnapshot } from '../../shared/types';
 
 const integration = '/api/integrations/gitlab';
 const settings: GitlabSettings = {
@@ -24,6 +24,105 @@ function readResult(repositoryId: number, count: number): GitlabDeploymentSyncRe
     mergeRequestsStored: 2, associationUnavailable: 3, associationLimited: 4, deploymentLimitReached: true,
   };
 }
+
+test('배포 조건과 페이지를 저장소 주소에서 열고 연결된 티켓 검토 후 같은 목록으로 돌아온다', async ({ page, context, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const snapshot = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const project = snapshot.projects[0];
+  const issue = snapshot.issues.find(value => value.projectId === project.id)!;
+  const link: GitlabLink = {
+    id: 'deployment-history-review-activity', projectId: 43, issueId: issue.id, kind: 'pipeline', iid: 7101,
+    title: '배포 검토 파이프라인', webUrl: `${settings.baseUrl}/team/repo-43/-/pipelines/7101`,
+    state: 'failed', updatedAt: '2024-02-14T12:00:00.000Z',
+  };
+  const environment = '배포 / staging';
+  await context.route(url => url.pathname === '/api/workspace', route => route.fulfill({ json: { ...snapshot, gitlabLinks: [link] } }));
+  await context.route(url => url.pathname === integration, route => route.fulfill({ json: settings }));
+  await context.route(url => url.pathname === `${integration}/deployments`, route => {
+    const query = new URL(route.request().url()).searchParams;
+    const repositoryId = Number(query.get('repositoryId'));
+    const offset = Number(query.get('offset'));
+    const data: GitlabDeploymentPage = {
+      items: offset >= 2 ? [] : [{ ...deployment(repositoryId, offset, false), environment: `${environment}-${offset}`,
+        status: query.get('status') === 'failed' ? 'failed' : 'created' }],
+      total: 2, offset, limit: 1,
+    };
+    return route.fulfill({ json: data });
+  });
+
+  const name = { name: 'GitLab 배포 기록', exact: true };
+  await page.goto(`/#/${project.id}/development`);
+  const panel = page.getByRole('region', name);
+  const repository = panel.getByRole('combobox', { name: '배포 저장소', exact: true });
+  const search = panel.getByRole('searchbox', { name: '배포 환경', exact: true });
+  const status = panel.getByRole('combobox', { name: '배포 상태', exact: true });
+  const rows = panel.getByRole('list', { name: 'GitLab 배포 목록', exact: true });
+  await repository.selectOption('43');
+  await search.fill(environment);
+  await status.selectOption('failed');
+  await panel.getByRole('button', { name: '배포 검색', exact: true }).click();
+  await expect(rows.getByRole('listitem')).toHaveAttribute('data-deployment-status', 'failed');
+  await expect(page).toHaveURL(url => {
+    const parameters = new URLSearchParams(url.hash.split('?')[1]);
+    return parameters.get('deploymentRepository') === '43' && parameters.get('deploymentEnvironment') === environment &&
+      parameters.get('deploymentStatus') === 'failed' && !parameters.has('deploymentOffset');
+  }, { timeout: 5_000 });
+  const firstPage = page.url();
+  await panel.getByRole('button', { name: '다음 배포', exact: true }).click();
+  await expect(rows.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4301');
+  await expect(page).toHaveURL(url => new URLSearchParams(url.hash.split('?')[1]).get('deploymentOffset') === '1');
+  const secondPage = page.url();
+
+  const opener = page.getByRole('region', { name: '연결된 개발 활동', exact: true }).getByRole('button', { name: issue.key, exact: true });
+  await opener.click();
+  const ticket = page.getByRole('dialog', { name: issue.title, exact: true });
+  await expect(ticket).toBeVisible();
+  const ticketPage = page.url();
+  await page.goBack();
+  await expect(ticket).toHaveCount(0);
+  await expect(page).toHaveURL(secondPage);
+  await expect(opener).toBeFocused();
+  await expect(rows.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4301');
+  await page.goForward();
+  await expect(ticket).toBeVisible();
+  await expect(page).toHaveURL(ticketPage);
+  await page.goBack();
+  await expect(ticket).toHaveCount(0);
+  await page.goBack();
+  await expect(page).toHaveURL(firstPage);
+  await expect(rows.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4300');
+  await page.goForward();
+  await expect(page).toHaveURL(secondPage);
+  await page.reload();
+  await expect(repository).toHaveValue('43');
+  await expect(search).toHaveValue(environment);
+  await expect(status).toHaveValue('failed');
+  await expect(rows.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4301');
+
+  const recipient = await context.newPage();
+  try {
+    await recipient.goto(secondPage);
+    const shared = recipient.getByRole('region', name);
+    await expect(shared.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4301');
+    await expect(shared.getByRole('searchbox', { name: '배포 환경' })).toHaveValue(environment);
+    await expect(shared.getByRole('combobox', { name: '배포 상태' })).toHaveValue('failed');
+
+    const stale = new URL(secondPage);
+    const [path, query] = stale.hash.split('?');
+    const parameters = new URLSearchParams(query);
+    parameters.set('deploymentRepository', '99');
+    stale.hash = `${path}?${parameters}`;
+    await recipient.goto(stale.href);
+    await expect(shared.getByRole('combobox', { name: '배포 저장소' })).toHaveValue('42');
+    await expect(shared.getByRole('listitem')).toHaveAttribute('data-deployment-id', '4200');
+    await expect(recipient).toHaveURL(url => {
+      const current = new URLSearchParams(url.hash.split('?')[1]);
+      return current.get('deploymentRepository') === '42' && !current.has('deploymentOffset');
+    });
+  } finally {
+    await recipient.close();
+  }
+});
 
 test('360px에서 선택한 저장소의 배포만 동기화하고 페이지와 최신 결과를 유지한다', async ({ page, request }) => {
   await page.setViewportSize({ width: 360, height: 820 });

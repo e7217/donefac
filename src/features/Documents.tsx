@@ -48,6 +48,7 @@ import { DocumentTreeCopy } from './DocumentTreeCopy';
 import { DocumentSiblingOrderDialog } from './DocumentSiblingOrderDialog';
 import { useDocumentTreeExpansion } from './document-tree-expansion';
 import { DocumentPublication } from './DocumentPublication';
+import { DocumentEditorHistory } from './DocumentEditorHistory';
 import { DocumentEditorOutline } from './DocumentEditorOutline';
 import { DocumentFindPanel } from './DocumentFindPanel';
 import { documentFindExtension } from './document-find';
@@ -2276,6 +2277,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <div className="docs-editor-sticky">
               <div className="docs-editor-toolbar" role="toolbar" aria-label={checklistReselecting ? '체크리스트 항목 다시 선택' : '문서 서식'}>
                 {!checklistReselecting && <>
+                <DocumentEditorHistory editor={editor}
+                  disabled={bodyReadOnly || archivedLiveRecovery || publicationOpen || Boolean(issueDrawerOpen) || draft.id !== selectedPageId} />
                 <button ref={findOpener} type="button" className={`docs-format-btn ${findOpen ? 'is-active' : ''}`}
                   title="본문에서 찾기" aria-label="본문에서 찾기" aria-expanded={findOpen} aria-keyshortcuts="Control+F Meta+F"
                   disabled={!canFind} onClick={() => findOpen ? closeFind() : openFind()}><Search size={15} aria-hidden="true" /></button>

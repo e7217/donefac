@@ -13,9 +13,10 @@ export type BulkLinkRuleChanges = Record<keyof BulkLinkRule, boolean>;
 export type BulkLinkDraft = BulkLinkRule & Pick<ScheduleBulkLinkInput, 'direction'> & { choice: AnchorChoice | null };
 export const bulkLinkDateFields = ['startDate', 'endDate'] as const;
 export type BulkLinkDateField = typeof bulkLinkDateFields[number];
+export type BulkLinkDateChoice = 'saved' | 'draft';
 export type BulkLinkDateRow = {
   issue: Issue;
-  dates: { field: BulkLinkDateField; base: string | null; saved: string | null; draft: string | null; conflict: boolean }[];
+  dates: { field: BulkLinkDateField; base: string | null; saved: string | null; draft: string | null; conflict: boolean; choice?: BulkLinkDateChoice }[];
 };
 
 type Props = {
@@ -138,13 +139,12 @@ export function GanttBulkChainFields({ issues, value, onChange, onMove, ...ruleO
   </>;
 }
 
-export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclude, onConfirm, projectNames,
+export function GanttBulkLinkDateFields({ rows, excluded, onInclude, onChoose, projectNames,
   description = '함께 저장할 날짜를 선택하세요. 제외한 초안은 간트에 남습니다.' }: {
   rows: readonly BulkLinkDateRow[];
   excluded: ReadonlySet<string>;
-  confirmations: ReadonlyMap<string, number>;
   onInclude: (id: string, include: boolean) => void;
-  onConfirm: (issue: Issue, confirm: boolean) => void;
+  onChoose: (id: string, field: BulkLinkDateField, saved: string | null, choice: BulkLinkDateChoice) => void;
   projectNames?: ReadonlyMap<string, string>;
   description?: string;
 }) {
@@ -155,8 +155,6 @@ export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclu
     <ul>
       {rows.map(({ issue, dates }) => {
         const included = !excluded.has(issue.id);
-        const hasConflict = dates.some(date => date.conflict);
-        const confirmed = confirmations.get(issue.id) === issue.version;
         const projectName = projectNames?.get(issue.projectId);
         return <li key={issue.id}>
           <label>
@@ -167,20 +165,26 @@ export function GanttBulkLinkDateFields({ rows, excluded, confirmations, onInclu
             </span>
           </label>
           <ul>
-            {dates.map(({ field, base, saved, draft, conflict }) => <li key={field}>
-              <strong>{field === 'startDate' ? '시작일' : '종료일'}</strong>{' '}
-              {saved === draft ? `${saved ?? '미정'} · 저장됨` : `저장된 값 ${saved ?? '미정'} → 초안 ${draft ?? '미정'}`}
-              {conflict && <span className="schedule-bulk-link-date-conflict">초안 작성 전 {base ?? '미정'}</span>}
-            </li>)}
+            {dates.map(({ field, base, saved, draft, conflict, choice }) => {
+              const label = field === 'startDate' ? '시작일' : '종료일';
+              const group = `${title}-${issue.id}-${field}`;
+              return <li key={field}>
+                <strong>{label}</strong>{' '}
+                {saved === draft ? `${saved ?? '미정'} · 저장됨` : `저장된 값 ${saved ?? '미정'} → 초안 ${draft ?? '미정'}`}
+                {conflict && <span className="schedule-bulk-link-date-conflict">초안 작성 전 {base ?? '미정'}</span>}
+                {conflict && included && <fieldset className="schedule-bulk-link-date-choices" aria-describedby={`${group}-help`}>
+                  <legend className="sr-only">{issue.key} {label} 선택</legend>
+                  <span id={`${group}-help`} className="sr-only">저장된 값 {saved ?? '미정'}, 간트 입력 {draft ?? '미정'}</span>
+                  <label><input type="radio" name={group} checked={choice === 'saved'} aria-label={`${issue.key} ${label} 저장값 사용`}
+                    onChange={() => onChoose(issue.id, field, saved, 'saved')} />저장값 사용</label>
+                  <label><input type="radio" name={group} checked={choice === 'draft'} aria-label={`${issue.key} ${label} 간트 입력 사용`}
+                    onChange={() => onChoose(issue.id, field, saved, 'draft')} />간트 입력 사용</label>
+                </fieldset>}
+              </li>;
+            })}
           </ul>
-          {hasConflict && included && <>
-            {!confirmed && <p className="schedule-paste-error" role="alert">작성 중에 저장된 날짜가 바뀌었습니다.</p>}
-            <label>
-              <input type="checkbox" checked={confirmed} aria-label={`${issue.key} 최신 날짜에 내 초안 적용`}
-                onChange={event => onConfirm(issue, event.currentTarget.checked)} />
-              최신 날짜에 내 초안 적용
-            </label>
-          </>}
+          {included && dates.some(date => date.conflict && !date.choice) &&
+            <p className="schedule-paste-error">작성 중에 저장된 날짜가 바뀌었습니다. 반영할 값을 고르세요.</p>}
         </li>;
       })}
     </ul>

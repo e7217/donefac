@@ -86,6 +86,101 @@ async function openLaneCreation(page: Page, lane: Locator, target: '백로그' |
   return { dialog, title, submit: dialog.getByRole('button', { name: '업무 만들기', exact: true }) };
 }
 
+test('360px 백로그와 선택한 사이클의 업무를 표시 순서로 검토하고 원래 행으로 돌아온다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('검토할 사이클');
+    const other = await f.plan('검토 범위 밖 사이클');
+    const filter = `업무 검토 ${f.suffix}`;
+    const backlog = await f.issue(`${filter} 백로그`);
+    const assigned = await f.issue(`${filter} 사이클`, { cycleId: cycle.id });
+    const outside = await f.issue(`${filter} 다른 사이클`, { cycleId: other.id });
+    const hidden = await f.issue(`검색에서 숨긴 업무 ${f.suffix}`, { cycleId: cycle.id });
+    const board = await openBoard(page, f, 'backlog', cycle);
+    await board.search.fill(filter);
+    const route = `#/${f.project.id}/backlog/${cycle.id}`;
+    const matchesRoute = (url: URL, issueId?: string) => {
+      const [path, query] = url.hash.split('?');
+      const params = new URLSearchParams(query);
+      return path === route && params.get('cycleQ') === filter && params.get('issue') === (issueId ?? null);
+    };
+    const opener = board.backlog.getByRole('button', { name: `${backlog.key} · ${backlog.title}`, exact: true });
+    const panel = (issue: Issue) => page.getByRole('dialog', { name: issue.title, exact: true });
+    const review = (issue: Issue) => panel(issue).getByRole('navigation', { name: '업무 검토 순서' });
+    const next = (issue: Issue) => review(issue).getByRole('button', { name: '다음 업무', exact: true });
+    const previous = (issue: Issue) => review(issue).getByRole('button', { name: '이전 업무', exact: true });
+    const saveBacklogIssue = () => page.waitForResponse(response => new URL(response.url()).pathname === `/api/issues/${backlog.id}` &&
+      response.request().method() === 'PATCH');
+    await expect(board.lane.locator(rowSelector(assigned))).toBeVisible();
+    await expect(page.locator(rowSelector(outside))).toHaveCount(0);
+    await expect(page.locator(rowSelector(hidden))).toHaveCount(0);
+
+    await opener.click();
+    await expect(review(backlog).getByRole('status')).toHaveText('2개 중 1번째');
+    await expect(next(backlog)).toHaveAttribute('title', assigned.key);
+    const title = panel(backlog).getByLabel('제목', { exact: true });
+    await title.fill('작성 중인 업무 제목');
+    const cancel = page.waitForEvent('dialog').then(async dialog => {
+      expect(dialog.message()).toMatch(/저장하지 않은/);
+      await dialog.dismiss();
+    });
+    await next(backlog).click();
+    await cancel;
+    await expect(title).toHaveValue('작성 중인 업무 제목');
+    await expect(page).toHaveURL(url => matchesRoute(url, backlog.id));
+
+    const discard = page.waitForEvent('dialog').then(dialog => dialog.accept());
+    await next(backlog).click();
+    await discard;
+    await expect(review(assigned).getByRole('status')).toHaveText('2개 중 2번째');
+    await expect(previous(assigned)).toHaveAttribute('title', backlog.key);
+    await expect(next(assigned)).toBeDisabled();
+    await expect(page).toHaveURL(url => matchesRoute(url, assigned.id));
+
+    await page.goBack();
+    await expect(page).toHaveURL(url => matchesRoute(url));
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.search).toHaveValue(filter);
+    await expect(opener).toBeFocused();
+    await page.goForward();
+    await expect(review(assigned).getByRole('status')).toHaveText('2개 중 2번째');
+    await panel(assigned).getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(opener).toBeFocused();
+    await expect(page).toHaveURL(url => matchesRoute(url));
+
+    await opener.click();
+    await panel(backlog).getByRole('combobox', { name: '사이클', exact: true }).selectOption(cycle.id);
+    const move = saveBacklogIssue();
+    await panel(backlog).getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    expect(await json<Issue>(await move)).toMatchObject({ id: backlog.id, cycleId: cycle.id });
+    await expect(board.backlog.locator(rowSelector(backlog))).toHaveCount(0);
+    await expect(board.lane.locator(rowSelector(backlog))).toHaveCount(1);
+    await expect(next(backlog)).toHaveAttribute('title', assigned.key);
+    await panel(backlog).getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    const movedOpener = board.lane.getByRole('button', { name: `${backlog.key} · ${backlog.title}`, exact: true });
+    await expect(movedOpener).toBeFocused();
+
+    const renamed = { ...backlog, title: `검색 밖으로 옮긴 업무 ${f.suffix}` };
+    await movedOpener.click();
+    await panel(backlog).getByLabel('제목', { exact: true }).fill(renamed.title);
+    const patch = saveBacklogIssue();
+    await page.locator('.issue-detail-panel').getByRole('button', { name: '변경사항 저장', exact: true }).click();
+    expect(await json<Issue>(await patch)).toMatchObject({ id: backlog.id, title: renamed.title });
+    await expect(page.locator(rowSelector(backlog))).toHaveCount(0);
+    await expect(review(renamed).getByRole('status')).toHaveText(/2개 중 [12]번째/);
+    await panel(renamed).getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(board.search).toBeFocused();
+    await expect(board.search).toHaveValue(filter);
+
+    await page.goto(`/${route}?${new URLSearchParams({ cycleQ: filter, issue: assigned.id })}`);
+    await page.reload();
+    await expect(panel(assigned)).toBeVisible();
+    await expect(review(assigned)).toHaveCount(0);
+  } finally { await f.close(); }
+});
+
 test('360px 사이클과 백로그에서 비어 있는 간트 날짜로 이동하고 선택한 사이클과 검색으로 돌아온다', async ({ page, request }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });

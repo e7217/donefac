@@ -95,6 +95,59 @@ test('두 브라우저의 실제 공동 편집이 중복 초기화 없이 합쳐
   } finally { await Promise.all(contexts.map(context => context.close())); }
 });
 
+test('360px 공동 편집에서 내 변경만 실행 취소하고 다시 실행한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
+  await enable(fixture);
+  const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 360, height: 820 } })));
+  try {
+    await Promise.all(contexts.map((context, index) => setActor(context, fixture.actorIds[index])));
+    const [author, peer] = await Promise.all(contexts.map(context => context.newPage()));
+    await Promise.all([open(author, fixture.document), open(peer, fixture.document)]);
+    await Promise.all([synced(author), synced(peer)]);
+    const toolbarButton = (page: Page, name: string) => page.getByRole('toolbar', { name: '문서 서식' }).getByRole('button', { name, exact: true });
+    const undo = toolbarButton(author, '실행 취소');
+    const redo = toolbarButton(author, '다시 실행');
+    const peerUndo = toolbarButton(peer, '실행 취소');
+    const body = author.locator('.docs-live-prose');
+    const peerBody = peer.locator('.docs-live-prose');
+    await expect(undo).toBeDisabled();
+    await expect(redo).toBeDisabled();
+
+    const myText = ' 내가 쓴 글';
+    const peerText = ' 동료가 쓴 글';
+    await body.press('Control+End');
+    await author.keyboard.insertText(myText);
+    await expect(peerBody).toHaveText(fixture.initialText + myText);
+    await expect(undo).toBeEnabled();
+    await expect(peerUndo).toBeDisabled();
+    await peerBody.press('Control+End');
+    await peer.keyboard.insertText(peerText);
+    await expect(body).toHaveText(fixture.initialText + myText + peerText);
+
+    await undo.press('Enter');
+    const peerOnly = fixture.initialText + peerText;
+    await expect(body).toHaveText(peerOnly);
+    await expect(peerBody).toHaveText(peerOnly);
+    await expect(body).toBeFocused();
+    await expect(undo).toBeDisabled();
+    await expect(redo).toBeEnabled();
+    await expect(peerUndo).toBeEnabled();
+    await expect.poll(async () => (await canonical(fixture)).plainText).toBe(peerOnly);
+
+    await redo.click();
+    const both = fixture.initialText + myText + peerText;
+    await expect(body).toHaveText(both);
+    await expect(peerBody).toHaveText(both);
+    await expect(undo).toBeEnabled();
+    await expect(redo).toBeDisabled();
+    await expect.poll(async () => (await canonical(fixture)).plainText).toBe(both);
+    await author.reload();
+    await synced(author);
+    await expect(body).toHaveText(both);
+    await expect(undo).toBeDisabled();
+    await expect(redo).toBeDisabled();
+  } finally { await Promise.all(contexts.map(context => context.close())); }
+});
+
 test('공동 편집에서 링크 입력 중 동료가 선택 양쪽에 글을 추가해도 원래 선택에만 링크를 적용한다', async ({ browser, baseURL, collaborativeDocument: fixture }) => {
   await enable(fixture);
   const contexts = await Promise.all(fixture.actorIds.map(() => browser.newContext({ baseURL, viewport: { width: 360, height: 820 } })));

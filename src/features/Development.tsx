@@ -5,6 +5,7 @@ import { ArrowRight, GitBranch, RefreshCw, Search } from 'lucide-react';
 import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SCOPE_LABELS, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
 import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
+import type { ChangeGitlabDeploymentView, GitlabDeploymentView } from '../lib/gitlab-deployment-route';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
@@ -79,7 +80,10 @@ type DevelopmentActivityProps = {
   onChangeActivityFilters: (filters: GitlabActivityFilters, mode?: 'push' | 'replace') => void;
   onOpenIssueForReview: OpenIssueForReview;
 };
-export function Development(props: FeatureProps & DevelopmentActivityProps) {
+export function Development(props: FeatureProps & DevelopmentActivityProps & {
+  deploymentView: GitlabDeploymentView;
+  onChangeDeploymentView: ChangeGitlabDeploymentView;
+}) {
   const {notify}=props;
   const [settings,setSettings]=useState<GitlabSettings|null>(null),[draft,setDraft]=useState< Draft>(empty),[baseline,setBaseline]=useState< Draft>(empty);
   const [busy,setBusy]=useState(false),[error,setError]=useState('');
@@ -413,7 +417,7 @@ export function Development(props: FeatureProps & DevelopmentActivityProps) {
     {settings && <GitlabProjectWebhookPanel key={`project-webhook:${props.actorId}:${settings.version}:${settings.webhookReceiverUrl ?? ''}`} settings={settings} />}
     {settings && <GitlabWebhookStatusPanel key={settings.version} settings={settings} />}
     <section className="card integration-guide"><div className="gitlab-symbol"><GitBranch size={35}/></div><h2>티켓 번호로 자연스럽게 연결</h2><p>브랜치 이름이나 커밋 메시지, MR 제목에 티켓 번호를 넣으세요.</p><code>feature/{props.data.projects.find(project=>project.id===props.projectId)?.key||'TEAM'}-12-login</code><ul><li>GitLab 웹훅에서 Push events를 켜면 MR을 열기 전에도 새 브랜치와 커밋을 티켓에서 확인할 수 있습니다.</li><li>티켓 상태 변경은 MR·파이프라인 이벤트에 연결한 활성화 규칙으로 처리합니다.</li><li>지금 동기화는 저장한 연결 설정을 사용합니다. 기존 브랜치·커밋을 포함하면 웹훅 설정 전의 활동도 찾을 수 있습니다.</li></ul></section></div>
-    {settings && <RepositoryGitlabDeployments settings={settings} syncStatus={syncStatus}
+    {settings && <RepositoryGitlabDeployments settings={settings} syncStatus={syncStatus} view={props.deploymentView} onChangeView={props.onChangeDeploymentView}
       onSyncSettled={() => readSyncStatus(settings.version)} />}
     <AutomationSettings {...props}/><WebhookSettings {...props}/>
   </div>;

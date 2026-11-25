@@ -83,6 +83,73 @@ function selection(issues: Issue[]) {
   return issues.map(({ id, version }) => ({ id, expectedVersion: version })).sort((a, b) => a.id.localeCompare(b.id));
 }
 
+test('일정 일괄 편집에서 날짜별 충돌을 다시 확인하고 저장값을 공통 날짜보다 우선한다', async ({ page, request }) => {
+  const fixture = await makeFixture(request);
+  try {
+    const first = await fixture.create(`${fixture.prefix} 다시 검토할 업무`, { startDate: date(1), endDate: date(6), dueDate: null });
+    const second = await fixture.create(`${fixture.prefix} 공통 날짜 업무`, { startDate: date(2), endDate: date(5), dueDate: null });
+    const { users: [, peer] } = await workspace(request);
+    const { chart, dialog, open, selected } = await openChart(page, fixture.projectId, fixture.prefix);
+    const start = chart.getByLabel(`${first.key} 시작일`, { exact: true });
+    const end = chart.getByLabel(`${first.key} 종료일`, { exact: true });
+    const preview = dialog.getByRole('button', { name: previewName, exact: true });
+    const reload = dialog.getByRole('button', { name: '새로고침', exact: true });
+    const draft = dialog.getByRole('radio', { name: `${first.key} 시작일 간트 입력 사용`, exact: true });
+    const keep = dialog.getByRole('radio', { name: `${first.key} 종료일 저장값 사용`, exact: true });
+    const change = async (version: number, dates: Partial<Dates>) => readJson<Issue>(await request.patch(`/api/issues/${first.id}`, {
+      headers: { 'X-Actor-Id': peer.id }, data: { expectedVersion: version, ...dates },
+    }), 200);
+
+    await start.fill(date(3));
+    await end.fill(date(12));
+    await selected(first).check();
+    await selected(second).check();
+    await open.click();
+    await dialog.getByLabel('종료일 변경', { exact: true }).selectOption('set');
+    await dialog.getByLabel('종료일 값', { exact: true }).fill(date(8));
+
+    const peerEdit = await change(first.version, { startDate: date(2), endDate: date(7) });
+    await reload.click();
+    await expect(preview).toBeDisabled();
+    await draft.check();
+    await expect(preview).toBeDisabled();
+    await keep.check();
+    await expect(preview).toBeEnabled();
+
+    const latest = await change(peerEdit.version, { endDate: first.endDate });
+    await reload.click();
+    await expect(draft).toBeChecked();
+    await expect(keep).not.toBeChecked();
+    await expect(preview).toBeDisabled();
+    await keep.check();
+    const reviewing = nextPost(page, previewRoute);
+    await preview.click();
+    const response = await reviewing;
+    expect(response.request().postDataJSON()).toMatchObject({
+      changes: { endDate: date(8) },
+      dates: [{ issue: { id: first.id, expectedVersion: latest.version }, changes: { startDate: date(3), endDate: first.endDate } }],
+    });
+    expect((await readJson<SchedulePastePreview>(response, 200)).changes).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.id, toStart: date(3), toEnd: first.endDate }),
+      expect.objectContaining({ id: second.id, toEnd: date(8) }),
+    ]));
+    const applying = nextPost(page, applyRoute);
+    await dialog.getByRole('button', { name: applyName, exact: true }).click();
+    await readJson<SchedulePasteApplyResult>(await applying, 200);
+    await expect(dialog).toHaveCount(0);
+    await expect(start).toHaveValue(date(3));
+    await expect(end).toHaveValue(first.endDate!);
+    await expect(chart.getByRole('button', { name: `${first.key} 날짜 저장`, exact: true })).toHaveCount(0);
+
+    const undoing = nextPost(page, undoRoute);
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    await readJson<SchedulePasteApplyResult>(await undoing, 200);
+    expect(await fixture.stored()).toEqual([values({ ...latest, version: latest.version + 2 }), values({ ...second, version: second.version + 2 })]);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test('360px 간트에서 보이는 선택 업무의 날짜만 검토하고 응답 유실 뒤 한 번 적용한 뒤 되돌린다', async ({ page, request }) => {
   test.setTimeout(95_000);
   const fixture = await makeFixture(request);

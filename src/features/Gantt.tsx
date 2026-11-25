@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type PointerEvent, type Ref } from 'react';
 import { AlertCircle, ArrowDownToLine, ArrowRight, BarChart3, CalendarClock, CalendarDays, CalendarRange, ChartNoAxesCombined, Check, ClipboardPaste, Diamond, Layers3, Link2, ListTree, MoveHorizontal, Network, Pencil, Plus, RefreshCw, Search, Sparkles, Undo2, X } from 'lucide-react';
-import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePastePreview, type SchedulePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
+import { isIssueViewGitlabFilter, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, type CustomFieldValue, type Dependency, type FeatureProps, type Issue, type PlanningItem, type PlanningKind, type Project, type ScheduleAnchorChange, type ScheduleBulkDateChanges, type ScheduleBulkLinkDateEdit, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePastePreview, type SchedulePreview, type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleUndoScope, type TeamGanttScheduleFilters, type User } from '../../shared/types';
 import { isTerminalStatus, projectStatuses, projectWorkflow, requiredFieldsFor, REQUIRED_FIELD_LABELS, statusMeta } from '../../shared/workflow-helpers';
 import { createCalendarMath, defaultWorkCalendar, isCalendarDate } from '../../shared/calendar';
 import { analyzeProjectSchedule } from '../../shared/schedule-analysis';
@@ -734,6 +734,19 @@ function ProjectGantt(props: GanttProps) {
     else if (draft.stored && retainedDates.current.get(saved.id) === draft.stored) {
       if (live) live.accept(saved);
       else { retainedDates.current.delete(saved.id); storeInlineDates(); }
+    }
+  }
+  function acceptReviewedDateDrafts(drafts: readonly ChartDateDraft[], reviewed: readonly ScheduleBulkLinkDateEdit[] | undefined, updated: readonly Issue[]) {
+    if (!reviewed?.length) return;
+    const capturedById = new Map(drafts.map(draft => [draft.source.id, draft]));
+    const updatedById = new Map(updated.map(issue => [issue.id, issue]));
+    const currentById = new Map(data.issues.map(issue => [issue.id, issue]));
+    for (const { issue: { id, expectedVersion }, changes } of reviewed) {
+      const draft = capturedById.get(id);
+      const current = currentById.get(id);
+      const saved = updatedById.get(id) ?? (current?.version === expectedVersion ? current : undefined);
+      if (draft && saved?.projectId === draft.source.projectId && (['startDate', 'endDate'] as const).every(field =>
+        !Object.hasOwn(changes, field) || (saved[field] ?? null) === changes[field])) acceptChartDateDraft({ ...saved }, draft);
     }
   }
   function reviewTeamBlockerDates(source: Issue, target: Issue, opener: HTMLButtonElement) {
@@ -3036,19 +3049,10 @@ function ProjectGantt(props: GanttProps) {
         else closeSchedulePaste();
         if (awaitingResult) void refresh().catch(() => notify('간트 목록을 불러오지 못했습니다. 화면을 다시 열어 확인해 주세요.', 'error'));
       }}
-      onApplied={async (result, _followUpIssueIds, _operation, includedDateDraftIds) => {
+      onApplied={async (result, _operation, reviewedDateDrafts) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
-        if (bulkDateSelection && includedDateDraftIds?.length) {
-          const included = new Set(includedDateDraftIds);
-          const savedById = new Map(result.updated.map(issue => [issue.id, issue]));
-          for (const draft of bulkDateSelection.dateDrafts) {
-            if (!included.has(draft.source.id)) continue;
-            const saved = savedById.get(draft.source.id) ?? bulkDateIssues?.find(issue => issue.id === draft.source.id);
-            if (saved && (['startDate', 'endDate'] as const).every(field =>
-              !Object.hasOwn(draft.changes, field) || saved[field] === draft.changes[field])) acceptChartDateDraft(saved, draft);
-          }
-        }
+        if (bulkDateSelection) acceptReviewedDateDrafts(bulkDateSelection.dateDrafts, reviewedDateDrafts, result.updated);
         await refresh();
         if (bulkDateIssues) {
           closeBulkDates(result.updated);
@@ -3127,17 +3131,10 @@ function ProjectGantt(props: GanttProps) {
         refresh,
       }}
       notify={notify} onDraftChange={trackDraft} onClose={() => closeBulkLinks()}
-      onApplied={async (result, followUpIssueIds, operation) => {
+      onApplied={async (result, operation, reviewedDateDrafts) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
-        const adjusted = new Set(followUpIssueIds);
-        for (const saved of result.updated) {
-          if (adjusted.has(saved.id)) continue;
-          const draft = bulkLinkSelection.dateDrafts.find(candidate => candidate.source.id === saved.id);
-          const capturedDatesSaved = draft && (['startDate', 'endDate'] as const).every(field =>
-            !Object.hasOwn(draft.changes, field) || saved[field] === draft.changes[field]);
-          if (capturedDatesSaved) acceptChartDateDraft(saved, draft);
-        }
+        acceptReviewedDateDrafts(bulkLinkSelection.dateDrafts, reviewedDateDrafts, result.updated);
         await refresh();
         closeBulkLinks(result.updated);
         const dates = result.updated.length, links = result.dependencyChanges ?? 0;
