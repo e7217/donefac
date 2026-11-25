@@ -24,6 +24,7 @@ type BulkDates = {
   issues: readonly Issue[];
   projects: readonly Project[];
   dateDrafts?: readonly BulkLinkDateDraft[];
+  clipboard?: { unavailableKeys: readonly string[] };
   refresh: () => Promise<void>;
 };
 export type BulkLinkDateDraft = {
@@ -191,6 +192,7 @@ function ProjectScheduleEditDialog({
   const formId = useId();
 
   const bulk = bulkDates ?? bulkLinks;
+  const clipboard = bulkDates?.clipboard;
   const bulkIssues = bulk?.issues ?? [];
   const managed = bulk ?? blockerLinks;
   const blockerDialog = Boolean(blockerLinks);
@@ -198,6 +200,7 @@ function ProjectScheduleEditDialog({
   const isTeamPaste = Boolean(teamPaste);
   const isTeamBlocker = projectId === null && blockerDialog;
   const focusTeamRecovery = isTeamPaste || isTeamBlocker;
+  const focusApplyRecovery = focusTeamRecovery || Boolean(clipboard);
   const preserveUnknownResult = Boolean(managed || teamPaste);
   const reportUnknownResult = directLinks || isTeamPaste || Boolean(bulkDates);
   const draftId = blockerLinks ? BLOCKER_LINK_DRAFT_ID : bulkLinks ? BULK_LINK_DRAFT_ID : bulkDates ? BULK_DRAFT_ID : SCHEDULE_PASTE_DRAFT_ID;
@@ -205,14 +208,14 @@ function ProjectScheduleEditDialog({
   const scopeLabel = focusTeamRecovery ? '전체 프로젝트' : projectLabel ? `대상 프로젝트 ${projectLabel}` : undefined;
   const linkOperationLabel = linkOperationLabels[linkOperation];
   const title = blockerLinks ? '차단 관계 선후행 검토'
-    : bulkLinks ? `선후행 연결 일괄 ${linkOperationLabel}` : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
+    : bulkLinks ? `선후행 연결 일괄 ${linkOperationLabel}` : clipboard ? '붙여넣은 날짜 검토' : bulkDates ? '일정 일괄 편집' : '일정 붙여넣기';
   const datesEdited = bulkFields.some(({ field }) => dates[field].action !== 'keep');
   const chainMode = linkMode === 'chain';
   const chainEdited = chainRule.type !== defaultLinkRule.type || chainRule.lagDays !== defaultLinkRule.lagDays ||
     chainOrder.some((id, index) => id !== bulkIssues[index]?.id);
   const linkRuleEdited = hasLinkInput(link, anchorQuery) || chainEdited;
   const dateDraftChoicesEdited = excludedDateDrafts.size > 0 || dateDraftChoices.size > 0;
-  const bulkDateInputsEdited = datesEdited || dateDraftChoicesEdited || rescheduleSuccessors;
+  const bulkDateInputsEdited = Boolean(clipboard) || datesEdited || dateDraftChoicesEdited || rescheduleSuccessors;
   const linkPreferencesEdited = rescheduleSuccessors || linkOperation !== 'add';
   const linksEdited = linkRuleEdited || dateDraftChoicesEdited || linkPreferencesEdited;
   const linkAction = bulkLinkAction(linkOperation, chainMode ? chainRule : link, linkRuleChanges);
@@ -326,7 +329,7 @@ function ProjectScheduleEditDialog({
     : bulkLinks
     ? Boolean(bulkLinkInput || bulkChainInput)
     : bulkDates
-      ? issues.length > 0 && (datesEdited || hasDateDraftEdits) && !hasConflictingDateDrafts &&
+      ? issues.length > 0 && (datesEdited || hasDateDraftEdits) && !hasConflictingDateDrafts && !clipboard?.unavailableKeys.length &&
         bulkFields.every(({ field }) => dates[field].action !== 'set' || dates[field].value)
       : Boolean(text.trim());
   const editLocked = Boolean(pending || applied || (preserveUnknownResult && retryApply));
@@ -360,7 +363,8 @@ function ProjectScheduleEditDialog({
   useEffect(() => {
     mounted.current = true;
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    (blockerProjectFilter.current ?? anchorSearch.current ?? linkModeSelect.current ?? firstDateAction.current ?? textarea.current ?? dialog.current)?.focus({ preventScroll: true });
+    (blockerProjectFilter.current ?? anchorSearch.current ?? linkModeSelect.current ?? firstDateAction.current ?? textarea.current ??
+      pastePreviewButton.current ?? dialog.current)?.focus({ preventScroll: true });
     return () => {
       mounted.current = false;
       request.current?.abort();
@@ -374,14 +378,14 @@ function ProjectScheduleEditDialog({
   }, []);
 
   useEffect(() => {
-    if (!focusTeamRecovery || pending) return;
+    if (!focusApplyRecovery || pending) return;
     if (retryApply || applied) {
       applyRecoveryButton.current?.focus({ preventScroll: true });
     } else if (error) {
       const active = document.activeElement;
       if (!dialog.current?.contains(active) || active?.matches(':disabled')) pastePreviewButton.current?.focus();
     }
-  }, [applied, error, focusTeamRecovery, pending, retryApply]);
+  }, [applied, error, focusApplyRecovery, pending, retryApply]);
 
   const close = useCallback(() => {
     if (busyRef.current) {
@@ -448,7 +452,7 @@ function ProjectScheduleEditDialog({
     setLatest(null);
     setError('');
     setNotice('');
-    dirtyRef.current = edited || Boolean(review);
+    dirtyRef.current = edited || Boolean(clipboard || review);
     onDraftChange(draftId, dirtyRef.current, false);
   }
 
@@ -780,8 +784,8 @@ function ProjectScheduleEditDialog({
   );
   const dateDraftFields = dateDraftRows.length > 0 && <GanttBulkLinkDateFields rows={dateDraftRows} excluded={excludedDateDrafts}
     onInclude={updateDateDraftInclusion} onChoose={chooseDateDraft}
-    projectNames={projectNames ?? undefined}
-    description={bulkDates
+    projectNames={projectNames ?? undefined} pasted={Boolean(clipboard)}
+    description={clipboard ? '저장할 업무와 날짜를 확인하세요. 행에 작성 중인 날짜는 간트에서 계속 편집할 수 있습니다.' : bulkDates
       ? '포함한 초안은 해당 업무의 같은 날짜 항목에서 위 공통 변경보다 우선합니다. 제외한 초안은 간트에 남습니다.'
       : undefined} />;
   return (
@@ -807,7 +811,7 @@ function ProjectScheduleEditDialog({
                 ? '차단하는 업무를 선행으로, 차단된 업무를 후행으로 연결합니다. 새 연결은 종료→시작(FS) · 0근무일이며 기존 연결은 유지합니다.'
                 : bulkLinks
                 ? `${linkDescription} ${linkInstructions}`
-                : bulkDates
+                : clipboard ? '날짜를 붙여넣은 칸부터 간트에 표시된 순서대로 업무를 찾았습니다.' : bulkDates
                   ? '날짜별 공통 변경과 업무별 간트 초안을 함께 검토할 수 있습니다.'
                   : isTeamPaste
                     ? '여러 프로젝트의 업무 키와 함께 날짜 또는 선행 업무를 붙여넣고, 변경 내용을 확인한 뒤 적용하세요.'
@@ -828,7 +832,7 @@ function ProjectScheduleEditDialog({
 
         <form id={formId} className="schedule-paste-input" onSubmit={preview}>
           <fieldset disabled={editLocked}>
-            {bulk && !(bulkLinks && chainMode) && (
+            {bulk && !clipboard && !(bulkLinks && chainMode) && (
               <details className="schedule-bulk-targets">
                 <summary>선택한 업무 {bulkIssues.length}개{projectCount !== undefined && ` · 프로젝트 ${projectCount}개`}</summary>
                 <ul>
@@ -846,6 +850,9 @@ function ProjectScheduleEditDialog({
                 선택한 업무가 삭제되었거나 다른 프로젝트로 이동했습니다. 간트에서 연결할 업무를 다시 선택해 주세요.
               </p>
             )}
+            {Boolean(clipboard?.unavailableKeys.length) && <p className="schedule-paste-error" role="alert">
+              {clipboard?.unavailableKeys.join(', ')} 업무가 이동되거나 삭제되었습니다. 현재 간트에서 날짜를 다시 붙여넣으세요.
+            </p>}
             {blockerLinks ? (
               <GanttBlockerLinkPicker projectId={projectId} projects={blockerLinks.projects} projectFilterRef={blockerProjectFilter}
                 issues={blockerIssuesById} dependencyFor={dependencyFor}
@@ -883,7 +890,7 @@ function ProjectScheduleEditDialog({
               </>
             ) : bulkDates ? (
               <>
-                <div className="schedule-bulk-date-fields">
+                {!clipboard && <div className="schedule-bulk-date-fields">
                   {bulkFields.map(({ field, label }, index) => {
                     const entry = dates[field];
                     return (
@@ -909,7 +916,7 @@ function ProjectScheduleEditDialog({
                       </div>
                     );
                   })}
-                </div>
+                </div>}
                 {dateDraftFields}
                 {followUpOption}
               </>

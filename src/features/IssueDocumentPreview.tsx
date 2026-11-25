@@ -1,7 +1,8 @@
 'use client';
 
-import { lazy, memo, Suspense, useCallback, useLayoutEffect, useRef, useState } from 'react';
-import { ArrowUpRight, X } from 'lucide-react';
+import { lazy, memo, Suspense, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ArrowUpRight, BookOpen, X } from 'lucide-react';
+import { documentReadingHash, savedDocumentSectionTitle } from '../../shared/document-sections';
 import type { DocPage, WorkspaceSnapshot } from '../../shared/types';
 import './issue-document-preview.css';
 
@@ -28,7 +29,23 @@ const DocumentReader = lazy(async () => {
   return { default: DocumentReader };
 });
 
-export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenDocument, openIssue, openDocument, referenceIssueId }: DocumentReaderProps & {
+const outlineRoot = '[data-document-outline-root]';
+const outlineHeading = '[data-document-outline-target]';
+
+function sectionBeforeReference(reference: HTMLElement) {
+  const root = reference.closest(outlineRoot);
+  if (!root) return undefined;
+  let sectionId: string | undefined;
+  for (const heading of root.querySelectorAll<HTMLElement>(outlineHeading)) {
+    if (heading.closest(outlineRoot) !== root) continue;
+    if (!(heading.compareDocumentPosition(reference) & Node.DOCUMENT_POSITION_FOLLOWING)) break;
+    sectionId = heading.dataset.documentSectionId;
+  }
+  return sectionId;
+}
+
+export function IssueDocumentPreview({ data, actorId, projectId, document, onClose, onOpenDocument, openIssue, openDocument, referenceIssueId }: DocumentReaderProps & {
+  projectId: string;
   onClose: () => void;
   onOpenDocument: () => void;
 }) {
@@ -39,8 +56,13 @@ export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenD
   const activeReference = useRef<HTMLButtonElement | null>(null);
   const backdropPress = useRef(false);
   const [bodyReady, setBodyReady] = useState(false);
+  const [readingSectionId, setReadingSectionId] = useState<string>();
   const [navigation, setNavigation] = useState<{ version: number; issueId: string; message: string }>();
   const markBodyReady = useCallback(() => setBodyReady(true), []);
+  const readingSectionTitle = useMemo(() => readingSectionId ? savedDocumentSectionTitle(document.content, readingSectionId) : undefined,
+    [document.content, readingSectionId]);
+  const readingHref = documentReadingHash(document.id, document.projectId ?? projectId,
+    readingSectionTitle === undefined ? undefined : readingSectionId);
 
   useLayoutEffect(() => {
     const element = dialog.current;
@@ -61,6 +83,7 @@ export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenD
     const references = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-preview-issue-reference]'));
     const previous = activeReference.current;
     if (!references.length) {
+      setReadingSectionId(undefined);
       setNavigation({ version: document.version, issueId: referenceIssueId, message: '미리보기에서 참조 위치를 표시할 수 없습니다.' });
       return;
     }
@@ -84,6 +107,7 @@ export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenD
     }
     const target = reference.getBoundingClientRect();
     container.scrollTop += target.top - container.getBoundingClientRect().top + (target.height - container.clientHeight) / 2;
+    setReadingSectionId(sectionBeforeReference(reference));
     setNavigation({ version: document.version, issueId: referenceIssueId, message: `${references.length}곳 중 ${index + 1}번째 본문 참조` });
   }
 
@@ -118,19 +142,29 @@ export function IssueDocumentPreview({ data, actorId, document, onClose, onOpenD
         <X size={19} aria-hidden="true" />
       </button>
     </header>
-    <div ref={body} className="issue-document-preview-body" role="region" aria-label="미리보기 본문" tabIndex={0}>
+    <div ref={body} className="issue-document-preview-body" role="region" aria-label="미리보기 본문" tabIndex={0}
+      onFocusCapture={event => {
+        const target = event.target;
+        if (target instanceof HTMLElement && target.matches(outlineHeading) && target.closest(outlineRoot)?.parentElement === event.currentTarget) {
+          setReadingSectionId(target.dataset.documentSectionId);
+        }
+      }}>
       <Suspense fallback={<p role="status">문서를 불러오는 중…</p>}>
         <DocumentReader data={data} actorId={actorId} document={document} openIssue={openIssue} openDocument={openDocument}
           referenceIssueId={referenceIssueId} onReady={markBodyReady} />
       </Suspense>
     </div>
     <footer className="issue-document-preview-footer">
+      {readingSectionTitle !== undefined && <p className="issue-document-preview-section">이어서 읽을 절 <strong>{readingSectionTitle || '제목 없는 절'}</strong></p>}
       {referenceIssueId && <>
         <span className="issue-document-preview-reference-status" role="status">
           {navigation?.version === document.version && navigation.issueId === referenceIssueId ? navigation.message : ''}
         </span>
         <button type="button" className="btn" disabled={!bodyReady} onClick={moveToNextReference}>본문 참조로 이동</button>
       </>}
+      <a className="btn" href={readingHref} target="_blank" rel="noopener noreferrer">
+        <BookOpen size={15} aria-hidden="true" />새 탭에서 저장본 읽기
+      </a>
       <button ref={openDocumentButton} type="button" className="btn" onClick={onOpenDocument}>
         문서 공간에서 열기 <ArrowUpRight size={15} aria-hidden="true" />
       </button>

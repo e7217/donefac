@@ -61,6 +61,7 @@
 }
 
 .issue-document-preview-footer > .btn { min-height: 40px; }
+.issue-document-preview-section { width: 100%; margin: 0; color: #567065; font-size: .8125rem; overflow-wrap: anywhere; }
 .issue-document-preview-reference-status { width: 100%; color: #567065; font-size: .8125rem; }
 .issue-document-preview-reference-status:empty { position: absolute; }
 

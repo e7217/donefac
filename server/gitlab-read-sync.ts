@@ -2,7 +2,8 @@ import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import type { GitlabProjectWebhook, GitlabProjectWebhookAttemptDetails, GitlabProjectWebhookAuthMode } from '../shared/gitlab-project-webhooks.js';
-import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
+import { GITLAB_MR_CHANGED_FILE_LIMIT } from '../shared/types.js';
+import type { GitlabBranchMergeRequests, GitlabIssueBranchTarget, GitlabMergeRequestChangedFile, GitlabMergeRequestChangedFiles, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTest, GitlabPipelineFailedTests, GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabRepositoryCandidate,
   GitlabRepositorySearch, GitlabReviewParticipant, GitlabReviewState, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabTestCounts, GitlabUnresolvedDiscussion } from '../shared/types.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl } from './gitlab-push.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -10,7 +11,7 @@ import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
 export type GitlabReadObject = Record<string, unknown>;
 export type GitlabReadStage = 'merge-requests' | 'pipelines' | 'project' | 'branches' | 'commits' | 'webhooks' |
   'deployments' | 'deployment-merge-requests' | 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests' | 'merge-request-review' |
-  'merge-request-discussions' | 'merge-request-pipeline';
+  'merge-request-discussions' | 'merge-request-pipeline' | 'merge-request-changed-files';
 type PipelineInspectionStage = Extract<GitlabReadStage, 'pipeline-jobs' | 'pipeline-test-report' | 'pipeline-failed-tests' | 'merge-request-pipeline'>;
 type GitlabReadErrorCode = 'http' | 'timeout' | 'network' | 'invalid-response' | 'response-too-large' | 'changed';
 type Connection = { baseUrl: string; token?: string | null };
@@ -45,6 +46,7 @@ const MR_DISCUSSION_PAGE_SIZE = 50;
 const MAX_MR_DISCUSSION_PAGES = 4;
 const MR_DISCUSSION_LIMIT = 30;
 const MR_DISCUSSION_EXCERPT_LIMIT = 300;
+const MR_CHANGED_FILE_PAGE_SIZE = 25;
 const BRANCH_PAGE_SIZE = 100;
 const MAX_BRANCH_PAGES = 5;
 const COMMIT_PAGE_SIZE = 100;
@@ -75,6 +77,7 @@ const stageNames: Record<GitlabReadStage, string> = {
   'merge-request-review': 'MR 검토',
   'merge-request-discussions': 'MR 토론',
   'merge-request-pipeline': 'MR 파이프라인',
+  'merge-request-changed-files': 'MR 변경 파일',
 };
 
 export class GitlabReadError extends Error {
@@ -86,7 +89,7 @@ export class GitlabReadError extends Error {
       'invalid-response': '응답 형식 오류',
       'response-too-large': '응답 크기 한도 초과',
       'changed': stage === 'branches' ? '브랜치가 변경되었습니다. 다시 확인해 주세요.'
-        : stage === 'merge-request-review' || stage === 'merge-request-discussions' || stage === 'merge-request-pipeline'
+        : stage === 'merge-request-review' || stage === 'merge-request-discussions' || stage === 'merge-request-pipeline' || stage === 'merge-request-changed-files'
           ? 'MR이 변경되었습니다. 다시 확인해 주세요.' : '파이프라인이 변경되었습니다. 다시 확인해 주세요.',
     }[code];
     super(`${stageNames[stage]} 조회 중 ${description}`);
@@ -797,6 +800,7 @@ const unavailableWorkflowStatuses = new Set([401, 403, 404, 405, 501]);
 const reviewStage = 'merge-request-review';
 const discussionStage = 'merge-request-discussions';
 const mergeRequestPipelineStage = 'merge-request-pipeline';
+const changedFilesStage = 'merge-request-changed-files';
 const positiveId = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 const nonNegativeCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 
@@ -977,11 +981,75 @@ export async function readGitlabMergeRequestDiscussions(connection: Connection, 
   return { threads, hasMore };
 }
 
+function invalidMergeRequestChangedFiles(): never {
+  throw new GitlabReadError(changedFilesStage, 'invalid-response');
+}
+
+function mergeRequestDiffRevision(object: GitlabReadObject) {
+  const refs = object.diff_refs;
+  if (refs != null && !isReadObject(refs)) invalidMergeRequestChangedFiles();
+  const reported = [object.sha, refs?.head_sha, refs?.base_sha, refs?.start_sha];
+  const commits = reported.map(gitlabObjectSha);
+  if (reported.some((value, index) => value != null && !commits[index]) || (!commits[0] && !commits[1])) invalidMergeRequestChangedFiles();
+  if (commits[0] && commits[1] && commits[0] !== commits[1]) throw new GitlabReadError(changedFilesStage, 'changed');
+  const timestamp = typeof object.updated_at === 'string' ? Date.parse(object.updated_at) : NaN;
+  if (object.updated_at != null && !Number.isFinite(timestamp)) invalidMergeRequestChangedFiles();
+  const count = typeof object.changes_count === 'string' && /^(?:0|[1-9]\d{0,14})\+?$/u.test(object.changes_count) ? object.changes_count : null;
+  return { revision: JSON.stringify([commits, Number.isFinite(timestamp) ? timestamp : null, object.state, count]), count };
+}
+
+function mergeRequestChangedFile(row: GitlabReadObject, token: Connection['token']): GitlabMergeRequestChangedFile {
+  const { old_path: oldPath, new_path: newPath, new_file: added, renamed_file: renamed, deleted_file: deleted,
+    generated_file: generated, collapsed, too_large: tooLarge } = row;
+  function isFilePath(value: unknown): value is string {
+    return typeof value === 'string' && Boolean(value.trim()) && value.length <= 1_024 && value.isWellFormed() &&
+      !/[\p{Cc}\p{Cf}]/u.test(value) && value.split('/').every(part => part && part !== '.' && part !== '..') &&
+      !includesGitlabCredential(token, [value]);
+  }
+  if (!isFilePath(oldPath) || !isFilePath(newPath) || [added, renamed, deleted].some(value => typeof value !== 'boolean') ||
+      [generated, collapsed, tooLarge].some(value => value !== undefined && typeof value !== 'boolean') ||
+      [added, renamed, deleted].filter(Boolean).length > 1 || (renamed === true && oldPath === newPath)) invalidMergeRequestChangedFiles();
+  return { oldPath, newPath, change: added ? 'added' : renamed ? 'renamed' : deleted ? 'deleted' : 'modified',
+    generated: generated === true, diffLimited: collapsed === true || tooLarge === true };
+}
+
+export async function readGitlabMergeRequestChangedFiles(connection: Connection, repositoryId: number, iid: number, objectId: number,
+  signal?: AbortSignal): Promise<Pick<GitlabMergeRequestChangedFiles, 'files' | 'hasMore'>> {
+  if (!positiveId(iid) || !positiveId(objectId)) invalidMergeRequestChangedFiles();
+  const { workflow } = gitlabLinkedActivityReader(connection, signal);
+  const { object } = await workflow(repositoryId, 'merge_request', iid, objectId);
+  const observed = mergeRequestDiffRevision(object);
+  const { projectUrl: url, headers } = projectReadRequest(connection, repositoryId, changedFilesStage);
+  url.pathname += '/merge_requests/' + iid + '/diffs';
+  url.searchParams.set('per_page', String(MR_CHANGED_FILE_PAGE_SIZE));
+  const files: GitlabMergeRequestChangedFile[] = [];
+  const seen = new Set<string>();
+  let hasMore = false;
+  const pageLimit = GITLAB_MR_CHANGED_FILE_LIMIT / MR_CHANGED_FILE_PAGE_SIZE;
+  for (let page = 1; page <= pageLimit; page++) {
+    url.searchParams.set('page', String(page));
+    let pagination = new Headers();
+    const rows = await readPage(url, headers, changedFilesStage, MR_CHANGED_FILE_PAGE_SIZE, signal, value => { pagination = value; });
+    for (const row of rows) {
+      const file = mergeRequestChangedFile(row, connection.token);
+      const identity = JSON.stringify([file.oldPath, file.newPath]);
+      if (seen.has(identity)) invalidMergeRequestChangedFiles();
+      seen.add(identity);
+      files.push(file);
+    }
+    hasMore = gitlabNextPage(pagination, url, page, rows.length, MR_CHANGED_FILE_PAGE_SIZE, changedFilesStage);
+    if (!hasMore) break;
+  }
+  const { object: latest } = await workflow(repositoryId, 'merge_request', iid, objectId);
+  if (mergeRequestDiffRevision(latest).revision !== observed.revision) throw new GitlabReadError(changedFilesStage, 'changed');
+  return { files, hasMore: hasMore || (observed.count !== null && (observed.count.endsWith('+') || Number(observed.count) > files.length)) };
+}
+
 function invalidPipelineJobs(): never {
   throw new GitlabReadError('pipeline-jobs', 'invalid-response');
 }
 
-type OffsetPageStage = 'pipelines' | 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage;
+type OffsetPageStage = 'pipelines' | 'pipeline-jobs' | 'merge-requests' | 'pipeline-failed-tests' | typeof discussionStage | typeof changedFilesStage;
 
 function gitlabReportedNextPage(headers: Headers, url: URL, page: number, rowCount: number,
   verifyFilters: boolean): 'next' | 'end' | 'missing' | 'invalid' {
@@ -1016,7 +1084,7 @@ function gitlabReportedNextPage(headers: Headers, url: URL, page: number, rowCou
 
 function gitlabNextPage(headers: Headers, url: URL, page: number, rowCount: number, pageSize: number | undefined,
   stage: OffsetPageStage): boolean {
-  const next = gitlabReportedNextPage(headers, url, page, rowCount, stage === 'pipelines');
+  const next = gitlabReportedNextPage(headers, url, page, rowCount, stage === 'pipelines' || stage === changedFilesStage);
   if (next === 'invalid') throw new GitlabReadError(stage, 'invalid-response');
   return next === 'next' || (next === 'missing' && rowCount === pageSize);
 }

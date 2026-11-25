@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { createApp } from '../../server/app.js';
-import type { AutomationRule, GitlabLink, GitlabMergeRequestDiscussions, GitlabMergeRequestReview, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
+import type { AutomationRule, GitlabLink, GitlabMergeRequestChangedFiles, GitlabMergeRequestDiscussions, GitlabMergeRequestReview, GitlabSettings, Issue, WorkspaceSnapshot } from '../../shared/types.js';
 
 const repositoryId = 42;
 const mergeRequestId = 811;
@@ -22,8 +22,10 @@ const mrPath = `${repositoryPath}/merge_requests/${mergeRequestIid}`;
 const reviewersPath = `${mrPath}/reviewers`;
 const approvalsPath = `${mrPath}/approvals`;
 const discussionsPath = `${mrPath}/discussions`;
+const diffsPath = `${mrPath}/diffs`;
 const route = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-review`;
 const discussionRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-discussions`;
+const changedFilesRoute = (issueId: string, linkId: string) => `/issues/${encodeURIComponent(issueId)}/gitlab-links/${encodeURIComponent(linkId)}/merge-request-changed-files`;
 
 type RequestOptions = { method?: string; body?: unknown; headers?: Record<string, string>; signal?: AbortSignal };
 type ResponseFixture = { status?: number; body: unknown; headers?: Record<string, string> };
@@ -42,6 +44,11 @@ function discussion(id: number, notes: Record<string, unknown>[], overrides: Rec
   return { id: `discussion-${id}`, individual_note: false, notes, ...overrides };
 }
 
+function diffFile(path: string, overrides: Record<string, unknown> = {}) {
+  return { old_path: path, new_path: path, new_file: false, deleted_file: false, renamed_file: false,
+    diff: privatePayload, ...overrides };
+}
+
 async function fixture(t: TestContext) {
   const calls: { method?: string; url: URL; credential?: string | string[] }[] = [];
   const dataDir = mkdtempSync(join(tmpdir(), 'teamspace-gitlab-merge-reviews-'));
@@ -56,13 +63,16 @@ async function fixture(t: TestContext) {
   let approvals: ResponseFixture = { body: { approved_by: [] } };
   let holdApprovals: (() => Promise<void>) | undefined;
   const discussionPages = new Map<number, ResponseFixture>();
+  const diffPages = new Map<number, ResponseFixture>();
   let holdDiscussions: ((response: import('node:http').ServerResponse) => Promise<void>) | undefined;
+  let onDiffRead: (() => void) | undefined;
 
   const mock = createServer(async (incoming, response) => {
     const url = new URL(incoming.url ?? '/', 'http://fixture.test');
     calls.push({ method: incoming.method, url, credential: incoming.headers['private-token'] });
     if (url.pathname === approvalsPath) await holdApprovals?.();
     if (url.pathname === discussionsPath) await holdDiscussions?.(response);
+    if (url.pathname === diffsPath) onDiffRead?.();
     if (response.destroyed) return;
     let fixture: ResponseFixture;
     if (url.pathname === repositoryPath) fixture = { body: { id: repositoryId, path_with_namespace: 'team/app', web_url: repoUrl(), ...project } };
@@ -70,6 +80,7 @@ async function fixture(t: TestContext) {
     else if (url.pathname === reviewersPath) fixture = reviewers;
     else if (url.pathname === approvalsPath) fixture = approvals;
     else if (url.pathname === discussionsPath) fixture = discussionPages.get(Number(url.searchParams.get('page'))) ?? { body: [] };
+    else if (url.pathname === diffsPath) fixture = diffPages.get(Number(url.searchParams.get('page'))) ?? { body: [] };
     else fixture = { status: 404, body: {} };
     response.writeHead(fixture.status ?? 200, { 'Content-Type': 'application/json', ...fixture.headers }).end(JSON.stringify(fixture.body));
   });
@@ -114,7 +125,8 @@ async function fixture(t: TestContext) {
   calls.length = 0;
 
   return { call, request, issue, link, createIssue, configure, baseUrl, calls, attach,
-    path: route(issue.id, link.id), discussionPath: discussionRoute(issue.id, link.id), snapshot: () => call<WorkspaceSnapshot>('/workspace'),
+    path: route(issue.id, link.id), discussionPath: discussionRoute(issue.id, link.id), filesPath: changedFilesRoute(issue.id, link.id),
+    snapshot: () => call<WorkspaceSnapshot>('/workspace'),
     runs: () => call(`/automation-runs?projectId=${projectId}`),
     unlink: (link: GitlabLink) => call(`${issueLinksPath}/${encodeURIComponent(link.id)}?${new URLSearchParams({ expectedManualLinkId: link.manualLinkId! })}`, { method: 'DELETE' }),
     setProject(value: Record<string, unknown>) { project = value; },
@@ -124,8 +136,73 @@ async function fixture(t: TestContext) {
     setApprovalGate(gate?: () => Promise<void>) { holdApprovals = gate; },
     setDiscussions(page: number, value: ResponseFixture) { discussionPages.set(page, value); },
     setDiscussionGate(gate?: typeof holdDiscussions) { holdDiscussions = gate; },
+    setDiffs(page: number, value: ResponseFixture) { diffPages.set(page, value); },
+    onDiffRead(callback?: typeof onDiffRead) { onDiffRead = callback; },
   };
 }
+
+test('changed files for a merged MR return bounded metadata from the exact linked object', async t => {
+  const f = await fixture(t);
+  f.setMr({ state: 'merged', changes_count: '1000+', diff_refs: { head_sha: sha, start_sha: 'b'.repeat(40), base_sha: 'c'.repeat(40) } });
+  f.setDiffs(1, { body: [
+    diffFile('src/new.ts', { new_file: true }),
+    diffFile('src/old.ts', { new_path: 'src/renamed.ts', renamed_file: true, generated_file: true }),
+    diffFile('src/removed.ts', { deleted_file: true, collapsed: true }),
+  ], headers: { 'X-Next-Page': '2' } });
+  f.setDiffs(2, { body: [diffFile('src/edit.ts', { too_large: true })], headers: { 'X-Next-Page': '3' } });
+  const before = await f.snapshot();
+  const result = await f.request<GitlabMergeRequestChangedFiles>(f.filesPath);
+  assert.equal(result.status, 200, JSON.stringify(result.data));
+  assert.match(result.headers.get('cache-control') ?? '', /\bno-store\b/u);
+  const { checkedAt, ...evidence } = result.data;
+  assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  assert.deepEqual(evidence, { linkId: f.link.id, repositoryId, mergeRequestIid, hasMore: true, files: [
+    { oldPath: 'src/new.ts', newPath: 'src/new.ts', change: 'added', generated: false, diffLimited: false },
+    { oldPath: 'src/old.ts', newPath: 'src/renamed.ts', change: 'renamed', generated: true, diffLimited: false },
+    { oldPath: 'src/removed.ts', newPath: 'src/removed.ts', change: 'deleted', generated: false, diffLimited: true },
+    { oldPath: 'src/edit.ts', newPath: 'src/edit.ts', change: 'modified', generated: false, diffLimited: true },
+  ] });
+  assert.deepEqual(f.calls.map(({ url }) => url.pathname), [repositoryPath, mrPath, diffsPath, diffsPath, mrPath]);
+  assert.deepEqual(f.calls.filter(({ url }) => url.pathname === diffsPath).map(({ url }) => url.search), [
+    '?per_page=25&page=1', '?per_page=25&page=2',
+  ]);
+  assert.ok(f.calls.every(call => call.method === 'GET' && call.credential === token));
+  assert.ok(!JSON.stringify(result.data).includes(privatePayload));
+  assert.deepEqual(await f.snapshot(), before);
+
+  f.setDiffs(1, { body: [diffFile('a')] });
+  f.setMr({ changes_count: '2' });
+  assert.equal((await f.call<GitlabMergeRequestChangedFiles>(f.filesPath)).hasMore, true);
+  f.setMr({ changes_count: '0' });
+  f.setDiffs(1, { body: [] });
+  const empty = await f.call<GitlabMergeRequestChangedFiles>(f.filesPath);
+  assert.deepEqual(empty.files, []);
+  assert.equal(empty.hasMore, false);
+});
+
+test('changed files reject malformed or stale continuity and suppress sensitive paths', async t => {
+  const f = await fixture(t);
+  const other = await f.createIssue('MR 연결이 없는 업무');
+  f.calls.length = 0;
+  await f.call(changedFilesRoute(other.id, f.link.id), undefined, 404);
+  await f.call(f.filesPath + '?page=2', undefined, 400);
+  assert.deepEqual(f.calls, []);
+  f.setDiffs(1, { status: 405, body: { secret: privatePayload } });
+  await f.call(f.filesPath, undefined, 501);
+  f.setDiffs(1, { body: [diffFile('src/' + token)] });
+  const sensitive = await f.request(f.filesPath);
+  assert.equal(sensitive.status, 502);
+  assert.ok(!JSON.stringify(sensitive.data).includes(token));
+  f.setDiffs(1, { body: [diffFile('src/same.ts')], headers: { 'X-Next-Page': '2' } });
+  f.setDiffs(2, { body: [diffFile('src/same.ts')] });
+  await f.call(f.filesPath, undefined, 502);
+  f.setDiffs(1, { body: [diffFile('src/ok.ts')], headers: { Link: '<' + f.baseUrl + '/api/v4/projects/42/merge_requests/19/diffs?per_page=24&page=2>; rel="next"' } });
+  await f.call(f.filesPath, undefined, 502);
+  f.setMr({ diff_refs: { head_sha: sha, base_sha: 'b'.repeat(40) } });
+  f.setDiffs(1, { body: [diffFile('src/ok.ts')] });
+  f.onDiffRead(() => f.setMr({ diff_refs: { head_sha: sha, base_sha: 'd'.repeat(40) } }));
+  await f.call(f.filesPath, undefined, 409);
+});
 
 test('reads exact linked MR reviewers and approvals by repository and IID without writing or triggering automation', async t => {
   const f = await fixture(t);

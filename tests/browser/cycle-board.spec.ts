@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Locator, type Page } from '@playwright/test';
-import type { CycleBoardMoveInput, CycleBoardMoveResult, Issue, PlanningItem, ProjectIssueOrder, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, CycleBoardMoveInput, CycleBoardMoveResult, Issue, IssueStatusChangeRequest, IssueStatusChangeResult, PlanningItem, ProjectIssueOrder, WorkspaceSnapshot } from '../../shared/types';
 
 async function json<T>(response: Pick<APIResponse, 'status' | 'text' | 'json'>, status = 200) {
   expect(response.status(), await response.text()).toBe(status);
@@ -85,6 +85,134 @@ async function openLaneCreation(page: Page, lane: Locator, target: '백로그' |
   await expect(title).toBeFocused();
   return { dialog, title, submit: dialog.getByRole('button', { name: '업무 만들기', exact: true }) };
 }
+
+test('360px 백로그와 사이클에서 상태·담당자·인수인계를 저장하고 원래 보드로 돌아온다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('인수인계 사이클');
+    const filter = `상태 인수인계 ${f.suffix}`;
+    const backlog = await f.issue(`${filter} 백로그`, { status: 'todo', assigneeId: f.actor.id });
+    const assigned = await f.issue(`${filter} 사이클`, { status: 'todo', cycleId: cycle.id });
+    const order = await f.order();
+    const board = await openBoard(page, f, 'backlog', cycle);
+    await board.search.fill(filter);
+    const boardUrl = page.url();
+    const action = (lane: Locator, issue: Issue) => lane.getByRole('button', { name: `${issue.key} 상태 변경`, exact: true });
+    const opener = action(board.backlog, backlog);
+    const bounds = await opener.boundingBox();
+    expect(bounds?.height).toBeGreaterThanOrEqual(44);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(360);
+    await opener.press('Enter');
+    const dialog = page.getByRole('dialog', { name: '업무 상태 변경', exact: true });
+    const status = dialog.getByRole('combobox', { name: '변경할 상태', exact: true });
+    const assignee = dialog.getByRole('combobox', { name: '담당자', exact: true });
+    const commentInput = dialog.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    const apply = dialog.getByRole('button', { name: '상태 변경 적용', exact: true });
+    await expect(status).toBeFocused();
+    await status.selectOption('in_progress');
+    await assignee.selectOption(`user:${f.peer.id}`);
+    const handoff = '백로그 검토를 마쳤습니다. 새 담당자가 업무를 진행해 주세요.';
+    await commentInput.fill(handoff);
+    const declined = page.waitForEvent('dialog').then(async prompt => {
+      expect(prompt.message()).toContain('인수인계 댓글');
+      await prompt.dismiss();
+    });
+    await dialog.getByRole('button', { name: '취소', exact: true }).click();
+    await declined;
+    await expect(commentInput).toHaveValue(handoff);
+
+    const attempts: IssueStatusChangeRequest[] = [];
+    const statusPath = `/api/issues/${backlog.id}/status-change`;
+    await page.route(`**${statusPath}`, async route => {
+      attempts.push(route.request().postDataJSON() as IssueStatusChangeRequest);
+      if (attempts.length > 1) { await route.continue(); return; }
+      const result = await json<IssueStatusChangeResult>(await route.fetch());
+      expect(result.duplicate).toBe(false);
+      await route.abort('failed');
+    });
+    await apply.click();
+    const retry = dialog.getByRole('button', { name: '저장 결과 다시 확인', exact: true });
+    await expect(retry).toBeFocused();
+    await expect(commentInput).toHaveValue(handoff);
+    const replay = page.waitForResponse(response => new URL(response.url()).pathname === statusPath && response.request().method() === 'POST');
+    await retry.click();
+    expect(await json<IssueStatusChangeResult>(await replay)).toMatchObject({
+      issue: { id: backlog.id, status: 'in_progress', assigneeId: f.peer.id, version: backlog.version + 1 },
+      duplicate: true,
+    });
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+    await expect(dialog).toHaveCount(0);
+    await expect(opener).toHaveText('진행 중');
+    await expect(opener).toBeFocused();
+    const comments = await json<Comment[]>(await request.get(`/api/comments?resourceType=issue&resourceId=${backlog.id}`, { headers: f.headers }));
+    expect(comments).toMatchObject([{ authorId: f.actor.id, body: handoff }]);
+
+    const cycleOpener = action(board.lane, assigned);
+    await cycleOpener.click();
+    await status.selectOption('in_progress');
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(cycleOpener).toHaveText('진행 중');
+    await expect(cycleOpener).toBeFocused();
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.search).toHaveValue(filter);
+    await expect(page).toHaveURL(boardUrl);
+    expect((await f.order()).issueIds).toEqual(order.issueIds);
+    const current = await workspace(request);
+    expect(current.issues.find(issue => issue.id === assigned.id)).toMatchObject({ status: 'in_progress', cycleId: cycle.id });
+    expect(current.issues.find(issue => issue.id === backlog.id)?.cycleId ?? null).toBeNull();
+  } finally { await f.close(); }
+});
+
+test('사이클 카드가 동료 편집으로 보이지 않아도 상태와 인수인계 초안을 다시 확인한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('현재 사이클');
+    const other = await f.plan('이동할 사이클');
+    const filter = `동시 인수인계 ${f.suffix}`;
+    const issue = await f.issue(`${filter} 업무`, { status: 'todo', cycleId: cycle.id });
+    const board = await openBoard(page, f, 'backlog', cycle);
+    await board.search.fill(filter);
+    const boardUrl = page.url();
+    await board.lane.getByRole('button', { name: `${issue.key} 상태 변경`, exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: '업무 상태 변경', exact: true });
+    const status = dialog.getByRole('combobox', { name: '변경할 상태', exact: true });
+    const comment = dialog.getByRole('textbox', { name: '인수인계 댓글', exact: true });
+    const apply = dialog.getByRole('button', { name: '상태 변경 적용', exact: true });
+    await status.selectOption('in_progress');
+    await comment.fill('새 사이클에서도 이어갈 인수인계입니다.');
+    const issuePath = `/api/issues/${issue.id}`;
+    const moved = await json<Issue>(await request.patch(issuePath, {
+      headers: { 'X-Actor-Id': f.peer.id },
+      data: { expectedVersion: issue.version, cycleId: other.id },
+    }));
+    expect(moved.cycleId).toBe(other.id);
+    const conflict = page.waitForResponse(response => new URL(response.url()).pathname === `${issuePath}/status-change`);
+    await apply.click();
+    expect((await conflict).status()).toBe(409);
+    await dialog.getByRole('button', { name: '최신 업무 불러오기', exact: true }).click();
+    await expect(status).toBeEnabled();
+    await expect(comment).toHaveValue('새 사이클에서도 이어갈 인수인계입니다.');
+    await status.selectOption('in_progress');
+    await apply.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(board.search).toBeFocused();
+    await expect(board.search).toHaveValue(filter);
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(page).toHaveURL(boardUrl);
+    await expect(board.lane.locator(rowSelector(issue))).toHaveCount(0);
+    const current = await workspace(request);
+    expect(current.issues.find(item => item.id === issue.id)).toMatchObject({
+      status: 'in_progress', cycleId: other.id, version: moved.version + 1,
+    });
+    expect(await json<Comment[]>(await request.get(`/api/comments?resourceType=issue&resourceId=${issue.id}`, { headers: f.headers })))
+      .toMatchObject([{ authorId: f.actor.id, body: '새 사이클에서도 이어갈 인수인계입니다.' }]);
+  } finally { await f.close(); }
+});
 
 test('360px 백로그와 선택한 사이클의 업무를 표시 순서로 검토하고 원래 행으로 돌아온다', async ({ page, request }) => {
   test.setTimeout(75_000);

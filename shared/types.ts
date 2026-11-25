@@ -1751,6 +1751,22 @@ export interface GitlabMergeRequestDiscussions {
   threads: GitlabUnresolvedDiscussion[];
   hasMore: boolean;
 }
+export const GITLAB_MR_CHANGED_FILE_LIMIT = 50;
+export interface GitlabMergeRequestChangedFile {
+  oldPath: string;
+  newPath: string;
+  change: 'added' | 'modified' | 'renamed' | 'deleted';
+  generated: boolean;
+  diffLimited: boolean;
+}
+export interface GitlabMergeRequestChangedFiles {
+  linkId: string;
+  repositoryId: number;
+  mergeRequestIid: number;
+  checkedAt: string;
+  files: GitlabMergeRequestChangedFile[];
+  hasMore: boolean;
+}
 export interface GitlabBranchMergeRequests {
   linkId: string;
   branchRevision: string;

@@ -32,6 +32,7 @@ import { CustomFields, initialIssueType, IssueTypeName, IssueTypeSelect } from '
 import { PlanningSelect, PLAN_LABELS } from './PlanningSelectors';
 import { IssueTypeIcon } from './Issues';
 import { IssuePasteDialog } from './IssuePasteDialog';
+import { parseGanttDateRangePaste } from './gantt-inline-date-paste';
 import { ISSUE_GITLAB_FILTER_LABELS } from './IssueGitlabSummary';
 import { buildIssueHierarchy, IssueHierarchyContext } from './IssueHierarchyContext';
 import { dayNumber, dependencyLabel, errorMessage, isoDay, moveDate, todayDate } from './schedule-utils';
@@ -147,7 +148,7 @@ type GanttProps = FeatureProps & {
 };
 type PlanAssignmentInput = { item: PlanningItem; issues: Issue[] };
 type ScheduleProjectScope = Project | 'team';
-type BulkDateSelection = { issues: Issue[]; dateDrafts: ChartDateDraft[] };
+type BulkDateSelection = { issues: Issue[]; dateDrafts: ChartDateDraft[]; clipboardOpener?: HTMLInputElement };
 type BulkLinkSelection = BulkDateSelection & { project: Project };
 type DependencyEditor = {
   dependency?: Dependency;
@@ -1214,9 +1215,12 @@ function ProjectGantt(props: GanttProps) {
   const canEditBulkDates = hasProject || (allProjects && data.projects.length > 0);
   const bulkDatesOverLimit = selectedIssues.length > MAX_SCHEDULE_BULK_DATE_ISSUES;
   const bulkDateIssues = bulkDateSelection?.issues.map(original => projectIssues.find(issue => issue.id === original.id) ?? original);
+  const clipboardUnavailable = bulkDateSelection?.clipboardOpener && bulkDateSelection.issues.filter(original =>
+    !projectIssues.some(issue => issue.id === original.id && issue.projectId === original.projectId)).map(issue => issue.key);
   const schedulePasteTarget = bulkDateIssues
     ? { projectId: allProjects ? null : projectId,
-      bulkDates: { issues: bulkDateIssues, dateDrafts: bulkDateSelection?.dateDrafts, projects: data.projects, refresh } }
+      bulkDates: { issues: bulkDateIssues, dateDrafts: bulkDateSelection?.dateDrafts, projects: data.projects, refresh,
+        ...(clipboardUnavailable ? { clipboard: { unavailableKeys: clipboardUnavailable } } : {}) } }
     : pasteScope === 'team' ? { projectId: null, teamPaste: { projects: data.projects } }
       : pasteScope ? { projectId: pasteScope.id, projectLabel: `${pasteScope.key} · ${pasteScope.name}` } : null;
   const selectedAnchor = selectedIssues.length === 1 ? selectedIssues[0] : undefined;
@@ -1609,12 +1613,30 @@ function ProjectGantt(props: GanttProps) {
       setBulkDateSelection({ issues: selectedIssues, dateDrafts });
     });
   }
+  function reviewPastedDateRange(issue: Issue, rows: readonly ScheduleBulkDateChanges[], opener: HTMLInputElement) {
+    if (!canKeepInlineDateDrafts()) {
+      notify('열린 일정 편집을 마친 뒤 날짜를 붙여넣으세요.', 'error');
+      return;
+    }
+    const start = visibleIssues.findIndex(row => row.id === issue.id);
+    if (start < 0 || start + rows.length > visibleIssues.length) {
+      notify('붙여넣은 날짜 행 수만큼 간트의 시작 칸 아래에 업무가 표시돼야 합니다.', 'error');
+      return;
+    }
+    const dateDrafts = rows.flatMap((changes, index) => Object.keys(changes).length
+      ? [{ source: visibleIssues[start + index], changes }] : []);
+    if (!dateDrafts.length) {
+      notify('붙여넣을 날짜를 한 칸 이상 입력하세요.', 'error');
+      return;
+    }
+    setBulkDateSelection({ issues: dateDrafts.map(draft => draft.source), dateDrafts, clipboardOpener: opener });
+  }
   function closeBulkDates(updated?: readonly Issue[]) {
+    const opener = bulkDateSelection?.clipboardOpener ?? bulkDatesTrigger.current;
     setBulkDateSelection(null);
     if (updated && focusAfterCompletingMissingRows(updated)) return;
     requestAnimationFrame(() => {
-      const trigger = bulkDatesTrigger.current;
-      if (trigger && !trigger.disabled) trigger.focus({ preventScroll: true });
+      if (opener?.isConnected && !opener.disabled) opener.focus({ preventScroll: true });
       else scrollRef.current?.focus({ preventScroll: true });
     });
   }
@@ -2715,7 +2737,7 @@ function ProjectGantt(props: GanttProps) {
       onLocateMilestoneIssue={id => onLocateIssueDate(id, 'endDate')} onOpenMilestoneIssue={openMilestoneIssue}
       onOpenMilestoneCandidateIssue={openChartIssue} />
     {baseline && <div className="gantt-baseline-caption"><span className="gantt-baseline-key" />비교 기준선 <strong>{baseline.name}</strong><span>회색은 캡처된 계획 · 종료 차이는 달력일 · 삭제된 업무와 마일스톤 기록도 보존됩니다.</span></div>}</div>}
-    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 칸에 YYYY-MM-DD를 붙여넣거나, 시작일 칸에 스프레드시트의 시작일·종료일 두 칸을 붙여넣을 수 있습니다. 행의 저장 버튼이나 Enter로 날짜를 저장합니다. 저장 전 날짜는 같은 탭에서 새로고침해도 남습니다. Esc로 날짜 변경을 취소합니다.</span></div>
+    <div className="gantt-hint" id="gantt-editing-help" hidden={Boolean(linkPicker || activeDatePicker)}><span><span className="gantt-mini-bar" />막대 가운데는 이동, 양 끝은 기간 조정 · 핸들은 ← → 키로도 조정</span><span>날짜 칸에 YYYY-MM-DD를 붙여넣으세요. 시작일 칸은 시작일·종료일 두 열을 받을 수 있습니다. 한 행은 초안으로 입력하고, 여러 행은 화면 순서대로 검토합니다. 초안은 새로고침해도 남으며 Enter로 저장하고 Esc로 취소합니다.</span></div>
     {dateStorageError && <p className="gantt-hint" role="status">브라우저의 날짜 초안을 읽거나 보관하지 못했습니다. 화면을 닫기 전에 입력을 저장해 주세요.</p>}
     {unavailableDateIds.length > 0 && <div className="gantt-hint">
       <span role="status">원래 업무와 연결할 수 없는 날짜 초안이 {unavailableDateIds.length}건 있습니다.</span>
@@ -2862,6 +2884,7 @@ function ProjectGantt(props: GanttProps) {
             </div>
             {dateRecoveryReady && <DateCells key={`${issue.id}:${issue.projectId}:${draftEpoch}`} issue={issue}
               recovered={recoverableDates(issue, inlineDateRecords.get(issue.id))} onDraftChange={trackDraft} onInlineDraftChange={trackInlineDates}
+              onPasteRange={reviewPastedDateRange} notify={notify}
               disabled={busy || Boolean(preview || cascade || linkPicker || activeDatePicker)}
               onSave={saveDates}
               onReview={outgoingIssueIds.has(issue.id) ? reviewSuccessors : undefined}
@@ -3075,7 +3098,9 @@ function ProjectGantt(props: GanttProps) {
       onApplied={async (result, _operation, reviewedDateDrafts) => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings);
-        if (bulkDateSelection) acceptReviewedDateDrafts(bulkDateSelection.dateDrafts, reviewedDateDrafts, result.updated);
+        if (bulkDateSelection && !bulkDateSelection.clipboardOpener) {
+          acceptReviewedDateDrafts(bulkDateSelection.dateDrafts, reviewedDateDrafts, result.updated);
+        }
         await refresh();
         if (bulkDateIssues) {
           closeBulkDates(result.updated);
@@ -3486,7 +3511,7 @@ function inlineDateInput(date: string | null): InlineDateInput {
   return { value, lastValid: value, incomplete: false };
 }
 
-function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange }: {
+function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled, onDraftChange, onInlineDraftChange, onPasteRange, notify }: {
   issue: Issue;
   recovered?: StoredGanttDateDraft;
   onSave: (source: Issue, start: string | null, end: string | null, origin: InlineScheduleOrigin) => Promise<void>;
@@ -3495,6 +3520,8 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
   disabled: boolean;
   onDraftChange: TrackDraft;
   onInlineDraftChange: (id: string, draft: InlineDateDraft | null, owner: symbol, detached?: boolean) => void;
+  onPasteRange: (issue: Issue, rows: readonly ScheduleBulkDateChanges[], opener: HTMLInputElement) => void;
+  notify: FeatureProps['notify'];
 }) {
   const [source, setSource] = useState(() => recovered
     ? { ...issue, version: recovered.version, startDate: recovered.startDate, endDate: recovered.endDate } : issue);
@@ -3594,6 +3621,13 @@ function DateCells({ issue, recovered, onSave, onReview, onReviewTeam, disabled,
       onPaste={event => {
         if (disabled || pendingRef.current) return;
         const text = event.clipboardData.getData('text/plain');
+        const range = parseGanttDateRangePaste(text, edge === 'start' ? 'startDate' : 'endDate');
+        if (range) {
+          event.preventDefault();
+          if ('error' in range) notify(range.error, 'error');
+          else onPasteRange(issue, range.rows, event.currentTarget);
+          return;
+        }
         if (text.includes('\t')) {
           event.preventDefault();
           if (edge !== 'start') return;

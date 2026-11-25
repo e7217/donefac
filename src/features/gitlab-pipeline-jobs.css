@@ -74,7 +74,8 @@
 
 .gitlab-pipeline-job-list,
 .gitlab-test-suite-list,
-.gitlab-discussion-list {
+.gitlab-discussion-list,
+.gitlab-changed-file-list {
   display: grid;
   width: 100%;
   max-height: min(24rem, 55vh);
@@ -89,7 +90,8 @@
 
 .gitlab-pipeline-job,
 .gitlab-test-suite,
-.gitlab-discussion {
+.gitlab-discussion,
+.gitlab-changed-file {
   display: grid;
   justify-items: start;
   gap: 4px;
@@ -99,7 +101,8 @@
 
 .gitlab-pipeline-job + .gitlab-pipeline-job,
 .gitlab-test-suite + .gitlab-test-suite,
-.gitlab-discussion + .gitlab-discussion {
+.gitlab-discussion + .gitlab-discussion,
+.gitlab-changed-file + .gitlab-changed-file {
   border-top: 1px solid #e5eee8;
 }
 

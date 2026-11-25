@@ -229,6 +229,14 @@
   overflow-wrap: anywhere;
 }
 
+.cycle-board-row-meta .cycle-board-status-action {
+  min-height: 30px;
+  padding-inline: 6px;
+  border: 1px solid #dce9e1;
+  color: #315e4d;
+  font-size: inherit;
+}
+
 .cycle-board-row-meta i {
   width: 7px;
   height: 7px;
@@ -319,6 +327,10 @@
 
   .cycle-board .btn,
   .cycle-board .field {
+    min-height: 44px;
+  }
+
+  .cycle-board-row-meta .cycle-board-status-action {
     min-height: 44px;
   }
 

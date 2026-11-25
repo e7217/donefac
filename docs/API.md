@@ -964,6 +964,12 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 테스트 결과를 조회할 때 저장된 MR 연결, MR의 소스 HEAD와 지정한 파이프라인, 실행의 저장소·ID·SHA를 다시 확인한다. `revision`이 없거나 형식이 잘못되면 `400`, 검토한 근거가 바뀌면 `409`를 반환한다. 화면에서 **MR 최신 파이프라인 다시 확인**을 누르면 현재 실행의 테스트 결과를 열 수 있다.
 
+### 연결된 MR의 변경 파일
+
+브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-changed-files`는 현재 티켓의 MR 연결을 확인한 뒤 저장된 읽기 자격 증명으로 25개씩 최대 두 페이지를 요청한다. `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`, `files`, `hasMore`를 반환한다. 파일에는 `oldPath`, `newPath`, `change`, `generated`, `diffLimited`가 들어간다. `change`는 `added`, `modified`, `renamed`, `deleted` 중 하나다. 응답 범위는 파일 경로와 상태이며 본문 변경 사항은 GitLab의 변경 화면에서 읽는다. [GitLab MR 변경 파일 API](https://docs.gitlab.com/api/merge_requests/#list-merge-request-diffs)
+
+조회 앞뒤의 MR 커밋 및 비교 범위와 Teamspace의 현재 연결을 대조한다. 도중에 바뀌면 `409`를 반환한다. `hasMore`는 조회 범위 밖에 파일이 있다는 근거가 있을 때 표시한다. 연결이 제공하는 API가 `405`나 `501`을 반환하면 `501`로 안내한다. 브라우저 응답에 `Cache-Control: no-store`를 적용한다.
+
 ### 연결된 MR 미해결 토론 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-discussions`는 사용자가 요청할 때만 현재 티켓에 연결된 열린 MR의 토론을 읽는다. 저장된 저장소와 전역 MR ID·IID를 대조한 뒤 GitLab에서 50개씩 최대 4페이지를 읽는다. 응답의 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`에 `threads`와 `hasMore`를 더한다. 확인한 미해결 토론은 최대 30개까지 표시한다. 표시 한도를 넘었거나 다음 원본 페이지가 남으면 `hasMore`는 `true`다. [GitLab 토론 API](https://docs.gitlab.com/api/discussions/#list-all-merge-request-discussion-items)
@@ -1382,6 +1388,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 `startDate`, `endDate`, `dueDate` 중 수정할 속성을 하나 이상 지정한다. 생략한 속성은 각 업무의 현재 값을 유지한다. `null`은 날짜를 지우고 문자열은 유효한 YYYY-MM-DD 날짜를 지정한다. 예시에서는 각 시작일을 유지하고 종료일을 지정하며 목표 마감일을 지운다.
 
 선택한 업무별로 `dates`에 `{issue:{id,expectedVersion},changes}`를 추가할 수 있다. 업무 ID와 버전은 `issues`의 값과 같아야 하며 업무마다 한 건을 지정한다. 개별 `changes`에 지정한 필드가 해당 업무의 공통 날짜보다 우선한다. 개별 변경이 있으면 공통 `changes`는 `{}`로 보낼 수 있다.
+
+간트의 날짜 칸에 붙여넣은 여러 행도 브라우저에서 현재 업무 ID와 선택한 날짜를 `dates`로 변환해 같은 경로로 검토한다. 선택하지 않은 날짜 항목은 생략한다.
 
 미리보기의 `changes`에는 변경할 업무의 시작·종료일과 `fromDue`·`toDue`가 포함된다. 업무가 없거나 버전이 달라지거나 날짜 검증에 실패하면 해당 업무를 `errors`에 표시한다. 프로젝트 ID를 명시한 요청은 소속이 다른 업무도 오류로 처리한다. 오류가 있거나 변경할 업무가 없으면 `previewId`는 `null`이다. 각 프로젝트의 달력으로 계산한 선후행 경고를 함께 표시한다.
 

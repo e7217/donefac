@@ -1,7 +1,7 @@
 import { createHash,createHmac,randomUUID,timingSafeEqual } from 'node:crypto';
 import type { StatementSync } from 'node:sqlite';
 import type { Express,Request,Response,NextFunction } from 'express';
-import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestDiscussions,GitlabMergeRequestPipeline,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStateAutomation,GitlabWebhookStatus,Issue } from '../shared/types.js';
+import type { AutomationEvent,AutomationRun,GitlabHistoryLimits,GitlabIssueBranchTarget,GitlabIssueRefreshResult,GitlabJiraRoute,GitlabJiraSource,GitlabLink,GitlabMergeReadiness,GitlabMergeRequestChangedFiles,GitlabMergeRequestDiscussions,GitlabMergeRequestPipeline,GitlabMergeRequestReview,GitlabPipelineFailedTests,GitlabPipelineJobs,GitlabPipelineTestReport,GitlabRepositorySearch,GitlabSettings,GitlabSyncFailure,GitlabSyncPreview,GitlabSyncPreviewCandidate,GitlabSyncPreviewCounts,GitlabSyncRepositoryFailure,GitlabSyncRepositoryResult,GitlabSyncResult,GitlabWebhookDelivery,GitlabWebhookStateAutomation,GitlabWebhookStatus,Issue } from '../shared/types.js';
 import { GITLAB_DEPLOYMENT_STATES, GITLAB_WEBHOOK_TRACKED_EVENTS, type GitlabDeploymentFilters, type GitlabWebhookTrackedEvent } from '../shared/types.js';
 import { isGitlabDeploymentEnvironment } from '../shared/automation.js';
 import { isCalendarDate } from '../shared/calendar.js';
@@ -11,7 +11,7 @@ import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
 import { gitlabPipelineGroup } from '../shared/issue-gitlab-view.js';
 import type { GitlabProjectWebhookHistory, GitlabProjectWebhookMessageReceipt } from '../shared/gitlab-project-webhooks.js';
 import { gitlabPushLinkUrl, gitlabRepositoryUrl, gitlabScopedPushUrl, readGitlabHeadPush, type GitlabHeadPush } from './gitlab-push.js';
-import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, includesGitlabCredential, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchHead, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
+import { GITLAB_REPOSITORY_SEARCH_MAX_PAGE, GitlabManualUrlError, GitlabReadError, GitlabRepositoryQueryError, gitlabLinkedActivityReader, includesGitlabCredential, isExactGitlabPipelineListRow, isGitlabMergeRequestUrl, readGitlabBranchHead, readGitlabBranchMergeRequests, readGitlabManualObject, readGitlabMergeRequestChangedFiles, readGitlabMergeRequestDiscussions, readGitlabMergeRequestPipeline, readGitlabMergeRequestReview, readGitlabPipelineFailedTests, readGitlabPipelineJobs, readGitlabPipelineTestReport, readGitlabRepositorySearch, readGitlabSyncProject } from './gitlab-read-sync.js';
 import type { MergeRequestPipelineTestReaders } from './gitlab-read-sync.js';
 import { GitlabProjectWebhookSetup } from './gitlab-project-webhook-setup.js';
 import { gitlabWebhookMessageDigest } from './gitlab-webhook-message.js';
@@ -33,6 +33,9 @@ function failGitlabWorkflowRead(error: GitlabReadError): never {
   if (error.httpStatus === 404) {
     if (error.stage === 'pipeline-test-report') fail('GitLab에서 이 파이프라인의 테스트 결과를 제공하지 않습니다.', 404);
     if (error.stage === 'pipeline-failed-tests') fail('GitLab에서 이 파이프라인의 실패 테스트 상세를 제공하지 않습니다.', 404);
+  }
+  if (error.stage === 'merge-request-changed-files' && (error.httpStatus === 405 || error.httpStatus === 501)) {
+    fail('이 GitLab 연결에서는 MR 변경 파일 조회를 지원하지 않습니다.', 501);
   }
   const status = error.code === 'changed' ? 409 : error.code === 'timeout' ? 504
     : error.httpStatus === 401 || error.httpStatus === 403 ? 403
@@ -1054,6 +1057,10 @@ export class GitlabIntegrationService{
   }
   async mergeRequestDiscussions(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestDiscussions> {
     const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 토론', readGitlabMergeRequestDiscussions);
+    return { ...result, ...response };
+  }
+  async mergeRequestChangedFiles(issueId: string, linkId: string, signal: AbortSignal): Promise<GitlabMergeRequestChangedFiles> {
+    const { result, response } = await this.readLinkedMergeRequest(issueId, linkId, signal, 'GitLab MR 변경 파일', readGitlabMergeRequestChangedFiles);
     return { ...result, ...response };
   }
   private async mergeRequestPipeline(issueId: string, linkId: string, signal: AbortSignal, includeJobs: boolean): Promise<GitlabMergeRequestPipeline> {
@@ -2401,7 +2408,8 @@ export class GitlabIntegrationService{
       catch (error) {
         if (!(error instanceof GitlabReadError) || error.stage === 'webhooks' || error.stage === 'deployments' ||
           error.stage === 'deployment-merge-requests' || error.stage === 'pipeline-jobs' || error.stage === 'pipeline-test-report' || error.stage === 'pipeline-failed-tests' ||
-          error.stage === 'merge-request-review' || error.stage === 'merge-request-discussions' || error.stage === 'merge-request-pipeline') throw error;
+          error.stage === 'merge-request-review' || error.stage === 'merge-request-discussions' || error.stage === 'merge-request-pipeline' ||
+          error.stage === 'merge-request-changed-files') throw error;
         const { stage, httpStatus, message } = error;
         reads.push({ projectId, failure:{ projectId, status:'error', counts:emptyCounts(options.includeHistory), error:{stage,httpStatus,message} } });
       }
@@ -2858,6 +2866,8 @@ export class GitlabIntegrationService{
       linkedWorkflowRead('GitLab MR 검토 조회 조건을 확인해 주세요.', this.mergeRequestReview.bind(this)));
     app.get('/api/issues/:id/gitlab-links/:linkId/merge-request-discussions',
       linkedWorkflowRead('GitLab MR 토론 조회 조건을 확인해 주세요.', this.mergeRequestDiscussions.bind(this)));
+    app.get('/api/issues/:id/gitlab-links/:linkId/merge-request-changed-files',
+      linkedWorkflowRead('GitLab MR 변경 파일 조회 조건을 확인해 주세요.', this.mergeRequestChangedFiles.bind(this)));
     app.get('/api/issues/:id/gitlab-links/:linkId/merge-request-pipeline',
       linkedWorkflowRead('GitLab MR 파이프라인 조회 조건을 확인해 주세요.', (issueId, linkId, signal) => this.mergeRequestPipeline(issueId, linkId, signal, false)));
     app.get('/api/issues/:id/gitlab-links/:linkId/merge-request-pipeline-jobs',

@@ -1,4 +1,6 @@
-import type { DocumentPublicationTarget } from './types.js';
+import { documentPlainText } from './document-plain-text.js';
+import { documentNodes } from './document-references.js';
+import type { DocumentPublicationTarget, RichContent } from './types.js';
 
 const sectionIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const markdownImportSectionPrefix = 'teamspace-md-section-';
@@ -25,6 +27,15 @@ export function isDocumentSectionId(value: unknown): value is string {
 
 export function outlineHeadingTitle(text: string): string {
   return text.trim().replace(/\s+/gu, ' ').replace(/^(.{240}).+$/u, '$1…');
+}
+
+export function savedDocumentSectionTitle(content: RichContent, sectionId: string): string | undefined {
+  for (const node of documentNodes(content)) {
+    if (node.type === 'heading' && node.attrs?.sectionId === sectionId) {
+      return outlineHeadingTitle(documentPlainText(node));
+    }
+  }
+  return undefined;
 }
 
 export function isDocumentReading(parameters: URLSearchParams): boolean {

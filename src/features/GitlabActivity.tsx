@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react';
-import { ArrowRight, ClipboardCheck, ExternalLink, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Link2, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
+import { ArrowRight, ClipboardCheck, ExternalLink, FileDiff, FlaskConical, GitBranch, GitCommitHorizontal, GitMerge, Link2, Workflow, RefreshCw, Unlink2 } from 'lucide-react';
 import { gitlabObjectSha, gitlabPipelineLinkIdentity, isGitlabBranchName, isRestorableGitlabLink } from '../../shared/gitlab-links';
 import { isGitlabMergeReadinessBlocked } from '../../shared/gitlab-merge-readiness';
 import { gitlabPipelineSourceLabel } from '../../shared/gitlab-pipeline-source';
 import type { GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
+import { GITLAB_MR_CHANGED_FILE_LIMIT } from '../../shared/types';
 import type {
-  FeatureProps, GitlabBranchMergeRequests, GitlabIssueRefreshResult, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTests,
+  FeatureProps, GitlabBranchMergeRequests, GitlabIssueRefreshResult, GitlabLink, GitlabMergeReadiness, GitlabMergeRequestChangedFile, GitlabMergeRequestChangedFiles, GitlabMergeRequestDiscussions, GitlabMergeRequestPipeline, GitlabMergeRequestReview, GitlabPipelineFailedTests,
   GitlabPipelineJob, GitlabPipelineJobs, GitlabPipelineTestReport, GitlabPipelineTriggerJob, GitlabTestCounts,
 } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
@@ -1107,6 +1108,83 @@ function MergeRequestDiscussionsResult({ result, url }: { result: GitlabMergeReq
   </>;
 }
 
+const fileChangeLabels = { added: '추가', modified: '수정', renamed: '이름 변경', deleted: '삭제' } satisfies Record<GitlabMergeRequestChangedFile['change'], string>;
+
+function isChangedFilesResult(result: GitlabMergeRequestChangedFiles | undefined, target: ReviewTarget): result is GitlabMergeRequestChangedFiles {
+  if (!result || result.linkId !== target.linkId || result.repositoryId !== target.repositoryId ||
+      result.mergeRequestIid !== target.mergeRequestIid || !Number.isFinite(Date.parse(result.checkedAt)) ||
+      typeof result.hasMore !== 'boolean' || !Array.isArray(result.files) || result.files.length > GITLAB_MR_CHANGED_FILE_LIMIT) return false;
+  const paths = new Set<string>();
+  return result.files.every(file => {
+    if (!file || typeof file.oldPath !== 'string' || !file.oldPath || typeof file.newPath !== 'string' || !file.newPath ||
+        !Object.hasOwn(fileChangeLabels, file.change) || typeof file.generated !== 'boolean' || typeof file.diffLimited !== 'boolean') return false;
+    const pair = JSON.stringify([file.oldPath, file.newPath]);
+    if (paths.has(pair)) return false;
+    paths.add(pair);
+    return true;
+  });
+}
+
+function changedFilesError(cause: unknown): string {
+  if (cause instanceof ApiError) {
+    if (cause.status === 401 || cause.status === 403) return 'GitLab 연결과 MR 변경 파일 조회 권한을 확인해 주세요.';
+    if (cause.status === 404) return 'GitLab에서 이 MR의 변경 파일을 조회할 수 없습니다.';
+    if (cause.status === 409) return 'MR 또는 GitLab 연결이 변경되었습니다. 변경 파일을 다시 확인해 주세요.';
+    if (cause.status === 429) return 'GitLab 요청 제한이 풀린 뒤 다시 확인해 주세요.';
+    if (cause.status === 501) return '이 GitLab 연결에서는 MR 변경 파일 조회를 지원하지 않습니다.';
+  }
+  return 'GitLab 변경 파일을 불러오지 못했습니다. 다시 확인해 주세요.';
+}
+
+function MergeRequestChangedFiles({ target, revision }: { target: ReviewTarget; revision: string }) {
+  const panelId = useId();
+  const { view, toggle, load } = useActivityLookup(revision, async signal => {
+    const path = ['/issues', encodeURIComponent(target.issueId), 'gitlab-links', encodeURIComponent(target.linkId), 'merge-request-changed-files'].join('/');
+    const result = await api<GitlabMergeRequestChangedFiles | undefined>(path, { method: 'GET', cache: 'no-store', signal });
+    return isChangedFilesResult(result, target) ? result : null;
+  }, '연결된 MR의 변경 파일 응답을 확인할 수 없습니다.', changedFilesError);
+  const changesUrl = new URL(target.url.href);
+  changesUrl.pathname = changesUrl.pathname.replace(/\/$/u, '') + '/diffs';
+
+  return <div className="gitlab-activity-inspection">
+    <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
+      <FileDiff size={14} aria-hidden="true" />{view ? '변경 파일 닫기' : '변경 파일 확인'}
+    </button>
+    {view && <section id={panelId} className="gitlab-activity-inspection-panel" aria-label="GitLab MR 변경 파일" aria-busy={view.kind === 'loading'}>
+      {view.kind === 'loading' && <p role="status">GitLab 변경 파일을 확인하고 있습니다.</p>}
+      {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 변경 파일을 다시 확인해 주세요.</p>}
+      {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
+      {view.kind === 'ready' && <>
+        <p className="gitlab-activity-inspection-meta">조회한 파일 {view.result.files.length}개 · <time dateTime={view.result.checkedAt}>
+          {new Date(view.result.checkedAt).toLocaleString('ko-KR')}
+        </time></p>
+        {view.result.files.length ? <ul className="gitlab-changed-file-list" role="list" aria-label="변경 파일" tabIndex={0}>
+          {view.result.files.map(file => <li key={JSON.stringify([file.oldPath, file.newPath])} className="gitlab-changed-file">
+            <div className="gitlab-activity-inspection-meta">
+              <strong>{fileChangeLabels[file.change]}</strong>
+              {file.generated && <span>생성된 파일</span>}
+              {file.diffLimited && <span>변경 내용 표시 제한</span>}
+            </div>
+            <div className="gitlab-activity-inspection-meta">
+              {file.change === 'renamed' && <><code>{file.oldPath}</code><span>→</span></>}
+              <code>{file.change === 'deleted' ? file.oldPath : file.newPath}</code>
+            </div>
+          </li>)}
+        </ul> : <p>조회한 변경 파일이 없습니다.</p>}
+        {view.result.hasMore && <p>조회 범위가 제한되었습니다. 나머지 파일은 GitLab에서 확인해 주세요.</p>}
+      </>}
+      <div className="gitlab-discussion-actions">
+        <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
+          <RefreshCw aria-hidden="true" size={14} />변경 파일 다시 확인
+        </button>
+        <a className="gitlab-discussion-link" href={changesUrl.href} target="_blank" rel="noopener noreferrer">
+          GitLab에서 변경 열기 <ExternalLink aria-hidden="true" size={13} />
+        </a>
+      </div>
+    </section>}
+  </div>;
+}
+
 function MergeReadiness({ value }: { value?: GitlabMergeReadiness }) {
   const state = value?.state ?? 'unknown';
   const tone = isGitlabMergeReadinessBlocked(state) ? 'blocked' : state === 'ready' ? 'ready' : 'neutral';
@@ -1293,6 +1371,8 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
     {mr && <MergeRequestPipeline key={`mr-pipeline:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       mr={link} manualActions={manualActions} reviewStatus={reviewStatus}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas, manualActions ? issueVersion : null])} />}
+    {mr && <MergeRequestChangedFiles key={`mr-files:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
+      revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas])} />}
     {mr && state === 'opened' && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,

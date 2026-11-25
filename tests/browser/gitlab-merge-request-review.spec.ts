@@ -29,7 +29,7 @@ async function holdNextResponse(page: Page, url: RegExp) {
   return { started: started.promise, release: release.resolve, finished: finished.promise };
 }
 
-test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론을 원하는 시점에 조회한다', async ({ page, request }) => {
+test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·미해결 토론을 원하는 시점에 조회한다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const settingsPath = '/api/integrations/gitlab';
@@ -45,6 +45,7 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
   const projectPath = `/forge/api/v4/projects/${repositoryId}`;
   const mrPath = `${projectPath}/merge_requests/${iid}`;
   const reviewerPath = `${mrPath}/reviewers`, approvalPath = `${mrPath}/approvals`, discussionsPath = `${mrPath}/discussions`;
+  const diffsPath = `${mrPath}/diffs`;
   const reviewer = { id: 81, name: '공정 검토자', username: 'reviewer' };
   const approver = { id: 82, name: '승인 담당자', username: 'approver' };
   const fallback = { id: 83, username: 'legacy-reviewer' };
@@ -56,6 +57,8 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
   let discussionMode: 'detailed' | 'empty' | 'partial' | 'unsupported' = 'detailed';
   let baseUrl = '';
   let head = 'e'.repeat(40);
+  const diffQueries = () => remoteCalls.filter(call => call.path === diffsPath).map(call => call.query);
+  let diffMode: 'files' | 'empty' = 'files';
   let updatedAt = new Date(Date.now() - 60_000).toISOString();
   let readiness = 'not_approved';
   const repositoryUrl = () => `${baseUrl}/team/app`;
@@ -73,7 +76,7 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
   };
   const mr = () => ({ id: mrId, iid, project_id: repositoryId, target_project_id: repositoryId, state: 'opened',
     title: `${issue.key} 검토 기다리는 변경`, source_branch: `feature/${issue.key}`, sha: head,
-    updated_at: updatedAt, web_url: mrUrl(), detailed_merge_status: readiness,
+    updated_at: updatedAt, web_url: mrUrl(), detailed_merge_status: readiness, changes_count: diffMode === 'files' ? '1000+' : '0',
     ...(mode === 'unavailable' ? {} : { reviewers: mode === 'fallback' ? [fallback] : mode === 'empty' ? [] : [reviewer, approver, withdrawn] }),
   });
   const mock = createServer((incoming, response) => {
@@ -82,6 +85,14 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
     response.setHeader('Content-Type', 'application/json');
     if (url.pathname === projectPath) response.end(JSON.stringify({ id: repositoryId, path_with_namespace: 'team/app', web_url: repositoryUrl() }));
     else if (url.pathname === mrPath) response.end(JSON.stringify(mr()));
+    else if (url.pathname === diffsPath) {
+      const rows = diffMode === 'files' ? [
+        { old_path: 'src/very-old.ts', new_path: 'src/new.ts', new_file: false, renamed_file: true, deleted_file: false,
+          generated_file: true, too_large: true, diff: '원문 코드 변경 내용' },
+        { old_path: 'src/deleted.ts', new_path: 'src/deleted.ts', new_file: false, renamed_file: false, deleted_file: true },
+      ] : [];
+      response.end(JSON.stringify(rows));
+    }
     else if (url.pathname === discussionsPath) {
       const page = Number(url.searchParams.get('page'));
       if (discussionMode === 'detailed' && page === 1) {
@@ -143,6 +154,22 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
     const comment = ticket.getByRole('textbox', { name: '댓글 내용', exact: true });
     await title.fill('저장하지 않은 MR 검토 업무 제목');
     await comment.fill('작성 중인 MR 검토 메모');
+    const showFiles = gitlab.getByRole('button', { name: '변경 파일 확인', exact: true });
+    expect(diffQueries()).toEqual([]);
+    await showFiles.press('Enter');
+    const filesPanel = gitlab.getByRole('region', { name: 'GitLab MR 변경 파일', exact: true });
+    const filesList = filesPanel.getByRole('list', { name: '변경 파일', exact: true });
+    await expect(filesList.getByRole('listitem')).toHaveCount(2);
+    const renamed = filesList.getByRole('listitem').filter({ hasText: 'src/very-old.ts' });
+    await expect(renamed).toContainText('이름 변경');
+    await expect(renamed).toContainText('src/new.ts');
+    await expect(renamed).toContainText('생성된 파일');
+    await expect(renamed).toContainText('변경 내용 표시 제한');
+    await expect(filesPanel).toContainText('조회 범위가 제한되었습니다.');
+    await expect(filesPanel).not.toContainText('원문 코드 변경 내용');
+    await expect(filesPanel.getByRole('link', { name: 'GitLab에서 변경 열기', exact: true })).toHaveAttribute('href', mrUrl() + '/diffs');
+    expect(await filesList.evaluate(list => list.scrollWidth - list.clientWidth)).toBe(0);
+    expect(diffQueries()).toEqual(['?per_page=25&page=1']);
     await open.press('Enter');
     const review = gitlab.getByRole('region', { name: 'GitLab MR 검토', exact: true });
     const reviewers = review.getByRole('list', { name: '검토자', exact: true });
@@ -208,6 +235,8 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
       expect(await publish()).toMatchObject({ linked: 1 });
       await gitlab.getByRole('button', { name: 'GitLab 활동 새로고침', exact: true }).click();
       await expect(review.getByRole('status')).toContainText('MR이 변경되었습니다.');
+      await expect(filesPanel.getByRole('status')).toContainText('MR이 변경되었습니다. 변경 파일을 다시 확인해 주세요.');
+      await expect(filesList).toHaveCount(0);
       expect((await aborted).failure()?.errorText).toContain('ERR_ABORTED');
       expect(remoteCalls).toHaveLength(countBefore);
     } finally {
@@ -221,6 +250,8 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
     await expect(page).toHaveURL(url => url.hash === route);
     await gitlab.getByRole('button', { name: 'MR 검토 닫기', exact: true }).press('Enter');
     await expect(open).toBeFocused();
+    await gitlab.getByRole('button', { name: '변경 파일 닫기', exact: true }).press('Enter');
+    await expect(showFiles).toBeFocused();
 
     mode = 'fallback';
     const development = await page.context().newPage();
@@ -340,6 +371,14 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
       await expect(activity.getByRole('button', { name: '미해결 토론 확인', exact: true })).toBeVisible();
       expect(remoteCalls).toHaveLength(beforeDevelopmentShortcut);
       const directDevelopmentPanel = await openShortcut(development, activity);
+      const openDevelopmentFiles = activity.getByRole('button', { name: '변경 파일 확인', exact: true });
+      expect(diffQueries()).toHaveLength(1);
+      diffMode = 'empty';
+      await openDevelopmentFiles.click();
+      const developmentFiles = activity.getByRole('region', { name: 'GitLab MR 변경 파일', exact: true });
+      await expect(developmentFiles).toContainText('조회한 변경 파일이 없습니다.');
+      await expect(developmentFiles).not.toContainText('조회 범위가 제한되었습니다.');
+      expect(diffQueries()).toHaveLength(2);
       await trigger.click();
       await expect(details).toContainText('GitLab에서 검토자 목록을 확인하지 못했습니다.');
       await expect(details.getByRole('button', { name: /^미해결 토론 (확인|닫기)$/u })).toHaveCount(0);
@@ -354,7 +393,7 @@ test('360px 티켓과 개발 화면에서 GitLab MR 검토와 미해결 토론�
     expect(final.issues.find(item => item.id === issue.id)).toEqual(issue);
     expect(remoteCalls.filter(call => call.path === reviewerPath).map(call => call.query)).toEqual(Array<string>(6).fill('?per_page=50&page=1'));
     expect(remoteCalls.every(call => call.method === 'GET' && call.credential === undefined)).toBe(true);
-    expect(new Set(remoteCalls.map(call => call.path))).toEqual(new Set([projectPath, mrPath, reviewerPath, approvalPath, discussionsPath]));
+    expect(new Set(remoteCalls.map(call => call.path))).toEqual(new Set([projectPath, mrPath, reviewerPath, approvalPath, discussionsPath, diffsPath]));
   } finally {
     try {
       const deleted = await request.delete(`/api/issues/${issue.id}`);

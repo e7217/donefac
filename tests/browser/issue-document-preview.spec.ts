@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type APIRequestContext, type APIResponse, type Dialog, type Page } from '@playwright/test';
-import { documentSectionHash } from '../../shared/document-sections';
+import { documentReadingHash, documentSectionHash } from '../../shared/document-sections';
 import type { Comment, DocPage, Issue, RichContent, SavedView, WorkspaceSnapshot } from '../../shared/types';
 
 async function readJson<T>(response: APIResponse, status = 200): Promise<T> {
@@ -170,8 +170,8 @@ test('360px 공유 보드에서 연결 문서를 미리 보고 티켓 초안을 
   }
 });
 
-test('문서의 절에서 티켓과 다른 연결 문서를 열어도 두 초안을 유지한다', async ({ page, request }) => {
-  test.setTimeout(65_000);
+test('360px 문서에서 열린 티켓의 연결 문서를 새 탭의 절에서 읽고 두 초안으로 돌아온다', async ({ page, context, request }) => {
+  test.setTimeout(90_000);
   await page.setViewportSize({ width: 360, height: 820 });
   const { projects: [project, relatedProject] } = await readJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
   const prefix = `문서 절의 연결 문서 ${randomUUID().slice(0, 8)}`;
@@ -196,10 +196,24 @@ test('문서의 절에서 티켓과 다른 연결 문서를 열어도 두 초안
     ] });
     documents.push(host);
     const linkedBody = `${prefix} 미리 볼 문서의 저장 본문`;
+    const linkedSection = `linked-${randomUUID()}`;
+    const linkedHeading = `${prefix} 저장본의 절`;
+    const issueReference: RichContent = { type: 'issueReference', attrs: { issueId: subject.id, label: subject.title } };
     const linked = await createDocument(request, relatedProject.id, `${prefix} 미리 볼 문서`, { type: 'doc', content: [
       { type: 'paragraph', content: [{ type: 'text', text: linkedBody }] },
+      { type: 'details', content: [
+        { type: 'detailsSummary', content: [{ type: 'text', text: `${prefix} 접힌 내용` }] },
+        { type: 'detailsContent', content: [
+          { type: 'heading', attrs: { level: 2, sectionId: linkedSection }, content: [{ type: 'text', text: linkedHeading }] },
+          issueReference,
+        ] },
+      ] },
+      { type: 'heading', attrs: { level: 2 }, content: [{ type: 'text', text: `${prefix} 주소 없는 절` }] },
+      issueReference,
     ] });
     documents.push(linked);
+    const enabled = await request.post(`/api/documents/${linked.id}/collaboration/enable`, { data: { expectedVersion: linked.version } });
+    expect(enabled.ok(), await enabled.text()).toBe(true);
     for (const doc of documents) {
       const link = await request.post('/api/resource-links', { data: { issueId: subject.id, documentId: doc.id, kind: 'related' } });
       expect(link.status(), await link.text()).toBe(201);
@@ -232,6 +246,47 @@ test('문서의 절에서 티켓과 다른 연결 문서를 열어도 두 초안
     await trigger.click();
     const reader = page.getByRole('dialog', { name: '연결 문서 미리보기', exact: true });
     await expect(reader).toContainText(linkedBody);
+    await expect.poll(() => route(page)).toEqual({ path, query: { ...ticketQuery, documentPreview: linked.id } });
+
+    const read = reader.getByRole('link', { name: '새 탭에서 저장본 읽기', exact: true });
+    const documentHref = documentReadingHash(linked.id, relatedProject.id);
+    const sectionHref = documentReadingHash(linked.id, relatedProject.id, linkedSection);
+    await expect(read).toHaveAttribute('href', documentHref);
+    await reader.getByText('문서 목차', { exact: true }).click();
+    await reader.getByText(`${prefix} 접힌 내용`, { exact: true }).click();
+    const heading = reader.getByRole('heading', { name: linkedHeading, exact: true });
+    await expect(heading).toBeHidden();
+    const outline = reader.getByRole('navigation', { name: '문서 제목', exact: true });
+    await outline.getByRole('button', { name: linkedHeading, exact: true }).click();
+    await expect(heading).toBeFocused();
+    await expect(read).toHaveAttribute('href', sectionHref);
+    await expect(reader.getByText(`이어서 읽을 절 ${linkedHeading}`, { exact: true })).toBeVisible();
+
+    const jump = reader.getByRole('button', { name: '본문 참조로 이동', exact: true });
+    await jump.click();
+    await expect(read).toHaveAttribute('href', sectionHref);
+    await jump.click();
+    await expect(read).toHaveAttribute('href', documentHref);
+    await jump.click();
+    await expect(read).toHaveAttribute('href', sectionHref);
+
+    const collaborationRequests: string[] = [];
+    const observe = (event: { url: () => string }) => {
+      if (new URL(event.url()).pathname === `/api/documents/${linked.id}/collaboration`) collaborationRequests.push(event.url());
+    };
+    context.on('request', observe);
+    try {
+      const [separateReader] = await Promise.all([context.waitForEvent('page'), read.click()]);
+      try {
+        const saved = separateReader.getByRole('article', { name: '저장본 읽기', exact: true });
+        await expect(saved).toBeVisible();
+        await expect.poll(() => route(separateReader)).toEqual({ path: `#/${relatedProject.id}/documents/${linked.id}`, query: { mode: 'read', section: linkedSection } });
+        await expect(saved.getByRole('heading', { name: linkedHeading, exact: true })).toBeFocused();
+        await expect(saved.getByText(linkedBody, { exact: true })).toBeVisible();
+        expect(collaborationRequests).toEqual([]);
+      } finally { await separateReader.close(); }
+    } finally { context.off('request', observe); }
+    await expect(reader).toBeVisible();
     await expect.poll(() => route(page)).toEqual({ path, query: { ...ticketQuery, documentPreview: linked.id } });
     await page.keyboard.press('Escape');
     await expect(reader).toHaveCount(0);

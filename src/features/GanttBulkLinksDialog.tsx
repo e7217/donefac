@@ -139,18 +139,20 @@ export function GanttBulkChainFields({ issues, value, onChange, onMove, ...ruleO
   </>;
 }
 
-export function GanttBulkLinkDateFields({ rows, excluded, onInclude, onChoose, projectNames,
+export function GanttBulkLinkDateFields({ rows, excluded, onInclude, onChoose, projectNames, pasted = false,
   description = '함께 저장할 날짜를 선택하세요. 제외한 초안은 간트에 남습니다.' }: {
   rows: readonly BulkLinkDateRow[];
   excluded: ReadonlySet<string>;
   onInclude: (id: string, include: boolean) => void;
   onChoose: (id: string, field: BulkLinkDateField, saved: string | null, choice: BulkLinkDateChoice) => void;
   projectNames?: ReadonlyMap<string, string>;
+  pasted?: boolean;
   description?: string;
 }) {
   const title = useId();
+  const input = pasted ? '붙여넣은 값' : '간트 입력';
   return <section className="schedule-bulk-link-dates" aria-labelledby={title}>
-    <h3 id={title}>간트 날짜 초안</h3>
+    <h3 id={title}>{pasted ? '붙여넣은 날짜' : '간트 날짜 초안'}</h3>
     <p>{description}</p>
     <ul>
       {rows.map(({ issue, dates }) => {
@@ -158,7 +160,7 @@ export function GanttBulkLinkDateFields({ rows, excluded, onInclude, onChoose, p
         const projectName = projectNames?.get(issue.projectId);
         return <li key={issue.id}>
           <label>
-            <input type="checkbox" checked={included} aria-label={`${issue.key} 날짜 초안 포함`}
+            <input type="checkbox" checked={included} aria-label={`${issue.key} ${pasted ? '붙여넣은 날짜' : '날짜 초안'} 포함`}
               onChange={event => onInclude(issue.id, event.currentTarget.checked)} />
             <span><strong>{issue.key}</strong> {issue.title}
               {projectName && <small className="schedule-bulk-project" data-schedule-project={issue.projectId}>{projectName}</small>}
@@ -170,15 +172,15 @@ export function GanttBulkLinkDateFields({ rows, excluded, onInclude, onChoose, p
               const group = `${title}-${issue.id}-${field}`;
               return <li key={field}>
                 <strong>{label}</strong>{' '}
-                {saved === draft ? `${saved ?? '미정'} · 저장됨` : `저장된 값 ${saved ?? '미정'} → 초안 ${draft ?? '미정'}`}
-                {conflict && <span className="schedule-bulk-link-date-conflict">초안 작성 전 {base ?? '미정'}</span>}
+                {saved === draft ? `${saved ?? '미정'} · 저장됨` : `저장된 값 ${saved ?? '미정'} → ${pasted ? input : '초안'} ${draft ?? '미정'}`}
+                {conflict && <span className="schedule-bulk-link-date-conflict">{pasted ? '붙여넣기 전' : '초안 작성 전'} {base ?? '미정'}</span>}
                 {conflict && included && <fieldset className="schedule-bulk-link-date-choices" aria-describedby={`${group}-help`}>
                   <legend className="sr-only">{issue.key} {label} 선택</legend>
-                  <span id={`${group}-help`} className="sr-only">저장된 값 {saved ?? '미정'}, 간트 입력 {draft ?? '미정'}</span>
+                  <span id={`${group}-help`} className="sr-only">저장된 값 {saved ?? '미정'}, {input} {draft ?? '미정'}</span>
                   <label><input type="radio" name={group} checked={choice === 'saved'} aria-label={`${issue.key} ${label} 저장값 사용`}
                     onChange={() => onChoose(issue.id, field, saved, 'saved')} />저장값 사용</label>
-                  <label><input type="radio" name={group} checked={choice === 'draft'} aria-label={`${issue.key} ${label} 간트 입력 사용`}
-                    onChange={() => onChoose(issue.id, field, saved, 'draft')} />간트 입력 사용</label>
+                  <label><input type="radio" name={group} checked={choice === 'draft'} aria-label={`${issue.key} ${label} ${input} 사용`}
+                    onChange={() => onChoose(issue.id, field, saved, 'draft')} />{input} 사용</label>
                 </fieldset>}
               </li>;
             })}

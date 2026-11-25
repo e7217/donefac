@@ -1,4 +1,4 @@
-import { contentReferences, documentPlainText } from './document-nodes.js';
+import { contentReferences } from './document-nodes.js';
 import { documentNodes } from './document-references.js';
 import { outlineHeadingTitle, parseDocumentHash } from './document-sections.js';
 import type { ContentReference, DocPage, RichContent } from './types.js';
@@ -50,13 +50,4 @@ export function documentPanelBacklinks(documents: readonly DocPage[], id: string
     const reference = matches.some(reference => !reference.linkMark);
     return matches.length ? [{ document, label: include ? '내 문서를 포함함' : reference ? '내 문서를 참조함' : '내 문서에 링크함' }] : [];
   });
-}
-
-export function savedDocumentSectionTitle(content: RichContent, sectionId: string): string | undefined {
-  for (const node of documentNodes(content)) {
-    if (node.type === 'heading' && node.attrs?.sectionId === sectionId) {
-      return outlineHeadingTitle(documentPlainText(node));
-    }
-  }
-  return undefined;
 }
