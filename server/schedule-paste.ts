@@ -5,15 +5,15 @@ import { traceGanttHierarchy } from '../shared/gantt-hierarchy-focus.js';
 import { isRelationId } from '../shared/issue-relations.js';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_DATE_ISSUES, MAX_SCHEDULE_BULK_LINK_ISSUES, MAX_SCHEDULE_MANUAL_ISSUES, MAX_SCHEDULE_ROW_DEPENDENCY_EDITS, SCHEDULE_BLOCKER_LINK_PAGE_SIZE, type Dependency, type Issue, type ScheduleBlockerLinkCandidate, type ScheduleBlockerLinkPage, type ScheduleBulkChainInput, type ScheduleBulkDateChanges, type ScheduleBulkDateInput, type ScheduleBulkLinkAction, type ScheduleBulkLinkDateEdit, type ScheduleBulkLinkInput,
   type ScheduleAnchorChange, type ScheduleChange, type ScheduleManualPreviewInput, type SchedulePasteApplyResult, type SchedulePasteDependencyChange, type SchedulePasteDependencyPair, type SchedulePasteKeyMapping, type SchedulePastePreview, type SchedulePreview,
-  type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleTeamBlockerApplyResult, type ScheduleTeamBlockerInput, type ScheduleTeamBlockerPreview,
+  type ScheduleRowDependencyEdit, type ScheduleRowEditInput, type ScheduleSheetChoices, type ScheduleTeamBlockerApplyResult, type ScheduleTeamBlockerInput, type ScheduleTeamBlockerPreview,
   type ProjectWorkflow, type TeamScheduleBlocker, type WorkCalendar } from '../shared/types.js';
 import { DEPENDENCY_ENDPOINTS, SCHEDULE_DATE_LABELS, TEAM_BLOCKER_SCHEDULE_RULE, checkDependencySchedule, dependencyGuardFields, isDependencyLag, isDependencyType } from '../shared/schedule-dependencies.js';
 import { MAX_WORKLOAD_LEVEL_DEPENDENCIES, MAX_WORKLOAD_LEVEL_ISSUES } from '../shared/workload-leveling.js';
 import { AutomaticScheduleError, AUTO_PREVIEW_TTL_MS, AUTO_RESULT_RETENTION_MS, calculateFixedFollowUpSchedule, type AutomaticScheduleMutation, type ScheduleUndoOrigin } from './automatic-schedule.js';
 import { addsScheduleDependencyPair, dependencyPair, hasScheduleDependencyCycle, projectScheduleDependencies, type ScheduleDependencyMutation } from './schedule-dependency-changes.js';
 import { readIssueSearchAliases } from './issue-search-aliases.js';
-import { parseSchedulePaste, type SchedulePasteRow } from './schedule-paste-parser.js';
-import { mergeScheduleSheetLink, scheduleSheetConflict, unchangedScheduleSheetLink } from './schedule-sheet-merge.js';
+import { parseSchedulePaste, SCHEDULE_PASTE_MAX_ROWS, type SchedulePasteRow } from './schedule-paste-parser.js';
+import { mergeScheduleSheetLink, scheduleSheetCellReviewer, unchangedScheduleSheetLink } from './schedule-sheet-merge.js';
 import { calculateTeamFollowUpSchedule, teamBatchFollowUpScope, TeamFollowUpScheduleError } from './team-follow-up-schedule.js';
 import type { Store } from './store.js';
 
@@ -192,6 +192,15 @@ function parsePasteFollowUpOptions(raw: Record<string, unknown>) {
     throw new SchedulePasteError(400, '후행 일정 검토 여부를 확인해 주세요.');
   }
   return { rescheduleSuccessors: raw.rescheduleSuccessors === true, includeTeamBlockers: raw.includeTeamBlockers === true };
+}
+
+function parseSheetChoices(raw: unknown): ScheduleSheetChoices {
+  if (raw === undefined) return {};
+  if (!isRecord(raw) || Object.keys(raw).length > SCHEDULE_PASTE_MAX_ROWS * 5 ||
+      Object.entries(raw).some(([id, choice]) => !/^[a-f0-9]{64}$/u.test(id) || (choice !== 'current' && choice !== 'input'))) {
+    throw new SchedulePasteError(400, '비교에서 선택한 일정 값을 확인해 주세요.');
+  }
+  return raw as ScheduleSheetChoices;
 }
 
 function parseSelectedDateEdits(raw: unknown, selection: ScheduleBulkDateInput['issues'], errorMessage: string): ScheduleBulkLinkDateEdit[] {
@@ -1130,7 +1139,7 @@ export class SchedulePasteService {
     });
   }
 
-  private preview(projectId: unknown, raw: unknown, actorId: string, hooks: PasteHooks,
+  private preview(projectId: unknown, raw: unknown, choices: ScheduleSheetChoices, actorId: string, hooks: PasteHooks,
     { rescheduleSuccessors, includeTeamBlockers }: ReturnType<typeof parsePasteFollowUpOptions>): SchedulePastePreview {
     if (projectId !== null && (typeof projectId !== 'string' || !projectId || projectId.length > 200)) {
       throw new SchedulePasteError(400, '붙여넣을 프로젝트를 선택해 주세요.');
@@ -1162,6 +1171,7 @@ export class SchedulePasteService {
         ...scope, previewId:null, expiresAt:null, changes:[], dependencyChanges, warnings:[], errors:parsed.errors, unchanged:0,
         ...(keyMappings.length ? { keyMappings } : {}),
       };
+      const sheet = scheduleSheetCellReviewer(preview, choices);
       const changes = new Map<string, ScheduleDateMutation>();
       const linkChanges: ScheduleDependencyMutation[] = [];
       const byPair = new Map(dependencies.map(link => [dependencyPair(link.predecessorId, link.successorId), link]));
@@ -1183,18 +1193,17 @@ export class SchedulePasteService {
           continue;
         }
         const request = requestedDates.get(issue.id) ?? { issue, line: null, dates: {}, firstLines: {} };
+        const mergeCell = sheet.forRow(row.line, row.key, [issue.projectId, issue.id]);
         let datesChanged = false;
         for (const field of dateKeys) {
-          const value = row[field];
+          let value = row[field];
           if (value === undefined) continue;
           const current = issue[field] ?? null;
           if (baseline) {
             const original = baseline[field] ?? null;
             if (value === original) continue;
-            if (current !== original && current !== value) {
-              preview.errors.push({ line: row.line, key: row.key, message: scheduleSheetConflict(dateFields[field], original, current, value) });
-              continue;
-            }
+            value = mergeCell(field, dateFields[field], original, current, value);
+            if (value === undefined) continue;
           }
           datesChanged ||= value !== current;
           const firstLine = request.firstLines[field];
@@ -1270,7 +1279,9 @@ export class SchedulePasteService {
         if (input && predecessor) {
           targetIds.add(predecessor.id);
           const before = byPair.get(pair);
-          const merge = mergeScheduleSheetLink(input, predecessor.id, before, row.baseline?.dependency);
+          const merge = mergeScheduleSheetLink(input, predecessor.id, before, row.baseline?.dependency,
+            sheet.forRow(row.line, row.key, [issue.projectId, issue.id, predecessor.id, before?.id ?? '']));
+          if (!merge) continue;
           if ('errors' in merge) {
             for (const message of merge.errors) preview.errors.push({ line: row.line, key: row.key, message });
             continue;
@@ -1296,6 +1307,7 @@ export class SchedulePasteService {
         }
         if (!datesChanged) unchangedRows.push(issue.id);
       }
+      sheet.verifyChoices();
       if (retainedDependencies.length) preview.retainedDependencies = retainedDependencies;
       const projectedLinks = linkChanges.length ? projectScheduleDependencies(dependencies, linkChanges) : dependencies;
       if (linkChanges.some(change => !change.before) && hasScheduleDependencyCycle(projectedLinks)) {
@@ -1891,7 +1903,7 @@ export class SchedulePasteService {
     app.post('/api/schedule/paste-preview', (req, res) => {
       if (!isRecord(req.body)) throw new SchedulePasteError(400, '후행 일정 검토 여부를 확인해 주세요.');
       const options = parsePasteFollowUpOptions(req.body);
-      res.json(this.preview(req.body.projectId, req.body.text, hooks.actor(req), hooks, options));
+      res.json(this.preview(req.body.projectId, req.body.text, parseSheetChoices(req.body.sheetChoices), hooks.actor(req), hooks, options));
     });
     app.post('/api/schedule/paste-apply', (req, res) => {
       res.json(this.apply(req, req.body.previewId, hooks));

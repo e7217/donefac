@@ -93,7 +93,8 @@ function customFieldError(draft: CustomFieldDraft, field: CustomFieldDefinition 
   return '';
 }
 
-export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: FeatureProps, visible: readonly BulkTarget[], report?: ReportSelection,
+export function useIssueBulkEdit({ data, projectId, actorId, refresh, notify }: Pick<FeatureProps, 'data' | 'projectId' | 'actorId' | 'refresh' | 'notify'>,
+  visible: readonly BulkTarget[], report?: ReportSelection,
   options?: { team: true }) {
   const team = Boolean(options?.team);
   const selection = report?.fieldBreakdown;
@@ -472,11 +473,12 @@ const outcomes = { changed: '변경 예정', unchanged: '변경 없음', blocked
 const memberPrefix = 'team-member:';
 const displayLabel = (label: string) => !label || label.trim() !== label || /[",\p{Cc}]/u.test(label) ? JSON.stringify(label) : label;
 
-export function IssueBulkEdit({ editor, statuses, users, onClose }: {
+export function IssueBulkEdit({ editor, statuses, users, onClose, selectionNote }: {
   editor: BulkEditor;
   statuses: WorkflowStatus[];
   users: FeatureProps['data']['users'];
   onClose: () => void;
+  selectionNote?: string;
 }) {
   const { changes, preview } = editor;
   const teamProjects = new Map(editor.teamProjects.map(project => [project.id, project]));
@@ -588,8 +590,8 @@ export function IssueBulkEdit({ editor, statuses, users, onClose }: {
         {!editor.team && <BulkCustomFields editor={editor} users={users} />}
       </fieldset>
       {editor.labelsError && <p className="issue-bulk-error" role="alert">{editor.labelsError}</p>}
-      <p className="issue-bulk-note">{editor.team ? '보드에 표시된 업무를 선택할 수 있습니다.' : editor.reportScoped
-        ? '같은 집계 그룹의 여러 페이지에서 업무를 선택할 수 있습니다.' : '현재 목록의 업무만 선택할 수 있습니다.'} 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
+      <p className="issue-bulk-note">{selectionNote ?? (editor.team ? '보드에 표시된 업무를 선택할 수 있습니다.' : editor.reportScoped
+        ? '같은 집계 그룹의 여러 페이지에서 업무를 선택할 수 있습니다.' : '현재 목록의 업무만 선택할 수 있습니다.')} 담당자를 직접 지정하지 않으면 상태 변경 시 자동 배정 규칙을 적용합니다.</p>
       {!editor.reportScoped && editor.visibleCount > ISSUE_BULK_EDIT_LIMIT && <p className="issue-bulk-note">전체 선택은 검색 결과가 {ISSUE_BULK_EDIT_LIMIT}개 이하일 때 가능합니다.</p>}
       <button type="submit" className="btn" disabled={editor.busy || !editor.canPreview}>변경 미리보기</button>
     </form>

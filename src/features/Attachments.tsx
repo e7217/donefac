@@ -15,6 +15,7 @@ export type AttachmentsProps = {
   onInsertFileLink?: (file: { filename: string; href: string }) => void;
   onChanged?: () => void | Promise<void>;
   reloadKey?: string;
+  readOnly?: boolean;
 };
 
 type Upload = {
@@ -43,7 +44,7 @@ export const attachmentFileUrl = (versionId: string, inline = false) => `/api/at
 const message = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 
 export function Attachments(props: AttachmentsProps) { return <ResourceAttachments key={`${props.resourceType}:${props.resourceId}:${props.actorId}`} {...props} />; }
-function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onInsertFileLink, onChanged, reloadKey }: AttachmentsProps) {
+function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInsertImage, onInsertFileLink, onChanged, reloadKey, readOnly = false }: AttachmentsProps) {
   const [attachments, setAttachments] = useState<AttachmentHead[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -279,7 +280,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
 
   return <section className="attachments-feature" aria-label="첨부파일">
     <div className="attachments-heading"><h3><Paperclip size={14} /> 첨부파일 <span>{attachments.length}</span></h3><button className="attachments-refresh" type="button" title="첨부파일 새로고침" aria-label="첨부파일 새로고침" disabled={loading || busy} onClick={() => void refreshAttachments()}><RefreshCw size={12} className={loading ? 'attachments-spin' : ''} /></button></div>
-    <div className={`attachments-dropzone ${dragging ? 'is-dragging' : ''} ${uploading ? 'is-busy' : ''}`}
+    {!readOnly && <><div className={`attachments-dropzone ${dragging ? 'is-dragging' : ''} ${uploading ? 'is-busy' : ''}`}
       onDragEnter={event => { if (!event.dataTransfer.types.includes('Files')) return; event.preventDefault(); dragDepthRef.current++; setDragging(true); }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = busy ? 'none' : 'copy'; } }}
       onDragLeave={event => { event.preventDefault(); dragDepthRef.current = Math.max(0, dragDepthRef.current - 1); if (!dragDepthRef.current) setDragging(false); }}
@@ -293,7 +294,7 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
         pickedAttachment.current = null;
         event.currentTarget.value = '';
         if (file && attachment) void addFiles([file], attachment);
-      }} />
+      }} /></>}
 
     {activeUploads.length > 0 && <div className="attachments-upload-list" aria-live="polite">{activeUploads.map(item => <div className={`attachments-upload ${item.status === 'error' ? 'has-error' : ''}`} key={item.id}><div><span>{item.filename}</span>{item.status === 'uploading' ? <span>{item.percent < 100 ? `${item.percent}%` : '저장 중…'}</span> : item.status === 'queued' ? <span>대기 중</span> : <button type="button" title="오류 닫기" aria-label={`${item.filename} 업로드 오류 닫기`} onClick={() => setUploads(previous => previous.filter(upload => upload.id !== item.id))}><X size={12} /></button>}</div>{item.status === 'uploading' && <div className="attachments-progress" role="progressbar" aria-label={`${item.filename} 업로드 진행률`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={item.percent}><span style={{ width: `${item.percent}%` }} /></div>}{item.error && <p role="alert">{item.error}</p>}</div>)}</div>}
     {loadError && <div className="attachments-error" role="alert"><p>{loadError}</p><button type="button" disabled={busy} onClick={() => void refreshAttachments()}>다시 불러오기</button></div>}
@@ -312,8 +313,8 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
           <div className="attachment-actions">
             {attachment.hasVersionHistory && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 버전`} aria-expanded={!!history}
               disabled={busy || loading} onClick={() => toggleVersions(attachment)}><History size={12} />버전 {attachment.versionCount}</button>}
-            <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 새 버전 업로드`}
-              disabled={busy || loading} onClick={() => selectVersionFile(attachment)}><Plus size={12} />새 버전</button>
+            {!readOnly && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 새 버전 업로드`}
+              disabled={busy || loading} onClick={() => selectVersionFile(attachment)}><Plus size={12} />새 버전</button>}
             {image && onInsertImage && <button type="button" className="attachment-insert" onClick={() => onInsertImage(attachmentFileUrl(currentVersionId, true))}><Plus size={10} />본문에 삽입</button>}
             {onInsertFileLink && <button className="attachment-insert" type="button" aria-label={`${attachment.filename} 본문에 링크 삽입`}
               disabled={busy || loading} onMouseDown={event => event.preventDefault()}
@@ -323,8 +324,8 @@ function ResourceAttachments({ resourceType, resourceId, actorId, notify, onInse
           </div>
         </div>
         <a className="attachment-action" href={downloadUrl} download={attachment.filename} aria-label={`${attachment.filename} 다운로드`} title="다운로드"><Download size={13} /></a>
-        <button className="attachment-action attachment-delete" type="button" aria-label={`${attachment.filename} 삭제`} title="모든 버전을 휴지통으로 이동"
-          disabled={busy || loading} onClick={() => void deleteFile(attachment)}>{deleting === attachment.id ? <Loader2 size={13} className="attachments-spin" /> : <Trash2 size={13} />}</button>
+        {!readOnly && <button className="attachment-action attachment-delete" type="button" aria-label={`${attachment.filename} 삭제`} title="모든 버전을 휴지통으로 이동"
+          disabled={busy || loading} onClick={() => void deleteFile(attachment)}>{deleting === attachment.id ? <Loader2 size={13} className="attachments-spin" /> : <Trash2 size={13} />}</button>}
       </article>
       {history && <section className="attachment-history" aria-label={`${attachment.filename} 보존 버전`}>
         <div className="attachment-history-heading">

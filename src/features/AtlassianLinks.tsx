@@ -8,7 +8,7 @@ import { api } from '../lib/api';
 import { ATLASSIAN_LINKS_CHANGED } from '../lib/use-atlassian-search';
 import './atlassian-links.css';
 
-type Props = Pick<FeatureProps, 'actorId' | 'notify'> & { targetType: AtlassianLinkTarget; targetId: string };
+type Props = Pick<FeatureProps, 'actorId' | 'notify'> & { targetType: AtlassianLinkTarget; targetId: string; readOnly?: boolean };
 type LinkList = { links: AtlassianLink[] } | { error: string };
 type Preview = { result: AtlassianLinkPreview } | { error: string };
 
@@ -28,7 +28,7 @@ export function AtlassianLinks(props: Props) {
   return <LinkPanel key={JSON.stringify([props.targetType, props.targetId, props.actorId, workspaceRevision])} {...props} />;
 }
 
-function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
+function LinkPanel({ targetType, targetId, actorId, notify, readOnly }: Props) {
   const panelId = useId();
   const headingId = `${panelId}-heading`;
   const productId = `${panelId}-product`;
@@ -109,7 +109,7 @@ function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
   const disabled = pending !== null || links === null;
   return <section className="atlassian-links" aria-labelledby={headingId}>
     <h3 id={headingId}><Link2 aria-hidden="true" size={16} />기존 도구 연결</h3>
-    <form className="atlassian-links-form" onSubmit={addLink}>
+    {!readOnly && <form className="atlassian-links-form" onSubmit={addLink}>
       <div>
         <label htmlFor={productId}>기존 도구</label>
         <select id={productId} className="field" value={product} disabled={disabled} onChange={event => setProduct(event.target.value as AtlassianProduct)}>
@@ -125,7 +125,7 @@ function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
       <button className="btn btn-secondary" type="submit" disabled={disabled || !url.trim()}>
         <Plus aria-hidden="true" size={14} />{pending === 'create' ? '원본 링크 추가 중…' : '원본 링크 추가'}
       </button>
-    </form>
+    </form>}
     {addError && <p className="atlassian-links-error" role="alert">{addError}</p>}
     {list === null && <p className="atlassian-links-note" role="status">원본 링크를 불러오는 중…</p>}
     {list && 'error' in list && <div className="atlassian-links-error">
@@ -134,12 +134,12 @@ function LinkPanel({ targetType, targetId, actorId, notify }: Props) {
     </div>}
     {links?.length === 0 && <p className="atlassian-links-note">연결된 Jira 티켓이나 Confluence 문서가 없습니다.</p>}
     {links && links.length > 0 && <ul className="atlassian-links-list">{links.map(link => <LinkRow key={link.id} link={link} actorId={actorId}
-      mutationPending={pending !== null} removing={pending === `remove:${link.id}`} onRemove={() => void removeLink(link.id)} />)}</ul>}
+      mutationPending={pending !== null} removing={pending === `remove:${link.id}`} onRemove={readOnly ? undefined : () => void removeLink(link.id)} />)}</ul>}
   </section>;
 }
 
 function LinkRow({ link, actorId, mutationPending, removing, onRemove }: {
-  link: AtlassianLink; actorId: string; mutationPending: boolean; removing: boolean; onRemove: () => void;
+  link: AtlassianLink; actorId: string; mutationPending: boolean; removing: boolean; onRemove?: () => void;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [reading, setReading] = useState(false);
@@ -177,9 +177,9 @@ function LinkRow({ link, actorId, mutationPending, removing, onRemove }: {
       <button className="btn" type="button" disabled={reading || removing} onClick={() => void readPreview()}>
         <RefreshCw aria-hidden="true" size={14} />원본 정보 조회
       </button>
-      <button className="btn btn-ghost" type="button" disabled={mutationPending} onClick={onRemove}>
+      {onRemove && <button className="btn btn-ghost" type="button" disabled={mutationPending} onClick={onRemove}>
         <Unlink aria-hidden="true" size={14} />{removing ? '연결 해제 중…' : '연결 해제'}
-      </button>
+      </button>}
     </div>
     {reading && <p className="atlassian-links-note" role="status">원본 정보를 불러오는 중…</p>}
     {preview && 'error' in preview && <p className="atlassian-links-error" role="alert">{preview.error}</p>}

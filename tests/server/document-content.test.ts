@@ -20,7 +20,7 @@ import { createEditorExtensions, createEditorSchema } from '../../shared/editor-
 import { COLLABORATION_SCHEMA,type CollaborationServerMessage } from '../../shared/collaboration.js';
 import { contentReferences, documentContentSchemaVersion, documentRevisionIncludes, MAX_CALLOUT_TITLE_LENGTH, MAX_STATUS_BADGE_LABEL_LENGTH } from '../../shared/document-nodes.js';
 import { DOCUMENT_LABEL_LIST_DEFAULTS } from '../../shared/document-label-list.js';
-import { documentSectionHash } from '../../shared/document-sections.js';
+import { documentReadingHash, documentSectionHash, parseDocumentHash } from '../../shared/document-sections.js';
 import type { DocPage,DocRevision,Issue,RichContent } from '../../shared/types.js';
 
 const now='2026-11-16T00:00:00.000Z',schema=createEditorSchema();
@@ -74,6 +74,18 @@ test('heading section IDs are canonical, unique within one document, and require
     { type: 'blockquote', content: [heading('중첩 제목', 'same')] }] }));
   rejects(() => normalizeDocumentContent({ type: 'doc', content: [{ type: 'paragraph', attrs: { sectionId: 'heading-only' } }] }));
   assert.equal(normalizeDocumentContent({ type: 'doc', content: [heading('다른 문서', 'section_a-1')] }).content.content?.[0].attrs?.sectionId, 'section_a-1');
+});
+
+test('document reading addresses preserve section IDs and reject ambiguous or pinned read modes', () => {
+  const plain = documentReadingHash('문서/&', '공간');
+  const section = documentReadingHash('문서/&', '공간', 'section_a-1');
+  assert.deepEqual(parseDocumentHash(plain), { id: '문서/&', reading: true });
+  assert.deepEqual(parseDocumentHash(section), { id: '문서/&', sectionId: 'section_a-1', reading: true });
+  assert.equal(parseDocumentHash(`${section}&mode=read`), undefined);
+  assert.equal(parseDocumentHash(`${plain}&publication=published&revision=example`), undefined);
+  assert.equal(parseDocumentHash(plain.replace('mode=read', 'mode=edit')), undefined);
+  assert.equal(parseDocumentHash(`${plain}&label=test`), undefined);
+  assert.deepEqual(parseDocumentHash(`${plain}&label=test`, { allowLabel: true }), { id: '문서/&', reading: true });
 });
 
 test('checklist identities preserve anonymous content and require schema 15 when present', () => {

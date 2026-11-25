@@ -11,7 +11,7 @@ import { appendGitlabActivityFilters, DEFAULT_GITLAB_ACTIVITY_FILTERS, readGitla
 import { NATIVE_BACKUP_SCHEMA_VERSION, supportsNativeBackupVersion } from '../shared/native-backup';
 import { projectStatuses, statusMeta, isTerminalStatus } from '../shared/workflow-helpers';
 import { countActiveMyWork } from '../shared/my-work';
-import { isDocumentSectionId } from '../shared/document-sections';
+import { isDocumentReading, isDocumentSectionId } from '../shared/document-sections';
 import { countIssueDocumentReferences } from '../shared/document-references';
 import { normalizeDocumentLabelKey } from '../shared/document-labels';
 import { appendDocumentPublicationCriteria, defaultDocumentPublicationCriteria, readDocumentPublicationCriteria,
@@ -88,6 +88,7 @@ type WorkspaceRoute = {
   decisionFollowUpScope?: DecisionFollowUpScope | null;
   fieldBreakdownScope?: FieldBreakdownScope | null;
   publicationTab?: DocumentPublicationListTab; publicationCriteria?: DocumentPublicationCriteria; publication?: DocumentPublicationTarget | null;
+  documentReading?: boolean;
   sectionId?: string | null;
   documentCommentId?: string | null;
   documentLabel?: string | null;
@@ -191,6 +192,7 @@ function routeHash(route: WorkspaceRoute) {
     query.set('revision', route.publication.revisionId);
   }
   if (route.view === 'documents' && route.documentId) {
+    if (route.documentReading && !route.publication) query.set('mode', 'read');
     if (route.documentCommentId && !route.publication) query.set('comment', route.documentCommentId);
     else if (route.sectionId) query.set('section', route.sectionId);
   }
@@ -469,6 +471,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const publication: DocumentPublicationTarget | null = view === 'documents' && documentId && (kind === 'review' || kind === 'published') &&
     revisionId && revisionId.length <= 200 && revisionId.trim() && !/[\u0000-\u001f\u007f]/.test(revisionId) ? {kind,revisionId} : null;
   const requestedComment = parameters.get('comment');
+  const documentReading = Boolean(view === 'documents' && documentId && !publication && isDocumentReading(parameters));
   const documentCommentId = view === 'documents' && documentId && !publication && isRelationId(requestedComment) ? requestedComment : null;
   const section = parameters.get('section');
   const sectionId = view === 'documents' && documentId && !documentCommentId && isDocumentSectionId(section) ? section : null;
@@ -502,7 +505,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   }
   return { projectId, view, documentId, issueId, issueCommentId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
-    documentLabel, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId,
+    documentLabel, documentReading, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId,
     cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
     gitlabActivityFilters: activityFilters, gitlabActivityId,
     gitlabDeploymentView: view === 'development' ? readGitlabDeploymentView(parameters) : undefined };
@@ -523,6 +526,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [documentPreviewId, setDocumentPreviewId] = useState<string | null>(null);
   const [documentId, setDocumentId] = useState<string | null>(null);
   const [documentLabel, setDocumentLabel] = useState<string | null>(null);
+  const [documentReading, setDocumentReading] = useState(false);
   const [reportId, setReportId] = useState<string | null>(null);
   const [blockerScope, setBlockerScope] = useState<DeliveryBlockerDraftScope | null>(null);
   const [decisionFollowUpScope, setDecisionFollowUpScope] = useState<DecisionFollowUpScope | null>(null);
@@ -776,6 +780,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     setDecisionFollowUpScope(scope => sameDecisionFollowUpScope(scope, route.decisionFollowUpScope) ? scope : route.decisionFollowUpScope ?? null);
     setFieldBreakdownScope(scope => sameFieldBreakdownScope(scope, route.fieldBreakdownScope) ? scope : route.fieldBreakdownScope ?? null);
     setDocumentLabel(route.documentLabel ?? null);
+    setDocumentReading(Boolean(route.documentReading));
     setDocumentPreviewId(route.documentPreviewId ?? null);
     setSavedViewId(route.savedViewId ?? null);
     setGanttScope(route.ganttScope);
@@ -1213,7 +1218,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     const targetProject = document.projectId || projectId;
     const next: WorkspaceRoute = { projectId: targetProject, view: 'documents', documentId: id, issueId: null,
       sectionId: targetSectionId, documentCommentId: requestedCommentId,
-      documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null };
+      documentLabel: current?.view === 'documents' && targetProject === current.projectId ? current.documentLabel : null,
+      documentReading: current?.view === 'documents' && current.documentReading };
     if (requestRoute(next)) {
       setSearchOpen(false);
       if (requestedCommentId && current && routeHash(current) === routeHash(next)) {
@@ -1296,23 +1302,30 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
-  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void }) => {
+  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void }, reading = false) => {
     const snapshot = dataRef.current;
     const previous = acceptedRouteRef.current;
     if (!snapshot || recovery && (previous?.view !== 'documents' || previous.documentId !== recovery.documentId ||
         !snapshot.documents.some(document => document.id === id))) return false;
-    const route = normalizeRoute(snapshot, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel}));
+    const route = normalizeRoute(snapshot, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel,documentReading:reading}));
     if (previous && routeHash(previous) === routeHash(route)) return true;
     const automaticSelection = previous?.view === 'documents' && !previous.documentId;
     recovery?.beforeOpen();
     writeRoute(route, routeIndexRef.current + (automaticSelection ? 0 : 1), automaticSelection ? 'replace' : 'push');
     return true;
   };
+  const changeDocumentReading = (reading: boolean) => {
+    const current = acceptedRouteRef.current;
+    if (current?.view === 'documents' && current.documentId && !current.issueId && !current.publication) {
+      requestRoute({ ...current, documentReading: reading });
+    }
+  };
   const copyDocumentCommentLink = async (commentId: string) => {
     const current = acceptedRouteRef.current;
     if (current?.view !== 'documents' || !current.documentId || !isRelationId(commentId)) return;
     const url = new URL(location.href);
-    url.hash = routeHash({ projectId: current.projectId, view: 'documents', documentId: current.documentId, issueId: null, documentCommentId: commentId });
+    url.hash = routeHash({ projectId: current.projectId, view: 'documents', documentId: current.documentId, issueId: null,
+      documentCommentId: commentId, documentReading: current.documentReading });
     try {
       await navigator.clipboard.writeText(url.href);
       notify('댓글 링크를 복사했습니다.');
@@ -1480,6 +1493,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         </Suspense>}
         {view === 'documents' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>문서를 불러오는 중입니다.</p></div>}><Documents {...props} selectedDocumentId={documentId} sectionId={sectionId} onSelectDocument={selectDocument} publicationLink={publication} onClosePublicationLink={closePublicationLink} issueDrawerOpen={documentIssueOpen}
           commentFocus={activeCommentFocus?.targetType === 'document' && activeCommentFocus.targetId === documentId ? activeCommentFocus : undefined}
+          reading={documentReading} onChangeReading={changeDocumentReading}
           onCopyCommentLink={copyDocumentCommentLink} onOpenIssueSchedule={openFollowUpSchedule} onOpenIssueForReview={openIssueForReview}
           onOpenMigratedIssue={openMigratedWikiIssue}
           documentLabel={documentLabel} onChangeDocumentLabel={label => {

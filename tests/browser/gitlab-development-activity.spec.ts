@@ -416,3 +416,131 @@ test('360px 개발 활동에서 최신 실패 연결만 골라 티켓을 검토�
     }
   }
 });
+
+test('360px GitLab 저장소별 진행 중 실행을 확인하고 공유한 검토 범위를 복원한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const suffix = randomUUID().slice(0, 8);
+  const activeRepo = 42;
+  const similarRepo = 43;
+  const secret = `synthetic-repository-review-${randomUUID()}`;
+  const remoteCalls: string[] = [];
+  const remote = createServer((incoming, response) => {
+    remoteCalls.push(incoming.url ?? '/');
+    response.writeHead(503).end('{}');
+  });
+  remote.listen(0, '127.0.0.1');
+  await once(remote, 'listening');
+  const baseUrl = `http://127.0.0.1:${(remote.address() as AddressInfo).port}/gitlab`;
+  const repoPath = (id: number) => `teams/service-${suffix}${id === similarRepo ? '-legacy' : ''}`;
+  const snapshot = () => request.get('/api/workspace').then(response => json<WorkspaceSnapshot>(response));
+  const settings = () => request.get(settingsPath).then(response => json<GitlabSettings>(response));
+  const issueIds = new Set<string>();
+  async function makeIssue(projectId: string, title: string) {
+    const issue = await json<Issue>(await request.post('/api/issues', { data: { projectId, title: `${title} ${suffix}` } }), 201);
+    issueIds.add(issue.id);
+    return issue;
+  }
+  async function send(id: number, repo: number, issue: Issue, group: string, status: string) {
+    const { linked } = await json<{ linked: number }>(await request.post(`${settingsPath}/webhook`, {
+      headers: { 'X-Gitlab-Event': 'Pipeline Hook', 'X-Gitlab-Token': secret, 'webhook-id': randomUUID() },
+      data: { object_kind: 'pipeline', project: { id: repo, web_url: `${baseUrl}/${repoPath(repo)}` }, object_attributes: {
+        id, ref: `feature/${issue.key}/${group}-${suffix}`, status, source: 'push', tag: false,
+        sha: 'a'.repeat(40), updated_at: new Date(Date.now() - 120_000 + id * 100).toISOString(),
+      } },
+    }));
+    expect(linked).toBe(1);
+  }
+  try {
+    const { projects: [project], users: [member] } = await snapshot();
+    const existing = await settings();
+    await json(await request.patch(settingsPath, { data: { expectedVersion: existing.version, baseUrl,
+      projectIds: [activeRepo, similarRepo], webhookSecret: secret } }));
+    const active = await makeIssue(project.id, '주 저장소 개발');
+    const similar = await makeIssue(project.id, '유사 저장소 개발');
+    for (let id = 1; id <= 13; id++) await send(id, activeRepo, active, `branch-${id}`, id === 1 ? 'pending' : 'running');
+    await send(14, activeRepo, active, 'replaced', 'running');
+    await send(15, activeRepo, active, 'replaced', 'success');
+    await send(16, similarRepo, similar, 'other', 'running');
+    const { gitlabLinks } = await snapshot();
+    const firstLink = gitlabLinks.find(link => link.issueId === active.id && link.iid === 1)!;
+    const [, instance] = firstLink.id.split(':', 2);
+    const activeKey = `${instance}:${activeRepo}`;
+    const similarKey = `${instance}:${similarRepo}`;
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.goto(`/#/${project.id}/development`);
+    const feed = page.getByRole('region', { name: '연결된 개발 활동', exact: true });
+    const repository = feed.getByRole('combobox', { name: 'GitLab 활동 저장소', exact: true });
+    const scope = feed.getByRole('combobox', { name: '개발 활동 범위', exact: true });
+    const query = feed.getByRole('searchbox', { name: '개발 활동 검색', exact: true });
+    const pipeline = feed.getByRole('region', { name: '파이프라인', exact: true });
+    const rows = pipeline.locator('.gitlab-activity-row');
+    const row = (id: number) => rows.filter({ has: page.getByText(`#${id}`, { exact: true }) });
+    const pager = pipeline.getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true });
+    const panel = page.getByRole('dialog', { name: active.title, exact: true });
+
+    await expect(repository.getByRole('option', { name: `${new URL(baseUrl).host}/gitlab/${repoPath(activeRepo)} (#42)`, exact: true })).toBeAttached();
+    await repository.selectOption(activeKey);
+    await scope.selectOption('running_pipelines');
+    await query.fill(`service-${suffix}`);
+    await query.press('Enter');
+    await expect(row(13)).toBeVisible();
+    await expect(row(14)).toHaveCount(0);
+    await expect(row(15)).toHaveCount(0);
+    await expect(row(16)).toHaveCount(0);
+    await expect(rows).toHaveCount(12);
+    await button(pager, '다음').click();
+    await expect(rows).toHaveCount(1);
+    await expect(row(1)).toBeVisible();
+    const shared = new URL(page.url()).hash;
+    const params = new URLSearchParams(shared.split('?')[1]);
+    expect(params.get('activityRepo')).toBe(activeKey);
+    expect(params.get('activityScope')).toBe('running_pipelines');
+    expect(params.get('activityPipelinePage')).toBe('2');
+
+    await repository.selectOption(similarKey);
+    await expect(rows).toHaveCount(1);
+    await expect(row(16)).toBeVisible();
+    await expect(page).toHaveURL(url => !new URLSearchParams(url.hash.split('?')[1]).has('activityPipelinePage'));
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === shared);
+    await expect(repository).toHaveValue(activeKey);
+    await expect(row(1)).toBeVisible();
+    await page.reload();
+    await expect(repository).toHaveValue(activeKey);
+    await expect(scope).toHaveValue('running_pipelines');
+    await expect(query).toHaveValue(`service-${suffix}`);
+    const opener = openActivity(row(1));
+    await opener.click();
+    await expect(selectedActivity(panel)).toHaveAttribute('data-gitlab-link-id', firstLink.id);
+    await gitlabRegion(panel).getByRole('combobox', { name: 'GitLab 활동 범위', exact: true }).selectOption('running_pipelines');
+    await expect(gitlabRegion(panel).getByText('#14', { exact: true })).toHaveCount(0);
+    await button(panel, '업무 상세 닫기').click();
+    await expect(opener).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === shared);
+
+    const stale = new URLSearchParams({ activityRepo: `${instance}:99`, activityMember: member.id });
+    await page.goto(`/#/${project.id}/development?${stale}`);
+    await expect(repository).toHaveValue(`${instance}:99`);
+    await expect(feed.getByRole('status')).toHaveText('이 프로젝트에 선택한 저장소의 개발 활동이 없습니다.');
+    await button(feed, '활동 필터 초기화').click();
+    await expect(repository).toHaveValue('');
+    await expect(row(16)).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+    expect(remoteCalls).toEqual([]);
+  } finally {
+    try {
+      for (const id of issueIds) {
+        const response = await request.delete(`/api/issues/${id}`);
+        if (response.ok()) await request.delete(`/api/trash/${(await response.json() as { trashEntryId: string }).trashEntryId}`);
+      }
+      const current = await settings();
+      if (current.baseUrl === baseUrl) await json(await request.patch(settingsPath, { data: {
+        expectedVersion: current.version, baseUrl: '', projectIds: [], webhookSecret: '',
+      } }));
+    } finally {
+      remote.closeAllConnections();
+      await new Promise<void>((resolve, reject) => remote.close(error => error ? reject(error) : resolve()));
+    }
+  }
+});

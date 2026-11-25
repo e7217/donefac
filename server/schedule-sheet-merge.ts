@@ -1,14 +1,39 @@
+import { createHash } from 'node:crypto';
 import type { ScheduleSheetBaseline } from '../shared/schedule-paste-format.js';
-import type { Dependency } from '../shared/types.js';
+import type { Dependency, SchedulePastePreview, ScheduleSheetChoices } from '../shared/types.js';
 import type { SchedulePasteRow } from './schedule-paste-parser.js';
 
 type LinkInput = NonNullable<SchedulePasteRow['dependency']>;
 type LinkBaseline = NonNullable<ScheduleSheetBaseline['dependency']>;
 type LinkValues = Pick<Dependency, 'type' | 'lagDays'>;
-type LinkResult = { values: LinkValues | null } | { errors: string[] };
+type LinkResult = { values: LinkValues | null } | { errors: string[] } | null;
+type SheetValue = string | number | null;
+type MergeCell = <T extends SheetValue>(field: string, label: string, original: T, current: T, input: T) => T | undefined;
 
-export function scheduleSheetConflict(label: string, baseline: string | number | null, saved: string | number | null, input: string | number | null) {
-  return `${label} 값이 일정표를 받은 뒤 바뀌었습니다. 내보낸 값 ${baseline ?? '미정'} · 현재 ${saved ?? '미정'} · 입력 ${input ?? '미정'}`;
+export function scheduleSheetCellReviewer(preview: SchedulePastePreview, choices: ScheduleSheetChoices) {
+  const accepted = new Set<string>();
+  return {
+    forRow(line: number, key: string, target: string[]): MergeCell {
+      return (field, label, original, current, input) => {
+        if (current === original || current === input) return input;
+        const id = createHash('sha256').update(JSON.stringify([line, key, target, field, original, current, input])).digest('hex');
+        (preview.sheetConflicts ??= []).push({ id, line, key, label, original, current, input });
+        const choice = choices[id];
+        if (choice) {
+          accepted.add(id);
+          return choice === 'current' ? current : input;
+        }
+        preview.errors.push({ line, key, sheetConflictId: id,
+          message: `${label} 값이 일정표를 받은 뒤 바뀌었습니다. 내보낸 값 ${original ?? '미정'} · 현재 ${current ?? '미정'} · 입력 ${input ?? '미정'}` });
+        return undefined;
+      };
+    },
+    verifyChoices() {
+      if (Object.keys(choices).length !== accepted.size) {
+        preview.errors.push({ line: null, message: '이전에 선택한 일정 값이 바뀌었습니다. 최신 값으로 다시 미리보기를 만들어 주세요.' });
+      }
+    },
+  };
 }
 
 function editedLinkValues(input: LinkInput, baseline: LinkBaseline) {
@@ -24,7 +49,7 @@ export function unchangedScheduleSheetLink(input: LinkInput, baseline: LinkBasel
 }
 
 export function mergeScheduleSheetLink(input: LinkInput, predecessorId: string, saved: Dependency | undefined,
-  baseline: ScheduleSheetBaseline['dependency'] | undefined): LinkResult {
+  baseline: ScheduleSheetBaseline['dependency'] | undefined, mergeCell: MergeCell): LinkResult {
   if (baseline === undefined) {
     return { values: input.type === '-' ? null : { type: input.type ?? saved?.type ?? 'FS', lagDays: input.lagDays ?? saved?.lagDays ?? 0 } };
   }
@@ -52,10 +77,7 @@ export function mergeScheduleSheetLink(input: LinkInput, predecessorId: string, 
     return { values: null };
   }
 
-  const errors: string[] = [];
-  if (type && saved.type !== baseline.type && saved.type !== type) errors.push(scheduleSheetConflict('연결 유형', baseline.type, saved.type, type));
-  if (lagDays !== undefined && saved.lagDays !== baseline.lagDays && saved.lagDays !== lagDays) {
-    errors.push(scheduleSheetConflict('근무일 간격', baseline.lagDays, saved.lagDays, lagDays));
-  }
-  return errors.length ? { errors } : { values: { type: type ?? saved.type, lagDays: lagDays ?? saved.lagDays } };
+  const nextType = type === undefined ? saved.type : mergeCell('type', '연결 유형', baseline.type, saved.type, type);
+  const nextLag = lagDays === undefined ? saved.lagDays : mergeCell('lagDays', '근무일 간격', baseline.lagDays, saved.lagDays, lagDays);
+  return nextType === undefined || nextLag === undefined ? null : { values: { type: nextType, lagDays: nextLag } };
 }

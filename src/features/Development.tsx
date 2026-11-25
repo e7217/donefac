@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type RefObject } from 'react';
 import { ArrowRight, GitBranch, RefreshCw, Search } from 'lucide-react';
-import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SCOPE_LABELS, filterGitlabActivityLinks, normalizeGitlabActivityQuery, type GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
+import { DEFAULT_GITLAB_ACTIVITY_FILTERS, GITLAB_ACTIVITY_QUERY_LIMIT, GITLAB_ACTIVITY_SCOPES, GITLAB_ACTIVITY_SCOPE_LABELS,
+  filterGitlabActivityLinks, gitlabActivityRepositories, normalizeGitlabActivityQuery, type GitlabActivityFilters } from '../../shared/gitlab-activity-filter';
 import type { FeatureProps, GitlabHistoryLimits, GitlabIssueRefreshResult, GitlabJiraRoute, GitlabJiraSource, GitlabLink, GitlabSettings, GitlabSyncCoverage, GitlabSyncCoverageState, GitlabSyncFailure, GitlabSyncPreview, GitlabSyncPreviewCounts, GitlabSyncRepositoryFailure, GitlabSyncResult, GitlabSyncStatus, Project } from '../../shared/types';
 import { api, ApiError, patch, post } from '../lib/api';
 import type { ChangeGitlabDeploymentView, GitlabDeploymentView } from '../lib/gitlab-deployment-route';
@@ -105,8 +106,8 @@ export function Development(props: FeatureProps & DevelopmentActivityProps & {
   const connectionForm = useRef<HTMLFormElement>(null);
   const pending=useRef(false),dirtyRef=useRef(false),alive=useRef(true);
   const dirty=JSON.stringify(draft)!==JSON.stringify(baseline);
-  const { scope: activityScope, query: activityQuery, memberId: activityMember } = props.activityFilters;
-  const activityContext = JSON.stringify([props.projectId, props.actorId, activityScope, activityQuery, activityMember]);
+  const { scope: activityScope, query: activityQuery, memberId: activityMember, repositoryKey: activityRepository } = props.activityFilters;
+  const activityContext = JSON.stringify([props.projectId, props.actorId, activityScope, activityQuery, activityMember, activityRepository]);
   const retainsToken = settings?.tokenConfigured && normalizedAddress(draft.baseUrl) === settings.baseUrl;
   const missingRoutesAfterAddressEdit = baseline.jiraRoutes.length > 0 && draft.jiraRoutes.length === 0
     && normalizedAddress(draft.baseUrl) !== normalizedAddress(baseline.baseUrl);
@@ -431,7 +432,7 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
     checkedActivityButton: RefObject<HTMLButtonElement | null>;
     onCheckActivityStatus: (link: GitlabLink, trigger: HTMLButtonElement, fallback: HTMLElement | null) => void;
   }) {
-  const { scope, query, memberId, pages } = activityFilters;
+  const { scope, query, memberId, repositoryKey, pages } = activityFilters;
   const heading = useRef<HTMLHeadingElement>(null);
   const [search, setSearch] = useState({ source: query, value: query, invalid: false });
   if (search.source !== query) setSearch({ source: query, value: query, invalid: false });
@@ -439,13 +440,15 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
   const issueKeys = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.key])), [projectIssues]);
   const issueVersions = useMemo(() => new Map(projectIssues.map(issue => [issue.id, issue.version])), [projectIssues]);
   const links = useMemo(() => data.gitlabLinks.filter(link => issueKeys.has(link.issueId)), [data.gitlabLinks, issueKeys]);
+  const repositories = useMemo(() => gitlabActivityRepositories(links), [links]);
+  const unavailableRepository = repositoryKey && !repositories.some(repository => repository.key === repositoryKey);
   const matching = useMemo(() => filterGitlabActivityLinks({ issues: projectIssues, issueAliases: data.issueAliases }, links,
-    { scope, query, memberId, pages: {} }), [data.issueAliases, projectIssues, links, scope, query, memberId]);
+    { scope, query, memberId, repositoryKey, pages: {} }), [data.issueAliases, projectIssues, links, scope, query, memberId, repositoryKey]);
   const checkedLink = checkedActivity && links.find(link => link.id === checkedActivity.id && link.issueId === checkedActivity.issueId &&
     link.projectId === checkedActivity.projectId && link.kind === checkedActivity.kind && link.iid === checkedActivity.iid &&
     link.manualLinkId === checkedActivity.manualLinkId);
   const filteredCheckedLink = checkedLink && !matching.includes(checkedLink) ? checkedLink : null;
-  const hasFilters = scope !== 'all' || Boolean(query || memberId || search.value || Object.keys(pages).length);
+  const hasFilters = scope !== 'all' || Boolean(query || memberId || repositoryKey || search.value || Object.keys(pages).length);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -486,6 +489,14 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
           {GITLAB_ACTIVITY_SCOPES.map(value => <option key={value} value={value}>{GITLAB_ACTIVITY_SCOPE_LABELS[value]}</option>)}
         </select>
       </label>
+      {(repositories.length > 0 || repositoryKey) && <label className="form-label development-activity-repository">저장소
+        <select className="field" aria-label="GitLab 활동 저장소" value={repositoryKey ?? ''} onChange={event =>
+          onChangeActivityFilters({ ...activityFilters, repositoryKey: event.currentTarget.value || undefined, pages: {} }, 'push')}>
+          <option value="">전체 저장소</option>
+          {unavailableRepository && <option disabled value={repositoryKey}>연결된 활동을 찾을 수 없는 저장소</option>}
+          {repositories.map(repository => <option key={repository.key} value={repository.key}>{repository.label}</option>)}
+        </select>
+      </label>}
       <label className="form-label development-activity-member">팀원
         <select className="field" aria-label="GitLab 활동 팀원" value={memberId ?? ''} onChange={event =>
           onChangeActivityFilters({ ...activityFilters, memberId: event.currentTarget.value || undefined, pages: {} }, 'push')}>
@@ -520,7 +531,8 @@ function DevelopmentActivityFeed({ data, projectId, refresh, notify, activityFil
     {matching.length > 0 ? <GitlabActivityList links={matching} heading="h3" issueVersions={issueVersions}
       issueReview={{ keys: issueKeys, openIssue: onOpenIssueForReview, fallbackRef: heading }} pagination={{ pages, onChangePage: changePage }}
       statusActions={{ disabled: statusBusy, refreshingLinkId, checkStatus: (link, trigger) => onCheckActivityStatus(link, trigger, heading.current) }} />
-      : links.length > 0 ? <p className="development-activity-empty" role="status">조건에 맞는 개발 활동이 없습니다.</p>
+      : unavailableRepository ? <p className="development-activity-empty" role="status">이 프로젝트에 선택한 저장소의 개발 활동이 없습니다.</p>
+        : links.length > 0 ? <p className="development-activity-empty" role="status">조건에 맞는 개발 활동이 없습니다.</p>
         : <div className="empty-state"><GitBranch aria-hidden="true" /><h3>아직 연결된 개발 활동이 없습니다</h3>
           <p>GitLab을 연결한 뒤 티켓 번호가 들어간 브랜치를 푸시하거나 지금 동기화를 실행하세요.</p></div>}
   </section>;

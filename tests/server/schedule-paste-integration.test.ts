@@ -143,6 +143,50 @@ test('editing an exported schedule applies only changed cells and fences diverge
   } finally { await f.close(); }
 });
 
+test('sheet choices only approve the compared values and cannot silently apply if a conflict disappears', async () => {
+  const f = await fixture();
+  try {
+    const target = await issue(f, '합성 날짜 비교', '2026-11-19', '2026-11-25', '2026-11-26');
+    const exported = buildGanttScheduleSheet([target], [target], []);
+    assert.ok(exported.ok);
+    const [header, exportedRow] = exported.text.trimEnd().split(/\r?\n/u);
+    const cells = exportedRow.split('\t');
+    cells[1] = '2026-11-20';
+    cells[3] = '-';
+    const text = `${header}\n${cells.join('\t')}`;
+    const peer = await f.call<Issue>(`/issues/${target.id}`, 'PATCH', { expectedVersion: target.version, dueDate: '2026-11-27' }, 'user-seo');
+    const previewChoices = (sheetChoices?: unknown) => f.call<SchedulePastePreview>('/schedule/paste-preview', 'POST', {
+      projectId: f.project.id, text, ...(sheetChoices === undefined ? {} : { sheetChoices }),
+    });
+    const first = await previewChoices();
+    const [conflict] = first.data.sheetConflicts ?? [];
+    assert.equal(first.data.previewId, null);
+    assert.equal(first.data.errors[0]?.sheetConflictId, conflict.id);
+    assert.deepEqual([conflict.original, conflict.current, conflict.input], [target.dueDate, peer.data.dueDate, null]);
+    assert.equal((await previewChoices({ [conflict.id]: 'force' })).status, 400);
+    const keep = await previewChoices({ [conflict.id]: 'current' });
+    assert.ok(keep.data.previewId);
+    assert.deepEqual(keep.data.sheetConflicts, [conflict]);
+    assert.deepEqual(keep.data.changes.map(({ toStart, toDue }) => [toStart, toDue]), [[cells[1], undefined]]);
+
+    const restore = await f.call<Issue>(`/issues/${target.id}`, 'PATCH', { expectedVersion: peer.data.version, dueDate: target.dueDate }, 'user-seo');
+    assert.equal(restore.status, 200);
+    assert.equal((await apply(f, keep.data)).status, 409);
+    const staleChoice = await previewChoices({ [conflict.id]: 'current' });
+    assert.equal(staleChoice.data.previewId, null);
+    assert.equal(staleChoice.data.sheetConflicts, undefined);
+    assert.match(staleChoice.data.errors[0].message, /이전에 선택한 일정 값이 바뀌었습니다/u);
+    assert.deepEqual(allDates((await workspace(f)).issues.find(value => value.id === target.id)!), allDates(restore.data));
+
+    const reviewAgain = await previewChoices();
+    assert.ok(reviewAgain.data.previewId);
+    assert.equal(reviewAgain.data.changes[0]?.toDue, null);
+    assert.deepEqual(allDates((await apply(f, reviewAgain.data)).data.updated[0]), {
+      startDate: cells[1], endDate: target.endDate, dueDate: null,
+    });
+  } finally { await f.close(); }
+});
+
 test('bulk calendar dates review set, clear and keep separately, bind proposal kind and undo only changed dates', async () => {
   const f = await fixture();
   try {

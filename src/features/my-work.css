@@ -7,6 +7,14 @@
   margin: 0;
 }
 
+.my-work-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .my-work-heading p,
 .my-work-total,
 .my-work-group-heading > span {
@@ -99,6 +107,29 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   border-top: 1px solid var(--line);
+}
+
+.my-work-list li[data-bulk-selected='true'] {
+  background: #edf7f1;
+}
+
+.my-work-bulk-controls {
+  color: #334f43;
+  font-size: 12px;
+}
+
+.my-work-bulk-row-select {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+}
+
+.my-work-bulk-row-select input,
+.my-work-bulk-controls input {
+  width: 16px;
+  height: 16px;
+  accent-color: #286c5d;
 }
 
 .my-work-list .my-work-status-action {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  appendGitlabActivityFilters, DEFAULT_GITLAB_ACTIVITY_FILTERS, filterGitlabActivityLinks, readGitlabActivityFilters,
+  appendGitlabActivityFilters, DEFAULT_GITLAB_ACTIVITY_FILTERS, filterGitlabActivityLinks, gitlabActivityRepositories,
+  readGitlabActivityFilters,
 } from '../../shared/gitlab-activity-filter.js';
 import type { GitlabActivityFilters } from '../../shared/gitlab-activity-filter.js';
 import type { GitlabLink, Issue } from '../../shared/types.js';
@@ -67,6 +68,47 @@ test('GitLab activity member selection round-trips alongside the existing route 
   assert.deepEqual(readGitlabActivityFilters(params), withoutMember);
 });
 
+test('GitLab activity routes retain exact repository identity and drop malformed keys', () => {
+  const filters: GitlabActivityFilters = { scope: 'running_pipelines', query: 'TS-21', memberId: 'user-test', pages: { pipeline: 2 } };
+  const repo = { ...filters, repositoryKey: 'abcdef012345:42' };
+  const params = new URLSearchParams();
+  appendGitlabActivityFilters(params, repo);
+  assert.equal(params.get('activityRepo'), repo.repositoryKey);
+  assert.deepEqual(readGitlabActivityFilters(params), repo);
+  for (const repositoryKey of ['42', 'abcdef012345:042', 'abcdef012345:0', 'abcdef012345:9007199254740992', 'abcdef012345:42\n', repository]) {
+    params.set('activityRepo', repositoryKey);
+    assert.deepEqual(readGitlabActivityFilters(params), filters);
+    appendGitlabActivityFilters(params, { ...filters, repositoryKey });
+    assert.equal(params.has('activityRepo'), false);
+  }
+});
+
+test('GitLab repository review is exact across similarly named repositories and historical instances', () => {
+  const first = link('gitlab:0123456789ab:42:merge_request:108:first');
+  const renamed = link('gitlab:0123456789ab:42:merge_request:109:first', { webUrl: `${repository}-renamed/-/merge_requests/21`,
+    updatedAt: '2026-11-25T00:00:00.000Z' });
+  const similar = link('gitlab:0123456789ab:43:merge_request:108:first', { projectId: 43, webUrl: `${repository}-legacy/-/merge_requests/21` });
+  const historical = link('gitlab:abcdef012345:42:merge_request:108:first', {
+    webUrl: 'https://user:private@git-old.example.test/team/service/-/merge_requests/21?secret=token',
+  });
+  const uncertain = link('old-snapshot-id');
+  const wrong = link('gitlab:0123456789ab:42:merge_request:110:first', { projectId: 43 });
+  const links = [first, renamed, similar, historical, uncertain, wrong];
+  const find = (repositoryKey: string | undefined, query = '') =>
+    filterGitlabActivityLinks(data, links, { ...DEFAULT_GITLAB_ACTIVITY_FILTERS, repositoryKey, query });
+  assert.deepEqual(find('0123456789ab:42'), [first, renamed]);
+  assert.deepEqual(find('0123456789ab:43', first.webUrl), []);
+  assert.deepEqual(find('0123456789ab:43', 'service'), [similar]);
+  assert.deepEqual(find('abcdef012345:42'), [historical]);
+  assert.deepEqual(find('unknown'), []);
+  assert.deepEqual(find(undefined), links);
+  assert.deepEqual(gitlabActivityRepositories(links).sort((a, b) => a.key.localeCompare(b.key)), [
+    { key: '0123456789ab:42', label: 'git.example.test/team/service-renamed (#42)' },
+    { key: '0123456789ab:43', label: 'git.example.test/team/service-legacy (#43)' },
+    { key: 'abcdef012345:42', label: 'git-old.example.test/team/service (#42)' },
+  ]);
+});
+
 test('GitLab activity search uses ticket aliases, safe object addresses and displayed numbers within the caller links', () => {
   const first = link('first', { title: 'MR 검토', sourceBranch: 'feature/TS-21' });
   const second = link('second', { iid: 213, webUrl: `${repository}/-/merge_requests/213` });
@@ -104,6 +146,23 @@ test('failed and manual GitLab triage selects current pipeline representatives b
   assert.deepEqual(find('pipeline', 'older failure'), [oldFailure]);
   assert.deepEqual(find('manual_pipelines'), [latestGate]);
   assert.deepEqual(find('manual_pipelines', 'older gate'), []);
+});
+
+test('running GitLab triage follows board status and selects current runs before searching', () => {
+  const oldRunning = pipeline(800, 'running', { title: 'Unique older run', updatedAt: '2026-11-24T02:00:00.000Z' });
+  const newerSuccess = pipeline(801, 'success');
+  const running = pipeline(802, 'running', { pipelineSource: 'merge_request_event' });
+  const pendingTag = pipeline(803, 'pending', { pipelineTag: true });
+  const created = pipeline(804, 'created', { sourceBranch: 'created' });
+  const preparing = pipeline(805, 'preparing', { sourceBranch: 'preparing' });
+  const waiting = pipeline(806, 'waiting_for_resource', { sourceBranch: 'waiting' });
+  const manual = pipeline(807, 'manual', { sourceBranch: 'manual' });
+  const links = [oldRunning, newerSuccess, running, pendingTag, created, preparing, waiting, manual];
+  const find = (query = '') => filterGitlabActivityLinks(data, links, { scope: 'running_pipelines', query, pages: {} });
+  assert.deepEqual(find(), [running, pendingTag, created, preparing, waiting]);
+  assert.deepEqual(find('older run'), []);
+  assert.deepEqual(find(oldRunning.webUrl), []);
+  assert.deepEqual(find(running.webUrl), [running]);
 });
 
 test('GitLab activity member filtering includes assigned and collaborating tickets with the same scope and search rules', () => {

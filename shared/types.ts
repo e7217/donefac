@@ -2317,7 +2317,17 @@ export interface ProjectScheduleAnalysis {
   warnings: string[];
   partial: boolean;
 }
-export interface SchedulePasteDiagnostic { line: number | null; key?: string; issueId?: string; message: string }
+export interface ScheduleSheetConflict {
+  id: string;
+  line: number;
+  key: string;
+  label: string;
+  original: string | number | null;
+  current: string | number | null;
+  input: string | number | null;
+}
+export type ScheduleSheetChoices = Record<string, 'current' | 'input'>;
+export interface SchedulePasteDiagnostic { line: number | null; key?: string; issueId?: string; message: string; sheetConflictId?: string }
 export interface SchedulePasteDependencyPair {
   line: number;
   projectId?: string;
@@ -2351,6 +2361,7 @@ export interface SchedulePastePreview {
   retainedDependencies?: SchedulePasteDependencyChange[];
   missingDependencies?: SchedulePasteDependencyPair[];
   keyMappings?: SchedulePasteKeyMapping[];
+  sheetConflicts?: ScheduleSheetConflict[];
   warnings: string[];
   teamBlockerWarnings?: string[];
   errors: SchedulePasteDiagnostic[];

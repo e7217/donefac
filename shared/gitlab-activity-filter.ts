@@ -1,7 +1,7 @@
 import { gitlabObjectSha, isGitlabBranchName } from './gitlab-links.js';
 import { isGitlabMergeReadinessBlocked } from './gitlab-merge-readiness.js';
 import { GITLAB_SEARCH_INPUT_LIMIT, normalizeGitlabSearchInput } from './gitlab-search.js';
-import { latestGitlabPipelineLinks } from './issue-gitlab-view.js';
+import { isGitlabPipelineRunning, latestGitlabPipelineLinks } from './issue-gitlab-view.js';
 import { isRelationId } from './issue-relations.js';
 import { myWorkMembership } from './my-work.js';
 import type { GitlabLink, WorkspaceSnapshot } from './types.js';
@@ -9,7 +9,7 @@ import { issueSearchAliases, normalizeWorkspaceSearchKey, normalizeWorkspaceSear
 
 export const GITLAB_ACTIVITY_SCOPES = [
   'all', 'merge_request', 'open_merge_requests', 'blocked_merge_requests',
-  'pipeline', 'failed_pipelines', 'manual_pipelines', 'branch', 'commit',
+  'pipeline', 'failed_pipelines', 'running_pipelines', 'manual_pipelines', 'branch', 'commit',
 ] as const;
 export type GitlabActivityScope = typeof GITLAB_ACTIVITY_SCOPES[number];
 
@@ -20,6 +20,7 @@ export const GITLAB_ACTIVITY_SCOPE_LABELS = {
   blocked_merge_requests: '검토가 막힌 MR',
   pipeline: '파이프라인',
   failed_pipelines: '실패 파이프라인',
+  running_pipelines: '진행 중 파이프라인',
   manual_pipelines: '수동 실행 대기 파이프라인',
   branch: '브랜치',
   commit: '커밋',
@@ -30,6 +31,7 @@ export interface GitlabActivityFilters {
   query: string;
   pages: Partial<Record<GitlabLink['kind'], number>>;
   memberId?: string;
+  repositoryKey?: string;
 }
 
 export const DEFAULT_GITLAB_ACTIVITY_FILTERS: GitlabActivityFilters = { scope: 'all', query: '', pages: {} };
@@ -55,11 +57,18 @@ function isActivityPage(value: number | undefined): value is number {
   return typeof value === 'number' && value > 1 && Number.isSafeInteger(value);
 }
 
+function isActivityRepositoryKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^[a-f0-9]{12}:([1-9]\d{0,15})$/u.exec(value);
+  return Boolean(match && Number.isSafeInteger(Number(match[1])));
+}
+
 export function readGitlabActivityFilters(params: URLSearchParams): GitlabActivityFilters {
   const rawScope = params.get('activityScope');
   const scope = GITLAB_ACTIVITY_SCOPES.find(value => value === rawScope) ?? 'all';
   const query = normalizeGitlabActivityQuery(params.get('activityQ') ?? '');
   const memberId = params.get('activityMember');
+  const repositoryKey = params.get('activityRepo');
   const pages: GitlabActivityFilters['pages'] = {};
   for (const [kind, key] of activityPages) {
     const raw = params.get(key);
@@ -67,7 +76,8 @@ export function readGitlabActivityFilters(params: URLSearchParams): GitlabActivi
     const page = Number(raw);
     if (isActivityPage(page)) pages[kind] = page;
   }
-  return { scope, query, pages, ...(isRelationId(memberId) ? { memberId } : {}) };
+  return { scope, query, pages, ...(isRelationId(memberId) ? { memberId } : {}),
+    ...(isActivityRepositoryKey(repositoryKey) ? { repositoryKey } : {}) };
 }
 
 export function appendGitlabActivityFilters(params: URLSearchParams, filters: GitlabActivityFilters): void {
@@ -80,6 +90,9 @@ export function appendGitlabActivityFilters(params: URLSearchParams, filters: Gi
 
   if (isRelationId(filters.memberId)) params.set('activityMember', filters.memberId);
   else params.delete('activityMember');
+
+  if (isActivityRepositoryKey(filters.repositoryKey)) params.set('activityRepo', filters.repositoryKey);
+  else params.delete('activityRepo');
 
   for (const [kind, key] of activityPages) {
     const page = filters.pages[kind];
@@ -101,6 +114,31 @@ function canonicalLinkAddress(link: GitlabLink) {
   return { canonical, repository: decodeURIComponent(path.slice(1)), ref, host: url.host };
 }
 
+function activityRepositoryKey(link: GitlabLink): string | null {
+  const match = /^gitlab:([a-f0-9]{12}):([1-9]\d{0,15}):(merge_request|pipeline|branch|commit):[^:]+:/u.exec(link.id);
+  if (!match || match[3] !== link.kind || !Number.isSafeInteger(link.projectId) || match[2] !== String(link.projectId) ||
+      link.id.slice(match[0].length) !== link.issueId || !link.issueId) return null;
+  return `${match[1]}:${match[2]}`;
+}
+
+export function gitlabActivityRepositories(links: readonly GitlabLink[]): { key: string; label: string }[] {
+  const repositories = new Map<string, { key: string; label: string; observedAt: number; hasPath: boolean }>();
+  for (const link of links) {
+    const key = activityRepositoryKey(link);
+    if (!key) continue;
+    const previous = repositories.get(key);
+    const address = canonicalLinkAddress(link);
+    const observedAt = Date.parse(link.updatedAt) || 0;
+    const label = address ? `${address.host}/${address.repository} (#${link.projectId})` : `저장소 #${link.projectId} (${key.slice(0, 12)})`;
+    if (!previous || (address && (!previous.hasPath || observedAt > previous.observedAt ||
+        observedAt === previous.observedAt && label < previous.label))) {
+      repositories.set(key, { key, label, observedAt, hasPath: Boolean(address) });
+    }
+  }
+  return [...repositories.values()].sort((a, b) => a.label.localeCompare(b.label, 'ko') || a.key.localeCompare(b.key))
+    .map(({ key, label }) => ({ key, label }));
+}
+
 function matchesScope(link: GitlabLink, scope: GitlabActivityScope, latest: ReadonlySet<GitlabLink> | null): boolean {
   switch (scope) {
     case 'all': return true;
@@ -108,6 +146,7 @@ function matchesScope(link: GitlabLink, scope: GitlabActivityScope, latest: Read
     case 'blocked_merge_requests': return link.kind === 'merge_request' && link.state === 'opened' &&
       isGitlabMergeReadinessBlocked(link.mergeReadiness?.state);
     case 'failed_pipelines': return latest?.has(link) === true && link.state === 'failed';
+    case 'running_pipelines': return latest?.has(link) === true && isGitlabPipelineRunning(link.state);
     case 'manual_pipelines': return latest?.has(link) === true && link.state === 'manual';
     default: return link.kind === scope;
   }
@@ -118,15 +157,16 @@ type ActivitySearchData = Pick<WorkspaceSnapshot, 'issues' | 'issueAliases'>;
 export function filterGitlabActivityLinks(
   data: ActivitySearchData | undefined, links: readonly GitlabLink[], filters: GitlabActivityFilters,
 ): GitlabLink[] {
-  const { memberId } = filters;
+  const { memberId, repositoryKey } = filters;
   const memberIssues = memberId ? new Set(data?.issues.filter(issue => {
     const participation = myWorkMembership(issue, memberId);
     return participation === 'assigned' || participation === 'collaborating';
   }).map(issue => issue.id)) : null;
-  const memberLinks = memberIssues ? links.filter(link => memberIssues.has(link.issueId)) : links;
-  const latest = filters.scope === 'failed_pipelines' || filters.scope === 'manual_pipelines'
-    ? new Set(latestGitlabPipelineLinks(memberLinks)) : null;
-  const scoped = memberLinks.filter(link => matchesScope(link, filters.scope, latest));
+  const candidates = memberIssues || repositoryKey ? links.filter(link => (!memberIssues || memberIssues.has(link.issueId)) &&
+    (!repositoryKey || activityRepositoryKey(link) === repositoryKey)) : links;
+  const latest = filters.scope === 'failed_pipelines' || filters.scope === 'running_pipelines' || filters.scope === 'manual_pipelines'
+    ? new Set(latestGitlabPipelineLinks(candidates)) : null;
+  const scoped = candidates.filter(link => matchesScope(link, filters.scope, latest));
   const query = normalizeGitlabActivityQuery(filters.query);
   if (!query) return scoped;
   if (httpUrlStart.test(query)) return scoped.filter(link => canonicalLinkAddress(link)?.canonical === query);

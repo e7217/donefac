@@ -14,6 +14,7 @@
 .development-activity-filters .form-label{display:grid;gap:4px;min-width:0;margin:0;color:#486554;font-size:13px}
 .development-activity-filters .field{width:100%;min-width:0;font-size:14px}
 .development-activity-scope,.development-activity-member{flex:1 1 12rem}
+.development-activity-repository{flex:2 1 16rem}
 .development-activity-search{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:4px 6px;flex:2 1 20rem;min-width:0}
 .development-activity-search p{grid-column:1/-1;margin:0;color:#9c3b37;font-size:12px}
 .development-activity-filters>.btn{align-self:start;margin-top:22px}

@@ -160,6 +160,7 @@
 
 .schedule-paste-error,
 .schedule-paste-rejected,
+.schedule-paste-sheet-conflicts,
 .schedule-paste-warnings,
 .schedule-paste-stale,
 .schedule-paste-success,
@@ -176,6 +177,28 @@
   color: #913c40;
   border-color: #e7c4c6;
   background: #fff4f4;
+}
+
+.schedule-paste-sheet-conflicts {
+  border-color: #e7d6b0;
+  background: #fff9eb;
+}
+
+.schedule-paste-sheet-conflicts ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.75rem 0;
+}
+
+.schedule-paste-sheet-conflicts li + li {
+  border-top: 1px solid #e7d6b0;
+}
+
+.schedule-paste-sheet-conflicts label {
+  display: grid;
+  justify-items: start;
+  gap: 0.35rem;
+  padding: 0.6rem 0;
 }
 
 .schedule-paste-rejected ul,

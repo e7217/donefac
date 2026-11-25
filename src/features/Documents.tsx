@@ -10,10 +10,10 @@ import { history } from '@tiptap/pm/history';
 import { NodeSelection, type Transaction } from '@tiptap/pm/state';
 import { createAbsolutePositionFromRelativePosition, createRelativePositionFromTypeIndex } from 'yjs';
 import {
-  ArrowDownToLine, Bold, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
+  ArrowDownToLine, Bold, BookOpen, ChartBar, Check, CheckCheck, ChevronDown, ChevronLeft, ChevronRight,
   Code2, Columns2, Columns3, Copy, CornerDownRight, FileCheck2, FileClock, FileInput, FilePlus2, FileStack, Files, FileText, FolderInput, History, ImageIcon, Info, Italic, Link2, List,
   ListChecks, ListFilter, ListOrdered, ListTree, Loader2, MessageSquare, PanelRightClose,
-  PanelRightOpen, Paperclip, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
+  PanelRightOpen, Paperclip, Pencil, Plus, Quote, RefreshCw, Save, Scissors, Search, Send, Strikethrough,
   RotateCcw, Table2, TableOfContents, TableProperties, Tag, Trash2, Unlink, X,
 } from 'lucide-react';
 import { createEditorExtensions } from '../../shared/editor-schema';
@@ -25,11 +25,11 @@ import { MAX_DOCUMENT_CHILD_LISTS } from '../../shared/document-child-list';
 import { MAX_DOCUMENT_PROPERTY_BLOCKS } from '../../shared/document-properties';
 import { DOCUMENT_CONTENT_SCHEMA_VERSION, DOCUMENT_HEADING_LEVELS, contentReferences, documentContentSchemaVersion, documentPlainText, findDocumentExcerpt, isDocumentHeadingLevel } from '../../shared/document-nodes';
 import { documentPanelBacklinks, documentPanelReferenceKey, documentPanelReferences, savedDocumentSectionTitle } from '../../shared/document-panel-references';
-import { isDocumentSectionId, parseDocumentHash } from '../../shared/document-sections';
+import { documentReadingHash, isDocumentSectionId, parseDocumentHash } from '../../shared/document-sections';
 import { isRelationId } from '../../shared/issue-relations';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { jiraMigratedTargetAddress, type MigratedJiraTarget } from '../../shared/jira-migration-address';
-import { DocumentBlocksProvider, DocumentDecisionRevision, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
+import { DocumentBlocksProvider, DocumentDecisionRevision, ReadonlyDocumentContent, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
 import { SourceOrigins } from './SourceOrigins';
@@ -87,8 +87,10 @@ import './document-comment-review.css';
 
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
-  onSelectDocument: (id: string, recovery?: { documentId: string; beforeOpen: () => void }) => boolean;
+  onSelectDocument: (id: string, recovery?: { documentId: string; beforeOpen: () => void }, reading?: boolean) => boolean;
   openDocument: (id: string, sectionId?: string) => void;
+  reading: boolean;
+  onChangeReading: (reading: boolean) => void;
   documentLabel?: string | null;
   onChangeDocumentLabel?: (label: string | null) => void;
   sectionId?: string | null;
@@ -224,7 +226,7 @@ function mergeCommentUpdate(current: Comment, updated: Comment): Comment {
 }
 
 export function Documents({ data, projectId, actorId, refresh, notify, openIssue, openDocument, selectedDocumentId, onSelectDocument,
-  documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
+  reading, onChangeReading, documentLabel, onChangeDocumentLabel, sectionId, publicationLink, onClosePublicationLink, issueDrawerOpen = false,
   commentFocus, onCopyCommentLink, onOpenIssueForReview, onOpenIssueSchedule, onOpenMigratedIssue }: Props) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [findScope, setFindScope] = useState<string | null>(null);
@@ -440,6 +442,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const [, forceToolbar] = useState(0);
   const [session, setSession] = useState<CollaborationSession | null>(null);
   const sessionRef = useRef<CollaborationSession | null>(null);
+  const [openedEditorScope, setOpenedEditorScope] = useState<string | null>(null);
+  const editorSessionNeeded = !reading || openedEditorScope === documentScope;
   const [sessionError, setSessionError] = useState('');
   const [manualRecovery, setManualRecovery] = useState(false);
   const manualRecoveryRef = useRef(false);
@@ -460,7 +464,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       migratedIssueRequest.current?.controller.abort();
       migratedIssueRequest.current = null;
     };
-  }, [documentScope, sectionId, issueDrawerOpen, publicationOpen, checklistReselecting]);
+  }, [documentScope, sectionId, issueDrawerOpen, publicationOpen, checklistReselecting, reading]);
 
   async function resolveMigratedIssue(anchor: HTMLAnchorElement, href: string, expectsComment: boolean) {
     if (!onOpenMigratedIssue || migratedIssueRequest.current?.anchor === anchor) return;
@@ -507,7 +511,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const orderOpen = Boolean(selectedPage && selectedPage.id === orderDocumentId);
   const currentProject = data.projects.find(project => project.id === projectId);
   const scoped = useMemo(() => data.documents.filter(page => projectId === 'all' || page.projectId === projectId || page.projectId === null), [data.documents, projectId]);
-  const activeSession = session?.document.id === selectedPage?.id ? session : null;
+  const activeSession = editorSessionNeeded && session?.document.id === selectedPageId ? session : null;
   const manualSession = activeSession?.enabled === false;
   const liveMode = Boolean(activeSession && (activeSession.enabled || archivedLiveRecovery) && !manualRecovery);
   const confirmingSave = saveRecovery?.actorId === actorId && saveRecovery.draft.id === draft?.id;
@@ -518,7 +522,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     documentAncestors(latestPage, new Map(data.documents.map(page => [page.id, page]))) : [], [latestPage, data.documents]);
   const { collapsed, toggleBranch } = useDocumentTreeExpansion(actorId, data.restoreGeneration, selectedDocumentId, ancestors);
   const spaceTitle = latestPage?.projectId ? data.projects.find(project => project.id === latestPage.projectId)?.name || '프로젝트' : '팀 공통';
-  const crumbQuery = documentLabel ? `?${new URLSearchParams({ label: documentLabel })}` : '';
+  const crumbParameters = new URLSearchParams();
+  if (reading) crumbParameters.set('mode', 'read');
+  if (documentLabel) crumbParameters.set('label', documentLabel);
+  const crumbQuery = crumbParameters.size ? `?${crumbParameters}` : '';
   const liveLocationChanged = latestPage !== selectedPage &&
     (latestPage?.projectId !== selectedPage?.projectId || latestPage?.parentId !== selectedPage?.parentId);
   const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
@@ -771,11 +778,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [manualEditor, rememberDraft, refresh, setConflict]);
 
   useEffect(() => {
+    // Leave an open editor connected so a same-document mode change preserves its history and pending updates.
+    setOpenedEditorScope(previous => !reading || previous === documentScope ? documentScope : null);
+  }, [documentScope, reading]);
+
+  useEffect(() => {
     if (!selectedPageId) return;
     let active = true;
     sessionRef.current = null; setSession(null); setSessionError('');
     manualRecoveryRef.current = false; setManualRecovery(false);
     archivedLiveRecoveryRef.current = false; setArchivedLiveRecovery(false);
+    if (!editorSessionNeeded) return;
     const check = async () => {
       try {
         const current = await api<CollaborationSession>(`/documents/${selectedPageId}/collaboration`);
@@ -797,7 +810,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     // never document writes. Once live, the WebSocket owns synchronization.
     const timer = setInterval(() => { if (!sessionRef.current?.enabled) void check(); }, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [selectedPageId, actorId, observeDocument]);
+  }, [selectedPageId, actorId, editorSessionNeeded, observeDocument]);
 
   useEffect(() => { manualEditor?.setEditable(manualSession && !manualRecovery && !archivedLiveRecovery, false); }, [manualEditor, manualSession, manualRecovery, archivedLiveRecovery]);
   useEffect(() => { if (activeSession?.enabled && draft?.bodyDirty) { manualRecoveryRef.current = true; setManualRecovery(true); } }, [activeSession?.enabled, draft?.id, draft?.bodyDirty]);
@@ -1028,6 +1041,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const handler = (event: KeyboardEvent) => {
       if (issueDrawerOpen || newOpen || templateManager || offlineExport || archiveImport || referenceDialog || issueBlockDialog) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+        if (reading) return;
         event.preventDefault();
         if (!publicationOpen && !moveOpen && !copyOpen && !orderOpen) void saveDraft();
       }
@@ -1035,7 +1049,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [saveDraft, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, referenceDialog, issueBlockDialog]);
+  }, [saveDraft, reading, publicationOpen, moveOpen, copyOpen, orderOpen, issueDrawerOpen, newOpen, templateManager, offlineExport, archiveImport, referenceDialog, issueBlockDialog]);
 
   const moveBlocker = () => {
     if (savingRef.current || restoring) return '저장 또는 버전 복원이 끝나면 문서를 이동할 수 있습니다.';
@@ -1190,6 +1204,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [commentFocus, commentActivation, loadedCommentActivation, focusedRoot, commentFilter, issueDrawerOpen, publicationOpen, documentAction,
     newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
+  const historyVersion = reading ? latestPage?.version : draft?.expectedVersion;
   useEffect(() => {
     if (!documentId || sideTab !== 'history' || publicationOpen) return;
     let active = true;
@@ -1199,13 +1214,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       .catch(error => { if (active) setHistoryError(error instanceof Error ? error.message : '이력을 불러오지 못했습니다.'); })
       .finally(() => { if (active) setHistoryLoading(false); });
     return () => { active = false; };
-  }, [documentId, draft?.expectedVersion, sideTab, publicationOpen]);
+  }, [documentId, historyVersion, sideTab, publicationOpen]);
 
   function selectDocument(id: string) {
     if (id === selectedDocumentId) return true;
     if (documentAction) {
       if (!window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return false;
-      onSelectDocument(id);
+      onSelectDocument(id, undefined, reading);
       return true;
     }
     if (savingRef.current || isReplySending() || isCommentEditPending()) { notify('저장이 끝난 후 이동해주세요.', 'error'); return false; }
@@ -1221,7 +1236,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     rememberDraft(draftRef.current);
     rememberComment();
     discardCommentEdit();
-    onSelectDocument(id);
+    onSelectDocument(id, undefined, reading);
     return true;
   }
 
@@ -1939,19 +1954,19 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const references = draft ? contentReferences(draft.content) : [];
   const showLinkPanel = sidebarOpen && sideTab === 'links';
   const workspaceLocation = typeof window === 'undefined' ? undefined : window.location;
-  const draftContent = draft?.content;
+  const displayedContent = reading ? latestPage?.content : draft?.content;
   const draftId = draft?.id;
   const documentsById = useMemo(() => new Map(data.documents.map(page => [page.id, page])), [data.documents]);
-  const outgoingDocuments = useMemo(() => showLinkPanel && draftContent
-    ? documentPanelReferences(draftContent, workspaceLocation) : [], [showLinkPanel, draftContent, workspaceLocation]);
+  const outgoingDocuments = useMemo(() => showLinkPanel && displayedContent
+    ? documentPanelReferences(displayedContent, workspaceLocation) : [], [showLinkPanel, displayedContent, workspaceLocation]);
   const backlinks = useMemo(() => showLinkPanel && draftId
     ? documentPanelBacklinks(data.documents, draftId, workspaceLocation) : [], [showLinkPanel, draftId, data.documents, workspaceLocation]);
-  const savedContent = selectedPage?.content;
+  const savedContent = (reading ? latestPage : selectedPage)?.content;
   const savedIssueReferences = useMemo(() => savedContent
     ? contentReferences(savedContent).filter(reference => reference.type === 'issue') : [], [savedContent]);
   const issuesById = useMemo(() => new Map(data.issues.map(issue => [issue.id, issue])), [data.issues]);
   const savedIssueReferenceIds = new Set(savedIssueReferences.map(reference => reference.id));
-  const draftIssueReferences = draft?.id === selectedPage?.id
+  const draftIssueReferences = !reading && draft?.id === selectedPage?.id
     ? references.filter(reference => reference.type === 'issue' && !savedIssueReferenceIds.has(reference.id)) : [];
   const unresolvedIssueReferences = savedIssueReferences.filter(reference => !issuesById.has(reference.id));
   const supplementalIssueReferences = [...new Map([...draftIssueReferences, ...unresolvedIssueReferences]
@@ -2125,7 +2140,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     navigateSlash(event);
   }
 
-  function openInlineDocumentLink(href: string) {
+  function openInlineDocumentLink(href: string, keepReading = false) {
     let destination: URL;
     try { destination = new URL(href, location.href); } catch { return false; }
     if (destination.origin !== location.origin || destination.pathname !== location.pathname ||
@@ -2134,9 +2149,34 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const parameters = new URLSearchParams(query);
     const sectionLink = /^#\/[^/?#]+\/documents\/[^/?#]+$/u.test(path) && isDocumentSectionId(parameters.get('section'));
     const completionLink = /^#\/[^/?#]+\/planning$/u.test(path) && readCycleCompletionRecordId(parameters);
-    if (!sectionLink && !completionLink && !parseDocumentHash(destination.hash, { allowLabel: true })) return false;
+    const documentLink = parseDocumentHash(destination.hash, { allowLabel: true });
+    if (!sectionLink && !completionLink && !documentLink) return false;
+    if (keepReading && (documentLink || sectionLink) && !parameters.has('publication')) {
+      parameters.set('mode', 'read');
+      destination.hash = `${path}?${parameters}`;
+    }
     window.location.hash = destination.hash;
     return true;
+  }
+
+  const readingPage = reading ? latestPage : null;
+  const breadcrumbTitle = documentTitleForSave(readingPage?.title ?? draft?.title ?? '');
+  const readingEditPending = readingPage && ((draft?.id === readingPage.id && draft.dirty) ||
+    (liveState?.document.id === readingPage.id && liveState.pending));
+  const migratedIssueNotice = migratedIssueLink && <div className="docs-notice docs-migrated-issue-link" role="status">
+    {migratedIssueLink.status === 'pending' ? '이관된 Jira 주소를 확인하는 중…' : migratedIssueLink.status === 'failed'
+      ? '이관된 Jira 주소를 조회하지 못했습니다.' : migratedIssueLink.expectsComment
+        ? '이관된 Jira 댓글을 확인할 수 없습니다.' : '이관된 Jira 업무를 확인할 수 없습니다.'}
+    {migratedIssueLink.status !== 'pending' && <> <a href={migratedIssueLink.href} target="_blank" rel="noopener noreferrer">원본 열기</a></>}
+  </div>;
+  async function copyReadingLink(page: DocPage) {
+    const href = new URL(documentReadingHash(page.id, page.projectId ?? projectId, sectionId), window.location.href).href;
+    try {
+      await navigator.clipboard.writeText(href);
+      notify('읽기 링크를 복사했습니다.', 'success');
+    } catch {
+      notify('주소창에서 읽기 링크를 복사해 주세요.', 'error');
+    }
   }
 
   return <DocumentBlocksProvider data={data} actorId={actorId} documentId={draft?.id || null} content={draft?.content} openIssue={openIssue} openDocument={openDocument}
@@ -2211,12 +2251,24 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   }}>{documentTitleForSave(ancestor.title)}</a>
               </span>)}
               <span className="docs-breadcrumb-step"><ChevronRight size={12} aria-hidden="true" />
-                <span aria-current="page" title={documentTitleForSave(draft.title)}>{documentTitleForSave(draft.title)}</span>
+                <span aria-current="page" title={breadcrumbTitle}>{breadcrumbTitle}</span>
               </span>
             </nav>
-            <div className="docs-top-actions"><span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : confirmingSave ? <><span /> 저장 결과 미확인</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>
+            <div className="docs-top-actions">{!reading && <span className={`docs-save-state ${draft.dirty ? 'is-dirty' : ''}`} aria-live="polite">{saving ? <><Loader2 size={12} className="docs-spin" /> 저장 중</> : confirmingSave ? <><span /> 저장 결과 미확인</> : draft.dirty ? <><span /> {liveMode ? '속성 변경' : '저장 필요'}</> : liveMode ? liveState?.phase === 'connected' && !liveState.pending ? <><CheckCheck size={13} /> 동기화됨</> : '동기화 대기' : <><CheckCheck size={13} /> 저장됨</>}</span>}
               <FavoriteAction type="document" id={selectedPage.id} />
               <NotificationSubscriptionButton actorId={actorId} targetType="document" targetId={selectedPage.id} notify={notify} />
+              <button type="button" className="btn btn-ghost docs-reading-toggle" disabled={saving || restoring}
+                onClick={() => { setExportOpen(false); onChangeReading(!reading); }}>
+                {reading ? <Pencil size={14} aria-hidden="true" /> : <BookOpen size={14} aria-hidden="true" />}
+                {reading ? '편집으로 돌아가기' : '저장본 읽기'}
+              </button>
+              {reading && <button type="button" className="btn btn-ghost docs-icon-button" aria-label="저장본 새로고침" title="저장본 새로고침"
+                disabled={referencesRefreshing} onClick={() => void refreshReferences()}>
+                <RefreshCw size={15} aria-hidden="true" className={referencesRefreshing ? 'docs-spin' : undefined} />
+              </button>}
+              {readingPage && <button type="button" className="btn btn-ghost docs-icon-button" aria-label="읽기 링크 복사" title="읽기 링크 복사"
+                onClick={() => void copyReadingLink(readingPage)}><Link2 size={15} aria-hidden="true" /></button>}
+              {!reading && <>
               <button ref={publicationOpener} type="button" className="btn btn-ghost docs-publication-button" disabled={saving || restoring} onClick={() => setPublicationDocumentId(selectedPage.id)}><FileCheck2 size={14} />검토·발행</button>
               <button type="button" className="btn btn-ghost docs-icon-button" title="팀 템플릿으로 저장" aria-label="팀 템플릿으로 저장"
                 disabled={saving || restoring} onClick={event => manageTemplates(event.currentTarget, latestPage ?? selectedPage)}><FileStack size={16} aria-hidden="true" /></button>
@@ -2244,11 +2296,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                 disabled={saving || restoring} onClick={() => { setExportOpen(false); setOrderDocumentId(selectedPage.id); }}>
                 <ListOrdered size={16} aria-hidden="true" />
               </button>
+              </>}
               <button className="btn btn-ghost docs-icon-button" title={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} aria-label={sidebarOpen ? '정보 패널 닫기' : '정보 패널 열기'} onClick={() => setSidebarOpen(value => !value)}>{sidebarOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}</button>
-              <button className="btn btn-primary docs-save-button" disabled={saving || (!confirmingSave && (!draft.dirty || manualRecovery || Boolean(metadataReview) || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))))} onClick={() => void saveDraft()}><Save size={14} /> {confirmingSave ? '저장 결과 다시 확인' : liveMode ? '속성 저장' : '저장'}</button>
+              {!reading && <button className="btn btn-primary docs-save-button" disabled={saving || (!confirmingSave && (!draft.dirty || manualRecovery || Boolean(metadataReview) || (liveMode && (liveState?.pending || liveState?.phase !== 'connected'))))} onClick={() => void saveDraft()}><Save size={14} /> {confirmingSave ? '저장 결과 다시 확인' : liveMode ? '속성 저장' : '저장'}</button>}
             </div>
           </div>
 
+          {!reading && <>
           {confirmingSave && !saving && <div className="docs-notice" role="status">문서 저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.</div>}
           {conflict && !manualRecovery && !confirmingSave && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
           {showLatest && previewDocument && <div className="docs-latest-preview"><div><strong>서버 버전 {previewDocument.version} · {previewDocument.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
@@ -2265,8 +2319,31 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
           {storageProblem && <div className="docs-notice" role="alert">브라우저 임시 저장 공간이 부족합니다. 이동하기 전에 저장하거나 JSON으로 내보내주세요.</div>}
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
           {manualRecovery && !confirmingSave && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
+          </>}
+          {readingPage && <div className="docs-paper-scroll">
+            <article className="docs-paper docs-reading-paper" aria-label="저장본 읽기" key={readingPage.id}
+              onClickCapture={event => {
+                if (event.defaultPrevented || event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
+                    !(event.target instanceof Element)) return;
+                const link = event.target.closest<HTMLAnchorElement>('a[href]');
+                if (link && !link.closest('.docs-migrated-issue-link') && (openMigratedIssueLink(link) || openInlineDocumentLink(link.href, true))) event.preventDefault();
+              }}>
+              <div className="docs-document-meta"><span>저장본 · 버전 {readingPage.version}</span><span>마지막 수정 {relativeTime(readingPage.updatedAt)}</span></div>
+              <h2 className="docs-title-input">{breadcrumbTitle}</h2>
+              {Boolean(readingPage.labels?.length) && <ul className="docs-label-chips" aria-label="문서에 적용한 라벨">
+                {readingPage.labels?.map(label => <li className="docs-label-chip" key={label}><span>{label}</span></li>)}
+              </ul>}
+              {readingEditPending && <p className="docs-reading-draft" role="status">편집 화면에 저장 대기 중인 변경이 있습니다.</p>}
+              {migratedIssueNotice}
+              <DocumentBlocksProvider data={data} actorId={actorId} documentId={readingPage.id} content={readingPage.content}
+                openIssue={openIssue} openDocument={openDocument}>
+                <ReadonlyDocumentContent content={readingPage.content} documentId={readingPage.id} nodeBudget={30_000} showOutline sectionId={sectionId}
+                  sectionLinkHref={id => documentReadingHash(readingPage.id, readingPage.projectId ?? projectId, id)} />
+              </DocumentBlocksProvider>
+            </article>
+          </div>}
 
-          <div className="docs-paper-scroll">
+          <div className="docs-paper-scroll" hidden={reading} inert={reading}>
             <div className="docs-paper">
               <div className="docs-document-meta"><span className={`docs-status-pill ${draft.status === 'published' ? 'is-published' : ''}`}>{draft.status === 'published' ? '공유 표시' : '초안'}</span><span>마지막 수정 {relativeTime((latestPage ?? selectedPage).updatedAt)}</span></div>
               <input ref={titleInput} className="docs-title-input" disabled={restoring || checklistReselecting} value={draft.title} onChange={event => updateDraft({ title: event.target.value })} placeholder="제목 없는 문서" aria-label="문서 제목" />
@@ -2350,12 +2427,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               </div>
               {!checklistReselecting && findOpen && editor && <DocumentFindPanel editor={editor} inputRef={findInput}
                 canReplace={!bodyReadOnly && !saving && !conflict} onClose={closeFind} />}
-              {migratedIssueLink && <div className="docs-notice docs-migrated-issue-link" role="status">
-                {migratedIssueLink.status === 'pending' ? '이관된 Jira 주소를 확인하는 중…' : migratedIssueLink.status === 'failed'
-                  ? '이관된 Jira 주소를 조회하지 못했습니다.' : migratedIssueLink.expectsComment
-                    ? '이관된 Jira 댓글을 확인할 수 없습니다.' : '이관된 Jira 업무를 확인할 수 없습니다.'}
-                {migratedIssueLink.status !== 'pending' && <> <a href={migratedIssueLink.href} target="_blank" rel="noopener noreferrer">원본 열기</a></>}
-              </div>}
+              {!reading && migratedIssueNotice}
               </div>
               {!checklistReselecting && editor && inColumnLayout && !bodyReadOnly && <div className="docs-column-layout-tools" role="group" aria-label="다단 구역 편집">
                 <button type="button" aria-keyshortcuts="Control+Shift+Enter Meta+Shift+Enter" title="Ctrl/⌘+Shift+Enter"
@@ -2366,7 +2438,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {!checklistReselecting && insertKind && <form className="docs-insert-form" onSubmit={insertUrlBlock}><input autoFocus className="field" value={insertUrl} onChange={event => setInsertUrl(event.target.value)} placeholder={insertKind === 'image' ? 'https://… 이미지 주소' : 'https://… 링크 주소'} aria-label={insertKind === 'image' ? '이미지 URL' : '링크 URL'} /><button className="btn btn-primary" type="submit">삽입</button><button className="btn btn-ghost docs-icon-button" type="button" aria-label="삽입 취소" onClick={() => setInsertKind(null)}><X size={15} /></button></form>}
               {draft.id === selectedPage.id && <DocumentEditorOutline key={draft.id} editor={editor}
                 documentId={draft.id} projectId={selectedPage.projectId ?? projectId}
-                sectionId={publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
+                sectionId={reading || publicationOpen ? null : sectionId} savedContent={selectionDocument?.content}
                 ready={!liveMode || Boolean(liveState?.ready)} canAssign={!bodyReadOnly && !saving && !conflict && !publicationOpen && !checklistReselecting} />}
               {clipboardImageUploads[documentScope] > 0 && <div className="docs-notice" role="status">이미지를 첨부하는 중입니다.</div>}
               <div ref={editorWrap} className="docs-editor-wrap" onPasteCapture={event => void pasteClipboardImages(event)} onKeyDownCapture={event => {
@@ -2426,7 +2498,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         {sidebarOpen && <aside className="docs-details" aria-label="문서 상세 정보" inert={checklistReselecting}
           style={checklistReselecting ? { display: 'none' } : undefined}><div className="docs-detail-tabs">{([{ id: 'comments', label: '댓글', icon: <MessageSquare size={14} /> }, { id: 'links', label: '연결', icon: <Link2 size={14} /> }, { id: 'history', label: '이력', icon: <History size={14} /> }, { id: 'attachments', label: '파일', icon: <Paperclip size={14} /> }, { id: 'source', label: '원본 기록', icon: <FileText size={14} /> }] as const).map(tab => <button key={tab.id} ref={tab.id === 'links' ? linksTab : undefined} className={sideTab === tab.id ? 'is-active' : ''} onClick={() => { setSideTab(tab.id); }}>{tab.icon}{tab.label}{tab.id === 'comments' && comments.length > 0 && <span>{comments.length}</span>}</button>)}</div>
           <button className="docs-panel-close" aria-label="문서 정보 패널 닫기" onClick={() => setSidebarOpen(false)}><X size={13} /> 패널 닫기</button><div className="docs-detail-content">
-            {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} />}
+            {sideTab === 'links' && <AtlassianLinks targetType="document" targetId={draft.id} actorId={actorId} notify={notify} readOnly={reading} />}
             {sideTab === 'comments' && <>
               <div className="docs-panel-heading docs-comment-heading">
                 <div><h3 tabIndex={-1} ref={commentsHeading}>팀과 이야기하기</h3><p>문서에 대한 질문과 의견을 남겨주세요.</p></div>
@@ -2531,10 +2603,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <DocumentLinkedWork key={selectedPage.id} data={data} document={selectedPage} openIssue={openIssue}
                 onOpenIssueForReview={onOpenIssueForReview} onOpenIssueSchedule={onOpenIssueSchedule}
                 refresh={refresh} notify={notify} issueDrawerOpen={issueDrawerOpen}>
-                <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>
+                {!reading && <button className="btn docs-follow-up-button" type="button" disabled={saving || restoring || !data.projects.length || draft.id !== selectedPage.id} onClick={event => openFollowUp(selectedPage, event.currentTarget)}><Plus size={14} aria-hidden="true" /> 후속 업무 만들기</button>}
               </DocumentLinkedWork>
-              <ResourceLinkPicker key={`${actorId}:${selectedPage.id}`} kind="issue" items={candidateIssues} projects={data.projects}
-                issueAliases={data.issueAliases} busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} />
+              <div hidden={reading}><ResourceLinkPicker key={`${actorId}:${selectedPage.id}`} kind="issue" items={candidateIssues} projects={data.projects}
+                issueAliases={data.issueAliases} busy={linkBusy || draft.id !== selectedPage.id} onLink={linkIssue} /></div>
               <div className="docs-reference-list">
                 <h3>본문에서 참조하는 문서</h3>
                 {!outgoingDocuments.length && <p>본문에 문서 링크, 참조나 포함을 추가하면 표시됩니다.</p>}
@@ -2571,13 +2643,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   </button>;
                 })}
               </div>}
-              <div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div>
+              {!reading && <div className="docs-document-properties"><h3>문서 속성</h3><label>상위 문서<select disabled={restoring} className="field" value={draft.parentId || ''} onChange={event => updateDraft({ parentId: event.target.value || null })}><option value="">최상위 문서</option>{parentOptions.map(page => <option key={page.id} value={page.id}>{page.title}</option>)}</select></label><label>작성 상태<select disabled={restoring} className="field" value={draft.status} onChange={event => updateDraft({ status: event.target.value as DocPage['status'] })}><option value="draft">초안</option><option value="published">공유 표시</option></select></label><p className="docs-panel-muted">속성 변경도 저장할 때 반영됩니다.</p><button className="docs-danger-action" onClick={() => void deleteDocument()} disabled={saving}><Trash2 size={13} /> 문서 삭제</button></div>}
             </>}
             {sideTab === 'source' && <SourceOrigins resourceType="document" resourceId={draft.id}/>}
-            {sideTab === 'attachments' && <><div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>첨부 링크나 이미지를 본문에 삽입하세요.</p></div><Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh}
+            {sideTab === 'attachments' && <>{!reading && <div className="docs-panel-heading"><h3>문서에 자료 모으기</h3><p>첨부 링크나 이미지를 본문에 삽입하세요.</p></div>}<Attachments key={draft.id} resourceType="document" resourceId={draft.id} actorId={actorId} notify={notify} onChanged={refresh} readOnly={reading}
               reloadKey={clipboardAttachment?.documentId === draft.id ? clipboardAttachment.versionId : undefined}
-              onInsertFileLink={bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
-              onInsertImage={bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}{sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError} current={{title:draft.title,content:draft.content,plainText:draft.plainText,version:draft.expectedVersion,dirty:draft.dirty}} users={data.users} onRestore={restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))} onSaveCopy={confirmingSave ? undefined : saveCopy} saving={saving} />}
+              onInsertFileLink={reading || bodyReadOnly || archivedLiveRecovery ? undefined : insertAttachmentLink}
+              onInsertImage={reading || bodyReadOnly ? undefined : url => { editor?.chain().focus().setImage({ src: url, alt: '첨부 이미지' }).run(); notify(liveMode ? '이미지를 삽입했습니다. 서버 동기화 상태를 확인해주세요.' : '이미지를 삽입했습니다. 문서를 저장하면 반영됩니다.', 'success'); }} /></>}
+            {sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError}
+              current={readingPage ? { ...readingPage, dirty: false } : { title: draft.title, content: draft.content, plainText: draft.plainText, version: draft.expectedVersion, dirty: draft.dirty }}
+              users={data.users} onRestore={reading ? undefined : restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))}
+              onSaveCopy={reading || confirmingSave ? undefined : saveCopy} saving={saving} />}
           </div>
         </aside>}
       </> : filtersActive && !visible.length ? <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>조건에 맞는 문서가 없습니다.</h2></div>

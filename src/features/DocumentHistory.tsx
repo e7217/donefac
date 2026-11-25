@@ -17,7 +17,7 @@ export interface DocumentHistoryProps {
   error: string;
   current: { title: string; content: RichContent; plainText: string; version: number; dirty: boolean };
   users: User[];
-  onRestore: (revision: DocRevision) => void | Promise<void>;
+  onRestore?: (revision: DocRevision) => void | Promise<void>;
   restoreDisabled: boolean;
   onSaveCopy?: () => void | Promise<void>;
   saving?: boolean;
@@ -38,10 +38,11 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
   });
   const preview = ordered.find(value => value.id === previewId);
   const hasFormattedPreview = preview && (containsDocumentNavigation(preview.content) || hasDocumentFormattedBlocks(preview.content) || contentReferences(preview.content).some(reference => reference.revisionId));
-  const dirtyLabel = current.dirty ? '현재 미저장 초안' : '현재 편집본';
+  const currentSource = onRestore ? '현재 편집본' : '현재 저장본';
+  const dirtyLabel = current.dirty ? '현재 미저장 초안' : currentSource;
   function openCompare(revision?: DocRevision) { setBeforeId((revision || ordered[1] || ordered[0])?.id || ''); setAfterId('current'); setCompareOpen(true); }
   return <div className="document-history">
-    <div className="docs-panel-heading"><h3>문서 변경 이력</h3><p>저장된 버전끼리 비교하거나 현재 편집 내용과 차이를 확인하세요.</p><button className="btn btn-ghost document-compare-open" disabled={!ordered.length || loading} onClick={() => openCompare()}><GitCompareArrows size={14} />버전 비교</button></div>
+    <div className="docs-panel-heading"><h3>문서 변경 이력</h3><button className="btn btn-ghost document-compare-open" disabled={!ordered.length || loading} onClick={() => openCompare()}><GitCompareArrows size={14} />버전 비교</button></div>
     {current.dirty && <div className="docs-history-hint">현재 편집을 저장한 후 이전 버전으로 복구할 수 있어요. 비교에서는 미저장 초안도 확인할 수 있습니다.{onSaveCopy && <button disabled={saving} onClick={() => void onSaveCopy()}>편집을 새 문서로 보관</button>}</div>}
     {loading && <p className="docs-panel-muted">이력을 불러오는 중…</p>}{error && <p className="docs-panel-error" role="alert">{error}</p>}
     {preview ? <div className="docs-history-preview">
@@ -50,10 +51,10 @@ export function DocumentHistory({ revisions, loading, error, current, users, onR
         pinnedSource={{ documentId: preview.documentId, revisionId: preview.id }} /></> : <>
         <span className="document-history-preview-label">텍스트 미리보기</span><pre>{preview.plainText ? preview.plainText.slice(0, 2000) : '텍스트 미리보기가 없습니다. 버전 비교에서 전체 문서 구조를 확인하세요.'}</pre>{preview.plainText.length > 2000 && <p className="document-history-preview-limit">전체 {preview.plainText.length.toLocaleString('ko-KR')}자 중 2,000자를 표시했습니다. 나머지 내용과 구조는 버전 비교에서 빠짐없이 확인할 수 있습니다.</p>}
       </>}
-      <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button><button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>
+      <button className="btn document-history-preview-compare" onClick={() => openCompare(preview)}><GitCompareArrows size={13} />이 버전과 {dirtyLabel} 비교</button>{onRestore && <button className="btn btn-primary" disabled={saving || restoreDisabled} onClick={() => void onRestore(preview)}><RotateCcw size={13} />이 버전으로 복구</button>}
     </div> : ordered.map(revision => <button className="docs-revision" key={revision.id} onClick={() => setPreviewId(revision.id)}><div className="docs-revision-icon"><History size={15} /></div><div><strong>{documentRevisionLabel(revision)}{revision.confluenceSourceVersion == null && revision.version === current.version && <span>현재</span>}</strong><p>{revision.summary || revision.title}</p><time>{when(revision.createdAt)} · {users.find(user => user.id === revision.authorId)?.name || '팀원'}</time></div><ChevronRight size={13} /></button>)}
     {!loading && !error && !ordered.length && <p className="docs-panel-muted">저장된 이력이 없습니다.</p>}
-    {compareOpen && typeof document !== 'undefined' && createPortal(<Comparison revisions={ordered} current={current} beforeId={beforeId} afterId={afterId} setBeforeId={setBeforeId} setAfterId={setAfterId} onClose={() => setCompareOpen(false)} />, document.body)}
+    {compareOpen && typeof document !== 'undefined' && createPortal(<Comparison revisions={ordered} current={current} currentSource={currentSource} beforeId={beforeId} afterId={afterId} setBeforeId={setBeforeId} setAfterId={setAfterId} onClose={() => setCompareOpen(false)} />, document.body)}
   </div>;
 }
 
@@ -78,13 +79,16 @@ function groupsOf(runs: DocumentDiffRun[]): Group[] {
   return groups;
 }
 
-function Comparison({ revisions, current, beforeId, afterId, setBeforeId, setAfterId, onClose }: { revisions: DocRevision[]; current: DocumentHistoryProps['current']; beforeId: string; afterId: string; setBeforeId: (id: string) => void; setAfterId: (id: string) => void; onClose: () => void }) {
+function Comparison({ revisions, current, currentSource, beforeId, afterId, setBeforeId, setAfterId, onClose }: {
+  revisions: DocRevision[]; current: DocumentHistoryProps['current']; currentSource: string; beforeId: string; afterId: string;
+  setBeforeId: (id: string) => void; setAfterId: (id: string) => void; onClose: () => void;
+}) {
   const [currentSnapshot, setCurrentSnapshot] = useState(() => structuredClone(current));
   const closeRef = useRef<HTMLButtonElement>(null), dialogRef = useRef<HTMLElement>(null);
   useEffect(() => { const previous = document.activeElement; closeRef.current?.focus(); return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); }; }, []);
   const before = revisions.find(value => value.id === beforeId);
   const savedAfter = revisions.find(value => value.id === afterId);
-  const currentLabel = `${currentSnapshot.dirty ? '현재 미저장 초안' : '현재 편집본'} · 버전 ${currentSnapshot.version} 기준`;
+  const currentLabel = `${currentSnapshot.dirty ? '현재 미저장 초안' : currentSource} · 버전 ${currentSnapshot.version} 기준`;
   function keyboard(event: KeyboardEvent) {
     if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onClose(); }
     if (event.key === 'Tab') { const focusable = dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled),select:not(:disabled),input:not(:disabled),a[href],[tabindex="0"]'); if (!focusable?.length) return; const first = focusable[0], last = focusable[focusable.length - 1]; if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); } else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); } }
@@ -107,8 +111,8 @@ function Comparison({ revisions, current, beforeId, afterId, setBeforeId, setAft
         </select></label>
       </>}
       note={reset => <div className="document-diff-current-note">
-        <span>현재 편집본은 비교를 열거나 다시 불러온 시점의 내용입니다.</span>
-        <button className="btn btn-ghost" onClick={() => { setCurrentSnapshot(structuredClone(current)); reset(); }}>현재 편집본 다시 불러오기</button>
+        <span>{currentSource}은 비교를 열거나 다시 불러온 시점의 내용입니다.</span>
+        <button className="btn btn-ghost" onClick={() => { setCurrentSnapshot(structuredClone(current)); reset(); }}>{currentSource} 다시 불러오기</button>
       </div>}
     />
     <footer><span>서식·블록 속성·표·이미지·참조 대상의 변경도 구조 정보에 표시합니다.</span><button className="btn" onClick={onClose}>비교 닫기</button></footer>

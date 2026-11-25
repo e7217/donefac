@@ -265,16 +265,36 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
     expect(rejected.errors).toEqual(expect.arrayContaining([expect.objectContaining({ key: left.key, line: 4, message: expect.stringMatching(/프로젝트/) })]));
     await expect(apply).toBeDisabled();
 
-    const sameCell = await review(edited.split('\n').map(line => {
+    const conflictingText = edited.split('\n').map(line => {
       const cells = line.split('\t');
-      if (cells[0] === left.key) cells[2] = updatedEnd;
+      if (cells[0] === left.key) {
+        cells[2] = updatedEnd;
+        cells[5] = 'FF';
+      }
       return cells.join('\t');
-    }).join('\n'));
+    }).join('\n');
+    const sameCell = await review(conflictingText);
     expect(sameCell.previewId).toBeNull();
-    await expect(dialog.getByRole('region', { name: '일정 붙여넣기 오류' })).toContainText(`현재 ${peerEnd} · 입력 ${updatedEnd}`);
+    const comparison = dialog.getByRole('region', { name: '일정표 값 비교' });
+    await expect(comparison).toContainText(`현재 ${peerEnd} · 입력 ${updatedEnd}`);
+    await expect(comparison).toContainText('내보낸 값 SS · 현재 SF · 입력 FF');
     await expect(apply).toBeDisabled();
-    const preview = await review(edited);
+    const endChoice = comparison.getByRole('combobox', { name: new RegExp(`${left.key} 종료일 선택`) });
+    const typeChoice = comparison.getByRole('combobox', { name: new RegExp(`${left.key} 연결 유형 선택`) });
+    async function reviewChoices() {
+      const response = waitPost('/api/schedule/paste-preview');
+      await comparison.getByRole('button', { name: '선택한 값으로 다시 미리보기' }).click();
+      return json<SchedulePastePreview>(await response);
+    }
+    await endChoice.selectOption('current');
+    expect((await reviewChoices()).previewId).toBeNull();
+    await expect(endChoice).toHaveValue('current');
+    await expect(apply).toBeDisabled();
+    await typeChoice.selectOption('input');
+    const preview = await reviewChoices();
     expect(preview).toMatchObject({ projectId: null, projectIds: [first.id, second.id].sort(), errors: [], previewId: expect.any(String) });
+    await expect(comparison.getByRole('combobox', { name: new RegExp(`${left.key} 연결 유형 선택`) })).toHaveValue('input');
+    await expect(textarea).toHaveValue(conflictingText);
     const dates = dialog.getByRole('table', { name: '붙여넣기 일정 변경 목록' });
     const links = dialog.getByRole('table', { name: '붙여넣기 업무 연결 변경 목록' });
     for (const project of [first, second]) {
@@ -307,7 +327,7 @@ test('360px 전체 프로젝트 일정표의 여러 날짜와 프로젝트별 �
     expect(after.issues.find(item => item.id === left.id)).toMatchObject({ startDate: updatedStart, endDate: peerEnd, version: peerLeft.version + 1 });
     expect(after.issues.find(item => item.id === right.id)).toMatchObject({ endDate: updatedEnd, version: right.version + 1 });
     expect(after.issues.find(item => item.id === skipped.id)).toEqual(skipped);
-    expect(after.dependencies.find(value => value.id === oldFirstLink.id)).toMatchObject({ type: 'SF', lagDays: 2 });
+    expect(after.dependencies.find(value => value.id === oldFirstLink.id)).toMatchObject({ type: 'FF', lagDays: 2 });
     expect(after.dependencies.find(value => value.id === oldSecondLink.id)).toBeUndefined();
 
     const undo = waitPost('/api/schedule/undo');

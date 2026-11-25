@@ -1,13 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { ArrowDown, CalendarRange, Check, ClipboardList, Link2, Loader2, RefreshCw, X } from 'lucide-react';
 import { DEPENDENCY_LABELS, isDependencyLag } from '../../shared/schedule-dependencies';
 import { MAX_SCHEDULE_BLOCKER_LINKS, MAX_SCHEDULE_BULK_LINK_ISSUES } from '../../shared/types';
 import type {
   Dependency, FeatureProps, Issue, Project, ScheduleBlockerLinkInput, ScheduleBulkDateChanges, ScheduleBulkDateInput,
   ScheduleBulkChainInput, ScheduleBulkLinkAction, ScheduleBulkLinkDateEdit, ScheduleBulkLinkInput, ScheduleChange, SchedulePasteApplyResult,
-  SchedulePasteDependencyChange, SchedulePasteDependencyPair, SchedulePastePreview, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
+  SchedulePasteDependencyChange, SchedulePasteDependencyPair, SchedulePastePreview, ScheduleSheetChoices, ScheduleUndoScope, TeamScheduleBlocker, WorkspaceSnapshot,
 } from '../../shared/types';
 import { issueSearchAliasLabel } from '../../shared/workspace-search';
 import { api, ApiError } from '../lib/api';
@@ -149,6 +149,7 @@ function ProjectScheduleEditDialog({
   teamPaste,
 }: SchedulePasteDialogProps) {
   const [text, setText] = useState('');
+  const [sheetChoices, setSheetChoices] = useState<ScheduleSheetChoices>({});
   const [rescheduleSuccessors, setRescheduleSuccessors] = useState(false);
   const [includeTeamBlockers, setIncludeTeamBlockers] = useState(false);
   const [dates, setDates] = useState<DateDraft>({ startDate: keepDate, endDate: keepDate, dueDate: keepDate });
@@ -187,6 +188,7 @@ function ProjectScheduleEditDialog({
   const busyRef = useRef(false);
   const dirtyRef = useRef(false);
   const request = useRef<AbortController | null>(null);
+  const formId = useId();
 
   const bulk = bulkDates ?? bulkLinks;
   const bulkIssues = bulk?.issues ?? [];
@@ -274,6 +276,7 @@ function ProjectScheduleEditDialog({
   const rowDatesInput = hasDateDraftEdits ? { dates: dateDraftEdits } : {};
   const followUpInput = rescheduleSuccessors ? { rescheduleSuccessors: true as const } : {};
   const teamFollowUpInput = includeTeamBlockers && rescheduleSuccessors ? { includeTeamBlockers: true as const } : {};
+  const sheetChoiceInput = Object.keys(sheetChoices).length ? { sheetChoices } : {};
   const reviewChoices = [[...excludedDateDrafts], [...dateDraftChoices], rescheduleSuccessors, includeTeamBlockers];
   const input = blockerInput ? JSON.stringify(blockerInput)
     : bulkLinks ? JSON.stringify([chainMode
@@ -281,7 +284,7 @@ function ProjectScheduleEditDialog({
       : [linkMode, link.choice?.id, link.direction],
       linkAction, ...reviewChoices])
       : bulkDates ? JSON.stringify([dates, ...reviewChoices])
-        : JSON.stringify([text, rescheduleSuccessors, includeTeamBlockers]);
+        : JSON.stringify([text, rescheduleSuccessors, includeTeamBlockers, sheetChoices]);
   const linkRulesValid = projectId !== null && !unavailableTargets?.length && !hasConflictingDateDrafts &&
     issues.length >= 2 && issues.length <= MAX_SCHEDULE_BULK_LINK_ISSUES;
   const bulkLinkInput: ScheduleBulkLinkInput | null = anchor && linkRulesValid && linkAction
@@ -451,7 +454,19 @@ function ProjectScheduleEditDialog({
 
   function updateText(value: string) {
     setText(value);
+    setSheetChoices({});
     resetReview(Boolean(value || rescheduleSuccessors));
+  }
+
+  function updateSheetChoice(id: string, choice: string) {
+    const next = { ...sheetChoices };
+    if (choice === 'current' || choice === 'input') next[id] = choice;
+    else delete next[id];
+    setSheetChoices(next);
+    setApproved(false);
+    setRetryApply(null);
+    setError('');
+    setNotice('');
   }
 
   function updateSuccessorReview(value: boolean) {
@@ -563,7 +578,7 @@ function ProjectScheduleEditDialog({
     setRetryApply(null);
     setNotice('');
     const submitted = { input, targets, projects: selectedProjects, linkOperation, reviewedDateDrafts };
-    let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true; includeTeamBlockers?: true } |
+    let payload: { projectId: string | null; text: string; rescheduleSuccessors?: true; includeTeamBlockers?: true; sheetChoices?: ScheduleSheetChoices } |
       ScheduleBulkDateInput | ScheduleBulkLinkInput |
       ScheduleBulkChainInput | ScheduleBlockerLinkInput;
     if (blockerInput) payload = blockerInput;
@@ -576,7 +591,7 @@ function ProjectScheduleEditDialog({
         if (action !== 'keep') changes[field] = action === 'clear' ? null : value;
       }
       payload = { projectId, issues, changes, ...rowDatesInput, ...followUpInput, ...teamFollowUpInput };
-    } else payload = { projectId, text, ...followUpInput, ...teamFollowUpInput };
+    } else payload = { projectId, text, ...followUpInput, ...teamFollowUpInput, ...sheetChoiceInput };
     try {
       const endpoint = blockerLinks ? '/schedule/blocker-links/preview'
         : bulkLinks ? '/schedule/bulk-links/preview' : bulkDates ? '/schedule/bulk-dates/preview' : '/schedule/paste-preview';
@@ -588,6 +603,11 @@ function ProjectScheduleEditDialog({
       if (!mounted.current || controller.signal.aborted) return;
       const next = { ...submitted, result };
       setLatest(next);
+      if (sheetChoiceInput.sheetChoices) {
+        const currentIds = new Set(result.sheetConflicts?.map(conflict => conflict.id));
+        const currentChoices = Object.entries(sheetChoices).filter(([id]) => currentIds.has(id));
+        if (currentChoices.length !== Object.keys(sheetChoices).length) setSheetChoices(Object.fromEntries(currentChoices));
+      }
       if (!result.errors.length) {
         setReview(next);
         setApproved(Boolean(result.previewId && hasChanges(result)));
@@ -717,6 +737,8 @@ function ProjectScheduleEditDialog({
   const reviewedOperationLabel = linkOperationLabels[reviewedOperation];
   const keyMappings = result?.keyMappings ?? [];
   const rejected = latest?.result.errors.length ? latest.result : null;
+  const sheetConflicts = latest?.result.sheetConflicts ?? [];
+  const inputErrors = rejected?.errors.filter(item => !item.sheetConflictId) ?? [];
   const rejectedMissingDependencies = rejected?.missingDependencies ?? [];
   const linkDescription = chainMode
     ? '목록에서 연이어 배치한 두 업무가 연결 대상입니다.'
@@ -804,7 +826,7 @@ function ProjectScheduleEditDialog({
           </button>
         </header>
 
-        <form className="schedule-paste-input" onSubmit={preview}>
+        <form id={formId} className="schedule-paste-input" onSubmit={preview}>
           <fieldset disabled={editLocked}>
             {bulk && !(bulkLinks && chainMode) && (
               <details className="schedule-bulk-targets">
@@ -994,16 +1016,39 @@ function ProjectScheduleEditDialog({
               적용 후 경고와 되돌리기는 간트에서 확인할 수 있습니다.
             </p>
           )}
-          {rejected && (
+          {sheetConflicts.length > 0 && !applied && (
+            <section className="schedule-paste-sheet-conflicts" aria-label="일정표 값 비교">
+              <h3>같은 칸에서 바뀐 일정 값 {sheetConflicts.length}개</h3>
+              <p>칸마다 사용할 값을 고른 뒤 다시 미리보기를 만드세요.</p>
+              <PagedList label="일정표 값 비교" items={sheetConflicts} render={conflict => (
+                <li key={conflict.id}>
+                  <label>
+                    <strong>{conflict.line}행 · {conflict.key} · {conflict.label}</strong>
+                    <span>내보낸 값 {conflict.original ?? '미정'} · 현재 {conflict.current ?? '미정'} · 입력 {conflict.input ?? '미정'}</span>
+                    <select className="field" aria-label={`${conflict.line}행 ${conflict.key} ${conflict.label} 선택`}
+                      value={sheetChoices[conflict.id] ?? ''} disabled={editLocked} onChange={event => updateSheetChoice(conflict.id, event.target.value)}>
+                      <option value="">선택하세요</option>
+                      <option value="current">현재 값 사용</option>
+                      <option value="input">일정표 값 사용</option>
+                    </select>
+                  </label>
+                </li>
+              )} />
+              <button className="btn" type="submit" form={formId} disabled={editLocked || !canPreview}>
+                선택한 값으로 다시 미리보기
+              </button>
+            </section>
+          )}
+          {rejected && (inputErrors.length > 0 || rejectedMissingDependencies.length > 0) && (
             <section className="schedule-paste-rejected" aria-label={directLinks ? '선후행 연결 오류' : bulkDates ? '선택 업무 날짜 오류' : '일정 붙여넣기 오류'}>
-              <h3>적용할 수 없는 입력 {rejected.errors.length}건</h3>
+              <h3>적용할 수 없는 입력 {inputErrors.length}건</h3>
               <p>
                 오류를 수정하고 미리보기를 다시 만드세요. 이전 변경안이 있으면 아래에 참고용으로 남겨
                 둡니다.
               </p>
               <PagedList
                 label={directLinks ? '선후행 연결 오류' : bulkDates ? '업무 날짜 오류' : '붙여넣기 오류'}
-                items={rejected.errors}
+                items={inputErrors}
                 render={(item, index) => (
                   <li key={index}>
                     <strong>

@@ -14,6 +14,10 @@ export interface IssueGitlabSummary {
 
 const activePipelineStates = new Set(['created', 'waiting_for_resource', 'preparing', 'pending', 'running']);
 
+export function isGitlabPipelineRunning(state: string): boolean {
+  return activePipelineStates.has(state);
+}
+
 export function gitlabPipelineGroup(link: GitlabLink) {
   if (!isGitlabBranchName(link.sourceBranch)) return null;
   const identity = gitlabPipelineLinkIdentity(link);
@@ -27,7 +31,7 @@ export function gitlabPipelineGroup(link: GitlabLink) {
 
 function countPipeline(summary: IssueGitlabSummary, state: string) {
   if (state === 'failed') summary.failedPipelines++;
-  else if (activePipelineStates.has(state)) summary.runningPipelines++;
+  else if (isGitlabPipelineRunning(state)) summary.runningPipelines++;
   else if (state === 'manual') summary.manualPipelines++;
 }
 

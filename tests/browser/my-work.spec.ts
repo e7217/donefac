@@ -1,8 +1,153 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
-import type { Comment, Issue, IssueStatusChangeRequest, WorkspaceSnapshot } from '../../shared/types';
+import type { Comment, Issue, IssueBulkEditPreview, IssueStatusChangeRequest, ProjectWorkflow, TeamIssueBulkEditPreviewInput, WorkspaceSnapshot } from '../../shared/types';
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'Asia/Seoul' });
+
+test('내 업무에서 현재 페이지의 두 프로젝트 업무를 일괄 검토하고 응답 유실 뒤 같은 적용을 확인한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const initial = await request.get('/api/workspace');
+  expect(initial.ok(), await initial.text()).toBe(true);
+  const { projects: [first, second], users, issues } = await initial.json() as WorkspaceSnapshot;
+  const actor = users.find(user => !issues.some(issue => issue.assigneeId !== user.id && issue.collaboratorIds.includes(user.id)));
+  const peer = users.find(user => user.id !== actor?.id);
+  if (!actor || !peer || !second) throw new Error('일괄 검토에 필요한 두 작업자와 프로젝트를 찾을 수 없습니다.');
+  const actorId = actor.id, peerId = peer.id;
+  const headers = { 'X-Actor-Id': actorId };
+  const suffix = randomUUID().slice(0, 8);
+  const targetStatus = { id: `triage_${suffix}`, label: `처리 완료 ${suffix}`, category: 'done', color: '#418561' } as const;
+  const workflowPath = `/api/projects/${first.id}/workflow`;
+  const workflowResponse = await request.get(workflowPath);
+  expect(workflowResponse.ok(), await workflowResponse.text()).toBe(true);
+  const workflow = await workflowResponse.json() as ProjectWorkflow;
+  const created: Issue[] = [];
+  let configured: ProjectWorkflow | undefined;
+
+  async function create(projectId: string, name: string, dueDate: string, collaboratorIds = [actorId]) {
+    const response = await request.post('/api/issues', { headers, data: {
+      projectId, title: `내 업무 일괄 ${suffix} ${name}`, dueDate, status: 'todo', priority: 'medium', reporterId: null,
+      assigneeId: peerId, collaboratorIds,
+    } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    const change = await request.patch(workflowPath, { headers, data: {
+      ...workflow, expectedVersion: workflow.version, statuses: [...workflow.statuses, targetStatus],
+      transitions: [...workflow.transitions, { from: 'todo', to: targetStatus.id, issueTypes: [], requiredFields: [] }],
+    } });
+    expect(change.ok(), await change.text()).toBe(true);
+    configured = await change.json() as ProjectWorkflow;
+    const earlier: Issue[] = [];
+    for (let index = 1; index <= 20; index++) earlier.push(await create(first.id, `첫 페이지 ${index}`, '2026-07-10'));
+    const late = await create(first.id, '둘째 페이지', '2026-07-16');
+    const today = await create(second.id, '오늘 마감', '2026-07-17');
+    const excluded = await create(second.id, '참여 범위 밖', '2026-07-17', []);
+
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.clock.setFixedTime(new Date('2026-07-16T16:00:00Z'));
+    const queueHash = `#/${first.id}/mywork`;
+    await page.goto(`/${queueHash}`);
+    const role = page.getByRole('combobox', { name: '참여 범위', exact: true });
+    const toggle = page.getByRole('button', { name: '내 업무 일괄 편집', exact: true });
+    const allVisible = page.getByRole('checkbox', { name: '표시된 업무 전체 선택', exact: true });
+    const selection = (issue: Issue) => page.locator('.my-work-list').getByRole('checkbox', { name: `${issue.key} 업무 선택`, exact: true });
+    const pagination = page.getByRole('navigation', { name: '마감 초과 페이지', exact: true });
+    const next = pagination.getByRole('button', { name: '다음', exact: true });
+    const previous = pagination.getByRole('button', { name: '이전', exact: true });
+    const editor = page.getByRole('region', { name: '업무 일괄 편집', exact: true });
+    const previewRegion = editor.getByRole('region', { name: '일괄 변경 미리보기', exact: true });
+    const status = (name: string) => editor.getByRole('combobox', { name: `일괄 상태 ${name}`, exact: true });
+    const priority = editor.getByRole('combobox', { name: '일괄 변경 우선순위', exact: true });
+    const posted = (action: string) => page.waitForResponse(response =>
+      new URL(response.url()).pathname === `/api/team/issues/${action}` && response.request().method() === 'POST');
+
+    await role.selectOption('collaborating');
+    await toggle.click();
+    await expect(allVisible).toBeFocused();
+    await expect(page.getByRole('button', { name: `${today.key} 상태 변경`, exact: true })).toHaveCount(0);
+    await expect(selection(late)).toHaveCount(0);
+    await expect(selection(excluded)).toHaveCount(0);
+    await selection(earlier[0]).check();
+    await selection(today).check();
+    await priority.selectOption('high');
+    await status(first.name).selectOption(targetStatus.id);
+    await next.click();
+    await expect(selection(today)).toBeChecked();
+    await expect(selection(late)).not.toBeChecked();
+    await expect(status(first.name)).toHaveCount(0);
+    await expect(priority).toHaveValue('high');
+    await previous.click();
+    await expect(selection(earlier[0])).not.toBeChecked();
+    await next.click();
+    await allVisible.check();
+    await expect(selection(today)).toBeChecked();
+    await expect(selection(late)).toBeChecked();
+    await expect(status(first.name)).toHaveValue('');
+    await status(first.name).selectOption(targetStatus.id);
+    await status(second.name).selectOption('cancelled');
+
+    const previewResponse = posted('bulk-preview');
+    await editor.getByRole('button', { name: '변경 미리보기', exact: true }).click();
+    const response = await previewResponse;
+    expect(response.ok(), await response.text()).toBe(true);
+    const input = response.request().postDataJSON() as TeamIssueBulkEditPreviewInput;
+    expect(input.issues).toEqual([late, today].map(({ id, projectId, version }) => ({ id, projectId, expectedVersion: version })));
+    expect(input.statuses).toEqual({ [first.id]: targetStatus.id, [second.id]: 'cancelled' });
+    expect(input.workflowVersions?.[first.id]).toBe(configured.version);
+    const preview = await response.json() as IssueBulkEditPreview;
+    expect(preview).toMatchObject({ changed: 2, blocked: 0, previewId: expect.any(String) });
+    await expect(previewRegion).toContainText(targetStatus.label);
+    await expect(previewRegion).toContainText(today.title);
+
+    const applyData: unknown[] = [];
+    await page.route('**/api/team/issues/bulk-apply', async route => {
+      applyData.push(route.request().postDataJSON());
+      const committed = await route.fetch();
+      await (applyData.length === 1 && committed.ok()
+        ? route.fulfill({ status: 408, json: { error: '합성 응답 유실' } }) : route.fulfill({ response: committed }));
+    });
+    await editor.getByRole('button', { name: '일괄 적용', exact: true }).click();
+    await expect(editor.getByRole('alert')).toContainText('적용 결과를 확인하지 못했습니다');
+    await expect(previous).toBeDisabled();
+    await expect(role).toBeDisabled();
+    await editor.getByRole('button', { name: '적용 결과 다시 확인', exact: true }).click();
+    await expect(selection(late)).toHaveCount(0);
+    await expect(selection(today)).toHaveCount(0);
+    await expect(selection(earlier[0])).not.toBeChecked();
+    await expect(role).toHaveValue('collaborating');
+    expect(applyData).toEqual([{ previewId: preview.previewId }, { previewId: preview.previewId }]);
+    await editor.getByRole('button', { name: '일괄 편집 닫기', exact: true }).click();
+    await expect(toggle).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === queueHash);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
+
+    const final = await request.get('/api/workspace');
+    expect(final.ok(), await final.text()).toBe(true);
+    const saved = (await final.json() as WorkspaceSnapshot).issues;
+    expect(saved.find(issue => issue.id === late.id)).toMatchObject({ status: targetStatus.id, priority: 'high', version: late.version + 1 });
+    expect(saved.find(issue => issue.id === today.id)).toMatchObject({ status: 'cancelled', priority: 'high', version: today.version + 1 });
+    for (const untouched of [...earlier, excluded]) expect(saved.find(issue => issue.id === untouched.id)).toEqual(untouched);
+  } finally {
+    for (const issue of created) {
+      const removed = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (removed.ok()) {
+        const { trashEntryId } = await removed.json() as { trashEntryId: string };
+        await request.delete(`/api/trash/${trashEntryId}`, { headers });
+      }
+    }
+    if (configured) {
+      const restored = await request.patch(workflowPath, { headers, data: {
+        ...workflow, expectedVersion: configured.version,
+        transitions: workflow.transitions.map(edge => ({ ...edge, requireResolvedBlockers: edge.requireResolvedBlockers === true })),
+      } });
+      expect(restored.ok(), await restored.text()).toBe(true);
+    }
+  }
+});
 
 test('구독한 업무는 현재 작업자별로 모아 보고 상세에서 해제하면 즉시 반영된다', async ({ page, request }) => {
   test.setTimeout(70_000);
