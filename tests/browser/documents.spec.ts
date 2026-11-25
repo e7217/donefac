@@ -62,6 +62,8 @@ async function openDocument(page: Page, document: DocPage) {
   await expect(page.locator('.docs-prose')).toBeVisible();
 }
 
+const issuesNavigation = (page: Page) => page.locator('.project-navigation').getByRole('button', { name: /^업무(?: \d+)?$/ });
+
 async function loseFirstSaveResponse(page: Page, path: string) {
   const attempts: unknown[] = [];
   await page.route(`**${path}`, async route => {
@@ -416,6 +418,118 @@ test('문서의 미저장 편집은 새로고침과 409 충돌에도 유지되�
   expect(snapshot.documents.find(value => value.id === document.id)?.version).toBe(2);
 });
 
+test('360px 편집 사본의 응답을 잃은 뒤 한 건만 확인하고 그 사이 작성한 내용을 보존한다', async ({ page, syntheticDocument }) => {
+  const { document, requests } = syntheticDocument;
+  await page.setViewportSize({ width: 360, height: 820 });
+  await openDocument(page, document);
+  const editor = page.locator('.docs-prose');
+  const body = '응답 유실 전에 새 문서로 보관할 본문';
+  const laterBody = '사본 제출 뒤 원래 문서에서 이어서 쓴 본문';
+  await editor.fill(body);
+  const remote = await requests.patch(`/api/documents/${document.id}`, {
+    data: { expectedVersion: document.version, content: richParagraph('동료가 저장한 최신 본문') },
+  });
+  expect(remote.status()).toBe(200);
+  await page.locator('.docs-save-button').click();
+  const saveCopy = page.getByRole('button', { name: '내 편집을 새 문서로 보관', exact: true });
+  await expect(saveCopy).toBeVisible();
+
+  const attempts: unknown[] = [];
+  let failList = false;
+  let failedLists = 0;
+  await page.route('**/api/workspace', route => {
+    if (route.request().method() !== 'GET' || !failList) return route.continue();
+    failList = false;
+    failedLists++;
+    return route.fulfill({ status: 503, json: { error: '합성 문서 목록 오류' } });
+  });
+  await page.route('**/api/documents', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    attempts.push(route.request().postDataJSON());
+    const response = await route.fetch();
+    if (attempts.length === 1) {
+      expect(response.status()).toBe(201);
+      return route.abort('failed');
+    }
+    expect(response.status()).toBe(200);
+    failList = true;
+    return route.fulfill({ response });
+  });
+  await saveCopy.click();
+  const retryCopy = page.getByRole('button', { name: '사본 저장 결과 다시 확인', exact: true });
+  await expect(retryCopy).toBeVisible();
+  page.once('dialog', dialog => dialog.accept());
+  await page.getByRole('button', { name: '편집 버리고 최신본 열기', exact: true }).click();
+  await expect(editor).toHaveText('동료가 저장한 최신 본문');
+  await editor.fill(laterBody);
+  const sequences = await page.evaluate(({ actorId, id }) => {
+    const draft = JSON.parse(localStorage.getItem(`teamspace:document-draft:${actorId}:${id}`) ?? 'null');
+    const attempt = JSON.parse(sessionStorage.getItem(`teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`) ?? 'null');
+    return { draft: draft?.editSequence, attempted: attempt?.editSequence };
+  }, { actorId: document.authorId, id: document.id });
+  expect(sequences.draft).toEqual(expect.any(Number));
+  expect(sequences.draft).toBe(sequences.attempted);
+  page.once('dialog', dialog => dialog.accept());
+  await page.reload();
+  await expect(editor).toHaveText(laterBody);
+  await retryCopy.click();
+  const retryList = page.getByRole('button', { name: '사본 목록 다시 불러오기', exact: true });
+  await expect(retryList).toBeVisible();
+  expect(attempts[0]).toMatchObject({ requestId: expect.any(String), expectedRestoreGeneration: expect.any(String), content: richParagraph(body) });
+  expect(attempts[1]).toEqual(attempts[0]);
+  expect(failedLists).toBe(1);
+  await retryList.click();
+  await expect(retryList).toHaveCount(0);
+  await expect(editor).toHaveText(laterBody);
+  await expect(page).toHaveURL(new RegExp(`/documents/${document.id}$`));
+  expect(attempts).toHaveLength(2);
+
+  const { documents } = await (await requests.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const copies = documents.filter(value => value.title === `${document.title} (편집 사본)`);
+  expect(copies).toHaveLength(1);
+  expect(copies[0].plainText).toBe(body);
+  expect(documents.find(value => value.id === document.id)?.plainText).toBe('동료가 저장한 최신 본문');
+});
+
+test('편집 사본이 최신 목록에서 잠시 빠져도 원래 초안과 확인한 사본을 유지한다', async ({ page, syntheticDocument }) => {
+  const { document } = syntheticDocument;
+  await openDocument(page, document);
+  const editor = page.locator('.docs-prose');
+  const body = '문서 목록이 갱신되기 전에 보관할 초안';
+  await editor.fill(body);
+  await page.getByRole('button', { name: '이력', exact: true }).click();
+  let copy: DocPage | undefined;
+  let hideCopy = false;
+  let posts = 0;
+  await page.route('**/api/documents', async route => {
+    if (route.request().method() !== 'POST') return route.continue();
+    posts++;
+    const response = await route.fetch();
+    expect(response.status()).toBe(201);
+    copy = await response.json() as DocPage;
+    hideCopy = true;
+    return route.fulfill({ response });
+  });
+  await page.route('**/api/workspace', async route => {
+    if (route.request().method() !== 'GET' || !hideCopy) return route.continue();
+    hideCopy = false;
+    const response = await route.fetch();
+    const workspace = await response.json() as WorkspaceSnapshot;
+    return route.fulfill({ response, json: { ...workspace, documents: workspace.documents.filter(value => value.id !== copy?.id) } });
+  });
+  await page.getByRole('button', { name: '편집을 새 문서로 보관', exact: true }).click();
+  const list = page.getByRole('button', { name: '사본 목록 다시 불러오기', exact: true });
+  await expect(list).toBeVisible();
+  await expect(editor).toHaveText(body);
+  expect(copy).toBeDefined();
+  await list.click();
+  await expect(page).toHaveURL(new RegExp(`/documents/${copy!.id}$`));
+  await expect(editor).toHaveText(body);
+  expect(posts).toBe(1);
+  await page.goBack();
+  await expect(editor).toHaveText(document.plainText);
+});
+
 test('문서 이동을 취소할 수 있고 승인한 이동 후에도 로컬 초안을 복원한다', async ({ page, syntheticDocument }) => {
   const { document } = syntheticDocument;
   await openDocument(page, document);
@@ -423,12 +537,12 @@ test('문서 이동을 취소할 수 있고 승인한 이동 후에도 로컬 �
   await page.locator('.docs-prose').fill(localText);
 
   page.once('dialog', dialog => dialog.dismiss());
-  await page.locator('.project-navigation button').filter({ hasText: /^업무/ }).click();
+  await issuesNavigation(page).click();
   await expect(page.locator('.docs-prose')).toContainText(localText);
   expect(page.url()).toContain(`/documents/${document.id}`);
 
   page.once('dialog', dialog => dialog.accept());
-  await page.locator('.project-navigation button').filter({ hasText: /^업무/ }).click();
+  await issuesNavigation(page).click();
   await expect(page.locator('.documents-feature')).toHaveCount(0);
   await page.getByRole('button', { name: '문서', exact: true }).click();
   await page.locator('.docs-tree-link').filter({ hasText: document.title }).click();
@@ -522,10 +636,10 @@ test('보내지 않은 문서 댓글은 이동을 막고 문서·작업자별로
   await expect(commentInput).toHaveValue(commentA);
 
   page.once('dialog', dialog => dialog.dismiss());
-  await page.locator('.project-navigation button').filter({ hasText: /^업무/ }).click();
+  await issuesNavigation(page).click();
   await expect(commentInput).toHaveValue(commentA);
   page.once('dialog', dialog => dialog.accept());
-  await page.locator('.project-navigation button').filter({ hasText: /^업무/ }).click();
+  await issuesNavigation(page).click();
   await expect(page.locator('.documents-feature')).toHaveCount(0);
   await page.getByRole('button', { name: '문서', exact: true }).click();
   await page.locator('.docs-tree-link').getByText(document.title, { exact: true }).click();
@@ -705,7 +819,7 @@ test('360px에서 다른 프로젝트 연결 업무를 열고 돌아와도 문�
     await details.getByRole('button', { name: '문서 정보 패널 닫기', exact: true }).click();
     approve = false;
     await page.getByRole('button', { name: '메뉴 열기', exact: true }).click();
-    const issueNavigation = page.locator('.project-navigation button').filter({ hasText: /^업무/ });
+    const issueNavigation = issuesNavigation(page);
     await issueNavigation.click();
     await expect.poll(() => prompts.length).toBe(3);
     expect(prompts[2]).toContain('저장하지 않은 편집');

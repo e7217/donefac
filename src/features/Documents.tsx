@@ -91,7 +91,7 @@ import './document-comment-review.css';
 
 type Props = FeatureProps & {
   selectedDocumentId: string | null;
-  onSelectDocument: (id: string, recovery?: { documentId: string; beforeOpen: () => void }, reading?: boolean) => boolean;
+  onSelectDocument: (id: string, recovery?: { documentId: string; expectedRestoreGeneration?: string; beforeOpen: () => void }, reading?: boolean) => boolean;
   openDocument: (id: string, sectionId?: string) => void;
   reading: boolean;
   onChangeReading: (reading: boolean) => void;
@@ -164,10 +164,17 @@ function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrde
 const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
+const editCopyCacheKey = (actorId: string, id: string) => `teamspace:document-edit-copy:${JSON.stringify([actorId, id])}`;
 const commentCacheKey = (actorId: string, id: string) => `teamspace:document-comment-draft:${actorId}:${id}`;
 const selectionCommentCacheKey = (actorId: string, id: string) => `teamspace:document-selection-comment-draft:${actorId}:${id}`;
 type CommentContext = { actorId: string; documentId: string };
 type DocumentCreationAttempt = { actorId: string; projectId: string | null; body: string; documentId?: string };
+type DocumentEditCopyAttempt = {
+  actorId: string; sourceId: string; editSequence: number; sourceMetadata: DocumentMetadata; documentId?: string;
+  input: Pick<DocPage, 'title' | 'projectId' | 'parentId' | 'content' | 'status' | 'labels'> & {
+    requestId: string; expectedRestoreGeneration: string;
+  };
+};
 type TemplateManagerContext = { projectId: string | null; source?: Pick<DocPage, 'id' | 'title' | 'version' | 'projectId'> };
 const draftFromPage = (page: DocPage): Draft => {
   const metadata = documentMetadata(page);
@@ -185,6 +192,16 @@ function readSaveAttempt(actorId: string, id: string, generation?: string): Docu
     if (attempt?.actorId === actorId && generation && attempt.expectedRestoreGeneration === generation &&
         typeof attempt.requestId === 'string' && typeof attempt.collaborative === 'boolean' && attempt.draft?.id === id &&
         attempt.draft.dirty && attempt.draft.content?.type === 'doc' && Number.isSafeInteger(attempt.draft.expectedVersion)) return attempt;
+  } catch { /* The cached request may be unavailable or malformed. */ }
+  return null;
+}
+
+function readEditCopyAttempt(actorId: string, id: string, generation?: string): DocumentEditCopyAttempt | null {
+  try {
+    const attempt = JSON.parse(sessionStorage.getItem(editCopyCacheKey(actorId, id)) ?? 'null') as DocumentEditCopyAttempt | null;
+    if (generation && attempt?.input?.expectedRestoreGeneration === generation && attempt.actorId === actorId && attempt.sourceId === id &&
+        Number.isSafeInteger(attempt.editSequence) && Array.isArray(attempt.sourceMetadata?.labels) &&
+        attempt.input.content?.type === 'doc' && typeof attempt.input.requestId === 'string') return attempt;
   } catch { /* The cached request may be unavailable or malformed. */ }
   return null;
 }
@@ -257,6 +274,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const actorRef = useRef(actorId);
   const activeActorRef = useRef(actorId);
   activeActorRef.current = actorId;
+  const activeGeneration = useRef(data.restoreGeneration);
+  activeGeneration.current = data.restoreGeneration;
   const [saving, setSaving] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const savingRef = useRef(false);
@@ -293,6 +312,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     requestAnimationFrame(() => publicationOpener.current?.focus());
   }, [onClosePublicationLink,publicationLink,selectedDocumentId]);
   const [storageProblem, setStorageProblem] = useState(false);
+  const [editCopyAttempt, setEditCopyAttempt] = useState<DocumentEditCopyAttempt | null>(null);
+  const recoveringEditCopy = editCopyAttempt?.actorId === actorId && editCopyAttempt.sourceId === selectedDocumentId &&
+    editCopyAttempt.input.expectedRestoreGeneration === data.restoreGeneration ? editCopyAttempt : null;
+  const rememberEditCopy = useCallback((attempt: DocumentEditCopyAttempt, pending: boolean) => {
+    if (actorRef.current === attempt.actorId && activeActorRef.current === attempt.actorId &&
+        activeGeneration.current === attempt.input.expectedRestoreGeneration && draftRef.current?.id === attempt.sourceId) {
+      setEditCopyAttempt(pending ? attempt : null);
+    }
+    try {
+      const key = editCopyCacheKey(attempt.actorId, attempt.sourceId);
+      if (pending) sessionStorage.setItem(key, JSON.stringify(attempt));
+      else sessionStorage.removeItem(key);
+    } catch { setStorageProblem(true); }
+  }, []);
   const rememberSaveAttempt = useCallback((owner: string, id: string, attempt: DocumentSaveAttempt | null) => {
     try {
       const key = saveCacheKey(owner, id);
@@ -847,6 +880,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         setConflict(null);
       }
       showSaveRecovery(null);
+      setEditCopyAttempt(null);
       return;
     }
     const sameActor = actorRef.current === actorId;
@@ -877,6 +911,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     const attempt = readSaveAttempt(actorId, selectedPage.id, data.restoreGeneration);
     if (attempt && (!next.dirty || next.expectedVersion < attempt.draft.expectedVersion)) next = attempt.draft;
     showSaveRecovery(attempt && next.expectedVersion === attempt.draft.expectedVersion ? attempt : null);
+    setEditCopyAttempt(readEditCopyAttempt(actorId, selectedPage.id, data.restoreGeneration));
     draftRef.current = next;
     setDraft(next);
     loadManualBody(manualEditor, next.content);
@@ -1559,21 +1594,64 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
   async function saveCopy() {
     const captured = draftRef.current;
-    if (!captured || savingRef.current || !confirmCommentEditExit()) return;
+    if (!captured || captured.id !== selectedDocumentId || savingRef.current || !data.restoreGeneration ||
+        actorRef.current !== activeActorRef.current || !confirmCommentEditExit()) return;
     const capturedActor = actorRef.current;
+    let request = recoveringEditCopy;
+    if (!request) {
+      const source = pagesById.get(captured.id);
+      if (!captured.dirty || !source) return;
+      request = { actorId: capturedActor, sourceId: captured.id, editSequence: captured.editSequence,
+        sourceMetadata: documentMetadata(captured),
+        input: { requestId: newRequestId(), expectedRestoreGeneration: data.restoreGeneration,
+          title: `${documentTitleForSave(captured.title)} (편집 사본)`, projectId: source.projectId, parentId: source.parentId,
+          content: captured.content, status: 'draft', labels: captured.labels } };
+    }
+    const attempt = request;
+    const { expectedRestoreGeneration } = attempt.input;
+    const sameContext = () => draftRef.current?.id === attempt.sourceId && actorRef.current === attempt.actorId &&
+      activeActorRef.current === attempt.actorId && activeGeneration.current === expectedRestoreGeneration;
     savingRef.current = true; setSaving(true);
+    rememberEditCopy(request, true);
+    let copyId = request.documentId;
     try {
-      const source = data.documents.find(page => page.id === captured.id);
-      const result = await post<DocPage>('/documents', { title: `${captured.title || '제목 없는 문서'} (편집 사본)`, projectId: source?.projectId || null, parentId: source?.parentId || null, content: captured.content, status: 'draft', labels: captured.labels });
-      await refresh();
-      const current = draftRef.current;
-      if (current?.id === captured.id && current.editSequence === captured.editSequence && actorRef.current === capturedActor && activeActorRef.current === capturedActor) {
-        const clean = { ...current, dirty: false }; draftRef.current = clean; setDraft(clean); rememberDraft(clean, capturedActor);
-        discardCommentEdit();
-        onSelectDocument(result.id);
+      if (!copyId) {
+        const result = await api<DocPage>('/documents', { method: 'POST', headers: { 'X-Actor-Id': attempt.actorId }, body: JSON.stringify(attempt.input) });
+        if (typeof result?.id !== 'string' || !result.id || result.id === attempt.sourceId || result.projectId !== attempt.input.projectId || result.authorId !== attempt.actorId) {
+          throw new Error('편집 사본의 저장 결과를 확인하지 못했습니다.');
+        }
+        copyId = result.id;
+        rememberEditCopy({ ...attempt, documentId: copyId }, true);
       }
+      await refresh();
+      if (!sameContext()) return;
+      const current = draftRef.current;
+      if (current && current.editSequence === attempt.editSequence && sameMetadata(current, attempt.sourceMetadata) && sameBody(current.content, attempt.input.content)) {
+        const opened = onSelectDocument(copyId, { documentId: attempt.sourceId, expectedRestoreGeneration, beforeOpen: () => {
+          const clean = { ...current, dirty: false, bodyDirty: false };
+          draftRef.current = clean;
+          setDraft(clean);
+          rememberDraft(clean, attempt.actorId);
+          discardCommentEdit();
+        } });
+        if (!opened) {
+          notify('저장한 사본을 목록에서 찾지 못했습니다. 현재 편집은 보관했습니다.', 'error');
+          return;
+        }
+      }
+      rememberEditCopy(attempt, false);
       notify('편집 내용을 새 문서로 보관했습니다.', 'success');
-    } catch (error) { notify(error instanceof Error ? error.message : '사본을 만들지 못했습니다.', 'error'); }
+    } catch (error) {
+      if (copyId) {
+        notify('편집 사본을 저장했습니다. 목록을 다시 불러와 확인해 주세요.', 'error');
+      } else if (isDefiniteTemplateFailure(error)) {
+        rememberEditCopy(attempt, false);
+        notify(error.message, 'error');
+        if (templateErrorReason(error) === 'workspace_changed') await refresh().catch(() => {});
+      } else {
+        notify('사본의 저장 결과를 확인하지 못했습니다. 같은 요청으로 다시 확인해 주세요.', 'error');
+      }
+    }
     finally { savingRef.current = false; setSaving(false); }
   }
 
@@ -2409,7 +2487,13 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
 
           {!reading && <>
           {confirmingSave && !saving && <div className="docs-notice" role="status">문서 저장 응답을 확인하지 못했습니다. 같은 요청으로 결과를 다시 확인해 주세요.</div>}
-          {conflict && !manualRecovery && !confirmingSave && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
+          {recoveringEditCopy && !saving && <div className="docs-notice" role="status">
+            {recoveringEditCopy.documentId ? '편집 사본을 저장했습니다. 문서 목록을 다시 불러와 주세요.' : '편집 사본의 저장 응답을 확인하지 못했습니다.'}
+            <button type="button" className="btn btn-ghost" onClick={() => void saveCopy()}>
+              {recoveringEditCopy.documentId ? '사본 목록 다시 불러오기' : '사본 저장 결과 다시 확인'}
+            </button>
+          </div>}
+          {conflict && !manualRecovery && !confirmingSave && <div className="docs-notice docs-conflict" role="alert"><strong>{metadataReview ? '같은 문서 속성이 변경됐어요.' : '다른 변경사항이 있어요.'}</strong><span>{metadataReview ? '최신본을 열어 저장할 값을 선택해 주세요.' : '내 편집은 유지했습니다. 최신본을 확인한 후 정리해주세요.'}</span><div><button aria-expanded={showLatest} onClick={() => setShowLatest(value => !value)}>서버 최신본 보기</button>{!recoveringEditCopy && <button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button>}<button onClick={discardLocal} disabled={saving}>편집 버리고 최신본 열기</button></div></div>}
           {showLatest && previewDocument && <div className="docs-latest-preview"><div><strong>서버 버전 {previewDocument.version} · {previewDocument.title}</strong><button aria-label="최신본 미리보기 닫기" onClick={() => setShowLatest(false)}><X size={14} /></button></div>
             {Boolean(draft.labels.length || previewDocument.labels?.length) && <p className="docs-latest-labels">{previewDocument.labels?.length ? <>라벨 · {previewDocument.labels.join(', ')}</> : '라벨 없음'}</p>}
             <pre>{previewDocument.plainText || contentText(previewDocument.content)}</pre>
@@ -2423,7 +2507,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             }))} onResolve={resolveMetadata} />}
           {storageProblem && <div className="docs-notice" role="alert">브라우저 임시 저장 공간이 부족합니다. 이동하기 전에 저장하거나 JSON으로 내보내주세요.</div>}
           {sessionError && <div className="docs-notice" role="alert">{sessionError} · 문서 연결을 확인하고 다시 열어주세요.</div>}
-          {manualRecovery && !confirmingSave && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button><button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button><button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
+          {manualRecovery && !confirmingSave && <div className="docs-notice docs-manual-recovery" role="alert"><strong>보관한 수동 편집이 있습니다.</strong><p>이 문서는 공동 편집이 시작되어, 보관한 본문을 서버 문서에 자동으로 덮어쓰지 않았습니다.</p><div><button onClick={() => downloadDocument(`${draft.title}-수동편집-복구.json`, JSON.stringify({ title: draft.title, content: draft.content, plainText: draft.plainText, labels: draft.labels }, null, 2), 'application/json')}>편집 내려받기</button>{!recoveringEditCopy && <button onClick={() => void saveCopy()} disabled={saving}>내 편집을 새 문서로 보관</button>}<button onClick={discardLocal}>편집 버리고 최신본 열기</button></div></div>}
           </>}
           {readingPage && readingFindOpen && <DocumentReadFindPanel inputRef={readingFindInput} contentRef={readingBody}
             content={readingPage.content} onClose={closeReadingFind} />}
@@ -2762,7 +2846,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             {sideTab === 'history' && <DocumentHistory key={draft.id} revisions={revisions} loading={historyLoading} error={historyError}
               current={readingPage ? { ...readingPage, dirty: false } : { title: draft.title, content: draft.content, plainText: draft.plainText, version: draft.expectedVersion, dirty: draft.dirty }}
               users={data.users} onRestore={reading ? undefined : restoreRevision} restoreDisabled={saving || draft.dirty || Boolean(liveMode && (liveState?.pending || liveState?.phase !== 'connected'))}
-              onSaveCopy={reading || confirmingSave ? undefined : saveCopy} saving={saving} />}
+              onSaveCopy={reading || confirmingSave || recoveringEditCopy ? undefined : saveCopy} saving={saving} />}
           </div>
         </aside>}
       </> : filtersActive && !visible.length ? <div className="docs-welcome"><div className="docs-welcome-icon"><FileText size={31} /></div><h2>조건에 맞는 문서가 없습니다.</h2></div>

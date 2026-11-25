@@ -902,3 +902,29 @@ test('document request receipts roll back with creation and follow trash and nat
   assert.deepEqual((await call<DocPage>('/v1/documents', 'POST', apiInput, 200, assigneeId, key.token)).data, created);
   assert.equal(created.authorId, actorId);
 });
+
+test('guarded document creation fences both pending and previously applied requests across workspace replacement', async t => {
+  const { call, observer } = await fixture(t);
+  const { data: { restoreGeneration } } = await call<WorkspaceSnapshot>('/workspace');
+  assert.ok(restoreGeneration);
+  const input = { requestId: randomUUID(), expectedRestoreGeneration: restoreGeneration, projectId, title: '복원 세대를 지정한 편집 사본' };
+  await call('/documents', 'POST', { ...input, requestId: undefined }, 400);
+  await call('/documents', 'POST', { ...input, expectedRestoreGeneration: '' }, 400);
+  const created = (await call<DocPage>('/documents', 'POST', input, 201)).data;
+  assert.deepEqual((await call<DocPage>('/documents', 'POST', input)).data, created);
+  const before = (await call<WorkspaceSnapshot>('/export')).data;
+  await call('/import', 'POST', { data: before });
+  const counts = () => ['documents', 'revisions', 'activities', 'document_creation_requests'].map(table =>
+    Number(observer.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.n));
+  const restored = counts();
+  const uncommitted = { ...input, requestId: randomUUID(), title: '처음 요청이 도착하기 전에 작업 공간을 복원함' };
+  for (const previousGeneration of [input, uncommitted]) {
+    const result = await call<Failure>('/documents', 'POST', previousGeneration, 409);
+    assert.equal(result.data.details.reason, 'workspace_changed');
+  }
+  assert.deepEqual(counts(), restored);
+  const currentGeneration = (await call<WorkspaceSnapshot>('/workspace')).data.restoreGeneration;
+  assert.notEqual(currentGeneration, restoreGeneration);
+  const replacement = await call<DocPage>('/documents', 'POST', { ...uncommitted, expectedRestoreGeneration: currentGeneration }, 201);
+  assert.notEqual(replacement.data.id, created.id);
+});

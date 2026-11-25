@@ -53,15 +53,15 @@ function propertyConflict<Value extends CustomFieldValue>(draft: PropertyDraft<V
   return Boolean(draft && !sameProperty(draft.base, saved) && !sameProperty(draft.value, saved));
 }
 
-function PropertyConflict({ label, saved, onUseSaved, onUseInput }: {
-  label: string; saved: string; onUseSaved: () => void; onUseInput: () => void;
+function PropertyConflict({ label, saved, disabled, onUseSaved, onUseInput }: {
+  label: string; saved: string; disabled?: boolean; onUseSaved: () => void; onUseInput: () => void;
 }) {
   return <div className="issue-status-property-conflict">
     <p>동료가 저장한 {label}</p>
     <blockquote>{saved || '미지정'}</blockquote>
     <div>
-      <button className="btn btn-ghost" type="button" aria-label={`${label} 저장값 사용`} onClick={onUseSaved}>저장값 사용</button>
-      <button className="btn" type="button" aria-label={`${label} 입력값 사용`} onClick={onUseInput}>입력값 사용</button>
+      <button className="btn btn-ghost" type="button" aria-label={`${label} 저장값 사용`} disabled={disabled} onClick={onUseSaved}>저장값 사용</button>
+      <button className="btn" type="button" aria-label={`${label} 입력값 사용`} disabled={disabled} onClick={onUseInput}>입력값 사용</button>
     </div>
   </div>;
 }
@@ -90,7 +90,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
   const changeAttempt = useRef<StatusChangeAttempt | null>(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(edit.choices.length === 1 ? edit.choices[0].id : '');
-  const [assigneeId, setAssigneeId] = useState<Issue['assigneeId'] | undefined>();
+  const [assignee, setAssignee] = useState<PropertyDraft<Issue['assigneeId']>>();
   const [priority, setPriority] = useState<PropertyDraft<Issue['priority']>>();
   const [dueDate, setDueDate] = useState<DueDateDraft>();
   const [description, setDescription] = useState<PropertyDraft<string>>();
@@ -136,16 +136,20 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       dueDate ? `현재 목표 마감일 ${savedDueDate ?? '미지정'}` : '';
   const incompleteProperties = missingDescription || missingDueDate || invalidDueDate ||
     propertyFields.some(field => customRequired(field) && !hasCustomValue(customValue(field)));
-  const unresolvedProperties = descriptionConflict || priorityConflict || dueDateConflict || unavailable.length > 0 ||
+  const assigneeConflict = propertyConflict(assignee, edit.issue.assigneeId);
+  const unresolvedProperties = assigneeConflict || descriptionConflict || priorityConflict || dueDateConflict || unavailable.length > 0 ||
     propertyFields.some(field => propertyConflict(customFields[field.id], storedCustom(field.id)));
-  const hasPropertiesDraft = Boolean(priority || dueDate || description || Object.keys(customFields).length);
+  const hasPropertiesDraft = Boolean(assignee || priority || dueDate || description || Object.keys(customFields).length);
+  const assigneeId = assignee?.value;
   const assigneeUnavailable = typeof assigneeId === 'string' && !latest.users.some(user => user.id === assigneeId);
   const assigneeOption = assigneeId === undefined ? '' : assigneeId === null ? UNASSIGNED : `${USER_OPTION}${assigneeId}`;
-  const unknownResult = comment.body.trim() ? UNKNOWN_HANDOFF : (priority || dueDate) ? '상태와 업무 속성의 변경 결과를 확인하지 못했습니다.' :
+  const hasCommentDraft = Boolean(comment.body.trim());
+  const unknownResult = hasCommentDraft ? UNKNOWN_HANDOFF : (priority || dueDate) ? '상태와 업무 속성의 변경 결과를 확인하지 못했습니다.' :
     `${assigneeId === undefined ? '상태' : '상태와 담당자'} 변경 결과를 확인하지 못했습니다.`;
-  const discardPrompt = recovery === 'verify' ? `${unknownResult} 닫을까요?` :
-    hasPropertiesDraft ? '작성 중인 업무 내용과 인수인계 입력을 버리고 닫을까요?' :
-      comment.body.trim() ? '작성 중인 인수인계 댓글을 버리고 닫을까요?' : null;
+  const discardPrompt = recovery === 'refresh' ? null : recovery === 'verify' ? `${unknownResult} 닫을까요?` :
+    hasPropertiesDraft && hasCommentDraft ? '작성 중인 업무 변경과 인수인계 댓글을 버리고 닫을까요?' :
+      hasPropertiesDraft ? '작성 중인 업무 변경을 버리고 닫을까요?' :
+        hasCommentDraft ? '작성 중인 인수인계 댓글을 버리고 닫을까요?' : null;
   const canSubmit = Boolean(selected && !assigneeUnavailable && !incompleteProperties && !unresolvedProperties && !fieldsDisabled);
   const nameCounts = new Map<string, number>();
   for (const user of latest.users) nameCounts.set(user.name, (nameCounts.get(user.name) ?? 0) + 1);
@@ -203,6 +207,11 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setError('');
     setShowDetails(false);
     setAssigneeRequired(false);
+  }
+
+  function changeAssignee(value: Issue['assigneeId'] | undefined, useLatest = false) {
+    setAssignee(value === undefined ? undefined : { base: useLatest || !assignee ? edit.issue.assigneeId : assignee.base, value });
+    clearValidation();
   }
 
   function changeDescription(value: string, useLatest = false) {
@@ -358,7 +367,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     try {
       if (recovery === 'verify' && changeAttempt.current) await applyStatusChange(changeAttempt.current);
       else if (recovery === 'refresh') await committed();
-      else if (comment.body.trim() || hasPropertiesDraft) await reviewLatestWithDraft();
+      else if (hasCommentDraft || hasPropertiesDraft) await reviewLatestWithDraft();
       else { await refresh(); onClose(); }
     } catch (cause) { setError(errorMessage(cause)); }
     finally { pending.current = false; setBusy(false); }
@@ -383,12 +392,11 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         </label>
         <label>담당자
           <select ref={assigneeField} className="field" value={assigneeOption} disabled={fieldsDisabled}
-            aria-invalid={assigneeRequired || assigneeUnavailable || undefined}
+            aria-invalid={assigneeRequired || assigneeUnavailable || assigneeConflict || undefined}
             aria-describedby={assigneeRequired || assigneeUnavailable ? errorId : undefined}
             onChange={event => {
               const value = event.currentTarget.value;
-              setAssigneeId(value === '' ? undefined : value === UNASSIGNED ? null : value.slice(USER_OPTION.length));
-              clearValidation();
+              changeAssignee(value === '' ? undefined : value === UNASSIGNED ? null : value.slice(USER_OPTION.length));
             }}>
             <option value="">자동 배정 규칙 따르기</option>
             <option value={UNASSIGNED}>미지정</option>
@@ -396,6 +404,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
             {assigneeUnavailable && <option value={assigneeOption} disabled>팀원 확인 불가</option>}
           </select>
         </label>
+        {assignee && assigneeConflict && <PropertyConflict label="담당자" saved={assigneeName(edit.issue.assigneeId)} disabled={fieldsDisabled}
+          onUseSaved={() => changeAssignee(edit.issue.assigneeId, true)} onUseInput={() => changeAssignee(assignee.value, true)} />}
         <fieldset className="issue-status-properties" disabled={fieldsDisabled}>
           <legend>우선순위와 목표 마감일</legend>
           <label>우선순위

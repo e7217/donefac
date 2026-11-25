@@ -3,9 +3,10 @@ import { documentNodes } from '../shared/document-references.js';
 import { documentSectionHash, isMarkdownImportSectionId } from '../shared/document-sections.js';
 import { creationRequestFingerprint, creationRequestId } from './creation-request.js';
 import type { Store } from './store.js';
+import { workspaceRestoreGeneration } from './workspace-revisions.js';
 
 type Receipt = { actorId: string; projectId: string | null; fingerprint: string; documentId: string | null };
-type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable';
+type CreationReason = 'invalid_request_id' | 'invalid_request_body' | 'request_conflict' | 'result_unavailable' | 'workspace_changed';
 type CreationOperation = 'delivery-blocker-draft' | 'decision-follow-up-draft' | 'document-template-draft' | 'weekly-report-snapshot'
   | `document-tree-copy:${string}` | `issue-linked-document:${string}`;
 
@@ -49,6 +50,11 @@ export class DocumentCreationService {
       verify?.(document);
       return document;
     };
+    const guarded = Object.hasOwn(input, 'expectedRestoreGeneration');
+    const generation = input.expectedRestoreGeneration;
+    if (guarded && (typeof generation !== 'string' || !generation || generation.length > 100 || !Object.hasOwn(input, 'requestId'))) {
+      throw new DocumentCreationError(400, '문서 생성 요청 ID와 작업 공간 버전을 확인해 주세요.', 'invalid_request_body');
+    }
     if (!Object.hasOwn(input, 'requestId')) return { document: this.store.transaction(createDocument), duplicate: false };
     const requestId = input.requestId;
     if (typeof requestId !== 'string' || !creationRequestId.test(requestId)) {
@@ -63,6 +69,9 @@ export class DocumentCreationService {
     catch { throw new DocumentCreationError(400, '문서 생성 입력 형식을 확인해 주세요.', 'invalid_request_body'); }
 
     return this.store.transaction(() => {
+      if (guarded && generation !== workspaceRestoreGeneration(this.store)) {
+        throw new DocumentCreationError(409, '작업 공간이 복원되었습니다. 문서 목록을 다시 확인해 주세요.', 'workspace_changed');
+      }
       const receipt = this.store.db.prepare(`SELECT actor_id AS actorId, project_id AS projectId,
         fingerprint, document_id AS documentId FROM document_creation_requests WHERE id=?`).get(id) as Receipt | undefined;
       if (receipt) {

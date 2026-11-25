@@ -187,6 +187,63 @@ test('전체 프로젝트 월간 일정은 프로젝트 필터를 적용하고 1
   }
 });
 
+test('월간 일정에서 작업 날짜를 다시 열고 선택한 프로젝트와 날짜를 팀원에게 공유한다', async ({ browser, page, context, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const recipient = await browser.newContext({ viewport: { width: 360, height: 820 } });
+  try {
+    const selectedDate = '2028-02-29';
+    const local = await f.issue('필터 밖의 마감', { dueDate: selectedDate });
+    const shared = await f.issue('함께 확인할 마감', { dueDate: selectedDate }, f.otherProject);
+    const g = await openGantt(page, f, '2028-01-31', true);
+    await page.getByRole('combobox', { name: '프로젝트 필터', exact: true }).selectOption(f.otherProject.id);
+    const start = g.row(shared).getByLabel(`${shared.key} 시작일`, { exact: true });
+    await start.fill('2028-01-31');
+    await g.toggle.click();
+    await g.date('2028-01-31').press('PageDown');
+    await expect(g.agendaIssue(shared)).toBeVisible();
+    await g.calendar.getByRole('button', { name: '월간 일정 닫기', exact: true }).click();
+    await expect(g.toggle).toBeFocused();
+    await g.toggle.click();
+    await expect(g.date(selectedDate)).toHaveAttribute('aria-pressed', 'true');
+    await expect(g.agendaIssue(shared)).toBeVisible();
+
+    const origin = new URL(page.url()).origin;
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin });
+    const addressBeforeCopy = page.url();
+    await g.calendar.getByRole('button', { name: '선택 날짜 링크 복사', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain(`ganttCalendar=${selectedDate}`);
+    const copied = new URL(await page.evaluate(() => navigator.clipboard.readText()));
+    expect(copied.origin).toBe(origin);
+    expect(page.url()).toBe(addressBeforeCopy);
+    await expect(start).toHaveValue('2028-01-31');
+    expect(await f.stored(shared)).toMatchObject({ startDate: null, version: shared.version });
+
+    const otherPage = await recipient.newPage();
+    await otherPage.goto(copied.href);
+    const otherCalendar = otherPage.getByRole('region', { name: '월간 일정', exact: true });
+    const agenda = otherCalendar.getByRole('list', { name: '선택한 날의 일정', exact: true });
+    await expect(otherPage.getByRole('combobox', { name: '프로젝트 필터', exact: true })).toHaveValue(f.otherProject.id);
+    await expect(otherCalendar.locator(`[data-calendar-date="${selectedDate}"]`)).toHaveAttribute('aria-pressed', 'true');
+    await expect(agenda.getByRole('button', { name: `${shared.key} ${shared.title}`, exact: true })).toBeVisible();
+    await expect(agenda.getByRole('button', { name: `${local.key} ${local.title}`, exact: true })).toHaveCount(0);
+    await otherPage.reload();
+    await expect(otherCalendar.locator(`[data-calendar-date="${selectedDate}"]`)).toHaveAttribute('aria-pressed', 'true');
+
+    const invalid = new URL(copied);
+    const [path, search] = invalid.hash.split('?');
+    const query = new URLSearchParams(search);
+    query.set('ganttCalendar', '2028-02-30');
+    invalid.hash = `${path}?${query}`;
+    await otherPage.goto(invalid.href);
+    await expect(otherCalendar).toHaveCount(0);
+    await expect(otherPage.getByRole('combobox', { name: '프로젝트 필터', exact: true })).toHaveValue(f.otherProject.id);
+  } finally {
+    await recipient.close();
+    await f.close();
+  }
+});
+
 test('360px 월간 일정에서 고른 날짜에 업무를 만들고 다른 날짜 초안과 팀 필터를 보존한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const f = await fixture(request);

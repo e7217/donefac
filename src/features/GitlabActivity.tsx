@@ -83,6 +83,26 @@ function activityTime(value: unknown) {
   return typeof value === 'string' ? Date.parse(value) || 0 : 0;
 }
 
+function compareActivityUpdates(a: GitlabLink, b: GitlabLink) {
+  return activityTime(b.updatedAt) - activityTime(a.updatedAt);
+}
+
+function compareSharedActivity(a: GitlabLink, b: GitlabLink) {
+  return compareActivityUpdates(a, b) || a.id.localeCompare(b.id, 'en');
+}
+
+function activityPage(links: readonly GitlabLink[], requestedPage: number) {
+  const pageCount = Math.ceil(links.length / PAGE_SIZE);
+  const page = Math.min(requestedPage, pageCount);
+  const offset = (page - 1) * PAGE_SIZE;
+  return { page, pageCount, rows: links.slice(offset, offset + PAGE_SIZE) };
+}
+
+export function isGitlabActivityOnPage(links: readonly GitlabLink[], target: GitlabLink, page: number) {
+  const group = links.filter(link => link.kind === target.kind).sort(compareSharedActivity);
+  return activityPage(group, page).rows.includes(target);
+}
+
 type PipelineTarget = { linkId: string; issueId: string; repositoryId: number; pipelineId: number; url: URL };
 type PipelineTestTarget = PipelineTarget & { mergeRequestRevision?: string };
 type ReviewTarget = { linkId: string; issueId: string; repositoryId: number; mergeRequestIid: number; url: URL };
@@ -1241,8 +1261,7 @@ export function GitlabActivityList({ links, issueReview, issueVersions, heading 
 }) {
   const sharedPages = pagination !== undefined;
   const groups = useMemo(() => kinds.map(group => ({ group,
-    rows: links.filter(link => link.kind === group.kind).sort((a, b) =>
-      activityTime(b.updatedAt) - activityTime(a.updatedAt) || (sharedPages ? a.id.localeCompare(b.id, 'en') : 0)),
+    rows: links.filter(link => link.kind === group.kind).sort(sharedPages ? compareSharedActivity : compareActivityUpdates),
   })), [links, sharedPages]);
   const issueContext: IssueContext | undefined = issueReview && {
     keys: issueReview.keys,
@@ -1274,11 +1293,10 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
     const index = links.findIndex(link => link.id === checkedActivity.linkId);
     if (index !== -1) setLocalPage({ page: Math.floor(index / PAGE_SIZE) + 1, checkedActivity });
   }
-  const pageCount = Math.ceil(links.length / PAGE_SIZE);
   const selectedIndex = selection && localPage === undefined ? links.indexOf(selection.link) : 0;
   const selectedPage = Math.floor(Math.max(0, selectedIndex) / PAGE_SIZE) + 1;
-  const currentPage = Math.min(pagination ? pagination.pages[group.kind] ?? 1 : localPage?.page ?? selectedPage, pageCount);
-  const offset = (currentPage - 1) * PAGE_SIZE;
+  const { page: currentPage, pageCount, rows } = activityPage(links,
+    pagination ? pagination.pages[group.kind] ?? 1 : localPage?.page ?? selectedPage);
   const Icon = group.Icon;
   function changePage(page: number) {
     if (pagination) pagination.onChangePage(group.kind, page);
@@ -1287,7 +1305,7 @@ function ActivityGroup({ group, links, issueContext, issueVersions, heading: Hea
 
   return <section className="gitlab-activity-group" aria-label={group.label}>
     <Heading className="gitlab-activity-group-heading"><Icon aria-hidden="true" size={15} />{group.label} <span>{links.length}</span></Heading>
-    <ul className="gitlab-activity-rows">{links.slice(offset, offset + PAGE_SIZE).map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
+    <ul className="gitlab-activity-rows">{rows.map(link => <ActivityRow key={link.id} link={link} issueContext={issueContext}
       issueVersion={issueVersions?.get(link.issueId)} manualActions={manualActions} statusActions={statusActions} commentActions={commentActions}
       followUpActions={followUpActions} onCopyActivityLink={onCopyActivityLink}
       checkedActivityTrigger={checkedActivity?.linkId === link.id ? checkedActivity.triggerRef : undefined}

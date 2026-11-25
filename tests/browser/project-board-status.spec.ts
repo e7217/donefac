@@ -566,6 +566,15 @@ test('프로젝트 보드 상태 변경은 워크플로 충돌과 응답 유실�
     await expect(chooser(page).getByRole('alert')).toContainText('다른 작업자가 변경했습니다.');
     await expect(assigneeChoice(page)).toHaveValue(`user:${f.actor.id}`);
     await button(chooser(page), '최신 업무 불러오기').tap();
+    await expect(chooser(page).getByRole('alert')).toContainText('현재 업무에서 변경할 수 있는 상태가 없습니다.');
+    await expect(assigneeChoice(page)).toHaveValue(`user:${f.actor.id}`);
+    await expect(button(chooser(page), '상태 변경 적용')).toBeDisabled();
+    const discard = page.waitForEvent('dialog').then(async prompt => {
+      await prompt.accept();
+      return prompt.message();
+    });
+    await button(chooser(page), '취소').tap();
+    expect(await discard).toContain('업무 변경');
     await expect(chooser(page)).toHaveCount(0);
     await expect(lane.locator(`[data-status-id="${f.finished.id}"]`).locator(card(page, issue))).toBeVisible();
     expect(await f.read(issue)).toMatchObject({ status: f.finished.id, assigneeId: f.newAssignee.id, version: issue.version + 2 });
@@ -616,6 +625,13 @@ test('보드는 응답이 끊겼을 때 같은 작업자의 다른 요청과 저
     expect(await f.read(issue)).toMatchObject({ status: f.review.id, assigneeId: f.newAssignee.id, version: issue.version + 1 });
 
     await button(dialog, '최신 업무 불러오기').tap();
+    await expect(destination(page)).toBeEnabled();
+    await expect(destination(page).locator(`option[value="${f.review.id}"]`)).toHaveCount(0);
+    await expect(assigneeChoice(page)).toHaveValue(`user:${f.newAssignee.id}`);
+    await expect(button(dialog, '상태 변경 적용')).toBeDisabled();
+    const discard = page.waitForEvent('dialog').then(prompt => prompt.accept());
+    await button(dialog, '취소').tap();
+    await discard;
     await expect(dialog).toHaveCount(0);
     const board = page.getByRole('region', { name: '업무 보드', exact: true });
     await expect(board.locator(`[data-status-id="${f.review.id}"]`).locator(card(page, issue))).toBeVisible();

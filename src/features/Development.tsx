@@ -11,7 +11,7 @@ import type { OpenIssueForReview } from '../lib/issue-review';
 import { afterAcceptedNavigation, isDevelopmentReviewNavigation } from '../lib/navigation';
 import { AutomationSettings } from './AutomationSettings';
 import { GitlabActivityList, GitlabActivityRefresh, gitlabActivityKindLabel, gitlabActivityStateLabel,
-  gitlabLinkedStatusRefreshPath, isGitlabLinkedStatusRefreshResult } from './GitlabActivity';
+  gitlabLinkedStatusRefreshPath, isGitlabActivityOnPage, isGitlabLinkedStatusRefreshResult } from './GitlabActivity';
 import { GitlabDeploymentPreview } from './GitlabDeploymentPreview';
 import { useGitlabFollowUp } from './GitlabFollowUp';
 import { RepositoryGitlabDeployments } from './GitlabDeployments';
@@ -449,7 +449,9 @@ function DevelopmentActivityFeed({ data, projectId, actorId, openIssue, refresh,
   const checkedLink = checkedActivity && links.find(link => link.id === checkedActivity.id && link.issueId === checkedActivity.issueId &&
     link.projectId === checkedActivity.projectId && link.kind === checkedActivity.kind && link.iid === checkedActivity.iid &&
     link.manualLinkId === checkedActivity.manualLinkId);
-  const filteredCheckedLink = checkedLink && !matching.includes(checkedLink) ? checkedLink : null;
+  const checkedOutsideFilters = checkedLink && !matching.includes(checkedLink);
+  const hiddenCheckedLink = checkedLink && (checkedOutsideFilters || !isGitlabActivityOnPage(matching, checkedLink, pages[checkedLink.kind] ?? 1))
+    ? checkedLink : null;
   const hasFilters = scope !== 'all' || Boolean(query || memberId || repositoryKey || search.value || Object.keys(pages).length);
 
   function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -517,15 +519,15 @@ function DevelopmentActivityFeed({ data, projectId, actorId, openIssue, refresh,
       </form>
       <button type="button" className="btn btn-ghost" disabled={!hasFilters} onClick={clearFilters}>활동 필터 초기화</button>
     </div>
-    {filteredCheckedLink && <section className="gitlab-activity-feedback" aria-label="확인한 GitLab 활동" data-gitlab-link-id={filteredCheckedLink.id}>
+    {hiddenCheckedLink && <section className="gitlab-activity-feedback" aria-label="확인한 GitLab 활동" data-gitlab-link-id={hiddenCheckedLink.id}>
       <p className="gitlab-activity-hint" role="status">
-        <strong>{gitlabActivityKindLabel(filteredCheckedLink.kind)} {filteredCheckedLink.kind === 'pipeline' ? `#${filteredCheckedLink.iid}` :
-          filteredCheckedLink.kind === 'merge_request' ? `!${filteredCheckedLink.iid}` : filteredCheckedLink.title} · {gitlabActivityStateLabel(filteredCheckedLink.state)}</strong>
-        {' '}현재 필터 범위를 벗어났습니다.
+        <strong>{gitlabActivityKindLabel(hiddenCheckedLink.kind)} {hiddenCheckedLink.kind === 'pipeline' ? `#${hiddenCheckedLink.iid}` :
+          hiddenCheckedLink.kind === 'merge_request' ? `!${hiddenCheckedLink.iid}` : hiddenCheckedLink.title} · {gitlabActivityStateLabel(hiddenCheckedLink.state)}</strong>
+        {' '}{checkedOutsideFilters ? '현재 필터 범위를 벗어났습니다.' : '상태를 확인한 뒤 다른 페이지로 이동했습니다.'}
       </p>
       <div className="gitlab-activity-actions">
         <button ref={checkedActivityButton} className="btn" type="button" data-gitlab-review-opener="activity"
-          onClick={event => openCheckedActivity(filteredCheckedLink, event.currentTarget)}>
+          onClick={event => openCheckedActivity(hiddenCheckedLink, event.currentTarget)}>
           <ArrowRight size={14} aria-hidden="true" />티켓에서 이 활동 보기
         </button>
       </div>

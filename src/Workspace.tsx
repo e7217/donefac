@@ -1352,10 +1352,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     }
   }, [writeRoute]);
   // The document tree already confirms/cache-preserves its local draft before invoking this callback.
-  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void }, reading = false) => {
+  const selectDocument = (id: string, recovery?: { documentId: string; beforeOpen: () => void; expectedRestoreGeneration?: string }, reading = false) => {
     const snapshot = dataRef.current;
     const previous = acceptedRouteRef.current;
     if (!snapshot || recovery && (previous?.view !== 'documents' || previous.documentId !== recovery.documentId ||
+        (recovery.expectedRestoreGeneration !== undefined && recovery.expectedRestoreGeneration !== snapshot.restoreGeneration) ||
         !snapshot.documents.some(document => document.id === id))) return false;
     const route = normalizeRoute(snapshot, routeHash({projectId,view:'documents',documentId:id,issueId:null,documentLabel,documentReading:reading}));
     if (previous && routeHash(previous) === routeHash(route)) return true;
@@ -1407,9 +1408,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       planningId: team ? null : selectedPlanId, savedViewId: current.savedViewId, ganttTimelineLink: link });
     try {
       await navigator.clipboard.writeText(url.href);
-      notify(`${link.date} 간트 위치 링크를 복사했습니다.`);
+      notify(link.calendarDate ? `${link.calendarDate} 월간 일정 링크를 복사했습니다.` : `${link.date} 간트 위치 링크를 복사했습니다.`);
     } catch {
-      notify('간트 위치 링크를 복사하지 못했습니다.', 'error');
+      notify(link.calendarDate ? '월간 일정 링크를 복사하지 못했습니다.' : '간트 위치 링크를 복사하지 못했습니다.', 'error');
     }
   };
   const changeIntakeRequest = (id: string | null) => {

@@ -165,3 +165,66 @@ test('360px 프로젝트 목록에서 동료가 같은 상태를 먼저 저장�
     await expect(dialog).toHaveCount(0);
   } finally { await f.close(); }
 });
+
+test('360px 팀 보드에서 동료의 최신 담당자와 인수인계 입력을 비교한 뒤 상태를 바꾼다', async ({ page, request }) => {
+  const f = await fixture(request);
+  const { issue, owner, peer } = f;
+  const text = '다음 담당자에게 검토 내용을 넘깁니다.';
+  try {
+    expect(issue.assigneeId).toBeNull();
+    const { dialog, target, note, apply } = await openChange(page, issue, owner, 'teamboard');
+    const assignee = dialog.getByRole('combobox', { name: '담당자', exact: true });
+    const latest = button(dialog, '최신 업무 불러오기');
+    const storedValue = button(dialog, '담당자 저장값 사용');
+    const inputValue = button(dialog, '담당자 입력값 사용');
+    const waitForTransition = () => page.waitForResponse(response => new URL(response.url()).pathname === transitionPath(issue));
+    async function applyOverPeerChange() {
+      const transition = waitForTransition();
+      await apply.click();
+      expect((await transition).status()).toBe(409);
+      await latest.click();
+      await expect(storedValue).toBeVisible();
+    }
+
+    await target.selectOption('in_progress');
+    await assignee.selectOption(`user:${owner.id}`);
+    const discard = page.waitForEvent('dialog').then(async prompt => {
+      await prompt.dismiss();
+      return prompt.message();
+    });
+    await button(dialog, '취소').click();
+    expect(await discard).toContain('업무 변경');
+    await expect(assignee).toHaveValue(`user:${owner.id}`);
+    const peerAssigned = await json<Issue>(await request.patch(issuePath(issue), { headers: actor(peer), data: {
+      expectedVersion: issue.version, assigneeId: peer.id,
+    } }));
+    await applyOverPeerChange();
+    await expect(assignee).toHaveValue(`user:${owner.id}`);
+    await expect(dialog.locator('.issue-status-property-conflict blockquote')).toHaveText(peer.name);
+    await target.selectOption('in_progress');
+    await expect(apply).toBeDisabled();
+    await storedValue.click();
+    await expect(assignee).toHaveValue(`user:${peer.id}`);
+
+    await note.fill(text);
+    const peerCleared = await json<Issue>(await request.patch(issuePath(issue), { headers: actor(peer), data: {
+      expectedVersion: peerAssigned.version, assigneeId: null,
+    } }));
+    await applyOverPeerChange();
+    await expect(note).toHaveValue(text);
+    await expect(dialog.locator('.issue-status-property-conflict blockquote')).toHaveText('미지정');
+    await target.selectOption('in_progress');
+    await expect(apply).toBeDisabled();
+    expect(await json<Comment[]>(await request.get(commentPath(issue)))).toEqual([]);
+    await inputValue.click();
+    const saved = waitForTransition();
+    await apply.click();
+    const response = await saved;
+    expect(response.request().postDataJSON()).toMatchObject({ expectedVersion: peerCleared.version, assigneeId: peer.id });
+    expect(response.status()).toBe(200);
+    const result = await response.json() as IssueStatusChangeResult;
+    expect(result.issue).toMatchObject({ status: 'in_progress', assigneeId: peer.id, version: peerCleared.version + 1 });
+    expect(await json<Comment[]>(await request.get(commentPath(issue)))).toMatchObject([{ id: result.receipt.commentId, body: text }]);
+    await expect(dialog).toHaveCount(0);
+  } finally { await f.close(); }
+});

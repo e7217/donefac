@@ -366,7 +366,8 @@ function ProjectGantt(props: GanttProps) {
   const [analysisOpen, setAnalysisOpen] = useState(false);
   const [findingsOpen, setFindingsOpen] = useState(false);
   const [deadlinesOpen, setDeadlinesOpen] = useState(false);
-  const [monthCalendarDate, setMonthCalendarDate] = useState<string | null>(null);
+  const [monthCalendarDate, setMonthCalendarDate] = useState<string | null>(timelineLink?.calendarDate ?? null);
+  const lastCalendarDate = useRef(timelineLink?.calendarDate);
   const [teamBlockersOpen, setTeamBlockersOpen] = useState(false);
   const [showTeamBlockerLines, setShowTeamBlockerLines] = useState(true);
   const [teamBlockerChartPair, setTeamBlockerChartPair] = useState<{ sourceId: string; targetId: string; opener: HTMLButtonElement }>();
@@ -1615,10 +1616,25 @@ function ProjectGantt(props: GanttProps) {
     setMonthCalendarDate(null);
     monthCalendarTrigger.current?.focus({ preventScroll: true });
   }
+  function toggleMonthCalendar() {
+    if (monthCalendarDate) closeMonthCalendar();
+    else {
+      const date = lastCalendarDate.current ?? visibleTimelineDate();
+      lastCalendarDate.current = date;
+      setMonthCalendarDate(date);
+    }
+  }
   function visibleTimelineDate() {
     const scroll = scrollRef.current;
     const visibleDays = scroll ? Math.max(0, Math.floor(timelineViewportOffset(scroll) / dayWidth)) : 0;
     return isoDay(Math.min(range.end, range.start + visibleDays));
+  }
+  function copyTimelinePosition(calendarDate?: string) {
+    if (!onCopyTimelineLink || scheduleFocus || activeDatePicker) return;
+    const planId = !allProjects && planningExpanded ? selectedPlanningId : null;
+    void onCopyTimelineLink({ date: visibleTimelineDate(), zoom, calendarDate, hideDone,
+      search: allProjects ? undefined : projectQuery.slice(0, 200).toWellFormed(),
+      plansOpen: !allProjects && planningExpanded, linkedOnly: Boolean(planId && linkedOnly) }, planId);
   }
   function choosePlan(id: string | null) {
     setSelectedPlanningId(id);
@@ -2648,7 +2664,7 @@ function ProjectGantt(props: GanttProps) {
       <button ref={monthCalendarTrigger} className="btn" type="button" aria-expanded={monthCalendarDate !== null}
         aria-controls={monthCalendarDate ? MONTH_CALENDAR_PANEL_ID : undefined}
         data-gantt-focus-control="" onPointerDown={keepInlineDateFocus} disabled={monthCalendarDisabled}
-        onClick={() => monthCalendarDate ? closeMonthCalendar() : setMonthCalendarDate(visibleTimelineDate())}>
+        onClick={toggleMonthCalendar}>
         <CalendarDays size={15} aria-hidden="true" />월간 일정
       </button>
       <button ref={deadlinesTrigger} className="btn" type="button" aria-label="목표 마감일 검토" aria-expanded={deadlinesOpen}
@@ -2742,6 +2758,8 @@ function ProjectGantt(props: GanttProps) {
     {monthCalendarDate && <GanttMonthCalendar id={MONTH_CALENDAR_PANEL_ID} initialDate={monthCalendarDate} today={todayDate()}
       issues={visibleIssues} milestones={milestones} projects={allProjects ? projectsById : undefined}
       disabled={monthCalendarDisabled} onPointerDown={keepInlineDateFocus} onClose={closeMonthCalendar}
+      onSelectDate={date => { lastCalendarDate.current = date; }}
+      onCopyDate={onCopyTimelineLink && !scheduleFocus && !activeDatePicker ? copyTimelinePosition : undefined}
       createForm={createOpen?.date ? createForm : undefined}
       onCreate={data.projects.length && !scheduleFocus ? (date, opener) => {
         if (!monthCalendarDisabled) setCreateOpen({ date, opener });
@@ -2850,12 +2868,7 @@ function ProjectGantt(props: GanttProps) {
         scrollToDate(dayNumber(overlapAnchor), defaultRangeStart);
       }}>보기 기간으로 이동</button>}
       {onCopyTimelineLink && <button type="button" className="btn" disabled={Boolean(scheduleFocus || activeDatePicker)}
-        onPointerDown={keepInlineDateFocus} onClick={() => {
-          const date = visibleTimelineDate();
-          const planId = !allProjects && planningExpanded ? selectedPlanningId : null;
-          void onCopyTimelineLink({ date, zoom, hideDone, search: allProjects ? undefined : projectQuery.slice(0, 200).toWellFormed(),
-            plansOpen: !allProjects && planningExpanded, linkedOnly: Boolean(planId && linkedOnly) }, planId);
-        }}><Link2 size={15} aria-hidden="true" />간트 위치 링크 복사</button>}
+        onPointerDown={keepInlineDateFocus} onClick={() => copyTimelinePosition()}><Link2 size={15} aria-hidden="true" />간트 위치 링크 복사</button>}
       <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled} title="저장된 일정으로 내려받기"
         onPointerDown={keepInlineDateFocus} onClick={downloadGantt}><ArrowDownToLine size={15} aria-hidden="true" />간트 HTML 내려받기</button>
       {sheetScope && <button type="button" className="btn" data-gantt-export="true" disabled={exportDisabled || !sheetIssues.length}

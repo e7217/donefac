@@ -210,6 +210,54 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
       await expect(otherGitlab.getByRole('heading', { name: /^GitLab/u })).toBeFocused();
       expect(calls).toHaveLength(readsBeforeTicketFilter);
     } finally { await reader.close(); }
+
+    const developmentPage = await page.context().newPage();
+    try {
+      await developmentPage.setViewportSize({ width: 360, height: 820 });
+      await developmentPage.goto(`/#/${project.id}/development`);
+      const feed = developmentPage.getByRole('region', { name: '연결된 개발 활동', exact: true });
+      const scope = feed.getByRole('combobox', { name: '개발 활동 범위', exact: true });
+      const query = feed.getByRole('searchbox', { name: '개발 활동 검색', exact: true });
+      const settingDraft = developmentPage.getByLabel('읽기 API 토큰', { exact: true });
+      await expect(settingDraft).toBeEnabled();
+      await settingDraft.fill('저장하지 않은 GitLab 연결 초안');
+      await scope.selectOption('pipeline');
+      await query.fill(issue.key);
+      await query.press('Enter');
+      const pager = feed.getByRole('navigation', { name: '파이프라인 페이지 이동', exact: true });
+      const row = feed.locator('.gitlab-activity-row').filter({ has: developmentPage.getByText(`#${oldPipelineId}`, { exact: true }) });
+      await button(pager, '다음').click();
+      await expect(row).toHaveAttribute('data-gitlab-state', 'running');
+      const address = developmentPage.url();
+      expect(new URLSearchParams(address.split('?')[1]).get('activityPipelinePage')).toBe('2');
+      const readsBeforeCheck = calls.length;
+      const checked = await refreshActivity(developmentPage, button(row, exactAction), exactPath);
+      expect(checked.links).toMatchObject([{ id: oldLink.id, state: 'failed' }]);
+      expect(calls.slice(readsBeforeCheck).map(call => call.path)).toEqual([projectRead, pipelineRead(oldPipelineId)]);
+      await expect(row).toHaveCount(0);
+      await expect(pager).toContainText('2 / 2 페이지');
+      const result = feed.getByRole('region', { name: '확인한 GitLab 활동', exact: true });
+      await expect(result).toContainText(`파이프라인 #${oldPipelineId} · 실패`);
+      await expect(result).toContainText('상태를 확인한 뒤 다른 페이지로 이동했습니다.');
+      const openChecked = button(result, '티켓에서 이 활동 보기');
+      await expect(openChecked).toBeFocused();
+      await openChecked.press('Enter');
+      const opened = developmentPage.getByRole('dialog', { name: issue.title, exact: true });
+      const selected = opened.locator('[data-gitlab-selected]');
+      await expect(selected).toHaveAttribute('data-gitlab-link-id', oldLink.id);
+      await expect(selected).toHaveAttribute('data-gitlab-state', 'failed');
+      await expect(selected).toBeFocused();
+      await button(opened, '업무 상세 닫기').click();
+      await expect(openChecked).toBeFocused();
+      await expect(developmentPage).toHaveURL(address);
+      await expect(query).toHaveValue(issue.key);
+      await expect(scope).toHaveValue('pipeline');
+      await expect(settingDraft).toHaveValue('저장하지 않은 GitLab 연결 초안');
+      await button(pager, '이전').click();
+      await expect(row).toHaveAttribute('data-gitlab-state', 'failed');
+      await expect(result).toHaveCount(0);
+    } finally { await developmentPage.close(); }
+
     await page.bringToFront();
     const readsBeforeExact = calls.length;
     const failed = await refreshActivity(page, button(oldRow, exactAction), exactPath);
@@ -313,7 +361,7 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
     await expect(title).toHaveValue('저장하지 않은 티켓 제목');
     await expect(comment).toHaveValue('전송하지 않은 티켓 댓글');
     expect((await workspace()).issues.find(value => value.id === issue.id)).toEqual(issue);
-    expect(browserWrites).toEqual([`POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`]);
+    expect(browserWrites).toEqual([`POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`]);
 
     await prepare.click();
     await expect(status).toHaveValue('done');
@@ -334,7 +382,7 @@ test('360px에서 이전 GitLab 활동을 공유하고 해당 연결의 상태�
     await expect(savedTicket.getByRole('textbox', { name: '댓글 내용', exact: true })).toHaveValue('전송하지 않은 티켓 댓글');
     expect(await json(await request.get(runsPath))).toEqual(beforeRuns);
     expect(browserWrites).toEqual([
-      `POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`, `PATCH ${issuePath}`,
+      `POST ${bulkPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${exactPath}`, `POST ${selectedReviewPath}`, `PATCH ${issuePath}`,
     ]);
     expect(calls.every(call => call.method === 'GET' && call.credential === token)).toBe(true);
   } finally {
