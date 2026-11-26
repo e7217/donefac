@@ -33,6 +33,7 @@ import { dispatchWorkspaceNavigation } from './lib/navigation';
 import { issueReviewPosition, type GitlabIssueReviewSelection, type IssueReviewDirection, type OpenIssueForReview } from './lib/issue-review';
 import type { WorkspaceRefresh } from './lib/workspace-refresh';
 import { Issues } from './features/Issues';
+import type { CycleBoardFilters } from './features/CycleBoard';
 import { Gantt } from './features/Gantt';
 import { clearGanttDateDrafts, type GanttIssueDateDrafts } from './features/gantt-date-draft-storage';
 import { IssuePanel } from './features/IssuePanel';
@@ -103,7 +104,7 @@ type WorkspaceRoute = {
   documentLabel?: string | null;
   teamOverviewFilters?: TeamOverviewFilters;
   teamBoardFilters?: TeamBoardFilters;
-  cycleQuery?: string;
+  cycleFilters?: CycleBoardFilters;
   gitlabActivityFilters?: GitlabActivityFilters;
   gitlabDeploymentView?: GitlabDeploymentView;
   searchFilters?: WorkspaceSearchFilters;
@@ -136,6 +137,7 @@ type WorkspaceRead = { request: number; snapshot: WorkspaceSnapshot | null; revi
 const validViews: View[] = ['overview','issues','intake','backlog','gantt','planning','reports','documents','publication','development','settings','mywork','favorites','trash','teamoverview','teamboard','search'];
 const emptyTeamOverviewFilters: TeamOverviewFilters = { projectId: '', memberId: '', date: '' };
 const emptyTeamBoardFilters: TeamBoardFilters = {};
+const emptyCycleBoardFilters: CycleBoardFilters = {};
 const emptyTeamGanttScheduleFilters: TeamGanttScheduleFilters = {};
 function readIssueFilterQuery(value?: string | null) {
   return value?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 200) || undefined;
@@ -172,7 +174,12 @@ function routeHash(route: WorkspaceRoute) {
     if (route.issueCommentId) query.set('issueComment', route.issueCommentId);
     else if (route.view === 'issues' && route.gitlabActivityId) query.set('gitlabActivity', route.gitlabActivityId);
   }
-  if (route.view === 'backlog' && route.cycleQuery) query.set('cycleQ', route.cycleQuery);
+  if (route.view === 'backlog' && route.cycleFilters) {
+    const { query: cycleQuery, statusId, assigneeId } = route.cycleFilters;
+    if (cycleQuery) query.set('cycleQ', cycleQuery);
+    if (statusId) query.set('cycleStatus', statusId);
+    if (assigneeId !== undefined) query.set('cycleAssignee', assigneeId ?? '');
+  }
   if (route.view === 'intake') {
     if (route.intakeRequestId) query.set('request', route.intakeRequestId);
     else if (route.intakeCompose) query.set('compose', '1');
@@ -258,6 +265,9 @@ function hasSameReportContext(previous: WorkspaceRoute, next: WorkspaceRoute): b
 }
 function sameTeamBoardFilters(a?: TeamBoardFilters, b?: TeamBoardFilters): boolean {
   return a?.projectId === b?.projectId && a?.memberId === b?.memberId && a?.query === b?.query && a?.gitlab === b?.gitlab;
+}
+function sameCycleBoardFilters(a?: CycleBoardFilters, b?: CycleBoardFilters): boolean {
+  return a?.query === b?.query && a?.statusId === b?.statusId && a?.assigneeId === b?.assigneeId;
 }
 function hasSameTeamBoardContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'teamboard' && next.view === 'teamboard' && previous.projectId === next.projectId &&
@@ -526,6 +536,12 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
     query: boardQuery,
     gitlab: isIssueViewGitlabFilter(boardGitlab) ? boardGitlab : undefined,
   } : undefined;
+  const cycleStatus = parameters.get('cycleStatus'), cycleAssignee = parameters.get('cycleAssignee');
+  const cycleFilters: CycleBoardFilters | undefined = view === 'backlog' ? {
+    query: readIssueFilterQuery(parameters.get('cycleQ')),
+    statusId: isRelationId(cycleStatus) ? cycleStatus : undefined,
+    assigneeId: cycleAssignee === '' ? null : isRelationId(cycleAssignee) ? cycleAssignee : undefined,
+  } : undefined;
   const searchFilters = view === 'search' ? readWorkspaceSearchFilters(parameters) : undefined;
   const activityFilters = view === 'development' ? readGitlabActivityFilters(parameters) : undefined;
   if (activityFilters?.memberId && !snapshot.users.some(user => user.id === activityFilters.memberId)) {
@@ -535,7 +551,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   return { projectId, view, documentId, issueId, issueCommentId, documentPreviewId, reportId, blockerScope, decisionFollowUpScope, fieldBreakdownScope, planningId, savedViewId,
     ganttScope, ganttProject, ganttScheduleFilters, ganttTimelineLink, ganttFocusIssueId, ganttFocusDate, ganttMilestoneId, publicationTab, publicationCriteria, publication, sectionId, documentCommentId,
     documentLabel, documentReading, teamOverviewFilters, teamBoardFilters, searchFilters, completionRecordId, intakeRequestId, intakeCompose,
-    cycleQuery: view === 'backlog' ? readIssueFilterQuery(parameters.get('cycleQ')) : undefined,
+    cycleFilters,
     gitlabActivityFilters: activityFilters, gitlabActivityId,
     gitlabDeploymentView: view === 'development' ? readGitlabDeploymentView(parameters) : undefined };
 }
@@ -580,7 +596,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const [sectionId, setSectionId] = useState<string | null>(null);
   const [teamOverviewFilters, setTeamOverviewFilters] = useState(emptyTeamOverviewFilters);
   const [teamBoardFilters, setTeamBoardFilters] = useState(emptyTeamBoardFilters);
-  const [cycleQuery, setCycleQuery] = useState('');
+  const [cycleFilters, setCycleFilters] = useState(emptyCycleBoardFilters);
   const [gitlabActivityFilters, setGitlabActivityFilters] = useState(DEFAULT_GITLAB_ACTIVITY_FILTERS);
   const [gitlabDeploymentView, setGitlabDeploymentView] = useState(DEFAULT_GITLAB_DEPLOYMENT_VIEW);
   const [searchFilters, setSearchFilters] = useState(DEFAULT_WORKSPACE_SEARCH_FILTERS);
@@ -845,7 +861,8 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       previous.issueMetric === filters.issueMetric && previous.issueOffset === filters.issueOffset ? previous : filters);
     const boardFilters = route.teamBoardFilters ?? emptyTeamBoardFilters;
     setTeamBoardFilters(previous => sameTeamBoardFilters(previous, boardFilters) ? previous : boardFilters);
-    setCycleQuery(route.cycleQuery ?? '');
+    const backlogFilters = route.cycleFilters ?? emptyCycleBoardFilters;
+    setCycleFilters(previous => sameCycleBoardFilters(previous, backlogFilters) ? previous : backlogFilters);
     setIntakeRoute(previous => previous.requestId === (route.intakeRequestId ?? null) && previous.compose === Boolean(route.intakeCompose)
       ? previous : { requestId: route.intakeRequestId ?? null, compose: Boolean(route.intakeCompose) });
     setGitlabActivityFilters(route.gitlabActivityFilters ?? DEFAULT_GITLAB_ACTIVITY_FILTERS);
@@ -919,7 +936,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     requestRoute({projectId:nextProject, view:nextView, documentId:nextDoc || null, issueId:null,
       documentLabel: sameView ? documentLabel : null,
       planningId: sameView && (nextView === 'backlog' || nextView === 'planning') ? planningId : null,
-      cycleQuery: sameView && nextView === 'backlog' ? cycleQuery : undefined,
+      cycleFilters: sameView && nextView === 'backlog' ? cycleFilters : undefined,
       gitlabActivityFilters: sameView && nextView === 'development' ? gitlabActivityFilters : undefined,
       gitlabDeploymentView: sameView && nextView === 'development' ? gitlabDeploymentView : undefined,
       publicationTab: sameView && nextView === 'publication' ? publicationTab : undefined,
@@ -929,11 +946,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       teamOverviewFilters: nextView === 'teamoverview' && view === 'teamoverview' ? teamOverviewFilters : undefined,
       teamBoardFilters: sameView && nextView === 'teamboard' ? teamBoardFilters : undefined});
   };
-  const changeCycleQuery = (query: string) => {
+  const changeCycleFilters = (filters: CycleBoardFilters) => {
     const current = acceptedRouteRef.current;
-    const nextQuery = readIssueFilterQuery(query);
-    if (current?.view === 'backlog' && current.cycleQuery !== nextQuery) {
-      writeRoute({ ...current, cycleQuery: nextQuery }, routeIndexRef.current, 'replace', true);
+    const next = { ...filters, query: readIssueFilterQuery(filters.query) };
+    if (current?.view === 'backlog' && !sameCycleBoardFilters(current.cycleFilters, next)) {
+      writeRoute({ ...current, cycleFilters: next }, routeIndexRef.current, 'replace', true);
     }
   };
   const changePublicationTab = (tab: DocumentPublicationListTab) => {
@@ -1040,7 +1057,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       view:view === 'documents' || view === 'settings' ? 'issues' : view, documentId:null,
       reportId:view === 'reports' ? reportId : null, planningId:sameProject ? planningId : null, savedViewId:sameProject ? savedViewId : null,
       completionRecordId: sameProject && view === 'planning' ? current?.completionRecordId : null,
-      cycleQuery: view === 'backlog' && sameProject ? current?.cycleQuery : undefined,
+      cycleFilters: view === 'backlog' && sameProject ? current?.cycleFilters : undefined,
       blockerScope:view === 'reports' ? current?.blockerScope : null,
       decisionFollowUpScope:view === 'reports' ? current?.decisionFollowUpScope : null,
       fieldBreakdownScope:view === 'reports' ? current?.fieldBreakdownScope : null,
@@ -1234,7 +1251,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   const openPlanIn = (nextView: 'planning' | 'gantt' | 'backlog', id?: string) => {
     const current = acceptedRouteRef.current;
     return requestRoute({ projectId, view: nextView, documentId: null, planningId: id, issueId: null,
-      cycleQuery: nextView === 'backlog' && current?.view === 'backlog' ? current.cycleQuery : undefined },
+      cycleFilters: nextView === 'backlog' && current?.view === 'backlog' ? current.cycleFilters : undefined },
     'push', false, selectedPlanReturn(id));
   };
   const openReleaseReadiness = (id: string) =>
@@ -1583,7 +1600,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
         </Suspense>}
         {view === 'backlog' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>사이클 계획을 불러오는 중입니다.</p></div>}>
           <CycleBoard key={`${projectId}:${actorId}`} {...props} initialCycleId={planningId} onChangeCycle={id => openPlanIn('backlog', id)}
-            query={cycleQuery} onQueryChange={changeCycleQuery} onOpenIssueSchedule={openPlannedIssueSchedule}
+            filters={cycleFilters} onFiltersChange={changeCycleFilters} onOpenIssueSchedule={openPlannedIssueSchedule}
             onOpenIssueForReview={openIssueForReview}
             onOpenPlanning={id => openPlanIn('planning', id)} onOpenIssues={() => navigate('issues')} />
         </Suspense>}

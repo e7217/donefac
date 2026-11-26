@@ -86,6 +86,65 @@ async function openLaneCreation(page: Page, lane: Locator, target: '백로그' |
   return { dialog, title, submit: dialog.getByRole('button', { name: '업무 만들기', exact: true }) };
 }
 
+test('360px 백로그와 사이클에서 상태와 담당자를 함께 적용해 표시된 업무만 검토한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  await page.setViewportSize({ width: 360, height: 820 });
+  const f = await fixture(request);
+  try {
+    const cycle = await f.plan('업무 분류 사이클');
+    const first = await f.issue(`분류할 첫 업무 ${f.suffix}`, { assigneeId: f.actor.id });
+    const second = await f.issue(`분류할 둘째 업무 ${f.suffix}`, { assigneeId: f.actor.id, cycleId: cycle.id });
+    const peerIssue = await f.issue(`동료의 업무 ${f.suffix}`, { assigneeId: f.peer.id });
+    const unassigned = await f.issue(`담당자 미지정 업무 ${f.suffix}`, { cycleId: cycle.id });
+    const hiddenBySearch = await f.issue('다른 제목으로 등록한 업무', { assigneeId: f.actor.id, cycleId: cycle.id });
+    const workflow = (await workspace(request)).workflows?.find(item => item.projectId === f.project.id);
+    const anotherStatus = workflow?.statuses.find(item => item.id !== first.status)?.id ?? (first.status === 'todo' ? 'in_progress' : 'todo');
+    expect(anotherStatus).not.toBe(first.status);
+    const another = await f.issue(`다른 상태의 업무 ${f.suffix}`, { assigneeId: f.actor.id, status: anotherStatus });
+    const board = await openBoard(page, f, 'backlog', cycle);
+    const status = page.getByRole('combobox', { name: '상태 필터', exact: true });
+    const assignee = page.getByRole('combobox', { name: '담당자 필터', exact: true });
+    await board.search.fill(f.suffix);
+    await status.selectOption(first.status, { timeout: 8000 });
+    await assignee.selectOption({ label: f.actor.name });
+    const address = new URL(page.url()).hash;
+    const row = (issue: Issue) => page.locator(rowSelector(issue));
+    await expect(board.backlog.locator(rowSelector(first))).toBeVisible();
+    await expect(board.lane.locator(rowSelector(second))).toBeVisible();
+    for (const hidden of [peerIssue, unassigned, hiddenBySearch, another]) await expect(row(hidden)).toHaveCount(0);
+
+    await row(first).getByRole('button', { name: `${first.key} · ${first.title}`, exact: true }).click();
+    const review = page.getByRole('navigation', { name: '업무 검토 순서' });
+    await expect(review.getByRole('status')).toHaveText('2개 중 1번째');
+    await review.getByRole('button', { name: '다음 업무' }).click();
+    await expect(page.getByRole('dialog', { name: second.title, exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(row(first).getByRole('button', { name: `${first.key} · ${first.title}` })).toBeFocused();
+    expect(new URL(page.url()).hash).toBe(address);
+    await page.reload();
+    await expect(status).toHaveValue(first.status);
+    await expect(assignee.locator('option:checked')).toHaveText(f.actor.name);
+    await expect(board.search).toHaveValue(f.suffix);
+
+    const bulk = page.getByRole('button', { name: '일괄 편집', exact: true });
+    await bulk.click();
+    await page.getByRole('checkbox', { name: '표시된 업무 전체 선택', exact: true }).check();
+    for (const issue of [first, second]) await expect(row(issue).getByRole('checkbox')).toBeChecked();
+    await assignee.selectOption({ label: '담당자 미지정' });
+    await expect(row(first)).toHaveCount(0);
+    await expect(row(second)).toHaveCount(0);
+    await expect(row(unassigned).getByRole('checkbox')).not.toBeChecked();
+    await bulk.click();
+    await page.getByRole('button', { name: '업무 필터 초기화', exact: true }).click();
+    await expect(board.selectedCycle).toHaveValue(cycle.id);
+    await expect(board.search).toHaveValue('');
+    await expect(status).toHaveValue('');
+    for (const issue of [peerIssue, another, hiddenBySearch]) await expect(row(issue)).toBeVisible();
+  } finally {
+    await f.close();
+  }
+});
+
 test('360px 백로그와 사이클에서 상태·담당자·인수인계를 저장하고 원래 보드로 돌아온다', async ({ page, request }) => {
   test.setTimeout(75_000);
   await page.setViewportSize({ width: 360, height: 820 });

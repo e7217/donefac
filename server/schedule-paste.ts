@@ -324,7 +324,7 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
   const followUp = { ...(raw.rescheduleSuccessors === true ? { rescheduleSuccessors: true } : {}),
     ...(raw.includeTeamBlockers === true ? { includeTeamBlockers: true } : {}) };
   if (Object.hasOwn(raw, 'changes')) {
-    if (Object.keys(raw).some(key => !['changes', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key)) ||
+    if (Object.keys(raw).some(key => !['changes', 'fillMissingWorkdays', 'rescheduleSuccessors', 'includeTeamBlockers'].includes(key)) ||
         !Array.isArray(raw.changes) || !raw.changes.length || raw.changes.length > MAX_SCHEDULE_MANUAL_ISSUES) throw invalid();
     const changes = Array.from(raw.changes, (value: unknown) => {
       if (!isRecord(value) || Object.keys(value).length !== 4) throw invalid();
@@ -334,6 +334,13 @@ function parseManualPreviewInput(raw: unknown): ScheduleManualPreviewInput {
       return { id, expectedVersion, startDate, endDate };
     });
     if (new Set(changes.map(change => change.id)).size !== changes.length) throw invalid();
+    if (Object.hasOwn(raw, 'fillMissingWorkdays')) {
+      const fill = raw.fillMissingWorkdays;
+      if (changes.length !== 1 || raw.rescheduleSuccessors === true || !isRecord(fill) || Object.keys(fill).length !== 2 ||
+          !isCalendarDate(fill.startOnOrAfter) || typeof fill.workingDays !== 'number' || !Number.isSafeInteger(fill.workingDays) ||
+          fill.workingDays < 1 || fill.workingDays > MAX_WORKING_DURATION_DAYS) throw invalid();
+      return { changes, fillMissingWorkdays: { startOnOrAfter: fill.startOnOrAfter, workingDays: fill.workingDays } };
+    }
     return { changes, ...followUp };
   }
   const { issueIds, days, workingDays } = raw;
@@ -1021,6 +1028,7 @@ export class SchedulePasteService {
   private previewManual(raw: unknown, actorId: string, hooks: PasteHooks): SchedulePreview {
     const input = parseManualPreviewInput(raw);
     const shift = 'changes' in input ? null : input;
+    const fillMissingWorkdays = 'changes' in input ? input.fillMissingWorkdays : undefined;
     const hierarchy = 'hierarchy' in input ? input.hierarchy : null;
     const expectedProjects = new Map(shift?.expectedProjects?.map(({ id, projectId }) => [id, projectId]));
     const checkProject = (issue: Issue) => {
@@ -1095,6 +1103,17 @@ export class SchedulePasteService {
           };
           try { dates = { startDate: move(issue.startDate), endDate: move(issue.endDate) }; }
           catch (error) {
+            if (!(error instanceof CalendarError)) throw error;
+            blocking.push(`${issue.key}: ${error.message}`);
+            continue;
+          }
+        } else if (fillMissingWorkdays && (!startDate || !endDate)) {
+          try {
+            const math = createCalendarMath(hooks.calendar(issue.projectId));
+            const { startOnOrAfter, workingDays } = fillMissingWorkdays;
+            dates = endDate ? calculateWorkingDateRange(math, 'endDate', endDate, workingDays)
+              : calculateWorkingDateRange(math, 'startDate', startDate ?? math.onOrAfter(startOnOrAfter), workingDays);
+          } catch (error) {
             if (!(error instanceof CalendarError)) throw error;
             blocking.push(`${issue.key}: ${error.message}`);
             continue;

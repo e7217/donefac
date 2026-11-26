@@ -668,11 +668,29 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const filterPages = useMemo(() => scoped.map(page => page.id === latestPage?.id && latestPage.version > page.version ? latestPage : page), [scoped, latestPage]);
   const searchKey = documentLabelKey(search.trim());
   const filtersActive = Boolean(searchKey || documentLabel);
-  const visible = useMemo(() => filterPages.filter(page => {
-    const labelKeys = page.labels?.map(documentLabelKey) ?? [];
-    return (!documentLabel || labelKeys.includes(documentLabel))
-      && (documentLabelKey(page.title).includes(searchKey) || labelKeys.some(key => key.includes(searchKey)));
-  }), [filterPages, searchKey, documentLabel]);
+  const searchPaths = useMemo(() => {
+    if (!filtersActive) return new Map<string, string>();
+    const currentPages = new Map(filterPages.map(page => [page.id, page]));
+    const projects = new Map(data.projects.map(project => [project.id, project.name]));
+    return new Map(filterPages.map(page => {
+      const parents = documentAncestors(page, currentPages).map(parent => parent.title || '제목 없는 문서');
+      const space = projectId === 'all' ? page.projectId === null ? '팀 공통 문서' : projects.get(page.projectId) : undefined;
+      if (space) parents.unshift(space);
+      return [page.id, parents.join(' / ') || '최상위 문서'];
+    }));
+  }, [data.projects, filterPages, filtersActive, projectId]);
+  const visible = useMemo(() => {
+    if (!filtersActive) return filterPages;
+    const terms = searchKey.split(/[/\s]+/u).filter(Boolean);
+    return filterPages.filter(page => {
+      const labelKeys = page.labels?.map(documentLabelKey) ?? [];
+      if (documentLabel && !labelKeys.includes(documentLabel)) return false;
+      const title = documentLabelKey(page.title);
+      if (title.includes(searchKey) || labelKeys.some(key => key.includes(searchKey))) return true;
+      const fields = [title, documentLabelKey(searchPaths.get(page.id) ?? ''), ...labelKeys];
+      return terms.length > 0 && terms.every(term => fields.some(field => field.includes(term)));
+    });
+  }, [filterPages, filtersActive, searchKey, documentLabel, searchPaths]);
   const treePages = useMemo(() => filtersActive ? visible : orderedTreePages(visible, data.documentOrders), [visible, filtersActive, data.documentOrders]);
   const labelOptions = useMemo(() => {
     const options = new Map<string, string>();
@@ -2391,6 +2409,10 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       const canToggle = children && !filtersActive;
       const branchCollapsed = collapsed.has(page.id);
       const selected = selectedDocumentId === page.id;
+      const title = page.title || '제목 없는 문서';
+      const searchPath = searchPaths.get(page.id);
+      const pathId = `${helpId}-${page.id}`;
+      const draftDescriptionId = searchPath && page.status === 'draft' ? `${pathId}-draft` : undefined;
       return <div key={page.id}>
         <div className={`docs-tree-row ${selected ? 'is-selected' : ''}`} style={{ paddingLeft: 10 + level * 15 }}
           data-dragging={treeDrag.draggedId === page.id ? '' : undefined} {...treeDrag.row(page)}>
@@ -2398,7 +2420,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
             aria-expanded={canToggle ? !branchCollapsed : undefined} disabled={!canToggle} onClick={() => toggleBranch(page.id)}>
             {canToggle ? branchCollapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} /> : <span />}
           </button>
-          <button type="button" className="docs-tree-link" aria-current={selected ? 'page' : undefined} onClick={() => selectDocument(page.id)}><span className="docs-page-icon">{page.icon || '📄'}</span><span>{page.title || '제목 없는 문서'}</span>{page.status === 'draft' && <span className="docs-draft-dot" title="초안" />}</button>
+          <button type="button" className="docs-tree-link" aria-current={selected ? 'page' : undefined} onClick={() => selectDocument(page.id)}
+            aria-label={searchPath ? title : undefined} aria-describedby={searchPath ? [pathId, draftDescriptionId].filter(Boolean).join(' ') : undefined}>
+            <span className="docs-page-icon">{page.icon || '📄'}</span>
+            {searchPath ? <span className="docs-tree-result-text">
+              <span className="docs-tree-result-title">{title}</span>
+              <span id={pathId} className="docs-tree-result-path" title={searchPath}>{searchPath}</span>
+            </span> : <span>{title}</span>}
+            {page.status === 'draft' && <span id={draftDescriptionId} className="docs-draft-dot" title="초안" />}
+          </button>
           <button type="button" className="docs-tree-add" title="하위 문서 만들기" aria-label={`${page.title} 하위 문서 만들기`} onClick={() => openNew(page.id)}><Plus size={13} /></button>
           {dragAvailable && <span className="docs-tree-grip" draggable aria-hidden="true" title="끌어서 문서 배치"
             onDragStart={event => treeDrag.start(event, page, data.documentOrders?.find(order =>

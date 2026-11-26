@@ -793,7 +793,9 @@ function mergeRequestReviewMessage(cause: unknown): string {
   return 'GitLab MR 검토 정보를 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function MergeRequestReview({ target, revision, directDiscussions }: { target: ReviewTarget; revision: string; directDiscussions: boolean }) {
+function MergeRequestReview({ target, revision, directDiscussions, commentActions }: {
+  target: ReviewTarget; revision: string; directDiscussions: boolean; commentActions?: GitlabActivityCommentActions;
+}) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/merge-request-review`;
@@ -802,7 +804,7 @@ function MergeRequestReview({ target, revision, directDiscussions }: { target: R
   }, '연결된 MR의 검토 정보 응답을 확인할 수 없습니다.', mergeRequestReviewMessage);
 
   return <div className="gitlab-activity-inspection">
-    {directDiscussions && <MergeRequestDiscussions target={target} revision={revision} />}
+    {directDiscussions && <MergeRequestDiscussions target={target} revision={revision} commentActions={commentActions} />}
     <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
       <GitMerge aria-hidden="true" size={14} />{view ? 'MR 검토 닫기' : 'MR 검토 확인'}
     </button>
@@ -812,7 +814,7 @@ function MergeRequestReview({ target, revision, directDiscussions }: { target: R
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
       {view.kind === 'ready' && <>
         <MergeRequestReviewResult result={view.result} url={target.url} />
-        {!directDiscussions && <MergeRequestDiscussions target={target} revision={revision} />}
+        {!directDiscussions && <MergeRequestDiscussions target={target} revision={revision} commentActions={commentActions} />}
       </>}
       <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
         <RefreshCw aria-hidden="true" size={14} />MR 검토 다시 확인
@@ -1079,7 +1081,9 @@ function mergeRequestDiscussionsMessage(cause: unknown): string {
   return 'GitLab 미해결 토론을 불러오지 못했습니다. 다시 확인해 주세요.';
 }
 
-function MergeRequestDiscussions({ target, revision }: { target: ReviewTarget; revision: string }) {
+function MergeRequestDiscussions({ target, revision, commentActions }: {
+  target: ReviewTarget; revision: string; commentActions?: GitlabActivityCommentActions;
+}) {
   const panelId = useId();
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = `/issues/${encodeURIComponent(target.issueId)}/gitlab-links/${encodeURIComponent(target.linkId)}/merge-request-discussions`;
@@ -1095,7 +1099,7 @@ function MergeRequestDiscussions({ target, revision }: { target: ReviewTarget; r
       {view.kind === 'loading' && <p role="status">GitLab 미해결 토론을 확인하고 있습니다.</p>}
       {view.kind === 'stale' && <p role="status">MR이 변경되었습니다. 미해결 토론을 다시 확인해 주세요.</p>}
       {view.kind === 'failed' && <p className="gitlab-activity-inspection-warning" role="alert">{view.message}</p>}
-      {view.kind === 'ready' && <MergeRequestDiscussionsResult result={view.result} url={target.url} />}
+      {view.kind === 'ready' && <MergeRequestDiscussionsResult result={view.result} url={target.url} commentActions={commentActions} />}
       <div className="gitlab-discussion-actions">
         <button type="button" className="btn btn-ghost" aria-disabled={view.kind === 'loading'} onClick={() => void load()}>
           <RefreshCw aria-hidden="true" size={14} />미해결 토론 다시 확인
@@ -1108,23 +1112,36 @@ function MergeRequestDiscussions({ target, revision }: { target: ReviewTarget; r
   </div>;
 }
 
-function MergeRequestDiscussionsResult({ result, url }: { result: GitlabMergeRequestDiscussions; url: URL }) {
+function MergeRequestDiscussionsResult({ result, url, commentActions }: {
+  result: GitlabMergeRequestDiscussions; url: URL; commentActions?: GitlabActivityCommentActions;
+}) {
   return <>
     <p className="gitlab-activity-inspection-meta">조회 시각 <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString('ko-KR')}</time></p>
     {result.threads.length > 0 ? <ul className="gitlab-discussion-list" role="list" aria-label="미해결 토론" tabIndex={0}>
       {result.threads.map(thread => {
         const noteUrl = new URL(url.href);
         noteUrl.hash = `note_${thread.noteId}`;
+        const commentUrl = commentActions && gitlabCommentReferenceKey(noteUrl.href);
+        const lineSide = thread.lineSide === 'old' ? '변경 전' : '변경 후';
         return <li className="gitlab-discussion" key={thread.noteId}>
           {(thread.author || thread.filePath) && <div className="gitlab-activity-inspection-meta">
             {thread.author && <strong>{thread.author}</strong>}
             {thread.filePath && <code>{thread.filePath}{thread.line !== null && `:${thread.line}`}</code>}
-            {thread.lineSide && <span>{thread.lineSide === 'old' ? '변경 전' : '변경 후'}</span>}
+            {thread.lineSide && <span>{lineSide}</span>}
           </div>}
           <p className="gitlab-discussion-excerpt">{thread.excerpt || '토론 미리보기가 없습니다.'}{thread.excerptTruncated && '…'}</p>
-          <a className="gitlab-discussion-link" href={noteUrl.href} target="_blank" rel="noopener noreferrer">
-            GitLab에서 토론 열기 <ExternalLink aria-hidden="true" size={13} />
-          </a>
+          <div className="gitlab-discussion-actions">
+            <a className="gitlab-discussion-link" href={noteUrl.href} target="_blank" rel="noopener noreferrer">
+              GitLab에서 토론 열기 <ExternalLink aria-hidden="true" size={13} />
+            </a>
+            {commentActions && commentUrl && <button className="btn btn-ghost" type="button" disabled={commentActions.disabled}
+              aria-label={`토론 #${thread.noteId} 댓글 초안에 추가`} onClick={() => {
+                const filePath = thread.filePath ? gitlabCommentCaption(thread.filePath) : '';
+                const location = filePath && thread.line !== null ? `${filePath}:${thread.line} (${lineSide})` : filePath;
+                const summary = [`GitLab MR !${result.mergeRequestIid}`, `미해결 토론 #${thread.noteId}`, location].filter(Boolean).join(' · ');
+                commentActions.add({ href: commentUrl, body: `${summary}\n<${commentUrl}>` });
+              }}><MessageSquarePlus aria-hidden="true" size={14} />토론을 댓글 초안에 추가</button>}
+          </div>
         </li>;
       })}
     </ul> : <p>{result.hasMore ? '조회 범위에서 미해결 토론을 찾지 못했습니다.' : '표시할 수 있는 미해결 토론이 없습니다.'}</p>}
@@ -1362,9 +1379,13 @@ function savedActivityCommentUrl(link: GitlabLink, url: URL | null): string | un
 }
 
 export function gitlabCommentReferenceKey(href: string): string | null {
+  const url = gitlabActivityUrl(commentWebUrl(href), 'pipeline');
+  if (url && /^#note_[1-9]\d*$/u.test(url.hash)) {
+    const mergeRequest = normalizeGitlabSearchInput(`${url.origin}${url.pathname.replace(/\/$/u, '')}`);
+    if (mergeRequest && /\/-\/merge_requests\/[1-9]\d*$/u.test(mergeRequest)) return `${mergeRequest}${url.hash}`;
+  }
   const activity = normalizeGitlabSearchInput(href);
   if (activity) return activity;
-  const url = gitlabActivityUrl(commentWebUrl(href), 'pipeline');
   return url && /^\/(?:[^/]+\/){2,}-\/jobs\/[1-9]\d*\/?$/u.test(url.pathname)
     ? `${url.origin}${url.pathname.replace(/\/$/u, '')}` : null;
 }
@@ -1448,7 +1469,7 @@ function ActivityRow({ link, issueContext, issueVersion, manualActions, statusAc
     {mr && <MergeRequestChangedFiles key={`mr-files:${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeCommitShas])} />}
     {mr && state === 'opened' && <MergeRequestReview key={`${link.id}:${link.manualLinkId ?? ''}:${mr.url.href}`} target={mr}
-      directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'}
+      directDiscussions={link.mergeReadiness?.state === 'discussions_unresolved'} commentActions={commentActions}
       revision={JSON.stringify([link.state, link.updatedAt, link.sourceBranch, link.sourceSha, link.mergeReadiness?.state,
         link.mergeReadiness?.observedAt, link.mergeReadiness?.source])} />}
     {(issueKey || statusCheck || manual || onCopyActivityLink || commentUrl || followUp) && <div className="gitlab-activity-row-actions">

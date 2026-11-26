@@ -48,6 +48,42 @@ async function handoffCalendar(f: Fixture, projectId: string, exceptions: WorkCa
 
 const scheduleState = async (f: Fixture) => (await f.request('/workspace')).data as WorkspaceSnapshot;
 
+test('quick date completion counts project workdays and rejects apply after a calendar change', async t => {
+  const f = await fixture();
+  t.after(async () => { await f.close(); f.remove(); });
+  const mondayOff = { date: '2026-11-23', isWorking: false, label: '월요일 휴무' };
+  await handoffCalendar(f, f.projectId, [mondayOff]);
+  const issue = await makeIssue(f, '근무일로 일정을 잡을 업무', null, null);
+  const input = {
+    changes: [{ id: issue.id, expectedVersion: issue.version, startDate: null, endDate: null }],
+    fillMissingWorkdays: { startOnOrAfter: '2026-11-21', workingDays: 3 },
+  };
+  const manualPreview = (body: unknown = input) => f.request('/schedule/manual-preview', 'POST', body);
+  const manualApply = (previewId: string) => f.request('/schedule/manual-apply', 'POST', { previewId });
+  const dates = (result: { data: { changes: ScheduleChange[] } }) => result.data.changes.map(change => [change.toStart, change.toEnd]);
+  const before = await manualPreview();
+  assert.equal(before.status, 200, JSON.stringify(before.data));
+  assert.deepEqual(dates(before), [['2026-11-24', '2026-11-26']]);
+  const backward = await manualPreview({ ...input, changes: [{ ...input.changes[0], endDate: '2026-11-23' }] });
+  assert.deepEqual(dates(backward), [['2026-11-18', '2026-11-23']]);
+  const explicit = await manualPreview({ ...input, changes: [{ ...input.changes[0], startDate: '2026-11-20', endDate: '2026-11-23' }] });
+  assert.deepEqual(dates(explicit), [['2026-11-20', '2026-11-23']]);
+  assert.equal((await manualPreview({ ...input, rescheduleSuccessors: true })).status, 400);
+  assert.equal((await manualPreview({ ...input, fillMissingWorkdays: { ...input.fillMissingWorkdays, workingDays: 0 } })).status, 400);
+
+  await handoffCalendar(f, f.projectId, [mondayOff, { date: '2026-11-21', isWorking: true, label: '토요일 근무' }]);
+  assert.equal((await manualApply(before.data.previewId)).status, 409);
+  assert.deepEqual(await getIssue(f, issue.id), issue);
+  const refreshed = await manualPreview();
+  assert.deepEqual(dates(refreshed), [['2026-11-21', '2026-11-25']]);
+  const saved = await manualApply(refreshed.data.previewId);
+  assert.equal(saved.status, 200, JSON.stringify(saved.data));
+  assert.equal((await getIssue(f, issue.id)).endDate, '2026-11-25');
+  assert.equal((await f.request('/schedule/undo', 'POST', { undoId: saved.data.undoId })).status, 200);
+  assert.equal((await getIssue(f, issue.id)).startDate, null);
+  assert.equal((await getIssue(f, issue.id)).endDate, null);
+});
+
 async function handoff(f: Fixture, relation: IssueRelation, anchorChange?: TeamFollowUpScheduleInput['anchorChange']): Promise<AutomaticSchedulePreview> {
   assert.ok(relation.version);
   const result = await f.request(teamReview, 'POST', { relationId: relation.id, expectedVersion: relation.version, anchorChange });

@@ -1377,6 +1377,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 
 브라우저의 `POST /api/schedule/manual-preview`에 `{issueIds,days,workingDays}`를 보내 여러 업무를 이동하거나 `{changes:[{id,expectedVersion,startDate,endDate}]}`로 날짜를 직접 지정한다. 대상은 1~1,000개이며, 이동 일수의 범위는 −3,650~3,650이다. 날짜를 직접 지정할 때는 두 날짜에 각각 `YYYY-MM-DD` 또는 `null`을 보낸다. 여러 프로젝트가 포함된 근무일 이동은 각 업무가 속한 프로젝트의 달력을 사용한다.
 
+한 업무의 빈 날짜를 채우려면 `changes`에 한 건을 넣고 `fillMissingWorkdays: {startOnOrAfter,workingDays}`를 보낸다. `workingDays`는 1~3,650 범위의 정수다. 서버는 지정된 날짜를 유지하고 `null`인 날짜를 해당 프로젝트 달력으로 계산한다. 양쪽이 `null`이면 `startOnOrAfter` 이후의 첫 근무일을 시작일로 삼으며 기준 날짜가 근무일이면 그날부터 센다. 이 요청은 먼저 한 업무의 날짜를 검토하며 `rescheduleSuccessors: true`를 함께 보내면 `400`을 반환한다.
+
 직접 지정, 선택 업무 이동, 상위·하위 이동에 `rescheduleSuccessors: true`를 함께 보내면 각 프로젝트의 직접·간접 후행을 검토한다. 이 옵션만 켠 경우 직접 지정은 현재 값과 같은 날짜 쌍도 기준으로 계산하고, 이동은 이동 일수로 날짜가 달라진 업무를 기준으로 삼는다. 기준 날짜를 고정하고 공통 후행은 모든 연결 조건을 적용해 한 번 계산한다. `changes`에는 날짜가 달라지는 업무를 반환하며, 후행 조정으로 날짜가 달라진 업무는 `followUpIssueIds`에도 기록한다. 1,000개 변경 한도는 모든 프로젝트의 기준과 후행 변경을 합산한다. 적용 시 검토한 후행 업무와 연결, 프로젝트 규칙을 함께 확인한다.
 
 `rescheduleSuccessors: true`와 `includeTeamBlockers: true`를 함께 보내면 세 요청 형식 모두에서 프로젝트 간 차단을 포함한다. `includeTeamBlockers: true`만 보내면 `400`을 반환한다. 실제 날짜가 바뀐 업무에서 시작해 프로젝트 내 선후행 연결과 열린 Teamspace·확인된 Jira 차단을 따라간다. 직접 지정하거나 이동해 계산한 기준 날짜는 고정한다. 계획으로 들어오는 범위 밖 선행에는 저장된 날짜를 사용한다. 프로젝트 간 차단은 후행 프로젝트 달력의 FS·0근무일 조건을 사용한다. 옵션을 켜면 `changes`에 각 업무의 `projectId`가 포함된다.

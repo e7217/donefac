@@ -139,13 +139,13 @@ test('360px 간트의 일정 완성은 입력한 시작일을 기준으로 종�
   try {
     const issue = await data.issue(data.first, '시작일만 입력할 업무', null, null);
     const other = await data.issue(data.first, '입력을 유지할 업무', date(24), date(27));
-    const typedStart = '2027-02-09';
-    const inferredEnd = '2027-02-11';
+    const typedStart = '2027-02-05';
+    const inferredEnd = '2027-02-09';
     const otherDraftEnd = date(30);
     const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
     const writes = scheduleWrites(page);
     const unscheduled = page.locator('.gantt-unscheduled-row').filter({ hasText: issue.title });
-    const initial = button(unscheduled, '오늘부터 3일');
+    const initial = button(unscheduled, '오늘부터 3근무일');
     const complete = button(unscheduled, '일정 완성');
     await expect(initial).toBeVisible();
     await chart.end(other).fill(otherDraftEnd);
@@ -163,8 +163,8 @@ test('360px 간트의 일정 완성은 입력한 시작일을 기준으로 종�
     await complete.click();
     const previewResponse = await previewRequest;
     expect(previewResponse.request().postDataJSON()).toEqual({ changes: [{
-      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: inferredEnd,
-    }] });
+      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: null,
+    }], fillMissingWorkdays: { startOnOrAfter: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u), workingDays: 3 } });
     const preview = await json<SchedulePreview>(previewResponse);
     expect(preview.changes).toEqual([expect.objectContaining({ id: issue.id, toStart: typedStart, toEnd: inferredEnd })]);
     const applyResponse = await applyRequest;
@@ -189,7 +189,6 @@ test('간트의 일정 완성을 다시 미리볼 때 입력한 시작일과 동
   try {
     const issue = await data.issue(data.first, '동료가 종료일을 저장할 업무', null, null);
     const typedStart = '2027-02-09';
-    const inferredEnd = '2027-02-11';
     const peerEnd = '2027-02-16';
     const chart = await openChart(page, data.first, data.actor.id, data.prefix, '');
     const writes = scheduleWrites(page);
@@ -207,9 +206,11 @@ test('간트의 일정 완성을 다시 미리볼 때 입력한 시작일과 동
     const rejectedPreview = nextPost(page, manualPreview);
     await complete.click();
     const rejected = await rejectedPreview;
+    const { fillMissingWorkdays } = rejected.request().postDataJSON();
+    expect(fillMissingWorkdays).toEqual({ startOnOrAfter: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/u), workingDays: 3 });
     expect(rejected.request().postDataJSON()).toEqual({ changes: [{
-      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: inferredEnd,
-    }] });
+      id: issue.id, expectedVersion: issue.version, startDate: typedStart, endDate: null,
+    }], fillMissingWorkdays });
     expect(rejected.status(), await rejected.text()).toBe(409);
     await expect(dialog.getByRole('alert')).toBeVisible();
     await expect(chart.start(issue)).toHaveValue(typedStart);
@@ -221,7 +222,7 @@ test('간트의 일정 완성을 다시 미리볼 때 입력한 시작일과 동
     const reviewed = await reviewing;
     expect(reviewed.request().postDataJSON()).toEqual({ changes: [{
       id: issue.id, expectedVersion: peerChange.version, startDate: typedStart, endDate: peerEnd,
-    }] });
+    }], fillMissingWorkdays });
     const preview = await json<SchedulePreview>(reviewed);
     expect(preview.changes).toEqual([expect.objectContaining({ id: issue.id, fromStart: null, fromEnd: peerEnd, toStart: typedStart, toEnd: peerEnd })]);
     await expect(dialog.locator('.gantt-new-dates')).toHaveText(`${typedStart}${peerEnd}`);

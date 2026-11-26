@@ -81,10 +81,8 @@ type InlineDateDraft = InlineDateValues & { accept: (saved: Issue) => void; owne
 type ChartDateDraft = { source: Issue; changes: ScheduleBulkDateChanges; owner?: symbol; stored?: StoredGanttDateDraft };
 type ChartBlockerEdit = { source: Issue; target: Issue; opener: HTMLButtonElement; sourceDraft?: ChartDateDraft; targetDraft?: ChartDateDraft };
 type DatePreviewOpener = HTMLButtonElement | HTMLInputElement;
-type QuickScheduleCompletion = { entered: ScheduleBulkDateChanges; fallbackStart: string };
 type InlineScheduleOrigin = {
   issueId: string; accept?: (issue: Issue) => void; returnToMissingRow: boolean; focus: DatePreviewOpener;
-  completion?: QuickScheduleCompletion;
 };
 type ManualReview = {
   input: ScheduleManualPreviewInput;
@@ -95,8 +93,9 @@ type ManualReview = {
 };
 type ManualReviewProblem = { kind: 'stale' | 'uncertain' | 'unavailable'; message: string };
 type ScheduleShiftInput = Extract<ScheduleManualPreviewInput, { days: number }>;
+type ManualDateInput = Extract<ScheduleManualPreviewInput, { changes: ScheduleAnchorChange[] }>;
 type ShiftMode = 'selection' | 'hierarchy';
-function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ScheduleManualPreviewInput {
+function manualDates(issue: Issue, startDate: string | null, endDate: string | null): ManualDateInput {
   return { changes: [{ id: issue.id, expectedVersion: issue.version, startDate, endDate }] };
 }
 function inlineDateChange(draft: InlineDateValues, issue = draft.source, picked?: ScheduleDependencyEndpoint): ScheduleAnchorChange {
@@ -235,14 +234,7 @@ const REFRESH_FEEDBACK = {
   updated: '간트를 새로고침했습니다.', skipped: '간트 새로고침을 건너뛰었습니다.', failed: '간트를 새로고침하지 못했습니다. 다시 시도해 주세요.',
 } as const;
 const MIN_TIMELINE_DAY = dayNumber('0000-01-01'), MAX_TIMELINE_DAY = dayNumber('9999-12-31');
-
-function completeDateRange(issue: Issue, { entered, fallbackStart }: QuickScheduleCompletion) {
-  const existingEnd = entered.endDate ?? issue.endDate;
-  const startDate = entered.startDate ?? issue.startDate ??
-    (existingEnd ? isoDay(Math.max(MIN_TIMELINE_DAY, dayNumber(existingEnd) - 2)) : fallbackStart);
-  const endDate = existingEnd ?? isoDay(Math.min(MAX_TIMELINE_DAY, dayNumber(startDate) + 2));
-  return { startDate, endDate };
-}
+const QUICK_SCHEDULE_WORKING_DAYS = 3;
 
 const clampWindowStart = (day: number) => Math.max(MIN_TIMELINE_DAY, Math.min(MAX_TIMELINE_DAY - MAX_TIMELINE_DAYS + 1, day));
 const windowForDate = (date: string) => isoDay(clampWindowStart(dayNumber(date) - 7));
@@ -1976,7 +1968,6 @@ function ProjectGantt(props: GanttProps) {
     if (busyRef.current || !manualReview || manualProblem?.kind !== 'stale' || missingHierarchyAnchor) return;
     let input = manualReview.input;
     const chartDates = manualReview.chartDates;
-    const completion = manualReview.inline?.completion;
     const singleDateEdit = manualReview.inline ?? chartDates;
     const dateEdits = manualReview.inlineDates ?? (singleDateEdit ? [singleDateEdit] : undefined);
     if (dateEdits && 'changes' in input) {
@@ -1988,9 +1979,7 @@ function ProjectGantt(props: GanttProps) {
           setManualProblem({ kind: 'stale', message: `${draft.source.key}: 업무가 이동했거나 삭제되었습니다. 미리보기를 닫고 현재 간트에서 날짜를 다시 확인하세요.` });
           return;
         }
-        if (completion) {
-          changes.push({ id: issue.id, expectedVersion: issue.version, ...completeDateRange(issue, completion) });
-        } else if (chartDates && !chartDates.pickedEdge) {
+        if (chartDates && !chartDates.pickedEdge) {
           changes.push({ id: issue.id, expectedVersion: issue.version, startDate: draft.startDate, endDate: draft.endDate });
         } else changes.push(inlineDateChange(draft, issue, chartDates?.pickedEdge));
       }
@@ -2022,10 +2011,11 @@ function ProjectGantt(props: GanttProps) {
       await refresh().catch(() => undefined);
     } finally { markBusy(false); }
   }
-  async function saveDates(issue: Issue, startDate: string | null, endDate: string | null, inline: InlineScheduleOrigin) {
-    if (startDate === issue.startDate && endDate === issue.endDate) return;
+  async function saveDates(issue: Issue, startDate: string | null, endDate: string | null, inline: InlineScheduleOrigin,
+    fillMissingWorkdays?: ManualDateInput['fillMissingWorkdays']) {
+    if (!fillMissingWorkdays && startDate === issue.startDate && endDate === issue.endDate) return;
     if (busyRef.current || manualReview) { notify('진행 중인 일정 변경이 끝난 뒤 다시 시도하세요.', 'error'); return; }
-    const input = manualDates(issue, startDate, endDate);
+    const input = { ...manualDates(issue, startDate, endDate), ...(fillMissingWorkdays && { fillMissingWorkdays }) };
     const dateOrigin = { ...inline, source: issue, startDate, endDate };
     markBusy(true);
     try {
@@ -2061,12 +2051,10 @@ function ProjectGantt(props: GanttProps) {
       return;
     }
     const source = draft?.source ?? issue;
-    const completion = { entered, fallbackStart: todayDate() };
-    const { startDate, endDate } = completeDateRange(source, completion);
-    void saveDates(source, startDate, endDate, {
-      issueId: issue.id, returnToMissingRow: true, focus: opener, completion,
+    void saveDates(source, entered.startDate ?? source.startDate, entered.endDate ?? source.endDate, {
+      issueId: issue.id, returnToMissingRow: true, focus: opener,
       accept: draft ? saved => acceptChartDateDraft(saved, draft) : undefined,
-    });
+    }, { startOnOrAfter: todayDate(), workingDays: QUICK_SCHEDULE_WORKING_DAYS });
   }
   function reviewSuccessors(anchorChange: CascadeAnchorChange, origin: CascadeOrigin) {
     const issue = projectIssues.find(value => value.id === anchorChange.id);
@@ -3139,7 +3127,8 @@ function ProjectGantt(props: GanttProps) {
       const stored = recoverableDates(issue, inlineDateRecords.get(issue.id));
       const draft = stored && !draftDatesAreSaved(issue, stored) ? stored : undefined;
       const clearedDate = draft && ((draft.startDate && draft.draftStart === null) || (draft.endDate && draft.draftEnd === null));
-      const completionLabel = clearedDate ? '일정과 연결 편집' : issue.startDate || issue.endDate || draft ? '일정 완성' : '오늘부터 3일';
+      const completionLabel = clearedDate ? '일정과 연결 편집' : issue.startDate || issue.endDate || draft ? '일정 완성'
+        : `오늘부터 ${QUICK_SCHEDULE_WORKING_DAYS}근무일`;
       return <div key={issue.id} className="gantt-unscheduled-row">
         <button type="button" onClick={event => openIssueRow(issue.id, event.currentTarget)}><IssueTypeIcon type={issue.type} data={data} projectId={issue.projectId} /><span className="issue-key">{issue.key}</span><strong>{issue.title}</strong></button>
         <button type="button" className="btn gantt-missing-date-action" aria-label={`${issue.key} 날짜 입력`} data-schedule-owner={issue.id}

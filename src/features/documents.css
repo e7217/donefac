@@ -31,6 +31,9 @@
 .docs-tree-toggle:disabled { cursor:default; }
 .docs-tree-link { display:flex; align-items:center; gap:7px; flex:1; min-width:0; background:none; border:0; text-align:left; color:inherit; padding:8px 2px; font-size:11px; cursor:pointer; }
 .docs-tree-link>span:nth-child(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.docs-tree-link .docs-tree-result-text { display:block; min-width:0; white-space:normal; }
+.docs-tree-result-title { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.docs-tree-result-path { display:block; margin-top:3px; color:#66738a; font-size:.95em; line-height:1.3; overflow-wrap:anywhere; }
 .docs-page-icon { font-size:13px; flex-shrink:0; filter:saturate(.65); }
 .docs-draft-dot { height:4px; width:4px; border-radius:50%; background:#b4bfd2; flex-shrink:0; }
 .docs-tree-add { border:0; background:transparent; color:#9aa5ba; cursor:pointer; opacity:0; padding:3px; }

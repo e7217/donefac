@@ -2380,7 +2380,8 @@ export const MAX_SCHEDULE_MANUAL_ISSUES = 1000;
 export type ScheduleManualPreviewInput = (({ issueIds: string[] } | { hierarchy: Pick<ScheduleAnchorChange, 'id' | 'expectedVersion'> }) & {
     days: number; workingDays: boolean; expectedProjects?: { id: string; projectId: string }[];
   } |
-  { changes: ScheduleAnchorChange[] }) & { rescheduleSuccessors?: boolean; includeTeamBlockers?: boolean };
+  { changes: ScheduleAnchorChange[]; fillMissingWorkdays?: { startOnOrAfter: string; workingDays: number } }) &
+  { rescheduleSuccessors?: boolean; includeTeamBlockers?: boolean };
 export const MAX_TEAM_FOLLOW_UP_RELATIONS = 100;
 export interface TeamFollowUpRelationReference { relationId: string; expectedVersion: number }
 export type TeamFollowUpScheduleInput = (TeamFollowUpRelationReference | { relations: TeamFollowUpRelationReference[] }) & {

@@ -233,6 +233,24 @@ test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·�
     await expect(title).toHaveValue('저장하지 않은 MR 검토 업무 제목');
     await expect(comment).toHaveValue('작성 중인 MR 검토 메모');
 
+    const beforeDraft = remoteCalls.length;
+    const prefix = `작성 중인 MR 검토 메모\n<${mrUrl()}>`;
+    await comment.fill(prefix);
+    const addDiscussion = visibleThread.getByRole('button', { name: '토론 #4401 댓글 초안에 추가', exact: true });
+    await addDiscussion.press('Enter');
+    const firstNote = `${prefix}\n\nGitLab MR !8 · 미해결 토론 #4401 · src/measurement/value.ts:27 (변경 후)\n<${mrUrl()}#note_4401>`;
+    await expect(comment).toHaveValue(firstNote);
+    await expect(comment).toBeFocused();
+    const alternateNote = firstNote.replace('#note_4401>', '/?view=parallel#note_4401>');
+    await comment.fill(alternateNote);
+    await addDiscussion.click();
+    await expect(comment).toHaveValue(alternateNote);
+    await secondThread.getByRole('button', { name: '토론 #4402 댓글 초안에 추가', exact: true }).click();
+    await expect(comment).toHaveValue(`${alternateNote}\n\nGitLab MR !8 · 미해결 토론 #4402 · src/measurement/old-value.ts:13 (변경 전)\n<${mrUrl()}#note_4402>`);
+    expect(remoteCalls).toHaveLength(beforeDraft);
+    await expect(title).toHaveValue('저장하지 않은 MR 검토 업무 제목');
+    await comment.fill('작성 중인 MR 검토 메모');
+
     const reviewRoute = /\/merge-request-review$/u;
     const pendingDiscussion = await holdNextResponse(page, discussionRoute);
     const pendingReview = await holdNextResponse(page, reviewRoute);

@@ -17,10 +17,12 @@ import { NewIssueModal } from './NewIssueModal';
 import { errorMessage } from './schedule-utils';
 import './cycle-board.css';
 
+export type CycleBoardFilters = { query?: string; statusId?: string; assigneeId?: string | null };
+
 type Props = FeatureProps & {
   initialCycleId?: string | null;
-  query: string;
-  onQueryChange: (query: string) => void;
+  filters: CycleBoardFilters;
+  onFiltersChange: (filters: CycleBoardFilters) => void;
   onChangeCycle: (id: string) => boolean;
   onOpenPlanning: (id: string) => void;
   onOpenIssues: () => void;
@@ -53,7 +55,7 @@ export function CycleBoard(props: Props) {
 }
 
 function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notify,
-  initialCycleId, query, onQueryChange, onChangeCycle, onOpenPlanning, onOpenIssues, onOpenIssueSchedule, onOpenIssueForReview }: Props) {
+  initialCycleId, filters, onFiltersChange, onChangeCycle, onOpenPlanning, onOpenIssues, onOpenIssueSchedule, onOpenIssueForReview }: Props) {
   const uid = useId();
   const [moveIssue, setMoveIssue] = useState<Issue | null>(null);
   const [creation, setCreation] = useState<Creation | null>(null);
@@ -90,18 +92,24 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
   const cycleId = cycle?.id;
   const backlog = issues.filter(issue => cycleIdOf(issue) === null);
   const members = cycleId ? issues.filter(issue => cycleIdOf(issue) === cycleId) : [];
+  const workflow = projectWorkflow(data, projectId);
+  const { query = '', statusId, assigneeId } = filters;
   const terms = query.toLocaleLowerCase().trim().split(/\s+/u).filter(Boolean);
-  const matchesSearch = (issue: Issue) => terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
+  const hasFieldFilters = Boolean(statusId || assigneeId !== undefined);
+  const filtered = terms.length > 0 || hasFieldFilters;
+  const matchesFilters = (issue: Issue) => (!statusId || issue.status === statusId) &&
+    (assigneeId === undefined || (issue.assigneeId ?? null) === assigneeId) &&
+    terms.every(term => nameOf(issue).toLocaleLowerCase().includes(term));
   const lanes = [{ items: backlog, targetCycle: undefined }, ...(cycle ? [{ items: members, targetCycle: cycle }] : [])]
-    .map(lane => ({ ...lane, visible: lane.items.filter(matchesSearch) }));
+    .map(lane => ({ ...lane, visible: lane.items.filter(matchesFilters) }));
   const visibleIssues = lanes.flatMap(lane => lane.visible);
   const bulk = useIssueBulkEdit({ data, projectId, actorId, refresh, notify }, visibleIssues);
   const writable = Boolean(order && actorId && !pending && !hold && !creation && !statusEdit && !bulk.active);
   const canEditStatus = Boolean(actorId && !pending && !hold && !moveIssue && !creation && !statusEdit && !bulk.active);
   const created = feedback?.created && (issues.find(issue => issue.id === feedback.created?.id) ?? feedback.created);
-  const createdMatchesSearch = created && matchesSearch(created);
+  const createdMatchesFilters = created && matchesFilters(created);
   const createdInLane = created && (cycleIdOf(created) === null || cycleIdOf(created) === cycleId);
-  const hiddenCreated = created && (!createdMatchesSearch || !createdInLane) ? created : null;
+  const hiddenCreated = created && (!createdMatchesFilters || !createdInLane) ? created : null;
 
   useEffect(() => {
     const guard = (event: Event) => {
@@ -152,7 +160,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     focusTarget.current = null;
     const row = rowOpeners.current.get(target);
     (row ?? searchInput.current)?.focus({ preventScroll: !row });
-  }, [cycleId, cycles, feedback, issues, onChangeCycle, pending, query]);
+  }, [cycleId, cycles, feedback, filters, issues, onChangeCycle, pending]);
 
   useEffect(() => {
     if (creation || !created || creationFocus.current !== created.id) return;
@@ -196,7 +204,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
       return;
     }
     focusTarget.current = issue.id;
-    onQueryChange('');
+    onFiltersChange({});
     setFeedback({ text: `${issue.key} 업무를 만들었습니다.` });
   }
 
@@ -226,7 +234,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
     if (!canEditStatus || !choices.length || request.current || dragSource.current ||
         !window.dispatchEvent(new Event('teamspace:navigate', { cancelable: true }))) return;
     statusFocus.current = null;
-    setStatusEdit({ issue, current, choices, workflowVersion: projectWorkflow(data, issue.projectId).version, opener });
+    setStatusEdit({ issue, current, choices, workflowVersion: workflow.version, opener });
   }
 
   function closeStatusEdit() {
@@ -409,7 +417,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
         <label htmlFor={`${uid}-search`}>업무 검색</label>
         <div className="cycle-board-search"><Search size={16} aria-hidden="true" />
           <input id={`${uid}-search`} className="field" type="text" ref={searchInput} value={query} maxLength={200}
-            placeholder="업무 키 또는 제목" disabled={bulk.locked} onChange={event => onQueryChange(event.currentTarget.value)} /></div>
+            placeholder="업무 키 또는 제목" disabled={bulk.locked} onChange={event => onFiltersChange({ ...filters, query: event.currentTarget.value })} /></div>
       </div>
       <div>
         <label htmlFor={`${uid}-cycle`}>보고 있는 사이클</label>
@@ -419,10 +427,39 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
           {cycles.map(item => <option key={item.id} value={item.id}>{item.name} · {item.status === 'active' ? '진행 중' : '계획'}</option>)}
         </select>
       </div>
+      <div className="cycle-board-filters">
+        <div>
+          <label htmlFor={`${uid}-filter-status`}>상태 필터</label>
+          <select className="field" id={`${uid}-filter-status`} value={statusId ?? ''} disabled={bulk.locked}
+            onChange={event => onFiltersChange({ ...filters, statusId: event.currentTarget.value || undefined })}>
+            <option value="">모든 상태</option>
+            {statusId && !workflow.statuses.some(status => status.id === statusId) &&
+              <option value={statusId} disabled>{statusId} (저장된 상태)</option>}
+            {workflow.statuses.map(status => <option value={status.id} key={status.id}>{status.label}</option>)}
+          </select>
+        </div>
+        <div>
+          <label htmlFor={`${uid}-filter-assignee`}>담당자 필터</label>
+          <select className="field" id={`${uid}-filter-assignee`} value={assigneeId === null ? 'none' : assigneeId ? `member:${assigneeId}` : ''}
+            disabled={bulk.locked} onChange={event => {
+              const { value } = event.currentTarget;
+              onFiltersChange({ ...filters, assigneeId: value === 'none' ? null : value ? value.slice('member:'.length) : undefined });
+            }}>
+            <option value="">모든 담당자</option>
+            <option value="none">담당자 미지정</option>
+            {assigneeId && !users.has(assigneeId) && <option value={`member:${assigneeId}`} disabled>담당자 확인 불가</option>}
+            {data.users.map(user => <option value={`member:${user.id}`} key={user.id}>{user.name}</option>)}
+          </select>
+        </div>
+      </div>
+      {(query || hasFieldFilters) && <button className="btn btn-ghost cycle-board-reset-filters" type="button" disabled={bulk.locked}
+        onClick={() => { onFiltersChange({}); searchInput.current?.focus({ preventScroll: true }); }}>업무 필터 초기화</button>}
     </div>
     {(feedback || hold) && <div className="cycle-board-feedback" data-error={feedback?.error || undefined}>
       {feedback && <p role={feedback.error ? 'alert' : 'status'}>{pending && <Loader2 size={15} className="spin" aria-hidden="true" />}{feedback.text}
-        {hiddenCreated && (createdInLane ? ' 현재 검색 조건에서 숨겨져 있습니다.' : ' 현재 선택한 사이클 밖에 있습니다.')}</p>}
+        {hiddenCreated && (createdInLane
+          ? (hasFieldFilters ? ' 현재 조건에서 숨겨져 있습니다.' : ' 현재 검색 조건에서 숨겨져 있습니다.')
+          : ' 현재 선택한 사이클 밖에 있습니다.')}</p>}
       {hiddenCreated && <button ref={showCreatedButton} className="btn" type="button" disabled={pending}
         onClick={() => revealCreated(hiddenCreated)}>만든 업무 보기</button>}
       {hold?.stage === 'uncertain' ? <button className="btn btn-primary" type="button" disabled={pending}
@@ -433,7 +470,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
       <div className="cycle-board-bulk-controls" ref={bulkControls} tabIndex={-1}>
         <IssueBulkSelectVisible editor={bulk} label="표시된 업무 전체 선택" />
       </div>
-      <IssueBulkEdit editor={bulk} statuses={projectWorkflow(data, projectId).statuses} users={data.users} onClose={closeBulkEdit}
+      <IssueBulkEdit editor={bulk} statuses={workflow.statuses} users={data.users} onClose={closeBulkEdit}
         selectionNote="현재 백로그와 선택한 사이클에 표시된 업무를 선택할 수 있습니다." />
     </>}
     {cycle && <CycleProgress cycle={cycle} actorId={actorId} data={data} projectId={projectId} openIssue={openIssue} />}
@@ -454,7 +491,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
               <div>
                 <h2>{targetCycle ? targetCycle.name : '백로그'}</h2>
                 <p>{targetCycle ? <>{targetCycle.status === 'active' ? '진행 중' : '계획'} · {dateRange}</> : '사이클 미지정'}
-                  {' · '}{terms.length ? `${visible.length}/${items.length}` : items.length}개{targetCycle && ` · 완료 ${done}개`}</p>
+                  {' · '}{filtered ? `${visible.length}/${items.length}` : items.length}개{targetCycle && ` · 완료 ${done}개`}</p>
               </div>
               <div className="cycle-board-lane-actions">
                 {targetCycle && <button className="btn btn-ghost" type="button" onClick={() => onOpenPlanning(targetCycle.id)}>사이클 상세</button>}
@@ -525,7 +562,7 @@ function ProjectCycleBoard({ data, projectId, actorId, openIssue, refresh, notif
                     }}>사이클 이동</button>
                 </div>}
               </li>;
-            })}</ol> : <p className="cycle-board-empty">{terms.length ? '검색에 맞는 업무가 없습니다.' : '아직 배정된 업무가 없습니다.'}</p>}
+            })}</ol> : <p className="cycle-board-empty">{filtered ? '현재 조건에 맞는 업무가 없습니다.' : '아직 배정된 업무가 없습니다.'}</p>}
           </section>;
         })}
       {!cycle && <section className="cycle-board-lane" aria-label="선택한 사이클">
