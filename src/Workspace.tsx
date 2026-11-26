@@ -1231,9 +1231,11 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (!issue) return false;
     const milestone = snapshot?.milestones?.find(value => value.id === id && value.projectId === issue.projectId && value.issueIds.includes(issue.id));
     if (!milestone) return false;
-    const sameGantt = current?.view === 'gantt' && !current.ganttScope && current.projectId === milestone.projectId;
-    return requestRoute({ ...(sameGantt ? current : {}), projectId: milestone.projectId, view: 'gantt',
-      documentId: null, issueId: null, documentPreviewId: null, ganttMilestoneId: id });
+    const sameGantt = current?.view === 'gantt' && (current.ganttScope === 'team'
+      ? !current.ganttProject || current.ganttProject === milestone.projectId : current.projectId === milestone.projectId);
+    const context = sameGantt ? current : { projectId: milestone.projectId };
+    return requestRoute({ ...context, view: 'gantt', documentId: null, issueId: null, issueCommentId: null,
+      documentPreviewId: null, ganttMilestoneId: id });
   };
   const openFollowUpSchedule = (id: string) => {
     const issue = dataRef.current?.issues.find(value => value.id === id);

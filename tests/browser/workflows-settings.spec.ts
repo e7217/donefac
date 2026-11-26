@@ -56,7 +56,7 @@ test('프로젝트에서 추가한 상태·전이·필수 속성이 간트 생�
     created = await (await createResponse).json() as Issue;
     expect(created.status).toBe(stateId);
     await expect(page.locator(`[data-issue-id="${created.id}"] .gantt-task-range`)).toHaveCSS('--bar-color', '#588b9c');
-    await page.locator('.project-navigation button').filter({ hasText: /^업무/ }).click();
+    await page.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
     await page.getByRole('button', { name: '보드', exact: true }).click();
     await page.getByLabel('업무 검색', { exact: true }).fill(created.title);
     const column = page.locator('.issue-board-column').filter({ has: page.locator('.issue-board-heading strong').filter({ hasText: label }) });

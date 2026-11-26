@@ -8,7 +8,7 @@ test('업무 생성과 상태·댓글·검색이 API에 저장된다', async ({ 
   page.on('pageerror', error => errors.push(error.message));
   try {
     await page.goto('/');
-    await page.locator('.project-navigation button').filter({hasText: /^업무/}).click();
+    await page.locator('.project-navigation').getByRole('button', { name: /^업무(?: [\d,]+)?$/u }).click();
     await page.getByRole('button', {name:'업무 만들기', exact:true}).first().click();
     const form = page.getByRole('dialog', {name:'새 업무 만들기'});
     await form.getByLabel('업무 제목').fill(title);

@@ -213,6 +213,72 @@ test('팀 간트와 월간 일정에서 프로젝트별 이정표를 구분하�
   } finally { await f.close(); }
 });
 
+test('팀 간트의 티켓에서 연결된 이정표를 열고 날짜 초안과 보기 이력을 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const selectedDay = '2031-03-03';
+  try {
+    const owner = f.otherProject;
+    const linked = await f.issue('이정표에 연결된 업무', { startDate: selectedDay, endDate: '2031-03-06' }, owner);
+    const other = await f.issue('날짜 초안을 유지할 업무', { startDate: selectedDay, endDate: '2031-03-07' }, owner);
+    const milestone = await f.milestone('연결된 이정표', '2031-03-05', [linked.id], owner);
+    const g = await openGantt(page, f, selectedDay, true);
+    const filter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    await filter.selectOption(owner.id);
+    const draft = g.row(other).getByLabel(`${other.key} 종료일`, { exact: true });
+    await draft.fill('2031-03-10');
+    await g.row(linked).getByRole('button', { name: new RegExp(linked.title) }).first().click();
+    const drawer = page.getByRole('dialog', { name: linked.title, exact: true });
+    await expect(drawer).toBeVisible();
+    const ticketUrl = page.url();
+    const milestoneLink = drawer.getByRole('link', { name: `${milestone.title} 간트에서 보기`, exact: true });
+    const title = drawer.getByLabel('제목', { exact: true });
+    await title.fill('저장하지 않은 제목');
+    const declined = page.waitForEvent('dialog').then(async confirmation => {
+      const message = confirmation.message();
+      await confirmation.dismiss();
+      return message;
+    });
+    await milestoneLink.click();
+    expect(await declined).toContain('저장하지 않은 업무');
+    await expect(page).toHaveURL(ticketUrl);
+    await expect(title).toHaveValue('저장하지 않은 제목');
+
+    await title.fill(linked.title);
+    await milestoneLink.click();
+    await expect(drawer).toHaveCount(0);
+    const milestoneUrl = new URL(page.url());
+    const [path, parameters] = milestoneUrl.hash.split('?');
+    expect(path).toBe(`#/${f.project.id}/gantt`);
+    expect(Object.fromEntries(new URLSearchParams(parameters))).toEqual({ scope: 'team', ganttProject: owner.id,
+      ganttQ: f.prefix, ganttDate: selectedDay, ganttScale: 'day', milestone: milestone.id });
+    const review = page.getByRole('region', { name: '이정표 연결 업무', exact: true });
+    const heading = review.getByRole('heading', { name: milestone.title, exact: true });
+    await expect(heading).toBeFocused();
+    await expect(draft).toHaveValue('2031-03-10');
+
+    await page.goBack();
+    await expect(page).toHaveURL(ticketUrl);
+    await expect(drawer).toBeVisible();
+    await page.goForward();
+    await expect(page).toHaveURL(milestoneUrl.href);
+    await expect(heading).toBeFocused();
+    await expect(filter).toHaveValue(owner.id);
+    await expect(g.search).toHaveValue(f.prefix);
+    await expect(draft).toHaveValue('2031-03-10');
+    expect(await f.stored(other)).toMatchObject({ endDate: '2031-03-07', version: other.version });
+
+    const excluded = await page.context().newPage();
+    try {
+      await excluded.goto(`/#/${f.project.id}/gantt?${new URLSearchParams({ scope: 'team', ganttProject: f.project.id, issue: linked.id })}`);
+      const excludedDrawer = excluded.getByRole('dialog', { name: linked.title, exact: true });
+      await excludedDrawer.getByRole('link', { name: `${milestone.title} 간트에서 보기`, exact: true }).click();
+      await expect(excluded).toHaveURL(url => url.hash === `#/${owner.id}/gantt?${new URLSearchParams({ milestone: milestone.id })}`);
+      await expect(excluded.getByRole('heading', { name: milestone.title, exact: true })).toBeFocused();
+    } finally { await excluded.close(); }
+  } finally { await f.close(); }
+});
+
 test('전체 프로젝트 월간 일정은 프로젝트 필터를 적용하고 10건이 넘는 날의 나머지 업무도 보여 준다', async ({ page, request }) => {
   test.setTimeout(80_000);
   const f = await fixture(request);
