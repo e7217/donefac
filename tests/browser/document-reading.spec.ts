@@ -20,6 +20,26 @@ async function placeCursor(target: Locator, start: boolean) {
   }, start);
 }
 
+async function selectReadText(target: Locator, value: string) {
+  await target.evaluate((element, text) => {
+    const owner = element.ownerDocument;
+    const walker = owner.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const first = element.textContent.indexOf(text), last = first + text.length;
+    if (first < 0) throw new Error(`Missing selected text: ${text}`);
+    let offset = 0;
+    const range = owner.createRange();
+    for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+      const length = current.textContent?.length ?? 0;
+      if (offset <= first && first < offset + length) range.setStart(current, first - offset);
+      if (offset < last && last <= offset + length) { range.setEnd(current, last - offset); break; }
+      offset += length;
+    }
+    const selection = owner.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }, value);
+}
+
 async function createDocument(request: APIRequestContext, projectId: string, content: RichContent[]) {
   const response = await request.post('/api/documents', { data: {
     projectId,
@@ -222,6 +242,99 @@ test('360px 저장본 읽기에서 절·참조·첨부를 열고 이전 편집�
     await shareContext.close();
     await cleanup(request, created.id);
     await cleanup(request, peer.id);
+  }
+});
+
+test('360px 공유 읽기에서 저장한 문장에 댓글을 달고 변경된 본문에 의견을 이어 쓴다', async ({ page, request }) => {
+  const { projects: [project], users: [author, reviewer] } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const oldQuote = '검토할 원래 문장', newQuote = '검토할 최신 문장';
+  const includedText = '원본에서만 댓글을 남길 내용';
+  const included = await createDocument(request, project.id, [paragraph(includedText)]);
+  const lead = '회의의 결론은 ';
+  const contents = (quote: string): RichContent[] => [
+    paragraph(quote),
+    { type: 'documentInclude', attrs: { documentId: included.id, label: included.title } },
+    { type: 'paragraph', content: [
+      { type: 'text', text: lead },
+      { type: 'text', text: '검토할', marks: [{ type: 'bold' }] },
+      { type: 'text', text: `${quote.slice('검토할'.length)} 뒤쪽입니다.` },
+    ] },
+  ];
+  const created = await createDocument(request, project.id, contents(oldQuote));
+  const path = `/api/documents/${created.id}`;
+  const readHash = documentReadingHash(created.id, project.id);
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), reviewer.id);
+    const existing = await request.post('/api/comments', { headers: { 'X-Actor-Id': author.id }, data: {
+      resourceType: 'document', resourceId: created.id, body: '공유 전에 남긴 일반 의견',
+    } });
+    expect(existing.status(), await existing.text()).toBe(201);
+    const collaboration: string[] = [];
+    page.on('request', request => {
+      if (new URL(request.url()).pathname === `${path}/collaboration`) collaboration.push(request.url());
+    });
+    await page.goto(`/${readHash}`);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const plainDraft = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await plainDraft.fill('아직 남겨둔 일반 댓글 초안');
+    await page.getByRole('button', { name: '정보 패널 닫기', exact: true }).press('Enter');
+    const reader = page.getByRole('article', { name: '저장본 읽기', exact: true });
+    const addComment = page.getByRole('button', { name: '선택한 본문에 댓글 남기기', exact: true });
+    const sentence = reader.locator('p').filter({ hasText: lead });
+    await expect(addComment).toBeDisabled();
+    await selectReadText(reader.getByText(includedText, { exact: true }), includedText);
+    await expect(addComment).toBeDisabled();
+    await reader.evaluate(element => {
+      const [first, last] = element.querySelectorAll('[data-document-find-block]');
+      const owner = element.ownerDocument;
+      const range = owner.createRange();
+      range.setStart(first.firstElementChild!.firstChild!, 0);
+      range.setEnd(last.lastElementChild!.firstChild!, 3);
+      owner.getSelection()?.removeAllRanges();
+      owner.getSelection()?.addRange(range);
+    });
+    await expect(addComment).toBeDisabled();
+    await selectReadText(sentence, oldQuote);
+    await expect(addComment).toBeEnabled();
+    await addComment.click();
+    const dialog = page.getByRole('dialog', { name: '선택한 본문에 댓글 남기기', exact: true });
+    const excerpt = dialog.locator('blockquote');
+    const draft = dialog.getByRole('textbox', { name: '발췌 댓글', exact: true });
+    await expect(excerpt).toHaveText(oldQuote);
+    await draft.fill('최신 근거를 확인했습니다.');
+    const changed = await request.patch(path, { headers: { 'X-Actor-Id': author.id }, data: {
+      expectedVersion: created.version, content: { type: 'doc', content: contents(newQuote) },
+    } });
+    expect(changed.status(), await changed.text()).toBe(200);
+    const latest = await changed.json() as DocPage;
+    const submit = dialog.getByRole('button', { name: '발췌 댓글 등록', exact: true });
+    await submit.click();
+    await expect(dialog.getByRole('alert')).toContainText('저장본이 변경');
+    await dialog.getByRole('button', { name: '본문 다시 선택', exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(reader.getByRole('heading', { name: created.title, exact: true })).toBeFocused();
+    await expect(addComment).toBeDisabled();
+    await selectReadText(sentence, newQuote);
+    await expect(addComment).toBeEnabled();
+    await addComment.press('Enter');
+    await expect(draft).toHaveValue('최신 근거를 확인했습니다.');
+    await expect(excerpt).toHaveText(newQuote);
+    const stored = page.waitForResponse(response => new URL(response.url()).pathname === `${path}/selection-comments` && response.status() === 201);
+    await submit.click();
+    const { comment } = await (await stored).json() as DocumentSelectionCommentResult;
+    const from = newQuote.length + 4 + lead.length;
+    expect(comment.documentSource).toEqual({ from, to: from + newQuote.length, text: newQuote, revisionId: expect.any(String) });
+    expect(comment.authorId).toBe(reviewer.id);
+    await expect(page.locator(`#document-comment-${comment.id}`)).toBeFocused();
+    await expect(page.getByText('공유 전에 남긴 일반 의견', { exact: true })).toBeVisible();
+    await expect(plainDraft).toHaveValue('아직 남겨둔 일반 댓글 초안');
+    await expect(page).toHaveURL(url => url.hash === readHash);
+    await expect(reader.getByText(`저장본 · 버전 ${latest.version}`, { exact: true })).toBeVisible();
+    expect(collaboration).toEqual([]);
+  } finally {
+    await cleanup(request, created.id);
+    await cleanup(request, included.id);
   }
 });
 

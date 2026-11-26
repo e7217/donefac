@@ -25,9 +25,9 @@ async function fixture(request: APIRequestContext) {
       issueIds.push(issue.id);
       return issue;
     },
-    async milestone(name: string, date: string, issueIds: string[] = []) {
+    async milestone(name: string, date: string, issueIds: string[] = [], owner: Project = project) {
       const milestone = await json<Milestone>(await request.post('/api/milestones', {
-        headers, data: { projectId: project.id, title: `${prefix} ${name}`, date, issueIds },
+        headers, data: { projectId: owner.id, title: `${prefix} ${name}`, date, issueIds },
       }), 201);
       milestones.push(milestone);
       return milestone;
@@ -152,6 +152,65 @@ test('360px 월간 일정은 윤일에 저장된 날짜와 마일스톤을 모�
   } finally {
     await f.close();
   }
+});
+
+test('팀 간트와 월간 일정에서 프로젝트별 이정표를 구분하고 연결 업무를 검토한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const f = await fixture(request);
+  const selectedDay = '2031-02-14';
+  try {
+    const local = await f.issue('유지할 날짜 입력', { startDate: '2031-02-17', endDate: '2031-02-18' });
+    const late = await f.issue('검색에 숨은 다른 프로젝트 후행 업무', { startDate: '2031-02-13', endDate: '2031-02-28' }, f.otherProject, false);
+    const first = await f.milestone('출시 판단', selectedDay, [local.id]);
+    const second = await f.milestone('출시 판단', selectedDay, [late.id], f.otherProject);
+    const g = await openGantt(page, f, selectedDay, true);
+    const firstChart = g.chart.getByRole('button', { name: `${f.project.key} ${first.title} 연결 업무 확인`, exact: true });
+    const secondChart = g.chart.getByRole('button', { name: `${f.otherProject.key} ${second.title} 연결 업무 확인`, exact: true });
+    await expect(firstChart).toBeVisible();
+    await expect(secondChart).toBeVisible();
+    const draft = g.row(local).getByLabel(`${local.key} 종료일`, { exact: true });
+    await draft.fill('2031-02-19');
+    await g.toggle.click();
+    await expect(g.date(selectedDay)).toHaveAccessibleName(/일정 2건$/u);
+    const firstAgenda = g.agenda.getByRole('button', { name: `${f.project.key} ${first.title}`, exact: true });
+    const secondAgenda = g.agenda.getByRole('button', { name: `${f.otherProject.key} ${second.title}`, exact: true });
+    await expect(firstAgenda).toBeVisible();
+    await secondAgenda.click();
+    const review = page.getByRole('region', { name: '이정표 연결 업무', exact: true });
+    await expect(review.getByRole('heading', { name: second.title, exact: true })).toBeFocused();
+    await expect(review).toContainText(f.otherProject.name);
+    await expect(review).toContainText('이정표 이후');
+    const sharedLink = page.url();
+    expect(new URLSearchParams(new URL(sharedLink).hash.split('?')[1]).get('milestone')).toBe(second.id);
+    const detail = review.getByRole('button', { name: `${late.key} 상세 열기`, exact: true });
+    await detail.click();
+    const drawer = page.getByRole('dialog', { name: late.title, exact: true });
+    await expect(drawer).toBeVisible();
+    await drawer.getByRole('button', { name: '업무 상세 닫기', exact: true }).click();
+    await expect(detail).toBeFocused();
+    await expect(draft).toHaveValue('2031-02-19');
+    await review.getByRole('button', { name: `${late.key} 간트 위치`, exact: true }).click();
+    await expect(g.row(late).getByLabel(`${late.key} 종료일`, { exact: true })).toBeFocused();
+    await expect(review).toBeVisible();
+    await expect(draft).toHaveValue('2031-02-19');
+
+    const linkedPage = await page.context().newPage();
+    try {
+      await linkedPage.goto(sharedLink);
+      const linkedReview = linkedPage.getByRole('region', { name: '이정표 연결 업무', exact: true });
+      await expect(linkedReview).toContainText(f.otherProject.name);
+      await expect(linkedReview).toContainText(late.title);
+    } finally { await linkedPage.close(); }
+
+    const filter = page.getByRole('combobox', { name: '프로젝트 필터', exact: true });
+    await filter.selectOption(f.project.id);
+    await expect(review).toHaveCount(0);
+    await expect(firstChart).toBeVisible();
+    await expect(secondChart).toHaveCount(0);
+    await expect(firstAgenda).toBeVisible();
+    await expect(secondAgenda).toHaveCount(0);
+    await expect(draft).toHaveValue('2031-02-19');
+  } finally { await f.close(); }
 });
 
 test('전체 프로젝트 월간 일정은 프로젝트 필터를 적용하고 10건이 넘는 날의 나머지 업무도 보여 준다', async ({ page, request }) => {

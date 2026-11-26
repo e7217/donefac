@@ -42,7 +42,7 @@ import { isUncertainScheduleResponse, scheduleUndoHeaders, useScheduleUndo } fro
 import { AutomaticScheduleDialog } from './AutomaticScheduleDialog';
 import { GanttCascadeDialog, type CascadeAnchorChange, type TeamFollowUpSelection } from './GanttCascadeDialog';
 import { SchedulePlanningPanel } from './SchedulePlanningPanel';
-import { SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
+import { ScheduleMilestoneReview, SCHEDULE_MILESTONE_REVIEW_ID } from './ScheduleMilestoneReview';
 import { ScheduleAnalysis } from './ScheduleAnalysis';
 import { bulkDateResultMessage, bulkLinkResultMessage, SCHEDULE_PASTE_DRAFT_ID, SchedulePasteDialog } from './SchedulePasteDialog';
 import { GanttRowScheduleEdit, type GanttRowLinkDraft } from './GanttRowScheduleEdit';
@@ -1063,8 +1063,9 @@ function ProjectGantt(props: GanttProps) {
   const ordinaryIssueIds = focusedTrace ? new Set(ordinaryIssues.map(issue => issue.id)) : null;
   const outsideFilterCount = ordinaryIssueIds ? issues.filter(issue => !ordinaryIssueIds.has(issue.id) && issue.id !== hierarchyTrace?.anchor.id).length : 0;
   const baseline = data.baselines?.find(value => value.id === selectedBaselineId && value.projectId === projectId);
-  const milestones = useMemo(() => allProjects || scheduleFocus ? [] : (data.milestones || []).filter(value => value.projectId === projectId),
-    [allProjects, data.milestones, projectId, scheduleFocus]);
+  const milestoneProjectId = allProjects ? chartProjectFilter : projectId;
+  const milestones = useMemo(() => scheduleFocus ? [] : (data.milestones ?? []).filter(value =>
+    milestoneProjectId === null || value.projectId === milestoneProjectId), [data.milestones, milestoneProjectId, scheduleFocus]);
   const reviewedMilestone = milestones.find(item => item.id === milestoneReviewId);
   const historicalIssues = scheduleFocus || planningScope || ganttViewId !== null ? [] : baseline?.issues.filter(value => !projectIssues.some(issue => issue.id === value.issueId)) || [];
   const historicalMilestones = scheduleFocus ? [] : baseline?.milestones.filter(value => !milestones.some(milestone => milestone.id === value.milestoneId)) || [];
@@ -2438,10 +2439,11 @@ function ProjectGantt(props: GanttProps) {
     if (drag.mode === 'end') delta = Math.max(delta, -duration);
     setDrag({ ...drag, delta });
   }
-  function openChartIssue(id: string, opener: HTMLElement, issueIds: readonly string[], fallback: HTMLElement | null = scrollRef.current) {
+  function openChartIssue(id: string, opener: HTMLElement, issueIds: readonly string[], fallback: HTMLElement | null = scrollRef.current,
+    projectScope: string | null | undefined = teamDependencyTrace ? null : undefined) {
     if (!props.onOpenIssueForReview) { openIssue(id); return; }
     props.onOpenIssueForReview(id, { issueIds, opener, fallback,
-      ...(teamDependencyTrace && { projectScope: null }) });
+      ...(projectScope !== undefined && { projectScope }) });
   }
   function openIssueRow(id: string, opener: HTMLElement) {
     openChartIssue(id, opener, issues.map(issue => issue.id));
@@ -2462,7 +2464,7 @@ function ProjectGantt(props: GanttProps) {
   }
   function openMilestoneIssue(id: string, opener: HTMLButtonElement) {
     if (!reviewedMilestone?.issueIds.includes(id)) return;
-    openChartIssue(id, opener, reviewedMilestone.issueIds);
+    openChartIssue(id, opener, reviewedMilestone.issueIds, scrollRef.current, reviewedMilestone.projectId);
   }
   function finishDrag(event: PointerEvent<HTMLButtonElement>) {
     if (!drag) return; const current = drag; setDrag(null);
@@ -2811,6 +2813,10 @@ function ProjectGantt(props: GanttProps) {
       onOpenMilestone={openMilestoneReview}
       onEditDate={(issue, field, opener) => openRowScheduleEdit(issue, opener,
         { focusDate: field, focusFallback: monthCalendarTrigger.current })} />}
+    {allProjects && !scheduleFocus && milestoneReviewId && <ScheduleMilestoneReview key={milestoneReviewId}
+      milestone={reviewedMilestone} project={reviewedMilestone && projectsById.get(reviewedMilestone.projectId)}
+      issues={data.issues} workflows={data.workflows} busy={busy || Boolean(issueOverlayOpen)} onClose={closeMilestoneReview}
+      onLocateIssue={id => onLocateIssueDate(id, 'endDate')} onOpenIssue={openMilestoneIssue} />}
     {deadlinesOpen && <GanttDeadlines id={DEADLINES_PANEL_ID} issues={issues} disabled={deadlineActionsDisabled}
       onClose={closeDeadlines} onLocate={locateDeadline} onEdit={(issue, opener) => openRowScheduleEdit(issue, opener, { focusDate: 'dueDate' })}
       onPointerDown={keepInlineDateFocus} />}
@@ -3092,13 +3098,15 @@ function ProjectGantt(props: GanttProps) {
         const captured = baseline?.milestones.find(value => value.milestoneId === milestone.id);
         const delta = captured ? dayNumber(milestone.date) - dayNumber(captured.date) : null;
         const expanded = milestoneReviewId === milestone.id;
+        const projectKey = allProjects ? projectsById.get(milestone.projectId)?.key : undefined;
         return <div key={milestone.id} className="gantt-row gantt-milestone-row" data-milestone-id={milestone.id}>
           <div className="gantt-left">
             <Diamond size={13} />
             <button type="button" className="gantt-milestone-name gantt-milestone-review-button" disabled={busy || scheduleEditorOpen || issueOverlayOpen}
-              aria-label={`${milestone.title} 연결 업무 확인`} aria-expanded={expanded} aria-controls={expanded ? SCHEDULE_MILESTONE_REVIEW_ID : undefined}
+              aria-label={`${projectKey ? `${projectKey} ` : ''}${milestone.title} 연결 업무 확인`}
+              aria-expanded={expanded} aria-controls={expanded ? SCHEDULE_MILESTONE_REVIEW_ID : undefined}
               onClick={event => openMilestoneReview(milestone.id, event.currentTarget)}>
-              <small>{milestone.status === 'reached' ? '달성' : '예정'} · 마일스톤</small><strong>{milestone.title}</strong>
+              <small>{projectKey && `${projectKey} · `}{milestone.status === 'reached' ? '달성' : '예정'} · 마일스톤</small><strong>{milestone.title}</strong>
               {delta !== null && <small>기준선 대비 {delta > 0 ? '+' : ''}{delta}일 · 달력일</small>}
             </button>
             <button className="gantt-history-date" onClick={() => showDate(milestone.date)}>{milestone.date}</button>

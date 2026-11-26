@@ -6,7 +6,7 @@ import {
   MILESTONE_READINESS_KINDS, MILESTONE_READINESS_LABELS, milestoneReadiness,
   type MilestoneReadinessKind,
 } from '../../shared/milestone-readiness';
-import type { Issue, Milestone, WorkspaceSnapshot } from '../../shared/types';
+import type { Issue, Milestone, Project, WorkspaceSnapshot } from '../../shared/types';
 import { dayNumber } from './schedule-utils';
 import './schedule-milestone-review.css';
 
@@ -16,6 +16,7 @@ type ReadinessFilter = 'all' | MilestoneReadinessKind;
 
 interface ScheduleMilestoneReviewProps {
   milestone: Milestone | undefined;
+  project?: Project;
   issues: readonly Issue[];
   workflows: WorkspaceSnapshot['workflows'];
   busy: boolean;
@@ -24,7 +25,7 @@ interface ScheduleMilestoneReviewProps {
   onOpenIssue: (id: string, opener: HTMLButtonElement) => void;
 }
 
-export function ScheduleMilestoneReview({ milestone, issues, workflows, busy, onClose, onLocateIssue, onOpenIssue }: ScheduleMilestoneReviewProps) {
+export function ScheduleMilestoneReview({ milestone, project, issues, workflows, busy, onClose, onLocateIssue, onOpenIssue }: ScheduleMilestoneReviewProps) {
   const heading = useRef<HTMLHeadingElement>(null);
   const [filter, setFilter] = useState<ReadinessFilter>('all');
   const [page, setPage] = useState(0);
@@ -51,7 +52,8 @@ export function ScheduleMilestoneReview({ milestone, issues, workflows, busy, on
     <header className="schedule-milestone-review-header">
       <div>
         <h2 tabIndex={-1} ref={heading}>{milestone?.title ?? '이정표를 찾을 수 없습니다.'}</h2>
-        {milestone && <p>이정표 날짜 <time dateTime={milestone.date}>{milestone.date}</time> · {milestone.status === 'reached' ? '달성' : '예정'}</p>}
+        {milestone && <p>{project && `${project.key} · ${project.name} · `}이정표 날짜 <time dateTime={milestone.date}>{milestone.date}</time>
+          {' · '}{milestone.status === 'reached' ? '달성' : '예정'}</p>}
       </div>
       <button type="button" className="btn btn-ghost" onClick={onClose} aria-label="연결 업무 닫기"><X size={16} aria-hidden="true" /></button>
     </header>

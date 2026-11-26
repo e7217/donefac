@@ -316,7 +316,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
       }
     }
     if (wholeNodeSelected) result = excerptMark(result, state, key);
-    return <span key={key} data-document-find-text={node.type === 'text' ? findSource : undefined}
+    return <span key={key} data-document-find-text={node.type === 'text' && findSource !== undefined ? key : undefined}
       data-document-find-separator={node.type === 'statusBadge' ? findSource : undefined}>{result}</span>;
   }
   if (node.type === 'documentRevisionInclude' && (!state.mode || state.mode === 'history')) {

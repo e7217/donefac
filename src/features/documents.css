@@ -73,6 +73,7 @@
 .docs-save-state.is-dirty { color:#b8934c; }
 .docs-save-state.is-dirty>span { width:5px; height:5px; border-radius:50%; background:#c6a05e; }
 .docs-icon-button { padding:6px!important; display:inline-flex; align-items:center; justify-content:center; min-width:29px; }
+.docs-read-selection-comment[aria-disabled='true'] { opacity:0.55; cursor:not-allowed; }
 .docs-save-button { font-size:10px!important; padding:7px 10px!important; min-height:29px!important; }
 .docs-export-container { position:relative; }
 .docs-popover { position:absolute; z-index:15; background:#fff; border:1px solid #e4e9f1; border-radius:8px; box-shadow:0 8px 30px #1c31551a; padding:5px; min-width:170px; }

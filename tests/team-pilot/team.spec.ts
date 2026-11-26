@@ -1,4 +1,4 @@
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { expect, request as apiRequest, test, type APIRequestContext, type BrowserContext, type Page } from '@playwright/test';
@@ -26,7 +26,7 @@ type Fixture = {
   seconds: number;
   evidencePath: string;
 } & (
-  { source: 'native'; intakeId: string } |
+  { source: 'native'; intakeId: string; liveRestart: { requestPath: string; readyPath: string } } |
   { source: 'migrated'; originalJiraKey: string; gitlabOriginalJiraKey: string; gitlabJiraInstanceKey: string }
 );
 
@@ -62,7 +62,8 @@ function loadFixture(): Fixture {
   if (!Array.isArray(fixture.actorIds) || fixture.actorIds.length !== TEAM_SIZE || new Set(fixture.actorIds).size !== TEAM_SIZE ||
     fixture.actorIds.some(id => typeof id !== 'string' || !id) || !Number.isSafeInteger(fixture.seconds) || fixture.seconds < 1 ||
     !fixture.projectId || !fixture.issueId || !fixture.issueKey || !fixture.gitlabIssueId ||
-    !(fixture.source === 'native' ? fixture.intakeId : fixture.source === 'migrated' &&
+    !(fixture.source === 'native' ? fixture.intakeId && fixture.liveRestart &&
+      isAbsolute(fixture.liveRestart.requestPath) && isAbsolute(fixture.liveRestart.readyPath) : fixture.source === 'migrated' &&
       fixture.originalJiraKey && fixture.gitlabOriginalJiraKey && fixture.gitlabJiraInstanceKey) ||
     !fixture.documentId || !fixture.initialEpoch || !fixture.title || !fixture.initialText || !fixture.editingParagraph || !fixture.evidencePath) {
     throw new Error('The isolated team pilot fixture is invalid.');
@@ -88,7 +89,7 @@ async function signInRequests(request: APIRequestContext, accessCode: string) {
   expect(status, 'Pilot API session login').toBe(303);
 }
 
-async function signInBrowser(peer: Peer, baseURL: string, location: string, accessCode: string, sessionTokens: Set<string>) {
+async function signInBrowser(peer: Pick<Peer, 'page' | 'context' | 'ordinal'>, baseURL: string, location: string, accessCode: string, sessionTokens: Set<string>) {
   const password = peer.page.getByLabel('팀 접속 키', { exact: true });
   await expect(password).toHaveAttribute('type', 'password', { timeout: SYNC_TIMEOUT });
   try {
@@ -198,6 +199,92 @@ function expectEdits(document: DocPage, original: string, edits: string[]) {
   expect(document.plainText.startsWith(original)).toBe(true);
   expect(document.plainText.split(original)).toHaveLength(2);
   expect((document.plainText.match(/\[team-edit-\d+-\d+\]/g) ?? []).sort()).toEqual([...edits].sort());
+}
+
+async function renewBrowserSession(peer: Peer, opener: Page, baseURL: string, accessCode: string, sessionTokens: Set<string>) {
+  const expired = await peer.context.request.get(`${baseURL}/api/workspace`);
+  expect(expired.status(), 'Old browser cookie after the backend restart').toBe(401);
+  const [login] = await Promise.all([
+    peer.context.waitForEvent('page'),
+    opener.getByRole('link', { name: '팀 접속', exact: true }).click(),
+  ]);
+  try { await signInBrowser({ ...peer, page: login }, baseURL, '/', accessCode, sessionTokens); }
+  finally { await login.close(); }
+}
+
+async function verifyLiveRestart({ documentPeer, schedulePeer, fixture, baseURL, accessCode, sessionTokens, before }: {
+  documentPeer: Peer; schedulePeer: Peer; fixture: Extract<Fixture, { source: 'native' }>; baseURL: string;
+  accessCode: string; sessionTokens: Set<string>; before: CollaborationSession;
+}) {
+  const startDate = '2031-05-06';
+  const draftEnd = '2031-05-08';
+  const requests = schedulePeer.context.request;
+  const created = await requests.post(`${baseURL}/api/issues`, {
+    headers: { Origin: baseURL, 'X-Actor-Id': schedulePeer.actorId },
+    data: { projectId: fixture.projectId, title: '재시작 중 일정 입력', startDate, endDate: startDate },
+  });
+  expect(created.status()).toBe(201);
+  const issue = await created.json() as Issue;
+  const gantt = await schedulePeer.context.newPage();
+  try {
+    const chartUrl = `${baseURL}/#/${fixture.projectId}/gantt`;
+    await gantt.goto(chartUrl, { waitUntil: 'domcontentloaded' });
+    const date = gantt.getByLabel(`${issue.key} 종료일`, { exact: true });
+    const save = gantt.getByRole('button', { name: `${issue.key} 날짜 저장`, exact: true });
+    await expect(date).toHaveValue(startDate);
+    await date.fill(draftEnd);
+    await expect(save).toBeEnabled();
+
+    const pending = '[team-restart-pending-edit]';
+    const priorAcks = documentPeer.acknowledgments.size;
+    await documentPeer.context.setOffline(true);
+    await expect(state(documentPeer.page)).toContainText('연결 끊김');
+    await append(documentPeer, pending);
+    await expect(state(documentPeer.page)).toHaveText('연결 끊김 · 편집 보관 중');
+    expect(documentPeer.acknowledgments.size).toBe(priorAcks);
+    await writeFile(fixture.liveRestart.requestPath, '', { flag: 'wx', mode: 0o600 });
+    await expect.poll(() => access(fixture.liveRestart.readyPath).then(() => true, () => false), { timeout: SYNC_TIMEOUT }).toBe(true);
+    await documentPeer.context.setOffline(false);
+    await Promise.all([
+      renewBrowserSession(documentPeer, documentPeer.page, baseURL, accessCode, sessionTokens),
+      renewBrowserSession(schedulePeer, gantt, baseURL, accessCode, sessionTokens),
+    ]);
+
+    await expect.poll(() => documentPeer.acknowledgments.size, { timeout: SYNC_TIMEOUT }).toBe(priorAcks + 1);
+    const recovered = await session(documentPeer.context.request, fixture.documentId);
+    expect(recovered.epoch).toBe(before.epoch);
+    expect(recovered.document.version).toBe(before.document.version + 1);
+    expect(recovered.document.plainText).toBe(`${before.document.plainText} ${pending}`);
+    await expect(editor(documentPeer.page)).toContainText(pending);
+    await expect(state(documentPeer.page)).toHaveText('서버에 동기화됨');
+    await expect(gantt).toHaveURL(chartUrl);
+    await expect(date).toHaveValue(draftEnd);
+
+    const title = '다른 팀원이 저장한 재시작 업무 제목';
+    const peerChange = await documentPeer.context.request.patch(`${baseURL}/api/issues/${issue.id}`, {
+      headers: { Origin: baseURL, 'X-Actor-Id': documentPeer.actorId }, data: { expectedVersion: issue.version, title },
+    });
+    expect(peerChange.status()).toBe(200);
+    const latest = await peerChange.json() as Issue;
+    expect(latest.endDate).toBe(startDate);
+    const scheduleResponse = (path: string) => gantt.waitForResponse(response => new URL(response.url()).pathname === `/api/schedule/${path}` &&
+      response.request().method() === 'POST');
+    const [conflict] = await Promise.all([scheduleResponse('manual-preview'), save.click()]);
+    expect(conflict.status(), 'The earlier version must not overwrite a peer change').toBe(409);
+    const review = gantt.getByRole('dialog', { name: '일정 변경 미리보기', exact: true });
+    await expect(date).toHaveValue(draftEnd);
+    const [preview] = await Promise.all([scheduleResponse('manual-preview'), review.getByRole('button', { name: '다시 미리보기', exact: true }).click()]);
+    expect(preview.status()).toBe(200);
+    expect(preview.request().postDataJSON()).toMatchObject({ changes: [{ id: issue.id, expectedVersion: latest.version, endDate: draftEnd }] });
+    const [applied] = await Promise.all([scheduleResponse('manual-apply'), review.getByRole('button', { name: '변경 적용', exact: true }).click()]);
+    expect(applied.status()).toBe(200);
+    const { updated } = await applied.json() as { updated: Issue[] };
+    expect(updated).toMatchObject([{ id: issue.id, title, startDate, endDate: draftEnd, version: latest.version + 1 }]);
+    await expect(review).toHaveCount(0);
+    await expect(date).toHaveValue(draftEnd);
+    console.log('Open browser tabs re-authenticated after a real backend restart, merged a queued edit once, and guarded a preserved Gantt draft.');
+    return { document: recovered.document, evidence: { pending, issue: updated[0] } };
+  } finally { await gantt.close(); }
 }
 
 async function verifyDocumentIssueReference(page: Page, fixture: Fixture) {
@@ -372,6 +459,7 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
       }
     }
     expect(sessionTokens.size, 'Distinct HTTPS browser sessions').toBe(TEAM_SIZE);
+    const initialSessionCount = sessionTokens.size;
     await matchesRendered(peers, initial.document, originalEpoch, fixture);
     const issueReferenceEvidence = await verifyDocumentIssueReference(peers[0].page, fixture);
     let knowledge: Awaited<ReturnType<typeof verifyNativeKnowledge>> | undefined;
@@ -514,13 +602,18 @@ test('twenty individually signed-in HTTPS browser actors collaborate, reconnect,
     expect(final.plainText).not.toContain(staleMarker);
     expect(final.plainText).not.toContain(replacedMarker);
     expect(peers.flatMap(peer => peer.errors)).toEqual([]);
-    await writeFile(fixture.evidencePath, JSON.stringify({
-      documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: final.version,
-      plainText: final.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
-      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, issueReference: issueReferenceEvidence, knowledge, cycle, workspaceTraffic, gitlabTraffic,
-      authentication: { transport: 'https', browserSessions: sessionTokens.size },
-    }), { flag: 'wx', mode: 0o600 });
     console.log('Team pilot restored its checkpoint, saved the stale edit as a separate copy, and synchronized twenty fresh edits.');
+    const restart = fixture.source === 'native' ? await verifyLiveRestart({
+      documentPeer: delayed, schedulePeer: peers[0], fixture, baseURL, accessCode, sessionTokens,
+      before: { ...restored, document: final },
+    }) : undefined;
+    const saved = restart?.document ?? final;
+    await writeFile(fixture.evidencePath, JSON.stringify({
+      documentId: fixture.documentId, originalEpoch, finalEpoch, documentVersion: saved.version,
+      plainText: saved.plainText, staleMarker, recoveryDocumentId: copied.id, recoveryText: copied.plainText,
+      rounds, peerCount: peers.length, elapsedMs, editCount: storedEdits.length, issueReference: issueReferenceEvidence, knowledge, cycle, workspaceTraffic, gitlabTraffic,
+      authentication: { transport: 'https', browserSessions: initialSessionCount }, liveRestart: restart?.evidence,
+    }), { flag: 'wx', mode: 0o600 });
   } finally {
     await Promise.allSettled([request.dispose(), ...contexts.map(context => context.close())]);
   }

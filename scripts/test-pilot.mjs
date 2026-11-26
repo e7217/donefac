@@ -3,6 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { watch } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
@@ -531,6 +532,12 @@ async function teamSnapshot(api, fixture, evidence) {
   assert.equal(recovery.projectId, fixture.projectId);
   assert.equal(recovery.authorId, fixture.actorIds.at(-1));
   assert.deepEqual(new Set(workspace.users.map(user => user.id)), new Set(fixture.actorIds));
+  const restartIssue = evidence.liveRestart && workspace.issues.find(issue => issue.id === evidence.liveRestart.issue.id);
+  if (fixture.liveRestart) {
+    assert.ok(evidence.liveRestart?.pending && restartIssue, 'The restored workspace must retain the browser restart evidence.');
+    assert.equal(current.plainText.split(evidence.liveRestart.pending).length, 2);
+    assert.deepEqual(restartIssue, evidence.liveRestart.issue);
+  }
 
   const traffic = evidence.workspaceTraffic;
   const issue = workspace.issues.find(value => value.id === fixture.issueId);
@@ -657,7 +664,7 @@ async function teamSnapshot(api, fixture, evidence) {
     // Hash complete records to compare the exact persisted fields without printing the body or Yjs bytes on mismatch.
     digest: createHash('sha256').update(JSON.stringify({ current, recovery, state, issue, otherIssue, downstream, blocker,
       otherCalendar, successor, dependency, issueList, view, statusRevision, competingReplay, competingRevision, dueDateRevision,
-      gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus, gitlabReadStatus })).digest('hex'),
+      gitlabIssue, gitlabRule, gitlabRuns, gitlabLinks, webhookStatus, gitlabReadStatus, restartIssue })).digest('hex'),
   };
 }
 
@@ -681,9 +688,20 @@ async function runTeamPilot(seconds) {
   finally { await proxy.close(); }
 }
 
+async function waitForBrowserRestart(requestPath, signal) {
+  try {
+    for await (const event of watch(scratch, { signal })) {
+      if (event.filename && existsSync(requestPath)) return true;
+    }
+  } catch (error) {
+    if (!signal.aborted || error.name !== 'AbortError') throw error;
+  }
+  return false;
+}
+
 async function rehearseTeamPilot(seconds, proxy, access) {
   const retiredCookies = new Set();
-  const pilot = await openTeamPilot(proxy, access, source, retiredCookies);
+  let pilot = await openTeamPilot(proxy, access, source, retiredCookies);
   const actorIds = [];
   for (let index = 1; index <= 20; index++) {
     const actorNumber = String(index).padStart(2, '0');
@@ -729,17 +747,32 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   });
   assert.ok(session.enabled && session.epoch);
   const evidencePath = join(scratch, 'team-evidence.json');
+  const liveRestart = native ? { requestPath: join(scratch, 'restart-requested'), readyPath: join(scratch, 'restart-ready') } : undefined;
   const fixture = {
     actorIds, projectId: issue.projectId, documentId: document.id, issueId: issue.id,
     title: document.title, initialText: session.document.plainText, editingParagraph,
     issueKey: issue.key, gitlabIssueId: gitlabIssue.id,
-    ...(native ? { source: 'native', intakeId: native.intake.id } : {
+    ...(native ? { source: 'native', intakeId: native.intake.id, liveRestart } : {
       source: 'migrated', originalJiraKey: 'OLD-1', gitlabOriginalJiraKey: 'OLD-2', gitlabJiraInstanceKey: 'pilot-jira',
     }),
     initialEpoch: session.epoch, seconds, evidencePath,
   };
   console.log(`Team pilot started: ${actorIds.length} actors over HTTPS, at least ${seconds}s of shared editing on ${fixture.source} content.`);
-  await browser(proxy.origin, { teamFixture: fixture, accessFile: access.file });
+  const browserEnded = new AbortController();
+  async function restartDuringBrowser() {
+    if (!liveRestart || !await waitForBrowserRestart(liveRestart.requestPath, browserEnded.signal)) return;
+    proxy.setBackendPort(null);
+    await stop(pilot);
+    pilot = await openTeamPilot(proxy, access, source, retiredCookies);
+    writeFileSync(liveRestart.readyPath, '', { flag: 'wx', mode: 0o600 });
+  }
+  const [restartResult, browserResult] = await Promise.allSettled([
+    restartDuringBrowser(),
+    browser(proxy.origin, { teamFixture: fixture, accessFile: access.file }).finally(() => browserEnded.abort()),
+  ]);
+  if (restartResult.status === 'rejected') throw restartResult.reason;
+  if (browserResult.status === 'rejected') throw browserResult.reason;
+  if (liveRestart) assert.ok(existsSync(liveRestart.readyPath), 'The live browser restart did not complete.');
 
   const browserEvidence = readFileSync(evidencePath, 'utf8');
   assert.ok(!browserEvidence.includes(access.code), 'The browser evidence must exclude the access key.');

@@ -192,7 +192,7 @@ function routeHash(route: WorkspaceRoute) {
   }
   if ((route.view === 'issues' || route.view === 'gantt' && !teamGantt) && route.savedViewId) query.set('savedView', route.savedViewId);
   if (route.view === 'gantt' && route.ganttTimelineLink) appendGanttTimelineLink(query, route.ganttTimelineLink);
-  if (route.view === 'gantt' && !teamGantt && route.ganttMilestoneId) query.set('milestone', route.ganttMilestoneId);
+  if (route.view === 'gantt' && route.ganttMilestoneId) query.set('milestone', route.ganttMilestoneId);
   if (route.view === 'reports' && route.blockerScope) {
     if (route.blockerScope.releaseId) query.set('release', route.blockerScope.releaseId);
     if (route.blockerScope.savedViewId) query.set('savedView', route.blockerScope.savedViewId);
@@ -337,13 +337,16 @@ function hasSameProjectGanttContext(previous: WorkspaceRoute, next: WorkspaceRou
     (previous.savedViewId ?? null) === (next.savedViewId ?? null) &&
     ganttTimelineLinkKey(previous.ganttTimelineLink) === ganttTimelineLinkKey(next.ganttTimelineLink);
 }
+function hasSameTeamGanttContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
+  return previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
+    previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
+    sameTeamGanttScheduleFilters(previous.ganttScheduleFilters, next.ganttScheduleFilters);
+}
 function hasSameDevelopmentProject(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
   return previous.view === 'development' && next.view === 'development' && previous.projectId === next.projectId;
 }
 function hasSameIssueOverlayContext(previous: WorkspaceRoute, next: WorkspaceRoute): boolean {
-  const sameTeamGantt = previous.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === 'team' && next.ganttScope === 'team' &&
-    previous.projectId === next.projectId && previous.ganttProject === next.ganttProject &&
-    sameTeamGanttScheduleFilters(previous.ganttScheduleFilters, next.ganttScheduleFilters) &&
+  const sameTeamGantt = hasSameTeamGanttContext(previous, next) &&
     previous.ganttFocusIssueId === next.ganttFocusIssueId && previous.ganttFocusDate === next.ganttFocusDate;
   const sameSearch = previous.view === 'search' && next.view === 'search' && previous.projectId === next.projectId &&
     sameWorkspaceSearchFilters(previous.searchFilters, next.searchFilters);
@@ -396,7 +399,9 @@ function confirmRouteNavigation(previous: WorkspaceRoute | null, next: Workspace
       issueReviewContext(previous) === issueReviewContext(next)) {
     return dispatchWorkspaceNavigation({ preserveGantt: 'issueOverlay' });
   }
-  if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) && hasSameProjectGanttContext(previous, next)) {
+  if (previous && (previous.ganttMilestoneId || next.ganttMilestoneId) &&
+      (hasSameProjectGanttContext(previous, next) || hasSameTeamGanttContext(previous, next) &&
+        ganttTimelineLinkKey(previous.ganttTimelineLink) === ganttTimelineLinkKey(next.ganttTimelineLink))) {
     return dispatchWorkspaceNavigation({ preserveGantt: true });
   }
   if (previous?.view === 'gantt' && next.view === 'gantt' && previous.ganttScope === next.ganttScope && previous.projectId === next.projectId &&
@@ -485,7 +490,7 @@ function normalizeRoute(snapshot: WorkspaceSnapshot, hash: string): WorkspaceRou
   const requestedFocusDate = parameters.get('focusDate');
   const ganttFocusDate = ganttFocusIssueId && (requestedFocusDate === 'startDate' || requestedFocusDate === 'endDate') ? requestedFocusDate : null;
   const requestedMilestone = parameters.get('milestone');
-  const ganttMilestoneId = view === 'gantt' && !ganttScope && projectId === parts[0] && isRelationId(requestedMilestone) ? requestedMilestone : null;
+  const ganttMilestoneId = view === 'gantt' && projectId === parts[0] && isRelationId(requestedMilestone) ? requestedMilestone : null;
   const keepGanttContext = view === 'gantt' && !ganttScope && (!ganttFocusIssueId || Boolean(ganttMilestoneId || ganttFocusDate));
   const routePlan = projectId === parts[0] && (view === 'planning' || view === 'gantt' && !ganttScope) && parts[2]
     ? snapshot.planningItems?.find(item => item.id === parts[2] && item.projectId === projectId) : undefined;
@@ -1005,7 +1010,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
     if (current?.view !== 'gantt' || current.ganttScope !== 'team' ||
       (id !== null && !dataRef.current?.projects.some(project => project.id === id))) return false;
     // The chart has already checked open editors and retained row dates.
-    const next = { ...current, ganttProject: id };
+    const milestone = dataRef.current?.milestones?.find(value => value.id === current.ganttMilestoneId);
+    const next = { ...current, ganttProject: id,
+      ganttMilestoneId: id === null || milestone?.projectId === id ? current.ganttMilestoneId : null };
     if (routeHash(next) !== routeHash(current)) writeRoute(next, routeIndexRef.current + 1, 'push');
     return true;
   };
@@ -1204,7 +1211,9 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       projectId: teamRoute?.projectId ?? issue.projectId, view: 'gantt', documentId: null, issueId: null,
       ganttScope: teamRoute?.ganttScope, ganttProject: teamRoute?.ganttProject, ganttScheduleFilters: teamRoute?.ganttScheduleFilters,
       planningId: milestoneRoute?.planningId, savedViewId: milestoneRoute?.savedViewId,
-      ganttMilestoneId: milestoneRoute?.ganttMilestoneId, ganttFocusIssueId: id, ganttFocusDate: endpoint,
+      ganttMilestoneId: teamRoute?.ganttMilestoneId ?? milestoneRoute?.ganttMilestoneId,
+      ganttTimelineLink: teamRoute?.ganttMilestoneId ? teamRoute.ganttTimelineLink : undefined,
+      ganttFocusIssueId: id, ganttFocusDate: endpoint,
     };
     if (endpoint && current && routeHash(current) === routeHash(target) && !confirmRouteNavigation(current, target)) return false;
     if (!requestRoute(target)) return false;
@@ -1213,7 +1222,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
   };
   const changeGanttMilestone = (id: string | null) => {
     const current = acceptedRouteRef.current;
-    return current?.view === 'gantt' && !current.ganttScope ? requestRoute({ ...current, ganttMilestoneId: id }) : false;
+    return current?.view === 'gantt' ? requestRoute({ ...current, ganttMilestoneId: id }) : false;
   };
   const openIssueMilestone = (id: string) => {
     const current = acceptedRouteRef.current;

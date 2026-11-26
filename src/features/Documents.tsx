@@ -60,6 +60,7 @@ import { clipboardImageFiles, trackClipboardImagePosition } from './document-cli
 import { captureDocumentSlashAnchor, type DocumentSlashAnchor, type DocumentSlashRange } from './document-slash-insertion';
 import { insertDocumentToc } from './DocumentToc';
 import { DocumentSelectionActions } from './DocumentSelectionActions';
+import { DocumentReadSelectionComment } from './DocumentReadSelectionComment';
 import { DocumentTableTools } from './DocumentTableTools';
 import { DocumentTablePaste } from './DocumentTablePaste';
 import { DocumentBlockOrder } from './DocumentBlockOrder';
@@ -2527,6 +2528,12 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     reselectedCommentDraft.current = { actorId, documentId, draft: value };
     try { localStorage.setItem(selectionCommentCacheKey(actorId, documentId), encodeCommentDraft(value)); } catch { setStorageProblem(true); }
 
+    if (reading) {
+      closeDocumentAction(false);
+      window.getSelection()?.removeAllRanges();
+      requestAnimationFrame(() => readingTitle.current?.focus({ preventScroll: true }));
+      return;
+    }
     if (!liveMode && !manualRecovery && latestPage?.id === documentId) {
       observeDocument({ document: latestPage, live: false });
     }
@@ -2724,6 +2731,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               {readingPage && <button ref={readingFindOpener} type="button" className="btn btn-ghost docs-icon-button"
                 aria-label="저장본 본문에서 찾기" title="저장본 본문에서 찾기" aria-expanded={readingFindOpen} aria-keyshortcuts="Control+F Meta+F"
                 onClick={() => readingFindOpen ? closeReadingFind() : openReadingFind()}><Search size={15} aria-hidden="true" /></button>}
+              {readingPage && <DocumentReadSelectionComment key={JSON.stringify([actorId, readingPage.id, readingPage.version, data.restoreGeneration])}
+                content={readingPage.content} contentRef={readingBody} disabled={!actorId || Boolean(documentAction || publicationOpen || issueDrawerOpen)}
+                onComment={(selection, opener) => openSelectionComment(readingPage, opener, selection)} />}
               {readingPage && <button type="button" className="btn btn-ghost docs-icon-button" aria-label="읽기 링크 복사" title="읽기 링크 복사"
                 onClick={() => void copyReadingLink(readingPage)}><Link2 size={15} aria-hidden="true" /></button>}
               {!reading && <>

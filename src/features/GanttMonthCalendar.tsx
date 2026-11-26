@@ -128,11 +128,14 @@ export function GanttMonthCalendar({ id, initialDate, today, issues, milestones,
           {shown.map(entry => {
             if (entry.kind === 'milestone') {
               const { milestone } = entry;
+              const projectKey = projects?.get(milestone.projectId)?.key;
               return <li key={`milestone:${milestone.id}`} className="gantt-month-agenda-item">
                 <button type="button" className="btn btn-ghost gantt-month-item-name" disabled={disabled}
+                  aria-label={projectKey ? `${projectKey} ${milestone.title}` : undefined}
                   onClick={event => onOpenMilestone(milestone.id, event.currentTarget)}>
                   <Diamond size={14} aria-hidden="true" />{milestone.title}
                 </button>
+                {projectKey && <span className="gantt-month-project">{projectKey}</span>}
                 <span className="gantt-month-milestone">마일스톤</span>
               </li>;
             }
