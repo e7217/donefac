@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useEffectEvent, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEvent as ReactClipboardEvent, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { EditorContent, useEditor, type Editor } from '@tiptap/react';
 import { getMarkRange, type EditorEvents, type MappablePosition } from '@tiptap/core';
 import { CollaborationMappablePosition } from '@tiptap/extension-collaboration';
@@ -29,6 +29,7 @@ import { documentReadingHash, isDocumentSectionId, parseDocumentHash, savedDocum
 import { isRelationId } from '../../shared/issue-relations';
 import { inlineAttachmentIdFromUrl } from '../../shared/inline-attachment';
 import { jiraMigratedTargetAddress, type MigratedJiraTarget } from '../../shared/jira-migration-address';
+import { normalizeWorkspaceSearchKey, WORKSPACE_SEARCH_QUERY_LIMIT } from '../../shared/workspace-search';
 import { DocumentBlocksProvider, DocumentDecisionRevision, ReadonlyDocumentContent, ReferenceChooser, decorateDocumentExtensions, insertDetails, insertDocumentExcerpt, unfoldDetails, unwrapDetails, type ReferenceKind, type ReferenceSelection } from './DocumentBlocks';
 import { DocumentAnnotationDialog, DocumentAnnotationProvider, type DocumentAnnotationKind, type DocumentAnnotationSelection, type OpenDocumentAnnotation } from './DocumentAnnotations';
 import { IssueBlockChooser, type IssueBlockSelection, type OpenIssueBlock } from './DocumentIssueList';
@@ -168,6 +169,14 @@ function orderedTreePages(pages: DocPage[], orders: readonly DocumentSiblingOrde
   return sorted;
 }
 const commentFilterFor = (comment: Comment): CommentFilter => comment.documentSource ? comment.resolution?.state ?? 'open' : 'all';
+const commentSearchTerms = (query: string) => normalizeWorkspaceSearchKey(query).split(' ').filter(Boolean);
+function threadMatchesCommentSearch(root: Comment, replies: readonly Comment[], terms: readonly string[], authors: ReadonlyMap<string, string>) {
+  if (!terms.length) return true;
+  const text = normalizeWorkspaceSearchKey([root.documentSource?.text, ...[root, ...replies].flatMap(comment =>
+    [comment.body, authors.get(comment.authorId) ?? '팀원'])].join(' '));
+  return terms.every(term => text.includes(term));
+}
+
 const cacheKey = (actorId: string, id: string) => `teamspace:document-draft:${actorId}:${id}`;
 const saveCacheKey = (actorId: string, id: string) => `teamspace:document-save:${JSON.stringify([actorId, id])}`;
 const restoreCacheKey = (actorId: string, id: string) => `teamspace:document-restore:${JSON.stringify([actorId, id])}`;
@@ -373,6 +382,8 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   }, [hasCommentEditDraft, isCommentEditPending, notify]);
   const [commentFilter, setCommentFilter] = useState<CommentFilter>('all');
   const activeCommentFilter = useRef<HTMLButtonElement>(null);
+  const [commentQuery, setCommentQuery] = useState('');
+  const commentSearchInput = useRef<HTMLInputElement>(null);
   const [resolvingCommentId, setResolvingCommentId] = useState<string | null>(null);
   const [resolutionError, setResolutionError] = useState('');
   const resolutionRequest = useRef<CommentContext | null>(null);
@@ -1220,12 +1231,35 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   const focusedRoot = rootComments.find(comment => comment.id === (focusedComment?.parentCommentId ?? focusedComment?.id));
   const linkedCommentMissing = commentActivation !== undefined && loadedCommentActivation === commentActivation && !focusedRoot && !commentError;
   const commentResultPending = commentAttempt?.actorId === actorId && commentAttempt.documentId === documentId;
-  const visibleComments = commentFilter === 'all' ? rootComments : rootComments.filter(comment => commentFilterFor(comment) === commentFilter);
+  const commentAuthors = useMemo(() => new Map(data.users.map(user => [user.id, user.name])), [data.users]);
+  const commentTerms = useMemo(() => commentSearchTerms(commentQuery), [commentQuery]);
+  const statusComments = useMemo(() => commentFilter === 'all' ? rootComments
+    : rootComments.filter(comment => commentFilterFor(comment) === commentFilter), [commentFilter, rootComments]);
+  const matchedComments = useMemo(() => statusComments.filter(comment =>
+    threadMatchesCommentSearch(comment, repliesByParent.get(comment.id) ?? [], commentTerms, commentAuthors)),
+  [commentAuthors, commentTerms, repliesByParent, statusComments]);
+  const replyParent = reply.current?.parentId;
+  const retainedReplyParent = replyParent && !matchedComments.some(comment => comment.id === replyParent)
+    ? statusComments.find(comment => comment.id === replyParent) : undefined;
+  const visibleComments = retainedReplyParent ? [...matchedComments, retainedReplyParent] : matchedComments;
   const activeCommentEdit = commentEditing.current?.base;
   const showDetachedCommentEdit = activeCommentEdit && (!visibleComments.some(comment => comment.id === (activeCommentEdit.parentCommentId ?? activeCommentEdit.id))
     || !comments.some(comment => comment.id === activeCommentEdit.id));
   const commentsPanelVisible = sidebarOpen && sideTab === 'comments' && !issueDrawerOpen && !publicationOpen && !newOpen &&
     !archiveImport && !issueBlockDialog && !templateManager && !offlineExport && !documentAction && !checklistReselecting;
+  const keepCommentListFocus = useEffectEvent((result: Comment[]) => {
+    const focused = document.activeElement?.closest('article[id^="document-comment-"]');
+    const filter = activeCommentFilter.current;
+    if (!focused || !filter) return;
+    const comment = result.find(item => `document-comment-${item.id}` === focused.id);
+    const root = comment?.parentCommentId ? result.find(item => item.id === comment.parentCommentId) : comment;
+    if (!root || (filter.value !== 'all' && commentFilterFor(root) !== filter.value)) {
+      filter.focus({ preventScroll: true });
+    } else if (root.id !== replyParent && commentTerms.length && !threadMatchesCommentSearch(root,
+      result.filter(item => item.parentCommentId === root.id), commentTerms, commentAuthors)) {
+      commentSearchInput.current?.focus({ preventScroll: true });
+    }
+  });
   useEffect(() => {
     if (!documentId) return;
     rememberComment();
@@ -1243,7 +1277,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     commentDraftRef.current = cached;
     setComments([]); setCommentDraft(cached); setCommentsLoading(true); setCommentsRefreshing(false); setCommentError('');
     setCommentAttempt(attempt); setCommentSubmitError('');
-    setCommentFilter('all'); setResolvingCommentId(null); setResolutionError('');
+    setCommentFilter('all'); setCommentQuery(''); setResolvingCommentId(null); setResolutionError('');
     return () => {
       if (resolutionRequest.current === context) resolutionRequest.current = null;
     };
@@ -1265,13 +1299,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
         signal: AbortSignal.any([request.signal, AbortSignal.timeout(COMMENT_LOAD_TIMEOUT_MS)]), headers: { 'X-Actor-Id': actorId },
       }).then(result => {
         if (request.signal.aborted) return;
-        const focused = document.activeElement?.closest('article[id^="document-comment-"]');
-        const filter = activeCommentFilter.current;
-        if (focused && filter) {
-          const comment = result.find(item => `document-comment-${item.id}` === focused.id);
-          const root = comment?.parentCommentId ? result.find(item => item.id === comment.parentCommentId) : comment;
-          if (!root || (filter.value !== 'all' && commentFilterFor(root) !== filter.value)) filter.focus({ preventScroll: true });
-        }
+        keepCommentListFocus(result);
         setComments(result);
         setCommentError('');
       })
@@ -1320,11 +1348,15 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
   useEffect(() => {
     if (!focusCommentId.current || !sidebarOpen || sideTab !== 'comments' || issueDrawerOpen || publicationOpen || documentAction || newOpen || templateManager) return;
     const article = document.getElementById(`document-comment-${focusCommentId.current}`);
+    if (!article && commentTerms.length && comments.some(comment => comment.id === focusCommentId.current)) {
+      setCommentQuery('');
+      return;
+    }
     if (!article || article.closest('[inert]')) return;
     focusCommentId.current = null;
     article.scrollIntoView({ block: 'nearest' });
     article.focus({ preventScroll: true });
-  }, [comments, sidebarOpen, sideTab, commentFilter, issueDrawerOpen, publicationOpen, documentAction, newOpen, templateManager]);
+  }, [comments, sidebarOpen, sideTab, commentFilter, commentTerms, issueDrawerOpen, publicationOpen, documentAction, newOpen, templateManager]);
 
   useEffect(() => {
     if (!commentFocus || commentActivation !== commentFocus.activation || loadedCommentActivation !== commentFocus.activation
@@ -1338,12 +1370,17 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       setCommentFilter(commentFilterFor(focusedRoot));
       return;
     }
-    const target = document.getElementById(`document-comment-${commentFocus.commentId}`) ?? commentsHeading.current;
+    const commentTarget = document.getElementById(`document-comment-${commentFocus.commentId}`);
+    if (!commentTarget && focusedRoot && commentTerms.length) {
+      setCommentQuery('');
+      return;
+    }
+    const target = commentTarget ?? commentsHeading.current;
     if (!target || target.closest('[inert]')) return;
     handledCommentActivation.current = commentFocus.activation;
     target.scrollIntoView({ block: 'nearest' });
     target.focus({ preventScroll: true });
-  }, [commentFocus, commentActivation, loadedCommentActivation, focusedRoot, commentFilter, issueDrawerOpen, publicationOpen, documentAction,
+  }, [commentFocus, commentActivation, loadedCommentActivation, focusedRoot, commentFilter, commentTerms, issueDrawerOpen, publicationOpen, documentAction,
     newOpen, templateManager, sidebarOpen, sideTab, issueBlockSelection]);
 
   const historyVersion = reading ? latestPage?.version : draft?.expectedVersion;
@@ -1562,6 +1599,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
       if (isCurrent()) {
         setComments(items => items.some(item => item.id === result.id) ? items : [...items, result]);
         setCommentFilter('all');
+        setCommentQuery(query => threadMatchesCommentSearch(result, [], commentSearchTerms(query), commentAuthors) ? query : '');
         if (sameCommentDraft(commentDraftPayload(commentDraftRef.current), payload)) updateCommentDraft(emptyCommentDraft());
       } else {
         try {
@@ -1608,6 +1646,11 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
     window.dispatchEvent(new Event(COMMENT_LIST_CHANGED));
     void refresh().catch(() => undefined);
     notify('답글을 등록했습니다.', 'success');
+  }
+
+  function closeDocumentReply() {
+    reply.close();
+    if (retainedReplyParent) commentSearchInput.current?.focus({ preventScroll: true });
   }
 
   function archiveCommentFromList(removed: Comment) {
@@ -2854,11 +2897,20 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   ref={filter === commentFilter ? activeCommentFilter : undefined} aria-pressed={filter === commentFilter}
                   onClick={() => setCommentFilter(filter)}>{COMMENT_FILTER_LABELS[filter]}</button>)}
               </div>
+              <label className="docs-comment-search">
+                <Search size={14} aria-hidden="true" />
+                <input ref={commentSearchInput} className="field" type="search" aria-label="문서 댓글 검색"
+                  value={commentQuery} onChange={event => setCommentQuery(event.currentTarget.value)}
+                  placeholder="댓글·답글·발췌·작성자" maxLength={WORKSPACE_SEARCH_QUERY_LIMIT} />
+              </label>
               {commentsLoading && <p className="docs-panel-muted">댓글을 불러오는 중…</p>}
               {commentError && <p className="docs-panel-error" role="alert">{commentError}</p>}
               {resolutionError && <p className="docs-panel-error" role="alert">{resolutionError}</p>}
               {linkedCommentMissing && <p className="docs-panel-muted" role="status">이동할 댓글을 찾을 수 없습니다.</p>}
-              {!commentsLoading && !commentError && !visibleComments.length && (commentFilter === 'all'
+              {!commentsLoading && !commentError && commentTerms.length > 0 && <p className="docs-panel-muted" role="status">
+                {matchedComments.length ? `${matchedComments.length.toLocaleString('ko-KR')}개 댓글 대화` : '검색 조건에 맞는 댓글이 없습니다.'}
+              </p>}
+              {!commentsLoading && !commentError && !commentTerms.length && !visibleComments.length && (commentFilter === 'all'
                 ? <div className="docs-panel-empty"><MessageSquare size={25} /><strong>아직 댓글이 없어요</strong><span>첫 의견을 남겨 대화를 시작해보세요.</span></div>
                 : <p className="docs-panel-muted">{commentFilter === 'resolved' ? '해결된 문장 댓글이 없습니다.' : '미해결 문장 댓글이 없습니다.'}</p>)}
               {visibleComments.map(comment => {
@@ -2919,7 +2971,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                       {(!resolved || reply.canRecover(comment.id)) && <button type="button" className="btn btn-ghost"
                         aria-label={resolved ? '답글 결과 확인 열기' : '답글 쓰기'} aria-expanded={Boolean(replyEditor)}
                         disabled={reply.busy || pending || saving || !actorId}
-                        onClick={event => replyEditor ? reply.close() : reply.open(comment, event.currentTarget)}>
+                        onClick={event => replyEditor ? closeDocumentReply() : reply.open(comment, event.currentTarget)}>
                         <MessageSquare size={14} aria-hidden="true" />{resolved ? '답글 결과 확인' : '답글'}
                       </button>}
                     </div>
@@ -2927,8 +2979,9 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
                   {comment.documentSource && <>
                     <DocumentReplyList replies={threadReplies} users={data.users} actorId={actorId} notify={notify} refresh={refresh}
                       editing={commentEditing} disabled={reply.busy || saving} onArchived={archiveCommentFromList} onCopyCommentLink={onCopyCommentLink} />
+                    {retainedReplyParent?.id === comment.id && <p className="docs-panel-muted">답글 작성 중</p>}
                     {replyEditor && <DocumentReplyComposer key={JSON.stringify([actorId, comment.id])} editor={replyEditor}
-                      resolved={resolved} busy={reply.busy} users={data.users} onChange={reply.edit} onClose={reply.close}
+                      resolved={resolved} busy={reply.busy} users={data.users} onChange={reply.edit} onClose={closeDocumentReply}
                       onSubmit={() => void reply.submit(comment, showSavedReply)} />}
                   </>}
                 </article>;

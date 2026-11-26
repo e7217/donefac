@@ -159,7 +159,7 @@ export async function prepareGitlabTraffic(context: BrowserContext, { origin, pr
         await page.close();
       }
       return { issue: issueAfter, links: finalLinks, rule, runs: applied.runs, webhookStatus, settings: settingsEvidence,
-        ...(nativeRead && { read: { link: nativeRead.link, status: nativeRead.status } }) };
+        ...(nativeRead && { read: { link: nativeRead.link, status: nativeRead.status, webhookReceipt: nativeRead.webhookReceipt } }) };
     } finally {
       await sender.dispose();
     }

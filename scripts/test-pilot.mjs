@@ -639,6 +639,9 @@ async function teamSnapshot(api, fixture, evidence) {
     assert.deepEqual(mergeRequests.links, [gitlab.read.link]);
     assert.deepEqual(readStatus, gitlab.read.status);
     assert.equal(gitlabSettings.tokenConfigured, true);
+    assert.equal(gitlab.read.webhookReceipt?.authentication, 'signing-token');
+    const webhookRepository = webhookStatus.repositories.find(repository => repository.repositoryId === gitlab.read.link.projectId);
+    assert.deepEqual(webhookRepository?.lastAcceptedByEvent.push, gitlab.read.webhookReceipt);
     expectedLinks.push(gitlab.read.link);
     gitlabReadStatus = readStatus;
   }
@@ -796,7 +799,7 @@ async function rehearseTeamPilot(seconds, proxy, access) {
   assert.equal(await verifyDetails(copy, restored), dataBaseline, 'The separate restoration changed the team workflow evidence.');
   await stop(copy);
   const records = native
-    ? 'native intake, cycle carryover and retrospective, published and draft documents, attachment bytes, member email, revoked API key and GitLab read and webhook evidence by Teamspace key'
+    ? 'native intake, cycle carryover and retrospective, published and draft documents, attachment bytes, member email, revoked API key, and GitLab activity by Teamspace key and authenticated webhook evidence'
     : 'Jira and Confluence records, attachment bytes and GitLab links by original Jira key';
   console.log(`Team pilot passed: ${evidence.peerCount} independent HTTPS browser sessions, ${evidence.rounds} rounds, ${evidence.editCount} retained edits, ` +
     `${(evidence.elapsedMs / 1000).toFixed(1)}s. Re-authenticated after restart and separate restore, then matched ${records}, ` +

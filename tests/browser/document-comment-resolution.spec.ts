@@ -19,6 +19,86 @@ function filterButtons(page: Page) {
   };
 }
 
+test('360px 문서 댓글 검색은 발췌·작성자·답글을 찾고 작성 중인 답글과 정확한 댓글 이동을 보존한다', async ({ page, request }) => {
+  await page.setViewportSize({ width: 360, height: 820 });
+  const { projects: [project], users: [author, reviewer] } = await expectJson<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const quote = '측정 기준을 검증하고 결과를 남깁니다.';
+  const source = await expectJson<DocPage>(await request.post('/api/documents', { headers: actor(author), data: {
+    projectId: project.id, title: `댓글 검색 ${randomUUID().slice(0, 8)}`, content: documentBody(quote),
+  } }), 201);
+  const path = `/api/documents/${source.id}`;
+  const documentHash = `#/${project.id}/documents/${source.id}`;
+  try {
+    const createAnchor = async (body: string) => (await expectJson<DocumentSelectionCommentResult>(
+      await request.post(`${path}/selection-comments`, { headers: actor(author), data: {
+        requestId: randomUUID(), expectedDocumentVersion: source.version,
+        sourceSelection: { from: 1, to: quote.length + 1, text: quote }, body,
+      } }), 201)).comment;
+    const open = await createAnchor('팀에서 확인할 측정 항목입니다.');
+    const closed = await createAnchor('별도의 처리 완료 항목입니다.');
+    const { comment: reply } = await expectJson<DocumentCommentReplyResult>(await request.post(`${path}/selection-comments/${open.id}/replies`, {
+      headers: actor(reviewer), data: { requestId: randomUUID(), expectedResolutionVersion: 0, body: 'Ｄｙｎａｍｉｃ 검증의 최종 기록입니다.' },
+    }), 201);
+    const plain = await expectJson<Comment>(await request.post('/api/comments', { headers: actor(author), data: {
+      resourceType: 'document', resourceId: source.id, body: '문서 첫 화면의 일반 의견입니다.',
+    } }), 201);
+    await expectJson<Comment>(await request.patch(`${path}/selection-comments/${closed.id}/resolution`, {
+      headers: actor(author), data: { state: 'resolved', expectedVersion: 0 },
+    }));
+
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
+    await page.goto(`/${documentHash}`);
+    await page.getByRole('button', { name: '정보 패널 열기', exact: true }).click();
+    const search = page.getByRole('searchbox', { name: '문서 댓글 검색', exact: true });
+    const filters = filterButtons(page);
+    const article = (comment: Comment) => page.locator(`#document-comment-${comment.id}`);
+    const commentDraft = page.getByRole('textbox', { name: '새 문서 댓글', exact: true });
+    await expect(article(plain)).toBeVisible();
+    await commentDraft.fill('보내지 않은 새 댓글');
+    await search.fill('측정 기준');
+    await expect(article(open)).toBeVisible();
+    await expect(article(closed)).toBeVisible();
+    await expect(article(plain)).toHaveCount(0);
+    await filters.resolved.click();
+    await expect(article(closed)).toBeVisible();
+    await expect(article(open)).toHaveCount(0);
+    await filters.all.click();
+    await search.fill(`${reviewer.name}  DYNAMIC`);
+    await expect(article(open)).toBeVisible();
+    await expect(article(reply)).toBeVisible();
+    await expect(article(closed)).toHaveCount(0);
+    await expect(article(plain)).toHaveCount(0);
+
+    await article(open).getByRole('button', { name: '답글 쓰기', exact: true }).click();
+    const replyDraft = page.getByRole('textbox', { name: '답글 내용', exact: true });
+    await replyDraft.fill('보내지 않은 답글');
+    await search.fill('일반 의견');
+    await expect(article(plain)).toBeVisible();
+    await expect(replyDraft).toHaveValue('보내지 않은 답글');
+    await expect(article(open).getByText('답글 작성 중', { exact: true })).toBeVisible();
+    await expect(commentDraft).toHaveValue('보내지 않은 새 댓글');
+    await page.getByRole('button', { name: '답글 닫기', exact: true }).click();
+    await expect(article(open)).toHaveCount(0);
+
+    await filters.resolved.click();
+    await expect(page.getByText('검색 조건에 맞는 댓글이 없습니다.', { exact: true })).toBeVisible();
+    await page.evaluate(hash => { window.location.hash = hash; }, `${documentHash}?comment=${encodeURIComponent(reply.id)}`);
+    await expect(filters.open).toHaveAttribute('aria-pressed', 'true');
+    await expect(search).toHaveValue('');
+    await expect(article(reply)).toBeFocused();
+    await expect(commentDraft).toHaveValue('보내지 않은 새 댓글');
+    await article(open).getByRole('button', { name: '답글 쓰기', exact: true }).click();
+    await expect(replyDraft).toHaveValue('보내지 않은 답글');
+    expect(await page.locator('body').evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(362);
+  } finally {
+    const removed = await request.delete(path, { headers: actor(author) });
+    if (removed.ok()) {
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      if (trashEntryId) await request.delete(`/api/trash/${trashEntryId}`, { headers: actor(author) });
+    }
+  }
+});
+
 test('360px 열린 문서 댓글에 팀원의 변경을 표시하고 본문과 새 댓글 초안을 보존한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   await page.setViewportSize({ width: 360, height: 820 });

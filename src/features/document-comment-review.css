@@ -39,6 +39,21 @@
   font-weight: 650;
 }
 
+.docs-comment-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  color: #52617a;
+}
+
+.docs-comment-search .field {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  font-size: 12px;
+}
+
 .docs-comment-review {
   display: flex;
   flex-wrap: wrap;
@@ -173,6 +188,8 @@
 }
 
 @media (max-width: 560px) {
+  .docs-comment-search .field { min-height: 44px; }
+
   .docs-comment-filters button,
   .docs-comment-review-actions .btn,
   .docs-comment-reply .docs-comment-reply-link,

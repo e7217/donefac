@@ -1,17 +1,27 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { expect, type BrowserContext } from '@playwright/test';
+import { expect, request as apiRequest, type BrowserContext } from '@playwright/test';
+import type { GitlabProjectWebhookHistory, GitlabProjectWebhookReview } from '../../shared/gitlab-project-webhooks';
 import type { GitlabLink, GitlabRepositorySearch, GitlabSettings, GitlabSyncPreview, GitlabSyncStatus, Issue, WorkspaceSnapshot } from '../../shared/types';
 
 const integration = '/api/integrations/gitlab';
 const repositoryPath = 'team/fixtures/engine';
 const apiRoot = '/forge/api/v4/projects';
 const mergeRequestIid = 12;
+const webhookId = 52;
+const deliveredAttemptId = 701;
+const proxyOnlyAttemptId = 702;
 
 export async function verifyNativeGitlabRead(context: BrowserContext, origin: string, issue: Issue, repositoryId: number, signingToken: string) {
   const token = randomUUID();
+  const managementToken = randomUUID();
+  const deliveredMessage = randomUUID();
+  const proxyOnlyMessage = randomUUID();
+  const receiverUrl = `${origin}${integration}/webhook`;
+  const hooksPath = `${apiRoot}/${repositoryId}/hooks`;
+  const historyPath = `${hooksPath}/${webhookId}/events`;
   const privateError = `upstream-${randomUUID()}`;
   const title = `${issue.key} 합성 저장소의 병합 요청`;
   const time = new Date(Date.now() - 10_000).toISOString();
@@ -20,12 +30,29 @@ export async function verifyNativeGitlabRead(context: BrowserContext, origin: st
   const calls: string[] = [];
   const mock = createServer((request, response) => {
     const path = new URL(request.url ?? '/', gitlabBase).pathname;
-    if (request.method !== 'GET' || request.headers['private-token'] !== token) {
+    const requestToken = request.headers['private-token'];
+    if (request.method !== 'GET') {
       calls.push('unauthenticated-or-write');
       return response.writeHead(403).end();
     }
     const repositoryUrl = `${gitlabBase}/${repositoryPath}`;
     response.setHeader('Content-Type', 'application/json');
+    if (path === hooksPath || path === historyPath) {
+      const credential = requestToken === managementToken ? 'manager' : requestToken === token ? 'read-token' : 'unexpected-token';
+      calls.push(`${path === hooksPath ? 'hooks' : 'history'}:${credential}`);
+      if (requestToken !== managementToken) return response.writeHead(403).end(JSON.stringify({ error: privateError }));
+      response.setHeader('X-Next-Page', '');
+      if (path === hooksPath) return response.end(JSON.stringify([{ id: webhookId, project_id: repositoryId, url: receiverUrl,
+        push_events: true, merge_requests_events: true, pipeline_events: true, deployment_events: true, enable_ssl_verification: true,
+        push_events_branch_filter: '', custom_webhook_template: null, alert_status: 'executable' }]));
+      return response.end(JSON.stringify([[proxyOnlyAttemptId, proxyOnlyMessage], [deliveredAttemptId, deliveredMessage]].map(([id, message]) => ({
+        id, url: receiverUrl, trigger: 'push_hooks', response_status: '200', request_headers: { 'webhook-id': message },
+      }))));
+    }
+    if (requestToken !== token) {
+      calls.push('unauthenticated-or-write');
+      return response.writeHead(403).end();
+    }
     if (path === `${apiRoot}/${encodeURIComponent(repositoryPath)}`) {
       calls.push('repository');
       return response.end(JSON.stringify({ id: repositoryId, name: 'Pilot Engine', path_with_namespace: repositoryPath, web_url: repositoryUrl }));
@@ -132,7 +159,59 @@ export async function verifyNativeGitlabRead(context: BrowserContext, origin: st
     expect(statusResponse.status()).toBe(200);
     const status = await statusResponse.json() as GitlabSyncStatus;
     expect(status.repositories).toMatchObject([{ repositoryId, activity: { includeHistory: false, result: { status: 'ok' } } }]);
-    return { settings: await readSettings(), repositoryUrl, link, status };
+    expect(saved.webhookReceiverUrl).toBe(receiverUrl);
+    const setup = page.getByRole('region', { name: 'GitLab 프로젝트 웹훅 설정', exact: true });
+    await expect(setup.getByLabel('웹훅 수신 주소', { exact: true })).toHaveValue(receiverUrl);
+    calls.length = 0;
+    const [denied] = await Promise.all([actionResponse('/project-webhook-review'),
+      setup.getByRole('button', { name: '웹훅 설정 점검', exact: true }).click()]);
+    expect(denied.status()).toBe(403);
+    expect(await denied.text()).not.toContain(privateError);
+    await expect(setup.getByRole('alert')).toContainText('웹훅을 볼 수 있는 GitLab 토큰');
+    await setup.getByLabel('GitLab 관리 API 토큰', { exact: true }).fill(managementToken);
+    const [reviewed] = await Promise.all([actionResponse('/project-webhook-review'),
+      setup.getByRole('button', { name: '다시 점검', exact: true }).click()]);
+    expect(reviewed.status()).toBe(200);
+    const hook = await reviewed.json() as GitlabProjectWebhookReview;
+    expect(hook).toMatchObject({ settingsVersion: saved.version, repositoryId, receiverUrl, authMode: 'signature', state: 'configured', hooks: [{ id: webhookId }] });
+    await expect(setup.getByRole('heading', { name: `웹훅 #${webhookId}`, exact: true })).toBeVisible();
+
+    const payload = {
+      object_kind: 'push', project_id: repositoryId, project: { id: repositoryId, web_url: repositoryUrl },
+      ref: 'refs/heads/synthetic-receiver-check', before: '0'.repeat(40), after: 'd'.repeat(40), commits: [], total_commits_count: 0,
+    };
+    const bytes = Buffer.from(`${JSON.stringify(payload, null, 2)}\n`);
+    const timestamp = String(Math.floor(Date.now() / 1_000));
+    const key = Buffer.from(signingToken.slice('whsec_'.length), 'base64');
+    const signature = createHmac('sha256', key).update(`${deliveredMessage}.${timestamp}.`).update(bytes).digest('base64');
+    const sender = await apiRequest.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
+    try {
+      const sent = await sender.post(receiverUrl, { data: bytes, maxRedirects: 0, headers: {
+        'Content-Type': 'application/json', 'X-Gitlab-Event': 'Push Hook', 'webhook-id': deliveredMessage,
+        'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}`,
+      } });
+      expect(sent.status()).toBe(200);
+      expect(await sent.json()).toEqual({ ok: true, duplicate: false, linked: 0, runs: [] });
+    } finally { await sender.dispose(); }
+
+    const [inspected] = await Promise.all([actionResponse('/project-webhook-history'),
+      setup.getByRole('button', { name: '최근 전송 확인', exact: true }).click()]);
+    expect(inspected.status()).toBe(200);
+    const history = await inspected.json() as GitlabProjectWebhookHistory;
+    const delivered = history.attempts.find(attempt => attempt.id === deliveredAttemptId)?.messageReceipt;
+    if (delivered?.status !== 'matched') throw new Error('The signed GitLab delivery did not match its exact setup history entry.');
+    expect(history).toMatchObject({ settingsVersion: saved.version, repositoryId, hookId: webhookId, partial: false, localReceipt: delivered.delivery });
+    expect(delivered.delivery).toMatchObject({ event: 'push', authentication: 'signing-token', duplicate: false, linked: 0, automationRuns: 0 });
+    expect(history.attempts.map(attempt => [attempt.id, attempt.status, attempt.messageReceipt.status])).toEqual([
+      [proxyOnlyAttemptId, 200, 'unconfirmed'], [deliveredAttemptId, 200, 'matched'],
+    ]);
+    const visibleHistory = setup.getByRole('region', { name: 'GitLab 최근 전송', exact: true });
+    await expect(visibleHistory.getByRole('listitem', { name: `GitLab 전송 #${deliveredAttemptId}`, exact: true })).toContainText('같은 메시지 인증 수신 확인');
+    await expect(visibleHistory.getByRole('listitem', { name: `GitLab 전송 #${proxyOnlyAttemptId}`, exact: true })).toContainText('같은 메시지 인증 수신 미확인');
+    expect([deliveredMessage, proxyOnlyMessage, managementToken, token, signingToken].some(value => JSON.stringify(history).includes(value))).toBe(false);
+    expect(calls).toEqual(['hooks:read-token', 'hooks:manager', 'hooks:manager', 'history:manager']);
+    expect(await persistedIssueAndLinks()).toEqual(after);
+    return { settings: await readSettings(), repositoryUrl, link, status, webhookReceipt: delivered.delivery };
   } finally {
     await page.close();
     if (mock.listening) {

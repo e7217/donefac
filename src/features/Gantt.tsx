@@ -356,7 +356,7 @@ function ProjectGantt(props: GanttProps) {
   const [datePicker, setDatePicker] = useState<DateRangePick | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [hideDone, setHideDone] = useState(Boolean(timelineLink?.hideDone));
-  const [autoOpen, setAutoOpen] = useState(false);
+  const [autoReview, setAutoReview] = useState<{ opener: HTMLButtonElement; finding?: GanttDependencyFinding } | null>(null);
   const [pasteScope, setPasteScope] = useState<ScheduleProjectScope | null>(null);
   const [newIssuePasteProject, setNewIssuePasteProject] = useState<Project | null>(null);
   const [pastedIssueIds, setPastedIssueIds] = useState<string[]>([]);
@@ -415,7 +415,7 @@ function ProjectGantt(props: GanttProps) {
     }
     if (selected.size) setSelected(new Set());
     if (shiftMode) setShiftMode(null);
-    if (autoOpen) setAutoOpen(false);
+    if (autoReview) setAutoReview(null);
     if (bulkDateSelection) setBulkDateSelection(null);
     if (bulkLinkSelection) setBulkLinkSelection(null);
     if (blockerLinksScope) setBlockerLinksScope(null);
@@ -474,7 +474,7 @@ function ProjectGantt(props: GanttProps) {
   const [inlineDateRecords, setInlineDateRecords] = useState<ReadonlyMap<string, StoredGanttDateDraft>>(() => new Map());
   const [inlineDateFocused, setInlineDateFocused] = useState(false);
   const otherScheduleEditorOpen = Boolean(teamFollowUp || teamFollowUpHandoff || drag || datePicker || preview || cascade ||
-    shiftMode || autoOpen || pasteScope || newIssuePasteProject || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
+    shiftMode || autoReview || pasteScope || newIssuePasteProject || bulkDateSelection || bulkLinkSelection || blockerLinksScope || rowScheduleEdit ||
     createOpen || scheduleIssueCreation || blockedIssueCreation || teamBlockerEdit || linkEditor || planAssignment || planShift);
   const scheduleEditorOpen = otherScheduleEditorOpen || Boolean(linkPicker);
   const refreshPaused = Boolean(issueOverlayOpen || busy || hasDraft || inlineDateFocused || scheduleEditorOpen);
@@ -1114,7 +1114,9 @@ function ProjectGantt(props: GanttProps) {
       if (findingsProjectId && dependencyProjectId !== findingsProjectId) continue;
       const check = checkDependencySchedule(dependency, predecessor, successor, mathForProject(dependencyProjectId));
       if (check.kind === 'valid') continue;
-      findings.push({ dependency, predecessor, successor, check });
+      const canSuggestDates = check.kind === 'conflict' && Boolean(successor.startDate && successor.endDate) &&
+        !isTerminalStatus(data, successor.projectId, successor.status);
+      findings.push({ dependency, predecessor, successor, check, canSuggestDates });
       if (check.kind === 'conflict') conflictingIds.add(dependency.id);
     }
     if (activeTeamBlockers.length) {
@@ -1278,6 +1280,8 @@ function ProjectGantt(props: GanttProps) {
   const automaticScheduleIssues = selectedIssues.length ? selectedIssues : planningScope && !scheduleFocus ? issues : [];
   const automaticProjectId = allProjects ? selectedProjectId ?? (!selectedIssues.length ? chartProjectFilter : null) : projectId;
   const automaticNeedsSelection = teamScheduleFilterActive && !selectedIssues.length;
+  const conflictReview = autoReview?.finding;
+  const automaticReviewProjectId = conflictReview?.successor.projectId ?? (automaticNeedsSelection ? null : automaticProjectId);
   const issueRows = new Map(issues.map((issue, index) => [issue.id, { issue, index }]));
   const hiddenPastedIssues = pastedIssueIds.filter(id => !issueRows.has(id) && projectIssues.some(issue => issue.id === id));
   const savedFindings = useMemo(() => [...findings, ...teamBlockerFindings], [findings, teamBlockerFindings]);
@@ -1589,6 +1593,20 @@ function ProjectGantt(props: GanttProps) {
     if (!scheduleFocus || !canChangeScheduleFocus()) return false;
     locateScheduleFocusRow(row.issue, { endpoint });
     return true;
+  }
+  function reviewFindingSchedule(finding: GanttDependencyFinding, opener: HTMLButtonElement) {
+    if (!finding.canSuggestDates || (!canKeepInlineDateDrafts() && !canLeave())) return;
+    queueMicrotask(() => setAutoReview({ finding, opener }));
+  }
+  function closeAutomaticReview(updated?: readonly Issue[]) {
+    const review = autoReview;
+    setAutoReview(null);
+    if (!review || (updated && focusAfterCompletingMissingRows(updated))) return;
+    pendingScheduleFocus.current = () => {
+      const target = [review.opener, review.finding ? findingsTrigger.current : null, scrollRef.current].find(element =>
+        element?.isConnected && !element.closest('[inert]') && !element.matches(':disabled'));
+      target?.focus({ preventScroll: true });
+    };
   }
   function locateTimelineDate(date: string, rowIndex?: number, preserveRange = false) {
     if (preserveRange && !outside(date)) scrollToDate(dayNumber(date), range.start);
@@ -2544,7 +2562,7 @@ function ProjectGantt(props: GanttProps) {
       </button>}
       {automaticProjectId && <button className="btn" disabled={busy || sharedViewUnavailable || automaticNeedsSelection || Boolean((planningScope || scheduleFocus) && !automaticScheduleIssues.length)}
         title={automaticNeedsSelection ? '현재 보기에서 자동 일정을 검토할 업무를 선택하세요.' : undefined}
-        onClick={() => { if (canLeave()) setAutoOpen(true); }}><Sparkles size={15} />자동 일정</button>}
+        onClick={event => { if (canLeave()) setAutoReview({ opener: event.currentTarget }); }}><Sparkles size={15} />자동 일정</button>}
       <button className="btn" type="button" disabled={busy} onClick={event => showLinkEditor(event.currentTarget)}><Link2 size={16} /> 업무 연결</button>
       <button ref={createTrigger} className="btn btn-primary" disabled={Boolean(createOpen)}
         onClick={event => { if (canLeave()) setCreateOpen({ opener: event.currentTarget }); }}><Plus size={16} /> 업무 추가</button>
@@ -2787,6 +2805,7 @@ function ProjectGantt(props: GanttProps) {
       allProjects={allProjects && !chartProjectFilter}
       disabled={busy || Boolean(issueOverlayOpen)} onLocateDate={locateFindingDate}
       onEditLink={(dependency, opener) => showLinkEditor(opener, { dependency })}
+      onReviewDependency={reviewFindingSchedule}
       onReviewTeamBlocker={({ relation, predecessor, successor }, opener) =>
         reviewTeamBlockerSchedules(predecessor, [{ relation, target: successor }], opener, findingsTrigger.current)}
       onPointerDown={keepInlineDateFocus}
@@ -3237,14 +3256,16 @@ function ProjectGantt(props: GanttProps) {
       </footer></section></div>}
     {cascade && <GanttCascadeDialog projectId={cascade.projectId} anchorChange={cascade.anchorChange} actorId={props.actorId} undoScope={undoScope}
       onClose={closeCascade} onApplied={applyCascade} onBusyChange={markBusy} />}
-    {autoOpen && automaticProjectId && !automaticNeedsSelection && <AutomaticScheduleDialog {...props} undoScope={undoScope}
-      projectId={automaticProjectId} selectedIssueIds={automaticScheduleIssues.map(issue => issue.id)} onClose={() => setAutoOpen(false)}
+    {autoReview && automaticReviewProjectId && <AutomaticScheduleDialog {...props} undoScope={undoScope}
+      projectId={automaticReviewProjectId}
+      selectedIssueIds={conflictReview ? [conflictReview.successor.id] : automaticScheduleIssues.map(issue => issue.id)}
+      conflictReview={conflictReview && { predecessorKey: conflictReview.predecessor.key, successorKey: conflictReview.successor.key }}
+      onClose={closeAutomaticReview}
       onApplied={async result => {
         rememberUndo(result.undoId);
         setScheduleWarnings(result.warnings || []);
         await refresh();
-        setAutoOpen(false);
-        focusAfterCompletingMissingRows(result.updated);
+        closeAutomaticReview(result.updated);
         notify(`${result.updated.length}개 업무에 자동 일정 제안을 적용했습니다.`);
       }} />}
     {schedulePasteTarget && <SchedulePasteDialog

@@ -30,9 +30,9 @@ async function fixture(request: APIRequestContext) {
   };
 }
 
-async function openChange(page: Page, issue: Issue, author: User, mode: 'teamboard' | 'issues') {
+async function openChange(page: Page, issue: Issue, author: User, mode: 'teamboard' | 'issues', unassignedOnly = false) {
   await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), author.id);
-  const query = mode === 'teamboard' ? `?${new URLSearchParams({ boardQuery: issue.title })}` : '';
+  const query = mode === 'teamboard' ? `?${new URLSearchParams({ boardQuery: issue.title, ...(unassignedOnly && { boardMember: '' }) })}` : '';
   await page.goto(`/#/${issue.projectId}/${mode}${query}`);
   const row = page.locator(`[data-issue-id="${issue.id}"]`);
   await button(row, `${issue.key} 상태 변경`).click();
@@ -45,6 +45,64 @@ async function openChange(page: Page, issue: Issue, author: User, mode: 'teamboa
     retry: button(dialog, '저장 결과 다시 확인'),
   };
 }
+
+test('상태와 인수인계 댓글 응답 유실 후 보드에서 사라진 업무를 같은 탭에서 확인한다', async ({ page, request }) => {
+  const f = await fixture(request);
+  const { issue, owner, peer } = f;
+  const submissions: IssueStatusChangeRequest[] = [];
+  const noteText = '다음 단계에 넘길 상태 변경 근거입니다.';
+  let failNextRead = false;
+  try {
+    const { dialog, target, note, apply, retry } = await openChange(page, issue, owner, 'teamboard', true);
+    await target.selectOption('in_progress');
+    await dialog.getByRole('combobox', { name: '담당자', exact: true }).selectOption(`user:${peer.id}`);
+    await note.fill(noteText);
+    await page.route('**/api/workspace', async route => {
+      if (!failNextRead) return route.continue();
+      failNextRead = false;
+      await route.fulfill({ status: 503, json: { error: '합성 업무 조회 실패' } });
+    });
+    await page.route(`**${transitionPath(issue)}`, async route => {
+      submissions.push(route.request().postDataJSON() as IssueStatusChangeRequest);
+      const response = await route.fetch();
+      expect(response.status(), await response.text()).toBe(200);
+      if (submissions.length === 1) await route.fulfill({ status: 503, json: { error: '합성 저장 응답 유실' } });
+      else {
+        expect(await response.json()).toMatchObject({ duplicate: true });
+        failNextRead = true;
+        await route.fulfill({ response });
+      }
+    });
+    await apply.click();
+    await expect(retry).toBeVisible();
+    const comments = await json<Comment[]>(await request.get(commentPath(issue)));
+    expect(comments).toMatchObject([{ authorId: owner.id, body: noteText }]);
+
+    await page.reload();
+    await expect(dialog).toHaveCount(0);
+    const recovery = page.getByRole('region', { name: '업무 상태 변경 결과', exact: true });
+    await expect(recovery).toContainText(issue.key);
+    await expect(page.locator(`[data-issue-id="${issue.id}"]`)).toHaveCount(0);
+    const actorField = page.getByLabel('작업자 선택', { exact: true });
+    await actorField.selectOption(peer.id);
+    await expect(recovery).toHaveCount(0);
+    await actorField.selectOption(owner.id);
+    await expect(recovery).toBeVisible();
+    await button(recovery, '상태 변경 결과 다시 확인').click();
+    await expect(recovery.getByRole('alert')).toContainText('합성 업무 조회 실패');
+    expect(submissions).toEqual([submissions[0], submissions[0]]);
+
+    await page.reload();
+    const refresh = button(recovery, '최신 업무 불러오기');
+    await expect(refresh).toBeEnabled();
+    await refresh.click();
+    await expect(recovery).toHaveCount(0);
+    await page.reload();
+    await expect(recovery).toHaveCount(0);
+    expect(submissions).toHaveLength(2);
+    expect(await json<Comment[]>(await request.get(commentPath(issue)))).toEqual(comments);
+  } finally { await f.close(); }
+});
 
 test('360px 팀 보드에서 상태·담당자·멘션 댓글을 함께 저장하고 응답 유실 뒤 같은 댓글을 확인한다', async ({ page, request }) => {
   test.setTimeout(85_000);

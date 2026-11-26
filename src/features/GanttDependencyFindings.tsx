@@ -1,7 +1,7 @@
 'use client';
 
 import { useId, useMemo, useState, type PointerEvent } from 'react';
-import { ArrowLeft, ArrowRight, CalendarDays, Link2, TriangleAlert, X } from 'lucide-react';
+import { ArrowLeft, ArrowRight, CalendarDays, Link2, Sparkles, TriangleAlert, X } from 'lucide-react';
 import {
   isDependencyLag, isDependencyType, SCHEDULE_DATE_LABELS,
   type DependencyScheduleCheck, type ScheduleDependencyEndpoint, type TeamBlockerScheduleCheck,
@@ -15,6 +15,7 @@ export interface GanttDependencyFinding {
   predecessor: Issue;
   successor: Issue;
   check: Exclude<DependencyScheduleCheck, { kind: 'valid' }>;
+  canSuggestDates: boolean;
 }
 
 export interface GanttTeamBlockerFinding {
@@ -32,6 +33,7 @@ interface GanttDependencyFindingsProps {
   onClose: () => void;
   onLocateDate: (issueId: string, endpoint: ScheduleDependencyEndpoint) => void;
   onEditLink: (dependency: Dependency, opener: HTMLButtonElement) => void;
+  onReviewDependency: (finding: GanttDependencyFinding, opener: HTMLButtonElement) => void;
   onReviewTeamBlocker: (finding: GanttTeamBlockerFinding, opener: HTMLButtonElement) => void;
   onPointerDown?: (event: PointerEvent<HTMLButtonElement>) => void;
   disabled: boolean;
@@ -44,7 +46,7 @@ const FINDING_LABELS = { conflict: '충돌', missing: '날짜 미정', invalid: 
 const FINDING_KINDS = ['conflict', 'missing', 'invalid'] as const;
 
 export function GanttDependencyFindings({
-  id, findings, onClose, onLocateDate, onEditLink, onReviewTeamBlocker, onPointerDown, disabled, focused, allProjects,
+  id, findings, onClose, onLocateDate, onEditLink, onReviewDependency, onReviewTeamBlocker, onPointerDown, disabled, focused, allProjects,
 }: GanttDependencyFindingsProps) {
   const heading = useId();
   const [page, setPage] = useState(0);
@@ -86,7 +88,7 @@ export function GanttDependencyFindings({
           const key = 'relation' in finding ? `blocker:${finding.relation.id}` : `dependency:${finding.dependency.id}`;
           return <li key={key} data-team-blocker-id={relationId}>
             <FindingDetails finding={finding} onLocateDate={onLocateDate} onEditLink={onEditLink}
-              onReviewTeamBlocker={onReviewTeamBlocker} onPointerDown={onPointerDown} disabled={disabled} />
+              onReviewDependency={onReviewDependency} onReviewTeamBlocker={onReviewTeamBlocker} onPointerDown={onPointerDown} disabled={disabled} />
           </li>;
         })}
       </ul>
@@ -103,9 +105,9 @@ export function GanttDependencyFindings({
   </section>;
 }
 
-function FindingDetails({ finding, onLocateDate, onEditLink, onReviewTeamBlocker, onPointerDown, disabled }: {
+function FindingDetails({ finding, onLocateDate, onEditLink, onReviewDependency, onReviewTeamBlocker, onPointerDown, disabled }: {
   finding: GanttScheduleFinding;
-} & Pick<GanttDependencyFindingsProps, 'onLocateDate' | 'onEditLink' | 'onReviewTeamBlocker' | 'onPointerDown' | 'disabled'>) {
+} & Pick<GanttDependencyFindingsProps, 'onLocateDate' | 'onEditLink' | 'onReviewDependency' | 'onReviewTeamBlocker' | 'onPointerDown' | 'disabled'>) {
   const heading = useId();
   const { predecessor, successor, check } = finding;
   const teamBlocker = 'relation' in finding ? finding : undefined;
@@ -147,6 +149,11 @@ function FindingDetails({ finding, onLocateDate, onEditLink, onReviewTeamBlocker
       {dependency && <button type="button" className="btn btn-ghost" disabled={disabled} aria-label={`${predecessor.key} → ${successor.key} 연결 수정`}
         onClick={event => onEditLink(dependency, event.currentTarget)}>
         <Link2 size={14} aria-hidden="true" />연결 수정
+      </button>}
+      {'dependency' in finding && finding.canSuggestDates && <button type="button" className="btn" aria-haspopup="dialog"
+        aria-label={`${successor.key} 후행 일정 검토`} aria-describedby={heading} data-gantt-focus-control="" onPointerDown={onPointerDown}
+        disabled={disabled} onClick={event => onReviewDependency(finding, event.currentTarget)}>
+        <Sparkles size={14} aria-hidden="true" />후행 일정 검토
       </button>}
       {teamBlocker && check.kind === 'conflict' && <button type="button" className="btn" aria-haspopup="dialog" aria-describedby={heading}
         data-gantt-focus-control="" onPointerDown={onPointerDown} disabled={disabled}

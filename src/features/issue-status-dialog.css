@@ -144,3 +144,45 @@
 .issue-status-handoff textarea {
   resize: vertical;
 }
+
+.issue-status-recovery {
+  margin-block-end: 16px;
+  padding: 12px 16px;
+}
+
+.issue-status-recovery h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+}
+
+.issue-status-recovery ul {
+  display: grid;
+  list-style: none;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+}
+
+.issue-status-recovery li {
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.issue-status-recovery p,
+.issue-status-recovery blockquote {
+  margin: 0;
+}
+
+.issue-status-recovery blockquote {
+  max-block-size: 8em;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.issue-status-recovery li > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

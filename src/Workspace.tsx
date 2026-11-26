@@ -36,6 +36,7 @@ import { Issues } from './features/Issues';
 import { Gantt } from './features/Gantt';
 import { clearGanttDateDrafts, type GanttIssueDateDrafts } from './features/gantt-date-draft-storage';
 import { IssuePanel } from './features/IssuePanel';
+import { IssueStatusRecovery } from './features/IssueStatusRecovery';
 import { MyWork } from './features/MyWork';
 import { ProjectCreationDialog } from './features/ProjectCreationDialog';
 import { WorkspaceMemberEmailDialog } from './features/WorkspaceMemberEmailDialog';
@@ -1546,6 +1547,7 @@ export default function Workspace({environmentLabel = '로컬 개발 환경', pi
       </div></header>
       <main className={`main-content view-${view}`} ref={workspaceMain}
         tabIndex={teamBoard || view === 'teamoverview' || view === 'issues' || view === 'gantt' || view === 'search' || view === 'favorites' || view === 'mywork' ? -1 : undefined}>
+        <IssueStatusRecovery key={JSON.stringify([actorId, data.restoreGeneration])} {...props} />
         {view === 'overview' && <Overview {...props} navigate={navigate}/>}
         {view === 'teamoverview' && <Suspense fallback={<div className="empty-state"><LoaderCircle className="spin"/><p>팀 개요를 불러오는 중입니다.</p></div>}>
           <TeamOverview {...props} filters={teamOverviewFilters} openPublication={openPublication}

@@ -4,7 +4,7 @@ import { X } from 'lucide-react';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { isCalendarDate, MAX_CALENDAR_DATE, MIN_CALENDAR_DATE } from '../../shared/calendar';
 import { PRIORITY, type CustomFieldDefinition, type CustomFieldValue, type FeatureProps, type Issue,
-  type IssueStatusChangeRequest, type IssueStatusChangeResult, type User, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
+  type User, type WorkflowStatus, type WorkspaceSnapshot } from '../../shared/types';
 import { fieldApplies, fieldValueLabel, hasCustomValue, projectIssueSchema, visibleIssueFieldIds } from '../../shared/issue-schema';
 import { allowedNextStatuses, projectWorkflow, requiredFieldsFor, statusMeta } from '../../shared/workflow-helpers';
 import { api, ApiError } from '../lib/api';
@@ -12,12 +12,12 @@ import { afterAcceptedNavigation } from '../lib/navigation';
 import { newRequestId } from '../lib/request-id';
 import { CommentMentionInput, commentDraftPayload, emptyCommentDraft } from './CommentMentions';
 import { CustomFieldInput } from './CustomFields';
+import { confirmStatusChange, readStatusChangeAttempts, saveStatusChangeAttempt, statusChangeAttemptSnapshot, type StatusChangeAttempt } from './issue-status-attempt';
 import { errorMessage } from './schedule-utils';
 import './issue-status-dialog.css';
 
 export type IssueStatusEdit = { issue: Issue; current: WorkflowStatus; choices: WorkflowStatus[]; workflowVersion: number };
 type Recovery = 'conflict' | 'verify' | 'refresh';
-type StatusChangeAttempt = { actorId: string; input: IssueStatusChangeRequest };
 type PropertyDraft<Value> = { base: Value; value: Value };
 type CustomDraft = PropertyDraft<CustomFieldValue> & { label: string; kind: CustomFieldDefinition['kind'] };
 type DueDateDraft = { base: Issue['dueDate']; mode: 'set' | 'clear'; date: string };
@@ -27,19 +27,6 @@ const REFRESH = '변경 사항을 저장했습니다. 화면에 반영하려면 
 const UNKNOWN_HANDOFF = '상태 변경과 인수인계 댓글의 저장 결과를 확인하지 못했습니다.';
 const UNASSIGNED = 'unassigned';
 const USER_OPTION = 'user:';
-
-function confirmedStatusChange(result: IssueStatusChangeResult, edit: IssueStatusEdit, input: IssueStatusChangeRequest): boolean {
-  const { issue, receipt, duplicate } = result ?? {};
-  return Boolean(receipt && issue && typeof duplicate === 'boolean' && receipt.requestId === input.requestId &&
-    receipt.issueId === edit.issue.id && receipt.projectId === edit.issue.projectId && receipt.appliedVersion === input.expectedVersion + 1 &&
-    receipt.status === input.status && (receipt.assigneeId === null || typeof receipt.assigneeId === 'string') &&
-    (input.assigneeId === undefined || receipt.assigneeId === input.assigneeId) && receipt.priority === input.priority && receipt.dueDate === input.dueDate &&
-    (input.comment ? typeof receipt.commentId === 'string' && receipt.commentId.length > 0 : receipt.commentId === null) &&
-    issue.id === receipt.issueId && issue.projectId === receipt.projectId && Number.isSafeInteger(issue.version) &&
-    (issue.version === receipt.appliedVersion ? issue.status === receipt.status && issue.assigneeId === receipt.assigneeId &&
-      (receipt.priority === undefined || issue.priority === receipt.priority) && (receipt.dueDate === undefined || issue.dueDate === receipt.dueDate) :
-      duplicate && issue.version > receipt.appliedVersion));
-}
 
 function definiteStatusError(cause: unknown): cause is ApiError {
   return cause instanceof ApiError && cause.status < 500 && ![408, 425, 429, 499].includes(cause.status);
@@ -250,6 +237,9 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     setRecovery('refresh');
     try {
       await refresh();
+      const attempt = changeAttempt.current;
+      if (attempt) saveStatusChangeAttempt(attempt, null);
+      changeAttempt.current = null;
       const label = edit.choices.find(status => status.id === selected)?.label ?? selected;
       const details = assigneeId === undefined ? '' : ` · 담당자 ${assigneeName(assigneeId)}`;
       notify(withComment ? `${edit.issue.key} · 상태 ${label}${details} · 인수인계 댓글 저장 완료` :
@@ -282,11 +272,8 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
     }
     const withComment = Boolean(attempt.input.comment);
     try {
-      const result = await api<IssueStatusChangeResult>(`/issues/${encodeURIComponent(edit.issue.id)}/status-change`, {
-        method: 'POST', headers: { 'X-Actor-Id': attempt.actorId }, body: JSON.stringify(attempt.input),
-      });
-      if (!confirmedStatusChange(result, edit, attempt.input)) throw new Error(unknownResult);
-      changeAttempt.current = null;
+      await confirmStatusChange(attempt);
+      saveStatusChangeAttempt(attempt, 'confirmed');
       setComment(emptyCommentDraft());
       setPriority(undefined);
       setDueDate(undefined);
@@ -300,6 +287,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
           setError(`${unknownResult} 접속을 확인한 뒤 같은 요청으로 다시 확인해 주세요.`);
           return;
         }
+        saveStatusChangeAttempt(attempt, null);
         changeAttempt.current = null;
         reportStatusError(cause);
       } else {
@@ -341,13 +329,20 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
       setError('현재 작업 공간을 확인하려면 최신 업무를 불러와 주세요.');
       return;
     }
+    const saved = readStatusChangeAttempts(statusChangeAttemptSnapshot(actorId, restoreGeneration), actorId, restoreGeneration);
+    if (saved.some(attempt => attempt.issueId === edit.issue.id)) {
+      setError('이 업무의 이전 요청을 먼저 확인해 주세요. 창을 닫으면 화면의 업무 상태 변경 결과에서 확인할 수 있습니다.');
+      return;
+    }
     const note = commentDraftPayload(comment);
     pending.current = true;
     setBusy(true);
     clearValidation();
     try {
       const changes = Object.fromEntries(Object.entries(draftCustom).filter(([id, value]) => !sameProperty(value, storedCustom(id))));
-      const attempt = { actorId, input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
+      const attempt = { actorId, issueId: edit.issue.id, projectId: edit.issue.projectId, issueKey: edit.issue.key,
+        statusLabel: edit.choices.find(status => status.id === selected)?.label ?? selected,
+        input: { requestId: newRequestId(), restoreGeneration, expectedVersion: edit.issue.version,
         expectedWorkflowVersion: edit.workflowVersion, status: selected, ...(assigneeId === undefined ? {} : { assigneeId }),
         ...(priority && priorityValue !== edit.issue.priority ? { priority: priorityValue } : {}),
         ...(dueDate ? { dueDate: dueDateValue } : {}),
@@ -355,6 +350,7 @@ export function IssueStatusDialog({ edit: originalEdit, actorId, latest, refresh
         ...(Object.keys(changes).length ? { customFields: changes, expectedIssueSchemaVersion: schemaVersion } : {}),
         ...(note.body ? { comment: note } : {}) } };
       changeAttempt.current = attempt;
+      saveStatusChangeAttempt(attempt, 'awaiting');
       await applyStatusChange(attempt);
     } catch (cause) { setError(errorMessage(cause)); }
     finally { pending.current = false; setBusy(false); }

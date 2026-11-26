@@ -115,6 +115,38 @@ test('360px 간트에서 공유 보기에 가려진 날짜를 찾아 일정 충�
     await linkEditor.getByRole('button', { name: '취소', exact: true }).click();
     await expect(editLink).toBeFocused();
 
+    const unrelatedDraft = row(predecessor).getByLabel(`${predecessor.key} 시작일`, { exact: true });
+    await unrelatedDraft.fill('2026-12-09');
+    await conflictFinding.getByRole('button', { name: `${conflicting.key} 후행 일정 검토`, exact: true }).click();
+    const automatic = page.getByRole('dialog', { name: '자동 일정 제안', exact: true });
+    await expect(automatic).toContainText(`${predecessor.key} → ${conflicting.key}`);
+    await expect(automatic.getByLabel('자동 일정 프로젝트', { exact: true })).toBeDisabled();
+    const reviewingAuto = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/auto-preview' && response.request().method() === 'POST');
+    await automatic.getByRole('button', { name: '자동 일정 미리보기', exact: true }).click();
+    const proposal = await reviewingAuto;
+    expect(proposal.request().postDataJSON()).toEqual({ projectId: project.id, issueIds: [conflicting.id] });
+    expect(proposal.ok(), await proposal.text()).toBeTruthy();
+    const result = await proposal.json() as AutomaticSchedulePreview;
+    expect(result.blocking).toEqual([]);
+    expect(result.changes).toEqual([expect.objectContaining({ id: conflicting.id, toStart: nextWorkingDay, toEnd: successorEnd })]);
+    const applyingAuto = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/auto-apply' && response.request().method() === 'POST');
+    await automatic.getByRole('button', { name: '자동 일정 적용', exact: true }).click();
+    const autoResult = await applyingAuto;
+    expect(autoResult.ok(), await autoResult.text()).toBeTruthy();
+    await expect(automatic).toHaveCount(0);
+    await expectCounts(0);
+    await expect(toggle).toBeFocused();
+    await expect(unrelatedDraft).toHaveValue('2026-12-09');
+
+    const undoing = page.waitForResponse(response => new URL(response.url()).pathname === '/api/schedule/undo' && response.request().method() === 'POST');
+    await page.getByRole('button', { name: '되돌리기', exact: true }).click();
+    const undone = await undoing;
+    expect(undone.ok(), await undone.text()).toBeTruthy();
+    await expectCounts(1);
+    await expect(unrelatedDraft).toHaveValue('2026-12-09');
+    await unrelatedDraft.press('Escape');
+    await expect(unrelatedDraft).toHaveValue(predecessor.startDate!);
+
     await editStart.click();
     await expect(page).toHaveURL(url => url.hash === conflictPath);
     await expectUsableFocus(start);
