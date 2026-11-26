@@ -862,9 +862,9 @@ function ProjectGantt(props: GanttProps) {
     else setTeamFollowUpHandoff(handoff);
   }
   function openTeamFollowUpChoices({ source, initialChange, origin }: TeamFollowUpHandoff, choices: readonly TeamFollowUpChoice[]) {
-    const { id, key, version, startDate, endDate } = source;
+    const { id, key, projectId, version, startDate, endDate } = source;
     setTeamFollowUpHandoff(null);
-    setTeamFollowUp({ choices, source: { id, key, version, startDate, endDate }, initialChange, origin });
+    setTeamFollowUp({ choices, source: { id, key, projectId, version, startDate, endDate }, initialChange, origin });
   }
   function restoreTeamFollowUpOrigin(origin: TeamFollowUpOrigin, sourceId: string, updated?: readonly Issue[]) {
     const completed = Boolean(updated && focusAfterCompletingMissingRows(updated));
@@ -3223,7 +3223,9 @@ function ProjectGantt(props: GanttProps) {
         {previewTeamFollowUp && <button ref={teamFollowUpPreviewButton} type="button" className="btn"
           disabled={busy || Boolean(manualProblem) || !preview.previewId} onClick={() => {
             const { id, key, title, version, fromStart, fromEnd, toStart, toEnd } = previewTeamFollowUp;
-            reviewTeamSuccessors({ id, key, title, version, startDate: fromStart, endDate: fromEnd },
+            const sourceProject = previewTeamFollowUp.projectId ?? projectIssues.find(issue => issue.id === id)?.projectId;
+            if (!sourceProject) return;
+            reviewTeamSuccessors({ id, key, title, projectId: sourceProject, version, startDate: fromStart, endDate: fromEnd },
               { id, expectedVersion: version, startDate: toStart, endDate: toEnd }, { kind: 'preview' });
           }}>프로젝트 간 일정 검토</button>}
         {manualProblem?.kind === 'stale' && !missingHierarchyAnchor && <button ref={manualReviewAction} type="button" className="btn" disabled={busy} onClick={() => void reviewManualAgain()}>다시 미리보기</button>}
@@ -3374,7 +3376,7 @@ function ProjectGantt(props: GanttProps) {
       onBlockedIssueCreated={({ id, key }) => setCreatedBlockedIssue({ id, key })} />}
     {teamFollowUpHandoff && <GanttTeamFollowUpChooser source={teamFollowUpHandoff.source} choices={teamFollowUpHandoff.choices}
       projects={data.projects} onChoose={choices => openTeamFollowUpChoices(teamFollowUpHandoff, choices)} onClose={closeTeamFollowUp} />}
-    {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} actorId={props.actorId} undoScope={undoScope}
+    {teamFollowUp && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} restoreGeneration={data.restoreGeneration} actorId={props.actorId} undoScope={undoScope}
       onClose={closeTeamFollowUp} onApplied={applyTeamFollowUp} onBusyChange={markBusy} onOutcomeUnknownChange={trackTeamFollowUpOutcome} />}
   </>;
 }

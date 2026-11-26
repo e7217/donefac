@@ -1123,6 +1123,7 @@ function isChangedFilesResult(result: GitlabMergeRequestChangedFiles | undefined
   const paths = new Set<string>();
   return result.files.every(file => {
     if (!file || typeof file.oldPath !== 'string' || !file.oldPath || typeof file.newPath !== 'string' || !file.newPath ||
+        (file.diffAnchor !== undefined && (typeof file.diffAnchor !== 'string' || !/^[a-f0-9]{40}$/u.test(file.diffAnchor))) ||
         !Object.hasOwn(fileChangeLabels, file.change) || typeof file.generated !== 'boolean' || typeof file.diffLimited !== 'boolean') return false;
     const pair = JSON.stringify([file.oldPath, file.newPath]);
     if (paths.has(pair)) return false;
@@ -1144,6 +1145,7 @@ function changedFilesError(cause: unknown): string {
 
 function MergeRequestChangedFiles({ target, revision }: { target: ReviewTarget; revision: string }) {
   const panelId = useId();
+  const [query, setQuery] = useState('');
   const { view, toggle, load } = useActivityLookup(revision, async signal => {
     const path = ['/issues', encodeURIComponent(target.issueId), 'gitlab-links', encodeURIComponent(target.linkId), 'merge-request-changed-files'].join('/');
     const result = await api<GitlabMergeRequestChangedFiles | undefined>(path, { method: 'GET', cache: 'no-store', signal });
@@ -1151,6 +1153,10 @@ function MergeRequestChangedFiles({ target, revision }: { target: ReviewTarget; 
   }, '연결된 MR의 변경 파일 응답을 확인할 수 없습니다.', changedFilesError);
   const changesUrl = new URL(target.url.href);
   changesUrl.pathname = changesUrl.pathname.replace(/\/$/u, '') + '/diffs';
+  const files = view?.kind === 'ready' ? view.result.files : [];
+  const pathQuery = query.trim().toLowerCase();
+  const visibleFiles = pathQuery ? files.filter(({ oldPath, newPath }) =>
+    oldPath.toLowerCase().includes(pathQuery) || newPath.toLowerCase().includes(pathQuery)) : files;
 
   return <div className="gitlab-activity-inspection">
     <button className="btn btn-ghost" type="button" aria-expanded={Boolean(view)} aria-controls={view ? panelId : undefined} onClick={toggle}>
@@ -1164,19 +1170,30 @@ function MergeRequestChangedFiles({ target, revision }: { target: ReviewTarget; 
         <p className="gitlab-activity-inspection-meta">조회한 파일 {view.result.files.length}개 · <time dateTime={view.result.checkedAt}>
           {new Date(view.result.checkedAt).toLocaleString('ko-KR')}
         </time></p>
-        {view.result.files.length ? <ul className="gitlab-changed-file-list" role="list" aria-label="변경 파일" tabIndex={0}>
-          {view.result.files.map(file => <li key={JSON.stringify([file.oldPath, file.newPath])} className="gitlab-changed-file">
-            <div className="gitlab-activity-inspection-meta">
-              <strong>{fileChangeLabels[file.change]}</strong>
-              {file.generated && <span>생성된 파일</span>}
-              {file.diffLimited && <span>변경 내용 표시 제한</span>}
-            </div>
-            <div className="gitlab-activity-inspection-meta">
-              {file.change === 'renamed' && <><code>{file.oldPath}</code><span>→</span></>}
-              <code>{file.change === 'deleted' ? file.oldPath : file.newPath}</code>
-            </div>
-          </li>)}
-        </ul> : <p>조회한 변경 파일이 없습니다.</p>}
+        {files.length > 0 && <label className="gitlab-changed-file-search">
+          조회한 파일 경로 검색
+          <input className="field" type="search" value={query} onChange={event => setQuery(event.target.value)} />
+        </label>}
+        {pathQuery && files.length > 0 && visibleFiles.length > 0 && <p role="status">일치하는 파일 {visibleFiles.length}개</p>}
+        {visibleFiles.length > 0 ? <ul className="gitlab-changed-file-list" role="list" aria-label="변경 파일" tabIndex={0}>
+          {visibleFiles.map(file => {
+            const filePath = file.change === 'deleted' ? file.oldPath : file.newPath;
+            return <li key={JSON.stringify([file.oldPath, file.newPath])} className="gitlab-changed-file">
+              <div className="gitlab-activity-inspection-meta">
+                <strong>{fileChangeLabels[file.change]}</strong>
+                {file.generated && <span>생성된 파일</span>}
+                {file.diffLimited && <span>변경 내용 표시 제한</span>}
+              </div>
+              <div className="gitlab-activity-inspection-meta">
+                {file.change === 'renamed' && <><code>{file.oldPath}</code><span>→</span></>}
+                {file.diffAnchor ? <a className="gitlab-discussion-link" href={`${changesUrl.href}#${file.diffAnchor}`}
+                  target="_blank" rel="noopener noreferrer" aria-label={`GitLab에서 ${filePath} 변경 열기`}>
+                  <code>{filePath}</code><ExternalLink aria-hidden="true" size={13} />
+                </a> : <code>{filePath}</code>}
+              </div>
+            </li>;
+          })}
+        </ul> : <p role="status">{files.length ? '일치하는 파일 경로가 없습니다.' : '조회한 변경 파일이 없습니다.'}</p>}
         {view.result.hasMore && <p>조회 범위가 제한되었습니다. 나머지 파일은 GitLab에서 확인해 주세요.</p>}
       </>}
       <div className="gitlab-discussion-actions">

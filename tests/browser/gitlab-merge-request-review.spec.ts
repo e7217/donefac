@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -168,6 +168,22 @@ test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·�
     await expect(filesPanel).toContainText('조회 범위가 제한되었습니다.');
     await expect(filesPanel).not.toContainText('원문 코드 변경 내용');
     await expect(filesPanel.getByRole('link', { name: 'GitLab에서 변경 열기', exact: true })).toHaveAttribute('href', mrUrl() + '/diffs');
+    const fileLink = (filePath: string) => `${mrUrl()}/diffs#${createHash('sha1').update(filePath).digest('hex')}`;
+    const renameLink = renamed.getByRole('link', { name: 'GitLab에서 src/new.ts 변경 열기', exact: true });
+    await expect(renameLink).toHaveAttribute('href', fileLink('src/new.ts'));
+    await expect(renameLink).toHaveAttribute('target', '_blank');
+    await expect(filesList.getByRole('link', { name: 'GitLab에서 src/deleted.ts 변경 열기', exact: true }))
+      .toHaveAttribute('href', fileLink('src/deleted.ts'));
+    const fileSearch = filesPanel.getByRole('searchbox', { name: '조회한 파일 경로 검색', exact: true });
+    await fileSearch.fill('missing.ts');
+    await expect(filesPanel).toContainText('일치하는 파일 경로가 없습니다.');
+    await expect(filesPanel).toContainText('조회 범위가 제한되었습니다.');
+    await fileSearch.fill('  VERY-OLD.TS  ');
+    await expect(filesList.getByRole('listitem')).toHaveCount(1);
+    await expect(renameLink).toBeVisible();
+    await fileSearch.fill('new.ts');
+    await expect(filesList.getByRole('listitem')).toHaveCount(1);
+    await expect(renameLink).toBeVisible();
     expect(await filesList.evaluate(list => list.scrollWidth - list.clientWidth)).toBe(0);
     expect(diffQueries()).toEqual(['?per_page=25&page=1']);
     await open.press('Enter');
@@ -237,6 +253,7 @@ test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·�
       await expect(review.getByRole('status')).toContainText('MR이 변경되었습니다.');
       await expect(filesPanel.getByRole('status')).toContainText('MR이 변경되었습니다. 변경 파일을 다시 확인해 주세요.');
       await expect(filesList).toHaveCount(0);
+      await expect(renameLink).toHaveCount(0);
       expect((await aborted).failure()?.errorText).toContain('ERR_ABORTED');
       expect(remoteCalls).toHaveLength(countBefore);
     } finally {
@@ -244,6 +261,10 @@ test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·�
       pendingReview.release();
     }
     await Promise.all([pendingDiscussion.finished, pendingReview.finished]);
+    await filesPanel.getByRole('button', { name: '변경 파일 다시 확인', exact: true }).click();
+    await expect(fileSearch).toHaveValue('new.ts');
+    await expect(filesList.getByRole('listitem')).toHaveCount(1);
+    await expect(renameLink).toHaveAttribute('href', fileLink('src/new.ts'));
     await expect(reviewers).toHaveCount(0);
     await expect(title).toHaveValue('저장하지 않은 MR 검토 업무 제목');
     await expect(comment).toHaveValue('작성 중인 MR 검토 메모');
@@ -372,13 +393,13 @@ test('360px 티켓과 개발 화면에서 GitLab MR의 변경 파일·검토·�
       expect(remoteCalls).toHaveLength(beforeDevelopmentShortcut);
       const directDevelopmentPanel = await openShortcut(development, activity);
       const openDevelopmentFiles = activity.getByRole('button', { name: '변경 파일 확인', exact: true });
-      expect(diffQueries()).toHaveLength(1);
+      expect(diffQueries()).toHaveLength(2);
       diffMode = 'empty';
       await openDevelopmentFiles.click();
       const developmentFiles = activity.getByRole('region', { name: 'GitLab MR 변경 파일', exact: true });
       await expect(developmentFiles).toContainText('조회한 변경 파일이 없습니다.');
       await expect(developmentFiles).not.toContainText('조회 범위가 제한되었습니다.');
-      expect(diffQueries()).toHaveLength(2);
+      expect(diffQueries()).toHaveLength(3);
       await trigger.click();
       await expect(details).toContainText('GitLab에서 검토자 목록을 확인하지 못했습니다.');
       await expect(details.getByRole('button', { name: /^미해결 토론 (확인|닫기)$/u })).toHaveCount(0);

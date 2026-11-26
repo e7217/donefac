@@ -1022,6 +1022,8 @@ CI 작업 조회와 같은 업무·저장소·파이프라인 검증 및 상태 
 
 조회 앞뒤의 MR 커밋 및 비교 범위와 Teamspace의 현재 연결을 대조한다. 도중에 바뀌면 `409`를 반환한다. `hasMore`는 조회 범위 밖에 파일이 있다는 근거가 있을 때 표시한다. 연결이 제공하는 API가 `405`나 `501`을 반환하면 `501`로 안내한다. 브라우저 응답에 `Cache-Control: no-store`를 적용한다.
 
+파일의 `diffAnchor`는 GitLab 변경 화면에서 해당 파일로 이동하는 경로 기반 앵커다. 선택한 MR의 현재 변경 화면을 열며 파일별 링크를 만들 때 별도 GitLab 요청을 보내지 않는다. [GitLab 파일 앵커 구현](https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/diff/file.rb)
+
 ### 연결된 MR 미해결 토론 확인
 
 브라우저의 `GET /api/issues/:id/gitlab-links/:linkId/merge-request-discussions`는 사용자가 요청할 때만 현재 티켓에 연결된 열린 MR의 토론을 읽는다. 저장된 저장소와 전역 MR ID·IID를 대조한 뒤 GitLab에서 50개씩 최대 4페이지를 읽는다. 응답의 `linkId`, `repositoryId`, `mergeRequestIid`, `checkedAt`에 `threads`와 `hasMore`를 더한다. 확인한 미해결 토론은 최대 30개까지 표시한다. 표시 한도를 넘었거나 다음 원본 페이지가 남으면 `hasMore`는 `true`다. [GitLab 토론 API](https://docs.gitlab.com/api/discussions/#list-all-merge-request-discussion-items)
@@ -1422,6 +1424,8 @@ Jira 패키지가 있는 영수증의 `jiraStatusHistory`는 보관 원본에서
 선행 업무의 날짜도 바꾸려면 `anchorChange: {id,expectedVersion,startDate,endDate}`를 함께 보낸다. `id`와 내부 `expectedVersion`은 선택한 관계의 선행 업무에 해당한다. 날짜는 `YYYY-MM-DD` 또는 `null`을 사용한다. 입력한 날짜를 고정하고, 선행 업무로 들어오는 연결과 선행 업무부터 이어지는 모든 프로젝트 내부 연결·열린 Teamspace 차단 및 선택한 Jira 관계를 검사한다. 이 경우 선행 업무를 포함해 최대 1,000개를 계산한다. 날짜가 바뀐 선행 업무는 후행 업무와 함께 `changes`에 들어간다. 선행 업무 버전이 바뀌면 미리보기와 적용은 `409` 및 `details.reason: "stale_team_follow_up_source"`와 현재 `currentVersion`, `startDate`, `endDate`를 반환한다.
 
 미리보기의 `teamFollowUp`에는 선택한 관계 ID·버전, 양쪽 업무 ID와 계산에 사용할 `sourceEndDate`가 포함된다. 배열 요청에서는 이 필드가 선택한 첫 관계를 가리키고, `relations`에 전체 선택의 `{relationId,expectedVersion,targetIssueId}`가 들어간다. `sourceSchedule`은 서버에 저장된 선행 업무의 `version`, `startDate`, `endDate`를 제공한다. `changes`는 각 업무의 `projectId`와 날짜 전후 값을, `warnings`는 마감 초과 등을, `blocking`은 적용 전에 해결할 항목을 표시한다. 저장은 모든 선택 관계의 버전과 현재 대상, 관련 업무의 소속·버전, 참여 프로젝트의 달력·워크플로·양식 및 현재 연결을 다시 검사한다.
+
+선택한 차단 관계가 사라졌거나 바뀌어 다시 선택해야 할 때 `details.reason`은 `stale_team_follow_up_relations`다. 없는 관계의 미리보기는 `404`, 달라진 관계나 적용 시 재검토는 `409`를 반환한다.
 
 검토 범위에 들어온 업무에 방향을 확인한 추가 Jira 선행 연결이 있으면 완료 후 시작 제약으로 계산한다. 범위 밖 원인 업무는 저장한 일정으로 계산하고, 필요한 종료일이 비어 있으면 `blocking`에 표시한다. 미리보기 뒤 원인 일정이나 이관 근거가 바뀌면 적용할 때 새 미리보기를 요구한다.
 

@@ -80,7 +80,22 @@ function safeUrl(value: unknown, image = false): string | undefined {
 }
 type PinnedSource = { documentId: string; revisionId: string };
 type RenderedExcerpt = DocumentSelectionHighlight & { anchorRendered: boolean };
-type RenderState = { documentId: string | null; remaining: number; exhausted: boolean; visited: Set<string>; includeDepth: number; structuralDepth: number; mode?: 'history' | 'pinned' | 'preview'; pinnedSource?: PinnedSource; outline: DocumentOutlineEntry[]; section?: { id: string; target?: string }; referenceIssueId?: string; excerpt?: RenderedExcerpt; findSource?: boolean };
+type RenderState = {
+  documentId: string | null;
+  remaining: number;
+  exhausted: boolean;
+  visited: Set<string>;
+  includeDepth: number;
+  structuralDepth: number;
+  mode?: 'history' | 'pinned' | 'preview';
+  pinnedSource?: PinnedSource;
+  outline: DocumentOutlineEntry[];
+  section?: { id: string; target?: string };
+  referenceIssueId?: string;
+  excerpt?: RenderedExcerpt;
+  findSource?: boolean;
+  routeHeading?: (target: string) => boolean;
+};
 
 function headingTitle(node: RichContent) {
   return outlineHeadingTitle(documentPlainText(node));
@@ -323,7 +338,8 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     excerpt: node.type === 'documentExcerptInclude', noPanel: node.attrs?.noPanel === true,
   });
   if (node.type === 'documentExcerpt' && node.attrs?.hidden === true && !state.mode) return null;
-  if (node.type === 'documentToc') return <ReadonlyDocumentToc key={key} entries={state.outline} attrs={node.attrs} />;
+  if (node.type === 'documentToc') return <ReadonlyDocumentToc key={key} entries={state.outline} attrs={node.attrs}
+    routeHeading={state.includeDepth === 0 ? state.routeHeading : undefined} />;
   if (node.type === 'documentChildList') {
     const options = normalizeDocumentChildListOptions(node.attrs);
     if (!options) return <Notice key={key}>저장된 하위 문서 목록 설정을 확인할 수 없습니다.</Notice>;
@@ -431,7 +447,7 @@ function renderNode(node: RichContent, context: Context, state: RenderState, key
     default: return <div key={key}><Notice>지원하지 않는 블록: {node.type}</Notice>{children}</div>;
   }
 }
-export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, referenceIssueId, selectionHighlight, canRevealExcerpt, findContentRef }: {
+export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTAL_INCLUDE_NODES, mode, pinnedSource, showOutline = false, sectionId, sectionLinkHref, onNavigateSection, referenceIssueId, selectionHighlight, canRevealExcerpt, findContentRef }: {
   content: RichContent;
   documentId?: string;
   nodeBudget?: number;
@@ -440,6 +456,7 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   showOutline?: boolean;
   sectionId?: string | null;
   sectionLinkHref?: (sectionId: string) => string;
+  onNavigateSection?: (sectionId: string | null) => void;
   referenceIssueId?: string;
   selectionHighlight?: DocumentSelectionHighlight | null;
   canRevealExcerpt?: () => boolean;
@@ -455,15 +472,28 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
   const outline: DocumentOutlineEntry[] = [];
   const sourceDocumentId = documentId ?? context.documentId;
   const excerpt = mode === 'pinned' ? selectionHighlight : undefined;
-  const state: RenderState = { documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false, visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0, mode, pinnedSource, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId, excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined, findSource: findContentRef !== undefined };
-  const body = renderNode(content, context, state, 'readonly');
-  const sectionTarget = state.section?.target;
-  const excerptTarget = state.excerpt?.anchorRendered ? state.excerpt.anchor : undefined;
   const goToHeading = useCallback((target: string) => {
     const root = contentRoot.current;
     if (!root) return false;
     return jumpToReadonlyHeading(root, target);
   }, []);
+  function routeHeading(target: string) {
+    if (!onNavigateSection) return false;
+    const nextSection = outline.find(entry => entry.target === target)?.sectionId ?? null;
+    if (nextSection === (sectionId ?? null)) return false;
+    onNavigateSection(nextSection);
+    return nextSection !== null;
+  }
+  const state: RenderState = {
+    documentId: sourceDocumentId, remaining: nodeBudget, exhausted: false,
+    visited: new Set(sourceDocumentId ? [sourceDocumentId] : []), includeDepth: 0, structuralDepth: 0,
+    mode, pinnedSource, outline, section: sectionId ? { id: sectionId } : undefined, referenceIssueId,
+    excerpt: excerpt ? { ...excerpt, anchorRendered: false } : undefined, findSource: findContentRef !== undefined,
+    routeHeading: onNavigateSection ? routeHeading : undefined,
+  };
+  const body = renderNode(content, context, state, 'readonly');
+  const sectionTarget = state.section?.target;
+  const excerptTarget = state.excerpt?.anchorRendered ? state.excerpt.anchor : undefined;
   useEffect(() => {
     if (lastSection.current && (lastSection.current.documentId !== documentId || lastSection.current.sectionId !== sectionId)) lastSection.current = null;
     if (!sectionId || !sectionTarget || lastSection.current) return;
@@ -486,7 +516,8 @@ export function ReadonlyDocumentContent({ content, documentId, nodeBudget = TOTA
     {sectionId && !sectionTarget && <p className="document-section-not-found" role="status">이 문서에서 연결된 절을 찾을 수 없습니다.</p>}
     {excerptTarget && <button type="button" className="btn btn-ghost doc-excerpt-jump" onClick={goToExcerpt}>발췌 위치로 이동</button>}
     {excerpt !== undefined && !excerptTarget && <p className="doc-pinned-message" role="status">저장본에서 발췌 위치를 찾을 수 없습니다.</p>}
-    {showOutline && <DocumentOutline entries={outline} onNavigate={goToHeading} sectionLinkHref={sectionLinkHref} />}
+    {showOutline && <DocumentOutline entries={outline} sectionLinkHref={sectionLinkHref}
+      onNavigate={target => { if (!routeHeading(target)) goToHeading(target); }} />}
     <div className="doc-readonly-content" data-document-outline-root="" data-static-document-content={mode ? '' : undefined} ref={attachContentRoot}>{body}{state.exhausted && <Notice>내용이 많거나 구조가 깊어 표시 한도에 도달했습니다. 원본 문서에서 이어서 확인하세요.</Notice>}</div>
   </>;
 }

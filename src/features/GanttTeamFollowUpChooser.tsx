@@ -10,15 +10,16 @@ type Props = {
   source: Pick<Issue, 'key' | 'title'>;
   choices: readonly TeamFollowUpChoice[];
   projects: readonly Pick<Project, 'id' | 'key' | 'name'>[];
+  reviewedIds?: readonly string[];
   onChoose: (choices: readonly TeamFollowUpChoice[]) => void;
   onClose: () => void;
 };
 
-export function GanttTeamFollowUpChooser({ source, choices, projects, onChoose, onClose }: Props) {
+export function GanttTeamFollowUpChooser({ source, choices, projects, reviewedIds, onChoose, onClose }: Props) {
   const heading = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const firstChoice = useRef<HTMLButtonElement>(null);
-  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [selectedIds, setSelectedIds] = useState<ReadonlySet<string>>(() => new Set(reviewedIds));
   const projectById = new Map(projects.map(project => [project.id, project]));
   const selected = choices.filter(({ relation }) => selectedIds.has(relation.id));
   const atLimit = selected.length >= MAX_TEAM_FOLLOW_UP_RELATIONS;
@@ -43,7 +44,7 @@ export function GanttTeamFollowUpChooser({ source, choices, projects, onChoose, 
 
   return <dialog ref={dialog} className="gantt-team-follow-up-chooser" aria-labelledby={heading} aria-describedby={`${heading}-source`}
     onCancel={event => { event.preventDefault(); onClose(); }}>
-    <h2 id={heading}>후행 업무 선택</h2>
+    <h2 id={heading}>{reviewedIds ? '최신 후행 업무 선택' : '후행 업무 선택'}</h2>
     <p id={`${heading}-source`}><strong>{source.key}</strong> · {source.title}</p>
     <p>함께 검토할 후행 업무를 선택하세요. 선행 날짜를 바꾸면 이 업무에서 이어지는 활성 Teamspace 차단 관계도 계산합니다.{choices.some(choice => choice.relation.origin === 'jira') &&
       ' Jira 이관 관계는 직접 선택한 연결을 포함합니다.'}</p>

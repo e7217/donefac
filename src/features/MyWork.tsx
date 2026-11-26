@@ -5,6 +5,7 @@ import { ArrowRightLeft, ChevronRight, ListChecks } from 'lucide-react';
 import { buildMyWorkQueue, type MyWorkGrouping, type MyWorkGroupId, type MyWorkItem, type MyWorkRole, type MyWorkRoleFilter } from '../../shared/my-work';
 import { ISSUE_BULK_EDIT_LIMIT, type FeatureProps, type Issue, type WorkflowStatus } from '../../shared/types';
 import { allowedNextStatuses, projectWorkflow, STATUS_CATEGORY_LABELS } from '../../shared/workflow-helpers';
+import { normalizeWorkspaceSearchKey } from '../../shared/workspace-search';
 import type { OpenIssueForReview } from '../lib/issue-review';
 import { IssueBulkEdit, IssueBulkSelectVisible, useIssueBulkEdit } from './IssueBulkEdit';
 import { IssueStatusDialog, type IssueStatusEdit } from './IssueStatusDialog';
@@ -31,6 +32,7 @@ export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueF
 }) {
   const [today, setToday] = useState(todayDate);
   const [projectId, setProjectId] = useState('');
+  const [search, setSearch] = useState('');
   const [role, setRole] = useState<MyWorkRoleFilter>('all');
   const [grouping, setGrouping] = useState<MyWorkGrouping>('deadline');
   const [includeClosed, setIncludeClosed] = useState(false);
@@ -80,10 +82,11 @@ export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueF
     return () => window.cancelAnimationFrame(frame);
   }, [statusEdit]);
 
+  const query = normalizeWorkspaceSearchKey(search);
   const { groups, total } = useMemo(() => buildMyWorkQueue(data, actorId, today, {
-    projectId: selectedProject || null, role, includeClosed, grouping,
-  }, subscriptions.ids), [data, actorId, today, selectedProject, role, includeClosed, grouping, subscriptions.ids]);
-  const queueScope = JSON.stringify([today, selectedProject, role, includeClosed, grouping]);
+    projectId: selectedProject || null, role, includeClosed, grouping, query,
+  }, subscriptions.ids), [data, actorId, today, selectedProject, role, includeClosed, grouping, query, subscriptions.ids]);
+  const queueScope = JSON.stringify([today, selectedProject, role, includeClosed, grouping, query]);
   const pages = pagination.scope === queueScope ? pagination.pages : {};
   if (pagination.scope !== queueScope) setPagination({ scope: queueScope, pages });
   const visibleGroups = groups.filter(group => group.items.length > 0).map(({ id, items }) => {
@@ -149,6 +152,11 @@ export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueF
       </header>
 
       <div className="card my-work-filters">
+        <label className="my-work-filter my-work-search">
+          업무 검색
+          <input className="field" type="search" value={search} maxLength={200} placeholder="제목, 업무 키, 속성"
+            disabled={bulk.locked} onChange={event => setSearch(event.currentTarget.value)} />
+        </label>
         <label className="my-work-filter">
           프로젝트
           <select className="field" value={selectedProject} disabled={bulk.locked} onChange={event => setProjectId(event.target.value)}>
@@ -192,7 +200,9 @@ export function MyWork({ data, actorId, openIssue, notify, refresh, onOpenIssueF
         <IssueBulkEdit editor={bulk} statuses={[]} users={data.users} onClose={closeBulkEdit}
           selectionNote="각 그룹에서 현재 페이지에 표시된 업무를 선택할 수 있습니다." />
       </>}
-      {!waitingForSubscriptions && total === 0 && <p className="card my-work-empty">표시할 업무가 없습니다.</p>}
+      {!waitingForSubscriptions && total === 0 && <p className="card my-work-empty">
+        {query ? '검색 조건에 맞는 업무가 없습니다.' : '표시할 업무가 없습니다.'}
+      </p>}
       <div className="my-work-groups" ref={queue} key={queueScope}>
         {visibleGroups.map(group => <WorkGroup key={group.id} {...group} openIssue={openWorkIssue}
           setPage={page => setPagination(current => ({ ...current, pages: { ...current.pages, [group.id]: page } }))}

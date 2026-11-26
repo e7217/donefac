@@ -504,26 +504,27 @@ export class AutomaticScheduleService{
     const references = batch ? input.relations : [input];
     const chosenIds = new Set(references.map(reference => reference.relationId));
     const blockersById = new Map(blockers.map(relation => [relation.id, relation]));
+    const staleRelations = { reason: 'stale_team_follow_up_relations' };
     const choices = references.map(reference => {
       const relation = blockersById.get(reference.relationId);
       const source = relation && byId.get(relation.sourceIssueId);
       const target = relation && byId.get(relation.targetIssueId);
       if (!relation || !source || !target || source.projectId === target.projectId) {
-        fail('프로젝트 간 차단 관계를 찾을 수 없습니다. 차단 목록을 다시 확인해 주세요.', applying ? 409 : 404);
+        fail('프로젝트 간 차단 관계를 찾을 수 없습니다. 차단 목록을 다시 확인해 주세요.', applying ? 409 : 404, staleRelations);
       }
       if (relation.version !== reference.expectedVersion || terminal(source) || terminal(target)) {
-        fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409);
+        fail('차단 관계 또는 원인·대상 업무의 상태가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409, staleRelations);
       }
       return { relation, source, target };
     });
     const [first] = choices;
     const { source } = first;
     if (choices.some(choice => choice.source.id !== source.id)) {
-      fail('같은 원인 업무의 차단 관계만 함께 검토할 수 있습니다.', applying ? 409 : 400);
+      fail('같은 원인 업무의 차단 관계만 함께 검토할 수 있습니다.', applying ? 409 : 400, applying ? staleRelations : undefined);
     }
     const { anchorChange } = input;
     if (anchorChange && anchorChange.id !== source.id) {
-      fail('선택한 관계의 원인 업무만 변경할 수 있습니다.', applying ? 409 : 400);
+      fail('선택한 관계의 원인 업무만 변경할 수 있습니다.', applying ? 409 : 400, applying ? staleRelations : undefined);
     }
     if (anchorChange && anchorChange.expectedVersion !== source.version) {
       fail('선행 업무가 변경되었습니다. 최신 일정을 확인한 뒤 다시 검토해 주세요.', 409, {
@@ -658,8 +659,10 @@ export class AutomaticScheduleService{
     if ('teamFollowUp' in proposal) {
       const { scope, teamFollowUp } = this.followUpContext(proposal.teamFollowUp, hooks, true);
       if (teamFollowUp.sourceIssueId !== proposal.teamFollowUp.sourceIssueId || teamFollowUp.targetIssueId !== proposal.teamFollowUp.targetIssueId ||
-          JSON.stringify(teamFollowUp.relations) !== JSON.stringify(proposal.teamFollowUp.relations) ||
-          JSON.stringify(followUpReadset(scope.issues)) !== JSON.stringify(proposal.issueVersions)) {
+          JSON.stringify(teamFollowUp.relations) !== JSON.stringify(proposal.teamFollowUp.relations)) {
+        fail('확인한 차단 관계가 바뀌었습니다. 열린 차단 업무를 다시 확인해 주세요.', 409, { reason: 'stale_team_follow_up_relations' });
+      }
+      if (JSON.stringify(followUpReadset(scope.issues)) !== JSON.stringify(proposal.issueVersions)) {
         fail('업무 또는 고정 선행 일정이 변경되었습니다. 다시 미리 확인해 주세요.', 409);
       }
       if (dependencyHash(scope.dependencies) !== proposal.dependencyHash) fail('업무 의존성이 변경되었습니다. 다시 미리 확인해 주세요.', 409);

@@ -1,4 +1,5 @@
 import { calendarDay, isCalendarDate } from './calendar.js';
+import { createTeamIssueSearchMatcher } from './issue-view.js';
 import { PRIORITY, type Issue, type Priority, type Project, type StatusCategory, type WorkflowStatus, type WorkspaceSnapshot } from './types.js';
 import { statusMeta } from './workflow-helpers.js';
 
@@ -27,9 +28,11 @@ interface MyWorkFilters {
   role: MyWorkRoleFilter;
   includeClosed: boolean;
   grouping: MyWorkGrouping;
+  query?: string;
 }
 
 type MyWorkData = Pick<WorkspaceSnapshot, 'projects' | 'issues' | 'workflows' | 'issueSchemas'>;
+type MyWorkQueueData = MyWorkData & Pick<WorkspaceSnapshot, 'users' | 'issueAliases'>;
 
 const priorities = Object.keys(PRIORITY) as Priority[];
 const issueKeys = new Intl.Collator('ko', { numeric: true });
@@ -83,12 +86,13 @@ function compareOpen(left: MyWorkItem, right: MyWorkItem): number {
   return priority || compareRecent(left.issue, right.issue) || compareKeys(left.issue, right.issue);
 }
 
-export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: string, options: MyWorkFilters, subscriptions?: ReadonlySet<string>) {
+export function buildMyWorkQueue(data: MyWorkQueueData, actorId: string, today: string, options: MyWorkFilters, subscriptions?: ReadonlySet<string>) {
   const groups = (options.grouping === 'deadline' ? deadlineGroups : statusGroups)
     .map(id => ({ id, items: [] as MyWorkItem[] }));
   const groupById = new Map<MyWorkGroupId, MyWorkItem[]>(groups.map(group => [group.id, group.items]));
   const projectById = new Map(data.projects.map(project => [project.id, project]));
   const todayDay = calendarDay(today);
+  const matchesSearch = createTeamIssueSearchMatcher(options.query);
   let total = 0;
   for (const issue of data.issues) {
     const subscribed = Boolean(actorId.trim() && subscriptions?.has(issue.id));
@@ -101,7 +105,7 @@ export function buildMyWorkQueue(data: MyWorkData, actorId: string, today: strin
     const project = projectById.get(issue.projectId);
     if (!project) continue;
     const status = statusMeta(data, issue.projectId, issue.status);
-    if (!options.includeClosed && isClosed(status.category)) continue;
+    if ((!options.includeClosed && isClosed(status.category)) || !matchesSearch(data, issue, project, status.label)) continue;
 
     const item: MyWorkItem = { issue, project, status, role, reported, subscribed, date: issueDeadline(issue) };
     const groupId = options.grouping === 'deadline' ? deadlineGroup(item, todayDay) : status.category;

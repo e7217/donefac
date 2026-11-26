@@ -2676,6 +2676,7 @@ export function Documents({ data, projectId, actorId, refresh, notify, openIssue
               <DocumentBlocksProvider data={data} actorId={actorId} documentId={readingPage.id} content={readingPage.content}
                 openIssue={openIssue} openDocument={openDocument}>
                 <ReadonlyDocumentContent content={readingPage.content} documentId={readingPage.id} nodeBudget={30_000} showOutline sectionId={sectionId} findContentRef={readingBody}
+                  onNavigateSection={id => openDocument(readingPage.id, id ?? undefined)}
                   sectionLinkHref={id => documentReadingHash(readingPage.id, readingPage.projectId ?? projectId, id)} />
               </DocumentBlocksProvider>
             </article>

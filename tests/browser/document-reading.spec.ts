@@ -36,6 +36,72 @@ async function cleanup(request: APIRequestContext, id: string) {
   if (removed.ok()) await request.delete(`/api/trash/${(await removed.json() as { trashEntryId: string }).trashEntryId}`);
 }
 
+test('저장본의 두 목차에서 이동한 절을 공유하고 브라우저 기록으로 돌아온다', async ({ page, request, baseURL }) => {
+  const { projects } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
+  const projectId = projects[0].id;
+  const context = { title: '검토 배경', sectionId: randomUUID() };
+  const conclusion = { title: '합의한 결론', sectionId: randomUUID() };
+  const unlinked = { title: '공유 주소가 없는 부록' };
+  const heading = ({ title, sectionId }: { title: string; sectionId?: string }): RichContent => ({
+    type: 'heading', attrs: { level: 2, ...(sectionId && { sectionId }) }, content: [{ type: 'text', text: title }],
+  });
+  const toc: RichContent = { type: 'documentToc', attrs: { minLevel: 1, maxLevel: 3, layout: 'list' } };
+  const otherSection = { title: '포함 문서의 제목', sectionId: conclusion.sectionId };
+  const included = await createDocument(request, projectId, [toc, heading(otherSection), paragraph('포함 문서의 본문')]);
+  const created = await createDocument(request, projectId, [
+    toc,
+    heading(context), paragraph('검토 배경 본문'),
+    { type: 'details', content: [
+      { type: 'detailsSummary', content: [{ type: 'text', text: '회의 기록 접기' }] },
+      { type: 'detailsContent', content: [heading(conclusion), paragraph('회의 결론 본문')] },
+    ] },
+    heading(unlinked), paragraph('검토 부록 본문'),
+    { type: 'documentInclude', attrs: { documentId: included.id, label: included.title } },
+  ]);
+  const readHash = (sectionId?: string) => documentReadingHash(created.id, projectId, sectionId);
+  const assertLocation = async (title: string, sectionId?: string) => {
+    await expect(page).toHaveURL(url => url.hash === readHash(sectionId));
+    await expect(page.getByRole('article', { name: '저장본 읽기' }).getByRole('heading', { name: title, exact: true })).toBeFocused();
+  };
+  const assertCopy = async (sectionId?: string) => {
+    await page.getByRole('button', { name: '읽기 링크 복사', exact: true }).press('Enter');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(new URL(`/${readHash(sectionId)}`, baseURL).href);
+  };
+  try {
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+    await page.goto(`/${readHash(context.sectionId)}`);
+    await assertLocation(context.title, context.sectionId);
+    const reader = page.getByRole('article', { name: '저장본 읽기', exact: true });
+    await reader.locator('.document-outline-summary').press('Enter');
+    await reader.getByRole('navigation', { name: '문서 제목', exact: true }).getByRole('button', { name: conclusion.title, exact: true }).press('Enter');
+    await assertLocation(conclusion.title, conclusion.sectionId);
+    await expect(reader.locator('details').filter({ hasText: '회의 기록 접기' })).toHaveAttribute('open', '');
+    await assertCopy(conclusion.sectionId);
+
+    await page.goBack();
+    await assertLocation(context.title, context.sectionId);
+    await page.goForward();
+    await assertLocation(conclusion.title, conclusion.sectionId);
+    const includedReader = reader.getByRole('region', { name: `포함된 문서 ${included.title}`, exact: true });
+    await includedReader.getByRole('button', { name: otherSection.title, exact: true }).press('Enter');
+    await expect(includedReader.getByRole('heading', { name: otherSection.title, exact: true })).toBeFocused();
+    await expect(page).toHaveURL(url => url.hash === readHash(conclusion.sectionId));
+    const bodyToc = reader.getByRole('navigation', { name: '본문 목차', exact: true })
+      .filter({ has: page.getByRole('button', { name: context.title, exact: true }) });
+    await bodyToc.getByRole('button', { name: context.title, exact: true }).press('Enter');
+    await assertLocation(context.title, context.sectionId);
+    await bodyToc.getByRole('button', { name: unlinked.title, exact: true }).press('Enter');
+    await assertLocation(unlinked.title);
+    await assertCopy();
+    await page.goBack();
+    await assertLocation(context.title, context.sectionId);
+  } finally {
+    await cleanup(request, created.id);
+    await cleanup(request, included.id);
+  }
+});
+
 test('360px 저장본 읽기에서 절·참조·첨부를 열고 이전 편집과 댓글 초안으로 돌아온다', async ({ page, request, browser, baseURL }) => {
   const { projects } = await (await request.get('/api/workspace')).json() as WorkspaceSnapshot;
   const projectId = projects[0].id;

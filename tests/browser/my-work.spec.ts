@@ -4,6 +4,95 @@ import type { Comment, Issue, IssueBulkEditPreview, IssueStatusChangeRequest, Pr
 
 test.use({ viewport: { width: 360, height: 820 }, timezoneId: 'Asia/Seoul' });
 
+test('내 업무 검색은 전체 페이지를 검색하고 참여 조건과 검토 순서를 유지한다', async ({ page, request }) => {
+  test.setTimeout(90_000);
+  const initial = await request.get('/api/workspace');
+  expect(initial.ok(), await initial.text()).toBe(true);
+  const { projects: [projectA, projectB], users } = await initial.json() as WorkspaceSnapshot;
+  const [actor, peer] = users;
+  const prefix = `개인 대기열 ${randomUUID().slice(0, 8)}`;
+  const headers = { 'X-Actor-Id': actor.id };
+  const created: Issue[] = [];
+  const row = (issue: Issue) => page.locator(`[data-issue-review-id="${issue.id}"]`);
+
+  async function create(label: string, projectId: string, dueDate: string, fields: Partial<Issue> = {}) {
+    const response = await request.post('/api/issues', { headers, data: { projectId, title: `${prefix} ${label}`, dueDate,
+      assigneeId: peer.id, collaboratorIds: [actor.id], reporterId: null, status: 'todo', ...fields } });
+    expect(response.status(), await response.text()).toBe(201);
+    const issue = await response.json() as Issue;
+    created.push(issue);
+    return issue;
+  }
+
+  try {
+    for (let count = 1; count <= 21; count++) await create(`일반 확인 ${count}`, projectA.id, '2026-07-10');
+    const late = await create('장비 방송 검토', projectB.id, '2026-07-16');
+    const today = await create('장비 현장 검토', projectA.id, '2026-07-17');
+    const excluded = await create('장비 역할 외 검토', projectB.id, '2026-07-17', { assigneeId: actor.id, collaboratorIds: [] });
+    const closed = await create('장비 완료 업무', projectB.id, '2026-07-17', { status: 'done' });
+
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.clock.setFixedTime(new Date('2026-07-16T16:00:00Z'));
+    const queueHash = `#/${projectA.id}/mywork`;
+    await page.goto(`/${queueHash}`);
+    const role = page.getByRole('combobox', { name: '참여 범위', exact: true });
+    const projectFilter = page.getByRole('combobox', { name: '프로젝트', exact: true });
+    const closedFilter = page.getByRole('checkbox', { name: '완료·취소 포함', exact: true });
+    const search = page.getByRole('searchbox', { name: '업무 검색', exact: true });
+    await role.selectOption('collaborating');
+    await expect(row(late)).toHaveCount(0);
+
+    const pager = page.getByRole('navigation', { name: '마감 초과 페이지', exact: true });
+    await pager.getByRole('button', { name: '다음', exact: true }).click();
+    await expect(row(late)).toBeVisible();
+    await search.fill(`${prefix} 일반 확인`);
+    await expect(pager.getByText('1–20 / 21', { exact: true })).toBeVisible();
+    await expect(row(created[0])).toBeVisible();
+    await expect(row(late)).toHaveCount(0);
+    await search.fill(late.key.toLowerCase());
+    await expect(row(late)).toBeVisible();
+    await expect(row(created[0])).toHaveCount(0);
+
+    const query = `${prefix}　장비`;
+    await search.fill(query);
+    await projectFilter.selectOption(projectA.id);
+    await expect(search).toHaveValue(query);
+    await expect(row(today)).toBeVisible();
+    await expect(row(late)).toHaveCount(0);
+    await projectFilter.selectOption('');
+    await expect(row(late)).toBeVisible();
+    await expect(row(excluded)).toHaveCount(0);
+    await expect(row(closed)).toHaveCount(0);
+    await closedFilter.check();
+    await expect(row(closed)).toBeVisible();
+    await closedFilter.uncheck();
+    await row(late).click();
+    const review = page.getByRole('navigation', { name: '업무 검토 순서', exact: true });
+    await expect(review.getByRole('status')).toHaveText('2개 중 1번째');
+    const next = review.getByRole('button', { name: '다음 업무', exact: true });
+    await expect(next).toHaveAttribute('title', today.key);
+    await next.click();
+    await expect(page.getByRole('dialog', { name: today.title, exact: true })).toBeVisible();
+    await page.goBack();
+    await expect(page).toHaveURL(url => url.hash === queueHash);
+    await expect(search).toHaveValue(query);
+    await expect(role).toHaveValue('collaborating');
+    await expect(row(late)).toBeFocused();
+
+    await search.fill(`${prefix} 미등록 검색어`);
+    await expect(page.getByText('검색 조건에 맞는 업무가 없습니다.', { exact: true })).toBeVisible();
+    await search.fill('');
+    await expect(row(created[0])).toBeVisible();
+  } finally {
+    for (const issue of created.reverse()) {
+      const removed = await request.delete(`/api/issues/${issue.id}`, { headers });
+      if (!removed.ok()) continue;
+      const { trashEntryId } = await removed.json() as { trashEntryId: string };
+      await request.delete(`/api/trash/${trashEntryId}`, { headers });
+    }
+  }
+});
+
 test('내 업무에서 현재 페이지의 두 프로젝트 업무를 일괄 검토하고 응답 유실 뒤 같은 적용을 확인한다', async ({ page, request }) => {
   test.setTimeout(90_000);
   const initial = await request.get('/api/workspace');

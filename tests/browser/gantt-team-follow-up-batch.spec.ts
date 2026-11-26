@@ -21,6 +21,82 @@ async function removeIssues(request: APIRequestContext, issueIds: Iterable<strin
   }
 }
 
+test('차단 관계가 바뀌면 선행 날짜 입력을 유지하고 최신 후행 업무를 다시 선택한다', async ({ page, request }) => {
+  test.setTimeout(75_000);
+  const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));
+  const { projects: [first, second], users: [actor, peer] } = await workspace();
+  const headers = { 'X-Actor-Id': actor.id };
+  const peerHeaders = { 'X-Actor-Id': peer.id };
+  const prefix = `후행 관계 재검토 ${randomUUID().slice(0, 8)}`;
+  const created: string[] = [];
+  const previewPath = '/api/schedule/team-follow-up-preview';
+  const applyPath = '/api/schedule/team-follow-up-apply';
+  async function issue(projectId: string, title: string, startDate: string, endDate: string) {
+    const saved = await json<Issue>(await request.post('/api/issues', { headers, data: { projectId, title: `${prefix} ${title}`, startDate, endDate } }), 201);
+    created.push(saved.id);
+    return saved;
+  }
+
+  try {
+    const source = await issue(first.id, '선행', '2026-11-23', '2026-11-24');
+    const removed = await issue(second.id, '이전 후행', '2026-11-25', '2026-11-26');
+    const replacement = await issue(second.id, '새 후행', '2026-11-25', '2026-11-26');
+    const path = `/api/issues/${source.id}/relations`;
+    const block = async (target: Issue, actorHeaders = headers) => json<IssueRelation>(await request.post(path, {
+      headers: actorHeaders, data: { type: 'blocks', direction: 'outgoing', otherIssueId: target.id },
+    }), 201);
+    const oldRelation = await block(removed);
+
+    await page.setViewportSize({ width: 360, height: 820 });
+    await page.addInitScript(id => localStorage.setItem('teamspace.actor', id), actor.id);
+    await page.goto(`/#/${first.id}/gantt?${new URLSearchParams({ scope: 'team', ganttQ: prefix })}`);
+    await page.getByRole('button', { name: '프로젝트 간 차단', exact: true }).click();
+    const blockers = page.getByRole('region', { name: '프로젝트 간 차단', exact: true });
+    const [initial] = await Promise.all([scheduleResponse(page, previewPath),
+      blockers.getByRole('button', { name: `${source.key} → ${removed.key} 프로젝트 간 일정 검토`, exact: true }).click()]);
+    const initialProposal = await json<AutomaticSchedulePreview>(initial);
+    const review = page.getByRole('dialog', { name: '프로젝트 간 후행 일정 검토', exact: true });
+    const start = review.getByLabel('선행 업무 시작일', { exact: true });
+    const end = review.getByLabel('선행 업무 종료일', { exact: true });
+    await end.fill('2026-11-27');
+
+    await json<IssueRelation>(await request.patch(`${path}/${oldRelation.id}`, {
+      headers: peerHeaders, data: { expectedVersion: oldRelation.version, type: 'related', direction: 'outgoing' },
+    }));
+    const newRelation = await block(replacement, peerHeaders);
+    const newSource = await json<Issue>(await request.patch(`/api/issues/${source.id}`, {
+      headers: peerHeaders, data: { expectedVersion: source.version, startDate: '2026-11-24' },
+    }));
+    const rejected = await json<{ details: { reason: string } }>(await request.post(applyPath, {
+      headers, data: { previewId: initialProposal.previewId },
+    }), 409);
+    expect(rejected.details.reason).toBe('stale_team_follow_up_relations');
+    const [stale] = await Promise.all([scheduleResponse(page, previewPath),
+      review.getByRole('button', { name: '미리보기 다시 계산', exact: true }).click()]);
+    expect(stale.status()).toBe(404);
+    await expect(review.getByRole('button', { name: '함께 적용', exact: true })).toBeDisabled();
+    await review.getByRole('button', { name: '최신 차단 관계 확인', exact: true }).click();
+    const chooser = page.getByRole('dialog', { name: '최신 후행 업무 선택', exact: true });
+    await expect(chooser.getByRole('checkbox', { name: `${removed.key} 함께 검토`, exact: true })).toHaveCount(0);
+    const choice = chooser.getByRole('checkbox', { name: `${replacement.key} 함께 검토`, exact: true });
+    await expect(choice).not.toBeChecked();
+    await choice.check();
+    const [recalculated] = await Promise.all([scheduleResponse(page, previewPath),
+      chooser.getByRole('button', { name: '선택한 후행 일정 검토', exact: true }).click()]);
+    expect(recalculated.request().postDataJSON()).toEqual({ relationId: newRelation.id, expectedVersion: newRelation.version,
+      anchorChange: { id: source.id, expectedVersion: newSource.version, startDate: newSource.startDate, endDate: '2026-11-27' } });
+    await expect(start).toHaveValue(newSource.startDate!);
+    await expect(end).toHaveValue('2026-11-27');
+    expect((await json<AutomaticSchedulePreview>(recalculated)).changes.map(change => change.id).sort()).toEqual([source.id, replacement.id].sort());
+
+    const [applied] = await Promise.all([scheduleResponse(page, applyPath),
+      review.getByRole('button', { name: '함께 적용', exact: true }).click()]);
+    expect((await json<SchedulePasteApplyResult>(applied)).updated.map(issue => issue.id).sort()).toEqual([source.id, replacement.id].sort());
+    await expect(review).toHaveCount(0);
+    expect((await workspace()).issues.find(issue => issue.id === removed.id)).toEqual(removed);
+  } finally { await removeIssues(request, created, headers); }
+});
+
 test('360px 간트 날짜 초안을 티켓 후행 검토에서 수정해 저장하고 동료의 시작일도 보존한다', async ({ page, request }) => {
   test.setTimeout(75_000);
   const workspace = async () => json<WorkspaceSnapshot>(await request.get('/api/workspace'));

@@ -1582,7 +1582,7 @@ function IssuePanelContent(props: IssuePanelProps) {
       onClose={closeRowScheduleEdit} onApplied={reflectRowScheduleEdit} />}
     {teamFollowUp && (teamFollowUp.choosing ? <GanttTeamFollowUpChooser source={teamFollowUp.source} choices={teamFollowUp.choices}
       projects={data.projects} onChoose={chooseTeamFollowUps} onClose={closeTeamFollowUp} />
-      : scheduleUndoScope && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} actorId={props.actorId} undoScope={scheduleUndoScope}
+      : scheduleUndoScope && <GanttCascadeDialog teamFollowUp={teamFollowUp} projects={data.projects} restoreGeneration={data.restoreGeneration} actorId={props.actorId} undoScope={scheduleUndoScope}
         onClose={closeTeamFollowUp} onApplied={reflectTeamFollowUp} onBusyChange={trackTeamFollowUpBusy}
         onInputDirtyChange={trackTeamFollowUpDirty} onOutcomeUnknownChange={trackTeamFollowUpOutcome} />)}
     {dependencyEditor && <GanttDependencyModal issues={data.issues} issueAliases={data.issueAliases} dependency={editingDependency}

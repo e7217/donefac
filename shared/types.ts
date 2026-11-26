@@ -1856,6 +1856,7 @@ export const GITLAB_MR_CHANGED_FILE_LIMIT = 50;
 export interface GitlabMergeRequestChangedFile {
   oldPath: string;
   newPath: string;
+  diffAnchor?: string;
   change: 'added' | 'modified' | 'renamed' | 'deleted';
   generated: boolean;
   diffLimited: boolean;

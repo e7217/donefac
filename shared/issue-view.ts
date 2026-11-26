@@ -341,7 +341,8 @@ export function matchesGitlabFilter(filter: IssueViewGitlabFilter, summary: Issu
 
 export function createTeamIssueSearchMatcher(query?: string) {
   const terms = normalizeWorkspaceSearchKey(query ?? '').split(' ').filter(Boolean);
-  return (data: WorkspaceSnapshot, issue: Issue, project: Pick<Project, 'key' | 'name'> | undefined, statusLabel: string) => {
+  return (data: Pick<WorkspaceSnapshot, 'users' | 'issueSchemas' | 'issueAliases'>, issue: Issue,
+    project: Pick<Project, 'key' | 'name'> | undefined, statusLabel: string) => {
     if (!terms.length) return true;
     const text = normalizeWorkspaceSearchKey(`${project?.key ?? ''} ${project?.name ?? ''} ${statusLabel} ${issueSearchText(data, issue)}`);
     const aliases = issueSearchAliases(data, issue.id).map(alias => normalizeWorkspaceSearchKey(alias.key));

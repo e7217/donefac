@@ -64,6 +64,18 @@
   color: #8d402e;
 }
 
+.gitlab-changed-file-search {
+  display: grid;
+  gap: 4px;
+  width: min(100%, 320px);
+  min-width: 0;
+}
+
+.gitlab-changed-file-search > input {
+  width: 100%;
+  min-width: 0;
+}
+
 .gitlab-trigger-jobs {
   display: grid;
   justify-self: stretch;

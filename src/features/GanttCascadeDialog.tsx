@@ -2,12 +2,13 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertCircle, ArrowRight, Check, RefreshCw } from 'lucide-react';
-import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange, ScheduleUndoScope } from '../../shared/types';
+import type { AutomaticSchedulePreview, Issue, Project, ScheduleAnchorChange, ScheduleUndoScope, WorkspaceSnapshot } from '../../shared/types';
 import { api, ApiError } from '../lib/api';
 import type { ScheduleApplyResult } from './AutomaticScheduleDialog';
-import type { TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
+import { GanttTeamFollowUpChooser, type TeamFollowUpChoice } from './GanttTeamFollowUpChooser';
 import { errorMessage } from './schedule-utils';
 import { scheduleUndoHeaders } from './schedule-undo';
+import { groupActiveTeamBlockers } from './team-follow-up-choices';
 import './gantt-team-blockers.css';
 
 export type CascadeAnchorChange = ScheduleAnchorChange;
@@ -17,7 +18,7 @@ type SourceSchedule = SourceDates & Pick<Issue, 'version'>;
 
 export type TeamFollowUpSelection = {
   choices: readonly TeamFollowUpChoice[];
-  source: Pick<Issue, 'id' | 'key'> & SourceSchedule;
+  source: Pick<Issue, 'id' | 'key' | 'projectId'> & SourceSchedule;
   initialChange?: ScheduleAnchorChange;
 };
 
@@ -30,11 +31,12 @@ type Props = {
   onInputDirtyChange?: (dirty: boolean) => void;
   onOutcomeUnknownChange?: (unknown: boolean) => void;
 } & (
-  | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never }
-  | { teamFollowUp: TeamFollowUpSelection; projects: readonly Project[]; projectId?: never; anchorChange?: never }
+  | { projectId: string; anchorChange: CascadeAnchorChange; teamFollowUp?: never; projects?: never; restoreGeneration?: never }
+  | { teamFollowUp: TeamFollowUpSelection; projects: readonly Project[]; restoreGeneration: WorkspaceSnapshot['restoreGeneration']; projectId?: never; anchorChange?: never }
 );
 
-type Operation = 'preview' | 'apply' | 'recover' | 'refresh';
+type Operation = 'preview' | 'apply' | 'recover' | 'refresh' | 'relations';
+type RelationReview = { source: Issue; choices: TeamFollowUpChoice[]; projects: Project[]; reviewedIds: string[] };
 
 function isApplyResult(value: ScheduleApplyResult | { applied: false }): value is ScheduleApplyResult {
   return Boolean(value && 'undoId' in value && typeof value.undoId === 'string' && Array.isArray(value.updated));
@@ -63,8 +65,13 @@ function currentSourceSchedule(cause: unknown): SourceSchedule | null {
   return { version: currentVersion, startDate, endDate };
 }
 
+function needsRelationReview(cause: unknown) {
+  return cause instanceof ApiError && (cause.status === 409 || cause.status === 404) &&
+    (cause.details as { reason?: unknown } | null)?.reason === 'stale_team_follow_up_relations';
+}
+
 export function GanttCascadeDialog({
-  projectId, anchorChange, teamFollowUp, projects, actorId, undoScope, onClose, onApplied, onBusyChange,
+  projectId, anchorChange, teamFollowUp, projects, restoreGeneration, actorId, undoScope, onClose, onApplied, onBusyChange,
   onInputDirtyChange, onOutcomeUnknownChange,
 }: Props) {
   const headingId = useId();
@@ -85,13 +92,17 @@ export function GanttCascadeDialog({
   const [handoffDates, setHandoffDates] = useState<SourceDates | null>(() => initialChange ? dateValues(initialChange) : null);
   const [reviewedSourceDates, setReviewedSourceDates] = useState<SourceDates | null>(null);
   const [staleSource, setStaleSource] = useState<SourceSchedule | null>(null);
+  const [staleRelations, setStaleRelations] = useState(false);
+  const [relationReview, setRelationReview] = useState<RelationReview | null>(null);
+  const [choices, setChoices] = useState(teamFollowUp?.choices);
+  const [reviewedProjects, setReviewedProjects] = useState<readonly Project[]>();
   const fromIssue = undoScope.kind === 'issue';
   const route = teamFollowUp ? '/schedule/team-follow-up' : '/schedule/auto';
   const sourceDatesDirty = sourceBaseline !== null && !datesMatch(sourceDates, sourceBaseline);
   const inputDirty = !applied && (handoffDates ? !datesMatch(sourceDates, handoffDates) : sourceDatesDirty);
   const sourceDateOrderInvalid = Boolean(sourceDates.startDate && sourceDates.endDate && sourceDates.startDate > sourceDates.endDate);
   const sourceDatesNeedPreview = reviewedSourceDates !== null && !datesMatch(sourceDates, reviewedSourceDates);
-  const needsPreview = freshPreviewNeeded || sourceDatesNeedPreview || staleSource !== null;
+  const needsPreview = freshPreviewNeeded || sourceDatesNeedPreview || staleSource !== null || staleRelations;
 
   const begin = useCallback((operation: Operation) => {
     if (request.current) return null;
@@ -111,12 +122,12 @@ export function GanttCascadeDialog({
     onBusyChange(false);
   }, [onBusyChange]);
 
-  const load = useCallback(async (change?: ScheduleAnchorChange, reviewedDates?: SourceDates) => {
+  const load = useCallback(async (change?: ScheduleAnchorChange, reviewedDates?: SourceDates, selected = teamFollowUp?.choices) => {
     const controller = begin('preview');
     if (!controller) return;
     setFreshPreviewNeeded(true);
     try {
-      const relations = teamFollowUp?.choices.map(({ relation }) => ({ relationId: relation.id, expectedVersion: relation.version }));
+      const relations = selected?.map(({ relation }) => ({ relationId: relation.id, expectedVersion: relation.version }));
       const input = relations ? { ...(relations.length === 1 ? relations[0] : { relations }),
         ...(change ? { anchorChange: change } : {}) } : { projectId, anchorChange };
       const result = await api<AutomaticSchedulePreview>(`${route}-preview`, {
@@ -136,16 +147,20 @@ export function GanttCascadeDialog({
       setFreshPreviewNeeded(false);
     } catch (cause) {
       if (!controller.signal.aborted) {
-        if (teamFollowUp) setStaleSource(currentSourceSchedule(cause));
+        if (teamFollowUp) {
+          setStaleSource(currentSourceSchedule(cause));
+          setStaleRelations(needsRelationReview(cause));
+        }
         setError(errorMessage(cause));
       }
     } finally { finish(controller); }
   }, [anchorChange, begin, finish, projectId, route, teamFollowUp]);
 
   useLayoutEffect(() => {
+    if (relationReview) return;
     const active = document.activeElement;
     if (!dialog.current?.contains(active) || active?.matches(':disabled')) dialog.current?.focus({ preventScroll: true });
-  }, [pending, outcomeUnknown, needsPreview, sourceDatesDirty, staleSource, applied]);
+  }, [pending, outcomeUnknown, needsPreview, sourceDatesDirty, staleSource, applied, relationReview]);
   useLayoutEffect(() => {
     onInputDirtyChange?.(inputDirty);
     return () => onInputDirtyChange?.(false);
@@ -164,11 +179,61 @@ export function GanttCascadeDialog({
   }, [load, onBusyChange, initialChange]);
 
   function reloadPreview() {
-    if (staleSource || sourceDateOrderInvalid) return;
+    if (staleSource || staleRelations || sourceDateOrderInvalid) return;
     const change = teamFollowUp && sourceBaseline && (sourceDatesDirty || initialChange)
       ? { id: teamFollowUp.source.id, expectedVersion: sourceBaseline.version, ...sourceDates }
       : undefined;
-    void load(change, teamFollowUp ? sourceDates : undefined);
+    void load(change, teamFollowUp ? sourceDates : undefined, choices);
+  }
+
+  async function loadCurrentRelations() {
+    if (!teamFollowUp || !choices || !staleRelations) return;
+    const controller = begin('relations');
+    if (!controller) return;
+    try {
+      const snapshot = await api<WorkspaceSnapshot>('/workspace', { cache: 'no-store', headers: { 'X-Actor-Id': actorId },
+        signal: AbortSignal.any([controller.signal, AbortSignal.timeout(12_000)]) });
+      if (controller.signal.aborted) return;
+      if (!restoreGeneration || snapshot.restoreGeneration !== restoreGeneration) {
+        setError('워크스페이스가 복원되었습니다. 최신 업무를 연 뒤 일정과 차단 관계를 다시 확인해 주세요.');
+        return;
+      }
+      const source = snapshot.issues.find(issue => issue.id === teamFollowUp.source.id && issue.projectId === teamFollowUp.source.projectId);
+      const projectsById = new Map(snapshot.projects.map(project => [project.id, project]));
+      const current = source && groupActiveTeamBlockers(snapshot, projectsById).outgoing.get(source.id);
+      if (!source || !current?.length) {
+        setError('같은 선행 업무에서 다시 선택할 열린 차단 관계가 없습니다. 입력한 날짜를 확인해 주세요.');
+        return;
+      }
+      const previous = new Map(choices.map(choice => [choice.relation.id, choice]));
+      const reviewedIds = current.filter(({ relation, target }) => {
+        const prior = previous.get(relation.id);
+        return prior?.target.id === target.id && prior.target.projectId === target.projectId;
+      }).map(({ relation }) => relation.id);
+      setRelationReview({ source, choices: current, projects: snapshot.projects, reviewedIds });
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(errorMessage(cause));
+    } finally { finish(controller); }
+  }
+
+  function reviewSelectedRelations(selected: readonly TeamFollowUpChoice[]) {
+    if (!relationReview || !sourceBaseline || !selected.length) return;
+    const { source, projects } = relationReview;
+    const dates = rebaseDates(sourceDates, sourceBaseline, source);
+    if (handoffDates) setHandoffDates(rebaseDates(handoffDates, sourceBaseline, source));
+    setSourceBaseline({ ...dateValues(source), version: source.version });
+    setSourceDates(dates);
+    setChoices(selected);
+    setReviewedProjects(projects);
+    setStaleSource(null);
+    setStaleRelations(false);
+    setRelationReview(null);
+    setPreview(null);
+    setError('');
+    setFreshPreviewNeeded(true);
+    if (dates.startDate && dates.endDate && dates.startDate > dates.endDate) return;
+    const change = !datesMatch(dates, source) ? { id: source.id, expectedVersion: source.version, ...dates } : undefined;
+    void load(change, dates, selected);
   }
 
   function rebaseSource() {
@@ -221,7 +286,10 @@ export function GanttCascadeDialog({
       const ambiguous = recovering || !(cause instanceof ApiError) || cause.status >= 500 || cause.status === 408;
       updateOutcomeUnknown(ambiguous);
       if (!ambiguous) {
-        if (teamFollowUp) setStaleSource(currentSourceSchedule(cause));
+        if (teamFollowUp) {
+          setStaleSource(currentSourceSchedule(cause));
+          setStaleRelations(needsRelationReview(cause));
+        }
         setFreshPreviewNeeded(true);
       }
       setError(ambiguous ? '적용 여부를 확인하지 못했습니다. 같은 제안의 적용 결과를 다시 확인해 주세요.' : errorMessage(cause));
@@ -264,10 +332,10 @@ export function GanttCascadeDialog({
   const canApply = preview && preview.changes.length > 0 && !preview.blocking.length && !needsPreview;
   const anchorId = teamFollowUp?.source.id ?? anchorChange?.id;
   const anchorListed = preview?.changes.some(change => change.id === anchorId);
-  const singleChoice = teamFollowUp?.choices.length === 1 ? teamFollowUp.choices[0] : undefined;
-  const selectedTargets = new Set(teamFollowUp?.choices.map(({ target }) => target.id));
-  const projectNames = new Map(projects?.map(project => [project.id, project.name]));
-  return <div className="issue-modal-overlay"><section className={`gantt-preview-modal${teamFollowUp ? ' gantt-team-follow-up-modal' : ''}`} role="dialog" aria-modal="true"
+  const singleChoice = choices?.length === 1 ? choices[0] : undefined;
+  const selectedTargets = new Set(choices?.map(({ target }) => target.id));
+  const projectNames = new Map((reviewedProjects ?? projects)?.map(project => [project.id, project.name]));
+  return <><div className="issue-modal-overlay"><section className={`gantt-preview-modal${teamFollowUp ? ' gantt-team-follow-up-modal' : ''}`} role="dialog" aria-modal="true"
       aria-labelledby={headingId} tabIndex={-1} ref={dialog} onKeyDown={handleKey}>
     <header><div><h2 id={headingId}>{teamFollowUp ? '프로젝트 간 후행 일정 검토' : '후행 일정 미리보기'}</h2>
       {teamFollowUp ? <>
@@ -278,7 +346,7 @@ export function GanttCascadeDialog({
         </> : <>
           <p>선행 업무 <strong>{teamFollowUp.source.key}</strong></p>
           <ul className="gantt-team-follow-up-selected" role="list" aria-label="선택한 후행 업무">
-            {teamFollowUp.choices.map(({ relation, target }) => <li key={relation.id}>
+            {choices?.map(({ relation, target }) => <li key={relation.id}>
               <strong>{target.key}</strong> · {target.title}
               <small>{projectNames.get(target.projectId) ?? '프로젝트 정보 없음'}{relation.origin === 'jira' && ' · Jira 이관 관계'}</small>
             </li>)}
@@ -305,7 +373,8 @@ export function GanttCascadeDialog({
       <p>최신 선행 업무 일정 <strong>{staleSource.startDate ?? '미정'} ~ {staleSource.endDate ?? '미정'}</strong></p>
       <button className="btn" type="button" onClick={rebaseSource}>최신 일정 기준으로 다시 검토</button>
     </div>}
-    {sourceDatesNeedPreview && !pending && !staleSource && <p className="gantt-team-follow-up-notice muted" role="status">입력한 날짜로 미리보기를 다시 계산해 주세요.</p>}
+    {sourceDatesNeedPreview && !pending && !staleSource && !staleRelations && <p className="gantt-team-follow-up-notice muted" role="status">입력한 날짜로 미리보기를 다시 계산해 주세요.</p>}
+    {pending === 'relations' && <p className="muted" role="status">최신 차단 관계를 불러오는 중입니다.</p>}
     {pending === 'preview' && <p className="muted" role="status">선후행 일정을 계산하는 중입니다.</p>}
     {preview?.blocking.length ? <div className="gantt-preview-warnings" role="alert"><AlertCircle size={17} aria-hidden="true" />
       <div><strong>함께 적용하기 전에 해결할 항목</strong>{preview.blocking.map(text => <p key={text}>{text}</p>)}</div></div> : null}
@@ -329,11 +398,16 @@ export function GanttCascadeDialog({
       {applied ? <button className="btn btn-primary" type="button" disabled={Boolean(pending)} onClick={() => void refreshApplied()}><RefreshCw size={15} />{fromIssue ? '업무 다시 불러오기' : '간트 다시 불러오기'}</button>
         : outcomeUnknown ? <button className="btn btn-primary" type="button" disabled={Boolean(pending)} onClick={() => void apply(true)}><RefreshCw size={15} />적용 결과 다시 확인</button>
         : <>
-          {needsPreview && !pending && !staleSource && <button className="btn" type="button" disabled={sourceDateOrderInvalid}
+          {staleRelations && <button className="btn" type="button" disabled={Boolean(pending)}
+            onClick={() => void loadCurrentRelations()}><RefreshCw size={15} />최신 차단 관계 확인</button>}
+          {needsPreview && !pending && !staleSource && !staleRelations && <button className="btn" type="button" disabled={sourceDateOrderInvalid}
             onClick={reloadPreview}><RefreshCw size={15} />미리보기 다시 계산</button>}
           {preview && (teamFollowUp || !needsPreview || pending) && <button className="btn btn-primary" type="button" disabled={Boolean(pending) || !canApply}
             onClick={() => void apply(false)}><Check size={16} />{pending === 'apply' ? '적용 중…' : '함께 적용'}</button>}
         </>}
     </footer>
-  </section></div>;
+  </section></div>
+  {relationReview && <GanttTeamFollowUpChooser source={relationReview.source} choices={relationReview.choices}
+    projects={relationReview.projects} reviewedIds={relationReview.reviewedIds} onChoose={reviewSelectedRelations} onClose={() => setRelationReview(null)} />}
+  </>;
 }

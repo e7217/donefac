@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isCalendarDate } from '../shared/calendar.js';
 import { gitlabObjectSha, isGitlabBranchName } from '../shared/gitlab-links.js';
 import { gitlabPipelineSource } from '../shared/gitlab-pipeline-source.js';
@@ -1009,7 +1010,9 @@ function mergeRequestChangedFile(row: GitlabReadObject, token: Connection['token
   if (!isFilePath(oldPath) || !isFilePath(newPath) || [added, renamed, deleted].some(value => typeof value !== 'boolean') ||
       [generated, collapsed, tooLarge].some(value => value !== undefined && typeof value !== 'boolean') ||
       [added, renamed, deleted].filter(Boolean).length > 1 || (renamed === true && oldPath === newPath)) invalidMergeRequestChangedFiles();
-  return { oldPath, newPath, change: added ? 'added' : renamed ? 'renamed' : deleted ? 'deleted' : 'modified',
+  // GitLab's Diff::File hashes the diff's new path for the changes view fragment.
+  const diffAnchor = createHash('sha1').update(newPath).digest('hex');
+  return { oldPath, newPath, diffAnchor, change: added ? 'added' : renamed ? 'renamed' : deleted ? 'deleted' : 'modified',
     generated: generated === true, diffLimited: collapsed === true || tooLarge === true };
 }
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -156,11 +157,12 @@ test('changed files for a merged MR return bounded metadata from the exact linke
   assert.match(result.headers.get('cache-control') ?? '', /\bno-store\b/u);
   const { checkedAt, ...evidence } = result.data;
   assert.equal(new Date(checkedAt).toISOString(), checkedAt);
+  const fileAnchor = (path: string) => createHash('sha1').update(path).digest('hex');
   assert.deepEqual(evidence, { linkId: f.link.id, repositoryId, mergeRequestIid, hasMore: true, files: [
-    { oldPath: 'src/new.ts', newPath: 'src/new.ts', change: 'added', generated: false, diffLimited: false },
-    { oldPath: 'src/old.ts', newPath: 'src/renamed.ts', change: 'renamed', generated: true, diffLimited: false },
-    { oldPath: 'src/removed.ts', newPath: 'src/removed.ts', change: 'deleted', generated: false, diffLimited: true },
-    { oldPath: 'src/edit.ts', newPath: 'src/edit.ts', change: 'modified', generated: false, diffLimited: true },
+    { oldPath: 'src/new.ts', newPath: 'src/new.ts', diffAnchor: fileAnchor('src/new.ts'), change: 'added', generated: false, diffLimited: false },
+    { oldPath: 'src/old.ts', newPath: 'src/renamed.ts', diffAnchor: fileAnchor('src/renamed.ts'), change: 'renamed', generated: true, diffLimited: false },
+    { oldPath: 'src/removed.ts', newPath: 'src/removed.ts', diffAnchor: fileAnchor('src/removed.ts'), change: 'deleted', generated: false, diffLimited: true },
+    { oldPath: 'src/edit.ts', newPath: 'src/edit.ts', diffAnchor: fileAnchor('src/edit.ts'), change: 'modified', generated: false, diffLimited: true },
   ] });
   assert.deepEqual(f.calls.map(({ url }) => url.pathname), [repositoryPath, mrPath, diffsPath, diffsPath, mrPath]);
   assert.deepEqual(f.calls.filter(({ url }) => url.pathname === diffsPath).map(({ url }) => url.search), [

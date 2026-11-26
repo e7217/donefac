@@ -32,9 +32,14 @@ function DocumentToc<Target extends string | number>({ entries, options, navigat
   </>;
 }
 
-export function ReadonlyDocumentToc({ entries, attrs }: { entries: DocumentOutlineEntry[]; attrs?: Record<string, unknown> }) {
+export function ReadonlyDocumentToc({ entries, attrs, routeHeading }: {
+  entries: DocumentOutlineEntry[];
+  attrs?: Record<string, unknown>;
+  routeHeading?: (target: string) => boolean;
+}) {
   const marker = useRef<HTMLElement>(null);
   function navigate(target: string) {
+    if (routeHeading?.(target)) return;
     const root = marker.current?.closest<HTMLElement>('[data-document-outline-root]');
     if (root) jumpToReadonlyHeading(root, target);
   }

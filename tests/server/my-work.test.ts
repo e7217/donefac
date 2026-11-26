@@ -30,7 +30,7 @@ function issue(key: string, extra: Partial<Issue> = {}): Issue {
 
 function snapshot(issues: Issue[]) {
   return {
-    projects, issues,
+    projects, issues, users: [],
     workflows: [{ ...defaultWorkflow('platform'), statuses: customStatuses }],
   };
 }
@@ -94,6 +94,27 @@ test('finds reported work independently of assignment and counts each active iss
   assert.deepEqual(keysByGroup(queue(input, { role: 'collaborating' })).undated, ['APP-2']);
   assert.deepEqual(queue(input, { role: 'reported' }).groups.find(group => group.id === 'undated')?.items
     .map(item => [item.role, item.reported]), [['assigned', true], ['collaborating', true], ['reported', true]]);
+});
+
+test('searches matching queue members by normalized title, previous key and shared status terms', () => {
+  const assigned = issue('APP-1', { title: '장비 Field 일정' });
+  const moved = issue('PLAT-2', { title: '장비 Field 회의', assigneeId: 'someone', status: 'verifying' });
+  const unrelated = issue('PLAT-3', { title: '장비 Field 검색으로 보이면 안 되는 업무', assigneeId: 'someone', status: 'verifying' });
+  const closed = issue('PLAT-4', { title: '장비 Field 완료', status: 'shipped' });
+  const data = { ...snapshot([assigned, moved, unrelated, closed]), issueAliases: {
+    [moved.id]: [{ key: 'OLD-7', source: 'move' as const }],
+    [unrelated.id]: [{ key: 'OLD-77', source: 'jira' as const }],
+  } };
+  const subscriptions = new Set([moved.id]);
+  const matches = (query: string, filters: Partial<Parameters<typeof buildMyWorkQueue>[3]> = {}) =>
+    buildMyWorkQueue(data, actor, today, { ...defaults, ...filters, query }, subscriptions);
+
+  assert.deepEqual(keysByGroup(matches('장비　ＦＩＥＬＤ')).undated, ['APP-1', 'PLAT-2']);
+  assert.deepEqual(keysByGroup(matches('old-７ 검증', { role: 'subscribed', grouping: 'status' })).review, ['PLAT-2']);
+  assert.equal(matches('old-7', { projectId: 'application' }).total, 0);
+  assert.deepEqual(keysByGroup(matches('field', { includeClosed: true })).closed, ['PLAT-4']);
+  assert.equal(matches('old-77').total, 0);
+  assert.equal(matches(' 　 ').total, 2);
 });
 
 test('prefers the deadline, falls back to the schedule end, and uses a seven-day calendar boundary', () => {
